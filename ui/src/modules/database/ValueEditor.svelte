@@ -176,7 +176,7 @@
   .ve-kind {
     height: 20px;
     padding: 0 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface-2);
     border: 1px solid var(--border);
@@ -187,7 +187,7 @@
     min-width: 120px;
     height: 20px;
     padding: 0 6px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text);
     background: var(--surface);
     border: 1px solid var(--border);

@@ -79,7 +79,7 @@
   async function startRebase(): Promise<void> {
     if (!plan) return;
     const snapshot = $state.snapshot(plan);
-    const yes = await confirmer.ask(`Replay ${snapshot.commits.length} commits in the displayed order onto ${snapshot.onto_sha.slice(0, 10)}? This rewrites local history.`, {
+    const yes = await confirmer.ask(`Replay ${snapshot.commits.length} commit${snapshot.commits.length === 1 ? '' : 's'} in the displayed order onto ${snapshot.onto_sha.slice(0, 10)}? This rewrites local history.`, {
       title: 'Start interactive rebase', confirmLabel: 'Start rebase', danger: true,
     });
     if (!yes || !alive) return;
@@ -155,7 +155,7 @@
         <div class="actions"><label>Onto revision <input bind:value={onto} oninput={() => { plan = null; }} placeholder="main or a commit SHA" disabled={busy} /></label>
           <button class="btn" disabled={busy || !onto.trim()} onclick={preview}>Preview plan</button></div>
         {#if plan}
-          <p>{plan.commits.length} commits · current {plan.head_sha.slice(0, 10)} → onto {plan.onto_sha.slice(0, 10)}</p>
+          <p>{plan.commits.length} commit{plan.commits.length === 1 ? '' : 's'} · current {plan.head_sha.slice(0, 10)} → onto {plan.onto_sha.slice(0, 10)}</p>
           <div class="scroll">
             {#each plan.commits as commit, index (commit.sha)}
               <div class="entry">
@@ -178,7 +178,7 @@
         <p>{bisect.finished ? 'First bad commit found' : 'Test the current candidate, then mark the result.'}</p>
         <div class="entry"><div><code>{bisect.first_bad ?? bisect.current_sha}</code><p>{bisect.current_subject}</p></div>
           <button class="btn" onclick={() => inspect(bisect!.first_bad ?? bisect!.current_sha)}>Inspect in graph</button></div>
-        {#if bisect.remaining !== null && !bisect.finished}<p>{bisect.remaining} commits remain in the range.</p>{/if}
+        {#if bisect.remaining !== null && !bisect.finished}<p>{bisect.remaining} commit{bisect.remaining === 1 ? '' : 's'} remain{bisect.remaining === 1 ? 's' : ''} in the range.</p>{/if}
         <div class="actions">
           {#if !bisect.finished}
             <button class="btn primary" disabled={busy} onclick={() => bisectAction('good')}>Works (good)</button>
@@ -208,7 +208,7 @@
   .scroll { max-height: 45vh; overflow: auto; }
   .entry { display: flex; align-items: center; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--border); }
   .entry > div { flex: 1; min-width: 0; }
-  code { font-size: 11px; overflow-wrap: anywhere; }
+  code { font-size: var(--fs-xs); overflow-wrap: anywhere; }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 25vh; overflow: auto; }
   .error { color: var(--danger); }
   @media (max-width: 600px) { .entry { flex-wrap: wrap; } .entry > div { flex-basis: 55%; } }

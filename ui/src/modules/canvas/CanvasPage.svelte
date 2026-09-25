@@ -125,6 +125,14 @@
   /** The list failed with nothing to show — the main pane owns the error + Retry. */
   const listFailed = $derived(!!canvas.listError && canvas.scenes.length === 0);
 
+  /** Phone push-nav back: save a pending edit first (closeScene drops the
+   *  autosave timer), then return to the scene list. */
+  async function backToList(): Promise<void> {
+    if (canvas.dirty) await canvas.saveNow().catch(() => {});
+    showConvo = false;
+    canvas.closeScene();
+  }
+
   async function createBlank(format: CanvasFormat = 'excalidraw'): Promise<void> {
     try {
       const created = await canvas.create('Untitled canvas', blankDoc(format));
@@ -139,9 +147,16 @@
 <!-- Canvas is Design Hall's Whiteboard studio: the crumb leads back to the Hall. -->
 <PageHeader
   title="Canvas"
-  subtitle="Describe a diagram — the agent draws it and keeps refining it as you chat."
+  subtitle="Diagrams an agent draws and refines as you chat"
   crumbs={[{ label: 'Design Hall', onclick: () => router.go('design') }]}
 >
+  {#snippet leading()}
+    {#if readonly && canvas.currentId}
+      <button class="icon-btn" onclick={() => void backToList()} aria-label="Back to scenes" title="Back to scenes">
+        <Icon name="chevronLeft" size={16} />
+      </button>
+    {/if}
+  {/snippet}
   {#snippet actions()}
     <!-- One primary per page: with no scenes yet the hero's mode cards own "new". -->
     {#if ws.currentId && !noScenes}
@@ -161,12 +176,18 @@
     />
   </div>
 {:else}
+  <!-- Phone: push navigation — the scene list IS the first screen (full
+       width); opening a scene replaces it and the header gets a Back button. -->
   <div class="canvas-page" class:phone={readonly}>
-    <aside class="scenes" class:hidden={(readonly && canvas.currentId) || noScenes || listFailed}>
+    <aside
+      class="scenes"
+      class:hidden={(readonly && canvas.currentId) || noScenes || listFailed}
+      class:full={readonly && !canvas.currentId}
+    >
       <SceneList />
     </aside>
 
-    <section class="main">
+    <section class="main" class:hidden={readonly && !canvas.currentId && !noScenes && !listFailed && !canvas.loadError}>
       {#if canvas.loadError && canvas.scene && canvas.currentId}
         <!-- Opening another scene failed: keep the open board, say so above it. -->
         <LoadState what="that scene" variant="compact" error={canvas.loadError} empty onretry={retryOpen} />
@@ -197,8 +218,8 @@
               {#if !showConvo}
                 <!-- Open the Assistant (Ask-AI lives in the conversation panel). -->
                 <div class="ai-bar">
-                  <button class="ai-fab" onclick={() => (showConvo = true)}>
-                    <Icon name="zap" size={15} /> Ask AI
+                  <button class="ai-fab" onclick={() => (showConvo = true)} title="Open the assistant: describe a change and the agent redraws the scene">
+                    <Icon name="sparkle" size={14} /> Ask AI
                   </button>
                 </div>
               {/if}
@@ -211,17 +232,9 @@
           </div>
         {/key}
       {:else if !noScenes}
-        {#if canvas.listLoading || canvas.scenes.length === 0 || !viewport.isPhone}
-          <!-- Listing / auto-opening a scene. -->
-          <LoadState what="scenes" variant="page" loading empty />
-        {:else}
-          <EmptyState
-            variant="page"
-            icon="shapes"
-            title="Pick a scene"
-            body="Open one from the list, or start a new one with New scene."
-          />
-        {/if}
+        <!-- Listing / auto-opening a scene (phone hides this pane: the list
+             is the screen until a scene opens). -->
+        <LoadState what="scenes" variant="page" loading empty />
       {:else}
         <div class="hero">
           <h2>Start a new canvas</h2>
@@ -273,11 +286,17 @@
   .scenes {
     width: 240px;
     flex: 0 0 240px;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     overflow-y: auto;
     background: var(--surface);
   }
-  .scenes.hidden {
+  .scenes.full {
+    flex: 1 1 auto;
+    width: auto;
+    border-inline-end: none;
+  }
+  .scenes.hidden,
+  .main.hidden {
     display: none;
   }
   .main {
@@ -313,27 +332,32 @@
     bottom: 18px;
     left: 50%;
     transform: translateX(-50%);
-    z-index: 6;
+    z-index: var(--z-sticky);
     display: flex;
     align-items: center;
     gap: 8px;
   }
+  /* A floating launcher, not a second primary: a raised neutral pill with an
+     accent glyph (the header's New scene is the page's one primary). */
   .ai-fab {
     display: inline-flex;
     align-items: center;
-    gap: 7px;
-    padding: 9px 16px;
-    border: none;
+    gap: 6px;
+    padding: 8px 16px;
+    border: 1px solid var(--border);
     border-radius: 999px;
-    background: var(--accent-solid);
-    color: var(--accent-contrast);
-    font-size: 13px;
+    background: var(--surface);
+    color: var(--text);
+    font-size: var(--fs-m);
     font-weight: 600;
     cursor: pointer;
-    box-shadow: var(--shadow, 0 4px 16px rgba(0, 0, 0, 0.25));
+    box-shadow: var(--shadow);
+  }
+  .ai-fab :global(svg) {
+    color: var(--accent-text);
   }
   .ai-fab:hover {
-    filter: brightness(1.08);
+    border-color: var(--accent);
   }
   /* The page's empty state: same fixed top offset as EmptyState variant="page". */
   .hero {
@@ -349,13 +373,13 @@
   }
   .hero h2 {
     margin: 0;
-    font-size: 15px;
+    font-size: var(--fs-l);
     font-weight: 600;
   }
   .sub {
     margin: 0;
-    color: var(--text-dim, #888);
-    font-size: 13px;
+    color: var(--text-dim);
+    font-size: var(--fs-m);
     max-width: 420px;
   }
   .modes {
@@ -386,14 +410,24 @@
     border-color: var(--accent);
     transform: translateY(-2px);
   }
+  @media (prefers-reduced-motion: reduce) {
+    .mode,
+    .mode:hover {
+      transition: none;
+      transform: none;
+    }
+  }
+  .mode :global(svg) {
+    color: var(--accent-text);
+  }
   .mode .m-title {
-    font-size: 14px;
-    font-weight: 700;
+    font-size: var(--fs-m);
+    font-weight: 600;
     margin-top: 2px;
   }
   .mode .m-sub {
-    font-size: 12px;
-    color: var(--text-dim, #888);
+    font-size: var(--fs-s);
+    color: var(--text-dim);
     line-height: 1.4;
   }
 </style>

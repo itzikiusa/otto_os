@@ -6,6 +6,9 @@
   import { onMount } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
+  import { toasts } from '../../lib/toast.svelte';
+  import { formatBytes, formatCount } from '../../lib/metric-format';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -82,6 +85,44 @@
     budgetAlert = null;
   }
 
+  // The Storage & retention panel renders at the TOP of the body and scrolls
+  // into view when opened from the header gear (it used to render below the
+  // sessions table, so the gear looked like it did nothing).
+  let settingsEl: HTMLElement | undefined = $state();
+  function toggleSettings(): void {
+    configOpen = !configOpen;
+    if (configOpen) queueMicrotask(() => settingsEl?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }));
+  }
+
+  /** Downloads land in the user's Downloads folder with no visible change on
+   *  the page — say what was exported. */
+  function exported(what: string, file: string): void {
+    toasts.success(`Exported ${what}`, file);
+  }
+  function exportProviders(): void {
+    usage.exportProvidersCsv();
+    exported('providers as CSV', `otto-usage-providers-${usage.days}d.csv`);
+  }
+  function exportDaily(): void {
+    usage.exportDailyCsv();
+    exported('daily cost as CSV', `otto-usage-daily-${usage.days}d.csv`);
+  }
+  function exportSessions(): void {
+    usage.exportSessionsCsv();
+    exported('sessions as CSV', `otto-usage-sessions-${usage.days}d.csv`);
+  }
+  function exportSummary(): void {
+    usage.exportSummaryJson();
+    exported('the usage summary as JSON', `otto-usage-summary-${usage.days}d.json`);
+  }
+
+  /** Throw away unsaved budget edits and re-seed from the server copy. */
+  function discardBudgets(): void {
+    budgetsDirty = false;
+    if (usage.budgets) budgetCfg = structuredClone($state.snapshot(usage.budgets.config));
+    budgetsOpen = false;
+  }
+
   onMount(() => {
     if (auth.isRoot) void usage.loadAll();
     return () => {
@@ -156,21 +197,16 @@
     return [...set].filter(Boolean);
   });
 
-  function fmtNum(n: number): string {
-    if (n >= 1_000_000) return (n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1) + 'M';
-    if (n >= 1_000) return (n / 1_000).toFixed(n >= 10_000 ? 0 : 1) + 'k';
-    return String(n);
+  // Shared formatters (content.md → numbers): 1.2k / 3.4M, KB/MB/GB.
+  const fmtNum = formatCount;
+  /** "1 session" / "3 sessions". */
+  function plural(n: number, one: string, many = one + 's'): string {
+    return `${formatCount(n)} ${n === 1 ? one : many}`;
   }
   function fmtCost(n: number): string {
     if (n === 0) return '$0';
     if (n < 0.01) return '<$0.01';
     return '$' + n.toFixed(n < 100 ? 2 : 0);
-  }
-  function fmtBytes(n: number): string {
-    if (n >= 1 << 30) return (n / (1 << 30)).toFixed(1) + ' GB';
-    if (n >= 1 << 20) return (n / (1 << 20)).toFixed(1) + ' MB';
-    if (n >= 1 << 10) return (n / (1 << 10)).toFixed(0) + ' KB';
-    return n + ' B';
   }
   const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   function shortDay(iso: string): string {
@@ -312,25 +348,35 @@
 </script>
 
 <div class="usage">
-  <PageHeader title="Usage & Metrics" icon="chart">
-    {#snippet badge()}
-      {#if usage.status?.available}
-        <span class="pill ok" title={usage.status.version ?? ''}>ClickHouse</span>
-      {/if}
-    {/snippet}
+  <PageHeader
+    title="Usage"
+    subtitle={usage.status?.available
+      ? `Tokens, estimated cost and system load · last ${usage.days} days · ${usage.ottoOnly ? 'Otto sessions only' : 'all agent sessions on this Mac'}`
+      : 'Tokens, estimated cost and system load'}
+  >
     {#snippet tabs()}
       {#if usage.status?.available}
-        <div class="seg" title="Scope: only sessions run inside Otto, or all Claude/codex usage on this machine">
-          <button class="seg-btn" class:active={usage.ottoOnly} onclick={() => usage.setOttoOnly(true)}>
+        <div
+          class="segmented"
+          role="group"
+          aria-label="Sessions to count"
+          title="Otto: only sessions run inside Otto. All: every Claude/Codex session on this Mac."
+        >
+          <button aria-pressed={usage.ottoOnly} class:active={usage.ottoOnly} onclick={() => usage.setOttoOnly(true)}>
             Otto
           </button>
-          <button class="seg-btn" class:active={!usage.ottoOnly} onclick={() => usage.setOttoOnly(false)}>
+          <button aria-pressed={!usage.ottoOnly} class:active={!usage.ottoOnly} onclick={() => usage.setOttoOnly(false)}>
             All
           </button>
         </div>
-        <div class="seg">
+        <div class="segmented" role="group" aria-label="Time window">
           {#each WINDOWS as w (w.days)}
-            <button class="seg-btn" class:active={usage.days === w.days} onclick={() => usage.setDays(w.days)}>
+            <button
+              aria-pressed={usage.days === w.days}
+              class:active={usage.days === w.days}
+              title="Last {w.days} days"
+              onclick={() => usage.setDays(w.days)}
+            >
               {w.label}
             </button>
           {/each}
@@ -339,687 +385,756 @@
     {/snippet}
     {#snippet actions()}
       {#if usage.status?.available}
-        <button class="btn" onclick={() => usage.loadAll()} disabled={usage.loading} title="Refresh">
-          <Icon name="refresh" size={13} /> Refresh
+        <button
+          class="icon-btn"
+          onclick={() => usage.loadAll()}
+          disabled={usage.loading}
+          title={usage.loading ? 'Refreshing…' : 'Refresh'}
+          aria-label="Refresh"
+          data-icon="refresh"
+          data-label="Refresh"
+        >
+          <Icon name="refresh" size={14} />
         </button>
         <button
-          class="btn"
-          class:active={usage.autoRefresh}
+          class="btn small"
+          class:on={usage.autoRefresh}
+          aria-pressed={usage.autoRefresh}
           onclick={() => usage.setAutoRefresh(!usage.autoRefresh)}
-          title={usage.autoRefresh ? 'Auto-refresh ON — click to stop' : 'Auto-refresh OFF — click to enable (refreshes every 60s)'}
-          data-label={usage.autoRefresh ? 'Stop auto-refresh' : 'Auto-refresh every 60s'}
+          title={usage.autoRefresh ? 'Refreshing every 60 s — click to stop' : 'Refresh this page every 60 s'}
+          data-icon="clock"
+          data-label={usage.autoRefresh ? 'Stop auto-refresh' : 'Auto-refresh every 60 s'}
         >
-          <Icon name="clock" size={13} />
-          {usage.autoRefresh ? 'Live' : 'Auto'}
+          <Icon name="clock" size={12} />
+          {usage.autoRefresh ? 'Live' : 'Auto-refresh'}
         </button>
         <button
-          class="btn"
+          class="btn small"
           disabled={!usage.summary}
-          onclick={() => usage.exportSummaryJson()}
-          title="Download full summary as JSON"
-          data-label="Export JSON"
+          onclick={exportSummary}
+          title={usage.summary ? 'Download the full summary as JSON' : 'Nothing to export yet'}
+          data-icon="download"
+          data-label="Export summary as JSON"
+          data-overflow="-1"
         >
-          <Icon name="download" size={13} /> Export
+          <Icon name="download" size={12} /> Export
         </button>
-        <button class="btn" class:active={configOpen} onclick={() => (configOpen = !configOpen)} title="Settings" aria-label="Usage settings" data-label="Settings">
-          <Icon name="gear" size={13} />
+        <button
+          class="icon-btn"
+          class:on={configOpen}
+          aria-pressed={configOpen}
+          onclick={toggleSettings}
+          title="Storage and retention settings"
+          aria-label="Storage and retention settings"
+          data-icon="gear"
+          data-label="Storage and retention"
+        >
+          <Icon name="gear" size={14} />
         </button>
       {/if}
     {/snippet}
   </PageHeader>
 
-  <!-- Live budget-exceeded banner (driven by BudgetExceeded WS event).
-       Dismissible; clears automatically on a "recovered" event. -->
-  {#if budgetAlert}
-    <div class="budget-banner" class:recovered={budgetAlert.direction === 'recovered'}>
-      <Icon name="warning" size={14} />
-      {#if budgetAlert.direction === 'recovered'}
-        <span>
-          Budget recovered — <strong>{budgetAlert.provider || 'workspace'}</strong>
-          spend (${budgetAlert.spendUsd.toFixed(2)}) is back below the ${budgetAlert.capUsd.toFixed(2)} cap.
-        </span>
-      {:else}
-        <span>
-          Budget exceeded — <strong>{budgetAlert.provider || 'workspace'}</strong>
-          spent ${budgetAlert.spendUsd.toFixed(2)} of the ${budgetAlert.capUsd.toFixed(2)} cap.
-        </span>
-      {/if}
-      <button class="close-btn" onclick={dismissBudgetAlert} title="Dismiss" aria-label="Dismiss budget alert"><Icon name="x" size={13} /></button>
-    </div>
-  {/if}
-
-  {#if !auth.isRoot}
-    <EmptyState
-      variant="page"
-      icon="gauge"
-      title="Usage is root-only"
-      body="Usage analytics are available to the root account."
-    />
-  {:else if !usage.status}
-    <!-- Status unknown (loading, or /usage/status failed): never fall through to
-         the "Install ClickHouse" prompt — a failed load is not "not installed". -->
-    <LoadState
-      what="usage"
-      variant="page"
-      rows={6}
-      loading={usage.loading || !usage.statusError}
-      error={usage.statusError}
-      empty
-      onretry={() => void usage.loadAll()}
-    />
-  {:else if !usage.status.available}
-    <!-- ClickHouse not installed: install / configure prompt -->
-    <div class="install card">
-      <Icon name="db" size={26} />
-      <h2>Set up usage tracking</h2>
-      <p>
-        Otto stores usage history and system metrics in an embedded
-        <strong>ClickHouse</strong> engine (run locally via <code>clickhouse local</code>, no
-        server or port). Install it once — Otto manages it from here on.
-      </p>
-      <div class="install-cmd">
-        <code>curl https://clickhouse.com/ | sh</code>
-      </div>
-      <div class="install-actions">
-        <button class="btn primary" onclick={() => usage.install()} disabled={usage.installing}>
-          {usage.installing ? 'Installing…' : 'Install ClickHouse'}
-        </button>
-      </div>
-      <div class="path-row">
-        <label for="ch-path">…or point at an existing binary</label>
-        <div class="path-input">
-          <PathField bind:value={chPath} files><input
-            id="ch-path"
-            class="input mono"
-            placeholder="/usr/local/bin/clickhouse"
-            bind:value={chPath}
-            spellcheck="false"
-          /></PathField>
-          <button
-            class="btn"
-            disabled={usage.saving || chPath.trim() === ''}
-            onclick={() => usage.saveConfig({ enabled: true, clickhouse_path: chPath.trim() })}
-          >
-            Use
-          </button>
-        </div>
-        {#if usage.status?.binary}
-          <span class="dim">Detected: <span class="mono">{usage.status.binary}</span></span>
+  <PageBody width="full">
+    <!-- Live budget banner (driven by the BudgetExceeded WS event).
+         Dismissible; clears automatically on a "recovered" event. -->
+    {#if budgetAlert}
+      <div class="budget-banner" class:recovered={budgetAlert.direction === 'recovered'} role="status">
+        <Icon name={budgetAlert.direction === 'recovered' ? 'check' : 'warning'} size={14} />
+        {#if budgetAlert.direction === 'recovered'}
+          <span>
+            Back under budget: <strong>{budgetAlert.provider || 'workspace'}</strong>
+            spend ({fmtCost(budgetAlert.spendUsd)}) is below its {fmtCost(budgetAlert.capUsd)} cap.
+          </span>
+        {:else}
+          <span>
+            Over budget: <strong>{budgetAlert.provider || 'workspace'}</strong>
+            spent {fmtCost(budgetAlert.spendUsd)} of its {fmtCost(budgetAlert.capUsd)} cap.
+          </span>
         {/if}
+        <button class="icon-btn" onclick={dismissBudgetAlert} title="Dismiss" aria-label="Dismiss budget alert"><Icon name="x" size={14} /></button>
       </div>
-      {#if usage.status?.priced_as_of}
-        <p class="install-meta dim">
-          Cost estimates use rates priced as of <strong>{usage.status.priced_as_of}</strong>.
-          Unknown models fall back to the Opus tier (flagged as "estimated" in session rows).
-        </p>
-      {/if}
-    </div>
-  {:else}
-    <div class="body">
-      {#if usage.summaryError}
-        <!-- Summary failed: inline error (no data yet) or a stale-data bar. -->
-        <LoadState
-          what="usage summary"
-          loading={usage.loading}
-          error={usage.summaryError}
-          empty={!usage.summary}
-          onretry={() => void usage.loadAll()}
-        />
-      {/if}
-      <!-- Stat cards -->
-      {#if usage.summary}
-        <div class="cards">
-          <div class="stat card">
-            <span class="stat-label">Total tokens</span>
-            <span class="stat-value">{fmtNum(usage.summary.total_tokens)}</span>
-            <div class="seg-bar" title={breakdownTitle(summaryParts(usage.summary))}>
-              {#each tokenSegs(summaryParts(usage.summary)) as s (s.label)}
+    {/if}
+
+    {#if !auth.isRoot}
+      <EmptyState
+        variant="page"
+        icon="chart"
+        title="Usage is root-only"
+        body="Token, cost and system-load history is visible to the root account. Ask whoever set up this Otto for access."
+      />
+    {:else if !usage.status}
+      <!-- Status unknown (loading, or /usage/status failed): never fall through to
+           the "Install ClickHouse" prompt — a failed load is not "not installed". -->
+      <LoadState
+        what="usage"
+        variant="page"
+        rows={6}
+        loading={usage.loading || !usage.statusError}
+        error={usage.statusError}
+        empty
+        onretry={() => void usage.loadAll()}
+      />
+    {:else if !usage.status.available}
+      <!-- Engine not installed: the page's one CTA installs it; pointing at an
+           existing binary is the quiet secondary path. -->
+      <EmptyState
+        variant="page"
+        icon="chart"
+        title="Set up usage tracking"
+        body="Otto keeps token, cost and system-load history in an embedded ClickHouse engine (clickhouse local — no server, no port). Install it once and Otto manages it from then on."
+        actionLabel={usage.installing ? 'Installing…' : 'Install ClickHouse'}
+        actionIcon="download"
+        onaction={() => { if (!usage.installing) void usage.install(); }}
+      >
+        <div class="install-alt">
+          <label for="ch-path">Or use a ClickHouse binary you already have</label>
+          <div class="path-input">
+            <PathField bind:value={chPath} files><input
+              id="ch-path"
+              class="input mono"
+              placeholder="/usr/local/bin/clickhouse"
+              bind:value={chPath}
+              spellcheck="false"
+            /></PathField>
+            <button
+              class="btn"
+              disabled={usage.saving || chPath.trim() === ''}
+              title={chPath.trim() === '' ? 'Enter the path to a clickhouse binary first' : 'Use this binary'}
+              onclick={() => usage.saveConfig({ enabled: true, clickhouse_path: chPath.trim() })}
+            >
+              {usage.saving ? 'Saving…' : 'Use binary'}
+            </button>
+          </div>
+          {#if usage.status?.binary}
+            <span class="dim small">Detected: <span class="mono">{usage.status.binary}</span></span>
+          {/if}
+          {#if usage.status?.priced_as_of}
+            <span class="dim small">
+              Cost estimates use published rates as of {usage.status.priced_as_of}; unknown models are priced
+              at the Opus tier and marked “est.”.
+            </span>
+          {/if}
+        </div>
+      </EmptyState>
+    {:else}
+      <div class="body">
+        <!-- Engine config (opened from the header gear). Rendered first so
+             opening it never lands off-screen below the sessions table. -->
+        {#if configOpen}
+          <section class="panel card" bind:this={settingsEl} aria-labelledby="usage-cfg-title">
+            <div class="panel-head">
+              <h3 id="usage-cfg-title">Storage and retention</h3>
+              <button class="icon-btn" onclick={() => (configOpen = false)} title="Close" aria-label="Close storage and retention">
+                <Icon name="x" size={14} />
+              </button>
+            </div>
+            <div class="cfg-grid">
+              <label for="cfg-retention">Keep history for (days)</label>
+              <input id="cfg-retention" class="input" type="number" min="1" max="3650" bind:value={retention} />
+
+              <label for="cfg-interval">Sample system load every (seconds)</label>
+              <input id="cfg-interval" class="input" type="number" min="5" max="3600" bind:value={interval} />
+
+              <label for="cfg-path">ClickHouse binary</label>
+              <PathField bind:value={chPath} files><input id="cfg-path" class="input mono" bind:value={chPath} spellcheck="false" /></PathField>
+            </div>
+            <div class="cfg-actions">
+              <button class="btn" disabled={usage.installing} onclick={() => usage.install()}>
+                {usage.installing ? 'Updating…' : 'Update ClickHouse'}
+              </button>
+              <button
+                class="btn primary"
+                disabled={usage.saving}
+                onclick={() =>
+                  usage.saveConfig({
+                    enabled: true,
+                    retention_days: retention,
+                    metrics_interval_secs: interval,
+                    clickhouse_path: chPath.trim(),
+                  })}
+              >
+                {usage.saving ? 'Saving…' : 'Save settings'}
+              </button>
+            </div>
+            <div class="engine-meta">
+              <span>ClickHouse <span class="mono">{usage.status.version ?? '—'}</span></span>
+              <span class="ellip-any" title={usage.status.data_dir}>Data: <span class="mono">{usage.status.data_dir}</span></span>
+              <span title="{usage.status.usage_rows.toLocaleString()} usage rows · {usage.status.metric_rows.toLocaleString()} metric rows">
+                On disk: {formatBytes(usage.status.disk_bytes)}
+                ({plural(usage.status.usage_rows, 'row')})
+              </span>
+              <span>Kept for {usage.status.retention_days} days</span>
+              {#if usage.status.priced_as_of}
+                <span title="Cost estimates use published rates as of this date. Unknown models fall back to the Opus tier.">
+                  Priced as of {usage.status.priced_as_of}
+                </span>
+              {/if}
+            </div>
+          </section>
+        {/if}
+
+        {#if usage.summaryError}
+          <!-- Summary failed: inline error (no data yet) or a stale-data bar.
+               The budgets card below still renders on its own. -->
+          <LoadState
+            what="usage summary"
+            loading={usage.loading}
+            error={usage.summaryError}
+            empty={!usage.summary}
+            onretry={() => void usage.loadAll()}
+          />
+        {:else if !usage.summary && usage.loading}
+          <LoadState what="usage summary" loading empty rows={4} />
+        {/if}
+
+        <!-- Stat cards: one sans figure per tile (tabular-nums), label above. -->
+        {#if usage.summary}
+          <div class="cards">
+            <div class="stat card">
+              <span class="stat-label">Total tokens</span>
+              <span class="stat-value" title={usage.summary.total_tokens.toLocaleString()}>{fmtNum(usage.summary.total_tokens)}</span>
+              <div class="seg-bar" title={breakdownTitle(summaryParts(usage.summary))}>
+                {#each tokenSegs(summaryParts(usage.summary)) as s (s.label)}
+                  {#if s.pct > 0}<div style="width: {s.pct}%; background: {s.color}"></div>{/if}
+                {/each}
+              </div>
+            </div>
+            <div class="stat card">
+              <span class="stat-label">Estimated cost</span>
+              <span class="stat-value">{fmtCost(usage.summary.total_cost_usd)}</span>
+              <span class="stat-sub">
+                in the last {usage.summary.days} days
+                <!-- Projected cost of the next agent run on the most-used
+                     provider (hidden when there's no history to base it on). -->
+                {#if usage.summary.providers.length > 0}
+                  <CostForecastChip
+                    feature="agent"
+                    provider={usage.summary.providers[0].provider}
+                  />
+                {/if}
+              </span>
+            </div>
+            <div class="stat card">
+              <span class="stat-label">Activity</span>
+              <span class="stat-value">{fmtNum(usage.summary.total_events)}</span>
+              <span class="stat-sub">{usage.summary.total_events === 1 ? 'event' : 'events'} recorded</span>
+            </div>
+            <div class="stat card">
+              <span class="stat-label">Providers</span>
+              <span class="stat-value">{usage.summary.providers.length}</span>
+              <span class="stat-sub">across {plural(usage.summary.sessions.length, 'session')}</span>
+            </div>
+          </div>
+        {/if}
+
+        <!-- Token breakdown: input · cache-write · cache-read · output -->
+        {#if usage.summary && usage.summary.total_tokens > 0}
+          {@const parts = summaryParts(usage.summary)}
+          <section class="panel card" aria-labelledby="usage-bd-title">
+            <div class="panel-head">
+              <h3 id="usage-bd-title">Token breakdown</h3>
+              <div class="legend">
+                {#each tokenSegs(parts) as s (s.label)}
+                  <span class="lg"><i style="background: {s.color}"></i>{s.label}</span>
+                {/each}
+              </div>
+            </div>
+            <div class="seg-bar big" title={breakdownTitle(parts)}>
+              {#each tokenSegs(parts) as s (s.label)}
                 {#if s.pct > 0}<div style="width: {s.pct}%; background: {s.color}"></div>{/if}
               {/each}
             </div>
-          </div>
-          <div class="stat card">
-            <span class="stat-label">Est. cost</span>
-            <span class="stat-value">{fmtCost(usage.summary.total_cost_usd)}</span>
-            <span class="stat-sub">
-              over {usage.summary.days}d
-              <!-- Pre-launch forecast chip: projects the cost of the next run
-                   using the most-used provider over the current window. -->
-              {#if usage.summary.providers.length > 0}
-                <CostForecastChip
-                  feature="agent"
-                  provider={usage.summary.providers[0].provider}
-                />
-              {/if}
-            </span>
-          </div>
-          <div class="stat card">
-            <span class="stat-label">Activity</span>
-            <span class="stat-value">{fmtNum(usage.summary.total_events)}</span>
-            <span class="stat-sub">events recorded</span>
-          </div>
-          <div class="stat card">
-            <span class="stat-label">Providers</span>
-            <span class="stat-value">{usage.summary.providers.length}</span>
-            <span class="stat-sub">{usage.summary.sessions.length} sessions</span>
-          </div>
-        </div>
-      {/if}
-
-      <!-- Token breakdown: input · cache-write · cache-read · output -->
-      {#if usage.summary && usage.summary.total_tokens > 0}
-        {@const parts = summaryParts(usage.summary)}
-        <div class="panel card">
-          <div class="panel-head">
-            <h3>Token breakdown</h3>
-            <div class="legend">
+            <div class="bd-list">
               {#each tokenSegs(parts) as s (s.label)}
-                <span class="lg"><i style="background: {s.color}"></i>{s.label}</span>
-              {/each}
-            </div>
-          </div>
-          <div class="seg-bar big" title={breakdownTitle(parts)}>
-            {#each tokenSegs(parts) as s (s.label)}
-              {#if s.pct > 0}<div style="width: {s.pct}%; background: {s.color}"></div>{/if}
-            {/each}
-          </div>
-          <div class="bd-list">
-            {#each tokenSegs(parts) as s (s.label)}
-              <div class="bd-item">
-                <i class="chip" style="background: {s.color}"></i>
-                <span class="bd-label">{s.label}</span>
-                <span class="bd-val">{fmtNum(s.v)}</span>
-                <span class="bd-pct dim">{s.pct.toFixed(0)}%</span>
-              </div>
-            {/each}
-          </div>
-        </div>
-      {/if}
-
-      <div class="grid">
-        <!-- Provider breakdown -->
-        <div class="panel card">
-          <div class="panel-head">
-            <h3>By provider</h3>
-            {#if usage.summary && usage.summary.providers.length > 0}
-              <button class="link-btn" onclick={() => usage.exportProvidersCsv()} title="Download as CSV">
-                <Icon name="download" size={11} /> CSV
-              </button>
-            {/if}
-          </div>
-          {#if usage.summary && usage.summary.providers.length > 0}
-            {@const pmax = Math.max(1, ...usage.summary.providers.map((p) => p.total_tokens))}
-            <div class="bars">
-              {#each usage.summary.providers as p (p.provider)}
-                <div class="bar-row">
-                  <span class="bar-name" title={p.provider}>{p.provider}</span>
-                  <div class="bar-track">
-                    <div class="bar-fill stacked" style="width: {(p.total_tokens / pmax) * 100}%" title={breakdownTitle(p)}>
-                      {#each tokenSegs(p) as s (s.label)}
-                        {#if s.pct > 0}<div style="width: {s.pct}%; background: {s.color}"></div>{/if}
-                      {/each}
-                    </div>
-                  </div>
-                  <span class="bar-val">{fmtNum(p.total_tokens)}</span>
-                  <span class="bar-cost dim">{fmtCost(p.cost_usd)}</span>
+                <div class="bd-item">
+                  <i class="swatch" style="background: {s.color}"></i>
+                  <span class="bd-label">{s.label}</span>
+                  <span class="bd-val" title={s.v.toLocaleString()}>{fmtNum(s.v)}</span>
+                  <span class="bd-pct dim">{s.pct.toFixed(0)}%</span>
                 </div>
               {/each}
             </div>
-          {:else}
-            <p class="dim small">No usage recorded yet. Activity appears here as agents run.</p>
-          {/if}
-        </div>
+          </section>
+        {/if}
 
-        <!-- Daily cost (SVG chart with y-axis labels, gridlines, x-axis ticks,
-             and per-point hover tooltip via <title>).
-             Uses the same stacked-token colour scheme as the bar chart. -->
-        <div class="panel card">
-          <div class="panel-head">
-            <h3>Daily cost</h3>
-            {#if usage.summary && usage.summary.daily.length > 0}
-              <button class="link-btn" onclick={() => usage.exportDailyCsv()} title="Download as CSV">
-                <Icon name="download" size={11} /> CSV
-              </button>
-            {/if}
-          </div>
-          {#if usage.summary && usage.summary.daily.length > 0 && dailyMaxCost === 0}
-            <p class="dim small" data-testid="daily-cost-empty">No spend recorded in this window.</p>
-          {:else if usage.summary && usage.summary.daily.length > 0}
-            {@const days = dailyDays}
-            {@const n = days.length}
-            <svg
-              class="daily-svg"
-              viewBox="0 0 {SVG_W} {SVG_H}"
-              aria-label="Daily cost chart"
-              role="img"
-            >
-              <!-- Gridlines + y-axis labels -->
-              {#each yTicks as tick (tick)}
-                {@const y = svgY(tick)}
-                <line class="grid-line" x1={AXIS_L} y1={y} x2={SVG_W} y2={y} />
-                <text class="axis-label y-label" x={AXIS_L - 4} y={y + 4} text-anchor="end">
-                  {fmtCost(tick)}
-                </text>
-              {/each}
-
-              <!-- Stacked area bars (one per day): a thin rect per token category -->
-              {#each days as d, i (d.day)}
-                {@const x = svgX(i, n)}
-                {@const barW = Math.max(2, Math.min(40, ((SVG_W - AXIS_L) / Math.max(1, n)) * 0.7))}
-                {@const barH = (d.cost_usd / (yTicks[yTicks.length - 1] || 1)) * (SVG_H - AXIS_B)}
-                {@const barY = SVG_H - AXIS_B - barH}
-                {@const segs = tokenSegs(d)}
-                <!-- stacked colour segments (bottom = input, then cache-write, cache-read, output) -->
-                {#each segs as s, si (s.label)}
-                  {#if s.pct > 0}
-                    {@const segH = (s.v / Math.max(1, d.total_tokens)) * barH}
-                    {@const segOffset = segs.slice(0, si).reduce((acc, prev) => acc + (prev.v / Math.max(1, d.total_tokens)) * barH, 0)}
-                    <rect
-                      x={x - barW / 2}
-                      y={barY + segOffset}
-                      width={barW}
-                      height={segH}
-                      fill={s.color}
-                      rx="1"
-                    />
-                  {/if}
-                {/each}
-                <!-- Invisible hit target for the tooltip, drawn OVER the
-                     segments so hovering the bar itself shows this day. (A
-                     bare <title> used to sit directly in the <svg>, which made
-                     day 1's text the tooltip for every bar.) -->
-                <rect
-                  class="bar-hit"
-                  x={x - barW / 2}
-                  y={0}
-                  width={barW}
-                  height={SVG_H - AXIS_B}
-                >
-                  <title>{d.day} · {fmtCost(d.cost_usd)} · {breakdownTitle(d)}</title>
-                </rect>
-
-                <!-- x-axis label (thinned) -->
-                {#if showXLabel(i, n)}
-                  <text
-                    class="axis-label x-label"
-                    x={x}
-                    y={SVG_H - 4}
-                    text-anchor="middle"
-                  >{shortDay(d.day)}</text>
+        {#if usage.summary}
+          <div class="grid">
+            <!-- Provider breakdown -->
+            <section class="panel card" aria-labelledby="usage-prov-title">
+              <div class="panel-head">
+                <h3 id="usage-prov-title">By provider</h3>
+                {#if usage.summary.providers.length > 0}
+                  <button class="btn small ghost" onclick={exportProviders} title="Download providers as CSV" aria-label="Download providers as CSV">
+                    <Icon name="download" size={12} /> CSV
+                  </button>
                 {/if}
-              {/each}
-
-              <!-- x-axis baseline -->
-              <line class="axis-line" x1={AXIS_L} y1={SVG_H - AXIS_B} x2={SVG_W} y2={SVG_H - AXIS_B} />
-            </svg>
-          {:else}
-            <p class="dim small">No daily data in this window.</p>
-          {/if}
-        </div>
-      </div>
-
-      <!-- By feature (by-kind): review / product / channel / agent / … -->
-      <div class="panel card">
-        <div class="panel-head">
-          <h3>By feature</h3>
-          {#if usage.summary && usage.summary.by_kind.length > 0}
-            <span class="dim small">cost + tokens by kind of work</span>
-          {/if}
-        </div>
-        {#if usage.summary && usage.summary.by_kind.length > 0}
-          {@const fmax = Math.max(1, ...usage.summary.by_kind.map((f) => f.total_tokens))}
-          <div class="bars">
-            {#each usage.summary.by_kind as f (f.feature)}
-              <div class="bar-row feat-row">
-                <span class="bar-name" title={f.feature}>
-                  <span class="kind-badge kind-{f.feature}">{featureLabel(f.feature)}</span>
-                </span>
-                <div class="bar-track">
-                  <div class="bar-fill stacked" style="width: {(f.total_tokens / fmax) * 100}%" title={breakdownTitle(f)}>
-                    {#each tokenSegs(f) as s (s.label)}
-                      {#if s.pct > 0}<div style="width: {s.pct}%; background: {s.color}"></div>{/if}
-                    {/each}
-                  </div>
-                </div>
-                <span class="bar-val">{fmtNum(f.total_tokens)}</span>
-                <span class="bar-cost dim">{fmtCost(f.cost_usd)}</span>
               </div>
-            {/each}
-          </div>
-        {:else}
-          <p class="dim small">No usage recorded yet. Cost splits by feature (review, product, channels, agents…) appear here as work runs.</p>
-        {/if}
-      </div>
-
-      <!-- Work-graph attribution drilldown (B1): "why did this cost so much?" -->
-      <!-- Shows only when the engine is available (same guard as other panels). -->
-      {#if usage.status?.available}
-        <AttributionDrilldown days={usage.days} />
-      {/if}
-
-      <!-- Budgets (opt-in spend caps) -->
-      <div class="panel card">
-        <div class="panel-head">
-          <h3>Budgets</h3>
-          <button class="link-btn" onclick={() => (budgetsOpen = !budgetsOpen)}>
-            {budgetsOpen ? 'Hide' : 'Configure'}
-          </button>
-        </div>
-        <span class="dim small">
-          Per-workspace / per-provider spend caps. Enforcement is opt-in — caps stay informational
-          (warnings only) until you turn enforcement on.
-        </span>
-
-        <!-- Status: budget vs spend -->
-        {#if usage.budgets && usage.budgets.rows.length > 0}
-          <div class="budget-rows">
-            {#each usage.budgets.rows as r (r.scope + ':' + r.key)}
-              <div class="budget-row" class:warn={r.warning && !r.exceeded} class:over={r.exceeded}>
-                <span class="budget-name" title={r.key}>
-                  <span class="kind-badge">{r.scope}</span>
-                  {r.scope === 'workspace' ? wsName(r.key) : (r.label ?? r.key)}
-                </span>
-                <div class="bar-track">
-                  <div
-                    class="bar-fill"
-                    style="width: {Math.min(100, r.used_fraction * 100)}%"
-                    title="{fmtCost(r.spent_usd)} of {fmtCost(r.limit_usd)}"
-                  ></div>
-                </div>
-                <span class="budget-val">
-                  {fmtCost(r.spent_usd)} / {fmtCost(r.limit_usd)}
-                  {#if r.exceeded}<span class="over-tag">over</span>
-                  {:else if r.warning}<span class="warn-tag">{(r.used_fraction * 100).toFixed(0)}%</span>{/if}
-                </span>
-              </div>
-            {/each}
-          </div>
-          {#if usage.budgets.config.enforce && usage.budgets.rows.some((r) => r.exceeded)}
-            <div class="budget-alert">
-              {usage.budgets.config.block_on_exceed
-                ? 'Enforcement is ON (blocking). Work in an over-budget scope can be blocked by the daemon.'
-                : 'Enforcement is ON (warn-only). Over-budget scopes are flagged but not blocked.'}
-            </div>
-          {/if}
-          <!-- Pre-launch hint: surface the most-constrained cap as a lightweight
-               "heads up" for users about to start work, without hiding it behind
-               the Configure toggle. Only shows when not already in exceeded
-               state (that case is covered by the alert above). -->
-          {#if !usage.budgets.config.enforce || !usage.budgets.rows.some((r) => r.exceeded)}
-            {#each usage.budgets.rows.filter((r) => r.warning && !r.exceeded) as r (r.scope + ':' + r.key)}
-              <p class="dim small" style="margin-top: 4px;">
-                Pre-launch note: {r.scope === 'workspace' ? wsName(r.key) : (r.label ?? r.key)}
-                is at {(r.used_fraction * 100).toFixed(0)}% of its cap
-                ({fmtCost(r.spent_usd)} / {fmtCost(r.limit_usd)}).
-              </p>
-            {/each}
-          {/if}
-        {:else if usage.budgetsError}
-          <LoadState
-            what="budgets"
-            variant="compact"
-            error={usage.budgetsError}
-            empty
-            onretry={() => void usage.loadBudgets()}
-          />
-        {:else}
-          <p class="dim small">No budgets set. Configure caps to track spend against a target.</p>
-        {/if}
-
-        <!-- Editor -->
-        {#if budgetsOpen}
-          <div class="budget-editor">
-            <label class="cfg-row">
-              <input type="checkbox" bind:checked={budgetCfg.enforce} onchange={() => (budgetsDirty = true)} />
-              <span>Enforce budgets (opt-in) — warn prominently when a cap is exceeded</span>
-            </label>
-            <label class="cfg-row" class:disabled={!budgetCfg.enforce}>
-              <input
-                type="checkbox"
-                bind:checked={budgetCfg.block_on_exceed}
-                disabled={!budgetCfg.enforce}
-                onchange={() => (budgetsDirty = true)}
-              />
-              <span>Block work when a cap is exceeded (otherwise warn only)</span>
-            </label>
-            <label class="cfg-row">
-              <span>Window (days)</span>
-              <input
-                class="num"
-                type="number"
-                min="1"
-                bind:value={budgetCfg.window_days}
-                onchange={() => (budgetsDirty = true)}
-              />
-            </label>
-
-            <div class="editor-section">
-              <div class="editor-head">
-                <span>Per workspace</span>
-                <button class="link-btn" onclick={addWsBudget}><Icon name="plus" size={11} /> Add</button>
-              </div>
-              {#each budgetCfg.workspaces as b, i (i)}
-                <div class="editor-line">
-                  <select bind:value={b.workspace_id} onchange={() => (budgetsDirty = true)}>
-                    <option value="">Select workspace…</option>
-                    {#each ws.workspaces as w (w.id)}
-                      <option value={w.id}>{w.name}</option>
-                    {/each}
-                  </select>
-                  <input
-                    class="num"
-                    type="number"
-                    min="0"
-                    step="1"
-                    placeholder="USD"
-                    bind:value={b.monthly_usd}
-                    onchange={() => (budgetsDirty = true)}
-                  />
-                  <button class="link-btn danger" onclick={() => removeWsBudget(i)}>Remove</button>
-                </div>
-              {/each}
-            </div>
-
-            <div class="editor-section">
-              <div class="editor-head">
-                <span>Per provider</span>
-                <button class="link-btn" onclick={addProviderBudget}><Icon name="plus" size={11} /> Add</button>
-              </div>
-              {#each budgetCfg.providers as b, i (i)}
-                <div class="editor-line">
-                  <select bind:value={b.provider} onchange={() => (budgetsDirty = true)}>
-                    <option value="">Select provider…</option>
-                    {#each providerChoices as p (p)}
-                      <option value={p}>{p}</option>
-                    {/each}
-                  </select>
-                  <input
-                    class="num"
-                    type="number"
-                    min="0"
-                    step="1"
-                    placeholder="USD"
-                    bind:value={b.monthly_usd}
-                    onchange={() => (budgetsDirty = true)}
-                  />
-                  <button class="link-btn danger" onclick={() => removeProviderBudget(i)}>Remove</button>
-                </div>
-              {/each}
-            </div>
-
-            <div class="editor-actions">
-              <button class="btn primary" disabled={usage.savingBudgets} onclick={saveBudgets}>
-                {usage.savingBudgets ? 'Saving…' : 'Save budgets'}
-              </button>
-            </div>
-          </div>
-        {/if}
-      </div>
-
-      <!-- System metrics -->
-      <div class="panel card">
-        <div class="panel-head">
-          <h3>System metrics</h3>
-          {#if latest}
-            <span class="dim small">
-              CPU {latest.cpu_pct.toFixed(0)}% · Mem {latest.mem_pct.toFixed(0)}%
-              ({fmtNum(Math.round(latest.mem_used_mb))}/{fmtNum(Math.round(latest.mem_total_mb))} MB) ·
-              ottod {latest.process_rss_mb.toFixed(0)} MB · {latest.active_sessions} active
-            </span>
-          {/if}
-        </div>
-        {#if usage.metrics.length > 1}
-          <div class="metrics">
-            <div class="metric">
-              <span class="metric-label">CPU %</span>
-              <svg viewBox="0 0 300 48" preserveAspectRatio="none" class="spark">
-                <path d={sparkPath(cpuSeries, 100, 300, 48)} class="spark-cpu" />
-              </svg>
-            </div>
-            <div class="metric">
-              <span class="metric-label">Memory %</span>
-              <svg viewBox="0 0 300 48" preserveAspectRatio="none" class="spark">
-                <path d={sparkPath(memSeries, 100, 300, 48)} class="spark-mem" />
-              </svg>
-            </div>
-          </div>
-          <span class="dim small">Last {usage.metrics.length} samples</span>
-        {:else}
-          <p class="dim small">Collecting metrics… (sampled every {usage.status.metrics_interval_secs}s)</p>
-        {/if}
-      </div>
-
-      <!-- Sessions leaderboard — rows are virtualized so raising SESSION_LIMIT
-           (currently 50) stays DOM-bounded. The header stays fixed above the
-           virtual list; rows use a CSS-grid div layout that mirrors the old
-           table columns (same visual output, same column widths). -->
-      <div class="panel card">
-        <div class="panel-head">
-          <h3>Top sessions</h3>
-          {#if usage.summary && usage.summary.sessions.length > 0}
-            <button class="link-btn" onclick={() => usage.exportSessionsCsv()} title="Download sessions as CSV">
-              <Icon name="download" size={11} /> CSV
-            </button>
-          {/if}
-        </div>
-        {#if usage.summary && usage.summary.sessions.length > 0}
-          <!-- Column header row (fixed, not virtualized) -->
-          <div class="sess-head">
-            <span>Session</span>
-            <span>Workspace</span>
-            <span>Provider / Model</span>
-            <span class="num">Events</span>
-            <span class="num">Tokens</span>
-            <span class="num">Cost</span>
-            <span>Last active</span>
-          </div>
-          <!-- Virtualized body: each row is ~46px (id+title or id-only ~38px,
-               plus 8px border; use 46 for a safe estimate that covers titled rows). -->
-          <VirtualList items={usage.summary.sessions} estimateHeight={46} class="sess-vlist">
-            {#snippet row(s)}
-              {@const isOttoSession = s.kind != null || s.title != null}
-              <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-              <div
-                class="sess-row"
-                class:sess-clickable={isOttoSession}
-                role={isOttoSession ? 'button' : undefined}
-                tabindex={isOttoSession ? 0 : undefined}
-                title={isOttoSession ? 'Open this session' : undefined}
-                onclick={isOttoSession ? () => openSession(s.session_id) : undefined}
-                onkeydown={isOttoSession
-                  ? (e) => (e.key === 'Enter' || e.key === ' ') && openSession(s.session_id)
-                  : undefined}
-              >
-                <div title={s.session_id}>
-                  <div class="sess-top">
-                    <span class="mono">{s.session_id.slice(0, 12)}</span>
-                    {#if s.kind}<span class="kind-badge kind-{s.kind}">{s.kind}</span>{/if}
-                  </div>
-                  {#if s.title}<div class="sess-title ellip" title={s.title}>{s.title}</div>{/if}
-                </div>
-                <div class="dim ellip">{s.workspace_name ?? '—'}</div>
-                <div>
-                  <div class="model-cell">
-                    <span>{s.provider}</span>
-                    {#if s.model}
-                      <span class="model-name dim" title={s.model}>{s.model.slice(0, 22)}</span>
-                    {/if}
-                  </div>
-                </div>
-                <div class="num">{fmtNum(s.events)}</div>
-                <div class="num">
-                  <div class="sess-tok">
-                    <span>{fmtNum(s.total_tokens)}</span>
-                    <div class="seg-bar mini" title={breakdownTitle(s)}>
-                      {#each tokenSegs(s) as seg (seg.label)}
-                        {#if seg.pct > 0}<div style="width: {seg.pct}%; background: {seg.color}"></div>{/if}
-                      {/each}
+              {#if usage.summary.providers.length > 0}
+                {@const pmax = Math.max(1, ...usage.summary.providers.map((p) => p.total_tokens))}
+                <div class="bars">
+                  {#each usage.summary.providers as p (p.provider)}
+                    <div class="bar-row">
+                      <span class="bar-name" title={p.provider}>{p.provider}</span>
+                      <div class="bar-track">
+                        <div class="bar-fill stacked" style="width: {(p.total_tokens / pmax) * 100}%" title={breakdownTitle(p)}>
+                          {#each tokenSegs(p) as s (s.label)}
+                            {#if s.pct > 0}<div style="width: {s.pct}%; background: {s.color}"></div>{/if}
+                          {/each}
+                        </div>
+                      </div>
+                      <span class="bar-val" title="{p.total_tokens.toLocaleString()} tokens">{fmtNum(p.total_tokens)}</span>
+                      <span class="bar-cost dim">{fmtCost(p.cost_usd)}</span>
                     </div>
-                  </div>
+                  {/each}
                 </div>
-                <div class="num" title={s.fallback_priced ? 'Estimated — model not in the rate table; priced at the Opus tier' : undefined}>
-                  {fmtCost(s.cost_usd)}
-                  {#if s.fallback_priced}<span class="est-tag">est.</span>{/if}
-                </div>
-                <div class="dim">{fmtLastActive(s.last_active)}</div>
+              {:else}
+                <p class="dim small">No usage in this window. Providers appear here as agents run.</p>
+              {/if}
+            </section>
+
+            <!-- Daily cost (SVG chart with y-axis labels, gridlines, x-axis ticks,
+                 and per-point hover tooltip via <title>).
+                 Uses the same stacked-token colour scheme as the bar chart. -->
+            <section class="panel card" aria-labelledby="usage-daily-title">
+              <div class="panel-head">
+                <h3 id="usage-daily-title">Daily cost</h3>
+                {#if usage.summary.daily.length > 0}
+                  <button class="btn small ghost" onclick={exportDaily} title="Download daily cost as CSV" aria-label="Download daily cost as CSV">
+                    <Icon name="download" size={12} /> CSV
+                  </button>
+                {/if}
               </div>
-            {/snippet}
-          </VirtualList>
-        {:else}
-          <p class="dim small">No sessions recorded yet.</p>
+              {#if usage.summary.daily.length > 0 && dailyMaxCost === 0}
+                <p class="dim small" data-testid="daily-cost-empty">No spend recorded in this window.</p>
+              {:else if usage.summary.daily.length > 0}
+                {@const days = dailyDays}
+                {@const n = days.length}
+                <svg
+                  class="daily-svg"
+                  viewBox="0 0 {SVG_W} {SVG_H}"
+                  aria-label="Daily cost over the last {usage.summary.days} days, peak {fmtCost(dailyMaxCost)}"
+                  role="img"
+                >
+                  <!-- Gridlines + y-axis labels -->
+                  {#each yTicks as tick (tick)}
+                    {@const y = svgY(tick)}
+                    <line class="grid-line" x1={AXIS_L} y1={y} x2={SVG_W} y2={y} />
+                    <text class="axis-label y-label" x={AXIS_L - 4} y={y + 4} text-anchor="end">
+                      {fmtCost(tick)}
+                    </text>
+                  {/each}
+
+                  <!-- Stacked bars (one per day): a thin rect per token category -->
+                  {#each days as d, i (d.day)}
+                    {@const x = svgX(i, n)}
+                    {@const barW = Math.max(2, Math.min(40, ((SVG_W - AXIS_L) / Math.max(1, n)) * 0.7))}
+                    {@const barH = (d.cost_usd / (yTicks[yTicks.length - 1] || 1)) * (SVG_H - AXIS_B)}
+                    {@const barY = SVG_H - AXIS_B - barH}
+                    {@const segs = tokenSegs(d)}
+                    <!-- stacked colour segments (bottom = input, then cache-write, cache-read, output) -->
+                    {#each segs as s, si (s.label)}
+                      {#if s.pct > 0}
+                        {@const segH = (s.v / Math.max(1, d.total_tokens)) * barH}
+                        {@const segOffset = segs.slice(0, si).reduce((acc, prev) => acc + (prev.v / Math.max(1, d.total_tokens)) * barH, 0)}
+                        <rect
+                          x={x - barW / 2}
+                          y={barY + segOffset}
+                          width={barW}
+                          height={segH}
+                          fill={s.color}
+                          rx="1"
+                        />
+                      {/if}
+                    {/each}
+                    <!-- Invisible hit target for the tooltip, drawn OVER the
+                         segments so hovering the bar itself shows this day. (A
+                         bare <title> used to sit directly in the <svg>, which made
+                         day 1's text the tooltip for every bar.) -->
+                    <rect
+                      class="bar-hit"
+                      x={x - barW / 2}
+                      y={0}
+                      width={barW}
+                      height={SVG_H - AXIS_B}
+                    >
+                      <title>{shortDay(d.day)} · {fmtCost(d.cost_usd)} · {breakdownTitle(d)}</title>
+                    </rect>
+
+                    <!-- x-axis label (thinned) -->
+                    {#if showXLabel(i, n)}
+                      <text
+                        class="axis-label x-label"
+                        x={x}
+                        y={SVG_H - 4}
+                        text-anchor="middle"
+                      >{shortDay(d.day)}</text>
+                    {/if}
+                  {/each}
+
+                  <!-- x-axis baseline -->
+                  <line class="axis-line" x1={AXIS_L} y1={SVG_H - AXIS_B} x2={SVG_W} y2={SVG_H - AXIS_B} />
+                </svg>
+              {:else}
+                <p class="dim small">No daily data in this window.</p>
+              {/if}
+            </section>
+          </div>
+
+          <!-- By feature (by-kind): review / product / channel / agent / … -->
+          <section class="panel card" aria-labelledby="usage-feat-title">
+            <div class="panel-head">
+              <h3 id="usage-feat-title">By feature</h3>
+              {#if usage.summary.by_kind.length > 0}
+                <span class="dim small">Tokens and cost by kind of work</span>
+              {/if}
+            </div>
+            {#if usage.summary.by_kind.length > 0}
+              {@const fmax = Math.max(1, ...usage.summary.by_kind.map((f) => f.total_tokens))}
+              <div class="bars">
+                {#each usage.summary.by_kind as f (f.feature)}
+                  <div class="bar-row feat-row">
+                    <span class="bar-name" title={featureLabel(f.feature)}>
+                      <span class="kind-badge">{featureLabel(f.feature)}</span>
+                    </span>
+                    <div class="bar-track">
+                      <div class="bar-fill stacked" style="width: {(f.total_tokens / fmax) * 100}%" title={breakdownTitle(f)}>
+                        {#each tokenSegs(f) as s (s.label)}
+                          {#if s.pct > 0}<div style="width: {s.pct}%; background: {s.color}"></div>{/if}
+                        {/each}
+                      </div>
+                    </div>
+                    <span class="bar-val" title="{f.total_tokens.toLocaleString()} tokens">{fmtNum(f.total_tokens)}</span>
+                    <span class="bar-cost dim">{fmtCost(f.cost_usd)}</span>
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <p class="dim small">No usage in this window. Cost splits by feature (reviews, product, channels, agents…) appear here as work runs.</p>
+            {/if}
+          </section>
+
+          <!-- Work-graph attribution drilldown (B1): "why did this cost so much?"
+               Loads on its own, with its own loading/empty/error states. -->
+          <AttributionDrilldown days={usage.days} />
+        {/if}
+
+        <!-- Budgets (opt-in spend caps). Config, not engine data: renders even
+             when the summary failed so caps stay visible and editable. -->
+        <section class="panel card" aria-labelledby="usage-budget-title">
+          <div class="panel-head">
+            <h3 id="usage-budget-title">Budgets</h3>
+            <button
+              class="btn small"
+              aria-expanded={budgetsOpen}
+              aria-controls="usage-budget-editor"
+              onclick={() => (budgetsOpen ? discardBudgets() : (budgetsOpen = true))}
+              title={budgetsOpen && budgetsDirty ? 'Close the editor and discard unsaved changes' : undefined}
+            >
+              {#if budgetsOpen}{budgetsDirty ? 'Discard changes' : 'Close editor'}{:else}<Icon name="edit" size={12} /> Edit budgets{/if}
+            </button>
+          </div>
+          <p class="dim small intro">
+            Spend caps per workspace or provider. They only warn until you turn on enforcement.
+          </p>
+
+          <!-- Status: budget vs spend -->
+          {#if usage.budgets && usage.budgets.rows.length > 0}
+            <div class="budget-rows">
+              {#each usage.budgets.rows as r (r.scope + ':' + r.key)}
+                {@const name = r.scope === 'workspace' ? wsName(r.key) : (r.label ?? r.key)}
+                <div class="budget-row" class:warn={r.warning && !r.exceeded} class:over={r.exceeded}>
+                  <span class="budget-name" title="{r.scope === 'workspace' ? 'Workspace' : 'Provider'}: {name}">
+                    <span class="kind-badge">{r.scope === 'workspace' ? 'Workspace' : 'Provider'}</span>
+                    <span class="ellip-any">{name}</span>
+                  </span>
+                  <div
+                    class="bar-track"
+                    role="meter"
+                    aria-label="{name} spend"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={Math.round(Math.min(100, r.used_fraction * 100))}
+                  >
+                    <div
+                      class="bar-fill"
+                      style="width: {Math.min(100, r.used_fraction * 100)}%"
+                      title="{fmtCost(r.spent_usd)} of {fmtCost(r.limit_usd)}"
+                    ></div>
+                  </div>
+                  <span class="budget-val">
+                    {fmtCost(r.spent_usd)} / {fmtCost(r.limit_usd)}
+                    {#if r.exceeded}<span class="over-tag">Over</span>
+                    {:else if r.warning}<span class="warn-tag">{(r.used_fraction * 100).toFixed(0)}%</span>{/if}
+                  </span>
+                </div>
+              {/each}
+            </div>
+            {#if usage.budgets.config.enforce && usage.budgets.rows.some((r) => r.exceeded)}
+              <div class="budget-alert" role="status">
+                <Icon name="warning" size={14} />
+                {usage.budgets.config.block_on_exceed
+                  ? 'Enforcement is on and blocking: new work in an over-budget scope can be refused.'
+                  : 'Enforcement is on (warn only): over-budget scopes are flagged, not blocked.'}
+              </div>
+            {/if}
+            <!-- Heads-up for caps close to their limit (the exceeded case is the
+                 alert above). -->
+            {#if !usage.budgets.config.enforce || !usage.budgets.rows.some((r) => r.exceeded)}
+              {#each usage.budgets.rows.filter((r) => r.warning && !r.exceeded) as r (r.scope + ':' + r.key)}
+                <p class="dim small heads-up">
+                  {r.scope === 'workspace' ? wsName(r.key) : (r.label ?? r.key)}
+                  is at {(r.used_fraction * 100).toFixed(0)}% of its cap
+                  ({fmtCost(r.spent_usd)} of {fmtCost(r.limit_usd)}).
+                </p>
+              {/each}
+            {/if}
+          {:else if usage.budgetsError}
+            <LoadState
+              what="budgets"
+              variant="compact"
+              error={usage.budgetsError}
+              empty
+              onretry={() => void usage.loadBudgets()}
+            />
+          {:else if !usage.budgets}
+            <LoadState what="budgets" variant="compact" loading empty />
+          {:else if !budgetsOpen}
+            <p class="dim small">No budgets yet. Use Edit budgets to set a cap and track spend against it.</p>
+          {/if}
+
+          <!-- Editor -->
+          {#if budgetsOpen}
+            <div class="budget-editor" id="usage-budget-editor">
+              <label class="checkbox-row">
+                <input type="checkbox" bind:checked={budgetCfg.enforce} onchange={() => (budgetsDirty = true)} />
+                <span>Enforce budgets: warn prominently when a cap is exceeded</span>
+              </label>
+              <label class="checkbox-row" class:disabled={!budgetCfg.enforce} title={budgetCfg.enforce ? undefined : 'Turn on enforcement first'}>
+                <input
+                  type="checkbox"
+                  bind:checked={budgetCfg.block_on_exceed}
+                  disabled={!budgetCfg.enforce}
+                  onchange={() => (budgetsDirty = true)}
+                />
+                <span>Block new work in a scope that is over its cap (otherwise warn only)</span>
+              </label>
+              <div class="window-row">
+                <label for="budget-window">Compare spend over the last</label>
+                <input
+                  id="budget-window"
+                  class="input num-in"
+                  type="number"
+                  min="1"
+                  bind:value={budgetCfg.window_days}
+                  onchange={() => (budgetsDirty = true)}
+                />
+                <span class="dim">days</span>
+              </div>
+
+              <div class="editor-section">
+                <div class="editor-head">
+                  <span id="budget-ws-head">Per workspace</span>
+                  <button class="btn small ghost" onclick={addWsBudget}><Icon name="plus" size={12} /> Add workspace cap</button>
+                </div>
+                {#each budgetCfg.workspaces as b, i (i)}
+                  <div class="editor-line">
+                    <select class="input" aria-label="Workspace" bind:value={b.workspace_id} onchange={() => (budgetsDirty = true)}>
+                      <option value="">Choose a workspace…</option>
+                      {#each ws.workspaces as w (w.id)}
+                        <option value={w.id}>{w.name}</option>
+                      {/each}
+                    </select>
+                    <span class="usd">$</span>
+                    <input
+                      class="input num-in"
+                      type="number"
+                      min="0"
+                      step="1"
+                      placeholder="0"
+                      aria-label="Cap in US dollars"
+                      bind:value={b.monthly_usd}
+                      onchange={() => (budgetsDirty = true)}
+                    />
+                    <button class="icon-btn rm-btn" onclick={() => removeWsBudget(i)} title="Remove this cap" aria-label="Remove this workspace cap">
+                      <Icon name="trash" size={14} />
+                    </button>
+                  </div>
+                {:else}
+                  <p class="dim small">No workspace caps.</p>
+                {/each}
+              </div>
+
+              <div class="editor-section">
+                <div class="editor-head">
+                  <span>Per provider</span>
+                  <button class="btn small ghost" onclick={addProviderBudget}><Icon name="plus" size={12} /> Add provider cap</button>
+                </div>
+                {#each budgetCfg.providers as b, i (i)}
+                  <div class="editor-line">
+                    <select class="input" aria-label="Provider" bind:value={b.provider} onchange={() => (budgetsDirty = true)}>
+                      <option value="">Choose a provider…</option>
+                      {#each providerChoices as p (p)}
+                        <option value={p}>{p}</option>
+                      {/each}
+                    </select>
+                    <span class="usd">$</span>
+                    <input
+                      class="input num-in"
+                      type="number"
+                      min="0"
+                      step="1"
+                      placeholder="0"
+                      aria-label="Cap in US dollars"
+                      bind:value={b.monthly_usd}
+                      onchange={() => (budgetsDirty = true)}
+                    />
+                    <button class="icon-btn rm-btn" onclick={() => removeProviderBudget(i)} title="Remove this cap" aria-label="Remove this provider cap">
+                      <Icon name="trash" size={14} />
+                    </button>
+                  </div>
+                {:else}
+                  <p class="dim small">No provider caps.</p>
+                {/each}
+              </div>
+
+              <div class="editor-actions">
+                <span class="dim small">Rows without a scope or a cap above $0 are dropped on save.</span>
+                <button
+                  class="btn primary"
+                  disabled={usage.savingBudgets || !budgetsDirty}
+                  title={budgetsDirty ? undefined : 'No changes to save'}
+                  onclick={saveBudgets}
+                >
+                  {usage.savingBudgets ? 'Saving…' : 'Save budgets'}
+                </button>
+              </div>
+            </div>
+          {/if}
+        </section>
+
+        {#if usage.summary}
+          <!-- System metrics -->
+          <section class="panel card" aria-labelledby="usage-sys-title">
+            <div class="panel-head">
+              <h3 id="usage-sys-title">System load</h3>
+              {#if latest}
+                <span class="dim small now">
+                  CPU {latest.cpu_pct.toFixed(0)}% · memory {latest.mem_pct.toFixed(0)}%
+                  ({fmtNum(Math.round(latest.mem_used_mb))} of {fmtNum(Math.round(latest.mem_total_mb))} MB) ·
+                  Otto daemon {latest.process_rss_mb.toFixed(0)} MB · {plural(latest.active_sessions, 'active session')}
+                </span>
+              {/if}
+            </div>
+            {#if usage.metrics.length > 1}
+              <div class="metrics">
+                <div class="metric">
+                  <span class="metric-label">CPU %</span>
+                  <svg viewBox="0 0 300 48" preserveAspectRatio="none" class="spark" role="img" aria-label="CPU over the last {usage.metrics.length} samples">
+                    <path d={sparkPath(cpuSeries, 100, 300, 48)} />
+                  </svg>
+                </div>
+                <div class="metric">
+                  <span class="metric-label">Memory %</span>
+                  <svg viewBox="0 0 300 48" preserveAspectRatio="none" class="spark" role="img" aria-label="Memory over the last {usage.metrics.length} samples">
+                    <path d={sparkPath(memSeries, 100, 300, 48)} />
+                  </svg>
+                </div>
+              </div>
+              <span class="dim small">Last {usage.metrics.length} samples, one every {usage.status.metrics_interval_secs} s</span>
+            {:else}
+              <p class="dim small">Collecting samples… one every {usage.status.metrics_interval_secs} s.</p>
+            {/if}
+          </section>
+
+          <!-- Sessions leaderboard — rows are virtualized so raising SESSION_LIMIT
+               (currently 50) stays DOM-bounded. The header stays fixed above the
+               virtual list; rows use a CSS-grid div layout. -->
+          <section class="panel card" aria-labelledby="usage-sess-title">
+            <div class="panel-head">
+              <h3 id="usage-sess-title">Top sessions</h3>
+              {#if usage.summary.sessions.length > 0}
+                <button class="btn small ghost" onclick={exportSessions} title="Download sessions as CSV" aria-label="Download sessions as CSV">
+                  <Icon name="download" size={12} /> CSV
+                </button>
+              {/if}
+            </div>
+            {#if usage.summary.sessions.length > 0}
+              <div class="sess-scroll">
+                <!-- Column header row (fixed, not virtualized) -->
+                <div class="sess-head">
+                  <span>Session</span>
+                  <span>Workspace</span>
+                  <span>Provider / model</span>
+                  <span class="num">Events</span>
+                  <span class="num">Tokens</span>
+                  <span class="num">Cost</span>
+                  <span>Last active</span>
+                </div>
+                <!-- Virtualized body: each row is ~46px. -->
+                <VirtualList items={usage.summary.sessions} estimateHeight={46} class="sess-vlist">
+                  {#snippet row(s)}
+                    {@const isOttoSession = s.kind != null || s.title != null}
+                    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+                    <div
+                      class="sess-row"
+                      class:sess-clickable={isOttoSession}
+                      role={isOttoSession ? 'button' : undefined}
+                      tabindex={isOttoSession ? 0 : undefined}
+                      aria-label={isOttoSession ? `Open session ${s.title ?? s.session_id}` : undefined}
+                      onclick={isOttoSession ? () => openSession(s.session_id) : undefined}
+                      onkeydown={isOttoSession
+                        ? (e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              openSession(s.session_id);
+                            }
+                          }
+                        : undefined}
+                    >
+                      <!-- Title first; the raw id is secondary (mono, dim, full id on hover). -->
+                      <div class="sess-cell" title={s.title ? `${s.title}\n${s.session_id}` : s.session_id}>
+                        <div class="sess-top">
+                          <span class="sess-name ellip-any">{s.title ?? 'Session outside Otto'}</span>
+                          {#if s.kind}<span class="kind-badge">{s.kind}</span>{/if}
+                        </div>
+                        <div class="sess-id mono">{s.session_id.slice(0, 12)}</div>
+                      </div>
+                      <div class="dim ellip-any" title={s.workspace_name ?? undefined}>{s.workspace_name ?? '—'}</div>
+                      <div class="model-cell">
+                        <span class="ellip-any" title={s.provider}>{s.provider}</span>
+                        {#if s.model}
+                          <span class="model-name dim ellip-any" title={s.model}>{s.model}</span>
+                        {/if}
+                      </div>
+                      <div class="num">{fmtNum(s.events)}</div>
+                      <div class="num">
+                        <div class="sess-tok">
+                          <span title="{s.total_tokens.toLocaleString()} tokens">{fmtNum(s.total_tokens)}</span>
+                          <div class="seg-bar mini" title={breakdownTitle(s)}>
+                            {#each tokenSegs(s) as seg (seg.label)}
+                              {#if seg.pct > 0}<div style="width: {seg.pct}%; background: {seg.color}"></div>{/if}
+                            {/each}
+                          </div>
+                        </div>
+                      </div>
+                      <div class="num" title={s.fallback_priced ? 'Estimated: this model isn’t in the rate table, so it is priced at the Opus tier' : undefined}>
+                        {fmtCost(s.cost_usd)}
+                        {#if s.fallback_priced}<span class="est-tag">est.</span>{/if}
+                      </div>
+                      <div class="dim">{fmtLastActive(s.last_active)}</div>
+                    </div>
+                  {/snippet}
+                </VirtualList>
+              </div>
+            {:else}
+              <p class="dim small">No sessions in this window.</p>
+            {/if}
+          </section>
         {/if}
       </div>
-
-      <!-- Config / engine status -->
-      {#if configOpen}
-        <div class="panel card">
-          <h3>Storage &amp; retention</h3>
-          <div class="cfg-grid">
-            <label for="cfg-retention">Retention (days)</label>
-            <input id="cfg-retention" class="input" type="number" min="1" max="3650" bind:value={retention} />
-
-            <label for="cfg-interval">Metrics sample interval (s)</label>
-            <input id="cfg-interval" class="input" type="number" min="5" max="3600" bind:value={interval} />
-
-            <label for="cfg-path">ClickHouse binary</label>
-            <PathField bind:value={chPath} files><input id="cfg-path" class="input mono" bind:value={chPath} spellcheck="false" /></PathField>
-          </div>
-          <div class="cfg-actions">
-            <button
-              class="btn primary"
-              disabled={usage.saving}
-              onclick={() =>
-                usage.saveConfig({
-                  enabled: true,
-                  retention_days: retention,
-                  metrics_interval_secs: interval,
-                  clickhouse_path: chPath.trim(),
-                })}
-            >
-              {usage.saving ? 'Saving…' : 'Save'}
-            </button>
-            <button class="btn" disabled={usage.installing} onclick={() => usage.install()}>
-              {usage.installing ? 'Updating…' : 'Update ClickHouse'}
-            </button>
-          </div>
-          <div class="engine-meta">
-            <span>Version: <span class="mono">{usage.status.version ?? '—'}</span></span>
-            <span>Data: <span class="mono">{usage.status.data_dir}</span></span>
-            <span title="{usage.status.usage_rows.toLocaleString()} usage rows · {usage.status.metric_rows.toLocaleString()} metric rows">
-              On disk: {fmtBytes(usage.status.disk_bytes)}
-              <span class="dim">({usage.status.usage_rows.toLocaleString()} rows)</span>
-            </span>
-            <span>Retention: {usage.status.retention_days}d</span>
-            {#if usage.status.priced_as_of}
-              <span title="Cost estimates use published rates as of this date. Unknown models fall back to the Opus tier.">
-                Priced as of: <strong>{usage.status.priced_as_of}</strong>
-              </span>
-            {/if}
-          </div>
-        </div>
-      {/if}
-    </div>
-  {/if}
+    {/if}
+  </PageBody>
 </div>
 
 <style>
@@ -1029,134 +1144,71 @@
     flex-direction: column;
     overflow: hidden;
   }
-  .pill {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 2px 7px;
-    border-radius: 999px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-  .pill.ok {
-    background: color-mix(in srgb, var(--status-working) 18%, transparent);
-    color: var(--status-working);
-  }
-  .seg {
-    display: flex;
-    flex-shrink: 0;
-    margin-inline-end: 6px;
-    background: var(--surface-2);
-    border-radius: var(--radius-s);
-    padding: 2px;
-  }
-  .seg-btn {
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 12px;
-    padding: 3px 9px;
-    border-radius: calc(var(--radius-s) - 1px);
-    cursor: pointer;
-  }
-  .seg-btn.active {
-    background: var(--surface);
-    color: var(--text);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
-  }
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 26px;
-    padding: 0 10px;
-    border: 1px solid var(--border);
-    background: var(--surface);
-    color: var(--text);
-    border-radius: var(--radius-s);
-    font-size: 12px;
-    cursor: pointer;
-  }
-  .btn:hover:not(:disabled) {
-    background: var(--surface-2);
-  }
-  .btn.active {
+  /* Toggle state for header buttons (auto-refresh, settings). */
+  .on {
     border-color: var(--accent);
     color: var(--accent-text);
-  }
-  /* The local .btn above re-sets the background at the same specificity as the
-     global .btn.primary, so restate the global primary from tokens (no #fff —
-     Warm dark's accent fill carries dark text). */
-  .btn.primary {
-    background: var(--accent-solid);
-    border-color: transparent;
-    color: var(--accent-contrast);
-  }
-  .btn.primary:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent-solid) 88%, black);
-  }
-  .btn:disabled {
-    opacity: 0.55;
-    cursor: default;
+    background: var(--accent-soft);
   }
 
   .body {
-    flex: 1;
-    overflow-y: auto;
-    padding: 18px 20px 40px;
     display: flex;
     flex-direction: column;
     gap: 14px;
-    min-height: 0;
-  }
-  .card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m, 8px);
+    min-width: 0;
   }
 
   .cards {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 12px;
   }
-  @media (min-width: 641px) and (max-width: 1024px) {
+  @media (max-width: 1024px) {
     .cards {
-      grid-template-columns: repeat(2, 1fr);
+      grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
   @media (max-width: 640px) {
     .cards {
-      grid-template-columns: 1fr;
+      grid-template-columns: minmax(0, 1fr);
     }
   }
   .stat {
     padding: 12px 14px;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 4px;
+    min-width: 0;
   }
   .stat-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     color: var(--text-dim);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
+  /* One sans family for every KPI figure, tabular so digits line up. */
   .stat-value {
-    font-size: 24px;
+    font-size: var(--fs-2xl);
     font-weight: 600;
     color: var(--text);
     font-variant-numeric: tabular-nums;
+    line-height: 1.2;
   }
   .stat-sub {
-    font-size: 11px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 2px 6px;
   }
 
   /* Stacked token-composition bar (input · cache-write · cache-read · output) */
   .seg-bar {
     display: flex;
     height: 6px;
-    margin-top: 7px;
+    margin-top: 8px;
     border-radius: 3px;
     overflow: hidden;
     background: var(--surface-2);
@@ -1166,14 +1218,14 @@
     flex-shrink: 0;
   }
   .seg-bar.big {
-    height: 13px;
-    margin: 2px 0 14px;
+    height: 12px;
+    margin: 0 0 14px;
     border-radius: 6px;
   }
   .seg-bar.mini {
-    height: 5px;
-    width: 70px;
-    margin-top: 3px;
+    height: 4px;
+    width: 72px;
+    margin-top: 4px;
   }
 
   .legend {
@@ -1184,13 +1236,14 @@
   .lg {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    font-size: 11px;
+    gap: 6px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  .lg i {
-    width: 9px;
-    height: 9px;
+  .lg i,
+  .swatch {
+    width: 8px;
+    height: 8px;
     border-radius: 2px;
     flex-shrink: 0;
   }
@@ -1198,19 +1251,14 @@
   .bd-list {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-    gap: 8px 18px;
+    gap: 8px 20px;
   }
   .bd-item {
     display: flex;
     align-items: center;
-    gap: 7px;
-    font-size: 12px;
-  }
-  .bd-item .chip {
-    width: 9px;
-    height: 9px;
-    border-radius: 2px;
-    flex-shrink: 0;
+    gap: 8px;
+    font-size: var(--fs-s);
+    min-width: 0;
   }
   .bd-label {
     color: var(--text-dim);
@@ -1224,53 +1272,57 @@
   .bd-pct {
     min-width: 32px;
     text-align: end;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-variant-numeric: tabular-nums;
   }
 
   .grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 14px;
   }
   .panel {
-    padding: 14px;
+    padding: 14px 16px;
+    min-width: 0;
   }
+  /* Card titles: sentence case, one level (dashboard archetype). */
   .panel h3 {
-    font-size: 12px;
-    margin: 0 0 12px;
+    font-size: var(--fs-m);
+    font-weight: 600;
+    margin: 0;
     color: var(--text);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
   }
   .panel-head {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
+    min-height: 24px;
     margin-bottom: 12px;
-    gap: 12px;
+    gap: 6px 12px;
   }
-  .panel-head h3 {
-    margin: 0;
+  .intro {
+    margin: -6px 0 10px;
   }
 
   .bars {
     display: flex;
     flex-direction: column;
-    gap: 9px;
+    gap: 8px;
   }
   .bar-row {
     display: grid;
-    grid-template-columns: 80px 1fr 56px 50px;
+    grid-template-columns: 88px minmax(0, 1fr) 56px 56px;
     align-items: center;
     gap: 8px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .bar-name {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--text);
+    min-width: 0;
   }
   .bar-track {
     height: 8px;
@@ -1281,6 +1333,7 @@
   .bar-fill {
     height: 100%;
     border-radius: 4px;
+    background: var(--accent-solid);
     transition: width 200ms ease-out;
   }
   /* Stacked variant: width = provider share of max; segments = composition. */
@@ -1288,6 +1341,7 @@
     display: flex;
     overflow: hidden;
     min-width: 2px;
+    background: none;
   }
   .bar-fill.stacked > div {
     height: 100%;
@@ -1301,6 +1355,11 @@
   .bar-cost {
     text-align: end;
     font-variant-numeric: tabular-nums;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .bar-fill {
+      transition: none;
+    }
   }
 
   /* Daily cost SVG chart --------------------------------------------------- */
@@ -1322,7 +1381,7 @@
   .axis-label {
     fill: var(--text-dim);
     font-size: var(--fs-xs);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-variant-numeric: tabular-nums;
   }
   .y-label {
     dominant-baseline: middle;
@@ -1335,13 +1394,14 @@
     cursor: crosshair;
   }
   .bar-hit:hover {
-    fill: color-mix(in srgb, var(--accent) 8%, transparent);
+    fill: var(--hover);
   }
 
   .metrics {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 16px;
+    margin-bottom: 6px;
   }
   .metric {
     display: flex;
@@ -1349,49 +1409,51 @@
     gap: 4px;
   }
   .metric-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .spark {
     width: 100%;
     height: 48px;
   }
+  /* Both series are labelled; colour isn't carrying meaning here. */
   .spark path {
     fill: none;
+    stroke: var(--info);
     stroke-width: 1.5;
     vector-effect: non-scaling-stroke;
   }
-  .spark-cpu {
-    stroke: var(--accent);
-  }
-  .spark-mem {
-    stroke: var(--success);
+  .now {
+    font-variant-numeric: tabular-nums;
   }
 
   /* Sessions leaderboard: fixed column header + VirtualList rows ----------- */
+  /* Wide table scrolls inside its own container, never the page. */
+  .sess-scroll {
+    overflow-x: auto;
+  }
   /* 7-column CSS grid: session · workspace · provider/model · events · tokens · cost · last active */
   .sess-head,
   .sess-row {
     display: grid;
-    grid-template-columns: minmax(130px, 2fr) minmax(80px, 1fr) minmax(100px, 1.5fr) 56px 90px 64px minmax(90px, 1fr);
+    grid-template-columns: minmax(160px, 2fr) minmax(90px, 1fr) minmax(110px, 1.4fr) 60px 90px 72px minmax(100px, 1fr);
     align-items: center;
-    gap: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
+    min-width: 680px;
   }
   .sess-head {
     border-bottom: 1px solid var(--border);
     color: var(--text-dim);
-    font-weight: 500;
-    padding: 5px 0;
+    font-weight: 600;
   }
   .sess-head > span,
   .sess-row > div {
-    padding: 5px 8px;
+    padding: 6px 8px;
+    min-width: 0;
   }
   .sess-row {
-    border-bottom: 1px solid var(--surface-2);
+    border-bottom: 1px solid var(--separator);
     color: var(--text);
-    transition: background 120ms ease-out;
   }
   .sess-row:last-child {
     border-bottom: none;
@@ -1406,72 +1468,104 @@
   /* VirtualList container: max-height so it stays bounded. */
   :global(.sess-vlist) {
     max-height: 460px;
+    /* As wide as its rows, so the header and rows scroll sideways together
+       inside .sess-scroll (not the rows alone inside the list). */
+    min-width: 680px;
+    overflow-x: hidden;
   }
-  /* Session Tokens cell: total over a compact composition mini-bar. */
   .sess-tok {
     display: flex;
     flex-direction: column;
     align-items: flex-end;
-    gap: 1px;
   }
-  .sess-tok .seg-bar.mini {
-    margin-top: 2px;
+  .sess-cell {
+    min-width: 0;
   }
-  .ellip {
-    max-width: 130px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  /* Session cell: id + kind badge on top, title (pane name) below */
   .sess-top {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
+    min-width: 0;
   }
-  .sess-title {
+  .sess-name {
+    color: var(--text);
+  }
+  .sess-id {
     margin-top: 2px;
-    max-width: 240px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
+  .ellip-any {
+    display: block;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 11px;
-    color: var(--text-dim);
   }
   .kind-badge {
     flex-shrink: 0;
     font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 1px 6px;
+    font-weight: 500;
+    padding: 1px 7px;
     border-radius: 999px;
     /* Kinds are categories, not statuses: one neutral chip, told apart by the
        word (foundations.md — no categorical rainbows). */
     background: var(--surface-2);
     color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .sess-clickable {
+    cursor: pointer;
+  }
+  .sess-clickable:hover {
+    background: var(--hover);
+  }
+  .sess-clickable:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+  .model-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .model-name {
+    font-size: var(--fs-xs);
+    font-family: var(--font-mono);
+  }
+  /* "Estimated" cost tag — the model is not in the rate table. */
+  .est-tag {
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    padding: 0 5px;
+    border-radius: 999px;
+    margin-inline-start: 4px;
+    background: var(--warning-soft);
+    color: var(--warning);
   }
 
   /* By-feature rows: widen the label column so the feature badge fits. */
   .feat-row {
-    grid-template-columns: 120px 1fr 56px 50px;
-  }
-  .feat-row .bar-name {
-    overflow: visible;
+    grid-template-columns: 128px minmax(0, 1fr) 56px 56px;
   }
 
+  /* Storage & retention ----------------------------------------------------- */
   .cfg-grid {
     display: grid;
-    grid-template-columns: 200px 1fr;
+    grid-template-columns: 240px minmax(0, 1fr);
     gap: 10px 12px;
     align-items: center;
-    max-width: min(620px, 92vw);
+    max-width: 640px;
   }
   .cfg-grid label {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .cfg-actions {
     display: flex;
+    justify-content: flex-end;
     gap: 8px;
+    max-width: 640px;
     margin-top: 14px;
   }
   .engine-meta {
@@ -1480,134 +1574,77 @@
     gap: 6px 18px;
     margin-top: 14px;
     padding-top: 12px;
-    border-top: 1px solid var(--surface-2);
-    font-size: 11px;
+    border-top: 1px solid var(--separator);
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
-
-  .input {
-    height: 28px;
-    padding: 0 9px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--bg);
-    color: var(--text);
-    font-size: 12px;
-    width: 100%;
+  .engine-meta > span {
+    max-width: 100%;
   }
-  .input.mono,
   .mono {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
   }
 
-  .install {
-    margin: 40px auto;
-    max-width: 520px;
-    padding: 28px 30px;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    text-align: center;
-    gap: 10px;
-    color: var(--text-dim);
-  }
-  .install h2 {
-    font-size: 16px;
-    margin: 4px 0 0;
-    color: var(--text);
-  }
-  .install p {
-    font-size: 12.5px;
-    line-height: 1.55;
-    margin: 0;
-  }
-  .install-cmd {
-    width: 100%;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    padding: 9px 12px;
-    margin: 4px 0;
-  }
-  .install-cmd code {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 12px;
-    color: var(--text);
-  }
-  .install-actions {
-    margin: 4px 0 8px;
-  }
-  .path-row {
-    width: 100%;
+  /* Not-installed page: the secondary "use an existing binary" path under the
+     EmptyState's one CTA. */
+  .install-alt {
+    width: min(460px, 100%);
     display: flex;
     flex-direction: column;
     gap: 6px;
     text-align: start;
-    border-top: 1px solid var(--surface-2);
+    margin-top: 12px;
     padding-top: 14px;
+    border-top: 1px solid var(--separator);
   }
-  .path-row label {
-    font-size: 11.5px;
+  .install-alt label {
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .path-input {
     display: flex;
     gap: 8px;
   }
+  .path-input > :global(:first-child) {
+    flex: 1;
+    min-width: 0;
+  }
   .dim {
     color: var(--text-dim);
   }
   .small {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
-  code {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  p.small {
+    margin: 0;
+    line-height: 1.5;
   }
 
   /* --- Budgets --------------------------------------------------------- */
-  .link-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-    background: none;
-    border: none;
-    color: var(--accent-text);
-    font-size: 12px;
-    cursor: pointer;
-    padding: 0;
-  }
-  .link-btn:hover {
-    text-decoration: underline;
-  }
-  .link-btn.danger {
-    color: var(--danger);
-  }
   .budget-rows {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    margin-top: 10px;
   }
   .budget-row {
     display: grid;
-    grid-template-columns: minmax(120px, 1.4fr) 2fr minmax(120px, auto);
+    grid-template-columns: minmax(140px, 1.4fr) minmax(0, 2fr) minmax(120px, auto);
     align-items: center;
     gap: 10px;
   }
   .budget-name {
-    font-size: 12px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    font-size: var(--fs-s);
     display: flex;
     align-items: center;
     gap: 6px;
+    min-width: 0;
   }
   .budget-val {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     text-align: end;
     white-space: nowrap;
+    font-variant-numeric: tabular-nums;
   }
   .budget-row.warn .bar-fill {
     background: var(--warning);
@@ -1624,66 +1661,71 @@
     color: var(--danger);
     font-weight: 600;
     margin-inline-start: 4px;
-    text-transform: uppercase;
   }
-  /* Live WS budget-exceeded banner — shown at the top of the Usage page. */
+  .heads-up {
+    margin-top: 6px;
+  }
+  /* Live WS budget banner — top of the page body. */
   .budget-banner {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 12px;
-    margin: 0 0 8px;
-    border-radius: var(--radius-s, 6px);
-    background: color-mix(in srgb, var(--danger) 12%, transparent);
+    padding: 6px 8px 6px 12px;
+    margin: 0 0 14px;
+    border-radius: var(--radius-s);
+    background: var(--danger-soft);
     border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
+  }
+  .budget-banner > :global(svg:first-child) {
+    color: var(--danger);
+    flex-shrink: 0;
   }
   .budget-banner.recovered {
-    background: color-mix(in srgb, var(--success) 12%, transparent);
+    background: var(--success-soft);
     border-color: color-mix(in srgb, var(--success) 40%, transparent);
+  }
+  .budget-banner.recovered > :global(svg:first-child) {
+    color: var(--success);
   }
   .budget-banner span {
     flex: 1;
-  }
-  .budget-banner .close-btn {
-    display: inline-grid;
-    place-items: center;
-    background: none;
-    border: none;
-    cursor: pointer;
-    line-height: 1;
-    color: var(--text-dim);
-    padding: 0 2px;
-  }
-  .budget-banner .close-btn:hover {
-    color: var(--text);
+    min-width: 0;
   }
   .budget-alert {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     margin-top: 10px;
     padding: 8px 10px;
-    border-radius: var(--radius-s, 6px);
-    background: color-mix(in srgb, var(--danger) 12%, transparent);
+    border-radius: var(--radius-s);
+    background: var(--danger-soft);
     border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
+  }
+  .budget-alert > :global(svg) {
+    color: var(--danger);
+    flex-shrink: 0;
   }
   .budget-editor {
     margin-top: 12px;
     padding-top: 12px;
-    border-top: 1px solid var(--border);
+    border-top: 1px solid var(--separator);
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 12px;
+    max-width: 640px;
   }
-  .cfg-row {
+  .checkbox-row.disabled {
+    opacity: 0.55;
+  }
+  .window-row {
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 12.5px;
-  }
-  .cfg-row.disabled {
-    opacity: 0.55;
+    font-size: var(--fs-m);
   }
   .editor-section {
     display: flex;
@@ -1694,50 +1736,53 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     color: var(--text-dim);
   }
   .editor-line {
     display: flex;
-    gap: 8px;
+    gap: 6px;
     align-items: center;
   }
   .editor-line select {
     flex: 1;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s, 6px);
-    color: var(--text);
-    font-size: 12px;
-    padding: 4px 6px;
+    min-width: 0;
   }
-  input.num {
-    width: 90px;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s, 6px);
-    color: var(--text);
-    font-size: 12px;
-    padding: 4px 6px;
+  .usd {
+    color: var(--text-dim);
+    font-size: var(--fs-s);
+  }
+  .num-in {
+    width: 96px;
     text-align: end;
+    font-variant-numeric: tabular-nums;
+  }
+  .rm-btn:hover {
+    color: var(--danger);
+    background: var(--danger-soft);
   }
   .editor-actions {
     display: flex;
+    align-items: center;
     justify-content: flex-end;
+    gap: 12px;
+    flex-wrap: wrap;
   }
 
-  @media (max-width: 640px) {
-    .body {
-      padding: 10px;
-    }
-    /* Two-column card grid → single column */
+  @media (max-width: 1024px) {
     .grid {
-      grid-template-columns: 1fr;
+      grid-template-columns: minmax(0, 1fr);
     }
-    /* Bar rows: replace fixed-width name + cost columns with a wrapping layout */
-    .bar-row {
-      grid-template-columns: 1fr 56px;
+  }
+  @media (max-width: 640px) {
+    .metrics {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    /* Bar rows: name + value on one line, the bar underneath. */
+    .bar-row,
+    .feat-row {
+      grid-template-columns: minmax(0, 1fr) 56px;
       grid-template-rows: auto auto;
       gap: 4px 8px;
     }
@@ -1748,40 +1793,16 @@
     .bar-row .bar-val {
       grid-column: 2;
       grid-row: 1;
-      text-align: end;
     }
     .bar-row .bar-track {
       grid-column: 1 / 3;
       grid-row: 2;
     }
     .bar-row .bar-cost {
-      display: none; /* keep layout tight; cost shown on bar hover title */
+      display: none; /* cost stays in the bar's hover title */
     }
-    .feat-row {
-      grid-template-columns: 1fr 56px;
-      grid-template-rows: auto auto;
-      gap: 4px 8px;
-    }
-    .feat-row .bar-name {
-      grid-column: 1;
-      grid-row: 1;
-      overflow: visible;
-    }
-    .feat-row .bar-val {
-      grid-column: 2;
-      grid-row: 1;
-      text-align: end;
-    }
-    .feat-row .bar-track {
-      grid-column: 1 / 3;
-      grid-row: 2;
-    }
-    .feat-row .bar-cost {
-      display: none;
-    }
-    /* Budget rows: narrower label column */
     .budget-row {
-      grid-template-columns: minmax(80px, 1fr) 1.5fr;
+      grid-template-columns: minmax(0, 1fr) auto;
       grid-template-rows: auto auto;
       gap: 4px 8px;
     }
@@ -1792,80 +1813,28 @@
     .budget-row .budget-val {
       grid-column: 2;
       grid-row: 1;
-      text-align: end;
-      white-space: normal;
-      font-size: 11px;
     }
     .budget-row .bar-track {
       grid-column: 1 / 3;
       grid-row: 2;
     }
-    /* Config grid: one column */
     .cfg-grid {
-      grid-template-columns: 1fr;
+      grid-template-columns: minmax(0, 1fr);
     }
-    /* Sessions: collapse workspace + last-active columns; keep session/tokens/cost readable. */
+    /* Sessions: drop workspace + last-active; the rest fits a phone. */
     .sess-head,
     .sess-row {
-      grid-template-columns: minmax(100px, 2fr) minmax(80px, 1.5fr) 56px 72px 56px;
+      grid-template-columns: minmax(0, 2fr) minmax(0, 1.5fr) 48px 64px 56px;
+      min-width: 0;
     }
-    /* Hide workspace + last-active columns on narrow screens. */
+    :global(.sess-vlist) {
+      min-width: 0;
+    }
     .sess-head > span:nth-child(2),
     .sess-head > span:nth-child(7),
     .sess-row > div:nth-child(2),
     .sess-row > div:nth-child(7) {
       display: none;
     }
-    /* Metrics: stack vertically */
-    .metrics {
-      grid-template-columns: 1fr;
-    }
-  }
-
-  /* "Estimated" cost tag — shown when the model is not in the rate table. */
-  .est-tag {
-    font-size: var(--fs-xs);
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 1px 4px;
-    border-radius: 3px;
-    margin-inline-start: 4px;
-    background: color-mix(in srgb, var(--warning) 22%, transparent);
-    color: var(--warning);
-    vertical-align: middle;
-  }
-
-  /* Clickable session row: hover highlight + pointer cursor. The hover applies
-     to the whole div row (not individual <td> cells, since we use divs now). */
-  .sess-clickable {
-    cursor: pointer;
-    transition: background 120ms ease-out;
-  }
-  .sess-clickable:hover {
-    background: color-mix(in srgb, var(--accent) 6%, transparent);
-  }
-
-  /* Provider / model two-line cell in the sessions table. */
-  .model-cell {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-  }
-  .model-name {
-    font-size: var(--fs-xs);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 140px;
-  }
-
-  /* Pricing note shown at the bottom of the install card. */
-  .install-meta {
-    font-size: 11px;
-    text-align: center;
-    max-width: 420px;
-    line-height: 1.5;
   }
 </style>

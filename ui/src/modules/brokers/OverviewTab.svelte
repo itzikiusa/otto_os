@@ -227,7 +227,7 @@
     border-color: color-mix(in srgb, var(--warning) 50%, transparent);
   }
   .card .k {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -240,17 +240,17 @@
     color: var(--warning);
   }
   .card .v small {
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     font-weight: 400;
   }
   .card .sub {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   h4 {
     margin: 0 0 8px;
-    font-size: 13px;
+    font-size: var(--fs-m);
   }
   .spark {
     display: flex;
@@ -289,11 +289,11 @@
     gap: 8px;
   }
   .broker-head .host {
-    font-size: 13px;
+    font-size: var(--fs-m);
   }
   .broker-head .leaders {
     margin-inline-start: auto;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .metric {
@@ -303,7 +303,7 @@
   }
   .metric .ml {
     width: 30px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .metric .track {
@@ -323,21 +323,21 @@
     background: var(--accent);
   }
   .metric .mv {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     min-width: 80px;
     text-align: end;
   }
   .mono {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .muted {
     color: var(--text-dim);
   }
   .muted.small,
   .small {
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   code {
     font-family: var(--font-mono);

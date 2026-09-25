@@ -20,10 +20,13 @@
     actionLabel?: string;
     actionIcon?: IconName;
     onaction?: () => void;
+    /** 'secondary' inside a card / widget / pane that already has (or sits
+     *  beside) the view's one primary action. */
+    actionKind?: 'primary' | 'secondary';
     variant?: 'page' | 'panel';
     children?: Snippet;
   }
-  let { icon = 'box', title, body, actionLabel, actionIcon, onaction, variant = 'panel', children }: Props = $props();
+  let { icon = 'box', title, body, actionLabel, actionIcon, onaction, actionKind = 'primary', variant = 'panel', children }: Props = $props();
 </script>
 
 <div class="empty" class:page={variant === 'page'} data-testid={variant === 'page' ? 'page-empty' : undefined}>
@@ -31,7 +34,7 @@
   <h3>{title}</h3>
   {#if body}<p>{body}</p>{/if}
   {#if actionLabel && onaction}
-    <button class="btn primary" onclick={onaction}>
+    <button class="btn" class:primary={actionKind === 'primary'} onclick={onaction}>
       {#if actionIcon}<Icon name={actionIcon} size={13} />{/if}
       {actionLabel}
     </button>

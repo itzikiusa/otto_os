@@ -79,7 +79,7 @@
         <span class="name" title={a.identity?.arn ?? a.profile ?? ''}>{a.name}</span>
         <EnvBadge env={a.environment} />
         <button
-          class="more"
+          class="icon-btn more"
           onclick={(e) => {
             e.stopPropagation();
             menu(e, a);
@@ -119,7 +119,7 @@
     flex-direction: column;
     overflow-y: auto;
     padding: 6px 0;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .rail-head {
     display: flex;
@@ -211,6 +211,6 @@
   .empty {
     margin: 8px 12px;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
 </style>

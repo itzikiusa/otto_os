@@ -14,6 +14,7 @@
     return s === 'partial' ? { key: 'partial', label: 'Partial', tone: 'warning' } : runStatus(s);
   }
   import { toasts } from '../../lib/toast.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { ProductAnalysis, ProductAnalysisDetail, ProductAnalysisAgent } from './types';
   import type { ProductLens } from '../../lib/api/types';
 
@@ -227,14 +228,23 @@
     }
   }
 
+  let historyError = $state<string | null>(null);
+
   async function loadHistory(): Promise<void> {
     if (historyLoaded) return;
     loadingHistory = true;
+    historyError = null;
+    const sid = product.selectedId;
     try {
       await product.loadAnalyses();
       historyLoaded = true;
+      // Open on the latest run, not on an empty "select a past run" pane.
+      if (!activeId && product.selectedId === sid && product.analyses.length > 0) {
+        const latest = [...product.analyses].sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''))[0];
+        void selectHistory(latest);
+      }
     } catch (e) {
-      toasts.error('Could not load history', product.errMsg(e));
+      historyError = loadErrorText(e);
     } finally {
       loadingHistory = false;
     }
@@ -422,7 +432,7 @@
         </div>
 
         <button
-          class="run-btn"
+          class="btn primary"
           onclick={runAnalysis}
           disabled={running || !canRun}
           title={!running && !canRun ? 'Enable at least one lens and pick a provider for it' : undefined}
@@ -454,7 +464,12 @@
         {/each}
       </select>
       {#if loadingHistory}
-        <span class="dim-sm">Loading…</span>
+        <span class="dim-sm">Loading past runs…</span>
+      {:else if historyError}
+        <span class="dim-sm hist-error" role="alert" title={historyError}><Icon name="warning" size={12} /> Couldn't load past runs</span>
+        <button class="btn small ghost" onclick={() => void loadHistory()}>Retry</button>
+      {:else if historyLoaded && product.analyses.length === 0}
+        <span class="dim-sm">No runs yet — configure the lenses above and run the first analysis.</span>
       {/if}
     </section>
 
@@ -464,7 +479,7 @@
       <!-- Synthesized summary (top, once done/partial) -->
       {#if (analysisStatus === 'done' || analysisStatus === 'partial') && currentAnalysis?.summary}
         <section class="synthesis-card card">
-          <div class="section-head">Synthesized Summary</div>
+          <div class="section-head">Synthesized summary</div>
           {#if summarizerAgent}
             <div class="summarizer-badge">
               <span class="rp-status-pill" data-status={summarizerAgent.status}><StatusBadge status={anStatus(summarizerAgent.status)} /></span>
@@ -537,7 +552,7 @@
               {/if}
               {#if agent.status === 'waiting'}
                 <p class="rp-agent-waiting">
-                  ⚠ This agent looks blocked on input. Click <strong>Open</strong> to view its
+                  <Icon name="warning" size={12} /> This agent looks blocked on input. Click <strong>Open</strong> to view its
                   session and respond (e.g. approve folder access).
                 </p>
               {/if}
@@ -606,7 +621,7 @@
                 <div class="collapsible">
                   <button class="coll-trigger" onclick={() => toggleCollapse(key)}>
                     <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
-                    Related Repos
+                    Related repos
                     <span class="coll-count">({findings.related_repos.length})</span>
                   </button>
                   {#if !collapsed[key]}
@@ -644,7 +659,7 @@
                 <div class="collapsible">
                   <button class="coll-trigger" onclick={() => toggleCollapse(key)}>
                     <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
-                    Integration Points
+                    Integration points
                     <span class="coll-count">({findings.integration_points.length})</span>
                   </button>
                   {#if !collapsed[key]}
@@ -682,7 +697,7 @@
                 <div class="collapsible">
                   <button class="coll-trigger" onclick={() => toggleCollapse(key)}>
                     <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
-                    Open Questions
+                    Open questions
                     <span class="coll-count">({findings.open_questions.length})</span>
                   </button>
                   {#if !collapsed[key]}
@@ -706,7 +721,7 @@
                 <div class="collapsible">
                   <button class="coll-trigger" onclick={() => toggleCollapse(key)}>
                     <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
-                    Suggested Learnings
+                    Suggested learnings
                     <span class="coll-count">({findings.suggested_learnings.length})</span>
                   </button>
                   {#if !collapsed[key]}
@@ -785,7 +800,7 @@
 <style>
   .muted {
     padding: 24px 0;
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     font-style: italic;
   }
@@ -842,7 +857,7 @@
     flex-shrink: 0;
   }
   .lens-name {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text);
     white-space: nowrap;
   }
@@ -863,7 +878,7 @@
     border: 1px solid var(--border);
     background: transparent;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 500;
     cursor: pointer;
     transition: background 100ms, color 100ms, border-color 100ms;
@@ -904,7 +919,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 6px 8px;
     line-height: 1.5;
     font-family: inherit;
@@ -941,7 +956,7 @@
     gap: 7px;
   }
   .field-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -953,29 +968,15 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 3px 8px;
     height: 26px;
   }
-  .run-btn {
-    height: 30px;
-    padding: 0 16px;
-    border: 1px solid var(--accent);
-    border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--accent-text);
-    font-size: 12.5px;
-    font-weight: 600;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 110ms, opacity 110ms;
-  }
-  .run-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
-  }
-  .run-btn:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
+  .hist-error {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--danger);
   }
 
   /* ── History row ──────────────────────────────────────────────── */
@@ -989,12 +990,12 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 4px 8px;
     max-width: 340px;
   }
   .dim-sm {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 
@@ -1013,7 +1014,7 @@
   }
   .synthesis-body {
     margin: 0;
-    font-size: 13.5px;
+    font-size: var(--fs-m);
     line-height: 1.6;
     color: var(--text);
   }
@@ -1031,8 +1032,8 @@
     margin-bottom: 8px;
   }
   .section-head {
-    font-size: 11px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-dim);
@@ -1053,7 +1054,7 @@
     gap: 8px;
   }
   .rp-agent-name {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
     color: var(--text);
     overflow: hidden;
@@ -1065,7 +1066,7 @@
   }
   .rp-agent-note {
     margin: 4px 0 0;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1.4;
   }
@@ -1075,7 +1076,7 @@
   }
   .rp-agent-waiting {
     margin: 6px 0 0;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.45;
     color: var(--warning);
   }
@@ -1097,7 +1098,7 @@
   .btn.small {
     height: 22px;
     padding: 0 9px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .btn.ghost {
     color: var(--text-dim);
@@ -1162,7 +1163,7 @@
     color: var(--text);
   }
   .findings-summary {
-    font-size: 13px;
+    font-size: var(--fs-m);
     line-height: 1.6;
     color: var(--text);
     margin: 0 0 8px;
@@ -1182,7 +1183,7 @@
     background: none;
     border: none;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -1200,7 +1201,7 @@
   }
   .coll-count {
     font-weight: 400;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 
@@ -1214,7 +1215,7 @@
     gap: 4px;
   }
   .findings-list li {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text);
   }
@@ -1223,7 +1224,7 @@
   }
   .mono-sm {
     font-family: var(--font-mono, monospace);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
 
   /* ── Open questions ───────────────────────────────────────────── */
@@ -1233,7 +1234,7 @@
     gap: 2px;
   }
   .q-text {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text);
     line-height: 1.4;
   }
@@ -1264,7 +1265,7 @@
   }
   .sl-kind {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     padding: 1px 6px;
@@ -1273,12 +1274,12 @@
     color: var(--accent-text);
   }
   .sl-title {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
     color: var(--text);
   }
   .sl-body {
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.55;
     color: var(--text-dim);
     margin: 0;
@@ -1286,7 +1287,7 @@
 
   /* ── Error message ────────────────────────────────────────────── */
   .error-msg {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--danger);
     line-height: 1.5;
     margin: 4px 0 0;
@@ -1307,7 +1308,7 @@
     border: 1px solid var(--border);
   }
   .sl-hint-text {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1.4;
     flex: 1;
@@ -1320,7 +1321,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--accent-text);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
     white-space: nowrap;

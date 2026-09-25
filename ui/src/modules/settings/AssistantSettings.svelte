@@ -5,6 +5,7 @@
   // unless you turn on automatic switching. One form, one Save.
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
+  import SettingToggle from './SettingToggle.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -12,6 +13,7 @@
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import { router } from '../../lib/router.svelte';
+  import { toasts } from '../../lib/toast.svelte';
   import { formatCount } from '../../lib/metric-format';
   import { assistant, describeError } from '../../lib/stores/assistant.svelte';
   import { PROVIDER_NAME, ROUTE_ROWS, loadShare, parseKeywords, type Provider } from '../assistant/model';
@@ -73,8 +75,12 @@
         memory_approval: draft.memory_approval,
       });
       savedNote = true;
+      // The Save button sits in the header; the inline note is at the top of a
+      // long form, so also confirm with a toast when it may be off-screen.
+      toasts.success('Routing saved', 'New turns use these rules.');
     } catch (e) {
       saveError = `Couldn’t save routing. ${describeError(e)}`;
+      toasts.error('Couldn’t save routing', describeError(e));
     } finally {
       saving = false;
     }
@@ -95,7 +101,7 @@
   }
 </script>
 
-<div class="page">
+<div class="settings-section">
   <PageHeader title={sectionLabel('assistant')} subtitle="How each turn routes between Claude and Codex plans">
     {#snippet actions()}
       <button class="btn small ghost" data-icon="assistant" onclick={() => router.go('assistant')}><Icon name="assistant" size={12} /> Open Assistant</button>
@@ -241,11 +247,12 @@
 
         <section>
           <h2 class="section-title">Memory</h2>
-          <label class="checkbox-row">
-            <input type="checkbox" bind:checked={draft.memory_approval} onchange={() => (savedNote = false)} />
-            Review memories before Otto keeps them
-          </label>
-          <p class="help indent">Off: Otto saves what matters and shows a chip with Undo. On: suggestions wait on the Memory tab until you accept them.</p>
+          <SettingToggle
+            label="Review memories before Otto keeps them"
+            hint="Off: Otto saves what matters and shows a chip with Undo. On: suggestions wait on the Memory tab until you accept them."
+            checked={draft.memory_approval}
+            onchange={(v) => { if (draft) draft.memory_approval = v; savedNote = false; }}
+          />
         </section>
       </div>
     {/if}
@@ -253,7 +260,9 @@
 </div>
 
 <style>
-  .page {
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. (Not the
+     global `.page` class — its padding would inset the PageHeader.) */
+  .settings-section {
     display: flex;
     flex-direction: column;
     height: 100%;
@@ -272,10 +281,6 @@
     margin: 0 0 10px;
     font-size: var(--fs-s);
     color: var(--text-dim);
-  }
-  .help.indent {
-    margin: 4px 0 0;
-    padding-inline-start: 22px;
   }
   .dim {
     color: var(--text-dim);

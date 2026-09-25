@@ -122,7 +122,7 @@ test('a conflicting rebase from the branch menu opens the resolver with op "reba
 
   const confirm = page.locator('.sheet[role="dialog"][aria-label="Rebase"]');
   await expect(confirm).toBeVisible({ timeout: 20_000 });
-  await expect(confirm).toContainText('commits will be replayed');
+  await expect(confirm).toContainText(/commits? will be replayed/);
   await confirm.getByRole('button', { name: 'Rebase' }).click();
 
   await expect(page.locator('.toast', { hasText: 'Rebased' })).toBeVisible({ timeout: 20_000 });

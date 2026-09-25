@@ -411,10 +411,10 @@
       </label>
       <span class="spacer"></span>
       {#if running && qid}
-        <button class="ghost sm" onclick={() => void cancel()}><Icon name="x" size={12} /> Cancel</button>
+        <button class="btn small" onclick={() => void cancel()}><Icon name="x" size={12} /> Cancel</button>
       {/if}
       <button
-        class="primary sm"
+        class="btn primary small"
         onclick={() => void run()}
         disabled={!canRun || running || !sql.trim()}
         title={canRun ? 'Run (⌘↵) — runs the selection when there is one' : 'Needs Edit on Athena'}
@@ -518,7 +518,7 @@
     min-height: 0;
     overflow: hidden;
     background: var(--bg-sidebar);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .tree-head {
     display: flex;
@@ -546,7 +546,7 @@
     background: transparent;
     color: var(--text);
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-s);
     outline: none;
   }
   .dbs,
@@ -573,7 +573,7 @@
     text-align: left;
     cursor: pointer;
     font: inherit;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .node:hover {
     background: var(--surface-2);
@@ -601,7 +601,7 @@
     display: flex;
     justify-content: space-between;
     gap: 8px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     padding: 1px 8px 1px 0;
     overflow: hidden;
   }
@@ -612,7 +612,7 @@
   }
   .sub {
     padding: 2px 8px 2px 24px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .dim {
     color: var(--text-dim);
@@ -640,7 +640,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .lbl {
     color: var(--text-dim);
@@ -653,7 +653,7 @@
     background: var(--bg);
     color: var(--text);
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .spacer {
     flex: 1;
@@ -672,7 +672,7 @@
     padding: 0 10px;
     min-height: 32px;
     border-bottom: 1px solid var(--border);
-    font-size: 12px;
+    font-size: var(--fs-s);
     flex-wrap: wrap;
     background: var(--surface);
   }
@@ -710,7 +710,7 @@
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .tabs button.on {
     color: var(--text);
@@ -726,7 +726,7 @@
   .hist {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .hist th {
     position: sticky;
@@ -735,7 +735,7 @@
     background: var(--surface);
     text-align: left;
     font-weight: 600;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -762,7 +762,7 @@
     outline: none;
   }
   .q {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .link {
     border: 0;
@@ -771,32 +771,7 @@
     cursor: pointer;
     padding: 0;
     font: inherit;
-    font-size: 12px;
-  }
-  .primary,
-  .ghost {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 10px;
-    border-radius: var(--radius-m);
-    cursor: pointer;
-    font-size: 12px;
-  }
-  .primary {
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: var(--accent-contrast);
-    font-weight: 600;
-  }
-  .primary:disabled {
-    opacity: 0.55;
-    cursor: default;
-  }
-  .ghost {
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text);
+    font-size: var(--fs-s);
   }
   .icon-btn {
     display: inline-grid;

@@ -12,6 +12,17 @@ export interface ChoiceOption {
   kind?: 'primary' | 'danger' | 'normal';
 }
 
+/** A confirm whose verb destroys, detaches or overrides something paints its
+ *  button red; any other verb ("Start", "Fill", "Import", "Stash & pull") is a
+ *  normal primary. Callers that pass `danger` explicitly always win — this
+ *  only replaces the old blanket default (red for everything), which made
+ *  harmless confirms look destructive. */
+const DESTRUCTIVE =
+  /^(delete|remove|discard|revoke|purge|drop|terminate|force|reset|roll back|revert|stop|cancel|reject|deny|forget|replace|overwrite|clear|kill|unregister|uninstall|disconnect|end\b)/i;
+export function isDestructiveVerb(label: string): boolean {
+  return DESTRUCTIVE.test(label.trim());
+}
+
 class ConfirmStore {
   open = $state(false);
   title = $state('Confirm');
@@ -44,7 +55,7 @@ class ConfirmStore {
     this.title = opts?.title ?? 'Confirm';
     this.confirmLabel = opts?.confirmLabel ?? 'Delete';
     this.cancelLabel = opts?.cancelLabel ?? 'Cancel';
-    this.danger = opts?.danger ?? true;
+    this.danger = opts?.danger ?? isDestructiveVerb(this.confirmLabel);
     this.open = true;
     return new Promise<boolean>((resolve) => {
       this.resolver = resolve as (v: boolean | string | null) => void;
@@ -73,7 +84,7 @@ class ConfirmStore {
     this.choices = null;
     this.message = message;
     this.title = opts?.title ?? 'Enter a value';
-    this.confirmLabel = opts?.confirmLabel ?? 'OK';
+    this.confirmLabel = opts?.confirmLabel ?? 'Continue';
     this.cancelLabel = 'Cancel';
     this.danger = opts?.danger ?? false;
     this.inputValue = opts?.initial ?? '';

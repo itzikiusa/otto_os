@@ -3,6 +3,7 @@
   // radially around the coordinator by `reports_to`. Click a node → open that
   // agent's session; hover → its live sessions. A side rail shows a per-member
   // brief (completed / live) and the currently active tasks.
+  import { sentenceCase } from '../../lib/status';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
@@ -315,8 +316,8 @@
                     <span class="node-status dim">{statusLine(a)}</span>
                     <span class="node-foot">
                       <span class="role">{a.specialization || a.title}</span>
-                      {#if el}<span class="el"><Icon name="clock" size={9} /> {el}</span>{/if}
-                      {#if sess.length > 0}<span class="sess"><Icon name="terminal" size={9} /> {sess.length}</span>{/if}
+                      {#if el}<span class="el"><Icon name="clock" size={12} /> {el}</span>{/if}
+                      {#if sess.length > 0}<span class="sess"><Icon name="terminal" size={12} /> {sess.length}</span>{/if}
                     </span>
                   </span>
                 </button>
@@ -328,7 +329,7 @@
                     {#each sess as s (s.id)}
                       {@const sst = ws.statusMap[s.id] ?? s.status}
                       <button class="tip-row" onclick={() => (swarm.selectedSessionId = s.id)}>
-                        <Icon name="terminal" size={11} />
+                        <Icon name="terminal" size={12} />
                         <span class="grow ellipsis">{s.title || s.provider}</span>
                         <span class="node-state st-{sst === 'running' || sst === 'working' ? 'working' : 'idle'}"></span>
                       </button>
@@ -353,8 +354,8 @@
           <button class="brief-row" onclick={() => openAgent(a)} title="Open session">
             <span class="avatar sm">{a.avatar || a.name.slice(0, 1)}</span>
             <span class="grow ellipsis">{a.name}</span>
-            <span class="stat done" title="completed runs"><Icon name="check" size={10} /> {completedCount(a.id)}</span>
-            <span class="stat addr" class:has={addr > 0} title="tasks / runs to address"><Icon name="zap" size={10} /> {addr}</span>
+            <span class="stat done" title="Completed runs"><Icon name="check" size={12} /> {completedCount(a.id)}</span>
+            <span class="stat addr" class:has={addr > 0} title="Tasks or runs that need attention"><Icon name="zap" size={12} /> {addr}</span>
           </button>
         {/each}
       </div>
@@ -364,9 +365,9 @@
       <div class="side-head"><Icon name="zap" size={12} /> Live tasks</div>
       <div class="search">
         <Icon name="search" size={12} />
-        <input class="search-input" placeholder="Search tasks…" bind:value={taskQuery} />
+        <input class="search-input" aria-label="Search tasks" placeholder="Search tasks…" bind:value={taskQuery} />
       </div>
-      <div class="task-list">
+      <div class="task-list" role="list" aria-label="Live tasks">
         {#each shownTasks as t (t.id)}
           {@const ag = swarm.agentById(t.assignee_agent_id)}
           <div
@@ -377,8 +378,8 @@
             <span class="task-main">
               <span class="task-title ellipsis2" title={t.title}>{t.title}</span>
               <span class="task-meta dim">
-                <span class="pchip prio-{t.priority}">{t.priority}</span>
-                <span>{t.status.replace('_', ' ')}</span>
+                <span class="pchip prio-{t.priority}" title="Priority">{sentenceCase(t.priority)}</span>
+                <span>{sentenceCase(t.status)}</span>
                 {#if ag}<span>· {ag.name}</span>{/if}
               </span>
             </span>
@@ -473,14 +474,15 @@
     border-radius: 50%;
     display: grid;
     place-items: center;
-    font-size: 14px;
+    font-size: var(--fs-l);
     flex: none;
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
   }
   .avatar.sm {
     width: 20px;
     height: 20px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .node-body {
     display: flex;
@@ -495,7 +497,7 @@
     gap: 6px;
   }
   .node-name {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -585,7 +587,7 @@
     border-radius: var(--radius-s);
     padding: 5px 6px;
     cursor: pointer;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     text-align: start;
   }
   .tip-row:hover {
@@ -619,7 +621,7 @@
     align-items: center;
     gap: 6px;
     padding: 8px 10px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text);
     border-bottom: 1px solid var(--border);
@@ -642,7 +644,7 @@
     border-radius: var(--radius-s);
     padding: 5px 7px;
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--fs-s);
     text-align: start;
   }
   .brief-row:hover {
@@ -677,8 +679,13 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
+    /* The focus ring is drawn on the .search wrapper (:focus-within). */
     outline: none;
+  }
+  .search:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .task-list {
     overflow-y: auto;
@@ -718,7 +725,7 @@
     flex: 1;
   }
   .task-title {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text);
   }
   .task-meta {
@@ -758,7 +765,7 @@
   }
   .empty {
     padding: 8px 4px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
 
   /* Stack the rail under the graph on narrow viewports. */

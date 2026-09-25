@@ -368,7 +368,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .grid {
@@ -384,7 +384,7 @@
   }
   .thead {
     border-bottom: 1px solid var(--border);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--text-dim);
@@ -402,7 +402,7 @@
     min-width: 0;
   }
   .tname .nm {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .code {
@@ -411,7 +411,7 @@
     color: var(--text-dim);
   }
   .desc {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -432,7 +432,7 @@
     border-radius: var(--radius-s, 6px);
     color: var(--text);
     padding: 5px 8px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .switch {
     width: 30px;
@@ -480,7 +480,7 @@
     border: none;
     background: transparent;
     color: var(--accent-text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
   .tester-head {
@@ -492,7 +492,7 @@
     color: var(--text-dim);
   }
   .tester-head .th {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
   }
@@ -512,7 +512,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
   }
   .field {
@@ -521,7 +521,7 @@
     gap: 4px;
   }
   .field > span {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   textarea {
@@ -530,7 +530,7 @@
   }
   .mono {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .result {
     border: 1px solid var(--border);
@@ -546,7 +546,7 @@
     margin-bottom: 8px;
   }
   .reason {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .tag {
@@ -565,7 +565,7 @@
   .json {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     white-space: pre-wrap;
     word-break: break-word;
     max-height: 320px;
@@ -574,19 +574,19 @@
   }
   .pending {
     margin: 0;
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--warning);
   }
   .warn {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--danger);
   }
   .muted {
     color: var(--text-dim);
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .pad {
     padding: 16px;

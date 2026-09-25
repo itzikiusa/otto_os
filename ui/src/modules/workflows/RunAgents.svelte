@@ -184,7 +184,7 @@
         </div>
         {#each g.sessions as sid (sid)}
           <div class="sess" data-sess={sid}>
-            <button class="sess-h" onclick={() => toggle(sid)} title="Show live terminal">
+            <button class="sess-h" onclick={() => toggle(sid)} aria-expanded={!!expanded[sid]} title={expanded[sid] ? 'Hide live terminal' : 'Show live terminal'}>
               <Icon name={expanded[sid] ? 'chevronDown' : 'chevronRight'} size={12} />
               <span class="s-dot {sStatus(sid)}"></span>
               <span class="s-title">{sTitle(sid)}</span>
@@ -229,7 +229,7 @@
 <style>
   .empty {
     padding: 16px 12px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.5;
   }
@@ -252,7 +252,7 @@
     align-items: center;
     gap: 7px;
     padding: 3px 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -296,7 +296,7 @@
     border: none;
     cursor: pointer;
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     text-align: start;
   }
   .sess-h:hover {
@@ -314,7 +314,7 @@
   }
   .fallback {
     padding: 4px 8px 8px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .s-status {
@@ -333,7 +333,7 @@
     margin-inline-start: 18px;
   }
   .sub {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;

@@ -4,6 +4,10 @@
   // and provides a "Run Discovery" button (with team picker) for repeat runs.
   import { product } from '../../lib/stores/product.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { runStatus } from '../../lib/status';
+  import { loadErrorText } from '../../lib/loadError';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
@@ -46,7 +50,7 @@
     try {
       runs = await product.listDiscoveryRuns();
     } catch (e) {
-      loadError = e instanceof Error ? e.message : String(e);
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -65,7 +69,7 @@
     try {
       expandedDetail = await product.getDiscoveryRun(id);
     } catch (e) {
-      expandError = e instanceof Error ? e.message : String(e);
+      expandError = loadErrorText(e);
     } finally {
       expandLoading = false;
     }
@@ -82,7 +86,7 @@
     const attCount = 0; // attachment count not tracked here; overview has the panel
     const ok = await confirmer.ask(
       `Run Discovery in ${teamName}? This will START the swarm and send the story info${attCount > 0 ? ` + ${attCount} attachments` : ''} as discovery context.`,
-      { title: 'Run Discovery', confirmLabel: 'Run Discovery', danger: false },
+      { title: 'Run discovery', confirmLabel: 'Run discovery', danger: false },
     );
     if (!ok) return;
 
@@ -156,7 +160,7 @@
       disabled={running}
       title="Launch a new discovery swarm run for this story"
     >
-      {running ? 'Starting…' : '⚡ Run Discovery'}
+      <Icon name="zap" size={12} /> {running ? 'Starting…' : 'Run discovery'}
     </button>
 
     <button
@@ -165,19 +169,17 @@
       disabled={loading}
       title="Reload discovery runs"
     >
-      {loading ? 'Loading…' : 'Refresh'}
+      <Icon name="refresh" size={12} /> {loading ? 'Refreshing…' : 'Refresh'}
     </button>
   </div>
 
   <!-- ── Run list ───────────────────────────────────────────────────── -->
-  {#if loading && runs.length === 0}
-    <div class="muted">Loading…</div>
-  {:else if loadError}
-    <div class="error-msg">Could not load discovery runs: {loadError}</div>
+  {#if (loading || loadError) && runs.length === 0}
+    <LoadState what="discovery runs" loading={loading} error={loadError} empty onretry={() => void loadRuns()} />
   {:else if runs.length === 0}
     <div class="empty-state">
       <p>No discovery runs yet.</p>
-      <p>Click <strong>Run Discovery</strong> to analyse this story with a swarm.</p>
+      <p>Run discovery to have a swarm analyse this story and report its findings here.</p>
     </div>
   {:else}
     <div class="run-list">
@@ -185,14 +187,12 @@
         {@const isOpen = expandedId === summary.run.id}
         <div class="run-card" class:open={isOpen}>
           <!-- ── Run header ──────────────────────────────────────────── -->
-          <div class="run-header" role="button" tabindex="0"
+          <div class="run-header" role="button" tabindex="0" aria-expanded={isOpen}
             onclick={() => toggleRun(summary.run.id)}
-            onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggleRun(summary.run.id); }}
+            onkeydown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void toggleRun(summary.run.id); } }}
           >
             <span class="coll-arrow" aria-hidden="true"><Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={11} /></span>
-            <span class="status-badge {statusColor(summary.derived_status)}">
-              {summary.derived_status}
-            </span>
+            <span class="status-badge"><StatusBadge status={runStatus(summary.derived_status)} /></span>
             <span class="run-date">{relDate(summary.run.created_at)}</span>
             <span class="run-progress">
               {summary.done_count}/{summary.task_count} tasks
@@ -202,7 +202,7 @@
               onclick={(e) => { e.stopPropagation(); void viewInSwarm(summary); }}
               title="Open in Swarm"
             >
-              View in Swarm →
+              Open in Swarm <Icon name="chevronRight" size={12} />
             </button>
           </div>
 
@@ -212,12 +212,12 @@
               {#if expandLoading}
                 <div class="muted inner-pad">Loading details…</div>
               {:else if expandError}
-                <div class="error-msg inner-pad">Could not load: {expandError}</div>
+                <LoadState what="the run details" variant="compact" error={expandError} empty onretry={() => { const id = summary.run.id; expandedId = null; void toggleRun(id); }} />
               {:else if expandedDetail}
                 <!-- Report markdown -->
                 {#if expandedDetail.run.report_md}
                   <div class="report-section">
-                    <div class="section-label">Discovery Report</div>
+                    <div class="section-label">Discovery report</div>
                     <div class="md-body">{@html renderMarkdown(expandedDetail.run.report_md)}</div>
                   </div>
                 {:else}
@@ -227,7 +227,7 @@
                 <!-- Per-task summaries -->
                 {#if expandedDetail.task_summaries.length > 0}
                   <div class="tasks-section">
-                    <div class="section-label">Task Summaries</div>
+                    <div class="section-label">Task summaries</div>
                     <div class="task-list">
                       {#each expandedDetail.tasks as task (task.id)}
                         {@const taskSummaryEntry = expandedDetail.task_summaries.find(([tid]) => tid === task.id)}
@@ -249,7 +249,7 @@
                 <!-- Board messages -->
                 {#if expandedDetail.messages.length > 0}
                   <div class="messages-section">
-                    <div class="section-label">Discovery Board Messages</div>
+                    <div class="section-label">Board messages</div>
                     <div class="message-list">
                       {#each expandedDetail.messages as msg (msg.id)}
                         <div class="message-item">
@@ -267,7 +267,7 @@
                     class="btn small"
                     onclick={() => viewInSwarm(summary)}
                   >
-                    View in Swarm →
+                    Open in Swarm <Icon name="chevronRight" size={12} />
                   </button>
                 </div>
               {/if}
@@ -299,7 +299,7 @@
     margin-bottom: 12px;
   }
   .toolbar-title {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -315,29 +315,24 @@
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
 
   /* ── States ──────────────────────────────────────────────────────── */
   .muted {
     color: var(--text-dim);
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-style: italic;
   }
   .inner-pad {
     padding: 12px 14px;
   }
-  .error-msg {
-    color: var(--danger);
-    font-size: 13px;
-    padding: 8px 0;
-  }
   .empty-state {
     padding: 40px 16px;
     text-align: center;
     color: var(--text-dim);
-    font-size: 13px;
+    font-size: var(--fs-m);
     line-height: 1.6;
   }
   .empty-state p {
@@ -373,7 +368,7 @@
     background: transparent;
     color: var(--text);
     cursor: pointer;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     transition: background 100ms;
     user-select: none;
   }
@@ -389,12 +384,7 @@
 
   /* Status badges */
   .status-badge {
-    font-size: var(--fs-xs);
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding: 2px 7px;
-    border-radius: 999px;
+    display: inline-flex;
     flex-shrink: 0;
   }
   .status-done {
@@ -416,21 +406,24 @@
 
   .run-date {
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .run-progress {
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     margin-left: auto;
   }
 
   .view-swarm-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     padding: 3px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--accent-text);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     font-weight: 500;
     cursor: pointer;
     white-space: nowrap;
@@ -465,7 +458,7 @@
   }
 
   .md-body {
-    font-size: 13.5px;
+    font-size: var(--fs-m);
     line-height: 1.6;
     color: var(--text);
     overflow-wrap: break-word;
@@ -485,7 +478,7 @@
     font-family: var(--font-mono, monospace);
     font-size: 0.9em;
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     padding: 1px 4px;
   }
 
@@ -528,13 +521,13 @@
     background: var(--text-dim);
   }
   .task-title {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 500;
     color: var(--text);
   }
   .task-summary-text {
     margin: 0 0 0 13px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.5;
   }
@@ -554,7 +547,7 @@
   .message-item {
     display: flex;
     gap: 8px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
   }
   .message-role {
@@ -563,7 +556,7 @@
     color: var(--text-dim);
     min-width: 50px;
     text-align: end;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding-top: 1px;
   }
   .message-content {

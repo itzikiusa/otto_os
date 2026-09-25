@@ -311,7 +311,7 @@
     align-self: flex-start;
   }
   .hint {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.5;
     margin: 0;
@@ -361,10 +361,10 @@
   }
   .ctx-name {
     font-weight: 500;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .ctx-meta {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -379,14 +379,14 @@
     border: 1px dashed var(--border);
     border-radius: var(--radius-m);
     color: var(--text-dim);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     line-height: 1.5;
   }
   .eks p {
     margin: 0;
   }
   .picked-summary {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     line-height: 1.5;
   }
   .picked-summary ul {
@@ -396,7 +396,7 @@
     overflow: auto;
   }
   .lbl {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     font-weight: 500;
     color: var(--text-dim);
   }
@@ -410,7 +410,7 @@
     border-radius: 999px;
     border: 1px solid var(--border);
     background: var(--surface-2);
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
     text-transform: capitalize;
@@ -429,7 +429,7 @@
   }
   .err {
     color: var(--status-exited);
-    font-size: 12px;
+    font-size: var(--fs-s);
     white-space: pre-wrap;
   }
   .spacer {

@@ -30,7 +30,7 @@ The app also keeps the Otto daemon running. It installs `ottod` as a background 
 **The ⌥Space bar**
 - The same command bar as inside Otto, in a floating glass panel over any app and every desktop Space. It opens centred near the bottom of the screen under your pointer.
 - It grows upward as answers arrive, up to 560 points tall, and always stays on screen.
-- Commands available there: **Open Otto**, "Go to <module>" for every module you can see, **Open Settings**, "Focus Session: …" and "Open Repo: …" for the space's workspace. Each one brings the main Otto window forward at that page.
+- Commands available there: **Open Otto**, "Go to <module>" for every module you can see, **Open Settings**, "Focus session: …" and "Open repo: …" for the space's workspace. Each one brings the main Otto window forward at that page.
 - Ask Otto works the same as in the main window. Answers have an **Open in Otto** button.
 - Spaces 01–04 are shared with the main window's bar. See [Command bar](#/walkthroughs/command-bar).
 - If you're signed out, the bar says so and offers **Open Otto**.

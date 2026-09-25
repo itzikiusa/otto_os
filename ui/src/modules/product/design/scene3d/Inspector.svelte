@@ -11,6 +11,7 @@
   // and — when a non-default STATE is showing — transform edits go to that
   // state's overrides (`editState`), exactly like the viewport gizmo.
   import NumberDrag from './NumberDrag.svelte';
+  import Icon from '../../../../lib/components/Icon.svelte';
   import { LIGHT_TYPES, type Scene3dDoc, type Scene3dMaterial, type Vec3 } from './types';
   import {
     findNode,
@@ -111,7 +112,7 @@
 
 {#snippet panelHead(key: string, title: string, meta?: string)}
   <button class="s3d-ph" onclick={() => toggle(key)} aria-expanded={open[key] !== false}>
-    <span class="s3d-ph-chev" class:closed={open[key] === false}>▾</span>
+    <span class="s3d-ph-chev" class:closed={open[key] === false} aria-hidden="true"><Icon name="chevronDown" size={12} /></span>
     <span class="s3d-ph-title">{title}</span>
     {#if meta}<span class="s3d-ph-meta">{meta}</span>{/if}
   </button>
@@ -134,7 +135,7 @@
     <input class="s3d-range" type="range" {min} {max} {step} {value} disabled={readonly} aria-label={label} oninput={(e) => on(Number(inputVal(e)))} />
     <NumberDrag label="" value={value} step={step} {min} {max} digits={2} disabled={readonly} onchange={(n) => on(n)} />
     {#if resettable}
-      <button class="s3d-reset" title="Reset to default" aria-label="Reset {label}" disabled={readonly} onclick={() => on(undefined)}>×</button>
+      <button class="s3d-reset" title="Reset to default" aria-label="Reset {label}" disabled={readonly} onclick={() => on(undefined)} ><Icon name="x" size={12} /></button>
     {/if}
   </div>
 {/snippet}
@@ -149,7 +150,7 @@
       else if (/^#[0-9a-f]{6}$/.test(t)) on(t);
       else (e.currentTarget as HTMLInputElement).value = value ?? '';
     }} />
-    <button class="s3d-reset" title="Reset to default" aria-label="Reset {label}" disabled={readonly} onclick={() => on(undefined)}>×</button>
+    <button class="s3d-reset" title="Reset to default" aria-label="Reset {label}" disabled={readonly} onclick={() => on(undefined)} ><Icon name="x" size={12} /></button>
   </div>
 {/snippet}
 
@@ -309,7 +310,7 @@
                   <span class="s3d-token" title="Follows the brand kit: changing the kit recolours this object">
                     <span class="s3d-dot" style:--sw={resolved.color}></span>{colorLabel(mat.color)} <code>{resolved.color}</code>
                   </span>
-                  <button class="s3d-reset" title="Detach from the brand kit (keep {resolved.color})" aria-label="Detach colour from the brand kit" disabled={readonly} onclick={() => onMat('color', resolved.color)}>×</button>
+                  <button class="s3d-reset" title="Detach from the brand kit (keep {resolved.color})" aria-label="Detach colour from the brand kit" disabled={readonly} onclick={() => onMat('color', resolved.color)} ><Icon name="x" size={12} /></button>
                 </div>
               {:else}
                 {@render colorRow('Color', mat.color, resolved.color, (c) => onMat('color', c))}
@@ -465,7 +466,7 @@
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
     padding: 1px 5px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text-dim);
     overflow: hidden;
@@ -503,9 +504,9 @@
     color: var(--text);
   }
   .s3d-ph-chev {
-    display: inline-block;
+    display: inline-flex;
     transition: transform 0.12s ease;
-    width: 10px;
+    width: 12px;
   }
   .s3d-ph-chev.closed {
     transform: rotate(-90deg);
@@ -586,10 +587,11 @@
     color: var(--text-dim);
     width: 18px;
     height: 22px;
+    display: inline-grid;
+    place-items: center;
+    padding: 0;
     cursor: pointer;
-    border-radius: 4px;
-    font-size: var(--fs-m);
-    line-height: 1;
+    border-radius: var(--radius-s);
     flex-shrink: 0;
   }
   .s3d-reset:hover:not(:disabled) {

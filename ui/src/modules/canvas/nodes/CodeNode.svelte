@@ -114,7 +114,7 @@
     margin: 0;
     padding: 8px 10px;
     overflow: auto;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text);
   }
@@ -133,7 +133,7 @@
     background: var(--term-bg);
     color: var(--text);
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     padding: 8px 10px;
   }

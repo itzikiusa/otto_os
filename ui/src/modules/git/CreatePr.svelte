@@ -9,6 +9,8 @@
   import type { BranchInfo, Collaborator, DraftPrResp, Id, PrSummary } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { git } from '../../lib/stores/git.svelte';
+  import { loadErrorText } from '../../lib/loadError';
 
   interface Props {
     repoId: string;
@@ -21,6 +23,13 @@
   let { repoId, initialSource, onclose, oncreated }: Props = $props();
 
   let branches: BranchInfo[] = $state([]);
+  /** Why the branch list failed to load — shown inline (the selects would
+   *  otherwise sit empty with Create silently disabled). */
+  let branchesError = $state<string | null>(null);
+  let branchesRev = $state(0);
+  const PROVIDER_LABEL: Record<string, string> = { github: 'GitHub', bitbucket: 'Bitbucket', gitlab: 'GitLab' };
+  const prRepo = $derived(git.allRepos.find((r) => r.id === repoId) ?? git.repos.find((r) => r.id === repoId) ?? null);
+  const providerName = $derived(prRepo?.provider ? (PROVIDER_LABEL[prRepo.provider] ?? prRepo.provider) : 'the provider');
   let source = $state('');
   let target = $state('');
   let title = $state('');
@@ -114,6 +123,8 @@
   }
 
   $effect(() => {
+    void branchesRev;
+    branchesError = null;
     void api
       .get<BranchInfo[]>(`/repos/${repoId}/branches`)
       .then((b) => {
@@ -132,7 +143,10 @@
             '';
         }
       })
-      .catch(() => (branches = []));
+      .catch((e) => {
+        branches = [];
+        branchesError = loadErrorText(e);
+      });
   });
 
   // Ask an agent to draft the title + description from the branch's diff vs the
@@ -193,7 +207,7 @@
       }
       oncreated(pr);
     } catch (e) {
-      toasts.error('Create failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t open the pull request', e instanceof Error ? e.message : String(e));
     } finally {
       busy = false;
       phase = '';
@@ -201,8 +215,15 @@
   }
 </script>
 
-<Modal title="New Pull Request" width={520} {onclose}>
+<Modal title="New pull request" width={520} {onclose}>
   <div class="createpr-form">
+  {#if branchesError}
+    <div class="cp-error" role="alert">
+      <Icon name="warning" size={14} />
+      <span class="grow">Couldn’t load the branches. <span class="dim">{branchesError}</span></span>
+      <button class="btn small" onclick={() => branchesRev++}>Retry</button>
+    </div>
+  {/if}
   <div class="row branch-row" style="gap: 12px; margin-bottom: 12px">
     <div class="field grow" style="margin: 0">
       <label for="pr-src">Source</label>
@@ -225,7 +246,7 @@
       {#each reviewers as r (r)}
         <span class="rev-chip chip">
           {r}
-          <button class="rev-chip-x" title="Remove {r}" aria-label="Remove reviewer {r}" onclick={() => removeReviewer(r)}>×</button>
+          <button class="rev-chip-x" title="Remove {r}" aria-label="Remove reviewer {r}" onclick={() => removeReviewer(r)}><Icon name="x" size={12} /></button>
         </span>
       {/each}
       <input
@@ -256,7 +277,7 @@
       {#if drafting}
         <span class="spinner-xs"></span>Drafting…
       {:else}
-        <Icon name="zap" size={11} /> Draft message with agent
+        <Icon name="zap" size={12} /> Draft message with agent
       {/if}
     </button>
     {#if drafting}
@@ -270,7 +291,7 @@
     {/if}
     {#if liveDraftId}
       <button class="btn small ghost" onclick={() => (showDraftTerm = !showDraftTerm)}>
-        <Icon name={showDraftTerm ? 'chevronUp' : 'terminal'} size={11} />
+        <Icon name={showDraftTerm ? 'chevronUp' : 'terminal'} size={12} />
         {showDraftTerm ? 'Hide agent' : 'Watch agent'}
       </button>
     {/if}
@@ -293,6 +314,15 @@
     <label for="pr-desc">Description <span class="dim">(markdown)</span></label>
     <textarea id="pr-desc" class="input" rows="6" bind:value={description}></textarea>
   </div>
+  <!-- Outward: say where it goes and who sees it before the button does it. -->
+  <p class="cp-where dim">
+    {#if source !== '' && source === target}
+      <span class="cp-warn"><Icon name="warning" size={12} /> Pick a target branch different from the source.</span>
+    {:else}
+      Pushes <span class="mono">{source || 'the source branch'}</span> to origin, then opens the pull request on
+      {providerName}{prRepo ? ` in ${prRepo.name}` : ''}. Everyone with access to the repository can see it; reviewers are notified.
+    {/if}
+  </p>
   </div>
 
   {#snippet footer()}
@@ -306,7 +336,7 @@
       disabled={busy || drafting || title.trim() === '' || source === '' || target === '' || source === target}
       onclick={create}
     >
-      {phase === 'pushing' ? 'Pushing…' : phase === 'creating' ? 'Creating…' : 'Create Pull Request'}
+      {phase === 'pushing' ? 'Pushing…' : phase === 'creating' ? 'Opening…' : 'Open pull request'}
     </button>
   {/snippet}
 </Modal>
@@ -357,14 +387,41 @@
     align-items: center;
     gap: 4px;
   }
+  .cp-error {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+    padding: 8px 10px;
+    border-radius: var(--radius-m);
+    background: var(--danger-soft);
+    font-size: var(--fs-s);
+  }
+  .cp-error > :global(svg) {
+    color: var(--danger);
+    flex-shrink: 0;
+  }
+  .cp-error .grow {
+    flex: 1;
+    min-width: 0;
+  }
+  .cp-where {
+    margin: 0;
+    font-size: var(--fs-xs);
+  }
+  .cp-warn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--warning);
+  }
   .rev-chip-x {
+    display: inline-flex;
     border: none;
     background: none;
     color: inherit;
     cursor: pointer;
     padding: 0 2px;
-    font-size: 12px;
-    line-height: 1;
   }
   .rev-suggest {
     margin-top: 4px;
@@ -385,7 +442,7 @@
     border-radius: var(--radius-s);
     cursor: pointer;
     text-align: start;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text);
   }
   .rev-suggest-item:hover {
@@ -396,13 +453,13 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
     margin-inline-end: auto;
     user-select: none;
   }
   .draft-hint {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .draft-term {
     height: 220px;
@@ -443,8 +500,8 @@
     }
     /* Scoped to this modal's own controls so nothing leaks to other pages. */
     .createpr-form input.input,
-    .createpr-form select.input { height: 40px; font-size: 14px; }
-    .createpr-form textarea.input { font-size: 14px; }
+    .createpr-form select.input { height: 40px; font-size: var(--fs-l); }
+    .createpr-form textarea.input { font-size: var(--fs-l); }
     .draft-row .btn { height: 36px; }
   }
 </style>

@@ -26,7 +26,7 @@ The bar has 4 **spaces** (01–04). Each space remembers its own name, workspace
 ## Everything it can do
 
 **Commands**
-- Every command Otto registers: "Go to <module>" for each module you can see (including hidden ones), "Focus Session: …", "Open Repo: …", "Switch Workspace: …", "Connect: …" for saved connections, session actions (restart, archive, rename, hand over, attach a Jira issue or product story), layout presets, themes, a "Guide: …" command for every Help guide, and more.
+- Every command Otto registers: "Go to <module>" for each module you can see (including hidden ones), "Focus session: …", "Open repo: …", "Switch workspace: …", "Connect: …" for saved connections, session actions (restart, archive, rename, hand over, attach a Jira issue or product story), layout presets, themes, a "Guide: …" command for every Help guide, and more.
 - Ranking is fuzzy over the title, keywords and group, and boosted by how often and how recently you ran each command.
 - Rows show the command's group and its shortcut, if it has one.
 - With nothing typed, the bar lists your 6 most recent commands.

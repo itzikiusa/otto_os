@@ -298,6 +298,22 @@
       action: () => setView(m),
     }));
   }
+  /** ←/→ (Home/End) move between the Terminal · Chat · Split tabs, like any
+   *  tablist; focus follows the selection (roving tabindex). */
+  function onViewTabKey(e: KeyboardEvent): void {
+    const modes = VIEW_META.map(([m]) => m).filter((m) => m !== 'split' || wide);
+    const i = modes.indexOf(effView);
+    let next = i;
+    if (e.key === 'ArrowRight') next = (i + 1) % modes.length;
+    else if (e.key === 'ArrowLeft') next = (i - 1 + modes.length) % modes.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = modes.length - 1;
+    else return;
+    e.preventDefault();
+    setView(modes[next]);
+    const list = e.currentTarget as HTMLElement;
+    queueMicrotask(() => list.querySelector<HTMLElement>(`[data-view="${modes[next]}"]`)?.focus());
+  }
   function openViewMenu(e: MouseEvent | KeyboardEvent): void {
     ctxMenu.show(e, viewRows(false));
   }
@@ -319,6 +335,23 @@
   let bodyEl = $state<HTMLDivElement | null>(null);
   let chatFrac = $state(untrack(() => transcript.splitFrac(sessionId)));
   let splitResizing = $state(false);
+  /** Keyboard / reset path for the chat|terminal separator: a step of ±5%
+   *  (RTL-aware), or `null` to reset to an even split. */
+  function nudgeSplit(delta: number | null): void {
+    chatFrac = delta === null ? 0.5 : Math.min(0.8, Math.max(0.3, chatFrac + delta));
+    transcript.setSplitFrac(sessionId, chatFrac);
+  }
+  function onSplitKey(e: KeyboardEvent): void {
+    const rtl = getComputedStyle(e.currentTarget as Element).direction === 'rtl';
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      const grow = (e.key === 'ArrowRight') !== rtl;
+      nudgeSplit(grow ? 0.05 : -0.05);
+    } else if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault();
+      nudgeSplit(e.key === 'Home' ? -1 : 1);
+    }
+  }
   function startSplit(e: MouseEvent): void {
     e.preventDefault();
     const el = bodyEl;
@@ -403,6 +436,12 @@
       dirsBusy = false;
     }
   }
+
+  /** The size the terminal actually draws at: below the chosen size while the
+   *  pane is too narrow for 80 columns (Terminal's column floor). The header
+   *  shows it, so "13px" never labels 10px text. */
+  let drawnFont = $state<number | null>(null);
+  const fontShrunk = $derived(drawnFont !== null && drawnFont < ui.termFontSize);
 
   function onTermStatus(s: SessionStatus): void {
     ws.statusMap[sessionId] = s;
@@ -537,7 +576,7 @@
       ...(tier >= 4 && handoverFromId
         ? [
             {
-              label: `Open handover source ↰ ${handoverFrom?.title ?? 'source'}`,
+              label: `Open handover source: ${handoverFrom?.title ?? 'source'}`,
               icon: 'link',
               action: () => ws.navigateToSession(handoverFromId),
             } as MenuItem,
@@ -552,8 +591,8 @@
       // tiling many sessions.
       ...(termCtlFolded
         ? [
-            { label: `Terminal font smaller (${ui.termFontSize}px)`, action: () => ui.termZoomOut() } as MenuItem,
-            { label: 'Terminal font larger', icon: 'plus', action: () => ui.termZoomIn() } as MenuItem,
+            { label: `Terminal font smaller (${ui.termFontSize}px)`, disabled: ui.termFontSize <= 8, action: () => ui.termZoomOut() } as MenuItem,
+            { label: 'Terminal font larger', icon: 'plus', disabled: ui.termFontSize >= 28, action: () => ui.termZoomIn() } as MenuItem,
             {
               label: ui.termCopyOnSelect ? 'Copy-on-select: on' : 'Copy-on-select: off',
               icon: 'copy',
@@ -577,7 +616,7 @@
       ...(readOnly
         ? []
         : [
-            { label: 'Rename…', icon: 'edit', action: startRename } as MenuItem,
+            { label: 'Rename', icon: 'edit', action: startRename } as MenuItem,
             ...(isAgent ? [{ label: 'Additional directories…', icon: 'folder', action: openDirs } as MenuItem] : []),
             ...(isAgent ? [{ label: 'Hand over to…', icon: 'send', action: openHandover } as MenuItem] : []),
             // Parity with the tab's right-click menu — a tiled/split pane has no
@@ -731,19 +770,19 @@
     {/if}
     {#if summary?.in_progress}
       <span class="now-task" title="Current task: {summary.in_progress}">
-        now: {summary.in_progress}
+        Now: {summary.in_progress}
       </span>
     {/if}
     {#if handoverFromId}
       <button
         class="handover-crumb"
-        title="Open the session this was handed over from"
+        title="Handed over from “{handoverFrom?.title ?? 'another session'}” — open it"
         onmousedown={(e) => e.stopPropagation()}
         onclick={() => ws.navigateToSession(handoverFromId)}
-      >↰ {handoverFrom?.title ?? 'source'}</button>
+       aria-label="Open handover source: {handoverFrom?.title ?? 'source'}"><Icon name="undo" size={11} /><span class="crumb-text">{handoverFrom?.title ?? 'source'}</span></button>
     {/if}
     {#if handoverPending}
-      <span class="handover-pending" title="Preparing the handover brief…">⏳ handover…</span>
+      <span class="handover-pending" title="Preparing the handover brief…"><Icon name="clock" size={11} /> Preparing handover…</span>
     {/if}
     {#if idleHint}
       <span class="idle-hint" title="Session is idle. Auto-suspend frees its RAM while keeping it resumable.">{idleHint}</span>
@@ -751,11 +790,11 @@
     {#if session?.cwd}<span class="pane-cwd mono" title={session.cwd}>{session.cwd}</span>{/if}
     <span class="grow"></span>
     {#if isAgent && tier < 5}
-      <div class="segmented view-seg" role="tablist" tabindex="-1" aria-label="Session view" onmousedown={(e) => e.stopPropagation()}>
-        <button role="tab" class:active={effView === 'terminal'} aria-selected={effView === 'terminal'} onclick={() => setView('terminal')} title="Terminal (⌘⇧C cycles)">Terminal</button>
-        <button role="tab" class:active={effView === 'chat'} aria-selected={effView === 'chat'} onclick={() => setView('chat')} title="Chat — the conversation rebuilt from the transcript">Chat</button>
+      <div class="segmented view-seg" role="tablist" tabindex="-1" aria-label="Session view" onmousedown={(e) => e.stopPropagation()} onkeydown={onViewTabKey}>
+        <button role="tab" class:active={effView === 'terminal'} aria-selected={effView === 'terminal'} tabindex={effView === 'terminal' ? 0 : -1} data-view="terminal" onclick={() => setView('terminal')} title="Terminal (⌘⇧C cycles)">Terminal</button>
+        <button role="tab" class:active={effView === 'chat'} aria-selected={effView === 'chat'} tabindex={effView === 'chat' ? 0 : -1} data-view="chat" onclick={() => setView('chat')} title="Chat — the conversation rebuilt from the transcript">Chat</button>
         {#if wide}
-          <button role="tab" class:active={effView === 'split'} aria-selected={effView === 'split'} onclick={() => setView('split')} title="Chat beside the terminal">Split</button>
+          <button role="tab" class:active={effView === 'split'} aria-selected={effView === 'split'} tabindex={effView === 'split' ? 0 : -1} data-view="split" onclick={() => setView('split')} title="Chat beside the terminal">Split</button>
         {/if}
       </div>
     {:else if isAgent && tier < 6}
@@ -777,9 +816,15 @@
            controls never float over (and hide) terminal content. The embedded
            <Terminal> gets showToolbar={false} to drop its overlay counterpart. -->
       <div class="term-ctl" role="toolbar" tabindex="-1" aria-label="Terminal controls" onmousedown={(e) => e.stopPropagation()}>
-        <button class="icon-btn" onclick={() => ui.termZoomOut()} disabled={ui.termFontSize <= 8} title="Terminal font smaller (⌘− in the terminal)" aria-label="Zoom out">−</button>
-        <span class="term-ctl-size" title="Terminal font size">{ui.termFontSize}px</span>
-        <button class="icon-btn" onclick={() => ui.termZoomIn()} disabled={ui.termFontSize >= 28} title="Terminal font larger (⌘+ in the terminal)" aria-label="Zoom in">+</button>
+        <button class="icon-btn" onclick={() => ui.termZoomOut()} disabled={ui.termFontSize <= 8} title="Terminal font smaller (⌘− in the terminal)" aria-label="Zoom out"><Icon name="minus" size={13} /></button>
+        <span
+          class="term-ctl-size"
+          class:shrunk={fontShrunk}
+          title={fontShrunk
+            ? `Terminal font size ${ui.termFontSize}px — drawn at ${drawnFont}px so this narrow pane keeps 80 columns`
+            : 'Terminal font size'}
+        >{fontShrunk ? `${drawnFont}px` : `${ui.termFontSize}px`}</span>
+        <button class="icon-btn" onclick={() => ui.termZoomIn()} disabled={ui.termFontSize >= 28} title="Terminal font larger (⌘+ in the terminal)" aria-label="Zoom in"><Icon name="plus" size={13} /></button>
         <button
           class="icon-btn term-ctl-copy"
           class:on={ui.termCopyOnSelect}
@@ -787,7 +832,7 @@
           title={ui.termCopyOnSelect ? 'Copy-on-select: on — click to disable' : 'Copy-on-select: off — click to enable'}
           aria-pressed={ui.termCopyOnSelect}
           aria-label="Copy on select"
-        >copy</button>
+        ><Icon name="copy" size={13} /></button>
       </div>
     {/if}
     {#if showZoom && tier < 5}
@@ -831,12 +876,27 @@
       </div>
     {/if}
     {#if effView === 'split'}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="pane-splitter" class:active={splitResizing} onmousedown={startSplit} title="Drag to resize"></div>
+      <!-- A focusable separator: drag it, or ←/→ when focused (double-click resets). -->
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+      <div
+        class="pane-splitter"
+        class:active={splitResizing}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize chat and terminal"
+        aria-valuemin={30}
+        aria-valuemax={80}
+        aria-valuenow={Math.round(chatFrac * 100)}
+        tabindex="0"
+        onmousedown={startSplit}
+        ondblclick={() => nudgeSplit(null)}
+        onkeydown={onSplitKey}
+        title="Drag to resize · double-click to reset"
+      ></div>
     {/if}
     {#if effView !== 'chat'}
       <div class="pane-term">
-        <Terminal bind:this={termRef} {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} restartNonce={ws.restartNonces[sessionId] ?? 0} onstatus={onTermStatus} showToolbar={false} autoFocus={kbFocused} preferDom={isAgent} claimOnAttach={!readOnly} />
+        <Terminal bind:this={termRef} {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} restartNonce={ws.restartNonces[sessionId] ?? 0} onstatus={onTermStatus} onfontfit={(px) => (drawnFont = px)} showToolbar={false} autoFocus={kbFocused} preferDom={isAgent} claimOnAttach={!readOnly} />
       </div>
     {/if}
   </div>
@@ -940,7 +1000,7 @@
     display: inline-block;
   }
   .pane-fullname {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;
@@ -949,7 +1009,7 @@
     flex-shrink: 1;
   }
   .pane-title {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     white-space: nowrap;
     overflow: hidden;
@@ -1030,11 +1090,24 @@
     border-radius: 99px;
     cursor: pointer;
   }
+  .handover-crumb {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .crumb-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .handover-crumb:hover {
     color: var(--text);
     border-color: color-mix(in srgb, var(--accent) 55%, transparent);
   }
   .handover-pending {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     flex-shrink: 0;
     font-size: var(--fs-xs);
     color: var(--accent-text);
@@ -1087,7 +1160,12 @@
     background: var(--border);
     transition: background 120ms ease-out;
   }
+  .pane-splitter:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -1px;
+  }
   .pane-splitter:hover,
+  .pane-splitter:focus-visible,
   .pane-splitter.active {
     background: color-mix(in srgb, var(--accent) 60%, var(--border));
   }
@@ -1124,7 +1202,7 @@
     cursor: text;
   }
   .rename-input {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     background: var(--surface-2);
     border: 1px solid var(--accent);
@@ -1140,6 +1218,14 @@
     align-items: center;
     gap: 2px;
   }
+  /* Auto-shrunk to keep 80 columns: a dotted underline says "there's more
+     in the tooltip" without borrowing an alert tone. */
+  .term-ctl-size.shrunk {
+    color: var(--text);
+    text-decoration: underline dotted;
+    text-underline-offset: 2px;
+    cursor: help;
+  }
   .term-ctl-size {
     font-size: var(--fs-xs);
     font-family: var(--font-mono);
@@ -1147,11 +1233,11 @@
     min-width: 30px;
     text-align: center;
   }
-  .term-ctl-copy {
-    font-size: var(--fs-xs);
-  }
+  /* Copy-on-select is a toggle: pressed reads as a soft accent fill, like the
+     view-mode toggles in the tab bar. */
   .term-ctl-copy.on {
     color: var(--accent-text);
+    background: var(--accent-soft);
   }
   /* Additional directories editor (mirrors New Session). */
   .dir-list {
@@ -1175,7 +1261,7 @@
   .dir-path {
     flex: 1;
     min-width: 0;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1241,7 +1327,7 @@
     gap: 6px;
   }
   .pane-head.t3 .pane-title {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     max-width: 130px;
   }
 

@@ -235,7 +235,7 @@
   }
   .ab-label {
     flex: 0 0 76px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .ab-coll {
@@ -243,7 +243,7 @@
     min-width: 0;
   }
   .ab-hint {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .ab-stages {
@@ -273,22 +273,22 @@
   .ab-n {
     width: 18px;
     text-align: right;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .ab-op {
     height: 24px;
     padding: 0 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .ab-err {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--status-exited);
   }
   .ab-body {
     width: 100%;
     box-sizing: border-box;
-    font-size: 12px;
+    font-size: var(--fs-s);
     resize: vertical;
   }
   .ab-add {
@@ -298,7 +298,7 @@
     color: var(--text-dim);
   }
   .ab-preview-head {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-weight: 600;
   }
@@ -307,7 +307,7 @@
     padding: 8px 10px;
     max-height: 220px;
     overflow: auto;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     line-height: 1.45;
     border: 1px dashed var(--border);
     border-radius: var(--radius-s);

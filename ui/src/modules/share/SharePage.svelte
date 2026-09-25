@@ -13,7 +13,7 @@
   import { onMount } from 'svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import { getSharedSession, openShareTerminalWs, verifyShareOtp, extendShare } from '../../lib/api/share';
+  import { getSharedSession, getShareWhoami, openShareTerminalWs, verifyShareOtp, extendShare } from '../../lib/api/share';
   import { getShareToken } from '../../lib/router.svelte';
   import type { Session, SessionStatus } from '../../lib/api/types';
   import { ApiError } from '../../lib/api/client';
@@ -61,6 +61,13 @@
 
     try {
       session = await getSharedSession(sessionId, t);
+      // An Editor link may type. A failed / older-daemon whoami keeps the
+      // safe read-only default (the daemon enforces the role either way).
+      try {
+        isViewer = (await getShareWhoami(t)).role !== 'editor';
+      } catch {
+        isViewer = true;
+      }
       viewState = 'ok';
     } catch (e: unknown) {
       if (e instanceof ApiError && e.status === 403 && isOtpPending(e)) {
@@ -167,15 +174,16 @@
   // Effective status for the header badge.
   const status = $derived<SessionStatus>(liveStatus ?? session?.status ?? 'idle');
 
-  // Is this a viewer share (read-only)?  Safe default: yes (enforcement is in the daemon).
+  // Is this a viewer share (read-only)? Safe default: yes until `/share/whoami`
+  // says Editor (enforcement is in the daemon either way).
   let isViewer = $state(true);
 
   const statusLabel: Record<SessionStatus, string> = {
-    running: 'running',
-    working: 'working',
-    idle: 'idle',
-    exited: 'exited',
-    reconnectable: 'reconnectable',
+    running: 'Running',
+    working: 'Working',
+    idle: 'Idle',
+    exited: 'Ended',
+    reconnectable: 'Disconnected',
   };
 
   // Allow submitting OTP form via Enter key.
@@ -187,9 +195,9 @@
 <!-- ── No token ─────────────────────────────────────────────────────── -->
 {#if !token}
   <div class="share-error" style={`zoom:${ui.zoom}`}>
-    <div class="error-card">
-      <div class="error-icon"><Icon name="warning" size={30} /></div>
-      <h2>Link invalid or expired</h2>
+    <div class="error-card" role="alert">
+      <div class="error-icon"><Icon name="warning" size={26} /></div>
+      <h2>This link is invalid or has expired</h2>
       <p>
         This share link is missing a token or has already expired.
         Ask the owner to send you a new link.
@@ -200,9 +208,9 @@
 <!-- ── Loading ──────────────────────────────────────────────────────── -->
 {:else if viewState === 'loading'}
   <div class="share-error" style={`zoom:${ui.zoom}`}>
-    <div class="error-card">
-      <div class="sp-spinner" aria-label="Loading…"></div>
-      <p class="dim">Connecting…</p>
+    <div class="error-card" role="status">
+      <div class="sp-spinner" aria-hidden="true"></div>
+      <p class="dim">Connecting to the shared session…</p>
     </div>
   </div>
 
@@ -210,7 +218,7 @@
 {:else if viewState === 'otp'}
   <div class="share-error" style={`zoom:${ui.zoom}`}>
     <div class="error-card otp-card">
-      <div class="otp-icon"><Icon name="mail" size={32} /></div>
+      <div class="otp-icon"><Icon name="mail" size={26} /></div>
       <h2>Enter your access code</h2>
       <p>
         A 6-digit code was emailed to you. Enter it below to access the shared session.
@@ -236,7 +244,7 @@
         </button>
       </div>
       {#if otpError}
-        <p class="otp-error">{otpError}</p>
+        <p class="otp-error" role="alert">{otpError}</p>
       {/if}
       <div class="otp-extend-row">
         <span class="dim">Code expired or not received?</span>
@@ -250,12 +258,12 @@
 <!-- ── Error (irrecoverable) ─────────────────────────────────────────── -->
 {:else if viewState === 'error'}
   <div class="share-error" style={`zoom:${ui.zoom}`}>
-    <div class="error-card">
-      <div class="error-icon"><Icon name="warning" size={30} /></div>
-      <h2>Couldn't load this session</h2>
+    <div class="error-card" role="alert">
+      <div class="error-icon"><Icon name="warning" size={26} /></div>
+      <h2>Couldn’t open this session</h2>
       <p>{loadCause}</p>
       {#if loadError}<p class="hint">{loadError}</p>{/if}
-      <button class="btn ec-retry" onclick={() => void loadSession()}>Retry</button>
+      <button class="btn ec-retry" onclick={() => void loadSession()}><Icon name="refresh" size={13} /> Retry</button>
     </div>
   </div>
 
@@ -263,14 +271,15 @@
 {:else}
   <div class="share-root" style={`zoom:${ui.zoom}`}>
     <header class="share-header">
-      <span class="session-title">{session?.title ?? 'Loading…'}</span>
+      <span class="session-title" title={session?.title ?? ''}>{session?.title ?? 'Loading…'}</span>
       <span class="header-spacer"></span>
       {#if session}
-        <span class="status-badge status-{status}">{statusLabel[status] ?? status}</span>
+        <span class="status-badge status-{status}" title="Session status">
+          <span class="status-dot" aria-hidden="true"></span>{statusLabel[status] ?? status}
+        </span>
       {/if}
-      {#if isViewer}
-        <span class="ro-badge" title="Viewer share — input disabled">read-only</span>
-      {/if}
+      <!-- Read-only is shown once, by the Terminal's own chip (it sits on the
+           surface it applies to); a second header pill only repeated it. -->
     </header>
 
     <div class="terminal-fill">
@@ -296,14 +305,14 @@
       {#if termEnded}
         <div class="extend-overlay">
           <div class="extend-card">
-            <div class="extend-icon"><Icon name="clock" size={28} /></div>
+            <div class="extend-icon"><Icon name="clock" size={26} /></div>
             <h3>Session window ended</h3>
             <p>
               Request a new access code to be emailed to the original recipient.
               Once you receive it, enter it below to re-attach.
             </p>
             {#if otpError}
-              <p class="otp-error">{otpError}</p>
+              <p class="otp-error" role="alert">{otpError}</p>
             {/if}
             <button class="btn primary" disabled={extendBusy} onclick={requestExtend}>
               {extendBusy ? 'Sending…' : 'Extend session'}
@@ -351,24 +360,27 @@
     color: var(--accent-text);
   }
   .error-card h2 {
-    font-size: 17px;
+    font-size: var(--fs-l);
     font-weight: 600;
     margin: 0;
     color: var(--text);
   }
   .error-card p {
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     margin: 0;
     line-height: 1.5;
   }
   .error-card .hint {
-    font-size: 11px;
-    opacity: 0.7;
+    font-size: var(--fs-xs);
+    font-family: var(--font-mono);
     overflow-wrap: anywhere;
   }
   .ec-retry {
     align-self: center;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
   }
   .dim {
     color: var(--text-dim);
@@ -384,22 +396,21 @@
   .otp-input {
     width: 140px;
     text-align: center;
-    font-size: 22px;
-    font-family: monospace;
+    font-size: var(--fs-2xl);
+    font-family: var(--font-mono);
     letter-spacing: 0.18em;
     padding: 10px 12px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface-2);
     color: var(--text);
-    outline: none;
     transition: border-color 120ms;
   }
   .otp-input:focus {
     border-color: var(--accent);
   }
   .otp-error {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--danger);
     margin: 0;
   }
@@ -407,7 +418,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     flex-wrap: wrap;
     justify-content: center;
   }
@@ -415,7 +426,7 @@
     border: none;
     background: transparent;
     color: var(--accent-text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
     padding: 2px 4px;
     text-decoration: underline;
@@ -433,6 +444,9 @@
     border-top-color: var(--accent);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .sp-spinner { animation-duration: 2.4s; }
   }
   @keyframes spin {
     to { transform: rotate(360deg); }
@@ -458,7 +472,8 @@
     min-height: 36px;
   }
   .session-title {
-    font-size: 13px;
+    min-width: 0;
+    font-size: var(--fs-m);
     font-weight: 500;
     color: var(--text);
     overflow: hidden;
@@ -470,10 +485,13 @@
   }
 
   /* Status pill — mirrors the palette chip colours. */
+  /* Status: a small dot (the status colour) + a sentence-case label — the
+     same dot-and-text pattern the session rows use. */
   .status-badge {
-    font-size: var(--fs-xs);
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--fs-s);
     padding: 2px 8px;
     border-radius: 999px;
     border: 1px solid var(--border);
@@ -481,24 +499,16 @@
     color: var(--text-dim);
     flex-shrink: 0;
   }
-  .status-badge.status-running  { color: var(--status-working); }
-  .status-badge.status-working  { color: var(--status-working); }
-  .status-badge.status-idle     { color: var(--text-dim); }
-  .status-badge.status-exited   { color: var(--status-exited); }
-
-  /* Read-only badge — subtle, top-right inside the header. */
-  .ro-badge {
-    font-size: var(--fs-xs);
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: var(--text-dim);
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    padding: 2px 7px;
-    border-radius: 999px;
-    flex-shrink: 0;
-    opacity: 0.85;
+  .status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--status-idle);
   }
+  .status-badge.status-running .status-dot,
+  .status-badge.status-working .status-dot { background: var(--status-working); }
+  .status-badge.status-exited .status-dot { background: var(--status-exited); }
+  .status-badge.status-reconnectable .status-dot { background: var(--status-warn); }
 
   /* Terminal fills the remaining space. */
   .terminal-fill {
@@ -515,7 +525,7 @@
     align-items: center;
     justify-content: center;
     color: var(--text-dim);
-    font-size: 13px;
+    font-size: var(--fs-m);
     background: var(--bg);
   }
 
@@ -528,7 +538,7 @@
     justify-content: center;
     background: color-mix(in srgb, var(--bg) 88%, transparent);
     backdrop-filter: blur(4px);
-    z-index: 10;
+    z-index: var(--z-sticky);
   }
   .extend-card {
     max-width: 360px;
@@ -549,13 +559,13 @@
     color: var(--text-dim);
   }
   .extend-card h3 {
-    font-size: 16px;
+    font-size: var(--fs-l);
     font-weight: 600;
     margin: 0;
     color: var(--text);
   }
   .extend-card p {
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     margin: 0;
     line-height: 1.5;

@@ -42,6 +42,16 @@
     return parts.length ? parts.join(' · ') : 'All quiet';
   });
 
+  /** "3m ago" for past rows, "in 2h" for what's coming (Up next) — the
+   *  compact relTime clamps future times to "0s". */
+  function when(iso: string): string {
+    const t = Date.parse(iso);
+    if (!Number.isFinite(t)) return '';
+    if (t <= Date.now()) return `${relTime(iso)} ago`;
+    const mins = Math.round((t - Date.now()) / 60_000);
+    return mins < 1 ? 'now' : mins < 60 ? `in ${mins}m` : `in ${Math.round(mins / 60)}h`;
+  }
+
   interface Card {
     id: string;
     title: string;
@@ -56,7 +66,15 @@
   const cards: Card[] = $derived([
     { id: 'needs', title: 'Needs you', icon: 'bell', rows: today.needs, empty: 'Nothing needs you right now.', more: () => router.go('agents') },
     { id: 'running', title: 'Running', icon: 'play', rows: today.running, empty: 'No agents or workflows are working.', more: () => router.go('mission-control') },
-    { id: 'next', title: 'Up next', icon: 'calendar', rows: today.upNext, empty: 'Nothing scheduled today. Reminders you ask Otto for land here.', more: () => router.go('assistant/tasks') },
+    {
+      id: 'next',
+      title: 'Up next',
+      icon: 'calendar',
+      rows: today.upNext,
+      empty: 'Nothing due in the next 24 hours. Reminders and scheduled tasks land here.',
+      more: () => router.go(today.upNext.some((r) => r.id.startsWith('scheduled:')) ? 'scheduled-tasks' : 'assistant/tasks'),
+      fetched: true,
+    },
     { id: 'recent', title: 'Recent', icon: 'clock', rows: today.recent, empty: 'Designs and pull requests you touch show up here.', more: () => router.go('design'), fetched: true },
   ]);
 </script>
@@ -64,7 +82,15 @@
 <section class="today" aria-label="Today">
   <div class="greet">
     <h2 class="hello">{greeting}{name ? `, ${name}` : ''}</h2>
-    <p class="line">{dateLine} · {summary}</p>
+    <p class="line">
+      {dateLine} · {summary}
+      {#if today.failed}
+        <!-- A source failed: say so instead of letting an empty card read as
+             "nothing here". Retry re-polls every source at once. -->
+        <span class="warn-line"><Icon name="warning" size={12} /> Some items couldn't load</span>
+        <button class="retry" onclick={() => today.refresh()}>Retry</button>
+      {/if}
+    </p>
   </div>
 
   <div class="glance">
@@ -96,7 +122,7 @@
                   </span>
                   <span class="gc-text">
                     <span class="gc-title">{r.title}</span>
-                    <span class="gc-sub">{r.detail}{#if r.at && now()} · {relTime(r.at)}{/if}</span>
+                    <span class="gc-sub" title={r.detail}>{r.detail}{#if r.at && now() && when(r.at)} · {when(r.at)}{/if}</span>
                   </span>
                 </button>
               </li>
@@ -136,6 +162,23 @@
     font-size: var(--fs-m);
     color: var(--text);
     opacity: 1;
+  }
+  .warn-line {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-inline-start: 8px;
+  }
+  .retry {
+    margin-inline-start: 6px;
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--text);
+    font: inherit;
+    font-weight: 600;
+    text-decoration: underline;
+    cursor: pointer;
   }
   .glance {
     display: grid;

@@ -170,6 +170,12 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/share/extend" {
         return Exempt;
     }
+    // A share guest's own scope (session id + role). Authenticated; only a
+    // share token gets an answer (the handler 400s a normal bearer) and a share
+    // scope reaches it via `scope_allows` before this policy is consulted.
+    if p == "/share/whoami" {
+        return Exempt;
+    }
     // Host filesystem access: authenticated; OS permissions enforced by I/O.
     // Share/MCP endpoint scopes are still checked before this exemption.
     if matches!(p, "/fs/browse" | "/fs/read") {
@@ -2547,7 +2553,10 @@ mod tests {
         );
         for p in ["nav", "control", "screenshot"] {
             assert_eq!(
-                pol(Method::POST, &format!("/api/v1/browser/tabs/{{id}}/live/{p}")),
+                pol(
+                    Method::POST,
+                    &format!("/api/v1/browser/tabs/{{id}}/live/{p}")
+                ),
                 Require(Browser, Edit)
             );
         }

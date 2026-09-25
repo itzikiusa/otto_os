@@ -9,6 +9,8 @@
   import { isTauri } from '../../lib/stores/ui.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { startSnip } from '../../lib/snip';
+  import SectionIntro from './SectionIntro.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
 
   const DEFAULT_ACCEL = 'Cmd+Ctrl+Shift+2';
 
@@ -97,11 +99,11 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('snipping')} subtitle="One-gesture screenshots: capture, annotate, paste" />
   <PageBody width="readable">
-  <p class="section-intro">Capture a screen region, annotate it (text, boxes, arrows, colors), and the result is <strong>already on your clipboard</strong> at every step — paste it straight into an agent session.</p>
+  <SectionIntro>Capture a screen region, annotate it (text, boxes, arrows, colours), and the result is <strong>already on your clipboard</strong> at every step — paste it straight into an agent session.</SectionIntro>
 
   {#if isTauri}
-    <div class="card">
-      <div class="row">
+    <div class="card snip-card">
+      <div class="snip-row">
         <div class="row-text">
           <span class="row-title">Global shortcut</span>
           <span class="row-desc">
@@ -114,9 +116,10 @@
           {#if recording}
             <!-- svelte-ignore a11y_autofocus -->
             <input
-              class="recorder"
+              class="input recorder"
               autofocus
               readonly
+              aria-label="Press the new shortcut"
               placeholder="Press keys… (Esc cancels)"
               onkeydown={onRecordKey}
               onblur={() => (recording = false)}
@@ -124,23 +127,23 @@
           {:else if unavailable}
             <span class="row-desc">This version of the app can't change the shortcut — update Otto.</span>
           {:else}
-            <code class="chord" data-accel={accel}>{loading ? '…' : pretty(accel)}</code>
-            <button class="btn" onclick={() => (recording = true)}>Change</button>
+            <kbd class="chord" data-accel={accel} title={accel || 'No shortcut'}>{loading ? '…' : accel ? pretty(accel) : 'Off'}</kbd>
+            <button class="btn small" onclick={() => (recording = true)}>{accel ? 'Change…' : 'Set…'}</button>
             {#if accel !== DEFAULT_ACCEL}
-              <button class="btn" onclick={() => void save(DEFAULT_ACCEL)}>Reset</button>
+              <button class="btn small ghost" onclick={() => void save(DEFAULT_ACCEL)}>Reset to {pretty(DEFAULT_ACCEL)}</button>
             {/if}
             {#if accel}
-              <button class="btn" onclick={() => void save('')}>Disable</button>
+              <button class="btn small ghost" onclick={() => void save('')}>Turn off</button>
             {/if}
           {/if}
         </div>
       </div>
       {#if saveError}
-        <div class="error">Could not set shortcut: {saveError}</div>
+        <div class="error" role="alert">Couldn't set the shortcut: {saveError}. It may already belong to another app — try a different chord.</div>
       {/if}
     </div>
   {:else}
-    <div class="card">
+    <div class="card snip-card">
       <div class="row-text">
         <span class="row-title">Global shortcut</span>
         <span class="row-desc">
@@ -151,18 +154,18 @@
     </div>
   {/if}
 
-  <div class="card">
-    <div class="row">
+  <div class="card snip-card">
+    <div class="snip-row">
       <div class="row-text">
         <span class="row-title">In-app triggers</span>
         <span class="row-desc">
           ⌘⇧S anywhere in Otto, “Take screenshot (snip)” in the ⌘K palette, or File → Take Snip.
-          The first capture will ask macOS for Screen Recording permission for
+          The first capture asks macOS for Screen Recording permission for
           <span class="mono">ottod</span> (System Settings → Privacy &amp; Security).
         </span>
       </div>
       <div class="row-controls">
-        <button class="btn primary" onclick={() => void startSnip()}>Take a snip now</button>
+        <button class="btn primary" onclick={() => void startSnip()}><Icon name="image" size={13} /> Take a snip</button>
       </div>
     </div>
   </div>
@@ -177,27 +180,12 @@
     height: 100%;
     min-height: 0;
   }
-  .section-intro {
-    margin: 0 0 14px;
-    font-size: 12.5px;
-    line-height: 1.5;
-    color: var(--text-dim);
-  }
-  .section-intro :global(code) {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    background: var(--surface-2);
-    padding: 1px 4px;
-    border-radius: 3px;
-  }
-  .card {
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--surface);
+  .snip-card {
+    max-width: 720px;
     padding: 14px 16px;
-    margin-bottom: 14px;
+    margin-bottom: 12px;
   }
-  .row {
+  .snip-row {
     display: flex;
     align-items: center;
     gap: 16px;
@@ -212,59 +200,36 @@
   }
   .row-title {
     font-weight: 600;
-    font-size: 13px;
+    font-size: var(--fs-m);
   }
   .row-desc {
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
   }
   .row-controls {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
+    flex-wrap: wrap;
   }
   .chord {
-    font-size: 15px;
-    padding: 4px 10px;
+    font-family: var(--font-ui);
+    font-size: var(--fs-m);
+    padding: 2px 10px;
     border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg);
-    min-width: 64px;
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    min-width: 56px;
     text-align: center;
   }
   .recorder {
     width: 220px;
-    padding: 6px 10px;
-    border: 1px solid var(--accent);
-    border-radius: 6px;
-    background: var(--bg);
-    color: var(--text);
-    font-size: 12px;
-    outline: none;
-  }
-  .btn {
-    border: 1px solid var(--border);
-    background: none;
-    color: var(--text);
-    border-radius: 6px;
-    padding: 5px 10px;
-    font-size: 12px;
-    cursor: pointer;
-  }
-  .btn:hover {
-    border-color: var(--accent);
-  }
-  .btn.primary {
-    background: var(--accent);
     border-color: var(--accent);
   }
   .error {
     margin-top: 10px;
     color: var(--danger);
-    font-size: 12px;
-  }
-  .mono {
-    font-family: ui-monospace, monospace;
+    font-size: var(--fs-s);
   }
 </style>

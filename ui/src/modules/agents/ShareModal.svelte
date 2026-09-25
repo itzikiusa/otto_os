@@ -416,7 +416,7 @@
     gap: 4px;
   }
   .sm-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -432,7 +432,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--warning);
     padding: 4px 0;
   }
@@ -442,7 +442,7 @@
     cursor: pointer;
   }
   .sm-note {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1.45;
   }
@@ -450,7 +450,7 @@
     display: flex;
     align-items: flex-start;
     gap: 6px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--accent) 6%, var(--surface-2));
     border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
@@ -467,7 +467,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     color: var(--text);
-    font-size: 13px;
+    font-size: var(--fs-m);
     padding: 7px 10px;
     appearance: auto;
   }
@@ -499,7 +499,7 @@
   .sm-url {
     flex: 1;
     min-width: 0;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--accent-text);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -511,7 +511,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 5px 10px;
   }
   .sm-qr-wrap {
@@ -525,7 +525,7 @@
     display: block;
   }
   .sm-qr-hint {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     margin: 0;
   }
@@ -533,7 +533,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     margin: 0;
   }
@@ -548,7 +548,7 @@
     margin-top: 4px;
   }
   .sm-section-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -560,7 +560,7 @@
   .sm-link-btn {
     border: none;
     background: transparent;
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
     padding: 2px 4px;
     border-radius: var(--radius-s);
@@ -591,7 +591,7 @@
   .sm-empty {
     padding: 14px;
     text-align: center;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .sm-share-row {
@@ -600,7 +600,7 @@
     gap: 8px;
     padding: 6px 8px;
     border-radius: var(--radius-s);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .sm-share-row:hover {
     background: var(--surface-2);
@@ -615,7 +615,7 @@
   }
   .sm-share-prefix {
     font-family: monospace;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     flex-shrink: 0;
@@ -648,12 +648,12 @@
     flex-shrink: 0;
   }
   .sm-share-expiry {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
   }
   .sm-revoke-btn {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 3px 8px;
     color: var(--danger);
     border-color: color-mix(in srgb, var(--danger) 35%, transparent);

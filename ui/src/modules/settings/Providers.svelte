@@ -12,6 +12,10 @@
   import type { Session } from '../../lib/api/types';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import SettingToggle from './SettingToggle.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { loadErrorText } from '../../lib/loadError';
 
   interface ProviderDef {
@@ -139,6 +143,10 @@
   let updateCmd = $state('');
   let modelArgs = $state('');
   let formOpen = $state(false);
+  // Inline validation for the provider sheet (not a toast — components.md §2).
+  let formError = $state('');
+  // Inline validation for the auto-update time field.
+  let timeError = $state('');
 
   async function updateAllCLIs(): Promise<void> {
     const wsId = ws.currentId;
@@ -189,6 +197,7 @@
     resumeArgs = '';
     updateCmd = '';
     modelArgs = '';
+    formError = '';
     formOpen = true;
   }
 
@@ -201,6 +210,7 @@
     resumeArgs = (p.resume_args ?? []).join(' ');
     updateCmd = p.update_command ?? '';
     modelArgs = (p.model_args ?? []).join(' ');
+    formError = '';
     formOpen = true;
   }
 
@@ -215,7 +225,7 @@
       toasts.success('Providers saved', 'Available immediately for new sessions');
       formOpen = false;
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t save providers', e instanceof Error ? e.message : String(e));
     } finally {
       saving = false;
     }
@@ -235,7 +245,7 @@
           : `PR and commit drafts use ${draftModel}`,
       );
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t save the draft model', e instanceof Error ? e.message : String(e));
     } finally {
       saving = false;
     }
@@ -256,7 +266,7 @@
           : `New sessions and channel replies default to ${defaultProvider}`,
       );
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t save the default agent', e instanceof Error ? e.message : String(e));
     } finally {
       saving = false;
     }
@@ -286,15 +296,19 @@
       if (enable) revert.add(nameOfProvider);
       else revert.delete(nameOfProvider);
       disabled = revert;
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error(`Couldn’t ${enable ? 'enable' : 'hide'} ${nameOfProvider}`, e instanceof Error ? e.message : String(e));
     }
   }
 
+  // Applies on change (like every other control on this page — no separate
+  // Save for one section). The time field commits on `change` (blur / Enter),
+  // so half-typed values never save; an invalid one is flagged inline.
   async function saveAutoUpdate(): Promise<void> {
     if (!/^\d{1,2}:\d{2}$/.test(autoUpdate.time_of_day)) {
-      toasts.error('Invalid time', 'Use HH:MM, e.g. 03:00');
+      timeError = 'Use HH:MM, for example 03:00.';
       return;
     }
+    timeError = '';
     savingAuto = true;
     try {
       allSettings = await api.put<Record<string, unknown>>('/settings', {
@@ -304,15 +318,35 @@
         ...AUTO_UPDATE_DEFAULTS,
         ...((allSettings['cli_auto_update'] as Partial<CliAutoUpdate> | undefined) ?? {}),
       };
-      toasts.success('Auto-update saved', autoUpdate.enabled ? 'Scheduler is on' : 'Scheduler is off');
+      toasts.success(
+        autoUpdate.enabled ? 'Automatic updates on' : 'Automatic updates off',
+        autoUpdate.enabled ? `Daily at ${autoUpdate.time_of_day} ${autoUpdate.use_utc ? 'UTC' : 'local time'}` : undefined,
+      );
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t save automatic updates', e instanceof Error ? e.message : String(e));
+      // Re-read so the controls never show a schedule that isn't saved.
+      autoUpdate = {
+        ...AUTO_UPDATE_DEFAULTS,
+        ...((allSettings['cli_auto_update'] as Partial<CliAutoUpdate> | undefined) ?? {}),
+      };
     } finally {
       savingAuto = false;
     }
   }
 
   async function saveSkipPermissions(): Promise<void> {
+    // Turning the bypass back ON removes a safety prompt from every new
+    // session — ask first. Turning it off (safer) needs no confirmation.
+    if (
+      skipPermissions &&
+      !(await confirmer.ask(
+        'New agent sessions will run tools, edit files and execute commands without asking you first.',
+        { title: 'Skip permission prompts?', confirmLabel: 'Skip prompts', danger: false },
+      ))
+    ) {
+      skipPermissions = false;
+      return;
+    }
     savingSkip = true;
     try {
       allSettings = await api.put<Record<string, unknown>>('/settings', {
@@ -326,7 +360,7 @@
       );
     } catch (e) {
       skipPermissions = !skipPermissions; // revert the optimistic toggle on failure
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t save the permission setting', e instanceof Error ? e.message : String(e));
     } finally {
       savingSkip = false;
     }
@@ -335,13 +369,18 @@
   async function save(): Promise<void> {
     const n = name.trim();
     if (n === '' || cmd.trim() === '') {
-      toasts.error('Name and command are required');
+      formError = 'Name and command are required.';
       return;
     }
     if (!/^[a-z0-9][a-z0-9_-]*$/.test(n)) {
-      toasts.error('Invalid name', 'Use lowercase letters, digits, - or _');
+      formError = 'Use lowercase letters, digits, - or _ in the name (for example opencode).';
       return;
     }
+    if (editing !== n && custom[n]) {
+      formError = `A custom provider named “${n}” already exists. Choose another name or edit it.`;
+      return;
+    }
+    formError = '';
     const def: ProviderDef = {
       cmd: cmd.trim(),
       args: args.trim() === '' ? [] : args.trim().split(/\s+/),
@@ -360,6 +399,13 @@
   }
 
   async function remove(n: string): Promise<void> {
+    if (
+      !(await confirmer.ask(
+        `Remove the custom provider “${n}”? It disappears from every picker; sessions already running on it keep working. You'd have to re-enter its command to add it back.`,
+        { title: 'Remove provider', confirmLabel: 'Remove' },
+      ))
+    )
+      return;
     const next = { ...custom };
     delete next[n];
     await persist(next);
@@ -369,61 +415,33 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('providers')} subtitle="Agent CLIs Otto can spawn as sessions">
     {#snippet actions()}
-      <button class="btn primary" onclick={updateAllCLIs} disabled={updating || loading}>
-        {updating ? 'Updating…' : 'Update all CLIs'}
+      <button
+        class="btn small primary"
+        data-icon="download"
+        onclick={updateAllCLIs}
+        disabled={updating || loading}
+        title="Run every CLI's update command now, in a new session"
+      >
+        <Icon name="download" size={12} /> {updating ? 'Updating…' : 'Update all CLIs'}
       </button>
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
   <div class="providers-body">
-  <p class="section-intro">Built-ins are always available; add any other CLI (opencode, kilo, …) below. <code>{'{sid}'}</code> and <code>{'{cwd}'}</code> expand in arguments; <code>{'{model}'}</code> in the model flag template.</p>
+  <p class="section-intro">Built-ins are always available; add any other CLI (opencode, kilo, …) under Custom. Every change here applies immediately to new sessions.</p>
 
   {#if loading}
     <Skeleton rows={4} />
   {:else if loadError}
     <LoadState what="provider settings" error={loadError} empty onretry={() => void loadSettings()} />
   {:else}
-    <div class="section">
-      <div class="label">Automatic updates</div>
-      <label class="toggle-row">
-        <input type="checkbox" bind:checked={autoUpdate.enabled} />
-        <span>Update all CLIs automatically, every day</span>
-      </label>
-      {#if autoUpdate.enabled}
-        <div class="row wrap">
-          <label class="inline">
-            <span>At</span>
-            <input class="time" type="time" bind:value={autoUpdate.time_of_day} />
-          </label>
-          <select class="select tz" bind:value={autoUpdate.use_utc}>
-            <option value={true}>UTC</option>
-            <option value={false}>Local time</option>
-          </select>
-          <label class="toggle-row">
-            <input type="checkbox" bind:checked={autoUpdate.reload_sessions} />
-            <span>Reload open sessions onto the new version</span>
-          </label>
-        </div>
-      {/if}
-      <p class="dim sm">
-        Runs each CLI's update command on a schedule, so you don't have to. Default
-        <strong>03:00 UTC</strong> — when new versions are typically published. A missed
-        window (machine asleep/off) runs at the next opportunity. Reloaded sessions
-        resume their conversation on the new binary.
-        {#if lastRun}<br />Last run: {new Date(lastRun).toLocaleString()}.{/if}
-      </p>
-      <div class="row">
-        <button class="btn primary" onclick={saveAutoUpdate} disabled={savingAuto}>
-          {savingAuto ? 'Saving…' : 'Save'}
-        </button>
-      </div>
-    </div>
-
-    <div class="section">
-      <div class="label">Default agent</div>
-      <div class="row">
+    <section class="section">
+      <h2 class="section-title">Default agent</h2>
+      <div class="field">
+        <label for="prov-default">Agent for new sessions and channel replies</label>
         <select
-          class="select"
+          id="prov-default"
+          class="input select"
           bind:value={defaultProvider}
           onchange={saveDefaultProvider}
           disabled={saving}
@@ -433,203 +451,255 @@
             <option value={p}>{p}</option>
           {/each}
         </select>
+        <span class="hint">Used unless a session, workflow or channel picks another agent.</span>
       </div>
-      <p class="dim sm">
-        The agent CLI used for new sessions and channel replies unless explicitly
-        overridden.
-      </p>
-    </div>
-
-    <div class="section">
-      <div class="label">PR &amp; commit draft model</div>
-      <div class="row">
-        <select class="select" bind:value={draftModel} onchange={saveDraftModel} disabled={saving}>
+      <div class="field">
+        <label for="prov-draft">PR &amp; commit draft model</label>
+        <select id="prov-draft" class="input select" bind:value={draftModel} onchange={saveDraftModel} disabled={saving}>
           <option value="">Fastest (haiku)</option>
           {#each DRAFT_MODELS as m (m)}
             <option value={m}>{m}</option>
           {/each}
         </select>
+        <span class="hint">
+          Only for drafting a PR title/description or a commit message from a diff — a short job that blocks the
+          dialog you're looking at, so it doesn't inherit the agent's model and skips MCP servers and tools. Raise
+          it if drafts come out thin.
+        </span>
       </div>
-      <p class="dim sm">
-        Used only for drafting a PR title/description or a commit message from a
-        diff — a short job that blocks the dialog you are looking at, so it does
-        not inherit the model above. The turn also skips MCP servers and tools,
-        since the diff is already in the prompt. Raise it if drafts come out thin.
-      </p>
-    </div>
+    </section>
 
-    <div class="section">
-      <div class="label">Permissions</div>
-      <label class="toggle-row">
-        <input
-          type="checkbox"
-          bind:checked={skipPermissions}
-          onchange={saveSkipPermissions}
-          disabled={savingSkip}
-        />
-        <span>Skip permission prompts — run agents unattended</span>
-      </label>
-      <p class="dim sm">
+    <section class="section">
+      <h2 class="section-title">Automatic updates</h2>
+      <SettingToggle
+        label="Update all CLIs automatically, every day"
+        checked={autoUpdate.enabled}
+        disabled={savingAuto}
+        onchange={(v) => { autoUpdate.enabled = v; return saveAutoUpdate(); }}
+      />
+      {#if autoUpdate.enabled}
+        <div class="row wrap indent">
+          <label class="inline" for="prov-time">At</label>
+          <input
+            id="prov-time"
+            class="input time"
+            type="time"
+            bind:value={autoUpdate.time_of_day}
+            onchange={saveAutoUpdate}
+            aria-invalid={timeError ? 'true' : undefined}
+            aria-describedby={timeError ? 'prov-time-err' : undefined}
+          />
+          <select class="input tz" bind:value={autoUpdate.use_utc} onchange={saveAutoUpdate} aria-label="Time zone">
+            <option value={true}>UTC</option>
+            <option value={false}>Local time</option>
+          </select>
+          <label class="checkbox-row reload">
+            <input type="checkbox" bind:checked={autoUpdate.reload_sessions} onchange={saveAutoUpdate} />
+            Reload open sessions onto the new version
+          </label>
+        </div>
+        {#if timeError}<p class="field-err indent" id="prov-time-err" role="alert">{timeError}</p>{/if}
+      {/if}
+      <p class="hint indent">
+        Runs each CLI's update command on a schedule. Default 03:00 UTC, when new versions are usually published;
+        a missed window (Mac asleep or off) runs at the next opportunity. Reloaded sessions resume their
+        conversation on the new binary.
+        {#if lastRun}Last run {new Date(lastRun).toLocaleString()}.{/if}
+      </p>
+    </section>
+
+    <section class="section">
+      <h2 class="section-title">Permissions</h2>
+      <SettingToggle
+        label="Skip permission prompts — run agents unattended"
+        checked={skipPermissions}
+        disabled={savingSkip}
+        onchange={(v) => { skipPermissions = v; return saveSkipPermissions(); }}
+      />
+      <p class="hint indent">
         On (default): built-in agents launch with their bypass flag
         (<code>--dangerously-skip-permissions</code>; codex
         <code>--dangerously-bypass-approvals-and-sandbox</code>) so tool use never blocks.
-        Turn off to use each CLI's own default permission mode (ask / auto) — tool use then
-        prompts in the session terminal. Applies to new sessions; running ones are unchanged.
-        Background agent runs (workflow steps, scheduled tasks, swarms, self-improvement) still
-        skip prompts whatever this says — nobody is at their terminal to answer.
+        Off: each CLI's own permission mode (ask / auto) — tool use prompts in the session terminal.
+        Applies to new sessions; running ones are unchanged. Background agent runs (workflow steps,
+        scheduled tasks, swarms, self-improvement) still skip prompts — nobody is at their terminal to answer.
       </p>
-    </div>
+    </section>
 
     <!-- Enable/exclude toggle shared by built-in + custom rows. Excluding a
          provider hides it from every picker (it may be installed but unwanted);
          existing sessions on it keep working. `shell` is never excludable. -->
     {#snippet enableToggle(pname: string)}
       <label
-        class="tgl"
+        class="checkbox-row tgl"
         title={disabled.has(pname)
-          ? 'Excluded — click to show in pickers'
-          : 'Shown in pickers — click to hide'}
+          ? `${pname} is hidden from every picker — check to show it`
+          : `${pname} is shown in pickers — uncheck to hide it`}
       >
         <input
           type="checkbox"
           checked={!disabled.has(pname)}
+          aria-label={`Show ${pname} in pickers`}
           onchange={(e) => toggleProvider(pname, e.currentTarget.checked)}
         />
-        <span>{disabled.has(pname) ? 'Hidden' : 'Enabled'}</span>
+        {disabled.has(pname) ? 'Hidden' : 'Enabled'}
       </label>
     {/snippet}
 
-    <div class="section">
-      <div class="label">Built-in</div>
+    <section class="section">
+      <h2 class="section-title">Built-in</h2>
       <div class="list">
         {#each BUILTINS as b (b)}
           <div class="item" class:off={disabled.has(b.name)}>
-            <span class="mono">{b.name}</span>
-            <span class="grow"></span>
+            <span class="mono name">{b.name}</span>
             {#if b.updateCmd}
-              <span class="dim sm mono">{b.updateCmd}</span>
+              <span class="dim sm mono meta" title="Update command">{b.updateCmd}</span>
             {/if}
-            <span class="dim sm">built-in{custom[b.name] ? ' · overridden below' : ''}</span>
+            <span class="grow"></span>
+            {#if custom[b.name]}<span class="chip">Overridden below</span>{/if}
             {#if b.name !== 'shell'}
               {@render enableToggle(b.name)}
+            {:else}
+              <span class="dim sm" title="Plain terminals need the shell provider">Always on</span>
             {/if}
           </div>
         {/each}
       </div>
-      <p class="dim sm">
-        Toggle <strong>Enabled</strong> off to hide a provider from every picker
-        (Default agent, New session, workflows, …) — useful when a CLI is installed
-        but you don't want to use it. Sessions already using it keep working.
+      <p class="hint">
+        Uncheck <strong>Enabled</strong> to hide a provider from every picker (Default agent, New session,
+        workflows, …) — useful when a CLI is installed but you don't want to use it. Sessions already using it
+        keep working.
       </p>
-    </div>
+    </section>
 
-    <div class="section">
+    <section class="section">
       <div class="row between">
-        <div class="label">Models catalog</div>
+        <h2 class="section-title">Custom</h2>
+        <button class="btn small" data-icon="plus" onclick={openNew}><Icon name="plus" size={12} /> Add provider…</button>
+      </div>
+      <div class="list">
+        {#each Object.entries(custom) as [n, p] (n)}
+          <div class="item" class:off={disabled.has(n)}>
+            <span class="mono name">{n}</span>
+            <span class="dim sm mono meta" title={`${p.cmd} ${(p.args ?? []).join(' ')}`}>{p.cmd} {(p.args ?? []).join(' ')}</span>
+            <span class="grow"></span>
+            {#if p.resume_args?.length}<span class="chip" title="Resume arguments set">resume</span>{/if}
+            {#if p.update_command}<span class="chip" title={`Update command: ${p.update_command}`}>update</span>{/if}
+            {#if p.model_args?.length}<span class="chip" title={`Model flag: ${(p.model_args ?? []).join(' ')}`}>model</span>{/if}
+            {@render enableToggle(n)}
+            <button class="btn small ghost" onclick={() => openEdit(n)}>Edit…</button>
+            <button class="btn small danger" onclick={() => remove(n)} disabled={saving}>Remove…</button>
+          </div>
+        {:else}
+          <div class="empty">
+            No custom providers yet. <button class="btn small ghost" onclick={openNew}>Add provider…</button>
+          </div>
+        {/each}
+      </div>
+      <p class="hint">
+        <code>{'{sid}'}</code> and <code>{'{cwd}'}</code> expand in arguments; <code>{'{model}'}</code> in the
+        model flag template.
+      </p>
+    </section>
+
+    <section class="section">
+      <div class="row between">
+        <h2 class="section-title">Models catalog</h2>
         <button
-          class="btn sm"
+          class="btn small"
+          data-icon="refresh"
           onclick={() => refreshModels()}
           disabled={refreshingModels !== null}
         >
-          {refreshingModels === '*' ? 'Refreshing…' : 'Refresh all'}
+          <Icon name="refresh" size={12} /> {refreshingModels === '*' ? 'Refreshing…' : 'Refresh all'}
         </button>
       </div>
       <div class="list">
         {#each Object.entries(catalog).sort() as [prov, cat] (prov)}
           <div class="item">
-            <span class="mono">{prov}</span>
+            <span class="mono name">{prov}</span>
             <span class="dim sm">{cat.models.length} models</span>
-            {#if cat.stale}<span class="chip">stale</span>{/if}
+            {#if cat.stale}<span class="chip warn" title={cat.last_error ?? 'The last refresh failed; showing the last good list'}>Stale</span>{/if}
             <span class="grow"></span>
-            <span class="dim sm">
+            <span
+              class="dim sm meta"
+              title={cat.fetched_at ? new Date(cat.fetched_at).toLocaleString() : undefined}
+            >
               {cat.fetched_at
-                ? `fetched ${new Date(cat.fetched_at).toLocaleString()}`
-                : 'never fetched'}{#if cat.last_error}&nbsp;· {cat.last_error}{/if}
+                ? `Fetched ${new Date(cat.fetched_at).toLocaleString()}`
+                : 'Never fetched'}{#if cat.last_error}&nbsp;· {cat.last_error}{/if}
             </span>
             <button
-              class="btn sm"
+              class="btn small ghost"
               onclick={() => refreshModels(prov)}
               disabled={refreshingModels !== null}
+              aria-label={`Refresh ${prov} models`}
             >
-              {refreshingModels === prov ? '…' : 'Refresh'}
+              {refreshingModels === prov ? 'Refreshing…' : 'Refresh'}
             </button>
           </div>
         {:else}
-          <div class="dim sm empty">No catalog yet — Refresh to discover models.</div>
+          <div class="empty">No catalog yet — Refresh all to discover models.</div>
         {/each}
       </div>
-      <p class="dim sm">
-        Model ids discovered at runtime from each provider's CLI or public docs
-        (no API keys). Model pickers across Otto offer these; a failed refresh
-        keeps the last good list and shows <em>stale</em> instead.
+      <p class="hint">
+        Model ids discovered at runtime from each provider's CLI or public docs (no API keys). Model pickers
+        across Otto offer these; a failed refresh keeps the last good list and marks it Stale.
       </p>
-    </div>
-
-    <div class="section">
-      <div class="row between">
-        <div class="label">Custom</div>
-        <button class="btn" onclick={openNew}>Add provider</button>
-      </div>
-      <div class="list">
-        {#each Object.entries(custom) as [n, p] (n)}
-          <div class="item" class:off={disabled.has(n)}>
-            <span class="mono">{n}</span>
-            <span class="dim sm mono">{p.cmd} {(p.args ?? []).join(' ')}</span>
-            <span class="grow"></span>
-            {#if p.resume_args?.length}<span class="chip">resume</span>{/if}
-            {#if p.update_command}<span class="chip">update</span>{/if}
-            {#if p.model_args?.length}<span class="chip">model</span>{/if}
-            {@render enableToggle(n)}
-            <button class="btn sm" onclick={() => openEdit(n)}>Edit</button>
-            <button class="btn sm danger" onclick={() => remove(n)} disabled={saving}>Remove</button>
-          </div>
-        {:else}
-          <div class="dim sm empty">No custom providers yet.</div>
-        {/each}
-      </div>
-    </div>
-
-    {#if formOpen}
-      <div class="section form">
-        <div class="label">{editing ? `Edit ${editing}` : 'New provider'}</div>
-        <div class="grid">
-          <label>
-            <span>Name</span>
-            <input bind:value={name} placeholder="opencode" spellcheck="false" />
-          </label>
-          <label>
-            <span>Command</span>
-            <input bind:value={cmd} placeholder="opencode" spellcheck="false" />
-          </label>
-          <label>
-            <span>Arguments (optional)</span>
-            <input bind:value={args} placeholder={'--session {sid}'} spellcheck="false" />
-          </label>
-          <label>
-            <span>Resume arguments (optional)</span>
-            <input bind:value={resumeArgs} placeholder={'--resume {sid}'} spellcheck="false" />
-          </label>
-          <label>
-            <span>Update command (optional)</span>
-            <input bind:value={updateCmd} placeholder={'npm i -g opencode'} spellcheck="false" />
-          </label>
-          <label>
-            <span>Model flag template (optional)</span>
-            <input bind:value={modelArgs} placeholder={'--model {model}'} spellcheck="false" />
-          </label>
-        </div>
-        <div class="row end">
-          <button class="btn" onclick={() => (formOpen = false)}>Cancel</button>
-          <button class="btn primary" onclick={save} disabled={saving}>
-            {saving ? 'Saving…' : 'Save provider'}
-          </button>
-        </div>
-      </div>
-    {/if}
+    </section>
   {/if}
   </div>
   </PageBody>
 </div>
+
+{#if formOpen}
+  <Modal title={editing ? `Edit ${editing}` : 'New provider'} width={560} onclose={() => (formOpen = false)}>
+    <form
+      class="grid"
+      id="provider-form"
+      onsubmit={(e) => {
+        e.preventDefault();
+        void save();
+      }}
+    >
+      <div class="field">
+        <label for="pv-name">Name</label>
+        <input id="pv-name" class="input mono-in" bind:value={name} placeholder="opencode" spellcheck="false" autocomplete="off" />
+      </div>
+      <div class="field">
+        <label for="pv-cmd">Command</label>
+        <input id="pv-cmd" class="input mono-in" bind:value={cmd} placeholder="opencode" spellcheck="false" autocomplete="off" />
+      </div>
+      <div class="field">
+        <label for="pv-args">Arguments (optional)</label>
+        <input id="pv-args" class="input mono-in" bind:value={args} placeholder={'--session {sid}'} spellcheck="false" />
+      </div>
+      <div class="field">
+        <label for="pv-resume">Resume arguments (optional)</label>
+        <input id="pv-resume" class="input mono-in" bind:value={resumeArgs} placeholder={'--resume {sid}'} spellcheck="false" />
+      </div>
+      <div class="field">
+        <label for="pv-update">Update command (optional)</label>
+        <input id="pv-update" class="input mono-in" bind:value={updateCmd} placeholder={'npm i -g opencode'} spellcheck="false" />
+      </div>
+      <div class="field">
+        <label for="pv-model">Model flag template (optional)</label>
+        <input id="pv-model" class="input mono-in" bind:value={modelArgs} placeholder={'--model {model}'} spellcheck="false" />
+      </div>
+    </form>
+    <p class="hint">
+      <code>{'{sid}'}</code> and <code>{'{cwd}'}</code> expand in arguments; <code>{'{model}'}</code> in the model flag
+      template. Leave the model template empty if the CLI takes no model flag.
+    </p>
+    {#if formError}<p class="field-err" role="alert">{formError}</p>{/if}
+    {#snippet footer()}
+      <button class="btn" onclick={() => (formOpen = false)}>Cancel</button>
+      <button class="btn primary" type="submit" form="provider-form" disabled={saving}>
+        {saving ? 'Saving…' : editing ? 'Save provider' : 'Add provider'}
+      </button>
+    {/snippet}
+  </Modal>
+{/if}
 
 <style>
   /* Section chrome: shared PageHeader bar + scrolling PageBody. */
@@ -640,95 +710,119 @@
     min-height: 0;
   }
   .section-intro {
-    margin: 0 0 14px;
-    font-size: 12.5px;
+    margin: 0;
+    max-width: 78ch;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text-dim);
-  }
-  .section-intro :global(code) {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    background: var(--surface-2);
-    padding: 1px 4px;
-    border-radius: 3px;
   }
   .providers-body {
     display: flex;
     flex-direction: column;
-    gap: 18px;
-  }
-  .providers-body > .section-intro {
-    margin-bottom: 0;
+    gap: 24px;
+    max-width: 880px;
   }
   .dim {
     color: var(--text-dim);
   }
   .sm {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .mono {
     font-family: var(--font-mono);
-    font-size: 12px;
-  }
-  .label {
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-dim);
+    font-size: var(--fs-s);
   }
   .section {
     display: flex;
     flex-direction: column;
     gap: 8px;
   }
+  .section .section-title {
+    margin: 0;
+  }
+  .section .field {
+    margin: 0;
+  }
+  .hint {
+    margin: 0;
+    max-width: 78ch;
+    font-size: var(--fs-xs);
+    line-height: 1.5;
+    color: var(--text-dim);
+  }
+  /* Hints and sub-controls under a toggle line up with its label text
+     (SettingToggle: 15px box + 10px gap). */
+  .indent {
+    padding-inline-start: 25px;
+  }
+  .reload {
+    font-size: var(--fs-s);
+  }
+  .field-err {
+    margin: 0;
+    font-size: var(--fs-s);
+    color: var(--danger);
+  }
   .list {
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     overflow: hidden;
+    background: var(--surface);
   }
   .item {
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 8px 12px;
-    background: var(--surface);
+    min-height: 36px;
+    padding: 4px 12px;
   }
   .item + .item {
     border-top: 1px solid var(--border);
+  }
+  .item .name {
+    flex-shrink: 0;
+    color: var(--text);
+  }
+  .item .meta {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   /* Excluded provider: dim the row (its name/command) so it reads as inactive,
      while leaving the toggle itself fully legible. */
   .item.off > .mono,
   .item.off > .dim {
-    opacity: 0.45;
+    opacity: 0.55;
   }
   .tgl {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    font-size: 11px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
     user-select: none;
     white-space: nowrap;
+    flex-shrink: 0;
   }
   .tgl input {
     cursor: pointer;
   }
   .grow {
     flex: 1;
+    min-width: 0;
   }
   .empty {
-    padding: 14px;
-    text-align: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 12px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
   }
-  .chip {
-    font-size: var(--fs-xs);
-    padding: 1px 7px;
-    border-radius: 99px;
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent-text);
+  .chip.warn {
+    color: var(--warning);
+    border-color: color-mix(in srgb, var(--warning) 35%, transparent);
+    background: var(--warning-soft);
   }
   .row {
     display: flex;
@@ -741,82 +835,41 @@
   .row.wrap {
     flex-wrap: wrap;
   }
-  .toggle-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-  }
   .inline {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .time {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface-2);
-    padding: 5px 8px;
-    font-size: 12.5px;
-    color: var(--text);
+    width: 110px;
   }
-  .select.tz {
+  .tz {
     min-width: 120px;
   }
-  .row.end {
-    justify-content: flex-end;
-  }
-  .form {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    padding: 14px;
-    background: var(--surface);
+  .select {
+    max-width: 320px;
   }
   .grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 10px;
+    gap: 0 12px;
   }
-  .grid label {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    font-size: 11.5px;
-    color: var(--text-dim);
-  }
-  .grid input {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface-2);
-    padding: 6px 9px;
-    font-size: 12.5px;
-    color: var(--text);
+  .mono-in {
     font-family: var(--font-mono);
-  }
-  .grid input:focus {
-    outline: none;
-    border-color: var(--accent);
-  }
-  .select {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface-2);
-    padding: 6px 9px;
-    font-size: 12.5px;
-    color: var(--text);
-    min-width: 220px;
-  }
-  .select:focus {
-    outline: none;
-    border-color: var(--accent);
+    font-size: var(--fs-s);
   }
   code {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     background: var(--surface-2);
     padding: 1px 4px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
+  }
+  @media (max-width: 640px) {
+    .grid {
+      grid-template-columns: 1fr;
+    }
+    .item {
+      flex-wrap: wrap;
+    }
   }
 </style>

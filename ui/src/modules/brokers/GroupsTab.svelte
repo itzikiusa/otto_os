@@ -508,7 +508,7 @@
   }
   .gid {
     font-family: var(--font-mono);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     word-break: break-all;
   }
   .gid.big {
@@ -518,7 +518,7 @@
     display: flex;
     gap: 8px;
     align-items: center;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .state {
     font-size: var(--fs-xs);
@@ -554,7 +554,7 @@
   }
   .lag-total {
     margin-inline-start: auto;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .lag-total.has-lag,
@@ -571,7 +571,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     cursor: pointer;
     white-space: nowrap;
@@ -609,7 +609,7 @@
     border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .sm-input {
     width: 120px;
@@ -619,7 +619,7 @@
   }
   h5 {
     margin: 16px 0 6px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--text-dim);
@@ -627,13 +627,13 @@
   table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   th {
     text-align: start;
     font-weight: 500;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 5px 8px;
   }
   td {
@@ -644,7 +644,7 @@
     font-family: var(--font-mono);
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .muted {
     color: var(--text-dim);
@@ -684,7 +684,7 @@
     align-items: center;
     padding: 6px 10px;
     background: color-mix(in srgb, var(--accent) 8%, transparent);
-    font-size: 12px;
+    font-size: var(--fs-s);
     gap: 8px;
   }
   .dryrun-summary .ok {
@@ -700,13 +700,13 @@
   .dryrun-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .dryrun-table th {
     text-align: start;
     padding: 4px 8px;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 500;
     border-bottom: 1px solid var(--border);
   }

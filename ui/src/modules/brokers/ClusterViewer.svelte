@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { CLUSTER_VIEWS, clusterViewKey, type ClusterView } from './types';
   // Embeddable Kafka cluster viewer: the header + per-cluster tab strip
   // (Overview / Topics / Consumer Groups / Schema Registry / Replay / Lag Alerts)
   // that the standalone Message Brokers page renders, factored out so the unified
@@ -25,7 +26,7 @@
   }
   let { cluster, onEdit, onRemove }: Props = $props();
 
-  type Tab = 'overview' | 'topics' | 'groups' | 'schema' | 'replay' | 'alerts';
+  type Tab = ClusterView;
   let tab = $state<Tab>('overview');
   let testing = $state(false);
 
@@ -96,14 +97,11 @@
     </div>
   </header>
 
-  <div class="cv-tabs" role="tablist" aria-label="Kafka cluster views">
-    <button class:on={tab === 'overview'} role="tab" aria-selected={tab === 'overview'} onclick={() => (tab = 'overview')}>Overview</button>
-    <button class:on={tab === 'topics'} role="tab" aria-selected={tab === 'topics'} onclick={() => (tab = 'topics')}>Topics</button>
-    <button class:on={tab === 'groups'} role="tab" aria-selected={tab === 'groups'} onclick={() => (tab = 'groups')}>Consumer Groups</button>
-    <button class:on={tab === 'schema'} role="tab" aria-selected={tab === 'schema'} onclick={() => (tab = 'schema')}>Schema Registry</button>
-    <button class:on={tab === 'replay'} role="tab" aria-selected={tab === 'replay'} onclick={() => (tab = 'replay')}>Replay</button>
-    <button class:on={tab === 'alerts'} role="tab" aria-selected={tab === 'alerts'} onclick={() => (tab = 'alerts')}>Lag Alerts</button>
-  </div>
+  <div class="cv-tabs" role="tablist" aria-label="Kafka cluster views" tabindex="-1" onkeydown={(e) => { const next = clusterViewKey(e, tab); if (next) tab = next; }}>
+        {#each CLUSTER_VIEWS as v (v.id)}
+          <button class:on={tab === v.id} role="tab" aria-selected={tab === v.id} tabindex={tab === v.id ? 0 : -1} onclick={() => (tab = v.id)}>{v.label}</button>
+        {/each}
+      </div>
 
   <div class="cv-body">
     {#key cluster.id}
@@ -179,7 +177,7 @@
     border-color: color-mix(in srgb, var(--success) 35%, transparent);
   }
   .boot {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     max-width: 380px;
   }
@@ -202,7 +200,7 @@
     border-bottom: 2px solid transparent;
     color: var(--text-dim);
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 6px 10px;
     cursor: pointer;
     white-space: nowrap;

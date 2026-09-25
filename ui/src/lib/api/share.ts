@@ -13,6 +13,28 @@ import type { Problem } from './types';
  * Fetch the session metadata using a scoped share token.
  * Uses `Authorization: Bearer <token>` — NOT the stored login token.
  */
+/** `GET /api/v1/share/whoami` — the share token's own session + capped role. */
+export interface ShareWhoami {
+  session_id: string;
+  role: 'viewer' | 'editor';
+}
+
+export async function getShareWhoami(token: string): Promise<ShareWhoami> {
+  const resp = await fetch(`${baseUrl()}/api/v1/share/whoami`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!resp.ok) {
+    let problem: Problem = { code: 'internal', message: resp.statusText };
+    try {
+      problem = await resp.json();
+    } catch {
+      // non-JSON error body — keep statusText
+    }
+    throw new ApiError(resp.status, problem);
+  }
+  return (await resp.json()) as ShareWhoami;
+}
+
 export async function getSharedSession(id: string, token: string): Promise<Session> {
   const resp = await fetch(`${baseUrl()}/api/v1/sessions/${encodeURIComponent(id)}`, {
     headers: { Authorization: `Bearer ${token}` },

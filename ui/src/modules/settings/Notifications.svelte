@@ -11,6 +11,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import type { NotificationSettings } from '../../lib/api/types';
+  import { router } from '../../lib/router.svelte';
+  import SettingToggle from './SettingToggle.svelte';
 
   // Load once on mount if the store hasn't fetched yet.
   $effect(() => {
@@ -52,7 +54,7 @@
   const CHANNEL_NOTIFY_FLAGS: Array<{ key: string; label: string; sub: string }> = [
     {
       key: 'channels.notify_self_improvement',
-      label: 'Push self-improvement events to Slack / Telegram',
+      label: 'Self-improvement events',
       sub: 'Posts a one-line summary when a run finishes or an approval is pending.',
     },
     {
@@ -118,7 +120,7 @@
       await api.put('/settings', { [key]: checked });
     } catch (e) {
       flagValues[key] = !checked; // revert
-      toasts.error('Could not save setting', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't save the channel notification", loadErrorText(e));
     }
   }
 </script>
@@ -127,85 +129,61 @@
   <PageHeader title={sectionLabel('notifications')} subtitle="Credential-expiry warnings and how Otto alerts you" />
   <PageBody width="readable">
 
+  <div class="section-title">Alerts</div>
+  <div class="card s-card">
+    <SettingToggle
+      label="Native macOS notifications for important alerts"
+      hint="Show system notifications for warnings and errors."
+      checked={notifications.settings.native_enabled}
+      onchange={(v) => save({ native_enabled: v })}
+    />
+    <SettingToggle
+      label="Notify on session events"
+      hint="A heads-up when a session finishes or is waiting for your input."
+      checked={notifications.settings.session_events}
+      onchange={(v) => save({ session_events: v })}
+    />
+  </div>
+
   <div class="section-title">Credential expiry</div>
-  <div class="card pad">
-    <div class="field" style="max-width: 320px">
+  <div class="card s-card">
+    <div class="field threshold">
       <label for="nt-threshold">Warn me this many days before a credential expires</label>
       <input
         id="nt-threshold"
-        class="input"
+        class="input num"
         type="number"
         min="1"
         max="30"
         value={notifications.settings.expiry_threshold_days}
         onchange={onThreshold}
       />
-      <span class="hint">1–30 days (default 3).</span>
+      <span class="hint">1–30 days (default 3). Covers Git and Jira account tokens and agent CLI sign-ins.</span>
     </div>
-  </div>
-
-  <div class="section-title">Alerts</div>
-  <div class="card pad">
-    <label class="opt">
-      <span class="opt-text">
-        <span class="opt-title">Native macOS notifications for important alerts</span>
-        <span class="opt-sub dim">Show system notifications for warnings and errors.</span>
-      </span>
-      <span class="toggle">
-        <input
-          type="checkbox"
-          checked={notifications.settings.native_enabled}
-          onchange={(e) => save({ native_enabled: e.currentTarget.checked })}
-        />
-        <span class="toggle-track"></span>
-      </span>
-    </label>
-
-    <label class="opt">
-      <span class="opt-text">
-        <span class="opt-title">Notify on session events (finished / awaiting input)</span>
-        <span class="opt-sub dim">Get a heads-up when a session finishes or needs you.</span>
-      </span>
-      <span class="toggle">
-        <input
-          type="checkbox"
-          checked={notifications.settings.session_events}
-          onchange={(e) => save({ session_events: e.currentTarget.checked })}
-        />
-        <span class="toggle-track"></span>
-      </span>
-    </label>
   </div>
 
   {#if auth.isRoot}
     <div class="section-title">Channel notifications</div>
-    <div class="sub dim" style="max-width:520px;margin-bottom:8px">
-      Each toggle below sends a one-line push notification to your configured
-      Slack / Telegram integration. All are off by default.
-    </div>
+    <p class="section-note">
+      Each one posts a one-line message to this workspace's Slack or Telegram channel (set up in
+      <button class="link" onclick={() => router.go('settings/channels')}>Channels</button>). All are off by default.
+    </p>
     {#if flagsError}
       <div class="flags-error" role="alert">
         <span>Couldn't load these settings: {flagsError}</span>
         <button class="btn small" onclick={() => void loadChannelFlags()}>Retry</button>
       </div>
     {/if}
-    <div class="card pad">
+    <div class="card s-card">
       {#each CHANNEL_NOTIFY_FLAGS as flag (flag.key)}
-        <label class="opt">
-          <span class="opt-text">
-            <span class="opt-title">{flag.label}</span>
-            <span class="opt-sub dim">{flag.sub}</span>
-          </span>
-          <span class="toggle">
-            <input
-              type="checkbox"
-              checked={flagValues[flag.key]}
-              disabled={flagLoading[flag.key] || !!flagsError}
-              onchange={(e) => void toggleFlag(flag.key, e.currentTarget.checked)}
-            />
-            <span class="toggle-track"></span>
-          </span>
-        </label>
+        <SettingToggle
+          label={flag.label}
+          hint={flag.sub}
+          checked={flagValues[flag.key]}
+          disabled={flagLoading[flag.key] || !!flagsError}
+          title={flagsError ? "Couldn't read the current value — Retry above" : undefined}
+          onchange={(v) => toggleFlag(flag.key, v)}
+        />
       {/each}
     </div>
   {/if}
@@ -220,83 +198,40 @@
     height: 100%;
     min-height: 0;
   }
-  .card.pad {
-    padding: 14px 16px;
-    max-width: 520px;
+  .s-card {
+    padding: 6px 16px;
+    max-width: 560px;
     margin-bottom: 8px;
   }
-  .opt {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    padding: 8px 0;
+  .threshold {
+    margin: 8px 0;
+  }
+  .num {
+    width: 96px;
+  }
+  .section-note {
+    margin: 0 0 8px;
+    max-width: 560px;
+    font-size: var(--fs-s);
+    line-height: 1.5;
+    color: var(--text-dim);
+  }
+  .link {
+    border: none;
+    background: none;
+    padding: 0;
+    font: inherit;
+    color: var(--accent-text);
+    text-decoration: underline;
     cursor: pointer;
   }
   .flags-error {
     display: flex;
     align-items: center;
     gap: 10px;
-    max-width: 520px;
+    max-width: 560px;
     margin-bottom: 8px;
     font-size: var(--fs-s);
     color: var(--danger);
-  }
-  .opt + .opt {
-    border-top: 1px solid var(--border);
-  }
-  .opt-text {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .opt-title {
-    font-size: 12.5px;
-  }
-  .opt-sub {
-    font-size: 11.5px;
-  }
-
-  /* Toggle switch (matches Channels) */
-  .toggle {
-    display: flex;
-    align-items: center;
-    cursor: pointer;
-    position: relative;
-    flex-shrink: 0;
-  }
-  .toggle input {
-    position: absolute;
-    opacity: 0;
-    width: 0;
-    height: 0;
-  }
-  .toggle-track {
-    width: 30px;
-    height: 17px;
-    border-radius: 9px;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    position: relative;
-    transition: background 140ms ease-out;
-  }
-  .toggle-track::after {
-    content: '';
-    position: absolute;
-    top: 2px;
-    inset-inline-start: 2px;
-    width: 11px;
-    height: 11px;
-    border-radius: 50%;
-    background: var(--text-dim);
-    transition: transform 140ms ease-out, background 140ms ease-out;
-  }
-  .toggle input:checked ~ .toggle-track {
-    background: var(--accent);
-    border-color: var(--accent);
-  }
-  .toggle input:checked ~ .toggle-track::after {
-    transform: translateX(13px);
-    background: #fff;
   }
 </style>

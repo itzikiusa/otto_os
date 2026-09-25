@@ -8,7 +8,7 @@
   import { assistant } from '../lib/stores/assistant.svelte';
   import { auth } from '../lib/stores/auth.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
-  import { ctxMenu } from '../lib/contextmenu.svelte';
+  import { ctxMenu, type MenuItem } from '../lib/contextmenu.svelte';
   import { sidePane, splitMenuItems, navClick, SPLIT_HINT } from '../lib/stores/sidePane.svelte';
   import { tick } from 'svelte';
   import {
@@ -62,6 +62,31 @@
     return activeId === id;
   }
 
+  // Same row menu as the Navigator (minus in-section moves): the side-by-side
+  // entries, Favorites, and a way into Customize — which lives in the
+  // expanded Navigator, so it expands the sidebar first.
+  function moduleMenu(e: MouseEvent, id: string, label: string): void {
+    const fav = ui.sidebarFavorites.includes(id);
+    const split = splitMenuItems(id, label);
+    const items: MenuItem[] = [
+      ...split,
+      ...(split.length ? [{ separator: true }] : []),
+      fav
+        ? { label: 'Remove from Favorites', icon: 'star', action: () => ui.removeSidebarFavorite(id) }
+        : { label: 'Add to Favorites', icon: 'star', action: () => ui.addSidebarFavorite(id) },
+      { separator: true },
+      {
+        label: 'Customize sidebar',
+        icon: 'edit',
+        action: () => {
+          if (!ui.railExpanded) ui.toggleRail();
+          ui.sidebarEditMode = true;
+        },
+      },
+    ];
+    ctxMenu.show(e, items);
+  }
+
   // The account avatar was a button that did nothing — and the collapsed
   // rail had no way to sign out (only the expanded Navigator's footer did).
   function accountMenu(e: MouseEvent): void {
@@ -101,10 +126,7 @@
           class:active={isActive(m.id)}
           class:side={inSide}
           onclick={(e) => navClick(e, m.id, m.label)}
-          oncontextmenu={(e) => {
-            const items = splitMenuItems(m.id, m.label);
-            if (items.length) ctxMenu.show(e, items);
-          }}
+          oncontextmenu={(e) => moduleMenu(e, m.id, m.label)}
           title={`${m.label} · ${sec.group.label}${inSide ? ' · in the side pane' : sidePane.supported ? ` — ${SPLIT_HINT}` : ''}`}
           aria-label={inSide ? `${m.label} (in the side pane)` : m.label}
           data-testid={`rail-${m.id}`}
@@ -261,8 +283,8 @@
     height: 22px;
     border-radius: 50%;
     background: color-mix(in srgb, var(--accent) 28%, transparent);
-    color: var(--accent);
-    font-size: 11px;
+    color: var(--accent-text);
+    font-size: var(--fs-xs);
     font-weight: 600;
     display: grid;
     place-items: center;

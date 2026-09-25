@@ -4,6 +4,7 @@
   import type { PersonalAgentDocument, Vault } from '../../lib/api/types';
   import Markdown from '../agents/conversation/Markdown.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
+  import { loadErrorText } from '../../lib/loadError';
 
   interface Props {
     agentId: string;
@@ -36,7 +37,7 @@
       draft = result.content;
       editing = false;
     } catch (e) {
-      if (seq === generation) error = e instanceof Error ? e.message : String(e);
+      if (seq === generation) error = `Couldn’t load the ${kind}. ${loadErrorText(e)}`;
     } finally { if (seq === generation) loading = false; }
   }
   $effect(() => {
@@ -56,12 +57,12 @@
       draft = result.content;
       editing = false;
     } catch (e) {
-      if (seq === generation) error = e instanceof Error ? e.message : String(e);
+      if (seq === generation) error = `Couldn’t save the ${kind}. ${loadErrorText(e)}`;
     } finally { if (seq === generation) saving = false; }
   }
   async function chooseVault() {
     try { vaults = await listVaults(workspaceId); vaultId = String(vaults[0]?.id ?? ''); }
-    catch (e) { error = e instanceof Error ? e.message : String(e); }
+    catch (e) { error = `Couldn’t list Vaults. ${loadErrorText(e)}`; }
   }
   function addReference(path: string) {
     draft += `${draft && !draft.endsWith('\n') ? '\n' : ''}\n- Reference: ${path}\n`;
@@ -76,7 +77,7 @@
     : 'Background notes and references you maintain. New runs and new chats receive a snapshot; existing chats keep their current context.'}</p>
   {#if document?.path}<code class="path">{document.path}</code>{/if}
   {#if kind === 'memory' && sharedWorkspace}<p class="hint">Agents using this same working directory share this memory file.</p>{/if}
-  {#if loading}<p role="status">Loading {label.toLowerCase()}…</p>
+  {#if loading}<p class="hint" role="status">Loading {label.toLowerCase()}…</p>
   {:else}
     {#if error}<div class="error" role="alert">{error}</div>{/if}
     {#if document}
@@ -112,11 +113,11 @@
 </section>
 {#if picker !== null}<FolderPicker title="Choose context reference" start={picker} files onpick={addReference} onclose={() => (picker = null)} />{/if}
 <style>
-  .document { padding: 16px; border: 1px solid var(--border); border-radius: var(--radius-m); min-width: 0; }
-  h2 { margin: 0 0 8px; font-size: 15px; }
-  .hint { color: var(--text-dim); font-size: 12px; line-height: 1.5; }
-  .path { display: block; overflow-wrap: anywhere; margin-bottom: 10px; }
-  textarea { width: 100%; box-sizing: border-box; min-height: 280px; resize: vertical; padding: 10px; font: 12px var(--font-mono); color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; }
+  .document { padding: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-m); min-width: 0; }
+  h2 { margin: 0 0 8px; font-size: var(--fs-l); font-weight: 600; }
+  .hint { color: var(--text-dim); font-size: var(--fs-s); line-height: 1.5; }
+  .path { display: block; overflow-wrap: anywhere; margin-bottom: 10px; font-size: var(--fs-s); color: var(--text-dim); }
+  textarea { width: 100%; box-sizing: border-box; min-height: 280px; resize: vertical; padding: 10px; font-family: var(--font-mono); font-size: var(--fs-s); color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-s); }
   .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
   select { min-width: 0; max-width: 100%; }
   .error { color: var(--danger); margin: 10px 0; }

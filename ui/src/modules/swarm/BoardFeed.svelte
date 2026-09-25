@@ -1,6 +1,6 @@
 <script lang="ts">
   // The shared surface: a live feed of agent + user board posts, with a composer.
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { rel } from '../../lib/stores/now.svelte';
@@ -46,26 +46,33 @@
     return 'system';
   }
 
-  const KIND_CLASS: Record<string, string> = {
-    concern: 'bad',
+  // Colour carries meaning only: a concern / shared-file clash wants a look
+  // (warning), an escalation is blocked (danger), a merge landed (success).
+  // Every other kind is neutral — the icon + word tell them apart.
+  const KIND_TONE: Record<string, 'warn' | 'bad' | 'ok'> = {
+    concern: 'warn',
+    shared: 'warn',
     escalation: 'bad',
-    decision: 'accent',
-    review: 'accent',
-    idea: 'ok',
-    worktree: 'ok',
-    shared: 'bad',
     merge: 'ok',
-    verify: 'accent',
   };
 
-  // Emoji glyphs for the Coordinator lifecycle kinds (distinct at a glance).
-  const KIND_ICON: Record<string, string> = {
-    worktree: '🌿',
-    shared: '⚠️',
-    merge: '✅',
-    verify: '🔎',
-    escalation: '🚫',
+  const KIND_ICON: Record<string, IconName> = {
+    message: 'comment',
+    idea: 'bulb',
+    review_request: 'eye',
+    review: 'eye',
+    decision: 'check',
+    status: 'info',
+    concern: 'warning',
+    escalation: 'warning',
+    handoff: 'send',
+    system: 'gear',
+    worktree: 'worktree',
+    shared: 'warning',
+    merge: 'merge',
+    verify: 'search',
   };
+  const FILTER_KINDS = ['idea', 'review', 'decision', 'concern', 'status', 'worktree', 'shared', 'merge', 'verify', 'escalation'];
 
   let posting = $state(false);
   async function post() {
@@ -96,11 +103,11 @@
 </script>
 
 <div class="board">
-  <div class="b-filters">
-    <button class="chip" class:accent={kindFilter === ''} onclick={() => (kindFilter = '')}>All</button>
-    {#each ['idea', 'review', 'decision', 'concern', 'status', 'worktree', 'shared', 'merge', 'verify', 'escalation'] as k (k)}
-      <button class="chip" class:accent={kindFilter === k} onclick={() => (kindFilter = k)}>
-        {KIND_ICON[k] ?? ''} {sentenceCase(k)}
+  <div class="b-filters" role="group" aria-label="Filter posts by kind">
+    <button class="chip" class:accent={kindFilter === ''} aria-pressed={kindFilter === ''} onclick={() => (kindFilter = '')}>All</button>
+    {#each FILTER_KINDS as k (k)}
+      <button class="chip" class:accent={kindFilter === k} aria-pressed={kindFilter === k} onclick={() => (kindFilter = k)}>
+        {#if KIND_ICON[k]}<Icon name={KIND_ICON[k]} size={12} />{/if} {sentenceCase(k)}
       </button>
     {/each}
     <span class="grow"></span>
@@ -118,14 +125,14 @@
     {#each filtered as m (m.id)}
       <div class="msg">
         <div class="msg-head">
-          <span class="chip {KIND_CLASS[m.kind] ?? ''}">{KIND_ICON[m.kind] ?? ''} {sentenceCase(m.kind)}</span>
+          <span class="chip kind-chip tone-{KIND_TONE[m.kind] ?? 'neutral'}">{#if KIND_ICON[m.kind]}<Icon name={KIND_ICON[m.kind]} size={12} />{/if} {sentenceCase(m.kind)}</span>
           <span class="who">{author(m)}</span>
-          {#if m.to_agent_id}<span class="dim">→ {swarm.agentById(m.to_agent_id)?.name ?? 'agent'}</span>{/if}
+          {#if m.to_agent_id}<span class="dim to">to {swarm.agentById(m.to_agent_id)?.name ?? 'an agent'}</span>{/if}
           <span class="grow"></span>
           {#if m.author_agent_id}
-            <button class="reply-btn" onclick={() => reply(m)} title="Reply to {author(m)}">Reply</button>
+            <button class="btn small ghost" onclick={() => reply(m)} title="Reply to {author(m)}">Reply</button>
           {/if}
-          <span class="dim time">{rel(m.created_at)}</span>
+          <span class="dim time" title={new Date(m.created_at).toLocaleString()}>{rel(m.created_at)}</span>
         </div>
         <div class="msg-body">{m.body}</div>
       </div>
@@ -133,16 +140,17 @@
   </div>
 
   <div class="composer">
-    <select class="input small" bind:value={draftTo} title="Who is this for?">
-      <option value="">— team —</option>
+    <select class="input small" bind:value={draftTo} aria-label="Post to" title="Who is this for?">
+      <option value="">Whole team</option>
       {#each agents as a (a.id)}<option value={a.id}>{a.name}</option>{/each}
     </select>
-    <select class="input small" bind:value={draftKind} title="Kind of post">
+    <select class="input small" bind:value={draftKind} aria-label="Kind of post" title="Kind of post">
       {#each KINDS as k (k)}<option value={k}>{sentenceCase(k)}</option>{/each}
     </select>
     <input
       bind:this={composerEl}
       class="input grow"
+      aria-label="Message"
       placeholder={draftTo ? `Tell ${swarm.agentById(draftTo)?.name ?? 'them'} what to do…` : 'Post to the team board…'}
       bind:value={draft}
       onkeydown={(e) => e.key === 'Enter' && post()}
@@ -164,19 +172,38 @@
     display: flex;
     gap: 4px;
     align-items: center;
-    padding: 8px 10px;
-    border-bottom: 1px solid var(--border);
+    padding: 6px 12px;
+    border-block-end: 1px solid var(--border);
     flex-wrap: wrap;
   }
-  .chip {
+  button.chip {
     cursor: pointer;
     border: 1px solid var(--border);
     background: transparent;
   }
+  /* Kind chips: neutral by default; a tone only where the kind means one. */
+  .kind-chip {
+    gap: 4px;
+  }
+  .tone-warn {
+    color: var(--warning);
+    background: var(--warning-soft);
+    border-color: transparent;
+  }
+  .tone-bad {
+    color: var(--danger);
+    background: var(--danger-soft);
+    border-color: transparent;
+  }
+  .tone-ok {
+    color: var(--success);
+    background: var(--success-soft);
+    border-color: transparent;
+  }
   .feed {
     flex: 1;
     overflow-y: auto;
-    padding: 10px;
+    padding: 12px;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -184,42 +211,33 @@
   .msg {
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 8px 10px;
+    padding: 8px 12px;
     background: var(--surface);
   }
   .msg-head {
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 11px;
-    margin-bottom: 4px;
+    font-size: var(--fs-s);
+    margin-block-end: 4px;
+    min-height: 22px;
   }
   .who {
     font-weight: 600;
   }
   .time {
     font-size: var(--fs-xs);
-  }
-  .reply-btn {
-    border: none;
-    background: transparent;
-    color: var(--accent-text);
-    cursor: pointer;
-    font-size: 11px;
-    padding: 0 4px;
-  }
-  .reply-btn:hover {
-    text-decoration: underline;
+    font-variant-numeric: tabular-nums;
   }
   .msg-body {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     white-space: pre-wrap;
     word-break: break-word;
   }
   .composer {
     display: flex;
     gap: 8px;
-    padding: 8px 10px;
-    border-top: 1px solid var(--border);
+    padding: 8px 12px;
+    border-block-start: 1px solid var(--border);
   }
 </style>

@@ -284,7 +284,7 @@
   .settings-nav {
     width: 200px;
     flex-shrink: 0;
-    border-inline-end: 1px solid var(--border);
+    border-inline-end: 1px solid var(--separator);
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -300,7 +300,7 @@
     justify-content: space-between;
     padding-block: 0;
     padding-inline: 18px 10px;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--separator);
     font-size: var(--fs-l);
     font-weight: 600;
     letter-spacing: -0.01em;

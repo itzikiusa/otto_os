@@ -31,10 +31,14 @@
 
 <footer class="statusbar chrome-material">
   <div class="sb-group">
-    <span class="sb-item" title={live ? 'Agents working' : 'Agents working (last known — reconnecting)'}>
+    <button
+      class="sb-item sb-btn"
+      onclick={() => router.go('agents')}
+      title={live ? 'Agents working — open Agents' : 'Agents working (last known — reconnecting) — open Agents'}
+    >
       <span class="working-dot" class:on={ws.workingCount > 0} class:stale={!live} aria-hidden="true"></span>
       {ws.workingCount} working
-    </span>
+    </button>
     {#if ws.needsYouCount > 0}
       <button
         class="sb-item sb-btn needs-you"

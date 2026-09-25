@@ -2,12 +2,20 @@
   // Capability & Health Registry (B3) — one page answering "what can Otto do
   // right now, what's degraded, and how do I fix it?". Root-only: backed by
   // GET /capabilities (5 s cached on the server) and GET /support-bundle.
-  import { capabilitiesApi, featureLabel, settingsRoute, statusClass, statusLabel } from './capabilities';
+  import { capabilitiesApi, featureLabel, settingsRoute, statusLabel } from './capabilities';
   import type { ModuleCapability } from './capabilities';
   import { router } from '../../lib/router.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { loadErrorText } from '../../lib/loadError';
+  import type { CapabilityStatus } from './capabilities';
+
+  /** Capability status → the shared status tone (green / amber / neutral). */
+  function tone(s: CapabilityStatus): 'success' | 'warning' | 'neutral' {
+    return s === 'ready' ? 'success' : s === 'degraded' ? 'warning' : 'neutral';
+  }
 
   // ---------------------------------------------------------------------------
   // State
@@ -38,7 +46,7 @@
     try {
       caps = await capabilitiesApi.list();
     } catch (e) {
-      loadErr = e instanceof Error ? e.message : String(e);
+      loadErr = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -76,175 +84,161 @@
 <div class="caps">
 
   {#if !loading && caps.length > 0}
-    <!-- Summary chips -->
-    <div class="summary-row">
-      {#if summary.ready > 0}
-        <span class="chip chip-green">{summary.ready} ready</span>
-      {/if}
+    <!-- Summary: counts by state, worst first. -->
+    <div class="summary-row" role="status">
       {#if summary.degraded > 0}
-        <span class="chip chip-yellow">{summary.degraded} degraded</span>
+        <StatusBadge tone="warning" label="{summary.degraded} degraded" />
       {/if}
       {#if summary.missing > 0}
-        <span class="chip chip-gray">{summary.missing} not set up</span>
+        <StatusBadge tone="neutral" label="{summary.missing} not set up" />
+      {/if}
+      {#if summary.ready > 0}
+        <StatusBadge tone="success" label="{summary.ready} ready" />
       {/if}
     </div>
   {/if}
 
-  {#if loading}
-    <Skeleton rows={5} height={68} />
-  {:else if caps.length === 0}
-    <EmptyState
-      icon="gauge"
-      variant="page"
-      title={loadErr ? "Couldn't load capabilities" : 'No capability data'}
-      body={loadErr || 'The daemon reported no capability information. Make sure you are logged in as root.'}
-      actionLabel="Retry"
-      actionIcon="refresh"
-      onaction={load}
-    />
-  {:else}
+  <LoadState what="capabilities" variant="page" {loading} error={loadErr || null} empty={caps.length === 0} onretry={load} rows={5}>
+    {#snippet emptyView()}
+      <EmptyState
+        icon="gauge"
+        variant="page"
+        title="No capability data"
+        body="The daemon reported no capability information. The Health view needs the root account."
+      />
+    {/snippet}
     <div class="cap-list">
       {#each sorted as cap (cap.feature)}
         {@const open = expanded.has(cap.feature)}
-        {@const cls = statusClass(cap.status)}
-        <div class="cap-card card" class:has-issues={cap.status !== 'ready'}>
-          <!-- Header row -->
-          <div class="cap-head" role="button" tabindex="0" aria-expanded={open}
-               onclick={() => toggle(cap.feature)}
-               onkeydown={(e) => {
-                 if (e.key === 'Enter' || e.key === ' ') {
-                   e.preventDefault();
-                   toggle(cap.feature);
-                 }
-               }}>
-            <span class="status-dot {cls}" title={statusLabel(cap.status)}></span>
-            <span class="feature-label">{featureLabel(cap.feature)}</span>
-            <span class="status-badge badge-{cls}">{statusLabel(cap.status)}</span>
-            <span class="dep-count dim">
-              {cap.deps.length} dep{cap.deps.length !== 1 ? 's' : ''}
-            </span>
+        <div class="cap-card" class:has-issues={cap.status !== 'ready'}>
+          <div class="cap-head">
+            <button class="cap-toggle" aria-expanded={open} aria-controls="deps-{cap.feature}" onclick={() => toggle(cap.feature)}>
+              <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
+              <span class="feature-label" title={featureLabel(cap.feature)}>{featureLabel(cap.feature)}</span>
+              <StatusBadge tone={tone(cap.status)} label={statusLabel(cap.status)} />
+              <span class="dep-count dim">
+                {cap.deps.length} {cap.deps.length !== 1 ? 'checks' : 'check'}
+              </span>
+            </button>
             {#if cap.status !== 'ready'}
               <!-- Quick link to the relevant settings surface -->
-              <button class="btn-sm" title="Open settings for this feature"
-                      onclick={(e) => { e.stopPropagation(); router.go(settingsRoute(cap.feature)); }}>
+              <button class="btn small" title="Open the settings that fix {featureLabel(cap.feature)}"
+                      onclick={() => router.go(settingsRoute(cap.feature))}>
                 <Icon name="gear" size={12} />
-                Fix
+                Fix…
               </button>
             {/if}
-            <Icon name={open ? 'chevronUp' : 'chevronDown'} size={14} />
           </div>
 
           <!-- Issues (reasons + fixes) -->
           {#if cap.reasons.length > 0}
-            <div class="cap-issues">
+            <ul class="cap-issues">
               {#each cap.reasons as reason, i (reason)}
-                <div class="issue-row">
-                  <Icon name="zap" size={13} />
-                  <span class="issue-reason">{reason}</span>
-                  {#if cap.fixes[i]}
-                    <span class="issue-fix dim">{cap.fixes[i]}</span>
-                  {/if}
-                </div>
+                <li class="issue-row">
+                  <Icon name="warning" size={13} />
+                  <div class="issue-text">
+                    <span class="issue-reason">{reason}</span>
+                    {#if cap.fixes[i]}
+                      <span class="issue-fix dim">{cap.fixes[i]}</span>
+                    {/if}
+                  </div>
+                </li>
               {/each}
-            </div>
+            </ul>
           {/if}
 
-          <!-- Expanded dep breakdown -->
+          <!-- Expanded check breakdown -->
           {#if open && cap.deps.length > 0}
-            <div class="dep-list">
+            <ul class="dep-list" id="deps-{cap.feature}">
               {#each cap.deps as dep (dep.name + dep.kind)}
-                <div class="dep-row">
-                  <span class="dep-ok" class:bad={!dep.ok} title={dep.ok ? 'OK' : 'Not OK'}>
-                    {#if dep.ok}
-                      <Icon name="check" size={12} />
-                    {:else}
-                      <Icon name="x" size={12} />
-                    {/if}
+                <li class="dep-row">
+                  <span class="dep-ok" class:bad={!dep.ok} role="img" aria-label={dep.ok ? 'OK' : 'Not OK'} title={dep.ok ? 'OK' : 'Not OK'}>
+                    <Icon name={dep.ok ? 'check' : 'x'} size={12} />
                   </span>
                   <span class="dep-kind dim">{dep.kind}</span>
                   <span class="dep-name">{dep.name}</span>
                   {#if dep.detail}
-                    <span class="dep-detail dim">{dep.detail}</span>
+                    <span class="dep-detail dim" title={dep.detail}>{dep.detail}</span>
                   {/if}
-                </div>
+                </li>
               {/each}
-            </div>
+            </ul>
           {/if}
         </div>
       {/each}
     </div>
-  {/if}
+  </LoadState>
 </div>
 
 <style>
-  .caps { max-width: 900px; }
-
-  /* summary chips */
+  /* summary */
   .summary-row { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
-  .chip { padding: 3px 10px; border-radius: 99px; font-size: 12px; font-weight: 500; }
-  .chip-green  { background: var(--success-soft); color: var(--success); }
-  .chip-yellow { background: var(--warning-soft);    color: var(--warning); }
-  .chip-gray   { background: var(--surface-2);         color: var(--text-dim);             }
 
   /* capability list */
   .cap-list { display: flex; flex-direction: column; gap: 8px; }
 
-  .cap-card { border-radius: 8px; overflow: hidden; }
+  .cap-card {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    border-radius: var(--radius-m);
+    overflow: hidden;
+  }
   .cap-card.has-issues { border-inline-start: 3px solid var(--warning); }
 
   .cap-head {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 12px 14px;
-    cursor: pointer;
-    user-select: none;
+    gap: 8px;
+    padding-inline-end: 12px;
   }
   .cap-head:hover { background: var(--hover); }
-
-  .feature-label { font-weight: 500; font-size: 14px; flex: 1; }
-  .dep-count { font-size: 12px; }
-
-  /* status dot (reuse global .status-dot colours if present, else inline) */
-  .status-dot {
-    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  .cap-toggle {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 14px;
+    background: none;
+    border: none;
+    color: var(--text);
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
   }
-  .status-dot.green  { background: var(--success); }
-  .status-dot.yellow { background: var(--warning); }
-  .status-dot.gray   { background: var(--text-dim); }
+  .cap-toggle :global(svg) { color: var(--text-dim); flex-shrink: 0; }
+  .cap-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--radius-m); }
 
-  /* status badge */
-  .status-badge { font-size: 11px; padding: 2px 8px; border-radius: 99px; }
-  .badge-green  { background: var(--success-soft); color: var(--success); }
-  .badge-yellow { background: var(--warning-soft);    color: var(--warning); }
-  .badge-gray   { background: var(--surface-2);         color: var(--text-dim); }
-
-  /* quick-fix button */
-  .btn-sm {
-    display: inline-flex; align-items: center; gap: 4px;
-    padding: 2px 8px; border-radius: 4px; font-size: 12px;
-    background: transparent; border: 1px solid var(--border);
-    cursor: pointer; color: var(--text-dim);
+  .feature-label {
+    font-weight: 500;
+    font-size: var(--fs-m);
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
-  .btn-sm:hover { background: var(--hover); }
+  .dep-count { font-size: var(--fs-s); flex-shrink: 0; }
 
   /* issues (reasons + fixes) */
-  .cap-issues { padding: 0 14px 10px; display: flex; flex-direction: column; gap: 6px; }
-  .issue-row  { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; flex-wrap: wrap; }
+  .cap-issues { list-style: none; margin: 0; padding-block: 0 12px; padding-inline: 36px 14px; display: flex; flex-direction: column; gap: 6px; }
+  .issue-row  { display: flex; align-items: flex-start; gap: 8px; font-size: var(--fs-m); }
+  .issue-row > :global(svg) { color: var(--warning); flex-shrink: 0; margin-block-start: 2px; }
+  .issue-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .issue-reason { font-weight: 500; }
-  .issue-fix  { font-size: 12px; }
+  .issue-fix  { font-size: var(--fs-s); }
 
-  /* dep breakdown */
-  .dep-list { border-top: 1px solid var(--border); padding: 8px 14px; }
+  /* check breakdown */
+  .dep-list { list-style: none; margin: 0; border-block-start: 1px solid var(--border); padding-block: 8px; padding-inline: 36px 14px; }
   .dep-row  {
     display: flex; align-items: center; gap: 8px;
-    padding: 3px 0; font-size: 12px;
+    padding: 3px 0; font-size: var(--fs-s); min-width: 0;
   }
   .dep-ok  { display: flex; align-items: center; flex-shrink: 0; color: var(--success); }
   .dep-ok.bad { color: var(--danger); }
   .dep-kind  { text-transform: uppercase; font-size: var(--fs-xs); letter-spacing: .04em; width: 56px; flex-shrink: 0; }
-  .dep-name  { font-weight: 500; }
-  .dep-detail { font-size: 11px; }
+  .dep-name  { font-weight: 500; flex-shrink: 0; }
+  .dep-detail { font-size: var(--fs-xs); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .dim { color: var(--text-dim); }
 </style>

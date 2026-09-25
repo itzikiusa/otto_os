@@ -226,7 +226,7 @@ test('ui: OpenAPI viewer resolves $ref parameters; multi-d2 notes render every d
   const row = op.locator('tbody tr', { hasText: 'brand_id' });
   await expect(row).toBeVisible();
   await expect(row).toContainText('path');
-  await expect(row).toContainText('✓');
+  await expect(row).toContainText('Yes');
 
   // Both d2 fences in one note render to SVG — concurrent renders used to
   // cross-wire the worker bridge ("[object Object]" / stuck raw source).

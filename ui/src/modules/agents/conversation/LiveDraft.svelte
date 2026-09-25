@@ -60,7 +60,7 @@
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: var(--status-working, #3fb950);
+    background: var(--status-working);
     animation: pulse 1.2s ease-in-out infinite;
   }
   @keyframes pulse {
@@ -76,11 +76,11 @@
     overflow: auto;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text);
-    background: color-mix(in srgb, var(--status-working, #3fb950) 6%, var(--surface));
-    border: 1px dashed color-mix(in srgb, var(--status-working, #3fb950) 45%, var(--border));
+    background: color-mix(in srgb, var(--status-working) 6%, var(--surface));
+    border: 1px dashed color-mix(in srgb, var(--status-working) 45%, var(--border));
     border-radius: var(--radius-m);
     padding: 8px 12px;
     text-align: start;

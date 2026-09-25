@@ -22,6 +22,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
+  import { rel } from '../../lib/stores/now.svelte';
 
   interface Props {
     repoId: string;
@@ -155,7 +156,7 @@
       await api.post(`/repos/${repoId}/prs/${number}/request-changes`, {
         body: requestChangesBody.trim() || null,
       });
-      toasts.success('Changes requested', `#${number}`);
+      toasts.success('Changes requested', `PR #${number}`);
       showRequestChanges = false;
       requestChangesBody = '';
       await load(repoId, number);
@@ -166,15 +167,25 @@
     }
   }
 
-  function formatRelativeDate(iso: string): string {
-    const diff = Date.now() - new Date(iso).getTime();
-    const mins = Math.floor(diff / 60000);
-    if (mins < 60) return `${mins}m ago`;
-    const hours = Math.floor(mins / 60);
-    if (hours < 24) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    if (days < 30) return `${days}d ago`;
-    return new Date(iso).toLocaleDateString();
+  // The shared, self-ticking relative time (lib/stores/now) — no local formatter.
+  const formatRelativeDate = (iso: string): string => rel(iso);
+
+  const PR_STATE_LABEL: Record<string, string> = { open: 'Open', merged: 'Merged', declined: 'Declined' };
+  const PROVIDER_LABEL: Record<string, string> = { github: 'GitHub', bitbucket: 'Bitbucket', gitlab: 'GitLab' };
+  const prRepo = $derived(git.allRepos.find((r) => r.id === repoId) ?? git.repos.find((r) => r.id === repoId) ?? null);
+  const providerName = $derived(prRepo?.provider ? (PROVIDER_LABEL[prRepo.provider] ?? prRepo.provider) : 'the provider');
+
+  /** ←/→ (Home/End) move between the PR tabs, like any tablist. */
+  function onTabKey(e: KeyboardEvent): void {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+    const i = TABS.indexOf(activeTab);
+    const rtl = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl';
+    const fwd = e.key === (rtl ? 'ArrowLeft' : 'ArrowRight');
+    const next = e.key === 'Home' ? 0 : e.key === 'End' ? TABS.length - 1 : (i + (fwd ? 1 : -1) + TABS.length) % TABS.length;
+    e.preventDefault();
+    selectTab(TABS[next]);
+    const list = (e.currentTarget as HTMLElement).closest('[role="tablist"]');
+    list?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();
   }
 
   function startEdit(): void {
@@ -234,7 +245,7 @@
       await postComment(newComment.trim());
       newComment = '';
     } catch (e) {
-      toasts.error('Comment failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t post the comment', e instanceof Error ? e.message : String(e));
     } finally {
       busy = '';
     }
@@ -242,7 +253,7 @@
 
   // Approve and Decline are posted to the provider under the user's account and
   // notify the author + reviewers, so both confirm where / what / who first.
-  const repoLabel = $derived(git.repos.find((r) => r.id === repoId)?.name ?? 'this repository');
+  const repoLabel = $derived(prRepo?.name ?? 'this repository');
 
   async function action(kind: 'approve' | 'decline'): Promise<void> {
     const approve = kind === 'approve';
@@ -304,7 +315,7 @@
 <div class="prd-page">
 <PageHeader
   title={pr ? `Pull request #${pr.number}` : 'Pull request'}
-  crumbs={[{ label: 'Pull Requests', onclick: () => router.go(`git/${repoId}/prs`) }]}
+  crumbs={[{ label: prRepo ? `${prRepo.name} · Pull requests` : 'Pull requests', onclick: () => router.go(`git/${repoId}/prs`) }]}
 >
   {#snippet actions()}
     {#if pr}
@@ -314,9 +325,11 @@
         {/each}
       </select>
       <button class="btn small" disabled={busy !== ''} onclick={openAsSession}>
-        <Icon name="terminal" size={11} /> Open as session
+        <Icon name="terminal" size={12} /> Open as session
       </button>
-      <button class="btn small" onclick={() => openExternal(pr?.url)}>View on provider</button>
+      <button class="btn small" data-icon="external" onclick={() => openExternal(pr?.url)} title="Open this pull request on {providerName}">
+        <Icon name="external" size={12} /> Open on {providerName}
+      </button>
     {/if}
   {/snippet}
 </PageHeader>
@@ -343,45 +356,61 @@
         </h2>
       {/if}
       <div class="prd-meta">
-        <span class="chip {pr.state === 'open' ? 'ok' : pr.state === 'merged' ? 'accent' : 'bad'}">{pr.state}</span>
+        <span class="chip {pr.state === 'open' ? 'ok' : pr.state === 'merged' ? 'accent' : 'bad'}">{PR_STATE_LABEL[pr.state] ?? pr.state}</span>
         <span class="dim">{pr.author}</span>
         <span class="mono dim">{pr.source_branch} <span class="dir-arrow">→</span> {pr.target_branch}</span>
-        {#if pr.mergeable === false}<span class="chip bad">conflicts</span>{/if}
+        {#if pr.mergeable === false}<span class="chip bad"><Icon name="warning" size={12} /> Conflicts</span>{/if}
         {#if pr.approved_by.length > 0}
           <span class="chip ok" title={pr.approved_by.join(', ')}>
-            ✓ {pr.approved_by.length} approval{pr.approved_by.length === 1 ? '' : 's'}
+            <Icon name="check" size={12} /> {pr.approved_by.length} approval{pr.approved_by.length === 1 ? '' : 's'}
           </span>
         {/if}
       </div>
     </div>
 
     <!-- Tab bar -->
-    <div class="prd-tabs">
+    <div class="prd-tabs" role="tablist" aria-label="Pull request views">
       <button
         class="tab-btn"
+        role="tab"
+        aria-selected={activeTab === 'summary'}
+        tabindex={activeTab === 'summary' ? 0 : -1}
         class:active={activeTab === 'summary'}
         onclick={() => selectTab('summary')}
+        onkeydown={onTabKey}
       >
         <Icon name="comment" size={12} /> Summary
       </button>
       <button
         class="tab-btn"
+        role="tab"
+        aria-selected={activeTab === 'files'}
+        tabindex={activeTab === 'files' ? 0 : -1}
         class:active={activeTab === 'files'}
         onclick={() => selectTab('files')}
+        onkeydown={onTabKey}
       >
         <Icon name="file" size={12} /> Files
       </button>
       <button
         class="tab-btn"
+        role="tab"
+        aria-selected={activeTab === 'commits'}
+        tabindex={activeTab === 'commits' ? 0 : -1}
         class:active={activeTab === 'commits'}
         onclick={() => selectTab('commits')}
+        onkeydown={onTabKey}
       >
         <Icon name="commit" size={12} /> Commits
       </button>
       <button
         class="tab-btn"
+        role="tab"
+        aria-selected={activeTab === 'review'}
+        tabindex={activeTab === 'review' ? 0 : -1}
         class:active={activeTab === 'review'}
         onclick={() => selectTab('review')}
+        onkeydown={onTabKey}
       >
         <Icon name="zap" size={12} /> Review
       </button>
@@ -391,11 +420,12 @@
     {#if activeTab === 'summary'}
       <section class="prd-desc card">
         {#if editMode}
-          <textarea class="input" rows="8" bind:value={editDesc}></textarea>
-          <div class="row" style="justify-content: flex-end; margin-top: 8px">
+          <textarea class="input" rows="8" bind:value={editDesc} aria-label="Pull request description"></textarea>
+          <div class="row prd-compose-foot">
+            <span class="hint dim">Updates the pull request on {providerName}; everyone on it sees the change.</span>
             <button class="btn small" onclick={() => (editMode = false)}>Cancel</button>
-            <button class="btn small primary" disabled={busy === 'edit'} onclick={saveEdit}>
-              {busy === 'edit' ? 'Saving…' : 'Save'}
+            <button class="btn small primary" disabled={busy === 'edit' || editTitle.trim() === ''} onclick={saveEdit}>
+              {busy === 'edit' ? 'Saving…' : 'Save to ' + providerName}
             </button>
           </div>
         {:else}
@@ -403,8 +433,8 @@
             <!-- renderMarkdown escapes input before transforming -->
             {@html renderMarkdown(pr.description_md || '_No description._')}
           </div>
-          <button class="btn small ghost edit-btn" onclick={startEdit}>
-            <Icon name="edit" size={11} /> Edit
+          <button class="btn small ghost edit-btn" onclick={startEdit} title="Edit the title and description on {providerName}">
+            <Icon name="edit" size={12} /> Edit
           </button>
         {/if}
       </section>
@@ -425,7 +455,7 @@
               {/if}
               <span class="reviewer-spacer"></span>
               {#if reviewer.approved}
-                <span class="chip ok"><Icon name="check" size={11} /> APPROVED</span>
+                <span class="chip ok"><Icon name="check" size={12} /> Approved</span>
               {/if}
             </div>
           {/each}
@@ -438,7 +468,7 @@
               <span class="reviewer-avatar">{name.charAt(0).toUpperCase()}</span>
               <span class="reviewer-name">{name}</span>
               <span class="reviewer-spacer"></span>
-              <span class="chip ok"><Icon name="check" size={11} /> APPROVED</span>
+              <span class="chip ok"><Icon name="check" size={12} /> Approved</span>
             </div>
           {/each}
         </section>
@@ -484,16 +514,18 @@
               class="input"
               rows="3"
               bind:value={requestChangesBody}
-              placeholder="Optional comment explaining what needs to change…"
+              aria-label="What needs to change"
+              placeholder="The retry loop needs a cap before this can merge."
             ></textarea>
-            <div class="row" style="justify-content: flex-end; margin-top: 8px; gap: 8px">
+            <div class="row prd-compose-foot">
+              <span class="hint dim">Posted to {repoLabel} PR #{number} under your account; {pr.author || 'the author'} and the reviewers are notified.</span>
               <button class="btn small ghost" onclick={() => (showRequestChanges = false)}>Cancel</button>
               <button
                 class="btn small warn"
                 disabled={busy === 'request-changes'}
                 onclick={requestChanges}
               >
-                {busy === 'request-changes' ? 'Requesting…' : 'Submit'}
+                {busy === 'request-changes' ? 'Requesting…' : 'Request changes'}
               </button>
             </div>
           </section>
@@ -509,18 +541,19 @@
             <CommentThread comment={c} onreply={(parentId, body) => postComment(body, undefined, undefined, parentId)} onresolve={resolveThread} />
           </div>
         {:else}
-          <p class="dim" style="font-size: 12px">No comments yet.</p>
+          <p class="dim" style="font-size: var(--fs-s)">No comments yet.</p>
         {/each}
 
         <div class="new-comment card">
-          <textarea class="input" rows="3" bind:value={newComment} placeholder="Leave a comment…" onfocus={scrollIntoViewOnFocus}></textarea>
-          <div class="row" style="justify-content: flex-end; margin-top: 8px">
+          <textarea class="input" rows="3" bind:value={newComment} aria-label="New comment" placeholder="Leave a comment…" onfocus={scrollIntoViewOnFocus}></textarea>
+          <div class="row prd-compose-foot">
+            <span class="hint dim">Posted to {repoLabel} PR #{number} under your account; everyone on the pull request sees it.</span>
             <button
-              class="btn primary small"
+              class="btn small"
               disabled={busy === 'comment' || newComment.trim() === ''}
               onclick={addGeneralComment}
             >
-              {busy === 'comment' ? 'Posting…' : 'Comment'}
+              {busy === 'comment' ? 'Posting…' : 'Post comment'}
             </button>
           </div>
         </div>
@@ -562,7 +595,7 @@
           empty={!commits || commits.length === 0}
           onretry={() => void loadCommits(repoId, number)}
         >
-          {#snippet emptyView()}<p class="dim" style="font-size: 12px; padding: 12px 0">No commits found.</p>{/snippet}
+          {#snippet emptyView()}<p class="dim" style="font-size: var(--fs-s); padding: 12px 0">No commits found.</p>{/snippet}
           {#each commits ?? [] as c (c.sha)}
             <div class="commit-row">
               <span class="commit-sha mono">{c.short_sha}</span>
@@ -625,17 +658,17 @@
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .prd-title {
-    font-size: 17px;
+    font-size: var(--fs-xl);
     font-weight: 600;
     margin: 0;
     letter-spacing: -0.01em;
   }
   .prd-title-input {
     width: 100%;
-    font-size: 15px;
+    font-size: var(--fs-l);
     height: 32px;
   }
   .prd-meta {
@@ -643,7 +676,7 @@
     align-items: center;
     gap: 10px;
     margin-top: 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
 
   /* Tabs */
@@ -661,7 +694,7 @@
     background: none;
     border: none;
     border-bottom: 2px solid transparent;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
     transition: color 120ms, border-color 120ms;
@@ -700,7 +733,7 @@
     margin-top: 10px;
   }
   .prd-reviewers-title {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -712,7 +745,7 @@
     align-items: center;
     gap: 9px;
     padding: 5px 0;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .reviewer-avatar {
     width: 22px;
@@ -724,7 +757,7 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   /* A long reviewer name truncates instead of pushing the APPROVED chip off. */
@@ -742,7 +775,7 @@
     object-fit: cover;
   }
   .reviewer-time {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .reviewer-spacer {
     flex: 1;
@@ -779,13 +812,27 @@
   }
 
   /* Request Changes inline panel */
+  /* Composer footers: the "who sees it" hint on the leading side, actions at
+     the trailing end. */
+  .prd-compose-foot {
+    justify-content: flex-end;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .prd-compose-foot .hint {
+    flex: 1 1 220px;
+    min-width: 0;
+    font-size: var(--fs-xs);
+  }
   .btn.warn {
-    background: var(--status-warn-soft);
-    color: var(--status-warn);
-    border-color: color-mix(in srgb, var(--status-warn) 45%, transparent);
+    background: var(--warning-soft);
+    color: var(--warning);
+    border-color: color-mix(in srgb, var(--warning) 45%, transparent);
   }
   .btn.warn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--status-warn) 24%, transparent);
+    background: color-mix(in srgb, var(--warning) 24%, transparent);
   }
   .prd-request-changes {
     padding: 12px 16px;
@@ -806,13 +853,13 @@
     gap: 10px;
     padding: 7px 12px;
     border-bottom: 1px solid var(--border);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .commit-row:last-child {
     border-bottom: none;
   }
   .commit-sha {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--accent-text);
     white-space: nowrap;
   }
@@ -826,11 +873,11 @@
     overflow: hidden;
     text-overflow: ellipsis;
     max-width: 140px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .commit-date {
     white-space: nowrap;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
 
   /* Direction-aware arrow: the source→target separator mirrors in place under
@@ -847,9 +894,9 @@
   @media (max-width: 1024px) {
     .prd { padding: 12px 12px 48px; }
     /* Header actions wrap instead of overflowing; comfortable touch targets. */
-    .prd-title { font-size: 18px; overflow-wrap: anywhere; }
+    .prd-title { font-size: var(--fs-xl); overflow-wrap: anywhere; }
     .prd-title-input { height: 38px; font-size: 16px; }
-    .prd-meta { flex-wrap: wrap; gap: 8px; font-size: 13px; min-width: 0; }
+    .prd-meta { flex-wrap: wrap; gap: 8px; font-size: var(--fs-m); min-width: 0; }
     /* Long branch names break instead of forcing horizontal overflow. */
     .prd-meta .mono { overflow-wrap: anywhere; min-width: 0; }
 
@@ -861,7 +908,7 @@
     }
     .prd-tabs::-webkit-scrollbar { display: none; }
     .tab-btn {
-      font-size: 14px;
+      font-size: var(--fs-l);
       padding: 10px 14px;
       white-space: nowrap;
       flex-shrink: 0;
@@ -878,20 +925,20 @@
     .commit-row {
       grid-template-columns: auto 1fr;
       gap: 4px 10px;
-      font-size: 13px;
+      font-size: var(--fs-m);
     }
     .commit-subject { grid-column: 1 / -1; white-space: normal; overflow-wrap: anywhere; }
-    .commit-sha { font-size: 12px; }
-    .commit-author, .commit-date { font-size: 12px; }
+    .commit-sha { font-size: var(--fs-s); }
+    .commit-author, .commit-date { font-size: var(--fs-s); }
 
     /* Comment composer + edit areas: legible, comfortable, edit always shown. */
     .prd-comments { max-width: 100%; }
     .new-comment textarea,
     .prd-desc textarea,
-    .prd-request-changes textarea { font-size: 14px; }
+    .prd-request-changes textarea { font-size: var(--fs-l); }
     .new-comment .btn,
     .prd-request-changes .btn { height: 34px; }
     .edit-btn { opacity: 1; }
-    .md-body { font-size: 14px; overflow-wrap: anywhere; }
+    .md-body { font-size: var(--fs-l); overflow-wrap: anywhere; }
   }
 </style>

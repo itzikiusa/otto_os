@@ -64,7 +64,7 @@
     flex: 1;
     min-height: 220px;
     padding: 10px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.55;
     background: var(--surface-2);
     color: var(--text);
@@ -80,7 +80,7 @@
   }
   .cv-err {
     color: var(--status-exited);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

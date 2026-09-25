@@ -8,6 +8,7 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import type { SwarmAgent } from './types';
 
   interface Props {
@@ -83,7 +84,7 @@
     try {
       await swarm.deleteAgent(a.id);
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't delete the agent", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -170,7 +171,14 @@
     </label>
   </div>
   {#if roots.length === 0}
-    <p class="dim pad">No agents yet. Use <strong>Recruit</strong> to add one.</p>
+    <EmptyState
+      icon="user"
+      title="No agents yet"
+      body="Recruit agents in the header, or add one by hand. They report to each other in an org tree; drag a row onto another to change who it reports to."
+      actionLabel={onadd ? 'Add agent' : undefined}
+      actionIcon="plus"
+      onaction={() => onadd?.(null)}
+    />
   {:else if draggingAgentId}
     <div class="drop-zone" class:drop-active={dropTargetId === null}>
       <Icon name="user" size={13} /> Drop here to make top-level
@@ -179,8 +187,8 @@
   {#each roots as r (r.id)}
     {@render node(r, 0)}
   {/each}
-  {#if !draggingAgentId}
-    <button class="add-top-btn dim" onclick={() => onadd?.(null)} title="Add agent at top level">
+  {#if !draggingAgentId && roots.length > 0}
+    <button class="add-top-btn dim" onclick={() => onadd?.(null)} title="Add an agent at the top level">
       <Icon name="plus" size={13} /> Add agent
     </button>
   {/if}
@@ -192,7 +200,7 @@
   {@const isOpen = open[a.id] ?? true}
   {@const running = runCount(a.id)}
   <div
-    class="row"
+    class="row org-row"
     class:drag-over={dropTargetId === a.id}
     class:dragging-self={draggingAgentId === a.id}
     style="padding-inline-start:{depth * 14 + 6}px"
@@ -214,24 +222,28 @@
     {:else}
       <span class="twist-spacer"></span>
     {/if}
-    <span class="avatar">{a.avatar || a.name.slice(0, 1)}</span>
-    <span class="who grow" title={a.title ? `${a.name} — ${a.title}` : a.name}>
+    <span class="avatar" aria-hidden="true">{a.avatar || a.name.slice(0, 1)}</span>
+    <!-- The name opens the agent's editor (the most common action); the rest
+         are in ⋯ / right-click. -->
+    <button class="who grow" onclick={() => onedit(a)} title={a.title ? `${a.name} — ${a.title} · Edit agent` : `${a.name} · Edit agent`}>
       <span class="name">{a.name}</span>
-      <span class="title dim">{a.title}</span>
-    </span>
+      {#if a.title}<span class="title dim">{a.title}</span>{/if}
+    </button>
     {#if a.schedule?.enabled}
-      <span class="badge" title="Runs on a schedule"><Icon name="clock" size={11} /></span>
+      <span class="badge" role="img" aria-label="Runs on a schedule" title="Runs on a schedule"><Icon name="clock" size={12} /></span>
     {/if}
     {#if running > 0}
-      <span class="chip accent" title="{running} active run{running === 1 ? '' : 's'}">{running}●</span>
+      <span class="chip runs-chip" title="{running} active run{running === 1 ? '' : 's'}"><span class="run-dot" aria-hidden="true"></span>{running}</span>
     {/if}
-    <span class="state {a.status}" title={a.status === 'paused' ? 'Paused' : 'Active'}></span>
-    <button class="icon-btn small" onclick={() => onadd?.(a)} aria-label="Add direct report" title="Add direct report">
-      <Icon name="plus" size={11} />
-    </button>
-    <button class="icon-btn small" onclick={(e) => menu(e, a)} aria-label="Agent actions" title="Agent actions">
-      <Icon name="more" size={14} />
-    </button>
+    <span class="state {a.status}" role="img" aria-label={a.status === 'paused' ? 'Paused' : 'Active'} title={a.status === 'paused' ? 'Paused' : 'Active'}></span>
+    <span class="row-tools">
+      <button class="icon-btn small" onclick={() => onadd?.(a)} aria-label="Add a direct report to {a.name}" title="Add direct report">
+        <Icon name="plus" size={12} />
+      </button>
+      <button class="icon-btn small" onclick={(e) => menu(e, a)} aria-label="Actions for {a.name}" title="Agent actions">
+        <Icon name="more" size={14} />
+      </button>
+    </span>
   </div>
   {#if isOpen}
     {#each sessions as s (s.id)}
@@ -240,11 +252,12 @@
         class:selected={swarm.selectedSessionId === s.id}
         style="padding-inline-start:{depth * 14 + 30}px"
         onclick={() => (swarm.selectedSessionId = s.id)}
-        title={s.title || s.provider}
+        title="Open session: {s.title || s.provider}"
+        aria-current={swarm.selectedSessionId === s.id ? 'true' : undefined}
       >
         <Icon name="terminal" size={12} />
         <span class="grow mono ellipsis">{s.title || s.provider}</span>
-        <span class="state {ws.statusMap[s.id] ?? s.status}"></span>
+        <span class="state {ws.statusMap[s.id] ?? s.status}" role="img" aria-label={ws.statusMap[s.id] ?? s.status}></span>
       </button>
     {/each}
     {#each kids as k (k.id)}
@@ -259,38 +272,61 @@
     height: 100%;
     padding: 4px 0;
   }
-  .pad {
-    padding: 12px;
-  }
   .tree-bar {
     display: flex;
     justify-content: flex-end;
-    padding: 4px 10px;
-    border-bottom: 1px solid var(--border);
+    padding: 4px 12px;
+    border-block-end: 1px solid var(--border);
   }
   .show-done {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    font-size: 11px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
   }
-  .row {
+  .org-row {
     display: flex;
     align-items: center;
     gap: 6px;
     height: 30px;
     cursor: grab;
   }
-  .row:hover {
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+  .org-row:hover {
+    background: var(--hover);
   }
-  .row.drag-over {
+  /* Row tools surface on hover / keyboard focus (always shown on touch). */
+  .row-tools {
+    display: inline-flex;
+    align-items: center;
+    padding-inline-end: 6px;
+    opacity: 0;
+  }
+  .org-row:hover .row-tools,
+  .org-row:focus-within .row-tools {
+    opacity: 1;
+  }
+  @media (hover: none) {
+    .row-tools {
+      opacity: 1;
+    }
+  }
+  .runs-chip {
+    gap: 4px;
+    font-variant-numeric: tabular-nums;
+  }
+  .run-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--status-working);
+  }
+  .org-row.drag-over {
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     outline: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent);
   }
-  .row.dragging-self {
+  .org-row.dragging-self {
     opacity: 0.4;
   }
   .drop-zone {
@@ -298,7 +334,7 @@
     align-items: center;
     gap: 6px;
     padding: 6px 10px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     border: 1px dashed var(--border);
     border-radius: var(--radius-s);
@@ -317,14 +353,14 @@
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font-size: 11.5px;
-    padding: 6px 10px;
+    font-size: var(--fs-s);
+    padding: 6px 12px;
     cursor: pointer;
     text-align: start;
   }
   .add-top-btn:hover {
     color: var(--text);
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
   }
   .twist,
   .twist-spacer {
@@ -344,18 +380,31 @@
     border-radius: 50%;
     display: grid;
     place-items: center;
-    font-size: 12px;
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    font-size: var(--fs-s);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
     flex: none;
   }
   .who {
     display: flex;
     flex-direction: column;
-    line-height: 1.1;
+    align-items: flex-start;
+    line-height: 1.15;
     overflow: hidden;
-  }
-  .who {
     min-width: 0;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    padding: 0;
+    text-align: start;
+    cursor: pointer;
+    font: inherit;
+  }
+  .who:hover .name {
+    text-decoration: underline;
+  }
+  .who > span {
+    max-width: 100%;
   }
   /* One line each — a long name/title used to wrap inside the fixed 30px row
      and get clipped vertically with no ellipsis (full text is in the title). */
@@ -367,7 +416,7 @@
     white-space: nowrap;
   }
   .name {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .title {
@@ -413,14 +462,15 @@
     color: var(--text-dim);
     cursor: pointer;
     text-align: start;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
+    padding-inline-end: 12px;
   }
   .session-row:hover {
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+    background: var(--hover);
     color: var(--text);
   }
   .session-row.selected {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent-text);
+    background: var(--accent-soft);
+    color: var(--text);
   }
 </style>

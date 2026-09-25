@@ -113,7 +113,7 @@
   }
   h2 {
     margin: 0;
-    font-size: 15px;
+    font-size: var(--fs-l);
     font-weight: 600;
   }
   .rule-section {
@@ -128,7 +128,7 @@
     border: none;
     background: color-mix(in srgb, var(--text-dim) 5%, transparent);
     color: var(--text);
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     text-align: start;
     cursor: pointer;

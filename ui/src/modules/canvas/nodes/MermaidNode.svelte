@@ -149,7 +149,7 @@
   .err {
     flex: 0 0 auto;
     padding: 4px 8px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--status-exited);
     background: var(--surface-2);
     border-bottom: 1px solid var(--border);
@@ -159,7 +159,7 @@
   }
   .dim {
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   textarea {
     flex: 1 1 auto;
@@ -169,7 +169,7 @@
     background: var(--term-bg);
     color: var(--text);
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     padding: 8px;
   }

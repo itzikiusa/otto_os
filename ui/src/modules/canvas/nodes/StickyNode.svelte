@@ -77,7 +77,7 @@
     /* Sticky bodies use a fixed dark ink so colored notes stay readable on both
        schemes regardless of --text. */
     color: #2a2a1a;
-    font-size: 13px;
+    font-size: var(--fs-m);
     line-height: 1.4;
     overflow: hidden;
   }

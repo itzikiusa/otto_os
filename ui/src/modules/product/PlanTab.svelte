@@ -15,6 +15,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
 
   // ── Provider selection (Otto's REAL provider list, like NewSession) ──────────
   // Drop the 'shell' pseudo-provider — it can't plan. Fall back to ['claude'] if
@@ -124,7 +126,9 @@
       planVersion = full;
       body = full.body_md ?? '';
     } catch (e) {
-      toasts.error('Could not load plan', product.errMsg(e));
+      // Nothing on screen yet → inline error with Retry; a refresh of a shown plan → toast.
+      if (planVersion) toasts.error('Could not load plan', product.errMsg(e));
+      else loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -204,13 +208,20 @@
 
   const story = $derived(product.detail?.story ?? null);
 
+  /** A failed first load — shown inline with Retry, never as "No plan yet". */
+  let loadError = $state<string | null>(null);
+
   async function initialLoad(): Promise<void> {
+    loadError = null;
+    loading = true;
     try {
       await product.loadVersions();
       const plan = latestPlan();
       if (plan) await loadPlanBody(plan);
     } catch (e) {
-      console.error('[PlanTab] initialLoad error', e);
+      loadError = loadErrorText(e);
+    } finally {
+      loading = false;
     }
   }
 
@@ -317,11 +328,6 @@
     return 'todo';
   }
 
-  function boxGlyph(s: Status): string {
-    if (s === 'done') return '✓';
-    if (s === 'in_progress') return '~';
-    return '';
-  }
 
   function taskCount(t: Task): string {
     const done = t.items.filter((i) => i.status === 'done').length;
@@ -391,8 +397,8 @@
   <div class="muted">No story selected.</div>
 {:else}
   <div class="plan-tab">
-    {#if loading}
-      <div class="muted">Loading plan…</div>
+    {#if (loading || loadError) && !planVersion}
+      <LoadState what="the plan" loading={loading} error={loadError} empty onretry={() => void initialLoad()} />
     {:else if !planVersion}
       <!-- ── No plan yet: generate panel ─────────────────────────────────────── -->
       <section class="pl-card gen-panel">
@@ -506,7 +512,7 @@
       <section class="pl-card plan-header">
         <div class="ph-row">
           <div class="ph-info">
-            <span class="ph-label">Implementation Plan v{planVersion.version_no}</span>
+            <span class="ph-label">Implementation plan v{planVersion.version_no}</span>
             <!-- Agent-written: attributed (the version row carries no provider,
                  so the byline names Otto) and a draft the PO works through. -->
             <AgentByline at={planVersion.created_at} testid="plan-byline" />
@@ -577,7 +583,7 @@
                     aria-label="Toggle: currently {statusLabel(item.status)}"
                     onclick={() => cycleItem(item.lineIndex, item.status)}
                     disabled={saving}
-                  >{boxGlyph(item.status)}</button>
+                  >{#if item.status === 'done'}<Icon name="check" size={12} />{:else if item.status === 'in_progress'}<Icon name="dot" size={12} />{/if}</button>
                   <span class="item-text">{item.text}</span>
                 </li>
               {/each}
@@ -598,7 +604,7 @@
 <style>
   .muted {
     padding: 24px 0;
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     font-style: italic;
   }
@@ -705,7 +711,7 @@
   .ph-info { display: flex; flex-direction: column; gap: 2px; min-width: 160px; }
   .ph-label { font-size: var(--fs-m); font-weight: 600; color: var(--text); }
   .ph-progress { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 160px; }
-  .prog-text { font-size: 12px; color: var(--text-dim); }
+  .prog-text { font-size: var(--fs-s); color: var(--text-dim); }
   .prog-bar {
     height: 6px;
     border-radius: 999px;
@@ -743,10 +749,10 @@
     margin: 0;
     flex: 1;
   }
-  .task-count { font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  .task-count { font-size: var(--fs-s); color: var(--text-dim); font-variant-numeric: tabular-nums; }
   .task-status {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     padding: 2px 8px;
@@ -758,14 +764,14 @@
   .status-done { background: var(--success-soft); color: var(--success); }
 
   .items { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 5px; }
-  .item { display: flex; align-items: flex-start; gap: 9px; font-size: 13px; line-height: 1.5; }
+  .item { display: flex; align-items: flex-start; gap: 9px; font-size: var(--fs-m); line-height: 1.5; }
   .item.status-done .item-text { text-decoration: line-through; color: var(--text-dim); }
   .item-text { color: var(--text); padding-top: 1px; }
   .checkbox {
     flex-shrink: 0;
     width: 18px;
     height: 18px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     border: 1.5px solid var(--border);
     background: var(--surface);
     color: var(--surface);
@@ -780,13 +786,13 @@
   }
   .checkbox:disabled { cursor: not-allowed; opacity: 0.6; }
   .checkbox.status-done { background: var(--success); border-color: var(--success); }
-  .checkbox.status-in_progress { background: var(--warning); border-color: var(--warning); font-weight: 700; }
+  .checkbox.status-in_progress { background: var(--warning); border-color: var(--warning); font-weight: 600; }
   .checkbox.status-todo:hover:not(:disabled) { border-color: var(--accent); }
 
   /* Raw markdown */
   .raw { padding: 14px 16px; }
-  .md-body { font-size: 13px; line-height: 1.6; color: var(--text); }
-  .md-body :global(h3) { font-size: 1.05em; font-weight: 700; margin: 1em 0 0.4em; }
+  .md-body { font-size: var(--fs-m); line-height: 1.6; color: var(--text); }
+  .md-body :global(h3) { font-size: 1.05em; font-weight: 600; margin: 1em 0 0.4em; }
   .md-body :global(ul) { padding-inline-start: 1.4em; margin: 0 0 0.6em; }
   .md-body :global(li) { margin-bottom: 0.2em; }
   .md-body :global(code) {
@@ -794,6 +800,6 @@
     font-size: 0.88em;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     padding: 1px 5px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
   }
 </style>

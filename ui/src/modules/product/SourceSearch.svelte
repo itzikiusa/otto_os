@@ -305,7 +305,7 @@
     margin-bottom: 10px;
   }
   .picker-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-weight: 500;
   }
@@ -316,12 +316,12 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s, 4px);
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     padding: 4px 8px;
     box-sizing: border-box;
   }
   .picker-loading {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     padding: 4px 0;
   }
@@ -358,14 +358,14 @@
     min-width: 0;
   }
   .issue-key {
-    font-size: 12px;
-    font-weight: 700;
+    font-size: var(--fs-s);
+    font-weight: 600;
     font-family: var(--font-mono);
     color: var(--accent-text);
     flex-shrink: 0;
   }
   .issue-summary {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -380,13 +380,13 @@
   .no-results {
     padding: 16px;
     text-align: center;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .load-more-btn {
     width: 100%;
     padding: 7px 0;
     margin-top: 2px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     color: var(--accent-text);
     background: transparent;

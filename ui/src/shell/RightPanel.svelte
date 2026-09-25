@@ -119,13 +119,42 @@
   }
 
   onDestroy(() => void flushNotes());
+
+  // Keep-alive for the v1 Browser: it holds live pages (native webviews),
+  // several tabs and unsent take-over annotations in component state, so
+  // unmounting it on every tab switch or ⌘J collapse threw all of that away.
+  // Once opened it stays mounted (hidden) until the panel itself goes away;
+  // every other tab still mounts on demand (their state lives in stores).
+  const open = $derived(ui.rightOpen || forceOpen);
+  let browserKept = $state(false);
+  $effect(() => {
+    if (open && ui.rightTab === 'browser' && ui.browserPanelVersion === 'v1') browserKept = true;
+  });
+  const browserShown = $derived(open && ui.rightTab === 'browser');
+
+  // Tablist keys: ←/→ (RTL-aware), Home/End move and select; focus follows.
+  function onTabsKey(e: KeyboardEvent): void {
+    const i = tabs.findIndex((t) => t.id === ui.rightTab);
+    const rtl = getComputedStyle(e.currentTarget as Element).direction === 'rtl';
+    let next = i;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+      const fwd = (e.key === 'ArrowRight') !== rtl;
+      next = (i + (fwd ? 1 : -1) + tabs.length) % tabs.length;
+    } else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = tabs.length - 1;
+    else return;
+    e.preventDefault();
+    ui.rightTab = tabs[next].id;
+    queueMicrotask(() => tabsEl?.querySelector<HTMLElement>('.rtab.active')?.focus());
+  }
 </script>
 
-{#if ui.rightOpen || forceOpen}
+{#if open || browserKept}
   <aside
     class="rpanel"
     class:resizing
     class:embedded={forceOpen}
+    hidden={!open}
     style={forceOpen ? undefined : `width:${ui.rightWidth}px`}
   >
     {#if !forceOpen}
@@ -138,13 +167,14 @@
       ></div>
     {/if}
     <header class="rpanel-head">
-      <div class="rpanel-tabs" role="tablist" bind:this={tabsEl}>
+      <div class="rpanel-tabs" role="tablist" tabindex="-1" aria-label="Session panel" bind:this={tabsEl} onkeydown={onTabsKey}>
         {#each tabs as t (t.id)}
           <button
             class="rtab"
             class:active={ui.rightTab === t.id}
             role="tab"
             aria-selected={ui.rightTab === t.id}
+            tabindex={ui.rightTab === t.id ? 0 : -1}
             onclick={() => (ui.rightTab = t.id)}
           >
             {t.label}
@@ -185,11 +215,13 @@
         <CanvasPanel />
       {:else if ui.rightTab === 'info'}
         <InfoPanel />
-      {:else if ui.rightTab === 'browser'}
+      {/if}
+      {#if browserShown || (browserKept && ui.browserPanelVersion === 'v1')}
         <!-- Transitional v1/v2 switch: v1 is the original per-session panel,
              v2 embeds the Browser module (persisted tabs/marks + ask bar).
-             Only here, in agent mode — the Browser page itself is always v2. -->
-        <div class="browser-host">
+             Only here, in agent mode — the Browser page itself is always v2.
+             v1 stays mounted while hidden (see `browserKept`). -->
+        <div class="browser-host" hidden={!browserShown}>
           <div class="browser-ver" role="group" aria-label="Browser version">
             <span class="dim">Browser</span>
             <button
@@ -210,12 +242,13 @@
           {#if ui.browserPanelVersion === 'v2'}
             <BrowserPanelV2 />
           {:else}
-            <BrowserPanel />
+            <BrowserPanel active={browserShown} />
           {/if}
         </div>
-      {:else if ui.rightTab === 'api'}
+      {/if}
+      {#if ui.rightTab === 'api'}
         <ApiPanel />
-      {:else}
+      {:else if ui.rightTab === 'notes'}
         <div class="notes-wrap">
           <textarea
             class="notes"
@@ -225,16 +258,17 @@
             spellcheck="false"
           ></textarea>
           <div class="notes-foot">
-            {#if saveState === 'saving'}<span class="dim">saving…</span>
-            {:else if saveState === 'saved'}<span class="dim">saved</span>
-            {:else}<span class="dim">autosaves to workspace</span>{/if}
+            {#if saveState === 'saving'}<span class="dim">Saving…</span>
+            {:else if saveState === 'saved'}<span class="dim">Saved</span>
+            {:else}<span class="dim">Saved to this workspace as you type</span>{/if}
           </div>
         </div>
       {/if}
     </div>
   </aside>
-{:else}
-  <aside class="rstrip">
+{/if}
+{#if !open}
+  <aside class="rstrip" aria-label="Session panel">
     {#each tabs as t (t.id)}
       <button
         class="icon-btn strip-btn"
@@ -258,6 +292,11 @@
     background: var(--bg);
     flex-shrink: 0;
     position: relative;
+  }
+  /* `hidden` must beat the display:flex above (kept-alive browser). */
+  .rpanel[hidden],
+  .browser-host[hidden] {
+    display: none;
   }
   .rpanel.resizing {
     /* no transition while dragging for 1:1 tracking */
@@ -319,7 +358,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 500;
     cursor: pointer;
     transition: background 120ms ease-out, color 120ms ease-out;
@@ -352,11 +391,11 @@
     gap: 0.3rem;
     padding: 0.25rem 0.6rem;
     border-bottom: 1px solid var(--border);
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
   }
   .browser-ver .dim {
     color: var(--text-dim);
-    margin-right: auto;
+    margin-inline-end: auto;
   }
   .ver {
     height: 20px;
@@ -366,7 +405,7 @@
     background: transparent;
     color: var(--text-dim);
     font: inherit;
-    font-size: 0.7rem;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .ver.active {
@@ -402,7 +441,7 @@
     background: transparent;
     padding: 12px;
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.6;
     color: var(--text);
     outline: none;

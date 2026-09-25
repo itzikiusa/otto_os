@@ -25,7 +25,7 @@
       toasts.success('Swarm created');
       onclose();
     } catch (e) {
-      toasts.error('Could not create swarm', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't create the swarm", e instanceof Error ? e.message : String(e));
     } finally {
       busy = false;
     }
@@ -83,10 +83,10 @@
   }
   .p-name {
     font-weight: 600;
-    font-size: 13px;
+    font-size: var(--fs-m);
     margin-bottom: 2px;
   }
   .p-desc {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
 </style>

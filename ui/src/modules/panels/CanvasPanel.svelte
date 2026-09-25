@@ -395,7 +395,7 @@
     padding: 8px 10px;
   }
   .empty-line {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.4;
     margin: 2px 0;
   }
@@ -438,7 +438,7 @@
     flex: 1;
   }
   .ref-title {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text);
     word-break: break-word;
   }
@@ -489,7 +489,7 @@
     align-items: center;
     gap: 8px;
     padding: 10px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 
@@ -498,7 +498,7 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .error-head {
     display: inline-flex;
@@ -540,7 +540,7 @@
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .footer-btn:hover:not(:disabled) {
@@ -570,7 +570,7 @@
     border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 0 7px;
     outline: none;
     box-sizing: border-box;
@@ -596,7 +596,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .candidate-btn:hover {

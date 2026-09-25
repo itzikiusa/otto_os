@@ -170,7 +170,7 @@
   }
   h5 {
     margin: 14px 0 6px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--text-dim);
@@ -185,7 +185,7 @@
     align-items: center;
     gap: 8px;
     padding: 3px 0;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .vnum {
     font-family: var(--font-mono);
@@ -194,11 +194,11 @@
   }
   .vid {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     min-width: 38px;
   }
   .vtype {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     flex: 1;
   }
   .vbtns {
@@ -220,7 +220,7 @@
     width: 100%;
     box-sizing: border-box;
     font-family: var(--font-mono);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     padding: 6px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -238,7 +238,7 @@
   }
   .compat-result {
     font-weight: 600;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .compat-result.ok {
     color: var(--success);
@@ -249,14 +249,14 @@
   .compat-msgs {
     margin: 4px 0 0;
     padding-inline-start: 18px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--danger);
   }
   .muted {
     color: var(--text-dim);
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .pad {
     padding: 12px;

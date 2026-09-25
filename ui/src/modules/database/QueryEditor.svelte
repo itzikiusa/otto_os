@@ -849,6 +849,7 @@
         onclick={() => void database.explainPlan()}
         disabled={!tab.statement.trim() || tab.running}
         title="Show the query plan (EXPLAIN) — a normalized tree with cost warnings"
+        aria-label="Explain"
       >
         <Icon name="zap" size={11} /><span class="btn-label">Explain</span>
       </button>
@@ -858,7 +859,8 @@
       class:on={database.assistOpen && database.assistMode === 'ask'}
       onclick={() => database.openAssist('ask')}
       disabled={!canQuery || !auth.can('agents','edit')}
-      title="Requires host agent access and query permission — opens the DB Assistant beside the editor"
+      title={!canQuery || !auth.can('agents','edit') ? 'Needs agent access and query permission on this connection' : 'Ask the DB Assistant about this connection — it opens beside the editor'}
+      aria-label="Ask AI"
     >
       <Icon name="sparkle" size={11} /><span class="btn-label">Ask AI</span>
     </button>
@@ -867,7 +869,8 @@
       class:on={database.assistOpen && database.assistMode === 'nl'}
       onclick={() => database.openAssist('nl')}
       disabled={!canQuery || !auth.can('agents','edit')}
-      title="Requires host agent access and query permission — the DB Assistant drafts a query you can insert or run"
+      title={!canQuery || !auth.can('agents','edit') ? 'Needs agent access and query permission on this connection' : 'Describe what you want in plain English — the DB Assistant drafts a query you can insert or run'}
+      aria-label="Ask in English"
     >
       <Icon name="comment" size={11} /><span class="btn-label">Ask in English</span>
     </button>
@@ -882,6 +885,7 @@
         title={isMongoshScript
           ? 'Format is disabled for mongosh scripts — reflowing real JavaScript breaks its statement boundaries'
           : 'Format / beautify the SQL'}
+        aria-label="Format"
       >
         <Icon name="format" size={11} /><span class="btn-label">Format</span>
       </button>
@@ -1177,6 +1181,17 @@
        than the window). */
     container: qe / inline-size;
   }
+  /* Chrome rows (query tabs, toolbar, vars/script bars, splitter) keep their
+     natural height; only the editor yields. Its height is a remembered px value
+     that can exceed a short pane (a prod banner + a wrapped toolbar), and the
+     tab strip — an overflow-x scroller, so its min-height is 0 — used to be the
+     one squashed to a sliver instead. */
+  .query-editor > :global(*) {
+    flex-shrink: 0;
+  }
+  .query-editor > .qe-edit {
+    flex-shrink: 1;
+  }
   .qe-tabs {
     display: flex;
     align-items: stretch;
@@ -1200,7 +1215,7 @@
     border-top-right-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
     white-space: nowrap;
     user-select: none;
@@ -1228,7 +1243,7 @@
     height: 18px;
     width: 130px;
     padding: 0 4px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     border: 1px solid var(--accent);
     border-radius: var(--radius-s);
     background: var(--surface);
@@ -1335,6 +1350,14 @@
       display: none;
     }
   }
+  /* Too narrow for actions + settings on one row: the settings wrap to a
+     second row that starts at the leading edge (a right-floated half row
+     read as orphaned). */
+  @container qe (max-width: 1010px) {
+    .qe-settings {
+      margin-inline-start: 0;
+    }
+  }
   /* Query-level variables bar — shown only when the statement references
      :name / {name}. One labelled input per variable, values remembered per tab. */
   .qe-vars {
@@ -1353,7 +1376,7 @@
     gap: 8px;
     margin-bottom: 8px;
     padding: 5px 10px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text);
     border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
     background: color-mix(in srgb, var(--accent) 8%, transparent);
@@ -1364,7 +1387,7 @@
     background: color-mix(in srgb, var(--status-warn) 10%, transparent);
   }
   .qe-script-state {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .qe-script-state.ok {
     color: var(--status-working);
@@ -1386,7 +1409,7 @@
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .qe-script-retry:hover {
@@ -1394,7 +1417,7 @@
     color: var(--accent-text);
   }
   .qe-vars-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
@@ -1407,7 +1430,7 @@
     padding: 2px 6px;
   }
   .qe-var-name {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--accent-text);
   }
   .qe-var-name::before {
@@ -1417,11 +1440,11 @@
   .qe-var-input {
     height: 22px;
     width: 120px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .qe-var-type {
     height: 22px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 0 2px;
   }
   .qe-var-esc {
@@ -1480,12 +1503,12 @@
     justify-content: space-between;
     gap: 12px;
     padding: 2px 4px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text);
   }
   .qe-kbd-keys {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface-2);
     border: 1px solid var(--border);
@@ -1503,7 +1526,7 @@
     background: color-mix(in srgb, var(--status-exited) 26%, transparent);
   }
   .kbd {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     opacity: 0.7;
     font-variant-numeric: tabular-nums;
   }
@@ -1524,21 +1547,21 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .qe-limit select,
   .qe-db select {
     height: 24px;
     padding: 0 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     width: auto;
     max-width: 160px;
   }
   .qe-timeout-input {
     height: 24px;
     padding: 0 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     width: 72px;
   }
   /* Mask PII/prod toggle — styled like a small button, highlights when active. */
@@ -1546,7 +1569,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     height: 24px;
     padding: 0 7px;
@@ -1587,7 +1610,7 @@
     padding: 0 0 8px;
   }
   .qe-edit {
-    flex: 0 0 auto;
+    flex: 0 1 auto;
     min-height: 100px;
     /* Edge-to-edge: only a hairline separating it from the results below. The
        inset rounded box cost ~20px of writing space and made the editor read as
@@ -1682,16 +1705,16 @@
     .qe-timeout-input,
     .qe-mask {
       height: 32px;
-      font-size: 12.5px;
+      font-size: var(--fs-m);
     }
     .qe-limit,
     .qe-db,
     .qe-timeout {
-      font-size: 12.5px;
+      font-size: var(--fs-m);
     }
     .qe-tab {
       height: 32px;
-      font-size: 13px;
+      font-size: var(--fs-m);
       max-width: 60vw;
     }
     /* Collapsible Editor / Results accordion headers. */
@@ -1710,13 +1733,13 @@
       text-align: start;
     }
     .qe-acc-title {
-      font-size: 12.5px;
+      font-size: var(--fs-m);
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.04em;
     }
     .qe-acc-count {
-      font-size: 11.5px;
+      font-size: var(--fs-s);
       color: var(--text-dim);
       background: var(--surface-2);
       border-radius: 999px;

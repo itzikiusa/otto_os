@@ -18,6 +18,7 @@
   import PageBody from '../../lib/components/PageBody.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import InstallPanel from './InstallPanel.svelte';
   import AccountsOverview from './AccountsOverview.svelte';
@@ -106,6 +107,23 @@
     }
   }
 
+  // `#/aws/<id>` alone opens the account's first service the user may view
+  // (S3 first) instead of a "pick a service" void.
+  const firstService = $derived.by<AwsService | null>(() => {
+    if (!routeAccountId) return null;
+    for (const svc of SERVICES) {
+      const feature = `aws_${svc}` as Feature;
+      if (resourceAccess.can('aws_account', routeAccountId, svc === 's3' ? 'discover' : `${svc}_view`, feature, 'view')) return svc;
+    }
+    return null;
+  });
+  $effect(() => {
+    if (routeAccountId && account && !routeService && firstService) {
+      const target = `aws/${routeAccountId}/${firstService}`;
+      untrack(() => router.replace(target));
+    }
+  });
+
   const canAdmin = $derived(auth.isRoot);
   // No accounts at all → the list pane is hidden and one page-level EmptyState
   // (with the single "Add account" CTA) owns the page.
@@ -121,7 +139,7 @@
 <PageHeader
   title={routeAccountId && account ? account.name : 'AWS'}
   crumbs={routeAccountId && account && !viewport.isMobile ? [{ label: 'AWS', onclick: () => router.go('aws') }] : []}
-  subtitle={!routeAccountId && aws.installed ? `Accounts are Otto rows (+ Keychain); the console shells out to the aws CLI${aws.status?.version ? ` v${aws.status.version}` : ''}` : undefined}
+  subtitle={!routeAccountId && aws.installed ? `S3, SQS, EC2, Athena, EKS and RDS through the aws CLI${aws.status?.version ? ` ${aws.status.version}` : ''}` : undefined}
 >
   {#snippet leading()}
     {#if viewport.isMobile && routeAccountId}
@@ -152,16 +170,12 @@
 </PageHeader>
 
 {#if !aws.statusLoaded}
-  <div class="pad"><Skeleton rows={4} /></div>
+  <div class="pad" role="status">
+    <p class="boot-note">Checking for the aws CLI…</p>
+    <Skeleton rows={4} />
+  </div>
 {:else if aws.statusError}
-  <EmptyState
-    variant="page"
-    icon="cloud"
-    title="AWS console unavailable"
-    body={aws.statusError}
-    actionLabel="Retry"
-    onaction={() => void aws.loadStatus()}
-  />
+  <LoadState variant="page" what="the AWS console" error={aws.statusError} empty onretry={() => void aws.loadStatus()} />
 {:else if !aws.installed}
   <div class="aws-scroll"><InstallPanel /></div>
 {:else}
@@ -198,7 +212,7 @@
             onaction={() => router.go('aws')}
           />
         {:else if !routeService}
-          <EmptyState variant="page" icon="cloud" title={account.name} body="Pick a service from the rail." />
+          <EmptyState variant="page" icon="lock" title="No AWS services available" body="You don't have View on any AWS service for this account. Ask an administrator for a grant." />
         {:else if !serviceAllowedByRbac}
           <EmptyState
             variant="page"
@@ -258,6 +272,11 @@
   .pad {
     padding: 18px 20px;
   }
+  .boot-note {
+    margin: 0 0 12px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
   .aws-scroll {
     flex: 1;
     min-height: 0;
@@ -275,7 +294,7 @@
     grid-template-columns: minmax(0, 1fr);
   }
   .svc-badge {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 1px 7px;
     border-radius: 999px;
@@ -299,7 +318,7 @@
     background: transparent;
     color: var(--text);
     font: inherit;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     outline: none;
     width: 160px;
   }

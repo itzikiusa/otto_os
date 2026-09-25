@@ -1,6 +1,7 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
+  import SectionIntro from './SectionIntro.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Runtime custom-plugins management (root). Install from a local path or git
   // URL, enable/disable (spawns/stops the sidecar), remove. Access for non-root
@@ -8,21 +9,33 @@
   import { onMount } from 'svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { api } from '../../lib/api/client';
+  import { toasts } from '../../lib/toast.svelte';
   import { plugins, type PluginRecord } from '../../lib/stores/plugins.svelte';
   import Icon, { asIcon } from '../../lib/components/Icon.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { loadErrorText } from '../../lib/loadError';
 
   let list = $state<PluginRecord[]>([]);
+  let loading = $state(true);
+  let loadError = $state('');
   let source = $state('');
-  let busy = $state(false);
-  let error = $state<string | null>(null);
+  // Which action is in flight: 'install', or a plugin slug (toggle/remove).
+  let busy = $state<string | null>(null);
+  // Install failures stay inline under the field (with the daemon's reason),
+  // since the fix is usually editing the source.
+  let installError = $state('');
   // Local-folder picker for the plugin source (daemon-host filesystem).
   let pickerOpen = $state(false);
+  let sourceEl = $state<HTMLInputElement | null>(null);
 
-  async function load(attempt = 0) {
-    error = null;
+  async function load(attempt = 0): Promise<void> {
+    loading = true;
     try {
       list = await api.get<PluginRecord[]>('/plugin-admin');
+      loadError = '';
     } catch (e) {
       // The daemon can be briefly unreachable right after an app update (it
       // restarts), which surfaces as a fetch "Load failed". Retry once on a fresh
@@ -31,109 +44,151 @@
         await new Promise((r) => setTimeout(r, 600));
         return load(attempt + 1);
       }
-      error = `Could not reach the daemon (${e instanceof Error ? e.message : String(e)}). Click Retry.`;
+      loadError = loadErrorText(e);
+    } finally {
+      loading = false;
     }
   }
-  onMount(() => load());
+  onMount(() => void load());
 
-  async function install() {
-    if (!source.trim()) return;
-    busy = true;
-    error = null;
+  function errText(e: unknown): string {
+    return e instanceof Error ? e.message : String(e);
+  }
+
+  async function install(): Promise<void> {
+    const src = source.trim();
+    if (!src || busy) return;
+    busy = 'install';
+    installError = '';
     try {
-      await api.post('/plugin-admin/install', { source: source.trim() });
+      await api.post('/plugin-admin/install', { source: src });
       source = '';
+      toasts.success('Plugin installed', 'Enable it to start its sidecar.');
       await load();
       await plugins.load();
     } catch (e) {
-      error = String(e);
+      installError = `Couldn’t install from “${src}”. ${errText(e)}`;
     } finally {
-      busy = false;
+      busy = null;
     }
   }
 
-  async function toggle(p: PluginRecord) {
-    busy = true;
-    error = null;
+  async function toggle(p: PluginRecord): Promise<void> {
+    busy = p.slug;
     try {
       await api.post(`/plugin-admin/${p.slug}/${p.enabled ? 'disable' : 'enable'}`);
       await load();
       await plugins.load();
     } catch (e) {
-      error = String(e);
+      toasts.error(`Couldn’t ${p.enabled ? 'disable' : 'enable'} ${p.name}`, errText(e));
     } finally {
-      busy = false;
+      busy = null;
     }
   }
 
-  async function remove(p: PluginRecord) {
-    if (!(await confirmer.ask(`Remove plugin "${p.name}"? Its files under ~/otto-plugins are kept.`, { title: 'Remove plugin', confirmLabel: 'Remove' }))) return;
-    busy = true;
-    error = null;
+  async function remove(p: PluginRecord): Promise<void> {
+    if (
+      !(await confirmer.ask(
+        `Remove the plugin “${p.name}”? Its sidecar stops and it leaves every user's sidebar. Its files under ~/otto-plugins are kept, so you can install it again.`,
+        { title: 'Remove plugin', confirmLabel: 'Remove' },
+      ))
+    )
+      return;
+    busy = p.slug;
     try {
       await api.del(`/plugin-admin/${p.slug}`);
+      toasts.info(`Removed ${p.name}`);
       await load();
       await plugins.load();
     } catch (e) {
-      error = String(e);
+      toasts.error(`Couldn’t remove ${p.name}`, errText(e));
     } finally {
-      busy = false;
+      busy = null;
     }
+  }
+
+  function installedLabel(ts: string): string {
+    const d = new Date(ts);
+    return Number.isNaN(d.getTime()) ? '' : `Installed ${d.toLocaleDateString()}`;
   }
 </script>
 
 <div class="settings-section">
   <PageHeader title={sectionLabel('plugins')} subtitle="Sidecar processes installed at runtime, no rebuild" />
   <PageBody width="readable">
-  <p class="lead">
-    Install from a local folder or a git URL, then enable to run it. Grant non-root users
-    access to a plugin in <strong>Settings → Users</strong>.
-  </p>
+  <SectionIntro>
+    Install from a local folder or a git URL, then enable it to run. A plugin runs as its own process on this Mac —
+    install only code you trust. Grant non-root users access to a plugin in <strong>Settings → Users</strong>.
+  </SectionIntro>
 
   <div class="install">
+    <label class="sr-only" for="plugin-source">Plugin source</label>
     <input
-      placeholder="Local path (e.g. ~/otto-plugins/dora-metrics) or git URL"
+      id="plugin-source"
+      class="input grow mono-in"
+      bind:this={sourceEl}
+      placeholder="~/otto-plugins/dora-metrics or https://github.com/org/plugin.git"
       bind:value={source}
-      onkeydown={(e) => e.key === 'Enter' && install()}
+      spellcheck="false"
+      autocomplete="off"
+      aria-invalid={installError ? 'true' : undefined}
+      aria-describedby={installError ? 'plugin-install-err' : undefined}
+      oninput={() => (installError = '')}
+      onkeydown={(e) => e.key === 'Enter' && void install()}
     />
-    <button class="btn" onclick={() => (pickerOpen = true)} title="Browse for a local plugin folder on this machine">
+    <button class="btn" onclick={() => (pickerOpen = true)} title="Browse for a local plugin folder on this Mac">
       <Icon name="folder" size={13} /> Browse…
     </button>
-    <button class="btn primary" onclick={install} disabled={busy || !source.trim()}>Install</button>
+    <button
+      class="btn primary"
+      onclick={() => void install()}
+      disabled={busy !== null || !source.trim()}
+      title={source.trim() ? 'Install this plugin' : 'Enter a local path or a git URL first'}
+    >
+      {busy === 'install' ? 'Installing…' : 'Install'}
+    </button>
   </div>
+  {#if installError}<p class="field-err" id="plugin-install-err" role="alert">{installError}</p>{/if}
 
-  {#if error}<div class="error">{error} <button class="btn" onclick={() => load()}>Retry</button></div>{/if}
-
-  {#if list.length === 0}
-    <p class="empty">No plugins installed.</p>
-  {:else}
-    <table>
-      <thead>
-        <tr><th>Plugin</th><th>Slug</th><th>Version</th><th>Status</th><th></th></tr>
-      </thead>
-      <tbody>
-        {#each list as p (p.slug)}
-          <tr>
-            <td>
-              <div class="name"><Icon name={asIcon(p.icon, 'box')} size={14} /> {p.name}</div>
-              <div class="src">{p.source}</div>
-            </td>
-            <td><code>{p.slug}</code></td>
-            <td>{p.version || '—'}</td>
-            <td>
-              <span class="badge" class:on={p.enabled}>{p.enabled ? 'enabled' : 'disabled'}</span>
-            </td>
-            <td class="actions">
-              <button class="btn" onclick={() => toggle(p)} disabled={busy}>
-                {p.enabled ? 'Disable' : 'Enable'}
-              </button>
-              <button class="btn danger" onclick={() => remove(p)} disabled={busy}>Remove</button>
-            </td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
-  {/if}
+  <LoadState what="plugins" {loading} error={loadError} empty={list.length === 0} rows={3} onretry={() => void load()}>
+    {#snippet emptyView()}
+      <EmptyState
+        icon="box"
+        title="No plugins installed"
+        body="Plugins add pages to Otto without a rebuild — dashboards, internal tools, integrations. Paste a folder path or git URL above, or Browse…, to install one."
+      />
+    {/snippet}
+    <div class="plist">
+      {#each list as p (p.slug)}
+        <div class="prow" class:off={!p.enabled}>
+          <span class="picon"><Icon name={asIcon(p.icon, 'box')} size={16} /></span>
+          <div class="pmain">
+            <div class="pname">
+              <span class="name-text" title={p.name}>{p.name}</span>
+              {#if p.version}<span class="chip">v{p.version}</span>{/if}
+              <StatusBadge variant="text" tone={p.enabled ? 'success' : 'neutral'} label={p.enabled ? 'Enabled' : 'Disabled'} />
+            </div>
+            {#if p.description}<div class="pdesc" title={p.description}>{p.description}</div>{/if}
+            <div class="psrc mono" title={p.source}>{p.slug} · {p.source}{#if installedLabel(p.installed_at)} · {installedLabel(p.installed_at)}{/if}</div>
+          </div>
+          <div class="pactions">
+            <button class="btn small" onclick={() => void toggle(p)} disabled={busy !== null}>
+              {busy === p.slug ? 'Working…' : p.enabled ? 'Disable' : 'Enable'}
+            </button>
+            <button
+              class="icon-btn danger-icon"
+              onclick={() => void remove(p)}
+              disabled={busy !== null}
+              aria-label={`Remove ${p.name}`}
+              title={`Remove ${p.name}`}
+            >
+              <Icon name="trash" size={14} />
+            </button>
+          </div>
+        </div>
+      {/each}
+    </div>
+  </LoadState>
   </PageBody>
 </div>
 
@@ -143,7 +198,9 @@
     start="~/otto-plugins"
     onpick={(p) => {
       source = p;
+      installError = '';
       pickerOpen = false;
+      queueMicrotask(() => sourceEl?.focus());
     }}
     onclose={() => (pickerOpen = false)}
   />
@@ -157,96 +214,111 @@
     height: 100%;
     min-height: 0;
   }
-  .lead {
-    color: var(--text-dim);
-    font-size: 12.5px;
-    line-height: 1.5;
-    margin: 0 0 14px;
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
   .install {
     display: flex;
     gap: 8px;
-    margin-bottom: 14px;
+    max-width: 880px;
+    margin-bottom: 6px;
   }
-  input {
+  .grow {
     flex: 1;
-    padding: 7px 10px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--surface-2);
-    color: var(--text);
-    font-size: 13px;
+    min-width: 0;
   }
-  .btn {
-    padding: 7px 12px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--surface-2);
-    color: var(--text);
-    font-size: 13px;
-    cursor: pointer;
+  .mono-in {
+    font-family: var(--font-mono);
+    font-size: var(--fs-s);
   }
-  .btn.primary {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
-  }
-  .btn.danger {
+  .field-err {
+    margin: 0 0 8px;
+    max-width: 880px;
+    font-size: var(--fs-s);
     color: var(--danger);
   }
-  .btn:disabled {
-    opacity: 0.5;
-    cursor: default;
+  .plist {
+    margin-top: 14px;
+    max-width: 880px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    background: var(--surface);
+    overflow: hidden;
   }
-  .error {
-    color: var(--danger);
-    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
-    border-radius: 6px;
-    padding: 8px 12px;
-    margin-bottom: 12px;
-  }
-  .empty {
-    color: var(--text-dim);
-  }
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 13px;
-  }
-  th,
-  td {
-    text-align: start;
-    padding: 8px;
-    border-bottom: 1px solid var(--border);
-    vertical-align: top;
-  }
-  th {
-    color: var(--text-dim);
-    font-weight: 600;
-  }
-  .name {
+  .prow {
     display: flex;
     align-items: center;
-    gap: 6px;
-    font-weight: 500;
+    gap: 12px;
+    padding: 10px 14px;
+    min-width: 0;
   }
-  .src {
+  .prow + .prow {
+    border-top: 1px solid var(--border);
+  }
+  .picon {
+    flex-shrink: 0;
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    border-radius: var(--radius-m);
+    background: var(--surface-2);
     color: var(--text-dim);
-    font-size: 11px;
-    margin-top: 2px;
   }
-  .badge {
-    font-size: 11px;
-    padding: 1px 7px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
+  .prow.off .picon {
+    opacity: 0.6;
   }
-  .badge.on {
-    background: color-mix(in srgb, #30a46c 24%, transparent);
-    color: #4cc38a;
-  }
-  .actions {
+  .pmain {
+    flex: 1;
+    min-width: 0;
     display: flex;
-    gap: 6px;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .pname {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    font-weight: 600;
+  }
+  .name-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pdesc,
+  .psrc {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .mono {
+    font-family: var(--font-mono);
+  }
+  .pactions {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .danger-icon:hover:not(:disabled) {
+    color: var(--danger);
+  }
+  @media (max-width: 640px) {
+    .install {
+      flex-wrap: wrap;
+    }
+    .install .input {
+      flex-basis: 100%;
+    }
   }
 </style>

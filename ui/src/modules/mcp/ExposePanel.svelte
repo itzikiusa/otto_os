@@ -128,7 +128,7 @@
     Add this to the external agent's <code>.mcp.json</code> and replace the token placeholder.
   </p>
   <div class="snippet">
-    <button class="btn xs copy" onclick={() => void copy(snippet, '.mcp.json')}>
+    <button class="btn small copy" onclick={() => void copy(snippet, '.mcp.json')}>
       <Icon name="file" size={12} /> Copy
     </button>
     <pre>{snippet}</pre>
@@ -141,11 +141,11 @@
   </p>
   <div class="urlrow">
     <code class="url" data-testid="mcp-http-url">{httpUrl}</code>
-    <button class="btn xs" onclick={() => void copy(httpUrl, 'URL')}>Copy URL</button>
+    <button class="btn small" onclick={() => void copy(httpUrl, 'URL')}>Copy URL</button>
   </div>
   <div class="urlrow">
     <code class="url">{httpCommand}</code>
-    <button class="btn xs" onclick={() => void copy(httpCommand, 'Command')}>Copy command</button>
+    <button class="btn small" onclick={() => void copy(httpCommand, 'Command')}>Copy command</button>
   </div>
 
   <button
@@ -216,7 +216,7 @@
   }
   .sec {
     margin: 4px 0 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -231,7 +231,7 @@
     margin: 0;
     padding: 12px;
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
     overflow: auto;
     color: var(--text);
   }
@@ -248,7 +248,7 @@
   .url {
     flex: 1 1 auto;
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-s, 6px);
@@ -298,16 +298,16 @@
     min-width: 0;
   }
   .t-name {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
   }
   .t-desc {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .port {
     width: 72px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 2px 6px;
     margin-inline-start: 4px;
     border: 1px solid var(--border);
@@ -316,18 +316,14 @@
     color: var(--text);
   }
   .t-warn {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--warning);
   }
   .muted {
     color: var(--text-dim);
   }
   .small {
-    font-size: 11.5px;
-  }
-  .btn.xs {
-    font-size: 11px;
-    padding: 3px 8px;
+    font-size: var(--fs-s);
   }
 
   @media (max-width: 640px) {

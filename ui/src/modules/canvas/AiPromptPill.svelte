@@ -109,6 +109,9 @@
     border-radius: 999px;
     box-shadow: var(--shadow);
   }
+  .pill:focus-within {
+    box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow);
+  }
   .pill.busy {
     opacity: 0.9;
   }
@@ -117,7 +120,7 @@
     border: none;
     background: none;
     color: var(--text);
-    font-size: 13px;
+    font-size: var(--fs-m);
     outline: none;
     min-width: 0;
   }
@@ -126,11 +129,11 @@
     gap: 2px;
   }
   .modes button {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 3px 7px;
     border: 1px solid var(--border);
     background: var(--bg);
-    color: var(--text-dim, #888);
+    color: var(--text-dim);
     border-radius: 999px;
     cursor: pointer;
   }
@@ -145,7 +148,7 @@
     background: var(--accent);
     color: #fff;
     border-radius: 999px;
-    font-size: 13px;
+    font-size: var(--fs-m);
     cursor: pointer;
     white-space: nowrap;
   }

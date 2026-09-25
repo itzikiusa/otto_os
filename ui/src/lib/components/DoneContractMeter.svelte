@@ -125,7 +125,7 @@
     font-variant-numeric: tabular-nums;
   }
   .ring-label .den {
-    font-size: 9px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .contract {
@@ -203,7 +203,7 @@
     color: var(--text-dim);
   }
   .tag {
-    font-size: 9px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     border-radius: 999px;

@@ -13,6 +13,7 @@
   import { router } from '../../lib/router.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { rel } from '../../lib/stores/now.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { designBus, events } from '../../lib/events.svelte';
@@ -241,6 +242,22 @@
   }
 </script>
 
+<!-- The search field rides in the header on desktop/tablet; a phone row has
+     no room for it (it pushed New off the edge), so it leads the body there. -->
+{#snippet searchField()}
+  <label class="search" data-keep>
+    <Icon name="search" size={14} />
+    <input
+      type="search"
+      placeholder="Search designs, stories, references…"
+      aria-label="Search all designs"
+      bind:value={q}
+      onkeydown={onSearchKey}
+      data-testid="design-search"
+    />
+  </label>
+{/snippet}
+
 <PageHeader title="Design Hall" class="dh-header">
   {#snippet tabs()}
     <div class="segmented" role="tablist" aria-label="Lobby view">
@@ -254,17 +271,7 @@
     </div>
   {/snippet}
   {#snippet actions()}
-    <label class="search" data-keep>
-      <Icon name="search" size={14} />
-      <input
-        type="search"
-        placeholder="Search designs, stories, references…"
-        aria-label="Search all designs"
-        bind:value={q}
-        onkeydown={onSearchKey}
-        data-testid="design-search"
-      />
-    </label>
+    {#if !viewport.isPhone}{@render searchField()}{/if}
     <button class="btn small" data-overflow="-1" data-icon="download" onclick={onimport}>
       <Icon name="download" size={12} /> Import
     </button>
@@ -279,6 +286,7 @@
 {:else}
 <PageBody>
   <div class="lobby-wrap">
+  {#if viewport.isPhone}<div class="phone-search">{@render searchField()}</div>{/if}
   <div class="lobby" data-testid="design-lobby">
     <div class="main">
       {#if searchActive}
@@ -504,8 +512,8 @@
         </section>
       {/if}
       <nav class="card quick" aria-label="Design Hall pages">
+        <!-- "What Otto learned" is the card above; no second link to it. -->
         <a href="#/design/brand"><Icon name="palette" size={14} /> Brand Kit</a>
-        <a href="#/design/learned"><Icon name="bulb" size={14} /> What Otto learned</a>
         <a href="#/canvas"><Icon name={asIcon('shapes')} size={14} /> Open Canvas boards</a>
       </nav>
     </aside>
@@ -580,6 +588,14 @@
     background: var(--surface-2);
     border: 1px solid var(--border);
     color: var(--text-dim);
+  }
+  .phone-search {
+    margin-block-end: 16px;
+  }
+  .phone-search .search {
+    display: flex;
+    width: 100%;
+    height: 36px;
   }
   .search:focus-within {
     border-color: var(--accent);

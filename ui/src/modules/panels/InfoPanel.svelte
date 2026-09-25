@@ -12,6 +12,8 @@
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import type { AttachedIssue } from '../../lib/api/types';
   import { allProviders } from '../../lib/providers';
+  import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
 
   const session = $derived(ws.activeSession);
   const workspace = $derived(ws.current);
@@ -79,26 +81,41 @@
     }
   }
 
-  async function addDir(path: string): Promise<void> {
+  /** Save the folder list and restart so `--add-dir` takes effect. A WORKING
+   *  agent would lose its in-flight turn, so that one case asks first — the
+   *  same rule as every other restart path (`ws.requestRestart`); this one
+   *  used to restart it silently. Restarting through `ws.restartSession` also
+   *  bumps the restart nonce, so the terminal re-attaches to the new PTY. */
+  async function applyDirs(dirs: string[], verb: 'added' | 'removed'): Promise<void> {
     if (!session) return;
-    folderPickerOpen = false;
-    if (extraDirs.includes(path)) return;
+    const id = session.id;
+    if (ws.statusMap[id] === 'working') {
+      const ok = await confirmer.ask(
+        `“${session.title}” is working right now. Changing its folders restarts it, which stops its current turn (it resumes its saved conversation where it can).`,
+        { title: 'Restart working session?', confirmLabel: `Restart and ${verb === 'added' ? 'add' : 'remove'} folder`, danger: true },
+      );
+      if (!ok) return;
+    }
     try {
-      await ws.setSessionDirs(session.id, [...extraDirs, path]);
-      toasts.info('Folder added — session restarted');
+      await ws.updateSessionMeta(id, { extra_dirs: dirs });
+      await ws.restartSession(id, { quiet: true });
+      toasts.success(verb === 'added' ? 'Folder added' : 'Folder removed', 'The session restarted with the new folders.');
     } catch (e) {
-      toasts.error('Failed to add folder', e instanceof Error ? e.message : String(e));
+      toasts.error(verb === 'added' ? 'Could not add folder' : 'Could not remove folder', e instanceof Error ? e.message : String(e));
     }
   }
 
-  async function removeDir(dir: string): Promise<void> {
-    if (!session) return;
-    try {
-      await ws.setSessionDirs(session.id, extraDirs.filter((d) => d !== dir));
-      toasts.info('Folder removed — session restarted');
-    } catch (e) {
-      toasts.error('Failed to remove folder', e instanceof Error ? e.message : String(e));
+  async function addDir(path: string): Promise<void> {
+    folderPickerOpen = false;
+    if (extraDirs.includes(path)) {
+      toasts.info('Already added', path);
+      return;
     }
+    await applyDirs([...extraDirs, path], 'added');
+  }
+
+  async function removeDir(dir: string): Promise<void> {
+    await applyDirs(extraDirs.filter((d) => d !== dir), 'removed');
   }
 </script>
 
@@ -133,7 +150,7 @@
       </div>
       <div class="row">
         <span class="key">Provider</span>
-        <span class="val chip">{session.provider}</span>
+        <span class="val val-provider"><ProviderIcon provider={session.provider} size={13} />{session.provider}</span>
       </div>
       <div class="row">
         <span class="key">Status</span>
@@ -141,7 +158,7 @@
       </div>
       {#if session.cwd}
         <div class="row">
-          <span class="key">CWD</span>
+          <span class="key">Folder</span>
           <span class="val mono cwd" title={session.cwd}>{session.cwd}</span>
         </div>
       {/if}
@@ -161,8 +178,8 @@
                 <span class="dir-path mono" title={dir}>{dir}</span>
                 <button
                   class="icon-btn dir-remove"
-                  title="Remove folder (restarts the session)"
-                  aria-label="Remove folder (restarts the session)"
+                  title="Remove {dir} (restarts the session)"
+                  aria-label="Remove {dir} (restarts the session)"
                   onclick={() => removeDir(dir)}
                 >
                   <Icon name="x" size={12} />
@@ -173,7 +190,7 @@
         {:else}
           <p class="dim no-dirs">No extra folders.</p>
         {/if}
-        <button class="btn btn-sm add-dir-btn" onclick={() => (folderPickerOpen = true)}>
+        <button class="btn small add-dir-btn" onclick={() => (folderPickerOpen = true)}>
           <Icon name="plus" size={12} /> Add folder…
         </button>
         <p class="hint">Adding or removing a folder restarts the session.</p>
@@ -193,20 +210,21 @@
               title="Open in browser"
             >
               {attachedIssue.key}
-              <Icon name="external" size={10} />
+              <Icon name="external" size={12} />
             </a>
             <span class="chip">{attachedIssue.status}</span>
           </div>
           <div class="issue-summary">{attachedIssue.summary}</div>
           <div class="issue-actions">
-            <button class="btn btn-sm" onclick={() => (attachOpen = true)}>Change…</button>
-            <button class="btn btn-sm" onclick={detach}>Detach</button>
+            <button class="btn small" onclick={() => (attachOpen = true)}>Change…</button>
+            <button class="btn small" onclick={detach}>Detach</button>
           </div>
         </div>
       {:else}
         <div class="no-issue dim">
           <p>No issue attached.</p>
-          <button class="btn primary btn-sm" onclick={() => (attachOpen = true)}>
+          <!-- Secondary: a side panel never carries the view's primary action. -->
+          <button class="btn small" onclick={() => (attachOpen = true)}>
             Attach Jira issue…
           </button>
         </div>
@@ -243,7 +261,7 @@
   }
   .section-title {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.07em;
     color: var(--text-dim);
@@ -255,7 +273,7 @@
     display: flex;
     align-items: baseline;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     min-height: 20px;
   }
   .key {
@@ -263,7 +281,7 @@
     width: 76px;
     flex-shrink: 0;
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .val {
     flex: 1;
@@ -271,13 +289,18 @@
     /* Wrap long tokens (paths, ids) without splitting ordinary words mid-word. */
     overflow-wrap: anywhere;
   }
+  .val-provider {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
   .ws-select {
     width: 100%;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     padding: 3px 6px;
   }
   .ws-select:focus {
@@ -314,8 +337,8 @@
   }
   .issue-key {
     font-family: var(--font-mono);
-    font-size: 12px;
-    font-weight: 700;
+    font-size: var(--fs-s);
+    font-weight: 600;
     color: var(--accent-text);
     text-decoration: none;
     display: flex;
@@ -326,7 +349,7 @@
     text-decoration: underline;
   }
   .issue-summary {
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.45;
     color: var(--text);
   }
@@ -334,11 +357,6 @@
     display: flex;
     gap: 6px;
     margin-top: 2px;
-  }
-  .btn-sm {
-    height: 24px;
-    padding: 0 10px;
-    font-size: 11.5px;
   }
   .no-issue {
     display: flex;
@@ -349,7 +367,7 @@
   }
   .no-issue p {
     margin: 0;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .dir-list {
     list-style: none;
@@ -384,7 +402,7 @@
     background: color-mix(in srgb, var(--danger) 12%, transparent);
   }
   .no-dirs {
-    font-size: 12px;
+    font-size: var(--fs-s);
     margin: 0 0 6px;
   }
   .add-dir-btn {

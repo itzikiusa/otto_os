@@ -305,7 +305,7 @@
   }
   .input.sm {
     height: 24px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     padding: 0 6px;
   }
   .spacer {
@@ -326,12 +326,12 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     width: 140px;
     outline: none;
   }
   .count {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .logs-body {
     flex: 1;
@@ -343,7 +343,7 @@
   }
   .ln {
     font-family: var(--font-mono);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     line-height: 18px;
     white-space: pre;
     padding: 0 10px;
@@ -380,7 +380,7 @@
     gap: 10px;
     padding: 3px 10px;
     border-top: 1px solid var(--border);
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .live {
     display: inline-flex;
@@ -403,7 +403,7 @@
   .err {
     padding: 8px 10px;
     color: var(--status-exited);
-    font-size: 12px;
+    font-size: var(--fs-s);
     white-space: pre-wrap;
   }
   .dim {
@@ -411,7 +411,7 @@
   }
   .pad {
     padding: 14px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .mono {
     font-family: var(--font-mono);

@@ -5,10 +5,11 @@
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import type { K8sResourceKind, K8sRow } from '../../lib/api/types';
   import { columnsFor, gridTemplate } from './columns';
-  import { healthClass, kindDef } from './k8s-util';
+  import { healthClass, kindDef, kubectlErrorSummary } from './k8s-util';
 
   interface Props {
     kind: K8sResourceKind;
@@ -26,6 +27,7 @@
     onretry: () => void;
   }
   let { kind, rows, total, hasMetrics, allNamespaces, loading, error, selected, onselect, onopen, onmenu, onretry }: Props = $props();
+  const errSummary = $derived(kubectlErrorSummary(error));
 
   const ROW_H = 30;
   const cols = $derived(columnsFor(kind, rows, hasMetrics, allNamespaces));
@@ -65,7 +67,13 @@
 
   {#if error && !rows.length}
     <div class="rt-state" data-testid="k8s-table-error">
-      <EmptyState icon="info" title="Couldn't load {kindDef(kind).label.toLowerCase()}" body={error} actionLabel="Retry" onaction={onretry} />
+      <LoadState what={kindDef(kind).label.toLowerCase()} error={errSummary} empty {onretry} />
+      {#if errSummary !== error.trim()}
+        <details class="rt-raw">
+          <summary>Show kubectl output</summary>
+          <pre>{error}</pre>
+        </details>
+      {/if}
     </div>
   {:else if loading && !rows.length}
     <div class="rt-state"><Skeleton rows={8} height={26} /></div>
@@ -160,7 +168,7 @@
     height: 100%;
   }
   .rt-row {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
     cursor: default;
     outline: none;
@@ -188,7 +196,7 @@
   }
   .mono {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .status-pill {
     display: inline-flex;
@@ -251,12 +259,36 @@
     padding: 12px;
     overflow: auto;
   }
+  .rt-raw {
+    max-width: 640px;
+    margin: 4px auto 0;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
+  .rt-raw summary {
+    cursor: pointer;
+    text-align: center;
+  }
+  .rt-raw pre {
+    margin: 8px 0 0;
+    padding: 8px 10px;
+    max-height: 220px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    direction: ltr;
+  }
   .rt-stale {
     display: flex;
     gap: 6px;
     align-items: center;
     padding: 4px 12px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--status-exited);
     border-top: 1px solid var(--border);
     background: color-mix(in srgb, var(--status-exited) 8%, var(--surface));

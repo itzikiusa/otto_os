@@ -17,6 +17,7 @@
   } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { untrack } from 'svelte';
 
   interface Props {
     existing: Connection | null;
@@ -338,10 +339,23 @@
   let testing = $state(false);
   let testResult = $state<{ ok: boolean; detail: string } | null>(null);
 
+  /** The settings the shown result was measured against — editing any field
+   *  afterwards clears it, so a green "Connected" never vouches for values
+   *  that were never tested. */
+  let testedSig = '';
+  const formSig = $derived(JSON.stringify([kind, buildParams(), secret]));
+  $effect(() => {
+    const sig = formSig;
+    untrack(() => {
+      if (testResult && !testing && sig !== testedSig) testResult = null;
+    });
+  });
+
   async function testUnsaved(): Promise<void> {
     if (testing || !auth.isRoot) return;
     testing = true;
     testResult = null;
+    testedSig = formSig;
     try {
       const body: Record<string, unknown> = {
         workspace_id: ws.currentId,
@@ -851,7 +865,7 @@
     border-radius: 999px;
     border: 1px solid var(--border);
     background: var(--surface-2);
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
     transition: all 130ms ease-out;
@@ -872,7 +886,7 @@
     border-radius: 999px;
     border: 1px solid var(--border);
     background: var(--surface-2);
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
     text-transform: capitalize;
@@ -894,7 +908,7 @@
     color: var(--danger);
   }
   .warn-banner {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     padding: 8px 10px;
     border-radius: var(--radius-s);
@@ -917,7 +931,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 13px;
+    font-size: var(--fs-m);
     cursor: pointer;
     user-select: none;
   }
@@ -966,7 +980,7 @@
   }
   .dsn-btn {
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .dsn-row {
     display: flex;
@@ -980,7 +994,7 @@
   }
   /* Inline unsaved-config test outcome (footer, before the buttons). */
   .test-result {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     max-width: 260px;
     overflow: hidden;
     text-overflow: ellipsis;

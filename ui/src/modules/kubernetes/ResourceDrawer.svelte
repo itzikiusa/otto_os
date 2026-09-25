@@ -354,7 +354,7 @@
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .dr-kind {
     font-size: var(--fs-xs);
@@ -371,13 +371,13 @@
   }
   .dr-ns {
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .status-pill {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .hdot {
     width: 7px;
@@ -414,7 +414,7 @@
     border: none;
     background: transparent;
     padding: 6px 10px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
     border-bottom: 2px solid transparent;
@@ -447,7 +447,7 @@
     grid-template-columns: minmax(80px, auto) 1fr;
     gap: 4px 14px;
     margin: 0;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .facts dt {
     color: var(--text-dim);
@@ -489,7 +489,7 @@
     gap: 8px;
     padding: 6px 10px;
     border-bottom: 1px solid var(--border);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .code {
     flex: 1;
@@ -498,7 +498,7 @@
   .describe {
     margin: 0;
     padding: 10px 12px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     white-space: pre;
     overflow: auto;
@@ -507,7 +507,7 @@
   .events {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .events th {
     position: sticky;
@@ -543,7 +543,7 @@
     padding: 12px 14px;
   }
   .small {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .ell {
     overflow: hidden;
@@ -552,12 +552,12 @@
   }
   .err {
     color: var(--status-exited);
-    font-size: 12px;
+    font-size: var(--fs-s);
     white-space: pre-wrap;
   }
   .dim {
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
   }
   .mono {

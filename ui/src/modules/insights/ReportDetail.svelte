@@ -626,7 +626,6 @@
   }
   .report-md :global(ul),
   .report-md :global(ol) {
-    padding-left: 0;
     padding-inline-start: 22px;
   }
   .report-md :global(li) {

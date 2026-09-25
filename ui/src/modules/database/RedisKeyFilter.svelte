@@ -62,7 +62,7 @@
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 0 6px;
     outline: none;
   }

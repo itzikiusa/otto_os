@@ -453,7 +453,7 @@
     color: var(--accent-text);
   }
   .chip {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     padding: 1px 5px;
     border-radius: 4px;
     background: color-mix(in srgb, var(--accent) 18%, transparent);

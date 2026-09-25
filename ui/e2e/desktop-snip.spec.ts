@@ -95,7 +95,7 @@ test('editor draws box + arrow + text and auto-copies the annotated PNG', async 
   await expect(editor).toHaveAttribute('data-count', '3');
 
   // Auto-copy: debounced flatten → POST → sink updated with the ANNOTATED png.
-  await expect(page.locator('.snip-copied')).toHaveText('Copied ✓', { timeout: 15_000 });
+  await expect(page.locator('.snip-copied')).toHaveText('Copied', { timeout: 15_000 });
   const sink = clipboardSink();
   expect(sink.equals(original)).toBeFalsy();
   expect(pngDims(sink)).toEqual({ w: 400, h: 300 }); // natural resolution kept

@@ -93,6 +93,6 @@
     border: none;
     cursor: pointer;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
 </style>

@@ -22,6 +22,12 @@ export interface MenuItem {
    *  the icon slot, `false` keeps the slot empty so labels stay aligned. */
   checked?: boolean;
   separator?: boolean;  // true → render a divider
+  /** Dim trailing text on the row: a shortcut (⌘\\, ⌥-click) or a short
+   *  qualifier. Not part of the accessible name's verb. */
+  hint?: string;
+  /** Tooltip for the row — most useful on a DISABLED row, to say why (a
+   *  disabled row is still hoverable, so the reason isn't lost). */
+  title?: string;
   /** In a filterable menu: always visible, never filtered or capped (use for
    *  the fixed action rows above a long data-driven list). */
   pinned?: boolean;

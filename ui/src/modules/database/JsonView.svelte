@@ -187,13 +187,13 @@
     padding: 4px 2px;
   }
   .alt-note {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 4px 6px 8px;
   }
   /* Container for the collapsible tree (JsonTree owns its own token colours). */
   .alt-json {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text);
   }
@@ -203,7 +203,7 @@
     width: 100%;
     padding: 6px 10px;
     margin: 2px 0 10px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface-2);
     border: 1px solid var(--border);
@@ -233,7 +233,7 @@
   .vv-tool {
     height: 20px;
     padding: 0 8px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface-2);
     border: 1px solid var(--border);
@@ -256,7 +256,7 @@
     color: var(--accent-text);
   }
   .jrec-more {
-    font-size: 13px;
+    font-size: var(--fs-m);
     line-height: 1;
     padding: 0 5px;
   }
@@ -266,7 +266,7 @@
     gap: 6px;
     background: var(--surface-2);
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 3px 8px;
     border-bottom: 1px solid var(--border);
   }
@@ -291,7 +291,7 @@
   /* Vertical / JSON views are the comfiest on a narrow phone — bump them too. */
   @media (max-width: 640px) {
     .alt-json {
-      font-size: 13px;
+      font-size: var(--fs-m);
     }
   }
 </style>

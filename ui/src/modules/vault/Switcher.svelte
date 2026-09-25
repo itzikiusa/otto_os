@@ -82,11 +82,14 @@
           <button class="hit" class:sel={i === sel} onclick={() => pick(h)}>
             <span class="t">{h.alias ?? h.title}</span>
             {#if h.alias}<span class="via">→ {h.title}</span>{/if}
-            <span class="p">{h.path}</span>
+            <span class="p" title={h.path}>{h.path}</span>
           </button>
         {/each}
         {#if hits.length === 0 && query.trim()}
-          <div class="create">↵ Create “{query.trim()}”</div>
+          <button class="hit create-btn" onclick={createFromQuery}>
+            <span class="t">Create “{query.trim()}”</span>
+            <span class="p">New note · Enter</span>
+          </button>
         {/if}
       </div>
     </div>
@@ -134,13 +137,13 @@
     background: var(--hover);
   }
   .t {
-    font-size: 13px;
+    font-size: var(--fs-m);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
   .via {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
   }
@@ -153,9 +156,7 @@
     text-overflow: ellipsis;
     max-width: 45%;
   }
-  .create {
-    padding: 10px 12px;
-    font-size: 12.5px;
-    color: var(--text-dim);
+  .create-btn .t {
+    color: var(--accent-text);
   }
 </style>

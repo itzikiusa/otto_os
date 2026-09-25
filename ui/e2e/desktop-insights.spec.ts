@@ -41,12 +41,12 @@ test('reports: list/detail, key findings, action plan, filter, markdown and sand
 
   const list = page.locator('[data-testid="report-list"]');
   await expect(list).toBeVisible({ timeout: 60_000 });
-  await expect(list.locator('button.row')).toHaveCount(13);
+  await expect(list.locator('button.rep-row')).toHaveCount(13);
 
   // Opens on the newest report (daily, Wed 23 Sep) — no empty pane.
   const report = page.locator('[data-testid="insight-report"]');
   await expect(report).toBeVisible();
-  await expect(list.locator('button.row').first()).toHaveAttribute('aria-current', 'true');
+  await expect(list.locator('button.rep-row').first()).toHaveAttribute('aria-current', 'true');
   await expect(report.locator('.r-headline')).toContainText('131 Claude sessions');
 
   // KPI tiles. Tool errors come from the summary (24), not index.json's 0.
@@ -92,14 +92,14 @@ test('reports: list/detail, key findings, action plan, filter, markdown and sand
   // Period filter → weekly reports only; a weekly summary with drifted wording
   // still parses ("carried, regressed" → a Regressed chip).
   await page.locator('.filter-chip', { hasText: 'Weekly' }).click();
-  await expect(list.locator('button.row')).toHaveCount(3);
-  await list.locator('button.row').first().click();
+  await expect(list.locator('button.rep-row')).toHaveCount(3);
+  await list.locator('button.rep-row').first().click();
   await expect(page.locator('[data-testid="action-plan"] > li')).toHaveCount(3);
   await expect(page.locator('[data-testid="action-plan"] > li').nth(1).locator('.chip', { hasText: 'Regressed' })).toBeVisible();
 
   // The oldest daily has no HTML yet: HTML is disabled and says why.
   await page.locator('.filter-chip', { hasText: 'Daily' }).click();
-  await list.locator('button.row').last().click();
+  await list.locator('button.rep-row').last().click();
   const htmlBtn = page.getByRole('button', { name: 'HTML', exact: true });
   await expect(htmlBtn).toBeDisabled();
   await expect(htmlBtn).toHaveAttribute('title', /no HTML report yet/);
@@ -114,7 +114,7 @@ test('reports on a phone: push navigation with a back button, no horizontal scro
   await expect(list).toBeVisible({ timeout: 60_000 });
   await expect(page.locator('[data-testid="insight-report"]')).toBeHidden();
   await expectNoHorizontalOverflow(page);
-  await list.locator('button.row').first().click();
+  await list.locator('button.rep-row').first().click();
   await expect(page.locator('[data-testid="insight-report"]')).toBeVisible();
   await expect(list).toBeHidden();
   await expectNoHorizontalOverflow(page);

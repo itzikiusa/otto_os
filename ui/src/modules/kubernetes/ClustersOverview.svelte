@@ -16,6 +16,7 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import ClusterWizard from './ClusterWizard.svelte';
   import InstallPanel from './InstallPanel.svelte';
@@ -74,7 +75,7 @@
         ? [
             { separator: true },
             { label: 'Edit…', icon: 'edit', action: () => { editing = c; wizardOpen = true; } },
-            { label: 'Delete', icon: 'trash', danger: true, action: () => void remove(c) },
+            { label: 'Delete…', icon: 'trash', danger: true, action: () => void remove(c) },
           ]
         : []),
     ]);
@@ -95,15 +96,17 @@
 <div class="k8s-overview">
 <PageHeader
   title="Kubernetes"
-  subtitle={`kubectl ${k8s.status?.kubectl.version ?? ''}${k8s.status?.k9s.installed ? ` · k9s ${k8s.status.k9s.version ?? ''}` : ''}`}
+  subtitle={k8s.status?.kubectl.version ? `kubectl ${k8s.status.kubectl.version}${k8s.status.k9s.installed && k8s.status.k9s.version ? ` · k9s ${k8s.status.k9s.version}` : ''}` : undefined}
 >
   {#snippet actions()}
     {#if !k8s.status?.k9s.installed && isAdmin}
       <button class="btn ghost" onclick={() => (k9sSheet = true)}>Install k9s</button>
     {/if}
+    {#if k8s.clusters.length > 0}
     <button class="btn" onclick={() => router.go('kubernetes/monitor')} title="Monitoring dashboard: pod metrics, restarts, health" data-testid="k8s-monitor-btn">
       <Icon name="gauge" size={14} /> Monitor
     </button>
+    {/if}
     <button class="icon-btn" onclick={() => void k8s.loadClusters()} title="Refresh" aria-label="Refresh clusters">
       <Icon name="refresh" size={14} />
     </button>
@@ -117,7 +120,7 @@
 <PageBody>
 
   {#if k8s.clustersError && !k8s.clusters.length}
-    <EmptyState icon="helm" title="Couldn't load clusters" body={k8s.clustersError} actionLabel="Retry" onaction={() => void k8s.loadClusters()} />
+    <LoadState what="clusters" variant="page" error={k8s.clustersError} empty onretry={() => void k8s.loadClusters()} />
   {:else if !k8s.clustersLoaded}
     <Skeleton rows={3} height={96} />
   {:else if !k8s.clusters.length}
@@ -166,7 +169,7 @@
               {#if caps.argo_rollouts}<span class="chip ok" title="Argo Rollouts CRD present">rollouts</span>{/if}
               {#if caps.argocd}<span class="chip ok" title="ArgoCD Application CRD present">argocd</span>{/if}
             {:else}
-              <span class="chip dim">capabilities pending</span>
+              <span class="chip dim" title="Server version and add-ons appear once the cluster is reached — open it or choose Test connection">not probed yet</span>
             {/if}
             {#if testing[c.id]}<span class="chip accent">testing…</span>{/if}
           </div>
@@ -238,7 +241,7 @@
   }
   .name {
     font-weight: 600;
-    font-size: 13.5px;
+    font-size: var(--fs-m);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -253,7 +256,7 @@
     opacity: 1;
   }
   .row2 {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

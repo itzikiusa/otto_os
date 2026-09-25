@@ -176,19 +176,21 @@
     position: absolute;
     top: -4px;
     inset-inline-end: -8px;
-    min-width: 14px;
-    height: 14px;
+    min-width: 15px;
+    height: 15px;
     padding: 0 3px;
     border-radius: 999px;
-    background: var(--status-working);
-    color: #fff;
-    font-size: 9px;
+    /* Count-chip language (tint + semantic text), opaque over the bar —
+       white on the bright working-green was ~2:1. */
+    background: color-mix(in srgb, var(--success) 24%, var(--bg-sidebar));
+    color: var(--success);
+    font-size: var(--fs-xs);
     font-weight: 700;
     display: grid;
     place-items: center;
   }
   .bn-badge.needs {
-    background: var(--warning-soft);
+    background: color-mix(in srgb, var(--warning) 24%, var(--bg-sidebar));
     color: var(--warning);
   }
 
@@ -241,7 +243,7 @@
     border-radius: var(--radius-m);
     background: var(--surface);
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .sheet-item.active {

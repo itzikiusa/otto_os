@@ -261,9 +261,9 @@
       <div class="actions">
         <button class="mode-btn" title="Note edit history" aria-label="Note edit history" onclick={() => void vault.openHistory(vault.notePath ?? '')}><Icon name="clock" size={14} /></button>
         {#if vault.saving}
-          <span class="save-state">saving…</span>
+          <span class="save-state" role="status">Saving…</span>
         {:else if vault.dirty}
-          <span class="save-state">edited</span>
+          <span class="save-state" title="Autosaves in a moment">Unsaved</span>
         {/if}
         <button
           class="mode-btn"
@@ -276,12 +276,13 @@
           <Icon name="zap" size={14} />
         </button>
         <button
-          class="mode-btn"
+          class="mode-btn labelled"
           title={vault.editing ? 'Reading view (⌘E)' : 'Edit (⌘E)'}
-          aria-label={vault.editing ? 'Reading view' : 'Edit'}
+          aria-pressed={vault.editing}
           onclick={() => vault.setView(!vault.editing)}
         >
-          <Icon name={vault.editing ? 'eye' : 'edit'} size={14} />
+          <Icon name={vault.editing ? 'eye' : 'edit'} size={13} />
+          {vault.editing ? 'Read' : 'Edit'}
         </button>
       </div>
     </header>
@@ -289,8 +290,8 @@
     {#if vault.conflict}
       <div class="conflict" role="alert">
         This note changed on disk while you were editing. Your edits are kept until you choose.
-        <button onclick={() => void vault.conflictOverwrite()} title="Save your version; the disk version stays in History">Keep my edits</button>
-        <button class="danger" onclick={() => void vault.conflictReload()}>Discard my edits…</button>
+        <button class="btn small" onclick={() => void vault.conflictOverwrite()} title="Save your version; the disk version stays in History">Keep my edits</button>
+        <button class="btn small danger" onclick={() => void vault.conflictReload()}>Discard my edits…</button>
       </div>
     {/if}
 
@@ -347,7 +348,7 @@
     display: flex;
     gap: 4px;
     min-width: 0;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     overflow: hidden;
     white-space: nowrap;
   }
@@ -374,20 +375,34 @@
     gap: 8px;
   }
   .save-state {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
+  /* Same quiet chrome as the header's icon buttons (no boxed outlines); the
+     Edit/Read toggle carries a label so the main verb is findable. */
   .mode-btn {
     background: none;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text);
-    padding: 4px 7px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-s);
+    color: var(--text-dim);
+    height: 28px;
+    min-width: 28px;
+    padding: 0 7px;
     cursor: pointer;
     display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    font: inherit;
+    font-size: var(--fs-s);
   }
   .mode-btn:hover {
     background: var(--hover);
+    color: var(--text);
+  }
+  .mode-btn.labelled {
+    border-color: var(--border);
+    color: var(--text);
   }
   .mode-btn.refine-on {
     border-color: var(--accent);
@@ -404,21 +419,9 @@
     border: 1px solid color-mix(in srgb, var(--warning) 55%, transparent);
     background: var(--warning-soft);
     border-radius: 8px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
-  .conflict button {
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text);
-    border-radius: 6px;
-    padding: 3px 10px;
-    cursor: pointer;
-    font-size: 12px;
-  }
-  .conflict button.danger {
-    border-color: color-mix(in srgb, var(--danger) 55%, transparent);
-    color: var(--danger);
-  }
+
   .editor-wrap {
     flex: 1;
     min-height: 0;
@@ -471,7 +474,7 @@
   }
   .read :global(div.note-embed .embed-title) {
     font-weight: 600;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .read :global(div.note-embed.embed-error) {
@@ -485,8 +488,8 @@
     margin: 8px 0;
   }
   .read :global(blockquote.callout .callout-title) {
-    font-weight: 700;
-    font-size: 12px;
+    font-weight: 600;
+    font-size: var(--fs-s);
     text-transform: capitalize;
     margin-bottom: 4px;
   }
@@ -528,12 +531,12 @@
   }
   .read :global(div.diagram-error) {
     color: var(--status-exited);
-    font-size: 12px;
+    font-size: var(--fs-s);
     margin-bottom: 8px;
   }
   .read :global(pre.diagram-src) {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .read :global(table) {
     border-collapse: collapse;

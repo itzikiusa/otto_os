@@ -90,7 +90,9 @@
   .live-box {
     flex: 1;
     min-height: 0;
-    background: #fff;
+    /* The iframe below keeps the page's own white; status text sits on the
+       app surface so it stays readable in dark schemes. */
+    background: var(--surface);
     border-radius: var(--radius-s);
     box-shadow: 0 0 0 1px var(--border);
     overflow: hidden;
@@ -108,7 +110,7 @@
   }
   .live-msg {
     padding: 24px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     text-align: center;
   }
@@ -120,8 +122,10 @@
     padding: 12px;
     flex: 1;
     overflow: auto;
-    font: 11.5px/1.5 var(--font-mono, monospace);
-    color: #334155;
-    background: #f8fafc;
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    line-height: 1.5;
+    color: var(--text);
+    background: var(--surface-2);
   }
 </style>

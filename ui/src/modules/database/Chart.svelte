@@ -243,7 +243,7 @@
     line-height: 1;
   }
   .num-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -257,7 +257,7 @@
     place-items: center;
     height: 100%;
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .svg-wrap {
     width: 100%;
@@ -290,7 +290,7 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text);
     overflow: auto;
     max-height: 100%;

@@ -10,6 +10,7 @@
   import type { AcceptanceCriterion, GoalLoopDraft } from '../../lib/api/types';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
 
   let { oncancel, oncreated }: { oncancel: () => void; oncreated: (id: string) => void } = $props();
 
@@ -36,6 +37,11 @@
   // model is a free-text alias ("" = provider default).
   let execProvider = $state(defaultAgentProvider());
   let execModel = $state('');
+  // The agent that DRAFTS the goal (the define call) — its own pick, so
+  // changing it doesn't silently change who executes the loop.
+  let defProvider = $state(defaultAgentProvider());
+  let defModel = $state('');
+  let showAdvanced = $state(false);
   const providers = $derived(
     agentProviders(),
   );
@@ -46,7 +52,7 @@
     defining = true;
     try {
       const d = await loops.define(wsId, {
-        seed, provider: execProvider, model: execModel, mode,
+        seed, provider: defProvider, model: defModel, mode,
         repo_path: repoPath.trim(),
         context: draft ? JSON.stringify(draft.definition) : undefined,
         feedback: feedback.trim() || undefined,
@@ -58,7 +64,7 @@
       perPhaseMinutes = Math.max(1, Math.round(d.suggested_limits.per_phase_timeout_secs / 60));
       feedback = '';
     } catch (e) {
-      toasts.error('Define failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t draft the goal', e instanceof Error ? e.message : String(e));
     } finally {
       defining = false;
     }
@@ -125,10 +131,22 @@
       });
       oncreated(loop.id);
     } catch (e) {
-      toasts.error('Launch failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t launch the goal loop', e instanceof Error ? e.message : String(e));
     } finally {
       launching = false;
     }
+  }
+
+  /** Leave the form; ask first once there is work to lose (a draft or a typed goal). */
+  async function cancel(): Promise<void> {
+    if (draft || seed.trim()) {
+      const ok = await confirmer.ask('Discard this goal loop? The draft and your edits are lost.', {
+        title: 'Discard goal loop',
+        confirmLabel: 'Discard',
+      });
+      if (!ok) return;
+    }
+    oncancel();
   }
 
   function setKind(c: AcceptanceCriterion, kind: AcceptanceCriterion['verify_kind']): void {
@@ -140,44 +158,43 @@
 <div class="form-page">
 <PageHeader title="New goal loop">
   {#snippet leading()}
-    <button class="icon-btn" title="Back to Goal Loops" aria-label="Back" onclick={oncancel}>
+    <button class="icon-btn" title="Back to Goal Loops" aria-label="Back to Goal Loops" onclick={cancel}>
       <Icon name="chevronLeft" size={15} />
     </button>
-  {/snippet}
-  {#snippet actions()}
-    <button class="btn ghost" onclick={oncancel}>Cancel</button>
   {/snippet}
 </PageHeader>
 <PageBody width="readable">
 <div class="form">
 
   <section class="block">
-    <label class="lbl" for="gl-mode">Mode</label>
-    <select id="gl-mode" class="in" bind:value={mode}><option value="build">Build</option><option value="research">Research</option></select>
-    <label class="lbl" for="gl-define-provider">Definer provider</label>
-    <select id="gl-define-provider" class="in" bind:value={execProvider}>{#each providers as p (p)}<option value={p}>{p}</option>{/each}</select>
-    <ModelPicker provider={execProvider} value={execModel} onchange={(m) => (execModel = m)} />
-    {#if mode === 'build'}
-    <label class="lbl" for="gl-repo">Repository path</label>
-    <div class="repo-row">
-      <input id="gl-repo" class="in grow" bind:value={repoPath} placeholder="/absolute/path/to/repo" />
-      <button type="button" class="btn" onclick={() => (picking = true)}>Browse…</button>
-    </div>
-    {/if}
-    <label class="lbl" for="gl-seed">Goal</label>
+    <label class="lbl" for="gl-seed">Goal <span class="hint">(what “done” looks like)</span></label>
     <textarea
       id="gl-seed"
-      class="in area"
+      class="input in area"
       bind:value={seed}
       rows="3"
       placeholder="e.g. Make the export endpoint stream instead of buffering, and add a test."
     ></textarea>
-    <div class="row">
-      <button class="btn primary" onclick={define} disabled={defining || !seed.trim() || (mode === 'build' && !repoPath.trim())}>
+    <label class="lbl" for="gl-mode">Mode</label>
+    <select id="gl-mode" class="input in" bind:value={mode}><option value="build">Build</option><option value="research">Research</option></select>
+    <p class="muted small">Build changes code on an isolated branch; Research writes findings to a scratch directory.</p>
+    {#if mode === 'build'}
+    <label class="lbl" for="gl-repo">Repository path</label>
+    <div class="repo-row">
+      <input id="gl-repo" class="input in grow" bind:value={repoPath} placeholder="/absolute/path/to/repo" />
+      <button type="button" class="btn" onclick={() => (picking = true)}>Browse…</button>
+    </div>
+    {/if}
+    <label class="lbl" for="gl-define-provider">Drafting agent <span class="hint">(turns your goal into criteria and a budget)</span></label>
+    <select id="gl-define-provider" class="input in" bind:value={defProvider} onchange={() => (defModel = '')}>{#each providers as p (p)}<option value={p}>{p}</option>{/each}</select>
+    <ModelPicker provider={defProvider} value={defModel} onchange={(m) => (defModel = m)} />
+    <div class="frow">
+      <button class="btn" class:primary={!draft} onclick={define} disabled={defining || !seed.trim() || (mode === 'build' && !repoPath.trim())}
+        title={!seed.trim() ? 'Describe the goal first' : mode === 'build' && !repoPath.trim() ? 'Choose the repository first' : 'Draft criteria and a budget from your goal'}>
         {defining ? 'Defining…' : draft ? 'Re-define' : 'Define with AI'}
       </button>
       {#if draft}
-        <input class="in grow" bind:value={feedback} placeholder="Refine: what to change about the draft" />
+        <input class="input in grow" bind:value={feedback} placeholder="Refine: what to change about the draft" />
         <button class="btn" onclick={define} disabled={defining || !feedback.trim()}>Refine</button>
       {/if}
     </div>
@@ -186,7 +203,7 @@
   {#if draft}
     <section class="block">
       <label class="lbl" for="gl-name">Name</label>
-      <input id="gl-name" class="in" bind:value={name} />
+      <input id="gl-name" class="input in" bind:value={name} />
       {#if draft.definition.summary}
         <p class="muted">{draft.definition.summary}</p>
       {/if}
@@ -195,24 +212,24 @@
       {#each draft.definition.acceptance_criteria as c, i (c.id)}
         <div class="crit">
           <div class="crit-row">
-            <input class="in grow" bind:value={c.text} placeholder="Criterion description" />
-            <button class="icon-btn" onclick={() => removeCriterion(i)} aria-label="Remove criterion" title="Remove criterion"><Icon name="x" size={13} /></button>
+            <input class="input in grow" bind:value={c.text} placeholder="Criterion description" />
+            <button class="icon-btn" onclick={() => removeCriterion(i)} aria-label="Remove criterion" title="Remove criterion"><Icon name="trash" size={13} /></button>
           </div>
           <div class="crit-row">
-            <select class="in kind" value={c.verify_kind} onchange={(e) => setKind(c, e.currentTarget.value as AcceptanceCriterion['verify_kind'])}>
+            <select class="input in kind" value={c.verify_kind} onchange={(e) => setKind(c, e.currentTarget.value as AcceptanceCriterion['verify_kind'])}>
               <option value="agent">Agent assessment</option>
               <option value="manual">Agent assessment (legacy)</option>
               <option value="human">Human verification</option>
               <option value="command">Shell command</option>
             </select>
             {#if c.verify_kind === 'command'}
-              <input class="in grow mono" bind:value={c.verify_cmd} placeholder="shell command (exit 0 = met), e.g. cargo test" />
+              <input class="input in grow mono" bind:value={c.verify_cmd} placeholder="shell command (exit 0 = met), e.g. cargo test" />
             {:else}
-              <input class="in grow" bind:value={c.verify} placeholder="how to verify (behavior/file)" />
+              <input class="input in grow" bind:value={c.verify} placeholder="how to verify (behavior/file)" />
             {/if}
           </div>
           {#if c.verify_kind === 'command'}
-            <input class="in grow" bind:value={c.verify} placeholder="what this checks (for humans)" />
+            <input class="input in grow" bind:value={c.verify} placeholder="what this checks (for humans)" />
           {/if}
         </div>
       {/each}
@@ -222,15 +239,15 @@
     <section class="block">
       <div class="lbl">Budget</div>
       <div class="budget">
-        <label>Max iterations <input class="in num" type="number" min="1" bind:value={maxIterations} /></label>
-        <label>Max minutes <input class="in num" type="number" min="1" bind:value={maxMinutes} /></label>
-        <label>Per-phase minutes <input class="in num" type="number" min="1" bind:value={perPhaseMinutes} /></label>
-        <label>Executors <input class="in num" type="number" min="1" max="6" bind:value={executorCount} /></label>
+        <label>Max iterations <input class="input in num" type="number" min="1" bind:value={maxIterations} /></label>
+        <label>Max minutes <input class="input in num" type="number" min="1" bind:value={maxMinutes} /></label>
+        <label>Per-phase minutes <input class="input in num" type="number" min="1" bind:value={perPhaseMinutes} /></label>
+        <label>Executors <input class="input in num" type="number" min="1" max="6" bind:value={executorCount} /></label>
       </div>
-      <div class="lbl">Executor agent</div>
+      <div class="lbl">Executor agent <span class="hint">(does the work each iteration)</span></div>
       <div class="budget">
         <label>Provider
-          <select class="in num prov" bind:value={execProvider}>
+          <select class="input in num prov" bind:value={execProvider} onchange={() => (execModel = '')}>
             {#each providers as p (p)}
               <option value={p}>{p}</option>
             {/each}
@@ -248,23 +265,35 @@
     </section>
 
     <section class="block">
-      <label class="lbl"><input type="checkbox" bind:checked={allowCommits} disabled={mode === 'research'} /> Allow local commits</label>
-      <p class="muted small">Working files are retained when a loop stops or finishes. Push and publishing require separate authorization.</p>
-      <label class="lbl"><input type="checkbox" bind:checked={requireReview} /> Require independent completion review</label>
+      <label class="checkbox-row" title={mode === 'research' ? 'Research loops don’t commit' : undefined}><input type="checkbox" bind:checked={allowCommits} disabled={mode === 'research'} /> Allow local commits</label>
+      <p class="muted small indent">Working files are retained when a loop stops or finishes. Push and publishing require separate authorization.</p>
+      <label class="checkbox-row"><input type="checkbox" bind:checked={requireReview} /> Require an independent completion review</label>
+    </section>
+
+    <section class="block adv">
+      <button type="button" class="adv-toggle" aria-expanded={showAdvanced} aria-controls="gl-advanced" onclick={() => (showAdvanced = !showAdvanced)}>
+        <Icon name={showAdvanced ? 'chevronDown' : 'chevronRight'} size={12} /> Advanced
+        <span class="hint">sources, skills, planner / evaluator / digester agents</span>
+      </button>
+      {#if showAdvanced}
+      <div id="gl-advanced">
       <label class="lbl" for="gl-sources">Source, spec and plan links (one per line)</label>
-      <textarea id="gl-sources" class="in area" bind:value={sourceLinks}></textarea>
+      <textarea id="gl-sources" class="input in area mono" rows="3" bind:value={sourceLinks} placeholder="https://…"></textarea>
       <label class="lbl" for="gl-skills">Selected skills (comma separated)</label>
-      <input id="gl-skills" class="in" bind:value={selectedSkills} />
+      <input id="gl-skills" class="input in" bind:value={selectedSkills} placeholder="e.g. db-mysql, golang-testing" />
       {#each ['planner', 'evaluator', 'digester'] as role}
         {@const key = role as 'planner' | 'evaluator' | 'digester'}
         <label class="lbl" for={`gl-${role}`}>{role[0].toUpperCase() + role.slice(1)} provider</label>
-        <select id={`gl-${role}`} class="in" bind:value={draft.suggested_config[key].provider} onchange={() => { if (draft) draft.suggested_config[key].model = ''; }}>
+        <select id={`gl-${role}`} class="input in" bind:value={draft.suggested_config[key].provider} onchange={() => { if (draft) draft.suggested_config[key].model = ''; }}>
           {#each providers as p (p)}<option value={p}>{p}</option>{/each}
         </select>
         <ModelPicker provider={draft.suggested_config[key].provider} value={draft.suggested_config[key].model} onchange={(m) => { if (draft) draft.suggested_config[key].model = m; }} />
       {/each}
+      </div>
+      {/if}
     </section>
-    <div class="row end">
+    <div class="frow end">
+      <button class="btn" onclick={cancel}>Cancel</button>
       <button
         class="btn primary"
         onclick={launch}
@@ -310,9 +339,10 @@
   }
   .lbl {
     display: block;
-    font-size: 12px;
-    font-weight: 600;
-    margin: 10px 0 5px;
+    font-size: var(--fs-s);
+    font-weight: 500;
+    color: var(--text);
+    margin: 12px 0 4px;
   }
   .lbl:first-child {
     margin-top: 0;
@@ -324,33 +354,55 @@
   }
   .muted.small,
   .small {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
+    margin: 4px 0 0;
+  }
+  .indent {
+    padding-inline-start: 22px;
+    margin-block-end: 8px;
   }
   .in {
     width: 100%;
     box-sizing: border-box;
-    padding: 6px 9px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--bg);
-    color: var(--text);
-    font-size: 12.5px;
   }
   .area {
-    resize: vertical;
     font-family: inherit;
   }
-  .mono {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  .in.mono,
+  .area.mono {
+    font-family: var(--font-mono);
   }
-  .row {
+  .frow {
     display: flex;
     gap: 8px;
     align-items: center;
-    margin-top: 10px;
+    margin-top: 12px;
   }
-  .row.end {
+  .frow.end {
     justify-content: flex-end;
+    margin-bottom: 24px;
+  }
+  .adv-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--text);
+    font: inherit;
+    font-size: var(--fs-m);
+    font-weight: 600;
+    cursor: pointer;
+    width: 100%;
+    text-align: start;
+  }
+  .adv-toggle .hint {
+    font-weight: 400;
+    font-size: var(--fs-s);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .grow {
     flex: 1;
@@ -370,7 +422,7 @@
     align-items: center;
   }
   .kind {
-    width: 110px;
+    width: 190px;
     flex: none;
   }
   .num {
@@ -397,7 +449,18 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
+  }
+  .block > :global(.checkbox-row) + :global(.checkbox-row) {
+    margin-top: 8px;
+  }
+  @media (max-width: 640px) {
+    .crit-row {
+      flex-wrap: wrap;
+    }
+    .kind {
+      width: 100%;
+    }
   }
 </style>

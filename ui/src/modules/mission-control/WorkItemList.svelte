@@ -1,17 +1,20 @@
 <script lang="ts">
   import Icon from '../../lib/components/Icon.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import type { WorkItem } from '../../lib/api/types';
   import {
     KIND_ICON,
     KIND_LABEL,
-    STATUS_LABEL,
     RISK_LABEL,
-    statusColor,
     riskColor,
+    workStatus,
     fmtCost,
     relTime,
+    ownerLabel,
+    riskIsElevated,
   } from './lib';
   import { now } from '../../lib/stores/now.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
 
   interface Props {
     items: WorkItem[];
@@ -28,28 +31,33 @@
   }
 </script>
 
-<div class="wi-list" aria-label="Work items">
+<div class="wi-list" role="group" aria-label="Work items">
   {#each items as it (it.id)}
+    {@const owner = ownerLabel(it.owner, auth.me?.id)}
     <button
       class="wi-row"
       class:active={it.id === selectedId}
+      aria-current={it.id === selectedId ? 'true' : undefined}
       onclick={() => onOpen(it.id)}
     >
       <span class="wi-icon" title={KIND_LABEL[it.kind]}><Icon name={KIND_ICON[it.kind]} size={15} /></span>
       <span class="wi-main">
-        <span class="wi-title">{it.title}</span>
+        <span class="wi-title" title={it.title}>{it.title}</span>
         <span class="wi-sub">
           <span class="wi-kindlabel">{KIND_LABEL[it.kind]}</span>
           {#if it.repo_id}<span class="wi-dot">·</span><span class="mono wi-clip" title={it.repo_id}>{shortRepo(it.repo_id)}</span>{/if}
-          {#if it.owner}<span class="wi-dot">·</span><span class="wi-clip" title={it.owner}>{it.owner}</span>{/if}
+          {#if it.branch}<span class="wi-dot">·</span><span class="mono wi-clip" title={it.branch}>{it.branch}</span>{/if}
+          {#if owner}<span class="wi-dot">·</span><span class="wi-clip" title={owner}>{owner}</span>{/if}
         </span>
       </span>
       <span class="wi-meta">
         {#if needsApproval.has(it.id)}
           <span class="badge-approve" title="Needs human approval">Needs approval</span>
         {/if}
-        <span class="chip-status" style="--c:{statusColor(it.status)}">{STATUS_LABEL[it.status]}</span>
-        <span class="chip-risk" style="--c:{riskColor(it.risk_level)}" title="Risk / policy">{RISK_LABEL[it.risk_level]}</span>
+        <StatusBadge status={workStatus(it.status)} />
+        {#if riskIsElevated(it.risk_level)}
+          <span class="chip-risk" style="--c:{riskColor(it.risk_level)}" title="Risk (policy): {RISK_LABEL[it.risk_level]}">{RISK_LABEL[it.risk_level]} risk</span>
+        {/if}
         <span class="wi-cost mono" title="Cost so far">{fmtCost(it.cost_so_far)}</span>
         <!-- now() re-renders on the shared clock so "3m" keeps counting; the
              hover shows the local time, never a raw ISO string. -->
@@ -73,19 +81,20 @@
     text-align: start;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius-m, 8px);
+    border-radius: var(--radius-m);
     padding: 9px 12px;
     color: var(--text);
     cursor: pointer;
     transition: border-color 0.12s, background 0.12s;
   }
   .wi-row:hover {
-    border-color: var(--accent);
+    border-color: var(--border-strong);
+    background: color-mix(in srgb, var(--surface) 70%, var(--hover));
   }
   /* Selection is the accent tint, like every other list in the app. */
   .wi-row.active {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--border-strong);
   }
   .wi-icon {
     flex: 0 0 auto;
@@ -139,10 +148,9 @@
     align-items: center;
     gap: 8px;
   }
-  .chip-status,
   .chip-risk {
     font-size: var(--fs-xs);
-    font-weight: 600;
+    font-weight: 500;
     padding: 2px 7px;
     border-radius: 999px;
     white-space: nowrap;
@@ -150,12 +158,9 @@
     border: 1px solid color-mix(in srgb, var(--c) 45%, transparent);
     background: color-mix(in srgb, var(--c) 14%, transparent);
   }
-  .chip-risk {
-    opacity: 0.92;
-  }
   .badge-approve {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     padding: 2px 7px;
     border-radius: 999px;
     background: var(--warning-soft);
@@ -165,12 +170,14 @@
   }
   .wi-cost {
     font-size: var(--fs-xs);
+    font-variant-numeric: tabular-nums;
     color: var(--text-dim);
     min-width: 48px;
     text-align: end;
   }
   .wi-time {
     font-size: var(--fs-xs);
+    font-variant-numeric: tabular-nums;
     min-width: 28px;
     text-align: end;
   }

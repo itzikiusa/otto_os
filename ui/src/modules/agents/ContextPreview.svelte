@@ -198,11 +198,11 @@
     flex-wrap: wrap;
   }
   .hint {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .skipped {
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 8px 10px;
     border: 1px dashed var(--border);
     border-radius: var(--radius-s);
@@ -214,7 +214,7 @@
     align-items: center;
     gap: 6px;
     flex-wrap: wrap;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 6px 8px;
     border-radius: var(--radius-s);
     background: var(--surface-2);
@@ -253,7 +253,7 @@
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .summary-lbl {
     font-weight: 600;
@@ -265,7 +265,7 @@
     flex-wrap: wrap;
   }
   .chip {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 1px 7px;
     border-radius: 99px;
     background: var(--surface-2);
@@ -281,7 +281,7 @@
     margin-top: 2px;
   }
   .files-title {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
   }
   .files {
@@ -326,7 +326,7 @@
     min-width: 78px;
   }
   .file-name {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     flex: 1;
     min-width: 0;
     overflow: hidden;
@@ -351,7 +351,7 @@
     padding: 8px 10px;
     border-top: 1px solid var(--border);
     background: var(--surface);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.45;
     white-space: pre-wrap;
     word-break: break-word;
@@ -361,7 +361,7 @@
 
   .generated summary {
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     display: flex;
     align-items: center;
@@ -374,7 +374,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.5;
     white-space: pre-wrap;
     word-break: break-word;

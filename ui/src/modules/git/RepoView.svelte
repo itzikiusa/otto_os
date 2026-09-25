@@ -22,6 +22,9 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { api } from '../../lib/api/client';
+  import { loadErrorText } from '../../lib/loadError';
 
   interface Props {
     repo: Repo;
@@ -73,6 +76,28 @@
             : null,
   );
 
+  // A failed FIRST status load (folder moved or deleted, daemon down) used to
+  // leave the toolbar and graph skeletons pulsing forever. Load it here so the
+  // cause can be shown with Retry; once any status exists, later failures keep
+  // the stale one (the store's behaviour).
+  let statusError = $state<string | null>(null);
+  let statusLoading = $state(false);
+  function loadStatus(id: string): void {
+    statusError = null;
+    statusLoading = true;
+    api
+      .get<RepoStatusResp>(`/repos/${id}/status`)
+      .then((s) => {
+        if (id === repo.id) git.setStatus(id, s);
+      })
+      .catch((e) => {
+        if (id === repo.id && !git.statusById[id]) statusError = loadErrorText(e);
+      })
+      .finally(() => {
+        if (id === repo.id) statusLoading = false;
+      });
+  }
+
   $effect(() => {
     const id = repo.id;
     resolving = false;
@@ -81,7 +106,7 @@
     mergeReq = null;
     // Status lives in the store; (re)load it for this repo. The auto-fetch loop
     // keeps it fresh thereafter, and the tab strip shares the same value.
-    void git.refreshStatus(id);
+    loadStatus(id);
   });
 
   // Unmerged paths as the status reports them. A merge in progress ALWAYS shows
@@ -202,12 +227,34 @@
 
   const tabs = [
     { id: 'graph', label: 'Graph' },
-    { id: 'prs', label: 'Pull Requests' },
+    { id: 'prs', label: 'Pull requests' },
     { id: 'review', label: 'Review' },
     // Cross-repo: "my PRs" + "my Jira work" — not scoped to this repo, but it
     // lives here because the git page is where you think about this.
     { id: 'focus', label: 'Focus' },
   ];
+
+  function selectTab(id: string): void {
+    resolving = false;
+    if (embedded) onTab?.(id);
+    else router.go(`git/${repo.id}/${id}`);
+  }
+
+  /** ←/→ (Home/End) move between the view tabs, like any tablist. */
+  function onTabKey(e: KeyboardEvent): void {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+    const list = (e.currentTarget as HTMLElement).closest<HTMLElement>('[role="tablist"]');
+    if (!list) return;
+    const btns = [...list.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+    const i = btns.indexOf(document.activeElement as HTMLButtonElement);
+    if (i < 0) return;
+    e.preventDefault();
+    const rtl = getComputedStyle(list).direction === 'rtl';
+    const fwd = e.key === (rtl ? 'ArrowLeft' : 'ArrowRight');
+    const next = e.key === 'Home' ? 0 : e.key === 'End' ? btns.length - 1 : (i + (fwd ? 1 : -1) + btns.length) % btns.length;
+    btns[next].focus();
+    btns[next].click();
+  }
 
   // Repo switcher: jump between repositories without going back to the list.
   // Prefer the workspace-independent global list (Git page); fall back to the
@@ -253,7 +300,7 @@
 <div class="repoview">
   <header class="rv-head">
     {#if !embedded}
-      <button class="btn ghost small" onclick={() => router.go('git')}><span class="rv-back-arrow" aria-hidden="true">←</span> Repos</button>
+      <button class="btn ghost small" onclick={() => router.go('git')}><span class="rv-back-arrow" aria-hidden="true"><Icon name="chevronLeft" size={12} /></span> Repositories</button>
     {/if}
     <button
       class="rv-name rv-switch"
@@ -261,13 +308,13 @@
       onclick={openRepoSwitcher}
       oncontextmenu={openRepoSwitcher}
     >
-      <Icon name="branch" size={13} />
+      <Icon name="branch" size={14} />
       <span class="rv-name-text">{repo.name}</span>
       {#if repoPool.length > 1}<span class="rv-count">{repoPool.length}</span>{/if}
-      <Icon name="chevronDown" size={11} />
+      <Icon name="chevronDown" size={12} />
     </button>
     {#if repo.provider}<span class="chip rv-provider" title="Hosted on {PROVIDER_LABEL[repo.provider] ?? repo.provider}">{PROVIDER_LABEL[repo.provider] ?? repo.provider}</span>{/if}
-    <button class="btn ghost small rv-headbtn" onclick={() => (remotesOpen = true)} title="Manage remotes">
+    <button class="btn ghost small rv-headbtn" onclick={() => (remotesOpen = true)} title="Add, rename or remove this repository’s remotes">
       <Icon name="globe" size={12} /> Remotes
     </button>
     <button class="btn ghost small rv-headbtn" onclick={() => gitBridge.openRecovery(repo.id)} title="Reflog recovery, interactive rebase and bisect">
@@ -276,33 +323,33 @@
     <span class="grow"></span>
     {#if status}
       <GitToolbar repoId={repo.id} {status} onstatus={setStatus} onrefresh={() => graphKey++} />
-    {:else}
-      <div class="toolbar-skeleton"></div>
+    {:else if !statusError}
+      <div class="toolbar-skeleton" aria-label="Loading repository status"></div>
     {/if}
   </header>
 
-  <nav class="rv-tabs">
+  <div class="rv-tabs" role="tablist" aria-label="{repo.name} views">
     {#each tabs as t (t.id)}
       <button
         class="rv-tab"
+        role="tab"
+        aria-selected={effTab === t.id && !resolving}
+        tabindex={effTab === t.id && !resolving ? 0 : -1}
         class:active={effTab === t.id && !resolving}
-        onclick={() => {
-          resolving = false;
-          if (embedded) onTab?.(t.id);
-          else router.go(`git/${repo.id}/${t.id}`);
-        }}
+        onclick={() => selectTab(t.id)}
+        onkeydown={onTabKey}
       >
         {t.label}
         {#if t.id === 'graph' && status && status.changes.length > 0}
           <span class="count" title="{status.changes.length} uncommitted change{status.changes.length === 1 ? '' : 's'} (WIP)">{status.changes.length}</span>
         {/if}
         {#if t.id === 'graph' && conflictedPaths.length > 0}
-          <span class="count conflict-count" title="{conflictedPaths.length} conflicted file{conflictedPaths.length === 1 ? '' : 's'}"><Icon name="warning" size={10} />{conflictedPaths.length}</span>
+          <span class="count conflict-count" title="{conflictedPaths.length} conflicted file{conflictedPaths.length === 1 ? '' : 's'}"><Icon name="warning" size={12} />{conflictedPaths.length}</span>
         {/if}
       </button>
     {/each}
     {#if merging}
-      <button class="rv-tab conflict-tab" class:active={resolving} onclick={openResolver}>
+      <button class="rv-tab conflict-tab" role="tab" aria-selected={resolving} tabindex={resolving ? 0 : -1} class:active={resolving} onclick={openResolver} onkeydown={onTabKey}>
         <Icon name="merge" size={12} />
         Resolve conflicts
         {#if conflictSeed.files.length > 0}
@@ -310,7 +357,7 @@
         {/if}
       </button>
     {/if}
-  </nav>
+  </div>
 
   <!-- In-progress merge banner (shown when not already in the resolver). -->
   {#if merging && !resolving}
@@ -396,6 +443,15 @@
           {/if}
         </div>
       </div>
+    {:else if statusError}
+      <LoadState
+        what={repo.name}
+        variant="page"
+        error={`${statusError} If the folder moved or was deleted, remove the repository from the Git page and add it again.`}
+        empty
+        loading={statusLoading}
+        onretry={() => loadStatus(repo.id)}
+      />
     {:else}
       <div style="padding: 16px"><Skeleton rows={5} height={36} /></div>
     {/if}
@@ -452,7 +508,7 @@
     gap: 6px;
     min-width: 0;
     max-width: 320px;
-    font-size: 13.5px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .rv-name > :global(svg),
@@ -479,7 +535,7 @@
   }
   .rv-count {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     padding: 0 5px;
     border-radius: 8px;
     background: var(--surface-2);
@@ -500,7 +556,7 @@
     border: none;
     background: transparent;
     border-bottom: 2px solid transparent;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
     transition: color 130ms ease-out, border-color 130ms ease-out;
@@ -529,29 +585,33 @@
   }
   .conflict-tab {
     margin-inline-start: auto;
-    color: var(--status-warn);
+    color: var(--warning);
     gap: 5px;
   }
   .conflict-tab:hover {
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .conflict-tab.active {
-    color: var(--status-warn);
-    border-bottom-color: var(--status-warn);
+    color: var(--warning);
+    border-bottom-color: var(--warning);
   }
   .conflict-count {
-    background: var(--status-warn-soft);
-    color: var(--status-warn);
+    background: var(--warning-soft);
+    color: var(--warning);
   }
   .merge-banner {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 7px 14px;
-    background: var(--status-warn-soft);
+    padding: 6px 14px;
+    background: var(--warning-soft);
     border-bottom: 1px solid var(--border);
-    color: var(--status-warn);
-    font-size: 12px;
+    color: var(--text);
+    font-size: var(--fs-s);
+  }
+  .merge-banner > :global(svg) {
+    color: var(--warning);
+    flex-shrink: 0;
   }
   .merge-banner .mono {
     font-family: var(--font-mono);
@@ -590,7 +650,7 @@
   /* The back arrow is a literal "←"; mirror it under RTL so it points the
      direction "back" actually goes (→) instead of always pointing left. */
   .rv-back-arrow {
-    display: inline-block;
+    display: inline-flex;
   }
   :global([dir='rtl']) .rv-back-arrow {
     transform: scaleX(-1);
@@ -629,7 +689,7 @@
       scrollbar-width: none;
     }
     .rv-head::-webkit-scrollbar { display: none; }
-    .rv-name { font-size: 14px; flex-shrink: 0; }
+    .rv-name { font-size: var(--fs-l); flex-shrink: 0; }
     /* The toolbar is the wide part — give it its own horizontal scroll so it
        never forces the page wider than the viewport. */
     .rv-head :global(.toolbar) {
@@ -650,7 +710,7 @@
     .rv-tab {
       height: 38px;
       padding: 0 12px;
-      font-size: 14px;
+      font-size: var(--fs-l);
       white-space: nowrap;
       flex-shrink: 0;
     }

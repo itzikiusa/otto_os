@@ -1152,7 +1152,7 @@
     flex-shrink: 0;
   }
   .nav-title {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
     white-space: nowrap;
@@ -1169,7 +1169,7 @@
     cursor: pointer;
     color: var(--text-dim);
     padding: 2px 4px;
-    border-radius: var(--radius-s, 3px);
+    border-radius: var(--radius-s);
     display: flex;
     align-items: center;
     flex-shrink: 0;
@@ -1185,7 +1185,7 @@
   }
   .nav-search {
     width: 100%;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     height: 26px;
     padding: 0 6px;
     box-sizing: border-box;
@@ -1211,7 +1211,7 @@
     gap: 4px;
     padding: 3px 8px;
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     min-width: 0;
     white-space: nowrap;
@@ -1251,7 +1251,7 @@
     padding: 4px 8px;
     padding-inline-start: 6px;
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text);
     border-radius: 0;
     transition: background 80ms;
@@ -1287,7 +1287,7 @@
   }
   .nav-base {
     font-weight: 600;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .nav-file-stats {
     display: flex;
@@ -1309,7 +1309,7 @@
     align-items: center;
   }
   .toolbar-search {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     height: 26px;
     padding: 0 8px;
     width: 180px;
@@ -1340,21 +1340,21 @@
     gap: 10px;
   }
   .diff-stats {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     display: inline-flex;
     gap: 8px;
     align-items: center;
   }
   .add {
-    color: var(--status-working);
+    color: var(--success);
     font-weight: 600;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .del {
-    color: var(--status-exited);
+    color: var(--danger);
     font-weight: 600;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .dfile {
     border: 1px solid var(--border);
@@ -1371,12 +1371,12 @@
     border: none;
     background: var(--surface-2);
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text);
     text-align: start;
   }
   .dfile-path {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1398,7 +1398,7 @@
   }
   .dfile-binary {
     padding: 14px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .file-comment-badge {
     font-size: var(--fs-xs);
@@ -1437,7 +1437,7 @@
     background: none;
     color: var(--text-dim);
     cursor: pointer;
-    font-size: 13px;
+    font-size: var(--fs-m);
     line-height: 1;
   }
   .dfile-tools:hover {
@@ -1462,7 +1462,7 @@
   .dtable {
     width: 100%;
     border-collapse: collapse;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.55;
   }
   .gut {
@@ -1507,11 +1507,11 @@
     cursor: default;
   }
   .hunk-btn.danger {
-    border-color: color-mix(in srgb, var(--status-exited) 40%, transparent);
-    color: var(--status-exited);
+    border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+    color: var(--danger);
   }
   .hunk-btn.danger:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--status-exited) 16%, transparent);
+    background: color-mix(in srgb, var(--danger) 16%, transparent);
   }
   /* Line selection wins over the add/del row tints below it. */
   tr.dline.selected td {
@@ -1531,16 +1531,16 @@
     user-select: text;
   }
   tr.dline.add {
-    background: color-mix(in srgb, var(--status-working) 11%, transparent);
+    background: color-mix(in srgb, var(--success) 11%, transparent);
   }
   tr.dline.del {
-    background: color-mix(in srgb, var(--status-exited) 10%, transparent);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
   }
   .code.half.add {
-    background: color-mix(in srgb, var(--status-working) 11%, transparent);
+    background: color-mix(in srgb, var(--success) 11%, transparent);
   }
   .code.half.del {
-    background: color-mix(in srgb, var(--status-exited) 10%, transparent);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
   }
   .code.half.void {
     background: color-mix(in srgb, var(--text-dim) 6%, transparent);
@@ -1615,29 +1615,29 @@
     .diff-root.with-nav .diff {
       padding-inline-start: 0;
     }
-    .nav-title { font-size: 13px; }
-    .nav-file { font-size: 13px; padding: 8px; }
-    .nav-base { font-size: 13px; }
-    .nav-dir-row { font-size: 13px; padding: 6px 8px; }
-    .nav-file-stats { font-size: 12px; }
-    .nav-search { font-size: 13px; height: 32px; }
+    .nav-title { font-size: var(--fs-m); }
+    .nav-file { font-size: var(--fs-m); padding: 8px; }
+    .nav-base { font-size: var(--fs-m); }
+    .nav-dir-row { font-size: var(--fs-m); padding: 6px 8px; }
+    .nav-file-stats { font-size: var(--fs-s); }
+    .nav-search { font-size: var(--fs-m); height: 32px; }
     /* No drag-resize on touch layouts — the sidebar is full-width there. */
     .nav-resize-handle { display: none; }
 
     .diff-toolbar { flex-wrap: wrap; gap: 8px; }
     .toolbar-search-wrap { flex: 1; min-width: 120px; }
-    .diff-stats { font-size: 13px; }
-    .add, .del { font-size: 13px; }
-    .toolbar-search { font-size: 13px; height: 32px; width: 100%; }
-    .dfile-head { font-size: 13px; padding: 9px 12px; min-height: 40px; }
-    .dfile-path { font-size: 13px; }
-    .hunk-header { font-size: 12px; padding: 4px 12px; }
+    .diff-stats { font-size: var(--fs-m); }
+    .add, .del { font-size: var(--fs-m); }
+    .toolbar-search { font-size: var(--fs-m); height: 32px; width: 100%; }
+    .dfile-head { font-size: var(--fs-m); padding: 9px 12px; min-height: 40px; }
+    .dfile-path { font-size: var(--fs-m); }
+    .hunk-header { font-size: var(--fs-s); padding: 4px 12px; }
     /* table-layout:fixed pins the gutter+sign columns so the code column can't
        be stretched past the viewport by a single long token — it wraps within
        its remaining width (E2E seeds 140-char lines that must wrap, not clip). */
-    .dtable { font-size: 12.5px; table-layout: fixed; width: 100%; }
+    .dtable { font-size: var(--fs-s); table-layout: fixed; width: 100%; }
     .gut {
-      font-size: 11px;
+      font-size: var(--fs-xs);
       width: 30px;
       min-width: 30px;
       padding: 0 5px 0 3px;
@@ -1646,7 +1646,7 @@
     /* Wrap code so long lines don't push the page wider than the screen.
        overflow-wrap:anywhere is the belt-and-suspenders for unbreakable tokens. */
     .code {
-      font-size: 12.5px;
+      font-size: var(--fs-s);
       white-space: pre-wrap;
       word-break: break-word;
       overflow-wrap: anywhere;
@@ -1664,7 +1664,7 @@
     /* Sidebar collapse button. */
     .nav-collapse-btn { min-width: 36px; min-height: 36px; justify-content: center; }
     /* "Show N more lines" / "Load all" hunk-cap button. */
-    .hunk-cap-btn { font-size: 12.5px; min-height: 32px; padding: 6px 12px; }
+    .hunk-cap-btn { font-size: var(--fs-s); min-height: 32px; padding: 6px 12px; }
     /* Comment composer Cancel/Comment buttons. */
     .composer-actions .btn { min-height: 36px; padding: 6px 14px; }
     /* PR inline-comment affordance: widen the gutter tap zone and surface a
@@ -1679,7 +1679,7 @@
       position: absolute;
       inset-inline-start: 2px;
       top: 1px;
-      font-size: 11px;
+      font-size: var(--fs-xs);
       line-height: 1;
       color: color-mix(in srgb, var(--accent) 55%, transparent);
       pointer-events: none;
@@ -1696,7 +1696,7 @@
     border-top: 1px dashed var(--border);
   }
   .hunk-cap-btn {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .hunk-cap-btn:hover {
@@ -1713,7 +1713,7 @@
     max-height: min(400px, 60vh);
     overscroll-behavior: contain;
     border-top: 1px solid var(--border);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.55;
   }
   .vrow {
@@ -1728,20 +1728,20 @@
     display: block;
   }
   .vrow.dline.add {
-    background: color-mix(in srgb, var(--status-working) 11%, transparent);
+    background: color-mix(in srgb, var(--success) 11%, transparent);
   }
   .vrow.dline.del {
-    background: color-mix(in srgb, var(--status-exited) 10%, transparent);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
   }
   /* Split side-by-side rows in VirtualList: 4-col grid matching split table */
   .split-vrow {
     grid-template-columns: 42px 1fr 42px 1fr;
   }
   .split-vrow .code.half.add {
-    background: color-mix(in srgb, var(--status-working) 11%, transparent);
+    background: color-mix(in srgb, var(--success) 11%, transparent);
   }
   .split-vrow .code.half.del {
-    background: color-mix(in srgb, var(--status-exited) 10%, transparent);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
   }
   .split-vrow .code.half.void {
     background: color-mix(in srgb, var(--text-dim) 6%, transparent);

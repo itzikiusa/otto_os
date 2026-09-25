@@ -199,7 +199,7 @@
     align-items: center;
     gap: 10px;
     flex-wrap: wrap;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .ranges {
     display: inline-flex;
@@ -213,7 +213,7 @@
     color: var(--text-dim);
     padding: 4px 9px;
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
   .ranges button + button {
@@ -225,7 +225,7 @@
     font-weight: 600;
   }
   .meta {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     flex: 1;
     min-width: 0;
     overflow: hidden;
@@ -258,7 +258,7 @@
   }
   .stale {
     margin: 0;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--status-warn);
   }
   .grid {
@@ -278,13 +278,13 @@
   }
   h4 {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
   }
   .stats {
     width: 100%;
     border-collapse: collapse;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     table-layout: fixed;
   }
   .stats th {

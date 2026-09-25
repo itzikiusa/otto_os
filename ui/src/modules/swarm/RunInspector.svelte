@@ -7,7 +7,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
-  import { runStatus } from '../../lib/status';
+  import { runStatus, sentenceCase } from '../../lib/status';
   import { toasts } from '../../lib/toast.svelte';
   import { openExternal, isExternalUrl } from '../../lib/external';
   import { swarm } from '../../lib/stores/swarm.svelte';
@@ -78,7 +78,7 @@
       await copyTextOrThrow(text);
       toasts.success(`Copied ${label}`);
     } catch {
-      toasts.error('Copy failed');
+      toasts.error("Couldn't copy to the clipboard");
     }
   }
 
@@ -90,7 +90,7 @@
     <!-- Header line: agent · kind · status · timing -->
     <div class="hdr">
       <span class="agent">{agent?.name ?? run.agent_id.slice(0, 8)}</span>
-      <span class="dim">· {run.kind}</span>
+      <span class="dim">· {sentenceCase(run.kind)}</span>
       <!-- Same shared vocabulary as the Runs list (done → Succeeded, error →
            Failed, stopped → Cancelled) instead of the raw status word. -->
       <StatusBadge status={runStatus(run.status)} />
@@ -162,7 +162,7 @@
           <span class="path mono">{cwd}</span>
           <span class="grow"></span>
           <button class="copy-btn" title="Copy path" onclick={() => copy(cwd!, 'path')}>
-            <Icon name="copy" size={11} /> Copy
+            <Icon name="copy" size={12} /> Copy
           </button>
         </div>
       </section>
@@ -182,7 +182,7 @@
               <Icon name={kind === 'pr' ? 'pr' : kind === 'url' ? 'external' : 'file'} size={13} />
               <span class="art-label">{a.label || target || a.type}</span>
               {#if target}<span class="art-target mono dim">{target}</span>{/if}
-              {#if target && isExternalUrl(target)}<Icon name="external" size={11} />{:else if target}<Icon name="link" size={11} />{/if}
+              {#if target && isExternalUrl(target)}<Icon name="external" size={12} />{:else if target}<Icon name="link" size={12} />{/if}
             </button>
           {/each}
         </div>
@@ -196,7 +196,7 @@
           <h3>Brief sent</h3>
           <span class="grow"></span>
           <button class="copy-btn" title="Copy brief" onclick={() => copy(brief!, 'brief')}>
-            <Icon name="copy" size={11} /> Copy
+            <Icon name="copy" size={12} /> Copy
           </button>
         </div>
         <pre class="block scrolly">{brief}</pre>
@@ -213,7 +213,7 @@
           {#each posts as m (m.id)}
             <div class="post">
               <div class="post-h">
-                <span class="chip">{m.kind}</span>
+                <span class="chip">{sentenceCase(m.kind)}</span>
                 <span class="who">{author(m)}</span>
                 <span class="grow"></span>
                 <span class="dim time">{rel(m.created_at)}</span>
@@ -232,7 +232,7 @@
           <h3>Raw result</h3>
           <span class="grow"></span>
           <button class="copy-btn" title="Copy JSON" onclick={() => copy(rawJson!, 'JSON')}>
-            <Icon name="copy" size={11} /> Copy
+            <Icon name="copy" size={12} /> Copy
           </button>
         </div>
         <pre class="block json scrolly">{rawJson}</pre>
@@ -246,7 +246,7 @@
     display: flex;
     flex-direction: column;
     gap: 14px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .hdr {
     display: flex;
@@ -263,21 +263,21 @@
     display: flex;
     gap: 6px;
     flex-wrap: wrap;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     margin-top: -8px;
   }
   .dim {
     color: var(--text-dim);
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .err {
     color: var(--danger);
     background: var(--danger-soft);
     padding: 7px 9px;
     border-radius: var(--radius-s);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .stats {
     display: flex;
@@ -300,7 +300,7 @@
     color: var(--text-dim);
   }
   .stat .v {
-    font-size: 14px;
+    font-size: var(--fs-l);
     font-weight: 600;
   }
   .mono {
@@ -342,7 +342,7 @@
     background: var(--surface);
   }
   .path {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     word-break: break-all;
   }
   .arts {
@@ -381,14 +381,14 @@
   }
   .art-target {
     flex: 1;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .block {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface);
     border: 1px solid var(--border);
@@ -418,7 +418,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     margin-bottom: 4px;
   }
   .who {
@@ -428,7 +428,7 @@
     font-size: var(--fs-xs);
   }
   .post-body {
-    font-size: 12px;
+    font-size: var(--fs-s);
     white-space: pre-wrap;
     word-break: break-word;
   }
@@ -501,7 +501,7 @@
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
   }
   .finding-text {
-    font-size: 12px;
+    font-size: var(--fs-s);
     white-space: pre-wrap;
     word-break: break-word;
   }

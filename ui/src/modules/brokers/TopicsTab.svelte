@@ -363,7 +363,7 @@
           >{pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, filtered.length)} of {filtered.length}</span
         >
         <button
-          class="btn tiny"
+          class="btn small"
           disabled={page <= 1}
           onclick={() => (page = Math.max(1, page - 1))}
           aria-label="Previous page"
@@ -373,7 +373,7 @@
         </button>
         <span class="muted">{Math.min(page, pageCount)} / {pageCount}</span>
         <button
-          class="btn tiny"
+          class="btn small"
           disabled={page >= pageCount}
           onclick={() => (page = Math.min(pageCount, page + 1))}
           aria-label="Next page"
@@ -408,7 +408,7 @@
     color: var(--text-dim);
     padding: 8px 12px;
     cursor: pointer;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     border-bottom: 1px solid var(--border);
   }
   .crumb:hover {
@@ -448,13 +448,13 @@
     border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .chk {
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     white-space: nowrap;
   }
@@ -464,13 +464,13 @@
     border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .spacer {
     flex: 1;
   }
   .count {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .create {
@@ -487,10 +487,10 @@
     border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .create label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     display: flex;
     gap: 4px;
@@ -507,13 +507,13 @@
   table.grid {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   table.grid th {
     text-align: start;
     font-weight: 500;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     padding: 8px 14px;
@@ -559,16 +559,13 @@
     justify-content: flex-end;
     padding: 8px 14px;
     border-top: 1px solid var(--border);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .muted {
     color: var(--text-dim);
   }
   .pad {
     padding: 14px;
-  }
-  .btn.tiny {
-    padding: 3px 7px;
   }
 
   /* Phone (≤640px): the toolbar/create rows wrap so nothing juts off the right

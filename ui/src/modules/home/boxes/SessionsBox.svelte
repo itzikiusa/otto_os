@@ -7,6 +7,8 @@
   import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import { ws } from '../../../lib/stores/workspace.svelte';
+  import { ui } from '../../../lib/stores/ui.svelte';
+  import { router } from '../../../lib/router.svelte';
   import { events } from '../../../lib/events.svelte';
   import { sessionState, type SessionStateInfo } from '../../../lib/status';
   import type { Session } from '../../../lib/api/types';
@@ -48,22 +50,30 @@
     <div class="stat"><span class="n">{sessions.length}</span><span class="l">open</span></div>
   </div>
   {#if sessions.length === 0}
-    <EmptyState icon="terminal" title="No open agent sessions" body="Start one from the Agents tab (⌘T)." />
+    <!-- A quiet secondary CTA: the page's one primary is "Add widget". -->
+    <EmptyState icon="terminal" title="No open agent sessions" body="Start Claude, Codex or a shell in this workspace.">
+      <button class="btn small" onclick={() => (ui.newSessionOpen = true)}><Icon name="plus" size={12} />New session</button>
+    </EmptyState>
   {:else}
     <ul class="rows">
       {#each sessions as s (s.id)}
         <li>
-          <button class="row" onclick={() => ws.navigateToSession(s.id)} title="Open {s.title}">
+          <button class="srow" onclick={() => ws.navigateToSession(s.id)} title="Open {s.title}">
             <StatusDot state={stateOf(s)} />
             <ProviderIcon provider={s.provider} size={12} />
             <span class="title ellipsis">{s.title}</span>
             {#if ws.needsYou[s.id]}<span class="pill needs">needs you</span>{/if}
-            <span class="ago">{now() && relTime(s.last_active_at)}</span>
-            <Icon name="external" size={11} />
+            <span class="ago" title={new Date(s.last_active_at).toLocaleString()}>{now() && relTime(s.last_active_at)}</span>
+            <span class="go" aria-hidden="true"><Icon name="chevronRight" size={12} /></span>
           </button>
         </li>
       {/each}
     </ul>
+    <!-- Anchors the card's foot (a short roster no longer floats in a tall,
+         empty box) and gives the widget an obvious way into the module. -->
+    <button class="foot" onclick={() => router.go('agents')}>
+      Open Agents<Icon name="chevronRight" size={12} />
+    </button>
   {/if}
 </div>
 
@@ -119,7 +129,7 @@
     min-height: 0;
     flex: 1;
   }
-  .row {
+  .srow {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -132,16 +142,52 @@
     cursor: pointer;
     text-align: start;
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
-  .row:hover {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+  .srow:hover {
+    background: var(--hover);
+  }
+  /* The row's "opens" cue shows on hover/focus only — a permanent icon on
+     every row was noise. */
+  .go {
+    display: inline-flex;
+    color: var(--text-dim);
+    opacity: 0;
+    transition: opacity 120ms ease-out;
+  }
+  .srow:hover .go,
+  .srow:focus-visible .go {
+    opacity: 1;
+  }
+  :global([dir='rtl']) .go {
+    transform: scaleX(-1);
+  }
+  .foot {
+    flex: none;
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px 0;
+    border: none;
+    background: none;
+    color: var(--accent-text);
+    font: inherit;
+    font-size: var(--fs-s);
+    cursor: pointer;
+  }
+  .foot:hover {
+    text-decoration: underline;
+  }
+  :global([dir='rtl']) .foot :global(svg) {
+    transform: scaleX(-1);
   }
   .title {
     flex: 1;
     min-width: 0;
   }
   .pill {
+    flex: none;
     padding: 0 6px;
     border-radius: 999px;
     font-size: var(--fs-xs);
@@ -152,7 +198,7 @@
   }
   .ago {
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-variant-numeric: tabular-nums;
   }
   .ellipsis {

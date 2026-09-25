@@ -446,7 +446,7 @@
           checked={database.showCounts}
           onchange={(e) => database.setShowCounts(e.currentTarget.checked)}
         />
-        Counts
+        Row counts
       </label>
     </div>
   {/if}
@@ -457,9 +457,9 @@
     </div>
   {:else if database.activeConnStatus?.phase === 'error'}
     <div class="tree-error" role="status" aria-live="polite">
-      <div class="tree-error-head"><Icon name="x" size={12} />Couldn't connect</div>
+      <div class="tree-error-head"><Icon name="warning" size={12} />Couldn't connect</div>
       <div class="tree-error-msg">{database.activeConnStatus.error}</div>
-      <button class="tree-error-retry" onclick={() => database.retryConnection()}>
+      <button class="btn small tree-error-retry" onclick={() => database.retryConnection()}>
         <Icon name="refresh" size={11} />Retry
       </button>
     </div>
@@ -600,7 +600,7 @@
     align-items: center;
     gap: 6px;
     padding: 8px 6px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .tree-error {
@@ -609,7 +609,7 @@
     align-items: flex-start;
     gap: 6px;
     padding: 10px 8px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .tree-error-head {
     display: flex;
@@ -624,20 +624,7 @@
     word-break: break-word;
   }
   .tree-error-retry {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 3px 9px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface-2);
-    color: var(--text);
-    cursor: pointer;
-    font-size: 11.5px;
-  }
-  .tree-error-retry:hover {
-    background: var(--surface);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    align-self: flex-start;
   }
   .node {
     display: flex;
@@ -856,7 +843,7 @@
     background: none;
     border: none;
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     text-align: left;
     cursor: pointer;
   }
@@ -895,7 +882,7 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     outline: none;
     min-width: 0;
   }
@@ -926,11 +913,11 @@
       font-size: 14px;
     }
     .nl-detail {
-      font-size: 12px;
+      font-size: var(--fs-s);
     }
     .tree-loading,
     .tree-empty {
-      font-size: 13.5px;
+      font-size: var(--fs-m);
     }
     .tree-search-input {
       font-size: 14px;

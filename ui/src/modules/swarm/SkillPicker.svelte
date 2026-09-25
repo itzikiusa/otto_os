@@ -69,7 +69,7 @@
       {#each selected as s (s)}
         <span class="chip">
           {s}
-          <button class="x" onclick={() => remove(s)} aria-label="Remove {s}" title="Remove {s}"><Icon name="x" size={10} /></button>
+          <button class="x" onclick={() => remove(s)} aria-label="Remove {s}" title="Remove {s}"><Icon name="x" size={12} /></button>
         </span>
       {/each}
     </div>
@@ -85,7 +85,7 @@
     gap: 6px;
   }
   .lbl {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .add {
@@ -104,7 +104,7 @@
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 2px 8px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .x {
     border: none;
@@ -119,7 +119,7 @@
     color: var(--danger);
   }
   .none {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     margin: 0;
   }
 </style>

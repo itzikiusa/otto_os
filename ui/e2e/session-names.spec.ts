@@ -190,7 +190,7 @@ test('settings panel: theme grid renders, picking one activates it, custom theme
 
   // Pick Scientists → it gains the Active badge.
   await scientists.click();
-  await expect(scientists.locator('.badge-on')).toBeVisible({ timeout: 10_000 });
+  await expect(scientists).toHaveAttribute('aria-pressed', 'true', { timeout: 10_000 });
 
   // Create a custom theme via the form.
   const label = `UI Team ${Date.now()}`;
@@ -203,7 +203,9 @@ test('settings panel: theme grid renders, picking one activates it, custom theme
 
   // Reset to footballers so we leave the user in a known state.
   await page.locator('.theme-card', { hasText: 'Footballers' }).click();
-  await expect(
-    page.locator('.theme-card', { hasText: 'Footballers' }).locator('.badge-on'),
-  ).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator('.theme-card', { hasText: 'Footballers' })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+    { timeout: 10_000 },
+  );
 });

@@ -63,6 +63,9 @@
      *  Default = undefined → falls back to today's wsUrl() behaviour. */
     shareToken?: string;
     onstatus?: (status: SessionStatus) => void;
+    /** The font size actually drawn (px) — below the user's size while the
+     *  pane is too narrow for 80 columns (see applyAutoFontFit). */
+    onfontfit?: (px: number) => void;
     /** Called when the server returns a ring-buffer search result frame.
      *  The parent can surface results in a search-result panel. */
     onsearchresult?: (frame: WsSearchResultFrame) => void;
@@ -86,7 +89,7 @@
      *  this. Default false. */
     claimOnAttach?: boolean;
   }
-  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, onstatus, onsearchresult, showToolbar = true, autoFocus = false, claimOnAttach = false }: Props = $props();
+  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, onstatus, onfontfit, onsearchresult, showToolbar = true, autoFocus = false, claimOnAttach = false }: Props = $props();
 
   const effScheme = $derived(forceDark ? 'dark' : ui.resolvedScheme);
 
@@ -677,6 +680,7 @@
       const maxFont = Math.floor((cur * cols) / MIN_FIT_COLS);
       target = Math.min(effFontSize, maxFont);
     }
+    onfontfit?.(target);
     if (target === cur) return;
     term.options.fontSize = target;
     clearWebglAtlas();
@@ -1534,25 +1538,26 @@
               if (onrestart) onrestart();
               else { exitCode = null; connect(); }
             }}
-          >{resumable ? 'Resume' : 'Reconnect'}</button>
+            title={resumable ? 'Resume the session where it left off' : onrestart ? 'Start the session again in this pane' : 'Reconnect to the session'}
+          >{resumable ? 'Resume' : onrestart ? 'Restart session' : 'Reconnect'}</button>
         {/if}
       </div>
     {:else if reconnecting}
       <div class="term-overlay dim">
-        <span class="badge">reconnecting…</span>
-        <button class="btn" onclick={() => { reconnectAttempts = 0; connect(); }}>Now</button>
+        <span class="badge">Reconnecting…</span>
+        <button class="btn" onclick={() => { reconnectAttempts = 0; connect(); }}>Reconnect now</button>
       </div>
     {:else if disconnected}
       <div class="term-overlay">
-        <span class="badge bad">disconnected</span>
+        <span class="badge bad">Disconnected</span>
         <button class="btn" onclick={connect}>Reconnect</button>
       </div>
     {:else if !connected}
-      <div class="term-overlay dim"><span class="badge">connecting…</span></div>
+      <div class="term-overlay dim"><span class="badge">Connecting…</span></div>
     {/if}
 
     {#if readOnly}
-      <div class="ro-chip" title="Viewer role — input disabled">read-only</div>
+      <div class="ro-chip" title="Viewer role — input disabled">Read-only</div>
     {/if}
 
     <!-- Task 5.1 + 5.3: phone-only floating control strip (keyboard + zoom).

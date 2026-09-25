@@ -97,10 +97,12 @@
   {:else if k8s.unavailable}
     <EmptyState icon="helm" title="Kubernetes console is off" body="Enable it in the daemon to see clusters here." />
   {:else if k8s.clusters.length === 0}
-    <EmptyState icon="helm" title="No clusters yet" body="Add a kubeconfig context on the Kubernetes page." actionLabel="Open Kubernetes" onaction={() => router.go('kubernetes')} />
+    <EmptyState icon="helm" title="No clusters yet" body="Add a kubeconfig context on the Kubernetes page.">
+      <button class="btn small" onclick={() => router.go('kubernetes')}>Open Kubernetes</button>
+    </EmptyState>
   {:else}
     {#if error && !monitored}
-      <div class="note" title={error}><Icon name="zap" size={10} />monitor data unavailable — showing the registry</div>
+      <div class="note" title={error}><Icon name="warning" size={12} />Monitor data unavailable — showing the registry</div>
     {/if}
     <ul class="rows">
       {#each k8s.clusters as c (c.id)}
@@ -146,7 +148,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .spacer {
     flex: 1;
@@ -206,7 +208,7 @@
     cursor: pointer;
     text-align: start;
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .row:hover {
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
@@ -245,7 +247,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }

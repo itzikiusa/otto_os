@@ -8,6 +8,8 @@
   import { api } from '../../lib/api/client';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { router } from '../../lib/router.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { IssueAccount } from '../../lib/api/types';
   import SourceSearch from './SourceSearch.svelte';
 
@@ -52,7 +54,7 @@
       accounts = await api.get<IssueAccount[]>('/issue/accounts');
       if (accounts.length > 0) accountId = accounts[0].id;
     } catch (e) {
-      accountsError = e instanceof Error ? e.message : String(e);
+      accountsError = loadErrorText(e);
     } finally {
       accountsLoading = false;
     }
@@ -96,8 +98,8 @@
   async function submit(): Promise<void> {
     formError = '';
     const key = effectiveKey;
-    if (!accountId) { formError = 'Please select an account.'; return; }
-    if (!key) { formError = 'Please pick an issue/page or enter an ID manually.'; return; }
+    if (!accountId) { formError = 'Pick an account.'; return; }
+    if (!key) { formError = 'Pick an issue or page, or enter its key manually.'; return; }
 
     submitting = true;
     try {
@@ -125,13 +127,16 @@
     {#if accountsLoading}
       <div class="loading">Loading accounts…</div>
     {:else if accountsError}
-      <div class="field-error">Could not load accounts: {accountsError}</div>
+      <div class="field-error" role="alert">Couldn't load your Jira / Confluence accounts. {accountsError}</div>
       <button class="btn small" onclick={() => void loadAccounts()}>Retry</button>
     {:else if accounts.length === 0}
       <div class="no-accounts">
         <Icon name="ticket" size={16} />
-        <span>No issue accounts configured. Add one in <strong>Settings → Jira / Confluence</strong>.</span>
+        <span>No Jira or Confluence account is connected yet. Add one to import issues and pages.</span>
       </div>
+      <button class="btn small" onclick={() => { onclose(); router.go('settings/jira'); }}>
+        <Icon name="plus" size={12} /> Add account in Settings
+      </button>
     {:else}
       <!-- Account -->
       <div class="field">
@@ -272,7 +277,7 @@
 <style>
   .loading {
     padding: 12px 0;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .no-accounts {
@@ -282,7 +287,7 @@
     padding: 12px 14px;
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.5;
   }
@@ -296,7 +301,7 @@
     margin-bottom: 4px;
   }
   .label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 500;
     color: var(--text-dim);
     text-transform: uppercase;
@@ -315,7 +320,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     padding: 5px 9px;
     box-sizing: border-box;
     outline: none;
@@ -335,7 +340,7 @@
     padding: 6px 12px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
     color: var(--text-dim);
     transition: border-color 110ms, color 110ms, background 110ms;
@@ -364,7 +369,7 @@
     background: color-mix(in srgb, var(--accent) 10%, transparent);
     border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .selected-label {
     color: var(--text);
@@ -376,7 +381,7 @@
   }
   .change-btn {
     flex-shrink: 0;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--accent-text);
     background: transparent;
     border: none;
@@ -395,7 +400,7 @@
     background: transparent;
     border: none;
     cursor: pointer;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     padding: 0;
     display: flex;
@@ -417,14 +422,14 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text);
     cursor: pointer;
     margin-bottom: 14px;
     user-select: none;
   }
   .field-error {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--danger);
     margin-bottom: 8px;
     padding: 6px 10px;
@@ -438,7 +443,7 @@
     height: 32px;
     padding: 0 16px;
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 500;
     cursor: pointer;
     border: 1px solid var(--border);

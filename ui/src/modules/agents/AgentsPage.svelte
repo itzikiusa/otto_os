@@ -61,16 +61,20 @@
       <EmptyState
         icon="terminal"
         title="No sessions yet"
-        body="Spawn an agent (claude, codex) or a plain shell in this workspace. Sessions keep running even when you close the app."
-        actionLabel="New Session  ⌘T"
+        body="Start an agent (Claude, Codex) or a plain shell in this workspace (⌘T). Sessions keep running even when you close the app."
+        variant="page"
+        actionIcon="plus"
+        actionLabel="New session…"
         onaction={() => (ui.newSessionOpen = true)}
       />
     {:else}
       <EmptyState
         icon="terminal"
         title="No open tabs"
-        body="Pick a session in the sidebar, switch to tiled view, or start a new one."
-        actionLabel="New Session  ⌘T"
+        body="Pick a session in the sidebar, switch to tiled view, or start a new one (⌘T)."
+        variant="page"
+        actionIcon="plus"
+        actionLabel="New session…"
         onaction={() => (ui.newSessionOpen = true)}
       />
     {/if}

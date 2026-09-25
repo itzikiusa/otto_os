@@ -8,6 +8,8 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { api } from '../../lib/api/client';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { rel } from '../../lib/stores/now.svelte';
   import type { CanvasSceneSummary, CanvasScene } from './types';
 
 
@@ -40,22 +42,24 @@
     });
   });
 
-  function ago(iso: string): string {
-    const t = Date.parse(iso);
-    if (!t) return '';
-    const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
-    if (s < 60) return 'just now';
-    const m = Math.floor(s / 60);
-    if (m < 60) return `${m}m ago`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h}h ago`;
-    return `${Math.floor(h / 24)}d ago`;
+  /** One ⋯ / right-click menu per row instead of four always-on icons
+   *  (the shared clamped ctxMenu). */
+  function rowMenu(e: MouseEvent | KeyboardEvent, s: CanvasSceneSummary): void {
+    e.preventDefault();
+    e.stopPropagation();
+    ctxMenu.show(e, [
+      { label: 'Rename…', icon: 'edit', action: () => void rename(null, s) },
+      { label: 'Move to section…', icon: 'folder', action: () => void move(null, s) },
+      { label: 'Duplicate', icon: 'copy', action: () => void duplicate(null, s) },
+      { separator: true },
+      { label: 'Delete…', icon: 'trash', danger: true, action: () => void remove(null, s) },
+    ]);
   }
 
-  async function rename(e: MouseEvent, s: CanvasSceneSummary): Promise<void> {
-    e.stopPropagation();
-    const t = await confirmer.promptText('Rename canvas', {
-      title: 'Rename',
+  async function rename(e: MouseEvent | null, s: CanvasSceneSummary): Promise<void> {
+    e?.stopPropagation();
+    const t = await confirmer.promptText('', {
+      title: 'Rename scene',
       initial: s.title,
       confirmLabel: 'Rename',
     });
@@ -67,10 +71,10 @@
     }
   }
 
-  async function move(e: MouseEvent, s: CanvasSceneSummary): Promise<void> {
-    e.stopPropagation();
-    const sec = await confirmer.promptText('Move to section', {
-      title: 'Section',
+  async function move(e: MouseEvent | null, s: CanvasSceneSummary): Promise<void> {
+    e?.stopPropagation();
+    const sec = await confirmer.promptText('Sections group scenes in the list. Use / to nest them.', {
+      title: 'Move to section',
       initial: s.section ?? '',
       placeholder: 'e.g. Platform/Staging — empty = no section',
       confirmLabel: 'Move',
@@ -87,8 +91,8 @@
    *  into a new scene titled "<title> (copy)", in the SAME section and workspace
    *  as the original (Canvas lists scenes across all workspaces, so this can
    *  differ from the currently-active one). */
-  async function duplicate(e: MouseEvent, s: CanvasSceneSummary): Promise<void> {
-    e.stopPropagation();
+  async function duplicate(e: MouseEvent | null, s: CanvasSceneSummary): Promise<void> {
+    e?.stopPropagation();
     try {
       const row = await api.get<CanvasScene>(`/canvas/scenes/${s.id}`);
       let doc: unknown;
@@ -109,11 +113,12 @@
     }
   }
 
-  async function remove(e: MouseEvent, s: CanvasSceneSummary): Promise<void> {
-    e.stopPropagation();
-    const ok = await confirmer.ask(`Delete scene "${s.title}"? This can't be undone.`, {
+  async function remove(e: MouseEvent | null, s: CanvasSceneSummary): Promise<void> {
+    e?.stopPropagation();
+    const ok = await confirmer.ask(`“${s.title}” and its drawing are deleted for good. This can’t be undone.`, {
+      title: 'Delete scene',
       danger: true,
-      confirmLabel: 'Delete',
+      confirmLabel: 'Delete scene',
     });
     if (!ok) return;
     try {
@@ -128,9 +133,9 @@
 <div class="scene-list">
   <div class="search">
     <Icon name="search" size={13} />
-    <input placeholder="Search scenes…" bind:value={filter} spellcheck="false" />
+    <input type="search" placeholder="Search scenes…" aria-label="Search scenes" bind:value={filter} spellcheck="false" />
     {#if filter}
-      <button class="clear" onclick={() => (filter = '')} aria-label="Clear search">
+      <button class="clear" onclick={() => (filter = '')} aria-label="Clear search" title="Clear search">
         <Icon name="x" size={12} />
       </button>
     {/if}
@@ -151,9 +156,16 @@
     {#if canvas.listError && !canvas.scenes.length}
       <!-- rendered above -->
     {:else if canvas.listLoading && !canvas.scenes.length}
-      <div class="hint">Loading…</div>
+      <LoadState what="scenes" variant="compact" loading empty />
     {:else if !rows.length}
-      <div class="hint">{filter ? 'No matches.' : 'No scenes yet.'}</div>
+      <div class="hint">
+        {#if filter}
+          No scenes match “{filter.trim()}”.
+          <button class="btn small" onclick={() => (filter = '')}>Clear search</button>
+        {:else}
+          No scenes yet.
+        {/if}
+      </div>
     {:else}
       {#each groups as [section, items] (section)}
         {#if section !== ''}
@@ -171,37 +183,40 @@
         {/if}
         {#if section === '' || !collapsed[section]}
           {#each items as s (s.id)}
-            <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+            <!-- The row is a real button (open) plus a sibling ⋯ button (the
+                 row menu, also on right-click / ⇧F10) — no role=button div. -->
             <div
               class="row"
               class:active={canvas.currentId === s.id}
               class:nested={section !== ''}
-              onclick={() => void canvas.open(s.id).catch(() => {})}
-              role="button"
-              tabindex="0"
-              ondblclick={(e) => rename(e, s)}
-              onkeydown={(e) => {
-                if (e.key === 'Enter') void canvas.open(s.id).catch(() => {});
-              }}
+              role="group"
+              aria-label={s.title}
+              oncontextmenu={(e) => rowMenu(e, s)}
             >
-              <div class="meta">
-                <span class="title" title={s.title}>{s.title}</span>
-                <span class="when">{ago(s.updated_at)}</span>
-              </div>
-              <div class="actions" class:shown={canvas.currentId === s.id}>
-                <button onclick={(e) => rename(e, s)} aria-label="Rename" title="Rename">
-                  <Icon name="edit" size={13} />
-                </button>
-                <button onclick={(e) => move(e, s)} aria-label="Move to section" title="Move to section">
-                  <Icon name="folder" size={13} />
-                </button>
-                <button onclick={(e) => duplicate(e, s)} aria-label="Duplicate" title="Duplicate">
-                  <Icon name="copy" size={13} />
-                </button>
-                <button class="del" onclick={(e) => remove(e, s)} aria-label="Delete" title="Delete">
-                  <Icon name="trash" size={13} />
-                </button>
-              </div>
+              <button
+                class="row-open"
+                aria-current={canvas.currentId === s.id ? 'true' : undefined}
+                onclick={() => void canvas.open(s.id).catch(() => {})}
+                ondblclick={(e) => rename(e, s)}
+                onkeydown={(e) => {
+                  if (e.key === 'F2') { e.preventDefault(); void rename(null, s); }
+                  else if (e.key === 'F10' && e.shiftKey) rowMenu(e, s);
+                }}
+                title={s.title}
+              >
+                <span class="title">{s.title}</span>
+                <span class="when">edited {rel(s.updated_at)}</span>
+              </button>
+              <button
+                class="icon-btn row-more"
+                class:shown={canvas.currentId === s.id}
+                onclick={(e) => rowMenu(e, s)}
+                aria-label="Actions for {s.title}"
+                aria-haspopup="menu"
+                title="Rename, move, duplicate or delete"
+              >
+                <Icon name="more" size={14} />
+              </button>
             </div>
           {/each}
         {/if}
@@ -228,14 +243,22 @@
     border-radius: var(--radius-s);
     color: var(--text-dim);
   }
+  /* The field itself is borderless; the box carries the focus ring. */
+  .search:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
   .search input {
     flex: 1 1 auto;
     border: none;
     outline: none;
     background: transparent;
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     min-width: 0;
+  }
+  .search input::-webkit-search-cancel-button {
+    display: none;
   }
   .clear {
     border: none;
@@ -252,22 +275,26 @@
     padding: 0 6px 8px;
   }
   .hint {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
     padding: 16px 12px;
     color: var(--text-dim);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     text-align: center;
   }
   .section-head {
     width: 100%;
     display: flex;
     align-items: center;
-    gap: 5px;
-    padding: 7px 8px 3px;
+    gap: 6px;
+    padding: 8px 8px 4px;
     border: none;
     background: none;
     color: var(--text-dim);
-    font-size: 11.5px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     letter-spacing: 0.02em;
     cursor: pointer;
     text-transform: uppercase;
@@ -284,79 +311,68 @@
     white-space: nowrap;
   }
   .section-count {
-    font-weight: 600;
-    opacity: 0.7;
+    font-weight: 400;
   }
   .row {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 7px 8px;
+    gap: 2px;
+    padding-inline-end: 4px;
     border-radius: var(--radius-s);
-    cursor: pointer;
   }
   .row.nested {
     margin-inline-start: 10px;
   }
   .row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .row.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
   }
-  .meta {
+  .row-open {
     flex: 1 1 auto;
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 1px;
+    align-items: flex-start;
+    gap: 2px;
+    padding: 6px 8px;
+    border: none;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+    border-radius: var(--radius-s);
   }
   .title {
-    font-size: 13px;
+    max-width: 100%;
+    font-size: var(--fs-m);
     color: var(--text);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .when {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  .actions {
-    flex: 0 0 auto;
-    display: flex;
-    gap: 1px;
+  .row-more {
+    flex: none;
+    width: 24px;
+    height: 24px;
     opacity: 0;
   }
-  /* Hover-only row actions were unreachable by keyboard (tabbing onto a
-     hidden button) and invisible on touch; keep them shown on focus, on the
-     open scene, and wherever there is no hover. */
-  .row:hover .actions {
-    opacity: 1;
-  }
-  .actions:focus-within,
-  .actions.shown {
+  /* Shown on hover, on keyboard focus, on the open scene, and wherever there
+     is no hover (touch) — never a hover-only dead control. */
+  .row:hover .row-more,
+  .row-more:focus-visible,
+  .row-more.shown {
     opacity: 1;
   }
   @media (hover: none) {
-    .actions {
+    .row-more {
       opacity: 1;
     }
-  }
-  .actions button {
-    border: none;
-    background: none;
-    color: var(--text-dim);
-    cursor: pointer;
-    padding: 2px;
-    display: inline-flex;
-    border-radius: var(--radius-s);
-  }
-  .actions button:hover {
-    color: var(--text);
-    background: var(--surface);
-  }
-  .actions .del:hover {
-    color: var(--danger);
   }
 </style>

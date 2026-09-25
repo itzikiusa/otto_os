@@ -101,7 +101,7 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
   }
   .cb-rollup {
@@ -109,20 +109,20 @@
     align-items: center;
     gap: 6px;
     flex-wrap: wrap;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     flex: 1;
     min-width: 0;
   }
   .cb-empty {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.5;
   }
   .cb-empty code {
     font-family: var(--font-mono, monospace);
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .cb-columns {
     display: grid;
@@ -143,7 +143,7 @@
     align-items: center;
     gap: 5px;
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
@@ -169,7 +169,7 @@
     border-color: var(--accent);
   }
   .cb-card-title {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 500;
     line-height: 1.3;
     display: -webkit-box;

@@ -8,12 +8,16 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { browserLive } from '../../lib/stores/browserLive.svelte';
   import { nativeBrowserAvailable } from '../../lib/nativeBrowser';
   import { formatBytes } from '../../lib/metric-format';
   import { toasts } from '../../lib/toast.svelte';
   import type { BrowserChromeBuild, BrowserLiveSettings } from '../../lib/api/types';
+  import SectionIntro from './SectionIntro.svelte';
+  import SettingToggle from './SettingToggle.svelte';
+  import { loadErrorText } from '../../lib/loadError';
 
   $effect(() => {
     if (!browserLive.status && !browserLive.loading && browserLive.supported !== false) void browserLive.load();
@@ -37,7 +41,7 @@
       await browserLive.updateSettings(patch);
       toasts.success('Browser engine settings saved', 'Used the next time the live browser starts.');
     } catch (e) {
-      saveError = e instanceof Error ? e.message : String(e);
+      saveError = loadErrorText(e);
     } finally {
       saving = false;
     }
@@ -49,7 +53,7 @@
       await browserLive.install(build);
       toasts.info('Download started', 'Otto is downloading the live browser engine. It keeps going if you leave this page.');
     } catch (e) {
-      installError = e instanceof Error ? e.message : String(e);
+      installError = loadErrorText(e);
     }
   }
 
@@ -63,14 +67,14 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('browser')} subtitle="Live tabs and the browser engine that runs them" />
   <PageBody width="readable">
-    <p class="section-intro">
+    <SectionIntro>
       A live tab is a real browser. In the desktop app it can use this Mac's web view; everywhere
       else (a remote session, your phone, and whenever an agent drives a page) it runs in a
       Chromium the Otto daemon manages and streams to you.
-    </p>
+    </SectionIntro>
 
     {#if nativeBrowserAvailable}
-      <section class="card" aria-labelledby="bs-renderer">
+      <section class="card bs-card" aria-labelledby="bs-renderer">
         <h2 id="bs-renderer" class="row-title">Live tabs on this device</h2>
         <div class="choices" role="radiogroup" aria-labelledby="bs-renderer">
           <label class="choice">
@@ -102,18 +106,18 @@
     {/if}
 
     {#if browserLive.supported === false}
-      <section class="card">
+      <section class="card bs-card">
         <p class="row-desc">This Otto daemon doesn't include the live browser engine. Update Otto to use it.</p>
       </section>
     {:else if browserLive.loadError && !st}
-      <section class="card" role="alert">
+      <section class="card bs-card err-card" role="alert">
         <p class="error">Couldn't load the browser engine settings: {browserLive.loadError}</p>
-        <button class="btn" onclick={() => void browserLive.load()}>Retry</button>
+        <button class="btn small" onclick={() => void browserLive.load()}><Icon name="refresh" size={12} /> Retry</button>
       </section>
     {:else if !st}
-      <section class="card"><p class="row-desc" role="status">Loading browser engine settings…</p></section>
+      <section class="card bs-card"><p class="row-desc" role="status">Loading browser engine settings…</p></section>
     {:else}
-      <section class="card" aria-labelledby="bs-engine">
+      <section class="card bs-card" aria-labelledby="bs-engine">
         <h2 id="bs-engine" class="row-title">Browser engine</h2>
         {#if !st.platform_supported}
           <p class="row-desc">The live browser engine runs on Apple silicon Macs only for now.</p>
@@ -181,35 +185,22 @@
         {/if}
       </section>
 
-      <section class="card" aria-labelledby="bs-headed">
-        <div class="row">
-          <div class="row-text">
-            <h2 id="bs-headed" class="row-title">Show the window on this Mac</h2>
-            <span class="row-desc">
-              Opens the live browser as a visible Chrome window on the Mac running Otto, as well as
-              streaming it. Needs Chrome for Testing. Off by default.
-            </span>
-          </div>
-          <div class="row-controls">
-            <input
-              type="checkbox"
-              role="switch"
-              aria-labelledby="bs-headed"
-              aria-checked={st.settings.headed}
-              checked={st.settings.headed}
-              disabled={!isAdmin || saving || st.settings.build !== 'chrome'}
-              title={st.settings.build !== 'chrome' ? 'Needs Chrome for Testing' : undefined}
-              onchange={(e) => void save({ headed: (e.currentTarget as HTMLInputElement).checked })}
-            />
-          </div>
-        </div>
+      <section class="card bs-card toggle-card">
+        <SettingToggle
+          label="Show the window on this Mac"
+          hint="Opens the live browser as a visible Chrome window on the Mac running Otto, as well as streaming it. Needs Chrome for Testing. Off by default."
+          checked={st.settings.headed}
+          disabled={!isAdmin || saving || st.settings.build !== 'chrome'}
+          title={!isAdmin ? 'Only a Browser admin can change this' : st.settings.build !== 'chrome' ? 'Needs Chrome for Testing' : undefined}
+          onchange={(v) => save({ headed: v })}
+        />
       </section>
 
-      <section class="card" aria-labelledby="bs-downloads">
-        <div class="row">
+      <section class="card bs-card" aria-labelledby="bs-downloads">
+        <div class="bs-row">
           <div class="row-text">
-            <h2 id="bs-downloads" class="row-title">Files pages download</h2>
-            <span class="row-desc">Kept in a quarantine folder on the Mac running Otto and never opened, or refused.</span>
+            <h2 id="bs-downloads" class="row-title">Downloads from web pages</h2>
+            <span class="row-desc">Keep them in a quarantine folder on the Mac running Otto (never opened), or block them.</span>
           </div>
           <div class="row-controls">
             <select
@@ -228,12 +219,12 @@
 
       <!-- A running Chromium is reused (engine, window and download policy are
            fixed at launch) until it has had no tabs for about a minute. -->
-      <p class="row-desc">
+      <p class="row-desc note">
         Engine, window and download changes apply the next time the live browser starts. One that is
         already running keeps its settings until all its tabs have been closed for about a minute.
       </p>
       {#if !isAdmin}
-        <p class="row-desc">Only a Browser admin can change the engine settings.</p>
+        <p class="row-desc note">Only a Browser admin can change the engine settings.</p>
       {/if}
       {#if saveError}<p class="error" role="alert">Couldn't save: {saveError}</p>{/if}
     {/if}
@@ -247,20 +238,27 @@
     height: 100%;
     min-height: 0;
   }
-  .section-intro {
-    margin: 0 0 16px;
-    font-size: var(--fs-m);
-    line-height: 1.5;
-    color: var(--text-dim);
-  }
-  .card {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface);
+  .bs-card {
+    max-width: 720px;
     padding: 14px 16px;
     margin-bottom: 12px;
   }
-  .row {
+  .note {
+    max-width: 720px;
+  }
+  .toggle-card {
+    padding-block: 6px;
+  }
+  .err-card {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .err-card .error {
+    margin: 0;
+  }
+  .bs-row {
     display: flex;
     align-items: center;
     gap: 16px;

@@ -266,7 +266,7 @@
     border: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
   .tb-btn:hover {
@@ -282,7 +282,7 @@
   }
   .exp-hint {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text-dim);
   }
@@ -293,7 +293,7 @@
   }
   .exp-label {
     flex: 0 0 76px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .exp-select,
@@ -301,7 +301,7 @@
     flex: 1;
     min-width: 0;
     padding: 6px 9px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
@@ -323,7 +323,7 @@
     flex: 1;
   }
   .exp-dest {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     padding: 6px 9px;
     border: 1px dashed var(--border);
@@ -361,7 +361,7 @@
     100% { left: 100%; }
   }
   .exp-prog-text {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   @media (prefers-reduced-motion: reduce) {

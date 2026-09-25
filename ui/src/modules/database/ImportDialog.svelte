@@ -286,7 +286,7 @@
   }
   .imp-hint {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.5;
   }
@@ -297,7 +297,7 @@
   }
   .imp-label {
     flex: 0 0 84px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .imp-select,
@@ -305,7 +305,7 @@
     flex: 1;
     height: 30px;
     padding: 0 8px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface);
@@ -325,7 +325,7 @@
     gap: 4px;
     height: 30px;
     padding: 0 9px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
@@ -338,7 +338,7 @@
     border-color: var(--accent);
   }
   .imp-dest {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     padding: 6px 8px;
     background: var(--surface-2);
@@ -372,7 +372,7 @@
     }
   }
   .imp-prog-text {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .imp-prog-text.ok {

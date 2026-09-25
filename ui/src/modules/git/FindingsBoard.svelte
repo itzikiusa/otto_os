@@ -7,6 +7,7 @@
   // (GET /findings/{id}). Filters by status + severity; a header with counts and a
   // Proof Pack button. Subscribes to the finding WS bus and refetches on match —
   // the same pattern ReviewPanel uses for review_changed.
+  import Icon from '../../lib/components/Icon.svelte';
   import { listFindings, getFinding } from '../../lib/api/client';
   import type {
     Finding,
@@ -222,16 +223,16 @@
             {#if f.requires_human_approval && !f.approved_at}
               <span class="chip fb-gate-chip">needs approval</span>
             {/if}
-            <span class="fb-title">{f.title || f.body.split('\n')[0]}</span>
+            <span class="fb-title" title={f.title || f.body.split('\n')[0]}>{f.title || f.body.split('\n')[0]}</span>
             <span class="grow"></span>
-            <span class="dim fb-caret">{isOpen ? '▾' : '▸'}</span>
+            <span class="dim fb-caret" aria-hidden="true"><Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} /></span>
           </button>
 
           <div class="fb-meta">
             {#if f.category}<span class="fb-cat">{f.category}</span>{/if}
             {#if loc(f)}<span class="mono fb-loc">{loc(f)}</span>{/if}
             {#if f.reviewer}<span class="dim fb-reviewer">· {f.reviewer}</span>{/if}
-            {#if f.occurrence_count > 1}<span class="dim">· seen ×{f.occurrence_count}</span>{/if}
+            {#if f.occurrence_count > 1}<span class="dim">· seen {f.occurrence_count} times</span>{/if}
             <span class="grow"></span>
             {#if f.linked_commit}<span class="chip fb-artifact">commit {f.linked_commit.slice(0, 9)}</span>{/if}
             {#if f.linked_test}<span class="chip fb-artifact" title={f.linked_test}>test</span>{/if}
@@ -272,7 +273,7 @@
               <div class="fb-field">
                 <span class="fb-field-label">Timeline</span>
                 {#if detailLoading[f.id] && !detail}
-                  <p class="dim" style="font-size:11.5px">Loading…</p>
+                  <p class="dim" style="font-size: var(--fs-xs)">Loading…</p>
                 {:else if detail && detail.events.length > 0}
                   <ul class="fb-timeline">
                     {#each detail.events as ev (ev.id)}
@@ -283,7 +284,7 @@
                     {/each}
                   </ul>
                 {:else if detail}
-                  <p class="dim" style="font-size:11.5px">No events yet.</p>
+                  <p class="dim" style="font-size: var(--fs-xs)">No events yet.</p>
                 {/if}
               </div>
 
@@ -317,9 +318,9 @@
     gap: 8px;
     flex-wrap: wrap;
   }
-  .fb-count { font-size: 12.5px; font-weight: 600; }
+  .fb-count { font-size: var(--fs-s); font-weight: 600; }
   .fb-hchip { font-size: var(--fs-xs); }
-  .fb-empty { font-size: 12.5px; padding: 12px 0; }
+  .fb-empty { font-size: var(--fs-s); padding: 12px 0; }
 
   /* Filters */
   .fb-filters { display: flex; flex-direction: column; gap: 6px; }
@@ -330,7 +331,7 @@
     flex-wrap: wrap;
   }
   .fb-filter-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
     width: 56px;
@@ -341,7 +342,7 @@
     border: 1px solid var(--border);
     color: var(--text-dim);
     border-radius: 999px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 2px 9px;
     cursor: pointer;
     text-transform: capitalize;
@@ -359,7 +360,7 @@
   /* Cards */
   .fb-list { display: flex; flex-direction: column; gap: 8px; }
   .fb-card { padding: 8px 12px; }
-  .fb-regressed { border-color: color-mix(in srgb, var(--status-warn) 45%, var(--border)); }
+  .fb-regressed { border-color: color-mix(in srgb, var(--warning) 45%, var(--border)); }
   .fb-card-head {
     display: flex;
     align-items: center;
@@ -373,20 +374,20 @@
     flex-wrap: wrap;
     color: var(--text);
   }
-  .fb-title { font-size: 12.5px; font-weight: 600; min-width: 0; }
-  .fb-caret { font-size: 11px; }
+  .fb-title { font-size: var(--fs-s); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fb-caret { display: inline-flex; flex-shrink: 0; }
   .fb-meta {
     display: flex;
     align-items: center;
     gap: 6px;
     flex-wrap: wrap;
     margin-top: 5px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .fb-cat {
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     color: var(--accent-text);
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     padding: 1px 6px;
     text-transform: capitalize;
   }
@@ -397,7 +398,7 @@
     white-space: nowrap;
     max-width: 320px;
   }
-  .fb-reviewer { font-size: 11px; }
+  .fb-reviewer { font-size: var(--fs-xs); }
   .fb-artifact {
     font-size: var(--fs-xs);
     background: color-mix(in srgb, var(--success) 16%, transparent);
@@ -407,13 +408,13 @@
   .fb-jira:hover { text-decoration: underline; }
   .fb-regress-chip {
     font-size: var(--fs-xs);
-    background: color-mix(in srgb, var(--status-warn) 18%, transparent);
-    color: var(--status-warn);
+    background: color-mix(in srgb, var(--warning) 18%, transparent);
+    color: var(--warning);
   }
   .fb-gate-chip {
     font-size: var(--fs-xs);
-    background: color-mix(in srgb, var(--status-warn) 20%, transparent);
-    color: var(--status-warn);
+    background: color-mix(in srgb, var(--warning) 20%, transparent);
+    color: var(--warning);
   }
 
   /* Expanded detail */
@@ -428,26 +429,26 @@
   .fb-field { display: flex; flex-direction: column; gap: 3px; }
   .fb-field-label {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0.05em;
     text-transform: uppercase;
     color: var(--text-dim);
   }
-  .fb-field-text { margin: 0; font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
+  .fb-field-text { margin: 0; font-size: var(--fs-s); line-height: 1.5; white-space: pre-wrap; }
   .fb-pre {
     margin: 0;
     padding: 6px 8px;
     background: var(--surface-2);
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     font-family: var(--font-mono, monospace);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.45;
     white-space: pre-wrap;
     overflow-x: auto;
     max-height: 200px;
   }
   .fb-timeline { list-style: none; margin: 0; padding: 0; }
-  .fb-event { font-size: 11px; line-height: 1.55; display: flex; gap: 6px; flex-wrap: wrap; }
+  .fb-event { font-size: var(--fs-xs); line-height: 1.55; display: flex; gap: 6px; flex-wrap: wrap; }
   .fb-event-kind { font-weight: 600; text-transform: capitalize; }
 
   .grow { flex: 1; }
@@ -457,15 +458,15 @@
   /* Status chips (shared vocabulary; high-contrast light-green + black for verified). */
   .chip.status-open { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
   .chip.status-accepted { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-text); }
-  .chip.status-fixed { background: color-mix(in srgb, var(--status-warn) 18%, transparent); color: var(--status-warn); }
-  .chip.status-verified { background: var(--success-soft); color: var(--success); font-weight: 700; }
+  .chip.status-fixed { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
+  .chip.status-verified { background: var(--success-soft); color: var(--success); font-weight: 600; }
   .chip.status-false_positive { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
   .chip.status-waived { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
 
   /* Severity chips (red for blocker severities critical/high). */
-  .chip.sev2-critical { background: var(--status-exited); color: #fff; font-weight: 700; }
-  .chip.sev2-high { background: color-mix(in srgb, var(--status-exited) 20%, transparent); color: var(--status-exited); }
-  .chip.sev2-medium { background: color-mix(in srgb, var(--status-warn) 18%, transparent); color: var(--status-warn); }
+  .chip.sev2-critical { background: var(--danger-soft); color: var(--danger); border-color: color-mix(in srgb, var(--danger) 55%, transparent); font-weight: 600; }
+  .chip.sev2-high { background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }
+  .chip.sev2-medium { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
   .chip.sev2-low { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-text); }
   .chip.sev2-info { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
 

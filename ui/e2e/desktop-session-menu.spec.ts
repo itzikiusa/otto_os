@@ -73,7 +73,7 @@ test('session ⋯ menu stays inside the viewport on a bottom-row tile', async ({
   await expectFullyInViewport(page, menu, 'session ⋯ menu');
 
   // The first action is visible…
-  await expect(menu.getByRole('menuitem', { name: 'Rename…' })).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: 'Rename', exact: true })).toBeVisible();
   // …and the LAST action (Delete) is reachable (menu scrolls internally).
   const del = menu.getByRole('menuitem', { name: 'Delete' });
   await del.scrollIntoViewIfNeeded();

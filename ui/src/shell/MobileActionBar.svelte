@@ -128,7 +128,7 @@
   }
 
   .ab-label {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 500;
     line-height: 1;
     overflow: hidden;

@@ -7,6 +7,8 @@
   import { renderMarkdown } from '../../lib/md';
   import DiffView from '../../lib/components/DiffView.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { confirmOutward } from '../../lib/confirmOutward';
   import type { ProductStoryVersion } from './types';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
@@ -110,7 +112,11 @@
     return best;
   }
 
+  /** A failed first load — inline with Retry, never as "no suggestion yet". */
+  let loadError = $state<string | null>(null);
+
   async function initialLoad(): Promise<void> {
+    loadError = null;
     try {
       await product.loadVersions();
       const suggested = latestSuggested();
@@ -118,7 +124,7 @@
         await loadVersionBodies(suggested);
       }
     } catch (e) {
-      console.error('[RewriteTab] initialLoad error', e);
+      loadError = loadErrorText(e);
     }
   }
 
@@ -135,7 +141,8 @@
         sourceVersion = fullSource;
       }
     } catch (e) {
-      toasts.error('Could not load version bodies', product.errMsg(e));
+      if (suggestedVersion) toasts.error('Could not load version bodies', product.errMsg(e));
+      else loadError = loadErrorText(e);
     } finally {
       loadingBodies = false;
     }
@@ -240,8 +247,10 @@
     </section>
 
     <!-- ── Suggested version display ────────────────────────────────────────── -->
-    {#if loadingBodies}
-      <div class="muted">Loading version content…</div>
+    {#if loadError && !suggestedVersion}
+      <LoadState what="the suggested rewrite" loading={loadingBodies} error={loadError} empty onretry={() => void initialLoad()} />
+    {:else if loadingBodies && !suggestedVersion}
+      <div class="muted">Loading the suggested rewrite…</div>
     {:else if suggestedVersion}
       <!-- Version metadata -->
       <section class="rw-card version-meta">
@@ -341,7 +350,7 @@
 <style>
   .muted {
     padding: 24px 0;
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     font-style: italic;
   }
@@ -424,7 +433,7 @@
     color: var(--text-dim);
   }
   .cn-body {
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text);
     line-height: 1.5;
     font-style: italic;
@@ -442,7 +451,7 @@
     flex: 1;
     min-width: 220px;
     margin: 0;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text-dim);
   }
@@ -478,7 +487,7 @@
   }
   .pane-label {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     padding: 2px 8px;
@@ -517,7 +526,7 @@
 
   /* ── Markdown body ───────────────────────────────────────────── */
   .md-body {
-    font-size: 13.5px;
+    font-size: var(--fs-m);
     line-height: 1.65;
     color: var(--text);
   }
@@ -526,7 +535,7 @@
   .md-body :global(h3),
   .md-body :global(h4) {
     margin: 1.2em 0 0.4em;
-    font-weight: 700;
+    font-weight: 600;
     line-height: 1.25;
     color: var(--text);
   }
@@ -549,7 +558,7 @@
     font-size: 0.88em;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     padding: 1px 5px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
   }
   .md-body :global(pre) {
     background: var(--surface);

@@ -73,7 +73,7 @@
       await swarm.putStandingGoals(detail.id, draftGoals);
       toasts.success('Standing goals saved');
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't save the standing goals", e instanceof Error ? e.message : String(e));
     } finally {
       savingGoals = false;
     }
@@ -87,7 +87,7 @@
     try {
       await swarm.updateSwarm(detail.id, { config: cfg } as Partial<Swarm>);
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't save the team skills", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -139,7 +139,7 @@
       triggerForm = null;
       triggerEditId = null;
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't save the trigger", e instanceof Error ? e.message : String(e));
     } finally {
       savingTrigger = false;
     }
@@ -148,7 +148,7 @@
     try {
       await swarm.updateTrigger(t.id, { enabled: !t.enabled });
     } catch (e) {
-      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't update the trigger", e instanceof Error ? e.message : String(e));
     }
   }
   async function delTrigger(t: SwarmChannelTrigger) {
@@ -162,7 +162,7 @@
       try {
         await swarm.deleteTrigger(t.id);
       } catch (e) {
-        toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+        toasts.error("Couldn't delete the trigger", e instanceof Error ? e.message : String(e));
       }
     }
   }
@@ -175,9 +175,23 @@
 </script>
 
 <Modal title="Swarm settings{detail ? ` — ${detail.name}` : ''}" width={640} {onclose}>
-  <div class="tabs">
+  <div
+    class="tabs"
+    role="tablist"
+    aria-label="Swarm settings section"
+    tabindex="-1"
+    onkeydown={(e) => {
+      const i = TABS.findIndex((t) => t.id === tab);
+      const n = e.key === 'ArrowRight' ? i + 1 : e.key === 'ArrowLeft' ? i - 1 : e.key === 'Home' ? 0 : e.key === 'End' ? TABS.length - 1 : null;
+      if (n === null) return;
+      e.preventDefault();
+      const j = (n + TABS.length) % TABS.length;
+      tab = TABS[j].id;
+      (e.currentTarget as HTMLElement).querySelectorAll<HTMLButtonElement>('[role="tab"]')[j]?.focus();
+    }}
+  >
     {#each TABS as t (t.id)}
-      <button class="tab" class:active={tab === t.id} onclick={() => (tab = t.id)}>
+      <button class="tab" class:active={tab === t.id} role="tab" aria-selected={tab === t.id} tabindex={tab === t.id ? 0 : -1} onclick={() => (tab = t.id)}>
         <Icon name={t.icon} size={13} /> {t.label}
       </button>
     {/each}
@@ -202,7 +216,7 @@
           <div class="row-item">
             <div class="ri-main">
               <span class="ri-title">{g.title}</span>
-              {#if g.blocking}<span class="blocking">blocking</span>{/if}
+              {#if g.blocking}<span class="blocking" title="Blocks task completion until it passes">Blocking</span>{/if}
               {#if g.metric}<span class="dim">· {g.metric}{g.comparator ? ` ${g.comparator}` : ''}{g.target_value != null ? ` ${g.target_value}` : ''}</span>{/if}
             </div>
             <button class="icon-btn small" onclick={() => editGoal(i)} aria-label="Edit standing goal" title="Edit standing goal"><Icon name="edit" size={13} /></button>
@@ -264,8 +278,8 @@
           {#each swarm.triggers as t (t.id)}
             <div class="row-item">
               <div class="ri-main">
-                <span class="tchip">{t.channel}</span>
-                <span class="ri-title">{t.keyword || 'any'}</span>
+                <span class="tchip">{t.channel === 'webhook' ? 'Webhook' : t.channel === 'slack' ? 'Slack' : t.channel === 'telegram' ? 'Telegram' : t.channel}</span>
+                <span class="ri-title">{t.keyword || 'Any message'}</span>
                 <span class="dim">{t.match_chat ? `in ${t.match_chat}` : 'any chat'}</span>
                 {#if t.auto_start}<span class="dim">· auto-start</span>{/if}
                 {#if t.reply}<span class="dim">· reply</span>{/if}
@@ -311,7 +325,7 @@
     background: transparent;
     color: var(--text-dim);
     padding: 6px 10px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
   .tab:hover {
@@ -322,7 +336,7 @@
     border-bottom-color: var(--accent);
   }
   .hint {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     margin: 0 0 10px;
   }
@@ -352,7 +366,7 @@
     gap: 6px;
     flex: 1;
     min-width: 0;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     flex-wrap: wrap;
   }
   .ri-title {
@@ -380,7 +394,7 @@
     color: var(--text-dim);
     border-radius: 999px;
     padding: 1px 10px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .toggle.on {
@@ -405,7 +419,7 @@
     gap: 6px;
   }
   .field label {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .toggles {
@@ -417,7 +431,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .form-actions {
     display: flex;

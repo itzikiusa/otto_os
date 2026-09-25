@@ -68,7 +68,7 @@
     align-items: center;
     gap: 0.32rem;
     color: var(--text-dim);
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
   }
   .bubble {
     display: inline-flex;
@@ -91,6 +91,8 @@
     position: relative;
     flex: none;
   }
+  /* The flow reads inline-start → inline-end: flip the arrow in RTL. */
+  :global([dir='rtl']) .arrow { transform: scaleX(-1); }
   .arrow::after {
     content: '';
     position: absolute;

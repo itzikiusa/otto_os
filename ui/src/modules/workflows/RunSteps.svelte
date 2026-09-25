@@ -132,7 +132,7 @@
       await copyTextOrThrow(text);
       toasts.success(`Copied ${label}`);
     } catch {
-      toasts.error('Copy failed');
+      toasts.error('Couldn’t copy to the clipboard', 'Select the text and copy it manually.');
     }
   }
   function asText(out: unknown): string {
@@ -165,7 +165,7 @@
       onRunUpdated?.(nr); // flips the run back to running; WS keeps it live
       toasts.info(includeDownstream ? 'Re-running from step…' : 'Step retrying…', nodeName(ns.node_id));
     } catch (e) {
-      toasts.error('Retry failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t retry the step', e instanceof Error ? e.message : String(e));
     } finally {
       retryingId = null;
     }
@@ -522,7 +522,7 @@
     flex-basis: 100%;
     margin-top: -2px;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .links {
     display: flex;
@@ -569,7 +569,7 @@
     padding: 9px 12px;
     cursor: pointer;
     list-style: none;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   summary::-webkit-details-marker {
     display: none;
@@ -595,7 +595,7 @@
   }
   .err {
     color: var(--danger);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     background: var(--danger-soft);
     padding: 7px 9px;
     border-radius: var(--radius-s);
@@ -604,7 +604,7 @@
   .text,
   .json {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface);
     border-radius: var(--radius-s);
@@ -687,7 +687,7 @@
   .zh {
     display: flex;
     align-items: center;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -695,7 +695,7 @@
   }
   .zbig {
     font-family: var(--font-mono);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     line-height: 1.5;
     color: var(--text);
     background: var(--surface);
@@ -709,7 +709,7 @@
     word-break: break-word;
   }
   .muted {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   /* Leading step dot — the shared run vocabulary (lib/status.ts): running is

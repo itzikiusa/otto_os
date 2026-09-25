@@ -22,6 +22,12 @@
   import Icon from '../../lib/components/Icon.svelte';
   import type { AttachedIssue } from '../../lib/api/types';
 
+  // `active` = this panel is the one on screen. The right panel keeps the
+  // browser MOUNTED while another tab (or the collapsed strip) is showing, so
+  // its tabs, pages and take-over annotations survive a tab switch; a native
+  // webview always paints above the HTML, so a hidden panel must hide them.
+  let { active = true }: { active?: boolean } = $props();
+
   const session = $derived(ws.activeSession);
   const attachedIssue = $derived(
     (session?.meta?.issue as AttachedIssue | undefined) ?? null,
@@ -142,7 +148,7 @@
     const list = tabs; // reactive dep
     const tab = activeTab; // reactive dep
     const overlay = ui.overlayOpen || ctxMenu.open;
-    const showActive = useNative && !!tab && !!tab.url && !overlay;
+    const showActive = active && useNative && !!tab && !!tab.url && !overlay;
     for (const t of list) {
       if (!showActive || !tab || t.id !== tab.id) void nativeBrowser.hide(t.id);
     }
@@ -160,7 +166,7 @@
 
   // Keep the active tab's webview aligned with the panel as it resizes / moves.
   $effect(() => {
-    if (!nativeBrowserAvailable || !useNative || !activeTab?.url || !hostEl) return;
+    if (!active || !nativeBrowserAvailable || !useNative || !activeTab?.url || !hostEl) return;
     const id = activeId;
     const _z = ui.zoom; // re-align immediately when the page zoom changes
     const sync = (): void => {
@@ -671,7 +677,7 @@
     border-bottom: none;
     border-radius: var(--radius-s) var(--radius-s) 0 0;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
     white-space: nowrap;
     transition: background 120ms ease-out, color 120ms ease-out;
@@ -741,7 +747,7 @@
     flex: 1;
     min-width: 0;
     height: 28px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .tb-btn {
     width: 28px;
@@ -805,7 +811,7 @@
     border: none;
     background: transparent;
     color: var(--accent-text);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .ellipsis {
@@ -822,7 +828,7 @@
   }
   .hint {
     margin: 0;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1.5;
   }
@@ -866,12 +872,12 @@
   }
   .ql-key {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     color: var(--accent-text);
   }
   .ql-label {
-    font-size: 12px;
+    font-size: var(--fs-s);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -883,7 +889,7 @@
     position: absolute;
     z-index: 200;
     width: 300px;
-    background: var(--surface, #1e1e2e);
+    background: var(--surface);
     border: 1px solid var(--accent);
     border-radius: var(--radius-s, 6px);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
@@ -907,7 +913,7 @@
   .popover-textarea {
     width: 100%;
     resize: vertical;
-    font-size: 12px;
+    font-size: var(--fs-s);
     min-height: 64px;
     box-sizing: border-box;
   }
@@ -926,14 +932,14 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    background: var(--surface, #1e1e2e);
+    background: var(--surface);
     border: 1px solid var(--accent);
     border-radius: var(--radius-s, 6px);
     padding: 5px 8px;
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
   }
   .annot-count {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 
@@ -944,7 +950,7 @@
     border: none;
     border-radius: var(--radius-s, 4px);
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 5px 10px;
     font-weight: 600;
   }
@@ -958,7 +964,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s, 4px);
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 5px 10px;
   }
   .btn-ghost:hover {
@@ -966,7 +972,7 @@
     border-color: var(--text-dim);
   }
   .btn-small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 3px 8px;
   }
 </style>

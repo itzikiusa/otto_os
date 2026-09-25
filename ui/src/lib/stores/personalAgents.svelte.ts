@@ -12,10 +12,16 @@ import type {
   PersonalAgentRun,
   PersonalAgentSchedule,
 } from '../api/types';
+import { loadErrorText } from '../loadError';
 
 class PersonalAgentsStore {
   agents: PersonalAgent[] = $state([]);
   loadingAgents = $state(false);
+  /** Why the last agents / rooms list load failed (null = it didn't). A
+   *  failed load keeps what was on screen and says so inline (LoadState),
+   *  instead of falling through to "No personal agents yet". */
+  agentsError: string | null = $state(null);
+  roomsError: string | null = $state(null);
   /** agent_id → its schedules (loaded with the list so cards can show next-run). */
   schedulesByAgent: Record<string, PersonalAgentSchedule[]> = $state({});
   /** agent_id → its recent runs (loaded on demand when the Runs tab opens). */
@@ -24,6 +30,9 @@ class PersonalAgentsStore {
   /** room_id → its messages, oldest first (appended via `after` paging). */
   messagesByRoom: Record<string, AgentRoomMessage[]> = $state({});
   private wsId = '';
+  /** Workspace each list was last loaded for (a late reply for another is dropped). */
+  private agentsWs = '';
+  private roomsWs = '';
 
   agent(id: string): PersonalAgent | undefined {
     return this.agents.find((a) => a.id === id);
@@ -39,12 +48,16 @@ class PersonalAgentsStore {
   }
 
   async loadAgents(workspaceId: string): Promise<void> {
+    if (this.agentsWs !== workspaceId) this.agents = [];
     this.wsId = workspaceId;
+    this.agentsWs = workspaceId;
     this.loadingAgents = true;
+    this.agentsError = null;
     try {
-      this.agents = await personalAgentsApi.list(workspaceId);
-    } catch {
-      this.agents = [];
+      const list = await personalAgentsApi.list(workspaceId);
+      if (this.agentsWs === workspaceId) this.agents = list;
+    } catch (e) {
+      if (this.agentsWs === workspaceId) this.agentsError = loadErrorText(e);
     } finally {
       this.loadingAgents = false;
     }
@@ -124,11 +137,15 @@ class PersonalAgentsStore {
   // -- Rooms ----------------------------------------------------------------
 
   async loadRooms(workspaceId: string): Promise<void> {
+    if (this.roomsWs !== workspaceId) this.rooms = [];
     this.wsId = workspaceId;
+    this.roomsWs = workspaceId;
+    this.roomsError = null;
     try {
-      this.rooms = await personalAgentsApi.rooms(workspaceId);
-    } catch {
-      this.rooms = [];
+      const rooms = await personalAgentsApi.rooms(workspaceId);
+      if (this.roomsWs === workspaceId) this.rooms = rooms;
+    } catch (e) {
+      if (this.roomsWs === workspaceId) this.roomsError = loadErrorText(e);
     }
   }
 

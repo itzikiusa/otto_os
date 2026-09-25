@@ -350,6 +350,7 @@ export const KEYMAP: ShortcutGroup[] = [
       { keys: '⌘⇧→', label: 'Navigate forward' },
       { keys: '⌘\\', label: 'Open or close the side-by-side pane' },
       { keys: '⌥-click', label: 'A sidebar item: open it side by side' },
+      { keys: '⌥↑ / ⌥↓', label: 'Sidebar: move a Favorite (any row while customizing)' },
     ],
   },
   {

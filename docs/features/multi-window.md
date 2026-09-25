@@ -67,7 +67,7 @@ ui/src/lib/win.ts                          per-window identity + key namespacing
 ## Side by side
 
 Inside one window, any two sidebar sections can sit side by side — e.g. Agents
-beside Connections. Right-click a sidebar row → **Open Side by Side** (or
+beside Connections. Right-click a sidebar row → **Open side by side** (or
 ⌥-click it, or `⌘\` for a picker); `⌘\` again, or the pane's ✕, closes it.
 
 ```

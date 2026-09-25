@@ -64,7 +64,7 @@ test('New Session sheet lists the custom provider', async ({ page }) => {
 
   // Open the ⌘T sheet; fall back to the TabBar + button if the shortcut doesn't
   // reach the app in this browser build (mirrors desktop-new-session-keys).
-  const dialog = page.locator('.sheet[role="dialog"][aria-label="New Session"]');
+  const dialog = page.locator('.sheet[role="dialog"][aria-label="New session"]');
   await page.keyboard.press('Meta+t');
   if (!(await dialog.isVisible().catch(() => false))) {
     await page.getByTitle('New session (⌘T)').click();
@@ -260,7 +260,7 @@ test('Excluding a provider hides it from /meta and every picker', async ({ page 
 
     // The New Session sheet drops the agy card while keeping claude + grok.
     await openPage(page, 'agents');
-    const dialog = page.locator('.sheet[role="dialog"][aria-label="New Session"]');
+    const dialog = page.locator('.sheet[role="dialog"][aria-label="New session"]');
     await page.keyboard.press('Meta+t');
     if (!(await dialog.isVisible().catch(() => false))) {
       await page.getByTitle('New session (⌘T)').click();

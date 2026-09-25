@@ -120,14 +120,14 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .rd-only {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .grow {
     flex: 1;
@@ -141,14 +141,14 @@
   .rd-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .rd-table th {
     position: sticky;
     top: 0;
     text-align: left;
     padding: 5px 8px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
     background: var(--surface-2);

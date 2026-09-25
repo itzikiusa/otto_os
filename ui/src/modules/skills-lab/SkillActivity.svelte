@@ -15,6 +15,7 @@
   import { runStatus } from '../../lib/status';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import Sparkline from '../../lib/components/Sparkline.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import { sourceLabel, type SkillGroup } from './skillGroups';
@@ -25,8 +26,10 @@
     wsId: string;
     onevaluate: () => void;
     onreview: () => void;
+    /** Open one evaluation run in the Evaluator. */
+    onopenrun?: (id: string) => void;
   }
-  let { group, view, wsId, onevaluate, onreview }: Props = $props();
+  let { group, view, wsId, onevaluate, onreview, onopenrun }: Props = $props();
 
   let evals = $state<SkillEval[] | null>(null);
   let reviews = $state<SkillReview[] | null>(null);
@@ -73,12 +76,6 @@
   // The shared run vocabulary (lib/status.ts). A `done` run finished — it
   // didn't necessarily *pass* (a 20/100 run is still `done`), so it must not
   // read "Passed".
-  function statusLabel(s: string): string {
-    return runStatus(s).label;
-  }
-  function statusTone(s: string): string {
-    return runStatus(s).tone;
-  }
   function fmtScore(v: number): string {
     return `${Math.round(v)}`;
   }
@@ -163,7 +160,7 @@
       <div class="card stat">
         <div class="stat-label">Last run</div>
         <div class="stat-value small" title={latest ? new Date(latest.created_at).toLocaleString() : ''}>{latest ? rel(latest.created_at) : '—'}</div>
-        {#if latest}<div class="stat-sub"><span class="chip tone-{statusTone(latest.status)}">{statusLabel(latest.status)}</span></div>{/if}
+        {#if latest}<div class="stat-sub"><StatusBadge status={runStatus(latest.status)} /></div>{/if}
       </div>
     </div>
     <div class="list-head">
@@ -172,12 +169,15 @@
     </div>
     <ul class="rows">
       {#each [...chrono].reverse() as e (e.id)}
-        <li class="rowi">
-          <span class="chip tone-{statusTone(e.status)}">{statusLabel(e.status)}</span>
-          <span class="grow ellipsis" title={e.task}>{e.task || e.summary || 'Evaluation'}</span>
-          <span class="dim mono">{e.impl_cli}</span>
-          <span class="score">{scoreOf(e) != null ? fmtScore(scoreOf(e)!) : '—'}</span>
-          <span class="dim when" title={new Date(e.created_at).toLocaleString()}>{rel(e.created_at)}</span>
+        <li>
+          <button class="rowi run-row" onclick={() => onopenrun?.(e.id)} title="Open this run in the Evaluator" disabled={!onopenrun}>
+            <StatusBadge status={runStatus(e.status)} variant="text" />
+            <span class="grow ellipsis" title={e.task}>{e.task || e.summary || 'Evaluation'}</span>
+            <span class="dim mono">{e.impl_cli}</span>
+            <span class="score">{scoreOf(e) != null ? fmtScore(scoreOf(e)!) : '—'}</span>
+            <span class="dim when" title={new Date(e.created_at).toLocaleString()}>{rel(e.created_at)}</span>
+            <Icon name="chevronRight" size={12} />
+          </button>
         </li>
       {/each}
     </ul>
@@ -311,8 +311,29 @@
     font-size: var(--fs-s);
     min-width: 0;
   }
-  .rowi + .rowi {
+  .rowi + .rowi,
+  .rows > li + li {
     border-top: 1px solid var(--border);
+  }
+  .run-row {
+    width: 100%;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: var(--fs-s);
+    text-align: start;
+    cursor: pointer;
+  }
+  .run-row:hover:not(:disabled) {
+    background: var(--hover);
+  }
+  .run-row:disabled {
+    cursor: default;
+  }
+  .run-row > :global(svg) {
+    color: var(--text-dim);
+    flex: none;
   }
   .src-icon {
     display: inline-flex;
@@ -353,21 +374,6 @@
   .note :global(svg) {
     margin-top: 2px;
     flex: none;
-  }
-  .chip.tone-success {
-    color: var(--success);
-    background: var(--success-soft);
-    border-color: color-mix(in srgb, var(--success) 35%, transparent);
-  }
-  .chip.tone-danger {
-    color: var(--danger);
-    background: var(--danger-soft);
-    border-color: color-mix(in srgb, var(--danger) 35%, transparent);
-  }
-  .chip.tone-info {
-    color: var(--info);
-    background: var(--info-soft);
-    border-color: color-mix(in srgb, var(--info) 35%, transparent);
   }
   .chip.tone-warning {
     color: var(--warning);

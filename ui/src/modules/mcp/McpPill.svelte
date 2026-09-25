@@ -11,7 +11,11 @@
   }
   let { kind, value, small = false }: Props = $props();
 
-  const label = $derived((value ?? 'unknown').replace(/_/g, ' '));
+  // Sentence case ("Pending approval"), like every other status badge.
+  const label = $derived.by(() => {
+    const t = (value ?? 'unknown').replace(/_/g, ' ');
+    return t.charAt(0).toUpperCase() + t.slice(1);
+  });
 
   type Tone = 'ok' | 'warn' | 'bad' | 'neutral' | 'info';
   const tone: Tone = $derived.by((): Tone => {
@@ -56,25 +60,22 @@
     display: inline-block;
     font-size: var(--fs-xs);
     line-height: 1.5;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    padding: 1px 6px;
-    border-radius: 4px;
+    padding: 1px 7px;
+    border-radius: 999px;
     white-space: nowrap;
     background: color-mix(in srgb, var(--text-dim) 16%, transparent);
     color: var(--text-dim);
   }
   .pill.small {
     /* Table cells: tighter box, but never below the 11px readable floor. */
-    padding: 0 5px;
-    letter-spacing: 0.02em;
+    padding: 0 6px;
   }
   .pill.ok {
     background: var(--success-soft);
     color: var(--success);
   }
   .pill.warn {
-    background: color-mix(in srgb, var(--warning) 22%, transparent);
+    background: var(--warning-soft);
     color: var(--warning);
   }
   .pill.bad {

@@ -47,13 +47,13 @@
 
     <div class="actions">
       {#if canInstall}
-        <button class="primary" onclick={() => void install()} disabled={running || aws.installBusy}>
+        <button class="btn primary" onclick={() => void install()} disabled={running || aws.installBusy}>
           {running ? 'Installing…' : failed ? 'Retry install' : 'Install now'}
         </button>
       {:else}
         <span class="dim">Ask an administrator to install the CLI (Admin on <code>aws</code>).</span>
       {/if}
-      <button class="ghost" onclick={() => void aws.loadStatus()}>Check again</button>
+      <button class="btn" onclick={() => void aws.loadStatus()}>Check again</button>
     </div>
 
     {#if job?.log_tail}
@@ -99,17 +99,17 @@
   }
   h1 {
     margin: 0;
-    font-size: 18px;
+    font-size: var(--fs-xl);
   }
   .body {
     margin: 0;
     color: var(--text-dim);
-    font-size: 13px;
+    font-size: var(--fs-m);
     line-height: 1.5;
   }
   code {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .progress {
     height: 6px;
@@ -134,7 +134,7 @@
   }
   .status {
     margin: 0;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
   }
   .status.err {
@@ -146,30 +146,9 @@
     gap: 10px;
     flex-wrap: wrap;
   }
-  .primary {
-    padding: 7px 14px;
-    border-radius: var(--radius-m);
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: var(--accent-contrast);
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .primary:disabled {
-    opacity: 0.6;
-    cursor: default;
-  }
-  .ghost {
-    padding: 7px 12px;
-    border-radius: var(--radius-m);
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
-  }
   .dim {
     color: var(--text-dim);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .log-toggle {
     display: inline-flex;
@@ -179,7 +158,7 @@
     border: 0;
     background: transparent;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
     padding: 0;
   }
@@ -192,7 +171,7 @@
     background: var(--term-bg);
     color: #ddd;
     font-family: var(--font-mono);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     white-space: pre-wrap;
     word-break: break-all;
   }

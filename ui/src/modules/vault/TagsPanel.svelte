@@ -9,9 +9,9 @@
 </script>
 
 <div class="tags">
-  <input bind:value={filter} placeholder="Filter tags…" />
+  <input type="search" bind:value={filter} placeholder="Filter tags…" aria-label="Filter tags" />
   {#if vault.tags.length === 0}
-    <div class="dim">No tags yet</div>
+    <div class="dim">No tags yet. Add #tags in a note, or tags: in its frontmatter.</div>
   {/if}
   <div class="list">
     {#each shown as t (t.tag)}
@@ -35,15 +35,15 @@
   input {
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: 7px;
+    border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     padding: 6px 10px;
     width: 100%;
   }
   .dim {
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 4px 2px;
   }
   .list {
@@ -65,11 +65,11 @@
     background: var(--hover);
   }
   .tag {
-    color: var(--accent, #9ab4ff);
-    font-size: 12.5px;
+    color: var(--accent-text);
+    font-size: var(--fs-s);
   }
   .count {
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
 </style>

@@ -161,7 +161,7 @@
       toasts.info(`${label[0].toUpperCase()}${label.slice(1)} aborted`);
       onleave();
     } catch (e) {
-      toasts.error('Abort failed', e instanceof Error ? e.message : String(e));
+      toasts.error(`Couldn’t abort the ${label}`, e instanceof Error ? e.message : String(e));
     } finally {
       busy = '';
     }
@@ -191,12 +191,13 @@
         selected = null;
         toasts.info('Operation paused', result.note ?? 'Amend the current commit, then continue.');
       } else {
-        toasts.success('Merge completed', result.commit ? result.commit.slice(0, 8) : undefined);
+        const done = opName ?? 'merge';
+        toasts.success(`${done[0].toUpperCase()}${done.slice(1)} completed`, result.commit ? result.commit.slice(0, 8) : undefined);
         onleave();
       }
     } catch (e) {
       await reconcile();
-      toasts.error('Complete failed', e instanceof Error ? e.message : String(e));
+      toasts.error(`Couldn’t complete the ${opName ?? 'merge'}`, e instanceof Error ? e.message : String(e));
     } finally {
       busy = '';
     }
@@ -241,7 +242,7 @@
       <!-- LEFT: conflicted files -->
       <aside class="files-panel" class:mob-collapsed={isMobile && !secFilesOpen}>
         {#if !isMobile}
-          <div class="files-head">CONFLICTED FILES</div>
+          <div class="files-head">Conflicted files</div>
         {/if}
         {#if allFiles.length === 0}
           <div class="dim files-empty">No conflicted files.</div>
@@ -277,7 +278,7 @@
           <Icon name="file" size={13} />
           <span class="mob-detail-title">{selected.split('/').pop()}</span>
           <span class="grow"></span>
-          <span class="mob-back">↑ Files</span>
+          <span class="mob-back"><Icon name="chevronUp" size={12} /> Files</span>
         </button>
       {/if}
 
@@ -334,23 +335,23 @@
     flex-shrink: 0;
   }
   .head-title {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .head-source {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .chip {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 1px 6px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 18%, transparent);
     color: var(--accent-text);
   }
   .head-count {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
     padding: 2px 8px;
@@ -380,13 +381,14 @@
   .files-head {
     padding: 5px 12px;
     font-size: var(--fs-xs);
-    font-weight: 700;
-    letter-spacing: 0.05em;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
     color: var(--text-dim);
   }
   .files-empty {
     padding: 6px 12px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .file-row {
     display: flex;
@@ -397,7 +399,7 @@
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
     text-align: start;
     transition: background 100ms, color 100ms;
@@ -421,7 +423,7 @@
   .file-status {
     flex-shrink: 0;
     display: inline-flex;
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .file-name {
     flex: 1;
@@ -432,7 +434,7 @@
        path and breaks the RTL layout); the row title shows the full path on
        hover/tap anyway. */
     text-align: start;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .file-detail {
     flex: 1;
@@ -444,7 +446,7 @@
     display: grid;
     place-items: center;
     height: 100%;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
 
   .resolver-foot {
@@ -456,7 +458,7 @@
     flex-shrink: 0;
   }
   .foot-hint {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .dim {
     color: var(--text-dim);
@@ -476,7 +478,7 @@
     border-bottom: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 14px;
+    font-size: var(--fs-l);
     font-weight: 600;
     cursor: pointer;
     text-align: start;
@@ -487,8 +489,8 @@
     background: color-mix(in srgb, var(--accent) 10%, var(--surface-2));
   }
   .mob-sec-count {
-    font-size: 11px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     padding: 1px 7px;
     border-radius: 999px;
     background: var(--surface);
@@ -498,16 +500,19 @@
     background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
   }
   .mob-detail-title {
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--accent-text);
-    font-weight: 700;
+    font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
   }
   .mob-back {
-    font-size: 12px;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     flex-shrink: 0;
   }
@@ -541,12 +546,12 @@
       display: none;
     }
     .mobile .file-row {
-      font-size: 13px;
+      font-size: var(--fs-m);
       padding: 9px 12px;
       min-height: 40px;
     }
     .mobile .file-name {
-      font-size: 13px;
+      font-size: var(--fs-m);
     }
     .mobile .file-detail {
       flex: 1 1 auto;

@@ -2,6 +2,8 @@
   // PublishDialog — shared modal for both "Publish as Jira Story" and
   // "Publish as Confluence RFC" actions. Also used for "Convert RFC → Story".
   import Modal from '../../lib/components/Modal.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import { router } from '../../lib/router.svelte';
   import { api, ApiError } from '../../lib/api/client';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -231,7 +233,10 @@
       </div>
       <button class="btn small" onclick={() => { formError = ''; formErrorDetail = ''; void loadAccounts(); }}>Retry</button>
     {:else if accounts.length === 0}
-      <div class="no-accounts">No Jira or Confluence account yet. Add one in Settings → Integrations → Jira.</div>
+      <div class="no-accounts">No Jira or Confluence account is connected yet — add one to publish.</div>
+      <button class="btn small" onclick={() => { onclose(); router.go('settings/jira'); }}>
+        <Icon name="plus" size={12} /> Add account in Settings
+      </button>
     {:else}
       <!-- Account -->
       <div class="field">
@@ -394,11 +399,11 @@
 <style>
   .loading {
     padding: 12px 0;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .loading-inline {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     font-style: italic;
     padding: 4px 0;
@@ -407,7 +412,7 @@
     padding: 12px 14px;
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.5;
   }
@@ -418,7 +423,7 @@
     margin-bottom: 14px;
   }
   .label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 500;
     color: var(--text-dim);
     text-transform: uppercase;
@@ -437,7 +442,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     padding: 5px 9px;
     box-sizing: border-box;
     outline: none;
@@ -462,14 +467,14 @@
     background: color-mix(in srgb, var(--text-dim) 5%, transparent);
   }
   .pd-preview-title {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
   }
   .pd-preview-body {
     margin: 0;
     font-family: inherit;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.45;
     color: var(--text-dim);
     white-space: pre-wrap;
@@ -491,7 +496,7 @@
     overflow-wrap: anywhere;
   }
   .field-error {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--danger);
     margin-bottom: 8px;
     padding: 6px 10px;
@@ -505,7 +510,7 @@
     height: 32px;
     padding: 0 16px;
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 500;
     cursor: pointer;
     border: 1px solid var(--border);

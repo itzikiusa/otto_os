@@ -122,6 +122,34 @@ export function riskColor(r: RiskLevel): string {
   }
 }
 
+const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/i;
+
+/** True for a raw ULID — an id, never primary text (patterns.md §6). */
+export function isUlid(s: string | null | undefined): boolean {
+  return !!s && ULID_RE.test(s);
+}
+
+/** A human owner label: "You" for the signed-in user, the name when the
+ *  daemon gave one, and null for a bare id (list rows hide it; the detail
+ *  shows it shortened in mono). */
+export function ownerLabel(owner: string | null | undefined, meId: string | null | undefined): string | null {
+  if (!owner) return null;
+  if (meId && owner === meId) return 'You';
+  return isUlid(owner) ? null : owner;
+}
+
+/** "01J9…X4QZ": a ULID/sha shortened for display (full value goes in `title`). */
+export function shortId(id: string | null | undefined): string {
+  if (!id) return '—';
+  return id.length > 12 ? `${id.slice(0, 4)}…${id.slice(-4)}` : id;
+}
+
+/** Risk worth a chip in a dense row: only when it's elevated. Low/medium is
+ *  the everyday default — a "Medium" pill on every row was noise. */
+export function riskIsElevated(r: RiskLevel): boolean {
+  return r === 'high' || r === 'critical';
+}
+
 export function fmtCost(n: number | null | undefined): string {
   const v = typeof n === 'number' ? n : 0;
   return `$${v.toFixed(2)}`;

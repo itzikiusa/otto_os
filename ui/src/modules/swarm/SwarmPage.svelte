@@ -5,6 +5,8 @@
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { sentenceCase, type Tone } from '../../lib/status';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -132,6 +134,35 @@
     railW = RAIL_W_DEFAULT;
     persistRailW();
   }
+  function onRailKey(e: KeyboardEvent): void {
+    const step = e.shiftKey ? 40 : 10;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      // Logical direction: in RTL the rail sits on the right, so → narrows it.
+      const rtl = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl';
+      const grow = (e.key === 'ArrowRight') !== rtl;
+      railW = Math.max(180, Math.min(400, railW + (grow ? step : -step)));
+      persistRailW();
+      e.preventDefault();
+    } else if (e.key === 'Enter' || e.key === 'Home') {
+      resetRailW();
+      e.preventDefault();
+    }
+  }
+  /** Keyboard resize for the view/session divider (same keys as the rail). */
+  function onSplitKey(e: KeyboardEvent): void {
+    const step = e.shiftKey ? 10 : 3;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      const rtl = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl';
+      const grow = (e.key === 'ArrowRight') !== rtl;
+      viewPct = Math.min(80, Math.max(20, viewPct + (grow ? step : -step)));
+      persistViewPct();
+      e.preventDefault();
+    } else if (e.key === 'Enter' || e.key === 'Home') {
+      viewPct = 55;
+      persistViewPct();
+      e.preventDefault();
+    }
+  }
   let editAgent = $state<SwarmAgent | null>(null);
   let editorOpen = $state(false);
   let showSettings = $state(false);
@@ -144,11 +175,38 @@
   let projSkills = $state<string[]>([]);
   let projSaving = $state(false);
 
-  // Load swarms for the current workspace.
+  // Load swarms for the current workspace. The store has no loading flag for
+  // the list, so track it here: a first load must show a skeleton, never flash
+  // the "No swarms in …" empty state while the request is in flight.
+  let listLoading = $state(false);
+  async function loadList(id: string): Promise<void> {
+    listLoading = true;
+    try {
+      await swarm.loadSwarms(id);
+    } finally {
+      listLoading = false;
+    }
+  }
   $effect(() => {
     const id = ws.currentId;
-    if (id) swarm.loadSwarms(id);
+    if (id) void loadList(id);
   });
+
+  // Opening a swarm can fail (deleted elsewhere, daemon hiccup). The store
+  // rethrows, so catch it here and show an inline error with Retry instead of
+  // an unhandled rejection that leaves the pane blank.
+  let openError = $state<string | null>(null);
+  let openErrorId = $state<string | null>(null);
+  async function openSwarm(id: string): Promise<void> {
+    openError = null;
+    openErrorId = null;
+    try {
+      await swarm.openSwarm(id);
+    } catch (e) {
+      openError = e instanceof Error ? e.message : String(e);
+      openErrorId = id;
+    }
+  }
 
   // A deep-link (e.g. Product → Swarm) opened a project and asked for the
   // Kanban board — honor it once, then clear the flag.
@@ -176,17 +234,34 @@
     if (swarm.swarms.length === 0) return;
     autoPickedFor = wsId;
     const id = initialSelection('swarm', swarm.swarms, (s) => s.id);
-    if (id) void swarm.openSwarm(id);
+    if (id) void openSwarm(id);
   });
   $effect(() => {
     if (detail?.id) rememberSelection('swarm', detail.id);
   });
   // The rail is pointless while there is nothing to list (and no load error to
   // retry): the page-level empty state owns the page then.
-  const showRail = $derived(swarm.swarms.length > 0 || !!swarm.swarmsError);
+  // (A failed first load is shown by the main pane's inline error + Retry.)
+  const showRail = $derived(swarm.swarms.length > 0);
   const queued = $derived(swarm.runs.filter((r) => r.status === 'queued').length);
   const running = $derived(swarm.runs.filter((r) => r.status === 'running' || r.status === 'waiting').length);
   const cap = $derived(detail?.config.max_parallel_sessions ?? 4);
+
+  // View switcher = a real tablist: ←/→ (and Home/End) move between views,
+  // with roving tabindex so Tab lands on the active one only.
+  function onTabKey(e: KeyboardEvent): void {
+    const i = VIEWS.findIndex((v) => v.id === view);
+    let next = -1;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (i + 1) % VIEWS.length;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = (i - 1 + VIEWS.length) % VIEWS.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = VIEWS.length - 1;
+    if (next < 0) return;
+    e.preventDefault();
+    view = VIEWS[next].id;
+    const list = (e.currentTarget as HTMLElement).querySelectorAll<HTMLButtonElement>('[role="tab"]');
+    list[next]?.focus();
+  }
 
   const VIEWS: { id: View; label: string; icon: IconName }[] = [
     { id: 'tree', label: 'Org', icon: 'user' },
@@ -309,10 +384,11 @@
           await swarm.updateProject(pid, { skills: projSkills } as Partial<SwarmProject>);
         }
         view = 'kanban';
+        toasts.success('Project created', `“${projName.trim()}” is open on the Board.`);
       }
       projModal = false;
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't save the project", e instanceof Error ? e.message : String(e));
     } finally {
       projSaving = false;
     }
@@ -332,7 +408,7 @@
         projModal = false;
         toasts.success('Project deleted');
       } catch (e) {
-        toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+        toasts.error("Couldn't delete the project", e instanceof Error ? e.message : String(e));
       }
     }
   }
@@ -348,9 +424,12 @@
     ) {
       try {
         await swarm.deleteSwarm(d.id);
-        toasts.success('Swarm deleted');
+        toasts.success('Swarm deleted', `“${d.name}” and its agents, projects and tasks were removed.`);
+        // Don't strand the page on a "pick one" pane: open the next swarm.
+        const next = swarm.swarms[0];
+        if (next && !viewport.isPhone) void openSwarm(next.id);
       } catch (e) {
-        toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+        toasts.error("Couldn't delete the swarm", e instanceof Error ? e.message : String(e));
       }
     }
   }
@@ -452,19 +531,27 @@
     {/snippet}
     {#snippet actions()}
       {#if detail}
-        <button class="btn small" onclick={() => (showRecruit = true)} data-icon="plus"><Icon name="plus" size={12} /> Recruit</button>
-        <button class="btn small" onclick={openProjectCreate} data-icon="note"><Icon name="note" size={12} /> Project</button>
+        <!-- Order = collapse order into ⋯ (lowest data-overflow first). The
+             destructive pair sits at the far start, away from the primary
+             lifecycle action; "New project" lives on the Board, where projects
+             are shown, so the header stays at five controls. -->
+        <button class="icon-btn" data-overflow="-3" data-icon="trash" data-label="Delete swarm…" onclick={deleteSwarm} aria-label="Delete swarm" title="Delete swarm"><Icon name="trash" size={14} /></button>
+        {#if detail.status !== 'aborted'}
+          <button class="btn small danger" data-overflow="-2" data-icon="x" title="Stop every agent and cancel queued runs" onclick={() => lifecycle('abort')}><Icon name="x" size={12} /> Abort all…</button>
+        {/if}
         <button class="btn small" data-overflow="-1" data-icon="gear" onclick={() => (showSettings = true)} title="Standing goals, team skills & channel triggers" data-label="Settings"><Icon name="gear" size={12} /> Settings</button>
-        <button class="icon-btn" data-overflow="-2" data-icon="trash" data-label="Delete swarm" onclick={deleteSwarm} aria-label="Delete swarm" title="Delete swarm"><Icon name="trash" size={14} /></button>
+        <button class="btn small" data-icon="plus" title="Let the Recruiter propose an agent for you to review and hire" onclick={() => (showRecruit = true)}><Icon name="plus" size={12} /> Recruit</button>
         {#if detail.status === 'active'}
-          <button class="btn small danger" data-overflow="1" onclick={() => lifecycle('abort')}><Icon name="x" size={12} /> Abort all…</button>
-          <button class="btn small" data-keep onclick={() => lifecycle('pause')}><Icon name="square" size={12} /> Pause</button>
+          <button class="btn small" data-keep title="Stop picking up new runs; running agents finish their current step" onclick={() => lifecycle('pause')}><Icon name="square" size={12} /> Pause</button>
         {:else if detail.status === 'paused'}
-          <button class="btn small danger" data-overflow="1" onclick={() => lifecycle('abort')}><Icon name="x" size={12} /> Abort all…</button>
           {#if detail.pause_reason}
-            <button class="btn small" data-overflow="1" onclick={() => (showBudgetModal = true)}><Icon name="play" size={12} /> Raise budget & resume</button>
+            <!-- A budget stop: resuming without headroom would pause again at
+                 once, so raising the budget is the primary path (plain Resume
+                 is offered inside the sheet). -->
+            <button class="btn small primary" onclick={() => (showBudgetModal = true)}><Icon name="play" size={12} /> Raise budget & resume…</button>
+          {:else}
+            <button class="btn small primary" onclick={() => lifecycle('resume')}><Icon name="play" size={12} /> Resume</button>
           {/if}
-          <button class="btn small primary" onclick={() => lifecycle('resume')}><Icon name="play" size={12} /> Resume</button>
         {:else}
           <button class="btn small primary" onclick={() => lifecycle('start')}><Icon name="play" size={12} /> Start</button>
         {/if}
@@ -495,47 +582,68 @@
       <button class="icon-btn" onclick={() => (showNew = true)} aria-label="New swarm" title="New swarm"><Icon name="plus" size={15} /></button>
     </div>
     <div class="rail-list">
-      {#each swarm.swarms as s (s.id)}
-        <button class="swarm-item" class:active={detail?.id === s.id} title={s.name} onclick={() => { swarm.openSwarm(s.id); if (viewport.isPhone) railOpen = false; }}>
-          <span class="grow ellipsis">{s.name}</span>
-          <span class="dot {s.status}" title={sentenceCase(s.status)}></span>
-        </button>
-      {/each}
-      {#if swarm.swarms.length === 0}
-        {#if swarm.swarmsError}
-          <!-- A failed load must never masquerade as "you have no swarms". -->
-          <p class="dim empty">Couldn't load swarms — {swarm.swarmsError}</p>
-          <button class="btn small" onclick={() => ws.currentId && swarm.loadSwarms(ws.currentId)}>Retry</button>
-        {:else}
-          <p class="dim empty">No swarms in {ws.current?.name ?? 'this workspace'}.</p>
-        {/if}
-      {/if}
+      <LoadState
+        what="swarms"
+        variant="compact"
+        loading={listLoading}
+        error={swarm.swarmsError}
+        empty={swarm.swarms.length === 0}
+        onretry={() => ws.currentId && void loadList(ws.currentId)}
+      >
+        {#each swarm.swarms as s (s.id)}
+          <button
+            class="swarm-item"
+            class:active={detail?.id === s.id}
+            aria-current={detail?.id === s.id ? 'true' : undefined}
+            title="{s.name} · {sentenceCase(s.status)}"
+            onclick={() => { void openSwarm(s.id); if (viewport.isPhone) railOpen = false; }}
+          >
+            <span class="grow ellipsis">{s.name}</span>
+            <span class="dot {s.status}" role="img" aria-label={sentenceCase(s.status)}></span>
+          </button>
+        {/each}
+      </LoadState>
     </div>
   </aside>
 
   {/if}
 
   {#if !viewport.isPhone && showRail}
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <!-- A focusable separator is a widget in ARIA (←/→ resize, Enter resets);
+         Svelte's lint doesn't know that — same exemption as agents/SplitNode. -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
     <div
       class="side-resizer"
       role="separator"
+      tabindex="0"
       aria-orientation="vertical"
-      aria-label="Drag to resize the swarms rail (double-click to reset)"
-      title="Drag to resize · double-click to reset"
+      aria-valuemin={180}
+      aria-valuemax={400}
+      aria-valuenow={Math.round(railW)}
+      aria-label="Resize the swarms list"
+      title="Drag or use ←/→ to resize · double-click or Enter to reset"
       ondblclick={resetRailW}
       onpointerdown={startRailResize}
+      onkeydown={onRailKey}
     ></div>
   {/if}
 
   <!-- Main -->
   <section class="main">
     {#if !detail}
-      {#if swarm.swarms.length > 0}
+      {#if openError}
+        <LoadState what="this swarm" variant="page" error={openError} empty={true} onretry={() => openErrorId && void openSwarm(openErrorId)} />
+      {:else if swarm.loading || (listLoading && swarm.swarms.length === 0) || (swarm.swarms.length > 0 && !viewport.isPhone && autoPickedFor !== ws.currentId)}
+        <div class="main-loading" aria-label="Loading swarm"><Skeleton rows={6} height={30} /></div>
+      {:else if swarm.swarmsError && swarm.swarms.length === 0}
+        <LoadState what="swarms" variant="page" error={swarm.swarmsError} empty={true} onretry={() => ws.currentId && void loadList(ws.currentId)} />
+      {:else if swarm.swarms.length > 0}
+        <!-- Only reachable on a phone (desktop auto-opens one): the list above
+             is the next step, so say so. -->
         <EmptyState
           variant="page"
           icon="grid"
-          title="Pick a swarm"
+          title="{swarm.swarms.length} {swarm.swarms.length === 1 ? 'swarm' : 'swarms'} in {ws.current?.name ?? 'this workspace'}"
           body="Open one from the list to see its org tree, board, runs and feed."
         />
       {:else}
@@ -576,40 +684,60 @@
         </EmptyState>
       {/if}
     {:else}
+      {@const runsCap = detail.max_total_runs}
+      {@const runsUsed = detail.counts.total_runs}
       <div class="switcher">
-        {#each VIEWS as v (v.id)}
-          <button class="seg" class:active={view === v.id} onclick={() => (view = v.id)}>
-            <Icon name={v.icon} size={13} /> {v.label}
-          </button>
-        {/each}
+        <div class="segmented seg-tabs" role="tablist" aria-label="Swarm view" tabindex="-1" onkeydown={onTabKey}>
+          {#each VIEWS as v (v.id)}
+            <button
+              class="seg"
+              class:active={view === v.id}
+              role="tab"
+              id="swarm-tab-{v.id}"
+              aria-selected={view === v.id}
+              aria-controls="swarm-view"
+              tabindex={view === v.id ? 0 : -1}
+              onclick={() => (view = v.id)}
+            >
+              <Icon name={v.icon} size={12} /> {v.label}
+            </button>
+          {/each}
+        </div>
         <span class="grow"></span>
         <!-- Budget meters + parallel cap: swarm-level status/settings that sit
              with the views rather than crowding the page header's actions. -->
         <div class="budget-bars">
-          <button class="budget-label dim cap-edit" onclick={setRunsCap} title="Click to change the run budget (blank = unlimited)">
-            {#if detail.max_total_runs != null}
-              runs {detail.counts.total_runs}/{detail.max_total_runs}
+          <button
+            class="budget-label cap-edit"
+            onclick={setRunsCap}
+            title={runsCap != null
+              ? `Run budget: ${runsUsed.toLocaleString()} of ${runsCap.toLocaleString()} runs used. The swarm pauses when it's spent. Click to change.`
+              : `${runsUsed.toLocaleString()} runs so far, no run budget. Click to set one.`}
+          >
+            {#if runsCap != null}
+              Runs {runsUsed.toLocaleString()} / {runsCap.toLocaleString()}
             {:else}
-              runs {detail.counts.total_runs} · ∞
+              Runs {runsUsed.toLocaleString()} · no limit
             {/if}
+            <Icon name="edit" size={12} />
           </button>
-          {#if detail.max_total_runs != null}
-            {@const pct = Math.min(100, (detail.counts.total_runs / detail.max_total_runs) * 100)}
-            <div class="budget-bar" title="Run budget: {detail.counts.total_runs}/{detail.max_total_runs}">
+          {#if runsCap != null}
+            {@const pct = Math.min(100, (runsUsed / runsCap) * 100)}
+            <div class="budget-bar" role="img" aria-label="Run budget {Math.round(pct)}% used" title="Run budget {Math.round(pct)}% used">
               <div class="budget-fill" class:budget-warn={pct > 80} style="width:{pct}%"></div>
             </div>
           {/if}
           {#if detail.max_cost_usd != null}
             {@const pct = Math.min(100, (detail.counts.cost_usd / detail.max_cost_usd) * 100)}
-            <span class="budget-label dim" title="Cost so far / cost budget (USD)">cost ${detail.counts.cost_usd.toFixed(2)}/${detail.max_cost_usd.toFixed(2)}</span>
-            <div class="budget-bar" title="Cost budget: ${detail.counts.cost_usd.toFixed(2)}/${detail.max_cost_usd.toFixed(2)}">
+            <span class="budget-label" title="Estimated cost so far of the cost budget (USD). The swarm pauses when it's spent.">Cost ${detail.counts.cost_usd.toFixed(2)} / ${detail.max_cost_usd.toFixed(2)}</span>
+            <div class="budget-bar" role="img" aria-label="Cost budget {Math.round(pct)}% used" title="Cost budget {Math.round(pct)}% used">
               <div class="budget-fill" class:budget-warn={pct > 80} style="width:{pct}%"></div>
             </div>
           {/if}
         </div>
-        <div class="cap">
-          <label for="cap" title="Most agent sessions this swarm runs at once">parallel</label>
-          <input id="cap" class="input small num" type="number" min="1" step="1" value={cap} title="Most agent sessions this swarm runs at once" onchange={(e) => setCap(e.currentTarget)} />
+        <div class="cap" title="The most agent sessions this swarm runs at the same time; extra runs wait in the queue">
+          <label for="swarm-cap">Max parallel</label>
+          <input id="swarm-cap" class="input small num" type="number" min="1" step="1" value={cap} onchange={(e) => setCap(e.currentTarget)} />
         </div>
       </div>
 
@@ -620,13 +748,13 @@
         class:phone-split={viewport.isPhone && swarm.selectedSessionId}
         style="--view-split:{viewPct}%"
       >
-        <div class="view">
+        <div class="view" id="swarm-view" role="tabpanel" aria-labelledby="swarm-tab-{view}">
           {#if view === 'tree'}
             <OrgTree onedit={(a) => openEditor(a)} onruntask={runForAgent} onadd={openEditorWithParent} onduplicate={duplicateAgent} />
           {:else if view === 'graph'}
             <AgentGraph />
           {:else if view === 'kanban'}
-            <KanbanBoard onrecruit={() => (showRecruit = true)} oneditproject={openProjectEdit} />
+            <KanbanBoard onnewproject={openProjectCreate} oneditproject={openProjectEdit} />
           {:else if view === 'runs'}
             <RunsList onhire={(p, rid) => { recruitProposal = p; recruitProposalRunId = rid; showRecruit = true; }} />
           {:else if view === 'board'}
@@ -636,8 +764,20 @@
 
         {#if swarm.selectedSessionId}
           {#if !viewport.isPhone}
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div class="resizer" title="Drag to resize" onmousedown={startResize}></div>
+            <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+            <div
+              class="resizer"
+              role="separator"
+              tabindex="0"
+              aria-orientation="vertical"
+              aria-valuemin={20}
+              aria-valuemax={80}
+              aria-valuenow={Math.round(viewPct)}
+              aria-label="Resize the session panel"
+              title="Drag or use ←/→ to resize · Enter to reset"
+              onmousedown={startResize}
+              onkeydown={onSplitKey}
+            ></div>
           {/if}
           <div class="session-panel">
             {#key swarm.selectedSessionId}
@@ -685,13 +825,13 @@
     <div class="field"><SkillPicker label="Project skills (optional)" selected={projSkills} onchange={(s) => (projSkills = s)} /></div>
     {#snippet footer()}
       {#if projEditId}
-        <button class="btn danger" style="margin-inline-end:auto" onclick={deleteProject} title="Delete this project, its tasks and feed">
+        <button class="btn danger" style="margin-inline-end:auto" onclick={deleteProject} disabled={projSaving} title="Delete this project, its tasks and feed">
           Delete project…
         </button>
       {/if}
-      <button class="btn" class:ghost={true} onclick={() => (projModal = false)}>Cancel</button>
-      <button class="btn" class:primary={true} onclick={saveProject} disabled={!projName.trim() || projSaving}>
-        {projSaving ? 'Saving…' : projEditId ? 'Save' : 'Create'}
+      <button class="btn ghost" onclick={() => (projModal = false)}>Cancel</button>
+      <button class="btn primary" onclick={saveProject} disabled={!projName.trim() || projSaving} title={projName.trim() ? undefined : 'Name the project first'}>
+        {projSaving ? 'Saving…' : projEditId ? 'Save' : 'Create project'}
       </button>
     {/snippet}
   </Modal>
@@ -714,8 +854,9 @@
         </div>
       {/if}
       {#snippet footer()}
-        <button class="btn" class:ghost={true} onclick={() => (showBudgetModal = false)}>Cancel</button>
-        <button class="btn" class:primary={true} onclick={raiseBudgetAndResume} disabled={!(extraRuns > 0) && !(extraCostUsd > 0)}>Raise &amp; resume</button>
+        <button class="btn ghost" style="margin-inline-end:auto" title="Resume with the current budget — the swarm pauses again as soon as it is spent" onclick={async () => { showBudgetModal = false; await lifecycle('resume'); }}>Resume without raising</button>
+        <button class="btn ghost" onclick={() => (showBudgetModal = false)}>Cancel</button>
+        <button class="btn primary" onclick={raiseBudgetAndResume} disabled={!(extraRuns > 0) && !(extraCostUsd > 0)}>Raise &amp; resume</button>
       {/snippet}
     </Modal>
   {/if}
@@ -756,15 +897,21 @@
     z-index: 2;
     touch-action: none;
   }
-  .side-resizer:hover {
+  .side-resizer:hover,
+  .side-resizer:focus-visible {
     background: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  .side-resizer:focus-visible,
+  .resizer:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -1px;
   }
   .rail-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
     padding: 10px 12px;
-    border-bottom: 1px solid var(--border);
+    border-block-end: 1px solid var(--border);
   }
   .rail-list {
     overflow-y: auto;
@@ -784,18 +931,19 @@
     color: var(--text);
     cursor: pointer;
     text-align: start;
-    font-size: 13px;
+    font-size: var(--fs-m);
+    min-height: 30px;
   }
   .swarm-item:hover {
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+    background: var(--hover);
   }
+  /* Selection = the quiet accent tint + normal text (layout.md list rows). */
   .swarm-item.active {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent-text);
+    background: var(--accent-soft);
+    font-weight: 500;
   }
-  .empty {
-    padding: 12px;
-    font-size: 12px;
+  .main-loading {
+    padding: 16px;
   }
   /* "Your swarms are in another workspace" shortcuts, rendered inside the main
      empty state. */
@@ -804,8 +952,8 @@
     flex-direction: column;
     align-items: center;
     gap: 6px;
-    margin-top: 10px;
-    font-size: 12px;
+    margin-block-start: 10px;
+    font-size: var(--fs-s);
   }
   .elsewhere p {
     margin: 0;
@@ -847,7 +995,7 @@
   /* Paused (usually a budget stop) is an attention state, not a failure —
      warning tone, matching the neutral "Paused" badge beside it. */
   .pause-reason {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--warning);
     background: var(--warning-soft);
     border-radius: var(--radius-s);
@@ -860,23 +1008,28 @@
   .budget-bars {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 6px;
     flex-wrap: wrap;
   }
   .budget-label {
-    font-size: var(--fs-xs);
+    font-size: var(--fs-s);
+    color: var(--text-dim);
     white-space: nowrap;
+    font-variant-numeric: tabular-nums;
   }
   .cap-edit {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     border: none;
     background: transparent;
-    color: var(--text-dim);
     cursor: pointer;
-    padding: 0;
+    padding: 2px 4px;
+    border-radius: var(--radius-s);
   }
   .cap-edit:hover {
     color: var(--text);
-    text-decoration: underline;
+    background: var(--hover);
   }
   .budget-bar {
     width: 60px;
@@ -891,6 +1044,11 @@
     background: var(--accent);
     transition: width 0.3s;
   }
+  @media (prefers-reduced-motion: reduce) {
+    .budget-fill {
+      transition: none;
+    }
+  }
   /* >80% of the budget: warn (amber), don't alarm — the run isn't failing. */
   .budget-fill.budget-warn {
     background: var(--warning);
@@ -902,9 +1060,10 @@
   .cap {
     display: flex;
     align-items: center;
-    gap: 5px;
-    font-size: 11px;
+    gap: 6px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
+    white-space: nowrap;
   }
   .num {
     width: 52px;
@@ -912,29 +1071,23 @@
   .switcher {
     display: flex;
     align-items: center;
-    gap: 4px;
-    padding: 6px 10px;
-    border-bottom: 1px solid var(--border);
+    gap: 12px;
+    padding: 6px 12px;
+    border-block-end: 1px solid var(--border);
+    min-height: 40px;
   }
-  .seg {
+  /* The shared .segmented control (app.css) supplies the surface-lift active
+     state; this only lays the icon + label out. */
+  .seg-tabs {
+    flex: none;
+  }
+  .seg-tabs > .seg {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    border: 1px solid transparent;
-    background: transparent;
-    color: var(--text-dim);
-    border-radius: var(--radius-s);
-    padding: 4px 10px;
-    font-size: 12px;
-    cursor: pointer;
   }
-  .seg:hover {
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+  .seg-tabs > .seg:hover:not(.active) {
     color: var(--text);
-  }
-  .seg.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent-text);
   }
   .body {
     flex: 1;
@@ -996,7 +1149,7 @@
     min-width: 0;
   }
   .rail-current {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     max-width: 160px;
   }
@@ -1011,7 +1164,7 @@
       width: 100%;
       flex: none;
       border-inline-end: none;
-      border-bottom: 1px solid var(--border);
+      border-block-end: 1px solid var(--border);
       min-height: 0;
     }
     .swarm-page.phone .rail-head {
@@ -1022,7 +1175,7 @@
       padding: 4px 0;
     }
     .swarm-page.phone .rail-toggle .section-title {
-      font-size: 14px;
+      font-size: var(--fs-s);
     }
     .swarm-page.phone .rail-list {
       max-height: 38vh;
@@ -1032,12 +1185,11 @@
       display: none;
     }
     .swarm-page.phone .swarm-item {
-      font-size: 14px;
+      font-size: var(--fs-l);
       padding: 11px 12px;
     }
 
     .swarm-page.phone .cap {
-      font-size: 12px;
       flex: none;
     }
     .swarm-page.phone .budget-bars {
@@ -1058,8 +1210,9 @@
     }
     .swarm-page.phone .seg {
       flex: none;
-      font-size: 13px;
-      padding: 7px 12px;
+      font-size: var(--fs-m);
+      height: 32px;
+      padding: 0 12px;
     }
 
     /* When a session panel opens, stack it under the view (vertical split) rather
@@ -1071,7 +1224,7 @@
       flex: 1 1 45%;
       min-height: 0;
       border-inline-end: none;
-      border-bottom: 1px solid var(--border);
+      border-block-end: 1px solid var(--border);
     }
     .swarm-page.phone .body.phone-split .session-panel {
       flex: 1 1 55%;

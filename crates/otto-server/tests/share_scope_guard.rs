@@ -122,7 +122,12 @@ fn app(pool: SqlitePool, ctx: AuthContext) -> Router {
         // A few representative non-session surfaces (all denied).
         .route("/usage/summary", get(ok))
         .route("/users", get(ok).post(ok))
-        .route("/connections", get(ok).post(ok));
+        .route("/connections", get(ok).post(ok))
+        // The REAL whoami handler (it only reads the injected AuthContext).
+        .route(
+            "/share/whoami",
+            get(otto_server::routes::share::share_whoami),
+        );
 
     let protected = protected.route_layer(from_fn_with_state(
         state.clone(),
@@ -329,4 +334,41 @@ async fn normal_root_token_unaffected() {
         status(&app, Method::GET, "/api/v1/users").await,
         StatusCode::OK
     );
+}
+
+// ---------------------------------------------------------------------------
+// /share/whoami — the guest page learns its role (Editor links may type)
+// ---------------------------------------------------------------------------
+
+async fn whoami(app: &Router) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/share/whoami")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+#[tokio::test]
+async fn share_whoami_reports_the_scoped_role() {
+    for (role, want) in [
+        (WorkspaceRole::Viewer, "viewer"),
+        (WorkspaceRole::Editor, "editor"),
+    ] {
+        let pool = mem_pool().await;
+        let ctx = root_owned_share_ctx(&pool, "S1", role).await;
+        let app = app(pool, ctx);
+        let (status, body) = whoami(&app).await;
+        assert_eq!(status, StatusCode::OK, "{want} share may ask whoami");
+        assert_eq!(body["role"], want);
+        assert_eq!(body["session_id"], "S1");
+    }
 }

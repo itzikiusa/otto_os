@@ -3,7 +3,8 @@
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { product } from '../../lib/stores/product.svelte';
-  import { toasts } from '../../lib/toast.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { ProductEvent } from './types';
 
   type SectionFilter =
@@ -44,13 +45,26 @@
     selectedSection = 'all';
   });
 
+  /** A failed load — inline with Retry, never as "No events yet". */
+  let loadError = $state<string | null>(null);
   async function doLoad(section: SectionFilter): Promise<void> {
+    loadError = null;
     try {
       await product.loadEvents(section === 'all' ? undefined : section);
       loaded = true;
     } catch (e) {
-      toasts.error('Could not load events', product.errMsg(e));
+      loadError = loadErrorText(e);
     }
+  }
+
+  /** Section id → its label ("tests" → "Tests"). */
+  function sectionLabel(id: string): string {
+    return SECTIONS.find((x) => x.id === id)?.label ?? id;
+  }
+  /** Event kind enum → words ("question_posted" → "Question posted"). */
+  function kindLabel(kind: string): string {
+    const w = kind.replace(/[_-]+/g, ' ').trim();
+    return w ? w[0].toUpperCase() + w.slice(1) : kind;
   }
 
   async function onSectionChange(e: Event): Promise<void> {
@@ -99,17 +113,17 @@
         {/each}
       </select>
       {#if product.loadingEvents}
-        <span class="dim">Loading…</span>
+        <span class="dim">Loading events…</span>
       {:else}
         <span class="dim">{events.length} event{events.length !== 1 ? 's' : ''}</span>
       {/if}
     </div>
 
     <!-- Timeline -->
-    {#if product.loadingEvents && !loaded}
-      <div class="muted">Loading events…</div>
+    {#if (product.loadingEvents && !loaded) || (loadError && events.length === 0)}
+      <LoadState what="history" loading={product.loadingEvents} error={loadError} empty onretry={() => void doLoad(selectedSection)} />
     {:else if events.length === 0}
-      <div class="muted">No events yet{selectedSection !== 'all' ? ` in "${selectedSection}"` : ''}.</div>
+      <div class="muted">No events yet{selectedSection !== 'all' ? ` in ${sectionLabel(selectedSection)}` : ''}.</div>
     {:else}
       <div class="timeline">
         {#each events as ev (ev.id)}
@@ -124,13 +138,10 @@
             <div class="ev-content">
               <div class="ev-header">
                 <span class="chip hist-sec-chip">
-                  <Icon name={sectionIcon(ev.section)} size={11} />
-                  {ev.section}
+                  <Icon name={sectionIcon(ev.section)} size={12} />
+                  {sectionLabel(ev.section)}
                 </span>
-                <span class="ev-kind">{ev.kind}</span>
-                {#if ev.actor_id}
-                  <span class="ev-actor dim">· {ev.actor_id}</span>
-                {/if}
+                <span class="ev-kind" title={ev.actor_id ? `${ev.kind} · by ${ev.actor_id}` : ev.kind}>{kindLabel(ev.kind)}</span>
                 <span class="spacer"></span>
                 <RelTime iso={ev.created_at} class="ev-time" />
               </div>
@@ -146,7 +157,7 @@
 <style>
   .muted {
     padding: 24px 0;
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     font-style: italic;
   }
@@ -240,12 +251,9 @@
     text-transform: capitalize;
   }
   .ev-kind {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 500;
     color: var(--text);
-  }
-  .ev-actor {
-    font-size: var(--fs-xs);
   }
   .ev-header :global(.ev-time) {
     font-size: var(--fs-xs);
@@ -254,7 +262,7 @@
     cursor: default;
   }
   .ev-summary {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text-dim);
     margin: 0;

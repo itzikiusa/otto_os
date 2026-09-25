@@ -1183,7 +1183,7 @@
   }
   .st-title h2 {
     margin: 0;
-    font-size: 15px;
+    font-size: var(--fs-l);
     font-weight: 600;
     color: var(--text);
   }
@@ -1197,7 +1197,7 @@
     border-radius: 999px;
   }
   .rowcount {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .block {
@@ -1207,7 +1207,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -1227,7 +1227,7 @@
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
     text-transform: none;
     letter-spacing: 0;
@@ -1255,7 +1255,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -1274,7 +1274,7 @@
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     text-transform: none;
     letter-spacing: 0;
   }
@@ -1302,7 +1302,7 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     text-align: start;
     cursor: pointer;
   }
@@ -1389,7 +1389,7 @@
   .nested-tag {
     margin-left: 6px;
     padding: 0 4px;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
     border-radius: var(--radius-s);
@@ -1404,7 +1404,7 @@
   }
   .ib-empty {
     padding: 8px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .ib-cond {
     display: flex;
@@ -1420,7 +1420,7 @@
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .ib-cond select:first-child {
     max-width: 260px;
@@ -1436,11 +1436,11 @@
     border-color: var(--accent);
   }
   .ib-cond-hint {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-family: var(--font-mono, monospace);
   }
   .ib-warn {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.5;
     color: var(--text-dim);
     border-inline-start: 2px solid var(--danger);
@@ -1457,7 +1457,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text);
   }
   .ib-name input {
@@ -1470,14 +1470,14 @@
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .ib-name input:focus {
     outline: none;
     border-color: var(--accent);
   }
   .ib-editing {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text-dim);
     border-inline-start: 2px solid var(--accent);
@@ -1488,7 +1488,7 @@
     gap: 6px;
   }
   .ib-hint {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .stats-grid {
     display: grid;
@@ -1503,7 +1503,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .stat .sk {
     color: var(--text-dim);
@@ -1563,7 +1563,7 @@
   .tbl td {
     padding: 5px 10px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     vertical-align: top;
   }
   .tbl tbody tr:hover td {
@@ -1586,7 +1586,7 @@
   }
   .pk {
     margin-inline-start: 6px;
-    font-size: 9px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
@@ -1600,7 +1600,7 @@
   .comment {
     color: var(--text-dim);
     font-style: italic;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .chips,
   .idx-list,
@@ -1617,7 +1617,7 @@
     flex-wrap: wrap;
   }
   .key-chip {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     background: var(--surface-2);
     border: 1px solid var(--border);
     padding: 2px 9px;
@@ -1635,7 +1635,7 @@
     background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     min-width: 0;
   }
   .idx-row:hover {
@@ -1704,7 +1704,7 @@
   button.idx {
     min-width: 0;
     font: inherit;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     text-align: start;
     cursor: default;
@@ -1746,7 +1746,7 @@
     overflow: hidden;
   }
   .tag {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 16%, transparent);
@@ -1763,7 +1763,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 12px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     overflow: auto;
     max-height: 360px;
@@ -1781,7 +1781,7 @@
     user-select: text;
   }
   .ddl-missing {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text-dim);
     background: var(--surface-2);
@@ -1790,7 +1790,7 @@
     padding: 10px 12px;
   }
   .ddl-missing code {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
     padding: 0 4px;
     border-radius: 3px;

@@ -10,6 +10,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import { authedBlobUrl } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { ProductAttachment } from './types';
 
   // ── Props ─────────────────────────────────────────────────────────────────
@@ -92,8 +94,11 @@
   }
 
   /** Load the attachment list from the server. */
+  /** A failed load — inline with Retry, never as the "drop files here" hint. */
+  let loadError = $state<string | null>(null);
   async function loadAttachments(): Promise<void> {
     localAttLoading = true;
+    loadError = null;
     try {
       localAtts = await product.listAttachments();
       // Eagerly fetch preview URLs for images.
@@ -101,7 +106,7 @@
         if (att.mime.startsWith('image/')) void loadAttUrl(att.id);
       }
     } catch (e) {
-      toasts.error('Could not load attachments', e instanceof Error ? e.message : String(e));
+      loadError = loadErrorText(e);
     } finally {
       localAttLoading = false;
     }
@@ -273,8 +278,8 @@
   </div>
 
   <!-- Drop-zone hint when empty -->
-  {#if localAttLoading}
-    <div class="att-empty">Loading…</div>
+  {#if (localAttLoading || loadError) && localAtts.length === 0}
+    <LoadState what="attachments" variant="compact" loading={localAttLoading} error={loadError} empty onretry={() => void loadAttachments()} />
   {:else if localAtts.length === 0 && !uploading}
     <div class="att-drop-hint">
       Drop files here, use + File, or paste a screenshot (⌘⌃⇧4)
@@ -407,14 +412,14 @@
     margin-bottom: 8px;
   }
   .att-panel-title {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-dim);
   }
   .att-pick-btn {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 2px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s, 4px);
@@ -428,15 +433,14 @@
     color: var(--accent-text);
   }
 
-  .att-empty,
   .att-uploading {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     font-style: italic;
     padding: 4px 0;
   }
   .att-drop-hint {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     text-align: center;
     padding: 10px 0;
@@ -462,7 +466,7 @@
     margin-bottom: 4px;
   }
   .att-fname {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 500;
     flex: 1;
     overflow: hidden;
@@ -512,12 +516,12 @@
     border-radius: var(--radius-s, 4px);
   }
   .att-loading-hint {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-style: italic;
   }
   .att-load-btn {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 2px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s, 4px);
@@ -542,10 +546,10 @@
     padding: 4px 0;
   }
   .att-chip-icon {
-    font-size: 14px;
+    font-size: var(--fs-m);
   }
   .att-chip-name {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     flex: 1;
     overflow: hidden;
@@ -553,7 +557,7 @@
     white-space: nowrap;
   }
   .att-dl-link {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--accent-text);
     text-decoration: underline;
     cursor: pointer;

@@ -11,6 +11,8 @@
   import { mcpCpApi } from '../../lib/api/mcp';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import type { McpServerDetail } from '../../lib/api/types';
   import McpPill from './McpPill.svelte';
   import RulesDrawer from './RulesDrawer.svelte';
@@ -120,6 +122,17 @@
   const NO_CONFIGURE = 'You need configure access to this server';
   const ROOT_ONLY = 'Only an Otto admin can add MCP servers';
 
+  function rowMenu(e: MouseEvent, s: McpServerDetail): void {
+    const configure = can(s.id, 'configure');
+    const items: MenuItem[] = [
+      { label: busy[s.id] === 'health' ? 'Checking health…' : 'Check health', icon: 'radar', disabled: !configure, action: () => void health(s) },
+      { label: expandedId === s.id ? 'Hide tools' : 'View tools', icon: 'eye', action: () => toggleExpanded(s.id) },
+    ];
+    if (auth.isRoot || can(s.id, 'manage_access')) items.push({ label: 'Manage access…', icon: 'key', action: () => (accessId = s.id) });
+    items.push({ separator: true }, { label: 'Delete…', icon: 'trash', danger: true, disabled: !configure, action: () => void remove(s) });
+    ctxMenu.show(e, items);
+  }
+
   function toggleExpanded(id: string): void {
     expandedId = expandedId === id ? null : id;
   }
@@ -133,9 +146,11 @@
     <button class="btn small" onclick={() => void onReload()} title="Refresh">
       <Icon name="refresh" size={13} /> Refresh
     </button>
+    {#if servers.length > 0 || error || loading}
     <button class="btn primary small" data-testid="mcp-add-server" disabled={!auth.isRoot} title={auth.isRoot ? undefined : ROOT_ONLY} onclick={() => (formOpen = true)}>
       <Icon name="plus" size={13} /> Add server
     </button>
+    {/if}
   </div>
 
   {#if error}
@@ -145,13 +160,16 @@
   {#if error && servers.length === 0}
     <!-- rendered above -->
   {:else if loading && servers.length === 0}
-    <p class="muted pad">Loading…</p>
+    <LoadState what="MCP servers" loading empty rows={3} />
   {:else if servers.length === 0}
-    <div class="empty">
-      <Icon name="plug" size={26} />
-      <p>No external servers yet. Otto's built-in server is on the Otto server tab; add an external MCP server here to govern it.</p>
-      <button class="btn primary" disabled={!auth.isRoot} title={auth.isRoot ? undefined : ROOT_ONLY} onclick={() => (formOpen = true)}>Add a server</button>
-    </div>
+    <EmptyState
+      icon="server"
+      title="No external servers yet"
+      body="Register an external MCP server to govern its tools with policies, approvals and audit. Otto's own server lives on the Otto server tab."
+      actionLabel={auth.isRoot ? 'Add server' : undefined}
+      actionIcon="plus"
+      onaction={auth.isRoot ? () => (formOpen = true) : undefined}
+    />
   {:else}
     <div class="grid">
       <div class="thead">
@@ -161,7 +179,7 @@
         <span class="num">Tools</span>
         <span>Injection</span>
         <span>Enabled</span>
-        <span class="actions-h">Actions</span>
+        <span class="actions-h"><span class="sr-only">Actions</span></span>
       </div>
       {#each servers as s (s.id)}
         {@const endpoint = s.transport === 'stdio' ? `${s.command} ${s.args.join(' ')}`.trim() : (s.url ?? '')}
@@ -177,14 +195,14 @@
             {#if s.description}<span class="desc" title={s.description}>{s.description}</span>{/if}
             <span class="endpoint mono" title={endpoint}>{endpoint}</span>
           </button>
-          <span class="cell"><span class="transport">{s.transport}</span></span>
-          <span class="cell">
+          <span class="cell" data-label="Transport"><span class="transport">{s.transport}</span></span>
+          <span class="cell" data-label="Health">
             <McpPill kind="health" value={s.health_status} small />
             {#if s.health_latency_ms != null && s.health_status === 'healthy'}<span class="lat">{s.health_latency_ms}ms</span>{/if}
           </span>
-          <span class="cell num">{s.tools_count}</span>
-          <span class="cell"><McpPill kind="injection" value={s.injection_risk} small /></span>
-          <span class="cell">
+          <span class="cell num" data-label="Tools">{s.tools_count}</span>
+          <span class="cell" data-label="Injection"><McpPill kind="injection" value={s.injection_risk} small /></span>
+          <span class="cell" data-label="Enabled">
             <button
               class="switch"
               class:on={s.enabled}
@@ -199,15 +217,17 @@
             </button>
           </span>
           <span class="cell actions">
-            {#if auth.isRoot || can(s.id,'manage_access')}<button class="btn xs" onclick={() => accessId=s.id}>Access</button>{/if}
-            <button class="btn xs" disabled={!!busy[s.id] || !can(s.id,'configure')} title={can(s.id,'configure') ? undefined : NO_CONFIGURE} onclick={() => void discover(s)}>
-              {busy[s.id] === 'discover' ? '…' : 'Discover'}
+            <button class="btn small" disabled={!!busy[s.id] || !can(s.id,'configure')} title={can(s.id,'configure') ? 'Fetch the tool list from this server' : NO_CONFIGURE} onclick={() => void discover(s)}>
+              {busy[s.id] === 'discover' ? 'Discovering…' : 'Discover'}
             </button>
-            <button class="btn xs" disabled={!!busy[s.id] || !can(s.id,'configure')} title={can(s.id,'configure') ? undefined : NO_CONFIGURE} onclick={() => void health(s)}>
-              {busy[s.id] === 'health' ? '…' : 'Health'}
-            </button>
-            <button class="btn xs danger" disabled={!!busy[s.id] || !can(s.id,'configure')} title={can(s.id,'configure') ? undefined : NO_CONFIGURE} onclick={() => void remove(s)}>
-              {busy[s.id] === 'delete' ? '…' : 'Delete'}
+            <button
+              class="icon-btn"
+              aria-label={`More actions for ${s.name}`}
+              title="More actions"
+              disabled={!!busy[s.id]}
+              onclick={(e) => rowMenu(e, s)}
+            >
+              <Icon name="more" size={14} />
             </button>
           </span>
           {#if expandedId === s.id}
@@ -246,7 +266,7 @@
     border-bottom: 1px solid var(--border);
   }
   .count {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .grow {
@@ -260,7 +280,7 @@
   .thead,
   .srow {
     display: grid;
-    grid-template-columns: minmax(220px, 2fr) 80px 140px 60px 90px 60px minmax(190px, auto);
+    grid-template-columns: minmax(220px, 1fr) 80px 120px 56px 96px 64px 124px;
     align-items: center;
     gap: 8px;
     padding: 8px 14px;
@@ -270,9 +290,8 @@
     top: 0;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     color: var(--text-dim);
     z-index: 1;
   }
@@ -280,7 +299,7 @@
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   }
   .srow:hover {
-    background: color-mix(in srgb, var(--text-dim) 5%, transparent);
+    background: var(--hover);
   }
   .num {
     text-align: right;
@@ -301,13 +320,13 @@
   }
   .name .nm {
     font-weight: 600;
-    font-size: 13px;
+    font-size: var(--fs-m);
   }
   .name:hover .nm {
     color: var(--accent-text);
   }
   .desc {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -330,7 +349,7 @@
     min-width: 0;
   }
   .transport {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-family: var(--font-mono);
     color: var(--text-dim);
   }
@@ -340,7 +359,7 @@
   }
   .actions {
     gap: 4px;
-    flex-wrap: wrap;
+    justify-content: flex-end;
   }
   .actions-h {
     text-align: start;
@@ -364,7 +383,11 @@
     flex: none;
   }
   .switch.on {
-    background: var(--success);
+    background: var(--accent-solid);
+  }
+  .switch:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
   .switch .knob {
     position: absolute;
@@ -373,7 +396,7 @@
     width: 13px;
     height: 13px;
     border-radius: 50%;
-    background: #fff;
+    background: var(--accent-contrast);
     transition: left 120ms ease;
   }
   .switch.on .knob {
@@ -382,31 +405,16 @@
   .mono {
     font-family: var(--font-mono);
   }
-  .muted {
-    color: var(--text-dim);
-  }
-  .pad {
-    padding: 16px;
-  }
-  .empty {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 10px;
-    color: var(--text-dim);
-    text-align: center;
-    padding: 40px 24px;
-  }
-  .btn.xs {
-    font-size: 11px;
-    padding: 3px 8px;
-  }
-  .btn.danger {
-    color: var(--danger);
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
 
-  @media (max-width: 760px) {
+  @media (max-width: 1024px) {
     .thead {
       display: none;
     }
@@ -414,6 +422,19 @@
       grid-template-columns: 1fr;
       gap: 4px;
       padding: 12px 14px;
+    }
+    .actions {
+      justify-content: flex-start;
+    }
+    /* Stacked: each value carries its column name. */
+    .cell[data-label]::before {
+      content: attr(data-label);
+      min-width: 84px;
+      font-size: var(--fs-xs);
+      color: var(--text-dim);
+    }
+    .cell.num {
+      text-align: start;
     }
   }
 </style>

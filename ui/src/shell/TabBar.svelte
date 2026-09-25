@@ -16,6 +16,9 @@
   import { ctxMenu } from '../lib/contextmenu.svelte';
   import { popoutItems } from '../lib/popoutMenu';
   import ShareModal from '../modules/agents/ShareModal.svelte';
+  import { confirmer } from '../lib/confirm.svelte';
+  import { toasts } from '../lib/toast.svelte';
+  import type { MenuItem } from '../lib/contextmenu.svelte';
 
   // Share modal: tracks the session id we're sharing; null = closed.
   let shareSessionId = $state<string | null>(null);
@@ -122,7 +125,66 @@
     renamingId = null;
     if (!id) return;
     const next = draft.trim();
-    if (next && next !== title(id)) await ws.renameSession(id, next);
+    if (!next || next === title(id)) return;
+    try {
+      await ws.renameSession(id, next);
+    } catch (e) {
+      toasts.error('Rename failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /** Drop leading, trailing and doubled separators — rows above are
+   *  conditional (the DB pane has no Rename/Share; the web build no pop-out). */
+  function tidy(items: MenuItem[]): MenuItem[] {
+    const out: MenuItem[] = [];
+    for (const it of items) {
+      if (it.separator && (out.length === 0 || out[out.length - 1].separator)) continue;
+      out.push(it);
+    }
+    while (out.length > 0 && out[out.length - 1].separator) out.pop();
+    return out;
+  }
+
+  // The SESSION rows of the tab menu — the same verbs, words and order as the
+  // pane ⋯ menu and the sidebar row (Rename · Share… · Restart · Archive ·
+  // Delete), so a session means the same thing wherever it is right-clicked.
+  function sessionRows(id: string): MenuItem[] {
+    const s = ws.sessions.find((x) => x.id === id);
+    if (!s || !ws.canEditSession(s)) return [];
+    const st = ws.statusMap[id] ?? s.status;
+    return [
+      { separator: true },
+      ...(s.kind === 'agent' && (st === 'running' || st === 'working')
+        ? [{ label: 'Restart session', icon: 'refresh', action: () => void ws.requestRestart(id) } as MenuItem]
+        : []),
+      ...(!s.archived
+        ? [{ label: 'Archive', icon: 'archive', action: () => void archiveTab(id) } as MenuItem]
+        : []),
+      { label: 'Delete', icon: 'trash', danger: true, action: () => void deleteTab(id) },
+    ];
+  }
+
+  async function archiveTab(id: string): Promise<void> {
+    try {
+      await ws.archiveSession(id);
+    } catch (e) {
+      toasts.error('Archive failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // Always asked, like the pane menu's and the sidebar's Delete.
+  async function deleteTab(id: string): Promise<void> {
+    const name = title(id).trim();
+    const ok = await confirmer.ask(
+      `Delete ${name ? `“${name}”` : 'this session'} and its entire history? This cannot be undone.`,
+      { title: 'Delete session', confirmLabel: 'Delete' },
+    );
+    if (!ok) return;
+    try {
+      await ws.killSession(id);
+    } catch (e) {
+      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+    }
   }
 
   // ── Drag-to-reorder tabs ─────────────────────────────────────────────────
@@ -207,8 +269,17 @@
             void ws.requestCloseTab(id);
           }
         }}
-        oncontextmenu={(e) => ctxMenu.show(e, [
-          { label: 'Rename', icon: 'edit', action: () => startRename(id) },
+        oncontextmenu={(e) => ctxMenu.show(e, tidy([
+          ...(id !== DB_PANE_ID && ws.myRole !== 'viewer'
+            ? [{ label: 'Rename', icon: 'edit', action: () => startRename(id) } as MenuItem]
+            : []),
+          ...(id !== DB_PANE_ID
+            ? [{ label: 'Share…', icon: 'share', action: () => (shareSessionId = id) } as MenuItem]
+            : []),
+          ...(id === DB_PANE_ID
+            ? popoutItems('database', 'Database')
+            : popoutItems(`agents/${id}`, ws.sessions.find((x) => x.id === id)?.title)),
+          { separator: true },
           { label: 'Close tab', icon: 'x', action: () => void ws.requestCloseTab(id) },
           ...(ws.openTabs.length > 1
             ? [{
@@ -234,15 +305,9 @@
           ...(ws.recentlyClosed.length > 0
             ? [{ label: 'Reopen closed tab', icon: 'refresh', action: () => ws.reopenClosedTab() }]
             : []),
+          ...(id !== DB_PANE_ID ? sessionRows(id) : []),
           { separator: true },
           { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
-          ...(id !== DB_PANE_ID
-            ? [{ label: 'Share…', icon: 'share', action: () => (shareSessionId = id) }]
-            : []),
-          ...(id === DB_PANE_ID
-            ? popoutItems('database', 'Database')
-            : popoutItems(`agents/${id}`, ws.sessions.find((x) => x.id === id)?.title)),
-          { separator: true },
           {
             label: ws.viewMode === 'tiled' ? 'Switch to tabbed view' : 'Switch to tiled view',
             icon: ws.viewMode === 'tiled' ? 'square' : 'grid',
@@ -253,7 +318,7 @@
             icon: 'gauge',
             action: () => ws.setViewMode(ws.viewMode === 'mission' ? 'tabs' : 'mission'),
           },
-        ])}
+        ]))}
       >
         {#if id === DB_PANE_ID}
           <Icon name="db" size={11} />
@@ -318,6 +383,7 @@
   <div class="view-toggle" role="group" aria-label="View mode">
     <button
       class:active={ws.viewMode === 'tabs'}
+      aria-pressed={ws.viewMode === 'tabs'}
       onclick={() => ws.setViewMode('tabs')}
       title="Tabbed view"
       aria-label="Tabbed view"
@@ -326,6 +392,7 @@
     </button>
     <button
       class:active={ws.viewMode === 'tiled'}
+      aria-pressed={ws.viewMode === 'tiled'}
       onclick={() => ws.setViewMode('tiled')}
       title="Tiled view — see all sessions at once"
       aria-label="Tiled view"
@@ -334,6 +401,7 @@
     </button>
     <button
       class:active={ws.viewMode === 'mission'}
+      aria-pressed={ws.viewMode === 'mission'}
       onclick={() => ws.setViewMode('mission')}
       title="Work Queue"
       aria-label="Work Queue"
@@ -408,7 +476,7 @@
     border-radius: var(--radius-s);
     border: 1px solid transparent;
     color: var(--text-dim);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
     white-space: nowrap;
     transition: background 120ms ease-out, color 120ms ease-out;

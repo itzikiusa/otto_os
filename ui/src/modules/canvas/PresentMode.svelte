@@ -407,7 +407,7 @@
     height: 100%;
     display: flex;
     align-items: center;
-    font-size: 18px;
+    font-size: var(--fs-xl);
     overflow: hidden;
   }
   .code {
@@ -419,7 +419,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     overflow: auto;
-    font-size: 12px;
+    font-size: var(--fs-s);
     box-sizing: border-box;
   }
   .frame {
@@ -429,8 +429,8 @@
     border-radius: var(--radius-m);
     padding: 6px;
     box-sizing: border-box;
-    color: var(--text-dim, #888);
-    font-size: 12px;
+    color: var(--text-dim);
+    font-size: var(--fs-s);
   }
   .notes {
     position: absolute;
@@ -442,7 +442,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     padding: 8px 12px;
-    font-size: 13px;
+    font-size: var(--fs-m);
   }
   .controls {
     position: absolute;
@@ -478,8 +478,8 @@
     color: var(--accent-text);
   }
   .counter {
-    font-size: 12px;
-    color: var(--text-dim, #888);
+    font-size: var(--fs-s);
+    color: var(--text-dim);
     white-space: nowrap;
   }
   .dots {

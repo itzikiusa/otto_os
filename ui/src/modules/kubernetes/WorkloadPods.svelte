@@ -122,7 +122,7 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .wp-sum {
     display: flex;
@@ -181,7 +181,7 @@
   }
   .mono {
     font-family: var(--font-mono);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .warn {
     color: var(--status-warn);

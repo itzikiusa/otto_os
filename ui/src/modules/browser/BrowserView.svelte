@@ -666,14 +666,18 @@
       type="text"
       placeholder="Enter URL"
       aria-label="Address"
+      enterkeyhint="go"
+      inputmode="url"
+      autocapitalize="off"
+      spellcheck="false"
       bind:this={urlEl}
       bind:value={urlInput}
       onkeydown={onkeydown}
       onfocus={() => (urlFocused = true)}
       onblur={() => (urlFocused = false)}
     />
-    <button class="icon-btn tool" onclick={go} title="Go" aria-label="Go">
-      <Icon name="external" size={14} />
+    <button class="icon-btn tool go-btn" onclick={go} title="Go" aria-label="Go" disabled={!urlInput.trim()}>
+      <span class="flip-rtl"><Icon name="chevronRight" size={14} /></span>
     </button>
     {#if browser.activeTab}
       <div class="mode-toggle" role="group" aria-label="Tab mode">
@@ -736,30 +740,34 @@
         <Icon name="key" size={14} />
       </button>
     {/if}
-    <button
-      class="icon-btn tool"
-      onclick={doSummarize}
-      disabled={!browser.activeTab || summarizing}
-      aria-label="Summarize"
-      title="Summarize"
-    >
-      <Icon name="zap" size={14} />
-    </button>
-    <button
-      class="icon-btn tool"
-      onclick={doVaultSave}
-      disabled={!browser.activeTab || vaultSaving}
-      aria-label="Save to vault"
-      title="Save to vault"
-    >
-      <Icon name="folder" size={14} />
-    </button>
+    <!-- Page actions only exist once a page is open (no row of disabled
+         icons on the empty state). -->
+    {#if browser.activeTab}
+      <button
+        class="icon-btn tool"
+        onclick={doSummarize}
+        disabled={summarizing}
+        aria-label="Summarize this page"
+        title={summarizing ? 'Summarizing…' : 'Summarize this page'}
+      >
+        <Icon name="sparkle" size={14} />
+      </button>
+      <button
+        class="icon-btn tool"
+        onclick={doVaultSave}
+        disabled={vaultSaving}
+        aria-label="Save to vault"
+        title={vaultSaving ? 'Saving to vault…' : 'Save to vault'}
+      >
+        <Icon name="book" size={14} />
+      </button>
+    {/if}
   </div>
 
   {#if summary}
     <div class="summary">
       <div class="summary-head">
-        <span>Summary</span>
+        <span>Summary · drafted by Otto</span>
         <button class="icon-btn" onclick={() => (summary = '')} aria-label="Close summary" title="Close summary"><Icon name="x" size={12} /></button>
       </div>
       <p>{summary}</p>
@@ -797,6 +805,7 @@
         page={browser.page}
         loading={browser.loadingPage}
         error={browser.pageError}
+        onopenurl={focusUrl}
         onretry={() => {
           const url = browser.activeTab?.url;
           if (url) void browser.loadPage(url);
@@ -826,7 +835,13 @@
     flex: 1;
     display: flex;
     min-height: 0;
+    min-width: 0;
     position: relative;
+  }
+  @media (max-width: 640px) {
+    .body {
+      flex-direction: column;
+    }
   }
   .live-note {
     position: absolute;
@@ -908,6 +923,10 @@
     background: var(--surface);
     color: var(--text);
   }
+  :global([dir='rtl']) .flip-rtl {
+    display: inline-flex;
+    transform: scaleX(-1);
+  }
   .icon-btn.tool:disabled {
     opacity: 0.5;
     cursor: not-allowed;
@@ -928,6 +947,11 @@
     .icon-btn.tool {
       width: 36px;
       height: 36px;
+    }
+    /* The phone keyboard's Go key submits; a lone Go button on its own row
+       was dead weight. */
+    .go-btn {
+      display: none;
     }
   }
   .summary {

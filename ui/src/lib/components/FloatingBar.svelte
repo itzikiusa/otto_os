@@ -129,7 +129,7 @@
   // ── commands ────────────────────────────────────────────────────────────
   // In-app: the palette's registry. In the ⌥Space window there is no shell to
   // register commands, so a small set is built from the API: Go to <module>,
-  // Focus Session, Open Repo — each opens the main window at that route.
+  // Focus session, Open repo — each opens the main window at that route.
   let windowCommands: Command[] = $state([]);
 
   async function loadWindowCommands(): Promise<void> {
@@ -169,14 +169,14 @@
         .filter((s) => !s.archived && isForeground(s) && visibleOnThisDevice(s))
         .map((s) => ({
           id: `session.${s.id}`,
-          title: `Focus Session: ${s.title}`,
+          title: `Focus session: ${s.title}`,
           group: 'Sessions',
           keywords: s.provider,
           run: go(`agents/${s.id}`),
         })),
       ...repos.map((r) => ({
         id: `repo.${r.id}`,
-        title: `Open Repo: ${r.name}`,
+        title: `Open repo: ${r.name}`,
         group: 'Git',
         keywords: `repository ${r.path}`,
         run: go(`git/${r.id}`),
@@ -442,15 +442,33 @@
   // ── geometry ────────────────────────────────────────────────────────────
   // In-app: the panel may grow up to the top of the window (panelBudget).
   let budget = $state(420);
+  /** Measured from the HOST column, not the pill: opening from the docked
+   *  chip, the pill is still display:none on the first run (top 0), which
+   *  capped the list at its 120px floor — two and a half rows. The pill
+   *  always rests 16px above the host's bottom edge when it is open. */
   function measure(): void {
-    if (!pillEl) return;
-    budget = panelBudget(pillEl.getBoundingClientRect().top, 0);
+    const host = rootEl?.parentElement;
+    if (host) {
+      budget = panelBudget(host.getBoundingClientRect().bottom - 16 - PILL_H, 0);
+      return;
+    }
+    if (pillEl) budget = panelBudget(pillEl.getBoundingClientRect().top, 0);
   }
   $effect(() => {
     if (!inApp || !showPanel) return;
     measure();
+    void tick().then(measure);
     window.addEventListener('resize', measure);
     return () => window.removeEventListener('resize', measure);
+  });
+
+  // Toasts sit bottom-right over the same column: while the pill floats
+  // there, lift the stack above it (--toast-lift, read by Toasts.svelte).
+  $effect(() => {
+    if (!inApp) return;
+    const lift = presence === 'full' ? PILL_H + 12 : presence === 'rest' ? 36 + 12 : 0;
+    document.documentElement.style.setProperty('--toast-lift', `${lift}px`);
+    return () => document.documentElement.style.removeProperty('--toast-lift');
   });
 
   // ⌥Space window: report the content height so the native panel grows upward.
@@ -853,13 +871,13 @@
           <kbd class="k-hint" title={inApp ? '⌘K focuses this bar from anywhere in Otto' : 'Commands and Ask Otto'}>⌘K</kbd>
           <span class="sep" aria-hidden="true"></span>
           <button
-            class="chip model"
+            class="fb-chip model"
             onclick={() => (editing = !editing)}
             aria-expanded={editing}
             title="{space.name}: {providerName(provider)} · {modelLabel} — change the space’s agent, model and workspace"
           >
             <ProviderIcon {provider} size={13} />
-            <span class="chip-label">{modelLabel}</span>
+            <span class="fb-chip-label">{modelLabel}</span>
             <Icon name="chevronDown" size={10} />
           </button>
           <span class="sep" aria-hidden="true"></span>
@@ -899,7 +917,7 @@
     position: absolute;
     inset-inline: 0;
     bottom: 16px;
-    z-index: 40;
+    z-index: var(--z-floating-bar);
     display: flex;
     justify-content: center;
     pointer-events: none;
@@ -1072,7 +1090,7 @@
     background: var(--border);
     flex-shrink: 0;
   }
-  .chip {
+  .fb-chip {
     display: inline-flex;
     align-items: center;
     gap: 5px;
@@ -1087,12 +1105,12 @@
     cursor: pointer;
     flex-shrink: 0;
   }
-  .chip:hover,
-  .chip[aria-expanded='true'] {
+  .fb-chip:hover,
+  .fb-chip[aria-expanded='true'] {
     background: var(--hover);
     border-color: var(--border-strong);
   }
-  .chip-label {
+  .fb-chip-label {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

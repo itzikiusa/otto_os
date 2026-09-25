@@ -212,7 +212,7 @@
                       <td><code>{p.name}</code></td>
                       <td>{p.in}</td>
                       <td>{typeLabel(p.schema ?? p)}</td>
-                      <td>{p.required ? '✓' : ''}</td>
+                      <td>{p.required ? 'Yes' : ''}</td>
                       <td
                         >{p.description ?? ''}{p.example !== undefined
                           ? `${p.description ? ' — ' : ''}e.g. ${p.example}`
@@ -255,7 +255,7 @@
     max-width: min(1240px, 96%);
     width: 100%;
     margin: 0 auto;
-    font-size: 13px;
+    font-size: var(--fs-m);
   }
   .head {
     display: flex;
@@ -267,9 +267,9 @@
     margin: 0;
   }
   .ver {
-    font-size: 11px;
-    color: var(--accent, #9ab4ff);
-    border: 1px solid var(--accent, #9ab4ff);
+    font-size: var(--fs-xs);
+    color: var(--accent-text);
+    border: 1px solid var(--accent);
     border-radius: 5px;
     padding: 1px 7px;
     white-space: nowrap;
@@ -290,7 +290,7 @@
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 2px 8px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   section h3 {
     margin: 22px 0 8px;
@@ -320,23 +320,22 @@
   }
   .method {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0.4px;
-    border-radius: 5px;
+    border-radius: var(--radius-s);
     padding: 2px 7px;
     min-width: 46px;
     text-align: center;
-    color: #fff;
     flex-shrink: 0;
   }
-  .method.get { background: #2f6feb; }
-  .method.post { background: #2da44e; }
-  .method.put { background: #b58a2c; }
-  .method.patch { background: #8250df; }
-  .method.delete { background: #cf4436; }
-  .method.options, .method.head { background: #6e7781; }
+  .method.get { background: var(--info-soft); color: var(--info); }
+  .method.post { background: var(--success-soft); color: var(--success); }
+  .method.put { background: var(--warning-soft); color: var(--warning); }
+  .method.patch { background: color-mix(in srgb, var(--cat-4) 16%, transparent); color: var(--cat-4); }
+  .method.delete { background: var(--danger-soft); color: var(--danger); }
+  .method.options, .method.head { background: var(--hover); color: var(--text-dim); }
   .path {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .path.deprecated {
     text-decoration: line-through;
@@ -344,7 +343,7 @@
   }
   .sum {
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -355,7 +354,7 @@
   }
   .op-body h4 {
     margin: 12px 0 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     text-transform: uppercase;
     letter-spacing: 0.4px;
     color: var(--text-dim);
@@ -363,12 +362,12 @@
   .mime {
     text-transform: none;
     letter-spacing: 0;
-    font-size: 11px;
-    color: var(--accent, #9ab4ff);
+    font-size: var(--fs-xs);
+    color: var(--accent-text);
   }
   table {
     border-collapse: collapse;
-    font-size: 12px;
+    font-size: var(--fs-s);
     width: 100%;
   }
   th, td {
@@ -388,7 +387,7 @@
   }
   ul.schema li {
     padding: 1px 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .pname {
     font-family: var(--font-mono);
@@ -398,34 +397,34 @@
     color: var(--status-exited);
   }
   .ptype {
-    color: var(--accent, #9ab4ff);
+    color: var(--accent-text);
     margin-inline-start: 8px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .pdesc {
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .ex {
     background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 10px 12px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     overflow-x: auto;
   }
   .resp {
     margin: 4px 0;
   }
   .resp .code {
-    font-weight: 700;
-    font-size: 12px;
+    font-weight: 600;
+    font-size: var(--fs-s);
     margin-inline-end: 8px;
   }
   .resp .code.ok { color: var(--status-working); }
   .resp .code.bad { color: var(--status-exited); }
   .rdesc {
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
 </style>

@@ -215,7 +215,7 @@
     grid-template-columns: minmax(120px, 0.3fr) 1fr;
     gap: 10px;
     padding: 3px 8px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     min-width: 0;
   }
   .vrow:hover {
@@ -303,7 +303,7 @@
     align-items: center;
     margin: 2px 8px;
     padding: 1px 6px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
     border: 1px solid var(--border);
@@ -321,7 +321,7 @@
   @media (max-width: 640px) {
     .vk,
     .vv {
-      font-size: 13px;
+      font-size: var(--fs-m);
     }
   }
 </style>

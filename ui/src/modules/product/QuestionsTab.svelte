@@ -7,14 +7,28 @@
   import { confirmOutward } from '../../lib/confirmOutward';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
+  import type { Tone } from '../../lib/status';
   import type { ProductQuestion, NewQuestionReq, UpdateQuestionReq } from './types';
 
   // ── Load questions when tab becomes active ─────────────────────────────────
+  // A failed load shows inline with Retry — never as "No questions yet".
+  let loadError = $state<string | null>(null);
+  async function load(): Promise<void> {
+    loadError = null;
+    try {
+      await product.loadQuestions();
+    } catch (e) {
+      loadError = loadErrorText(e);
+    }
+  }
   $effect(() => {
     // Track selectedId reactively so we reload on story change.
     product.selectedId;
     if (product.selectedId) {
-      void product.loadQuestions();
+      void load();
     }
   });
 
@@ -38,7 +52,7 @@
     { value: 'scope', label: 'Scope' },
     { value: 'data', label: 'Data' },
     { value: 'ux', label: 'UX' },
-    { value: 'edge-case', label: 'Edge Case' },
+    { value: 'edge-case', label: 'Edge case' },
     { value: 'dependency', label: 'Dependency' },
     { value: 'other', label: 'Other' },
   ];
@@ -245,25 +259,20 @@
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
-  function statusClass(status: string): string {
+  /** Question status → one tone + a sentence-case word (StatusBadge). */
+  function statusTone(status: string): Tone {
     switch (status) {
-      case 'open': return 'pill-open';
-      case 'posted': return 'pill-posted';
-      case 'answered': return 'pill-answered';
-      case 'discarded': return 'pill-discarded';
-      default: return 'pill-open';
+      case 'posted': return 'info';
+      case 'answered': return 'success';
+      default: return 'neutral';
     }
   }
-
-  function catClass(cat: string): string {
-    switch (cat) {
-      case 'scope': return 'cat-scope';
-      case 'data': return 'cat-data';
-      case 'ux': return 'cat-ux';
-      case 'edge-case': return 'cat-edge';
-      case 'dependency': return 'cat-dep';
-      default: return 'cat-other';
-    }
+  function statusLabel(status: string): string {
+    return STATUS_OPTIONS.find((o) => o.value === status)?.label ?? status;
+  }
+  /** Category enum → its word ("edge-case" → "Edge case"); a neutral chip, no hues. */
+  function catLabel(cat: string): string {
+    return CAT_OPTIONS.find((o) => o.value === cat)?.label ?? cat;
   }
 
   function fmtDate(s: string): string {
@@ -317,8 +326,8 @@
     </div>
 
     <!-- ── Loading state ────────────────────────────────────────────────────── -->
-    {#if product.loadingQuestions}
-      <div class="muted">Loading questions…</div>
+    {#if (product.loadingQuestions || loadError) && product.questions.length === 0}
+      <LoadState what="questions" loading={product.loadingQuestions} error={loadError} empty onretry={() => void load()} />
     {:else if filtered.length === 0}
       <div class="muted">
         {product.questions.length === 0
@@ -374,7 +383,7 @@
                     <option value="scope">Scope</option>
                     <option value="data">Data</option>
                     <option value="ux">UX</option>
-                    <option value="edge-case">Edge Case</option>
+                    <option value="edge-case">Edge case</option>
                     <option value="dependency">Dependency</option>
                     <option value="other">Other</option>
                   </select>
@@ -397,8 +406,8 @@
                   <div class="q-top">
                     <span class="q-text">{q.text}</span>
                     <div class="q-chips">
-                      <span class="cat-chip {catClass(q.category)}">{q.category}</span>
-                      <span class="status-pill {statusClass(q.status)}">{q.status}</span>
+                      <span class="chip">{catLabel(q.category)}</span>
+                      <StatusBadge tone={statusTone(q.status)} label={statusLabel(q.status)} />
                     </div>
                   </div>
                   {#if q.rationale}
@@ -421,32 +430,32 @@
               {#if editingId !== q.id && answeringId !== q.id}
                 <div class="q-actions">
                   <button
-                    class="qa-btn"
+                    class="btn small ghost q-act"
                     onclick={() => startEdit(q)}
                     disabled={savingId === q.id || deletingId === q.id}
                     title="Edit"
                   >Edit</button>
                   <button
-                    class="qa-btn"
+                    class="btn small ghost q-act"
                     onclick={() => startAnswer(q)}
                     disabled={savingId === q.id || deletingId === q.id}
                     title="Answer / add context"
                   >Answer</button>
                   {#if q.status !== 'discarded'}
                     <button
-                      class="qa-btn warn-btn"
+                      class="btn small ghost q-act"
                       onclick={() => discard(q)}
                       disabled={savingId === q.id || deletingId === q.id}
                       title="Discard"
                     >Discard</button>
                   {/if}
                   <button
-                    class="qa-btn danger-btn"
+                    class="btn small danger q-act"
                     onclick={() => deleteQ(q)}
                     disabled={savingId === q.id || deletingId === q.id}
                     title="Delete"
                   >
-                    {deletingId === q.id ? '…' : 'Delete'}
+                    {deletingId === q.id ? 'Deleting…' : 'Delete'}
                   </button>
                 </div>
               {/if}
@@ -530,7 +539,7 @@
 <style>
   .muted {
     padding: 24px 0;
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     font-style: italic;
   }
@@ -562,7 +571,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 4px 8px;
   }
 
@@ -579,7 +588,7 @@
     gap: 6px;
     cursor: pointer;
     user-select: none;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .cb-label input {
@@ -587,7 +596,7 @@
     cursor: pointer;
   }
   .sel-count {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
 
   /* ── Question list ───────────────────────────────────────────────── */
@@ -649,7 +658,7 @@
     /* Basis 220px so the category/status chips drop BELOW the text on a narrow
        column (e.g. iPhone SE) instead of squeezing it to ~2 words per line. */
     flex: 1 1 220px;
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 500;
     color: var(--text);
     line-height: 1.4;
@@ -662,13 +671,13 @@
     flex-shrink: 0;
   }
   .q-rationale {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.45;
     font-style: italic;
   }
   .q-answer {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text);
     line-height: 1.45;
     padding: 6px 10px;
@@ -677,48 +686,18 @@
     border-radius: 0 var(--radius-s) var(--radius-s) 0;
   }
   .answer-label {
-    font-weight: 700;
+    font-weight: 600;
     color: var(--accent-text);
     margin-inline-end: 4px;
   }
   .q-ref {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .q-meta {
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-
-  /* ── Category chips ──────────────────────────────────────────────── */
-  .cat-chip {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 2px 7px;
-    border-radius: 999px;
-  }
-  .cat-scope   { background: color-mix(in srgb, #3b82f6 18%, transparent); color: #60a5fa; }
-  .cat-data    { background: color-mix(in srgb, #8b5cf6 18%, transparent); color: #a78bfa; }
-  .cat-ux      { background: color-mix(in srgb, #ec4899 18%, transparent); color: #f472b6; }
-  .cat-edge    { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
-  .cat-dep     { background: color-mix(in srgb, var(--success) 18%, transparent); color: var(--success); }
-  .cat-other   { background: color-mix(in srgb, var(--text-dim) 15%, transparent); color: var(--text-dim); }
-
-  /* ── Status pills ────────────────────────────────────────────────── */
-  .status-pill {
-    font-size: var(--fs-xs);
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding: 2px 7px;
-    border-radius: 999px;
-  }
-  .pill-open      { background: color-mix(in srgb, var(--status-working) 18%, transparent); color: var(--status-working); }
-  .pill-posted    { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-text); }
-  .pill-answered  { background: color-mix(in srgb, var(--success) 18%, transparent); color: var(--success); }
-  .pill-discarded { background: color-mix(in srgb, var(--text-dim) 15%, transparent); color: var(--text-dim); }
 
   /* ── Per-question action buttons ─────────────────────────────────── */
   .q-actions {
@@ -727,36 +706,6 @@
     gap: 4px;
     flex-shrink: 0;
   }
-  .qa-btn {
-    height: 24px;
-    padding: 0 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 11px;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 80ms, color 80ms;
-  }
-  .qa-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text);
-  }
-  .qa-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-  .warn-btn:hover:not(:disabled) {
-    border-color: var(--warning);
-    color: var(--warning);
-    background: color-mix(in srgb, var(--warning) 10%, transparent);
-  }
-  .danger-btn:hover:not(:disabled) {
-    border-color: var(--danger);
-    color: var(--danger);
-    background: color-mix(in srgb, var(--danger) 10%, transparent);
-  }
 
   /* ── Phone: the row-actions wrap below the text automatically (see `.q-body`
         flex-basis). Here we only bump legibility + touch-target sizes. ─────── */
@@ -764,17 +713,17 @@
     .q-actions {
       gap: 6px;
     }
-    .qa-btn {
+    .q-act {
       height: 32px;
       padding: 0 14px;
-      font-size: 13px;
+      font-size: var(--fs-m);
     }
     .q-text {
-      font-size: 14.5px;
+      font-size: var(--fs-l);
     }
     .q-rationale,
     .q-answer {
-      font-size: 13.5px;
+      font-size: var(--fs-m);
     }
   }
 
@@ -787,7 +736,7 @@
   }
   .edit-text {
     width: 100%;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -799,7 +748,7 @@
   }
   .edit-input {
     width: 100%;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -808,7 +757,7 @@
     font-family: inherit;
   }
   .edit-sel {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -840,7 +789,7 @@
     display: flex;
     flex-direction: column;
     gap: 5px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -848,12 +797,12 @@
   }
   .req {
     color: var(--danger);
-    font-weight: 700;
+    font-weight: 600;
   }
   .form-textarea,
   .form-input {
     width: 100%;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -867,7 +816,7 @@
     resize: none;
   }
   .form-select {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);

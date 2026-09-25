@@ -4,12 +4,13 @@
   // selected matrix — one row per prompt, one column per provider·skill pair,
   // the highest-scoring cell in each row highlighted as the winner.
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { skillsEvalApi } from '../../lib/api/skillsEval';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
-  import { runStatus } from '../../lib/status';
+  import { runStatus, sentenceCase } from '../../lib/status';
   import { rel } from '../../lib/stores/now.svelte';
   import type { EvalMatrix, MatrixCell, MatrixPrompt, StartMatrixReq } from '../../lib/api/types';
 
@@ -23,6 +24,10 @@
   let selectedId: string | null = $state(null);
   let showForm = $state(false);
   let creating = $state(false);
+  // The selected matrix's own load: shown inline in the detail pane (a toast
+  // left the pane on the generic "Eval matrix" intro, as if nothing existed).
+  let detailError: string | null = $state(null);
+  let detailLoading = $state(false);
 
   // --- New-matrix form fields --------------------------------------------
   let fName = $state('');
@@ -63,13 +68,24 @@
   async function selectMatrix(id: string): Promise<void> {
     selectedId = id;
     showForm = false;
+    detailError = null;
+    if (selected?.id !== id) selected = null;
+    detailLoading = true;
     try {
       const m = await skillsEvalApi.getMatrix(id);
       if (selectedId === id) selected = m;
       syncListEntry(m);
     } catch (e) {
-      toasts.error('Could not load matrix', e instanceof Error ? e.message : String(e));
+      if (selectedId === id) detailError = e instanceof Error ? e.message : String(e);
+    } finally {
+      if (selectedId === id) detailLoading = false;
     }
+  }
+
+  /** Leave the form: back to the matrix that was open, else the newest one. */
+  function closeForm(): void {
+    showForm = false;
+    if (matrices.length > 0) void selectMatrix(matrices[0].id);
   }
 
   function syncListEntry(m: EvalMatrix): void {
@@ -101,12 +117,19 @@
 
   async function cancel(): Promise<void> {
     if (!selected) return;
+    if (
+      !(await confirmer.ask(`Stop the matrix "${selected.name}"? Cells still running are abandoned; scored cells are kept.`, {
+        title: 'Stop matrix',
+        confirmLabel: 'Stop matrix',
+      }))
+    )
+      return;
     try {
       const m = await skillsEvalApi.cancelMatrix(selected.id);
       selected = m;
       syncListEntry(m);
     } catch (e) {
-      toasts.error('Could not cancel matrix', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't stop the matrix", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -136,6 +159,15 @@
       parseList(fSkills).length > 0 &&
       fPrompts.some((p) => p.task.trim().length > 0),
   );
+
+  // Why "Create matrix" is disabled, for its tooltip.
+  const createBlock = $derived.by(() => {
+    if (creating) return 'Creating…';
+    if (parseList(fProviders).length === 0) return 'Add at least one provider';
+    if (parseList(fSkills).length === 0) return 'Add at least one skill';
+    if (!fPrompts.some((p) => p.task.trim())) return 'Add at least one prompt with a task';
+    return '';
+  });
 
   async function create(): Promise<void> {
     const wsId = ws.currentId;
@@ -171,7 +203,7 @@
       await selectMatrix(m.id);
       toasts.success('Matrix created', 'Cells score the working tree in the background.');
     } catch (e) {
-      toasts.error('Could not create matrix', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't create the matrix", e instanceof Error ? e.message : String(e));
     } finally {
       creating = false;
     }
@@ -232,19 +264,20 @@
   <aside class="mx-side">
     <div class="mx-side-head">
       <span class="mx-side-title">Matrices</span>
-      <button class="btn small primary" data-testid="matrix-new-btn" onclick={openForm}>
-        <Icon name="plus" size={13} /> New matrix
+      <!-- Not .primary: the form's "Create matrix" / the empty state's CTA is the view's primary. -->
+      <button class="btn small" data-testid="matrix-new-btn" onclick={openForm} aria-pressed={showForm}>
+        <Icon name="plus" size={12} /> New matrix
       </button>
     </div>
     <div class="mx-list">
       {#if !ws.currentId}
         <div class="mx-muted">No workspace selected.</div>
       {:else if loading && matrices.length === 0}
-        <div class="mx-muted">Loading…</div>
+        <div class="mx-muted" role="status">Loading matrices…</div>
       {:else if loadError && matrices.length === 0}
         <div class="mx-muted mx-err" role="alert">
-          Couldn't load matrices: {loadError}
-          <button class="btn small" onclick={() => ws.currentId && loadList(ws.currentId)}>Retry</button>
+          <span><Icon name="warning" size={12} /> <strong>Couldn't load matrices.</strong> <span class="mx-err-detail">{loadError}</span></span>
+          <button class="btn small" onclick={() => ws.currentId && loadList(ws.currentId)} disabled={loading}>{loading ? 'Retrying…' : 'Retry'}</button>
         </div>
       {:else if matrices.length === 0}
         <div class="mx-muted">No matrices yet.</div>
@@ -252,6 +285,7 @@
         {#each matrices as m (m.id)}
           <button
             class="mx-item"
+            aria-current={!showForm && selectedId === m.id ? 'true' : undefined}
             class:active={!showForm && selectedId === m.id}
             onclick={() => selectMatrix(m.id)}
           >
@@ -260,7 +294,7 @@
               <span class="mx-dot st-{m.status}" role="img" aria-label={runStatus(m.status).label} title={runStatus(m.status).label}></span>
             </div>
             <div class="mx-item-meta">
-              <span title="providers × skills × prompts">{m.providers.length}×{m.skills.length}×{m.prompts.length}</span>
+              <span title="{m.providers.length} providers × {m.skills.length} skills × {m.prompts.length} prompts">{m.providers.length} × {m.skills.length} × {m.prompts.length}</span>
               <span class="grow"></span>
               <span title={new Date(m.created_at).toLocaleString()}>{rel(m.created_at)}</span>
             </div>
@@ -277,8 +311,8 @@
       <div class="mx-form">
         <h2>New matrix</h2>
         <p class="lede">
-          A provider × skill × prompt grid — each cell is a scored run. For now matrices run in
-          <span class="mono">score_only</span> mode and score the workspace working tree.
+          A provider × skill × prompt grid — each cell is a scored run. Matrices currently score the
+          workspace's working tree (score only; no improvement iterations).
         </p>
 
         <section class="card block">
@@ -319,10 +353,10 @@
           {#each fPrompts as p, i (i)}
             <div class="prompt card">
               <div class="row">
-                <input class="input grow" data-testid="matrix-prompt-label" placeholder="label (e.g. happy path)" bind:value={p.label} />
+                <input class="input grow" data-testid="matrix-prompt-label" aria-label="Prompt {i + 1} label" placeholder="Happy path" bind:value={p.label} />
                 {#if fPrompts.length > 1}
-                  <button class="btn small ghost danger" type="button" title="Remove" onclick={() => removePrompt(i)}>
-                    <Icon name="trash" size={13} />
+                  <button class="icon-btn" type="button" title="Remove prompt" aria-label="Remove prompt {i + 1}" onclick={() => removePrompt(i)}>
+                    <Icon name="trash" size={14} />
                   </button>
                 {/if}
               </div>
@@ -330,6 +364,7 @@
                 class="input"
                 rows="2"
                 data-testid="matrix-prompt-task"
+                aria-label="Prompt {i + 1} task"
                 placeholder="What the agent should do…"
                 bind:value={p.task}
               ></textarea>
@@ -339,24 +374,33 @@
 
         <div class="actions">
           <span class="grow"></span>
-          <button class="btn" type="button" onclick={() => (showForm = false)}>Cancel</button>
-          <button class="btn primary" data-testid="matrix-create" disabled={!canCreate} onclick={create}>
+          <button class="btn" type="button" onclick={closeForm}>Cancel</button>
+          <button class="btn primary" data-testid="matrix-create" disabled={!canCreate} title={canCreate ? undefined : createBlock} onclick={create}>
             {creating ? 'Creating…' : 'Create matrix'}
           </button>
         </div>
       </div>
+    {:else if selectedId && detailError}
+      <div class="mx-detail-err" role="alert">
+        <Icon name="warning" size={22} />
+        <strong>Couldn't load this matrix</strong>
+        <p>{detailError}</p>
+        <button class="btn small" onclick={() => selectedId && selectMatrix(selectedId)} disabled={detailLoading}><Icon name="refresh" size={12} /> {detailLoading ? 'Retrying…' : 'Retry'}</button>
+      </div>
+    {:else if selectedId && !selected}
+      <div class="mx-muted mx-pad" role="status">Loading matrix…</div>
     {:else if selected}
       <div class="mx-detail">
         <div class="mx-detail-head">
           <div class="mx-detail-title">
             <h2>{selected.name}</h2>
-            <span class="mx-sub mono" title={selected.repo_key}>{selected.mode} · {selected.repo_key}</span>
+            <span class="mx-sub" title={selected.repo_key}>{sentenceCase(selected.mode)} · <span class="mono">{selected.repo_key}</span></span>
           </div>
           <span class="grow"></span>
           <StatusBadge status={runStatus(selected.status)} />
           {#if selected.status === 'running'}
             <button class="btn small" type="button" onclick={cancel}>
-              <Icon name="x" size={13} /> Cancel
+              <Icon name="square" size={12} /> Stop
             </button>
           {/if}
         </div>
@@ -368,9 +412,9 @@
             <table data-testid="matrix-grid">
               <thead>
                 <tr>
-                  <th class="rowlabel"></th>
+                  <th class="rowlabel" scope="col"><span class="sr-only">Prompt</span></th>
                   {#each cols as col (col.provider + '\u0000' + col.skill)}
-                    <th>
+                    <th scope="col">
                       <div class="col-prov">{col.provider}</div>
                       <div class="col-skill mono">{col.skill}</div>
                     </th>
@@ -381,7 +425,7 @@
                 {#each promptRows as prompt (prompt)}
                   {@const winnerId = rowWinnerId(prompt)}
                   <tr>
-                    <td class="rowlabel">{prompt}</td>
+                    <th class="rowlabel" scope="row">{prompt}</th>
                     {#each cols as col (col.provider + '\u0000' + col.skill)}
                       {@const cell = cellAt(prompt, col.provider, col.skill)}
                       <td
@@ -391,18 +435,18 @@
                       >
                         {#snippet cellBody(c: MatrixCell)}
                           {#if c.composite_score != null}
-                            <span class="score">{c.composite_score.toFixed(0)}</span>
+                            <span class="score">{#if winnerId != null && c.eval_id === winnerId}<Icon name="check" size={12} /><span class="sr-only">Top score: </span>{/if}{c.composite_score.toFixed(0)}</span>
                           {:else}
                             <span class="cell-status">{runStatus(c.status).label}</span>
                           {/if}
-                          <span class="proof {proofClass(c.proof_status)}">{c.proof_status || 'missing'}</span>
+                          <span class="proof {proofClass(c.proof_status)}" title="Proof pack status">{sentenceCase(c.proof_status || 'missing')}</span>
                         {/snippet}
                         {#if cell?.eval_id}
                           {@const evalId = cell.eval_id}
                           <button
                             type="button"
                             class="cell-in clickable"
-                            title="Open this run"
+                            title={winnerId != null && cell.eval_id === winnerId ? 'Top score in this row · open this run' : 'Open this run'}
                             onclick={() => onopenrun?.(evalId)}
                           >{@render cellBody(cell)}</button>
                         {:else if cell}
@@ -422,9 +466,10 @@
     {:else}
       <EmptyState
         icon="grid"
-        title="Eval matrix"
-        body="Compare providers × skills × prompts in a single scored grid."
+        title="No matrices yet"
+        body="A matrix scores several providers and skills against the same prompts in one grid, so you can see which combination does best."
         actionLabel="New matrix"
+        actionIcon="plus"
         onaction={openForm}
       />
     {/if}
@@ -440,6 +485,7 @@
   .mx-side {
     width: 280px;
     flex-shrink: 0;
+    background: var(--surface);
     border-inline-end: 1px solid var(--border);
     display: flex;
     flex-direction: column;
@@ -452,8 +498,8 @@
     padding: 12px 12px 8px;
   }
   .mx-side-title {
-    font-size: 12px;
-    font-weight: 700;
+    font-size: var(--fs-s);
+    font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: var(--text-dim);
@@ -470,15 +516,48 @@
   .mx-muted {
     padding: 16px 8px;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .mx-err {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
     gap: 8px;
-    color: var(--danger);
+    color: var(--text);
     overflow-wrap: anywhere;
+  }
+  .mx-err :global(svg),
+  .mx-detail-err > :global(svg) {
+    color: var(--danger);
+    vertical-align: -1px;
+  }
+  .mx-err-detail {
+    color: var(--text-dim);
+  }
+  .mx-pad {
+    padding: 30px;
+    text-align: center;
+  }
+  .mx-detail-err {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 40px 20px;
+    text-align: center;
+    overflow-wrap: anywhere;
+  }
+  .mx-detail-err p {
+    margin: 0 0 6px;
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
   }
   .mx-item {
     text-align: start;
@@ -492,11 +571,11 @@
     gap: 3px;
   }
   .mx-item:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
   }
   /* Selection is accent (same as the Runs list), not the success green. */
   .mx-item.active {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     border-color: color-mix(in srgb, var(--accent) 30%, transparent);
   }
   .mx-item-top {
@@ -505,7 +584,7 @@
     gap: 6px;
   }
   .mx-item-name {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
     flex: 1;
     min-width: 0;
@@ -539,6 +618,21 @@
   .mx-dot.st-error {
     background: var(--status-exited);
   }
+  @media (max-width: 640px) {
+    .mx {
+      flex-direction: column;
+    }
+    .mx-side {
+      width: 100%;
+      max-height: 40%;
+      border-inline-end: none;
+      border-bottom: 1px solid var(--border);
+    }
+    .mx-main {
+      flex: 1;
+      min-height: 0;
+    }
+  }
   @media (prefers-reduced-motion: reduce) {
     .mx-dot.st-running {
       animation: none;
@@ -556,9 +650,12 @@
   }
 
   /* Form */
-  .mx-form {
+  .mx-form > :global(*) {
     max-width: 760px;
-    margin: 0 auto;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .mx-form {
     padding: 18px 20px 60px;
     display: flex;
     flex-direction: column;
@@ -569,11 +666,11 @@
   }
   h2 {
     margin: 0;
-    font-size: 16px;
+    font-size: var(--fs-l);
   }
   .lede {
     margin: 0;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.5;
   }
@@ -596,8 +693,8 @@
     min-width: 0;
   }
   .field-label {
-    font-size: 11px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: var(--text-dim);
@@ -617,7 +714,7 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    background: color-mix(in srgb, var(--text-dim) 5%, transparent);
+    background: var(--surface-2);
   }
   textarea.input {
     resize: vertical;
@@ -647,7 +744,7 @@
   }
   .mx-sub {
     display: block;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -659,7 +756,7 @@
   table {
     border-collapse: collapse;
     width: 100%;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   th,
   td {
@@ -668,8 +765,8 @@
     text-align: center;
     vertical-align: middle;
   }
-  th {
-    background: color-mix(in srgb, var(--text-dim) 6%, transparent);
+  thead th {
+    background: var(--surface-2);
   }
   .rowlabel {
     text-align: start;
@@ -703,19 +800,26 @@
     cursor: pointer;
   }
   .cell-in.clickable:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
   }
+  /* Winner: an outline + a check before the score (colour is never the only
+     signal, and no success tint under the proof pill's own tone). */
   .cell.winner {
-    background: color-mix(in srgb, var(--success) 22%, transparent);
     outline: 2px solid var(--success);
     outline-offset: -2px;
   }
   .score {
-    font-weight: 700;
-    font-size: 14px;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-weight: 600;
+    font-size: var(--fs-m);
+  }
+  .cell.winner .score :global(svg) {
+    color: var(--success);
   }
   .cell-status {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .dash {
@@ -723,10 +827,8 @@
   }
   .proof {
     font-size: var(--fs-xs);
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    padding: 1px 7px;
+    font-weight: 500;
+    padding: 1px 8px;
     border-radius: 999px;
   }
   .pf-pass {
@@ -738,11 +840,11 @@
     color: var(--danger);
   }
   .pf-partial {
-    background: color-mix(in srgb, var(--warning) 22%, transparent);
+    background: var(--warning-soft);
     color: var(--warning);
   }
   .pf-none {
-    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+    background: var(--surface-2);
     color: var(--text-dim);
   }
   .grow {

@@ -261,8 +261,8 @@
           <span class="cell mono"><span class="match" title={matchSummary(p.match)}>{matchSummary(p.match)}</span></span>
           <span class="cell">{#if p.enabled}<Icon name="check" size={14} />{:else}<span class="off">off</span>{/if}</span>
           <span class="cell actions">
-            <button class="btn xs" onclick={() => openEdit(p)}>Edit</button>
-            <button class="btn xs danger" onclick={() => void remove(p)}>Delete</button>
+            <button class="btn small" onclick={() => openEdit(p)}>Edit</button>
+            <button class="btn small danger" onclick={() => void remove(p)}>Delete</button>
           </span>
         </div>
       {/each}
@@ -293,7 +293,7 @@
     border-bottom: 1px solid var(--border);
   }
   .count {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .grow {
@@ -325,12 +325,12 @@
     color: var(--text-dim);
   }
   .eval-row .el {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
   }
   .reason {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .grid {
@@ -346,7 +346,7 @@
   }
   .thead {
     border-bottom: 1px solid var(--border);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--text-dim);
@@ -371,11 +371,11 @@
     min-width: 0;
   }
   .pname .nm {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .desc {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -388,19 +388,19 @@
     min-width: 0;
   }
   .scope {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .match {
     min-width: 0;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .off {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .actions {
@@ -414,7 +414,7 @@
     border-radius: var(--radius-s, 6px);
     color: var(--text);
     padding: 6px 8px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   textarea {
     width: 100%;
@@ -427,12 +427,8 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
-  }
-  .btn.xs {
-    font-size: 11px;
-    padding: 3px 8px;
   }
   .btn.danger {
     color: var(--danger);

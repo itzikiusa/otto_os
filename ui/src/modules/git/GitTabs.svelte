@@ -219,7 +219,7 @@
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--fs-s);
     white-space: nowrap;
   }
   .git-tab:hover {
@@ -244,7 +244,7 @@
   }
   /* Uncommitted changes present → amber dot (a quiet "dirty" beacon). */
   .git-tab-dot.dirty {
-    background: var(--status-warn);
+    background: var(--warning);
     opacity: 1;
   }
   .git-tab-name {
@@ -287,7 +287,7 @@
     color: var(--text-dim);
     cursor: pointer;
     padding: 0;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
   }
   .git-tab-close:hover {
     background: var(--border);
@@ -380,7 +380,7 @@
     .git-tab {
       max-width: 200px;
       padding: 8px 6px 8px 12px;
-      font-size: 13px;
+      font-size: var(--fs-m);
       flex-shrink: 0;
     }
     /* ≥40px touch hit area for the close ✕ — its onclick already

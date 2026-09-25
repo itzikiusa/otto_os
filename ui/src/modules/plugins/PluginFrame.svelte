@@ -19,14 +19,22 @@
   import { agentProviders } from '../../lib/providers';
   import { plugins } from '../../lib/stores/plugins.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
+  import { router } from '../../lib/router.svelte';
 
   let { slug }: { slug: string } = $props();
 
   const origin = new URL(baseUrl()).origin;
+  /** Display name: the manifest name once the nav list has it, else the slug. */
+  const name = $derived(plugins.get(slug)?.name ?? slug);
   const src = $derived(`${origin}/plugins/${slug}/ui/`);
   let frame = $state<HTMLIFrameElement | undefined>();
 
-  let probe = $state<'loading' | 'ok' | 'error'>('loading');
+  // 'missing' = the daemon has no UI for this slug (disabled, uninstalled or
+  // UI-less) — not a failure to retry, so it gets an empty state with a way
+  // to the plugin settings instead of "Couldn't load" + Retry.
+  let probe = $state<'loading' | 'ok' | 'error' | 'missing'>('loading');
   let probeError = $state<string | null>(null);
   let frameLoaded = $state(false);
   let probeSeq = 0;
@@ -44,10 +52,12 @@
         probe = 'ok';
         return;
       }
-      probeError =
-        r.status === 404
-          ? 'The plugin is disabled, uninstalled, or ships no UI. Check Settings → Plugins.'
-          : `The daemon answered ${r.status}.`;
+      if (r.status === 404) {
+        probeError = null;
+        probe = 'missing';
+        return;
+      }
+      probeError = `Otto answered ${r.status} for the plugin’s page. Try again, or check the plugin’s health in Settings → Plugins.`;
       probe = 'error';
     } catch (e) {
       if (seq !== probeSeq) return;
@@ -118,7 +128,7 @@
 <!-- Same chrome as every built-in module: the plugin's name in the shared
      header bar, its own UI below. -->
 <div class="plugin-page">
-  <PageHeader title={plugins.get(slug)?.name ?? slug} />
+  <PageHeader title={name} />
   {#if probe === 'ok'}
     <div class="pf-host">
       <iframe
@@ -129,12 +139,31 @@
         allow="clipboard-write"
       ></iframe>
       {#if !frameLoaded}
-        <div class="pf-loading"><LoadState what={plugins.get(slug)?.name ?? slug} variant="page" loading empty /></div>
+        <div class="pf-loading"><LoadState what={name} variant="page" loading empty /></div>
       {/if}
     </div>
+  {:else if probe === 'missing'}
+    {#if auth.isRoot}
+      <EmptyState
+        variant="page"
+        icon="box"
+        title="{name} isn’t available"
+        body="It’s disabled, uninstalled, or ships no page of its own. Enable or reinstall it in Settings → Plugins."
+        actionLabel="Open plugin settings"
+        actionIcon="gear"
+        onaction={() => router.go('settings/plugins')}
+      />
+    {:else}
+      <EmptyState
+        variant="page"
+        icon="box"
+        title="{name} isn’t available"
+        body="It’s disabled, uninstalled, or ships no page of its own. Ask an Otto admin to enable it."
+      />
+    {/if}
   {:else}
     <LoadState
-      what={plugins.get(slug)?.name ?? `the ${slug} plugin`}
+      what={name}
       variant="page"
       loading={probe === 'loading'}
       error={probeError}

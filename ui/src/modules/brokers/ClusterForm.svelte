@@ -289,7 +289,7 @@
     gap: 4px;
   }
   .field span {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .field .field-err {
@@ -307,13 +307,13 @@
     border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
-    font-size: 13px;
+    font-size: var(--fs-m);
   }
   .check {
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .check span em {
@@ -357,7 +357,7 @@
       flex: 1 1 auto !important;
     }
     .field span {
-      font-size: 13px;
+      font-size: var(--fs-m);
     }
     .field {
       align-items: stretch;
@@ -370,7 +370,7 @@
       padding: 10px 11px;
     }
     .check {
-      font-size: 13px;
+      font-size: var(--fs-m);
       align-items: flex-start;
     }
   }

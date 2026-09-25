@@ -14,10 +14,17 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
+  import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { loadErrorText } from '../../lib/loadError';
 
   let users: User[] = $state([]);
   let loading = $state(true);
+  let loadError = $state('');
   let createOpen = $state(false);
+  let createError = $state('');
   let newUsername = $state('');
   let newDisplay = $state('');
   let newPassword = $state('');
@@ -39,23 +46,26 @@
   async function copyUsername(u: User): Promise<void> {
     try {
       await copyTextOrThrow(`@${u.username}`);
-      toasts.success('Copied', `@${u.username}`);
+      toasts.success('Username copied', `@${u.username}`);
     } catch {
-      toasts.error('Copy failed', 'Could not write to clipboard.');
+      toasts.error('Couldn’t copy the username', 'The clipboard write was blocked.');
     }
   }
 
   async function copyUserJson(u: User): Promise<void> {
     try {
       await copyAsJson(u);
-      toasts.success('Copied', 'User JSON copied to clipboard.');
+      toasts.success('User JSON copied');
     } catch {
-      toasts.error('Copy failed', 'Could not write to clipboard.');
+      toasts.error('Couldn’t copy the user', 'The clipboard write was blocked.');
     }
   }
 
   // role matrix
   const roleOptions: (WorkspaceRole | 'none')[] = ['none', 'viewer', 'editor', 'admin'];
+  const ROLE_LABEL: Record<WorkspaceRole | 'none', string> = { none: 'None', viewer: 'Viewer', editor: 'Editor', admin: 'Admin' };
+  const CAP_LABEL: Record<Capability, string> = { none: 'None', view: 'View', edit: 'Edit', admin: 'Admin' };
+  let matrixError = $state('');
 
   let matrixWs: string = $state('');
   let members: MemberEntry[] = $state([]);
@@ -120,7 +130,7 @@
       // Keep the by-workspace view honest when it's showing the same workspace.
       if (matrixWs === wsId) members = saved;
     } catch (e) {
-      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t change the workspace role', e instanceof Error ? e.message : String(e));
     } finally {
       savingWs = savingWs.filter((id) => id !== wsId);
     }
@@ -171,6 +181,14 @@
   let grantMap: Record<string, Capability> = $state({});
   let grantLoading = $state(false);
   let grantSaving = $state(false);
+  // A failed grants load must never show every feature as "None" — one Save
+  // would then wipe the user's real grants.
+  let grantError = $state('');
+  let grantSavedKey = $state('');
+  function grantKey(m: Record<string, Capability>): string {
+    return JSON.stringify(ALL_FEATURES.map((f) => m[f] ?? 'none'));
+  }
+  const grantsDirty = $derived(!grantLoading && !grantError && grantKey(grantMap) !== grantSavedKey);
 
   /** The non-root users available to manage grants for. */
   const nonRootUsers = $derived(users.filter((u) => !u.is_root));
@@ -186,13 +204,24 @@
   $effect(() => {
     const id = matrixWs;
     if (id === '') return;
-    matrixLoading = true;
-    void api
-      .get<MemberEntry[]>(`/workspaces/${id}/members`)
-      .then((m) => (members = m))
-      .catch(() => (members = []))
-      .finally(() => (matrixLoading = false));
+    void loadMatrix(id);
   });
+
+  async function loadMatrix(id: string): Promise<void> {
+    matrixLoading = true;
+    matrixError = '';
+    try {
+      const m = await api.get<MemberEntry[]>(`/workspaces/${id}/members`);
+      if (matrixWs === id) members = m;
+    } catch (e) {
+      if (matrixWs === id) {
+        members = [];
+        matrixError = loadErrorText(e);
+      }
+    } finally {
+      if (matrixWs === id) matrixLoading = false;
+    }
+  }
 
   // Auto-select first non-root user for the grant matrix when the list loads.
   $effect(() => {
@@ -219,32 +248,49 @@
   $effect(() => {
     const id = grantUserId;
     if (id === '') return;
-    grantLoading = true;
-    grantMap = {};
-    void api
-      .get<UserGrantsResp>(`/users/${id}/grants`)
-      .then((resp) => {
-        const m: Record<string, Capability> = {};
-        for (const g of resp.grants) m[g.feature] = g.capability as Capability;
-        grantMap = m;
-      })
-      .catch(() => (grantMap = {}))
-      .finally(() => (grantLoading = false));
+    void loadGrants(id);
   });
+
+  async function loadGrants(id: string): Promise<void> {
+    grantLoading = true;
+    grantError = '';
+    grantMap = {};
+    try {
+      const resp = await api.get<UserGrantsResp>(`/users/${id}/grants`);
+      if (grantUserId !== id) return;
+      const m: Record<string, Capability> = {};
+      for (const g of resp.grants) m[g.feature] = g.capability as Capability;
+      grantMap = m;
+      grantSavedKey = grantKey(m);
+    } catch (e) {
+      if (grantUserId === id) grantError = loadErrorText(e);
+    } finally {
+      if (grantUserId === id) grantLoading = false;
+    }
+  }
 
   async function loadUsers(): Promise<void> {
     loading = true;
     try {
       users = await api.get<User[]>('/users');
+      loadError = '';
     } catch (e) {
-      toasts.error('Could not load users', e instanceof Error ? e.message : String(e));
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
   }
 
+  function openCreate(): void {
+    newUsername = newDisplay = newPassword = '';
+    createError = '';
+    createOpen = true;
+  }
+
   async function createUser(): Promise<void> {
+    if (busy || newUsername.trim() === '' || newPassword.length < 6) return;
     busy = true;
+    createError = '';
     try {
       const u = await api.post<User>('/users', {
         username: newUsername.trim(),
@@ -256,7 +302,8 @@
       newUsername = newDisplay = newPassword = '';
       toasts.success('User created', u.username);
     } catch (e) {
-      toasts.error('Create failed', e instanceof Error ? e.message : String(e));
+      // Inline, in the sheet — the fix (another username) happens there.
+      createError = e instanceof Error ? e.message : String(e);
     } finally {
       busy = false;
     }
@@ -266,8 +313,9 @@
     try {
       const updated = await api.patch<User>(`/users/${u.id}`, { disabled: !u.disabled });
       users = users.map((x) => (x.id === u.id ? updated : x));
+      toasts.success(updated.disabled ? `Disabled @${u.username}` : `Enabled @${u.username}`, updated.disabled ? 'They can no longer sign in.' : 'They can sign in again.');
     } catch (e) {
-      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+      toasts.error(`Couldn’t ${u.disabled ? 'enable' : 'disable'} @${u.username}`, e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -276,15 +324,15 @@
   async function doImpersonate(u: User): Promise<void> {
     const ok = await confirmer.ask(
       `Act as "${u.display_name}" (@${u.username})? You will see their sessions and data until you stop impersonating.`,
-      { title: 'Impersonate User', confirmLabel: 'Impersonate', danger: false },
+      { title: 'Impersonate user', confirmLabel: 'Impersonate', danger: false },
     );
     if (!ok) return;
     impersonatingId = u.id;
     try {
       await auth.impersonate(u.id);
-      toasts.success('Now acting as', u.username);
+      toasts.success(`Now acting as @${u.username}`);
     } catch (e) {
-      toasts.error('Impersonate failed', e instanceof Error ? e.message : String(e));
+      toasts.error(`Couldn’t impersonate @${u.username}`, e instanceof Error ? e.message : String(e));
     } finally {
       impersonatingId = null;
     }
@@ -309,9 +357,10 @@
       members = await api.put<MemberEntry[]>(`/workspaces/${matrixWs}/members`, {
         members: next.map((m) => ({ user_id: m.user_id, role: m.role })),
       });
-      toasts.success('Membership updated');
+      // Keep the by-user view's cache honest too.
+      if (allMembers[matrixWs]) allMembers = { ...allMembers, [matrixWs]: members };
     } catch (e) {
-      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t change the workspace role', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -324,96 +373,114 @@
   }
 
   async function saveGrants(): Promise<void> {
-    if (!grantUserId) return;
+    if (!grantUserId || grantError || !grantsDirty) return;
     grantSaving = true;
     try {
       const grants: GrantEntry[] = ALL_FEATURES
         .filter((f) => grantMap[f] && grantMap[f] !== 'none')
         .map((f) => ({ feature: f, capability: grantMap[f] }));
       await api.put(`/users/${grantUserId}/grants`, { grants });
-      toasts.success('Feature grants saved');
+      grantSavedKey = grantKey(grantMap);
+      const who = users.find((u) => u.id === grantUserId);
+      toasts.success('Feature grants saved', who ? `@${who.username}` : undefined);
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t save feature grants', e instanceof Error ? e.message : String(e));
     } finally {
       grantSaving = false;
     }
+  }
+
+  function userMenu(e: MouseEvent, u: User): void {
+    const items: MenuItem[] = [
+      { label: 'Copy @username', icon: 'copy', action: () => void copyUsername(u) },
+      { label: 'Copy as JSON', icon: 'copy', action: () => void copyUserJson(u) },
+    ];
+    if (!u.is_root) {
+      if (u.id !== auth.realUser?.id && !u.disabled) {
+        items.push({ separator: true }, { label: 'Impersonate…', icon: 'user', disabled: !!impersonatingId, action: () => void doImpersonate(u) });
+      }
+      items.push({ separator: true }, {
+        label: u.disabled ? 'Enable account' : 'Disable account',
+        icon: u.disabled ? 'unlock' : 'lock',
+        danger: !u.disabled,
+        action: () => void toggleDisabled(u),
+      });
+    }
+    ctxMenu.show(e, items);
   }
 </script>
 
 <div class="settings-section">
   <PageHeader title={sectionLabel('users')} subtitle="Root manages accounts and per-workspace roles">
     {#snippet actions()}
-      <button class="btn primary" onclick={() => (createOpen = true)}>New User</button>
+      <button class="btn small primary" data-icon="plus" onclick={openCreate}><Icon name="plus" size={12} /> New user</button>
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
 
-  {#if loading}
-    <Skeleton rows={3} height={40} />
-  {:else}
-    <div class="user-filter-row">
-      <input
-        class="input"
-        type="search"
-        placeholder="Filter users…"
-        bind:value={userFilter}
-        style="max-width: 260px"
-      />
-      <span class="dim" style="font-size: 11.5px">
-        {filteredUsers.length} of {users.length}
-      </span>
-    </div>
+  <LoadState what="users" {loading} error={loadError} empty={users.length === 0} rows={3} onretry={() => void loadUsers()}>
+    <h2 class="section-title first">Accounts</h2>
+    {#if users.length > 5}
+      <div class="user-filter-row">
+        <input
+          class="input filter"
+          type="search"
+          placeholder="Filter users…"
+          aria-label="Filter users"
+          bind:value={userFilter}
+        />
+        <span class="dim count">{filteredUsers.length} of {users.length}</span>
+      </div>
+    {/if}
     <div class="card user-table">
       {#each filteredUsers as u (u.id)}
         <div class="user-row" class:disabled={u.disabled}>
-          <span class="avatar">{u.display_name.slice(0, 1).toUpperCase()}</span>
+          <span class="avatar" aria-hidden="true">{u.display_name.slice(0, 1).toUpperCase()}</span>
           <div class="grow">
             <div class="u-name">
-              {u.display_name}
-              {#if u.is_root}<span class="chip accent">root</span>{/if}
-              {#if u.disabled}<span class="chip bad">disabled</span>{/if}
+              <span class="u-text" title={u.display_name}>{u.display_name}</span>
+              {#if u.is_root}<span class="chip">Root</span>{/if}
+              {#if u.disabled}<span class="chip bad">Disabled</span>{/if}
+              {#if u.id === auth.realUser?.id}<span class="dim you">you</span>{/if}
             </div>
             <div class="u-sub">@{u.username}</div>
           </div>
-          <button
-            class="btn small icon-only"
-            title="Copy @username"
-            onclick={() => copyUsername(u)}
-            aria-label="Copy username"
-          >@</button>
-          <button
-            class="btn small icon-only"
-            title="Copy as JSON"
-            onclick={() => copyUserJson(u)}
-            aria-label="Copy as JSON"
-          >{'{}'}</button>
-          {#if !u.is_root}
-            <button class="btn small {u.disabled ? '' : 'danger'}" onclick={() => toggleDisabled(u)}>
-              {u.disabled ? 'Enable' : 'Disable'}
-            </button>
-            {#if !u.is_root && u.id !== auth.realUser?.id}
-              <button
-                class="btn small"
-                disabled={!!impersonatingId || u.disabled}
-                onclick={() => doImpersonate(u)}
-              >
-                {impersonatingId === u.id ? 'Acting as…' : 'Impersonate'}
-              </button>
-            {/if}
+          {#if !u.is_root && u.disabled}
+            <button class="btn small" onclick={() => void toggleDisabled(u)}>Enable</button>
           {/if}
+          <button
+            class="icon-btn"
+            title={`Actions for @${u.username}`}
+            aria-label={`Actions for @${u.username}`}
+            onclick={(e) => userMenu(e, u)}
+          >
+            <Icon name="more" size={14} />
+          </button>
         </div>
+      {:else}
+        <div class="matrix-empty dim">No users match “{userFilter.trim()}”.</div>
       {/each}
     </div>
 
-    <div class="section-title">Workspace roles</div>
-    <div class="sub" style="margin-bottom: 10px">
+    {#if nonRootUsers.length === 0}
+      <div class="no-members">
+        <EmptyState
+          icon="user"
+          title="Only the root account so far"
+          body="Add a user to give them their own sign-in, then choose which workspaces they reach and which features they can use."
+        />
+      </div>
+    {:else}
+    <h2 class="section-title">Workspace roles</h2>
+    <p class="sub">
       A user only reaches the workspaces they're a member of. Switch to <b>By user</b> to grant one
       account several workspaces at once.
-    </div>
-    <div class="row" style="margin-bottom: 10px">
-      <div class="segmented axis">
+    </p>
+    <div class="urow controls">
+      <div class="segmented axis" role="group" aria-label="View roles">
         <button
           class:active={membershipAxis === 'workspace'}
+          aria-pressed={membershipAxis === 'workspace'}
           onclick={() => (membershipAxis = 'workspace')}
           data-testid="membership-axis-workspace"
         >
@@ -421,6 +488,7 @@
         </button>
         <button
           class:active={membershipAxis === 'user'}
+          aria-pressed={membershipAxis === 'user'}
           onclick={() => (membershipAxis = 'user')}
           data-testid="membership-axis-user"
         >
@@ -428,13 +496,13 @@
         </button>
       </div>
       {#if membershipAxis === 'workspace'}
-        <select class="input" bind:value={matrixWs} style="max-width: 220px">
+        <select class="input picker" bind:value={matrixWs} aria-label="Workspace">
           {#each ws.workspaces as w (w.id)}
             <option value={w.id}>{w.name}</option>
           {/each}
         </select>
       {:else}
-        <select class="input" bind:value={memberUserId} style="max-width: 220px">
+        <select class="input picker" bind:value={memberUserId} aria-label="User">
           {#each nonRootUsers as u (u.id)}
             <option value={u.id}>{u.display_name} (@{u.username})</option>
           {/each}
@@ -445,54 +513,55 @@
     {#if membershipAxis === 'workspace'}
       {#if matrixLoading}
         <Skeleton rows={3} height={32} />
+      {:else if matrixError}
+        <LoadState what="this workspace's members" error={matrixError} empty onretry={() => void loadMatrix(matrixWs)} />
       {:else}
         <div class="card matrix">
           <div class="matrix-head">
             <span>User</span>
             <span>Role in workspace</span>
           </div>
-          {#each users.filter((u) => !u.is_root) as u (u.id)}
+          {#each nonRootUsers as u (u.id)}
             <div class="matrix-row">
-              <span class:dim={u.disabled}>{u.display_name} <span class="dim">@{u.username}</span></span>
-              <div class="segmented">
+              <span class="ws-label" class:dim={u.disabled} title={`${u.display_name} (@${u.username})`}>{u.display_name} <span class="dim">@{u.username}</span></span>
+              <div class="segmented" role="group" aria-label={`Role for @${u.username}`}>
                 {#each roleOptions as r (r)}
                   <button
                     class:active={roleOf(u.id) === r}
+                    aria-pressed={roleOf(u.id) === r}
                     disabled={u.disabled}
+                    title={u.disabled ? 'Enable the account to change its role' : undefined}
                     onclick={() => setRole(u.id, r)}
                   >
-                    {r}
+                    {ROLE_LABEL[r]}
                   </button>
                 {/each}
               </div>
             </div>
-          {:else}
-            <div class="matrix-empty dim">No non-root users yet.</div>
           {/each}
         </div>
       {/if}
-    {:else if nonRootUsers.length === 0}
-      <div class="dim" style="padding: 8px 0">No non-root users yet.</div>
     {:else if allMembersLoading}
       <Skeleton rows={4} height={32} />
     {:else}
-      <div class="row" style="margin-bottom: 10px; gap: 8px; align-items: center">
+      <div class="urow controls">
         <span class="dim">
           Member of {memberWsCount} of {ws.workspaces.length} workspace{ws.workspaces.length === 1
             ? ''
             : 's'}
         </span>
         <span class="grow"></span>
-        <span class="dim">Set all:</span>
-        {#each roleOptions as r (r)}
-          <button
-            class="btn small"
-            disabled={savingWs.length > 0}
-            onclick={() => void setRoleEverywhere(r)}
-          >
-            {r === 'none' ? 'remove' : r}
-          </button>
-        {/each}
+        <span class="dim">Set all to</span>
+        <div class="segmented" role="group" aria-label="Set the role in every workspace">
+          {#each roleOptions as r (r)}
+            <button
+              disabled={savingWs.length > 0}
+              onclick={() => void setRoleEverywhere(r)}
+            >
+              {r === 'none' ? 'Remove' : ROLE_LABEL[r]}
+            </button>
+          {/each}
+        </div>
       </div>
       <div class="card matrix">
         <div class="matrix-head">
@@ -504,14 +573,15 @@
             <span class="ws-label" title={w.root_path}>
               {w.name} <span class="dim">{w.root_path}</span>
             </span>
-            <div class="segmented">
+            <div class="segmented" role="group" aria-label={`Role in ${w.name}`}>
               {#each roleOptions as r (r)}
                 <button
                   class:active={roleIn(w.id, memberUserId) === r}
+                  aria-pressed={roleIn(w.id, memberUserId) === r}
                   disabled={savingWs.includes(w.id)}
                   onclick={() => void setRoleIn(w.id, memberUserId, r)}
                 >
-                  {r}
+                  {ROLE_LABEL[r]}
                 </button>
               {/each}
             </div>
@@ -523,79 +593,90 @@
     {/if}
 
     <!-- Feature grant matrix -->
-    <div class="section-title" style="margin-top: 24px">Feature grants</div>
-    <div class="sub" style="margin-bottom: 10px">Per-feature capability for non-root users. None = no access; root always has admin everywhere.</div>
+    <div class="grant-title-row">
+      <h2 class="section-title">Feature grants</h2>
+      <span class="grow"></span>
+      {#if grantsDirty}<span class="unsaved">Unsaved changes</span>{/if}
+      <button class="btn small" disabled={grantSaving || !grantsDirty} title={grantsDirty ? 'Save these grants' : 'No unsaved changes'} onclick={saveGrants}>
+        {grantSaving ? 'Saving…' : 'Save grants'}
+      </button>
+    </div>
+    <p class="sub">Per-feature capability for non-root users. None = no access; root always has admin everywhere.</p>
 
-    {#if nonRootUsers.length === 0}
-      <div class="dim" style="padding: 8px 0">No non-root users yet.</div>
+    <div class="urow controls">
+      <select class="input picker" bind:value={grantUserId} aria-label="User to grant features to">
+        {#each nonRootUsers as u (u.id)}
+          <option value={u.id}>{u.display_name} (@{u.username})</option>
+        {/each}
+      </select>
+    </div>
+
+    {#if grantLoading}
+      <Skeleton rows={5} height={32} />
+    {:else if grantError}
+      <LoadState what="this user's feature grants" error={grantError} empty onretry={() => void loadGrants(grantUserId)} />
     {:else}
-      <div class="row" style="margin-bottom: 10px">
-        <select class="input" bind:value={grantUserId} style="max-width: 220px">
-          {#each nonRootUsers as u (u.id)}
-            <option value={u.id}>{u.display_name} (@{u.username})</option>
-          {/each}
-        </select>
-      </div>
-
-      {#if grantLoading}
-        <Skeleton rows={5} height={32} />
-      {:else}
-        <div class="card grant-matrix">
-          <div class="grant-head">
-            <span>Feature</span>
-            <div class="grant-caps-head">
+      <div class="card grant-matrix">
+        <div class="grant-head">
+          <span>Feature</span>
+          <span>Access</span>
+        </div>
+        {#each ALL_FEATURES as feat (feat)}
+          <div class="grant-row">
+            <span class="grant-label">{FEATURE_LABELS[feat]}</span>
+            <div class="segmented" role="group" aria-label={`Access to ${FEATURE_LABELS[feat]}`}>
               {#each CAP_OPTIONS as c (c)}
-                <span>{c}</span>
+                <button
+                  class:active={grantCapOf(feat) === c}
+                  aria-pressed={grantCapOf(feat) === c}
+                  onclick={() => setGrantCap(feat, c)}
+                >{CAP_LABEL[c]}</button>
               {/each}
             </div>
           </div>
-          {#each ALL_FEATURES as feat (feat)}
-            <div class="grant-row">
-              <span class="grant-label">{FEATURE_LABELS[feat]}</span>
-              <div class="segmented">
-                {#each CAP_OPTIONS as c (c)}
-                  <button
-                    class:active={grantCapOf(feat) === c}
-                    onclick={() => setGrantCap(feat, c)}
-                  >{c}</button>
-                {/each}
-              </div>
-            </div>
-          {/each}
-        </div>
-        <div style="margin-top: 10px">
-          <button class="btn primary" disabled={grantSaving} onclick={saveGrants}>
-            {grantSaving ? 'Saving…' : 'Save grants'}
-          </button>
-        </div>
-      {/if}
+        {/each}
+      </div>
     {/if}
-  {/if}
+    {/if}
+  </LoadState>
   </PageBody>
 </div>
 
 {#if createOpen}
-  <Modal title="New User" onclose={() => (createOpen = false)}>
-    <div class="field">
-      <label for="nu-user">Username</label>
-      <input id="nu-user" class="input" bind:value={newUsername} spellcheck="false" />
-    </div>
-    <div class="field">
-      <label for="nu-display">Display name <span class="dim">(optional)</span></label>
-      <input id="nu-display" class="input" bind:value={newDisplay} />
-    </div>
-    <div class="field">
-      <label for="nu-pass">Password</label>
-      <input id="nu-pass" class="input" type="password" bind:value={newPassword} autocomplete="new-password" />
-    </div>
+  <Modal title="New user" onclose={() => (createOpen = false)}>
+    <form
+      id="new-user-form"
+      onsubmit={(e) => {
+        e.preventDefault();
+        void createUser();
+      }}
+    >
+      <div class="field">
+        <label for="nu-user">Username</label>
+        <input id="nu-user" class="input" bind:value={newUsername} spellcheck="false" autocomplete="off" placeholder="dana" />
+        <span class="hint">They sign in with this; shown as @username.</span>
+      </div>
+      <div class="field">
+        <label for="nu-display">Display name <span class="dim">(optional)</span></label>
+        <input id="nu-display" class="input" bind:value={newDisplay} placeholder="Dana Cohen" />
+      </div>
+      <div class="field">
+        <label for="nu-pass">Password</label>
+        <input id="nu-pass" class="input" type="password" bind:value={newPassword} autocomplete="new-password" aria-describedby="nu-pass-hint" />
+        <span class="hint" id="nu-pass-hint" class:bad={newPassword.length > 0 && newPassword.length < 6}>At least 6 characters. Share it with them privately.</span>
+      </div>
+      {#if createError}<p class="form-err" role="alert"><strong>Couldn’t create the user.</strong> {createError}</p>{/if}
+    </form>
     {#snippet footer()}
       <button class="btn" onclick={() => (createOpen = false)}>Cancel</button>
       <button
         class="btn primary"
+        type="submit"
+        form="new-user-form"
         disabled={busy || newUsername.trim() === '' || newPassword.length < 6}
-        onclick={createUser}
+        title={newUsername.trim() === '' ? 'Enter a username' : newPassword.length < 6 ? 'Enter a password of at least 6 characters' : undefined}
       >
-        {busy ? 'Creating…' : 'Create User'}
+        {busy ? 'Creating…' : 'Create user'}
       </button>
     {/snippet}
   </Modal>
@@ -609,61 +690,111 @@
     height: 100%;
     min-height: 0;
   }
+  .section-title {
+    margin: 24px 0 6px;
+  }
+  .section-title.first {
+    margin-top: 0;
+  }
+  .sub {
+    margin: 0 0 10px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+    max-width: 78ch;
+  }
+  .dim {
+    color: var(--text-dim);
+  }
+  .urow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .controls {
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+    font-size: var(--fs-s);
+  }
+  .picker {
+    max-width: 260px;
+  }
+  .grow {
+    flex: 1;
+    min-width: 0;
+  }
   .user-filter-row {
     display: flex;
     align-items: center;
     gap: 10px;
     margin-bottom: 10px;
   }
-
-  .user-table {
-    max-width: 600px;
-    overflow: hidden;
+  .filter {
+    max-width: 260px;
   }
-
-  .icon-only {
-    font-size: 11px;
-    font-family: monospace;
-    padding: 0 7px;
+  .count {
+    font-size: var(--fs-xs);
+  }
+  .user-table,
+  .matrix,
+  .grant-matrix {
+    max-width: 760px;
+    overflow: hidden;
   }
   .user-row {
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 10px 14px;
+    padding: 8px 10px 8px 14px;
+    min-width: 0;
   }
   .user-row + .user-row {
     border-top: 1px solid var(--border);
   }
-  .user-row.disabled {
+  .user-row.disabled .avatar,
+  .user-row.disabled .u-name .u-text {
     opacity: 0.6;
   }
   .avatar {
+    flex-shrink: 0;
     width: 28px;
     height: 28px;
     border-radius: 50%;
-    background: color-mix(in srgb, var(--accent) 25%, transparent);
-    color: var(--accent-text);
-    font-size: 12px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: var(--fs-s);
     font-weight: 600;
     display: grid;
     place-items: center;
   }
   .u-name {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 500;
     display: flex;
     align-items: center;
     gap: 6px;
+    min-width: 0;
+  }
+  .u-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .you {
+    font-size: var(--fs-xs);
+    font-weight: 400;
   }
   .u-sub {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  .matrix {
-    max-width: min(640px, 92vw);
+  .no-members {
+    max-width: 760px;
+    margin-top: 16px;
   }
-  .matrix-head {
+  .matrix-head,
+  .grant-head {
     display: flex;
     justify-content: space-between;
     padding: 8px 14px;
@@ -674,22 +805,29 @@
     color: var(--text-dim);
     border-bottom: 1px solid var(--border);
   }
-  .matrix-row {
+  .matrix-row,
+  .grant-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 8px 14px;
-    font-size: 12.5px;
+    padding: 6px 14px;
+    min-height: 36px;
+    font-size: var(--fs-s);
   }
-  .matrix-row + .matrix-row {
+  .matrix-row + .matrix-row,
+  .grant-row + .grant-row {
     border-top: 1px solid var(--border);
+  }
+  .matrix-row .segmented,
+  .grant-row .segmented {
+    flex-shrink: 0;
   }
   .matrix-empty {
     padding: 16px;
     text-align: center;
+    font-size: var(--fs-s);
   }
-  /* Membership axis switch (By workspace / By user). */
   .segmented.axis {
     flex: 0 0 auto;
   }
@@ -702,42 +840,41 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  /* ---- feature grant matrix ---- */
-  .grant-matrix {
-    max-width: min(700px, 92vw);
-  }
-  .grant-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 8px 14px;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-dim);
-    border-bottom: 1px solid var(--border);
-  }
-  .grant-caps-head {
-    display: flex;
-    gap: 2px;
-    /* align with the segmented buttons below */
-    min-width: 280px;
-    justify-content: space-between;
-    padding: 0 2px;
-  }
-  .grant-row {
+  .grant-title-row {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 7px 14px;
-    font-size: 12.5px;
+    gap: 8px;
+    max-width: 760px;
+    margin-top: 24px;
   }
-  .grant-row + .grant-row {
-    border-top: 1px solid var(--border);
+  .grant-title-row .section-title {
+    margin: 0;
+  }
+  .grant-title-row + .sub {
+    margin-top: 6px;
+  }
+  .unsaved {
+    font-size: var(--fs-s);
+    color: var(--warning);
   }
   .grant-label {
-    min-width: 130px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .hint.bad {
+    color: var(--danger);
+  }
+  .form-err {
+    margin: 0;
+    font-size: var(--fs-s);
+    color: var(--danger);
+  }
+  @media (max-width: 640px) {
+    .matrix-row,
+    .grant-row {
+      flex-wrap: wrap;
+    }
   }
 </style>

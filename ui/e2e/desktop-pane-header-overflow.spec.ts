@@ -56,7 +56,7 @@ async function columnsUntil(page: Page, maxW: number): Promise<number> {
   for (let i = 0; i < 14 && w > maxW; i++) {
     await page.keyboard.press('Meta+d');
     await expect(page.locator('[data-pane-key]')).toHaveCount(i + 2, { timeout: 15_000 });
-    await runCommand(page, 'Layout: Equal Columns');
+    await runCommand(page, 'Layout: equal columns');
     w = await page.locator('.pane-head').first().evaluate((el) => el.clientWidth);
   }
   expect(w, `could not reach a ${maxW}px header before the pane cap`).toBeLessThanOrEqual(maxW);

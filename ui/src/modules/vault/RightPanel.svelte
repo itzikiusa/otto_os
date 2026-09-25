@@ -66,7 +66,7 @@
           onclick={() => l.dst_path && void vault.open(l.dst_path)}
         >
           <div class="t">
-            {l.kind === 'embed' ? '⧉ ' : ''}{l.alias ?? l.raw_target}
+            {#if l.kind === 'embed'}<span class="embed-ic" title="Embedded"><Icon name="image" size={11} /></span>{/if}{l.alias ?? l.raw_target}
             {#if !l.dst_path}<span class="ghost">unresolved</span>{/if}
           </div>
         </button>
@@ -127,23 +127,23 @@
         <span class="tri" class:open={open.okf}><Icon name="chevronRight" size={12} /></span>
         OKF
         {#if vault.okfReport}
-          <span class="badge" class:err={!vault.okfReport.conformant}>
-            {vault.okfReport.conformant ? '✓' : vault.okfReport.errors.length}
+          <span class="badge" class:err={!vault.okfReport.conformant} title={vault.okfReport.conformant ? 'Conformant' : `${vault.okfReport.errors.length} errors`}>
+            {#if vault.okfReport.conformant}<Icon name="check" size={11} />{:else}{vault.okfReport.errors.length}{/if}
           </span>
         {/if}
       </button>
       {#if open.okf}
         <div class="okf-actions">
-          <button class="mini" disabled={vault.okfBusy} onclick={() => void vault.validateOkf()}>
-            Validate
+          <button class="btn small" disabled={vault.okfBusy} onclick={() => void vault.validateOkf()}>
+            {vault.okfBusy ? 'Working…' : 'Validate'}
           </button>
-          <button class="mini" disabled={vault.okfBusy} onclick={() => void vault.generateIndexes()}>
+          <button class="btn small" disabled={vault.okfBusy} onclick={() => void vault.generateIndexes()} title="Write the index.md files OKF expects in each folder">
             Generate indexes
           </button>
         </div>
         {#if vault.okfReport}
           {#if vault.okfReport.conformant}
-            <div class="none ok">✓ OKF conformant ({vault.okfReport.checked_notes} notes)</div>
+            <div class="none ok"><Icon name="check" size={11} /> OKF conformant ({vault.okfReport.checked_notes} notes)</div>
           {/if}
           {#each vault.okfReport.errors as f, i (i)}
             <button class="item finding err" onclick={() => f.path.endsWith('.md') && void vault.open(f.path)}>
@@ -187,7 +187,7 @@
     background: none;
     border: none;
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     padding: 6px 4px;
     cursor: pointer;
@@ -218,7 +218,7 @@
     text-align: start;
     background: none;
     border: none;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     padding: 5px 8px;
     cursor: pointer;
     color: var(--text);
@@ -228,46 +228,45 @@
   }
   .item:disabled {
     cursor: default;
-    opacity: 0.7;
   }
   .item .t {
-    font-size: 12px;
+    font-size: var(--fs-s);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .item .ctx {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .item.unresolved .t {
-    opacity: 0.6;
+    color: var(--text-dim);
   }
   .ghost {
     font-size: var(--fs-xs);
     border: 1px dashed var(--text-dim);
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     padding: 0 4px;
     margin-inline-start: 6px;
     color: var(--text-dim);
   }
   .none {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     padding: 4px 8px;
   }
   .none.ok {
-    color: var(--status-working);
+    color: var(--success);
   }
   .none.warn {
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .props {
     width: 100%;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     border-collapse: collapse;
   }
   .props td {
@@ -288,19 +287,25 @@
     gap: 6px;
     padding: 2px 4px 6px;
   }
-  .mini {
-    font-size: 11px;
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text);
-    border-radius: 6px;
-    padding: 3px 8px;
-    cursor: pointer;
+  .embed-ic {
+    display: inline-flex;
+    vertical-align: -1px;
+    margin-inline-end: 4px;
+    color: var(--text-dim);
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+  }
+  .none.ok {
+    display: flex;
+    align-items: center;
+    gap: 4px;
   }
   .finding.err .t b {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .finding.warn .t b {
-    color: var(--status-warn);
+    color: var(--warning);
   }
 </style>

@@ -62,7 +62,7 @@
   const groups = $derived.by(() => {
     const map = new Map<string, GoldenTask[]>();
     for (const t of tasks) {
-      const key = t.repo_key || '(unknown)';
+      const key = t.repo_key || '';
       const arr = map.get(key) ?? [];
       arr.push(t);
       map.set(key, arr);
@@ -71,7 +71,8 @@
   });
 
   function repoLabel(key: string): string {
-    return key === ws.currentId ? 'this workspace' : key;
+    if (!key) return 'Unknown repository';
+    return key === ws.currentId ? 'This workspace' : key;
   }
 
   function truncate(s: string, n = 140): string {
@@ -117,10 +118,8 @@
   async function submit(): Promise<void> {
     const wsId = ws.currentId;
     if (!wsId || saving) return;
-    if (!fName.trim() || !fPrompt.trim()) {
-      toasts.error('Missing fields', 'Name and prompt are both required.');
-      return;
-    }
+    // Save stays disabled until both are filled (see canSave).
+    if (!fName.trim() || !fPrompt.trim()) return;
     saving = true;
     const body: GoldenTaskReq = {
       name: fName.trim(),
@@ -142,7 +141,7 @@
       }
       closeForm();
     } catch (e) {
-      toasts.error('Could not save golden task', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't save the golden task", e instanceof Error ? e.message : String(e));
     } finally {
       saving = false;
     }
@@ -159,7 +158,7 @@
       onopenrun?.(result);
       toasts.success('Evaluation started', `Scoring “${t.name}” against the working tree.`);
     } catch (e) {
-      toasts.error('Could not run golden task', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't run the golden task", e instanceof Error ? e.message : String(e));
     } finally {
       runningId = null;
     }
@@ -173,7 +172,7 @@
       if (editingId === t.id) closeForm();
       toasts.success('Golden task deleted', t.name);
     } catch (e) {
-      toasts.error('Could not delete golden task', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't delete the golden task", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -184,18 +183,22 @@
   <header class="gt-head">
     <h2>Golden tasks</h2>
     <span class="grow"></span>
-    <button
-      class="btn small primary"
-      data-testid="golden-new-btn"
-      onclick={toggleCreate}
-      disabled={!ws.currentId}
-    >
-      <Icon name="plus" size={13} /> New golden task
-    </button>
+    <!-- While the list is empty its EmptyState owns the one "New" action. -->
+    {#if tasks.length > 0 || showForm}
+      <button
+        class="btn small primary"
+        data-testid="golden-new-btn"
+        onclick={toggleCreate}
+        disabled={!ws.currentId}
+        aria-expanded={showForm && editingId === null}
+      >
+        <Icon name="plus" size={12} /> New golden task
+      </button>
+    {/if}
   </header>
 
   <div class="gt-hint">
-    <Icon name="info" size={13} />
+    <Icon name="info" size={12} />
     <span>
       Golden tasks are reusable, per-repo evaluation cases — a prompt plus a test command.
       Failed evals can be saved here as regression cases.
@@ -207,8 +210,8 @@
       <div class="gt-form-head">
         <span class="field-label">{editingId ? 'Edit golden task' : 'New golden task'}</span>
         <span class="grow"></span>
-        <button type="button" class="btn small ghost" onclick={closeForm} title="Close">
-          <Icon name="x" size={12} />
+        <button type="button" class="icon-btn" onclick={closeForm} title="Close form" aria-label="Close form">
+          <Icon name="x" size={14} />
         </button>
       </div>
 
@@ -275,25 +278,28 @@
     {#if !ws.currentId}
       <EmptyState icon="zap" title="No workspace selected" body="Pick a workspace to manage its golden tasks." />
     {:else if loading && tasks.length === 0}
-      <div class="gt-muted">Loading…</div>
+      <div class="gt-muted" role="status">Loading golden tasks…</div>
     {:else if loadError && tasks.length === 0}
       <div class="gt-muted gt-err" role="alert">
-        Couldn't load golden tasks: {loadError}
-        <button class="btn small" onclick={() => ws.currentId && load(ws.currentId)}>Retry</button>
+        <span><Icon name="warning" size={12} /> <strong>Couldn't load golden tasks.</strong> <span class="gt-err-detail">{loadError}</span></span>
+        <button class="btn small" onclick={() => ws.currentId && load(ws.currentId)} disabled={loading}>{loading ? 'Retrying…' : 'Retry'}</button>
       </div>
     {:else if tasks.length === 0}
+      {#if !showForm}
       <EmptyState
-        icon="radar"
-        title="No golden tasks"
-        body="Add a golden task — a repo-specific prompt + test command — to evaluate skills against it."
+        icon="target"
+        title="No golden tasks yet"
+        body="A golden task is a repo-specific prompt plus a test command — a fixed case to score skills against, run after run."
         actionLabel="New golden task"
+        actionIcon="plus"
         onaction={toggleCreate}
       />
+      {/if}
     {:else}
       {#each groups as g (g.repoKey)}
         <section class="gt-group">
           <h3 class="gt-group-head">
-            <Icon name="db" size={12} />
+            <Icon name="folder" size={12} />
             {repoLabel(g.repoKey)}
             <span class="gt-count">{g.items.length}</span>
           </h3>
@@ -302,9 +308,9 @@
               <div class="gt-card-top">
                 <span class="gt-name" title={t.name}>{t.name}</span>
                 {#if t.origin === 'regression'}
-                  <span class="gt-badge regression" data-testid="golden-regression-badge">regression</span>
+                  <span class="gt-badge regression" data-testid="golden-regression-badge">Regression</span>
                 {/if}
-                {#if !t.enabled}<span class="gt-badge muted">disabled</span>{/if}
+                {#if !t.enabled}<span class="gt-badge muted">Disabled</span>{/if}
                 <span class="grow"></span>
                 <div class="gt-actions">
                   <button
@@ -316,17 +322,17 @@
                   >
                     <Icon name="play" size={12} /> {runningId === t.id ? 'Running…' : 'Run'}
                   </button>
-                  <button class="btn small ghost" onclick={() => openEdit(t)} title="Edit">
+                  <button class="btn small ghost" onclick={() => openEdit(t)}>
                     <Icon name="edit" size={12} /> Edit
                   </button>
-                  <button class="btn small ghost danger" onclick={() => remove(t)} title="Delete">
-                    <Icon name="trash" size={12} />
+                  <button class="icon-btn" onclick={() => remove(t)} title="Delete golden task" aria-label="Delete golden task {t.name}">
+                    <Icon name="trash" size={14} />
                   </button>
                 </div>
               </div>
 
               <div class="gt-meta">
-                {#if t.skill}<span class="gt-pill"><Icon name="zap" size={11} /> {t.skill}</span>{/if}
+                {#if t.skill}<span class="gt-pill"><Icon name="zap" size={12} /> {t.skill}</span>{/if}
                 {#if t.test_cmd}<code class="gt-code" title={t.test_cmd}>{t.test_cmd}</code>{/if}
               </div>
 
@@ -335,7 +341,7 @@
               {#if t.tags.length > 0}
                 <div class="gt-tags">
                   {#each t.tags as tag (tag)}
-                    <span class="gt-tag"><Icon name="tag" size={10} /> {tag}</span>
+                    <span class="gt-tag"><Icon name="tag" size={12} /> {tag}</span>
                   {/each}
                 </div>
               {/if}
@@ -364,7 +370,7 @@
   }
   .gt-head h2 {
     margin: 0;
-    font-size: 16px;
+    font-size: var(--fs-l);
   }
   .grow {
     flex: 1;
@@ -374,16 +380,16 @@
     align-items: flex-start;
     gap: 8px;
     padding: 8px 11px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.45;
     color: var(--text-dim);
     border: 1px solid var(--border);
     border-radius: var(--radius-m, 8px);
-    background: color-mix(in srgb, var(--text-dim) 5%, transparent);
+    background: var(--surface-2);
   }
   .field-label {
-    font-size: 11px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: var(--text-dim);
@@ -431,15 +437,22 @@
   .gt-muted {
     padding: 16px 4px;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .gt-err {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
     gap: 8px;
-    color: var(--danger);
+    color: var(--text);
     overflow-wrap: anywhere;
+  }
+  .gt-err :global(svg) {
+    color: var(--danger);
+    vertical-align: -1px;
+  }
+  .gt-err-detail {
+    color: var(--text-dim);
   }
   .gt-group {
     display: flex;
@@ -451,8 +464,8 @@
     align-items: center;
     gap: 6px;
     margin: 0;
-    font-size: 11px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: var(--text-dim);
@@ -484,7 +497,7 @@
   }
   .gt-name {
     min-width: 0;
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
     overflow: hidden;
@@ -497,27 +510,17 @@
     gap: 5px;
     flex-shrink: 0;
   }
-  /* Run / pass affordance: high-contrast light-green. */
-  .btn.gt-run {
-    color: var(--success);
-    border-color: color-mix(in srgb, var(--success) 45%, transparent);
-  }
-  .btn.gt-run:hover {
-    background: color-mix(in srgb, var(--success) 16%, transparent);
-  }
   .gt-badge {
     font-size: var(--fs-xs);
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    padding: 2px 7px;
+    font-weight: 500;
+    padding: 2px 8px;
     border-radius: 999px;
     flex-shrink: 0;
   }
   .gt-badge.regression {
     color: var(--warning);
-    background: color-mix(in srgb, var(--warning) 20%, transparent);
-    border: 1px solid color-mix(in srgb, var(--warning) 42%, transparent);
+    background: var(--warning-soft);
+    border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
   }
   .gt-badge.muted {
     color: var(--text-dim);
@@ -534,7 +537,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     border: 1px solid var(--border);
     border-radius: 999px;
@@ -542,7 +545,7 @@
   }
   .gt-code {
     font-family: var(--font-mono, monospace);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text);
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
     border-radius: var(--radius-s, 5px);
@@ -554,7 +557,7 @@
   }
   .gt-prompt {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text-dim);
   }

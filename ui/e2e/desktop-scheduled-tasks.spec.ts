@@ -255,7 +255,9 @@ test.describe('scheduled tasks UI', () => {
     await page.getByRole('button', { name: 'New task' }).click();
     // Provider select + the new toggles are present.
     await expect(page.getByText('Provider', { exact: true })).toBeVisible();
-    await expect(page.getByText('Only notify on meaningful change')).toBeVisible();
+    // The rarer fields (sandbox, retries, delivery rules) sit behind "Advanced".
+    await page.getByRole('button', { name: /Advanced/ }).click();
+    await expect(page.getByText('Only deliver when the report meaningfully changes')).toBeVisible();
     await expect(page.getByText('Attach a proof pack to each run')).toBeVisible();
     // Switching the cadence to Cron reveals the cron expression + timezone fields.
     await page.locator('select').filter({ hasText: 'Interval' }).selectOption('cron');
@@ -279,7 +281,7 @@ test.describe('scheduled tasks UI', () => {
     const slug = page.getByPlaceholder(/register it in Settings first/);
     await expect(slug).toBeVisible();
     await slug.fill('my-custom-agent');
-    await page.getByRole('button', { name: 'Save' }).click();
+    await page.getByRole('button', { name: 'Create task' }).click();
 
     // The task appears in the list, and the persisted provider is the custom slug.
     await expect(page.getByText('E2E custom provider').first()).toBeVisible({ timeout: 15_000 });

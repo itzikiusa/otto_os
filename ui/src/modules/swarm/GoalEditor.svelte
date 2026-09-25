@@ -80,7 +80,7 @@
       }
       onclose();
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't save the goal", e instanceof Error ? e.message : String(e));
     } finally {
       busy = false;
     }
@@ -152,7 +152,7 @@
     margin-bottom: 10px;
   }
   .field label {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .grid {
@@ -167,11 +167,11 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text);
   }
   .mono {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
 </style>

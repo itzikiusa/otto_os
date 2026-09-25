@@ -44,7 +44,7 @@ test('landing is the Otto server view', async ({ page }) => {
   await page.goto('/#/mcp');
 
   await expect(page.locator('.otto')).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator('[data-testid="mcp-nav-otto"]')).toHaveClass(/\bon\b/);
+  await expect(page.locator('[data-testid="mcp-nav-otto"]')).toHaveAttribute('aria-selected', 'true');
   await expect(page.locator('input[data-testid="mcp-session-attach"]')).toBeVisible();
   await expect(page.locator('[data-testid="mcp-sessions-panel"]')).toBeVisible();
   await expect(page.locator('.otto .grp-name', { hasText: 'Workflows' })).toBeVisible();
@@ -60,7 +60,8 @@ test('landing is the Otto server view', async ({ page }) => {
 
 test('sub-routes expose external servers and activity', async ({ page }) => {
   await page.goto('/#/mcp/servers');
-  await expect(page.locator('[data-testid="mcp-add-server"]')).toBeVisible({ timeout: 30_000 });
+  // The bar's "Add server" while servers exist; the empty state's CTA otherwise.
+  await expect(page.getByRole('button', { name: 'Add server' }).first()).toBeVisible({ timeout: 30_000 });
 
   await page.goto('/#/mcp/activity');
   await expect(page.locator('[data-testid="mcp-approvals"]')).toBeVisible({ timeout: 30_000 });

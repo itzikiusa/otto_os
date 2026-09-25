@@ -9,6 +9,8 @@
   import { missionControlApi } from '../../lib/api/missionControl';
   import { ApiError } from '../../lib/api/client';
   import { router } from '../../lib/router.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
+  import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import type {
     GraphView,
     MissionSummary,
@@ -32,6 +34,8 @@
 
   let view = $state<'list' | 'graph'>('list');
   let selectedId = $state<string | null>(null);
+  /** The user closed the detail pane: don't auto-open it again this visit. */
+  let userClosed = false;
 
   // Deep link `#/mission-control/<item id>` (the Home Mission Control box's
   // rows go there): open that item's detail. Without this the row click
@@ -39,6 +43,39 @@
   $effect(() => {
     const [mod, itemId] = router.parts;
     if (mod === 'mission-control' && itemId) untrack(() => (selectedId = itemId));
+  });
+
+  /** Select an item (or close with null): the URL carries the selection so a
+   *  reload / share lands on the same item, and the last pick is remembered. */
+  function select(id: string | null): void {
+    selectedId = id;
+    if (id === null) userClosed = true;
+    rememberSelection('mission-control', id);
+    if (router.module === 'mission-control') router.replace(id ? `mission-control/${id}` : 'mission-control');
+  }
+
+  // Another workspace's item isn't selectable here: a switch starts fresh
+  // (and re-arms the auto-open below).
+  let lastWs = untrack(() => ws.currentId);
+  $effect(() => {
+    const id = ws.currentId;
+    if (id === lastWs) return;
+    lastWs = id;
+    untrack(() => {
+      items = [];
+      if (selectedId) select(null);
+      userClosed = false;
+    });
+  });
+
+  // A list/detail page opens on an item, never a "pick one" void: on desktop
+  // (where the detail sits beside the list) restore the last selection or the
+  // first item once the list lands. Tablet/phone show the detail as a sheet
+  // over the list, so there it opens only on a click.
+  $effect(() => {
+    if (selectedId || userClosed || !viewport.isDesktop || items.length === 0) return;
+    const pick = untrack(() => initialSelection('mission-control', items, (i) => i.id));
+    if (pick) untrack(() => select(pick));
   });
 
   // filters
@@ -84,7 +121,7 @@
       graph = g;
     } catch (e) {
       if (seq !== reqSeq) return;
-      err = e instanceof ApiError ? e.message : 'Failed to load Mission Control';
+      err = e instanceof ApiError ? e.message : 'Otto couldn’t reach the daemon.';
     } finally {
       if (seq === reqSeq) loading = false;
     }
@@ -184,6 +221,15 @@
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
   }
+  function onResizerKey(e: KeyboardEvent): void {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    // Anchored at the inline end: ← widens (→ in RTL).
+    const rtl = document.documentElement.dir === 'rtl';
+    const grow = (e.key === 'ArrowLeft') !== rtl;
+    detailW = Math.max(300, Math.min(720, detailW + (grow ? 24 : -24)));
+    persistDetailW();
+  }
   function resetDetailW(): void {
     detailW = DETAIL_W_DEFAULT;
     persistDetailW();
@@ -204,7 +250,7 @@
 <PageBody>
 <div class="mission-control" class:detail-open={selectedId}>
   <!-- summary tiles -->
-  <div class="tiles">
+  <div class="tiles" aria-label="Summary">
     <div class="tile">
       <span class="t-val">{summary?.total ?? 0}</span>
       <span class="t-lbl">Work items</span>
@@ -214,7 +260,7 @@
       <span class="t-lbl">Active</span>
     </div>
     <div class="tile" class:warn={(summary?.needs_approval ?? 0) > 0}>
-      <span class="t-val">{summary?.needs_approval ?? 0}</span>
+      <span class="t-val" class:warn-text={(summary?.needs_approval ?? 0) > 0}>{summary?.needs_approval ?? 0}</span>
       <span class="t-lbl">Needs approval</span>
     </div>
     <div class="tile">
@@ -226,32 +272,39 @@
   <!-- toolbar -->
   <div class="toolbar">
     <div class="filters">
-      <select bind:value={kindF} aria-label="Filter by kind">
+      <select class="input" bind:value={kindF} aria-label="Filter by kind">
         <option value="">All kinds</option>
         {#each WORK_KINDS as k (k)}<option value={k}>{KIND_LABEL[k]}</option>{/each}
       </select>
-      <select bind:value={statusF} aria-label="Filter by status">
+      <select class="input" bind:value={statusF} aria-label="Filter by status">
         <option value="">All statuses</option>
         {#each WORK_STATUSES as s (s)}<option value={s}>{STATUS_LABEL[s]}</option>{/each}
       </select>
-      <select bind:value={riskF} aria-label="Filter by risk">
-        <option value="">All risk</option>
+      <select class="input" bind:value={riskF} aria-label="Filter by risk">
+        <option value="">Any risk</option>
         {#each RISK_LEVELS as r (r)}<option value={r}>{RISK_LABEL[r]}</option>{/each}
       </select>
-      <input class="search" type="search" placeholder="Search title…" bind:value={q} oninput={onQInput} aria-label="Search work items" />
-      {#if hasFilters}<button class="btn ghost small" onclick={clearFilters}>Clear</button>{/if}
+      <input class="input search" type="search" placeholder="Search titles…" bind:value={q} oninput={onQInput} aria-label="Search work items" />
+      {#if hasFilters}<button class="btn ghost small" onclick={clearFilters}>Clear filters</button>{/if}
     </div>
-    <div class="view-toggle" role="tablist" aria-label="View">
-      <button role="tab" aria-selected={view === 'list'} class:on={view === 'list'} onclick={() => (view = 'list')}>
-        <Icon name="sidebar" size={13} /> List
+    <div class="segmented view-toggle" role="tablist" aria-label="View">
+      <button role="tab" aria-selected={view === 'list'} class:active={view === 'list'} onclick={() => (view = 'list')}>
+        <Icon name="format" size={12} /> List
       </button>
-      <button role="tab" aria-selected={view === 'graph'} class:on={view === 'graph'} onclick={() => (view = 'graph')}>
-        <Icon name="grid" size={13} /> Graph
+      <button role="tab" aria-selected={view === 'graph'} class:active={view === 'graph'} onclick={() => (view = 'graph')}>
+        <Icon name="share" size={12} /> Graph
       </button>
     </div>
   </div>
 
-  {#if err && items.length > 0}<div class="banner-err">{err}</div>{/if}
+  {#if err && items.length > 0}
+    <!-- Stale data + a failed refresh: keep the list, say so, offer Retry. -->
+    <div class="banner-err" role="alert">
+      <Icon name="warning" size={14} />
+      <span class="be-text">Couldn't refresh Mission Control. {err}</span>
+      <button class="btn small" onclick={() => ws.currentId && void reload(ws.currentId)}>Retry</button>
+    </div>
+  {/if}
 
   <!-- body -->
   <div class="mc-body">
@@ -276,34 +329,40 @@
             body={hasFilters
               ? 'Try clearing the filters, or refresh to re-derive the graph from every module.'
               : 'Mission Control unifies every agentic activity. Start a session, swarm, loop, workflow, review, or story — or press Refresh to materialize existing work.'}
-            actionLabel={hasFilters ? 'Clear filters' : backfilling ? 'Refreshing…' : 'Refresh / backfill'}
+            actionLabel={hasFilters ? 'Clear filters' : backfilling ? 'Refreshing…' : 'Refresh'}
             onaction={hasFilters ? clearFilters : runBackfill}
           />
         </div>
       {:else if view === 'list'}
-        <WorkItemList {items} needsApproval={needsApprovalIds} {selectedId} onOpen={(id) => (selectedId = id)} />
+        <WorkItemList {items} needsApproval={needsApprovalIds} {selectedId} onOpen={select} />
       {:else}
-        <WorkGraphView {graph} {selectedId} onOpen={(id) => (selectedId = id)} />
+        <WorkGraphView {graph} {selectedId} onOpen={select} />
       {/if}
     </div>
 
     {#if selectedId}
       <div class="mc-detail" style={`--mc-detail-w:${detailW}px`}>
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
         <div
           class="detail-resizer"
           role="separator"
+          tabindex="0"
           aria-orientation="vertical"
-          aria-label="Drag to resize the detail pane (double-click to reset)"
-          title="Drag to resize · double-click to reset"
+          aria-label="Resize the detail pane"
+          aria-valuenow={Math.round(detailW)}
+          aria-valuemin={300}
+          aria-valuemax={720}
+          title="Drag or use ←/→ to resize · double-click to reset"
           ondblclick={resetDetailW}
           onpointerdown={startDetailResize}
+          onkeydown={onResizerKey}
         ></div>
+        <!-- ↑ a focusable separator: drag, or ←/→ to resize; double-click resets. -->
         <WorkItemDetail
           wsId={ws.currentId ?? ''}
           id={selectedId}
-          onClose={() => (selectedId = null)}
-          onOpen={(id) => (selectedId = id)}
+          onClose={() => select(null)}
+          onOpen={select}
           {onChange}
         />
       </div>
@@ -334,8 +393,8 @@
   .tile {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius-m, 8px);
-    padding: 11px 14px;
+    border-radius: var(--radius-m);
+    padding: 12px 14px;
     display: flex;
     flex-direction: column;
     gap: 2px;
@@ -346,18 +405,22 @@
   }
   .t-val {
     font-size: var(--fs-2xl);
-    font-weight: 700;
+    font-weight: 600;
     line-height: 1;
     font-variant-numeric: tabular-nums;
   }
+  /* "Active" is live work: the info tone (runs' Running), not the accent. */
   .t-val.accent {
-    color: var(--accent-text);
+    color: var(--info);
   }
+  .t-val.warn-text {
+    color: var(--warning);
+  }
+  /* Sentence-case labels (content.md): the only uppercase micro-label is
+     .section-title, and a figure's caption isn't one. */
   .t-lbl {
-    font-size: 11px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
   }
   .toolbar {
     display: flex;
@@ -372,57 +435,32 @@
     flex-wrap: wrap;
     align-items: center;
   }
-  .filters select,
   .filters .search {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-s);
-    padding: 5px 8px;
+    min-width: 180px;
   }
-  .filters .search {
-    min-width: 160px;
-  }
-  /* The shared segmented-control look (app.css .segmented): selection is a
-     raised surface, never a colour — the old lime fill read as "success". */
   .view-toggle {
-    display: inline-flex;
-    gap: 2px;
-    padding: 2px;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
     flex: 0 0 auto;
   }
   .view-toggle button {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    height: 24px;
-    padding: 0 10px;
-    background: transparent;
-    border: none;
-    border-radius: 4px;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: var(--fs-s);
-    font-weight: 500;
-    cursor: pointer;
-  }
-  .view-toggle button.on {
-    background: var(--surface);
-    color: var(--text);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
   }
   .banner-err {
-    background: color-mix(in srgb, var(--danger) 14%, transparent);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--danger-soft);
     border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
     color: var(--danger);
-    border-radius: 6px;
-    padding: 7px 10px;
+    border-radius: var(--radius-s);
+    padding: 6px 8px 6px 10px;
     font-size: var(--fs-s);
+  }
+  .be-text {
+    flex: 1;
+    min-width: 0;
+    color: var(--text);
   }
   .mc-body {
     flex: 1 1 auto;
@@ -439,7 +477,7 @@
        overrides it. The ≤900px overlay below goes fullscreen instead. */
     flex: 0 0 var(--mc-detail-w, 380px);
     width: var(--mc-detail-w, 380px);
-    border-radius: var(--radius-m, 8px);
+    border-radius: var(--radius-m);
     overflow: hidden;
     border: 1px solid var(--border);
     align-self: stretch;
@@ -457,10 +495,13 @@
     z-index: 2;
     touch-action: none;
   }
-  .detail-resizer:hover {
+  .detail-resizer:hover,
+  .detail-resizer:focus-visible {
     background: color-mix(in srgb, var(--accent) 45%, transparent);
+    outline: none;
   }
-  @media (max-width: 900px) {
+  /* Tablet and phone (the 1024 breakpoint): the detail is a full sheet. */
+  @media (max-width: 1024px) {
     .tiles {
       grid-template-columns: repeat(2, 1fr);
     }
@@ -478,7 +519,7 @@
       display: none;
     }
   }
-  @media (max-width: 560px) {
+  @media (max-width: 640px) {
     .toolbar {
       align-items: stretch;
     }

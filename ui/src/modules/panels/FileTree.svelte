@@ -3,6 +3,7 @@
   // for the right-panel Files tab.
   import { onDestroy } from 'svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { openFile as openFileSignal } from '../../lib/stores/openfile.svelte';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
@@ -222,16 +223,26 @@
       return `<pre>${src.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c] ?? c))}</pre>`;
     }
   }
-  const PREVIEW_CSS = `
-    :root { color-scheme: light dark; }
-    body { font: 14px/1.6 -apple-system, system-ui, sans-serif; margin: 16px; color: #ddd; background: transparent; }
-    h1,h2,h3 { line-height: 1.25; } h1,h2 { border-bottom: 1px solid #ffffff22; padding-bottom: .2em; }
-    a { color: #6ea8fe; } code { background: #ffffff14; padding: .15em .35em; border-radius: 4px; font-family: ui-monospace, monospace; }
-    pre { background: #ffffff10; padding: 12px; border-radius: 6px; overflow: auto; } pre code { background: none; padding: 0; }
-    table { border-collapse: collapse; } th,td { border: 1px solid #ffffff22; padding: 4px 8px; }
-    blockquote { border-left: 3px solid #ffffff33; margin: 0; padding-left: 12px; color: #aaa; }
+  // The srcdoc is an isolated, script-less document: it can't see the app's
+  // tokens, so it gets a palette per resolved scheme (it used to be dark-only
+  // — light grey text on a hard-coded near-black box in the light theme).
+  const PREVIEW_PALETTE = {
+    dark: { text: '#dddddd', dim: '#aaaaaa', link: '#6ea8fe', line: '#ffffff22', fill: '#ffffff12' },
+    light: { text: '#1d1d1f', dim: '#6e6e73', link: '#0a60d0', line: '#00000022', fill: '#0000000d' },
+  } as const;
+  const PREVIEW_CSS = $derived.by(() => {
+    const p = PREVIEW_PALETTE[ui.resolvedScheme];
+    return `
+    :root { color-scheme: ${ui.resolvedScheme}; }
+    body { font: 14px/1.6 -apple-system, system-ui, sans-serif; margin: 16px; color: ${p.text}; background: transparent; }
+    h1,h2,h3 { line-height: 1.25; } h1,h2 { border-bottom: 1px solid ${p.line}; padding-bottom: .2em; }
+    a { color: ${p.link}; } code { background: ${p.fill}; padding: .15em .35em; border-radius: 4px; font-family: ui-monospace, monospace; }
+    pre { background: ${p.fill}; padding: 12px; border-radius: 6px; overflow: auto; } pre code { background: none; padding: 0; }
+    table { border-collapse: collapse; } th,td { border: 1px solid ${p.line}; padding: 4px 8px; }
+    blockquote { border-left: 3px solid ${p.line}; margin: 0; padding-left: 12px; color: ${p.dim}; }
     img { max-width: 100%; }
   `;
+  });
 
   // Collect flattened visible nodes for rendering (DFS walk).
   function flatten(nodes: TreeNode[]): TreeNode[] {
@@ -499,7 +510,7 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
     text-align: start;
     white-space: nowrap;
@@ -555,7 +566,7 @@
 
   .empty-dir {
     padding: 8px 12px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
 
   /* ── viewer ───────────────────────────── */
@@ -581,7 +592,7 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     font-family: var(--font-mono);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -623,7 +634,7 @@
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
     border-radius: var(--radius-s);
   }
@@ -636,13 +647,14 @@
     min-height: 0;
     width: 100%;
     border: none;
-    background: #1a1a1a; /* PREVIEW_CSS in the srcdoc is dark-only */
+    /* The srcdoc body is transparent over this; its palette follows the scheme. */
+    background: var(--bg);
   }
 
   /* ── misc ─────────────────────────────── */
   .loading {
     padding: 12px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .load-error {
     display: flex;
@@ -650,7 +662,7 @@
     align-items: flex-start;
     gap: 6px;
     padding: 12px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .error-head {
     display: flex;
@@ -669,7 +681,7 @@
   }
   .error-msg {
     padding: 12px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--danger);
     word-break: break-all;
   }

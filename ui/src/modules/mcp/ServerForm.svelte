@@ -265,7 +265,7 @@
     gap: 4px;
   }
   .field > span {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .field em {
@@ -285,7 +285,7 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     cursor: pointer;
   }
@@ -298,20 +298,20 @@
     border-radius: var(--radius-s, 6px);
     color: var(--text);
     padding: 7px 9px;
-    font-size: 13px;
+    font-size: var(--fs-m);
   }
   textarea {
     resize: vertical;
   }
   .mono {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .check {
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text);
   }
   .check input {
@@ -319,7 +319,7 @@
   }
   .tpl-notes {
     margin: -4px 0 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text-dim);
     background: color-mix(in srgb, var(--accent) 8%, transparent);
@@ -333,7 +333,7 @@
   }
   .warn {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--warning);
     background: color-mix(in srgb, var(--warning) 12%, transparent);
     border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);

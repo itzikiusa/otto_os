@@ -162,7 +162,7 @@
     <div class="account-badge">
       <Icon name="ticket" size={13} />
       <span>{accounts[0].label}</span>
-      <span class="dim mono" style="font-size:11px">{accounts[0].base_url}</span>
+      <span class="dim mono" style="font-size: var(--fs-xs)">{accounts[0].base_url}</span>
     </div>
   {/if}
 
@@ -226,7 +226,7 @@
     align-items: center;
     gap: 8px;
     padding: 14px 0;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .account-badge {
@@ -236,7 +236,7 @@
     padding: 6px 10px;
     background: var(--surface-2);
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     margin-bottom: 12px;
   }
   .picker-field {
@@ -246,7 +246,7 @@
     margin-bottom: 10px;
   }
   .picker-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-weight: 500;
   }
@@ -257,12 +257,12 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s, 4px);
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     padding: 4px 8px;
     box-sizing: border-box;
   }
   .picker-loading {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     padding: 4px 0;
   }
@@ -299,14 +299,14 @@
     min-width: 0;
   }
   .issue-key {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 700;
     font-family: var(--font-mono);
     color: var(--accent-text);
     flex-shrink: 0;
   }
   .issue-summary {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -321,7 +321,7 @@
   .no-results {
     padding: 16px;
     text-align: center;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .no-results .err {
     display: block;

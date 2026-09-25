@@ -30,14 +30,14 @@ test('trash restores a file and edit history compares recoverable versions', asy
   const trash = page.getByRole('region', {name: 'Vault trash'});
   await expect(trash.getByText('recovery.md', {exact: true})).toBeVisible();
   await trash.getByRole('button', {name: 'Restore', exact: true}).click();
-  await expect(trash.getByText('No deleted items.')).toBeVisible();
+  await expect(trash.getByText('The trash is empty.', { exact: false })).toBeVisible();
   await page.getByRole('button', {name: 'More vault actions', exact: true}).click();
   await page.getByRole('menuitem', {name: 'Edit history'}).click();
   await page.getByLabel('History file path', {exact: true}).fill('recovery.md');
   await page.getByRole('navigation', {name: 'Saved revisions'}).getByRole('button').first().click();
   await expect(page.getByRole('button', {name: 'Restore before version'})).toBeEnabled();
   await page.getByRole('button', {name: 'Restore before version'}).click();
-  await expect(page.getByText('Restored before version of recovery.md', {exact: true})).toBeVisible();
+  await expect(page.getByText('Restored the before version', {exact: true})).toBeVisible();
   const {ctx, base} = await apiCtx();
   const note = await (await ctx.get(`${base}/api/v1/workspaces/${workspaceId}/vault/vaults/${vaultId}/note?path=recovery.md`)).json();
   expect(note.raw).toBe('# Before version\n');

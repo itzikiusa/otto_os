@@ -310,7 +310,7 @@
     padding: 1px 7px;
   }
   .empty-line {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.4;
     margin: 2px 10px 10px;
   }
@@ -345,7 +345,7 @@
     background: transparent;
     color: var(--text);
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-s);
     text-align: start;
     cursor: pointer;
   }
@@ -386,7 +386,7 @@
     gap: 6px;
     padding: 6px 10px;
     border-bottom: 1px solid var(--border);
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
   }
   .ptitle {
@@ -421,7 +421,7 @@
     min-height: 0;
     overflow: auto;
     padding: 10px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
   }
   .pbody.media {
@@ -435,7 +435,7 @@
   }
   .pbody.text {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     white-space: pre-wrap;
     word-break: break-word;
   }
@@ -460,7 +460,7 @@
     word-break: break-word;
   }
   .path {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     word-break: break-all;
     margin-bottom: 6px;
   }

@@ -197,7 +197,7 @@
       },
       { separator: true },
       {
-        label: 'Delete (→ .trash)',
+        label: 'Move to trash',
         icon: 'trash',
         danger: true,
         action: () => void vault.trash(n.entry.path),
@@ -273,7 +273,7 @@
             />
             <Icon name={n.entry.kind === 'note' ? 'note' : 'file'} size={14} />
           {/if}
-          <span class="name" title={n.entry.path}>
+          <span class="name" title={n.entry.reserved ? `${n.entry.path} — reserved OKF file (folder index)` : n.entry.path}>
             {n.entry.kind === 'note' ? n.entry.name.replace(/\.md$/i, '') : n.entry.name}
           </span>
           {#if n.entry.kind === 'dir'}
@@ -310,19 +310,20 @@
       <div class="sel-row">
         <span class="sel-count">{selected.size} selected</span>
         <button
-          class="ghost"
+          class="btn small"
           title="Review + fix ALL {selected.size} selected notes as one coherent set (starts the agent immediately)"
           onclick={groupReviewFix}
         >
           Review + fix
         </button>
-        <button class="ghost dim" onclick={clearSelection}>Clear</button>
+        <button class="btn small ghost" onclick={clearSelection}>Clear</button>
       </div>
       <div class="sel-row">
         <select
           class="sel-select"
           bind:value={groupProvider}
           title="Agent provider that runs the group action"
+          aria-label="Agent provider"
         >
           {#each agentProviders() as p (p)}
             <option value={p}>{p}</option>
@@ -331,7 +332,8 @@
         <input
           class="sel-input"
           bind:value={groupModel}
-          placeholder="model (optional)"
+          placeholder="Model (optional)"
+          aria-label="Model override"
           title="Model override for the agent (leave empty for the provider default)"
         />
       </div>
@@ -341,12 +343,13 @@
           bind:this={groupInputEl}
           bind:value={groupPrompt}
           placeholder="Instruction for the {selected.size} notes… (Enter to send)"
+          aria-label="Instruction for the selected notes"
           onkeydown={(e) => {
             if (e.key === 'Enter') groupSend();
           }}
         />
         <button
-          class="ghost"
+          class="btn small"
           title="Send ALL {selected.size} selected notes to an agent with this instruction"
           disabled={!groupPrompt.trim()}
           onclick={groupSend}
@@ -377,7 +380,7 @@
     gap: 8px;
     padding: 16px 12px;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .row {
     display: flex;
@@ -385,10 +388,10 @@
     gap: 5px;
     height: 26px;
     padding-inline-end: 8px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text);
     cursor: pointer;
-    border-radius: 5px;
+    border-radius: var(--radius-s);
     user-select: none;
     position: relative;
     white-space: nowrap;
@@ -399,8 +402,10 @@
   .row.active {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
   }
+  /* Reserved OKF files (index.md…): dim + italic, never faded below the
+     readable text contrast. */
   .row.reserved .name {
-    opacity: 0.65;
+    color: var(--text-dim);
     font-style: italic;
   }
   .row.drag-over {
@@ -453,7 +458,7 @@
     gap: 6px;
   }
   .sel-count {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     margin-inline-end: auto;
   }
@@ -462,9 +467,9 @@
     min-width: 0;
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     padding: 4px 8px;
   }
   .sel-select {
@@ -472,30 +477,10 @@
     max-width: 45%;
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     padding: 4px 6px;
-  }
-  .sel-bar .ghost:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-  .sel-bar .ghost {
-    background: none;
-    border: 1px solid var(--border);
-    color: var(--text);
-    border-radius: 6px;
-    padding: 3px 9px;
-    font-size: 11.5px;
-    cursor: pointer;
-  }
-  .sel-bar .ghost:hover {
-    border-color: var(--accent);
-    color: var(--accent-text);
-  }
-  .sel-bar .ghost.dim {
-    color: var(--text-dim);
   }
   .name {
     overflow: hidden;
@@ -526,7 +511,7 @@
     border: 1px solid var(--accent);
     border-radius: 4px;
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 2px 6px;
     z-index: 2;
   }

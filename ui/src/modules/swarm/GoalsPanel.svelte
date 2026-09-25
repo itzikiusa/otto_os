@@ -9,6 +9,7 @@
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { sentenceCase } from '../../lib/status';
   import type { GoalStatus, SwarmGoal, SwarmTask } from './types';
 
   interface Props {
@@ -51,9 +52,9 @@
     try {
       const res = await swarm.verifyTask(task.id);
       if (res.started) toasts.success('Verification started', 'Watch goal statuses update live.');
-      else toasts.info('Not started', res.reason ?? 'Verification could not start.');
+      else toasts.info("Verification didn't start", res.reason ?? 'Verification could not start.');
     } catch (e) {
-      toasts.error('Verify failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't start verification", e instanceof Error ? e.message : String(e));
     } finally {
       verifying = false;
     }
@@ -64,7 +65,7 @@
       await swarm.stopVerify(task.id);
       toasts.info('Verification stopped');
     } catch (e) {
-      toasts.error('Stop failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't stop verification", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -87,7 +88,7 @@
       try {
         await swarm.deleteGoal(g.id);
       } catch (e) {
-        toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+        toasts.error("Couldn't delete the goal", e instanceof Error ? e.message : String(e));
       }
     }
   }
@@ -96,7 +97,7 @@
 <Modal title="Goals — {task.title}" width={620} {onclose}>
   <div class="bar">
     {#if running}
-      <span class="running"><span class="spinner-xs"></span> Verifying…</span>
+      <span class="running" role="status"><span class="spinner-xs" aria-hidden="true"></span> Verifying…</span>
       <button class="btn small" onclick={stop}><Icon name="square" size={12} /> Stop</button>
     {:else}
       <button class="btn small primary" onclick={runVerify} disabled={verifying || !goals.length} title={goals.length ? 'Run every goal check for this task now' : 'Add a goal first'}>
@@ -116,8 +117,8 @@
         <div class="goal">
           <div class="g-head">
             <span class="status {g.status}" class:pulse={g.status === 'verifying'}>{STATUS_LABEL[g.status]}</span>
-            <span class="kind">{g.kind}</span>
-            {#if g.blocking}<span class="blocking" title="Blocks task completion until it passes">blocking</span>{/if}
+            <span class="kind">{sentenceCase(g.kind)}</span>
+            {#if g.blocking}<span class="blocking" title="Blocks task completion until it passes">Blocking</span>{/if}
             <span class="g-title">{g.title}</span>
             <span class="grow"></span>
             <button class="icon-btn small" onclick={() => edit(g)} aria-label="Edit goal" title="Edit goal"><Icon name="edit" size={13} /></button>
@@ -162,7 +163,7 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--accent-text);
   }
   .spinner-xs {
@@ -193,7 +194,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .g-title {
     font-weight: 600;
@@ -217,7 +218,7 @@
     padding: 0 6px;
   }
   .g-desc {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     margin-top: 4px;
     white-space: pre-wrap;
@@ -227,7 +228,7 @@
     flex-wrap: wrap;
     gap: 8px 12px;
     margin-top: 6px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .pair .k {
@@ -248,7 +249,7 @@
   }
   .verdict {
     margin-top: 6px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     border-inline-start: 2px solid var(--border);
     padding-inline-start: 8px;

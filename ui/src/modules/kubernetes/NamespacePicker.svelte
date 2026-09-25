@@ -252,7 +252,7 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-family: var(--font-mono);
     outline: none;
   }
@@ -280,7 +280,7 @@
     gap: 8px;
     padding: 6px 8px;
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     cursor: pointer;
   }
   .ns-opt.active {
@@ -296,7 +296,7 @@
   }
   .ns-err {
     padding: 6px 8px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .mono {

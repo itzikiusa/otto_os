@@ -8,7 +8,13 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type { LspCapabilities, LspServerStatus } from '../../lib/api/types';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import SectionIntro from './SectionIntro.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import { copyTextOrThrow } from '../../lib/clipboard';
+  import { loadErrorText } from '../../lib/loadError';
   import type { Session } from '../../lib/api/types';
 
   // ── State ──────────────────────────────────────────────────────────────────
@@ -31,7 +37,7 @@
     try {
       caps = await api.get<LspCapabilities>('/lsp/capabilities');
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -41,29 +47,41 @@
 
   const wsId = $derived(ws.currentId);
 
-  async function installLang(lang: string): Promise<void> {
-    if (!wsId) { toasts.error('No workspace selected'); return; }
+  async function installLang(lang: string, command: string): Promise<void> {
+    if (!wsId) { toasts.error("Couldn't start the install", 'Select a workspace first.'); return; }
+    // It installs software on this Mac: say exactly what runs first.
+    const ok = await confirmer.ask(
+      `Run “${command}” in a new terminal session? It installs the ${langLabel(lang)} language server on this Mac.`,
+      { title: `Install ${langLabel(lang)} server`, confirmLabel: 'Install', danger: false },
+    );
+    if (!ok) return;
     installing = new Set([...installing, lang]);
     try {
       const session = await api.post<Session>(`/workspaces/${wsId}/lsp/install`, { langs: [lang] });
       ws.addSession(session); // navigates to the install session
-      toasts.info('Installing…', 'Watch the terminal session for progress.');
+      toasts.info(`Installing the ${langLabel(lang)} server`, 'Follow it in the terminal session, then Refresh here.');
     } catch (e) {
-      toasts.error('Install failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't start the install", loadErrorText(e));
     } finally {
       installing = new Set([...installing].filter((l) => l !== lang));
     }
   }
 
   async function installAll(): Promise<void> {
-    if (!wsId) { toasts.error('No workspace selected'); return; }
+    if (!wsId) { toasts.error("Couldn't start the install", 'Select a workspace first.'); return; }
+    const cmds = missingWithInstall.map((s) => s.install_command).join('\n');
+    const ok = await confirmer.ask(
+      `Run these in a new terminal session to install ${missingWithInstall.length} missing language server${missingWithInstall.length === 1 ? '' : 's'} on this Mac?\n\n${cmds}`,
+      { title: 'Install missing servers', confirmLabel: 'Install', danger: false },
+    );
+    if (!ok) return;
     installingAll = true;
     try {
       const session = await api.post<Session>(`/workspaces/${wsId}/lsp/install`, {});
       ws.addSession(session); // navigates to the install session
-      toasts.info('Installing all missing…', 'Watch the terminal session for progress.');
+      toasts.info('Installing the missing servers', 'Follow it in the terminal session, then Refresh here.');
     } catch (e) {
-      toasts.error('Install failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't start the install", loadErrorText(e));
     } finally {
       installingAll = false;
     }
@@ -95,77 +113,88 @@
   function langLabel(lang: string): string {
     return LANG_LABELS[lang] ?? lang;
   }
+
+  async function copyCmd(cmd: string): Promise<void> {
+    try {
+      await copyTextOrThrow(cmd);
+      toasts.success('Install command copied');
+    } catch {
+      toasts.error("Couldn't copy", 'Select the command and copy it manually.');
+    }
+  }
 </script>
 
 <div class="settings-section">
-  <PageHeader title={sectionLabel('language-servers')} subtitle="Servers are detected on your PATH">
+  <PageHeader title={sectionLabel('language-servers')} subtitle="Code intelligence for the editors — servers found on your PATH">
     {#snippet actions()}
+      <button class="btn small" data-icon="refresh" disabled={loading} onclick={() => void load()}>
+        <Icon name="refresh" size={12} /> {loading ? 'Checking…' : 'Refresh'}
+      </button>
       {#if missingWithInstall.length > 0}
         <button class="btn primary" disabled={installingAll} onclick={installAll}>
-          {installingAll ? 'Installing…' : `Install all missing (${missingWithInstall.length})`}
+          {installingAll ? 'Starting…' : `Install missing (${missingWithInstall.length})…`}
         </button>
       {/if}
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
-  <p class="section-intro">The daemon promotes your shell PATH so tools installed via <code>mise</code>, <code>asdf</code>, or shell rc files are found.</p>
+  <SectionIntro>Otto's editors use these for completion, hover and go-to-definition. The daemon reads your shell PATH, so servers installed via <code>mise</code>, <code>asdf</code> or your shell rc files are found.</SectionIntro>
 
-  {#if loading}
-    <div class="skeleton-list">
-      {#each [1,2,3,4,5] as _}
-        <Skeleton height={44} />
-      {/each}
-    </div>
-  {:else if error}
-    <div class="error-msg">{error}</div>
-  {:else if caps}
-    <table class="ls-table">
-      <thead>
-        <tr>
-          <th>Language</th>
-          <th>Server command</th>
-          <th>Status</th>
-          <th>Install command</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each caps.servers as server (server.lang)}
-          <tr>
-            <td class="lang-name">{langLabel(server.lang)}</td>
-            <td class="mono dim">{server.command}</td>
-            <td>
-              {#if server.available}
-                <span class="badge ok">Installed ✓</span>
-              {:else}
-                <span class="badge missing">Missing ✗</span>
-              {/if}
-            </td>
-            <td class="mono dim install-cmd">
-              {server.install_command ?? '—'}
-            </td>
-            <td class="action-cell">
-              {#if !server.available && server.install_command}
-                <button
-                  class="btn btn-sm"
-                  disabled={installing.has(server.lang)}
-                  onclick={() => installLang(server.lang)}
-                >
-                  {installing.has(server.lang) ? 'Installing…' : 'Install'}
-                </button>
-              {/if}
-            </td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
-
-    {#if caps.servers.length === 0}
-      <div class="empty-note dim">
-        No language servers are configured. The backend detected no supported languages.
+  <LoadState what="language servers" {loading} {error} empty={!caps || caps.servers.length === 0} onretry={() => void load()} rows={5}>
+    {#snippet emptyView()}
+      <EmptyState icon="function" title="No language servers configured" body="This daemon doesn't list any supported languages." />
+    {/snippet}
+    {#if caps}
+      <div class="table-wrap card">
+        <table class="ls-table">
+          <thead>
+            <tr>
+              <th>Language</th>
+              <th>Status</th>
+              <th>Server</th>
+              <th><span class="sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each caps.servers as server (server.lang)}
+              <tr>
+                <td class="lang-name">{langLabel(server.lang)}</td>
+                <td>
+                  {#if server.available}
+                    <span class="chip ok"><Icon name="check" size={12} /> Installed</span>
+                  {:else}
+                    <span class="chip">Not installed</span>
+                  {/if}
+                </td>
+                <td class="cmd-cell">
+                  {#if server.available}
+                    <span class="mono path" title={server.command}>{server.command}</span>
+                  {:else if server.install_command}
+                    <button class="mono path copy" title="Copy: {server.install_command}" onclick={() => void copyCmd(server.install_command ?? '')}>
+                      {server.install_command}
+                    </button>
+                  {:else}
+                    <span class="mono path dim" title={server.command}>{server.command} · install it yourself</span>
+                  {/if}
+                </td>
+                <td class="action-cell">
+                  {#if !server.available && server.install_command}
+                    <button
+                      class="btn small"
+                      disabled={installing.has(server.lang)}
+                      onclick={() => installLang(server.lang, server.install_command ?? '')}
+                    >
+                      {installing.has(server.lang) ? 'Starting…' : 'Install…'}
+                    </button>
+                  {/if}
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
       </div>
     {/if}
-  {/if}
+  </LoadState>
   </PageBody>
 </div>
 
@@ -177,133 +206,93 @@
     height: 100%;
     min-height: 0;
   }
-  .section-intro {
-    margin: 0 0 14px;
-    font-size: 12.5px;
-    line-height: 1.5;
-    color: var(--text-dim);
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
-  .section-intro :global(code) {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    background: var(--surface-2);
-    padding: 1px 4px;
-    border-radius: 3px;
+  /* Wide paths scroll inside the card, never the page. */
+  .table-wrap {
+    overflow-x: auto;
   }
-
   .ls-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
+    table-layout: fixed;
   }
-
   .ls-table th {
+    position: sticky;
+    top: 0;
     text-align: start;
-    padding: 6px 10px;
-    font-size: 11px;
+    padding: 8px 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.06em;
     color: var(--text-dim);
+    background: var(--surface);
     border-bottom: 1px solid var(--border);
   }
-
+  .ls-table th:nth-child(1) {
+    width: 150px;
+  }
+  .ls-table th:nth-child(2) {
+    width: 130px;
+  }
+  .ls-table th:nth-child(4) {
+    width: 96px;
+  }
   .ls-table td {
-    padding: 8px 10px;
-    border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+    height: 32px;
+    padding: 4px 12px;
+    border-bottom: 1px solid var(--border);
     vertical-align: middle;
   }
-
   .ls-table tr:last-child td {
     border-bottom: none;
   }
-
-  .ls-table tr:hover td {
-    background: var(--surface-2);
+  .ls-table tbody tr:hover td {
+    background: var(--hover);
   }
-
   .lang-name {
     font-weight: 500;
     color: var(--text);
     white-space: nowrap;
   }
-
-  .mono {
-    font-family: var(--font-mono);
-    font-size: 11.5px;
+  .cmd-cell {
+    min-width: 0;
   }
-
-  .install-cmd {
-    max-width: 220px;
+  .path {
+    display: block;
+    max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+    direction: ltr;
   }
-
+  .copy {
+    border: none;
+    background: none;
+    padding: 0;
+    text-align: start;
+    cursor: copy;
+  }
+  .copy:hover {
+    color: var(--text);
+  }
   .action-cell {
     white-space: nowrap;
     text-align: end;
   }
-
-  .badge {
-    font-size: 11px;
-    padding: 2px 8px;
-    border-radius: 999px;
-    font-weight: 500;
-    white-space: nowrap;
-  }
-
-  .badge.ok {
-    background: color-mix(in srgb, var(--status-working, #34c759) 15%, transparent);
-    color: var(--status-working, #34c759);
-  }
-
-  .badge.missing {
-    background: color-mix(in srgb, var(--status-exited, #ff3b30) 12%, transparent);
-    color: var(--status-exited, #ff453a);
-  }
-
-  .btn {
-    height: 28px;
-    padding: 0 12px;
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text);
-    border-radius: var(--radius-s);
-    font-size: 12px;
-    cursor: pointer;
-    transition: background 120ms ease-out;
-    white-space: nowrap;
-  }
-  .btn:hover:not(:disabled) {
-    background: var(--surface);
-  }
-  .btn:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-
-  .btn-sm {
-    height: 24px;
-    padding: 0 10px;
-    font-size: 11px;
-  }
-
-  .skeleton-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .error-msg {
-    padding: 12px;
-    font-size: 12px;
-    color: var(--danger);
-  }
-
-  .empty-note {
-    padding: 16px;
-    font-size: 12px;
-    text-align: center;
+  @media (max-width: 640px) {
+    .ls-table {
+      min-width: 520px;
+    }
   }
 </style>

@@ -10,7 +10,8 @@
   import RelTime from '../../lib/components/RelTime.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import type { OttoRun } from '../../lib/api/types';
-  import { humanize, isTerminal, sourceColor, sourceLabel, statusTone } from './runStatus';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { humanize, isTerminal, runStatusInfo, sourceLabel } from './runStatus';
 
   interface Props {
     run: OttoRun;
@@ -22,6 +23,11 @@
   let error = $state('');
   let rejectNote = $state('');
   let rejecting = $state(false);
+  let rejectEl: HTMLTextAreaElement | undefined = $state();
+  // Reject opens the reason box — put the caret in it.
+  $effect(() => {
+    if (rejecting) rejectEl?.focus();
+  });
 
   const events = $derived(runWithOtto.eventsByRun[run.id] ?? []);
 
@@ -104,12 +110,21 @@
 <aside class="detail">
   <header class="d-head">
     <div class="d-title">
-      <span class="badge src-badge" style="--src: {sourceColor(run.source_kind)}">{sourceLabel(run.source_kind)}</span>
-      <strong>{run.title || run.source_ref}</strong>
-      <span class="pill {statusTone(run.status)}">{humanize(run.status)}</span>
+      <span class="chip">{sourceLabel(run.source_kind)}</span>
+      <StatusBadge status={runStatusInfo(run.status)} />
     </div>
-    <button class="btn small" onclick={onClose} aria-label="Close">Close</button>
+    <div class="d-actions">
+      <!-- Stop stays reachable at the top while the run is live (patterns.md §1),
+           never beside a primary. -->
+      {#if !isTerminal(run.status)}
+        <button class="btn small danger" disabled={busy} onclick={cancel}>Cancel run</button>
+      {/if}
+      <button class="icon-btn" onclick={onClose} aria-label="Close run detail" title="Close run detail">
+        <Icon name="x" size={14} />
+      </button>
+    </div>
   </header>
+  <h2 class="d-name">{run.title || run.source_ref}</h2>
 
   {#if error}<div class="err" role="alert">{error}</div>{/if}
   {#if run.status === 'failed' && run.error}
@@ -122,10 +137,14 @@
   </section>
 
   <section class="block">
-    <div class="goal">{run.goal || '(no goal text)'}</div>
+    {#if run.goal}
+      <div class="goal">{run.goal}</div>
+    {:else}
+      <div class="goal muted">No goal text.</div>
+    {/if}
     <div class="src-row">
       {#if run.source_url}
-        <a class="link" href={run.source_url} target="_blank" rel="noreferrer">{run.source_ref} <Icon name="external" size={11} /></a>
+        <a class="link" href={run.source_url} target="_blank" rel="noreferrer" title={run.source_url}>{run.source_ref} <Icon name="external" size={12} /></a>
       {:else}
         <span class="muted">{run.source_ref}</span>
       {/if}
@@ -144,12 +163,12 @@
       <ProofStatusChip status={run.proof_status} risk={run.risk_score} />
     {/if}
     <span class="findings">
-      <span class="fnum">{run.findings_total}</span> findings
+      <span class="fnum">{run.findings_total}</span> {run.findings_total === 1 ? 'finding' : 'findings'}
       {#if run.findings_blocking > 0}
-        <span class="blocking" title="blocking findings">{run.findings_blocking} blocking</span>
+        <span class="blocking" title="Findings that block the PR">{run.findings_blocking} blocking</span>
       {/if}
     </span>
-    {#if run.branch}<span class="muted mono">{run.branch}</span>{/if}
+    {#if run.branch}<span class="muted mono branch" title={run.branch}><Icon name="branch" size={12} /> <span class="branch-name">{run.branch}</span></span>{/if}
   </section>
 
   <!-- stage timeline -->
@@ -167,11 +186,11 @@
       <ol class="timeline">
         {#each events as ev (ev.id)}
           <li class="tl-item">
-            <span class="tl-dot {ev.status ? statusTone(ev.status) : 'dim'}"></span>
+            <span class="tl-dot tone-{ev.status ? runStatusInfo(ev.status).tone : 'neutral'}" aria-hidden="true"></span>
             <div class="tl-body">
               <div class="tl-top">
                 <span class="tl-kind">{humanize(ev.kind)}</span>
-                {#if ev.status}<span class="pill {statusTone(ev.status)} tiny">{humanize(ev.status)}</span>{/if}
+                {#if ev.status}<StatusBadge status={{ ...runStatusInfo(ev.status), live: false }} variant="text" dot={false} />{/if}
                 <span class="tl-when"><RelTime iso={ev.created_at} /></span>
               </div>
               {#if ev.message}<div class="tl-msg">{ev.message}</div>{/if}
@@ -186,16 +205,27 @@
   {#if run.status === 'awaiting_approval'}
     <section class="block gate">
       <h3 class="h">Awaiting your approval</h3>
+      <p class="gate-note">
+        Approve to draft the PR from <span class="mono">{run.branch || 'the run branch'}</span>. Nothing is pushed
+        until you open the PR. Reject ends the run and removes its worktree.
+      </p>
       {#if rejecting}
-        <textarea bind:value={rejectNote} rows="2" placeholder="Optional reason for rejecting…"></textarea>
+        <textarea
+          bind:this={rejectEl}
+          bind:value={rejectNote}
+          rows="2"
+          aria-label="Reason for rejecting (optional)"
+          placeholder="Optional reason for rejecting…"
+          onkeydown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); rejecting = false; rejectNote = ''; } }}
+        ></textarea>
         <div class="actions">
-          <button class="btn danger" disabled={busy} onclick={() => approve('reject')}>Confirm reject</button>
-          <button class="btn" disabled={busy} onclick={() => { rejecting = false; rejectNote = ''; }}>Back</button>
+          <button class="btn danger" disabled={busy} onclick={() => approve('reject')}>Reject run</button>
+          <button class="btn" disabled={busy} onclick={() => { rejecting = false; rejectNote = ''; }}>Cancel</button>
         </div>
       {:else}
         <div class="actions">
           <button class="btn primary" disabled={busy} onclick={() => approve('approve')}>Approve</button>
-          <button class="btn danger" disabled={busy} onclick={() => (rejecting = true)}>Reject</button>
+          <button class="btn danger" disabled={busy} onclick={() => (rejecting = true)}>Reject…</button>
         </div>
       {/if}
     </section>
@@ -205,7 +235,10 @@
   {#if prDraft}
     <section class="block pr">
       <h3 class="h">PR draft</h3>
-      <div class="pr-title">{prDraft.title || '(untitled)'}</div>
+      <div class="pr-title">{prDraft.title || 'Untitled PR'}</div>
+      {#if prDraft.source || prDraft.target}
+        <div class="muted mono">{prDraft.source || run.branch}{prDraft.target ? ` → ${prDraft.target}` : ''}</div>
+      {/if}
       {#if prDraft.description}<pre class="pr-desc">{prDraft.description}</pre>{/if}
       <div class="actions">
         {#if run.pr_url}
@@ -230,12 +263,6 @@
     </section>
   {/if}
 
-  <!-- cancel (non-terminal only) -->
-  {#if !isTerminal(run.status)}
-    <section class="block">
-      <button class="btn small danger" disabled={busy} onclick={cancel}>Cancel run</button>
-    </section>
-  {/if}
 </aside>
 
 <style>
@@ -243,79 +270,77 @@
     border: 1px solid var(--border);
     background: var(--surface);
     border-radius: var(--radius-l);
-    padding: 0.85rem 1rem;
+    padding: 12px 16px;
     display: flex;
     flex-direction: column;
-    gap: 0.85rem;
+    gap: 14px;
     color: var(--text);
+    min-width: 0;
   }
-  .d-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.75rem; }
-  .d-title { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; min-width: 0; }
-  .d-title strong { font-size: 1rem; min-width: 0; overflow-wrap: anywhere; }
-  .block { display: flex; flex-direction: column; gap: 0.5rem; }
-  .h { margin: 0; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); }
-  .goal { font-size: 0.92rem; line-height: 1.45; }
-  .src-row { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; flex-wrap: wrap; }
-  .link { color: var(--accent-text); display: inline-flex; align-items: center; gap: 0.25rem; overflow-wrap: anywhere; }
+  .d-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .d-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+  .d-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+  .d-name { margin: -6px 0 0; font-size: var(--fs-l); font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+  .block { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .h {
+    margin: 0; font-size: var(--fs-xs); font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.04em; color: var(--text-dim);
+  }
+  .goal { font-size: var(--fs-m); line-height: 1.5; overflow-wrap: anywhere; }
+  .src-row { display: flex; align-items: center; gap: 6px; font-size: var(--fs-s); flex-wrap: wrap; min-width: 0; }
+  .link { color: var(--accent-text); display: inline-flex; align-items: center; gap: 4px; overflow-wrap: anywhere; }
   .muted { color: var(--text-dim); }
-  .mono { font-family: var(--font-mono); font-size: 0.78rem; }
+  .mono { font-family: var(--font-mono); font-size: var(--fs-s); }
   .dot { color: var(--text-dim); }
-  .stats { flex-direction: row; align-items: center; gap: 0.65rem; flex-wrap: wrap; }
-  .findings { font-size: 0.82rem; color: var(--text-dim); }
+  .stats { flex-direction: row; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .findings { font-size: var(--fs-s); color: var(--text-dim); }
   .fnum { color: var(--text); font-weight: 600; }
   .blocking {
-    margin-inline-start: 0.35rem; font-size: 0.72rem; padding: 0.05rem 0.45rem; border-radius: 999px;
-    background: color-mix(in srgb, var(--status-exited) 16%, transparent); color: var(--status-exited);
+    margin-inline-start: 4px; font-size: var(--fs-xs); padding: 0 6px; border-radius: 999px;
+    background: var(--danger-soft); color: var(--danger);
   }
-  .timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.55rem; }
-  .tl-item { display: flex; gap: 0.6rem; }
-  .tl-dot { width: 9px; height: 9px; border-radius: 999px; margin-top: 0.3rem; flex: none; background: var(--text-dim); }
-  .tl-dot.ok { background: var(--status-working); }
-  .tl-dot.bad { background: var(--status-exited); }
-  .tl-dot.warn { background: var(--status-warn); }
-  .tl-dot.active { background: var(--accent); }
-  .tl-dot.dim { background: var(--text-dim); }
-  .tl-body { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
-  .tl-top { display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; }
-  .tl-kind { font-size: 0.85rem; font-weight: 600; }
-  .tl-when { color: var(--text-dim); font-size: 0.74rem; font-variant-numeric: tabular-nums; }
-  .tl-msg { font-size: 0.82rem; color: var(--text-dim); line-height: 1.4; }
-  .gate { border: 1px solid color-mix(in srgb, var(--status-warn) 40%, transparent); border-radius: var(--radius-m); padding: 0.65rem 0.75rem; background: color-mix(in srgb, var(--status-warn) 7%, transparent); }
-  .actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
-  .hint { font-size: 0.8rem; }
-  .pr-title { font-size: 0.92rem; font-weight: 600; }
+  .branch { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; }
+  .branch-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .tl-item { display: flex; gap: 10px; }
+  .tl-dot { width: 8px; height: 8px; border-radius: 999px; margin-top: 5px; flex: none; background: var(--text-dim); }
+  .tl-dot.tone-success { background: var(--status-working); }
+  .tl-dot.tone-danger { background: var(--status-exited); }
+  .tl-dot.tone-warning { background: var(--status-warn); }
+  .tl-dot.tone-info { background: var(--accent); }
+  .tl-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+  .tl-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .tl-kind { font-size: var(--fs-m); font-weight: 600; }
+  .tl-when { color: var(--text-dim); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; margin-inline-start: auto; }
+  .tl-msg { font-size: var(--fs-s); color: var(--text-dim); line-height: 1.45; overflow-wrap: anywhere; }
+  .gate {
+    border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
+    border-radius: var(--radius-m);
+    padding: 10px 12px;
+    background: var(--warning-soft);
+  }
+  .gate-note { margin: 0; font-size: var(--fs-s); color: var(--text); line-height: 1.45; }
+  .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .hint { font-size: var(--fs-s); }
+  .pr-title { font-size: var(--fs-m); font-weight: 600; overflow-wrap: anywhere; }
   .pr-desc {
     white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono);
-    font-size: 0.78rem; line-height: 1.45; background: var(--bg); border: 1px solid var(--border);
-    border-radius: var(--radius-s); padding: 0.5rem 0.6rem; max-height: 16rem; overflow: auto; margin: 0;
+    font-size: var(--fs-s); line-height: 1.45; background: var(--bg); border: 1px solid var(--border);
+    border-radius: var(--radius-s); padding: 8px 10px; max-height: 16rem; overflow: auto; margin: 0;
   }
-  .summary { font-size: 0.85rem; line-height: 1.45; }
+  .summary { font-size: var(--fs-m); line-height: 1.5; overflow-wrap: anywhere; }
   textarea {
     width: 100%; box-sizing: border-box; background: var(--bg); color: var(--text);
-    border: 1px solid var(--border); border-radius: var(--radius-s); padding: 0.45rem 0.55rem; font: inherit;
+    border: 1px solid var(--border); border-radius: var(--radius-s); padding: 6px 9px; font: inherit;
+  }
+  textarea:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .err {
     background: var(--danger-soft);
-    color: var(--danger); padding: 0.5rem 0.75rem; overflow-wrap: anywhere;
-    border-radius: var(--radius-s); font-size: 0.85rem;
+    color: var(--danger); padding: 6px 10px; overflow-wrap: anywhere;
+    border-radius: var(--radius-s); font-size: var(--fs-s);
   }
-  .badge {
-    font-size: 0.7rem; padding: 0.05rem 0.45rem; border-radius: 999px;
-    border: 1px solid var(--border); color: var(--text-dim); text-transform: capitalize;
-  }
-  .src-badge {
-    color: var(--src);
-    border-color: color-mix(in srgb, var(--src) 40%, var(--border));
-    background: color-mix(in srgb, var(--src) 10%, transparent);
-  }
-  .pill {
-    font-size: 0.7rem; padding: 0.05rem 0.5rem; border-radius: 999px;
-    border: 1px solid transparent; text-transform: capitalize; white-space: nowrap;
-  }
-  .pill.tiny { font-size: var(--fs-xs); padding: 0.02rem 0.4rem; }
-  .pill.ok { background: color-mix(in srgb, var(--status-working) 16%, transparent); color: var(--status-working); }
-  .pill.bad { background: color-mix(in srgb, var(--status-exited) 16%, transparent); color: var(--status-exited); }
-  .pill.warn { background: color-mix(in srgb, var(--status-warn) 18%, transparent); color: var(--status-warn); }
-  .pill.active { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-text); }
-  .pill.dim { background: color-mix(in srgb, var(--text-dim) 14%, transparent); color: var(--text-dim); }
 </style>

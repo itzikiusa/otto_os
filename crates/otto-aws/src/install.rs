@@ -149,11 +149,37 @@ pub fn parse_version(text: &str) -> Option<String> {
         .map(|v| v.to_string())
 }
 
+/// Last successful `aws --version`, keyed by the binary's path + mtime.
+/// `aws --version` boots Python and costs ~4 s, and the AWS page asks for the
+/// status on every visit; an upgrade / reinstall changes the mtime (or the
+/// path) and so re-probes.
+type VersionKey = (PathBuf, Option<std::time::SystemTime>);
+static VERSION_CACHE: Mutex<Option<(VersionKey, String)>> = Mutex::new(None);
+
+async fn cached_version(bin: &Path) -> Option<String> {
+    let key: VersionKey = (
+        bin.to_path_buf(),
+        std::fs::metadata(bin).and_then(|m| m.modified()).ok(),
+    );
+    if let Ok(g) = VERSION_CACHE.lock() {
+        if let Some((k, v)) = g.as_ref() {
+            if *k == key && key.1.is_some() {
+                return Some(v.clone());
+            }
+        }
+    }
+    let v = version(bin).await?;
+    if let Ok(mut g) = VERSION_CACHE.lock() {
+        *g = Some((key, v.clone()));
+    }
+    Some(v)
+}
+
 /// Presence + version + install-job snapshot.
 pub async fn status(data_dir: &Path) -> AwsStatus {
     let path = locate(data_dir);
     let version = match &path {
-        Some(p) => version(p).await,
+        Some(p) => cached_version(p).await,
         None => None,
     };
     AwsStatus {

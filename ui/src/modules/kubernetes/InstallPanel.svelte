@@ -157,13 +157,13 @@
   }
   h2 {
     margin: 0 0 4px;
-    font-size: 15px;
+    font-size: var(--fs-l);
     font-weight: 600;
   }
   .sub,
   .dim {
     color: var(--text-dim);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     line-height: 1.5;
     margin: 0;
   }
@@ -172,7 +172,7 @@
     gap: 8px;
     align-items: center;
     color: var(--status-working);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     flex-wrap: wrap;
   }
   .progress {
@@ -201,7 +201,7 @@
     gap: 8px;
     align-items: center;
     color: var(--status-exited);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .actions {
     display: flex;
@@ -211,7 +211,7 @@
   }
   .log summary {
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .log pre {
@@ -219,7 +219,7 @@
     max-height: 240px;
     overflow: auto;
     padding: 10px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.45;
     background: var(--surface-2);
     border-radius: var(--radius-s);

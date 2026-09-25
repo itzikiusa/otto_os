@@ -408,23 +408,24 @@ export const SPLIT_HINT = '⌥-click to open side by side';
 
 /**
  * Context-menu rows for a sidebar module (`id` is its sidebar id = route):
- * "Open Side by Side" (or "Show in Side Pane" while a pane is open); for the
- * module the pane already shows, "Open in Main Pane" + "Close Side Pane".
+ * "Open side by side" (or "Show in side pane" while a pane is open); for the
+ * module the pane already shows, "Open in main pane" + "Close side pane".
  * Nothing for the main pane's own module, and nothing off desktop.
  */
 export function splitMenuItems(id: string, label: string): MenuItem[] {
   if (!sidePane.supported) return [];
   if (sidePane.route !== null && sidePane.key === id) {
     return [
-      { label: 'Open in Main Pane', icon: 'maximize', action: () => sidePane.promote() },
-      { label: 'Close Side Pane', icon: 'x', action: () => sidePane.close() },
+      { label: 'Open in main pane', icon: 'maximize', action: () => sidePane.promote() },
+      { label: 'Close side pane', icon: 'x', hint: '⌘\\', action: () => sidePane.close() },
     ];
   }
   if (sidePane.primaryKey === id) return [];
   return [
     {
-      label: sidePane.route !== null ? 'Show in Side Pane' : 'Open Side by Side',
+      label: sidePane.route !== null ? 'Show in side pane' : 'Open side by side',
       icon: 'columns',
+      hint: '⌥-click',
       action: () => sidePane.open(id, { label }),
     },
   ];

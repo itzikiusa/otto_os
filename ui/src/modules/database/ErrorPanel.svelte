@@ -84,11 +84,11 @@
     color: var(--status-exited);
   }
   .err-title {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .err-code {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 1px 7px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--status-exited) 18%, transparent);
@@ -114,7 +114,7 @@
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     color: var(--accent-text);
     border-radius: var(--radius-s);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     padding: 3px 9px;
     cursor: pointer;
     flex-shrink: 0;
@@ -124,7 +124,7 @@
   }
   .err-msg {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     white-space: pre-wrap;
     word-break: break-word;
@@ -144,7 +144,7 @@
   }
   .err-excerpt-code {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.4;
     color: var(--text);
     white-space: pre;

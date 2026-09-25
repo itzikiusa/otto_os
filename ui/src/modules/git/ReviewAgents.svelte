@@ -4,6 +4,7 @@
   // terminal), "Retry", per-agent findings and status pills behave identically
   // and live in one place. The backend is already shared: retry hits
   // POST /reviews/{id}/agents/{index}/retry, keyed by review id.
+  import Icon from '../../lib/components/Icon.svelte';
   import { api } from '../../lib/api/client';
   import type { Review } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
@@ -163,8 +164,8 @@
       {/if}
       {#if agent.status === 'waiting'}
         <p class="rp-agent-waiting">
-          ⚠ This agent looks blocked on input. Click <strong>Open</strong> to view its session and
-          respond (e.g. approve folder access).
+          <Icon name="warning" size={12} /> This agent looks blocked on input. Click <strong>Open</strong> to view its session and
+          respond (for example, approve folder access).
         </p>
       {/if}
       {#if agent.session_id && openTerminals.has(agent.session_id)}
@@ -217,7 +218,7 @@
     flex-wrap: wrap;
   }
   .rp-agent-name {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
   }
   .rp-agent-chip {
@@ -230,7 +231,7 @@
   }
   .rp-agent-note {
     margin: 4px 0 0;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1.4;
   }
@@ -242,9 +243,12 @@
     align-items: center;
   }
 
+  .rp-agent-waiting :global(svg) {
+    vertical-align: -2px;
+  }
   .rp-agent-waiting {
     margin: 6px 0 0;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.45;
     color: var(--warning);
   }
@@ -269,7 +273,7 @@
     display: flex;
     align-items: baseline;
     gap: 6px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.4;
   }
   .rp-finding-body {
@@ -277,7 +281,7 @@
     min-width: 0;
   }
   .rp-loc {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -288,9 +292,9 @@
   .severity-chip {
     display: inline-block;
     padding: 2px 7px;
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }
@@ -315,7 +319,7 @@
     font-size: var(--fs-xs);
     padding: 1px 5px;
     text-transform: uppercase;
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0.03em;
     flex-shrink: 0;
   }

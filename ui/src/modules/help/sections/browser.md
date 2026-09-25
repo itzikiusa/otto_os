@@ -18,7 +18,7 @@ You can **mark** elements on a page, add a note to each mark, and ask an agent a
 
 1. Open **Browser** in the sidebar (Infrastructure group).
 2. Type a URL in the address bar and press ↵. A missing `https://` is added for you. The page opens as a reader tab.
-3. To mark something, choose **Mark element** above the page, click the element, write a note and choose **Save mark**. The mark appears in the **Marks** rail.
+3. To mark something, choose **Mark passage** above the page, click a passage, write a note and choose **Save mark**. The mark appears in the **Marks** rail.
 4. To ask an agent, use the dock under the page: **New agent** starts an agent session, or **Attach…** binds one you already have. Type your question in the ask bar and press ↵.
 5. To see the real page, switch the tab to **Live** with the globe button next to the address bar.
 
@@ -59,7 +59,7 @@ You can **mark** elements on a page, add a note to each mark, and ask an agent a
 - If you only have view access you can watch but not drive.
 
 **Marks**
-- Reader: **Mark element**, then click an element and add a note.
+- Reader: **Mark passage**, then click an element and add a note.
 - Live (this Mac's web view): the target button **Pick an element to mark**, then click in the page.
 - Marks are tied to the page URL, so they reappear on any tab that opens the same page and are highlighted on the page.
 - In the **Marks** rail you can edit a note, delete a mark, or send one mark into a live agent session.

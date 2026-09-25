@@ -106,7 +106,7 @@
   {#if loading && !rows.length}
     <div class="grid"><Skeleton rows={3} height={140} /></div>
   {:else if error && !rows.length}
-    <EmptyState icon="helm" title="Couldn't load the overview" body={error} actionLabel="Retry" onaction={() => void load()} />
+    <EmptyState actionKind="secondary" icon="warning" title="Couldn't load the overview" body={error} actionLabel="Retry" onaction={() => void load()} />
   {:else if !rows.length}
     <EmptyState icon="helm" title="No clusters yet" body="Add a cluster in the Kubernetes console first, then enable monitoring on it here." actionLabel="Open clusters" onaction={() => router.go('kubernetes')} />
   {:else}
@@ -221,7 +221,7 @@
     background: none;
     border: none;
     padding: 3px 10px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
   }
@@ -265,7 +265,7 @@
   }
   .name {
     font-weight: 600;
-    font-size: 13.5px;
+    font-size: var(--fs-m);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -299,7 +299,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .stats {
     display: grid;
@@ -319,11 +319,11 @@
     color: var(--text-dim);
   }
   .v {
-    font-size: 15px;
+    font-size: var(--fs-l);
     font-weight: 600;
   }
   .note {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .note.bad {
@@ -353,7 +353,7 @@
     display: flex;
     gap: 10px;
     flex-wrap: wrap;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .lg i {
@@ -368,11 +368,11 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: orange;
   }
   .status {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -381,7 +381,7 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 8px;
     border-radius: var(--radius-s, 6px);
     background: color-mix(in srgb, orange 8%, var(--surface));
@@ -401,7 +401,7 @@
     color: var(--text-dim);
   }
   .tiny {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .mono {
     font-family: var(--font-mono);

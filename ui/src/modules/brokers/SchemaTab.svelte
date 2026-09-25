@@ -128,7 +128,7 @@
   }
   .sn {
     font-family: var(--font-mono);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     word-break: break-all;
   }
   .view {
@@ -148,7 +148,7 @@
   }
   .sn-big {
     font-family: var(--font-mono);
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     word-break: break-all;
   }
@@ -161,7 +161,7 @@
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 6px 10px;
     cursor: pointer;
     border-bottom: 2px solid transparent;
@@ -176,7 +176,7 @@
     margin: 0;
     padding: 14px;
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
     white-space: pre-wrap;
     word-break: break-word;
   }
@@ -189,7 +189,7 @@
     color: var(--text-dim);
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .pad {
     padding: 12px;

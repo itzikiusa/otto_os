@@ -179,6 +179,8 @@ test('customize: moves stay in-section, hidden stays hidden, empty sections vani
       .locator('[data-testid^="sidebar-edit-row-"]')
       .evaluateAll((els) => els.map((e) => e.getAttribute('data-testid')!.replace('sidebar-edit-row-', '')));
   expect((await automateRows()).slice(0, 3)).toEqual(['swarm', 'loops', 'workflows']);
+  // The arrows open up on row hover / focus (the label keeps its room).
+  await page.getByTestId('sidebar-edit-row-workflows').hover();
   await page.getByRole('button', { name: 'Move Workflows up' }).click();
   expect((await automateRows()).slice(0, 3)).toEqual(['swarm', 'workflows', 'loops']);
 

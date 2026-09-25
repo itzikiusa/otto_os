@@ -407,6 +407,7 @@ except `/share/verify`: the feature guard `403`s every protected route (even
 |---|---|---|---|
 | POST /api/v1/share/verify | **public** (the share token is the auth) | `VerifyShareReq {token, otp}` | `VerifyShareResp {verified: true}` on success |
 | POST /api/v1/share/extend | **public** (the share token is the auth) | `ExtendShareReq {token}` | `{ "ok": true }` on success |
+| GET /api/v1/share/whoami | share token (verified scope) | — | `ShareWhoami {session_id, role: "viewer"\|"editor"}`; `400` for a non-share bearer |
 
 `POST /api/v1/share/verify` is **Exempt** (public) — the share `token` in the body
 is the auth. It is **IP rate-limited** (the share throttle; `429` with

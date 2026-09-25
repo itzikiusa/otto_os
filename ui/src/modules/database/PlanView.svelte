@@ -93,7 +93,7 @@
     flex-shrink: 0;
   }
   .plan-title {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     color: var(--text);
   }
@@ -118,7 +118,7 @@
     background: var(--surface);
     color: var(--text-dim);
     border-radius: var(--radius-s);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 2px 8px;
     cursor: pointer;
   }
@@ -152,7 +152,7 @@
   }
   .plan-raw {
     padding: 10px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text);
     white-space: pre;
@@ -162,7 +162,7 @@
     align-items: center;
     gap: 7px;
     min-height: 24px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text);
     flex-wrap: wrap;
   }
@@ -189,7 +189,7 @@
     font-weight: 600;
   }
   .plan-object {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--accent-text);
   }
   .plan-rows {
@@ -198,7 +198,7 @@
     font-variant-numeric: tabular-nums;
   }
   .plan-detail {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;

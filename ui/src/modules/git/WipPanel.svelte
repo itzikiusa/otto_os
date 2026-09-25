@@ -500,7 +500,7 @@
     <span class="wp-title mono">// WIP</span>
     <span class="wp-count">{status.changes.length} file{status.changes.length === 1 ? '' : 's'} changed</span>
     <span class="grow"></span>
-    <button class="wp-close" onclick={onclose} title="Close" aria-label="Close WIP panel">✕</button>
+    <button class="icon-btn wp-close" onclick={onclose} title="Close WIP panel" aria-label="Close WIP panel"><Icon name="x" size={14} /></button>
   </div>
 
   <div class="wp-scroll" class:has-diff={selectedPath !== null}>
@@ -673,7 +673,7 @@
             <button class:active={stagedView} onclick={() => (stagedView = true)}>Staged</button>
           </div>
         {/if}
-        <button class="wp-close" onclick={() => (selectedPath = null)} title="Close diff" aria-label="Close diff">✕</button>
+        <button class="icon-btn wp-close" onclick={() => (selectedPath = null)} title="Close diff" aria-label="Close diff"><Icon name="x" size={14} /></button>
       </div>
       <div class="wp-diff-body">
         {#if diffLoading && !diff}
@@ -799,27 +799,17 @@
     flex-shrink: 0;
   }
   .wp-title {
-    font-size: 13px;
-    font-weight: 700;
+    font-size: var(--fs-m);
+    font-weight: 600;
     color: var(--accent-text);
   }
   .wp-count {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
+  /* .icon-btn; only placement is local. */
   .wp-close {
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    font-size: 12px;
-    padding: 2px 6px;
-    border-radius: 4px;
     flex-shrink: 0;
-  }
-  .wp-close:hover {
-    color: var(--text);
-    background: var(--surface-2);
   }
   .grow {
     flex: 1;
@@ -849,15 +839,15 @@
     border: none;
     background: var(--surface-2);
     color: var(--text);
-    font-size: 11px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     letter-spacing: 0.03em;
     cursor: pointer;
     text-align: start;
   }
   .wp-sec-count {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     min-width: 16px;
     padding: 0 5px;
     border-radius: 999px;
@@ -876,17 +866,17 @@
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .wp-sec-action.danger {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .wp-sec-action.danger:hover {
-    background: color-mix(in srgb, var(--status-exited) 14%, transparent);
+    background: color-mix(in srgb, var(--danger) 14%, transparent);
   }
   .wp-list {
     padding: 4px 2px;
   }
   .wp-empty {
     padding: 6px 12px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .wp-file {
     display: flex;
@@ -913,7 +903,7 @@
     text-align: start;
   }
   .wp-fname {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -925,7 +915,7 @@
     color: var(--text-dim);
     cursor: pointer;
     padding: 3px 5px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     line-height: 1;
     opacity: 0;
     transition: opacity 100ms ease-out;
@@ -936,8 +926,8 @@
     opacity: 1;
   }
   .wp-discard:hover {
-    color: var(--status-exited);
-    background: color-mix(in srgb, var(--status-exited) 12%, transparent);
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
   }
   .wp-folder {
     display: flex;
@@ -964,7 +954,7 @@
     text-align: start;
   }
   .wp-fold-label {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -983,8 +973,8 @@
   /* Conflicts section: warn-tinted header, side-pick buttons instead of the
      stage checkbox (staging an unresolved file would bury its markers). */
   .wp-conflict-head {
-    background: var(--status-warn-soft);
-    color: var(--status-warn);
+    background: var(--warning-soft);
+    color: var(--warning);
     cursor: default;
   }
   .wp-conflict-row {
@@ -1010,33 +1000,33 @@
   .kind {
     width: 15px;
     height: 15px;
-    border-radius: 3px;
-    font-size: 9.5px;
-    font-weight: 700;
+    border-radius: var(--radius-s);
+    font-size: var(--fs-xs);
+    font-weight: 600;
     display: grid;
     place-items: center;
     flex-shrink: 0;
   }
   .k-modified {
-    background: var(--status-warn-soft);
-    color: var(--status-warn);
+    background: var(--warning-soft);
+    color: var(--warning);
   }
   .k-added,
   .k-untracked {
-    background: color-mix(in srgb, var(--status-working) 22%, transparent);
-    color: var(--status-working);
+    background: color-mix(in srgb, var(--success) 22%, transparent);
+    color: var(--success);
   }
   .k-deleted {
-    background: color-mix(in srgb, var(--status-exited) 22%, transparent);
-    color: var(--status-exited);
+    background: color-mix(in srgb, var(--danger) 22%, transparent);
+    color: var(--danger);
   }
   .k-renamed {
     background: color-mix(in srgb, var(--accent) 22%, transparent);
     color: var(--accent-text);
   }
   .k-conflicted {
-    background: color-mix(in srgb, var(--status-exited) 35%, transparent);
-    color: var(--status-exited);
+    background: color-mix(in srgb, var(--danger) 35%, transparent);
+    color: var(--danger);
   }
 
   .wp-diff {
@@ -1062,7 +1052,7 @@
     overscroll-behavior: contain;
   }
   .wp-diff-path {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1121,7 +1111,7 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
   }
@@ -1157,7 +1147,7 @@
     }
     .wp-fname,
     .wp-fold-label {
-      font-size: 13px;
+      font-size: var(--fs-m);
     }
     .wp-file input[type='checkbox'],
     .wp-folder input[type='checkbox'] {
@@ -1179,7 +1169,7 @@
     .wp-composer .btn.primary {
       height: 36px;
       padding: 0 16px;
-      font-size: 14px;
+      font-size: var(--fs-l);
     }
   }
 </style>

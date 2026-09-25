@@ -10,7 +10,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { openExternal } from '../../lib/external';
   import Modal from '../../lib/components/Modal.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
 
   interface Props {
     repoId: string;
@@ -76,12 +76,12 @@
     unknown: 'Unknown (branch not checked out locally)',
   };
 
-  function checkIcon(state: string): { glyph: string; cls: string } {
-    if (state === 'success') return { glyph: '✓', cls: 'ok' };
-    if (state === 'failure') return { glyph: '✗', cls: 'bad' };
-    if (state === 'skipped' || state === 'neutral') return { glyph: '–', cls: 'dim' };
+  function checkIcon(state: string): { icon: IconName; cls: string } {
+    if (state === 'success') return { icon: 'check', cls: 'ok' };
+    if (state === 'failure') return { icon: 'x', cls: 'bad' };
+    if (state === 'skipped' || state === 'neutral') return { icon: 'dot', cls: 'dim' };
     // Anything else is still pending / in progress — waiting on CI.
-    return { glyph: '●', cls: 'warn' };
+    return { icon: 'clock', cls: 'warn' };
   }
 
   /** Persist the Review tab and route to the PR — PrDetail honours the stored
@@ -135,9 +135,9 @@
           {#if checksLoading}
             <span class="dim">Loading…</span>
           {:else if checks === null}
-            <span class="dim">unavailable</span>
+            <span class="dim">Unavailable</span>
           {:else if checks.checks.length === 0}
-            <span class="dim">no checks reported</span>
+            <span class="dim">No checks reported</span>
           {:else}
             <span class="checks">
               {#each checks.checks as c (c.name)}
@@ -148,11 +148,11 @@
                     title="{c.name} — {c.state}"
                     onclick={() => void openExternal(c.url)}
                   >
-                    <span class="glyph">{ic.glyph}</span>{c.name}
+                    <span class="glyph"><Icon name={ic.icon} size={12} /></span>{c.name}
                   </button>
                 {:else}
                   <span class="check {ic.cls}" title="{c.name} — {c.state}">
-                    <span class="glyph">{ic.glyph}</span>{c.name}
+                    <span class="glyph"><Icon name={ic.icon} size={12} /></span>{c.name}
                   </span>
                 {/if}
               {/each}
@@ -165,7 +165,7 @@
         <span class="rlabel">Approvals</span>
         <span class="rvalue">
           {#if readinessLoading}<span class="dim">Loading…</span>
-          {:else if readiness === null}<span class="dim">unavailable</span>
+          {:else if readiness === null}<span class="dim">Unavailable</span>
           {:else}{readiness.approvals}{/if}
         </span>
       </div>
@@ -173,9 +173,9 @@
       <div class="row-item">
         <span class="rlabel">Mergeable</span>
         <span class="rvalue">
-          {#if mergeable === true}<span class="ok">yes</span>
-          {:else if mergeable === false}<span class="bad">no</span>
-          {:else}<span class="dim">unknown</span>{/if}
+          {#if mergeable === true}<span class="ok">Yes</span>
+          {:else if mergeable === false}<span class="bad">No — resolve the conflicts first</span>
+          {:else}<span class="dim">Unknown</span>{/if}
         </span>
       </div>
 
@@ -188,7 +188,7 @@
             <span class="dim">of {readiness.review.unresolved_total} unresolved</span>
             <button class="linkbtn" onclick={openReview}>Open review</button>
           {:else}
-            <span class="dim">no review run</span>
+            <span class="dim">No review run</span>
           {/if}
         </span>
       </div>
@@ -214,10 +214,10 @@
     <div class="opts">
       <label class="opt">
         <span class="rlabel">Strategy</span>
-        <select class="input" bind:value={strategy} style="width: 110px">
-          <option value="merge">merge</option>
-          <option value="squash">squash</option>
-          <option value="rebase">rebase</option>
+        <select class="input" bind:value={strategy} style="width: 140px">
+          <option value="merge">Merge commit</option>
+          <option value="squash">Squash</option>
+          <option value="rebase">Rebase</option>
         </select>
       </label>
       <label class="check-opt">
@@ -233,8 +233,12 @@
     </div>
 
     {#if error}
-      <div class="err"><Icon name="x" size={13} /><span>{error}</span></div>
+      <div class="err" role="alert"><Icon name="warning" size={14} /><span>Couldn’t merge. {error}</span></div>
     {/if}
+    <p class="who dim">
+      Merges <span class="mono">{pr.source_branch}</span> into <span class="mono">{pr.target_branch}</span> on the provider.
+      Everyone with access to the repository sees it, and it can’t be undone from Otto.
+    </p>
   </div>
 
   {#snippet footer()}
@@ -246,13 +250,17 @@
       <button class="btn ghost" onclick={onclose} disabled={merging}>Cancel</button>
       <button class="btn primary" onclick={doMerge} disabled={!canMerge}>
         <Icon name="merge" size={12} />
-        {merging ? 'Merging…' : 'Merge'}
+        {merging ? 'Merging…' : 'Merge pull request'}
       </button>
     </div>
   {/snippet}
 </Modal>
 
 <style>
+  .who {
+    margin: 10px 0 0;
+    font-size: var(--fs-xs);
+  }
   .body {
     display: flex;
     flex-direction: column;
@@ -262,14 +270,14 @@
     display: flex;
     align-items: baseline;
     gap: 6px;
-    font-size: 13px;
+    font-size: var(--fs-m);
   }
   .ptitle {
     font-weight: 600;
     overflow-wrap: anywhere;
   }
   .flow {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   /* source→target separator mirrors in place under RTL. */
   .dir-arrow {
@@ -290,7 +298,7 @@
     align-items: baseline;
     gap: 10px;
     padding: 7px 10px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .row-item + .row-item {
     border-top: 1px solid var(--border);
@@ -298,7 +306,7 @@
   .rlabel {
     flex: 0 0 168px;
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .rvalue {
     display: flex;
@@ -316,7 +324,7 @@
     display: inline-flex;
     align-items: baseline;
     gap: 4px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     overflow-wrap: anywhere;
   }
   .check.link {
@@ -329,7 +337,8 @@
     text-underline-offset: 2px;
   }
   .glyph {
-    font-weight: 700;
+    display: inline-flex;
+    margin-inline-end: 3px;
   }
   .ok {
     color: var(--success);
@@ -349,7 +358,7 @@
     padding: 0;
     color: var(--accent-text);
     cursor: pointer;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     text-decoration: underline;
     text-underline-offset: 2px;
   }
@@ -367,7 +376,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
   .check-opt input {
@@ -384,7 +393,7 @@
     border-radius: var(--radius-m);
     background: var(--danger-soft);
     color: var(--danger);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.45;
   }
   .foot {
@@ -398,7 +407,7 @@
     flex: 1;
   }
   .reasons {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--danger);
     overflow-wrap: anywhere;
   }

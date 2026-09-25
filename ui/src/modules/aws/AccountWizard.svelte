@@ -359,7 +359,7 @@
           {#if testResult.login_required && saved}
             {#if saved.auth_mode === 'profile'}
               <p class="dim">This profile needs an interactive sign-in (<code>aws sso login</code>).</p>
-              <button class="primary" onclick={() => saved && onsignin(saved)}><Icon name="key" size={12} /> Sign in now</button>
+              <button class="btn primary" onclick={() => saved && onsignin(saved)}><Icon name="key" size={12} /> Sign in now</button>
             {:else}
               <p class="dim">The keys were rejected — go back and re-enter them.</p>
             {/if}
@@ -373,20 +373,21 @@
 
   {#snippet footer()}
     {#if step === 1}
-      <button class="ghost" onclick={onclose}>Cancel</button>
-      <button class="primary" disabled={!step1Valid} onclick={() => (step = 2)}>Next</button>
+      <button class="btn" onclick={onclose}>Cancel</button>
+      <button class="btn primary" disabled={!step1Valid} onclick={() => (step = 2)}>Next</button>
     {:else if step === 2}
-      {#if !editing}<button class="ghost" onclick={() => (step = 1)}>Back</button>{/if}
-      <button class="ghost" onclick={onclose}>Cancel</button>
-      <button class="primary" disabled={!step2Valid || busy} onclick={() => void saveAndTest()} data-testid="aws-wizard-save">
+      {#if !editing}<button class="btn" onclick={() => (step = 1)}>Back</button>{/if}
+      <button class="btn" onclick={onclose}>Cancel</button>
+      <button class="btn primary" disabled={!step2Valid || busy} onclick={() => void saveAndTest()} data-testid="aws-wizard-save">
         {busy ? 'Saving…' : 'Save & test'}
       </button>
     {:else}
       {#if saved && !testResult?.ok}
-        <button class="ghost" onclick={() => saved && void runTest(saved)} disabled={testing}>Test again</button>
-        <button class="ghost" onclick={() => (step = 2)}>Back</button>
+        <button class="btn" onclick={() => saved && void runTest(saved)} disabled={testing}>Test again</button>
+        <button class="btn" onclick={() => (step = 2)}>Back</button>
       {/if}
-      <button class="primary" onclick={finish}>Done</button>
+      <!-- When the next step is "Sign in now" (in the body), that is the one primary. -->
+      <button class="btn" class:primary={!(testResult?.login_required && saved?.auth_mode === 'profile')} onclick={finish}>Done</button>
     {/if}
   {/snippet}
 </Modal>
@@ -403,7 +404,7 @@
     margin: 0;
     padding: 0;
     list-style: none;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .steps li.on {
@@ -425,7 +426,7 @@
     background: var(--surface-2);
     color: var(--text);
     cursor: pointer;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .modes button.on {
     border-color: var(--accent);
@@ -433,7 +434,7 @@
   }
   .hint {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.45;
   }
@@ -442,7 +443,7 @@
   }
   code {
     font-family: var(--font-mono);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .profiles {
     list-style: none;
@@ -455,7 +456,7 @@
   }
   .profiles li.dim {
     padding: 10px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .prof {
     display: flex;
@@ -476,11 +477,11 @@
   }
   .pname {
     font-weight: 600;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .phint {
     flex: 1;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -490,7 +491,7 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     min-width: 0;
   }
@@ -506,7 +507,7 @@
     background: var(--bg);
     color: var(--text);
     font: inherit;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     min-width: 0;
   }
   .row2 {
@@ -524,7 +525,7 @@
     border: 1px solid var(--border);
     background: transparent;
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
   .env-chip.selected {
@@ -556,7 +557,7 @@
   }
   .adv summary {
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .adv .row2,
@@ -570,7 +571,7 @@
     padding: 8px 10px;
     border: 1px dashed var(--border);
     border-radius: var(--radius-m);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     flex-wrap: wrap;
   }
   .dot {
@@ -586,7 +587,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 13px;
+    font-size: var(--fs-m);
   }
   .ok {
     color: var(--status-working);
@@ -599,7 +600,7 @@
     grid-template-columns: auto 1fr;
     gap: 4px 10px;
     margin: 0 0 8px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .idn dt {
     color: var(--text-dim);
@@ -623,32 +624,8 @@
   }
   .err {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--status-exited);
-  }
-  .primary {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 12px;
-    border-radius: var(--radius-m);
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: var(--accent-contrast);
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .primary:disabled {
-    opacity: 0.55;
-    cursor: default;
-  }
-  .ghost {
-    padding: 6px 12px;
-    border-radius: var(--radius-m);
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
   }
   @media (max-width: 640px) {
     .row2,

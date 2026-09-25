@@ -214,9 +214,10 @@ test('shell reconnect: an exited shell offers Reconnect and comes back live', as
   const overlay = page.locator('.term-overlay');
   await expect(overlay).toBeVisible({ timeout: 20_000 });
 
-  // A plain shell isn't WS-resumable, so the overlay offers "Reconnect"
-  // (respawn) rather than "Resume". Clicking it brings the session back live.
-  const reconnect = page.getByRole('button', { name: 'Reconnect' });
+  // A plain shell isn't WS-resumable, so the overlay offers "Restart session"
+  // (a respawn — it used to be mislabelled "Reconnect") rather than "Resume".
+  // Clicking it brings the session back live.
+  const reconnect = overlay.getByRole('button', { name: /^(Restart session|Reconnect)$/ });
   await expect(reconnect).toBeVisible({ timeout: 10_000 });
   await reconnect.click();
 

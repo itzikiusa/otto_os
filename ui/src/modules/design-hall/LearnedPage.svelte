@@ -322,7 +322,7 @@
   const withEvidence = $derived((tab === 'pending' || tab === 'rules') && !!selection);
 </script>
 
-<PageHeader title="What Otto learned" subtitle="Rules Otto proposes from your team’s choices. Nothing applies until you approve it."
+<PageHeader title="What Otto learned"
   crumbs={[{ label: 'Design Hall', onclick: () => router.go('design') }]}>
   {#snippet tabs()}
     <div class="segmented" role="tablist" aria-label="Learning" bind:this={tablist}>
@@ -470,10 +470,8 @@
         {#if tab === 'pending'}
           <p class="lead dim">Otto proposes rules from what your team applies, rejects and edits. Nothing applies until you approve it.</p>
           {#if learned.pending.length === 0}
-            <div class="none card">
-              <strong>No rules waiting for you</strong>
-              <p class="dim">A rule is proposed when the same choice repeats 3 times across 2 designs.</p>
-            </div>
+            <EmptyState icon="bulb" title="No rules waiting for you"
+              body="Otto proposes a rule when the same choice repeats 3 times across 2 designs. Approved rules apply to every design turn." />
           {/if}
           {#each learned.pending as e (e.edit_id)}
             <article class="rule-card card" class:sel={selectedKey === e.edit_id} data-testid="design-pending-rule">
@@ -513,10 +511,10 @@
           {/if}
         {:else}
           {#if learned.active.length === 0}
-            <div class="none card">
-              <strong>No team rules yet</strong>
-              <p class="dim">Rules you approve under Pending show here, with the evidence behind them. Otto follows them in every design turn and says so.</p>
-            </div>
+            <EmptyState icon="book" title="No team rules yet"
+              body="Rules you approve under Pending show here, with the evidence behind them. Otto follows them in every design turn and says so."
+              actionLabel={count('pending') ? 'Review pending rules' : undefined}
+              onaction={() => go('pending')} />
           {:else}
             <div class="rules card">
               {#each learned.active as r (r.key)}
@@ -621,13 +619,6 @@
     padding: 8px 12px;
     border-radius: var(--radius-s);
     background: var(--info-soft);
-    font-size: var(--fs-s);
-  }
-  .none {
-    padding: 16px;
-  }
-  .none p {
-    margin: 4px 0 0;
     font-size: var(--fs-s);
   }
   .rule-card {

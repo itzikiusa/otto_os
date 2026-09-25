@@ -493,10 +493,10 @@ Two sections of the sidebar can share the content column, like a split view:
 `[sidebar] [main pane │ side pane]`. It is a split, not an inner window: no
 title bar of its own, no dragging, no overlap, never more than two panes.
 
-- **Entry points.** A sidebar row's context menu ("Open Side by Side", or
-  "Show in Side Pane" while one is open), ⌥-click on a row, `⌘\` (a module
-  picker; `⌘\` again closes the pane) and the ⌘K "Open <Module> Side by Side"
-  / "Close Side Pane" / "Swap Panes" commands. Desktop main window only: on
+- **Entry points.** A sidebar row's context menu ("Open side by side", or
+  "Show in side pane" while one is open), ⌥-click on a row, `⌘\` (a module
+  picker; `⌘\` again closes the pane) and the ⌘K "Open <Module> side by side"
+  / "Close side pane" / "Swap panes" commands. Desktop main window only: on
   phone and tablet, and in pop-outs, the entry points aren't offered and a
   pane that no longer fits is hidden, never cleared.
 - **One module per pane.** A navigation to the module the other pane shows

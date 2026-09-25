@@ -97,6 +97,8 @@
     if (sid && w) void activity.load(w, sid);
   });
 
+  const loadError = $derived(session ? (activity.loadErrorBySession[session.id] ?? null) : null);
+
   let note = $state('');
   let adding = $state(false);
   let expanded = $state<Record<string, boolean>>({});
@@ -182,6 +184,17 @@
   />
 {:else}
   <div class="activity">
+    {#if loadError}
+      <!-- The trail + tasks didn't load: say so (an empty board would read as
+           "the agent has done nothing"), with Retry. -->
+      <div class="load-error" role="alert">
+        <Icon name="warning" size={14} />
+        <span class="grow">Couldn't load this session's activity. {loadError}</span>
+        <button class="btn small" onclick={() => session && wsId && void activity.load(wsId, session.id, true)}>
+          <Icon name="refresh" size={12} /> Retry
+        </button>
+      </div>
+    {/if}
     <!-- Task tracker ------------------------------------------------------- -->
     <section class="section">
       <div class="section-title">
@@ -200,7 +213,7 @@
               title={sessionEnded ? 'The session has exited — the task is kept and handed over on resume' : 'Push a task to this agent'}
               data-testid="add-task-btn"
             >
-              <Icon name="plus" size={11} /> Add task
+              <Icon name="plus" size={12} /> Add task
             </button>
           {/if}
         </span>
@@ -260,10 +273,10 @@
               <span class="task-glyph">{TASK_GLYPH[t.status]}</span>
               <span class="task-title">{t.title}</span>
               {#if t.source === 'user'}
-                <span class="badge board" title="Added from the board / Activity panel">from board</span>
+                <span class="badge board" title="Added from the board / Activity panel">From board</span>
               {/if}
               {#if t.nudge_pending}
-                <span class="badge queued" title="Waiting to be handed to the agent">queued</span>
+                <span class="badge queued" title="Waiting to be handed to the agent">Queued</span>
               {/if}
             </li>
           {/each}
@@ -396,7 +409,7 @@
     padding: 1px 7px;
   }
   .empty-line {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.4;
     margin: 2px 0;
   }
@@ -408,8 +421,8 @@
     gap: 6px;
   }
   .count.nudge {
-    color: var(--status-warn, #d29922);
-    background: color-mix(in srgb, var(--status-warn, #d29922) 14%, transparent);
+    color: var(--status-warn);
+    background: color-mix(in srgb, var(--status-warn) 14%, transparent);
   }
   .add-task-btn {
     display: inline-flex;
@@ -446,7 +459,7 @@
     background: var(--surface-2);
     color: var(--text);
     font: inherit;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     padding: 4px 8px;
     outline: none;
     resize: vertical;
@@ -470,13 +483,13 @@
     background: var(--surface-2);
     color: var(--text);
     font: inherit;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .tbtn.primary {
     background: var(--accent);
     border-color: var(--accent);
-    color: var(--accent-contrast, #fff);
+    color: var(--accent-contrast);
   }
   .tbtn:disabled {
     opacity: 0.5;
@@ -498,8 +511,8 @@
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .badge.queued {
-    color: var(--status-warn, #d29922);
-    background: color-mix(in srgb, var(--status-warn, #d29922) 14%, transparent);
+    color: var(--status-warn);
+    background: color-mix(in srgb, var(--status-warn) 14%, transparent);
   }
   .task.nudge-pending .task-glyph {
     animation: pulse 1.4s ease-in-out infinite;
@@ -544,7 +557,7 @@
     display: flex;
     align-items: baseline;
     gap: 7px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.35;
   }
   .task-glyph {
@@ -566,14 +579,14 @@
     font-weight: 600;
   }
   .task-completed .task-glyph {
-    color: var(--status-working, #3fb950);
+    color: var(--status-working);
   }
   .task-completed .task-title {
     color: var(--text-dim);
     text-decoration: line-through;
   }
   .task-blocked .task-glyph {
-    color: var(--status-exited, #e5534b);
+    color: var(--status-exited);
   }
   .task-cancelled .task-title {
     color: var(--text-dim);
@@ -598,7 +611,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .tab:hover {
@@ -617,7 +630,7 @@
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 0 7px;
     outline: none;
   }
@@ -637,7 +650,7 @@
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     padding: 4px 8px;
     outline: none;
   }
@@ -705,24 +718,24 @@
     color: var(--accent-text);
   }
   .lvl-warn .row-icon {
-    color: var(--status-warn, #d29922);
+    color: var(--status-warn);
   }
   .lvl-error .row-icon {
-    color: var(--status-exited, #e5534b);
+    color: var(--status-exited);
   }
   .row-body {
     min-width: 0;
     flex: 1;
   }
   .row-summary {
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.35;
     color: var(--text);
     word-break: break-word;
   }
   .kind-command .row-summary {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   /* Text uses the text-safe semantic tokens (the --status-* ones are for dots). */
   .lvl-warn .row-summary {
@@ -762,5 +775,24 @@
     word-break: break-word;
     max-height: 220px;
     overflow: auto;
+  }
+  .load-error {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-block-end: 10px;
+    padding: 8px 10px;
+    border-radius: var(--radius-m);
+    background: var(--danger-soft);
+    color: var(--text);
+    font-size: var(--fs-s);
+  }
+  .load-error > :global(svg) {
+    color: var(--danger);
+    flex-shrink: 0;
+  }
+  .load-error .grow {
+    flex: 1;
+    min-width: 0;
   }
 </style>

@@ -290,6 +290,11 @@ fn scope_allows(method: &Method, template: &str, concrete: &str, scope: &Session
             None => false,
         };
     }
+    // GET /api/v1/share/whoami — the token's own session id + role (no id in
+    // the path; it only ever describes this scope).
+    if method == Method::GET && template == "/api/v1/share/whoami" {
+        return true;
+    }
     // Deny-by-default: anything not on the allow-list above.
     false
 }
@@ -430,6 +435,25 @@ mod scope_tests {
             "/api/v1/sessions/S1",
             &s
         ));
+    }
+
+    #[test]
+    fn any_share_may_ask_whoami_but_not_post_to_it() {
+        for role in [WorkspaceRole::Viewer, WorkspaceRole::Editor] {
+            let s = scope("S1", role);
+            assert!(scope_allows(
+                &Method::GET,
+                "/api/v1/share/whoami",
+                "/api/v1/share/whoami",
+                &s
+            ));
+            assert!(!scope_allows(
+                &Method::POST,
+                "/api/v1/share/whoami",
+                "/api/v1/share/whoami",
+                &s
+            ));
+        }
     }
 
     #[test]

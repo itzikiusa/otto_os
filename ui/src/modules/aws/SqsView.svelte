@@ -232,7 +232,7 @@
 
 <ViewToolbar
   title="SQS"
-  subtitle={`${queues?.length ?? 0} queues`}
+  subtitle={queues ? `${queues.length} queue${queues.length === 1 ? '' : 's'}` : ''}
   bind:filter
   filterPlaceholder="Filter queues…"
   {loading}
@@ -246,7 +246,7 @@
       {#if loading && !queues}
         <div class="pad"><Skeleton rows={8} /></div>
       {:else if error}
-        <EmptyState icon="cloud" title="Couldn't list queues" body={error} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
+        <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list queues" body={error} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
       {:else if shown.length === 0}
         <EmptyState icon="send" title={filter ? 'No matching queues' : 'No queues'} />
       {:else}
@@ -292,7 +292,7 @@
           <strong class="qname" title={selected.url}>{selected.name}</strong>
           {#if selected.fifo}<span class="tag">FIFO</span>{/if}
           {#if attrs}<span class="dim counts mono">{attrs.approx_messages} avail · {attrs.approx_not_visible} in-flight · {attrs.approx_delayed} delayed</span>{/if}
-          <button class="more" onclick={(e) => selected && queueMenu(e, selected)} aria-label="Queue actions" title="Actions"><Icon name="more" size={14} /></button>
+          <button class="icon-btn more" onclick={(e) => selected && queueMenu(e, selected)} aria-label="Queue actions" title="Actions"><Icon name="more" size={14} /></button>
         </div>
         <div class="tabs" role="tablist">
           {#each [['messages', 'Messages'], ['send', 'Send'], ['attributes', 'Attributes'], ['metrics', 'Metrics'], ['redrive', 'Redrive']] as const as [id, label] (id)}
@@ -304,7 +304,7 @@
           {#if tab === 'messages'}
             <div class="bar">
               <label>Peek <select bind:value={peekN}>{#each [1, 2, 5, 10] as n (n)}<option value={n}>{n}</option>{/each}</select></label>
-              <button class="primary sm" onclick={() => void peek()} disabled={!canReceive || peeking} title={canReceive ? undefined : 'Needs Edit on SQS'}>{peeking ? 'Peeking…' : 'Peek'}</button>
+              <button class="btn primary small" onclick={() => void peek()} disabled={!canReceive || peeking} title={canReceive ? undefined : 'Needs Edit on SQS'}>{peeking ? 'Peeking…' : 'Peek'}</button>
               <span class="dim">Non-destructive (visibility timeout 0). Messages may appear in any order.</span>
             </div>
             {#if messages.length === 0}
@@ -362,11 +362,11 @@
                     <button class="icon-btn" onclick={() => (sendAttrs = sendAttrs.filter((_, j) => j !== i))} aria-label="Remove attribute" title="Remove attribute"><Icon name="x" size={12} /></button>
                   </div>
                 {/each}
-                <button class="ghost sm self" onclick={() => (sendAttrs = [...sendAttrs, { k: '', v: '' }])}><Icon name="plus" size={12} /> Attribute</button>
+                <button class="btn small self" onclick={() => (sendAttrs = [...sendAttrs, { k: '', v: '' }])}><Icon name="plus" size={12} /> Attribute</button>
               </div>
               <div class="bar">
-                <button class="ghost sm" onclick={() => (sendBody = prettyJson(sendBody))}>Pretty JSON</button>
-                <button class="primary sm" onclick={() => void send()} disabled={!canSend || sending || !sendBody.trim() || (selected.fifo && !sendGroup.trim())}>{sending ? 'Sending…' : 'Send message'}</button>
+                <button class="btn small" onclick={() => (sendBody = prettyJson(sendBody))}>Pretty JSON</button>
+                <button class="btn primary small" onclick={() => void send()} disabled={!canSend || sending || !sendBody.trim() || (selected.fifo && !sendGroup.trim())}>{sending ? 'Sending…' : 'Send message'}</button>
               </div>
             </div>
           {:else if tab === 'attributes'}
@@ -395,7 +395,7 @@
               {#if dlqSource.length}<p class="dim">Known source queues: {dlqSource.join(', ')}</p>{/if}
               <label class="field"><span>Destination ARN <em>(blank = original source)</em></span><input class="mono" bind:value={redriveDest} placeholder="arn:aws:sqs:…" /></label>
               <div class="bar">
-                <button class="primary sm" onclick={() => void redrive()} disabled={!canRedrive || redriving || !attrs}>{redriving ? 'Starting…' : 'Start redrive'}</button>
+                <button class="btn primary small" onclick={() => void redrive()} disabled={!canRedrive || redriving || !attrs}>{redriving ? 'Starting…' : 'Start redrive'}</button>
               </div>
             </div>
           {/if}
@@ -436,7 +436,7 @@
   .tbl {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .tbl th {
     position: sticky;
@@ -445,7 +445,7 @@
     background: var(--surface);
     text-align: left;
     font-weight: 600;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -468,7 +468,7 @@
     position: static;
     text-transform: none;
     letter-spacing: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     width: 34%;
     vertical-align: top;
   }
@@ -521,14 +521,14 @@
     flex-wrap: wrap;
   }
   .qname {
-    font-size: 13.5px;
+    font-size: var(--fs-m);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     max-width: 100%;
   }
   .counts {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .back {
     border: 0;
@@ -560,7 +560,7 @@
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .tabs button.on {
     color: var(--text);
@@ -581,7 +581,7 @@
     gap: 10px;
     padding: 8px 12px;
     flex-wrap: wrap;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .bar select {
     margin-left: 4px;
@@ -605,7 +605,7 @@
     align-items: center;
     gap: 8px;
     padding: 6px 8px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     flex-wrap: wrap;
   }
   .msg-toggle {
@@ -630,7 +630,7 @@
     margin: 0;
     padding: 6px 10px 8px;
     font-family: var(--font-mono);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     white-space: pre-wrap;
     word-break: break-word;
     border-top: 1px solid var(--border);
@@ -652,7 +652,7 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .field em {
@@ -665,7 +665,7 @@
     background: var(--bg);
     color: var(--text);
     font: inherit;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     padding: 6px 8px;
   }
   .field textarea {
@@ -687,37 +687,6 @@
   }
   code {
     font-family: var(--font-mono);
-  }
-  .primary {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 12px;
-    border-radius: var(--radius-m);
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: var(--accent-contrast);
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .primary:disabled {
-    opacity: 0.55;
-    cursor: default;
-  }
-  .ghost {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 6px 12px;
-    border-radius: var(--radius-m);
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
-  }
-  .sm {
-    padding: 4px 10px;
-    font-size: 12px;
   }
   .icon-btn {
     display: inline-grid;

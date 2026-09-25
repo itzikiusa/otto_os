@@ -106,7 +106,7 @@
     spellcheck="false"
     aria-label="Ask the agent about this page"
   ></textarea>
-  <label class="chip" class:off={!includeMarks} title="Include this page's marks in the question so the agent knows which elements you mean">
+  <label class="marks-chip" class:off={!includeMarks || marks.length === 0} title={marks.length === 0 ? 'No marks on this page yet — use Mark passage to add one' : "Include this page's marks in the question so the agent knows which elements you mean"}>
     <input type="checkbox" bind:checked={includeMarks} disabled={marks.length === 0} />
     <Icon name="target" size={11} />
     <span>{marks.length} mark{marks.length === 1 ? '' : 's'}</span>
@@ -120,8 +120,8 @@
   .askbar {
     display: flex;
     align-items: flex-end;
-    gap: 0.4rem;
-    padding: 0.4rem 0.6rem;
+    gap: 6px;
+    padding: 6px 12px;
     border-top: 1px solid var(--border);
     background: var(--surface);
   }
@@ -134,9 +134,9 @@
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 0.35rem 0.55rem;
+    padding: 5px 10px;
     font: inherit;
-    font-size: 0.85rem;
+    font-size: var(--fs-m);
     line-height: 1.35;
   }
   textarea:focus {
@@ -146,26 +146,31 @@
   textarea:disabled {
     opacity: 0.6;
   }
-  .chip {
+  .marks-chip {
     display: inline-flex;
     align-items: center;
-    gap: 0.25rem;
+    gap: 4px;
     height: 30px;
-    padding: 0 0.5rem;
+    padding: 0 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     cursor: pointer;
     white-space: nowrap;
     user-select: none;
   }
-  .chip.off {
+  .marks-chip.off {
     color: var(--text-dim);
     background: transparent;
   }
-  .chip input {
+  /* The checkbox is visually hidden, so the chip carries its focus ring. */
+  .marks-chip:focus-within {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  .marks-chip input {
     position: absolute;
     opacity: 0;
     width: 0;
@@ -178,8 +183,8 @@
     width: 30px;
     height: 30px;
     border-radius: var(--radius-s);
-    border: 1px solid var(--accent);
-    background: var(--accent);
+    border: 1px solid var(--accent-solid);
+    background: var(--accent-solid);
     color: var(--accent-contrast);
     cursor: pointer;
   }

@@ -105,7 +105,7 @@
       toasts.success(editing ? 'Agent updated' : 'Agent hired');
       onclose();
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error(editing ? "Couldn't save the agent" : "Couldn't hire the agent", e instanceof Error ? e.message : String(e));
     } finally {
       busy = false;
     }
@@ -133,7 +133,7 @@
     <div class="field">
       <label for="ag-reports">Reports to</label>
       <select id="ag-reports" class="input" bind:value={reportsTo}>
-        <option value="">— top of org —</option>
+        <option value="">Top of the org</option>
         {#each (swarm.detail?.agents ?? []).filter((a) => a.id !== agent?.id) as a (a.id)}
           <option value={a.id}>{a.name} ({a.title})</option>
         {/each}
@@ -178,20 +178,20 @@
       {#each skills as s, i (s.name)}
         <span class="skill-chip" class:must={s.must_use}>
           <button
-            class="link"
+            class="link must-toggle"
             aria-label={s.must_use ? `Make ${s.name} optional` : `Require ${s.name} (must use)`}
             aria-pressed={s.must_use}
             title={s.must_use ? 'Must use — click to make optional' : 'Optional — click to require'}
             onclick={() => (skills[i] = { ...s, must_use: !s.must_use })}
           >
-            {s.must_use ? '★' : '☆'}
+            <Icon name="star" size={12} />
           </button>
           {s.name}
           <button
             class="link"
             aria-label="Remove skill {s.name}"
             title="Remove skill"
-            onclick={() => (skills = skills.filter((_, j) => j !== i))}><Icon name="x" size={10} /></button>
+            onclick={() => (skills = skills.filter((_, j) => j !== i))}><Icon name="x" size={12} /></button>
         </span>
       {/each}
     </div>
@@ -239,6 +239,18 @@
 </Modal>
 
 <style>
+  /* Must-use toggle: an outline star; filled while the skill is required. */
+  .must-toggle {
+    display: inline-grid;
+    place-items: center;
+    color: var(--text-dim);
+  }
+  .skill-chip.must .must-toggle {
+    color: var(--warning);
+  }
+  .skill-chip.must .must-toggle :global(svg path) {
+    fill: currentColor;
+  }
   .grid2 {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -261,7 +273,7 @@
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 2px 8px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .skill-chip.must {
     border-color: var(--accent);

@@ -102,7 +102,7 @@
     border-bottom: 1px solid var(--border);
   }
   .count {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .grow {
@@ -124,7 +124,7 @@
     top: 0;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--text-dim);
@@ -132,7 +132,7 @@
   }
   .srow {
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .srow:hover {
     background: color-mix(in srgb, var(--text-dim) 5%, transparent);
@@ -155,7 +155,7 @@
     color: var(--danger);
   }
   .when {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .mono {
@@ -165,7 +165,7 @@
     color: var(--text-dim);
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .pad {
     padding: 16px;

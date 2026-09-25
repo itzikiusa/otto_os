@@ -157,7 +157,7 @@
   {#if loading && !instances}
     <div class="pad"><Skeleton rows={8} /></div>
   {:else if error}
-    <EmptyState icon="cloud" title="Couldn't list DB instances" body={error} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
+    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list DB instances" body={error} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
   {:else if shown.length === 0}
     <EmptyState icon="db" title={filter ? 'No matching instances' : `No DB instances in ${region}`} />
   {:else}
@@ -261,7 +261,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .lbl {
     color: var(--text-dim);
@@ -274,7 +274,7 @@
     background: var(--bg);
     color: var(--text);
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 0 4px;
   }
   .body {
@@ -295,7 +295,7 @@
        and let .tbl-wrap scroll sideways instead of squeezing every cell. */
     min-width: 820px;
     border-collapse: collapse;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .tbl th {
     position: sticky;
@@ -304,7 +304,7 @@
     background: var(--surface);
     text-align: left;
     font-weight: 600;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -381,7 +381,7 @@
   }
   .tag.pl {
     margin: 0;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     font-weight: 400;
     padding: 2px 8px;
     border: 1px solid var(--border);
@@ -407,7 +407,7 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     padding: 12px 14px;
   }
   .kv {
@@ -425,7 +425,7 @@
   }
   h3 {
     margin: 6px 0 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -436,7 +436,7 @@
     gap: 6px;
   }
   .raw {
-    font-size: 12px;
+    font-size: var(--fs-s);
     overflow: auto;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);

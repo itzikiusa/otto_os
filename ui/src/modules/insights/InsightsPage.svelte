@@ -586,7 +586,7 @@
                 {#each filtered as r (keyOf(r))}
                   {@const p = parsedByKey.get(keyOf(r))}
                   {@const acts = actionSummary(r)}
-                  <button class="row" class:active={keyOf(r) === selectedKey} aria-current={keyOf(r) === selectedKey ? 'true' : undefined} onclick={() => select(r)}>
+                  <button class="rep-row" class:active={keyOf(r) === selectedKey} aria-current={keyOf(r) === selectedKey ? 'true' : undefined} onclick={() => select(r)}>
                     <div class="row-top">
                       <span class="chip">{kindLabel(r.kind)}</span>
                       <span class="row-date">{periodShort(r)}</span>
@@ -766,7 +766,7 @@
     flex-direction: column;
     gap: 2px;
   }
-  .row {
+  .rep-row {
     display: flex;
     flex-direction: column;
     align-items: stretch;
@@ -781,10 +781,10 @@
     cursor: pointer;
     font: inherit;
   }
-  .row:hover {
+  .rep-row:hover {
     background: var(--hover);
   }
-  .row.active {
+  .rep-row.active {
     background: var(--accent-soft);
     border-color: color-mix(in srgb, var(--accent) 28%, transparent);
   }

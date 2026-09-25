@@ -246,7 +246,7 @@
 </script>
 
 <div class="api-root">
-  <PageHeader title="API" subtitle="Build, send and save HTTP requests. They run from Otto’s daemon, not the browser.">
+  <PageHeader title="API" subtitle="Requests run from Otto’s daemon, not the browser">
     {#snippet leading()}
       {#if viewport.isPhone && phonePane === 'main' && !onboarding}
         <button class="icon-btn" onclick={() => (phonePane = 'list')} aria-label="Show saved requests" title="Show saved requests"><Icon name="chevronLeft" size={16} /></button>

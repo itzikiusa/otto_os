@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { CLUSTER_VIEWS, clusterViewKey, type ClusterView } from './types';
   import Icon from '../../lib/components/Icon.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -20,7 +21,7 @@
   import ReplayPanel from './ReplayPanel.svelte';
   import LagAlertsPanel from './LagAlertsPanel.svelte';
 
-  type Tab = 'overview' | 'topics' | 'groups' | 'schema' | 'replay' | 'alerts';
+  type Tab = ClusterView;
   let tab = $state<Tab>('overview');
   let formOpen = $state(false);
   let editTarget = $state<BrokerCluster | null>(null);
@@ -209,7 +210,7 @@
         { label: 'Open in tab', action: () => brokers.select(c.id) },
         { label: 'Test', action: () => void testConn(c) },
         { label: 'Edit…', action: () => openEdit(c) },
-        { label: 'Remove', danger: true, action: () => void removeCluster(c) },
+        { label: 'Remove…', icon: 'trash', danger: true, action: () => void removeCluster(c) },
       ]);
     } else {
       const s = brokers.sections.find((x) => x.id === id);
@@ -356,7 +357,7 @@
   {/snippet}
   {#snippet actions()}
     {#if selected}
-      <button class="btn small danger" data-overflow="-1" onclick={() => removeCluster(selected)}>Remove</button>
+      <button class="btn small danger" data-overflow="-1" onclick={() => removeCluster(selected)} title="Remove this cluster profile from Otto (topics on the broker are untouched)">Remove…</button>
       <button class="btn small" onclick={() => openEdit(selected)}>Edit</button>
       <button class="btn small" data-keep onclick={() => testConn(selected)} disabled={testing}>
         {testing ? 'Testing…' : 'Test'}
@@ -393,7 +394,10 @@
           {@render sectionNode(node, 0)}
         {/each}
 
-        <!-- Ungrouped doubles as the top-level / no-section drop target. -->
+        <!-- Ungrouped doubles as the top-level / no-section drop target. With no
+             sections at all it is just noise, so it only shows once a section
+             exists (or while something is being dragged). -->
+        {#if brokers.sections.length > 0 || draggedClusterId || draggedSectionId}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="sec-head plain"
@@ -411,8 +415,9 @@
           <span class="sec-name grow">Ungrouped</span>
           {#if ungrouped.length > 0}<span class="count">{ungrouped.length}</span>{/if}
         </div>
+        {/if}
         {#each ungrouped as c (c.id)}
-          {@render clusterRow(c, 1)}
+          {@render clusterRow(c, brokers.sections.length > 0 ? 1 : 0)}
         {/each}
 
         {#if brokers.clusters.length === 0 && brokers.sections.length === 0}
@@ -466,13 +471,10 @@
       </div>
     {/if}
     {#if selected}
-      <div class="tabs" role="tablist" aria-label="Kafka cluster views">
-        <button class:on={tab === 'overview'} role="tab" aria-selected={tab === 'overview'} onclick={() => (tab = 'overview')}>Overview</button>
-        <button class:on={tab === 'topics'} role="tab" aria-selected={tab === 'topics'} onclick={() => (tab = 'topics')}>Topics</button>
-        <button class:on={tab === 'groups'} role="tab" aria-selected={tab === 'groups'} onclick={() => (tab = 'groups')}>Consumer Groups</button>
-        <button class:on={tab === 'schema'} role="tab" aria-selected={tab === 'schema'} onclick={() => (tab = 'schema')}>Schema Registry</button>
-        <button class:on={tab === 'replay'} role="tab" aria-selected={tab === 'replay'} onclick={() => (tab = 'replay')}>Replay</button>
-        <button class:on={tab === 'alerts'} role="tab" aria-selected={tab === 'alerts'} onclick={() => (tab = 'alerts')}>Lag Alerts</button>
+      <div class="tabs" role="tablist" aria-label="Kafka cluster views" tabindex="-1" onkeydown={(e) => { const next = clusterViewKey(e, tab); if (next) tab = next; }}>
+        {#each CLUSTER_VIEWS as v (v.id)}
+          <button class:on={tab === v.id} role="tab" aria-selected={tab === v.id} tabindex={tab === v.id ? 0 : -1} onclick={() => (tab = v.id)}>{v.label}</button>
+        {/each}
       </div>
 
       <div class="tab-body">
@@ -644,7 +646,7 @@
     padding: 12px 12px 8px;
   }
   .aside-head .title {
-    font-size: 12px;
+    font-size: var(--fs-s);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -679,14 +681,14 @@
   }
   .sec-head.plain {
     cursor: default;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     opacity: 0.8;
     margin-top: 4px;
   }
   .sec-name {
-    font-size: 12px;
+    font-size: var(--fs-s);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -745,7 +747,7 @@
   }
   .cn {
     flex: 1;
-    font-size: 13px;
+    font-size: var(--fs-m);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -773,7 +775,7 @@
     padding: 0 10px;
     cursor: pointer;
     border-inline-end: 1px solid var(--border);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     white-space: nowrap;
     border-top: 2px solid transparent;
@@ -851,7 +853,7 @@
     color: var(--text-dim);
     padding: 8px 14px;
     cursor: pointer;
-    font-size: 13px;
+    font-size: var(--fs-m);
     border-bottom: 2px solid transparent;
     white-space: nowrap;
     flex: none;
@@ -872,7 +874,7 @@
     padding: 12px;
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
 
   /* Collapse toggles. On desktop the cluster-list toggle is a plain inert label
@@ -952,14 +954,14 @@
     }
     .sec-toggle .hcount {
       display: inline-block;
-      font-size: 11px;
+      font-size: var(--fs-xs);
       color: var(--text-dim);
       background: color-mix(in srgb, var(--text-dim) 14%, transparent);
       border-radius: 9px;
       padding: 1px 8px;
     }
     .head-btns .btn.small {
-      font-size: 13px;
+      font-size: var(--fs-m);
       padding: 6px 8px;
     }
     /* Expanded: scroll within a capped height. Collapsed: hidden. */
@@ -976,7 +978,7 @@
       padding: 11px 14px;
     }
     .cn {
-      font-size: 15px;
+      font-size: var(--fs-l);
     }
     .sec-name {
       font-size: 14px;
@@ -985,10 +987,10 @@
       padding: 8px 10px 8px 8px;
     }
     .count {
-      font-size: 11px;
+      font-size: var(--fs-xs);
     }
     .sec-head.plain {
-      font-size: 12px;
+      font-size: var(--fs-s);
     }
 
     /* Content section. */

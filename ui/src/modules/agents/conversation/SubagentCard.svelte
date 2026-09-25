@@ -47,7 +47,7 @@
     {#if meta?.model}<span class="chip sub-model">{meta.model}</span>{/if}
     {#if children.length}<span class="chip sub-kids" title="{children.length} nested agents">{children.length} ⤵</span>{/if}
     <span class="sub-dot {status ?? 'unknown'}"></span>
-    <span class="sub-caret">{open ? '▾' : '▸'}</span>
+    <span class="sub-caret" aria-hidden="true"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} /></span>
   </button>
   {#if open}
     <div class="sub-body">
@@ -114,7 +114,7 @@
     display: flex;
     gap: 6px;
     align-items: baseline;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     white-space: nowrap;
     overflow: hidden;
   }
@@ -140,17 +140,17 @@
     flex-shrink: 0;
   }
   .sub-dot.done {
-    background: var(--status-working, #3fb950);
+    background: var(--status-working);
   }
   .sub-dot.error {
-    background: var(--status-exited, #e5534b);
+    background: var(--status-exited);
   }
   .sub-dot.running {
-    background: var(--status-warn, #febc2e);
+    background: var(--status-warn);
   }
   .sub-caret {
+    display: inline-flex;
     color: var(--text-dim);
-    font-size: 11px;
   }
   .sub-body {
     border-top: 1px solid var(--border);
@@ -162,7 +162,7 @@
     overflow: auto;
   }
   .sub-note {
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 2px 6px;
   }
   .sub-note.err {

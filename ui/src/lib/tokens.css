@@ -42,6 +42,9 @@
   --z-popover-backdrop: 9998; /* ContextMenu / popover click-catcher */
   --z-popover: 9999; /* ContextMenu, NotificationBell panel — above sheets */
   --z-overlay-max: 9999;
+  /* How far the toast stack rises above its resting spot — the floating
+     command bar sets it while its pill floats over the content column. */
+  --toast-lift: 0px;
 
   --accent: #0a84ff;
   /* Text/icon colour on an --accent-solid fill (see the warm/dark override). */
@@ -66,6 +69,8 @@
   --success: #56d06c;
   --info: #6cb2ff;
   --danger-solid: #c42b22;
+  /* Text/icon on a --danger-solid fill (the confirm sheet's red button). */
+  --danger-contrast: #ffffff;
 
   /* Derived tokens. Declared once: they resolve on <html> against whichever
      theme block (or custom accent) is active, so every theme gets them. */

@@ -116,7 +116,7 @@
     padding: 4px 8px;
     border-bottom: 1px solid var(--border);
     background: color-mix(in srgb, var(--surface-2) 60%, transparent);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .mfb-label {
     display: inline-flex;
@@ -130,7 +130,7 @@
     min-width: 0;
     height: 22px;
     padding: 0 8px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface);
@@ -153,7 +153,7 @@
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .mfb-seg + .mfb-seg {
@@ -174,7 +174,7 @@
     border: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
   .mfb-run:hover {

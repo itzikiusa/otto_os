@@ -32,11 +32,35 @@
   import RefineTab from './RefineTab.svelte';
   import ChatTab from './ChatTab.svelte';
   import LearningsView from './LearningsView.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { ProductStory, TreeKind } from './types';
 
   let importOpen = $state(false);
   let draftCreating = $state(false);
+  /** A failed story-list load — shown inline with Retry, never as "No stories yet". */
+  let storiesError = $state<string | null>(null);
+  /** A failed open of the selected story — inline in the content pane with Retry. */
+  let detailError = $state<string | null>(null);
+
+  async function loadStories(): Promise<void> {
+    try {
+      await product.loadStories();
+      storiesError = null;
+    } catch (e) {
+      storiesError = loadErrorText(e);
+    }
+  }
+  /** Open a story; a failed detail load is shown inline (Retry), not swallowed. */
+  async function openStory(id: string): Promise<void> {
+    detailError = null;
+    try {
+      await product.select(id);
+    } catch (e) {
+      if (product.selectedId === id) detailError = loadErrorText(e);
+    }
+  }
 
   // ── Epic tree state (design §3.2) ─────────────────────────────────────────
   // Collapsed epics / folders (keys: epic id, `${epicId}/${folder}`). The tree
@@ -205,7 +229,7 @@
       // On mobile, reveal the new draft's content panel right away.
       mobileSection = 'content';
     } catch (e) {
-      console.error('createDraft failed', e);
+      toasts.error("Couldn't create the draft", product.errMsg(e));
     } finally {
       draftCreating = false;
     }
@@ -241,7 +265,7 @@
 
   /** Stories view with nothing at all to list: the empty list pane is hidden
    *  (≥641px) and the page EmptyState owns the ONE import CTA. */
-  const noStories = $derived(product.view === 'stories' && !product.loadingStories && product.stories.length === 0);
+  const noStories = $derived(product.view === 'stories' && !product.loadingStories && !storiesError && product.stories.length === 0);
 
   // List/detail never opens onto an empty "pick one" pane: once a workspace's
   // stories are in, restore the last story opened here (or the first in the
@@ -257,7 +281,7 @@
       if (product.selectedId || viewport.isPhone) return;
       const last = recallSelection('product');
       const pick = product.stories.find((x) => x.id === last) ?? tree[0]?.story ?? product.stories[0];
-      if (pick) void product.select(pick.id);
+      if (pick) void openStory(pick.id);
     });
   });
   /** The selected story's parent epic (breadcrumb) and epic-ness (Add child ▾). */
@@ -273,7 +297,7 @@
       // A workspace switch leaves no artifact open: release the arena's cached
       // blob URLs / editor bases before the new list loads.
       product.teardown();
-      void product.loadStories();
+      void loadStories();
     }
   });
 
@@ -318,7 +342,7 @@
       icon: 'send',
       subs: [
         { id: 'plan', label: 'Plan' },
-        { id: 'testcases', label: 'Test Cases' },
+        { id: 'testcases', label: 'Test cases' },
         { id: 'inject', label: 'Inject' },
       ],
     },
@@ -364,7 +388,7 @@
   }
 
   function selectStory(s: ProductStory): void {
-    void product.select(s.id);
+    void openStory(s.id);
     rememberSelection('product', s.id);
     // Reset to overview whenever a new story is selected.
     product.tab = 'overview';
@@ -413,7 +437,7 @@
     if (wasOpen && next && product.stories.some((x) => x.id === next.id)) {
       product.tab = 'overview';
       rememberSelection('product', next.id);
-      void product.select(next.id);
+      void openStory(next.id);
     }
   }
 
@@ -435,7 +459,7 @@
   );
   const headerCrumbs = $derived(
     product.view === 'stories' && selectedParent
-      ? [{ label: selectedParent.title, onclick: () => void product.select(selectedParent.id) }]
+      ? [{ label: selectedParent.title, onclick: () => void openStory(selectedParent.id) }]
       : [],
   );
 
@@ -511,7 +535,7 @@
             <StatusBadge status={storyStage(s.stage)} variant="text" />
           {/if}
           {#if s.tree_kind === 'doc'}
-            <span class="draft-badge doc">DOC</span>
+            <span class="draft-badge doc">Doc</span>
           {:else if s.source_kind === 'draft'}
             <!-- A draft story's stage badge already says "draft". -->
             {#if s.stage !== 'draft'}<span class="draft-badge">Draft</span>{/if}
@@ -638,12 +662,14 @@
           <button
             class="tag-filter-btn"
             class:active={activeTagFilter === null}
+            aria-pressed={activeTagFilter === null}
             onclick={() => (activeTagFilter = null)}
           >All</button>
           {#each allTags as tag (tag)}
             <button
               class="tag-filter-btn"
               class:active={activeTagFilter === tag}
+              aria-pressed={activeTagFilter === tag}
               onclick={() => (activeTagFilter = activeTagFilter === tag ? null : tag)}
             >{tag}</button>
           {/each}
@@ -651,12 +677,15 @@
       {/if}
 
       <div class="story-list">
-        {#if product.loadingStories}
-          <div class="list-empty">Loading…</div>
+        {#if (product.loadingStories || storiesError) && product.stories.length === 0}
+          <LoadState what="stories" variant="compact" loading={product.loadingStories} error={storiesError} empty onretry={() => void loadStories()} />
         {:else if product.stories.length === 0}
           <div class="list-empty">No stories yet.</div>
         {:else if filteredStories.length === 0}
-          <div class="list-empty">No stories match the selected tag.</div>
+          <div class="list-empty">
+            No stories tagged “{activeTagFilter}”.
+            <button class="btn small ghost" onclick={() => (activeTagFilter = null)}>Clear filter</button>
+          </div>
         {:else}
           {#each tree as node (node.story.id)}
             {@render storyRow(node.story, node)}
@@ -696,6 +725,7 @@
           <button
             class="learn-filter-btn"
             class:active={learningsFilter === opt.value}
+            aria-pressed={learningsFilter === opt.value}
             onclick={() => (learningsFilter = opt.value)}
           >{opt.label}</button>
         {/each}
@@ -780,16 +810,20 @@
     <div class="product-body">
       {#if product.view === 'learnings'}
         <LearningsView filter={learningsFilter} />
+      {:else if storiesError && product.stories.length === 0}
+        <LoadState what="stories" variant="page" loading={product.loadingStories} error={storiesError} empty onretry={() => void loadStories()} />
       {:else if noStories}
         <EmptyState
           variant="page"
           icon="file"
-          title="Analyse a story"
+          title="No stories yet"
           body="Import a Jira / Confluence issue, then ask questions, draft a plan and test cases, and publish back. Or start a blank draft from New."
           actionLabel="Import story"
           actionIcon="plus"
           onaction={() => (importOpen = true)}
         />
+      {:else if product.selectedId && detailError && product.detail?.story.id !== product.selectedId}
+        <LoadState what="this story" variant="page" loading={product.loadingDetail} error={detailError} empty onretry={() => void openStory(product.selectedId!)} />
       {:else if !product.selectedId}
         <!-- No story open (a phone, or the list is still loading): a summary
              of the collection with every recent story one click away. -->
@@ -921,7 +955,7 @@
     min-height: 0;
   }
   .list-empty {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     padding: 8px 4px;
     line-height: 1.5;
@@ -1031,7 +1065,7 @@
     padding-block: 5px;
   }
   .story-row-wrap.child .story-title {
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .folder-head {
     display: flex;
@@ -1044,7 +1078,7 @@
     background: transparent;
     color: var(--text-dim);
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0.03em;
     cursor: pointer;
     text-align: start;
@@ -1065,7 +1099,7 @@
   }
   .epic-badge {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     padding: 1px 6px;
@@ -1201,7 +1235,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 500;
     cursor: pointer;
     white-space: nowrap;
@@ -1282,7 +1316,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 500;
     cursor: pointer;
     text-align: start;
@@ -1395,7 +1429,7 @@
       border-bottom: 1px solid var(--border);
       background: var(--bg-sidebar, var(--surface));
       color: var(--text);
-      font-size: 15px;
+      font-size: var(--fs-l);
       font-weight: 600;
       cursor: pointer;
       text-align: start;
@@ -1413,7 +1447,7 @@
     }
     .m-acc-count {
       flex-shrink: 0;
-      font-size: 12px;
+      font-size: var(--fs-s);
       font-weight: 600;
       color: var(--text-dim);
       background: color-mix(in srgb, var(--text-dim) 14%, transparent);
@@ -1461,32 +1495,32 @@
 
     /* ── Bigger, more legible text on phones ───────────────────────────── */
     .list-empty {
-      font-size: 14px;
+      font-size: var(--fs-m);
     }
     .story-title {
-      font-size: 15px;
+      font-size: var(--fs-l);
     }
     .story-key,
     .story-meta {
-      font-size: 12.5px;
+      font-size: var(--fs-s);
     }
     .tag-filter-btn,
     .story-tag-chip {
-      font-size: 12px;
+      font-size: var(--fs-s);
     }
     .st {
       height: 38px;
-      font-size: 14px;
+      font-size: var(--fs-m);
       padding: 0 13px;
     }
     /* Keep the sub-nav touch-friendly but still a notch smaller than the groups. */
     .sub-tab-strip .st {
       height: 34px;
-      font-size: 13px;
+      font-size: var(--fs-m);
       padding: 0 11px;
     }
     .learn-filter-btn {
-      font-size: 14.5px;
+      font-size: var(--fs-l);
       padding: 10px 12px;
     }
     .product-body {

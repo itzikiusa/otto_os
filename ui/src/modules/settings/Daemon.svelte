@@ -10,6 +10,9 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import SettingToggle from './SettingToggle.svelte';
 
   interface NetworkListener {
     enabled: boolean;
@@ -81,6 +84,18 @@
 
   async function save(): Promise<void> {
     if (!dirty || portError) return;
+    // Exposing the daemon beyond this Mac is outward-facing: say where it
+    // goes and who can reach it before writing it.
+    if (
+      listenerDirty &&
+      enabled &&
+      !savedListener.enabled &&
+      !(await confirmer.ask(
+        `After the daemon restarts, Otto's login page is served on https://0.0.0.0:${port} — anyone on your network can reach it. Only do this on a trusted network.`,
+        { title: 'Expose Otto on your network?', confirmLabel: 'Enable listener', danger: false },
+      ))
+    )
+      return;
     // Only the changed groups: an unchanged network_listener in the body would
     // still write a network-listener audit entry.
     const body: Record<string, unknown> = {};
@@ -142,20 +157,17 @@
   {:else if loadError}
     <LoadState what="daemon settings" error={loadError} empty onretry={() => void load()} />
   {:else}
-    <div class="section-title">Network</div>
-    <div class="card pad">
-      <label class="checkbox-row">
-        <input type="checkbox" bind:checked={enabled} />
-        Enable network listener (binds <span class="mono">0.0.0.0</span>)
-      </label>
-      <p class="warn-note" class:visible={enabled}>
-        Anyone on your network can reach the login page. Only enable on trusted networks.
-      </p>
-      <p class="hint-line">
+    {#if dirty}<p class="unsaved" role="status">Unsaved changes — Save to apply them.</p>{/if}
+    <h2 class="section-title first">Network</h2>
+    <div class="card pad dm-card">
+      <SettingToggle label="Enable network listener (binds 0.0.0.0)" checked={enabled} onchange={(v) => { enabled = v; }}>
         Served over HTTPS with a self-signed certificate. Takes effect the next time the daemon
         starts (quit and reopen Otto).
-      </p>
-      <div class="field" style="max-width: 160px">
+      </SettingToggle>
+      {#if enabled}
+        <p class="warn-note indent"><Icon name="warning" size={12} /> Anyone on your network can reach the login page. Only enable on trusted networks.</p>
+      {/if}
+      <div class="field port indent">
         <label for="dm-port">Port</label>
         <input
           id="dm-port"
@@ -165,33 +177,31 @@
           max="65535"
           bind:value={port}
           disabled={!enabled}
+          title={enabled ? undefined : 'Enable the network listener to change its port'}
           aria-invalid={!!portError}
+          aria-describedby={portError ? 'dm-port-err' : undefined}
         />
-        {#if portError}<span class="hint port-error">{portError}</span>{/if}
+        {#if portError}<span class="hint port-error" id="dm-port-err" role="alert">{portError}</span>{/if}
       </div>
     </div>
 
-    <div class="section-title">Process sandbox</div>
-    <div class="card pad">
-      <label class="checkbox-row">
-        <input type="checkbox" bind:checked={sandboxEnabled} data-testid="sandbox-enabled" />
-        Confine agent sessions with the OS sandbox (macOS Seatbelt)
-      </label>
-      <p class="hint-line">
+    <h2 class="section-title">Process sandbox</h2>
+    <div class="card pad dm-card">
+      <SettingToggle label="Confine agent sessions with the OS sandbox (macOS Seatbelt)" checked={sandboxEnabled} testid="sandbox-enabled" onchange={(v) => { sandboxEnabled = v; }}>
         When on, spawned agent CLIs (claude / codex / agy / shell) can only write to
         the workspace, its git dir, the CLIs' own caches and temp — never the rest of
-        your disk. Reads are unaffected. macOS only; ignored on other systems. Applies to
-        sessions started from now on — running ones keep the confinement they started with.
-        Not yet confined: custom providers, connection terminals, and background agent runs
-        (workflow steps, scheduled tasks, swarms).
-      </p>
-      <div class="field" style="max-width: 320px">
+        your disk. Reads are unaffected. macOS only. Applies to sessions started from now on;
+        running ones keep the confinement they started with. Not yet confined: custom providers,
+        connection terminals, and background agent runs (workflow steps, scheduled tasks, swarms).
+      </SettingToggle>
+      <div class="field net indent">
         <label for="dm-sandbox-net">Network</label>
         <select
           id="dm-sandbox-net"
           class="input"
           bind:value={sandboxNetwork}
           disabled={!sandboxEnabled}
+          title={sandboxEnabled ? undefined : 'Turn on the sandbox to choose its network access'}
           data-testid="sandbox-network"
         >
           <option value="full">Full (agents reach their model API)</option>
@@ -199,20 +209,19 @@
           <option value="none">No network</option>
         </select>
       </div>
-      <p class="warn-note" class:visible={sandboxEnabled && sandboxNetwork !== 'full'}>
-        Non-`full` network blocks agent CLIs from reaching their model API — use only
-        for offline shells.
-      </p>
+      {#if sandboxEnabled && sandboxNetwork !== 'full'}
+        <p class="warn-note indent"><Icon name="warning" size={12} /> Without full network access, agent CLIs can't reach their model API — use this only for offline shells.</p>
+      {/if}
     </div>
 
-    <div class="section-title">Logs</div>
-    <div class="card pad">
-      <div class="row">
+    <h2 class="section-title">Logs</h2>
+    <div class="card pad dm-card logs">
+      <div class="log-line">
         <span class="dim">Log file</span>
-        <span class="mono">~/Library/Logs/Otto/ottod.log.YYYY-MM-DD</span>
+        <span class="mono path" title="~/Library/Logs/Otto/ottod.log.YYYY-MM-DD">~/Library/Logs/Otto/ottod.log.YYYY-MM-DD</span>
       </div>
       <p class="hint-line">A new file each day; older files are kept.</p>
-      <button class="btn" onclick={() => router.go('settings/logs')}>Open log viewer</button>
+      <div><button class="btn small" onclick={() => router.go('settings/logs')}>Open log viewer</button></div>
     </div>
   {/if}
   </PageBody>
@@ -226,27 +235,64 @@
     height: 100%;
     min-height: 0;
   }
+  .section-title.first {
+    margin-top: 0;
+  }
+  .unsaved {
+    margin: 0 0 12px;
+    font-size: var(--fs-s);
+    color: var(--warning);
+  }
   .card.pad {
-    padding: 14px 16px;
-    max-width: 520px;
-    margin-bottom: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px 16px 14px;
+    max-width: 760px;
+  }
+  /* Sub-controls line up with the toggle's label text (15px box + 10px gap). */
+  .indent {
+    margin-inline-start: 25px;
+  }
+  .dm-card .field {
+    margin: 0;
+  }
+  .field.port {
+    max-width: 160px;
+  }
+  .field.net {
+    max-width: 320px;
   }
   .warn-note {
-    font-size: 11.5px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--fs-s);
     color: var(--warning);
-    margin: 6px 0 12px;
-    opacity: 0;
-    transition: opacity 150ms ease-out;
-  }
-  .warn-note.visible {
-    opacity: 1;
+    margin: 0;
   }
   .hint-line {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
+    line-height: 1.5;
     color: var(--text-dim);
-    margin: 8px 0 0;
+    margin: 0;
   }
   .port-error {
     color: var(--danger);
+  }
+  .log-line {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
+  }
+  .log-line .path {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dim {
+    color: var(--text-dim);
   }
 </style>

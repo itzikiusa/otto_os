@@ -500,7 +500,7 @@
     {#if tableLoading && !rows.length}
       <Skeleton rows={2} height={60} />
     {:else if tableError}
-      <EmptyState icon="helm" title="Couldn't load the fleet" body={tableError} actionLabel="Retry" onaction={refresh} />
+      <EmptyState actionKind="secondary" actionIcon="refresh" icon="warning" title="Couldn't load the fleet" body={tableError} actionLabel="Retry" onaction={refresh} />
     {:else}
       <div class="kpis" data-testid="k8s-fleet-kpis">
         <div class="kpi"><span class="k">Unplanned restarts</span><span class="v mono" class:bad={kpi.restarts > 0}>{kpi.restarts}</span><span class="d">OOM {kpi.oom} · crash {kpi.crash}</span></div>
@@ -521,7 +521,7 @@
     {#if chartsLoading && !Object.keys(charts).length}
       <Skeleton rows={3} height={160} />
     {:else if chartsError}
-      <EmptyState icon="helm" title="Couldn't load the charts" body={chartsError} actionLabel="Retry" onaction={() => void loadSeries()} />
+      <EmptyState actionKind="secondary" icon="warning" title="Couldn't load the charts" body={chartsError} actionLabel="Retry" onaction={() => void loadSeries()} />
     {:else}
       <div class="charts" data-testid="k8s-fleet-charts">
         {#each METRICS as m (m.id)}
@@ -545,7 +545,7 @@
     {#if tableLoading && !rows.length}
       <Skeleton rows={8} height={30} />
     {:else if tableError}
-      <EmptyState icon="helm" title="Couldn't load the table" body={tableError} actionLabel="Retry" onaction={() => void loadTable()} />
+      <EmptyState actionKind="secondary" icon="warning" title="Couldn't load the table" body={tableError} actionLabel="Retry" onaction={() => void loadTable()} />
     {:else if !rows.length}
       <EmptyState icon="clock" title="No data in this window" body="Nothing was collected for this selection. Widen the window, clear a filter, or enable monitoring on a cluster." />
     {:else}
@@ -611,7 +611,7 @@
     {#if evLoading && !events.length}
       <Skeleton rows={8} height={28} />
     {:else if evError}
-      <EmptyState icon="helm" title="Couldn't load events" body={evError} actionLabel="Retry" onaction={() => void loadEvents()} />
+      <EmptyState actionKind="secondary" icon="warning" title="Couldn't load events" body={evError} actionLabel="Retry" onaction={() => void loadEvents()} />
     {:else if !events.length}
       <EmptyState icon="check" title="Nothing in this window" body="No restarts or pod replacements were recorded for this selection." />
     {:else}
@@ -651,7 +651,7 @@
     {#if reqLoading && !reqs}
       <Skeleton rows={6} height={28} />
     {:else if reqError}
-      <EmptyState icon="helm" title="Couldn't load requests" body={reqError} actionLabel="Retry" onaction={() => void loadRequests()} />
+      <EmptyState actionKind="secondary" icon="warning" title="Couldn't load requests" body={reqError} actionLabel="Retry" onaction={() => void loadRequests()} />
     {:else if reqs}
       {#if reqs.enabled_on.length === 0}
         <div class="note card" data-testid="k8s-fleet-requests-off">
@@ -724,7 +724,7 @@
     background: none;
     border: none;
     padding: 3px 10px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
   }
@@ -760,7 +760,7 @@
     background: transparent;
     color: var(--text);
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
   .pill:hover {
@@ -799,7 +799,7 @@
     border: none;
     border-bottom: 2px solid transparent;
     padding: 6px 12px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     cursor: pointer;
   }
@@ -846,7 +846,7 @@
     line-height: 1.1;
   }
   .kpi .d {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .charts {
@@ -862,7 +862,7 @@
     display: flex;
     justify-content: space-between;
     align-items: baseline;
-    font-size: 12px;
+    font-size: var(--fs-s);
     margin-bottom: 4px;
   }
   .tablewrap {
@@ -871,7 +871,7 @@
   .wl {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .wl th {
     text-align: left;
@@ -920,7 +920,7 @@
     font-variant-numeric: tabular-nums;
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .dim {
     color: var(--text-dim);
@@ -944,7 +944,7 @@
     flex-direction: column;
     gap: 6px;
     padding: 12px 14px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .note .links {
     display: flex;

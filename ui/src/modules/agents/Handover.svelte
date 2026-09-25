@@ -4,6 +4,7 @@
   // the source agent's recent work (+ git state), summarizes it, and types a
   // handover brief into the target. Optionally review/edit the brief first.
   import Modal from '../../lib/components/Modal.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import { events } from '../../lib/events.svelte';
   import { sessionState } from '../../lib/status';
@@ -290,7 +291,7 @@
 
   {#snippet footer()}
     {#if phase === 'review'}
-      <button class="btn" onclick={() => (phase = 'compose')} disabled={busy}>← Back</button>
+      <button class="btn" onclick={() => (phase = 'compose')} disabled={busy}><Icon name="chevronLeft" size={12} /> Back</button>
       <button class="btn primary" disabled={busy || !canSubmit} onclick={primary}>
         {busy ? 'Sending…' : 'Send handover'}
       </button>
@@ -314,7 +315,7 @@
 <style>
   .lead {
     margin: 0 0 14px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text-dim);
   }
@@ -324,7 +325,7 @@
   }
   .note {
     margin: -6px 0 12px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.45;
     color: var(--status-idle, var(--text-dim));
     background: color-mix(in srgb, var(--accent) 8%, transparent);
@@ -360,7 +361,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     cursor: pointer;
   }
@@ -406,14 +407,14 @@
     cursor: not-allowed;
   }
   .provider-name {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     display: flex;
     align-items: center;
     gap: 6px;
   }
   .provider-desc {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .badge {
@@ -462,7 +463,7 @@
   .agent-title {
     flex: 1;
     min-width: 0;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -501,7 +502,7 @@
     gap: 1px;
   }
   .toggle-title {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
   }
 </style>

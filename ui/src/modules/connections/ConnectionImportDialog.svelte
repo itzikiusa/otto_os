@@ -396,7 +396,7 @@
   }
   .imp-hint {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.5;
   }
@@ -404,13 +404,13 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--danger);
     line-height: 1.5;
   }
   .imp-empty {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     font-style: italic;
     line-height: 1.5;
@@ -463,11 +463,11 @@
     flex: 1;
   }
   .tool-name {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .tool-sub {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .tool-sub.found {
@@ -486,7 +486,7 @@
     padding: 8px 0;
   }
   .imp-loading-text {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .imp-bar {
@@ -519,11 +519,11 @@
     min-width: 0;
   }
   .prev-title {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .prev-path {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     min-width: 0;
     flex: 0 1 auto;
@@ -540,7 +540,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--warning);
     line-height: 1.4;
   }
@@ -550,18 +550,18 @@
     gap: 6px;
   }
   .prev-count {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .dot-sep {
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .link-btn {
     border: none;
     background: transparent;
     color: var(--accent-text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
     padding: 2px 4px;
     border-radius: 3px;
@@ -625,11 +625,11 @@
     min-width: 0;
   }
   .row-name {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .row-desc {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .ellipsis {
@@ -668,7 +668,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .grow {

@@ -247,5 +247,5 @@ test('MCP Control Plane page renders and lists the seeded server', async ({ page
   // The bare module route lands on Otto's built-in server.
   await page.goto('/#/mcp');
   await expect(page.locator('.otto')).toBeVisible({ timeout: 20_000 });
-  await expect(page.locator('nav.tabs button[data-testid="mcp-nav-otto"]')).toHaveClass(/\bon\b/);
+  await expect(page.locator('.tabs button[data-testid="mcp-nav-otto"]')).toHaveAttribute('aria-selected', 'true');
 });

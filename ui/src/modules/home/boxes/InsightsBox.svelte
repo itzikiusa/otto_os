@@ -4,6 +4,7 @@
   // (or on demand from the Insights page), so a 5-minute cadence is plenty.
   import { untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import { loadErrorText } from '../../../lib/loadError';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
   import { insightsApi } from '../../../lib/api/insights';
@@ -29,7 +30,7 @@
       error = '';
       return true;
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = loadErrorText(e);
       return false;
     } finally {
       loading = false;
@@ -73,9 +74,13 @@
   {#if loading && reports.length === 0}
     <Skeleton rows={3} />
   {:else if error && reports.length === 0}
-    <EmptyState icon="gauge" title="Insights unavailable" body={error} actionLabel="Retry" actionIcon="refresh" onaction={() => poller?.now()} />
+    <EmptyState icon="warning" title="Couldn't load Insights" body={error}>
+      <button class="btn small" onclick={() => poller?.now()}><Icon name="refresh" size={12} />Retry</button>
+    </EmptyState>
   {:else if reports.length === 0}
-    <EmptyState icon="gauge" title="No reports yet" body="Turn on daily / weekly reports or run one now." actionLabel="Open Insights" onaction={() => router.go('insights')} />
+    <EmptyState icon="gauge" title="No reports yet" body="Turn on daily or weekly reports, or run one now.">
+      <button class="btn small" onclick={() => router.go('insights')}>Open Insights</button>
+    </EmptyState>
   {:else}
     <ul class="rows">
       {#each shown as r (r.html_path)}
@@ -86,7 +91,7 @@
             <div class="head">
               <span class="kind">{KIND_LABEL[r.kind] ?? r.kind}</span>
               <span class="per">{period(r)}</span>
-              <Icon name="external" size={11} />
+              <Icon name="external" size={12} />
             </div>
             <p class="sum" class:clamp={!zoomed}>{r.summary || 'No summary.'}</p>
           </button>
@@ -133,14 +138,16 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
+  /* The one uppercase micro-label form (.section-title): dim, 600, .06em —
+     accent is for selection and the primary, not a category. */
   .kind {
-    font-weight: 700;
-    color: var(--accent-text);
+    font-weight: 600;
+    color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.06em;
     font-size: var(--fs-xs);
   }
   .per {
@@ -148,7 +155,7 @@
   }
   .sum {
     margin: 4px 0 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.4;
     white-space: pre-line;
   }

@@ -638,6 +638,7 @@
     if (ws.currentId) {
       void (async () => {
         await database.loadConnections();
+        connsSettled = true;
         await database.restoreWorkbench();
         // `#/database/<connId>` (a pop-out window, a link) opens that tab.
         const deep = router.module === 'database' ? router.parts[1] : undefined;
@@ -649,6 +650,21 @@
       void database.loadDashboards();
     }
   });
+
+  /** The first connection load has finished (so "nothing listed" is real, not
+   *  "not fetched yet") — gates the empty-hub layout below. */
+  let connsSettled = $state(false);
+  /** Nothing to list at all: the list pane is hidden and one page-level
+   *  EmptyState owns the "New connection" CTA (no duplicate link in the list). */
+  const hubEmpty = $derived(
+    connsSettled &&
+      !database.connectionsLoading &&
+      !database.connectionsError &&
+      database.connections.length === 0 &&
+      database.otherConnections.length === 0 &&
+      brokers.clusters.length === 0 &&
+      sections.length === 0,
+  );
 
   /** Tooltip for the connection health chip: "Connected · <version> · <ms> ms". */
   function healthTitle(st: { serverVersion?: string; latencyMs?: number }): string {
@@ -853,10 +869,12 @@
 <PageHeader title="Connections">
   {#snippet actions()}
     {#if !viewport.isPhone}
+      {#if !hubEmpty}
       <button class="btn ghost" disabled={!auth.isRoot} onclick={() => (connImportOpen = true)} title={auth.isRoot ? 'Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster' : 'Only the owner can import connections'}>
         <Icon name="arrowDown" size={12} /> Import
       </button>
-      {#if database.connections.length > 0 || brokers.clusters.length > 0}
+      {/if}
+      {#if database.connections.length > 0 || database.otherConnections.length > 0 || brokers.clusters.length > 0}
         <button class="btn primary" disabled={!auth.isRoot} onclick={newConnectionFromStrip} title={auth.isRoot ? 'New connection (SSH, database or custom CLI)' : 'Only the owner can create connections'}>
           <Icon name="plus" size={12} /> New connection
         </button>
@@ -865,7 +883,7 @@
   {/snippet}
 </PageHeader>
 <div class="db-page">
-  {#if !viewport.isPhone && database.sidebarCollapsed}
+  {#if !viewport.isPhone && database.sidebarCollapsed && !hubEmpty}
     <!-- Collapsed rail: never zero-width — an invisible sidebar is unrecoverable. -->
     <div class="side-rail">
       <button
@@ -881,7 +899,7 @@
   {/if}
   <aside
     class="db-side"
-    class:collapsed={!viewport.isPhone && database.sidebarCollapsed}
+    class:collapsed={!viewport.isPhone && (database.sidebarCollapsed || hubEmpty)}
     style={viewport.isPhone || database.sidebarCollapsed ? '' : `width:${sideW}px`}
   >
     {#if viewport.isPhone}
@@ -969,7 +987,7 @@
     {/if}
   </aside>
 
-  {#if !viewport.isPhone && !database.sidebarCollapsed}
+  {#if !viewport.isPhone && !database.sidebarCollapsed && !hubEmpty}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
       class="side-resizer"
@@ -990,19 +1008,38 @@
            connection, or reveal a picker that is hidden (collapsed rail /
            another side tab). With the list already on screen there is no
            button — "Show connections" next to the visible list was noise. -->
-      <EmptyState
-        variant={viewport.isPhone ? 'panel' : 'page'}
-        icon="db"
-        title="Open a connection"
-        body={database.connections.length === 0 && brokers.clusters.length === 0
-          ? 'No database, Kafka, SSH or custom connections in this workspace yet.'
-          : `Choose a connection, Kafka cluster or SSH host ${viewport.isPhone ? 'above' : 'on the left'} to open it here.`}
-        actionLabel={database.connections.length === 0 && brokers.clusters.length === 0
-          ? auth.isRoot ? 'New connection' : undefined
-          : database.sidebarCollapsed || database.sideTab !== 'connections' ? 'Show connections' : undefined}
-        actionIcon={database.connections.length === 0 && brokers.clusters.length === 0 ? 'plus' : undefined}
-        onaction={database.connections.length === 0 && brokers.clusters.length === 0 ? newConnection : showConnections}
-      />
+      {#if database.connections.length === 0 && database.otherConnections.length === 0 && brokers.clusters.length === 0}
+        <EmptyState
+          variant={viewport.isPhone ? 'panel' : 'page'}
+          icon="plug"
+          title="No connections yet"
+          body="Add a database (MySQL, PostgreSQL, Redis, MongoDB, ClickHouse), an SSH host or a custom CLI, then open it here to query, browse its schema or get a terminal."
+          actionLabel={auth.isRoot ? 'New connection' : undefined}
+          actionIcon="plus"
+          onaction={auth.isRoot ? newConnection : undefined}
+        >
+          {#if auth.isRoot}
+            <div class="empty-alt">
+              <button class="btn ghost small" onclick={newCluster}><Icon name={engineGlyph('kafka')} size={12} /> Add a Kafka cluster</button>
+              <button class="btn ghost small" onclick={() => (connImportOpen = true)}><Icon name="arrowDown" size={12} /> Import from another tool…</button>
+            </div>
+          {:else}
+            <p class="empty-note">Only the owner can add connections.</p>
+          {/if}
+        </EmptyState>
+      {:else}
+        <!-- One CTA, and only when it does something: reveal a picker that is
+             hidden (collapsed rail / another side tab). With the list already
+             on screen there is no button. -->
+        <EmptyState
+          variant={viewport.isPhone ? 'panel' : 'page'}
+          icon="db"
+          title="Open a connection"
+          body={`Choose a connection, Kafka cluster or SSH host ${viewport.isPhone ? 'above' : 'on the left'} to open it here.`}
+          actionLabel={database.sidebarCollapsed || database.sideTab !== 'connections' ? 'Show connections' : undefined}
+          onaction={showConnections}
+        />
+      {/if}
     {:else}
       <!-- Unified tab strip: DB connections, Kafka clusters, and SSH/custom terminals -->
       <div class="conn-tabs" role="tablist" aria-label="Open connections" bind:this={connTabsEl}>
@@ -1093,7 +1130,7 @@
         </div>
       {/if}
 
-      <div class="main-tabs">
+      <div class="main-tabs" class:many={visibleTabs.length > 3}>
         <!-- The workbench views: a segmented control (selection = surface
              lift), ←/→ move between them like any tablist. -->
         <div class="segmented view-switch" role="tablist" aria-label="Workbench view" tabindex="-1" onkeydown={onViewKey}>
@@ -1104,6 +1141,7 @@
               role="tab"
               aria-selected={database.mainTab === t.id}
               tabindex={database.mainTab === t.id ? 0 : -1}
+              title={t.label}
               onclick={() => database.setMainTab(t.id)}
             >
               <Icon name={t.icon} size={12} />{t.label}
@@ -1116,7 +1154,7 @@
             <span class="cap-chip mono" title="Engine">{database.capabilities.engine}</span>
           {/if}
           {#if database.activeConnStatus?.phase === 'connecting'}
-            <span class="conn-state"><span class="conn-tab-spin spin"><Icon name="refresh" size={11} /></span>Connecting…</span>
+            <span class="conn-state" title="Connecting…"><span class="conn-tab-spin spin"><Icon name="refresh" size={11} /></span><span class="lbl">Connecting…</span></span>
           {:else if database.activeConnStatus?.phase === 'error'}
             <span class="conn-state err" title={database.activeConnStatus.error}>Disconnected</span>
           {:else if database.activeConnStatus?.phase === 'ready'}
@@ -1131,12 +1169,12 @@
             </span>
           {/if}
           {#if ['mysql','postgres'].includes(database.connections.find(c=>c.id===database.selectedConnId)?.kind ?? '')}
-            <button class="btn small ghost" onclick={()=>changesOpen=true} title="Reviewed schema changes for this connection">
-              <Icon name="branch" size={11} />Changes
+            <button class="btn small ghost" onclick={()=>changesOpen=true} title="Reviewed schema changes for this connection" aria-label="Schema changes">
+              <Icon name="branch" size={11} /><span class="lbl">Changes</span>
             </button>
           {/if}
-          <button class="btn small ghost" onclick={() => database.testConnection()} disabled={database.testing}>
-            <Icon name="plug" size={11} />{database.testing ? 'Testing…' : 'Test'}
+          <button class="btn small ghost" onclick={() => database.testConnection()} disabled={database.testing} title="Test this connection" aria-label={database.testing ? 'Testing connection' : 'Test connection'}>
+            <Icon name="plug" size={11} /><span class="lbl">{database.testing ? 'Testing…' : 'Test'}</span>
           </button>
           {#if database.testResult}
             <span class="test-dot" class:ok={database.testResult.ok} title={database.testResult.message}></span>
@@ -1653,7 +1691,7 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     outline: none;
     min-width: 0;
   }
@@ -1675,7 +1713,7 @@
   }
   .conn-empty,
   .list-empty {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     padding: 8px 6px;
     line-height: 1.5;
@@ -1708,7 +1746,7 @@
     color: var(--text);
     border-radius: var(--radius-s);
     padding: 4px 7px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .list-search-input:focus {
     outline: none;
@@ -1723,7 +1761,7 @@
     border-radius: var(--radius-s);
     padding: 4px 7px;
     margin: 0 2px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .rename-input:focus {
     outline: none;
@@ -1734,7 +1772,7 @@
     background: transparent;
     color: var(--accent-text);
     cursor: pointer;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     padding: 8px 6px;
     text-align: center;
   }
@@ -1750,7 +1788,7 @@
     background: none;
     color: var(--accent-text);
     cursor: pointer;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     padding: 0;
   }
   .conn-item {
@@ -1771,10 +1809,10 @@
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
   }
   .conn-row.open:not(.active) .conn-item {
-    background: color-mix(in srgb, var(--text-dim) 7%, transparent);
+    background: var(--hover);
   }
   .conn-row.active .conn-item {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
   }
   .conn-head {
     display: flex;
@@ -1913,26 +1951,14 @@
     flex-shrink: 0;
     color: var(--text-dim);
   }
-  .conn-glyph.mysql,
-  .conn-glyph.clickhouse {
-    color: var(--accent-text);
-  }
-  .conn-glyph.postgres {
-    color: #336791;
-  }
-  .conn-glyph.redis {
-    color: #d2691e;
-  }
-  .conn-glyph.mongodb {
-    color: var(--status-working);
-  }
+  /* Engine glyphs stay neutral (no per-source hues); the kind tag names it. */
   .conn-row.active .conn-item .conn-glyph {
     color: var(--accent-text);
   }
   .conn-name {
     flex: 1;
     min-width: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 500;
     line-height: 1.35;
     /* Show the FULL connection name instead of clipping it: wrap onto extra lines
@@ -1968,7 +1994,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     font-weight: 500;
     cursor: pointer;
   }
@@ -2016,7 +2042,7 @@
     height: 28px;
     padding: 0 6px;
     border-radius: var(--radius-s);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .saved-row:hover,
   .hist-row:hover {
@@ -2044,7 +2070,7 @@
   .hist-stmt {
     flex: 1;
     min-width: 0;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .hist-meta {
     font-size: var(--fs-xs);
@@ -2074,7 +2100,7 @@
     align-items: center;
     gap: 8px;
     padding: 7px 14px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.4;
     color: var(--status-working);
     background: color-mix(in srgb, var(--status-working) 12%, transparent);
@@ -2165,7 +2191,7 @@
     display: none;
   }
   .conn-tab-path {
-    font-size: 9px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--accent-text);
@@ -2206,7 +2232,7 @@
     background: transparent;
     color: inherit;
     cursor: pointer;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 500;
     padding: 0;
     height: 100%;
@@ -2217,19 +2243,7 @@
     flex-shrink: 0;
     color: var(--text-dim);
   }
-  .conn-tab-glyph.mysql,
-  .conn-tab-glyph.clickhouse {
-    color: var(--accent-text);
-  }
-  .conn-tab-glyph.postgres {
-    color: #336791;
-  }
-  .conn-tab-glyph.redis {
-    color: #d2691e;
-  }
-  .conn-tab-glyph.mongodb {
-    color: var(--status-working);
-  }
+  /* Engine glyphs stay neutral (no per-source hues); the kind tag names it. */
   .conn-tab.active .conn-tab-glyph {
     color: var(--accent-text);
   }
@@ -2307,7 +2321,20 @@
       display: none;
     }
   }
-  @container dbmain (max-width: 600px) {
+  /* Five views (SQL engines) + status + Changes + Test don't fit a ~740px
+     workbench: the status/utility buttons go icon-only first (they carry a
+     title + aria-label), so nothing is ever clipped off the trailing edge. */
+  @container dbmain (max-width: 900px) {
+    .main-tabs.many .conn-status .lbl {
+      display: none;
+    }
+  }
+  @container dbmain (max-width: 700px) {
+    .conn-status .lbl {
+      display: none;
+    }
+  }
+  @container dbmain (max-width: 640px) {
     .view-switch .mt {
       font-size: 0;
       gap: 0;
@@ -2349,7 +2376,7 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .conn-state.err {
@@ -2461,13 +2488,24 @@
   }
   .rail-label {
     writing-mode: vertical-rl;
-    font-size: 9px;
+    font-size: var(--fs-xs);
     letter-spacing: 0.12em;
     color: var(--text-dim);
     user-select: none;
   }
   .db-side.collapsed {
     display: none;
+  }
+  .empty-alt {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 6px;
+  }
+  .empty-note {
+    margin: 0;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
   }
 
   .side-resizer {
@@ -2558,10 +2596,10 @@
       text-align: start;
     }
     .acc-toggle .conn-head-title {
-      font-size: 12.5px;
+      font-size: var(--fs-m);
     }
     .acc-count {
-      font-size: 11px;
+      font-size: var(--fs-xs);
       color: var(--text-dim);
       background: var(--surface-2);
       border-radius: 999px;
@@ -2574,24 +2612,24 @@
     }
     /* Larger, legible text for the connection rows + tiny meta on phones. */
     .conn-name {
-      font-size: 15px;
+      font-size: var(--fs-l);
     }
     .conn-item {
       min-height: 40px;
     }
     .conn-head-title {
-      font-size: 12px;
+      font-size: var(--fs-s);
     }
     .conn-empty,
     .list-empty {
-      font-size: 13.5px;
+      font-size: var(--fs-m);
     }
     .hist-stmt {
-      font-size: 13px;
+      font-size: var(--fs-m);
     }
     .hist-meta,
     .count {
-      font-size: 12px;
+      font-size: var(--fs-s);
     }
     .saved-open {
       font-size: 14px;
@@ -2658,7 +2696,7 @@
     }
     .ss {
       height: 30px;
-      font-size: 13px;
+      font-size: var(--fs-m);
     }
     /* The status row (engine chip + Test) can wrap rather than overflow. */
     .conn-status {

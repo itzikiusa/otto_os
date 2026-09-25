@@ -17,6 +17,7 @@
     SkillEval,
   } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -59,7 +60,6 @@
   let implDiffLoading = $state<Set<string>>(new Set());
   let retrying = $state<Set<string>>(new Set());
   let cancelling = $state(false);
-  let confirmingDelete = $state(false);
   let deleting = $state(false);
 
   // Promote modal.
@@ -104,7 +104,7 @@
       const msg = e instanceof Error ? e.message : String(e);
       // Keep a loaded report on screen and just toast; with nothing to show,
       // put the error (and Retry) in the pane itself.
-      if (run) toasts.error('Could not load evaluation', msg);
+      if (run) toasts.error("Couldn't refresh the evaluation", msg);
       else loadError = msg;
     } finally {
       loading = false;
@@ -188,14 +188,22 @@
   // --- header actions -------------------------------------------------------
   async function cancelRun(): Promise<void> {
     if (!run || cancelling) return;
+    // Stopping loses the in-flight iteration's work; say so first.
+    if (
+      !(await confirmer.ask(`Stop the evaluation of ${run.source_skill}? The iteration in progress is abandoned; finished iterations and their scores are kept.`, {
+        title: 'Stop evaluation',
+        confirmLabel: 'Stop run',
+      }))
+    )
+      return;
     cancelling = true;
     try {
       const r = await skillsEvalApi.cancel(run.id);
       run = r;
       onupdate?.(r);
-      toasts.info('Evaluation cancelled');
+      toasts.info('Evaluation stopped');
     } catch (e) {
-      toasts.error('Cancel failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't stop the evaluation", e instanceof Error ? e.message : String(e));
     } finally {
       cancelling = false;
     }
@@ -203,16 +211,21 @@
 
   async function deleteRun(): Promise<void> {
     if (!run || deleting) return;
+    if (
+      !(await confirmer.ask(`Delete the evaluation of ${run.source_skill}? Its report, scores and iteration worktrees are removed. Skills you promoted to the library are kept.`, {
+        title: 'Delete evaluation',
+      }))
+    )
+      return;
     deleting = true;
     try {
       await skillsEvalApi.remove(run.id);
       toasts.info('Evaluation deleted');
       ondeleted?.(run.id);
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't delete the evaluation", e instanceof Error ? e.message : String(e));
     } finally {
       deleting = false;
-      confirmingDelete = false;
     }
   }
 
@@ -229,7 +242,7 @@
       if (isActive(r)) schedulePoll();
       toasts.info('Re-running validation…');
     } catch (e) {
-      toasts.error('Retry failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't re-run the validation", e instanceof Error ? e.message : String(e));
     } finally {
       retrying = new Set([...retrying].filter((k) => k !== key));
     }
@@ -244,7 +257,7 @@
       try {
         implDiffs[it.id] = await skillsEvalApi.implDiff(run.id, it.id);
       } catch (e) {
-        toasts.error('Could not load diff', e instanceof Error ? e.message : String(e));
+        toasts.error("Couldn't load the code diff", e instanceof Error ? e.message : String(e));
         // Collapse again so the toggle doesn't read "Hide code diff" over nothing.
         openImplDiffs = toggle(openImplDiffs, it.id);
       } finally {
@@ -262,7 +275,7 @@
       await copyTextOrThrow(skillContent(it, source));
       toasts.success('Skill copied to clipboard');
     } catch {
-      toasts.error('Copy failed');
+      toasts.error("Couldn't copy the skill", 'The clipboard is unavailable. Use Download instead.');
     }
   }
   function downloadSkill(it: EvalIteration, source: 'tested' | 'improved'): void {
@@ -278,6 +291,11 @@
   let promoteForce = $state(false);
   let promoteGate = $state<PromoteGate | null>(null);
   let gateLoading = $state(false);
+  let gateError = $state(false);
+  // Inline name check (was a toast after clicking Promote).
+  const promoteNameError = $derived(
+    promoteName.trim() && !/^[A-Za-z0-9_-]+$/.test(promoteName.trim()) ? "Use letters, digits, '-' or '_' only." : '',
+  );
 
   async function openPromote(it: EvalIteration, source: 'tested' | 'improved'): Promise<void> {
     promoteIterId = it.id;
@@ -285,6 +303,7 @@
     promoteName = run?.source_skill ?? it.skill_name;
     promoteForce = false;
     promoteGate = null;
+    gateError = false;
     promoteOpen = true;
     if (!run) return;
     gateLoading = true;
@@ -292,6 +311,7 @@
       promoteGate = await skillsEvalApi.promoteGate(run.id, it.id);
     } catch {
       promoteGate = null;
+      gateError = true;
     } finally {
       gateLoading = false;
     }
@@ -304,10 +324,7 @@
   async function doPromote(): Promise<void> {
     if (!run || promoting) return;
     const name = promoteName.trim();
-    if (!/^[A-Za-z0-9_-]+$/.test(name)) {
-      toasts.error('Invalid name', "Use letters, digits, '-' or '_' only.");
-      return;
-    }
+    if (!name || promoteNameError) return;
     promoting = true;
     try {
       const body: PromoteSkillReq = {
@@ -322,7 +339,7 @@
       // Reflect promoted state.
       void load(run.id);
     } catch (e) {
-      toasts.error('Promote failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't promote the skill", e instanceof Error ? e.message : String(e));
     } finally {
       promoting = false;
     }
@@ -344,9 +361,8 @@
       const r = await skillsEvalApi.rate(run.id, it.id, { rating: n, note: '' });
       run = r;
       onupdate?.(r);
-      toasts.success('Rated', `${n}/5`);
     } catch (e) {
-      toasts.error('Rating failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't save your rating", e instanceof Error ? e.message : String(e));
     } finally {
       const next = new Set(rating);
       next.delete(it.id);
@@ -361,7 +377,7 @@
       const g = await skillsEvalApi.regression(run.id, it.id, {});
       toasts.success('Saved as regression case', g.name);
     } catch (e) {
-      toasts.error('Could not save regression', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't save the regression case", e instanceof Error ? e.message : String(e));
     } finally {
       const next = new Set(savingReg);
       next.delete(it.id);
@@ -371,11 +387,13 @@
 </script>
 
 {#if loading && !run}
-  <div class="rd-loading"><span class="spinner-xs"></span> Loading…</div>
+  <div class="rd-loading" role="status"><span class="spinner-xs"></span> Loading evaluation…</div>
 {:else if loadError && !run}
   <div class="rd-loading rd-load-err" role="alert">
-    <p>Couldn't load this evaluation: {loadError}</p>
-    <button class="btn small" onclick={() => load(evalId)}>Retry</button>
+    <Icon name="warning" size={22} />
+    <strong>Couldn't load this evaluation</strong>
+    <p class="rd-load-detail">{loadError}</p>
+    <button class="btn small" onclick={() => load(evalId)} disabled={loading}><Icon name="refresh" size={12} /> {loading ? 'Retrying…' : 'Retry'}</button>
   </div>
 {:else if run}
   <div class="rd">
@@ -395,7 +413,7 @@
       <div class="rd-actions">
         {#if isActive(run)}
           <button class="btn small" disabled={cancelling} onclick={cancelRun}>
-            {cancelling ? 'Cancelling…' : 'Cancel run'}
+            <Icon name="square" size={12} /> {cancelling ? 'Stopping…' : 'Stop run'}
           </button>
         {/if}
         {#if run.best_iteration != null}
@@ -404,17 +422,9 @@
           </button>
         {/if}
         <span class="grow"></span>
-        {#if confirmingDelete}
-          <span class="confirm-text">Delete this run?</span>
-          <button class="btn small ghost" onclick={() => (confirmingDelete = false)}>Keep</button>
-          <button class="btn small danger" disabled={deleting} onclick={deleteRun}>
-            {deleting ? 'Deleting…' : 'Delete'}
-          </button>
-        {:else}
-          <button class="btn small ghost danger" onclick={() => (confirmingDelete = true)} title="Delete run + worktrees">
-            <Icon name="trash" size={13} /> Delete
-          </button>
-        {/if}
+        <button class="btn small danger" disabled={deleting} onclick={deleteRun} title="Delete this run and its worktrees">
+          <Icon name="trash" size={12} /> {deleting ? 'Deleting…' : 'Delete…'}
+        </button>
       </div>
 
       <p class="rd-task">{run.task}</p>
@@ -426,7 +436,7 @@
         {/each}
       </div>
       {#if run.summary}<p class="rd-summary">{run.summary}</p>{/if}
-      {#if run.error}<p class="rd-error">⚠ {run.error}</p>{/if}
+      {#if run.error}<p class="rd-error" role="alert"><Icon name="warning" size={12} /> {run.error}</p>{/if}
     </header>
 
     {#each run.iterations as it, idx (it.id)}
@@ -494,28 +504,28 @@
                 <span class="val-name">{a.name}</span>
                 <span class="chip mono">{a.provider}{a.model ? ' · ' + a.model : ''}</span>
                 {#if a.status === 'done'}
-                  <span class="pf {a.passed ? 'pass' : 'fail'}">{a.passed ? 'passed' : 'failed'}</span>
+                  <span class="pf {a.passed ? 'pass' : 'fail'}">{a.passed ? 'Passed' : 'Failed'}</span>
                   <span class="score-badge sm {scoreClass(a.score)}">{a.score.toFixed(0)}</span>
                 {/if}
                 <span class="grow"></span>
                 {#if a.session_id}
-                  <button class="btn small ghost" onclick={() => (openTerminals = toggle(openTerminals, a.session_id ?? ''))}>
-                    {openTerminals.has(a.session_id ?? '') ? 'Hide' : 'Open'}
+                  <button class="btn small ghost" aria-expanded={openTerminals.has(a.session_id ?? '')} onclick={() => (openTerminals = toggle(openTerminals, a.session_id ?? ''))}>
+                    {openTerminals.has(a.session_id ?? '') ? 'Hide session' : 'Open session'}
                   </button>
                 {/if}
                 <button class="btn small ghost" disabled={retrying.has(rk)} onclick={() => retry(it, ai)} title="Re-run this validation">
                   {retrying.has(rk) ? 'Retrying…' : 'Retry'}
                 </button>
                 {#if a.findings.length > 0}
-                  <button class="btn small ghost" onclick={() => (openFindings = toggle(openFindings, key))}>
-                    {openFindings.has(key) ? 'Hide' : `${a.findings.length} issue${a.findings.length === 1 ? '' : 's'}`}
+                  <button class="btn small ghost" aria-expanded={openFindings.has(key)} onclick={() => (openFindings = toggle(openFindings, key))}>
+                    {openFindings.has(key) ? 'Hide issues' : `${a.findings.length} issue${a.findings.length === 1 ? '' : 's'}`}
                   </button>
                 {/if}
                 <StatusBadge status={evalStatus(a.status)} />
               </div>
               {#if a.note && a.status !== 'done'}<p class="val-note">{a.note}</p>{/if}
               {#if a.status === 'waiting'}
-                <p class="val-waiting">⚠ Looks blocked on input — <strong>Open</strong> the session to respond.</p>
+                <p class="val-waiting"><Icon name="warning" size={12} /> Looks blocked on input — <strong>Open session</strong> to respond.</p>
               {/if}
               {#if a.session_id && openTerminals.has(a.session_id)}
                 <div class="term">{#key a.session_id}<Terminal sessionId={a.session_id} preferDom />{/key}</div>
@@ -545,18 +555,22 @@
 
         <!-- Human rating + regression capture -->
         <div class="rate-row" data-testid="rate-row">
-          <span class="lbl">Your rating</span>
-          {#each [1, 2, 3, 4, 5] as n (n)}
-            <button
-              class="star"
-              class:on={(it.human_rating ?? 0) >= n}
-              disabled={rating.has(it.id)}
-              onclick={() => rate(it, n)}
-              title={`${n}/5`}
-              data-testid="rate-star"
-              aria-label={`Rate ${n} of 5`}
-            >★</button>
-          {/each}
+          <span class="lbl" id="rate-lbl-{it.id}">Your rating</span>
+          <span class="stars" role="group" aria-labelledby="rate-lbl-{it.id}">
+            {#each [1, 2, 3, 4, 5] as n (n)}
+              <button
+                class="star"
+                class:on={(it.human_rating ?? 0) >= n}
+                disabled={rating.has(it.id)}
+                onclick={() => rate(it, n)}
+                title={`Rate ${n} of 5`}
+                data-testid="rate-star"
+                aria-label={`Rate ${n} of 5`}
+                aria-pressed={(it.human_rating ?? 0) === n}
+              ><Icon name="star" size={14} /></button>
+            {/each}
+          </span>
+          {#if it.human_rating}<span class="rated dim">{it.human_rating}/5</span>{/if}
           <span class="grow"></span>
           <button
             class="btn small ghost"
@@ -617,7 +631,8 @@
         under the name below (overwrites an existing skill of that name).
       </p>
       <label class="field-label" for="promote-name">Library skill name</label>
-      <input id="promote-name" class="input" bind:value={promoteName} placeholder="my-skill" />
+      <input id="promote-name" class="input" bind:value={promoteName} placeholder="my-skill" aria-invalid={!!promoteNameError} aria-describedby="promote-name-err" />
+      {#if promoteNameError}<p class="field-err" id="promote-name-err">{promoteNameError}</p>{/if}
       {#if promoteIter?.skill_after}
         <div class="src-toggle">
           <label class="chip-toggle" class:on={promoteSource === 'tested'}>
@@ -634,14 +649,16 @@
       <!-- Promote gate: score + proof must pass, else show why. -->
       <div class="gate" data-testid="promote-gate">
         {#if gateLoading}
-          <p class="muted"><span class="spinner-xs"></span> Checking gate…</p>
+          <p class="muted"><span class="spinner-xs"></span> Checking the promote gate…</p>
+        {:else if gateError}
+          <p class="muted">Couldn't check the promote gate here — Otto checks it again when you promote.</p>
         {:else if promoteGate}
           {#if promoteGate.allowed}
             <p class="gate-ok" data-testid="gate-ok">
-              ✓ Gate passed — score {promoteGate.score.toFixed(0)} ≥ {promoteGate.threshold.toFixed(0)}, proof {promoteGate.proof_status || 'n/a'}.
+              <Icon name="check" size={12} /> Gate passed — score {promoteGate.score.toFixed(0)} ≥ {promoteGate.threshold.toFixed(0)}, proof {promoteGate.proof_status || 'n/a'}.
             </p>
           {:else}
-            <p class="gate-bad" data-testid="gate-blocked">⚠ Promote gate not met:</p>
+            <p class="gate-bad" data-testid="gate-blocked"><Icon name="warning" size={12} /> Promote gate not met:</p>
             <ul class="gate-reasons">
               {#each promoteGate.reasons as r, ri (ri)}<li>{r}</li>{/each}
             </ul>
@@ -657,7 +674,7 @@
       <button class="btn" onclick={() => (promoteOpen = false)}>Cancel</button>
       <button
         class="btn primary"
-        disabled={promoting || (promoteGate != null && !promoteGate.allowed && !promoteForce)}
+        disabled={promoting || !promoteName.trim() || !!promoteNameError || (promoteGate != null && !promoteGate.allowed && !promoteForce)}
         onclick={doPromote}
         data-testid="promote-confirm"
       >
@@ -685,17 +702,40 @@
   .rate-row .lbl {
     margin-inline-end: 6px;
   }
+  .stars {
+    display: inline-flex;
+    gap: 2px;
+  }
   .star {
+    display: inline-grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
     background: none;
     border: none;
+    border-radius: var(--radius-s);
     cursor: pointer;
-    font-size: 16px;
-    line-height: 1;
     color: var(--text-dim);
-    padding: 0 1px;
+    padding: 0;
+  }
+  .star:hover:not(:disabled) {
+    background: var(--hover);
   }
   .star.on {
     color: var(--warning);
+  }
+  .star.on :global(svg path) {
+    fill: currentColor;
+  }
+  .rated {
+    font-size: var(--fs-xs);
+    margin-inline-start: 4px;
+    font-variant-numeric: tabular-nums;
+  }
+  .field-err {
+    margin: 4px 0 0;
+    font-size: var(--fs-xs);
+    color: var(--danger);
   }
   .star:disabled {
     cursor: default;
@@ -707,33 +747,33 @@
   }
   .gate-ok {
     color: var(--success);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     margin: 0;
   }
   .gate-bad {
     color: var(--danger);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     margin: 0 0 4px;
     font-weight: 600;
   }
   .gate-reasons {
     margin: 0 0 8px;
     padding-inline-start: 18px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .force-row {
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .rd-loading,
   .muted {
     padding: 8px 0;
     color: var(--text-dim);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .rd-loading {
     padding: 30px;
@@ -751,16 +791,25 @@
   }
   .rd-title {
     margin: 0;
-    font-size: 15px;
+    font-size: var(--fs-l);
     min-width: 0;
     overflow-wrap: anywhere;
   }
   .rd-load-err {
-    color: var(--danger);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    color: var(--text);
     overflow-wrap: anywhere;
   }
-  .rd-load-err p {
-    margin: 0 0 10px;
+  .rd-load-err > :global(svg) {
+    color: var(--danger);
+  }
+  .rd-load-detail {
+    margin: 0 0 6px;
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
   }
   .rd-actions {
     display: flex;
@@ -768,13 +817,9 @@
     gap: 6px;
     flex-wrap: wrap;
   }
-  .confirm-text {
-    font-size: 11.5px;
-    color: var(--text-dim);
-  }
   .rd-task {
     margin: 0;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     line-height: 1.5;
   }
   .rd-meta {
@@ -785,13 +830,13 @@
   }
   .rd-summary {
     margin: 4px 0 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.5;
   }
   .rd-error {
     margin: 4px 0 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--danger);
   }
 
@@ -808,8 +853,8 @@
     flex-wrap: wrap;
   }
   .iter-num {
-    font-size: 13px;
-    font-weight: 700;
+    font-size: var(--fs-m);
+    font-weight: 600;
   }
   .reg {
     font-size: var(--fs-xs);
@@ -842,8 +887,8 @@
   }
   .lbl,
   .vals-head {
-    font-size: 11px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: var(--text-dim);
@@ -851,7 +896,7 @@
   .impl-summary,
   .improve-summary {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
   }
   .worktree {
@@ -880,17 +925,17 @@
     flex-wrap: wrap;
   }
   .val-name {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
   }
   .val-note {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .val-waiting {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--warning);
   }
 
@@ -915,17 +960,17 @@
   .issue,
   .fix {
     margin: 2px 0;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.45;
   }
   .tag {
     display: inline-block;
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0.05em;
     text-transform: uppercase;
     padding: 1px 5px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     margin-inline-end: 5px;
     background: var(--danger-soft);
     color: var(--danger);
@@ -954,7 +999,7 @@
     max-height: 360px;
     overflow: auto;
     font-family: var(--font-mono, monospace);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.45;
     background: var(--surface-2);
     border: 1px solid var(--border);
@@ -979,7 +1024,7 @@
 
   .pf {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     padding: 2px 6px;
     border-radius: var(--radius-s, 4px);
@@ -994,8 +1039,8 @@
   }
 
   .score-badge {
-    font-size: 11px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     padding: 2px 8px;
     border-radius: 999px;
   }
@@ -1010,7 +1055,7 @@
   }
   .score-badge.ok,
   .chip.score.ok {
-    background: color-mix(in srgb, var(--warning) 22%, transparent);
+    background: var(--warning-soft);
     color: var(--warning);
   }
   .score-badge.bad,
@@ -1024,7 +1069,7 @@
     padding: 2px 7px;
     border-radius: var(--radius-s, 4px);
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }
@@ -1033,7 +1078,7 @@
     color: var(--accent-text);
   }
   .sev-warn {
-    background: color-mix(in srgb, var(--warning) 20%, transparent);
+    background: var(--warning-soft);
     color: var(--warning);
   }
   .sev-fail {
@@ -1048,13 +1093,13 @@
 
   .modal-lede {
     margin: 0 0 10px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.5;
   }
   .field-label {
-    font-size: 11px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: var(--text-dim);
@@ -1073,7 +1118,7 @@
     padding: 4px 10px;
     border: 1px solid var(--border);
     border-radius: 999px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .chip-toggle.on {

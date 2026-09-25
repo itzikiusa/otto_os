@@ -461,7 +461,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.4;
     white-space: nowrap;
   }
@@ -544,7 +544,7 @@
     gap: 1px;
   }
   .title {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 600;
     white-space: nowrap;
     overflow: hidden;
@@ -632,7 +632,7 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 15px;
+    font-size: var(--fs-l);
     border-radius: var(--radius-s);
     cursor: pointer;
   }

@@ -179,16 +179,16 @@
     gap: 10px;
   }
   .empty {
-    color: var(--text-dim, #888);
-    font-size: 12px;
+    color: var(--text-dim);
+    font-size: var(--fs-s);
     line-height: 1.5;
     padding: 8px 4px;
   }
   .section-title {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--text-dim, #888);
+    color: var(--text-dim);
     font-weight: 600;
   }
   .field {
@@ -196,11 +196,11 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text);
   }
   .field span {
-    color: var(--text-dim, #888);
+    color: var(--text-dim);
   }
   .field input,
   .field select {
@@ -211,7 +211,7 @@
     border-radius: var(--radius-s, 6px);
     background: var(--bg);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .field input[type='color'] {
     padding: 0;
@@ -219,7 +219,7 @@
     max-width: 40px;
   }
   .hint-sm {
-    font-size: 11px;
-    color: var(--text-dim, #888);
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
 </style>

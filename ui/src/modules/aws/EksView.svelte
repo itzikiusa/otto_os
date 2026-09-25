@@ -142,7 +142,7 @@
   {#if loading && !clusters}
     <div class="pad"><Skeleton rows={5} /></div>
   {:else if error}
-    <EmptyState icon="cloud" title="Couldn't list clusters" body={error} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
+    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list clusters" body={error} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
   {:else if shown.length === 0}
     <EmptyState icon="helm" title={filter ? 'No matching clusters' : `No EKS clusters in ${region}`} />
   {:else}
@@ -158,7 +158,7 @@
             <td class="dim hide-sm" title={fmtDate(c.created_at)}>{fmtAgo(c.created_at)}</td>
             <td class="act">
               {#if canImport}
-                <button class="ghost sm" onclick={(e) => { e.stopPropagation(); void openInK8s(c); }} disabled={importing === c.name}>
+                <button class="btn small" onclick={(e) => { e.stopPropagation(); void openInK8s(c); }} disabled={importing === c.name}>
                   <Icon name="helm" size={12} /> {importing === c.name ? 'Importing…' : 'Open in Kubernetes'}
                 </button>
               {/if}
@@ -180,7 +180,7 @@
         <span class="mono dim ell" title={d.c.arn ?? ''}>{d.c.arn ?? ''}</span>
         {#if canImport}
           <span class="spacer"></span>
-          <button class="primary sm" onclick={() => void openInK8s(d.c)} disabled={importing === d.c.name}><Icon name="helm" size={12} /> Open in Kubernetes</button>
+          <button class="btn primary small" onclick={() => void openInK8s(d.c)} disabled={importing === d.c.name}><Icon name="helm" size={12} /> Open in Kubernetes</button>
         {/if}
       </div>
       <h3>Node groups</h3>
@@ -224,7 +224,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .lbl {
     color: var(--text-dim);
@@ -237,7 +237,7 @@
     background: var(--bg);
     color: var(--text);
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .tbl-wrap {
     flex: 1;
@@ -247,7 +247,7 @@
   .tbl {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .tbl th {
     position: sticky;
@@ -256,7 +256,7 @@
     background: var(--surface);
     text-align: left;
     font-weight: 600;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -320,7 +320,7 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .dt-top {
     display: flex;
@@ -339,46 +339,19 @@
   }
   h3 {
     margin: 6px 0 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
   }
   .raw {
-    font-size: 12px;
+    font-size: var(--fs-s);
     max-height: 45vh;
     overflow: auto;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     padding: 8px;
     background: var(--bg);
-  }
-  .primary,
-  .ghost {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 10px;
-    border-radius: var(--radius-m);
-    cursor: pointer;
-    font-size: 12px;
-    white-space: nowrap;
-  }
-  .primary {
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: var(--accent-contrast);
-    font-weight: 600;
-  }
-  .ghost {
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text);
-  }
-  .primary:disabled,
-  .ghost:disabled {
-    opacity: 0.55;
-    cursor: default;
   }
   @media (max-width: 640px) {
     .hide-sm {

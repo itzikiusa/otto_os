@@ -5,6 +5,7 @@
 //! - `GET  /api/v1/sessions/{id}/shares`   — list live shares for a session (owner).
 //! - `DELETE /api/v1/auth/shares/{share_id}` — revoke one share by id (owner).
 //! - `POST /api/v1/auth/shares/revoke-all` — revoke all the caller's shares (owner).
+//! - `GET  /api/v1/share/whoami`           — a share guest's own session + role.
 //!
 //! ## Guards (mint)
 //! The caller must:
@@ -622,4 +623,22 @@ pub async fn revoke_all_shares(
     .await;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/v1/share/whoami` — what a share token is: its pinned session and
+/// capped role (`viewer` | `editor`). The guest page (`#/s/{id}/{token}`) reads
+/// it to decide whether the terminal takes input; before this it had to assume
+/// read-only, so an Editor link could never type. Only a scoped (share) token
+/// may call it — the feature guard admits it for any verified share scope — and
+/// anything else gets 400 (a normal bearer has no share role to report).
+pub async fn share_whoami(
+    CurrentAuthContext(auth): CurrentAuthContext,
+) -> ApiResult<Json<serde_json::Value>> {
+    let Some(scope) = auth.scope.as_ref() else {
+        return Err(ApiError(Error::Invalid("not a share token".into())));
+    };
+    Ok(Json(serde_json::json!({
+        "session_id": scope.session_id,
+        "role": scope.role.as_str(),
+    })))
 }

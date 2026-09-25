@@ -65,7 +65,7 @@ async function openFixture(page: Page): Promise<void> {
 }
 
 async function markHeading(page: Page, note: string): Promise<void> {
-  await page.getByRole('button', { name: 'Mark element' }).click();
+  await page.getByRole('button', { name: 'Mark passage' }).click();
   await page.locator('.reader h1').click();
   await page.getByPlaceholder('Add a note').fill(note);
   await page.getByRole('button', { name: 'Save mark' }).click();
@@ -102,7 +102,7 @@ test('browser page: dock starts detached, attaches a session, ask sends page + m
   // and the marks chip counts it.
   await expect(ask).toBeFocused();
   await expect(ask).toHaveAttribute('placeholder', /element you just marked/);
-  await expect(page.locator('.askbar .chip')).toContainText('1 mark');
+  await expect(page.locator('.askbar .marks-chip')).toContainText('1 mark');
 
   const askReq = page.waitForRequest(
     (req) => req.url().includes('/browser/ask') && req.method() === 'POST',

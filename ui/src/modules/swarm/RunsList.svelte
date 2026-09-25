@@ -2,7 +2,7 @@
   // All runs/iterations as a filterable list (per assignee / project / status).
   import Icon from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
-  import { runStatus } from '../../lib/status';
+  import { runStatus, sentenceCase } from '../../lib/status';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import RunInspector from './RunInspector.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
@@ -59,22 +59,22 @@
 
 <div class="runs">
   <div class="filters">
-    <select class="input small" bind:value={agentFilter}>
+    <select class="input small" aria-label="Filter by assignee" bind:value={agentFilter}>
       <option value="">All assignees</option>
       {#each swarm.detail?.agents ?? [] as a (a.id)}
         <option value={a.id}>{a.name}</option>
       {/each}
     </select>
-    <select class="input small" bind:value={projectFilter}>
+    <select class="input small" aria-label="Filter by project" bind:value={projectFilter}>
       <option value="">All projects</option>
       {#each swarm.detail?.projects ?? [] as p (p.id)}
         <option value={p.id}>{p.name}</option>
       {/each}
     </select>
-    <div class="chips">
-      <button class="chip" class:accent={statusFilter === ''} onclick={() => (statusFilter = '')}>All</button>
+    <div class="chips" role="group" aria-label="Filter by status">
+      <button class="chip" class:accent={statusFilter === ''} aria-pressed={statusFilter === ''} onclick={() => (statusFilter = '')}>All</button>
       {#each STATUSES as s (s)}
-        <button class="chip" class:accent={statusFilter === s} onclick={() => (statusFilter = s)}>{runStatus(s).label}</button>
+        <button class="chip" class:accent={statusFilter === s} aria-pressed={statusFilter === s} onclick={() => (statusFilter = s)}>{runStatus(s).label}</button>
       {/each}
     </div>
     <span class="grow"></span>
@@ -93,7 +93,7 @@
         onaction={() => { agentFilter = ''; projectFilter = ''; statusFilter = ''; }}
       />
     {:else}
-      <EmptyState icon="clock" title="No runs" body="Runs appear here as agents work tasks." />
+      <EmptyState icon="clock" title="No runs yet" body="Runs appear here as agents work tasks. Start one from the Board (Run now) or an agent's menu in Org." />
     {/if}
   {:else}
     <div class="table">
@@ -113,7 +113,7 @@
               <span class="agent-name">{agent?.name ?? r.agent_id.slice(0, 6)}</span>
               {#if agent?.title}<span class="agent-title dim">{agent.title}</span>{/if}
             </span>
-            <span class="c-kind dim" title={r.summary ? `${r.kind} · ${r.summary}` : r.kind}>{r.kind}{r.summary ? ` · ${r.summary}` : ''}</span>
+            <span class="c-kind dim" title={r.summary ? `${sentenceCase(r.kind)} · ${r.summary}` : sentenceCase(r.kind)}>{sentenceCase(r.kind)}{r.summary ? ` · ${r.summary}` : ''}</span>
             <span class="c-status"><StatusBadge status={runStatus(r.status)} /></span>
             <span class="c-time dim">{rel(r.started_at ?? r.enqueued_at ?? '')}</span>
             <span class="c-tok mono dim" title={r.tokens_input != null || r.tokens_output != null ? tokenTitle(r) : 'No usage recorded'}>
@@ -122,17 +122,17 @@
                 : '—'}
             </span>
             <span class="c-act">
-              <button class="icon-btn" title="Inspect run" aria-label="inspect run" onclick={(e) => { e.stopPropagation(); inspecting = r; }}>
+              <button class="icon-btn" title="Inspect run" aria-label="Inspect run" onclick={(e) => { e.stopPropagation(); inspecting = r; }}>
                 <Icon name="eye" size={14} />
               </button>
               {#if r.session_id}
-                <button class="btn small ghost" onclick={(e) => { e.stopPropagation(); swarm.selectedSessionId = r.session_id!; }}>Open</button>
+                <button class="btn small ghost" title="Open this run's session beside the view" onclick={(e) => { e.stopPropagation(); swarm.selectedSessionId = r.session_id!; }}>Open session</button>
               {/if}
               {#if r.kind === 'recruit' && r.status === 'done' && r.result && onhire && !swarm.recruitHired.has(r.id)}
                 <button class="btn small primary" title="Review & hire this proposed agent" onclick={(e) => { e.stopPropagation(); onhire?.(r.result as unknown as RecruitedAgent, r.id); }}>Hire</button>
               {/if}
               {#if active(r)}
-                <button class="btn small danger" onclick={(e) => { e.stopPropagation(); void stop(r); }}>Stop</button>
+                <button class="btn small danger" title="Stop this run; its session is closed" onclick={(e) => { e.stopPropagation(); void stop(r); }}>Stop</button>
               {/if}
             </span>
           </div>
@@ -189,14 +189,14 @@
     gap: 8px;
     align-items: center;
     padding: 6px 10px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .thead {
     position: sticky;
     top: 0;
     background: var(--surface-2);
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     border-bottom: 1px solid var(--border);
   }
   .trow {

@@ -247,7 +247,7 @@
           {/if}
         {/each}
         {#if conflictCount === 0}
-          <div class="dim" style="padding: 16px; font-size: 12px">
+          <div class="dim" style="padding: 16px; font-size: var(--fs-s)">
             No conflict markers in this file. Mark it resolved to continue.
           </div>
         {/if}
@@ -330,7 +330,7 @@
     flex-shrink: 0;
   }
   .pane-path {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -370,7 +370,7 @@
   .context {
     margin: 0;
     padding: 4px 10px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.55;
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 4%, transparent);
@@ -381,15 +381,15 @@
   }
   .binary {
     padding: 16px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .load-error {
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 16px;
-    font-size: 12px;
-    color: var(--status-exited);
+    font-size: var(--fs-s);
+    color: var(--danger);
   }
   .dim {
     color: var(--text-dim);
@@ -426,8 +426,8 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 11px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     letter-spacing: 0.04em;
     cursor: pointer;
     padding: 2px 0;
@@ -467,7 +467,7 @@
   }
   .out-context {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.5;
     color: var(--text-dim);
     white-space: pre-wrap;
@@ -475,11 +475,11 @@
   }
   .out-resolved {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.5;
     color: var(--text);
-    background: color-mix(in srgb, var(--status-working) 10%, transparent);
-    border-inline-start: 2px solid color-mix(in srgb, var(--status-working) 60%, transparent);
+    background: color-mix(in srgb, var(--success) 10%, transparent);
+    border-inline-start: 2px solid color-mix(in srgb, var(--success) 60%, transparent);
     padding: 1px 8px;
     white-space: pre-wrap;
     word-break: break-all;
@@ -495,11 +495,11 @@
     align-items: center;
     gap: 6px;
     width: 100%;
-    border: 1px dashed color-mix(in srgb, var(--status-warn) 55%, transparent);
+    border: 1px dashed color-mix(in srgb, var(--warning) 55%, transparent);
     border-radius: var(--radius-s);
-    background: var(--status-warn-soft);
-    color: var(--status-warn);
-    font-size: 11px;
+    background: var(--warning-soft);
+    color: var(--warning);
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 3px 8px;
     margin: 3px 0;
@@ -515,7 +515,7 @@
     }
     .pane-path {
       flex-basis: 100%;
-      font-size: 13px;
+      font-size: var(--fs-m);
     }
     .pane-head .btn {
       min-height: 40px;
@@ -525,7 +525,7 @@
       -webkit-overflow-scrolling: touch;
     }
     .context {
-      font-size: 12.5px;
+      font-size: var(--fs-s);
       word-break: break-word;
       overflow-wrap: anywhere;
     }

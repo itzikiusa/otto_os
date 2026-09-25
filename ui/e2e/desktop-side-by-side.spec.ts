@@ -60,12 +60,12 @@ async function openAgents(page: Page): Promise<void> {
   await expect(page.locator('.navigator')).toBeVisible({ timeout: 15_000 });
 }
 
-/** Right-click Connections → "Open Side by Side", and wait for the pane's
+/** Right-click Connections → "Open side by side", and wait for the pane's
  *  document to boot (the host's loading cover goes away). */
 async function openConnectionsBeside(page: Page): Promise<void> {
   await navRow(page, 'connections').click({ button: 'right' });
   await expectFullyInViewport(page, menu(page), 'sidebar row menu');
-  await menu(page).getByRole('menuitem', { name: 'Open Side by Side' }).click();
+  await menu(page).getByRole('menuitem', { name: 'Open side by side' }).click();
   await expect(pane(page)).toBeVisible();
   await expect(pane(page)).toHaveAttribute('data-module', 'connections');
   await expect(page.getByTestId('side-pane-cover')).toHaveCount(0, { timeout: 30_000 });
@@ -177,12 +177,12 @@ test('one module per pane: sidebar clicks go to the pane that shows it; ⌥-clic
   // The main pane's own module is not offered for the side pane.
   await navRow(page, 'agents').click({ button: 'right' });
   await expect(menu(page)).toBeVisible();
-  await expect(menu(page).getByRole('menuitem', { name: /Side by Side|Side Pane/ })).toHaveCount(0);
+  await expect(menu(page).getByRole('menuitem', { name: /side by side|side pane/i })).toHaveCount(0);
   await page.keyboard.press('Escape');
 
   // The pane's module row offers to promote / close it.
   await navRow(page, 'connections').click({ button: 'right' });
-  await expect(menu(page).getByRole('menuitem', { name: 'Close Side Pane' })).toBeVisible();
+  await expect(menu(page).getByRole('menuitem', { name: 'Close side pane' })).toBeVisible();
   await page.keyboard.press('Escape');
 
   // ⌘\ closes an open pane (focus is back on the sidebar row, in the main

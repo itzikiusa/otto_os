@@ -228,7 +228,7 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     padding: 2px 0;
     outline: none;
   }
@@ -258,14 +258,14 @@
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .gsb-link {
     border: none;
     background: transparent;
     color: var(--accent-text);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     cursor: pointer;
     padding: 0;
   }
@@ -296,7 +296,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     text-align: start;
     cursor: pointer;
   }
@@ -305,7 +305,7 @@
   }
   .gsb-sha {
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .gsb-subject {
     overflow: hidden;
@@ -315,7 +315,7 @@
   .gsb-author,
   .gsb-date {
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     white-space: nowrap;
   }
   @media (max-width: 720px) {

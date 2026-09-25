@@ -27,7 +27,9 @@
     createProofPack,
     deleteArtifact,
     deleteProofPack,
+    getProofPack,
     getRepoProofConfig,
+    listProofPacks,
     proofReport,
     runPrCheck,
     setRepoProofConfig,
@@ -39,7 +41,19 @@
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import type { ProofArtifactView } from '../../lib/api/types';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
+  import { sentenceCase } from '../../lib/status';
+
+  /** Enum → words for kinds and statuses (self_review → "Self review",
+   *  pr_check → "PR check", ci → "CI", api → "API", db → "Database"). */
+  const WORDS: Record<string, string> = { ci: 'CI', api: 'API', db: 'Database', pr_check: 'PR check', self_review: 'Self review', all: 'All' };
+  function words(raw: string | null | undefined): string {
+    const k = (raw ?? '').trim();
+    return WORDS[k] ?? sentenceCase(k || 'unknown');
+  }
 
   const MEDIA_KINDS = new Set(['screenshot', 'video']);
 
@@ -53,11 +67,34 @@
   const ARTIFACT_STATUSES = ['info', 'passed', 'failed', 'pending'];
 
   // Load the list (for the active filter) + the summary roll-up for this ws.
+  // The store swallows a failed list load into an empty list; an empty result
+  // is re-checked here so a failure shows inline (with Retry) instead of the
+  // "No proof packs yet" empty state.
+  let listError = $state<string | null>(null);
+  let listLoaded = $state(false);
+  async function loadList(id: string, f: StatusFilter): Promise<void> {
+    const q = f === 'all' ? undefined : { status: f };
+    await proof.loadPacks(id, q);
+    if (proof.packs.length === 0) {
+      try {
+        await listProofPacks(id, q);
+        listError = null;
+      } catch (e) {
+        listError = loadErrorText(e);
+      }
+    } else {
+      listError = null;
+    }
+    listLoaded = true;
+  }
+  function retryList(): void {
+    if (ws.currentId) void loadList(ws.currentId, filter);
+  }
   $effect(() => {
     const id = ws.currentId;
     if (!id) return;
     const f = filter;
-    void proof.loadPacks(id, f === 'all' ? undefined : { status: f });
+    void loadList(id, f);
     void proof.loadSummary(id);
   });
 
@@ -85,6 +122,13 @@
   // An empty, unfiltered list has nothing to show: the page-level empty state
   // owns the page (a filtered-empty list keeps the rail so the filter can change).
   const showRail = $derived(proof.packs.length > 0 || filter !== 'all');
+  const filterCounts = $derived.by(() => {
+    // Counts only mean something on the unfiltered list.
+    if (filter !== 'all') return null;
+    const c: Record<string, number> = { all: proof.packs.length };
+    for (const p of proof.packs) c[p.status] = (c[p.status] ?? 0) + 1;
+    return c;
+  });
 
   // Group the open pack's artifacts by kind for display.
   const artifactGroups = $derived.by((): [string, ProofArtifactView[]][] => {
@@ -130,12 +174,22 @@
       fullContent[id] = c.content ?? '(no content)';
       expanded[id] = true;
     } catch (e) {
-      toasts.error('Load failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't load the artifact", loadErrorText(e));
     }
   }
 
-  function open(id: string): void {
-    void proof.open(id);
+  // Opens a pack into the detail pane. The store's own open() drops a failure
+  // silently (the pane just stays as it was), so load here and say so.
+  let openingId = $state<string | null>(null);
+  async function open(id: string): Promise<void> {
+    openingId = id;
+    try {
+      proof.detail = await getProofPack(id);
+    } catch (e) {
+      toasts.error("Couldn't open the proof pack", loadErrorText(e));
+    } finally {
+      if (openingId === id) openingId = null;
+    }
   }
 
   // ---- inline media (R4): object URLs for screenshot/video artifacts --------
@@ -205,19 +259,19 @@
       addOpen = false;
       resetAdd();
     } catch (e) {
-      toasts.error('Add artifact failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't add the artifact", e instanceof Error ? e.message : String(e));
     }
   }
 
   async function removeArtifact(id: string): Promise<void> {
     if (!detail) return;
     const name = detail.artifacts.find((x) => x.id === id)?.title;
-    if (!(await confirmer.ask(name ? `Delete the artifact “${name}” from this proof pack?` : 'Delete this artifact from the proof pack?', { title: 'Delete artifact?' }))) return;
+    if (!(await confirmer.ask(name ? `Delete the artifact “${name}” from this proof pack? The pack's status is re-derived without it.` : 'Delete this artifact from the proof pack?', { title: 'Delete artifact' }))) return;
     try {
       await deleteArtifact(id);
       await proof.refreshDetail();
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't delete the artifact", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -246,9 +300,9 @@
     try {
       await assembleProof(detail.pack.id, { cwd: cwd.trim() || undefined });
       await proof.refreshDetail();
-      toasts.success('Assembled', 'Proof re-assembled from the working directory.');
+      toasts.success('Proof assembled', 'Re-assembled from the working directory.');
     } catch (e) {
-      toasts.error('Assemble failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't assemble proof", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -263,8 +317,9 @@
       await proof.refreshDetail();
       waiveOpen = false;
       waiveReason = '';
+      toasts.success('Proof gate waived', 'Recorded with you as the approver.');
     } catch (e) {
-      toasts.error('Waive failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't waive the proof gate", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -312,7 +367,7 @@
       mediaOpen = false;
       resetMedia();
     } catch (e) {
-      toasts.error('Add media failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't attach the media", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -394,7 +449,7 @@
       evidenceOpen = false;
       resetEvidence();
     } catch (e) {
-      toasts.error('Add evidence failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't add the evidence", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -404,9 +459,9 @@
     try {
       await ciRefresh(detail.pack.id, {});
       await proof.refreshDetail();
-      toasts.success('CI refreshed', 'Live CI status pulled into a ci artifact.');
+      toasts.success('CI refreshed', 'Live CI status pulled into a CI artifact.');
     } catch (e) {
-      toasts.error('CI refresh failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't refresh CI", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -437,7 +492,7 @@
       prOpen = false;
       resetPr();
     } catch (e) {
-      toasts.error('PR check failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't run the PR check", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -452,7 +507,7 @@
         format === 'md' ? 'text/markdown' : 'text/html',
       );
     } catch (e) {
-      toasts.error('Export failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't export the report", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -482,7 +537,7 @@
         require_review: !!c.require_review,
       };
     } catch (e) {
-      toasts.error('Load requirements failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't load the proof requirements", loadErrorText(e));
       cfgOpen = false;
     } finally {
       cfgLoading = false;
@@ -502,24 +557,28 @@
       });
       await proof.refreshDetail();
       cfgOpen = false;
-      toasts.success('Saved', 'Proof requirements updated for this repo.');
+      toasts.success('Requirements saved', 'Proof requirements updated for this repo.');
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't save the requirements", e instanceof Error ? e.message : String(e));
     }
   }
 
   async function removePack(): Promise<void> {
     if (!detail) return;
     const t = detail.pack.title || 'this pack';
-    if (!(await confirmer.ask(`Delete proof pack "${t}" and all its artifacts?`, { title: 'Delete proof pack?' }))) {
+    const n = detail.artifacts.length;
+    if (!(await confirmer.ask(`Delete proof pack "${t}"? Its ${n} artifact${n === 1 ? '' : 's'} and snapshots are deleted too.`, { title: 'Delete proof pack' }))) {
       return;
     }
     try {
       await deleteProofPack(detail.pack.id);
       proof.closeDetail();
-      if (ws.currentId) await proof.loadPacks(ws.currentId, filter === 'all' ? undefined : { status: filter });
+      toasts.success('Proof pack deleted', t);
+      if (ws.currentId) await loadList(ws.currentId, filter);
+      // Land on the next pack instead of an empty "pick one" pane.
+      if (!viewport.isPhone && proof.packs.length > 0) void open(proof.packs[0].id);
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't delete the proof pack", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -541,12 +600,28 @@
         work_item_id: crypto.randomUUID(),
         title: title.trim(),
       });
-      await proof.loadPacks(ws.currentId, filter === 'all' ? undefined : { status: filter });
-      await proof.open(created.id);
+      await loadList(ws.currentId, filter);
+      await open(created.id);
     } catch (e) {
-      toasts.error('Create failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't create the proof pack", e instanceof Error ? e.message : String(e));
     }
   }
+
+  // ⌘K: the page's verbs (pack verbs only while a pack is open).
+  $effect(() => {
+    const d = detail;
+    return registry.register('proof', [
+      { id: 'proof.new', title: 'New proof pack…', group: 'Proof', keywords: 'create manual evidence', run: () => void newPack() },
+      ...(d
+        ? [
+            { id: 'proof.assemble', title: 'Assemble proof pack…', group: 'Proof', keywords: 'rebuild refresh evidence', run: () => void assemble() },
+            { id: 'proof.add', title: 'Add artifact to proof pack…', group: 'Proof', keywords: 'evidence attach log', run: () => { resetAdd(); addOpen = true; } },
+            { id: 'proof.waive', title: 'Waive proof pack…', group: 'Proof', keywords: 'approve override gate', run: () => { waiveReason = ''; waiveOpen = true; } },
+            { id: 'proof.export', title: 'Export proof report (Markdown)', group: 'Proof', keywords: 'download md report', run: () => void exportReport('md') },
+          ]
+        : []),
+    ]);
+  });
 </script>
 
 <div class="proof-page" class:phone={viewport.isPhone}>
@@ -564,7 +639,7 @@
     {#snippet badge()}
       {#if detail}
         <ProofStatusChip status={detail.pack.status} risk={detail.pack.risk_score} />
-        <span class="kind-tag">{detail.pack.work_item_kind}</span>
+        <span class="kind-tag">{words(detail.pack.work_item_kind)}</span>
         {#if detail.pack.pr_number != null}
           <span class="kind-tag pr" title="Linked pull request">PR #{detail.pack.pr_number}</span>
         {/if}
@@ -592,31 +667,43 @@
   <aside class="rail" class:hide-phone={viewport.isPhone && detail}>
     <div class="rail-head">
       <span class="section-title">Proof Packs</span>
-      <button class="icon-btn" onclick={newPack} aria-label="New proof pack" title="New manual proof pack">
-        <Icon name="plus" size={15} />
+      <button class="icon-btn" onclick={newPack} aria-label="New proof pack" title="New proof pack">
+        <Icon name="plus" size={14} />
       </button>
     </div>
-    <div class="filters">
+    <div class="filters" role="group" aria-label="Filter by status">
       {#each STATUS_FILTERS as f (f)}
-        <button class="chip-btn" class:active={filter === f} onclick={() => (filter = f)}>{f}</button>
+        <button class="chip-btn" class:active={filter === f} aria-pressed={filter === f} onclick={() => (filter = f)}>
+          {words(f)}{#if filterCounts && (filterCounts[f] ?? 0) > 0}<span class="chip-n">{filterCounts[f]}</span>{/if}
+        </button>
       {/each}
     </div>
     <div class="rail-list">
+      {#if listError && proof.packs.length === 0}
+        <LoadState what="proof packs" error={listError} empty variant="compact" loading={proof.loading} onretry={retryList} />
+      {/if}
       {#each proof.packs as p (p.id)}
-        <button class="pack-item" class:active={detail?.pack.id === p.id} onclick={() => open(p.id)}>
+        <button class="pack-item" class:active={detail?.pack.id === p.id} aria-current={detail?.pack.id === p.id ? 'true' : undefined} aria-busy={openingId === p.id} onclick={() => open(p.id)}>
           <div class="pack-top">
             <span class="grow ellipsis pack-title" title={p.title || p.work_item_id}>{p.title || p.work_item_id}</span>
             <span class="done-pill" title={`Done score ${p.done_score}/100`}>{p.done_score}</span>
             <ProofStatusChip status={p.status} risk={p.risk_score} />
           </div>
           <div class="pack-meta">
-            <span class="kind-tag">{p.work_item_kind}</span>
+            <span class="kind-tag">{words(p.work_item_kind)}</span>
             <ProofBadges badges={p.badges} />
           </div>
         </button>
       {/each}
-      {#if proof.packs.length === 0}
-        <p class="dim empty">{proof.loading ? 'Loading…' : 'No proof packs match.'}</p>
+      {#if proof.packs.length === 0 && !listError}
+        {#if proof.loading && !listLoaded}
+          <p class="dim empty" role="status">Loading proof packs…</p>
+        {:else}
+          <div class="empty">
+            <p class="dim">No {words(filter).toLowerCase()} proof packs.</p>
+            <button class="btn small ghost" onclick={() => (filter = 'all')}>Show all</button>
+          </div>
+        {/if}
       {/if}
     </div>
   </aside>
@@ -625,15 +712,17 @@
   <!-- Right: detail. -->
   <section class="main">
     {#if !detail}
-      {#if showRail}
+      {#if listError && !showRail}
+        <LoadState what="proof packs" error={listError} empty variant="page" loading={proof.loading} onretry={retryList} />
+      {:else if showRail}
         <EmptyState
           variant="page"
           icon="check"
-          title="Select a proof pack"
-          body="Verified evidence — tests, diffs, CI, reviews, approvals — assembled for each piece of work. Pick a pack to inspect its artifacts and badges."
+          title={openingId ? 'Opening the proof pack…' : 'No proof pack open'}
+          body="Verified evidence — tests, diffs, CI, reviews, approvals — assembled for each piece of work. Open a pack from the list to inspect its artifacts and badges."
         />
-      {:else if proof.loading}
-        <p class="dim empty">Loading…</p>
+      {:else if proof.loading || !listLoaded}
+        <p class="dim empty" role="status">Loading proof packs…</p>
       {:else}
         <EmptyState
           variant="page"
@@ -652,8 +741,8 @@
 
         <!-- Pack-level tools: report export (R9) + repo requirements (R3). -->
         <div class="tools-row">
-          <button class="btn small ghost" onclick={() => exportReport('md')}><Icon name="file" size={12} /> Export .md</button>
-          <button class="btn small ghost" onclick={() => exportReport('html')}><Icon name="external" size={12} /> Export .html</button>
+          <button class="btn small ghost" onclick={() => exportReport('md')}><Icon name="download" size={12} /> Export Markdown</button>
+          <button class="btn small ghost" onclick={() => exportReport('html')}><Icon name="download" size={12} /> Export HTML</button>
           {#if detail.pack.repo_id}
             <button class="btn small ghost" onclick={openConfig}><Icon name="gear" size={12} /> Requirements</button>
           {/if}
@@ -686,23 +775,25 @@
         {:else}
           {#each artifactGroups as [kind, items] (kind)}
             <section class="art-group">
-              <h3 class="group-title">{kind} <span class="dim">· {items.length}</span></h3>
+              <h3 class="group-title">{words(kind)} <span class="dim">· {items.length}</span></h3>
               {#each items as a (a.id)}
                 <div class="art-row">
                   <div class="art-top">
-                    <span class="art-status {a.status}" title={a.status}></span>
+                    <span class="art-status {a.status}" aria-hidden="true"></span>
                     <span class="grow ellipsis art-title" title={a.title}>{a.title}</span>
                     {#if a.content_sha256}
                       <span class="sha-chip" title={`content sha256: ${a.content_sha256}`}>sha:{a.content_sha256.slice(0, 8)}…</span>
                     {/if}
-                    <span class="art-status-label {a.status}">{a.status}</span>
+                    <span class="art-status-label {a.status}">{words(a.status)}</span>
                     {#if a.preview != null}
-                      <button class="link-btn" onclick={() => toggleExpand(a.id)}>
+                      <button class="link-btn" aria-expanded={!!expanded[a.id]} onclick={() => toggleExpand(a.id)}>
                         {expanded[a.id] ? 'Hide' : 'Show'}
                       </button>
                     {/if}
-                    <button class="link-btn" onclick={() => loadFull(a.id)}>Load full</button>
-                    <button class="icon-btn small" onclick={() => removeArtifact(a.id)} aria-label="Delete artifact" title="Delete artifact"><Icon name="trash" size={12} /></button>
+                    {#if a.preview == null || a.truncated}
+                      <button class="link-btn" onclick={() => loadFull(a.id)}>Load full</button>
+                    {/if}
+                    <button class="icon-btn small" onclick={() => removeArtifact(a.id)} aria-label="Delete artifact {a.title}" title="Delete artifact"><Icon name="trash" size={12} /></button>
                   </div>
                   {#if MEDIA_KINDS.has(a.kind)}
                     {#if mediaUrls[a.id]}
@@ -740,7 +831,7 @@
                   {#if expanded[a.id]}
                     <pre class="art-content">{fullContent[a.id] ?? a.preview ?? ''}</pre>
                     {#if a.truncated && fullContent[a.id] == null}
-                      <button class="link-btn trunc" onclick={() => loadFull(a.id)}>…truncated — Load full</button>
+                      <button class="link-btn trunc" onclick={() => loadFull(a.id)}>Truncated — load full</button>
                     {/if}
                   {/if}
                 </div>
@@ -756,7 +847,7 @@
             {#each detail.children as c (c.id)}
               <button class="child-link" onclick={() => open(c.id)}>
                 <span class="grow ellipsis" title={c.title || c.work_item_id}>{c.title || c.work_item_id}</span>
-                <span class="kind-tag">{c.work_item_kind}</span>
+                <span class="kind-tag">{words(c.work_item_kind)}</span>
                 <ProofStatusChip status={c.status} risk={c.risk_score} />
               </button>
             {/each}
@@ -773,7 +864,7 @@
     <div class="field">
       <label for="a-kind">Kind</label>
       <select id="a-kind" class="input" bind:value={aKind}>
-        {#each ARTIFACT_KINDS as k (k)}<option value={k}>{k}</option>{/each}
+        {#each ARTIFACT_KINDS as k (k)}<option value={k}>{words(k)}</option>{/each}
       </select>
     </div>
     <div class="field">
@@ -783,7 +874,7 @@
     <div class="field">
       <label for="a-status">Status</label>
       <select id="a-status" class="input" bind:value={aStatus}>
-        {#each ARTIFACT_STATUSES as s (s)}<option value={s}>{s}</option>{/each}
+        {#each ARTIFACT_STATUSES as s (s)}<option value={s}>{words(s)}</option>{/each}
       </select>
     </div>
     <div class="field">
@@ -792,7 +883,7 @@
     </div>
     {#snippet footer()}
       <button class="btn ghost" onclick={() => (addOpen = false)}>Cancel</button>
-      <button class="btn primary" onclick={submitAdd} disabled={!aTitle.trim()}>Add</button>
+      <button class="btn primary" onclick={submitAdd} disabled={!aTitle.trim()} title={aTitle.trim() ? undefined : 'Give the artifact a title'}>Add artifact</button>
     {/snippet}
   </Modal>
 {/if}
@@ -827,8 +918,8 @@
     <div class="field">
       <label for="m-kind">Kind</label>
       <select id="m-kind" class="input" bind:value={mKind}>
-        <option value="screenshot">screenshot</option>
-        <option value="video">video</option>
+        <option value="screenshot">Screenshot</option>
+        <option value="video">Video</option>
       </select>
     </div>
     <div class="field">
@@ -847,7 +938,7 @@
     </div>
     {#snippet footer()}
       <button class="btn ghost" onclick={() => (mediaOpen = false)}>Cancel</button>
-      <button class="btn primary" onclick={submitMedia} disabled={!mFile || !mTitle.trim()}>Attach</button>
+      <button class="btn primary" onclick={submitMedia} disabled={!mFile || !mTitle.trim()} title={!mFile ? 'Choose a file' : !mTitle.trim() ? 'Give it a title' : undefined}>Attach media</button>
     {/snippet}
   </Modal>
 {/if}
@@ -963,7 +1054,7 @@
 {#if cfgOpen && detail}
   <Modal title="Proof requirements" width={480} onclose={() => (cfgOpen = false)}>
     {#if cfgLoading}
-      <p class="dim">Loading…</p>
+      <p class="dim" role="status">Loading requirements…</p>
     {:else}
       <p class="modal-hint">Per-repo gates. These can only strengthen the default proof contract.</p>
       <label class="check-row">
@@ -985,7 +1076,7 @@
     {/if}
     {#snippet footer()}
       <button class="btn ghost" onclick={() => (cfgOpen = false)}>Cancel</button>
-      <button class="btn primary" onclick={saveConfig} disabled={cfgLoading}>Save</button>
+      <button class="btn primary" onclick={saveConfig} disabled={cfgLoading}>Save requirements</button>
     {/snippet}
   </Modal>
 {/if}
@@ -1028,23 +1119,31 @@
     border-bottom: 1px solid var(--border);
   }
   .chip-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 22px;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--text-dim);
     border-radius: 999px;
-    padding: 2px 9px;
-    font-size: 11px;
+    padding: 0 8px;
+    font-size: var(--fs-xs);
+    font-weight: 500;
     cursor: pointer;
-    text-transform: capitalize;
   }
   .chip-btn:hover {
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+    background: var(--hover);
     color: var(--text);
   }
   .chip-btn.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent-text);
+    background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    color: var(--text);
+  }
+  .chip-n {
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
   }
   .rail-list {
     overflow-y: auto;
@@ -1060,16 +1159,16 @@
     padding: 8px 10px;
     border: 1px solid transparent;
     background: transparent;
-    border-radius: var(--radius-s);
+    border-radius: var(--radius-m);
     color: var(--text);
     cursor: pointer;
     text-align: start;
   }
   .pack-item:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
   }
   .pack-item.active {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     border-color: color-mix(in srgb, var(--accent) 30%, transparent);
   }
   .pack-top {
@@ -1078,7 +1177,7 @@
     gap: 8px;
   }
   .pack-title {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 500;
   }
   .pack-meta {
@@ -1090,16 +1189,13 @@
   .kind-tag {
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    border-radius: var(--radius-s);
-    padding: 1px 6px;
+    background: var(--surface-2);
+    border-radius: 999px;
+    padding: 1px 8px;
     white-space: nowrap;
-    text-transform: capitalize;
   }
   .kind-tag.pr {
-    color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    text-transform: none;
+    color: var(--text);
   }
   /* PR-consistency report (R7): the structured per-check breakdown a pr_check
      artifact carries in metadata.report. */
@@ -1108,10 +1204,10 @@
     padding: 8px 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--text-dim) 5%, transparent);
+    background: var(--surface-2);
   }
   .pr-report-head {
-    font-size: 12px;
+    font-size: var(--fs-s);
     margin-bottom: 4px;
   }
   .pr-report-head .ok {
@@ -1127,7 +1223,7 @@
     list-style: none;
     margin: 0;
     padding: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .pr-checks li {
     padding: 1px 0;
@@ -1152,7 +1248,10 @@
   }
   .empty {
     padding: 12px;
-    font-size: 12px;
+    font-size: var(--fs-s);
+  }
+  .empty p {
+    margin: 0 0 6px;
   }
   .main {
     flex: 1;
@@ -1171,7 +1270,7 @@
     margin-bottom: 10px;
   }
   .summary {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     margin: 0 0 12px;
   }
@@ -1179,10 +1278,11 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 11.5px;
-    color: var(--status-warn);
-    background: color-mix(in srgb, var(--status-warn) 10%, transparent);
-    border-radius: var(--radius-s);
+    font-size: var(--fs-xs);
+    color: var(--text);
+    background: var(--warning-soft);
+    border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+    border-radius: var(--radius-m);
     padding: 6px 10px;
     margin: 0 0 12px;
   }
@@ -1190,18 +1290,18 @@
     margin-bottom: 16px;
   }
   .group-title {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.06em;
     color: var(--text-dim);
     margin: 0 0 6px;
   }
   .art-row {
     border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    padding: 7px 10px;
-    margin-bottom: 5px;
+    border-radius: var(--radius-m);
+    padding: 8px 10px;
+    margin-bottom: 6px;
     background: var(--surface);
   }
   .art-top {
@@ -1210,7 +1310,7 @@
     gap: 8px;
   }
   .art-title {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .art-status {
     width: 8px;
@@ -1229,29 +1329,27 @@
     background: var(--status-warn);
   }
   .art-status.info {
-    background: var(--accent);
+    background: var(--info);
   }
   .art-status-label {
     font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
     color: var(--text-dim);
   }
   .art-status-label.passed {
-    color: var(--status-working);
+    color: var(--success);
   }
   .art-status-label.failed {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .art-status-label.pending {
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .link-btn {
     border: none;
     background: transparent;
     color: var(--accent-text);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 0 2px;
     white-space: nowrap;
   }
@@ -1263,7 +1361,7 @@
     padding: 8px 10px;
     background: var(--surface-2);
     border-radius: var(--radius-s);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.45;
     white-space: pre-wrap;
     word-break: break-word;
@@ -1283,7 +1381,7 @@
     cursor: pointer;
     text-align: start;
     margin-bottom: 5px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .child-link:hover {
     background: var(--surface-2);
@@ -1306,7 +1404,7 @@
     font-weight: 600;
     font-variant-numeric: tabular-nums;
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+    background: var(--surface-2);
     border-radius: 999px;
     padding: 0 6px;
     line-height: 16px;
@@ -1323,7 +1421,7 @@
     font-family: var(--font-mono, ui-monospace, monospace);
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+    background: var(--surface-2);
     border-radius: var(--radius-s);
     padding: 1px 6px;
     white-space: nowrap;
@@ -1339,10 +1437,10 @@
   }
   .media-loading {
     margin: 8px 0 0;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .modal-hint {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.45;
     margin: 0 0 12px;
@@ -1354,7 +1452,7 @@
     color: var(--text-dim);
   }
   .char-hint.short {
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .field-row {
     display: flex;
@@ -1368,7 +1466,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     margin-bottom: 10px;
     cursor: pointer;
   }

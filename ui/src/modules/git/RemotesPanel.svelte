@@ -179,11 +179,11 @@
     min-width: 0;
   }
   .rp-name {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
   }
   .rp-url {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -191,7 +191,7 @@
   }
   .rp-empty {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .rp-err {
@@ -199,7 +199,7 @@
     align-items: center;
     gap: 6px;
     margin: 0;
-    font-size: 12px;
-    color: var(--status-exited);
+    font-size: var(--fs-s);
+    color: var(--danger);
   }
 </style>

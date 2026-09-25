@@ -170,7 +170,7 @@
     display: flex;
     align-items: baseline;
     gap: 4px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.55;
     min-width: 0;
     text-align: left;
@@ -227,7 +227,7 @@
     align-items: center;
     margin: 2px 0;
     padding: 1px 6px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
     border: 1px solid var(--border);

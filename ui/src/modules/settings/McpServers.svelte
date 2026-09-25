@@ -2,6 +2,7 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
+  import SectionIntro from './SectionIntro.svelte';
   // MCP Servers settings page: per-workspace, user-managed MCP servers that Otto
   // merges into the workspace's `.mcp.json` when an agent session spawns there
   // (alongside Otto's own managed entries, e.g. the browser server). Nothing is
@@ -15,8 +16,12 @@
   import type { McpServer, CreateMcpServerReq } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import SettingToggle from './SettingToggle.svelte';
+  import { loadErrorText } from '../../lib/loadError';
 
   // The first-party `otto` MCP server (Otto's read-only tools + the read-only DB
   // connection tools), attached to agent sessions per WORKSPACE through the same
@@ -47,21 +52,20 @@
     }
   }
 
-  async function toggleOtto(input: HTMLInputElement): Promise<void> {
+  async function toggleOtto(next: boolean): Promise<void> {
     const id = ws.currentId;
     if (!id) return;
-    const next = input.checked;
     ottoSaving = true;
     try {
       const r = await mcpCpExtraApi.setSessionAttach(id, { enabled: next });
       ottoEnabled = r.attached;
-      toasts.info(
-        r.attached ? 'Connections MCP enabled' : 'Connections MCP disabled',
+      toasts.success(
+        r.attached ? 'Connections MCP attached' : 'Connections MCP detached',
         'For this workspace — applies to agent sessions started from now on.',
       );
     } catch (e) {
-      input.checked = ottoEnabled; // the box flipped itself; put it back
-      toasts.error('Could not update setting', errMsg(e));
+      // SettingToggle re-syncs the box to ottoEnabled (unchanged) after this.
+      toasts.error("Couldn't change the Connections MCP setting", errMsg(e));
     } finally {
       ottoSaving = false;
     }
@@ -69,6 +73,7 @@
 
   let servers: McpServer[] = $state([]);
   let loading = $state(false);
+  let loadError = $state('');
   let loadGeneration = 0;
   const canConfigure = (id: string) => resourceAccess.can('mcp_server', id, 'configure', 'mcp', 'admin');
   $effect(() => { for (const server of servers) void resourceAccess.load('mcp_server', server.id); });
@@ -95,9 +100,10 @@
   let saving = $state(false);
 
   const wsId = $derived(ws.currentId);
+  const formValid = $derived(fName.trim() !== '' && (!auth.isRoot || fCommand.trim() !== ''));
 
   function errMsg(e: unknown): string {
-    return e instanceof Error ? e.message : String(e);
+    return loadErrorText(e);
   }
 
   $effect(() => {
@@ -107,11 +113,12 @@
   async function load(id: string): Promise<void> {
     const generation = ++loadGeneration;
     loading = true;
+    loadError = '';
     try {
       const result = await mcpApi.list(id);
       if (generation === loadGeneration) servers = result;
     } catch (e) {
-      toasts.error('Could not load MCP servers', errMsg(e));
+      if (generation === loadGeneration) loadError = errMsg(e);
     } finally {
       loading = false;
     }
@@ -179,10 +186,7 @@
     if (!wsId || (!editing && !auth.isRoot)) return;
     const name = fName.trim();
     const command = fCommand.trim();
-    if (!name || (auth.isRoot && !command)) {
-      toasts.error('Name and command are required');
-      return;
-    }
+    if (!formValid) return;
     // Secret env: parse KEY=value lines; a KEY= line with an empty value keeps
     // the currently stored Keychain value (edit flow surfaces keys that way).
     const secretPairs = parseEnv(fSecretEnv, true);
@@ -218,7 +222,7 @@
       closeForm();
       await load(wsId);
     } catch (e) {
-      toasts.error('Save failed', errMsg(e));
+      toasts.error(editing ? "Couldn't save the MCP server" : "Couldn't add the MCP server", errMsg(e));
     } finally {
       saving = false;
     }
@@ -231,7 +235,7 @@
       await mcpApi.update(s.id, { enabled: !s.enabled });
       await load(wsId);
     } catch (e) {
-      toasts.error('Could not update MCP server', errMsg(e));
+      toasts.error(`Couldn't ${s.enabled ? 'disable' : 'enable'} ${s.name}`, errMsg(e));
     } finally {
       busyId = null;
     }
@@ -239,14 +243,20 @@
 
   async function remove(s: McpServer): Promise<void> {
     if (!wsId) return;
-    if (!(await confirmer.ask(`Remove MCP server "${s.name}"?`, { title: 'Remove MCP server', confirmLabel: 'Remove' }))) return;
+    if (
+      !(await confirmer.ask(
+        `Remove MCP server “${s.name}”? It stops being written to this workspace's .mcp.json for new sessions${s.secret_env_keys.length ? ', and its secret values are removed from the Keychain' : ''}.`,
+        { title: 'Remove MCP server', confirmLabel: 'Remove' },
+      ))
+    )
+      return;
     busyId = s.id;
     try {
       await mcpApi.remove(s.id);
-      toasts.info('MCP server removed', s.name);
+      toasts.success('MCP server removed', s.name);
       await load(wsId);
     } catch (e) {
-      toasts.error('Could not remove MCP server', errMsg(e));
+      toasts.error(`Couldn't remove ${s.name}`, errMsg(e));
     } finally {
       busyId = null;
     }
@@ -256,189 +266,200 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('mcp-servers')} subtitle="Per-workspace Model Context Protocol servers">
     {#snippet actions()}
-      {#if wsId}
-        <button class="btn primary" disabled={!auth.isRoot} onclick={openCreate}>Add server</button>
+      {#if wsId && servers.length > 0}
+        <button
+          class="btn primary"
+          disabled={!auth.isRoot}
+          title={auth.isRoot ? undefined : 'Only the owner can add MCP servers (they run a command on this Mac)'}
+          onclick={openCreate}><Icon name="plus" size={13} /> Add server</button
+        >
       {/if}
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
-  <p class="section-intro">Enabled servers are merged into this workspace's <code>.mcp.json</code> when an agent session spawns here, alongside Otto's own managed entries (e.g. the browser). Nothing is auto-enabled — a server is only written once you turn it on.</p>
+  <SectionIntro>Enabled servers are merged into this workspace's <code>.mcp.json</code> when an agent session spawns here, alongside Otto's own entries (e.g. the browser). Nothing is auto-enabled — a server is only written once you turn it on.</SectionIntro>
 
-  <div class="card otto" data-testid="connections-mcp">
-    <div class="otto-row">
-      <div class="otto-text">
-        <div class="otto-title">
-          Connections MCP <span class="badge">read-only</span>
-        </div>
-        <div class="sub">
-          Gives every agent session in this workspace Otto's <code>otto</code> MCP server — including tools to
-          discover your database connections and run <strong>read-only</strong> queries:
-          <code>otto_list_connections</code>, <code>otto_db_schema</code>,
-          <code>otto_db_children</code>, <code>otto_db_object</code>, <code>otto_db_query</code>.
-          Writes/DDL are refused server-side; rows are capped, PII-masked and audited. Attached to
-          Claude via <code>.mcp.json</code> and to Codex via <code>-c</code> overrides. Default on;
-          the same switch as “Attach to sessions” on the MCP page.
-        </div>
-        {#if ottoError}
-          <div class="sub otto-error" role="alert">
-            Couldn't read this workspace's setting: {ottoError}
-            <button class="btn small" onclick={() => ws.currentId && void loadOttoSetting(ws.currentId)}>Retry</button>
-          </div>
-        {/if}
+  <div class="section-title">Built in</div>
+  <div class="card mcp-card otto" data-testid="connections-mcp">
+    <SettingToggle
+      label="Attach the Connections MCP to agent sessions"
+      checked={ottoEnabled}
+      disabled={!wsId || !ottoLoaded || ottoSaving || !!ottoError}
+      title={!wsId ? 'Select a workspace first' : ottoError ? "Couldn't read the current value — Retry below" : undefined}
+      onchange={toggleOtto}
+    >
+      Otto's own <code>otto</code> server, <strong>read-only</strong>: agents can list your database
+      connections and run read-only queries (<code>otto_list_connections</code>, <code>otto_db_schema</code>,
+      <code>otto_db_query</code>, …). Writes and DDL are refused; rows are capped, PII-masked and audited.
+      For this workspace; the same switch as “Attach to sessions” on the MCP page.
+    </SettingToggle>
+    {#if ottoError}
+      <div class="otto-error" role="alert">
+        <span>Couldn't read this workspace's setting: {ottoError}</span>
+        <button class="btn small" onclick={() => ws.currentId && void loadOttoSetting(ws.currentId)}>Retry</button>
       </div>
-      <label
-        class="switch"
-        title={wsId ? 'Toggle the otto MCP server for agent sessions in this workspace' : 'Select a workspace first'}
-      >
-        <input
-          type="checkbox"
-          checked={ottoEnabled}
-          disabled={!wsId || !ottoLoaded || ottoSaving || !!ottoError}
-          onchange={(e) => void toggleOtto(e.currentTarget as HTMLInputElement)}
-        />
-        <span class="switch-label">{ottoEnabled ? 'On' : 'Off'}</span>
-      </label>
-    </div>
+    {/if}
   </div>
 
+  <div class="section-title">Your servers</div>
   {#if !wsId}
     <EmptyState
-      icon="gear"
+      icon="server"
       title="Select a workspace first"
       body="MCP servers are per-workspace. Choose a workspace from the sidebar to configure them."
     />
-  {:else if loading && servers.length === 0}
-    <Skeleton rows={2} height={64} />
   {:else}
-    {#if formOpen}
-      <div class="card form">
-        <div class="field">
-          <label for="mcp-name">Name</label>
-          <input
-            id="mcp-name"
-            class="input"
-            bind:value={fName}
-            spellcheck="false"
-            autocomplete="off"
-            placeholder="linear"
-          />
-          <span class="hint">The key under <code>mcpServers</code> in <code>.mcp.json</code> (unique per workspace).</span>
+    <LoadState what="MCP servers" {loading} error={loadError} empty={servers.length === 0} onretry={() => wsId && void load(wsId)} rows={2}>
+      {#snippet emptyView()}
+        <div class="card mcp-card">
+          <EmptyState
+            icon="server"
+            title="No MCP servers yet"
+            body="Add a Model Context Protocol server (a command such as npx @linear/mcp) to give agents extra tools in this workspace."
+            actionLabel={auth.isRoot ? 'Add server' : undefined}
+            actionIcon="plus"
+            onaction={auth.isRoot ? openCreate : undefined}
+          >
+            {#if !auth.isRoot}<span class="dim">Only the owner can add servers.</span>{/if}
+          </EmptyState>
         </div>
-        {#if !auth.isRoot}<p class="hint">Owner manages credentials and the native server command.</p>{/if}
-        <div class="field">
-          <label for="mcp-command">Command</label>
-          <input
-            id="mcp-command"
-            class="input"
-            bind:value={fCommand}
-            spellcheck="false"
-            autocomplete="off"
-            placeholder="npx"
-          />
-        </div>
-        <div class="field">
-          <label for="mcp-args">Arguments (one per line)</label>
-          <textarea
-            id="mcp-args"
-            class="input mono"
-            rows="3"
-            bind:value={fArgs}
-            spellcheck="false"
-            placeholder={'-y\n@linear/mcp'}
-          ></textarea>
-        </div>
-        <div class="field">
-          <label for="mcp-env">Environment (KEY=value, one per line)</label>
-          <textarea
-            id="mcp-env"
-            class="input mono"
-            rows="3"
-            bind:value={fEnv}
-            spellcheck="false"
-            placeholder={'API_KEY=...'}
-          ></textarea>
-          <span class="hint">
-            Non-secret configuration only — these values are stored in Otto's database. Put
-            tokens/keys in the secret field below instead.
-          </span>
-        </div>
-        <div class="field">
-          <label for="mcp-secret-env">Secret environment (KEY=value, one per line) 🔒</label>
-          <textarea
-            id="mcp-secret-env"
-            class="input mono"
-            rows="3"
-            bind:value={fSecretEnv}
-            spellcheck="false"
-            placeholder={'API_TOKEN=...'}
-          ></textarea>
-          <span class="hint">
-            Values are stored in the macOS Keychain, never in Otto's database, and are injected
-            into <code>.mcp.json</code> only when a session spawns. When editing, a bare
-            <code>KEY=</code> line keeps the stored value. Note the rendered
-            <code>.mcp.json</code> on disk does contain the real value — the agent CLI needs it.
-          </span>
-        </div>
-        <div class="field field-row">
-          <label for="mcp-enabled">Enabled (write to <code>.mcp.json</code> on next spawn)</label>
-          <input id="mcp-enabled" type="checkbox" bind:checked={fEnabled} />
-        </div>
-        <div class="actions">
-          <button class="btn primary" disabled={saving} onclick={save}>
-            {saving ? 'Saving…' : editing ? 'Save changes' : 'Add server'}
-          </button>
-          <button class="btn" disabled={saving} onclick={closeForm}>Cancel</button>
-        </div>
-      </div>
-    {/if}
-
-    {#if servers.length === 0 && !formOpen}
-      <EmptyState
-        icon="gear"
-        title="No MCP servers"
-        body="Add a Model Context Protocol server to give agents extra tools in this workspace."
-      />
-    {:else}
+      {/snippet}
       <div class="server-list">
         {#each servers as s (s.id)}
+          {@const locked = busyId === s.id || !canConfigure(s.id)}
           <div class="card server" class:off={!s.enabled}>
             <div class="server-main">
               <div class="server-head">
-                <span class="server-name mono">{s.name}</span>
+                <span class="server-name mono" title={s.name}>{s.name}</span>
                 {#if s.enabled}
-                  <span class="badge on">enabled</span>
+                  <span class="chip accent">Enabled</span>
                 {:else}
-                  <span class="badge">off</span>
+                  <span class="chip">Off</span>
                 {/if}
               </div>
-              <div class="server-cmd mono dim">
+              <div class="server-cmd mono" title={`${s.command} ${s.args.join(' ')}`.trim()}>
                 {s.command}{s.args.length ? ' ' + s.args.join(' ') : ''}
               </div>
-              {#if Object.keys(s.env).length}
-                <div class="server-env dim">env: {Object.keys(s.env).join(', ')}</div>
-              {/if}
-              {#if s.secret_env_keys.length}
-                <div class="server-env dim">secret env 🔒: {s.secret_env_keys.join(', ')}</div>
+              {#if Object.keys(s.env).length || s.secret_env_keys.length}
+                <div class="server-env">
+                  {#if Object.keys(s.env).length}env: {Object.keys(s.env).join(', ')}{/if}
+                  {#if s.secret_env_keys.length}
+                    {#if Object.keys(s.env).length} · {/if}<Icon name="lock" size={12} /> {s.secret_env_keys.join(', ')}
+                  {/if}
+                </div>
               {/if}
             </div>
             <div class="server-actions">
-              <button class="btn small" disabled={busyId === s.id || !canConfigure(s.id)} onclick={() => toggleEnabled(s)}>
+              <button class="btn small" disabled={locked} title={!canConfigure(s.id) ? "You can't configure this server" : undefined} onclick={() => toggleEnabled(s)}>
                 {s.enabled ? 'Disable' : 'Enable'}
               </button>
-              <button class="btn small" disabled={busyId === s.id || !canConfigure(s.id)} onclick={() => openEdit(s)}>
-                Edit
+              <button class="btn small" disabled={locked} title={!canConfigure(s.id) ? "You can't configure this server" : undefined} onclick={() => openEdit(s)}>
+                Edit…
               </button>
-              <button class="btn small danger" disabled={busyId === s.id || !canConfigure(s.id)} onclick={() => remove(s)}>
-                Remove
+              <button
+                class="icon-btn"
+                disabled={locked}
+                title="Remove {s.name}"
+                aria-label="Remove {s.name}"
+                onclick={() => remove(s)}
+              >
+                <Icon name="trash" size={14} />
               </button>
             </div>
           </div>
         {/each}
       </div>
-    {/if}
+    </LoadState>
   {/if}
   </PageBody>
 </div>
+
+{#if formOpen}
+  <Modal title={editing ? 'Edit MCP server' : 'Add MCP server'} width={540} onclose={closeForm}>
+    <div class="field">
+      <label for="mcp-name">Name</label>
+      <input
+        id="mcp-name"
+        class="input mono"
+        bind:value={fName}
+        spellcheck="false"
+        autocomplete="off"
+        placeholder="linear"
+      />
+      <span class="hint">The key under <code>mcpServers</code> in <code>.mcp.json</code> (unique per workspace).</span>
+    </div>
+    {#if !auth.isRoot}<p class="hint owner-note">The owner manages credentials and the server command.</p>{/if}
+    <div class="field">
+      <label for="mcp-command">Command</label>
+      <input
+        id="mcp-command"
+        class="input mono"
+        bind:value={fCommand}
+        disabled={!auth.isRoot}
+        spellcheck="false"
+        autocomplete="off"
+        placeholder="npx"
+      />
+    </div>
+    <div class="field">
+      <label for="mcp-args">Arguments <span class="dim">(one per line)</span></label>
+      <textarea
+        id="mcp-args"
+        class="input mono"
+        rows="3"
+        bind:value={fArgs}
+        disabled={!auth.isRoot}
+        spellcheck="false"
+        placeholder={'-y\n@linear/mcp'}
+      ></textarea>
+    </div>
+    <div class="field">
+      <label for="mcp-env">Environment <span class="dim">(KEY=value, one per line)</span></label>
+      <textarea
+        id="mcp-env"
+        class="input mono"
+        rows="3"
+        bind:value={fEnv}
+        disabled={!auth.isRoot}
+        spellcheck="false"
+        placeholder={'LOG_LEVEL=info'}
+      ></textarea>
+      <span class="hint">Non-secret values only — stored in Otto's database. Put tokens and keys below.</span>
+    </div>
+    <div class="field">
+      <label for="mcp-secret-env"><Icon name="lock" size={12} /> Secret environment <span class="dim">(KEY=value, one per line)</span></label>
+      <textarea
+        id="mcp-secret-env"
+        class="input mono"
+        rows="3"
+        bind:value={fSecretEnv}
+        disabled={!auth.isRoot}
+        spellcheck="false"
+        placeholder={'API_TOKEN=…'}
+      ></textarea>
+      <span class="hint">
+        Stored in the macOS Keychain, never in Otto's database, and written into <code>.mcp.json</code>
+        only when a session spawns (the agent CLI needs the real value on disk). When editing, a bare
+        <code>KEY=</code> line keeps the stored value.
+      </span>
+    </div>
+    <label class="checkbox-row enable-row">
+      <input id="mcp-enabled" type="checkbox" bind:checked={fEnabled} />
+      Enabled — write it to <code>.mcp.json</code> for new sessions
+    </label>
+    {#snippet footer()}
+      <button class="btn" disabled={saving} onclick={closeForm}>Cancel</button>
+      <button
+        class="btn primary"
+        disabled={saving || !formValid}
+        title={formValid ? undefined : auth.isRoot ? 'Enter a name and a command' : 'Enter a name'}
+        onclick={save}
+      >
+        {saving ? 'Saving…' : editing ? 'Save changes' : 'Add server'}
+      </button>
+    {/snippet}
+  </Modal>
+{/if}
 
 <style>
   /* Section chrome: shared PageHeader bar + scrolling PageBody. */
@@ -448,171 +469,59 @@
     height: 100%;
     min-height: 0;
   }
-  .sub {
-    font-size: 12.5px;
-    color: var(--text-dim);
-    line-height: 1.5;
-    max-width: 560px;
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+  }
+  .mcp-card {
+    max-width: 640px;
+  }
+  .otto {
+    padding: 4px 16px;
+  }
+  .section-title:first-of-type {
+    margin-top: 0;
   }
   .otto-error {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-top: 6px;
+    margin: 0 0 10px;
+    font-size: var(--fs-s);
     color: var(--danger);
   }
-  .section-intro {
-    margin: 0 0 14px;
-    font-size: 12.5px;
-    line-height: 1.5;
+  .owner-note {
+    margin: 0 0 12px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  .section-intro :global(code) {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    background: var(--surface-2);
-    padding: 1px 4px;
-    border-radius: 3px;
-  }
-  code {
-    font-family: var(--font-mono, monospace);
-    font-size: 0.92em;
-  }
-  .card {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m, 8px);
-    background: var(--surface);
-    padding: 14px 16px;
-  }
-  .otto {
-    margin-bottom: 16px;
-  }
-  .otto-row {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 16px;
-  }
-  .otto-title {
-    font-size: 14px;
-    font-weight: 600;
-    margin-bottom: 4px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .switch {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    flex-shrink: 0;
-    cursor: pointer;
-    user-select: none;
-  }
-  .switch input {
-    width: 16px;
-    height: 16px;
+  .enable-row {
     cursor: pointer;
   }
-  .switch-label {
-    font-size: 12.5px;
-    color: var(--text-dim);
-    min-width: 22px;
+  .enable-row input {
+    width: 15px;
+    height: 15px;
+    margin: 0;
+    accent-color: var(--accent);
   }
-  .form {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    margin-bottom: 16px;
-  }
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .field-row {
-    flex-direction: row;
-    align-items: center;
-    gap: 8px;
-  }
-  .field-row label {
-    flex: 1;
-  }
-  label {
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--text);
-  }
-  .input {
-    width: 100%;
-    box-sizing: border-box;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s, 6px);
-    color: var(--text);
-    font-size: 12.5px;
-    padding: 6px 8px;
-  }
-  textarea.input {
-    resize: vertical;
-  }
-  .mono {
-    font-family: var(--font-mono, monospace);
-  }
-  .hint {
-    font-size: 11.5px;
-    color: var(--text-dim);
-    line-height: 1.45;
-  }
-  .actions {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-  }
-  .btn {
-    height: 28px;
-    padding: 0 12px;
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text);
-    border-radius: var(--radius-s, 6px);
-    font-size: 12.5px;
-    cursor: pointer;
-  }
-  .btn:hover {
-    background: var(--surface-3);
-  }
-  .btn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: var(--accent-contrast);
-  }
-  .btn.small {
-    height: 24px;
-    padding: 0 8px;
-    font-size: 11.5px;
-  }
-  .btn.danger:hover {
-    border-color: var(--danger);
-    color: var(--danger);
-  }
-  .btn:disabled {
-    opacity: 0.5;
-    cursor: default;
+  .field label :global(svg) {
+    vertical-align: -2px;
   }
   .server-list {
     display: flex;
     flex-direction: column;
     gap: 8px;
+    max-width: 640px;
   }
   .server {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
+    padding: 12px 14px;
   }
-  .server.off {
-    opacity: 0.72;
+  .server.off .server-main {
+    opacity: 0.7;
   }
   .server-main {
     min-width: 0;
@@ -624,38 +533,40 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    min-width: 0;
   }
   .server-name {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
-  }
-  .server-cmd,
-  .server-env {
-    font-size: 11.5px;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .dim {
+  .server-cmd,
+  .server-env {
+    font-size: var(--fs-s);
     color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
-  .badge {
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 1px 6px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-  }
-  .badge.on {
-    color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 50%, transparent);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+  .server-env :global(svg) {
+    vertical-align: -2px;
   }
   .server-actions {
     display: flex;
+    align-items: center;
     gap: 6px;
     flex-shrink: 0;
+  }
+  @media (max-width: 640px) {
+    .server {
+      flex-wrap: wrap;
+    }
+    .server-actions {
+      width: 100%;
+      justify-content: flex-end;
+    }
   }
 </style>

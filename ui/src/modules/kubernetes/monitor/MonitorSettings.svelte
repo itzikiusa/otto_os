@@ -432,7 +432,7 @@
   }
   h3 {
     margin: 0;
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .row {
@@ -456,10 +456,10 @@
     font-weight: 600;
   }
   .status {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .rbac {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     padding: 8px;
     border-radius: 6px;
     background: color-mix(in srgb, orange 8%, var(--surface));
@@ -488,7 +488,7 @@
     display: flex;
     flex-direction: column;
     gap: 3px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     min-width: 0;
   }
   .field > span {
@@ -504,14 +504,14 @@
   .err {
     color: var(--status-exited);
     font-style: normal;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .err.span {
     grid-column: 1 / -1;
   }
   .help {
     margin: 0;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .probe {
     border: 1px solid var(--border);
@@ -550,7 +550,7 @@
     align-items: center;
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .dim {
     color: var(--text-dim);
@@ -560,7 +560,7 @@
   }
   .error {
     color: var(--status-exited);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .test {
     display: flex;
@@ -579,7 +579,7 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .tp.bad {
     border-color: color-mix(in srgb, var(--status-exited) 40%, var(--border));
@@ -587,7 +587,7 @@
   .samples {
     width: 100%;
     border-collapse: collapse;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .samples td {
     padding: 2px 6px;

@@ -113,16 +113,29 @@
     { id: 'bundled', icon: 'box', title: 'From a bundled skill', body: 'Copy one of Otto’s skills under a new name and adapt it.' },
     { id: 'import', icon: 'download', title: 'Import a file', body: 'A skill package (.zip) with SKILL.md at its root.' },
   ];
+  // Radiogroup keyboard: ←/→ (and ↑/↓) move the choice, as native radios do.
+  let tplEl = $state<HTMLElement | null>(null);
+  function onTplKey(e: KeyboardEvent): void {
+    const i = TEMPLATES.findIndex((t) => t.id === template);
+    let n = -1;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') n = (i + 1) % TEMPLATES.length;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') n = (i - 1 + TEMPLATES.length) % TEMPLATES.length;
+    if (n < 0) return;
+    e.preventDefault();
+    template = TEMPLATES[n].id;
+    queueMicrotask(() => (tplEl?.querySelectorAll('[role="radio"]')[n] as HTMLElement | undefined)?.focus());
+  }
 </script>
 
 <Modal title="New skill" width={560} {onclose}>
-  <div class="templates" role="radiogroup" aria-label="Start from">
+  <div class="templates" role="radiogroup" aria-label="Start from" tabindex="-1" bind:this={tplEl} onkeydown={onTplKey}>
     {#each TEMPLATES as t (t.id)}
       <button
         class="tpl"
         class:active={template === t.id}
         role="radio"
         aria-checked={template === t.id}
+        tabindex={template === t.id ? 0 : -1}
         onclick={() => (template = t.id)}
         data-testid="tpl-{t.id}"
       >

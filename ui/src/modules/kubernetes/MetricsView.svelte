@@ -94,7 +94,7 @@
     display: flex;
     flex-direction: column;
     gap: 14px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .totals {
     display: flex;
@@ -122,7 +122,7 @@
     gap: 12px;
   }
   .ctr-name {
-    font-size: 12px;
+    font-size: var(--fs-s);
     margin-bottom: 4px;
   }
   .bar-row {
@@ -151,14 +151,14 @@
   }
   .val {
     text-align: right;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .dim {
     color: var(--text-dim);
     line-height: 1.5;
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .err {
     color: var(--status-exited);

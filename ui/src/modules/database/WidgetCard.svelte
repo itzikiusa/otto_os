@@ -170,7 +170,7 @@
   }
   .wc-title {
     flex: 1;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 600;
     min-width: 0;
   }
@@ -198,7 +198,7 @@
     place-items: center;
     height: 100%;
     color: var(--status-exited);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .wc-stale {
     display: inline-flex;

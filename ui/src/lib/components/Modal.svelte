@@ -158,7 +158,7 @@
   h2 {
     margin: 0;
     min-width: 0;
-    font-size: 14px;
+    font-size: var(--fs-l);
     font-weight: 600;
     /* A title carrying a path / branch / session name wraps instead of
        pushing the close button out of the sheet. */

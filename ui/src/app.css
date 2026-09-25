@@ -149,6 +149,16 @@ a:hover {
   background: var(--danger-soft);
   border-color: color-mix(in srgb, var(--danger) 40%, transparent);
 }
+/* The COMMIT of a destructive action (the confirm sheet's red button that
+   repeats the verb — patterns.md §7). The request itself stays .btn.danger. */
+.btn.danger-solid {
+  background: var(--danger-solid);
+  border-color: transparent;
+  color: var(--danger-contrast);
+}
+.btn.danger-solid:hover {
+  filter: brightness(1.06);
+}
 .btn.small {
   height: 22px;
   padding: 0 8px;

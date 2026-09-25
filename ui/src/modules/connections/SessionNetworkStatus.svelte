@@ -61,7 +61,7 @@
   </div>
 </details>
 <style>
-  .network { flex-shrink: 0; min-width: 0; border-block-end: 1px solid var(--border); font-size: 11px; }
+  .network { flex-shrink: 0; min-width: 0; border-block-end: 1px solid var(--border); font-size: var(--fs-xs); }
   summary { cursor: pointer; padding: 5px 9px; overflow-wrap: anywhere; color: var(--text-dim); }
   .contents { max-height: 40vh; overflow: auto; padding: 5px 9px; } .endpoint { display: grid; gap: 3px; margin-block: 8px; }
   code { white-space: normal; overflow-wrap: anywhere; } p { margin: 6px 0; } .error { color: var(--danger); }

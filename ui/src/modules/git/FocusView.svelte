@@ -226,6 +226,15 @@
     return `${days}d`;
   }
 
+  const CI_LABEL: Record<string, string> = {
+    success: 'CI passing',
+    passing: 'CI passing',
+    failure: 'CI failing',
+    failed: 'CI failing',
+    failing: 'CI failing',
+    pending: 'CI running',
+  };
+
   const forgeLabel: Record<string, string> = {
     github: 'GitHub',
     bitbucket: 'Bitbucket',
@@ -248,7 +257,7 @@
       <span class="grow"></span>
       {#if node.issue.priority}<span class="fx-prio dim">{node.issue.priority}</span>{/if}
       <span class="fx-status">{node.issue.status}</span>
-      <span class="fx-ago dim">{ago(node.issue.updated_at)}</span>
+      <span class="fx-ago dim" title={node.issue.updated_at ? `Updated ${new Date(node.issue.updated_at).toLocaleString()}` : undefined}>{ago(node.issue.updated_at)}</span>
     </button>
     <button
       class="fx-ext"
@@ -256,7 +265,7 @@
       title="Open in Jira"
       aria-label="Open {node.issue.key} in Jira"
     >
-      <Icon name="globe" size={12} />
+      <Icon name="external" size={12} />
     </button>
   </div>
   {#each node.children as child (child.issue.key)}
@@ -271,17 +280,17 @@
       <header class="fx-head">
         <!-- "All open" lists every open PR across the registered repos, not just
              the user's — the heading says which one is showing. -->
-        <span class="fx-title">{prFilter === 'mine' && myHandles.size > 0 ? 'MY PULL REQUESTS' : 'OPEN PULL REQUESTS'}</span>
+        <span class="fx-title">{prFilter === 'mine' && myHandles.size > 0 ? 'My pull requests' : 'Open pull requests'}</span>
         <span class="fx-count">{visiblePrRows.length}</span>
         <span class="grow"></span>
         {#if myHandles.size > 0}
-          <div class="fx-seg">
-            <button class:active={prFilter === 'all'} onclick={() => (prFilter = 'all')}>All open</button>
-            <button class:active={prFilter === 'mine'} onclick={() => (prFilter = 'mine')}>Opened by me</button>
+          <div class="segmented" role="group" aria-label="Which pull requests">
+            <button aria-pressed={prFilter === 'all'} class:active={prFilter === 'all'} onclick={() => (prFilter = 'all')}>All open</button>
+            <button aria-pressed={prFilter === 'mine'} class:active={prFilter === 'mine'} onclick={() => (prFilter = 'mine')}>Opened by me</button>
           </div>
         {/if}
-        <button class="btn small ghost" onclick={() => void loadPrs()} title="Refresh pull requests">
-          <Icon name="refresh" size={12} />
+        <button class="icon-btn" onclick={() => void loadPrs()} title="Refresh pull requests" aria-label="Refresh pull requests">
+          <Icon name="refresh" size={14} />
         </button>
       </header>
 
@@ -305,7 +314,7 @@
           </div>
           {#each rows as row (row.repo.id + '#' + row.pr.number)}
             <div class="fx-pr">
-              <span class="fx-ago dim" title={row.pr.updated_at}>{ago(row.pr.updated_at)}</span>
+              <span class="fx-ago dim" title="Updated {new Date(row.pr.updated_at).toLocaleString()}">{ago(row.pr.updated_at)}</span>
               <button
                 class="fx-pr-title"
                 onclick={() => openExternal(row.pr.url)}
@@ -324,14 +333,14 @@
                 }}
                 title="Open {row.repo.name} in Otto"
               >
-                <Icon name="branch" size={11} />
-                {row.repo.name}
+                <Icon name="branch" size={12} />
+                <span class="fx-repo-name">{row.repo.name}</span>
               </button>
               <span class="fx-branch mono" title="{row.pr.source_branch} → {row.pr.target_branch}">
                 {row.pr.source_branch}
               </span>
               {#if row.pr.ci_status}
-                <span class="fx-ci ci-{row.pr.ci_status}">{row.pr.ci_status}</span>
+                <span class="fx-ci ci-{row.pr.ci_status}" title="CI {row.pr.ci_status}">{CI_LABEL[row.pr.ci_status] ?? row.pr.ci_status}</span>
               {/if}
             </div>
           {/each}
@@ -342,7 +351,7 @@
     <!-- ── MY WORK (Jira) ── -->
     <section class="fx-section">
       <header class="fx-head">
-        <span class="fx-title">MY WORK</span>
+        <span class="fx-title">My Jira work</span>
         {#if !workLoading && work.length > 0}<span class="fx-count">{work.length}</span>{/if}
         <span class="grow"></span>
         {#if issueAccounts.length > 1}
@@ -353,22 +362,27 @@
           </select>
         {/if}
         {#if issueAccountId}
-          <button class="btn small ghost" onclick={() => void loadWork(issueAccountId)} title="Refresh my work">
-            <Icon name="refresh" size={12} />
+          <button class="icon-btn" onclick={() => void loadWork(issueAccountId)} title="Refresh my Jira work" aria-label="Refresh my Jira work">
+            <Icon name="refresh" size={14} />
           </button>
         {/if}
       </header>
 
       {#if issueAccounts.length === 0 && !workLoading}
-        <div class="fx-empty dim">
-          No Jira account connected — add one under Settings → Integrations to see your assigned work here.
+        <div class="fx-empty dim fx-empty-row">
+          <span>Connect a Jira account to see the issues assigned to you here.</span>
+          <button class="btn small" onclick={() => router.go('settings/jira')}><Icon name="ticket" size={12} /> Add Jira account…</button>
         </div>
       {:else if workLoading}
         <div style="padding: 10px"><Skeleton rows={5} height={24} /></div>
       {:else if workError}
-        <div class="fx-empty dim">Failed to load your Jira work: {workError}</div>
+        <div class="fx-empty fx-empty-row" role="alert">
+          <Icon name="warning" size={14} />
+          <span class="grow">Couldn’t load your Jira work. <span class="dim">{workError}</span></span>
+          <button class="btn small" onclick={() => void loadWork(issueAccountId)}>Retry</button>
+        </div>
       {:else if work.length === 0}
-        <div class="fx-empty dim">Nothing assigned to you 🎉</div>
+        <div class="fx-empty dim">No open issues are assigned to you.</div>
       {:else}
         {#each projects as proj (proj.key)}
           <div class="fx-group-head">
@@ -406,9 +420,9 @@
           disabled={!quickIssue}
           title="Open in Jira"
         >
-          <Icon name="globe" size={12} /> Jira
+          <Icon name="external" size={12} /> Open in Jira
         </button>
-        <button class="fx-quick-close" onclick={closeQuick} title="Close" aria-label="Close issue quick view"><Icon name="x" size={12} /></button>
+        <button class="fx-quick-close" onclick={closeQuick} title="Close issue quick view" aria-label="Close issue quick view"><Icon name="x" size={14} /></button>
       </header>
       {#if quickLoading}
         <div style="padding: 12px"><Skeleton rows={6} height={20} /></div>
@@ -423,11 +437,15 @@
           {#if quickIssue.description}
             <pre class="fx-quick-desc">{quickIssue.description}</pre>
           {:else}
-            <div class="dim" style="font-size: 12px">No description.</div>
+            <div class="dim" style="font-size: var(--fs-s)">No description.</div>
           {/if}
         </div>
       {:else}
-        <div class="fx-empty dim">Failed to load {quickKey}.</div>
+        <div class="fx-empty fx-empty-row" role="alert">
+          <Icon name="warning" size={14} />
+          <span class="grow">Couldn’t load {quickKey}.</span>
+          <button class="btn small" onclick={() => quickKey && void openQuick(quickKey)}>Retry</button>
+        </div>
       {/if}
     </aside>
   {/if}
@@ -461,14 +479,17 @@
     border-bottom: 1px solid var(--border);
     margin-bottom: 4px;
   }
+  /* Same shape as the global .section-title micro-label. */
   .fx-title {
-    font-size: 12px;
-    font-weight: 800;
-    letter-spacing: 0.08em;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-dim);
   }
   .fx-count {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     min-width: 16px;
     padding: 0 5px;
     border-radius: 999px;
@@ -479,40 +500,35 @@
   .grow {
     flex: 1;
   }
-  .fx-seg {
-    display: inline-flex;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    overflow: hidden;
-  }
-  .fx-seg button {
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 11px;
-    padding: 3px 10px;
-    cursor: pointer;
-  }
-  .fx-seg button.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent-text);
-    font-weight: 600;
-  }
   .fx-empty {
     padding: 14px 10px;
-    font-size: 12px;
+    font-size: var(--fs-s);
+  }
+  .fx-empty-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .fx-empty-row > :global(svg) {
+    color: var(--danger);
+    flex-shrink: 0;
+  }
+  .fx-empty-row .grow {
+    flex: 1;
+    min-width: 0;
   }
   .fx-warn {
     padding: 4px 10px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .fx-group-head {
     display: flex;
     align-items: center;
     gap: 7px;
     padding: 8px 4px 4px;
-    font-size: 11px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     color: var(--text);
   }
   .fx-group-head .mono {
@@ -549,7 +565,7 @@
     color: var(--text);
     cursor: pointer;
     text-align: start;
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 0;
   }
   .fx-pr-title:hover .fx-pr-text {
@@ -558,16 +574,16 @@
   }
   .fx-pr-num {
     color: var(--accent-text);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     flex-shrink: 0;
   }
   .fx-draft {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     padding: 0 5px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text-dim);
     border: 1px dashed var(--border);
@@ -580,7 +596,7 @@
     min-width: 0;
   }
   .fx-pr-author {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     flex: 0 0 auto;
     max-width: 130px;
     overflow: hidden;
@@ -607,11 +623,19 @@
   .fx-repo-link:hover {
     background: color-mix(in srgb, var(--accent) 20%, transparent);
   }
+  .fx-repo-link > :global(svg) {
+    flex-shrink: 0;
+  }
+  .fx-repo-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .fx-branch {
     font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface-2);
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     padding: 1px 6px;
     max-width: 180px;
     overflow: hidden;
@@ -621,21 +645,23 @@
   }
   .fx-ci {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     padding: 1px 6px;
     border-radius: 999px;
     flex-shrink: 0;
     background: var(--surface-2);
     color: var(--text-dim);
   }
-  .fx-ci.ci-success {
-    background: color-mix(in srgb, var(--status-working) 18%, transparent);
-    color: var(--status-working);
+  .fx-ci.ci-success,
+  .fx-ci.ci-passing {
+    background: color-mix(in srgb, var(--success) 18%, transparent);
+    color: var(--success);
   }
   .fx-ci.ci-failed,
+  .fx-ci.ci-failing,
   .fx-ci.ci-failure {
-    background: color-mix(in srgb, var(--status-exited) 18%, transparent);
-    color: var(--status-exited);
+    background: color-mix(in srgb, var(--danger) 18%, transparent);
+    color: var(--danger);
   }
 
   /* ── Jira rows ── */
@@ -644,7 +670,7 @@
     align-items: center;
     gap: 7px;
     padding: 5px 6px 3px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .fx-parent-summary {
@@ -676,7 +702,7 @@
     color: var(--text);
     cursor: pointer;
     text-align: start;
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 2px 6px;
     border-radius: var(--radius-s);
   }
@@ -685,34 +711,20 @@
   }
   .fx-type {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.03em;
     padding: 1px 5px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text-dim);
     flex-shrink: 0;
   }
-  .fx-type.t-epic {
-    background: color-mix(in srgb, #c678dd 20%, transparent);
-    color: #c678dd;
-  }
-  .fx-type.t-story {
-    background: color-mix(in srgb, var(--status-working) 18%, transparent);
-    color: var(--status-working);
-  }
-  .fx-type.t-bug {
-    background: color-mix(in srgb, var(--status-exited) 18%, transparent);
-    color: var(--status-exited);
-  }
-  .fx-type.t-sub-task,
-  .fx-type.t-subtask {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent-text);
-  }
+  /* Issue types are kinds, not statuses: one neutral chip for all of them
+     (no per-type rainbow — green "Story" read as success, red "Bug" as a
+     failure). The word carries the type. */
   .fx-key {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--accent-text);
     flex-shrink: 0;
@@ -759,7 +771,7 @@
   }
   .fx-account {
     height: 26px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     max-width: 180px;
   }
 
@@ -789,7 +801,7 @@
     color: var(--text-dim);
     cursor: pointer;
     padding: 4px 6px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
   }
   .fx-quick-close:hover {
     color: var(--text);
@@ -805,7 +817,7 @@
     gap: 10px;
   }
   .fx-quick-summary {
-    font-size: 13.5px;
+    font-size: var(--fs-m);
     font-weight: 600;
     line-height: 1.4;
   }
@@ -813,12 +825,12 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     flex-wrap: wrap;
   }
   .fx-quick-desc {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.55;
     white-space: pre-wrap;
     word-break: break-word;

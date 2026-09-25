@@ -240,6 +240,10 @@ test('product: manually edit Jira story title and description', async ({
   await expect(descArea).toHaveValue(INITIAL_DESC);
   await descArea.fill(NEW_DESC);
   await page.locator('.desc-editor').getByRole('button', { name: /^Save to / }).click();
+  // Replacing the whole live description is outward-facing: it confirms first.
+  const replaceDlg = page.getByRole('dialog');
+  await expect(replaceDlg).toContainText('Where: Jira');
+  await replaceDlg.getByRole('button', { name: 'Replace description' }).click();
 
   // Optimistic update: the rendered body shows the new text; editor closes.
   await expect(descArea).toHaveCount(0, { timeout: 10_000 });

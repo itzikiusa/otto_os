@@ -17,6 +17,7 @@
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus } from '../../lib/status';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
+  import { sourceLabel } from './skillGroups';
 
   interface Props {
     wsId: string;
@@ -33,6 +34,8 @@
   let reviews = $state<SkillReview[]>([]);
   // Inline list-load failure + Retry (instead of a toast over "No skill reviews yet").
   let listError = $state<string | null>(null);
+  // First list load: don't flash "No skill reviews yet" before it lands.
+  let listLoading = $state(true);
   let selected = $state<SkillReview | null>(null);
   let skillOpts = $state<SkillOpt[]>([]);
 
@@ -93,12 +96,17 @@
   }
 
   async function loadList(): Promise<void> {
-    if (!wsId) return;
+    if (!wsId) {
+      listLoading = false;
+      return;
+    }
     try {
       reviews = await skillReviewApi.list(wsId);
       listError = null;
     } catch (e) {
       listError = e instanceof Error ? e.message : String(e);
+    } finally {
+      listLoading = false;
     }
   }
 
@@ -108,7 +116,7 @@
     try {
       selected = await skillReviewApi.get(id);
     } catch (e) {
-      if (!quiet) toasts.error('Open review failed', e instanceof Error ? e.message : String(e));
+      if (!quiet) toasts.error("Couldn't open the review", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -133,7 +141,7 @@
       selected = rev;
       await loadList();
     } catch (e) {
-      toasts.error('Start review failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't start the review", e instanceof Error ? e.message : String(e));
     } finally {
       starting = false;
     }
@@ -150,7 +158,7 @@
       fixTermOpen = true;
       toasts.info('Fixer agent starting…');
     } catch (e) {
-      toasts.error('Apply fixes failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't start the fixer agent", e instanceof Error ? e.message : String(e));
     } finally {
       applying = false;
     }
@@ -158,11 +166,18 @@
 
   async function cancelReview(): Promise<void> {
     if (!selected) return;
+    if (
+      !(await confirmer.ask(`Stop the review of "${selected.skill_name}"? Agents still running are stopped and their partial findings are not summarized.`, {
+        title: 'Stop review',
+        confirmLabel: 'Stop review',
+      }))
+    )
+      return;
     try {
       selected = await skillReviewApi.cancel(selected.id);
       await loadList();
     } catch (e) {
-      toasts.error('Cancel failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't stop the review", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -181,7 +196,7 @@
       if (selected?.id === rev.id) selected = null;
       await loadList();
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't delete the review", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -259,26 +274,29 @@
 
 <div class="lab-review" data-testid="skill-review">
   <aside class="lr-side">
-    <button class="btn small primary block" onclick={newReview} data-testid="new-skill-review"><Icon name="plus" size={12} /> New review</button>
+    <!-- Not .primary: the form's "Start review" is the view's primary. -->
+    <button class="btn small block" onclick={newReview} aria-pressed={!selected} data-testid="new-skill-review"><Icon name="plus" size={12} /> New review</button>
     {#if listError && reviews.length === 0}
       <div class="lr-empty lr-list-err" role="alert">
-        Couldn't load reviews: {listError}
+        <span><Icon name="warning" size={12} /> <strong>Couldn't load reviews.</strong> <span class="lr-err-detail">{listError}</span></span>
         <button class="btn small" onclick={loadList}>Retry</button>
       </div>
+    {:else if listLoading && reviews.length === 0}
+      <p class="lr-empty" role="status">Loading reviews…</p>
     {:else if reviews.length === 0}
-      <p class="lr-empty">No skill reviews yet.</p>
+      <p class="lr-empty">No skill reviews yet. Start one with the form.</p>
     {:else}
       <ul class="lr-list">
         {#each reviews as r (r.id)}
           <li>
-            <button class="lr-item" class:active={selected?.id === r.id} onclick={() => openReview(r.id)}>
+            <button class="lr-item" class:active={selected?.id === r.id} aria-current={selected?.id === r.id ? 'true' : undefined} onclick={() => openReview(r.id)}>
               <span class="lr-item-name" title={r.skill_name}>{r.skill_name}</span>
               <span class="lr-item-meta">
-                <span class="chip lr-src">{r.skill_source}</span>
+                <span class="chip lr-src">{sourceLabel(r.skill_source)}</span>
                 <span class="rp-status-pill" data-status={r.status}><StatusBadge status={runStatus(r.status)} /></span>
               </span>
             </button>
-            <button class="btn small ghost lr-del" title="Delete review" aria-label="Delete the review of {r.skill_name}" onclick={() => deleteReview(r)}><Icon name="trash" size={12} /></button>
+             <button class="icon-btn lr-del" title="Delete review" aria-label="Delete the review of {r.skill_name}" onclick={() => deleteReview(r)}><Icon name="trash" size={12} /></button>
           </li>
         {/each}
       </ul>
@@ -297,7 +315,7 @@
         </p>
         <label class="lr-field">
           <span>Skill under review</span>
-          <select bind:value={fSkill} data-testid="skill-review-select">
+          <select class="input" bind:value={fSkill} data-testid="skill-review-select">
             <option value="" disabled>Pick a skill…</option>
             {#each skillOpts as o (o.source + ':' + o.name)}
               <option value={o.source + ':' + o.name}>{o.label}</option>
@@ -322,7 +340,7 @@
         <label class="lr-field">
           <span>Additional instructions (optional)</span>
           <textarea
-            class="lr-textarea"
+            class="input lr-textarea"
             rows="3"
             bind:value={fInstructions}
             placeholder="Extra context for the reviewers — e.g. “check recent commits: they fix the previous review round”, known issues from earlier implementations…"
@@ -339,17 +357,17 @@
         <div class="lr-detail-head">
           <div>
             <h3>{selected.skill_name}</h3>
-            <span class="chip lr-src">{selected.skill_source}</span>
+            <span class="chip lr-src">{sourceLabel(selected.skill_source)}</span>
             <span class="rp-status-pill" data-status={selected.status}><StatusBadge status={runStatus(selected.status)} /></span>
           </div>
           <div class="grow"></div>
           {#if selected.status === 'running'}
-            <button class="btn small ghost" onclick={cancelReview}>Cancel</button>
+            <button class="btn small" onclick={cancelReview}><Icon name="square" size={12} /> Stop review</button>
           {/if}
         </div>
 
         {#if selected.error}
-          <p class="lr-error">{selected.error}</p>
+          <p class="lr-error" role="alert"><Icon name="warning" size={12} /> {selected.error}</p>
         {/if}
 
         {#if selected.instructions}
@@ -433,12 +451,12 @@
             {#if selected.fix_agent}
               {@const fx = selected.fix_agent}
               <div class="lr-fix-row">
-                <span class="lr-fix-name">fixer</span>
+                <span class="lr-fix-name">Fixer</span>
                 <span class="chip">{fx.provider}</span>
                 <span class="grow"></span>
                 {#if fx.session_id}
-                  <button class="btn small ghost" onclick={() => (fixTermOpen = !fixTermOpen)}>
-                    {fixTermOpen ? 'Hide' : 'Open'}
+                  <button class="btn small ghost" aria-expanded={fixTermOpen} onclick={() => (fixTermOpen = !fixTermOpen)}>
+                    {fixTermOpen ? 'Hide session' : 'Open session'}
                   </button>
                 {/if}
                 <span class="rp-status-pill" data-status={fx.status}><StatusBadge status={runStatus(fx.status)} /></span>
@@ -447,7 +465,7 @@
                 <p class="lr-fix-note">{fx.note}</p>
               {/if}
               {#if fx.status === 'waiting'}
-                <p class="lr-fix-waiting">⚠ The fixer looks blocked on input. Click <strong>Open</strong> to respond.</p>
+                <p class="lr-fix-waiting"><Icon name="warning" size={12} /> The fixer looks blocked on input. <strong>Open session</strong> to respond.</p>
               {/if}
               {#if fx.session_id && fixTermOpen}
                 <div class="lr-fix-term">
@@ -460,15 +478,16 @@
                 <p class="lr-hint">Bundled skills are read-only — install the skill to the library first, then review and apply fixes there.</p>
               {:else}
                 <p class="lr-hint">
-                  Send the findings and patch plan to an agent that applies them directly to the skill directory.
+                  Send the findings and patch plan to an agent that edits the {sourceLabel(selected.skill_source)} copy of the skill directly on disk.
                 </p>
                 <div class="lr-fix-form">
-                  <select bind:value={fixProvider} title="Fixer provider">
+                  <select class="input" bind:value={fixProvider} title="Fixer agent" aria-label="Fixer agent">
                     {#each agentProviders() as p (p)}<option value={p}>{p}</option>{/each}
                   </select>
                   <input
                     type="text"
-                    class="lr-fix-input"
+                    class="input lr-fix-input"
+                    aria-label="Extra instructions for the fixer"
                     bind:value={fixInstructions}
                     placeholder="Extra instructions for the fixer (optional)…"
                   />
@@ -491,7 +510,9 @@
   .lr-side { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; padding: 10px 8px; background: var(--surface); border-inline-end: 1px solid var(--border); }
   .block { width: 100%; }
   .lr-empty { color: var(--text-dim); font-size: var(--fs-s); padding: 8px; }
-  .lr-list-err { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; color: var(--danger); overflow-wrap: anywhere; }
+  .lr-list-err { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; color: var(--text); overflow-wrap: anywhere; }
+  .lr-list-err :global(svg), .lr-error :global(svg) { color: var(--danger); vertical-align: -1px; }
+  .lr-err-detail { color: var(--text-dim); }
   .lr-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
   .lr-list li { display: flex; align-items: center; gap: 4px; }
   .lr-item {
@@ -507,71 +528,61 @@
   .lr-main { overflow-y: auto; min-height: 0; padding: 16px 20px; }
   .lr-form { padding: 16px; max-width: 620px; display: flex; flex-direction: column; gap: 12px; }
   .lr-form h3 { margin: 0; }
-  .lr-hint { font-size: 12px; color: var(--text-dim); line-height: 1.5; margin: 0; }
+  .lr-hint { font-size: var(--fs-s); color: var(--text-dim); line-height: 1.5; margin: 0; }
   .lr-field { display: flex; flex-direction: column; gap: 6px; border: none; margin: 0; padding: 0; }
-  .lr-field > span { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); }
-  .lr-field select { padding: 8px; border-radius: var(--radius-m); border: 1px solid var(--border); background: var(--surface); color: var(--text); }
-  .lr-radio, .lr-check { display: flex; align-items: center; gap: 7px; font-size: 12.5px; }
-  .lr-textarea {
-    padding: 8px; border-radius: var(--radius-m); border: 1px solid var(--border);
-    background: var(--surface); color: var(--text); font: inherit; font-size: 12.5px; resize: vertical;
-  }
+  .lr-field > span { font-size: var(--fs-s); font-weight: 500; color: var(--text-dim); }
+  .lr-radio, .lr-check { display: flex; align-items: center; gap: 7px; font-size: var(--fs-s); }
+  .lr-textarea { resize: vertical; }
   .lr-instructions {
-    margin: 0; font-size: 12px; color: var(--text-dim); line-height: 1.5;
+    margin: 0; font-size: var(--fs-s); color: var(--text-dim); line-height: 1.5;
     border-inline-start: 2px solid var(--border); padding: 2px 10px;
   }
 
   .lr-fix { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
   .lr-fix h4 { margin: 0; }
   .lr-fix-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .lr-fix-name { font-size: 12.5px; font-weight: 600; }
-  .lr-fix-note { margin: 0; font-size: 11.5px; color: var(--text-dim); line-height: 1.4; }
-  .lr-fix-waiting { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--warning); }
+  .lr-fix-name { font-size: var(--fs-s); font-weight: 600; }
+  .lr-fix-note { margin: 0; font-size: var(--fs-xs); color: var(--text-dim); line-height: 1.4; }
+  .lr-fix-waiting { margin: 0; font-size: var(--fs-xs); line-height: 1.45; color: var(--warning); }
   .lr-fix-term {
     height: min(360px, 65vh); border: 1px solid var(--border);
     border-radius: var(--radius-m); overflow: hidden; overscroll-behavior: contain; background: var(--term-bg);
   }
   .lr-fix-form { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .lr-fix-form select {
-    padding: 7px 8px; border-radius: var(--radius-m); border: 1px solid var(--border);
-    background: var(--surface); color: var(--text);
-  }
-  .lr-fix-input {
-    flex: 1; min-width: 180px; padding: 7px 9px; border-radius: var(--radius-m);
-    border: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 12.5px;
-  }
+  .lr-fix-form select { width: auto; }
+  .lr-fix-input { flex: 1; min-width: 180px; }
 
   .lr-detail { display: flex; flex-direction: column; gap: 12px; }
   .lr-detail-head { display: flex; align-items: center; gap: 8px; }
   .lr-detail-head h3 { margin: 0 8px 0 0; display: inline; }
-  .lr-error { color: var(--danger); font-size: 12px; }
+  .lr-error { color: var(--danger); font-size: var(--fs-s); }
   .grow { flex: 1; }
 
   .lr-static, .lr-summary { padding: 12px 14px; }
   .lr-verdict { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
-  .lr-verdict-badge { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; padding: 3px 8px; border-radius: var(--radius-s); }
+  .lr-verdict-badge { font-size: var(--fs-xs); font-weight: 500; padding: 2px 8px; border-radius: 999px; }
   .verdict-ready .lr-verdict-badge { background: var(--success-soft); color: var(--success); }
   .verdict-fixes .lr-verdict-badge { background: var(--warning-soft); color: var(--warning); }
   .verdict-block .lr-verdict-badge { background: var(--danger-soft); color: var(--danger); }
-  .lr-avg { font-size: 11.5px; color: var(--text-dim); }
-  .lr-score { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+  .lr-avg { font-size: var(--fs-xs); color: var(--text-dim); }
+  .lr-score { width: 100%; border-collapse: collapse; font-size: var(--fs-xs); }
   .lr-score td { padding: 3px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
   .lr-area { font-weight: 600; white-space: nowrap; }
   .lr-num { text-align: right; white-space: nowrap; color: var(--text-dim); }
   .lr-notes { color: var(--text-dim); }
   .lr-findings { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
   .lr-agents-sec h4, .lr-summary h5 { margin: 8px 0 4px; }
-  .lr-plan { margin: 4px 0 8px 18px; font-size: 12.5px; line-height: 1.5; }
+  .lr-plan { margin: 4px 0 8px 18px; font-size: var(--fs-s); line-height: 1.5; }
 
   .rp-status-pill { display: inline-flex; align-items: center; }
-  .rp-finding { display: flex; align-items: baseline; gap: 6px; font-size: 11.5px; line-height: 1.4; }
+  .rp-finding { display: flex; align-items: baseline; gap: 6px; font-size: var(--fs-xs); line-height: 1.4; }
   .rp-finding-body { flex: 1; min-width: 0; }
-  .rp-loc { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
-  .severity-chip { display: inline-block; padding: 2px 7px; border-radius: var(--radius-s, 4px); font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+  .rp-loc { font-size: var(--fs-xs); color: var(--text-dim); white-space: nowrap; }
+  .severity-chip { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: var(--fs-xs); font-weight: 500; text-transform: capitalize; }
   .sev-critical { background: var(--danger-soft); color: var(--danger); }
   .sev-high { background: var(--danger-soft); color: var(--danger); }
   .sev-medium { background: var(--warning-soft); color: var(--warning); }
-  .sev-low { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent-text); }
+  .sev-low { background: var(--info-soft); color: var(--info); }
   .mono { font-family: var(--font-mono, monospace); }
 
   @media (max-width: 1024px) {

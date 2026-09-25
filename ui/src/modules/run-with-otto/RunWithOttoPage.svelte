@@ -16,7 +16,10 @@
   import RunDetail from './RunDetail.svelte';
   import RunStageRail from './RunStageRail.svelte';
   import type { OttoRun } from '../../lib/api/types';
-  import { humanize, sourceColor, sourceLabel, statusTone } from './runStatus';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { initialSelection, rememberSelection } from '../../lib/lastSelection';
+  import { viewport } from '../../lib/stores/viewport.svelte';
+  import { runStatusInfo, sourceLabel } from './runStatus';
 
   // Load the workspace's runs whenever the active workspace changes. This effect
   // reads ONLY ws.currentId (not the run list it loads), so it never self-loops.
@@ -35,19 +38,48 @@
   const list = $derived(runWithOtto.list);
   const openRun = $derived(runWithOtto.openRun);
 
-  function onLaunched(run: OttoRun): void {
+  let detailEl: HTMLElement | undefined = $state();
+
+  // A list/detail page opens ON a run, never on a list with nothing beside it
+  // (layout.md): once the list is in, open the remembered run (else the
+  // newest). Desktop only — on narrow widths the detail stacks under the list
+  // and auto-opening would push the list off-screen. Runs once per workspace
+  // list, so closing the panel sticks.
+  let autoOpenedFor = '';
+  $effect(() => {
+    const id = ws.currentId;
+    const rows = list;
+    if (!id || runWithOtto.loadingList || rows.length === 0 || autoOpenedFor === id) return;
+    autoOpenedFor = id;
+    untrack(() => {
+      if (runWithOtto.openRun || !viewport.isDesktop) return;
+      const pick = initialSelection('run-with-otto', rows, (r) => r.id);
+      if (pick) void runWithOtto.open(pick);
+    });
+  });
+
+  function show(run: OttoRun): void {
+    rememberSelection('run-with-otto', run.id);
     void runWithOtto.open(run.id);
+    // Stacked layout: bring the freshly opened detail into view.
+    if (!viewport.isDesktop) {
+      requestAnimationFrame(() => detailEl?.scrollIntoView({ block: 'start', behavior: 'smooth' }));
+    }
+  }
+
+  function onLaunched(run: OttoRun): void {
+    show(run);
   }
 
   function selectRun(run: OttoRun): void {
-    void runWithOtto.open(run.id);
+    show(run);
   }
 </script>
 
 <div class="rwo-page">
 <PageHeader
   title="Run with Otto"
-  subtitle="Turn any source — a Jira story, a GitHub issue/PR, a Slack thread, a finding, a failing test — into a reviewed, evidence-backed PR draft. One button."
+  subtitle="Turn a Jira story, GitHub issue or PR, finding or failing test into a reviewed PR draft"
 />
 <PageBody>
 <div class="rwo">
@@ -56,8 +88,9 @@
     <RunLauncher wsId={ws.currentId} {onLaunched} />
   {/if}
 
+  <div class="body-wrap">
   <div class="body" class:has-detail={openRun}>
-    <section class="list-col">
+    <section class="list-col" aria-label="Runs">
       <LoadState
         what="runs"
         loading={runWithOtto.loadingList}
@@ -66,20 +99,22 @@
         onretry={() => ws.currentId && void runWithOtto.loadList(ws.currentId)}
       >
         {#snippet emptyView()}
-          <EmptyState icon="play" title="No runs yet" body="Paste a source above and press Run with Otto." />
+          <EmptyState icon="play" title="No runs yet" body="Paste a source above and press Run with Otto. Each run shows up here with its stage, proof and findings." />
         {/snippet}
+        <h2 class="list-h">Runs <span class="count">{list.length}</span></h2>
         <ul class="runs">
           {#each list as r (r.id)}
             <li>
               <button
                 class="run"
                 class:selected={openRun?.id === r.id}
+                aria-current={openRun?.id === r.id ? 'true' : undefined}
                 onclick={() => selectRun(r)}
               >
                 <div class="run-top">
-                  <span class="badge src-badge" style="--src: {sourceColor(r.source_kind)}">{sourceLabel(r.source_kind)}</span>
+                  <span class="chip">{sourceLabel(r.source_kind)}</span>
                   <span class="run-title" title={r.title || r.source_ref}>{r.title || r.source_ref}</span>
-                  <span class="pill {statusTone(r.status)}">{humanize(r.status)}</span>
+                  <StatusBadge status={runStatusInfo(r.status)} />
                 </div>
                 <div class="run-meta">
                   <RunStageRail status={r.status} mini />
@@ -87,7 +122,7 @@
                     <ProofStatusChip status={r.proof_status} risk={r.risk_score} compact />
                   {/if}
                   <span class="findings">
-                    {r.findings_total} findings
+                    {r.findings_total} {r.findings_total === 1 ? 'finding' : 'findings'}
                     {#if r.findings_blocking > 0}
                       <span class="blocking">{r.findings_blocking} blocking</span>
                     {/if}
@@ -105,7 +140,7 @@
     </section>
 
     {#if openRun}
-      <section class="detail-col">
+      <section class="detail-col" bind:this={detailEl} aria-label="Run detail">
         <!-- keyed: the reject draft / action error belong to ONE run -->
         {#key openRun.id}
           <RunDetail run={openRun} onClose={() => runWithOtto.closeDetail()} />
@@ -113,52 +148,57 @@
       </section>
     {/if}
   </div>
+  </div>
 </div>
 </PageBody>
 </div>
 
 <style>
   .rwo-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-  .body { display: grid; grid-template-columns: 1fr; gap: 1rem; align-items: start; }
+  /* Container query, not a viewport one: the page also renders in the narrow
+     side-by-side pane, where the viewport is wide but the column is not. */
+  .body-wrap { container-type: inline-size; }
+  .body { display: grid; grid-template-columns: 1fr; gap: 16px; align-items: start; }
   .body.has-detail { grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); }
-  @media (max-width: 860px) {
+  @container (max-width: 860px) {
     .body.has-detail { grid-template-columns: 1fr; }
   }
-  .runs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+  .detail-col { min-width: 0; }
+  .list-h {
+    margin: 0 0 8px;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .count { font-variant-numeric: tabular-nums; font-weight: 500; }
+  .runs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
   .run {
     width: 100%; text-align: start; cursor: pointer;
     border: 1px solid var(--border); background: var(--surface); color: var(--text);
-    border-radius: var(--radius-m); padding: 0.6rem 0.75rem;
-    display: flex; flex-direction: column; gap: 0.35rem; font: inherit;
+    border-radius: var(--radius-m); padding: 10px 12px;
+    display: flex; flex-direction: column; gap: 6px; font: inherit;
   }
   .run:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
-  .run.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, var(--surface)); }
-  .run-top { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
-  .run-title { font-size: 0.95rem; font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .run-meta { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; font-size: 0.8rem; color: var(--text-dim); }
+  .run.selected { border-color: var(--accent); background: var(--accent-soft); }
+  .run-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .run-title {
+    font-size: var(--fs-m); font-weight: 600; flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .run-meta { display: flex; align-items: center; gap: 4px 10px; flex-wrap: wrap; font-size: var(--fs-s); color: var(--text-dim); }
   .findings { font-variant-numeric: tabular-nums; }
   .blocking {
-    margin-inline-start: 0.3rem; font-size: 0.7rem; padding: 0.02rem 0.4rem; border-radius: 999px;
-    background: color-mix(in srgb, var(--status-exited) 16%, transparent); color: var(--status-exited);
+    margin-inline-start: 4px; font-size: var(--fs-xs); padding: 0 6px; border-radius: 999px;
+    background: var(--danger-soft); color: var(--danger);
   }
   .when { margin-inline-start: auto; font-variant-numeric: tabular-nums; }
-  .badge {
-    font-size: 0.7rem; padding: 0.05rem 0.45rem; border-radius: 999px;
-    border: 1px solid var(--border); color: var(--text-dim); text-transform: capitalize;
+  .agent {
+    font-size: var(--fs-xs); font-family: var(--font-mono);
+    max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  .src-badge {
-    color: var(--src);
-    border-color: color-mix(in srgb, var(--src) 40%, var(--border));
-    background: color-mix(in srgb, var(--src) 10%, transparent);
-  }
-  .agent { font-size: 0.74rem; font-family: var(--font-mono); }
-  .pill {
-    font-size: 0.7rem; padding: 0.05rem 0.5rem; border-radius: 999px;
-    border: 1px solid transparent; text-transform: capitalize; white-space: nowrap;
-  }
-  .pill.ok { background: color-mix(in srgb, var(--status-working) 16%, transparent); color: var(--status-working); }
-  .pill.bad { background: color-mix(in srgb, var(--status-exited) 16%, transparent); color: var(--status-exited); }
-  .pill.warn { background: color-mix(in srgb, var(--status-warn) 18%, transparent); color: var(--status-warn); }
-  .pill.active { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-text); }
-  .pill.dim { background: color-mix(in srgb, var(--text-dim) 14%, transparent); color: var(--text-dim); }
 </style>

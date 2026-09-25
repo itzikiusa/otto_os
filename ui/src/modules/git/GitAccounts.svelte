@@ -8,13 +8,16 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import type { GitAccount, GitAccountTestResp, GitProviderKind } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
 
   let accounts: GitAccount[] = $state([]);
   let loading = $state(true);
+  let loadError = $state('');
   let addOpen = $state(false);
   let busy = $state(false);
 
@@ -41,10 +44,18 @@
   let formTest: GitAccountTestResp | 'busy' | null = $state(null);
 
   function testLabel(r: GitAccountTestResp): string {
-    if (!r.ok) return r.error ?? 'failed';
-    const scopes = r.scopes?.length ? ` (scopes: ${r.scopes.join(', ')})` : '';
-    return `ok — authenticated as ${r.login ?? 'unknown'}${scopes}`;
+    if (!r.ok) return `Couldn't connect: ${r.error ?? 'the provider refused the token'}`;
+    const scopes = r.scopes?.length ? ` · scopes: ${r.scopes.join(', ')}` : '';
+    return `Connected as ${r.login ?? 'an unknown user'}${scopes}`;
   }
+
+  /** Provider ids → their proper names (GitHub, not "github"). */
+  const PROVIDER_LABELS: Record<GitProviderKind, string> = {
+    github: 'GitHub',
+    bitbucket: 'Bitbucket',
+    gitlab: 'GitLab',
+  };
+  const PROVIDERS: GitProviderKind[] = ['github', 'bitbucket', 'gitlab'];
 
   async function testAccount(a: GitAccount): Promise<void> {
     testResults = { ...testResults, [a.id]: 'busy' };
@@ -54,7 +65,7 @@
     } catch (e) {
       testResults = {
         ...testResults,
-        [a.id]: { ok: false, error: e instanceof Error ? e.message : String(e) },
+        [a.id]: { ok: false, error: loadErrorText(e) },
       };
     }
   }
@@ -75,7 +86,7 @@
                 provider === 'gitlab' && apiBaseUrl.trim() !== '' ? apiBaseUrl.trim() : null,
             });
     } catch (e) {
-      formTest = { ok: false, error: e instanceof Error ? e.message : String(e) };
+      formTest = { ok: false, error: loadErrorText(e) };
     }
   }
 
@@ -124,10 +135,11 @@
 
   async function load(): Promise<void> {
     loading = true;
+    loadError = '';
     try {
       accounts = await api.get<GitAccount[]>('/git/accounts');
     } catch (e) {
-      toasts.error('Could not load git accounts', e instanceof Error ? e.message : String(e));
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -179,7 +191,7 @@
       closeModal();
       toasts.success('Git account added', a.label);
     } catch (e) {
-      toasts.error('Add failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't add the Git account", loadErrorText(e));
     } finally {
       busy = false;
     }
@@ -199,10 +211,13 @@
       if (token !== '') body.token = token;
       const updated = await api.patch<GitAccount>(`/git/accounts/${editing.id}`, body);
       accounts = accounts.map((x) => (x.id === updated.id ? updated : x));
+      // A changed token/username makes an earlier verdict stale.
+      const { [updated.id]: _stale, ...rest } = testResults;
+      testResults = rest;
       closeModal();
       toasts.success('Git account updated', updated.label);
     } catch (e) {
-      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't save the Git account", loadErrorText(e));
     } finally {
       busy = false;
     }
@@ -213,9 +228,9 @@
     try {
       await api.del(`/git/accounts/${a.id}`);
       accounts = accounts.filter((x) => x.id !== a.id);
-      toasts.info('Account deleted', a.label);
+      toasts.success('Git account deleted', a.label);
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't delete the Git account", loadErrorText(e));
     }
   }
 </script>
@@ -223,92 +238,97 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('git-accounts')} subtitle="Keychain tokens for PR actions and HTTPS pushes">
     {#snippet actions()}
-      <button class="btn primary" onclick={openAdd}>Add account</button>
+      <!-- While the list is empty the EmptyState owns the one "Add account". -->
+      {#if accounts.length > 0}
+        <button class="btn primary" onclick={openAdd}><Icon name="plus" size={13} /> Add account</button>
+      {/if}
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
 
-  {#if loading}
-    <Skeleton rows={2} height={48} />
-  {:else if accounts.length === 0}
-    <div class="card" style="padding: 24px; text-align: center; max-width: 520px">
-      <p class="dim" style="margin: 0 0 10px">
-        No git accounts yet. Add one to list pull requests and push over https.
-      </p>
-      <button class="btn primary" onclick={openAdd}>Add account</button>
-    </div>
-  {:else}
+  <LoadState what="Git accounts" variant="page" {loading} error={loadError} empty={accounts.length === 0} onretry={() => void load()} rows={2}>
+    {#snippet emptyView()}
+      <EmptyState
+        variant="page"
+        icon="branch"
+        title="No Git accounts yet"
+        body="Add a GitHub, Bitbucket or GitLab token to list and review pull requests and to push over HTTPS. The token is stored in the macOS Keychain."
+        actionLabel="Add account"
+        actionIcon="plus"
+        onaction={openAdd}
+      />
+    {/snippet}
     <div class="acct-list">
       {#each accounts as a (a.id)}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="acct card"
           oncontextmenu={(e) => ctxMenu.show(e, [
-            { label: 'Edit', icon: 'edit', action: () => openEdit(a) },
+            { label: 'Test connection', icon: 'refresh', action: () => testAccount(a) },
+            { label: 'Edit…', icon: 'edit', action: () => openEdit(a) },
             { separator: true },
-            { label: 'Delete', icon: 'trash', danger: true, action: () => remove(a) },
+            { label: 'Delete…', icon: 'trash', danger: true, action: () => remove(a) },
           ])}
         >
-          <span class="acct-icon"><Icon name="key" size={14} /></span>
+          <span class="acct-icon"><Icon name="branch" size={14} /></span>
           <div class="grow">
             <div class="acct-label">
-              {a.label}
-              <span class="chip">{a.provider}</span>
+              <span class="acct-name" title={a.label}>{a.label}</span>
+              <span class="chip">{PROVIDER_LABELS[a.provider] ?? a.provider}</span>
             </div>
-            <div class="acct-sub dim">
+            <div class="acct-sub">
               {a.username}
               {#if a.namespace}· <span class="mono">{a.namespace}</span>{/if}
               {#if a.api_base_url}· <span class="mono">{a.api_base_url}</span>{/if}
-              · token ••••••
               {#if a.token_expires_at}
                 · <span class="expiry" class:expired={new Date(a.token_expires_at).getTime() <= Date.now()}>{expiryLabel(a.token_expires_at)}</span>
               {/if}
             </div>
             {#if testResults[a.id]}
               {@const r = testResults[a.id]}
-              <div class="test-result" class:ok={r !== 'busy' && r.ok} class:bad={r !== 'busy' && !r.ok}>
+              <div class="test-result" role="status" class:ok={r !== 'busy' && r.ok} class:bad={r !== 'busy' && !r.ok}>
+                {#if r !== 'busy'}<Icon name={r.ok ? 'check' : 'warning'} size={12} />{/if}
                 {r === 'busy' ? 'Testing…' : testLabel(r)}
               </div>
             {/if}
           </div>
           <button
-            class="btn small ghost"
-            title="Verify the stored token against the provider"
+            class="btn small"
+            title="Check the stored token against {PROVIDER_LABELS[a.provider] ?? a.provider}"
             disabled={testResults[a.id] === 'busy'}
             onclick={() => testAccount(a)}
           >
-            Test
+            {testResults[a.id] === 'busy' ? 'Testing…' : 'Test'}
           </button>
-          <button class="icon-btn" title="Edit" onclick={() => openEdit(a)}>
-            <Icon name="edit" size={13} />
+          <button class="icon-btn acct-tool" title="Edit {a.label}" aria-label="Edit {a.label}" onclick={() => openEdit(a)}>
+            <Icon name="edit" size={14} />
           </button>
-          <button class="icon-btn" title="Delete" onclick={() => remove(a)}>
-            <Icon name="trash" size={13} />
+          <button class="icon-btn acct-tool" title="Delete {a.label}" aria-label="Delete {a.label}" onclick={() => remove(a)}>
+            <Icon name="trash" size={14} />
           </button>
         </div>
       {/each}
     </div>
-  {/if}
+  </LoadState>
   </PageBody>
 </div>
 
 {#if addOpen}
-  <Modal title={isEdit ? 'Edit Git Account' : 'Add Git Account'} onclose={closeModal}>
+  <Modal title={isEdit ? 'Edit Git account' : 'Add Git account'} onclose={closeModal}>
     <div class="field">
       <label for="ga-provider">Provider</label>
       {#if isEdit}
-        <div class="input" style="background: var(--surface-2); cursor: default; opacity: 0.7;">
-          {provider}
-        </div>
+        <div class="input provider-fixed" id="ga-provider">{PROVIDER_LABELS[provider]}</div>
         <span class="hint">Provider cannot be changed after creation.</span>
       {:else}
-        <div class="segmented" id="ga-provider">
-          {#each ['github', 'bitbucket', 'gitlab'] as p (p)}
+        <div class="segmented" id="ga-provider" role="group" aria-label="Provider">
+          {#each PROVIDERS as p (p)}
             <button
               class:active={provider === p}
-              onclick={() => (provider = p as GitProviderKind)}
+              aria-pressed={provider === p}
+              onclick={() => { provider = p; formTest = null; }}
             >
-              {p}
+              {PROVIDER_LABELS[p]}
             </button>
           {/each}
         </div>
@@ -317,7 +337,7 @@
     </div>
     <div class="field">
       <label for="ga-label">Label</label>
-      <input id="ga-label" class="input" bind:value={label} placeholder="work github" />
+      <input id="ga-label" class="input" bind:value={label} placeholder="Work {PROVIDER_LABELS[provider]}" />
     </div>
     <div class="field">
       <label for="ga-user">Username</label>
@@ -356,7 +376,8 @@
     </div>
 
     {#if formTest}
-      <div class="test-result form-test" class:ok={formTest !== 'busy' && formTest.ok} class:bad={formTest !== 'busy' && !formTest.ok}>
+      <div class="test-result form-test" role="status" class:ok={formTest !== 'busy' && formTest.ok} class:bad={formTest !== 'busy' && !formTest.ok}>
+        {#if formTest !== 'busy'}<Icon name={formTest.ok ? 'check' : 'warning'} size={12} />{/if}
         {formTest === 'busy' ? 'Testing…' : testLabel(formTest)}
       </div>
     {/if}
@@ -365,7 +386,7 @@
       <button
         class="btn"
         style="margin-inline-end: auto"
-        title="Verify the token against the provider without saving"
+        title={token === '' && !isEdit ? 'Enter a token to test it' : 'Check the token against the provider without saving'}
         disabled={busy || formTest === 'busy' || (token === '' && !isEdit)}
         onclick={testForm}
       >
@@ -405,7 +426,7 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    max-width: 560px;
+    max-width: 640px;
   }
   .acct {
     display: flex;
@@ -413,53 +434,75 @@
     gap: 12px;
     padding: 12px 14px;
   }
+  .acct .grow {
+    min-width: 0;
+  }
   .acct-icon {
-    width: 30px;
-    height: 30px;
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent-text);
+    background: var(--surface-2);
+    color: var(--text-dim);
     display: grid;
     place-items: center;
   }
   .acct-label {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     display: flex;
     align-items: center;
     gap: 6px;
+    min-width: 0;
+  }
+  .acct-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .acct-sub {
-    font-size: 11.5px;
-    margin-top: 2px;
-  }
-  .expiry {
+    font-size: var(--fs-s);
     color: var(--text-dim);
+    margin-top: 2px;
+    overflow-wrap: anywhere;
   }
   .expiry.expired {
-    color: var(--status-exited);
+    color: var(--danger);
     font-weight: 600;
   }
-  /* Inline connection-test verdict (row + form). Colors only on the verdict —
-     the provider's own error text is rendered verbatim. */
+  /* Inline connection-test verdict (row + form); the provider's own error
+     text follows the words. */
   .test-result {
-    font-size: 11.5px;
-    margin-top: 3px;
-    word-break: break-word;
+    display: flex;
+    align-items: flex-start;
+    gap: 5px;
+    font-size: var(--fs-s);
+    margin-top: 4px;
+    overflow-wrap: anywhere;
+    color: var(--text-dim);
+  }
+  .test-result :global(svg) {
+    flex-shrink: 0;
+    margin-top: 2px;
   }
   .test-result.ok {
     color: var(--success);
   }
   .test-result.bad {
-    color: var(--status-exited, #f85149);
+    color: var(--danger);
   }
   .form-test {
     margin: 4px 0 0;
   }
+  .provider-fixed {
+    display: flex;
+    align-items: center;
+    color: var(--text-dim);
+    cursor: default;
+  }
 
-  /* ── Mobile + tablet (≤1024px): full-width account rows + form. Long mono
-     namespace / api-base values must wrap (min-width:0 + word-break) so a row
-     can't push the page wider than the viewport; bump icon-button + segmented
+  /* ── Mobile + tablet (≤1024px): full-width account rows + form, and 36px
      tap targets. The modal box is already viewport-clamped by Modal.svelte. ── */
   @media (max-width: 1024px) {
     .acct-list {
@@ -469,14 +512,7 @@
       gap: 10px;
       padding: 12px;
     }
-    .acct .grow {
-      min-width: 0;
-    }
-    .acct-sub {
-      font-size: 12px;
-      word-break: break-word;
-    }
-    .acct .icon-btn {
+    .acct-tool {
       min-width: 36px;
       min-height: 36px;
     }
@@ -488,8 +524,6 @@
     .segmented > button {
       flex: 1;
       height: 32px;
-      /* Keep each provider label (github / bitbucket / gitlab) on one line —
-         at 320px they would otherwise wrap and clip against the 32px height. */
       white-space: nowrap;
     }
   }

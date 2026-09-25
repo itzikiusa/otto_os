@@ -142,7 +142,7 @@
             </button>
           {/if}
           {#if filteredBranches.length === 0 && !canCreate}
-            <div class="dim" style="padding: 8px 10px; font-size: 12px">No branches</div>
+            <div class="dim" style="padding: 8px 10px; font-size: var(--fs-s)">No branches</div>
           {/if}
         </div>
       </div>
@@ -184,10 +184,10 @@
     font-weight: 600;
   }
   .ab.up {
-    color: var(--status-working);
+    color: var(--success);
   }
   .ab.down {
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .dd {
     position: absolute;
@@ -216,7 +216,7 @@
     border: none;
     background: transparent;
     border-radius: var(--radius-s);
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text);
     cursor: pointer;
     text-align: start;
@@ -271,7 +271,7 @@
     .dd {
       width: min(280px, calc(100vw - 24px));
     }
-    .dd-item { height: 40px; font-size: 13px; }
-    .dd-filter { height: 40px; font-size: 14px; }
+    .dd-item { height: 40px; font-size: var(--fs-m); }
+    .dd-filter { height: 40px; font-size: var(--fs-l); }
   }
 </style>

@@ -5,6 +5,8 @@
   // assignee, details, linked issues, comments, history, and attachments.
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { storyStage, STORY_STAGES } from '../../lib/status';
   import { product } from '../../lib/stores/product.svelte';
@@ -249,7 +251,9 @@
   });
 
   $effect(() => {
-    if (isJira && story && !issueFull && !issueLoading) {
+    // `!issueError`: a failed load stays failed until Retry — without it the
+    // effect re-fired on every settle and hammered the daemon in a loop.
+    if (isJira && story && !issueFull && !issueLoading && !issueError) {
       void loadIssueFull();
     }
   });
@@ -309,7 +313,7 @@
     const attCount = 0; // attachments listed in the panel; count not tracked here
     const ok = await confirmer.ask(
       `Run Discovery in ${teamName}? This will START the swarm and send the story info${attCount > 0 ? ` + ${attCount} attachments` : ''} as discovery context.`,
-      { title: 'Run Discovery', confirmLabel: 'Run Discovery', danger: false },
+      { title: 'Run discovery', confirmLabel: 'Run discovery', danger: false },
     );
     if (!ok) return;
     runningDiscovery = true;
@@ -398,7 +402,7 @@
         `/issue/${story.account_id}/${story.source_key}/full`,
       );
     } catch (e) {
-      issueError = e instanceof Error ? e.message : String(e);
+      issueError = loadErrorText(e);
     } finally {
       issueLoading = false;
     }
@@ -416,7 +420,7 @@
         `/issue/${story.account_id}/${story.source_key}/devstatus${idParam}`,
       );
     } catch (e) {
-      devError = e instanceof Error ? e.message : String(e);
+      devError = loadErrorText(e);
     } finally {
       // Mark loaded even on error: the on-open $effect gates on `devLoaded`, so
       // leaving it false after a failed fetch would re-trigger this every time
@@ -780,6 +784,16 @@
   /** Save the description via the dedicated (ADF-aware) description endpoint. */
   async function saveDesc(): Promise<void> {
     if (!story) return;
+    // The whole description is replaced upstream (not merged) — the one inline
+    // Jira write that can silently lose someone else's text, so it asks first.
+    const ok = await confirmOutward({
+      verb: `Replace description`,
+      title: `Replace the description of ${story.source_key}?`,
+      where: jiraWhere(),
+      what: descDraft.trim() || '(empty description)',
+      who: `Everyone with access to ${story.source_key} sees the new text; the previous description is only in Jira's history.`,
+    });
+    if (!ok) return;
     descSaving = true;
     try {
       issueFull = await api.put<IssueFull>(
@@ -1121,8 +1135,10 @@
   </div>
 {/snippet}
 
-{#if product.loadingDetail}
-  <div class="loading">Loading…</div>
+{#if product.loadingDetail && (!detail || detail.story.id !== product.selectedId)}
+  <!-- First open (or a switch to another story): a skeleton. A refresh of the
+       story already on screen keeps it visible instead of blanking the tab. -->
+  <div class="loading" aria-label="Loading story"><Skeleton rows={5} height={36} /></div>
 {:else if !detail || !story}
   <div class="muted">No story selected.</div>
 {:else}
@@ -1241,7 +1257,7 @@
           {/each}
         </select>
         {#if versionLoading}
-          <span class="ver-loading">…</span>
+          <span class="ver-loading">Loading…</span>
         {/if}
       </div>
 
@@ -1288,9 +1304,9 @@
         onclick={runDiscovery}
         disabled={runningDiscovery}
         title="Launch a discovery swarm run — agents analyse the story and report findings"
-        aria-label="Run Discovery"
+        aria-label="Run discovery"
       >
-        <Icon name="zap" size={12} /> {runningDiscovery ? 'Starting…' : 'Run Discovery'}
+        <Icon name="zap" size={12} /> {runningDiscovery ? 'Starting…' : 'Run discovery'}
       </button>
     </div>
 
@@ -1345,7 +1361,7 @@
                 Publish as Confluence RFC…
               </button>
               <button class="btn primary" onclick={() => (publishDialogMode = 'story')}>
-                Publish as Jira Story…
+                Publish as Jira story…
               </button>
             </div>
           </div>
@@ -1668,7 +1684,7 @@
               <Skeleton rows={6} height={36} />
               <div class="jira-loading">Loading Jira details…</div>
             {:else if issueError}
-              <div class="jira-error">Could not load Jira details: {issueError}</div>
+              <LoadState what="Jira details" variant="compact" error={issueError} empty onretry={() => void loadIssueFull()} />
             {:else if issueFull}
 
               <!-- ── Status + Transition ──────────────────────────── -->
@@ -1909,7 +1925,7 @@
                     {#if devLoading}
                       <div class="dropdown-loading">Loading development info…</div>
                     {:else if devError}
-                      <div class="jira-error">Could not load development info: {devError}</div>
+                      <LoadState what="development info" variant="compact" error={devError} empty onretry={() => { devLoaded = false; void loadDevStatus(); }} />
                     {:else if devStatus && (devStatus.branches.length || devStatus.commits.length || devStatus.pull_requests.length)}
                       {#if devStatus.pull_requests.length}
                         <div class="dev-group">
@@ -2057,7 +2073,7 @@
   .loading,
   .muted {
     padding: 24px 0;
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     font-style: italic;
   }
@@ -2117,7 +2133,7 @@
     border: none;
     padding: 0 1px;
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1;
     color: var(--accent-text);
     opacity: 0.6;
@@ -2181,7 +2197,7 @@
     padding: 5px 10px;
     cursor: pointer;
     text-align: start;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text);
     transition: background 100ms;
   }
@@ -2239,8 +2255,8 @@
   }
   .story-title {
     margin: 0 0 10px;
-    font-size: 20px;
-    font-weight: 700;
+    font-size: var(--fs-xl);
+    font-weight: 600;
     line-height: 1.25;
     color: var(--text);
   }
@@ -2268,7 +2284,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 13px;
+    font-size: var(--fs-m);
     cursor: pointer;
     opacity: 0;
     transition: opacity 100ms, background 100ms, color 100ms;
@@ -2297,8 +2313,8 @@
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);
-    font-size: 18px;
-    font-weight: 700;
+    font-size: var(--fs-xl);
+    font-weight: 600;
   }
   .title-input:focus {
     outline: none;
@@ -2315,7 +2331,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--accent-text);
     text-decoration: none;
   }
@@ -2323,7 +2339,7 @@
     text-decoration: underline;
   }
   .source-key {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .counts-row {
@@ -2336,7 +2352,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 9%, transparent);
     padding: 2px 8px;
@@ -2360,7 +2376,7 @@
     gap: 6px;
   }
   .ver-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-weight: 500;
     text-transform: uppercase;
@@ -2372,12 +2388,12 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 4px 8px;
     max-width: 280px;
   }
   .ver-loading {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .grow {
@@ -2391,7 +2407,7 @@
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
 
@@ -2400,7 +2416,7 @@
     flex: 1;
   }
   .version-banner {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--accent) 8%, transparent);
     border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
@@ -2412,7 +2428,7 @@
     font-style: italic;
   }
   .md-body {
-    font-size: 13.5px;
+    font-size: var(--fs-m);
     line-height: 1.65;
     color: var(--text);
   }
@@ -2422,7 +2438,7 @@
   .md-body :global(h3),
   .md-body :global(h4) {
     margin: 1.2em 0 0.4em;
-    font-weight: 700;
+    font-weight: 600;
     line-height: 1.25;
     color: var(--text);
   }
@@ -2445,7 +2461,7 @@
     font-size: 0.88em;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     padding: 1px 5px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
   }
   .md-body :global(pre) {
     background: var(--surface);
@@ -2489,16 +2505,11 @@
   .jira-activity {
     margin-top: 18px;
   }
-  .jira-loading,
-  .jira-error {
-    font-size: 12.5px;
+  .jira-loading {
+    font-size: var(--fs-s);
     color: var(--text-dim);
     font-style: italic;
     padding: 8px 0;
-  }
-  .jira-error {
-    color: var(--danger);
-    font-style: normal;
   }
 
   /* ── Jira card ─────────────────────────────────────────────── */
@@ -2519,8 +2530,8 @@
     flex-wrap: wrap;
   }
   .jira-section-label {
-    font-size: 11px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-dim);
@@ -2538,7 +2549,7 @@
     cursor: pointer;
     text-align: start;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     border-radius: var(--radius-s);
     transition: background 100ms;
   }
@@ -2551,7 +2562,7 @@
     flex-shrink: 0;
   }
   .section-count {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 400;
     color: var(--text-dim);
     margin-inline-start: 2px;
@@ -2564,12 +2575,14 @@
     gap: 8px;
   }
   .status-badge {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     padding: 2px 10px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent-text);
+    /* A Jira workflow status is a value, not a selection: neutral pill. */
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text);
   }
 
   /* ── Assignee control ──────────────────────────────────────── */
@@ -2587,7 +2600,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .avatar {
     width: 24px;
@@ -2609,19 +2622,19 @@
     border-radius: 50%;
     background: color-mix(in srgb, var(--accent) 20%, transparent);
     color: var(--accent-text);
-    font-size: 11px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
   }
   .user-name {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text);
   }
   .unassigned {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     font-style: italic;
   }
@@ -2637,7 +2650,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     cursor: pointer;
     white-space: nowrap;
     transition: background 100ms, color 100ms;
@@ -2651,7 +2664,7 @@
     cursor: not-allowed;
   }
   .dropdown-loading {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     padding: 10px 12px;
     font-style: italic;
@@ -2666,7 +2679,7 @@
     align-items: start;
   }
   .detail-key {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
     white-space: nowrap;
@@ -2676,7 +2689,7 @@
     opacity: 0.65;
   }
   .detail-val {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text);
     line-height: 1.4;
   }
@@ -2716,7 +2729,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
     opacity: 0;
     transition: opacity 100ms, background 100ms, color 100ms;
@@ -2744,7 +2757,7 @@
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .field-input:focus {
     outline: none;
@@ -2764,7 +2777,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text);
     cursor: pointer;
   }
@@ -2786,8 +2799,8 @@
     margin-bottom: 8px;
   }
   .desc-label {
-    font-size: 11px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-dim);
@@ -2802,7 +2815,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     cursor: pointer;
     transition: background 100ms, color 100ms, border-color 100ms;
   }
@@ -2827,7 +2840,7 @@
     background: var(--surface);
     color: var(--text);
     font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     line-height: 1.55;
   }
   .desc-textarea:focus {
@@ -2863,7 +2876,7 @@
     min-width: 70px;
   }
   .link-key {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--accent-text);
     font-family: var(--font-mono, monospace);
   }
@@ -2875,7 +2888,7 @@
     color: var(--text-dim);
   }
   .link-summary {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text);
     flex: 1;
     min-width: 120px;
@@ -2889,7 +2902,7 @@
   }
   .mono-sm {
     font-family: var(--font-mono, monospace);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
 
   /* ── Development (branches / commits / PRs) ────────────────── */
@@ -2927,7 +2940,7 @@
   }
   .dev-pr-name,
   .dev-commit-msg {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text);
     flex: 1;
     min-width: 120px;
@@ -2962,21 +2975,21 @@
     margin-bottom: 6px;
   }
   .comment-author {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     color: var(--text);
   }
   .comment-date {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .comment-body {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     line-height: 1.55;
   }
   .comments-empty {
     padding: 10px 14px 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     font-style: italic;
   }
@@ -2989,7 +3002,7 @@
   }
   .comment-textarea {
     font-family: inherit;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     line-height: 1.5;
   }
   .add-comment-row {
@@ -2999,7 +3012,7 @@
   /* ── Estimate chip ─────────────────────────────────────────── */
   .estimate-chip {
     display: inline-block;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 2px 9px;
     border-radius: 999px;
@@ -3026,16 +3039,16 @@
     margin-bottom: 4px;
   }
   .history-author {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     color: var(--text);
   }
   .history-date {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .history-change {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.5;
   }
@@ -3048,7 +3061,7 @@
     color: var(--text);
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
     padding: 0 4px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
   }
 
   /* ── Attachments ───────────────────────────────────────────── */
@@ -3073,7 +3086,7 @@
     margin-bottom: 6px;
   }
   .att-filename {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
     color: var(--text);
     overflow: hidden;
@@ -3082,7 +3095,7 @@
     max-width: 320px;
   }
   .att-meta {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
   }
@@ -3113,7 +3126,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     cursor: pointer;
     transition: background 100ms, color 100ms;
   }
@@ -3127,7 +3140,7 @@
     cursor: not-allowed;
   }
   .att-dl-link {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--accent-text);
     text-decoration: none;
   }
@@ -3143,7 +3156,7 @@
     padding-top: 4px;
   }
   .draft-hint {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--accent) 8%, transparent);
     border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
@@ -3157,7 +3170,7 @@
     gap: 4px;
   }
   .label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 500;
     color: var(--text-dim);
     text-transform: uppercase;
@@ -3168,7 +3181,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 13px;
+    font-size: var(--fs-m);
     padding: 6px 10px;
     outline: none;
     width: 100%;
@@ -3182,7 +3195,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-family: var(--font-mono, monospace);
     padding: 8px 10px;
     outline: none;
@@ -3214,8 +3227,8 @@
     justify-content: space-between;
   }
   .section-title {
-    font-size: 11px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-dim);
@@ -3246,7 +3259,7 @@
     cursor: pointer;
     text-align: start;
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     transition: background 80ms;
   }
   .transcript-toggle:hover {
@@ -3260,7 +3273,7 @@
     white-space: nowrap;
   }
   .transcript-date {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     flex-shrink: 0;
@@ -3274,7 +3287,7 @@
     background: none;
     border: none;
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     transition: color 80ms, background 80ms;
     margin-inline-end: 4px;
@@ -3286,7 +3299,7 @@
   }
   .transcript-body {
     padding: 8px 12px 10px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     white-space: pre-wrap;
     color: var(--text-dim);
     line-height: 1.55;

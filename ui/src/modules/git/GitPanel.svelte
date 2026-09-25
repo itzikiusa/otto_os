@@ -55,7 +55,7 @@
     text-align: center;
   }
   .gp-empty p {
-    font-size: 12px;
+    font-size: var(--fs-s);
     margin: 0 0 10px;
   }
 </style>

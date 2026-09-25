@@ -7,6 +7,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { lsGet, lsSet } from '../../lib/storage';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -115,8 +116,8 @@
   function vaultMenu(e: MouseEvent): void {
     ctxMenu.show(e, [
       ...vault.vaults.map((v) => ({
-        label: v.name + (v.id === vault.current?.id ? '  ✓' : ''),
-        icon: 'globe',
+        label: v.name,
+        checked: v.id === vault.current?.id,
         action: () => void vault.select(v.id),
       })),
       { separator: true },
@@ -124,17 +125,17 @@
       ...(vault.current
         ? [
             {
-              label: vault.current.okf ? 'Disable OKF mode' : 'Enable OKF mode',
-              icon: 'check',
+              label: 'OKF mode (validation + templates)',
+              checked: vault.current.okf,
               action: () => void vault.toggleOkf(),
             },
             { label: 'Rescan', icon: 'refresh', action: () => void vault.rescan() },
             {
-              label: 'Unregister vault (keeps files)',
+              label: 'Unregister vault…',
               icon: 'trash',
               danger: true,
               action: async () => {
-                if (await confirmer.ask(`Unregister "${vault.current?.name}"? Files on disk are untouched.`, { title: 'Unregister vault', confirmLabel: 'Unregister' }) && vault.current) {
+                if (await confirmer.ask(`Otto stops indexing “${vault.current?.name}” and removes it from this list. The files on disk are not touched, and you can add the folder again later.`, { title: 'Unregister vault', confirmLabel: 'Unregister vault', danger: false }) && vault.current) {
                   void vault.unregister(vault.current!.id);
                 }
               },
@@ -248,7 +249,7 @@
         title={vault.current ? `${vault.current.name} — switch vault` : 'Switch vault'}
         aria-haspopup="menu"
       >
-        <Icon name="globe" size={14} />
+        <Icon name="book" size={14} />
         <span class="vp-name">{vault.current?.name ?? 'No vault'}</span>
         <span class="tri"><Icon name="chevronDown" size={12} /></span>
       </button>
@@ -260,7 +261,9 @@
       {#if scanning}
         <span class="scan-chip">Indexing vault…</span>
       {:else if scanError}
-        <span class="scan-chip err" title={vault.status?.scan_state}>index error</span>
+        <button class="scan-chip err" title={`${vault.status?.scan_state ?? ''} — click to rescan`} onclick={() => void vault.rescan()}>
+          <Icon name="warning" size={12} /> Indexing failed · Rescan
+        </button>
       {/if}
       {#if vault.activeDocsRuns.length > 0}
         <!-- Always-visible signal that agents are writing into this vault right
@@ -308,8 +311,8 @@
         <button class="icon-btn vh-tool" title="Quick switcher (⌘O)" aria-label="Quick switcher" data-icon="search" onclick={() => (vault.switcherOpen = true)}>
           <Icon name="search" size={14} />
         </button>
-        <button class="icon-btn vh-tool" title="New note (⌘N)" aria-label="New note" data-icon="plus" data-overflow="1" onclick={() => openNewNote('')}>
-          <Icon name="plus" size={14} />
+        <button class="btn primary" title="New note (⌘N)" data-icon="plus" onclick={() => openNewNote('')}>
+          <Icon name="plus" size={13} /> New note
         </button>
         <button
           class="icon-btn vh-tool"
@@ -325,7 +328,11 @@
     {/snippet}
   </PageHeader>
 
-  {#if !vault.current && !vault.loading}
+  {#if !vault.current && vault.loadError}
+    <LoadState what="vaults" variant="page" loading={vault.loading} error={vault.loadError} empty onretry={() => void vault.load()} />
+  {:else if !vault.current && vault.loading}
+    <LoadState what="vaults" variant="page" loading empty />
+  {:else if !vault.current && !vault.loading}
     <EmptyState
       variant="page"
       icon="note"
@@ -391,36 +398,38 @@
 
       <main class="center">
         {#if vault.tabs.length > 0}
-          <div class="tabstrip" role="tablist">
+          <!-- Each tab is a presentational wrapper around TWO real buttons (the
+               tab + its close), so the close control isn't nested inside an
+               interactive role=tab. Middle-click closes too. -->
+          <div class="tabstrip" role="tablist" aria-label="Open notes">
             {#each vault.tabs as t, i (t.kind + ':' + t.path)}
+              {@const tabName = t.kind === 'note'
+                ? (t.path.split('/').pop() ?? t.path).replace(/\.md$/i, '')
+                : (t.path.split('/').pop() ?? t.path)}
               <div
                 class="vtab"
                 class:active={i === vault.activeTab &&
                   (vault.centerMode === 'note' || vault.centerMode === 'file')}
-                role="tab"
-                tabindex="0"
-                aria-selected={i === vault.activeTab}
-                title={t.path}
-                onclick={() => void vault.activateTab(i)}
-                onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && void vault.activateTab(i)}
-                onauxclick={(e) => {
-                  if (e.button === 1) void vault.closeTab(i);
-                }}
+                role="presentation"
               >
-                <Icon name={t.kind === 'note' ? 'note' : 'file'} size={12} />
-                <span class="vtab-name">
-                  {t.kind === 'note'
-                    ? (t.path.split('/').pop() ?? t.path).replace(/\.md$/i, '')
-                    : (t.path.split('/').pop() ?? t.path)}
-                </span>
+                <button
+                  class="vtab-main"
+                  role="tab"
+                  aria-selected={i === vault.activeTab}
+                  title={t.path}
+                  onclick={() => void vault.activateTab(i)}
+                  onauxclick={(e) => {
+                    if (e.button === 1) void vault.closeTab(i);
+                  }}
+                >
+                  <Icon name={t.kind === 'note' ? 'note' : 'file'} size={12} />
+                  <span class="vtab-name">{tabName}</span>
+                </button>
                 <button
                   class="vtab-close"
                   title="Close tab"
-                  aria-label="Close tab"
-                  onclick={(e) => {
-                    e.stopPropagation();
-                    void vault.closeTab(i);
-                  }}><Icon name="x" size={11} /></button
+                  aria-label="Close {tabName}"
+                  onclick={() => void vault.closeTab(i)}><Icon name="x" size={11} /></button
                 >
               </div>
             {/each}
@@ -473,21 +482,22 @@
 
     <footer class="vault-statusbar">
       <span class="vs-counts">
-        {vault.status?.notes ?? vault.current.notes} notes · {vault.status?.links ?? vault.current.links} links{#if (vault.status?.unresolved ?? 0) > 0}
-          · {vault.status?.unresolved} unresolved{/if}
+        {vault.status?.notes ?? vault.current.notes} notes · {vault.status?.links ?? vault.current.links} links{#if (vault.status?.unresolved ?? 0) > 0}{' · '}{vault.status?.unresolved} unresolved{/if}
       </span>
       {#if vault.note}
         <span>{vault.backlinks.length} backlinks</span>
         <span>{vault.note.meta.word_count} words</span>
         <span>{(vault.editing ? vault.draft : vault.note.raw).length} characters</span>
         {#if vault.current.okf && vault.okfReport}
-          <span class:ok={vault.okfReport.conformant} class:bad={!vault.okfReport.conformant}>
-            OKF {vault.okfReport.conformant ? '✓' : `✗ ${vault.okfReport.errors.length}`}
+          <span class:ok={vault.okfReport.conformant} class:bad={!vault.okfReport.conformant}
+            title={vault.okfReport.conformant ? 'This note passes OKF validation' : 'See the OKF section in the right panel'}>
+            <Icon name={vault.okfReport.conformant ? 'check' : 'warning'} size={11} />
+            {vault.okfReport.conformant ? 'OKF valid' : `OKF: ${vault.okfReport.errors.length} ${vault.okfReport.errors.length === 1 ? 'issue' : 'issues'}`}
           </span>
         {/if}
       {/if}
       <span class="grow"></span>
-      <span class="dim">{vault.current.root_path}</span>
+      <span class="dim vs-path" title={vault.current.root_path}>{vault.current.root_path}</span>
     </footer>
   {/if}
 </div>
@@ -539,9 +549,9 @@
 <Switcher />
 
 <style>
-  .graph-scope { display: flex; align-items: center; gap: 12px; padding: 8px 12px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim); }
+  .graph-scope { display: flex; align-items: center; gap: 12px; padding: 8px 12px; flex-wrap: wrap; font-size: var(--fs-s); color: var(--text-dim); border-bottom: 1px solid var(--border); }
   .gs-path { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .graph-scope select { background: var(--bg); color: var(--text); border: 1px solid var(--border); padding: 4px; border-radius: 4px; }
+  .graph-scope select { background: var(--bg); color: var(--text); border: 1px solid var(--border); padding: 4px; border-radius: var(--radius-s); }
   .vault-page {
     display: flex;
     flex-direction: column;
@@ -558,7 +568,7 @@
     background: var(--surface-2);
     border: 1px solid var(--border);
     color: var(--text);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     padding: 5px 10px;
     font-size: var(--fs-s);
     cursor: pointer;
@@ -580,11 +590,11 @@
   }
   .okf-chip {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0.4px;
-    color: var(--accent-text);
-    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
-    border-radius: 5px;
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
     padding: 1px 6px;
   }
   .scan-chip {
@@ -593,7 +603,17 @@
     animation: pulse 1.2s ease-in-out infinite;
   }
   .scan-chip.err {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     color: var(--danger);
+    background: var(--danger-soft);
+    border: none;
+    border-radius: 999px;
+    padding: 2px 8px;
+    font: inherit;
+    font-size: var(--fs-xs);
+    cursor: pointer;
     animation: none;
   }
   .run-chip {
@@ -691,18 +711,30 @@
   .vtab {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 4px 6px 4px 10px;
-    font-size: 12px;
+    gap: 2px;
+    padding-inline-end: 6px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     background: none;
     border: 1px solid transparent;
     border-bottom: none;
-    border-radius: 7px 7px 0 0;
-    cursor: pointer;
+    border-radius: var(--radius-m) var(--radius-m) 0 0;
     user-select: none;
     white-space: nowrap;
     max-width: 220px;
+  }
+  .vtab-main {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    padding: 4px 4px 4px 10px;
+    border: none;
+    background: none;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    border-radius: var(--radius-s);
   }
   .vtab:hover {
     background: var(--hover);
@@ -724,7 +756,7 @@
     width: 16px;
     height: 16px;
     border: none;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     background: none;
     color: var(--text-dim);
     flex-shrink: 0;
@@ -752,8 +784,13 @@
     align-items: center;
     padding: 4px 14px;
     border-top: 1px solid var(--border);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
+  }
+  .vault-statusbar > span:has(> :global(svg)) {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
   }
   .vault-statusbar .ok {
     color: var(--success);
@@ -767,7 +804,7 @@
   .vault-statusbar .dim {
     min-width: 0;
     max-width: 100%;
-    opacity: 0.7;
+    font-family: var(--font-mono);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -819,15 +856,19 @@
 
   /* Mid widths (narrow desktop / tablet portrait / phone landscape): the
    * fixed side panes would crush the note pane — drop the right panel. */
-  @media (max-width: 1100px) {
+  @media (max-width: 1024px) {
     .right-pane,
     .resizer-right {
       display: none;
     }
   }
 
-  /* Mobile: stack — left pane becomes a top strip, right panel hidden. */
-  @media (max-width: 800px) {
+  /* Phone: stack — left pane becomes a top strip, right panel hidden, and the
+   * status bar drops the on-disk path (it would take a whole row). */
+  @media (max-width: 640px) {
+    .vs-path {
+      display: none;
+    }
     .panes {
       flex-direction: column;
     }

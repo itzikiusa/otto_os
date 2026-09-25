@@ -80,8 +80,8 @@ test.beforeEach(async ({ page }, testInfo) => {
 async function openNewPrSheet(page: Page): Promise<void> {
   await page.goto(`/#/git/${githubRepoId}/prs`);
   await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
-  await page.getByRole('button', { name: 'New PR' }).click();
-  await expect(page.getByText('New Pull Request')).toBeVisible();
+  await page.getByRole('button', { name: 'New pull request' }).click();
+  await expect(page.getByRole('dialog', { name: 'New pull request' })).toBeVisible();
 }
 
 test('create sheet: draft toggle renders and persists per repo', async ({ page }) => {
@@ -93,7 +93,7 @@ test('create sheet: draft toggle renders and persists per repo', async ({ page }
   // Tick it, close the sheet, reopen: the choice must survive (localStorage).
   await toggle.check();
   await page.getByRole('button', { name: 'Cancel' }).click();
-  await page.getByRole('button', { name: 'New PR' }).click();
+  await page.getByRole('button', { name: 'New pull request' }).click();
   await expect(page.locator('.draft-toggle input[type="checkbox"]')).toBeChecked();
 
   // And it survives a full reload too.
@@ -134,8 +134,8 @@ test('unrecognized forge: PR tab renders an honest empty state naming the host',
     page.getByText("Pull requests aren't available for bitbucket-server.corp.example.com"),
   ).toBeVisible();
   await expect(page.getByText('Otto supports GitHub, Bitbucket Cloud, and GitLab', { exact: false })).toBeVisible();
-  // No "New PR" button on an unsupported forge — the surface is the message.
-  await expect(page.getByRole('button', { name: 'New PR' })).toHaveCount(0);
+  // No "New pull request" button on an unsupported forge — the surface is the message.
+  await expect(page.getByRole('button', { name: 'New pull request' })).toHaveCount(0);
 });
 
 test('git accounts: row Test button renders the verdict inline', async ({ page }) => {
@@ -153,9 +153,9 @@ test('git accounts: row Test button renders the verdict inline', async ({ page }
   // accounts may exist — any one row exercises the flow.
   const row = page.locator('.acct', { hasText: 'e2e test acct' }).first();
   await expect(row).toBeVisible();
-  await row.getByRole('button', { name: 'Test' }).click();
+  await row.getByRole('button', { name: 'Test', exact: true }).click();
   const verdict = row.locator('.test-result');
-  await expect(verdict).toHaveText(/ok — authenticated as octo-e2e/);
+  await expect(verdict).toHaveText(/Connected as octo-e2e/);
   await expect(verdict).toHaveText(/repo, read:org/);
   await expect(verdict).toHaveClass(/ok/);
 });
@@ -172,7 +172,7 @@ test('git accounts: failed test renders the provider error inline (red)', async 
   // beforeAll runs once per parallel worker, so several identical seeded
   // accounts may exist — any one row exercises the flow.
   const row = page.locator('.acct', { hasText: 'e2e test acct' }).first();
-  await row.getByRole('button', { name: 'Test' }).click();
+  await row.getByRole('button', { name: 'Test', exact: true }).click();
   const verdict = row.locator('.test-result');
   await expect(verdict).toHaveText(/github 401: Bad credentials/);
   await expect(verdict).toHaveClass(/bad/);

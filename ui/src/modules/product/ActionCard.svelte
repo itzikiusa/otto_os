@@ -400,7 +400,7 @@
     flex-shrink: 0;
   }
   .card-title {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
     color: var(--text);
     overflow: hidden;
@@ -422,7 +422,7 @@
     border: none;
     background: transparent;
     color: var(--accent-text);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
   }
@@ -476,13 +476,13 @@
     min-width: 0;
   }
   .item-text {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     line-height: 1.45;
     color: var(--text);
     overflow-wrap: break-word;
   }
   .item-sub {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.4;
     color: var(--text-dim);
   }
@@ -515,7 +515,7 @@
   }
   .mmd-err,
   .mmd-loading {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-style: italic;
     padding: 8px;

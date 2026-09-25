@@ -27,7 +27,15 @@
     try {
       const s = await git.fetchRepo(repoId);
       onstatus(s); // Store refsRev quietly refreshes the graph without a remount.
-      toasts.success('Fetched', `origin`);
+      // Say what the fetch found, not which remote we assume it hit.
+      toasts.success(
+        'Fetched',
+        s.behind > 0
+          ? `${s.behind} new commit${s.behind === 1 ? '' : 's'} on ${s.upstream ?? 'the upstream'} — pull to bring them in`
+          : s.upstream
+            ? `${s.branch} is up to date with ${s.upstream}`
+            : 'Remote branches and tags refreshed',
+      );
     } catch (e) {
       toasts.error('Fetch failed', e instanceof Error ? e.message : String(e));
     } finally {
@@ -78,12 +86,15 @@
   }
 
   async function doPush(): Promise<void> {
+    // No confirm: push is the most routine git action (the user asked for
+    // fewer nag dialogs, and no git client asks before a plain push). The
+    // button label already says Push vs Publish, and the toast reports it.
     busy = 'push';
     try {
       const s = await api.post<RepoStatusResp>(`/repos/${repoId}/push`, {});
       onstatus(s);
       onrefresh?.();
-      toasts.success('Pushed');
+      toasts.success(status.upstream ? 'Pushed' : 'Branch published', s.upstream ?? status.branch);
     } catch (e) {
       toasts.error('Push failed', e instanceof Error ? e.message : String(e));
     } finally {
@@ -163,49 +174,58 @@
   >
     <Icon name="branch" size={12} />
     <span class="mono branch-name">{status.branch}</span>
-    {#if status.ahead > 0}<span class="ab up">↑{status.ahead}</span>{/if}
-    {#if status.behind > 0}<span class="ab down">↓{status.behind}</span>{/if}
+    {#if status.ahead > 0}<span class="ab up" aria-label="{status.ahead} ahead">↑{status.ahead}</span>{/if}
+    {#if status.behind > 0}<span class="ab down" aria-label="{status.behind} behind">↓{status.behind}</span>{/if}
   </span>
 
   <span class="divider"></span>
 
   <!-- Fetch -->
-  <button class="tbtn" disabled={busy !== ''} onclick={doFetch} title="Fetch from remote">
-    <Icon name="fetch" size={13} />
+  <button class="btn ghost tbtn" disabled={busy !== ''} onclick={doFetch} title="Fetch from remote">
+    <Icon name="fetch" size={14} />
     {busy === 'fetch' ? 'Fetching…' : 'Fetch'}
   </button>
 
   <!-- Pull (split button: the repo's configured mode, ▾ overrides it once) -->
   <span class="split">
     <button
-      class="tbtn"
+      class="btn ghost tbtn"
       disabled={busy !== ''}
       onclick={() => void doPull()}
       title="Pull from upstream using the repo's configured mode"
     >
-      <Icon name="arrowDown" size={13} />
+      <Icon name="arrowDown" size={14} />
       {busy === 'pull' ? 'Pulling…' : `Pull (${MODE_LABEL[pullMode]})`}
     </button>
     <button
-      class="tbtn caret"
+      class="btn ghost tbtn caret"
       disabled={busy !== ''}
       onclick={pullMenu}
       title="Pull with a different mode"
       aria-label="Pull options"
-    ><Icon name="chevronDown" size={11} /></button>
+    ><Icon name="chevronDown" size={12} /></button>
   </span>
 
   <!-- Push -->
-  <button class="tbtn" disabled={busy !== ''} onclick={doPush} title="Push to upstream">
-    <Icon name="arrowUp" size={13} />
-    {busy === 'push' ? 'Pushing…' : 'Push'}
+  <button
+    class="btn ghost tbtn"
+    disabled={busy !== ''}
+    onclick={() => void doPush()}
+    title={status.upstream
+      ? status.ahead > 0
+        ? `Push ${status.ahead} commit${status.ahead === 1 ? '' : 's'} to ${status.upstream}`
+        : `Nothing to push — ${status.branch} matches ${status.upstream}`
+      : `Publish ${status.branch} to origin`}
+  >
+    <Icon name="arrowUp" size={14} />
+    {busy === 'push' ? 'Pushing…' : status.upstream ? 'Push' : 'Publish'}
   </button>
 
   <span class="divider"></span>
 
   <!-- Branch (create) -->
-  <button class="tbtn" disabled={busy !== ''} onclick={() => void doCreateBranch()} title="Create a new branch from {status.branch} and switch to it">
-    <Icon name="plus" size={13} />
+  <button class="btn ghost tbtn" disabled={busy !== ''} onclick={() => void doCreateBranch()} title="Create a new branch from {status.branch} and switch to it">
+    <Icon name="plus" size={14} />
     {busy === 'branch' ? 'Creating…' : 'Branch'}
   </button>
 
@@ -213,18 +233,18 @@
 
   <!-- Stash -->
   <button
-    class="tbtn"
+    class="btn ghost tbtn"
     disabled={busy !== '' || status.changes.length === 0}
     onclick={doStash}
     title={status.changes.length === 0 ? 'Nothing to stash — the working tree is clean' : 'Stash working changes (including untracked files)'}
   >
-    <Icon name="stash" size={13} />
+    <Icon name="stash" size={14} />
     {busy === 'stash' ? 'Stashing…' : 'Stash'}
   </button>
 
   <!-- Pop -->
-  <button class="tbtn" disabled={busy !== ''} onclick={doPop} title="Pop the latest stash">
-    <Icon name="arrowDown" size={13} />
+  <button class="btn ghost tbtn" disabled={busy !== ''} onclick={doPop} title="Apply the latest stash and drop it">
+    <Icon name="archive" size={14} />
     {busy === 'pop' ? 'Popping…' : 'Pop'}
   </button>
 </div>
@@ -264,10 +284,10 @@
   }
   .ab {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
   }
-  .ab.up { color: var(--status-working); }
-  .ab.down { color: var(--status-warn); }
+  .ab.up { color: var(--accent-text); }
+  .ab.down { color: var(--warning); }
   .divider {
     display: inline-block;
     width: 1px;
@@ -276,28 +296,15 @@
     margin: 0 4px;
     flex-shrink: 0;
   }
+  /* Toolbar buttons are global .btn.ghost; only the quieter label tone and
+     the tighter toolbar padding are local. */
   .tbtn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 26px;
     padding: 0 9px;
-    border: 1px solid transparent;
-    border-radius: var(--radius-s);
-    background: transparent;
     color: var(--text-dim);
-    font-size: 12px;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 120ms ease-out, color 120ms ease-out;
+    font-size: var(--fs-s);
   }
   .tbtn:hover:not(:disabled) {
-    background: var(--surface-2);
     color: var(--text);
-  }
-  .tbtn:disabled {
-    opacity: 0.45;
-    cursor: default;
   }
   /* Pull split button: one visual unit — the halves share a square seam with a
      hairline between them, and hovering either half outlines both. */
@@ -327,7 +334,7 @@
     .tbtn {
       height: 36px;
       padding: 0 11px;
-      font-size: 13px;
+      font-size: var(--fs-m);
     }
   }
 </style>

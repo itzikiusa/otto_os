@@ -290,16 +290,16 @@
   }
   .panel-head h2 {
     margin: 0;
-    font-size: 0.95rem;
+    font-size: var(--fs-m);
   }
   .sub {
     color: var(--text-dim);
-    font-size: 0.78rem;
+    font-size: var(--fs-s);
     margin-top: 0.2rem;
   }
   .empty {
     color: var(--text-dim);
-    font-size: 0.82rem;
+    font-size: var(--fs-s);
     padding: 0.5rem 0.1rem;
   }
   .list {
@@ -333,7 +333,7 @@
   }
   .domain {
     font-weight: 600;
-    font-size: 0.86rem;
+    font-size: var(--fs-m);
     color: var(--text);
   }
   .badge {
@@ -346,11 +346,11 @@
     color: var(--accent-contrast);
   }
   .username {
-    font-size: 0.8rem;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .notes {
-    font-size: 0.76rem;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: pre-wrap;
   }
@@ -364,8 +364,8 @@
     background: var(--surface-2);
   }
   .reveal-value {
-    font-family: var(--font-mono, monospace);
-    font-size: 0.8rem;
+    font-family: var(--font-mono);
+    font-size: var(--fs-s);
     user-select: all;
     word-break: break-all;
   }
@@ -399,13 +399,13 @@
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);
-    font-size: 0.78rem;
+    font-size: var(--fs-s);
     padding: 0.3rem 0.65rem;
     cursor: pointer;
   }
   .btn.small {
     padding: 0.2rem 0.5rem;
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
   }
   .btn.primary {
     background: var(--accent-solid);
@@ -425,7 +425,7 @@
     display: flex;
     flex-direction: column;
     gap: 0.25rem;
-    font-size: 0.8rem;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .form label.checkbox {
@@ -445,14 +445,14 @@
     border-radius: var(--radius-s);
     padding: 0.4rem 0.55rem;
     font: inherit;
-    font-size: 0.82rem;
+    font-size: var(--fs-s);
   }
   .form input:disabled {
     opacity: 0.65;
   }
   .warning {
     margin: 0;
-    font-size: 0.76rem;
+    font-size: var(--fs-xs);
     color: var(--warning);
     background: var(--warning-soft);
     border-radius: var(--radius-s);

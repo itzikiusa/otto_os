@@ -3,6 +3,7 @@
   // best score, iterations, and per-validation scores from each run's best
   // iteration. Pure client-side over already-loaded runs.
   import type { SkillEval } from '../../lib/api/types';
+  import Icon from '../../lib/components/Icon.svelte';
 
   interface Props {
     runs: SkillEval[];
@@ -55,13 +56,14 @@
 
 <div class="cmp">
   <h2>Compare {runs.length} runs</h2>
+  <p class="lede">Scores from each run's best iteration. <Icon name="check" size={12} /> marks the top score in each row.</p>
   <div class="table-wrap">
     <table>
       <thead>
         <tr>
-          <th class="rowlabel"></th>
+          <th class="rowlabel" scope="col"><span class="sr-only">Signal</span></th>
           {#each cols as c (c.run.id)}
-            <th>
+            <th scope="col" title={c.run.task}>
               <div class="col-skill">{c.run.source_skill}</div>
               <div class="col-cli mono">{c.run.impl_cli}</div>
             </th>
@@ -70,13 +72,13 @@
       </thead>
       <tbody>
         <tr class="major">
-          <td class="rowlabel">Best score</td>
+          <th class="rowlabel" scope="row">Best score</th>
           {#each cols as c (c.run.id)}
             {@const bs = c.run.best_score ?? undefined}
             {@const top = best(cols.map((x) => x.run.best_score ?? undefined))}
             <td>
               {#if bs != null}
-                <span class="score {scoreClass(bs)}" class:winner={top != null && bs === top}>{bs.toFixed(0)}</span>
+                <span class="score {scoreClass(bs)}" class:winner={top != null && bs === top} title={top != null && bs === top ? 'Top score' : undefined}>{#if top != null && bs === top}<Icon name="check" size={12} />{/if}{bs.toFixed(0)}</span>
               {:else}
                 <span class="dash">—</span>
               {/if}
@@ -84,7 +86,7 @@
           {/each}
         </tr>
         <tr>
-          <td class="rowlabel">Iterations</td>
+          <th class="rowlabel" scope="row">Iterations</th>
           {#each cols as c (c.run.id)}
             <td>{c.run.iterations.length}</td>
           {/each}
@@ -92,12 +94,12 @@
         {#each dimensions as dim (dim)}
           {@const top = best(cols.map((c) => c.scores[dim]))}
           <tr>
-            <td class="rowlabel">{dim}</td>
+            <th class="rowlabel" scope="row">{dim}</th>
             {#each cols as c (c.run.id)}
               {@const v = c.scores[dim]}
               <td>
                 {#if v != null}
-                  <span class="score {scoreClass(v)}" class:winner={top != null && v === top}>{v.toFixed(0)}</span>
+                  <span class="score {scoreClass(v)}" class:winner={top != null && v === top} title={top != null && v === top ? 'Top score' : undefined}>{#if top != null && v === top}<Icon name="check" size={12} />{/if}{v.toFixed(0)}</span>
                 {:else}
                   <span class="dash">—</span>
                 {/if}
@@ -118,7 +120,7 @@
   }
   h2 {
     margin: 0 0 12px;
-    font-size: 15px;
+    font-size: var(--fs-l);
   }
   .table-wrap {
     overflow-x: auto;
@@ -126,7 +128,7 @@
   table {
     border-collapse: collapse;
     width: 100%;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   th,
   td {
@@ -135,8 +137,23 @@
     text-align: center;
     vertical-align: middle;
   }
-  th {
-    background: color-mix(in srgb, var(--text-dim) 6%, transparent);
+  thead th {
+    background: var(--surface-2);
+  }
+  .lede {
+    margin: -6px 0 12px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
+  .lede :global(svg) {
+    vertical-align: -1px;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
   }
   .rowlabel {
     text-align: start;
@@ -145,7 +162,7 @@
     white-space: nowrap;
   }
   .major td {
-    font-weight: 700;
+    font-weight: 600;
   }
   .col-skill {
     font-weight: 600;
@@ -155,18 +172,20 @@
     color: var(--text-dim);
   }
   .score {
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
     min-width: 28px;
     padding: 2px 8px;
     border-radius: 999px;
-    font-weight: 700;
+    font-weight: 600;
   }
   .score.good {
     background: var(--success-soft);
     color: var(--success);
   }
   .score.ok {
-    background: color-mix(in srgb, var(--warning) 22%, transparent);
+    background: var(--warning-soft);
     color: var(--warning);
   }
   .score.bad {

@@ -16,7 +16,10 @@
 
   type Tab = 'skills' | 'review' | 'evaluator';
   const tab = $derived<Tab>(router.parts[1] === 'review' ? 'review' : router.parts[1] === 'evaluator' ? 'evaluator' : 'skills');
-  function go(t: Tab): void {
+  async function go(t: Tab): Promise<void> {
+    if (t === tab) return;
+    // Leaving Skills unmounts an open editor: ask before dropping its edits.
+    if (tab === 'skills' && browser && !(await browser.confirmLeave())) return;
     router.go(t === 'skills' ? 'skills-eval' : `skills-eval/${t}`);
   }
   const TABS: { id: Tab; label: string }[] = [
@@ -33,8 +36,7 @@
     else if (e.key === 'End') next = TABS.length - 1;
     if (next < 0) return;
     e.preventDefault();
-    go(TABS[next].id);
-    queueMicrotask(() => (document.querySelector(`[data-testid="tab-${TABS[next].id}"]`) as HTMLElement | null)?.focus());
+    void go(TABS[next].id).then(() => (document.querySelector(`[data-testid="tab-${tab}"]`) as HTMLElement | null)?.focus());
   }
 
   // Cross-tab intent: "Review this skill" from the Skills tab pre-fills the
@@ -42,14 +44,21 @@
   let reviewTarget = $state<{ name: string; source: string } | null>(null);
   function reviewSkill(name: string, source: string): void {
     reviewTarget = { name, source };
-    go('review');
+    void go('review');
   }
   // "Evaluate <skill>" opens the Evaluator's start form with that skill
   // pre-selected (it used to land on the form with whatever came first).
   let evalTarget = $state<{ name: string; source: string } | null>(null);
   function evaluateSkill(name: string, source: string): void {
     evalTarget = { name, source };
-    go('evaluator');
+    void go('evaluator');
+  }
+
+  // "Open run" from a skill's Evals tab: the Evaluator opens on that run.
+  let runTarget = $state<string | null>(null);
+  function openRun(id: string): void {
+    runTarget = id;
+    void go('evaluator');
   }
 
   const wsId = $derived(ws.currentId ?? '');
@@ -93,11 +102,11 @@
 
   <div class="lab-body">
     {#if tab === 'skills'}
-      <SkillsBrowser bind:this={browser} onreview={reviewSkill} onevaluate={evaluateSkill} onempty={(empty) => (canCreate = !empty)} onphonedetail={(o) => (phoneDetail = o)} />
+      <SkillsBrowser bind:this={browser} onreview={reviewSkill} onevaluate={evaluateSkill} onopenrun={openRun} onempty={(empty) => (canCreate = !empty)} onphonedetail={(o) => (phoneDetail = o)} />
     {:else if tab === 'review'}
       <SkillReviewPanel {wsId} initialTarget={reviewTarget} onconsumed={() => (reviewTarget = null)} />
     {:else}
-      <SkillsEvalPage initialSkill={evalTarget} onconsumed={() => (evalTarget = null)} />
+      <SkillsEvalPage initialSkill={evalTarget} onconsumed={() => (evalTarget = null)} initialRun={runTarget} onrunconsumed={() => (runTarget = null)} />
     {/if}
   </div>
 </div>

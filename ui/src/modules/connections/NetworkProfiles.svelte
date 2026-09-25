@@ -78,7 +78,7 @@
 </div>
 <style>
   .manager { display: grid; gap: 8px; min-width: 0; max-height: 60vh; overflow-y: auto; padding: 8px; border: 1px solid var(--border); border-radius: 5px; }
-  label { display: grid; gap: 4px; font-size: 12px; min-width: 0; } fieldset { display: grid; gap: 6px; min-width: 0; border: 1px solid var(--border); }
+  label { display: grid; gap: 4px; font-size: var(--fs-s); min-width: 0; } fieldset { display: grid; gap: 6px; min-width: 0; border: 1px solid var(--border); }
   input, select, button { min-width: 0; max-width: 100%; box-sizing: border-box; padding: 6px; color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; }
-  .profiles { display: flex; flex-wrap: wrap; gap: 5px; } .archive { display: flex; align-items: center; } p { font-size: 12px; color: var(--text-dim); margin: 3px 0; overflow-wrap: anywhere; } .error { color: var(--danger); }
+  .profiles { display: flex; flex-wrap: wrap; gap: 5px; } .archive { display: flex; align-items: center; } p { font-size: var(--fs-s); color: var(--text-dim); margin: 3px 0; overflow-wrap: anywhere; } .error { color: var(--danger); }
 </style>

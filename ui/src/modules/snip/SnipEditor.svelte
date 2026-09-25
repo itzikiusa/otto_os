@@ -11,7 +11,7 @@
   import { snipApi } from '../../lib/snip';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { isTauri } from '../../lib/stores/ui.svelte';
   import {
     PALETTE,
@@ -477,23 +477,30 @@
     }
   }
 
-  const TOOLS: { id: Tool; label: string; icon: string; title: string; key: string }[] = [
-    { id: 'select', label: 'Select', icon: '⬚', title: 'Select / move (V)', key: 'v' },
-    { id: 'rect', label: 'Box', icon: '▭', title: 'Rectangle (R)', key: 'r' },
-    { id: 'ellipse', label: 'Ellipse', icon: '◯', title: 'Ellipse (O)', key: 'o' },
-    { id: 'arrow', label: 'Arrow', icon: '↗', title: 'Arrow (A)', key: 'a' },
-    { id: 'line', label: 'Line', icon: '╱', title: 'Line (L)', key: 'l' },
-    { id: 'pen', label: 'Pen', icon: '✎', title: 'Freehand (P)', key: 'p' },
-    { id: 'highlight', label: 'Mark', icon: '▆', title: 'Highlighter (H)', key: 'h' },
-    { id: 'text', label: 'Text', icon: 'T', title: 'Text (T)', key: 't' },
-    { id: 'pixelate', label: 'Blur', icon: '▩', title: 'Pixelate region (B)', key: 'b' },
-    { id: 'badge', label: 'Step', icon: '➊', title: 'Numbered step (N)', key: 'n' },
+  // Tool icons: the shared `Icon` where the set has a fitting glyph, else a
+  // stroke path drawn exactly like Icon (16-unit viewBox, 1.4 stroke, round
+  // caps) so the rail reads as one set — never a text glyph (they render at
+  // different weights/baselines per font and flip meaning in RTL).
+  const TOOLS: { id: Tool; label: string; icon?: IconName; path?: string; title: string; key: string }[] = [
+    { id: 'select', label: 'Select', icon: 'cursor', title: 'Select / move (V)', key: 'v' },
+    { id: 'rect', label: 'Box', path: 'M2.5 4h11v8h-11Z', title: 'Rectangle (R)', key: 'r' },
+    { id: 'ellipse', label: 'Ellipse', path: 'M8 3.5c3 0 5.5 2 5.5 4.5S11 12.5 8 12.5 2.5 10.5 2.5 8 5 3.5 8 3.5Z', title: 'Ellipse (O)', key: 'o' },
+    { id: 'arrow', label: 'Arrow', path: 'M3 13 12.5 3.5M7 3.5h5.5V9', title: 'Arrow (A)', key: 'a' },
+    { id: 'line', label: 'Line', path: 'M3 13 13 3', title: 'Line (L)', key: 'l' },
+    { id: 'pen', label: 'Pen', icon: 'edit', title: 'Freehand (P)', key: 'p' },
+    { id: 'highlight', label: 'Mark', path: 'M2.5 13.5h11M5 11l5.5-7.5 2.3 1.7L7.3 12.7H5Z', title: 'Highlighter (H)', key: 'h' },
+    { id: 'text', label: 'Text', path: 'M3.5 3.5h9M8 3.5v9M6 12.5h4', title: 'Text (T)', key: 't' },
+    { id: 'pixelate', label: 'Blur', icon: 'grid', title: 'Pixelate region (B)', key: 'b' },
+    { id: 'badge', label: 'Step', path: 'M8 2.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11ZM7 6.3 8.4 5.3v5.4', title: 'Numbered step (N)', key: 'n' },
   ];
+  /** Human names for the palette swatches (tooltips/aria — not hex codes). */
+  const COLOR_NAMES = ['Red', 'Orange', 'Yellow', 'Green', 'Blue', 'Purple', 'Black', 'White'];
+  const SIZE_NAMES = ['Small', 'Medium', 'Large'];
 
   const copyLabel = $derived.by(() => {
     switch (copyState) {
       case 'copied':
-        return 'Copied ✓';
+        return 'Copied';
       case 'copying':
       case 'pending':
         return 'Copying…';
@@ -520,19 +527,26 @@
           aria-pressed={tool === t.id}
           onclick={() => pickTool(t.id)}
         >
-          <span class="icon">{t.icon}</span><span class="lbl">{t.label}</span>
+          {#if t.icon}
+            <Icon name={t.icon} size={14} />
+          {:else}
+            <svg class="tool-ic" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+              stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d={t.path} /></svg>
+          {/if}
+          <span class="lbl">{t.label}</span>
         </button>
       {/each}
     </div>
     <div class="group colors" role="toolbar" aria-label="Colors">
-      {#each PALETTE as c (c)}
+      {#each PALETTE as c, i (c)}
         <button
           class="swatch"
           class:active={color === c}
           data-color={c}
           style={`background:${c}`}
-          title={c}
-          aria-label={`Color ${c}`}
+          title={COLOR_NAMES[i] ?? c}
+          aria-label={`Color: ${COLOR_NAMES[i] ?? c}`}
+          aria-pressed={color === c}
           onclick={() => (color = c)}
         ></button>
       {/each}
@@ -543,7 +557,9 @@
           class="tb size"
           class:active={strokeIx === i}
           data-stroke={s}
-          title={`Stroke ${s} / font ${FONTS[i]}px`}
+          title={`${SIZE_NAMES[i]} stroke and text`}
+          aria-label={`${SIZE_NAMES[i]} stroke and text`}
+          aria-pressed={strokeIx === i}
           onclick={() => {
             strokeIx = i;
             fontIx = i;
@@ -566,22 +582,25 @@
       </button>
     </div>
     <div class="spacer"></div>
-    <span class="snip-copied" class:ok={copyState === 'copied' || copyState === 'idle'} class:bad={copyState === 'failed'}
-      >{copyLabel}</span
+    <span class="snip-copied" role="status" class:ok={copyState === 'copied' || copyState === 'idle'} class:bad={copyState === 'failed'}
+      title="Every change is copied to the clipboard automatically"
+      >{#if copyState === 'copied' || copyState === 'idle'}<Icon name="check" size={12} />{:else if copyState === 'failed'}<Icon name="warning" size={12} />{/if}{copyLabel}</span
     >
     <div class="group actions">
-      <button class="tb" data-act="close" title="Close" onclick={() => void close()}>Close</button>
-      <button class="tb primary" data-act="copy" title="Copy now (⌘C)" onclick={() => void copyNow()}>Copy</button>
+      <button class="tb" data-act="close" title="Close the editor (the clipboard keeps the latest copy)" onclick={() => void close()}>Close</button>
+      <button class="tb primary" data-act="copy" title="Copy now (⌘C)" onclick={() => void copyNow()}><Icon name="copy" size={13} />Copy</button>
     </div>
   </header>
 
   <div class="snip-body" bind:this={wrapEl}>
     {#if loading}
-      <div class="snip-empty">Loading…</div>
+      <div class="snip-empty" role="status">Loading the snip…</div>
     {:else if missing}
-      <div class="snip-empty snip-missing">
-        <p>This snip no longer exists.</p>
-        <button class="tb" data-act="close" onclick={() => void close()}>Close</button>
+      <div class="snip-empty snip-missing" role="alert">
+        <Icon name="image" size={26} />
+        <p class="snip-missing-title">This snip no longer exists</p>
+        <p>It was deleted, or its image file is gone. Take a new one with ⌘⇧S.</p>
+        <button class="btn" data-act="close" onclick={() => void close()}>Close</button>
       </div>
     {:else}
       <canvas
@@ -621,7 +640,7 @@
   .snip-bar {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     padding: 8px 12px;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
@@ -630,7 +649,7 @@
   /* Leave room for the macOS traffic lights in a dedicated Tauri window
      (overlay titlebar, hidden title — see tauri.conf.json). */
   .snip-bar.tauri-pad {
-    padding-left: 84px;
+    padding-inline-start: 84px;
   }
   .group {
     display: flex;
@@ -638,8 +657,8 @@
     gap: 2px;
   }
   .group + .group {
-    border-left: 1px solid var(--border);
-    padding-left: 10px;
+    border-inline-start: 1px solid var(--border);
+    padding-inline-start: 8px;
   }
   .spacer {
     flex: 1;
@@ -647,13 +666,13 @@
   .tb {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     border: 1px solid transparent;
     background: none;
     color: var(--text-dim);
     border-radius: var(--radius-s);
-    padding: 4px 8px;
-    font-size: 12px;
+    padding: 4px 6px;
+    font-size: var(--fs-s);
     cursor: pointer;
     white-space: nowrap;
   }
@@ -690,8 +709,8 @@
     opacity: 0.4;
     cursor: default;
   }
-  .tb .icon {
-    font-size: 13px;
+  .tool-ic {
+    flex-shrink: 0;
   }
   .swatch {
     width: 18px;
@@ -710,8 +729,12 @@
     justify-content: center;
   }
   .snip-copied {
-    font-size: 12px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
+    white-space: nowrap;
   }
   .snip-copied.ok {
     color: var(--accent-text);
@@ -751,11 +774,23 @@
   .snip-empty {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 8px;
     align-items: center;
+    text-align: center;
+    max-width: 360px;
     color: var(--text-dim);
+    font-size: var(--fs-m);
   }
-  @media (max-width: 760px) {
+  .snip-empty p {
+    margin: 0;
+  }
+  .snip-missing-title {
+    color: var(--text);
+    font-weight: 600;
+  }
+  /* Narrow windows: tools go icon-only (the tooltip keeps name + key) so
+     the bar stays one row as long as possible. */
+  @media (max-width: 1024px) {
     .tb .lbl {
       display: none;
     }

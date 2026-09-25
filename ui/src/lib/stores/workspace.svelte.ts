@@ -1361,6 +1361,9 @@ class WorkspaceStore {
     const restarted = await api.post<Session>(`/sessions/${sessionId}/restart`);
     this.sessions = this.sessions.map((x) => (x.id === sessionId ? restarted : x));
     this.statusMap[sessionId] = restarted.status;
+    // The PTY was respawned: bump the nonce so the mounted terminal reconnects
+    // (restartSession does the same) instead of staring at the dead socket.
+    this.restartNonces[sessionId] = (this.restartNonces[sessionId] ?? 0) + 1;
   }
 
   /** Save `notes` into workspace `wsId` (default: current). The PATCH replaces

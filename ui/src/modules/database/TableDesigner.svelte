@@ -484,7 +484,7 @@
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     min-width: 0;
   }
   .ctr {
@@ -529,14 +529,14 @@
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     min-width: 0;
   }
   .td-chk {
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     white-space: nowrap;
   }
@@ -552,7 +552,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
   .td-add:hover {
@@ -564,13 +564,13 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 10px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     white-space: pre-wrap;
     margin: 0;
     color: var(--text);
   }
   .td-nochange {
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 8px;
   }
   .td-foot {

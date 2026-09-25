@@ -4,6 +4,10 @@
   // shows cost + tokens per group. Supports CSV and JSON export via exporters.ts.
   import { api } from '../../lib/api/client';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { toasts } from '../../lib/toast.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { exportCsv, downloadJson, copyAsJson } from '../../lib/components/exporters';
   import type { AttributionRow, AttributionDim } from './types';
   import { DIM_LABELS } from './types';
@@ -35,8 +39,17 @@
   // not let the older (often slower) response land under the new labels.
   let seq = 0;
 
+  // The dimension/window the current `rows` belong to: a new grouping clears
+  // them so the old dimension's keys never sit under the new column label.
+  let rowsKey = '';
+
   async function load(): Promise<void> {
     const mine = ++seq;
+    const key = `${selectedDim}:${days}`;
+    if (key !== rowsKey) {
+      rows = [];
+      rowsKey = key;
+    }
     loading = true;
     try {
       const next = await api.get<AttributionRow[]>(
@@ -48,7 +61,7 @@
       }
     } catch (e) {
       if (mine !== seq) return;
-      error = e instanceof Error ? e.message : String(e);
+      error = loadErrorText(e);
       rows = [];
     } finally {
       if (mine === seq) loading = false;
@@ -89,10 +102,12 @@
       })),
       `otto-attribution-${selectedDim}-${days}d.csv`,
     );
+    toasts.success('Exported attribution as CSV', `otto-attribution-${selectedDim}-${days}d.csv`);
   }
 
   function exportRowsJson(): void {
     downloadJson(rows, `otto-attribution-${selectedDim}-${days}d.json`);
+    toasts.success('Exported attribution as JSON', `otto-attribution-${selectedDim}-${days}d.json`);
   }
 
   async function copyRow(r: AttributionRow): Promise<void> {
@@ -101,6 +116,7 @@
     try {
       await copyAsJson(r);
     } catch {
+      toasts.error("Couldn't copy the row", 'Clipboard access was blocked.');
       return;
     }
     copiedRow = r.key;
@@ -110,59 +126,64 @@
   }
 </script>
 
-<div class="attribution-panel">
+<section class="card attribution-panel" aria-labelledby="attr-title">
   <div class="attr-header">
-    <h3 class="attr-title">Cost attribution</h3>
-    <span class="attr-subtitle">Why did this cost so much?</span>
+    <div class="attr-heading">
+      <h3 class="attr-title" id="attr-title">Cost attribution</h3>
+      <span class="attr-subtitle">Where the spend went, grouped by the work it was for</span>
+    </div>
     <div class="attr-controls">
       <label class="dim-label" for="attr-dim-select">Group by</label>
-      <select
-        id="attr-dim-select"
-        class="dim-select"
-        bind:value={selectedDim}
-      >
+      <select id="attr-dim-select" class="input dim-select" bind:value={selectedDim}>
         {#each DIMS as dim}
           <option value={dim}>{DIM_LABELS[dim]}</option>
         {/each}
       </select>
       {#if rows.length > 0}
-        <button class="export-btn" onclick={exportRowsCsv} title="Export CSV">CSV</button>
-        <button class="export-btn" onclick={exportRowsJson} title="Export JSON">JSON</button>
+        <button class="btn small ghost" onclick={exportRowsCsv} title="Download as CSV" aria-label="Download attribution as CSV">
+          <Icon name="download" size={12} /> CSV
+        </button>
+        <button class="btn small ghost" onclick={exportRowsJson} title="Download as JSON" aria-label="Download attribution as JSON">
+          <Icon name="download" size={12} /> JSON
+        </button>
       {/if}
     </div>
   </div>
 
-  {#if loading}
-    <div class="attr-loading">Loading attribution…</div>
-  {:else if error}
-    <div class="attr-error" role="alert">
-      <span>Couldn't load attribution: {error}</span>
-      <button class="btn small" onclick={() => void load()}>Retry</button>
-    </div>
-  {:else if rows.length === 0}
-    <div class="attr-empty">
-      No attributed usage for this dimension in the selected window.
-      Sessions need a work reference stamped at creation time (review/product/swarm
-      runners do this automatically; manual sessions carry origin="manual").
-    </div>
-  {:else}
+  <LoadState
+    what="cost attribution"
+    {loading}
+    {error}
+    empty={rows.length === 0}
+    rows={3}
+    onretry={() => void load()}
+  >
+    {#snippet emptyView()}
+      <EmptyState
+        icon="chart"
+        title="Nothing attributed by {DIM_LABELS[selectedDim].toLowerCase()} in the last {days} days"
+        body={selectedDim === 'origin'
+          ? 'Usage shows up here once agents run in this window.'
+          : 'Reviews, product stories, swarms and workflows tag the sessions they start. Ad-hoc sessions only appear under Origin.'}
+      />
+    {/snippet}
     <div class="attr-table-wrap">
       <table class="attr-table">
         <thead>
           <tr>
             <th class="col-key">{DIM_LABELS[selectedDim]}</th>
-            <th class="col-bar"></th>
+            <th class="col-bar"><span class="sr-only">Share of cost</span></th>
             <th class="col-cost">Cost</th>
-            <th class="col-pct">%</th>
+            <th class="col-pct">Share</th>
             <th class="col-tokens">Tokens</th>
             <th class="col-sessions">Sessions</th>
-            <th class="col-copy"></th>
+            <th class="col-copy"><span class="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody>
           {#each rows as r (r.key)}
             <tr class="attr-row">
-              <td class="col-key attr-key" title={r.key}>{r.key}</td>
+              <td class="col-key"><span class="attr-key" title={r.key}>{r.key}</span></td>
               <td class="col-bar">
                 <div class="bar-track">
                   <div class="bar-fill" style="width: {pct(r.cost_usd).toFixed(1)}%"></div>
@@ -170,16 +191,16 @@
               </td>
               <td class="col-cost">{fmtCost(r.cost_usd)}</td>
               <td class="col-pct dim-pct">{pct(r.cost_usd).toFixed(1)}%</td>
-              <td class="col-tokens">{fmtNum(r.tokens)}</td>
+              <td class="col-tokens" title="{r.tokens.toLocaleString()} tokens">{fmtNum(r.tokens)}</td>
               <td class="col-sessions">{r.sessions}</td>
               <td class="col-copy">
                 <button
-                  class="copy-btn"
+                  class="icon-btn"
                   onclick={() => copyRow(r)}
-                  title="Copy row as JSON"
-                  aria-label="Copy row as JSON"
+                  title={copiedRow === r.key ? 'Copied' : 'Copy row as JSON'}
+                  aria-label={copiedRow === r.key ? 'Copied' : 'Copy row as JSON'}
                 >
-                  <Icon name={copiedRow === r.key ? 'check' : 'copy'} size={12} />
+                  <Icon name={copiedRow === r.key ? 'check' : 'copy'} size={14} />
                 </button>
               </td>
             </tr>
@@ -198,76 +219,53 @@
         </tfoot>
       </table>
     </div>
-  {/if}
-</div>
+  </LoadState>
+</section>
 
 <style>
-  /* Same card + heading treatment as the other Usage panels (it used to be
-     the one grey, title-cased card on the page). */
+  /* Same card + heading treatment as the other Usage panels (global .card). */
   .attribution-panel {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    padding: 14px;
-    background: var(--surface);
+    padding: 14px 16px;
+    min-width: 0;
   }
 
   .attr-header {
     display: flex;
     align-items: center;
-    gap: 12px;
+    justify-content: space-between;
+    gap: 8px 12px;
     flex-wrap: wrap;
-    margin-bottom: 14px;
+    margin-bottom: 12px;
+  }
+  .attr-heading {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 2px 10px;
+    min-width: 0;
   }
   .attr-title {
     margin: 0;
-    font-size: var(--fs-s);
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
   }
   .attr-subtitle {
     font-size: var(--fs-s);
     color: var(--text-dim);
-    flex: 1;
   }
   .attr-controls {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
+    flex-wrap: wrap;
   }
   .dim-label {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .dim-select {
-    font-size: var(--fs-s);
-    padding: 3px 6px;
-    background: var(--surface-2);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-  }
-  .export-btn {
-    font-size: var(--fs-xs);
-    padding: 3px 8px;
-    background: var(--surface-2);
-    color: var(--text-dim);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    cursor: pointer;
-  }
-  .export-btn:hover {
-    color: var(--text);
-    border-color: var(--text-dim);
-  }
-
-  .attr-loading,
-  .attr-empty {
-    font-size: 12px;
-    color: var(--text-dim);
-    padding: 24px 0;
-    text-align: center;
+    width: auto;
   }
 
   .attr-table-wrap {
@@ -276,7 +274,8 @@
   .attr-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12px;
+    font-size: var(--fs-s);
+    font-variant-numeric: tabular-nums;
   }
   .attr-table thead th {
     text-align: start;
@@ -286,64 +285,82 @@
     border-bottom: 1px solid var(--border);
     white-space: nowrap;
   }
+  .attr-table thead th.col-cost,
+  .attr-table thead th.col-pct,
+  .attr-table thead th.col-tokens,
+  .attr-table thead th.col-sessions {
+    text-align: end;
+  }
   .attr-row td {
-    padding: 5px 8px;
-    border-bottom: 1px solid var(--border);
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--separator);
     color: var(--text);
     vertical-align: middle;
+  }
+  .attr-row:hover td {
+    background: var(--hover);
   }
   .attr-row:last-child td {
     border-bottom: none;
   }
   .attr-total td {
-    padding: 5px 8px;
+    padding: 6px 8px;
     border-top: 1px solid var(--border);
     font-weight: 600;
     color: var(--text-dim);
   }
 
-  .col-key { max-width: 200px; }
+  .col-key {
+    max-width: 260px;
+  }
   .attr-key {
+    display: block;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
-  .col-bar { width: 120px; }
+  .col-bar {
+    width: 120px;
+  }
   .bar-track {
     height: 6px;
-    background: var(--surface-3);
+    background: var(--surface-2);
     border-radius: 3px;
     overflow: hidden;
   }
   .bar-fill {
     height: 100%;
-    background: var(--accent);
+    background: var(--accent-solid);
     border-radius: 3px;
     transition: width 0.2s;
   }
-  .col-cost, .col-pct, .col-tokens, .col-sessions { text-align: end; }
-  .dim-pct { color: var(--text-dim); }
-  .col-copy { width: 32px; text-align: center; }
-  .attr-error {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-size: var(--fs-s);
-    color: var(--danger);
+  @media (prefers-reduced-motion: reduce) {
+    .bar-fill {
+      transition: none;
+    }
   }
-  .copy-btn {
-    display: inline-grid;
-    place-items: center;
-    background: none;
-    border: none;
-    cursor: pointer;
+  .col-cost,
+  .col-pct,
+  .col-tokens,
+  .col-sessions {
+    text-align: end;
+    white-space: nowrap;
+  }
+  .dim-pct {
     color: var(--text-dim);
-    font-size: 13px;
-    padding: 2px 4px;
-    border-radius: 3px;
-    line-height: 1;
   }
-  .copy-btn:hover { color: var(--text); background: var(--surface-3); }
+  .col-copy {
+    width: 32px;
+    text-align: center;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
 </style>

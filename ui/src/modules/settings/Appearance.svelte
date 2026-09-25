@@ -137,7 +137,7 @@
   <div class="section-title">Theme</div>
   <div class="theme-grid">
     {#each themes as t (t.id)}
-      <button class="theme-card" class:selected={ui.theme === t.id} onclick={() => ui.setTheme(t.id)}>
+      <button class="theme-card" class:selected={ui.theme === t.id} aria-pressed={ui.theme === t.id} onclick={() => ui.setTheme(t.id)}>
         <div class="theme-preview" style="background: {swatches[t.id].bg}">
           <div class="tp-bar" style="background: {swatches[t.id].acc}"></div>
           <div class="tp-line" style="background: {swatches[t.id].fg}; opacity: 0.8"></div>
@@ -152,10 +152,11 @@
   <div class="section-title">Scheme</div>
   <!-- Pro Dark resolves to dark whatever the scheme says (ui.applyTheme), so
        the picker is shown as not applying instead of silently doing nothing. -->
-  <div class="segmented" class:off={ui.theme === 'pro-dark'}>
+  <div class="segmented" class:off={ui.theme === 'pro-dark'} role="group" aria-label="Scheme">
     {#each schemes as s (s.id)}
       <button
         class:active={ui.scheme === s.id}
+        aria-pressed={ui.scheme === s.id}
         disabled={ui.theme === 'pro-dark'}
         title={ui.theme === 'pro-dark' ? 'Pro Dark is always dark' : undefined}
         onclick={() => ui.setScheme(s.id)}>{s.label}</button
@@ -169,23 +170,23 @@
   </p>
 
   <div class="section-title">Direction</div>
-  <div class="segmented">
+  <div class="segmented" role="group" aria-label="Direction">
     {#each directions as d (d.id)}
-      <button class:active={ui.direction === d.id} onclick={() => ui.setDirection(d.id)}>{d.label}</button>
+      <button class:active={ui.direction === d.id} aria-pressed={ui.direction === d.id} onclick={() => ui.setDirection(d.id)}>{d.label}</button>
     {/each}
   </div>
   <p class="hint-line">Right-to-left mirrors the layout for RTL languages (Hebrew, Arabic).</p>
 
-  <div class="section-title">Accent color</div>
+  <div class="section-title">Accent colour</div>
   <div class="row">
     <input
       type="color"
       class="accent-input"
       value={ui.accent || (/^#[0-9a-f]{6}$/i.test(accentNow) ? accentNow : '#0a84ff')}
       oninput={(e) => ui.setAccent(e.currentTarget.value)}
-      aria-label="Accent color"
+      aria-label="Accent colour"
     />
-    <span class="mono dim">{ui.accent || 'theme default'}</span>
+    <span class="accent-val">{ui.accent ? ui.accent.toUpperCase() : 'Theme default'}</span>
     {#if ui.accent}
       <button class="btn small" onclick={() => ui.setAccent('')}>Reset</button>
     {/if}
@@ -240,10 +241,11 @@
   </p>
 
   <div class="section-title">Terminal font</div>
-  <div class="segmented">
+  <div class="segmented" role="group" aria-label="Terminal font">
     {#each TERM_FONT_OPTIONS as f (f.id)}
       <button
         class:active={ui.termFontFamily === f.id}
+        aria-pressed={ui.termFontFamily === f.id}
         title={f.desc}
         onclick={() => ui.setTermFontFamily(f.id)}>{f.name}</button
       >
@@ -281,7 +283,7 @@
     <span>Show font-size and copy-on-select controls on terminals</span>
   </label>
 
-  <div class="section-title">Right-to-left text <span class="exp-tag">Experimental</span></div>
+  <div class="section-title">Right-to-left text <span class="chip accent exp-tag">Experimental</span></div>
   <label class="switch-row">
     <input
       type="checkbox"
@@ -291,7 +293,7 @@
     <span>Right-to-left text in the terminal</span>
   </label>
   <p class="hint-line warn">
-    ⚠ Lays out Hebrew right-to-left with English embedded left-to-right, using the browser's bidi
+    <Icon name="warning" size={12} /> Lays out Hebrew right-to-left with English embedded left-to-right, using the browser's bidi
     engine (switches the terminal off the GPU renderer). Because text is reflowed for reading, the
     monospace grid no longer lines up exactly — great for chat-style output, imperfect for TUI
     tables or box art. Toggling reloads open terminals.
@@ -510,10 +512,10 @@
     background: var(--surface);
     padding: 10px;
     cursor: pointer;
-    transition: border-color 130ms ease-out, transform 130ms ease-out;
+    transition: border-color 130ms ease-out;
   }
-  .theme-card:hover {
-    transform: translateY(-1px);
+  .theme-card:hover:not(.selected) {
+    border-color: var(--border-strong);
   }
   .theme-card.selected {
     border-color: var(--accent);
@@ -588,7 +590,7 @@
     gap: 4px;
   }
   .term-size-label {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
     margin-inline-end: 6px;
   }
@@ -619,15 +621,16 @@
     width: 55%;
   }
   .theme-name {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .theme-desc {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .hint-line {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
+    line-height: 1.5;
     color: var(--text-dim);
     margin: 8px 0 0;
     max-width: min(620px, 92vw);
@@ -635,11 +638,19 @@
   .hint-line.warn {
     color: var(--warning);
   }
+  .hint-line.warn :global(svg) {
+    vertical-align: -2px;
+  }
+  .accent-val {
+    font-family: var(--font-mono);
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
   .switch-row {
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
     cursor: pointer;
     user-select: none;
@@ -656,15 +667,10 @@
     accent-color: var(--accent);
     cursor: pointer;
   }
+  /* A sentence-case chip inside the uppercase section title. */
   .exp-tag {
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    font-weight: 700;
-    color: var(--accent-text);
-    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
-    border-radius: 999px;
-    padding: 1px 6px;
+    text-transform: none;
+    letter-spacing: normal;
     margin-inline-start: 6px;
     vertical-align: middle;
   }
@@ -726,11 +732,11 @@
     height: 32px;
     padding: 0 4px 0 8px;
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
   }
   .sidebar-row:hover {
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+    background: var(--hover);
   }
   .sidebar-group-label {
     display: flex;

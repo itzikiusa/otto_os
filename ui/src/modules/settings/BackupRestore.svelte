@@ -15,6 +15,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { downloadJson } from '../../lib/components/exporters';
+  import SectionIntro from './SectionIntro.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
 
   // ---- Module-local types (mirrors the Rust response structs) ---------------
 
@@ -44,6 +46,10 @@
   let exporting = $state(false);
   let importing = $state(false);
   let lastExport: SettingsExportResp | null = $state(null);
+  // Real buttons drive hidden file inputs (a <label> around a display:none
+  // input can't be reached with Tab).
+  let importEl: HTMLInputElement | null = $state(null);
+  let restoreEl: HTMLInputElement | null = $state(null);
 
   async function exportSettings(): Promise<void> {
     exporting = true;
@@ -59,7 +65,7 @@
           : 'No secrets in export',
       );
     } catch (e) {
-      toasts.error('Export failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t export settings', e instanceof Error ? e.message : String(e));
     } finally {
       exporting = false;
     }
@@ -76,15 +82,14 @@
     try {
       parsed = JSON.parse(await file.text()) as SettingsExportResp;
     } catch {
-      toasts.error('Import failed', 'Could not parse the JSON file.');
+      toasts.error('Couldn’t import settings', `“${file.name}” isn't valid JSON.`);
       return;
     }
 
     const keyCount = Object.keys(parsed.settings ?? {}).length;
     const ok = await confirmer.ask(
-      `Merge ${keyCount} setting${keyCount === 1 ? '' : 's'} from "${file.name}"?\n` +
-        'Secret-keyed entries will be rejected automatically.',
-      { title: 'Import Settings', confirmLabel: 'Import' },
+      `Merge ${keyCount} setting${keyCount === 1 ? '' : 's'} from “${file.name}” into this Otto? Matching settings are overwritten; secret-keyed entries are rejected automatically.`,
+      { title: 'Import settings', confirmLabel: 'Import', danger: false },
     );
     if (!ok) return;
 
@@ -93,7 +98,7 @@
       await api.post('/settings/import', { settings: parsed.settings ?? {} });
       toasts.success('Settings imported', `${keyCount} entr${keyCount === 1 ? 'y' : 'ies'} merged.`);
     } catch (err) {
-      toasts.error('Import failed', err instanceof Error ? err.message : String(err));
+      toasts.error('Couldn’t import settings', err instanceof Error ? err.message : String(err));
     } finally {
       importing = false;
     }
@@ -103,9 +108,6 @@
 
   let backingUp = $state(false);
   let restoring = $state(false);
-  /** Typed restore-confirm string — must match the sentinel below. */
-  let restoreConfirmText = $state('');
-  const RESTORE_SENTINEL = 'restore';
 
   async function downloadBackup(): Promise<void> {
     backingUp = true;
@@ -114,7 +116,7 @@
       downloadJson(resp, `otto-state-backup-${dateSlug()}.json`);
       toasts.success('Settings backup downloaded', `${resp.manifest.workspace_count} workspace${resp.manifest.workspace_count === 1 ? '' : 's'} in manifest.`);
     } catch (e) {
-      toasts.error('Backup failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t download the settings backup', e instanceof Error ? e.message : String(e));
     } finally {
       backingUp = false;
     }
@@ -126,36 +128,28 @@
     if (!file) return;
     input.value = '';
 
-    if (restoreConfirmText.trim().toLowerCase() !== RESTORE_SENTINEL) {
-      toasts.error('Confirm required', `Type "${RESTORE_SENTINEL}" to enable restore.`);
-      return;
-    }
-
     let backup: StateBackupResp;
     try {
       backup = JSON.parse(await file.text()) as StateBackupResp;
     } catch {
-      toasts.error('Restore failed', 'Could not parse the backup file.');
+      toasts.error('Couldn’t restore settings', `“${file.name}” isn't a valid settings backup.`);
       return;
     }
 
     const keyCount = Object.keys(backup.settings ?? {}).length;
+    const snap = backup.manifest?.snapshot_at ? new Date(backup.manifest.snapshot_at).toLocaleString() : 'an unknown date';
     const ok = await confirmer.ask(
-      `Restore ${keyCount} setting${keyCount === 1 ? '' : 's'} from backup "${file.name}"?\n` +
-        `Snapshot: ${backup.manifest?.snapshot_at ?? 'unknown'}\n` +
-        `Daemon: ${backup.manifest?.daemon_version ?? 'unknown'}\n\n` +
-        'This DOES NOT wipe the database or delete sessions.',
-      { title: 'Restore State', confirmLabel: 'Restore', danger: true },
+      `Overwrite ${keyCount} setting${keyCount === 1 ? '' : 's'} with the values in “${file.name}” (taken ${snap}, daemon ${backup.manifest?.daemon_version ?? 'unknown'})? The database, workspaces, sessions and credentials are not touched.`,
+      { title: 'Restore settings', confirmLabel: 'Restore', danger: true },
     );
     if (!ok) return;
 
     restoring = true;
     try {
       await api.post('/state/restore', { backup, confirm: true });
-      toasts.success('State restored', `${keyCount} setting${keyCount === 1 ? '' : 's'} applied.`);
-      restoreConfirmText = '';
+      toasts.success('Settings restored', `${keyCount} setting${keyCount === 1 ? '' : 's'} applied.`);
     } catch (err) {
-      toasts.error('Restore failed', err instanceof Error ? err.message : String(err));
+      toasts.error('Couldn’t restore settings', err instanceof Error ? err.message : String(err));
     } finally {
       restoring = false;
     }
@@ -171,99 +165,74 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('backup')} subtitle="Back up Otto data, restore an archive or transfer settings" />
   <PageBody width="readable">
+  <SectionIntro>
+    Everything here stays on this Mac unless you push a Git backup to a remote. Credentials are never included
+    unless you explicitly export connection passwords.
+  </SectionIntro>
 
   <FullBackup />
   <GitBackup />
   <ConnectionsExport />
 
-  <!-- Settings export / import -->
-  <div class="section-title">Settings</div>
-  <div class="card pad">
+  <!-- Settings only: export/import + backup/restore with a manifest -->
+  <section class="card pad" aria-label="Settings file">
+    <h2 class="card-title">Settings only</h2>
     <p class="hint">
-      Export downloads a JSON file with all daemon settings. Secrets (tokens, passwords, Keychain
-      refs) are filtered automatically. This export contains settings only; review configuration before sharing it.
+      Daemon settings as a JSON file — for moving your configuration to another Mac. Secrets (tokens,
+      passwords, Keychain refs) are filtered out automatically; review the file before sharing it.
     </p>
     <div class="row-actions">
-      <button class="btn primary" disabled={exporting} onclick={exportSettings}>
-        {exporting ? 'Exporting…' : 'Export settings'}
+      <button class="btn" disabled={exporting} onclick={exportSettings}>
+        <Icon name="download" size={13} /> {exporting ? 'Exporting…' : 'Export settings'}
       </button>
-
-      <label class="btn" class:disabled={importing} title="Import settings from a previously exported JSON file">
-        {importing ? 'Importing…' : 'Import settings'}
-        <input
-          type="file"
-          accept=".json,application/json"
-          class="file-input"
-          disabled={importing}
-          onchange={importSettings}
-        />
-      </label>
+      <button class="btn" disabled={importing} title="Merge settings from a previously exported JSON file" onclick={() => importEl?.click()}>
+        {importing ? 'Importing…' : 'Import settings…'}
+      </button>
+      <input
+        type="file"
+        accept=".json,application/json"
+        class="file-input"
+        disabled={importing}
+        onchange={importSettings}
+        bind:this={importEl}
+        tabindex="-1"
+        aria-hidden="true"
+      />
     </div>
-
     {#if lastExport}
-      <div class="hint-line dim">
+      <div class="hint-line">
         Last export: {lastExport.excluded_keys.length > 0
           ? `${lastExport.excluded_keys.length} secret key${lastExport.excluded_keys.length === 1 ? '' : 's'} excluded`
           : 'no secrets present'}
       </div>
     {/if}
-  </div>
 
-  <!-- State backup / restore -->
-  <div class="section-title">Settings backup with manifest</div>
-  <div class="card pad">
+    <h3 class="sub-title">Settings backup with manifest</h3>
     <p class="hint">
-      A settings backup bundles the scrubbed settings with a manifest (workspace names, migration
-      level, daemon version). It does <em>not</em> include session data, PTY output, secrets, or
-      raw database rows.
+      The scrubbed settings plus a manifest (workspace names, migration level, daemon version). It does
+      <em>not</em> include session data, terminal output, secrets or database rows. Restoring overwrites
+      matching settings only — the database, workspaces, sessions and credentials are untouched, and the
+      restore is audited.
     </p>
-    <button class="btn primary" disabled={backingUp} onclick={downloadBackup}>
-      {backingUp ? 'Downloading…' : 'Download settings backup'}
-    </button>
-  </div>
-
-  <div class="section-title">Restore settings</div>
-  <div class="card pad">
-    <p class="hint">
-      Restoring applies the non-secret settings from a backup file. It does <em>not</em> wipe the
-      database, delete workspaces, or touch credentials. The daemon restarts any reloaded providers
-      immediately.
-    </p>
-    <div class="confirm-row">
-      <label for="restore-confirm" class="confirm-label">
-        Type <span class="mono">{RESTORE_SENTINEL}</span> to unlock restore:
-      </label>
-      <input
-        id="restore-confirm"
-        class="input mono"
-        type="text"
-        placeholder={RESTORE_SENTINEL}
-        bind:value={restoreConfirmText}
-        autocomplete="off"
-        spellcheck={false}
-      />
-    </div>
-
-    <label
-      class="btn danger"
-      class:disabled={restoring || restoreConfirmText.trim().toLowerCase() !== RESTORE_SENTINEL}
-      title="Select a backup JSON file to restore from"
-    >
-      {restoring ? 'Restoring…' : 'Restore from backup'}
+    <div class="row-actions">
+      <button class="btn" disabled={backingUp} onclick={downloadBackup}>
+        <Icon name="download" size={13} /> {backingUp ? 'Downloading…' : 'Download settings backup'}
+      </button>
+      <button class="btn danger" disabled={restoring} title="Choose a settings backup file to restore from" onclick={() => restoreEl?.click()}>
+        {restoring ? 'Restoring…' : 'Restore from backup…'}
+      </button>
       <input
         type="file"
         accept=".json,application/json"
         class="file-input"
-        disabled={restoring || restoreConfirmText.trim().toLowerCase() !== RESTORE_SENTINEL}
+        disabled={restoring}
         onchange={restoreState}
+        bind:this={restoreEl}
+        tabindex="-1"
+        aria-hidden="true"
       />
-    </label>
-
-    <p class="warn-note">
-      This action is audited. The restore merges settings — existing workspaces, sessions, and
-      credentials are unaffected.
-    </p>
-  </div>
+    </div>
+  </section>
   </PageBody>
 </div>
 
@@ -276,18 +245,31 @@
     min-height: 0;
   }
   .card.pad {
-    padding: 14px 16px;
-    max-width: 540px;
-    margin-bottom: 8px;
+    padding: 16px 18px;
+    max-width: 880px;
+    margin-bottom: 16px;
+  }
+  .card-title {
+    margin: 0 0 6px;
+    font-size: var(--fs-m);
+    font-weight: 600;
+  }
+  .sub-title {
+    margin: 20px 0 6px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    font-size: var(--fs-m);
+    font-weight: 600;
   }
   .hint {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     margin: 0 0 12px;
     line-height: 1.5;
   }
   .hint-line {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
     margin-top: 8px;
   }
   .row-actions {
@@ -296,38 +278,7 @@
     flex-wrap: wrap;
     align-items: center;
   }
-  .confirm-row {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    margin-bottom: 10px;
-  }
-  .confirm-label {
-    font-size: 12px;
-    color: var(--text-dim);
-  }
-  .input {
-    max-width: 200px;
-  }
-  .warn-note {
-    font-size: 11.5px;
-    color: var(--text-dim);
-    margin: 10px 0 0;
-  }
-  /* Hide the real file input but keep it accessible */
   .file-input {
     display: none;
-  }
-  label.btn {
-    display: inline-flex;
-    align-items: center;
-    cursor: pointer;
-    user-select: none;
-  }
-  label.btn.disabled,
-  label.btn:has(input:disabled) {
-    opacity: 0.5;
-    pointer-events: none;
-    cursor: not-allowed;
   }
 </style>

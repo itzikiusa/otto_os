@@ -4,6 +4,7 @@
 
 import type { IconName } from '../../lib/components/Icon.svelte';
 import type { RunStatus } from '../../lib/api/types';
+import type { StatusInfo, Tone } from '../../lib/status';
 
 /** Tone buckets that map onto the page's status-pill CSS classes. */
 export type StatusTone = 'ok' | 'bad' | 'warn' | 'active' | 'dim';
@@ -41,10 +42,36 @@ export function statusTone(status: RunStatus | string): StatusTone {
   }
 }
 
-/** Humanize a snake_case status/kind into a Title-case label. */
+/** Humanize a snake_case status/kind into a sentence-case label
+ *  ("awaiting_approval" → "Awaiting approval"; content.md: sentence case). */
 export function humanize(s: string): string {
   if (!s) return '';
-  return s.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  const t = s.replace(/_/g, ' ').trim().toLowerCase();
+  return t ? t[0].toUpperCase() + t.slice(1) : t;
+}
+
+const TONE_OF: Record<StatusTone, Tone> = {
+  ok: 'success',
+  bad: 'danger',
+  warn: 'warning',
+  active: 'info',
+  dim: 'neutral',
+};
+
+/** A run status as the shared `StatusBadge` input: the run's own stage word
+ *  ("Executing", "Awaiting approval" — more telling than a bare "Running")
+ *  with the shared tone vocabulary (patterns.md §1: running is info, never
+ *  the success green; the one human gate is the amber warning). */
+export function runStatusInfo(status: RunStatus | string): StatusInfo {
+  const tone = statusTone(status);
+  const stage = STAGES.find((s) => s.statuses.includes(status));
+  return {
+    key: status,
+    label: humanize(status),
+    tone: TONE_OF[tone],
+    live: tone === 'active' && !isTerminal(status),
+    hint: stage ? `${stage.label}: ${stage.hint}` : undefined,
+  };
 }
 
 // ---------------------------------------------------------------------------

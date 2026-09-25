@@ -577,15 +577,15 @@
               {/if}
             {/if}
             {#if selected.value?.raw_base64}
-              <button class="btn tiny" onclick={() => (rawView = !rawView)}>
+              <button class="btn small" onclick={() => (rawView = !rawView)}>
                 {rawView ? 'Decoded' : 'Raw'}
               </button>
             {/if}
-            <button class="btn tiny" onclick={copySelectedAsJson} title="Copy message as JSON">
+            <button class="btn small" onclick={copySelectedAsJson} title="Copy message as JSON">
               <Icon name="copy" size={11} /> Copy
             </button>
             {#if ws.current}
-              <button class="btn tiny" onclick={() => (sendToAgentOpen = true)} title="Send message to a running agent (redacted preview)">
+              <button class="btn small" onclick={() => (sendToAgentOpen = true)} title="Send message to a running agent (redacted preview)">
                 <Icon name="send" size={11} /> To agent
               </button>
             {/if}
@@ -697,7 +697,7 @@
       <div class="headers-section">
         <div class="headers-title">
           <span class="dim-label">Headers</span>
-          <button class="btn tiny" onclick={addHeader}><Icon name="plus" size={11} /> Add</button>
+          <button class="btn small" onclick={addHeader}><Icon name="plus" size={11} /> Add</button>
         </div>
         {#each pHeaders as h, i (i)}
           <div class="header-row">
@@ -798,7 +798,7 @@
     padding: 6px 12px;
     border-radius: var(--radius-s) var(--radius-s) 0 0;
     cursor: pointer;
-    font-size: 13px;
+    font-size: var(--fs-m);
     white-space: nowrap;
     flex: none;
   }
@@ -821,7 +821,7 @@
     border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .sm {
     width: 110px;
@@ -841,7 +841,7 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     cursor: pointer;
@@ -850,7 +850,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     cursor: pointer;
@@ -886,13 +886,13 @@
   table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   th {
     text-align: start;
     font-weight: 500;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     padding: 6px 10px;
@@ -981,7 +981,7 @@
   }
   h5 {
     margin: 12px 0 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--text-dim);
@@ -993,7 +993,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
     white-space: pre-wrap;
     word-break: break-word;
     max-height: 40vh;
@@ -1005,7 +1005,7 @@
   table.headers td {
     border: none;
     padding: 2px 8px 2px 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .cfg-set {
     display: flex;
@@ -1019,7 +1019,7 @@
     border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .produce {
     display: flex;
@@ -1038,7 +1038,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
     white-space: nowrap;
@@ -1054,7 +1054,7 @@
     gap: 8px;
   }
   .dim-label {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .header-row {
@@ -1069,7 +1069,7 @@
     border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .header-val {
     flex: 1;
@@ -1078,7 +1078,7 @@
     border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .danger-tiny {
     color: var(--danger);
@@ -1097,7 +1097,7 @@
     gap: 4px;
   }
   .field span {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .field input,
@@ -1108,7 +1108,7 @@
     border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-family: inherit;
   }
   .field textarea {
@@ -1122,7 +1122,7 @@
     color: var(--text-dim);
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .pad {
     padding: 14px;
@@ -1132,7 +1132,7 @@
     align-items: center;
     gap: 8px;
     padding: 8px 14px;
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text);
     border-bottom: 1px solid var(--border);
   }
@@ -1142,10 +1142,6 @@
   .err-text {
     flex: 1;
     min-width: 0;
-  }
-  .btn.tiny {
-    padding: 2px 8px;
-    font-size: 11px;
   }
 
   /* Phone (≤640px): the message list + detail are side-by-side on desktop, which

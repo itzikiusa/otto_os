@@ -184,7 +184,7 @@
     font-weight: 600;
   }
   .count {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .grow {
@@ -194,7 +194,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
   }
   .list {
@@ -225,11 +225,11 @@
     padding: 1px 6px;
   }
   .title {
-    font-size: 13.5px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .when {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .meta {
@@ -237,7 +237,7 @@
     gap: 12px;
     flex-wrap: wrap;
     margin-top: 6px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .route {
@@ -248,13 +248,13 @@
   }
   .detail {
     margin: 8px 0 0;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
   }
   .args {
     margin: 8px 0 0;
     font-family: var(--font-mono);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-s, 6px);
@@ -277,7 +277,7 @@
     border-radius: var(--radius-s, 6px);
     color: var(--text);
     padding: 6px 9px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .btn.ok {
     color: var(--success);
@@ -287,7 +287,7 @@
   }
   .decided {
     margin-top: 8px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .muted {

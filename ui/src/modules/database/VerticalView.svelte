@@ -347,7 +347,7 @@
     padding: 4px 2px;
   }
   .alt-note {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 4px 6px 8px;
   }
   /* Expand / Collapse / Reset strip above the records. */
@@ -361,7 +361,7 @@
   .vv-tool {
     height: 20px;
     padding: 0 8px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface-2);
     border: 1px solid var(--border);
@@ -389,7 +389,7 @@
     width: 100%;
     padding: 6px 10px;
     margin: 2px 0 10px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface-2);
     border: 1px solid var(--border);
@@ -416,7 +416,7 @@
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
   }
   .vrec-more {
-    font-size: 13px;
+    font-size: var(--fs-m);
     line-height: 1;
     padding: 0 5px;
   }
@@ -435,7 +435,7 @@
     gap: 6px;
     background: var(--surface-2);
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 3px 8px;
     border-bottom: 1px solid var(--border);
   }

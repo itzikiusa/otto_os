@@ -383,7 +383,7 @@
 
 <style>
   .transfers { max-height: 180px; overflow: auto; padding: 8px 12px; border-bottom: 1px solid var(--border); }
-  .transfer { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 4px 0; font-size: 12px; }
+  .transfer { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 4px 0; font-size: var(--fs-s); }
   .transfer > .ellipsis { max-width: 45%; }
   .transfer progress { width: 100px; }
   .sftp {
@@ -406,7 +406,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 4px 8px;
   }
   .sftp-search:focus {
@@ -421,7 +421,7 @@
     align-items: center;
     flex-wrap: wrap;
     gap: 2px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     padding: 2px 0;
   }
@@ -472,7 +472,7 @@
     z-index: 1;
   }
   .cell {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     min-width: 0;
     overflow: hidden;
   }
@@ -497,7 +497,7 @@
     color: var(--accent-text);
   }
   .link-to {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     max-width: 45%;
   }
   /* Long names / paths / link targets truncate with an ellipsis (the full
@@ -516,7 +516,7 @@
   }
   .pad {
     padding: 16px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .err {
     color: var(--danger);
@@ -526,7 +526,7 @@
     overflow: auto;
     margin: 0;
     padding: 10px 12px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     background: var(--surface-2);
     border: 1px solid var(--border);
@@ -534,7 +534,7 @@
     white-space: pre;
   }
   .trunc {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     padding: 0 2px 8px;
   }

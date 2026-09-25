@@ -194,7 +194,7 @@
     background: transparent;
     color: var(--text-dim);
     padding: 4px 9px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
   .views button.on {
@@ -212,7 +212,7 @@
     background: transparent;
     color: var(--text-dim);
     padding: 8px 14px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
   .bar {
@@ -227,7 +227,7 @@
     flex: 1;
   }
   .count {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   select,
@@ -237,7 +237,7 @@
     border-radius: var(--radius-s, 6px);
     color: var(--text);
     padding: 6px 8px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .grid {
     overflow: auto;
@@ -255,7 +255,7 @@
     top: 0;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--text-dim);
@@ -263,7 +263,7 @@
   }
   .arow {
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .arow:hover {
     background: color-mix(in srgb, var(--text-dim) 5%, transparent);
@@ -290,7 +290,7 @@
     text-align: right;
   }
   .when {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .mono {

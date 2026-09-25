@@ -5,7 +5,6 @@
   // pick the improver agent. Prefilled from the saved defaults (/settings/skill-eval).
   import { auth } from '../../lib/stores/auth.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import { toasts } from '../../lib/toast.svelte';
   import { skillsEvalApi } from '../../lib/api/skillsEval';
   import type {
     SkillEvalValidationCfg,
@@ -62,12 +61,19 @@
   let validations: SkillEvalValidationCfg[] = $state([]);
 
   let loaded = $state(false);
+  // A failed defaults/sources load is shown inline with Retry: the form would
+  // otherwise look ready with no skills and no validations.
+  let loadError = $state<string | null>(null);
+  // The improver model saved in Settings → Skills evaluator (sent with the run
+  // so the setting isn't silently dropped).
+  let improverModel = $state('');
 
   $effect(() => {
     if (!loaded) void load();
   });
 
   async function load(): Promise<void> {
+    loadError = null;
     try {
       const wsId = ws.currentId;
       const [cfg, src] = await Promise.all([
@@ -82,11 +88,12 @@
       sources = src.sources;
       implCli = defaultAgentProvider();
       improverProvider = cfg.improver?.provider || implCli;
+      improverModel = cfg.improver?.model ?? '';
       const want = initialSkill ? matchSource(sources, initialSkill) : -1;
       if (want >= 0) sourceSel = want;
       else if (sources.length > 0) sourceSel = 0;
     } catch (e) {
-      toasts.error('Could not load evaluator defaults', e instanceof Error ? e.message : String(e));
+      loadError = e instanceof Error ? e.message : String(e);
     } finally {
       loaded = true;
     }
@@ -110,6 +117,7 @@
 
   const canStart = $derived(
     !starting &&
+      loaded &&
       task.trim().length > 0 &&
       implCli.length > 0 &&
       (sourceSel === 'custom' ? customPath.trim().length > 0 : sources.length > 0) &&
@@ -121,6 +129,7 @@
   // leaves the user hunting through the form).
   const blockReason = $derived.by(() => {
     if (starting) return 'Starting…';
+    if (!loaded) return 'Loading the evaluator defaults…';
     if (sourceSel === 'custom' ? !customPath.trim() : sources.length === 0) return 'Choose the skill under test';
     if (!task.trim()) return 'Describe the task to implement';
     if (validations.length === 0) return 'Add at least one validation';
@@ -161,13 +170,20 @@
         providers: v.providers.length > 0 ? v.providers : [implCli],
         model: v.model ?? '',
       })),
-      improver: { provider: improverProvider, model: '' },
+      improver: { provider: improverProvider, model: improverProvider === improverDefaultProvider ? improverModel : '' },
       base_ref: baseRef.trim() || null,
       test_cmd: testCmd.trim() || null,
       lint_cmd: lintCmd.trim() || null,
     };
     onstart(req);
   }
+
+  // The saved improver model belongs to the saved improver provider; picking a
+  // different agent here falls back to that agent's default model.
+  let improverDefaultProvider = $state('');
+  $effect(() => {
+    if (loaded && !improverDefaultProvider) improverDefaultProvider = improverProvider;
+  });
 
   function sourceLabel(s: SkillSourceInfo): string {
     const origin = s.kind === 'provider' ? s.provider : 'library';
@@ -183,10 +199,22 @@
     each round scored.
   </p>
 
+  {#if loadError}
+    <div class="load-err" role="alert">
+      <Icon name="warning" size={14} />
+      <div class="grow">
+        <strong>Couldn't load the evaluator defaults.</strong>
+        <span class="dim">The skill list and saved validations are missing until they load. {loadError}</span>
+      </div>
+      <button class="btn small" type="button" onclick={() => void load()}>Retry</button>
+    </div>
+  {/if}
+
   <!-- Skill source -->
   <section class="card block">
     <label class="field-label" for="se-source">Skill under test</label>
-    <select id="se-source" class="input" bind:value={sourceSel}>
+    <select id="se-source" class="input" bind:value={sourceSel} disabled={!loaded}>
+      {#if !loaded}<option value="custom">Loading skills…</option>{/if}
       {#each sources as s, i (s.kind + s.name + (s.provider ?? ''))}
         <option value={i}>{sourceLabel(s)}</option>
       {/each}
@@ -197,6 +225,7 @@
       <div class="row">
         <input
           class="input grow"
+          aria-label="Skill path or archive"
           placeholder="/path/to/skill-folder · SKILL.md · skill.zip"
           bind:value={customPath}
         />
@@ -272,18 +301,19 @@
     {#each validations as v, i (i)}
       <div class="val card">
         <div class="row">
-          <input class="input grow" placeholder="name (e.g. logging)" bind:value={v.name} />
-          <button class="btn small ghost danger" onclick={() => removeValidation(i)} type="button" title="Remove">
-            <Icon name="trash" size={13} />
+          <input class="input grow" placeholder="logging" aria-label="Validation {i + 1} name" bind:value={v.name} />
+          <button class="icon-btn" onclick={() => removeValidation(i)} type="button" title="Remove validation" aria-label="Remove validation {v.name.trim() || i + 1}">
+            <Icon name="trash" size={14} />
           </button>
         </div>
         <textarea
           class="input"
           rows="2"
+          aria-label="Validation {i + 1} criteria"
           placeholder="What to check and how to judge it (passed to the agent)"
           bind:value={v.criteria}
         ></textarea>
-        <div class="provider-chips">
+        <div class="provider-chips" role="group" aria-label="Agents that run validation {i + 1}">
           {#each providerOpts as p (p)}
             <label class="chip-toggle" class:on={v.providers.includes(p)}>
               <input
@@ -335,9 +365,14 @@
 {/if}
 
 <style>
-  .form-wrap {
+  /* Left-aligned readable column (never a centred island); the scroller spans
+     the whole pane so its scrollbar sits at the pane edge. */
+  .form-wrap > :global(*) {
     max-width: 760px;
-    margin: 0 auto;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .form-wrap {
     padding: 18px 20px 60px;
     display: flex;
     flex-direction: column;
@@ -351,11 +386,11 @@
   }
   h2 {
     margin: 0;
-    font-size: 16px;
+    font-size: var(--fs-l);
   }
   .lede {
     margin: 0;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.5;
   }
@@ -380,13 +415,13 @@
     min-width: 0;
   }
   .cost {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     align-self: center;
   }
   .field-label {
-    font-size: 11px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: var(--text-dim);
@@ -406,7 +441,7 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    background: color-mix(in srgb, var(--text-dim) 5%, transparent);
+    background: var(--surface-2);
   }
   .provider-chips {
     display: flex;
@@ -421,14 +456,14 @@
     padding: 3px 9px;
     border: 1px solid var(--border);
     border-radius: 999px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
     user-select: none;
   }
   .chip-toggle.on {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     border-color: color-mix(in srgb, var(--accent) 40%, transparent);
-    color: var(--accent-text);
+    color: var(--text);
   }
   /* Visually hidden but still focusable (display:none dropped the chips out
      of the tab order); the label shows the focus ring instead. */
@@ -448,7 +483,7 @@
   }
   .hint {
     margin: 0;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1.45;
   }
@@ -463,6 +498,33 @@
   }
   .grow {
     flex: 1;
+  }
+  .load-err {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+    border-radius: var(--radius-m);
+    background: var(--surface);
+    font-size: var(--fs-s);
+    overflow-wrap: anywhere;
+  }
+  .load-err > :global(svg) {
+    color: var(--danger);
+    flex: none;
+    margin-top: 2px;
+  }
+  .dim {
+    color: var(--text-dim);
+  }
+  @media (max-width: 640px) {
+    .grid4 {
+      grid-template-columns: 1fr 1fr;
+    }
+    .grid4 > div[style] {
+      grid-column: span 2;
+    }
   }
   .mono {
     font-family: var(--font-mono, monospace);

@@ -9,6 +9,16 @@
   import LoopDetail from './LoopDetail.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { loopStatus } from './loopStatus';
+  import Icon from '../../lib/components/Icon.svelte';
+  import RelTime from '../../lib/components/RelTime.svelte';
+
+  const PHASE_LABEL: Record<string, string> = {
+    planning: 'Planning',
+    executing: 'Executing',
+    evaluating: 'Evaluating',
+    digesting: 'Digesting',
+    waiting: 'Waiting on an agent',
+  };
 
   let selectedId = $state<string | null>(null);
   let creating = $state(false);
@@ -48,7 +58,7 @@
         <!-- One primary per page: while the list is empty the empty state owns
              the "New goal loop" CTA. -->
         {#if list.length > 0}
-          <button class="btn primary" onclick={() => (creating = true)}>New goal loop</button>
+          <button class="btn small primary" onclick={() => (creating = true)}><Icon name="plus" size={12} /> New goal loop</button>
         {/if}
       {/snippet}
     </PageHeader>
@@ -76,16 +86,18 @@
       <ul class="cards">
         {#each list as l (l.id)}
           <li>
-            <button class="card" onclick={() => open(l.id)}>
+            <button class="loop-card" onclick={() => open(l.id)}>
               <div class="card-top">
                 <span class="name" title={l.name}>{l.name}</span>
                 <StatusBadge status={loopStatus(l.status)} />
               </div>
-              <div class="bar"><span class="bar-fill" style:width={`${l.progress_pct}%`}></span></div>
+              {#if l.definition?.summary}<span class="goal" title={l.definition.summary}>{l.definition.summary}</span>{/if}
+              <div class="bar" aria-hidden="true"><span class="bar-fill" class:done={l.status === 'succeeded'} style:width={`${l.progress_pct}%`}></span></div>
               <div class="card-meta">
-                <span>Iteration {l.current_iteration}/{l.limits.max_iterations}</span>
+                <span>Iteration {l.current_iteration} of {l.limits.max_iterations}</span>
                 <span>{l.progress_pct}% complete</span>
-                {#if l.status === 'running'}<span class="phase">{l.phase}</span>{/if}
+                {#if l.status === 'running' && PHASE_LABEL[l.phase]}<span class="phase">{PHASE_LABEL[l.phase]}</span>
+                {:else if l.updated_at}<span class="when">Updated <RelTime iso={l.updated_at} /></span>{/if}
               </div>
             </button>
           </li>
@@ -111,7 +123,7 @@
     grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
     gap: 12px;
   }
-  .card {
+  .loop-card {
     width: 100%;
     text-align: start;
     background: var(--surface);
@@ -123,8 +135,15 @@
     flex-direction: column;
     gap: 8px;
   }
-  .card:hover {
-    background: var(--surface-2);
+  .loop-card:hover {
+    border-color: var(--border-strong);
+  }
+  .loop-card:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .loop-card:hover {
+    background: var(--hover);
   }
   .card-top {
     display: flex;
@@ -134,7 +153,7 @@
   }
   .name {
     font-weight: 600;
-    font-size: 13px;
+    font-size: var(--fs-m);
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -142,13 +161,25 @@
   }
   .card-meta {
     display: flex;
-    gap: 12px;
-    font-size: 11.5px;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .phase {
-    color: var(--status-working);
-    text-transform: capitalize;
+    color: var(--text);
+  }
+  .when {
+    margin-inline-start: auto;
+  }
+  .goal {
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
   }
   .bar {
     height: 5px;
@@ -160,5 +191,8 @@
     display: block;
     height: 100%;
     background: var(--status-working);
+  }
+  .bar-fill.done {
+    background: var(--success);
   }
 </style>

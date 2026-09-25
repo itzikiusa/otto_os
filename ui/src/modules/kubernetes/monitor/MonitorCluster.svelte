@@ -277,7 +277,7 @@
     {#if eventsLoading && !events.length}
       <Skeleton rows={6} height={28} />
     {:else if eventsError}
-      <EmptyState icon="helm" title="Couldn't load events" body={eventsError} actionLabel="Retry" onaction={() => void loadEvents()} />
+      <EmptyState actionKind="secondary" icon="warning" title="Couldn't load events" body={eventsError} actionLabel="Retry" onaction={() => void loadEvents()} />
     {:else if !events.length}
       <EmptyState icon="check" title="Nothing in this window" body={enabled ? 'No restarts or pod replacements were recorded. Widen the window or check the raw cluster events.' : 'Monitoring is off for this cluster.'} />
     {:else}
@@ -317,7 +317,7 @@
     {:else if loading && !rows.length}
       <Skeleton rows={8} height={30} />
     {:else if error}
-      <EmptyState icon="helm" title="Couldn't load workloads" body={error} actionLabel="Retry" onaction={() => void loadWorkloads()} />
+      <EmptyState actionKind="secondary" icon="warning" title="Couldn't load workloads" body={error} actionLabel="Retry" onaction={() => void loadWorkloads()} />
     {:else if !rows.length}
       <EmptyState icon="clock" title="No data yet" body="The first cycle runs within the configured interval. Use “Run once” in Settings to collect immediately." />
     {:else}
@@ -476,7 +476,7 @@
     background: none;
     border: none;
     padding: 3px 10px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
   }
@@ -494,7 +494,7 @@
     border: none;
     border-bottom: 2px solid transparent;
     padding: 6px 12px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     cursor: pointer;
   }
@@ -521,7 +521,7 @@
   .wl {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .wl th {
     text-align: left;
@@ -596,7 +596,7 @@
   .pods {
     width: 100%;
     border-collapse: collapse;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     margin-bottom: 12px;
   }
   .pods th {
@@ -629,7 +629,7 @@
     gap: 4px;
   }
   .ct {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .timeline {
@@ -647,7 +647,7 @@
     align-items: baseline;
     padding: 5px 8px;
     border-radius: 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .timeline li:hover {
     background: var(--surface-2);
@@ -659,13 +659,13 @@
     align-self: center;
   }
   .tts {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
   }
   .tclass {
     font-weight: 600;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .twl,
   .tmsg {
@@ -677,7 +677,7 @@
     color: var(--text-dim);
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .mono {
     font-family: var(--font-mono);

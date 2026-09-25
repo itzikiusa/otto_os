@@ -22,11 +22,11 @@ A vault is a folder of Markdown files on your Mac. Otto indexes it for links, ta
 
 **Vaults**
 - Register several vaults; every workspace can see all of them. Switch with the vault button in the header.
-- **Rescan** re-indexes the folder. **Unregister vault (keeps files)** removes Otto's index only.
+- **Rescan** re-indexes the folder. **Unregister vault…** removes Otto's index only; the files stay on disk.
 - Changes made outside Otto (for example in Obsidian) appear within a few seconds.
 
 **Files and tabs**
-- A file tree that loads folders as you open them. Right-click for **New note here**, **New folder here**, **Rename**, **Move to…**, **Open in new tab**, **Delete (→ .trash)** and **Docs agent here**.
+- A file tree that loads folders as you open them. Right-click for **New note here**, **New folder here**, **Rename**, **Move to…**, **Open in new tab**, **Move to trash** (restore it from ⋯ → **Trash and restore**) and **Docs agent here**.
 - Renaming or moving a note rewrites every link to it across the vault and tells you how many links changed. Drag a file onto a folder to move it.
 - Deleting moves the file to the vault's `.trash/` folder. **Trash and restore** brings it back, to its old path or a new one, and never overwrites an existing file.
 - `⌘`-click selects several notes. Then **Send to agent…** with an instruction, or **Review + fix** them as one set.

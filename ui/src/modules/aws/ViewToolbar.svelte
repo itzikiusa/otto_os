@@ -111,7 +111,7 @@
     white-space: nowrap;
   }
   .sub {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;
@@ -145,7 +145,7 @@
     background: transparent;
     color: var(--text);
     font: inherit;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     outline: none;
   }
   .icon-btn {
@@ -170,7 +170,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
     user-select: none;

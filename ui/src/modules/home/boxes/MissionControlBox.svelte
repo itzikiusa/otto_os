@@ -14,6 +14,7 @@
   import type { MissionSummary, WorkItem } from '../../../lib/api/types';
   import { KIND_ICON, STATUS_LABEL, fmtCost, relTime, statusColor } from '../../mission-control/lib';
   import type { HomeBox } from '../home.svelte';
+  import { loadErrorText } from '../../../lib/loadError';
   import { poll, type Poller } from './poll';
 
   interface Props {
@@ -50,7 +51,7 @@
       return true;
     } catch (e) {
       if (mine !== seq) return true;
-      error = e instanceof Error ? e.message : String(e);
+      error = loadErrorText(e);
       return false;
     } finally {
       if (mine === seq) loading = false;
@@ -81,7 +82,9 @@
   {#if loading && !summary}
     <Skeleton rows={4} />
   {:else if error && !summary}
-    <EmptyState icon="radar" title="Mission Control unavailable" body={error} actionLabel="Retry" actionIcon="refresh" onaction={() => poller?.now()} />
+    <EmptyState icon="warning" title="Couldn't load Mission Control" body={error}>
+      <button class="btn small" onclick={() => poller?.now()}><Icon name="refresh" size={12} />Retry</button>
+    </EmptyState>
   {:else if summary}
     <div class="stats">
       <div class="stat"><span class="n" class:working={summary.active > 0}>{summary.active}</span><span class="l">active</span></div>
@@ -109,12 +112,15 @@
               <Icon name={KIND_ICON[it.kind]} size={12} />
               <span class="title ellipsis">{it.title}</span>
               <span class="st" style:color={statusColor(it.status)}>{STATUS_LABEL[it.status]}</span>
-              <span class="ago">{now() && relTime(it.updated_at)}</span>
+              <span class="ago" title={new Date(it.updated_at).toLocaleString()}>{now() && relTime(it.updated_at)}</span>
             </button>
           </li>
         {/each}
       </ul>
     {/if}
+    <button class="foot" onclick={() => router.go('mission-control')}>
+      Open Mission Control<Icon name="chevronRight" size={12} />
+    </button>
   {/if}
 </div>
 
@@ -204,10 +210,30 @@
     cursor: pointer;
     text-align: start;
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .row:hover {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+    background: var(--hover);
+  }
+  .foot {
+    flex: none;
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px 0;
+    border: none;
+    background: none;
+    color: var(--accent-text);
+    font: inherit;
+    font-size: var(--fs-s);
+    cursor: pointer;
+  }
+  .foot:hover {
+    text-decoration: underline;
+  }
+  :global([dir='rtl']) .foot :global(svg) {
+    transform: scaleX(-1);
   }
   .dot {
     width: 7px;
@@ -220,11 +246,12 @@
     min-width: 0;
   }
   .st {
+    flex: none;
     font-size: var(--fs-xs);
   }
   .ago {
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-variant-numeric: tabular-nums;
     min-width: 28px;
     text-align: end;

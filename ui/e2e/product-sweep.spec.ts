@@ -129,7 +129,7 @@ const GROUP_OF: Record<string, string> = {
   Discovery: 'Discover',
   Refine: 'Discover',
   Plan: 'Deliver',
-  'Test Cases': 'Deliver',
+  'Test cases': 'Deliver',
   Inject: 'Deliver',
   History: 'Log',
 };
@@ -293,7 +293,7 @@ test('product mobile sweep', async ({ page }, info) => {
   await shot(page, info, '08-rewrite');
 
   // 9. Test cases (grouped by category).
-  await openTab(page, info, 'Test Cases');
+  await openTab(page, info, 'Test cases');
   await expect(page.locator('.tc-tab')).toBeVisible({ timeout: 15_000 });
   await settleFor(page, '.case-card');
   await shot(page, info, '09-testcases');

@@ -239,11 +239,16 @@
 
   function rowFor(el: HTMLElement): MenuItem {
     const disabled = (el as HTMLButtonElement).disabled === true || el.getAttribute('aria-disabled') === 'true';
+    const label = labelOf(el);
+    // The control's tooltip rides along (it usually says WHY a disabled
+    // button is disabled — that reason was lost in the ⋯ menu).
+    const tip = el.getAttribute('title');
     return {
-      label: labelOf(el),
+      label,
       icon: el.dataset.icon,
       danger: el.classList.contains('danger'),
       disabled,
+      title: tip && tip !== label ? tip : undefined,
       action: () => el.click(),
     };
   }

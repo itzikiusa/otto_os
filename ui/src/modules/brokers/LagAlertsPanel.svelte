@@ -168,7 +168,7 @@
   }
   h5 {
     margin: 0 0 6px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--text-dim);
@@ -179,14 +179,14 @@
   table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     margin-top: 8px;
   }
   th {
     text-align: start;
     font-weight: 500;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 4px 8px;
     border-bottom: 1px solid var(--border);
   }
@@ -196,7 +196,7 @@
   }
   .mono {
     font-family: var(--font-mono);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .badge {
     font-size: var(--fs-xs);
@@ -229,7 +229,7 @@
     border-radius: var(--radius-s);
     padding: 5px 7px;
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     min-width: 120px;
   }
   .field.wide {
@@ -241,21 +241,21 @@
     border-radius: var(--radius-s);
     padding: 5px 7px;
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     width: 90px;
   }
   .thresh-label {
     display: flex;
     flex-direction: column;
     gap: 3px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .muted {
     color: var(--text-dim);
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .pad {
     padding: 8px 0;

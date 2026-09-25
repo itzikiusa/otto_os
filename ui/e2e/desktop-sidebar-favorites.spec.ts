@@ -198,6 +198,8 @@ test('edit mode: star toggles, arrows inside Favorites, unknown saved ids skippe
 
   await expect(page.getByRole('button', { name: 'Move Vault up' })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Move Usage down' })).toBeDisabled();
+  // The arrows open up on row hover / focus (the label keeps its room).
+  await page.getByTestId('sidebar-edit-row-usage').hover();
   await page.getByRole('button', { name: 'Move Usage up' }).click();
   expect(await favEditRows()).toEqual(['usage', 'vault']);
   // The unknown id kept its saved slot (it returns if it ever becomes available).
@@ -218,6 +220,7 @@ test('sections reorder from edit mode and the header menu; persist; reset restor
   await expect(page.getByRole('button', { name: 'Move Work section up' })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Move Insight section down' })).toBeDisabled();
 
+  await head(page, 'insight').hover();
   await page.getByRole('button', { name: 'Move Insight section up' }).click();
   expect(await sectionIds(page)).toEqual(['work', 'automate', 'build', 'insight', 'infra']);
   await expect(page.getByRole('button', { name: 'Move Insight section up' })).toBeFocused();

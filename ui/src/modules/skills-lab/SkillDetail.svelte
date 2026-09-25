@@ -44,8 +44,35 @@
     onbody: (source: VariantSource, body: string) => void;
     onreview: () => void;
     onevaluate: () => void;
+    /** The Edit tab has unsaved changes (the browser guards skill switches). */
+    ondirty?: (dirty: boolean) => void;
+    onopenrun?: (id: string) => void;
   }
-  let { group, source, tab, wsId, libraryBody, bodyOf, onsource, ontab, onchanged, ondeleted, onbody, onreview, onevaluate }: Props = $props();
+  let { group, source, tab, wsId, libraryBody, bodyOf, onsource, ontab, onchanged, ondeleted, onbody, onreview, onevaluate, ondirty, onopenrun }: Props = $props();
+
+  // Unsaved edits in the Edit tab: leaving the tab (or the copy) unmounts the
+  // editor, so ask first instead of silently dropping the draft.
+  let editorDirty = $state(false);
+  function setDirty(d: boolean): void {
+    editorDirty = d;
+    ondirty?.(d);
+  }
+  async function confirmDiscard(): Promise<boolean> {
+    if (!editorDirty) return true;
+    const ok = await confirmer.ask(`Discard your unsaved changes to ${group.name}?`, { title: 'Discard changes', confirmLabel: 'Discard' });
+    if (ok) setDirty(false);
+    return ok;
+  }
+  async function goTab(t: DetailTab): Promise<void> {
+    if (t === tab) return;
+    if (tab === 'edit' && !(await confirmDiscard())) return;
+    ontab(t);
+  }
+  async function goSource(s: VariantSource): Promise<void> {
+    if (s === source) return;
+    if (!(await confirmDiscard())) return;
+    onsource(s);
+  }
 
   const variant = $derived(group.variants.find((v) => v.source === source) ?? group.variants[0]);
   const isLibrary = $derived(variant.source === 'library');
@@ -112,6 +139,7 @@
   });
   const refBody = $derived(group.reference === 'library' ? libraryBody : bodyOf(group.reference));
   async function compare(s: VariantSource): Promise<void> {
+    if (comparing !== s && tab === 'edit' && !(await confirmDiscard())) return;
     comparing = comparing === s ? null : s;
     compareError = null;
     // The diff lives on Overview, above the rendered SKILL.md.
@@ -218,8 +246,7 @@
     else if (e.key === 'End') n = TABS.length - 1;
     if (n < 0) return;
     e.preventDefault();
-    ontab(TABS[n].id);
-    queueMicrotask(() => (tablist?.querySelectorAll('[role="tab"]')[n] as HTMLElement | undefined)?.focus());
+    void goTab(TABS[n].id).then(() => (tablist?.querySelectorAll('[role="tab"]')[TABS.findIndex((x) => x.id === tab)] as HTMLElement | undefined)?.focus());
   }
 
   let editorFile = $state('SKILL.md');
@@ -263,7 +290,7 @@
       <span class="chip">{group.category}</span>
       <div class="variants" role="group" aria-label="Copy to show">
         {#each group.variants as v (v.source)}
-          <button class="variant" class:active={v.source === variant.source} aria-pressed={v.source === variant.source} onclick={() => onsource(v.source)} data-testid="variant-{v.source}">
+          <button class="variant" class:active={v.source === variant.source} aria-pressed={v.source === variant.source} onclick={() => goSource(v.source)} data-testid="variant-{v.source}">
             {#if v.source === 'library'}<Icon name="book" size={12} />{:else if v.source === 'bundled'}<Icon name="box" size={12} />{:else}<ProviderIcon provider={v.source} size={12} />{/if}
             {sourceLabel(v.source)}
             {#if group.driftedSources.includes(v.source)}<span class="vdot" title="Differs from {sourceLabel(group.reference)}"></span>{/if}
@@ -289,7 +316,7 @@
     {/if}
     <div class="tabs" role="tablist" aria-label="Skill detail" tabindex="-1" bind:this={tablist} onkeydown={onTabKey}>
       {#each TABS as t (t.id)}
-        <button role="tab" id="st-{t.id}" aria-selected={tab === t.id} aria-controls="sp-{t.id}" tabindex={tab === t.id ? 0 : -1} class:active={tab === t.id} onclick={() => ontab(t.id)}>{t.label}</button>
+        <button role="tab" id="st-{t.id}" aria-selected={tab === t.id} aria-controls="sp-{t.id}" tabindex={tab === t.id ? 0 : -1} class:active={tab === t.id} onclick={() => goTab(t.id)}>{t.label}</button>
       {/each}
     </div>
   </header>
@@ -324,7 +351,9 @@
         <div class="overview">
           <aside class="meta card" aria-label="Skill metadata">
             <dl>
-              {#if metaMap.get('description')}
+              <!-- The header already shows the description (2 lines); repeat it here
+                   only when it differs or was clipped there. -->
+              {#if metaMap.get('description') && (metaMap.get('description') !== group.description || String(metaMap.get('description')).length > 160)}
                 <div class="m-row wide"><dt>Description</dt><dd>{metaMap.get('description')}</dd></div>
               {/if}
               <div class="m-row"><dt>Category</dt><dd>{metaMap.get('category') ?? group.category}</dd></div>
@@ -384,9 +413,10 @@
         }}
         oninstall={install}
         oncopytolibrary={hasLibrary ? undefined : copyToLibrary}
+        ondirty={setDirty}
       />
     {:else}
-      <SkillActivity {group} view={tab} {wsId} {onevaluate} {onreview} />
+      <SkillActivity {group} view={tab} {wsId} {onevaluate} {onreview} {onopenrun} />
     {/if}
   </div>
 </div>

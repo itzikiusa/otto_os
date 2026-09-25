@@ -1477,7 +1477,7 @@
     border-radius: 999px;
     background: var(--surface-2);
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
     white-space: nowrap;
   }
@@ -1525,7 +1525,7 @@
     border-radius: var(--radius-m);
     background: var(--surface);
     box-shadow: var(--shadow);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
   }
   .rg-spin {
@@ -1550,7 +1550,7 @@
     background: color-mix(in srgb, var(--status-exited) 14%, transparent);
     color: var(--status-exited);
     border-radius: var(--radius-s);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
     padding: 3px 9px;
     cursor: pointer;
@@ -1572,7 +1572,7 @@
     background: var(--surface-2);
     color: var(--text);
     border-radius: var(--radius-s);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 1px 8px;
     cursor: pointer;
   }
@@ -1585,7 +1585,7 @@
     cursor: default;
   }
   .pg-range {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
@@ -1725,7 +1725,7 @@
   }
   /* Notice shown above results (e.g. the Mongo command a SQL query translated to). */
   .grid-notice {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--accent) 9%, transparent);
     border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
@@ -1752,7 +1752,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
   }
@@ -1765,7 +1765,7 @@
     border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
     border-radius: 999px;
     background: var(--surface);
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .chip.exclude {
     border-color: color-mix(in srgb, var(--status-exited) 45%, transparent);
@@ -1829,7 +1829,7 @@
     border-bottom: 1px dashed var(--border);
     background: transparent;
     color: var(--text);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     outline: none;
   }
   .chip-text {
@@ -1899,7 +1899,7 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     outline: none;
     padding: 0;
   }
@@ -2018,7 +2018,7 @@
     border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     color: var(--accent-text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
   }
   /* Selection action bar (shown when ≥1 row is selected). */
@@ -2029,7 +2029,7 @@
     padding: 5px 10px;
     border-bottom: 1px solid var(--border);
     background: color-mix(in srgb, var(--accent) 6%, var(--surface-2));
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .sel-count {
     font-weight: 600;
@@ -2090,7 +2090,7 @@
     border: 1px solid color-mix(in srgb, var(--status-warn) 45%, transparent);
     background: color-mix(in srgb, var(--status-warn) 10%, transparent);
     border-radius: var(--radius-s);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text);
     flex-shrink: 0;
   }
@@ -2219,11 +2219,11 @@
       min-height: 320px;
     }
     .gt-search-input {
-      font-size: 13px;
+      font-size: var(--fs-m);
     }
     .grid-empty,
     .grid-error {
-      font-size: 13.5px;
+      font-size: var(--fs-m);
     }
   }
 </style>

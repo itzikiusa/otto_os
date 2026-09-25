@@ -24,8 +24,11 @@
     /** Read-only copies: what makes them editable. */
     oninstall?: () => void;
     oncopytolibrary?: () => void;
+    /** Unsaved-edit state, so the parents can ask before a tab / skill switch
+     *  unmounts the editor and drops the draft. */
+    ondirty?: (dirty: boolean) => void;
   }
-  let { name, source, files, skillMd, initialFile = 'SKILL.md', onsaved, oninstall, oncopytolibrary }: Props = $props();
+  let { name, source, files, skillMd, initialFile = 'SKILL.md', onsaved, oninstall, oncopytolibrary, ondirty }: Props = $props();
 
   const editable = $derived(source === 'library');
 
@@ -38,6 +41,10 @@
   let saving = $state(false);
   let loadError = $state<string | null>(null);
   const dirty = $derived(editing && content !== original);
+  $effect(() => {
+    ondirty?.(dirty);
+  });
+  $effect(() => () => ondirty?.(false));
 
   async function open(path: string): Promise<void> {
     if (dirty && !(await confirmer.ask(`Discard your unsaved changes to ${currentFile}?`, { title: 'Discard changes', confirmLabel: 'Discard' }))) return;
@@ -191,7 +198,11 @@
         {/if}
       </div>
       {#if loadError}
-        <p class="dim msg">{loadError}</p>
+        <div class="msg load-err" role="alert">
+          <Icon name="warning" size={14} />
+          <span class="grow">{source === 'bundled' ? loadError : `Couldn't open ${currentFile}. ${loadError}`}</span>
+          {#if source !== 'bundled'}<button class="btn small" onclick={() => open(currentFile)}>Retry</button>{/if}
+        </div>
       {:else if binary}
         <p class="dim msg">Binary file — not editable here.</p>
       {:else if editing && editable}
@@ -350,6 +361,17 @@
   .msg {
     padding: 14px;
     margin: 0;
+  }
+  .load-err {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--fs-s);
+    overflow-wrap: anywhere;
+  }
+  .load-err > :global(svg) {
+    color: var(--text-dim);
+    flex: none;
   }
   @media (max-width: 640px) {
     .editor {

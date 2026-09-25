@@ -6,6 +6,7 @@
 // the focused session is instant and background sessions keep accumulating.
 
 import { api } from '../api/client';
+import { loadErrorText } from '../loadError';
 import type {
   AgentTask,
   AppendTrailReq,
@@ -38,6 +39,9 @@ class ActivityStore {
   /** Latest History-index walk progress; null until a walk reports in. Reset to
    *  `{…, done:false}` when a rescan is requested so the button can show it. */
   historyIndex: HistoryIndexProgress | null = $state(null);
+  /** session id -> why its trail/tasks load failed (cleared on success), so
+   *  the Activity panel shows "Couldn't load" + Retry, not an empty board. */
+  loadErrorBySession: Record<string, string> = $state({});
   /** session ids we've already fetched once (avoid refetch churn) */
   private loaded = new Set<string>();
   private artifactsLoaded = new Set<string>();
@@ -66,8 +70,10 @@ class ActivityStore {
       ]);
       this.trailBySession[sessionId] = trail;
       this.tasksBySession[sessionId] = tasks;
-    } catch {
+      if (this.loadErrorBySession[sessionId]) delete this.loadErrorBySession[sessionId];
+    } catch (e) {
       this.loaded.delete(sessionId);
+      this.loadErrorBySession[sessionId] = loadErrorText(e);
     }
   }
 

@@ -106,7 +106,7 @@ test('epic tree: epic row, folders and indented children render; the epic collap
   const childB = page.locator('.story-row-wrap.child', { hasText: CHILD_B });
   await expect(childA).toBeVisible();
   await expect(childB).toBeVisible();
-  await expect(page.locator('.story-row-wrap.child', { hasText: DOC_CHILD }).locator('.draft-badge.doc')).toHaveText('DOC');
+  await expect(page.locator('.story-row-wrap.child', { hasText: DOC_CHILD }).locator('.draft-badge.doc')).toHaveText('Doc');
 
   // Collapse the epic → children + folders disappear; expand → back.
   await epic.locator('.tree-toggle').click();

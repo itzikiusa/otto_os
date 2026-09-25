@@ -64,7 +64,7 @@
   }
 </script>
 
-<Modal title="Attach Product Story" width={540} {onclose}>
+<Modal title="Attach product story" width={540} {onclose}>
   <div class="hint">
     Injects the full refined context — story, analysis, Q&amp;A, approved tests, and learnings —
     into the running agent session.
@@ -113,7 +113,7 @@
 
 <style>
   .hint {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     margin-bottom: 10px;
     line-height: 1.5;
@@ -126,7 +126,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     color: var(--text);
-    font-size: 13px;
+    font-size: var(--fs-m);
     margin-bottom: 10px;
     outline: none;
   }
@@ -155,7 +155,7 @@
     padding: 7px 10px;
     cursor: pointer;
     color: var(--text);
-    font-size: 13px;
+    font-size: var(--fs-m);
   }
   .story-row:hover:not(:disabled) {
     background: color-mix(in srgb, var(--accent) 10%, transparent);
@@ -166,7 +166,7 @@
     cursor: default;
   }
   .story-key {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--accent-text);
     white-space: nowrap;
@@ -188,7 +188,7 @@
   }
   .dim {
     color: var(--text-dim);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     text-align: center;
     padding: 20px 0;
   }

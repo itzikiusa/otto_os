@@ -657,6 +657,7 @@
     const items: MenuItem[] = [
       { label: 'Save named version…', icon: 'commit', disabled: readonly, action: () => void saveNamed() },
       { label: 'Discard edits…', icon: 'refresh', disabled: !dirty, action: () => void discard() },
+      { label: 'Compare versions…', icon: 'columns', disabled: versions.length < 2, action: openCompare },
       { separator: true },
       { label: 'Rename…', icon: 'edit', disabled: !canEdit, action: () => void rename() },
       { label: 'Move to project…', icon: 'folder', disabled: !canEdit, action: () => queueMicrotask(() => moveMenu(e)) },
@@ -669,11 +670,11 @@
     ctxMenu.show(e, items);
   }
 
+  // An unfiled design has no project crumb: "Unfiled" only led back to the
+  // lobby (the first crumb already does) and ate the title's room.
   const crumbs = $derived([
     { label: 'Design Hall', onclick: () => router.go('design') },
-    project
-      ? { label: project.name, onclick: () => router.go(`design/p/${encodeURIComponent(project.id)}`) }
-      : { label: 'Unfiled', onclick: () => router.go('design') },
+    ...(project ? [{ label: project.name, onclick: () => router.go(`design/p/${encodeURIComponent(project.id)}`) }] : []),
   ]);
 </script>
 
@@ -698,15 +699,8 @@
     {/snippet}
     {#snippet actions()}
       {#if artifact}
-        <button
-          class="btn small"
-          data-icon="columns"
-          onclick={openCompare}
-          disabled={versions.length < 2}
-          title={versions.length < 2 ? 'Compare needs at least two versions — save once more first' : 'Compare two versions'}
-        >
-          <Icon name="columns" size={12} /> Compare
-        </button>
+        <!-- Compare lives on the version strip (where versions are picked) and
+             in ⋯ / ⌘K — a second header copy was a duplicate CTA. -->
         <button class="icon-btn" data-icon="more" data-label="More actions" onclick={moreMenu} aria-label="More actions" title="More actions" aria-haspopup="menu" data-testid="design-more">
           <Icon name="more" size={14} />
         </button>
@@ -1031,13 +1025,15 @@
     .studio,
     .studio.wide-right {
       grid-template-columns: minmax(0, 1fr);
-      grid-template-rows: minmax(360px, 1fr) auto;
+      /* Stacked: the stage keeps a usable height and the details panel gets
+         a real one too (it was squeezed to ~170px, clipping Links/Otto); the
+         studio scrolls between them. */
+      grid-template-rows: minmax(320px, 1fr) minmax(420px, auto);
       overflow-y: auto;
     }
     .right {
       border-inline-start: 0;
       border-block-start: 1px solid var(--border);
-      max-height: 60%;
     }
   }
 </style>
