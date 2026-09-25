@@ -868,6 +868,13 @@ class DatabaseStore {
 
   // ── Saved queries / history ─────────────────────────────────────────────
   savedQueries: DbSavedQuery[] = $state([]);
+  savedQueriesLoading = $state(false);
+  savedQueriesError: string | null = $state(null);
+  private savedQueriesScope: string | null = null;
+  private savedQueriesRequest = 0;
+  historyLoading = $state(false);
+  historyError: string | null = $state(null);
+  private historyRequest = 0;
   history: DbHistoryEntry[] = $state([]);
   /** How many history rows the current window requested. Bumped by "Load more"
    *  (100 → up to the API's 1000 cap). Reset to 100 on a fresh connection load. */
@@ -1825,8 +1832,10 @@ class DatabaseStore {
     this.builderTablesCache = snap.builderTablesCache;
     this.tabs = snap.tabs;
     this.activeTab = snap.activeTab;
-    this.savedQueries = snap.savedQueries;
+    // Saved queries belong to the workspace, not this connection snapshot.
     this.history = snap.history;
+    this.historyError = null;
+    void this.loadHistory(id);
     this.mainTab = snap.mainTab;
     this.sideTab = snap.sideTab;
     this.connView = snap.connView;
@@ -2024,6 +2033,8 @@ class DatabaseStore {
     // …and the result view remembered for it (null = engine default).
     this.connView = view?.view ?? null;
     // Fresh window of history for this connection.
+    this.history = [];
+    this.historyError = null;
     this.historyLimit = 100;
     await Promise.all([this.loadCapabilities(id), this.loadSchemaRoot(id), this.loadHistory(id)]);
     // Closed (or superseded) while the loads were in flight — stop here: no
@@ -3366,14 +3377,24 @@ class DatabaseStore {
   // ── Saved queries ─────────────────────────────────────────────────────────
 
   async loadSavedQueries(): Promise<void> {
-    const accessEpoch=this.accessEpoch;
+    const accessEpoch = this.accessEpoch;
     const base = this.wsBase();
-    if (!base) return;
+    const request = ++this.savedQueriesRequest;
+    if (this.savedQueriesScope !== base) {
+      this.savedQueries = [];
+      this.savedQueriesError = null;
+      this.savedQueriesScope = base;
+    }
+    if (!base) { this.savedQueriesLoading = false; return; }
+    const current = () => request === this.savedQueriesRequest && base === this.wsBase() && accessEpoch === this.accessEpoch;
+    this.savedQueriesLoading = true;
     try {
       const queries = await api.get<DbSavedQuery[]>(`${base}/saved-queries`);
-      if(accessEpoch===this.accessEpoch)this.savedQueries=queries;
+      if (current()) { this.savedQueries = queries; this.savedQueriesError = null; }
     } catch (e) {
-      toasts.error('Could not load saved queries', errMsg(e));
+      if (current()) this.savedQueriesError = errMsg(e);
+    } finally {
+      if (current()) this.savedQueriesLoading = false;
     }
   }
 
@@ -3491,19 +3512,21 @@ class DatabaseStore {
   // ── History ─────────────────────────────────────────────────────────────
 
   async loadHistory(connId?: Id): Promise<void> {
-    const accessEpoch=this.accessEpoch;
+    const accessEpoch = this.accessEpoch;
     const id = connId ?? this.selectedConnId;
-    if (!id) return;
+    // A background query may finish after its connection is no longer visible.
+    // Its history is refreshed when the connection is reopened.
+    if (!id || id !== this.selectedConnId) return;
+    const request = ++this.historyRequest;
+    const current = () => request === this.historyRequest && this.selectedConnId === id && accessEpoch === this.accessEpoch;
+    this.historyLoading = true;
     try {
-      const rows = await api.get<DbHistoryEntry[]>(
-        `${this.connBase(id)}/history?limit=${this.historyLimit}`,
-      );
-      // The singleton list shows the SELECTED connection's history — a refresh
-      // for a background conn (e.g. a reattached run landing) must not clobber it.
-      if (this.selectedConnId === id && accessEpoch===this.accessEpoch) this.history = rows;
+      const rows = await api.get<DbHistoryEntry[]>(`${this.connBase(id)}/history?limit=${this.historyLimit}`);
+      if (current()) { this.history = rows; this.historyError = null; }
     } catch (e) {
-      if (this.selectedConnId !== id) return; // background refresh: stay quiet
-      toasts.error('Could not load history', errMsg(e));
+      if (current()) this.historyError = errMsg(e);
+    } finally {
+      if (current()) this.historyLoading = false;
     }
   }
 

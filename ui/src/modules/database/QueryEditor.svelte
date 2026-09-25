@@ -745,12 +745,24 @@
         class:agent={!!t.agent}
         data-db-tab-id={t.id}
         role="tab"
-        tabindex="0"
+        tabindex={i === database.activeTab ? 0 : -1}
         aria-selected={i === database.activeTab}
         onclick={() => database.switchTab(i)}
         ondblclick={() => startRename(i, t)}
         oncontextmenu={(e) => tabMenu(e, i, t)}
         onkeydown={(e) => {
+          if (e.target !== e.currentTarget) return;
+          let next = i;
+          if (e.key === 'ArrowRight') next = (i + 1) % database.tabs.length;
+          else if (e.key === 'ArrowLeft') next = (i - 1 + database.tabs.length) % database.tabs.length;
+          else if (e.key === 'Home') next = 0;
+          else if (e.key === 'End') next = database.tabs.length - 1;
+          if (next !== i) {
+            e.preventDefault();
+            database.switchTab(next);
+            const bar = e.currentTarget.parentElement;
+            queueMicrotask(() => bar?.querySelectorAll<HTMLElement>('[role="tab"]')[next]?.focus());
+          }
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
             database.switchTab(i);

@@ -27,6 +27,8 @@
   let selected = $state<string | null>(null);
   let detail = $state<GroupDetail | null>(null);
   let detailLoading = $state(false);
+  let detailRequest = 0;
+  let listRequest = 0;
   // Sort offsets table by lag descending; toggle to sort by topic+partition.
   let sortByLag = $state(true);
   // Offset reset state.
@@ -80,8 +82,11 @@
 
   $effect(() => {
     void cluster.id;
+    detailRequest++;
     selected = null;
     detail = null;
+    detailLoading = false;
+    dryRunResult = null;
     detailError = null;
     // Another cluster's groups are not "stale data" for this one.
     groups = [];
@@ -90,11 +95,15 @@
   });
 
   function loadGroups(): void {
+    const request = ++listRequest;
+    const clusterId = cluster.id;
+    const current = () => request === listRequest && cluster.id === clusterId;
     loading = true;
     accessDenied = false;
     api
       .get<GroupSummary[]>(`/brokers/clusters/${cluster.id}/groups`)
       .then((g) => {
+        if (!current()) return;
         groups = g;
         accessDenied = false;
         loadError = null;
@@ -102,6 +111,7 @@
         if (!selected && g.length > 0) open(g[0].group_id);
       })
       .catch((e) => {
+        if (!current()) return;
         if (e instanceof ApiError && e.status === 403 && /consumer-group access/i.test(e.message)) {
           // Broker ACLs deny group access — show the banner, don't toast/retry.
           accessDenied = true;
@@ -111,10 +121,15 @@
           loadError = loadErrorText(e);
         }
       })
-      .finally(() => (loading = false));
+      .finally(() => { if (current()) loading = false; });
   }
 
   function open(id: string) {
+    const request = ++detailRequest;
+    const clusterId = cluster.id;
+    const current = () => request === detailRequest && cluster.id === clusterId && selected === id;
+    dryRunResult = null;
+    dryRunLoading = false;
     selected = id;
     detail = null;
     detailError = null;
@@ -122,9 +137,9 @@
     resetTopic = '';
     api
       .get<GroupDetail>(`/brokers/clusters/${cluster.id}/groups/${encodeURIComponent(id)}`)
-      .then((d) => (detail = d))
-      .catch((e) => (detailError = loadErrorText(e)))
-      .finally(() => (detailLoading = false));
+      .then((d) => { if (current()) detail = d; })
+      .catch((e) => { if (current()) detailError = loadErrorText(e); })
+      .finally(() => { if (current()) detailLoading = false; });
   }
 
   function stateClass(s: string): string {
@@ -163,6 +178,13 @@
     [...new Set(detail?.offsets.map((o) => o.topic) ?? [])].sort(),
   );
 
+  const resetError = $derived(
+    resetMode === 'timestamp' && (!resetTs || !Number.isFinite(new Date(resetTs).getTime()))
+      ? 'Choose a valid target time'
+      : resetMode === 'offset' && (!Number.isSafeInteger(resetOffset) || resetOffset < 0)
+        ? 'Offset must be a non-negative whole number' : null,
+  );
+
   function buildResetBody(confirm: boolean): Record<string, unknown> {
     let body: Record<string, unknown>;
     if (resetMode === 'offset') {
@@ -170,7 +192,7 @@
     } else if (resetMode === 'timestamp') {
       body = {
         mode: 'timestamp',
-        timestamp_ms: new Date(resetTs).getTime() || Date.now(),
+        timestamp_ms: new Date(resetTs).getTime(),
         confirm,
       };
     } else {
@@ -181,30 +203,36 @@
   }
 
   async function previewReset() {
-    if (!selected) return;
+    if (!selected || resetError) return;
+    const groupId = selected;
+    const clusterId = cluster.id;
+    const request = detailRequest;
+    const body = buildResetBody(false);
+    const current = () => request === detailRequest && groupId === selected && clusterId === cluster.id && JSON.stringify(body) === JSON.stringify(buildResetBody(false));
     dryRunLoading = true;
     dryRunResult = null;
     try {
-      dryRunResult = await api.post<DryRunResp>(
-        `/brokers/clusters/${cluster.id}/groups/${encodeURIComponent(selected)}/reset?dry_run=true`,
-        buildResetBody(false),
+      const preview = await api.post<DryRunResp>(
+        `/brokers/clusters/${clusterId}/groups/${encodeURIComponent(groupId)}/reset?dry_run=true`,
+        body,
       );
+      if (current()) dryRunResult = preview;
     } catch (e) {
-      toasts.error("Couldn't preview the reset", e instanceof Error ? e.message : String(e));
+      if (current()) toasts.error("Couldn't preview the reset", e instanceof Error ? e.message : String(e));
     } finally {
-      dryRunLoading = false;
+      if (request === detailRequest) dryRunLoading = false;
     }
   }
 
   async function applyReset() {
-    if (!selected) return;
+    if (!selected || resetError) return;
     // Clear preview and proceed to confirmation.
     dryRunResult = null;
     await resetOffsets();
   }
 
   async function resetOffsets() {
-    if (!selected) return;
+    if (!selected || resetError) return;
     const typed = await confirmer.promptText(
       `Type the group name to confirm offset reset.`,
       { title: `Reset offsets for "${selected}"`, confirmLabel: 'Reset', placeholder: selected, danger: true },
@@ -398,7 +426,7 @@
         <button
           class="btn small"
           onclick={previewReset}
-          disabled={dryRunLoading || resetting}
+          disabled={dryRunLoading || resetting || !!resetError}
           title="Preview what this reset would do without committing"
         >
           {dryRunLoading ? 'Previewing…' : 'Preview'}
@@ -406,12 +434,14 @@
         <button
           class="btn small danger"
           onclick={applyReset}
-          disabled={resetting || dryRunLoading}
+          disabled={resetting || dryRunLoading || !!resetError}
           title={guarded ? 'Cluster is guarded — requires confirmation' : 'Reset committed offsets'}
         >
           {resetting ? 'Resetting…' : 'Reset'}
         </button>
       </div>
+
+      {#if resetError}<p class="muted small" role="status">{resetError}</p>{/if}
 
       <!-- Dry-run preview table -->
       {#if dryRunResult}
@@ -725,10 +755,9 @@
     margin: 0;
   }
 
-  /* Phone (≤640px): the 300px fixed group list + detail can't sit side-by-side
-     on a ~375–430px viewport. Stack them, cap the list height so the detail
-     stays reachable, and let the reset bar wrap. */
-  @media (max-width: 640px) {
+  /* Stack on tablets too: the app rail and cluster sidebar leave too little
+     room for both the group list and a readable offsets table. */
+  @media (max-width: 1100px) {
     .groups {
       flex-direction: column;
     }

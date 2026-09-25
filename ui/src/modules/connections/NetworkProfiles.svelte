@@ -1,9 +1,13 @@
 <script lang="ts">
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { api } from '../../lib/api/client';
   import type { Connection, NetworkEndpoint, NetworkProfile, NetworkProfileInput } from '../../lib/api/types';
   let { workspaceId, profiles, onsaved }: { workspaceId: string; profiles: NetworkProfile[]; onsaved: (profile: NetworkProfile) => void } = $props();
   let connections = $state<Connection[]>([]);
   let error = $state('');
+  let connectionsLoading = $state(true);
+  let connectionsError = $state<string | null>(null);
+  let attempt = $state(0);
   let busy = $state(false);
   let editing = $state<NetworkProfile | null>(null);
   let name = $state('');
@@ -15,11 +19,16 @@
   function emptyEndpoint(): NetworkEndpoint { return { name: '', remote_host: '', remote_port: 5432, host_env: '', port_env: '' }; }
   $effect(() => {
     const scope = workspaceId;
-    let alive = true;
+    void attempt;
+    let current = true;
+    connections = [];
+    connectionsLoading = true;
+    connectionsError = null;
     void api.get<Connection[]>(`/workspaces/${scope}/connections`).then((rows) => {
-      if (alive) connections = rows.filter((c) => c.kind === 'ssh');
-    }).catch((e) => { if (alive) error = e instanceof Error ? e.message : String(e); });
-    return () => { alive = false; };
+      if (current) connections = rows.filter((c) => c.kind === 'ssh');
+    }).catch((e) => { if (current) connectionsError = e instanceof Error ? e.message : String(e); })
+      .finally(() => { if (current) connectionsLoading = false; });
+    return () => { current = false; };
   });
   function edit(profile: NetworkProfile | null) {
     editing = profile; name = profile?.name ?? ''; sshId = profile?.ssh_connection_id ?? '';
@@ -53,11 +62,12 @@
     <button type="button" disabled={busy} onclick={() => edit(null)}>New network profile</button>
   </div>
   <label>Network profile name<input aria-label="Network profile name" bind:value={name} disabled={busy} maxlength="120" /></label>
-  <label>SSH connection<select aria-label="SSH connection" bind:value={sshId} disabled={busy}>
+  <label>SSH connection<select aria-label="SSH connection" bind:value={sshId} disabled={busy || connectionsLoading || !!connectionsError}>
     <option value="">Choose SSH connection</option>
     {#each connections as connection (connection.id)}<option value={connection.id}>{connection.name}</option>{/each}
   </select></label>
-  {#if !connections.length}<p>Create an SSH connection in Connections before saving a network profile.</p>{/if}
+  <LoadState what="SSH connections" loading={connectionsLoading} error={connectionsError} empty={connections.length === 0} variant="compact" onretry={() => attempt++} />
+  {#if !connectionsLoading && !connectionsError && !connections.length}<p>Create an SSH connection in Connections before saving a network profile.</p>{/if}
   {#each endpoints as endpoint, i (i)}
     <fieldset disabled={busy}><legend>Endpoint {i + 1}</legend>
       <label>Name<input aria-label={`Endpoint ${i + 1} name`} bind:value={endpoint.name} placeholder="DB" /></label>
@@ -72,7 +82,7 @@
   <p>Otto also sets OTTO_TUNNEL_&lt;NAME&gt;_HOST and _PORT. TLS server names and topology discovery may need application configuration.</p>
   {#if editing}<label class="archive"><input type="checkbox" bind:checked={archived} disabled={busy} />Archived (unavailable for new launches)</label>{/if}
   {#if error}<p class="error" role="alert">{error}</p>{/if}
-  <div class="profiles"><button type="button" disabled={busy || !name.trim() || !sshId || endpoints.some((e) => !e.name.trim() || !e.remote_host.trim() || !e.remote_port)} onclick={save}>{busy ? 'Saving…' : 'Save network profile'}</button>
+  <div class="profiles"><button type="button" disabled={busy || connectionsLoading || !!connectionsError || !name.trim() || !sshId || endpoints.some((e) => !e.name.trim() || !e.remote_host.trim() || !e.remote_port)} onclick={save}>{busy ? 'Saving…' : 'Save network profile'}</button>
   {#if editing}<button type="button" disabled={busy} onclick={reloadSaved}>Reload saved profile</button>{/if}
   <button type="button" disabled={busy} onclick={() => edit(null)}>Cancel edits</button></div>
 </div>
