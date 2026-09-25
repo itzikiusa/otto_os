@@ -321,8 +321,9 @@
   <div class="section-title">Closing a session tab</div>
   <p class="hint-line">
     Closing a tab (×, ⌘W, sidebar ×) ends the session — the same as Archive or Delete from its
-    menu. Choose what happens, or be asked each time. A remembered choice applies without asking;
-    closing several session tabs at once still asks once, naming the count.
+    menu. Choose what happens, or be asked each time. A remembered choice applies without asking —
+    "Always delete" also skips the confirm on a session's Delete command. Closing or deleting
+    several sessions at once still asks once, naming the count.
   </p>
   <div class="radio-col" role="radiogroup" aria-label="When closing a session tab">
     <label class="switch-row">
