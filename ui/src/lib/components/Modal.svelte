@@ -172,6 +172,8 @@
   }
   footer {
     display: flex;
+    flex-wrap: wrap;
+    flex-shrink: 0;
     justify-content: flex-end;
     gap: 8px;
     padding: 12px 16px;
