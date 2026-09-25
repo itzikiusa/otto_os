@@ -96,6 +96,8 @@ pub mod swarm_workspace;
 pub mod transcript_cache;
 pub mod transcript_tail;
 pub mod turn_oracle;
+pub mod ui_bridge;
+pub mod ui_commands;
 pub mod vault_docs_agent;
 pub mod workflow_chat;
 mod workflow_checkpoint;
@@ -207,7 +209,13 @@ fn cors_layer() -> CorsLayer {
             Method::DELETE,
             Method::OPTIONS,
         ])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            // Agent UI control: the result/progress POSTs name the Otto window
+            // (event-socket connection) the command was sent to.
+            header::HeaderName::from_static("x-otto-ui-conn"),
+        ])
 }
 
 /// Whether a request `Origin` is trusted by [`cors_layer`].

@@ -28,9 +28,27 @@
     node?: string | null;
     /** Export permission on the connection — re-checked before each run. */
     canExport: boolean;
+    /** Prefill (an agent's `otto.ui_db_export`): the format / row limit to
+     *  start from. The person still picks the folder + name and confirms. */
+    initialFormat?: DbExportFormat;
+    initialMaxRows?: number;
+    /** Who asked for this export — shown in the dialog so it's attributed. */
+    requestedBy?: string;
+    /** Called once when the export finished writing (before `onclose`). */
+    ondone?: (r: ExportToPathResp) => void;
     onclose: () => void;
   }
-  let { statement, connectionId, node, canExport, onclose }: Props = $props();
+  let {
+    statement,
+    connectionId,
+    node,
+    canExport,
+    initialFormat,
+    initialMaxRows,
+    requestedBy,
+    ondone,
+    onclose,
+  }: Props = $props();
 
   type ExportFmtOpt = { value: DbExportFormat; label: string };
   const EXPORT_FORMATS: ExportFmtOpt[] = [
@@ -70,10 +88,13 @@
   // The dialog mounts fresh on every open, so the remembered format/directory
   // and the default file name are seeded right here.
   let pickingDir = $state(false);
-  let exportFormat = $state<DbExportFormat>(loadFormat());
+  // A prefill (initialFormat / initialMaxRows) is read once, at mount.
+  // svelte-ignore state_referenced_locally
+  let exportFormat = $state<DbExportFormat>(initialFormat ?? loadFormat());
   let exportDir = $state<string>(loadDir());
   let exportName = $state(defaultExportName());
-  let exportLimit = $state('');
+  // svelte-ignore state_referenced_locally
+  let exportLimit = $state(initialMaxRows ? String(initialMaxRows) : '');
   let exportingPath = $state(false);
   // Live progress for the streaming export (bytes written so far). Null when no
   // export is running; drives the dialog's progress bar.
@@ -141,6 +162,7 @@
           localStorage.setItem(LS_FORMAT, exportFormat);
           localStorage.setItem(LS_DIR, dir);
         }
+        ondone?.(r);
         onclose();
         toasts.success(
           'Exported',
@@ -172,6 +194,11 @@
   }}
 >
   <div class="exp-form">
+    {#if requestedBy}
+      <p class="exp-agent" data-agent-target>
+        <Icon name="sparkle" size={12} />{requestedBy} asked for this export — you choose where it goes.
+      </p>
+    {/if}
     <p class="exp-hint">
       Runs the statement on the daemon host and <strong>streams</strong> the full result to a local
       file — for sets too large to pull into the browser. Choose the format, destination directory,
@@ -279,6 +306,17 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
+  }
+  .exp-agent {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    font-size: var(--fs-s);
   }
   .exp-hint {
     margin: 0;

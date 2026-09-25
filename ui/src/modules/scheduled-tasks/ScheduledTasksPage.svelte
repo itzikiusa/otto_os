@@ -11,6 +11,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { scheduledTasks } from '../../lib/stores/scheduledTasks.svelte';
+  import { scheduledTasksPort } from '../../lib/uiCommands/scheduled';
   import { authedText } from '../../lib/api/client';
   import { scheduledTasksApi, type ScheduledTaskInput } from '../../lib/api/scheduledTasks';
   import { router } from '../../lib/router.svelte';
@@ -29,6 +30,8 @@
   let creating = $state(false);
   let editId = $state<string | null>(null);
   let expandedId = $state<string | null>(null);
+  // Agent UI control (lib/uiCommands/scheduled.ts) expands a task's runs.
+  $effect(() => scheduledTasksPort.bind({ expand: (id) => (expandedId = id) }));
   let busy = $state(false);
   /** Inline form error (validation / failed save). Row actions report via toasts. */
   let error = $state('');
@@ -809,7 +812,7 @@
       {/snippet}
       <ul class="tasks">
         {#each list as t (t.id)}
-          <li class="task">
+          <li class="task" data-task-id={t.id}>
             <div class="task-main">
               <div class="task-info">
                 <div class="task-title">

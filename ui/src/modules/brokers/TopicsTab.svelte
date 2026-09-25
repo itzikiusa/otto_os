@@ -6,6 +6,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import TopicDetail from './TopicDetail.svelte';
+  import { brokersTopicsPort } from '../../lib/uiCommands/brokers';
   import type {
     BrokerCluster,
     CreateTopicReq,
@@ -33,6 +34,8 @@
   let cleanupFilter = $state('');
   let page = $state(1);
   let selected = $state<string | null>(null);
+  // Agent UI control (lib/uiCommands/brokers.ts) opens a topic here.
+  $effect(() => brokersTopicsPort.bind({ clusterId: cluster.id, open: (name) => (selected = name) }));
 
   let creating = $state(false);
   let newName = $state('');

@@ -3,6 +3,7 @@
   // WIP row is selected. Unstaged / Staged file trees (per-file + per-folder
   // stage toggles, discard), a per-file working diff, and the commit composer.
   // Replaces the old separate "Changes" tab — staging now lives on the graph.
+  import { untrack } from 'svelte';
   import { api } from '../../lib/api/client';
   import type {
     CommitConfig,
@@ -14,6 +15,7 @@
   } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { git } from '../../lib/stores/git.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import DiffViewer from './DiffViewer.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -152,6 +154,24 @@
         diffError = e instanceof Error ? e.message : String(e);
       })
       .finally(() => (diffLoading = false));
+  });
+
+  // Agent UI control (lib/uiCommands/git.ts): a pending WIP request for this
+  // repo selects a file's diff and/or prefills the composer — so the user sees
+  // what the agent is looking at, and the message it is about to commit.
+  $effect(() => {
+    const r = git.wipRequest;
+    if (!r || r.repoId !== repoId) return;
+    untrack(() => {
+      const req = git.takeWipRequest(repoId);
+      if (!req) return;
+      if (req.path !== undefined) {
+        stagedView = req.staged ?? false;
+        selectedPath = req.path;
+      }
+      if (req.subject !== undefined) subject = req.subject;
+      if (req.body !== undefined) body = req.body;
+    });
   });
 
   // A staged/unstaged move can remove the selected file from the tree entirely
@@ -377,17 +397,12 @@
     committing = true;
     try {
       const message = subject.trim() + (body.trim() ? `\n\n${body.trim()}` : '');
-      const r = await api.post<{ sha: string }>(`/repos/${repoId}/commit`, {
-        message,
-        amend,
-        sign: signOn,
-      });
+      const r = await git.commit(repoId, { message, amend, sign: signOn });
       toasts.success('Committed', r.sha.slice(0, 8));
       subject = '';
       body = '';
       amend = false;
-      const s = await api.get<RepoStatusResp>(`/repos/${repoId}/status`);
-      onstatus(s);
+      onstatus(r.status);
       selectedPath = null;
       oncommitted();
     } catch (e) {

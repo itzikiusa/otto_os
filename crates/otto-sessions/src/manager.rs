@@ -2222,6 +2222,13 @@ impl SessionManager {
     ) -> Result<Session> {
         let _mcp_activation = crate::mcp::activation_gate().read().await;
         let mut req = req;
+        // Agent UI control's grant is server-owned and never outlives the
+        // session it was given to: no creator (a client, a handover/fork
+        // copying meta, an agent calling the create route with its token)
+        // may start a session pre-granted.
+        if let Some(obj) = req.meta.as_mut().and_then(serde_json::Value::as_object_mut) {
+            obj.remove("ui_control");
+        }
         // Fold the explicit `model` param into `meta.model` (winning over any
         // model already in `meta`) so ONE meta key drives both the spawn args
         // below and every later resume (`restart_locked` re-reads it).

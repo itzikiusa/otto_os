@@ -733,17 +733,22 @@ class VaultStore {
     }
   }
 
+  /** An agent's proposed text is staged in the editor awaiting the user's
+   *  confirm (lib/uiCommands/vault.ts): no autosave until they decide. */
+  holdAutosave = $state(false);
+
   onDraftChange(content: string): void {
     this.draft = content;
     this.dirty = content !== (this.note?.raw ?? '');
     this.persistDraft();
     if (this.saveTimer) clearTimeout(this.saveTimer);
-    if (this.dirty && !this.conflict) {
+    if (this.dirty && !this.conflict && !this.holdAutosave) {
       this.saveTimer = setTimeout(() => void this.saveNow(), 800);
     }
   }
 
   async saveNow(overwrite = false): Promise<boolean> {
+    if (this.holdAutosave) return false;
     if (this.savePromise) {
       if (!(await this.savePromise)) return false;
       return this.dirty ? this.saveNow(overwrite) : true;

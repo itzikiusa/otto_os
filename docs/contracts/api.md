@@ -42,7 +42,7 @@ connection library unusable for every non-root account.)
 | 17 | GET /api/v1/workspaces/{id}/sessions | ws viewer, **owner-scoped** (non-admins see only their own sessions; root/ws-admin get the full list) | optional query `?archived=&kind=&source=&status=` (all narrowing; `source=none` = sessions with no `meta.source`) | `Session[]` — each row carries transient `live: bool` + `viewers: number` |
 | 18 | POST /api/v1/workspaces/{id}/sessions | ws editor | CreateSessionReq | Session |
 | 19 | GET /api/v1/sessions/{id} | ws viewer + **session owner-or-admin** | — | Session (with transient `live` + `viewers`) |
-| 20 | PATCH /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | UpdateSessionReq | Session |
+| 20 | PATCH /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | UpdateSessionReq | Session — `meta.ui_control` and `meta.client_id` are **server-owned**: a PATCH that changes either is `403` (an unchanged round-trip is accepted and dropped). The grant is written only by `POST /sessions/{id}/ui-control`; session creation strips any client-supplied `meta.ui_control` |
 | 21 | DELETE /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | — | 204 (kills PTY, removes row) |
 | 22 | POST /api/v1/sessions/{id}/restart | ws editor + **session owner-or-admin** | — | Session (respawn; uses resume args when provider_session_id set; `409` when the session is archived) |
 | 23 | POST /api/v1/workspaces/{id}/orchestrate | ws editor | OrchestrateReq | OrchestrateResp |
@@ -135,6 +135,15 @@ Notes:
   the flag), so a genuine read still passes on its own classification while a raw write tagged
   `explain:true` is still blocked. The UI requires a typed confirmation before sending
   `confirm_write`.
+- `QueryRequest.read_only` (bool, default `false`): the same endpoint runs the statement
+  read-only on ANY connection. The statement is classified first (the MCP gate's classifier;
+  Redis `KEYS` is refused too): a write/DDL → `403 forbidden` with `Problem.message` prefixed
+  `read_only: `, before the driver is touched; a read then executes in the engine's native
+  read-only mode (MySQL/PostgreSQL read-only transaction, ClickHouse `readonly`). Unlike
+  `mcp-query` the caller's `mask`/`max_rows`/`offset`/`query_id` are honoured (no forced mask or
+  200-row cap — a human is watching the grid). It is checked ahead of the write-guard, so
+  `confirm_write` cannot lift it. The UI sets it on agent-driven runs (agent UI control) and, on a
+  `read_only:` refusal, asks the human before re-running without it.
 - DB read-only MCP query (`POST /api/v1/connections/{id}/db/mcp-query`, ws **viewer**;
   global connections: `Database:View`) — the agent-facing query path used by `ottod mcp-tools`. Body
   `{statement, max_rows?, node?}` → `QueryResult`. Read-only is enforced **unconditionally**
@@ -302,7 +311,7 @@ that user's workspace roles. Bootstrap one with a one-time login, then save it i
 
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
-| 87 | POST /api/v1/auth/tokens | member | CreateApiTokenReq `{label?}` | CreateApiTokenResp `{token, info}` (secret shown once) |
+| 87 | POST /api/v1/auth/tokens | member | CreateApiTokenReq `{label?}` | CreateApiTokenResp `{token, info}` (secret shown once). `403` for an agent session's credential or an MCP token — a PAT carries no session binding, so minting one would launder an agent into a human credential |
 | 88 | GET /api/v1/auth/tokens | member | — | `ApiTokenInfo[]` (never the secret; newest first) |
 | 89 | DELETE /api/v1/auth/tokens/{id} | member | — | 204 (404 if not found / not owned) |
 | 90 | GET /api/v1/repos/{id}/stashes | ws viewer | — | `StashInfo[]` (read-only `git stash list`) |
@@ -3567,6 +3576,93 @@ workspace_id?: string  // optional pin }`. **McpTokenInfo** — `{ id, user_id, 
 label?, token_prefix, scope, created_at, last_seen_at, expires_at }` (never the secret).
 Multiple tokens (and multiple users) may each hold a different scope — that is the
 mechanism for "different users have different accesses".
+
+### Agent UI control (`otto.ui_*`)
+
+An agent running in an Otto session drives the user's own Otto window, visibly:
+open a module in the side pane next to its session, open a query tab, run it,
+page the grid, and so on. The command catalog is
+**`docs/contracts/ui-commands.json`** (the single source of truth — the daemon
+embeds it, the UI imports it, both test against it). Each entry is one governed
+tool `otto.ui_<name>` (stdio `otto_ui_<name>`, category **"UI control"**) that
+runs through CP26 like every other `otto.*` tool — per-token scope, enable,
+audit — then through the UI bridge (`crates/otto-server/src/ui_bridge.rs`):
+
+1. **Session-bound.** Only a credential bound to an Otto session
+   (`managed_session_id` / an internal MCP `mcp_session_id`) may call them; the
+   session's owner must be the caller. Anything else → `forbidden`. Such a call
+   skips the outward master switch `mcp_otto_server_enabled` (it is not an
+   outward integration) — only the per-tool enable applies. `ui_*` tools are
+   **default-enabled** (a saved tool list gains UI tools that did not exist when
+   it was saved, tracked in `mcp_otto_server_ui_tools_known`; one the operator
+   unticked stays off), never `DANGEROUS` (no per-call approval), and
+   `local_write` / `outward` ones count as mutating for a read-only token scope.
+2. **Granted per session.** `session.meta.ui_control.enabled` must be `true`.
+   Otherwise the daemon emits the owner-scoped `ui_control_requested` event (see
+   `ws.md`; at most once per 10 s per session), waits up to 15 s for the grant,
+   and answers `pending_grant`: *"The user hasn't allowed UI control for this
+   session yet — they were asked in Otto; retry after they allow it"*. A Deny /
+   Stop within the last 60 s answers `pending_grant` without asking again; with
+   no Otto window open it answers at once.
+3. **Validated + pre-checked.** Arguments are validated against the entry's
+   `input_schema` (`invalid_args`); a `connection_id` (id OR name) is resolved
+   as the owner — a connection they cannot list is `not_found` / `forbidden`.
+4. **One window.** The target is the owner's document that implements the
+   command (`hello.capabilities`), on the device that started the session
+   (`session.meta.client_id`; unknown — a session not started from a window —
+   → any of the owner's devices; another device only when that one has no Otto
+   window at all, and then only a document already showing the module and
+   focused), preferring a document showing the module (paneKey), then
+   focused > visible > most recent. When none shows it, the daemon first sends
+   `open {module, route, placement:"side"}` to that device's main document and
+   waits ≤ 10 s for the module's document of that window to report.
+5. **Delivered + awaited.** A per-connection `ui_command` frame goes to that
+   document only (`ws.md` §2); the window runs the action **with the user's own
+   login token** (so the endpoint's native RBAC runs again) and reports back on
+   the routes below. Deadline: the entry's `timeout_ms` (`db_run_query`: its
+   `timeout_ms` argument + 15 s), ≤ 120 s; a human-confirm `progress` extends it.
+   On timeout, Stop / revoke, session removal, the agent's call going away, or
+   the window closing, the document receives `ui_command_cancel`.
+6. **Returned.** `{ui_visible: true, …result}` — every array capped at 200
+   entries (`<key>_truncated: <n>` marks a cut) and redacted with
+   `otto_core::redact`. With no window that can run it, a `read` entry with a
+   `headless` twin runs in the daemon instead (`ui_visible: false`, plus a
+   `note`): `presence` (the owner's registered documents), `db_list_connections`
+   (the connection directory), `db_mcp_query` (the read-only
+   `/connections/{id}/db/mcp-query` path — needs `connection_id` + `statement`).
+   Otherwise `no_ui_client`.
+
+A failure is the governed envelope `{decision:"error", executed, is_error:true,
+code, reason, content:{error, code}}` with `code` one of `pending_grant`,
+`no_ui_client`, `invalid_args`, `not_found`, `forbidden`, `cancelled_by_user`,
+`timeout`, `failed` (`executed:false` when nothing reached a window). The audit
+row (`mcp_call_log`) records the call and its outcome like any `otto.*` tool.
+
+| # | Method + Path | Auth | Body | Response |
+|---|---|---|---|---|
+| UI1 | GET /api/v1/ui/commands/catalog | any authenticated user (Exempt) | — | the parsed `ui-commands.json` `{version, commands:[UiCommandSpec]}` |
+| UI2 | POST /api/v1/ui/commands/{id}/result | **human credential** (Exempt from the feature table; see below) + header `X-Otto-Ui-Conn: <conn_id>` | `{ok:true, result:{…}}` or `{ok:false, error:{code, message}}` (≤ 1 MiB) | `204`; `404` unknown / finished / cancelled command; `403` wrong user or connection |
+| UI3 | POST /api/v1/ui/commands/{id}/progress | same as UI2 | `{note?, awaiting_human?:bool}` | `204` — `awaiting_human` extends the deadline to now + 120 s, never past dispatch + 150 s |
+| UI4 | POST /api/v1/sessions/{id}/ui-control | Agents:Edit + **human credential**; grant = the session **owner**, not impersonated; revoke = owner, workspace admin or root | `{enabled: bool}` | `Session` — sets `meta.ui_control = {enabled, granted_at, granted_by}` (emits `session_meta_updated`), audits `ui_control.grant` / `ui_control.revoke`, and on `enabled:false` cancels the session's in-flight UI commands (`cancelled_by_user`). `enabled:false` is accepted with no prior grant (a Deny) |
+
+**Human credential** (UI2–UI4): the request's token must not be an agent
+session's (`managed_session_id`), an internal / restricted MCP token
+(`mcp_session_id`, `mcp_only`) or a share link — the agent holds its owner's
+full API token and a shell, so these routes are how the daemon tells the person
+from the agent. UI2/UI3 additionally require the caller to be the command's
+target user **and** `X-Otto-Ui-Conn` to equal the `conn_id` (from `hello_ack`)
+the command was sent to; an agent can neither forge a result nor grant itself
+control. Only a human credential's `/ws/events` socket may register as a window
+(`hello`). Error `code`s a window may report: `cancelled_by_user`,
+`invalid_args`, `not_found`, `forbidden`, `failed` (anything else → `failed`).
+
+`UiCommandSpec` = `{name, module, route, risk:"read"|"navigate"|"local_write"|"outward",
+timeout_ms, headless?, description, input_schema, $comment?}` — `module` is the
+paneKey of the document that runs it (`shell` = any document), `route` the hash
+route opened when no document shows it. Phase 1: `state`, `open`, `focus`,
+`db_list_connections`, `db_open_connection`, `db_new_tab`, `db_set_statement`,
+`db_run_query`, `db_get_result`, `db_page`, `db_set_view`, `db_open_object`,
+`db_explain`, `db_stop`, `db_export`; later phases add entries per module.
 
 ---
 

@@ -272,7 +272,7 @@ const PR_NUMBER_DESC: &str = "Pull request number (otto.list_prs).";
 /// so the control-plane UI can group the (now large) checklist. Adding a tool here
 /// surfaces it in the control plane automatically (`GET /mcp/otto-server`).
 pub fn otto_tool_specs() -> Vec<Value> {
-    vec![
+    let mut specs = vec![
         json!({"name":"otto.search_codebase","mutating":false,"category":"Code & Context",
             "description":"Search a workspace's code for a literal query; returns file:line matches. Read-only, confined to the workspace root.",
             "inputSchema":{"type":"object","required":["workspace_id","query"],"properties":{
@@ -898,17 +898,57 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["cluster_id","action","kind","namespace","name"],"properties":{
                 "cluster_id":{"type":"string","description":K8S_CLUSTER_REF_DESC},"action":{"type":"string"},"kind":{"type":"string"},
                 "namespace":{"type":"string"},"name":{"type":"string"},"params":{"type":"object"}}}}),
-    ]
+    ];
+    // Agent UI control: one governed tool per `docs/contracts/ui-commands.json`
+    // entry (`otto.ui_*`, category "UI control") — see `crate::ui_commands`.
+    specs.extend(crate::ui_commands::specs());
+    specs
 }
 
+/// Settings key recording which `ui_*` tools existed when the operator last
+/// saved the enabled-tool list (see [`merge_enabled`]).
+const UI_TOOLS_KNOWN_KEY: &str = "mcp_otto_server_ui_tools_known";
+
 async fn enabled_tools(ctx: &ServerCtx) -> Vec<String> {
-    SettingsRepo::new(ctx.pool.clone())
+    let settings = SettingsRepo::new(ctx.pool.clone());
+    let stored = settings
         .get("mcp_otto_server_tools")
         .await
         .ok()
         .flatten()
+        .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok());
+    let ui_known = settings
+        .get(UI_TOOLS_KNOWN_KEY)
+        .await
+        .ok()
+        .flatten()
         .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
-        .unwrap_or_else(|| DEFAULT_ENABLED.iter().map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    merge_enabled(stored, &ui_known, &crate::ui_commands::tool_names())
+}
+
+/// The effective enabled set. Never saved → [`DEFAULT_ENABLED`] + every UI
+/// tool. Saved → the saved list, PLUS each UI tool that did not exist when it
+/// was saved (`ui_known`): agent UI control is default-on — it does nothing
+/// without the per-session human grant — so a list saved before a UI command
+/// shipped must not silently switch the new command off. A UI tool the
+/// operator saw and unchecked stays off. Pure.
+fn merge_enabled(stored: Option<Vec<String>>, ui_known: &[String], ui_tools: &[String]) -> Vec<String> {
+    match stored {
+        None => DEFAULT_ENABLED
+            .iter()
+            .map(|s| s.to_string())
+            .chain(ui_tools.iter().cloned())
+            .collect(),
+        Some(mut list) => {
+            for t in ui_tools {
+                if !ui_known.contains(t) && !list.contains(t) {
+                    list.push(t.clone());
+                }
+            }
+            list
+        }
+    }
 }
 
 async fn outward_enabled(ctx: &ServerCtx) -> bool {
@@ -925,13 +965,19 @@ async fn outward_enabled(ctx: &ServerCtx) -> bool {
 /// therefore do not depend on the admin's outward-server toggle/tool list. Their
 /// immutable per-token scope has already run before this check. External MCP
 /// tokens retain the existing master-toggle + enabled-tool behavior.
+///
+/// Agent UI control (`ui_session`: a `ui_*` tool called with a credential bound
+/// to an Otto session) is not an outward integration either: the master
+/// switch does not apply, only the per-tool enable (and, in the bridge, the
+/// per-session human grant).
 fn mcp_tool_enabled_for_token(
     internal: bool,
+    ui_session: bool,
     outward_on: bool,
     globally_enabled: &[String],
     short: &str,
 ) -> bool {
-    internal || (outward_on && globally_enabled.iter().any(|tool| tool == short))
+    internal || ((outward_on || ui_session) && globally_enabled.iter().any(|tool| tool == short))
 }
 
 async fn require_approval_dangerous(ctx: &ServerCtx) -> bool {
@@ -1297,8 +1343,14 @@ pub struct OttoInvokeReq {
 /// **mutating** tool. The mutating set is exactly [`DANGEROUS`] (every catalog
 /// entry with `mutating:true` is approval-gated), so this is the single source of
 /// truth the per-token read-only axis keys on.
+///
+/// Agent UI control tools are the one exception: they are never DANGEROUS (the
+/// session grant + the UI's own confirms replace a per-call approval), but a
+/// `local_write` / `outward` one still counts as mutating so a read-only token
+/// scope refuses it.
 pub(crate) fn tool_is_mutating(bare: &str) -> bool {
     DANGEROUS.contains(&bare)
+        || crate::ui_commands::by_tool(bare).is_some_and(|c| c.risk.mutating())
 }
 
 pub async fn otto_tools_invoke(
@@ -1379,7 +1431,9 @@ pub(crate) async fn governed_invoke(
 
     let outward_on = outward_enabled(ctx).await;
     let enabled = enabled_tools(ctx).await;
-    if !mcp_tool_enabled_for_token(auth.mcp_internal, outward_on, &enabled, &short) {
+    let is_ui = crate::ui_commands::is_ui_tool(&short);
+    let ui_session = is_ui && auth.managed_session_id.is_some();
+    if !mcp_tool_enabled_for_token(auth.mcp_internal, ui_session, outward_on, &enabled, &short) {
         let reason = if outward_on {
             "this tool is not enabled on the Otto MCP server"
         } else {
@@ -1590,6 +1644,33 @@ pub(crate) async fn governed_invoke(
         }
         _ => arguments,
     };
+    // Agent UI control: routed to the session owner's Otto window by the
+    // bridge (session-bound, grant-gated, target-picked), not a self-call —
+    // it needs `auth`'s session binding, which `execute_otto_tool` discards.
+    if is_ui {
+        let r = crate::ui_bridge::run(ctx, auth, &short, arguments).await;
+        let latency = started.elapsed().as_millis() as i64;
+        return Ok(match r {
+            Ok(value) => {
+                let bytes = serde_json::to_vec(&value).map(|v| v.len() as i64).unwrap_or(0);
+                let _ = ctx
+                    .mcp
+                    .call_log()
+                    .finalize(&audit_id, true, None, Some(latency), Some(bytes), None)
+                    .await;
+                json!({"decision":"allowed","executed":true,"content":value})
+            }
+            Err(e) => {
+                let msg = otto_core::redact::redact_text(&e.message).value;
+                let _ = ctx
+                    .mcp
+                    .call_log()
+                    .finalize(&audit_id, false, Some(&format!("{}: {msg}", e.code)), Some(latency), None, None)
+                    .await;
+                ui_error_envelope(&e.code, &msg)
+            }
+        });
+    }
     let result = match directory_kind(&short) {
         // Cross-workspace list tools: the `agent_refs` directory (as the
         // caller, pin applied), not a single-workspace route.
@@ -1626,6 +1707,20 @@ pub(crate) async fn governed_invoke(
             Ok(json!({"decision":"error","executed":true,"is_error":true,"content":{"error":err}}))
         }
     }
+}
+
+/// The governed envelope of a failed UI-control call. `code` is stable
+/// (`pending_grant`, `no_ui_client`, `cancelled_by_user`, `invalid_args`,
+/// `not_found`, `forbidden`, `timeout`, `failed`) and repeated inside
+/// `content` so a client that only surfaces `content` still sees it.
+/// `executed` is false when nothing reached a window.
+fn ui_error_envelope(code: &str, message: &str) -> Value {
+    let executed = !matches!(
+        code,
+        "pending_grant" | "no_ui_client" | "invalid_args" | "forbidden" | "not_found"
+    );
+    json!({"decision":"error","executed":executed,"is_error":true,"code":code,
+           "reason":message,"content":{"error":message,"code":code}})
 }
 
 async fn deny_audit(ctx: &ServerCtx, audit: &mut NewCallLog, reason: &str) -> Value {
@@ -1940,7 +2035,10 @@ const PIN_PROBES: &[(&str, &str, &str, &str)] = &[
 /// accounts, root-only usage, the skill catalogue, and the directory tools
 /// (which the pin itself narrows).
 fn pin_global(tool: &str) -> bool {
-    tool.starts_with("aws_")
+    // UI-control tools act on the CALLING SESSION, whose workspace the bridge
+    // checks against the pin itself (`ui_bridge::run`).
+    crate::ui_commands::is_ui_tool(tool)
+        || tool.starts_with("aws_")
         || tool.starts_with("k8s_")
         || DIRECTORY_TOOLS.iter().any(|(t, _)| *t == tool)
         || matches!(
@@ -2401,7 +2499,7 @@ fn pick_vault_workspace(
         .map(|(w, _)| w.id.clone())
 }
 
-async fn execute_otto_tool(
+pub(crate) async fn execute_otto_tool(
     ctx: &ServerCtx,
     user: &otto_core::domain::User,
     tool: &str,
@@ -4423,6 +4521,12 @@ pub async fn otto_server_config(
             .put("mcp_otto_server_tools", &json!(normalized))
             .await
             .map_err(ApiError)?;
+        // The operator has now seen every current UI tool: from here on only
+        // the ones left checked are enabled (see `merge_enabled`).
+        settings
+            .put(UI_TOOLS_KNOWN_KEY, &json!(crate::ui_commands::tool_names()))
+            .await
+            .map_err(ApiError)?;
     }
     // Approval exemptions: an explicit list replaces the stored one (audited —
     // it loosens the posture); either way the result is pruned to the enabled
@@ -4774,14 +4878,74 @@ mod tests {
 
     #[test]
     fn internal_reviewer_scope_does_not_depend_on_outward_server_toggle() {
-        assert!(mcp_tool_enabled_for_token(true, false, &[], "vault_read"));
-        assert!(!mcp_tool_enabled_for_token(false, false, &[], "vault_read"));
+        assert!(mcp_tool_enabled_for_token(true, false, false, &[], "vault_read"));
+        assert!(!mcp_tool_enabled_for_token(false, false, false, &[], "vault_read"));
         assert!(mcp_tool_enabled_for_token(
+            false,
             false,
             true,
             &["vault_read".to_string()],
             "vault_read",
         ));
+    }
+
+    /// Q1: a UI-control tool called from an Otto session skips the outward
+    /// master switch — but never the per-tool enable.
+    #[test]
+    fn ui_tools_from_a_session_skip_only_the_master_switch() {
+        let on = vec!["ui_db_run_query".to_string()];
+        assert!(mcp_tool_enabled_for_token(false, true, false, &on, "ui_db_run_query"));
+        assert!(!mcp_tool_enabled_for_token(false, true, false, &[], "ui_db_run_query"));
+        // Not from a session → the master switch still applies.
+        assert!(!mcp_tool_enabled_for_token(false, false, false, &on, "ui_db_run_query"));
+        assert!(mcp_tool_enabled_for_token(false, false, true, &on, "ui_db_run_query"));
+    }
+
+    #[test]
+    fn ui_tools_are_default_on_and_survive_an_old_saved_list() {
+        let ui = crate::ui_commands::tool_names();
+        assert!(!ui.is_empty());
+        // Never saved: defaults + every UI tool.
+        let d = merge_enabled(None, &[], &ui);
+        assert!(ui.iter().all(|t| d.contains(t)));
+        assert!(d.contains(&"list_workflows".to_string()));
+        // Saved before UI tools existed: they are added.
+        let old = merge_enabled(Some(vec!["list_workflows".into()]), &[], &ui);
+        assert!(ui.iter().all(|t| old.contains(t)));
+        // Saved after: an unchecked UI tool stays off, a checked one stays on,
+        // a UI tool added later still turns on.
+        let known = vec!["ui_db_run_query".to_string(), "ui_state".to_string()];
+        let saved = merge_enabled(Some(vec!["ui_state".into()]), &known, &ui);
+        assert!(!saved.contains(&"ui_db_run_query".to_string()));
+        assert!(saved.contains(&"ui_state".to_string()));
+        assert!(saved.contains(&"ui_db_page".to_string()));
+    }
+
+    #[test]
+    fn ui_tools_are_classified() {
+        for t in crate::ui_commands::catalog() {
+            let bare = t.tool();
+            assert!(!DANGEROUS.contains(&bare.as_str()), "{bare} must not be DANGEROUS");
+            assert_eq!(tool_is_mutating(&bare), t.risk.mutating(), "{bare}");
+            assert!(pin_global(&bare), "{bare}: pin story");
+            // A read-only token scope refuses the mutating ones.
+            let ro = McpScope { tools: None, allow_writes: false, workspace_id: None };
+            assert_eq!(ro.deny_reason(&bare, tool_is_mutating(&bare), None).is_some(), t.risk.mutating());
+        }
+        assert!(tool_is_mutating("ui_db_export"));
+        assert!(!tool_is_mutating("ui_db_run_query"));
+    }
+
+    #[test]
+    fn ui_error_envelope_shape() {
+        let v = ui_error_envelope("pending_grant", "ask");
+        assert_eq!(v["decision"], "error");
+        assert_eq!(v["executed"], false);
+        assert_eq!(v["is_error"], true);
+        assert_eq!(v["code"], "pending_grant");
+        assert_eq!(v["content"], json!({"error":"ask","code":"pending_grant"}));
+        assert_eq!(ui_error_envelope("timeout", "slow")["executed"], true);
+        assert_eq!(ui_error_envelope("cancelled_by_user", "no")["executed"], true);
     }
 
     #[test]
@@ -4888,6 +5052,12 @@ mod tests {
             }
             // Classification invariant: mutating ⟺ DANGEROUS; reads are default-on XOR opt-in.
             let s = short.as_str();
+            // Agent UI control tools have their own invariants
+            // (`ui_tools_are_classified`): never DANGEROUS, default-on via the
+            // catalog, mutating iff their risk tier writes.
+            if crate::ui_commands::is_ui_tool(s) {
+                continue;
+            }
             if mutating {
                 assert!(
                     DANGEROUS.contains(&s),
@@ -6279,7 +6449,7 @@ mod tests {
         }
         for r in ["get_confluence_page", "list_confluence_page_comments"] {
             assert!(
-                mcp_tool_enabled_for_token(true, false, &[], r),
+                mcp_tool_enabled_for_token(true, false, false, &[], r),
                 "{r} should be a default-enabled read"
             );
         }

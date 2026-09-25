@@ -30,6 +30,9 @@
   import { presetItems } from './SplitNode.svelte';
   import ConversationView from './conversation/ConversationView.svelte';
   import type { AttachedIssue, SessionStatus } from '../../lib/api/types';
+  import { uiControl } from '../../lib/stores/uiControl.svelte';
+  import { commandLabel, providerName } from '../../lib/uiCommands/frames';
+  import { moduleLabel } from '../../lib/sidebar';
 
   // Default idle-suspend grace period (5 minutes) used for the "suspends in N"
   // countdown hint. Reflects the backend's SUSPEND_GRACE constant; the backend
@@ -212,6 +215,44 @@
   // Only agent sessions launch a CLI that honors `--add-dir`.
   const isAgent = $derived(session?.kind === 'agent');
 
+  // --- Agent UI control (stores/uiControl.svelte.ts) --------------------------
+  // The grant is server-owned (`meta.ui_control`); the header toggle flips it,
+  // and an ungranted `otto.ui_*` call raises the inline prompt under the header.
+  const uiGranted = $derived(isAgent && uiControl.granted(sessionId));
+  /** The agent asked again after a Deny: no banner, just a mark on the toggle. */
+  const uiAskedAgain = $derived(isAgent && uiControl.askedAfterDeny(sessionId));
+  const uiBusy = $derived(uiControl.busy[sessionId] === true);
+  /** Only the owner, signed in as themselves, may ALLOW it (it drives their
+   *  window); anyone who sees it on may still turn it off (the daemon also
+   *  lets a workspace admin revoke). */
+  const uiCanGrant = $derived(
+    isAgent && !readOnly && !auth.isImpersonating && !!session && session.created_by === auth.me?.id,
+  );
+  const uiToggleShown = $derived(uiCanGrant || (uiGranted && !readOnly));
+  const uiPrompt = $derived(uiCanGrant ? uiControl.promptFor(sessionId) : null);
+  /** The UI-control toggle rides in the header while there's room — and longer
+   *  while it's ON or the agent is asking (a live permission stays visible). */
+  const uiToggleInline = $derived(
+    uiToggleShown && (uiGranted || uiAskedAgain ? tier < 6 : tier < 4),
+  );
+  const agentWho = $derived(providerName(session?.provider ?? ''));
+  const uiToggleTitle = $derived(
+    uiGranted
+      ? `UI control is on — ${agentWho} can open and drive Otto beside this session. Click to turn it off.`
+      : uiAskedAgain
+        ? `${agentWho} asked to drive Otto (you denied it earlier). Click to allow it for this session.`
+        : `Allow UI control — let ${agentWho} open and drive Otto beside this session, where you can see it`,
+  );
+  function toggleUiControl(): void {
+    void uiControl.setGrant(sessionId, !uiGranted);
+  }
+  /** What the agent asked for, in words: "“Run query” in Connections". */
+  const uiAskWhat = $derived(
+    uiPrompt
+      ? `“${commandLabel(uiPrompt.command)}”${uiPrompt.module && uiPrompt.module !== 'shell' ? ` in ${moduleLabel(uiPrompt.module)}` : ''}`
+      : '',
+  );
+
   // --- Terminal · Chat · Split (docs/design/conversation-view.md §5.1) --------
   // The chat is rebuilt from the provider transcript; probing it once per agent
   // session (cheap 200, `unavailable_reason` when nothing resolves) makes the
@@ -257,6 +298,8 @@
       gripOn,
       readOnly,
       renaming,
+      uiGranted,
+      uiAskedAgain,
     ].join('|'),
   );
   let lastFitSig = '';
@@ -643,6 +686,18 @@
             ...(isAgent
               ? [
                   { separator: true } as MenuItem,
+                  ...(uiToggleShown
+                    ? [
+                        {
+                          label: 'Allow UI control',
+                          icon: 'cursor',
+                          checked: uiGranted,
+                          disabled: uiBusy,
+                          title: uiToggleTitle,
+                          action: toggleUiControl,
+                        } as MenuItem,
+                      ]
+                    : []),
                   {
                     label: keepAlive ? 'Unpin (allow auto-suspend)' : 'Pin (keep alive)',
                     icon: 'pin',
@@ -855,6 +910,20 @@
         <Icon name={maximized ? 'minimize' : 'maximize'} size={13} />
       </button>
     {/if}
+    {#if uiToggleInline}
+      <button
+        class="icon-btn ui-ctl"
+        class:on={uiGranted}
+        class:asked={uiAskedAgain}
+        onmousedown={(e) => e.stopPropagation()}
+        onclick={toggleUiControl}
+        disabled={uiBusy}
+        aria-pressed={uiGranted}
+        title={uiToggleTitle}
+        aria-label="Allow UI control"
+        data-testid="ui-control-toggle"
+      ><Icon name="cursor" size={13} /></button>
+    {/if}
     {#if !readOnly && isAgent && tier < 5}
       <button class="icon-btn" onclick={restart} title={status === 'working' ? 'Restart session (asks first — it is working)' : 'Restart session'} aria-label="Restart session"><Icon name="refresh" size={13} /></button>
     {/if}
@@ -879,6 +948,21 @@
        Direct" in every session header was chrome with nothing to say. -->
   {#if session && auth.can('connections', 'view') && (networkProfileId || netOpen)}
     {#key sessionId}<SessionNetworkStatus defaultOpen={netOpen && !networkProfileId} {sessionId} workspaceId={session.workspace_id} selectedProfileId={typeof session.meta?.network_profile_id === 'string' ? session.meta.network_profile_id : ''} editable={!readOnly} manageEditable={!readOnly && auth.can('connections', 'edit')} onchange={async (id) => { await ws.updateSessionMeta(sessionId, { network_profile_id: id || null }); }} />{/key}
+  {/if}
+  {#if uiPrompt}
+    <!-- An agent called an `otto.ui_*` tool without the grant. Asked once per
+         session: Deny is remembered on this device (the toggle then only
+         carries a mark), Allow lasts for the session. -->
+    <div class="ui-ask" role="group" aria-label="UI control request" data-testid="ui-control-request">
+      <span class="ui-ask-mark" aria-hidden="true"><Icon name="cursor" size={13} /></span>
+      <span class="ui-ask-text" aria-live="polite">
+        <strong>{agentWho}{session?.title ? ` · ${session.title}` : ''} wants to drive Otto</strong> — {uiAskWhat}. Everything it does shows beside this session, and writes still ask you.
+      </span>
+      <span class="ui-ask-actions">
+        <button class="btn small" onmousedown={(e) => e.stopPropagation()} onclick={() => void uiControl.deny(sessionId)} disabled={uiBusy} data-testid="ui-control-deny">Deny</button>
+        <button class="btn small primary" onmousedown={(e) => e.stopPropagation()} onclick={() => void uiControl.allow(sessionId)} disabled={uiBusy} data-testid="ui-control-allow">Allow for this session</button>
+      </span>
+    </div>
   {/if}
   {#if session?.meta?.handover}<HandoverDeliveryPanel {session} readonly={readOnly} />{/if}
   <div class="pane-body" class:split={effView === 'split'} class:resizing={splitResizing} bind:this={bodyEl} data-view={effView}>
@@ -977,6 +1061,52 @@
 {/if}
 
 <style>
+  /* Agent UI control: the header toggle (accent while on — it is a selected
+     state) and the one-time request strip under the header. */
+  .ui-ctl.on {
+    color: var(--accent-text);
+    background: var(--accent-soft);
+  }
+  .ui-ctl.asked {
+    position: relative;
+  }
+  .ui-ctl.asked::after {
+    content: '';
+    position: absolute;
+    inset-block-start: 3px;
+    inset-inline-end: 3px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--status-warn);
+  }
+  .ui-ask {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--separator);
+    background: var(--warning-soft);
+    color: var(--text);
+    font-size: var(--fs-s);
+  }
+  .ui-ask-mark {
+    display: inline-flex;
+    color: var(--warning);
+    flex-shrink: 0;
+  }
+  .ui-ask-text {
+    flex: 1 1 240px;
+    min-width: 0;
+    line-height: 1.4;
+  }
+  .ui-ask-actions {
+    display: inline-flex;
+    gap: 6px;
+    flex-shrink: 0;
+    margin-inline-start: auto;
+  }
   .pane {
     display: flex;
     flex-direction: column;

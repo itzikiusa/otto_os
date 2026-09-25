@@ -31,6 +31,7 @@
   import { mergeRunProgress, fmtStepMs } from './runProgress';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { workflowRunBus } from '../../lib/events.svelte';
+  import { workflowsPagePort } from '../../lib/uiCommands/workflows';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import type {
@@ -721,10 +722,18 @@
   }
 
   async function execRun(body: RunWorkflowReq): Promise<void> {
-    if (!current || running) return;
-    if (!await validateGraph()) return;
+    const r = await startRun(body);
+    if (r) await followRun(r);
+  }
+
+  /** Validate, save, POST the run and show it. Null when it didn't start (the
+   *  reason is on the page: validation issues inline, a failed POST toasted).
+   *  On success `running` stays set until {@link followRun} settles it. */
+  async function startRun(body: RunWorkflowReq): Promise<WorkflowRun | null> {
+    if (!current || running) return null;
+    if (!await validateGraph()) return null;
     if (dirty) await save();
-    if (dirty) return; // failed save: never execute an older persisted graph
+    if (dirty) return null; // failed save: never execute an older persisted graph
     running = true;
     const workflowId = current.id;
     try {
@@ -733,6 +742,16 @@
       // live-run sync streams its progress in.
       requestedRunId = r.id;
       run = r;
+      return r;
+    } catch (e) {
+      toasts.error('Couldn’t start the run', e instanceof Error ? e.message : String(e));
+      running = false;
+      return null;
+    }
+  }
+
+  async function followRun(r: WorkflowRun): Promise<void> {
+    try {
       const done = await waitRunTerminal(r.id);
       if (destroyed) return;
       if (done.status === 'success') toasts.success('Run complete');
@@ -745,6 +764,31 @@
       running = false;
     }
   }
+
+  // Agent UI control (lib/uiCommands/workflows.ts): the agent opens a
+  // workflow / run and starts runs through THIS editor, so the user watches
+  // the same canvas + run inspector their own clicks would show.
+  $effect(() =>
+    workflowsPagePort.bind({
+      list: () => workflows,
+      loading: () => wfLoading,
+      currentId: () => current?.id ?? null,
+      async open(id: string): Promise<boolean> {
+        if (current?.id === id) return true;
+        if (!(await discardEditsOk())) return false;
+        const wf = workflows.find((w) => w.id === id) ?? (await api.get<Workflow>(`/workflows/${id}`));
+        open(wf);
+        return true;
+      },
+      openRun: (workflowId: string, runId: string) => openRunById(workflowId, runId),
+      async start(body: RunWorkflowReq): Promise<WorkflowRun | null> {
+        const r = await startRun(body);
+        if (r) void followRun(r);
+        return r;
+      },
+      currentRun: () => run,
+    }),
+  );
 
   // Every node kind in the graph, including the inner steps of `loop` nodes.
   function collectKinds(): Set<string> {

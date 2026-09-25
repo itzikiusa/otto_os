@@ -27,6 +27,8 @@
   import ClusterViewer from '../brokers/ClusterViewer.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import ImportDialog from './ImportDialog.svelte';
+  import ExportDialog from './ExportDialog.svelte';
+  import { databaseAccessChild } from '../../lib/access-options';
   import { database, engineGlyph, type DbMainTab } from '../../lib/stores/database.svelte';
   import { brokers } from '../../lib/stores/brokers.svelte';
   import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
@@ -1641,6 +1643,29 @@
   {#key database.importTable}
     <ImportDialog />
   {/key}
+{/if}
+
+<!-- "Export all rows…" an agent asked for (otto.ui_db_export): prefilled, but
+     the person picks the folder + file and confirms. Closing without exporting
+     reports `exported:false` back to the agent. -->
+{#if database.exportRequest}
+  {@const req = database.exportRequest}
+  <ExportDialog
+    statement={req.statement}
+    connectionId={req.connId}
+    node={req.node}
+    canExport={resourceAccess.can('connection', req.connId, 'db_export', 'database', 'view', databaseAccessChild(req.node ?? undefined))}
+    initialFormat={req.format}
+    initialMaxRows={req.maxRows}
+    requestedBy={req.agentLabel}
+    ondone={(r) => {
+      req.done({ exported: true, path: r.local_path, rows: r.rows, bytes: r.bytes });
+    }}
+    onclose={() => {
+      if (database.exportRequest === req) database.exportRequest = null;
+      req.done({ exported: false });
+    }}
+  />
 {/if}
 
 <style>

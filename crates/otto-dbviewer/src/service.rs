@@ -56,6 +56,13 @@ pub const WRITE_BLOCKED_PREFIX: &str = "write_blocked: ";
 /// connection's write-guard, so an agent-supplied statement can never mutate data.
 pub const MCP_READ_ONLY_PREFIX: &str = "mcp_read_only: ";
 
+/// Stable marker prefixed to the rejection of a [`QueryRequest::read_only`]
+/// request (a UI run an agent asked for) whose statement is a write/DDL.
+/// Distinct from [`MCP_READ_ONLY_PREFIX`] (no human in that loop) and from
+/// [`WRITE_BLOCKED_PREFIX`] (a guarded connection; a typed confirm lifts it):
+/// here the UI asks the human, then re-runs WITHOUT `read_only`.
+pub const READ_ONLY_PREFIX: &str = "read_only: ";
+
 /// Hard ceiling on rows a read-only MCP query may return, applied server-side
 /// regardless of the request (the `ottod mcp-tools` process caps again before the
 /// rows reach the agent transcript). Keeps a runaway `SELECT *` from flooding an
@@ -92,18 +99,40 @@ fn mask_result(res: &mut QueryResult) {
 /// whatever passes in the engine's native read-only mode, so a statement the
 /// classifier misjudges still cannot change data.
 pub fn ensure_read_only(engine: Engine, statement: &str) -> Result<()> {
+    classify_read_only(
+        engine,
+        statement,
+        MCP_READ_ONLY_PREFIX,
+        "only read-only statements may run over MCP",
+    )
+}
+
+/// The same gate as [`ensure_read_only`] for a [`QueryRequest::read_only`]
+/// request, tagged [`READ_ONLY_PREFIX`] so the UI can tell "the agent's
+/// statement writes — ask the human" apart from the MCP and write-guard refusals.
+pub fn ensure_read_only_request(engine: Engine, statement: &str) -> Result<()> {
+    classify_read_only(
+        engine,
+        statement,
+        READ_ONLY_PREFIX,
+        "this run was requested read-only",
+    )
+}
+
+/// Shared body of the read-only gates: `prefix` is the stable marker, `why`
+/// the human-readable reason that leads the write/DDL refusal.
+fn classify_read_only(engine: Engine, statement: &str, prefix: &str, why: &str) -> Result<()> {
     if statement.trim().is_empty() {
         return Err(Error::Invalid("empty statement".into()));
     }
     if statement_is_write(engine, statement) {
         return Err(Error::Forbidden(format!(
-            "{MCP_READ_ONLY_PREFIX}only read-only statements may run over MCP; \
-             this statement is classified as a write/DDL"
+            "{prefix}{why}; this statement is classified as a write/DDL"
         )));
     }
     if engine == Engine::Redis && crate::types::redis_uses_keys(statement) {
         return Err(Error::Forbidden(format!(
-            "{MCP_READ_ONLY_PREFIX}KEYS blocks the Redis server while it scans every key; \
+            "{prefix}KEYS blocks the Redis server while it scans every key; \
              use SCAN with MATCH and COUNT instead"
         )));
     }
@@ -1477,7 +1506,24 @@ impl DbViewerService {
     /// the driver errors or the future is cancelled), so a concurrent
     /// [`Self::cancel`] can issue engine-native cancellation against it. The
     /// driver fills the [`CancelToken`] with its native handle as it starts.
+    ///
+    /// With [`QueryRequest::read_only`] the statement is classified first
+    /// ([`ensure_read_only_request`], refused before the driver is touched) and
+    /// then runs in the engine's native read-only mode — on ANY connection, and
+    /// ahead of the write-guard, so `confirm_write` cannot lift it. Unlike
+    /// [`Self::run_read_only`] the caller's `mask` / `max_rows` / paging are kept.
     pub async fn run(&self, conn_id: &Id, user_id: &Id, req: &QueryRequest) -> Result<QueryResult> {
+        if req.read_only {
+            let conn = self.connections.get(conn_id).await?;
+            let engine = Engine::from_kind(conn.kind).ok_or_else(|| {
+                Error::Invalid(format!(
+                    "connection '{}' is not a queryable database (kind {:?})",
+                    conn.name, conn.kind
+                ))
+            })?;
+            ensure_read_only_request(engine, &req.statement)?;
+            return self.run_inner(conn_id, user_id, req, true).await;
+        }
         self.run_inner(conn_id, user_id, req, false).await
     }
 
@@ -1802,6 +1848,8 @@ impl DbViewerService {
             mask: Some(true),
             offset: None,
             cursor: None,
+            // This path forces native read-only itself (below).
+            read_only: false,
         };
         // Second barrier: execute in the engine's native read-only mode —
         // MySQL `START TRANSACTION READ ONLY` / PostgreSQL `BEGIN READ ONLY`
@@ -2785,6 +2833,52 @@ mod tests {
             ensure_read_only(Engine::Mongodb, "db.users.deleteOne({})").unwrap_err(),
             Error::Forbidden(_)
         ));
+    }
+
+    // --- ensure_read_only_request: the UI's `read_only` run (agent-driven) ----
+
+    #[test]
+    fn read_only_request_refuses_writes_with_its_own_marker() {
+        for (engine, stmt) in [
+            (Engine::Mysql, "DELETE FROM t"),
+            (Engine::Mysql, "SELECT 1; DROP TABLE t"),
+            (Engine::Postgres, "UPDATE t SET a = 1"),
+            (Engine::Clickhouse, "TRUNCATE TABLE t"),
+            (Engine::Redis, "SET k v"),
+            (Engine::Redis, "KEYS *"),
+            (Engine::Mongodb, "db.users.deleteOne({})"),
+        ] {
+            match ensure_read_only_request(engine, stmt).unwrap_err() {
+                // The UI keys its "ask the human" path on this marker, so it
+                // must be the request marker — never the MCP one (no confirm
+                // path) nor write_blocked (the typed guarded-connection confirm).
+                Error::Forbidden(m) => assert!(
+                    m.starts_with(READ_ONLY_PREFIX) && !m.starts_with(MCP_READ_ONLY_PREFIX),
+                    "{engine:?} {stmt:?}: {m}"
+                ),
+                other => panic!("{engine:?} {stmt:?}: expected Forbidden, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn read_only_request_allows_reads_and_rejects_empty() {
+        assert!(ensure_read_only_request(Engine::Mysql, "SELECT * FROM t").is_ok());
+        assert!(ensure_read_only_request(Engine::Postgres, "EXPLAIN SELECT 1").is_ok());
+        assert!(ensure_read_only_request(Engine::Redis, "GET k").is_ok());
+        assert!(ensure_read_only_request(Engine::Mongodb, "db.users.find({})").is_ok());
+        assert!(matches!(
+            ensure_read_only_request(Engine::Mysql, "  ").unwrap_err(),
+            Error::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn mcp_gate_keeps_its_marker_after_the_refactor() {
+        match ensure_read_only(Engine::Mysql, "DROP TABLE t").unwrap_err() {
+            Error::Forbidden(m) => assert!(m.starts_with(MCP_READ_ONLY_PREFIX), "{m}"),
+            other => panic!("expected Forbidden, got {other:?}"),
+        }
     }
 
     #[test]

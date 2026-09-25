@@ -442,6 +442,16 @@
     }
   });
 
+  // Agent UI control: `git.requestWip` (lib/uiCommands/git.ts) opens this
+  // repo's WIP panel; WipPanel then takes the request (file / composer).
+  $effect(() => {
+    const r = git.wipRequest;
+    if (!r || r.repoId !== repoId || status.changes.length === 0) return;
+    untrack(() => {
+      if (!wipSelected) selectWip();
+    });
+  });
+
   $effect(() => {
     const id = repoId;
     refsLoading = true;

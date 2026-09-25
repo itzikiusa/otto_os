@@ -640,6 +640,22 @@ pub enum Event {
         task_id: Option<Id>,
         auto_switched: bool,
     },
+    /// Agent UI control: an agent in `session_id` called an `otto.ui_*` tool
+    /// but the session has no "Allow UI control" grant yet. The UI shows an
+    /// inline Allow / Deny prompt beside the session (the grant itself is
+    /// `POST /sessions/{id}/ui-control`, human credentials only). Delivered
+    /// ONLY to the session owner's connections (owner-scoped, like the
+    /// Assistant events) — never to workspace admins or root.
+    UiControlRequested {
+        user_id: Id,
+        workspace_id: Id,
+        session_id: Id,
+        session_title: String,
+        /// The paneKey the command targets (`connections`, `shell`, …).
+        module: String,
+        /// The catalog command name (`db_run_query`), no `ui_` prefix.
+        command: String,
+    },
 }
 
 #[cfg(test)]
@@ -744,10 +760,26 @@ mod tests {
         })
         .unwrap();
         assert_eq!(v["type"], "assistant_limit");
+
         assert_eq!(v["limit"]["provider"], "claude");
         assert!(v.get("suggestion").is_some_and(|s| s.is_null()));
         assert!(v.get("task_id").is_some_and(|s| s.is_null()));
         assert_eq!(v["auto_switched"], false);
+
+        let v = serde_json::to_value(Event::UiControlRequested {
+            user_id: "u1".into(),
+            workspace_id: "w1".into(),
+            session_id: "s1".into(),
+            session_title: "Fix it".into(),
+            module: "connections".into(),
+            command: "db_run_query".into(),
+        })
+        .unwrap();
+        assert_eq!(v["type"], "ui_control_requested");
+        assert_eq!(v["session_title"], "Fix it");
+        assert_eq!(v["command"], "db_run_query");
+        assert_eq!(v["user_id"], "u1");
+        assert_eq!(v["module"], "connections");
     }
 
     /// Design Hall events: snake_case tags, and the optional ids / `content`

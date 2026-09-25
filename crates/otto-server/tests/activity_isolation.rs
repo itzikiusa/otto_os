@@ -316,6 +316,7 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
         browser_tabs: otto_state::BrowserTabsRepo::new(pool.clone()),
         browser_annotations: otto_state::BrowserAnnotationsRepo::new(pool.clone()),
         browser_credentials: otto_state::BrowserCredentialsRepo::new(pool.clone()),
+        ui_bridge: Default::default(),
         browser: Arc::new(otto_server::routes::browser::BrowserEngineHandle::new(
             None,
             PathBuf::from("/tmp/otto-test"),

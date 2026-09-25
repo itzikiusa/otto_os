@@ -8,6 +8,7 @@
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import { api } from '../../lib/api/client';
   import { brokers } from '../../lib/stores/brokers.svelte';
+  import { brokersPagePort } from '../../lib/uiCommands/brokers';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -89,6 +90,8 @@
     void brokers.selectedId;
     tab = 'overview';
   });
+  // Agent UI control (lib/uiCommands/brokers.ts) switches the sub-tab here.
+  $effect(() => brokersPagePort.bind({ setTab: (v) => (tab = v) }));
 
   const selected = $derived(brokers.selected);
 

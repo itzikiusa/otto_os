@@ -122,6 +122,12 @@
     }
   });
 
+  // Agent UI control: an agent editing/sending a request brings the request
+  // editor to the front (apiClient.showRequestView, lib/uiCommands/api.ts).
+  $effect(() => {
+    if (apiClient.requestViewTick > 0) untrack(() => showRequest());
+  });
+
   // Open on an item: the first time this device opens a workspace's API client
   // (no persisted tab slot yet — e.g. requests came from Git sync or another
   // Mac), land on the most recently edited saved request instead of an empty
