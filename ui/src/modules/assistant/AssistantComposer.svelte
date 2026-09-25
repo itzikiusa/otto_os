@@ -4,6 +4,7 @@
   // it), the model chip pins the thread, attachments land in the assistant's
   // inbox, and the mic is honestly disabled until voice ships.
   import Icon from '../../lib/components/Icon.svelte';
+  import { guardUnsaved } from '../../lib/leaveGuard';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import { assistantApi } from '../../lib/api/assistant';
   import { assistant, describeError } from '../../lib/stores/assistant.svelte';
@@ -28,6 +29,8 @@
   let uploading = $state(0);
   let ta = $state<HTMLTextAreaElement | null>(null);
   let fileInput = $state<HTMLInputElement | null>(null);
+
+  $effect(() => guardUnsaved(() => !!text.trim() || files.length > 0 || sending || uploading > 0, { what: 'this message' }));
 
   const hint = $derived(parseRouteHint(text));
   const hasText = $derived(hint.text.trim() !== '' || files.length > 0);
@@ -56,8 +59,8 @@
       await assistant.send(thread.id, body, attachments);
     } catch (e) {
       // Nothing is lost: the draft comes back with the reason.
-      text = body;
-      files = attachments;
+      text = text.trim() ? `${body}\n\n${text}` : body;
+      files = [...attachments, ...files.filter((file) => !attachments.some((sent) => sent.id === file.id))];
       error = `Couldn’t send. ${describeError(e)}`;
     } finally {
       sending = false;
@@ -74,6 +77,7 @@
 
   async function onFiles(list: FileList | null): Promise<void> {
     if (!list) return;
+    error = '';
     for (const f of Array.from(list)) {
       uploading += 1;
       try {
@@ -262,8 +266,8 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    height: 26px;
-    padding: 0 4px 0 8px;
+    min-height: 26px;
+    padding: 3px 4px 3px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface);
@@ -272,10 +276,10 @@
   }
   .fname {
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
+  .file > .dim, .file > .x { flex-shrink: 0; }
+  .file > .dim { white-space: nowrap; }
   .dim {
     color: var(--text-dim);
   }
