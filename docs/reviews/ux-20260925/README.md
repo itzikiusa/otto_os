@@ -42,7 +42,7 @@ Ratings above describe tested browser behavior, not a guarantee of every applica
 
 ## Round 3 (in progress)
 
-Eight fresh reviewers have started. Settings, content, shell, automation and shared accessibility have completed their repairs and scoped checks; Git, data and cloud are active. This round includes terminal sizing, save races, installed plugin routes, Snip editor, auth/share boot states, desktop auxiliary surfaces and complete onboarding flows. Ten fresh reviewers will run before the combined round gate. Rounds four and five are also mandatory.
+All ten fresh reviewers have started. Eight have completed repairs and scoped checks; Assistant/Insights and Help/onboarding remain active. This round includes terminal sizing, save races, installed plugin routes, Snip editor, auth/share boot states, desktop auxiliary surfaces and complete onboarding flows. Ten fresh reviewers will run before the combined round gate. Rounds four and five are also mandatory.
 
 | Completed scope | Verified dimensions / 10 | Evidence |
 |---|---:|---|
@@ -51,6 +51,9 @@ Eight fresh reviewers have started. Settings, content, shell, automation and sha
 | Shell, Home, sessions and panels | 9.2–9.6 by dimension; Files/Notes and standalone bar need deeper coverage | [Review](r3-shell.md) |
 | Automation and agent coordination | 9.1–9.5 by dimension; complex graph/coordination variants remain below target | [Review](r3-automation.md) |
 | Shared accessibility, auth and guest sharing | 9.3–9.6 by inspected dimension; broader Modal variants are explicitly incomplete | [Review](r3-access.md) |
+| Git, graph, PRs, Focus | 9.4–9.6 by dimension; active review flows remain unscored | [Review](r3-git.md) |
+| Database, API, connections, brokers | 9.5 on verified main flows; network-profile composition remains 9.4 | [Review](r3-data.md) |
+| AWS and Kubernetes | 9.3–9.5 by dimension; deeper fleet and cloud operations remain unscored | [Review](r3-cloud.md) |
 
 Content verification passed 73 scoped checks plus four diagnostic reload repetitions. One intermittent Product reload rejection did not reproduce with tracing and remains an explicit next-round investigation. This is not a clean-runtime claim. Mid-round UI checking passed with zero errors or warnings. The complete Rust rerun passed 3,562 tests with zero failures (66 ignored), and full clippy passed after repairing a stale macOS browser-install test with an isolated fixture. These gates precede the later Git normalization repair; the updated Git crate separately passed 236 tests. Final gates will verify the integrated revision. [Parent cross-checks](r3-parent.md) document a newly reproduced Canvas queue identity regression, its repair and both-engine validation, plus workflow response compatibility.
 
