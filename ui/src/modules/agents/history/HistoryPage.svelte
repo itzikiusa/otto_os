@@ -952,9 +952,7 @@
     margin: 0;
     font-size: var(--fs-l);
     font-weight: 600;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
   .dmeta {
     display: flex;
