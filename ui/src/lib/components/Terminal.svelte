@@ -64,7 +64,7 @@
     shareToken?: string;
     onstatus?: (status: SessionStatus) => void;
     /** The font size actually drawn (px) — below the user's size while the
-     *  pane is too narrow for 80 columns (see applyAutoFontFit). */
+     *  pane is too narrow for 80 columns (with an 11px readability floor). */
     onfontfit?: (px: number) => void;
     /** Called when the server returns a ring-buffer search result frame.
      *  The parent can surface results in a search-result panel. */
@@ -97,14 +97,36 @@
   // floor (PHONE_MIN_FONT): a 13px monospace grid is legible on a desktop
   // monitor but cramped on a high-DPI handset held at arm's length, which is a
   // big part of why the mobile terminal felt unusable. The user's zoom still
-  // wins when they zoom LARGER — we only raise the floor, never cap. Desktop is
-  // unchanged (the floor never applies), so `ui.termFontSize` passes through 1:1.
+  // wins when they zoom LARGER — we only raise the floor, never cap. Desktop
+  // keeps the shared 11px readable-content floor, including dense split panes.
   const PHONE_MIN_FONT = 15;
   const effFontSize = $derived(
-    viewport.isPhone ? Math.max(ui.termFontSize, PHONE_MIN_FONT) : ui.termFontSize,
+    viewport.isPhone ? Math.max(ui.termFontSize, PHONE_MIN_FONT) : Math.max(ui.termFontSize, 11),
   );
 
   let container: HTMLDivElement;
+  let horizontalOverflow = $state(false);
+  function scrollFocus(node: HTMLElement, overflowing: boolean) {
+    const update = (value: boolean) => {
+      if (value) node.tabIndex = 0;
+      else node.removeAttribute('tabindex');
+    };
+    // Make the focused region's scrolling explicit across webviews. Handle
+    // only this host; xterm input keeps its keys.
+    const onKey = (event: KeyboardEvent) => {
+      if (event.target !== node || node.scrollWidth <= node.clientWidth) return;
+      if (event.key === 'ArrowLeft') node.scrollLeft -= 40;
+      else if (event.key === 'ArrowRight') node.scrollLeft += 40;
+      else if (event.key === 'Home') node.scrollLeft = 0;
+      else if (event.key === 'End') node.scrollLeft = node.scrollWidth;
+      else return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    node.addEventListener('keydown', onKey);
+    update(overflowing);
+    return { update, destroy() { node.removeEventListener('keydown', onKey); } };
+  }
   let term: Terminal | null = null;
   let fit: FitAddon | null = null;
   let search: SearchAddon | null = null;
@@ -422,13 +444,14 @@
         const msg = JSON.parse(ev.data);
         switch (msg.type) {
           case 'scrollback': {
-            // A delayed optional compact must not erase a selection started
-            // after its request. A new process/connection still rebuilds: its
+            // A delayed optional compact must not erase a selection or reading
+            // position established after its request. A new process/connection still rebuilds: its
             // epoch differs (or was cleared on connect).
             const compact = compactPending && snapshotEpoch === msg.epoch;
             compactPending = false;
             snapshotEpoch = msg.epoch;
-            if (compact && term?.hasSelection()) break;
+            const buffer = term?.buffer.active;
+            if (compact && (term?.hasSelection() || (buffer && buffer.baseY - buffer.viewportY > 3))) break;
             // A snapshot fully reconstructs terminal state: history rows +
             // coherent current-screen frame + input modes (bracketed paste,
             // keypad). ALWAYS reset and rebuild from it — appending under the
@@ -581,6 +604,14 @@
   function runResizeCompact(): void {
     resizeCompactTimer = null;
     if (!term || !connected) return;
+    // Wait for attach's epoch, then allow only one optional snapshot in flight.
+    // Otherwise the first reply
+    // clears compactPending and a later reply looks like an attach, bypassing
+    // the selection/reading guard. WS replies are ordered but can be delayed.
+    if (snapshotEpoch === null || compactPending) {
+      scheduleResizeCompact();
+      return;
+    }
     if (resizeSendTimer !== null) {
       // Grid still moving (pane add/remove animates the tile layout for a
       // while — a confirm cycle is often in flight when this fires). RETRY
@@ -653,59 +684,60 @@
       return false; // container not laid out / detached
     }
     if (!dims || !Number.isFinite(dims.cols) || !Number.isFinite(dims.rows)) return false;
-    // Floor, not just >0: when the right panel expands to viewport-max the pane
-    // is squeezed to a sliver (~12 cols). Fitting then would SIGWINCH the PTY
-    // and a TUI (claude/codex) repaints its whole screen at that width,
-    // permanently mangling the scrollback. Below the floor keep the last sane
-    // grid — the (mostly occluded) pane clips, and restoring the layout re-fits
-    // to the same wide grid with no repaint.
-    if (dims.cols < 20 || dims.rows < 3) return false;
-    try {
-      fit.fit();
-    } catch {
+    // Never send an intermediate narrow grid: provider TUIs can permanently
+    // hard-wrap their transcript on SIGWINCH. First choose readable metrics,
+    // then resize once to the final grid. Narrow desktop panes scroll locally.
+    if (dims.rows < 3) return false;
+    // A maximized right panel can leave only a sliver of terminal visible.
+    // Preserve its existing grid entirely, as before, while keeping those
+    // columns reachable inside the host rather than repainting at 80 columns.
+    if (dims.cols < 20) {
+      horizontalOverflow = true;
+      const screen = term.element?.querySelector<HTMLElement>('.xterm-screen');
+      if (term.element && screen) {
+        const scrollbar = term.options.scrollback === 0 ? 0 : (term.options.overviewRuler?.width || 15);
+        term.element.style.width = `${Math.ceil(screen.getBoundingClientRect().width + scrollbar)}px`;
+      }
       return false;
     }
-    applyAutoFontFit();
+    const cur = term.options.fontSize ?? effFontSize;
+    const target = viewport.isPhone ? effFontSize
+      : Math.max(11, Math.min(effFontSize, Math.floor(cur * dims.cols / MIN_FIT_COLS)));
+    onfontfit?.(target);
+    if (target !== cur) {
+      term.options.fontSize = target;
+      clearWebglAtlas();
+      dims = fit.proposeDimensions();
+      if (!dims) return false;
+    }
+    const cols = viewport.isPhone ? dims.cols : Math.max(MIN_FIT_COLS, dims.cols);
+    try {
+      // Use the same measured cell metrics as FitAddon. DOM screen bounds
+      // lag resize by a render frame, so dividing them by NEW rows/columns
+      // oscillates the grid and prevents the stability confirmation below.
+      const cell = (term as unknown as {
+        _core: { _renderService: { dimensions: { css: { cell: { width: number; height: number } } } } };
+      })._core._renderService.dimensions.css.cell;
+      if (term.element) {
+        const scrollbar = term.options.scrollback === 0 ? 0 : (term.options.overviewRuler?.width || 15);
+        horizontalOverflow = cols > dims.cols;
+        term.element.style.width = horizontalOverflow
+          ? `${Math.ceil(cols * cell.width + scrollbar)}px` : '100%';
+      }
+      // clientHeight excludes classic horizontal scrollbars; overlay macOS
+      // scrollbars consume no height. Keep the last terminal row reachable.
+      const rows = Math.floor(container.clientHeight / cell.height);
+      term.resize(cols, Number.isFinite(rows) && rows >= 3 ? rows : dims.rows);
+    } catch {
+      return false; // detached mid-fit
+    }
+    if (target !== cur) forceViewportRefresh();
     return true;
   }
 
-  // ── Column floor via auto font shrink ───────────────────────────────────────
-  // A pane in a dense tile grid (6 sessions ⇒ ~45 cols at normal font) used to
-  // size the PTY to the tile — everything the agent printed while tiled was
-  // hard-wrapped that narrow FOREVER (no terminal can re-wrap printed line
-  // breaks). Instead of letting the grid drop below MIN_FIT_COLS, shrink the
-  // FONT so the tile keeps ≥80 real columns: the tile becomes a small-text
-  // monitor, the agent keeps rendering at sane width, and a later maximize
-  // (+ the one-shot compact) shows a clean wide transcript. The font returns
-  // to the user's preference as soon as the pane is wide enough. Desktop only —
-  // phone keeps its readability floor.
+  // A stable minimum preserves provider transcript wrapping in split/tile
+  // views. At the 11px readability floor, overflow stays inside the terminal.
   const MIN_FIT_COLS = 80;
-  const MIN_FIT_FONT = 6;
-  function applyAutoFontFit(): void {
-    if (!term || !fit || viewport.isPhone) return;
-    const cols = term.cols;
-    const cur = term.options.fontSize ?? effFontSize;
-    let target = cur;
-    if (cols < MIN_FIT_COLS) {
-      // cols scale ≈ 1/fontSize: pick the font that yields ≥ MIN_FIT_COLS.
-      target = Math.max(MIN_FIT_FONT, Math.floor((cur * cols) / MIN_FIT_COLS));
-    } else {
-      // Room available — restore toward the user's preferred size, but never
-      // past the size that would dip back under the floor (hysteresis).
-      const maxFont = Math.floor((cur * cols) / MIN_FIT_COLS);
-      target = Math.min(effFontSize, maxFont);
-    }
-    onfontfit?.(target);
-    if (target === cur) return;
-    term.options.fontSize = target;
-    clearWebglAtlas();
-    try {
-      fit.fit(); // re-measure at the new metrics (container already validated)
-    } catch {
-      /* detached mid-change */
-    }
-    forceViewportRefresh();
-  }
 
   /** Cap below which a shell frame is treated as interactive (not a stream dump).
    *  Only used when we are NOT in full-redraw mode (plain shells on WebGL). */
@@ -1526,15 +1558,17 @@
          onpointerdown/move/up are no-ops on desktop (we check viewport.isPhone
          + e.pointerType inside the handlers). Desktop mouse-wheel uses xterm's
          own built-in scroll handler which is completely untouched. -->
-    <!-- role="none" because this is a pure rendering surface managed by xterm.js;
-         ARIA structure is inside the xterm canvas layer, not this host div. -->
+    <!-- A narrow desktop grid can be scrolled horizontally with the keyboard
+         from this region; terminal input retains its own xterm focus target. -->
     <div
       class="term-host"
       class:ro={readOnly}
       class:force-dark={forceDark}
       class:rtl-bidi={ui.rtlBidi}
       bind:this={container}
-      role="none"
+      role="region"
+      aria-label="Terminal viewport"
+      use:scrollFocus={horizontalOverflow}
       onpointerdown={onTouchPointerDown}
       onpointermove={onTouchPointerMove}
       onpointerup={onTouchPointerUp}
@@ -1665,6 +1699,9 @@
   .term-host {
     position: absolute;
     inset: 6px 0 4px 8px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    direction: ltr;
   }
   .term-host.force-dark {
     background: #131318;
