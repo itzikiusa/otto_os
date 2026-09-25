@@ -19,7 +19,9 @@ import { seedProductStory } from './seed-product';
 // rather than the ≤640px stacked variant, and the overlay has a large, stable
 // click target. Only `viewport` is overridden — the mobile projects run on
 // WebKit, where `isMobile` is unsupported, and the layout is width-driven anyway.
-test.use({ viewport: { width: 1280, height: 900 }, actionTimeout: 12_000 });
+// These cases exercise the full three-pane workbench. Narrow available panes
+// now use tabs; desktop-ux-r3-content covers the 1280/1024px transition.
+test.use({ viewport: { width: 1800, height: 900 }, actionTimeout: 12_000 });
 
 const HTML_FIXTURE = join(process.cwd(), 'e2e', 'fixtures', 'mockup.html');
 const NOTE_TEXT = 'E2E annotation: align the CTA to the grid';

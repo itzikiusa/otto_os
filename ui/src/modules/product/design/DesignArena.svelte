@@ -70,6 +70,7 @@
     typeLabel,
     type ArtifactKind,
   } from './format';
+  import { viewport } from '../../../lib/stores/viewport.svelte';
   import { DESIGN_TEMPLATES, blankSource, type DesignTemplate } from './templates';
   import {
     canvasToPng,
@@ -295,6 +296,7 @@
       // the previously-selected one is gone.
       if (!selectedId || !rows.some((r) => r.att.id === selectedId)) {
         selectedId = rows[0]?.att.id ?? null;
+        if (selectedId && !viewport.isPhone) mobilePane = 'canvas';
       }
     } catch (e) {
       // A load failure is shown inline in the assets pane (with Retry), not toasted.
@@ -677,6 +679,21 @@
     ctxMenu.show(e, items);
   }
 
+  function onPaneTabKey(event: KeyboardEvent): void {
+    const button = event.currentTarget as HTMLButtonElement;
+    const group = button.parentElement!;
+    const tabs = Array.from(group.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+    const index = tabs.indexOf(button);
+    const direction = getComputedStyle(group).direction === 'rtl' ? -1 : 1;
+    const next = event.key === 'ArrowRight' ? (index + direction + tabs.length) % tabs.length
+      : event.key === 'ArrowLeft' ? (index - direction + tabs.length) % tabs.length
+      : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : -1;
+    if (next < 0) return;
+    event.preventDefault();
+    tabs[next].focus();
+    tabs[next].click();
+  }
+
   // ── Row actions ────────────────────────────────────────────────────────────
   function selectArtifact(id: string): void {
     selectedId = id;
@@ -783,6 +800,7 @@
   }
 </script>
 
+<div class="arena-container">
 <!-- `.mockups-tab` is kept as an alias class: the product-mockups E2E + deep links target it. -->
 <div
   class="design-arena mockups-tab"
@@ -790,11 +808,11 @@
   class:m-canvas={mobilePane === 'canvas'}
   class:m-inspector={mobilePane === 'inspector'}
 >
-  <!-- ≤640px segmented pane switch (Database Explorer idiom) -->
+  <!-- Narrow available pane: preserve a useful stage with explicit pane navigation. -->
   <div class="arena-seg" role="tablist" aria-label="Design panes">
-    <button class="seg" class:active={mobilePane === 'assets'} role="tab" aria-selected={mobilePane === 'assets'} onclick={() => (mobilePane = 'assets')}>Assets</button>
-    <button class="seg" class:active={mobilePane === 'canvas'} role="tab" aria-selected={mobilePane === 'canvas'} onclick={() => (mobilePane = 'canvas')}>Canvas</button>
-    <button class="seg" class:active={mobilePane === 'inspector'} role="tab" aria-selected={mobilePane === 'inspector'} onclick={() => (mobilePane = 'inspector')}>Inspector</button>
+    <button class="seg" class:active={mobilePane === 'assets'} role="tab" aria-selected={mobilePane === 'assets'} tabindex={mobilePane === 'assets' ? 0 : -1} onkeydown={onPaneTabKey} onclick={() => (mobilePane = 'assets')}>Assets</button>
+    <button class="seg" class:active={mobilePane === 'canvas'} role="tab" aria-selected={mobilePane === 'canvas'} tabindex={mobilePane === 'canvas' ? 0 : -1} onkeydown={onPaneTabKey} onclick={() => (mobilePane = 'canvas')}>Canvas</button>
+    <button class="seg" class:active={mobilePane === 'inspector'} role="tab" aria-selected={mobilePane === 'inspector'} tabindex={mobilePane === 'inspector' ? 0 : -1} onkeydown={onPaneTabKey} onclick={() => (mobilePane = 'inspector')}>Inspector</button>
   </div>
 
   <!-- ── ASSETS / HIERARCHY ─────────────────────────────────────────────── -->
@@ -1093,8 +1111,10 @@
     {/if}
   </aside>
 </div>
+</div>
 
 <style>
+  .arena-container { container-type: inline-size; display: flex; flex: 1; min-height: 0; min-width: 0; }
   .design-arena {
     flex: 1;
     min-height: 0;
@@ -1623,7 +1643,7 @@
   }
 
   /* ── Phone: segmented single pane ─────────────────────────────────────── */
-  @media (max-width: 640px) {
+  @container (max-width: 960px) {
     .design-arena {
       flex-direction: column;
     }

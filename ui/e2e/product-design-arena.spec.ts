@@ -12,7 +12,9 @@ import { seedProductStory } from './seed-product';
 // survive a reload, New ▾ → template creates an HTML screen that renders inside a
 // SANDBOXED iframe inside a device frame, and the phone layout collapses to the
 // segmented single pane.
-test.use({ viewport: { width: 1280, height: 900 }, actionTimeout: 12_000 });
+// These cases exercise the full three-pane workbench. Narrow available panes
+// now use tabs; desktop-ux-r3-content covers the 1280/1024px transition.
+test.use({ viewport: { width: 1800, height: 900 }, actionTimeout: 12_000 });
 
 let workspaceId = '';
 let storyId = '';
