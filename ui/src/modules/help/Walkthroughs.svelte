@@ -575,6 +575,7 @@
   .keys,
   .guide-body :global(.keys) {
     display: inline-flex;
+    direction: ltr;
     gap: 2px;
     vertical-align: baseline;
   }

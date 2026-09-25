@@ -1,11 +1,20 @@
 import { test, expect } from '@playwright/test';
 import { expectFullyInViewport } from './helpers';
 
+// The empty-workspace fixture must not be bypassed by the app worker.
+test.use({ serviceWorkers: 'block' });
+
 for (const direction of ['ltr', 'rtl']) {
   test(`first-run setup keeps controls reachable on a phone (${direction})`, async ({ page }, info) => {
     await page.setViewportSize({ width: 375, height: 812 });
     await page.addInitScript((dir) => localStorage.setItem('otto_direction', dir), direction);
     await page.route('**/api/v1/workspaces', (route) => route.fulfill({ json: [] }));
+    await page.route('**/api/v1/library/bundled', (route) => route.fulfill({ json:
+      ['grill', 'correctness-review', 'security-review', 'insights'].map((name) => ({
+        name, category: 'Review', version: 1, description: 'Synthetic setup skill',
+        installed_version: null, state: 'not_installed', update_available: false,
+      })),
+    }));
     await page.goto('/#/agents');
     const coach = page.locator('.coach');
     await expect(coach).toBeVisible();

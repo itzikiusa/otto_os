@@ -53,6 +53,7 @@
   }
 
   let videoEl: HTMLVideoElement | null = $state(null);
+  let filmEl: HTMLElement | undefined = $state();
   let src = $state<string | null>(null);
   let status = $state<'loading' | 'ready' | 'failed'>('loading');
   let currentTime = $state(0);
@@ -130,6 +131,7 @@
     if (videoEl && pendingSeek !== null) {
       videoEl.currentTime = pendingSeek;
       pendingSeek = null;
+      revealPlayer();
       void videoEl.play().catch(() => {});
     }
   }
@@ -137,6 +139,7 @@
   /** Seek to `seconds` and play (queued until the metadata is in). Used by the
    *  chapter list, the markers and the guides' "Watch this part". */
   export function playAt(seconds: number): void {
+    revealPlayer();
     currentTime = seconds;
     if (status === 'failed') {
       pendingSeek = seconds;
@@ -150,9 +153,15 @@
       pendingSeek = seconds;
     }
   }
+
+  function revealPlayer(): void {
+    // Only explicit playback requests reveal the film; timeupdate must leave
+    // readers where they scrolled. Instant also respects reduced motion.
+    filmEl?.querySelector('.film-frame')?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+  }
 </script>
 
-<section class="film" aria-label="Tour film" data-testid="tour-film">
+<section class="film" bind:this={filmEl} aria-label="Tour film" data-testid="tour-film">
   {#if !film}
     <div class="film-missing" role="status" data-testid="tour-film-missing">
       <span class="film-missing-icon" aria-hidden="true"><Icon name="play" size={14} /></span>
@@ -436,11 +445,10 @@
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
     font-size: var(--fs-xs);
+    white-space: nowrap;
   }
   .chapter-title {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
   .chapter.active .chapter-title {
     color: var(--accent-text);
