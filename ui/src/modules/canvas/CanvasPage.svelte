@@ -11,6 +11,7 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -39,6 +40,7 @@
   >(undefined);
   // The Assistant panel (the agent shell + Ask-AI input) — opens on demand.
   let showConvo = $state(false);
+  let workspaceEmpty: HTMLDivElement | undefined = $state();
 
   // Canvas is global — list the user's scenes across all workspaces. A failure
   // lands in `canvas.listError` and renders inline with Retry.
@@ -167,12 +169,23 @@
   {/snippet}
 </PageHeader>
 {#if !ws.currentId}
-  <div class="canvas-page empty-ws">
+  <div class="canvas-page empty-ws" bind:this={workspaceEmpty}>
     <EmptyState
       variant="page"
       icon="shapes"
       title="Select a workspace"
       body="Canvas scenes live in a workspace. Pick or create one to start drawing."
+      actionLabel="Choose workspace"
+      onaction={() => {
+        const trigger = workspaceEmpty?.querySelector('button');
+        trigger?.focus();
+        if (!ws.workspaces.length) { ui.newWorkspaceOpen = true; return; }
+        ctxMenu.showAt(trigger!, [
+          ...ws.workspaces.map(w => ({ label: w.name, icon: 'folder', action: () => void ws.select(w.id) })),
+          { separator: true },
+          { label: 'Add workspace…', icon: 'plus', action: () => (ui.newWorkspaceOpen = true) },
+        ], { filter: true, filterPlaceholder: 'Find a workspace…' });
+      }}
     />
   </div>
 {:else}

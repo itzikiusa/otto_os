@@ -405,6 +405,13 @@
       {/if}
 
       <main class="center">
+        {#if vault.noteOpenError}
+          <div class="note-open-error" role="alert" data-testid="note-open-error">
+            <span>Couldn’t open <bdi>{vault.noteOpenError.path}</bdi>. {vault.noteOpenError.message}</span>
+            <button class="btn small" onclick={() => { const failed = vault.noteOpenError; if (failed) void vault.open(failed.path, failed.opts); }}>Retry</button>
+            <button class="btn small ghost" onclick={() => (vault.noteOpenError = null)}>Dismiss</button>
+          </div>
+        {/if}
         {#if vault.tabs.length > 0}
           <!-- Each tab is a presentational wrapper around TWO real buttons (the
                tab + its close), so the close control isn't nested inside an
@@ -546,6 +553,19 @@
 <Switcher />
 
 <style>
+  .center > .note-open-error {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--danger-soft);
+    color: var(--text);
+    font-size: var(--fs-s);
+  }
+  .note-open-error span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+
   .graph-scope { display: flex; align-items: center; gap: 12px; padding: 8px 12px; flex-wrap: wrap; font-size: var(--fs-s); color: var(--text-dim); border-bottom: 1px solid var(--border); }
   .gs-path { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .graph-scope select { background: var(--bg); color: var(--text); border: 1px solid var(--border); padding: 4px; border-radius: var(--radius-s); }

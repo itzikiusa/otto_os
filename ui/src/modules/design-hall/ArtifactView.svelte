@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onTabKey } from './tabKeys';
   // One design, open (canvas/studio archetype):
   //
   //   PageHeader: Design Hall › Project › Title · status ▾ · vN      Compare  ⋯  [Save]
@@ -313,7 +314,7 @@
     const body = { content: source, base_version: baseVersionId ?? '', ...(message ? { message } : {}) };
     try {
       const res = named ? await api.commitVersion(id, { ...body, message: message ?? '' }) : await api.putContent(id, body);
-      applySaved(res);
+      applySaved(res, body.content);
       if (!res.created) toasts.info('No changes to save', 'The content matches the current version.');
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) await resolveConflict(named ? message : undefined);
@@ -378,7 +379,7 @@
       try {
         const body = { content: source ?? '', base_version: latest.id, ...(namedMessage ? { message: namedMessage } : {}) };
         const res = namedMessage ? await api.commitVersion(id, { ...body, message: namedMessage }) : await api.putContent(id, body);
-        applySaved(res);
+        applySaved(res, body.content);
         if (byAgent) {
           api.captureSignal({ artifact_id: id, kind: 'variant_rejected', version_id: latest.id, payload: { source: 'conflict', rejected_version_id: latest.id, rejected_seq: latest.seq, kept_version_id: res.version.id, reason: 'kept my edits' } });
         }
@@ -816,13 +817,13 @@
         </section>
         <aside class="right" aria-label="Design details">
           <div class="tabs segmented" role="tablist" aria-label="Details panel">
-            <button role="tab" aria-selected={rightTab === 'otto'} class:active={rightTab === 'otto'} onclick={() => (rightTab = 'otto')} data-testid="design-tab-otto">
+            <button role="tab" aria-selected={rightTab === 'otto'} tabindex={rightTab === 'otto' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'otto'} onclick={() => (rightTab = 'otto')} data-testid="design-tab-otto">
               Otto
             </button>
-            <button role="tab" aria-selected={rightTab === 'links'} class:active={rightTab === 'links'} onclick={() => (rightTab = 'links')} data-testid="design-tab-links">
+            <button role="tab" aria-selected={rightTab === 'links'} tabindex={rightTab === 'links' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'links'} onclick={() => (rightTab = 'links')} data-testid="design-tab-links">
               Links <span class="count">{split.uses.length + split.usedIn.length}</span>
             </button>
-            <button role="tab" aria-selected={rightTab === 'references'} class:active={rightTab === 'references'} onclick={() => (rightTab = 'references')} data-testid="design-tab-references">
+            <button role="tab" aria-selected={rightTab === 'references'} tabindex={rightTab === 'references' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'references'} onclick={() => (rightTab = 'references')} data-testid="design-tab-references">
               References
             </button>
           </div>

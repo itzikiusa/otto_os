@@ -106,6 +106,7 @@ class VaultStore {
   // Open note.
   note = $state<VaultNote | null>(null);
   notePath = $state<string | null>(null);
+  noteOpenError = $state<{ path: string; message: string; opts: { edit?: boolean; newTab?: boolean } } | null>(null);
   editing = $state(false);
   draft = $state('');
   dirty = $state(false);
@@ -265,6 +266,7 @@ class VaultStore {
     }
     if (!(await this.canLeaveNote())) return;
     this.noteLoadSeq += 1;
+    this.noteOpenError = null;
     this.current = v;
     this.status = null;
     this.dirty = false;
@@ -511,12 +513,18 @@ class VaultStore {
   }
 
   /** Commit navigation only after a successful save and read. */
-  private async openNoteInPlace(path: string, opts: { edit?: boolean } = {}): Promise<boolean> {
-    if (!this.current || !(await this.canLeaveNote())) return false;
-    const id = this.current.id, seq = ++this.noteLoadSeq;
+  private async openNoteInPlace(path: string, opts: { edit?: boolean; newTab?: boolean } = {}): Promise<boolean> {
+    if (!this.current) return false;
+    const id = this.current.id, wsId = this.wsId, seq = ++this.noteLoadSeq;
+    const current = () => this.current?.id === id && this.wsId === wsId && this.noteLoadSeq === seq;
+    this.noteOpenError = null;
+    if (!(await this.canLeaveNote()) || !current()) return false;
     try {
-      const n = await vaultNote(this.wsId, id, path);
-      if (this.current?.id !== id || this.noteLoadSeq !== seq) return false;
+      const n = await vaultNote(wsId, id, path);
+      if (!current()) return false;
+      // The existing editor remains usable during the read. Save any edits
+      // typed meanwhile before replacing it, and recheck navigation ownership.
+      if (!(await this.canLeaveNote()) || !current()) return false;
       this.note = n;
       this.notePath = path;
       this.draft = n.raw;
@@ -536,7 +544,7 @@ class VaultStore {
       void this.reloadBacklinks();
       return true;
     } catch (e) {
-      toasts.error(`Couldn’t open ${path.split('/').pop() ?? path}`, msg(e));
+      if (current()) this.noteOpenError = { path, message: msg(e), opts };
       return false;
     }
   }
@@ -599,6 +607,8 @@ class VaultStore {
         return; // activateTab persisted
       }
       this.activeTab = -1;
+      ++this.noteLoadSeq;
+      this.noteOpenError = null;
       this.note = null;
       this.notePath = null;
       this.clearFileView();
@@ -662,6 +672,7 @@ class VaultStore {
     if (!(await this.canLeaveNote())) return;
     // Supersede any note load still in flight so it cannot replace this file.
     this.noteLoadSeq += 1;
+    this.noteOpenError = null;
     this.claimTab({ kind: 'file', path }, opts.newTab);
     await this.loadFile(path);
     this.persistView();

@@ -71,6 +71,7 @@ class CanvasStore {
   /** The scene id that `loadError` belongs to — what Retry re-opens. */
   loadErrorId = $state<string | null>(null);
 
+  #openSequence = 0;
   #history: string[] = [];
   #future: string[] = [];
   #saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -111,10 +112,12 @@ class CanvasStore {
   }
 
   async open(id: string): Promise<void> {
+    const sequence = ++this.#openSequence;
     this.loadError = null;
     this.loadErrorId = null;
     try {
       const row = await api.get<CanvasScene>(`/canvas/scenes/${id}`);
+      if (sequence !== this.#openSequence) return;
       this.currentId = row.id;
       this.scene = parseScene(row.doc_json, row.title);
       let doc: CanvasDoc | null = null;
@@ -136,6 +139,7 @@ class CanvasStore {
       this.savedAt = Date.parse(row.updated_at) || null;
       this.rev += 1;
     } catch (e) {
+      if (sequence !== this.#openSequence) return;
       this.loadError = loadErrorText(e);
       this.loadErrorId = id;
       throw e;
@@ -143,6 +147,7 @@ class CanvasStore {
   }
 
   closeScene(): void {
+    ++this.#openSequence;
     if (this.#saveTimer) clearTimeout(this.#saveTimer);
     this.currentId = null;
     this.scene = null;
