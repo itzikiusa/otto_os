@@ -37,6 +37,7 @@
   // canvas.currentId, which on a scene switch already points at the NEXT scene and
   // would write this Excalidraw doc into a Mermaid scene (corruption).
   const sceneId = canvas.currentId;
+  const saveContext = canvas.saveContext;
 
   let host = $state<HTMLDivElement | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -242,11 +243,11 @@
   }
 
   function scheduleSave(): void {
-    if (readonly || suppressSave || !sceneId) return;
+    if (canvas.saveContext !== saveContext || readonly || suppressSave || !sceneId) return;
     const doc = snapshotDoc();
     if (!doc || doc.source === pendingDoc?.source) return;
     pendingDoc = doc;
-    canvas.stageDoc(sceneId, doc);
+    canvas.stageDoc(sceneId, doc, saveContext);
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => { saveTimer = null; void saveNow(); }, 700);
   }
@@ -255,9 +256,9 @@
     const doc = pendingDoc;
     if (!doc || !sceneId) return;
     try {
-      await canvas.persistDoc(sceneId, doc);
+      await canvas.persistDoc(sceneId, doc, saveContext);
       // Newer local drawing wins over the response to an older snapshot.
-      if (!destroyed && canvas.currentId === sceneId && pendingDoc === doc) {
+      if (!destroyed && canvas.saveContext === saveContext && canvas.currentId === sceneId && pendingDoc === doc) {
         lastApplied = doc.source ?? '';
         canvas.source = lastApplied;
       }

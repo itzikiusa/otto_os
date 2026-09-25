@@ -33,6 +33,7 @@
   // The scene THIS editor is mounted for — saves target THIS id, never
   // canvas.currentId (which on a scene switch already points at the next scene).
   const sceneId = canvas.currentId;
+  const saveContext = canvas.saveContext;
 
   let surface = $state<HTMLDivElement | null>(null);
   let content = $state<HTMLDivElement | null>(null);
@@ -64,12 +65,12 @@
   // toggle, which rides along in the doc) to THIS scene (guarded: if the scene
   // switched, drop the stale save).
   async function saveD2(value: string): Promise<void> {
-    if (canvas.currentId !== sceneId || !sceneId) return;
+    if (canvas.saveContext !== saveContext || canvas.currentId !== sceneId || !sceneId) return;
     const doc: CanvasDoc = { type: 'otto-canvas', version: 1, format: 'd2' as CanvasFormat, source: value, sketch };
     canvas.source = value; // drives the live preview re-render
     canvas.rawDoc = doc;
     try {
-      await canvas.persistDoc(sceneId, doc);
+      await canvas.persistDoc(sceneId, doc, saveContext);
     } catch (e) {
       if (canvas.currentId === sceneId)
         toasts.error('Save failed', e instanceof Error ? e.message : String(e));
@@ -79,10 +80,11 @@
   /** The code-pane text a pending debounce has not saved yet. */
   let pendingCode: string | null = null;
   function onCode(value: string): void {
+    if (canvas.saveContext !== saveContext) return;
     if (codeTimer) clearTimeout(codeTimer);
     pendingCode = value;
     // Unsaved typing wins over live agent pushes (ingestDoc skips while dirty).
-    if (sceneId) canvas.stageDoc(sceneId, { type: 'otto-canvas', version: 1, format: 'd2', source: value, sketch });
+    if (sceneId) canvas.stageDoc(sceneId, { type: 'otto-canvas', version: 1, format: 'd2', source: value, sketch }, saveContext);
     codeTimer = setTimeout(() => {
       codeTimer = null;
       pendingCode = null;
@@ -98,7 +100,7 @@
     if (pendingCode === null || !sceneId) return;
     const doc: CanvasDoc = { type: 'otto-canvas', version: 1, format: 'd2' as CanvasFormat, source: pendingCode, sketch };
     pendingCode = null;
-    void canvas.persistDoc(sceneId, doc).catch((e: unknown) =>
+    void canvas.persistDoc(sceneId, doc, saveContext).catch((e: unknown) =>
       toasts.error('Save failed', e instanceof Error ? e.message : String(e)),
     );
   }
@@ -258,6 +260,7 @@
     // The result belongs to THIS scene even if the user switches away while
     // the agent works (the server commits it there).
     const sceneId = canvas.currentId;
+  const saveContext = canvas.saveContext;
     canvas.pushConvo('user', p, sceneId);
     try {
       const res = await canvas.assist(p, 'flow');
