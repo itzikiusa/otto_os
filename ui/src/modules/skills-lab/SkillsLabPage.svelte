@@ -6,6 +6,7 @@
   //   • Review    `#/skills-eval/review`    — multi-agent skill review
   //   • Evaluator `#/skills-eval/evaluator` — the Skills Evaluator (Runs /
   //                                            Golden Tasks / Matrix), unchanged
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
   import SkillsBrowser from './SkillsBrowser.svelte';
@@ -76,11 +77,15 @@
   let browser = $state<ReturnType<typeof SkillsBrowser> | null>(null);
   let canCreate = $state(true);
   let phoneDetail = $state(false);
+  let listCollapsed = $state(false);
 </script>
 
 <div class="skills-lab">
   <PageHeader title="Skills Lab" subtitle={tab === 'skills' ? 'Every skill your agents can load, in one place' : undefined}>
     {#snippet leading()}
+      {#if tab === 'skills' && !viewport.isPhone}
+        <button class="icon-btn" onclick={() => (listCollapsed = !listCollapsed)} aria-label={listCollapsed ? 'Show skills list' : 'Hide skills list'} title={listCollapsed ? 'Show skills list' : 'Hide skills list'} aria-expanded={!listCollapsed} aria-controls="skills-list-pane"><Icon name="sidebar" size={16} /></button>
+      {/if}
       {#if tab === 'skills' && phoneDetail}
         <button class="icon-btn" onclick={() => browser?.back()} aria-label="Back to skills" title="Back to skills"><Icon name="chevronLeft" size={16} /></button>
       {/if}
@@ -113,7 +118,7 @@
 
   <div class="lab-body">
     {#if tab === 'skills'}
-      <SkillsBrowser bind:this={browser} onreview={reviewSkill} onevaluate={evaluateSkill} onopenrun={openRun} onempty={(empty) => (canCreate = !empty)} onphonedetail={(o) => (phoneDetail = o)} onopenreview={openReview} />
+      <SkillsBrowser {listCollapsed} bind:this={browser} onreview={reviewSkill} onevaluate={evaluateSkill} onopenrun={openRun} onempty={(empty) => (canCreate = !empty)} onphonedetail={(o) => (phoneDetail = o)} onopenreview={openReview} />
     {:else if tab === 'review'}
       <SkillReviewPanel {wsId} initialTarget={reviewTarget} onconsumed={() => (reviewTarget = null)} initialReview={reviewOpen} onreviewconsumed={() => (reviewOpen = null)} />
     {:else}

@@ -186,6 +186,16 @@
               <Icon name="trash" size={14} />
             </button>
           </div>
+          <details class="plugin-details">
+            <summary>Plugin details</summary>
+            <dl>
+              <dt>Name</dt><dd>{p.name}</dd>
+              <dt>Version</dt><dd dir="ltr">{p.version || 'Not specified'}</dd>
+              <dt>Source</dt><dd class="mono" dir="ltr">{p.source}</dd>
+              <dt>Identifier</dt><dd class="mono" dir="ltr">{p.slug}</dd>
+              {#if p.description}<dt>Description</dt><dd>{p.description}</dd>{/if}
+            </dl>
+          </details>
         </div>
       {/each}
     </div>
@@ -254,6 +264,7 @@
   }
   .prow {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 12px;
     padding: 10px 14px;
@@ -262,6 +273,19 @@
   .prow + .prow {
     border-top: 1px solid var(--border);
   }
+  .plugin-details {
+    flex-basis: 100%;
+    min-width: 0;
+    font-size: var(--fs-s);
+  }
+  .plugin-details summary {
+    cursor: pointer;
+    color: var(--text-dim);
+    padding-block: 8px;
+  }
+  .plugin-details dl { margin: 4px 0 0; }
+  .plugin-details dt { color: var(--text-dim); margin-block-start: 8px; }
+  .plugin-details dd { margin: 2px 0 0; overflow-wrap: anywhere; }
   .picon {
     flex-shrink: 0;
     display: grid;
