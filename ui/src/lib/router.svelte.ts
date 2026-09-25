@@ -18,8 +18,10 @@
 // never persists in browser history, logs, or the address bar.
 // The token is intentionally NOT stored in localStorage (would clobber a real
 // owner login under the 'otto_token' key and survive the session).
-const _shareTokens: Map<string, string> = new Map();
+// Replacing a token for the same session must refresh the guest's role too.
+const _shareTokens = new SvelteMap<string, string>();
 
+import { SvelteMap } from 'svelte/reactivity';
 import { winKey } from './win';
 import { lsGet, lsSet } from './storage';
 import { isEmbedded } from './desktop';

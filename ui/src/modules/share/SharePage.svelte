@@ -10,10 +10,10 @@
   // "email-OTP verification" signal, we show an OTP entry screen before attaching.
   // After verification, `getSharedSession` is retried. An "Extend" control allows
   // re-sending a fresh OTP to the locked original recipient.
-  import { onMount } from 'svelte';
+  import { onDestroy } from 'svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import { getSharedSession, getShareWhoami, openShareTerminalWs, verifyShareOtp, extendShare } from '../../lib/api/share';
+  import { getSharedSession, getShareWhoami, verifyShareOtp, extendShare } from '../../lib/api/share';
   import { getShareToken } from '../../lib/router.svelte';
   import type { Session, SessionStatus } from '../../lib/api/types';
   import { ApiError } from '../../lib/api/client';
@@ -54,26 +54,45 @@
   /** Why the OTP card shows: the first visit, or a lapsed access window. */
   let otpReason = $state<'first' | 'lapsed'>('first');
 
+  // Requests belong to one link/load. A delayed reply from a prior link or
+  // access window must never change the currently attached session or role.
+  let generation = 0;
+  onDestroy(() => { generation++; });
+  function isCurrent(seq: number, id: string, bearer: string): boolean {
+    return seq === generation && id === sessionId && bearer === token;
+  }
+
   // ── load session (or detect OTP gate) ────────────────────────────────────
   async function loadSession(): Promise<void> {
     const t = token;
     if (!t) return;
+    const id = sessionId;
+    const seq = ++generation;
     viewState = 'loading';
+    isViewer = true;
+    otpBusy = false;
+    extendBusy = false;
     loadError = null;
     session = null;
     liveStatus = null;
 
     try {
-      session = await getSharedSession(sessionId, t);
+      const loaded = await getSharedSession(id, t);
+      if (!isCurrent(seq, id, t)) return;
+      let viewer = true;
       // An Editor link may type. A failed / older-daemon whoami keeps the
       // safe read-only default (the daemon enforces the role either way).
       try {
-        isViewer = (await getShareWhoami(t)).role !== 'editor';
+        viewer = (await getShareWhoami(t)).role !== 'editor';
       } catch {
-        isViewer = true;
+        viewer = true;
       }
+      if (!isCurrent(seq, id, t)) return;
+      session = loaded;
+      isViewer = viewer;
       viewState = 'ok';
     } catch (e: unknown) {
+      if (!isCurrent(seq, id, t)) return;
       if (e instanceof ApiError && e.status === 403 && isOtpPending(e)) {
         // The share requires email-OTP verification before attaching.
         viewState = 'otp';
@@ -105,8 +124,15 @@
 
   $effect(() => {
     const t = token;
+    // Reset link-local form state even when navigating to an invalid link.
+    generation++;
+    otpInput = '';
+    otpError = null;
+    otpBusy = false;
+    extendBusy = false;
+    extendSent = false;
+    otpReason = 'first';
     if (!t) return;
-    // Re-run the load whenever the token changes (first mount or after extend).
     void loadSession();
   });
 
@@ -117,10 +143,12 @@
   async function recheckAccess(): Promise<void> {
     const t = token;
     if (!t || viewState !== 'ok') return;
+    const id = sessionId;
+    const seq = generation;
     try {
-      await getSharedSession(sessionId, t);
+      await getSharedSession(id, t);
     } catch (e: unknown) {
-      if (viewState !== 'ok') return;
+      if (!isCurrent(seq, id, t) || viewState !== 'ok') return;
       if (e instanceof ApiError && e.status === 403 && isOtpPending(e)) {
         otpReason = 'lapsed';
         otpInput = '';
@@ -148,7 +176,9 @@
   // ── OTP verification ───────────────────────────────────────────────────────
   async function submitOtp(): Promise<void> {
     const t = token;
-    if (!t || otpBusy) return;
+    if (!t || otpBusy || extendBusy) return;
+    const id = sessionId;
+    const seq = generation;
     const code = otpInput.trim();
     if (code.length !== 6 || !/^\d{6}$/.test(code)) {
       otpError = 'Please enter the 6-digit code from your email.';
@@ -158,6 +188,7 @@
     otpError = null;
     try {
       const resp = await verifyShareOtp(t, code);
+      if (!isCurrent(seq, id, t)) return;
       if (resp.verified) {
         // OTP accepted — reload the session (now unblocked).
         otpInput = '';
@@ -167,6 +198,7 @@
         otpError = 'That code didn’t match. Check the latest email and try again.';
       }
     } catch (e: unknown) {
+      if (!isCurrent(seq, id, t)) return;
       if (e instanceof ApiError && e.status === 429) {
         otpError = 'Too many attempts. Wait a minute, then try again.';
       } else if (e instanceof ApiError && e.status === 401) {
@@ -177,24 +209,28 @@
         otpError = 'Couldn’t verify the code. Try again in a moment.';
       }
     } finally {
-      otpBusy = false;
+      if (isCurrent(seq, id, t)) otpBusy = false;
     }
   }
 
   // ── Extend (re-send OTP to locked recipient) ──────────────────────────────
   async function requestExtend(): Promise<void> {
     const t = token;
-    if (!t || extendBusy) return;
+    if (!t || extendBusy || otpBusy) return;
+    const id = sessionId;
+    const seq = generation;
     extendBusy = true;
     extendSent = false;
     otpError = null;
     try {
       await extendShare(t);
+      if (!isCurrent(seq, id, t)) return;
       extendSent = true;
       // After extend, show the OTP prompt again for the fresh code.
       otpInput = '';
       viewState = 'otp';
     } catch (e: unknown) {
+      if (!isCurrent(seq, id, t)) return;
       if (e instanceof ApiError && e.status === 429) {
         otpError = 'Too many requests. Wait a minute, then re-send the code.';
       } else if (e instanceof ApiError && e.status === 400) {
@@ -203,7 +239,7 @@
         otpError = 'Couldn’t send a new code. Try again in a moment.';
       }
     } finally {
-      extendBusy = false;
+      if (isCurrent(seq, id, t)) extendBusy = false;
     }
   }
 
@@ -290,7 +326,7 @@
           onkeydown={onOtpKeydown}
           aria-label="One-time access code"
         />
-        <button class="btn primary" disabled={otpBusy} onclick={submitOtp}>
+        <button class="btn primary" disabled={otpBusy || extendBusy} onclick={submitOtp}>
           {otpBusy ? 'Verifying…' : 'Verify'}
         </button>
       </div>
@@ -299,7 +335,7 @@
       {/if}
       <div class="otp-extend-row">
         <span class="dim">Code expired or not received?</span>
-        <button class="otp-link" disabled={extendBusy} onclick={requestExtend}>
+        <button class="otp-link" disabled={extendBusy || otpBusy} onclick={requestExtend}>
           {extendBusy ? 'Sending…' : 'Re-send code'}
         </button>
       </div>
