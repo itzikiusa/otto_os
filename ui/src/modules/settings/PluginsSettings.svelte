@@ -125,6 +125,7 @@
     <label class="sr-only" for="plugin-source">Plugin source</label>
     <input
       id="plugin-source"
+      dir="ltr"
       class="input grow mono-in"
       bind:this={sourceEl}
       placeholder="~/otto-plugins/dora-metrics or https://github.com/org/plugin.git"
@@ -165,11 +166,11 @@
           <div class="pmain">
             <div class="pname">
               <span class="name-text" title={p.name}>{p.name}</span>
-              {#if p.version}<span class="chip">v{p.version}</span>{/if}
+              {#if p.version}<span class="chip version" dir="ltr" title="v{p.version}">v{p.version}</span>{/if}
               <StatusBadge variant="text" tone={p.enabled ? 'success' : 'neutral'} label={p.enabled ? 'Enabled' : 'Disabled'} />
             </div>
             {#if p.description}<div class="pdesc" title={p.description}>{p.description}</div>{/if}
-            <div class="psrc mono" title={p.source}>{p.slug} · {p.source}{#if installedLabel(p.installed_at)}{' · '}{installedLabel(p.installed_at)}{/if}</div>
+            <div class="psrc mono" dir="ltr" title={p.source}>{p.slug} · {p.source}{#if installedLabel(p.installed_at)}{' · '}{installedLabel(p.installed_at)}{/if}</div>
           </div>
           <div class="pactions">
             <button class="btn small" onclick={() => void toggle(p)} disabled={busy !== null}>
@@ -241,6 +242,7 @@
     max-width: var(--settings-col);
     font-size: var(--fs-s);
     color: var(--danger);
+    overflow-wrap: anywhere;
   }
   .plist {
     margin-top: 14px;
@@ -282,13 +284,22 @@
   }
   .pname {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
     min-width: 0;
     font-weight: 600;
   }
   .name-text {
+    flex-basis: 100%;
     min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .version {
+    min-width: 0;
+    max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

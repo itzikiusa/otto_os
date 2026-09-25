@@ -121,9 +121,9 @@
     wsId: string,
     userId: string,
     role: WorkspaceRole | 'none',
-  ): Promise<void> {
-    if (allMembersLoading || allMembersError || !allMembers[wsId] || savingWs.includes(wsId)) return;
-    if (roleIn(wsId, userId) === role) return;
+  ): Promise<boolean> {
+    if (allMembersLoading || allMembersError || !allMembers[wsId] || savingWs.includes(wsId)) return false;
+    if (roleIn(wsId, userId) === role) return true;
     const current = allMembers[wsId] ?? [];
     const next = current.filter((m) => m.user_id !== userId);
     if (role !== 'none') next.push({ user_id: userId, username: '', display_name: '', role });
@@ -136,8 +136,10 @@
       // Keep the by-workspace view honest when it's showing the same workspace.
       if (matrixWs === wsId) members = saved;
       flashSaved('roles');
+      return true;
     } catch (e) {
       toasts.error('Couldn’t change the workspace role', e instanceof Error ? e.message : String(e));
+      return false;
     } finally {
       savingWs = savingWs.filter((id) => id !== wsId);
     }
@@ -146,10 +148,15 @@
   /** Give the selected user the same role in EVERY workspace (or remove them). */
   async function setRoleEverywhere(role: WorkspaceRole | 'none'): Promise<void> {
     const userId = memberUserId;
-    if (!userId) return;
+    if (!userId || savingWs.length || allMembersLoading || allMembersError) return;
     const targets = ws.workspaces.filter((w) => roleIn(w.id, userId) !== role);
     if (targets.length === 0) return;
-    await Promise.all(targets.map((w) => setRoleIn(w.id, userId, role)));
+    const results = await Promise.all(targets.map((w) => setRoleIn(w.id, userId, role)));
+    const updated = results.filter(Boolean).length;
+    if (updated !== targets.length) {
+      toasts.error('Some workspace roles were not updated', `${updated} of ${targets.length} workspaces updated. Retry to apply the remaining changes.`);
+      return;
+    }
     toasts.success(
       role === 'none' ? 'Removed from all workspaces' : `Set to ${role} in all workspaces`,
       `${targets.length} workspace${targets.length === 1 ? '' : 's'} updated`,

@@ -42,6 +42,8 @@
   let original = $state('');
   let binary = $state(false);
   let saving = $state(false);
+  let loading = $state(false);
+  let loadGeneration = 0;
   let loadError = $state<string | null>(null);
   // Bumped whenever the text is replaced from outside (another file, Revert,
   // a reload) so the uncontrolled CodeEditor remounts on the new document.
@@ -56,9 +58,12 @@
 
   async function open(path: string): Promise<void> {
     if (dirty && !(await confirmer.ask(`You have unsaved changes to ${currentFile}. Opening another file discards them.`, { title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing' }))) return;
+    const generation = ++loadGeneration;
     currentFile = path;
     loadError = null;
     binary = false;
+    content = original = '';
+    loading = path !== 'SKILL.md';
     if (path === 'SKILL.md') {
       content = original = skillMd;
       docKey++;
@@ -67,6 +72,7 @@
     try {
       if (source === 'library') {
         const r = await skillLabApi.getFile(name, path);
+        if (generation !== loadGeneration) return;
         content = original = r.content;
         binary = r.binary;
         docKey++;
@@ -75,12 +81,15 @@
         loadError = 'Install this skill to the library to open its other files.';
       } else {
         const r = await skillLabApi.getProviderFile(source, name, path);
+        if (generation !== loadGeneration) return;
         content = original = r.content;
         binary = r.binary;
         docKey++;
       }
     } catch (e) {
-      loadError = e instanceof Error ? e.message : String(e);
+      if (generation === loadGeneration) loadError = e instanceof Error ? e.message : String(e);
+    } finally {
+      if (generation === loadGeneration) loading = false;
     }
   }
 
@@ -107,15 +116,19 @@
   }
 
   async function save(): Promise<void> {
-    if (!editable || saving) return;
+    if (!editable || saving || loading || loadError || binary || !dirty) return;
+    const path = currentFile;
+    const submitted = content;
+    const generation = loadGeneration;
     saving = true;
     try {
-      const next = await skillLabApi.putFile(name, { path: currentFile, content });
-      original = content;
-      onsaved(next, currentFile === 'SKILL.md' ? content : null);
-      toasts.success('Saved', currentFile);
+      const next = await skillLabApi.putFile(name, { path, content: submitted });
+      // A save acknowledges only the submitted snapshot, never later typing.
+      if (generation === loadGeneration) original = submitted;
+      onsaved(next, path === 'SKILL.md' ? submitted : null);
+      toasts.success('Saved', path);
     } catch (e) {
-      toasts.error(`Couldn't save ${currentFile}`, e instanceof Error ? e.message : String(e));
+      toasts.error(`Couldn't save ${path}`, e instanceof Error ? e.message : String(e));
     } finally {
       saving = false;
     }
@@ -211,7 +224,7 @@
         <span class="mono path" dir="ltr" title={currentFile}>{currentFile}</span>
         {#if dirty}<span class="chip tone-warning">Unsaved</span>{/if}
         <span class="grow"></span>
-        {#if editable && !binary && !loadError}
+        {#if editable && !loading && !binary && !loadError}
           {#if dirty}
             <button class="btn small ghost" onclick={revert} title="Drop your changes to {currentFile}">Revert</button>
           {:else}
@@ -220,7 +233,9 @@
           <button class="btn small primary" disabled={saving || !dirty} title={dirty ? 'Save (⌘S)' : 'No changes to save'} onclick={save} data-testid="save-skill">{saving ? 'Saving…' : 'Save'}</button>
         {/if}
       </div>
-      {#if loadError}
+      {#if loading}
+        <p class="dim msg" role="status">Loading {currentFile}…</p>
+      {:else if loadError}
         <div class="msg load-err" role="alert">
           <Icon name="warning" size={14} />
           <span class="grow">{source === 'bundled' ? loadError : `Couldn't open ${currentFile}. ${loadError}`}</span>
@@ -234,7 +249,7 @@
             <CodeEditor
               path={`${name}/${currentFile}`}
               root=""
-              content={original}
+              {content}
               language={currentFile.toLowerCase().endsWith('.md') ? 'md' : undefined}
               readOnly={!editable}
               onchange={(v) => (content = v)}
@@ -352,8 +367,9 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    height: 36px;
-    padding: 0 10px;
+    min-height: 36px;
+    flex-wrap: wrap;
+    padding: 6px 10px;
     border-bottom: 1px solid var(--border);
   }
   .path {
@@ -396,7 +412,7 @@
     color: var(--text-dim);
     flex: none;
   }
-  @media (max-width: 640px) {
+  @container skilldetail (max-width: 640px) {
     .editor {
       grid-template-columns: 1fr;
       grid-template-rows: auto 1fr;

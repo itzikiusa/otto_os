@@ -27,6 +27,7 @@
   let filter = $state('');
   let attach = $state<McpSessionAttach | null>(null);
   let attachBusy = $state(false);
+  let attachGeneration = 0;
   let attachError = $state<string | null>(null);
   let gatewayTools = $state<McpGatewayToolRow[]>([]);
   let gatewayLoading = $state(false);
@@ -155,33 +156,38 @@
   }
 
   async function loadAttach(id: string): Promise<void> {
+    const generation = ++attachGeneration;
     attach = null;
     attachError = null;
     try {
       const next = await mcpCpExtraApi.sessionAttach(id);
-      if (wsId === id) attach = next;
+      if (wsId === id && generation === attachGeneration) attach = next;
     } catch (e) {
-      if (wsId === id) attachError = e instanceof Error ? e.message : String(e);
+      if (wsId === id && generation === attachGeneration) attachError = e instanceof Error ? e.message : String(e);
     }
   }
 
   async function updateAttach(enabled: boolean, input: HTMLInputElement): Promise<void> {
     const id = wsId;
-    if (!id) return;
+    if (!id || !attach || attachBusy) return;
+    const generation = ++attachGeneration;
     attachBusy = true;
     attachError = null;
     try {
-      attach = await mcpCpExtraApi.setSessionAttach(id, { enabled });
+      const next = await mcpCpExtraApi.setSessionAttach(id, { enabled });
+      if (wsId !== id || generation !== attachGeneration) return;
+      attach = next;
       toasts.success(
         enabled ? 'Attached to sessions' : 'Detached from sessions',
         'Applies to sessions started from now on.',
       );
     } catch (e) {
+      if (wsId !== id || generation !== attachGeneration) return;
       // Put the box back: the daemon still has the old value.
       input.checked = attach?.attached ?? true;
       toasts.error(enabled ? 'Could not attach to sessions' : 'Could not detach from sessions', e instanceof Error ? e.message : String(e));
     } finally {
-      attachBusy = false;
+      if (wsId === id && generation === attachGeneration) attachBusy = false;
     }
   }
 
@@ -216,6 +222,8 @@
 
   $effect(() => {
     const id = wsId;
+    attachGeneration++;
+    attachBusy = false;
     attach = null;
     attachError = null;
     gatewayTools = [];
@@ -242,12 +250,13 @@
     </div>
 
     {#if wsId}
+      {#key wsId}
       <label class="switchrow">
         <input
           type="checkbox"
           data-testid="mcp-session-attach"
           checked={attach?.attached ?? true}
-          disabled={!wsId || attachBusy || !isMcpAdmin}
+          disabled={!attach || attachBusy || !isMcpAdmin}
           onchange={(event) => void updateAttach(event.currentTarget.checked, event.currentTarget)}
         />
         <span class="switchcopy">
@@ -257,6 +266,7 @@
           </span>
         </span>
       </label>
+      {/key}
     {:else}
       <p class="muted small">Select a workspace to manage session attachment.</p>
     {/if}
