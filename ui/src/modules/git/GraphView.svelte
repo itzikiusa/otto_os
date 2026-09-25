@@ -705,15 +705,10 @@
    *  FOREIGN worktree (checking those out errors hard — the refs tree routes
    *  them to their worktree instead). */
   function commitBranchNames(c: CommitInfo): string[] {
-    const { localNames } = refKnowledge;
     const names: string[] = [];
-    for (const r of c.refs) {
-      const arrow = r.match(/^HEAD\s*->\s*(.+)$/);
-      const raw = (arrow ? arrow[1] : r).trim();
-      if (!raw || raw === 'HEAD' || isTagRef(raw)) continue;
-      if (raw === 'refs/stash' || /^stash@\{/.test(raw)) continue;
-      // A remote decoration (origin/x) maps to its short local name.
-      const name = localNames.has(raw) ? raw : raw.replace(/^[^/]+\//, '');
+    for (const chip of chipsFor(c)) {
+      if (!['head', 'local', 'remote'].includes(chip.kind)) continue;
+      const name = chip.kind === 'remote' ? chip.label.replace(/^[^/]+\//, '') : chip.label;
       if (!name || names.includes(name) || worktreeBranches.has(name)) continue;
       names.push(name);
     }
@@ -1634,13 +1629,10 @@
      *  wins, then a plain local branch, then a remote-tracking one. Tags, stashes
      *  and a detached HEAD are NOT branches and never name a lane. */
     function branchOf(commit: CommitInfo): string | null {
-      let remote: string | null = null;
-      for (const ref of commit.refs) {
-        const chip = classifyRef(ref);
-        if (chip.kind === 'head' || chip.kind === 'local') return chip.label;
-        if (chip.kind === 'remote' && remote === null) remote = chip.label;
-      }
-      return remote;
+      const chips = chipsFor(commit);
+      return (chips.find((chip) => chip.kind === 'head')
+        ?? chips.find((chip) => chip.kind === 'local')
+        ?? chips.find((chip) => chip.kind === 'remote'))?.label ?? null;
     }
 
     const rows: LaneRow[] = [];
@@ -2061,6 +2053,30 @@
     };
   });
 
+  // Decorations from `git log %D` can contain the same text for a local
+  // origin/foo and the remote origin/foo. The refs endpoint already gives us
+  // unambiguous type and tip SHA; index it once instead of guessing per row.
+  const haveTypedRefs = $derived.by(() => {
+    const r: RefsResp | null = refs;
+    return r !== null && [...r.local, ...r.remote].every((b) => !!b.sha);
+  });
+  const branchChipsBySha = $derived.by(() => {
+    const bySha = new Map<string, RefChip[]>();
+    for (const b of [...(refs?.local ?? []), ...(refs?.remote ?? [])]) {
+      if (!b.sha) continue;
+      const chip: RefChip = {
+        kind: b.remote ? 'remote' : b.is_current ? 'head' : 'local',
+        label: b.name,
+        current: b.is_current,
+        worktree: !b.remote && worktreeBranches.has(b.name),
+      };
+      const list = bySha.get(b.sha) ?? [];
+      list.push(chip);
+      bySha.set(b.sha, list);
+    }
+    return bySha;
+  });
+
   function classifyRef(ref: string): RefChip {
     // Stash ref (`refs/stash` for the top stash, or a `stash@{N}` selector) —
     // its own kind, never bucketed as a remote branch.
@@ -2102,7 +2118,11 @@
     const order: Record<ChipKind, number> = {
       tag: 0, stash: 0, remote: 1, local: 2, detached: 3, head: 3,
     };
-    const all = c.refs.filter((r) => !/\/HEAD$/.test(r)).map(classifyRef);
+    const decorations = c.refs.filter((r) => !/\/HEAD$/.test(r)).map(classifyRef);
+    const all = haveTypedRefs
+      ? [...(branchChipsBySha.get(c.sha) ?? []), ...decorations.filter((chip) =>
+          chip.kind === 'tag' || chip.kind === 'stash' || chip.kind === 'detached')]
+      : decorations;
     // Collapse a local/head branch and its same-named remote twin (origin/<name>)
     // into ONE chip flagged `onRemote`: keeps the branch NAME, adds a small remote
     // glyph to show it's pushed, and frees a whole chip in the narrow column.
@@ -2337,9 +2357,7 @@
   // chips check out a local tracking branch (mirrors checkoutRemote); tags
   // check out detached; worktree branches open the linked tree as a git tab.
   function refRowCheckout(chip: RefChip): void {
-    // Re-resolve against the current refs; the list may have loaded/refreshed
-    // since this popover opened. Preserve tag identity for detached checkout.
-    if (chip.kind !== 'tag') chip = classifyRef(chip.label);
+    // Keep the explicit local/remote identity; their display names may match.
     closeRefMenu();
     if (chip.kind === 'remote') {
       void checkout(chip.label.replace(/^[^/]+\//, ''), true);
@@ -2369,8 +2387,7 @@
       if (t) tagMenu(e, t);
       return;
     }
-    const b = r.local.find((x) => x.name === chip.label)
-      ?? r.remote.find((x) => x.name === chip.label);
+    const b = (chip.kind === 'remote' ? r.remote : r.local).find((x) => x.name === chip.label);
     if (b) branchMenu(e, b);
   }
 
