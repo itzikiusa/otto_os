@@ -73,9 +73,12 @@ class AuthStore {
 
   /** Fetch the caller's effective capabilities from /auth/capabilities. */
   private async loadCapabilities(): Promise<void> {
+    // Never show the previous identity's grants while refreshing or on failure.
+    const token = getToken();
+    this.capabilities = {};
     try {
       const resp = await api.get<CapabilitiesResp>('/auth/capabilities');
-      this.capabilities = resp.capabilities;
+      if (token === getToken()) this.capabilities = resp.capabilities;
     } catch {
       // non-fatal: capabilities stay empty (all-deny for non-root)
     }
@@ -90,8 +93,21 @@ class AuthStore {
     // (the admin token survives because we persisted it before swapping).
   }
 
-  async boot(): Promise<void> {
-    this.phase = 'loading';
+  private booting = false;
+
+  async boot(retry = false): Promise<void> {
+    if (this.booting) return;
+    this.booting = true;
+    try {
+      await this.performBoot(retry);
+    } finally {
+      this.booting = false;
+    }
+  }
+
+  private async performBoot(retry: boolean): Promise<void> {
+    // Quiet retries keep the offline explanation and focused Retry available.
+    if (!retry) this.phase = 'loading';
     try {
       this.meta = await api.get<MetaResp>('/meta');
     } catch {

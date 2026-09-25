@@ -45,7 +45,7 @@
       />
     </div>
 
-    {#if error}<div class="login-error">{error}</div>{/if}
+    {#if error}<div class="login-error" role="alert">{error}</div>{/if}
 
     <button class="btn primary login-btn" type="submit" disabled={busy || !username || !password}>
       {busy ? 'Signing in…' : 'Sign In'}
@@ -81,7 +81,7 @@
   .login-error {
     margin-bottom: 10px;
     font-size: 12px;
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .login-btn {
     height: 30px;
