@@ -524,8 +524,8 @@
 
   /** A save updates its own row; a late response must never reopen an old editor. */
   function applySavedWorkflow(wf: Workflow): void {
-    if (current?.id === wf.id && wf.version >= current.version) current = wf;
-    workflows = workflows.map((w) => (w.id === wf.id && wf.version >= w.version ? wf : w));
+    if (current?.id === wf.id && (wf.version ?? 0) >= (current.version ?? 0)) current = wf;
+    workflows = workflows.map((w) => (w.id === wf.id && (wf.version ?? 0) >= (w.version ?? 0) ? wf : w));
   }
 
   async function save(): Promise<void> {
