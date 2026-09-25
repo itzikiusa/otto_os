@@ -72,9 +72,42 @@ class CanvasStore {
   loadErrorId = $state<string | null>(null);
 
   #openSequence = 0;
+  // File-backed editors retain unsaved snapshots across scene/workspace changes.
+  // A per-scene queue keeps delayed older PUTs from overwriting newer edits.
+  #drafts = new Map<string, CanvasDoc>();
+  docSaveErrors = $state<Record<string, string>>({});
+  #writes = new Map<string, Promise<void>>();
+
+  stageDoc(id: string, doc: CanvasDoc): void {
+    this.#drafts.set(id, doc);
+    if (this.currentId === id) this.dirty = true;
+  }
+
+  async persistDoc(id: string, doc: CanvasDoc): Promise<void> {
+    this.stageDoc(id, doc);
+    const previous = this.#writes.get(id);
+    const write = (async () => {
+      await previous?.catch(() => {});
+      await api.put(`/canvas/scenes/${id}`, { doc });
+      if (this.#drafts.get(id) !== doc) return;
+      this.#drafts.delete(id);
+      delete this.docSaveErrors[id];
+      if (this.currentId === id) this.markSaved(doc);
+    })();
+    this.#writes.set(id, write);
+    try { await write; }
+    catch (e) { this.docSaveErrors[id] = loadErrorText(e); throw e; }
+    finally { if (this.#writes.get(id) === write) this.#writes.delete(id); }
+  }
+
   #history: string[] = [];
   #future: string[] = [];
   #saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  async retryDoc(id: string): Promise<void> {
+    const doc = this.#drafts.get(id);
+    if (doc) await this.persistDoc(id, doc);
+  }
 
   get canUndo(): boolean {
     return this.#history.length > 0;
@@ -126,6 +159,7 @@ class CanvasStore {
       } catch {
         doc = null;
       }
+      doc = this.#drafts.get(id) ?? doc;
       this.rawDoc = doc;
       this.source = typeof doc?.source === 'string' ? doc.source : null;
       this.format =
@@ -135,7 +169,7 @@ class CanvasStore {
       this.sessionId = row.session_id;
       this.#history = [];
       this.#future = [];
-      this.dirty = false;
+      this.dirty = this.#drafts.has(id);
       this.savedAt = Date.parse(row.updated_at) || null;
       this.rev += 1;
     } catch (e) {
@@ -157,7 +191,10 @@ class CanvasStore {
   }
 
   async del(id: string): Promise<void> {
+    await this.#writes.get(id)?.catch(() => {});
     await api.del(`/canvas/scenes/${id}`);
+    this.#drafts.delete(id);
+    delete this.docSaveErrors[id];
     if (this.currentId === id) this.closeScene();
     await this.loadScenes().catch(() => {});
   }
@@ -324,6 +361,10 @@ class CanvasStore {
   }
 
   async saveNow(): Promise<void> {
+    if (this.currentId && this.#drafts.has(this.currentId)) {
+      await this.retryDoc(this.currentId);
+      return;
+    }
     if (!this.currentId || !this.scene || this.saving) return;
     this.saving = true;
     try {

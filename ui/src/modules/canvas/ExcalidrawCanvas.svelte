@@ -23,7 +23,6 @@
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { canvasDocBus } from '../../lib/events.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
-  import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import type { CanvasDoc } from './types';
   import { buildExcalidrawElements, isSimplified } from './excalidraw-build';
@@ -51,6 +50,7 @@
   let generating = $state(false);
   let suppressSave = false;
   let lastApplied = '';
+  let pendingDoc: CanvasDoc | null = null;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function center(e: any): { x: number; y: number } {
@@ -227,47 +227,42 @@
     if (doc && typeof doc.source === 'string') canvas.ingestDoc(doc);
   });
 
+  function snapshotDoc(): CanvasDoc | null {
+    if (!excaliApi) return null;
+    const appState = excaliApi.getAppState();
+    return {
+      type: 'otto-canvas', version: 1, format: 'excalidraw',
+      source: JSON.stringify({
+        type: 'excalidraw', version: 2, source: 'otto',
+        elements: excaliApi.getSceneElements(),
+        appState: { viewBackgroundColor: appState.viewBackgroundColor, gridSize: appState.gridSize ?? null },
+        files: excaliApi.getFiles?.() ?? {},
+      }),
+    };
+  }
+
   function scheduleSave(): void {
-    if (readonly || suppressSave) return;
+    if (readonly || suppressSave || !sceneId) return;
+    const doc = snapshotDoc();
+    if (!doc || doc.source === pendingDoc?.source) return;
+    pendingDoc = doc;
+    canvas.stageDoc(sceneId, doc);
     if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => void saveNow(), 700);
+    saveTimer = setTimeout(() => { saveTimer = null; void saveNow(); }, 700);
   }
 
   async function saveNow(): Promise<void> {
-    if (!excaliApi || !sceneId) return;
-    const elements = excaliApi.getSceneElements();
-    const appState = excaliApi.getAppState();
-    const files = excaliApi.getFiles?.() ?? {};
-    const scene = {
-      type: 'excalidraw',
-      version: 2,
-      source: 'otto',
-      elements,
-      appState: {
-        viewBackgroundColor: appState.viewBackgroundColor,
-        gridSize: appState.gridSize ?? null,
-      },
-      files,
-    };
-    const str = JSON.stringify(scene);
-    // Save to THIS editor's scene (always excalidraw). Only sync the store when
-    // it's still the open scene — otherwise a scene switch would clobber the new
-    // scene's state with this one's Excalidraw doc.
-    if (canvas.currentId === sceneId) lastApplied = str; // don't bounce back through the source effect
-    const doc = { type: 'otto-canvas', version: 1, format: 'excalidraw', source: str };
+    const doc = pendingDoc;
+    if (!doc || !sceneId) return;
     try {
-      await api.put(`/canvas/scenes/${sceneId}`, { doc });
-      // Re-check AFTER the await: a scene switch may have landed WHILE the PUT was
-      // in flight (the await is the yield point). Syncing `canvas.source` with this
-      // stale flag would write Excalidraw JSON into the now-open Mermaid scene —
-      // exactly the corruption we must avoid. Read currentId fresh here.
-      if (canvas.currentId === sceneId) {
-        canvas.source = str;
-        canvas.markSaved(doc);
+      await canvas.persistDoc(sceneId, doc);
+      // Newer local drawing wins over the response to an older snapshot.
+      if (!destroyed && canvas.currentId === sceneId && pendingDoc === doc) {
+        lastApplied = doc.source ?? '';
+        canvas.source = lastApplied;
       }
     } catch (e) {
-      if (canvas.currentId === sceneId)
-        toasts.error('Canvas save failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Canvas save failed', e instanceof Error ? e.message : String(e));
     }
   }
 

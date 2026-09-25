@@ -17,7 +17,6 @@
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { canvasDocBus } from '../../lib/events.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
-  import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import { renderD2 } from './d2';
   import { svgToPngDownload } from './export';
@@ -66,13 +65,11 @@
   // switched, drop the stale save).
   async function saveD2(value: string): Promise<void> {
     if (canvas.currentId !== sceneId || !sceneId) return;
-    const doc = { type: 'otto-canvas', version: 1, format: 'd2' as CanvasFormat, source: value, sketch };
+    const doc: CanvasDoc = { type: 'otto-canvas', version: 1, format: 'd2' as CanvasFormat, source: value, sketch };
     canvas.source = value; // drives the live preview re-render
     canvas.rawDoc = doc;
     try {
-      await api.put(`/canvas/scenes/${sceneId}`, { doc });
-      // Re-check after the await: don't mark a now-switched scene as saved/clean.
-      if (canvas.currentId === sceneId) canvas.markSaved(doc);
+      await canvas.persistDoc(sceneId, doc);
     } catch (e) {
       if (canvas.currentId === sceneId)
         toasts.error('Save failed', e instanceof Error ? e.message : String(e));
@@ -85,7 +82,7 @@
     if (codeTimer) clearTimeout(codeTimer);
     pendingCode = value;
     // Unsaved typing wins over live agent pushes (ingestDoc skips while dirty).
-    if (canvas.currentId === sceneId) canvas.dirty = true;
+    if (sceneId) canvas.stageDoc(sceneId, { type: 'otto-canvas', version: 1, format: 'd2', source: value, sketch });
     codeTimer = setTimeout(() => {
       codeTimer = null;
       pendingCode = null;
@@ -99,9 +96,9 @@
     if (codeTimer) clearTimeout(codeTimer);
     codeTimer = null;
     if (pendingCode === null || !sceneId) return;
-    const doc = { type: 'otto-canvas', version: 1, format: 'd2' as CanvasFormat, source: pendingCode, sketch };
+    const doc: CanvasDoc = { type: 'otto-canvas', version: 1, format: 'd2' as CanvasFormat, source: pendingCode, sketch };
     pendingCode = null;
-    void api.put(`/canvas/scenes/${sceneId}`, { doc }).catch((e: unknown) =>
+    void canvas.persistDoc(sceneId, doc).catch((e: unknown) =>
       toasts.error('Save failed', e instanceof Error ? e.message : String(e)),
     );
   }

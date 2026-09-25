@@ -14,7 +14,6 @@
   import { onMount, onDestroy, tick } from 'svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { canvasDocBus } from '../../lib/events.svelte';
-  import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import { renderMermaid } from './mermaid';
   import { svgToPngDownload } from './export';
@@ -58,13 +57,11 @@
   // scene (guarded: if the scene switched, drop the stale save).
   async function saveMermaid(value: string): Promise<void> {
     if (canvas.currentId !== sceneId || !sceneId) return;
-    const doc = { type: 'otto-canvas', version: 1, format: 'mermaid' as CanvasFormat, source: value };
+    const doc: CanvasDoc = { type: 'otto-canvas', version: 1, format: 'mermaid' as CanvasFormat, source: value };
     canvas.source = value; // drives the live preview re-render
     canvas.rawDoc = doc;
     try {
-      await api.put(`/canvas/scenes/${sceneId}`, { doc });
-      // Re-check after the await: don't mark a now-switched scene as saved/clean.
-      if (canvas.currentId === sceneId) canvas.markSaved(doc);
+      await canvas.persistDoc(sceneId, doc);
     } catch (e) {
       if (canvas.currentId === sceneId)
         toasts.error('Save failed', e instanceof Error ? e.message : String(e));
@@ -77,7 +74,7 @@
     if (codeTimer) clearTimeout(codeTimer);
     pendingCode = value;
     // Unsaved typing wins over live agent pushes (ingestDoc skips while dirty).
-    if (canvas.currentId === sceneId) canvas.dirty = true;
+    if (sceneId) canvas.stageDoc(sceneId, { type: 'otto-canvas', version: 1, format: 'mermaid', source: value });
     codeTimer = setTimeout(() => {
       codeTimer = null;
       pendingCode = null;
@@ -91,9 +88,9 @@
     if (codeTimer) clearTimeout(codeTimer);
     codeTimer = null;
     if (pendingCode === null || !sceneId) return;
-    const doc = { type: 'otto-canvas', version: 1, format: 'mermaid' as CanvasFormat, source: pendingCode };
+    const doc: CanvasDoc = { type: 'otto-canvas', version: 1, format: 'mermaid' as CanvasFormat, source: pendingCode };
     pendingCode = null;
-    void api.put(`/canvas/scenes/${sceneId}`, { doc }).catch((e: unknown) =>
+    void canvas.persistDoc(sceneId, doc).catch((e: unknown) =>
       toasts.error('Save failed', e instanceof Error ? e.message : String(e)),
     );
   }

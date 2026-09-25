@@ -168,6 +168,13 @@
     {/if}
   {/snippet}
 </PageHeader>
+{#each Object.entries(canvas.docSaveErrors) as [id, error] (id)}
+  <div class="save-error" role="alert">
+    <span>Could not save {canvas.scenes.find(scene => scene.id === id)?.title ?? 'scene'}. Your draft is kept in this app. {error}</span>
+    <button class="btn small" onclick={() => void canvas.open(id).catch(() => {})}>Open draft</button>
+    <button class="btn small" onclick={() => void canvas.retryDoc(id).catch(() => {})}>Retry save</button>
+  </div>
+{/each}
 {#if !ws.currentId}
   <div class="canvas-page empty-ws" bind:this={workspaceEmpty}>
     <EmptyState
@@ -280,6 +287,9 @@
 </div>
 
 <style>
+  .save-error { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 12px; border-block-end: 1px solid var(--danger); background: var(--danger-soft); font-size: var(--fs-s); }
+  .save-error span { flex: 1; min-width: 160px; overflow-wrap: anywhere; }
+
   .canvas-shell {
     display: flex;
     flex-direction: column;
