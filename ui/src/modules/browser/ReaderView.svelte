@@ -62,20 +62,39 @@
     pending = null;
   }
 
+  // A composer belongs to one fetched page, never the next URL or refresh.
+  $effect(() => {
+    void page;
+    markMode = false;
+    pending = null;
+    pendingTarget = null;
+    noteText = '';
+  });
+
   // While marking, the rendered blocks form a roving keyboard selection.
   // Restore their original semantics as soon as marking ends.
   $effect(() => {
     const root = articleEl;
     if (!markMode || !root) return;
+    void html;
+    const nested = Array.from(root.querySelectorAll<HTMLElement>('a, button, input, select, textarea, [tabindex]'));
+    const nestedTabs = nested.map(el => el.getAttribute('tabindex'));
+    nested.forEach(el => { el.tabIndex = -1; });
     const blocks = Array.from(root.children).filter((el): el is HTMLElement => el instanceof HTMLElement);
     const previous = blocks.map((el) => [el.getAttribute('tabindex'), el.getAttribute('role')]);
     blocks.forEach((el, i) => { el.tabIndex = i === 0 ? 0 : -1; el.setAttribute('role', 'button'); });
-    return () => blocks.forEach((el, i) => {
-      for (const [j, attr] of ['tabindex', 'role'].entries()) {
-        const value = previous[i][j];
-        if (value === null) el.removeAttribute(attr); else el.setAttribute(attr, value);
-      }
-    });
+    return () => {
+      nested.forEach((el, i) => {
+        const value = nestedTabs[i];
+        if (value === null) el.removeAttribute('tabindex'); else el.setAttribute('tabindex', value);
+      });
+      blocks.forEach((el, i) => {
+        for (const [j, attr] of ['tabindex', 'role'].entries()) {
+          const value = previous[i][j];
+          if (value === null) el.removeAttribute(attr); else el.setAttribute(attr, value);
+        }
+      });
+    };
   });
 
   async function markElement(target: Element): Promise<void> {
@@ -126,6 +145,8 @@
   async function saveMark(): Promise<void> {
     if (!pending || !page || saving) return;
     saving = true;
+    const selection = pending;
+    const sourcePage = page;
     try {
       await browser.createAnnotation({
         url: page.url,
@@ -134,6 +155,7 @@
         text: pending.text,
         comment: noteText.trim(),
       });
+      if (page !== sourcePage || pending !== selection) return;
       pending = null;
       noteText = '';
       markMode = false;
