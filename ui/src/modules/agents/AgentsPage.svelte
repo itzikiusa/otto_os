@@ -25,6 +25,9 @@
     })(),
   );
   const showCoach = $derived(!coachDismissed && ws.agentSessions.length === 0);
+  const preserveCoachDraft = $derived(
+    showCoach && ws.currentId === null && !tiled && !mission && ws.panes.length === 0,
+  );
 
   // Never open onto a "pick one" void when there are sessions: once per
   // workspace, if its restored layout has no panes, open the most recently
@@ -46,7 +49,10 @@
 
 <div class="agents">
   <div class="agents-body">
-  {#if ws.sessionsLoading && ws.sessions.length === 0}
+  <!-- Scratch-session discovery can begin after the no-workspace coach has
+       accepted a draft. Keep that form mounted; real workspace navigation
+       and the ordinary empty state still show their loading skeleton. -->
+  {#if ws.sessionsLoading && ws.sessions.length === 0 && !preserveCoachDraft}
     <div style="padding: 16px">
       <Skeleton rows={3} height={48} />
     </div>

@@ -72,6 +72,8 @@
   const RECOMMENDED = ['grill', 'correctness-review', 'security-review', 'insights'];
   let bundled: BundledSkill[] = $state([]);
   let skillsLoaded = $state(false);
+  let skillsLoading = $state(false);
+  let skillsError = $state(false);
   let skillBusy: Set<string> = $state(new Set());
   const recommendedSkills = $derived(
     RECOMMENDED.map((n) => bundled.find((b) => b.name === n)).filter(
@@ -80,18 +82,22 @@
   );
 
   $effect(() => {
-    if (skillsLoaded || !auth.isRoot) return;
+    if (skillsLoaded || skillsLoading || !auth.isRoot) return;
     void loadSkills();
   });
 
   async function loadSkills(): Promise<void> {
+    if (skillsLoading) return;
+    skillsLoading = true;
+    skillsError = false;
     try {
       bundled = await contextApi.listBundled();
     } catch {
-      // Non-fatal: the skills step just stays empty.
-      bundled = [];
+      // Optional setup must stay recoverable without blocking the first agent.
+      skillsError = true;
     } finally {
       skillsLoaded = true;
+      skillsLoading = false;
     }
   }
 
@@ -261,7 +267,7 @@
     </div>
 
     <!-- Step 3: recommended skills (optional) -->
-    {#if auth.isRoot && recommendedSkills.length > 0}
+    {#if auth.isRoot && (!skillsLoaded || skillsError || recommendedSkills.length > 0)}
       <div class="step optional">
         <span class="step-mark"><span class="num">3</span></span>
         <div class="step-body">
@@ -272,6 +278,14 @@
             Drop-in expertise your agents can use — code review and usage insights. Install now or
             later from <button class="link" onclick={() => router.go('settings/skills')}>Settings → Skills</button>.
           </div>
+          {#if skillsLoading}
+            <p class="step-hint" role="status">Loading recommended skills…</p>
+          {:else if skillsError}
+            <div class="step-hint" role="status">
+              <p>Could not load recommended skills.</p>
+              <button class="btn small" onclick={loadSkills}>Retry skills</button>
+            </div>
+          {/if}
           <div class="skill-rows">
             {#each recommendedSkills as s (s.name)}
               {@const installed = s.state === 'up_to_date' || s.state === 'ahead'}
@@ -390,9 +404,6 @@
     gap: 11px;
     padding: 12px 0;
     border-top: 1px solid var(--border);
-  }
-  .step.optional {
-    opacity: 0.95;
   }
   .step-mark {
     flex-shrink: 0;
@@ -545,5 +556,18 @@
   }
   .link:hover {
     text-decoration: underline;
+  }
+  @media (max-width: 640px) {
+    .coach button {
+      min-height: 36px;
+    }
+    .coach-close {
+      min-width: 36px;
+      top: 6px;
+      inset-inline-end: 6px;
+    }
+    .coach-head {
+      padding-inline-end: 20px;
+    }
   }
 </style>
