@@ -9,7 +9,7 @@
 import { bundle } from '@remotion/bundler';
 import { renderMedia, renderStill, selectComposition } from '@remotion/renderer';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -88,7 +88,9 @@ await renderStill({ serveUrl, composition: posterComp, output: join(out, 'otto-t
 const timing = JSON.parse(readFileSync(join(tour, 'src/generated/timing.json'), 'utf8'));
 const vtt = join(out, 'otto-tour.vtt');
 const walk = join(repo, 'ui/src/lib/walkthroughs');
-copyFileSync(vtt, join(walk, 'otto-tour.vtt'));
+// The instrumental edition can reuse its versioned captions without invoking TTS.
+if (existsSync(vtt)) copyFileSync(vtt, join(walk, 'otto-tour.vtt'));
+else copyFileSync(join(walk, 'otto-tour.vtt'), vtt);
 const film = {
   file: 'otto-tour-instrumental-20260925.mp4',
   poster: 'otto-tour-poster.jpg',

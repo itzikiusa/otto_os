@@ -5,7 +5,8 @@ every main area of the app, chaptered by sidebar section. The Help →
 Walkthroughs page plays it from `ui/src/lib/walkthroughs/film.json`.
 
 Everything here is self-contained: its own `package.json`, footage captured from
-the **current** UI, an original instrumental soundtrack synthesized from code, and instructional captions. Nothing is downloaded or licensed.
+the **current** UI, an original instrumental soundtrack synthesized from code,
+and instructional captions. No sampled commercial music is used.
 
 ```
 script/chapters.json     narration text + chapter → sidebar section map (edit this first)
@@ -20,7 +21,7 @@ src/                     the Remotion compositions (Tour, Poster) and scene spec
 
 ## Prerequisites
 
-- macOS with `say` and ffmpeg (`/opt/homebrew/bin/ffmpeg`, or set `FFMPEG`).
+- ffmpeg on PATH (or set `FFMPEG`); macOS `say` only for optional timing regeneration.
 - A daemon binary built from this tree: `cargo build -p ottod` (or point
   `OTTO_E2E_BIN` at an existing one).
 - The production UI build: `cd ui && npm run build` (→ `ui/dist`).

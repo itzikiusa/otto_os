@@ -2,7 +2,7 @@
   "name": "otto-tour-film",
   "private": true,
   "version": "1.0.0",
-  "description": "Otto product tour film: one narrated Remotion film captured from the live app",
+  "description": "Otto product tour film: one instrumental Remotion film captured from the live app",
   "type": "module",
   "scripts": {
     "capture": "node scripts/capture.mjs",
