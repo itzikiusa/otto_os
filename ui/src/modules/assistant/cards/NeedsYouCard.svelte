@@ -23,7 +23,7 @@
 
   interface Props {
     task: AssistantTask;
-    /** Tighter card (no preview) — the Tasks tab lists many. */
+    /** Tighter card (disclosed preview) — the Tasks tab lists many. */
     compact?: boolean;
   }
   let { task, compact = false }: Props = $props();
@@ -89,6 +89,8 @@
     denying = false;
     void run('deny', reason ? { reason } : {}, 'deny');
   }
+  // Keyboard users can scroll long payloads; this is a named scroll region.
+  function focusablePreview(node: HTMLElement): void { node.tabIndex = 0; }
   const suggestion = $derived(ny?.suggestion?.provider ?? null);
 </script>
 
@@ -115,13 +117,16 @@
       <dd>{a.who_sees}</dd>
       <dt>Why</dt>
       <dd>{a.reason}</dd>
-      {#if a.what && compact}
-        <dt>What</dt>
-        <dd class="clip" title={a.what}>{a.what}</dd>
-      {/if}
     </dl>
-    {#if a.what && !compact}
-      <div class="preview" aria-label="Exactly what is sent">{a.what}</div>
+    {#if a.what}
+      {#if compact}
+        <details class="payload">
+          <summary>Review exactly what is sent</summary>
+          <div class="preview" role="region" use:focusablePreview aria-label="Exactly what is sent">{a.what}</div>
+        </details>
+      {:else}
+        <div class="preview" role="region" use:focusablePreview aria-label="Exactly what is sent">{a.what}</div>
+      {/if}
     {/if}
   {:else if kind === 'limit'}
     <p class="q">{limitNotice(ny?.limit?.provider ?? 'claude', ny?.limit?.until ?? null, pending ? suggestion : null, clock)}</p>
@@ -241,11 +246,8 @@
   :global([dir='rtl']) .preview {
     border-radius: var(--radius-m) 0 0 var(--radius-m);
   }
-  .kv dd.clip {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
+  .payload { margin-top: 10px; }
+  .payload summary { cursor: pointer; color: var(--accent-text); }
   .q {
     margin: 0;
     white-space: pre-line;

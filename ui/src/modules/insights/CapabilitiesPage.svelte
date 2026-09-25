@@ -199,7 +199,6 @@
   }
   .cap-head:hover { background: var(--hover); }
   .fix-slot { display: flex; justify-content: flex-end; min-width: 124px; flex: none; }
-  @media (max-width: 640px) { .fix-slot { min-width: 0; } }
   .cap-toggle {
     flex: 1;
     min-width: 0;
@@ -249,4 +248,13 @@
   .dep-detail { font-size: var(--fs-xs); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .dim { color: var(--text-dim); }
+  @media (max-width: 640px) {
+    .cap-head { flex-wrap: wrap; padding: 0 12px 10px; gap: 4px; }
+    .cap-toggle { flex-basis: 100%; padding-inline: 0; flex-wrap: wrap; }
+    .feature-label { white-space: normal; overflow-wrap: anywhere; }
+    .fix-slot { min-width: 0; margin-inline-start: auto; }
+    .dep-row { flex-wrap: wrap; }
+    .dep-name { flex-shrink: 1; overflow-wrap: anywhere; }
+    .dep-detail { flex-basis: 100%; white-space: normal; overflow-wrap: anywhere; }
+  }
 </style>

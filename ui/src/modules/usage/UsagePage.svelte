@@ -167,6 +167,8 @@
     budgetCfg.providers = budgetCfg.providers.filter((_, j) => j !== i);
   }
   async function saveBudgets(): Promise<void> {
+    if (usage.savingBudgets) return;
+    const submitted = JSON.stringify(budgetCfg);
     // Drop blank rows before saving (no key or no cap = nothing to enforce).
     const cfg: UsageBudgetConfig = {
       ...budgetCfg,
@@ -174,12 +176,9 @@
       workspaces: budgetCfg.workspaces.filter((b) => b.workspace_id && b.monthly_usd > 0),
       providers: budgetCfg.providers.filter((b) => b.provider && b.monthly_usd > 0),
     };
-    const before = usage.budgets;
-    await usage.saveBudgets(cfg);
-    // saveBudgets toasts + swallows a failure; only a landed save (fresh
-    // status object) may clear dirty — otherwise the seeding effect would
-    // overwrite the user's unsaved edits with the old server config.
-    if (usage.budgets !== before) budgetsDirty = false;
+    const saved = await usage.saveBudgets(cfg);
+    // The response acknowledges the submitted draft, never newer local edits.
+    if (saved && JSON.stringify(budgetCfg) === submitted) budgetsDirty = false;
   }
 
   // Workspace name for a budget row's id (falls back to the id). The hidden
@@ -925,7 +924,7 @@
                   type="number"
                   min="1"
                   bind:value={budgetCfg.window_days}
-                  onchange={() => (budgetsDirty = true)}
+                  oninput={() => (budgetsDirty = true)}
                 />
                 <span class="dim">days</span>
               </div>
@@ -952,7 +951,7 @@
                       placeholder="0"
                       aria-label="Cap in US dollars"
                       bind:value={b.monthly_usd}
-                      onchange={() => (budgetsDirty = true)}
+                      oninput={() => (budgetsDirty = true)}
                     />
                     <button class="icon-btn rm-btn" onclick={() => removeWsBudget(i)} title="Remove this cap" aria-label="Remove this workspace cap">
                       <Icon name="trash" size={14} />
@@ -985,7 +984,7 @@
                       placeholder="0"
                       aria-label="Cap in US dollars"
                       bind:value={b.monthly_usd}
-                      onchange={() => (budgetsDirty = true)}
+                      oninput={() => (budgetsDirty = true)}
                     />
                     <button class="icon-btn rm-btn" onclick={() => removeProviderBudget(i)} title="Remove this cap" aria-label="Remove this provider cap">
                       <Icon name="trash" size={14} />

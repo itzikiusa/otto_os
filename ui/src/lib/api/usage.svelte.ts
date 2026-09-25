@@ -236,10 +236,11 @@ class UsageStore {
   /** Load status + (when available) summary + metrics for the current window. */
   async loadAll(): Promise<void> {
     this.loading = true;
+    let mine: number | null = null;
     try {
       await this.loadStatus();
       if (this.status?.available) {
-        const mine = ++this.summarySeq;
+        mine = ++this.summarySeq;
         const [summary, metrics] = await Promise.all([
           api.get<UsageSummary>(`/usage/summary?${this.summaryQuery()}`),
           api.get<MetricPoint[]>('/usage/metrics?minutes=180'),
@@ -255,7 +256,7 @@ class UsageStore {
         this.metrics = [];
       }
     } catch (e) {
-      this.summaryError = loadErrorText(e);
+      if (mine === this.summarySeq) this.summaryError = loadErrorText(e);
     }
     try {
       // Budgets are config (not engine) data — load them whether or not the
@@ -279,13 +280,15 @@ class UsageStore {
   }
 
   /** Persist the budget config and refresh the status. */
-  async saveBudgets(cfg: UsageBudgetConfig): Promise<void> {
+  async saveBudgets(cfg: UsageBudgetConfig): Promise<boolean> {
     this.savingBudgets = true;
     try {
       this.budgets = await api.put<UsageBudgetStatus>('/usage/budgets', cfg);
       toasts.success('Budgets saved');
+      return true;
     } catch (e) {
       toasts.error('Could not save budgets', errMsg(e));
+      return false;
     } finally {
       this.savingBudgets = false;
     }

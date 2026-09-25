@@ -64,7 +64,7 @@
   $effect(() => {
     const want = router.parts[1];
     if (!want || history.entries.length === 0) return;
-    const hit = history.entries.find((e) => e.session_id === want);
+    const hit = history.visible.find((e) => e.session_id === want);
     if (hit && history.selectedKey !== entryKey(hit)) history.select(hit);
   });
 
@@ -90,12 +90,14 @@
   $effect(() => {
     const w = wsId;
     const groups = history.groups;
-    if (!w || history.loading || history.selectedKey) return;
+    if (!w || history.loading) return;
+    const visible = groups.flatMap((g) => g.entries);
+    if (history.selectedKey && visible.some((e) => entryKey(e) === history.selectedKey)) return;
     untrack(() => {
+      if (history.selectedKey) clearSelection();
       const want = router.parts[1];
-      if (want && history.entries.some((e) => e.session_id === want)) return;
+      if (want && visible.some((e) => e.session_id === want)) return;
       if (typeof window !== 'undefined' && window.matchMedia?.('(max-width: 768px)').matches) return;
-      const visible = groups.flatMap((g) => g.entries);
       if (visible.length === 0) return;
       const last = recallSelection('history');
       pick(visible.find((e) => entryKey(e) === last) ?? visible[0]);

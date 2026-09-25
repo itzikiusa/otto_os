@@ -53,6 +53,19 @@
   // ---------------------------------------------------------------------------
 
   const tab = $derived(router.parts[1] === 'health' ? 'health' : 'reports');
+  function onTabKey(e: KeyboardEvent): void {
+    const tabs = (e.currentTarget as HTMLElement).querySelectorAll<HTMLButtonElement>('[role="tab"]');
+    const at = tab === 'reports' ? 0 : 1;
+    let next = -1;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') next = 1 - at;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = 1;
+    if (next < 0) return;
+    e.preventDefault();
+    router.go(next === 0 ? 'insights' : 'insights/health');
+    tabs[next]?.focus();
+  }
+
   /** `daily:20260923_20260923` when the route names one report. */
   const routeKey = $derived.by(() => {
     const [, r, kind, start, end] = router.parts;
@@ -169,11 +182,12 @@
   let selectedKey: string | null = $state(null);
   /** Phone: list/detail is push navigation — the detail replaces the list. */
   let phoneDetail = $state(false);
+  $effect(() => { phoneDetail = routeKey !== null; });
 
   // Open on the routed report, else the last-viewed one, else the newest.
   $effect(() => {
     if (loading || reports.length === 0) return;
-    if (routeKey && filtered.some((r) => keyOf(r) === routeKey)) {
+    if (routeKey) {
       if (selectedKey !== routeKey) selectedKey = routeKey;
       return;
     }
@@ -398,17 +412,20 @@
     }
     pollTimer = setTimeout(async () => {
       pollCount += 1;
-      const prev = reports.length;
+      const prev = new Map(reports.map((r) => [keyOf(r), JSON.stringify(r)]));
       try {
         reports = await insightsApi.listReports();
       } catch {
         /* keep polling; the next tick retries */
       }
-      if (reports.length > prev) {
+      const ready = reports.find((r) => prev.get(keyOf(r)) !== JSON.stringify(r));
+      if (ready) {
         pollRunId = null;
-        selectedKey = keyOf(reports[0]);
+        fullMd = {};
+        filter = 'all';
+        select(ready);
         void loadIndex();
-        toasts.success('Insights report ready', periodShort(reports[0]));
+        toasts.success('Insights report ready', periodShort(ready));
       } else {
         schedulePoll();
       }
@@ -481,16 +498,16 @@
   >
     {#snippet leading()}
       {#if viewport.isPhone && tab === 'reports' && phoneDetail && selected}
-        <button class="icon-btn" onclick={() => (phoneDetail = false)} aria-label="Back to reports" title="Back to reports">
+        <button class="icon-btn" onclick={() => { phoneDetail = false; if (routeKey) router.replace('insights'); }} aria-label="Back to reports" title="Back to reports">
           <Icon name="chevronLeft" size={16} />
         </button>
       {/if}
     {/snippet}
     {#snippet tabs()}
       {#if !detailOnly}
-        <div class="segmented" role="tablist" aria-label="Insights view">
-          <button role="tab" aria-selected={tab === 'reports'} class:active={tab === 'reports'} onclick={() => router.go('insights')}>Reports</button>
-          <button role="tab" aria-selected={tab === 'health'} class:active={tab === 'health'} onclick={() => router.go('insights/health')}>Health</button>
+        <div class="segmented" role="tablist" tabindex="-1" aria-label="Insights view" onkeydown={onTabKey}>
+          <button role="tab" tabindex={tab === 'reports' ? 0 : -1} aria-selected={tab === 'reports'} class:active={tab === 'reports'} onclick={() => router.go('insights')}>Reports</button>
+          <button role="tab" tabindex={tab === 'health' ? 0 : -1} aria-selected={tab === 'health'} class:active={tab === 'health'} onclick={() => router.go('insights/health')}>Health</button>
         </div>
       {/if}
     {/snippet}

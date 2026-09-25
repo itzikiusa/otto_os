@@ -7,6 +7,7 @@
   //    search, forget one, or forget everything matching a phrase (with Undo).
   //  • Import from Hermes — a one-off, read-only scan of ~/.hermes/memories
   //    that only QUEUES entries for review. Hermes itself is never changed.
+  import { guardUnsaved } from '../../lib/leaveGuard';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -37,6 +38,7 @@
   const saved = $derived(mem.data?.profile.content ?? '');
   const profile = $derived(draft ?? saved);
   const dirty = $derived(draft !== null && draft !== saved);
+  $effect(() => guardUnsaved(() => dirty, { what: 'your profile' }));
   let saving = $state(false);
   let justSaved = $state(false);
   let profileError = $state('');

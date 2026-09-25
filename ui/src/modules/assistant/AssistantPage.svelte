@@ -95,9 +95,10 @@
   // Tab list keyboard: ←/→, Home/End move between tabs.
   function onTabKey(e: KeyboardEvent): void {
     const at = TABS.findIndex((t) => t.id === tab);
+    const step = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl' ? -1 : 1;
     let next = -1;
-    if (e.key === 'ArrowRight') next = (at + 1) % TABS.length;
-    else if (e.key === 'ArrowLeft') next = (at - 1 + TABS.length) % TABS.length;
+    if (e.key === 'ArrowRight') next = (at + step + TABS.length) % TABS.length;
+    else if (e.key === 'ArrowLeft') next = (at - step + TABS.length) % TABS.length;
     else if (e.key === 'Home') next = 0;
     else if (e.key === 'End') next = TABS.length - 1;
     if (next < 0) return;
