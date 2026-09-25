@@ -32,11 +32,34 @@
   import RefineTab from './RefineTab.svelte';
   import ChatTab from './ChatTab.svelte';
   import LearningsView from './LearningsView.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { ProductStory, TreeKind } from './types';
 
   let importOpen = $state(false);
   let draftCreating = $state(false);
+  /** A failed story-list load (the store's `error`) — shown inline with Retry,
+   *  never as "No stories yet". */
+  const storiesError = $derived(product.error);
+  /** A failed open of the selected story (the store's `detailError`) — inline
+   *  in the content pane with Retry. */
+  const detailError = $derived(product.detailError);
+
+  async function loadStories(): Promise<void> {
+    try {
+      await product.loadStories();
+    } catch {
+      /* in product.error — rendered inline */
+    }
+  }
+  /** Open a story; a failed detail load is shown inline (Retry), not swallowed. */
+  async function openStory(id: string): Promise<void> {
+    try {
+      await product.select(id);
+    } catch {
+      /* in product.detailError — rendered inline */
+    }
+  }
 
   // ── Epic tree state (design §3.2) ─────────────────────────────────────────
   // Collapsed epics / folders (keys: epic id, `${epicId}/${folder}`). The tree
@@ -205,13 +228,17 @@
       // On mobile, reveal the new draft's content panel right away.
       mobileSection = 'content';
     } catch (e) {
-      console.error('createDraft failed', e);
+      toasts.error("Couldn't create the draft", product.errMsg(e));
     } finally {
       draftCreating = false;
     }
   }
 
-  let learningsFilter = $state<'all' | 'pattern' | 'avoid'>('all');
+  // Learnings is one full-width view (its own filter control): no list pane,
+  // and on a phone its content section is the one that's open.
+  $effect(() => {
+    if (product.view === 'learnings') untrack(() => (mobileSection = 'content'));
+  });
 
   // Tag filter state
   let activeTagFilter = $state<string | null>(null);
@@ -241,7 +268,7 @@
 
   /** Stories view with nothing at all to list: the empty list pane is hidden
    *  (≥641px) and the page EmptyState owns the ONE import CTA. */
-  const noStories = $derived(product.view === 'stories' && !product.loadingStories && product.stories.length === 0);
+  const noStories = $derived(product.view === 'stories' && !product.loadingStories && !storiesError && product.stories.length === 0);
 
   // List/detail never opens onto an empty "pick one" pane: once a workspace's
   // stories are in, restore the last story opened here (or the first in the
@@ -257,7 +284,7 @@
       if (product.selectedId || viewport.isPhone) return;
       const last = recallSelection('product');
       const pick = product.stories.find((x) => x.id === last) ?? tree[0]?.story ?? product.stories[0];
-      if (pick) void product.select(pick.id);
+      if (pick) void openStory(pick.id);
     });
   });
   /** The selected story's parent epic (breadcrumb) and epic-ness (Add child ▾). */
@@ -273,7 +300,7 @@
       // A workspace switch leaves no artifact open: release the arena's cached
       // blob URLs / editor bases before the new list loads.
       product.teardown();
-      void product.loadStories();
+      void loadStories();
     }
   });
 
@@ -318,7 +345,7 @@
       icon: 'send',
       subs: [
         { id: 'plan', label: 'Plan' },
-        { id: 'testcases', label: 'Test Cases' },
+        { id: 'testcases', label: 'Test cases' },
         { id: 'inject', label: 'Inject' },
       ],
     },
@@ -355,6 +382,23 @@
     }
   }
 
+  /** Tablist keyboard (←/→, Home/End) for the view toggle and both story
+   *  tab strips: activate the neighbour, then move focus onto it. */
+  function onTabKey(e: KeyboardEvent): void {
+    const list = e.currentTarget as HTMLElement;
+    const tabs = [...list.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+    const at = tabs.findIndex((t) => t.getAttribute('aria-selected') === 'true');
+    let next = -1;
+    if (e.key === 'ArrowRight') next = (at + 1) % tabs.length;
+    else if (e.key === 'ArrowLeft') next = (at - 1 + tabs.length) % tabs.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = tabs.length - 1;
+    if (next < 0 || !tabs.length) return;
+    e.preventDefault();
+    tabs[next].click();
+    queueMicrotask(() => list.querySelector<HTMLButtonElement>('[aria-selected="true"]')?.focus());
+  }
+
   function sourceIcon(kind: string): IconName {
     switch (kind) {
       case 'jira': return 'ticket';
@@ -364,7 +408,7 @@
   }
 
   function selectStory(s: ProductStory): void {
-    void product.select(s.id);
+    void openStory(s.id);
     rememberSelection('product', s.id);
     // Reset to overview whenever a new story is selected.
     product.tab = 'overview';
@@ -384,8 +428,13 @@
   }
 
   async function deleteStory(s: ProductStory): Promise<void> {
+    // Name what else goes (patterns.md §7): the story's Otto-side work is
+    // deleted with it; children are re-parented to the top level, not deleted.
+    const kids = product.childrenOf(s.id).length;
     const ok = await confirmer.ask(
-      `Delete "${s.title}"? This removes it from Otto (the Jira/Confluence item is untouched).`,
+      `Delete "${s.title}"? This removes it from Otto (the Jira/Confluence item is untouched).\n\n` +
+        'Its versions, questions, notes, analyses, test cases, transcripts and attachments are deleted too.' +
+        (kids > 0 ? ` Its ${kids} child stor${kids === 1 ? 'y moves' : 'ies move'} to the top level.` : ''),
       { title: 'Delete story', confirmLabel: 'Delete', danger: true },
     );
     if (!ok) return;
@@ -408,7 +457,7 @@
     if (wasOpen && next && product.stories.some((x) => x.id === next.id)) {
       product.tab = 'overview';
       rememberSelection('product', next.id);
-      void product.select(next.id);
+      void openStory(next.id);
     }
   }
 
@@ -430,7 +479,7 @@
   );
   const headerCrumbs = $derived(
     product.view === 'stories' && selectedParent
-      ? [{ label: selectedParent.title, onclick: () => void product.select(selectedParent.id) }]
+      ? [{ label: selectedParent.title, onclick: () => void openStory(selectedParent.id) }]
       : [],
   );
 
@@ -494,7 +543,7 @@
       class="story-row"
       class:active={product.selectedId === s.id}
       onclick={() => selectStory(s)}
-      title={s.source_key}
+      title={s.source_kind === 'draft' ? s.title : `${s.source_key} · ${s.title}`}
     >
       <span class="story-icon"><Icon name={node?.isEpic ? 'folder' : s.tree_kind === 'doc' ? 'note' : sourceIcon(s.source_kind)} size={13} /></span>
       <span class="story-info">
@@ -506,7 +555,7 @@
             <StatusBadge status={storyStage(s.stage)} variant="text" />
           {/if}
           {#if s.tree_kind === 'doc'}
-            <span class="draft-badge doc">DOC</span>
+            <span class="draft-badge doc">Doc</span>
           {:else if s.source_kind === 'draft'}
             <!-- A draft story's stage badge already says "draft". -->
             {#if s.stage !== 'draft'}<span class="draft-badge">Draft</span>{/if}
@@ -523,21 +572,16 @@
         {/if}
       </span>
     </button>
+    <!-- ONE row action: the ⋯ menu (move, folder, epic role, Delete) — the
+         same menu a right-click opens. -->
     <button
       class="row-menu-btn"
       onclick={(e) => storyMenu(e, s, node)}
-      aria-label="Story menu"
-      title="Move to epic, set folder, mark as epic…"
+      aria-label="More actions for {s.title}"
+      title="More actions"
+      aria-haspopup="menu"
     >
-      <Icon name="grip" size={12} />
-    </button>
-    <button
-      class="delete-btn"
-      onclick={() => deleteStory(s)}
-      aria-label="Delete story"
-      title="Delete story"
-    >
-      <Icon name="trash" size={12} />
+      <Icon name="more" size={12} />
     </button>
   </div>
 {/snippet}
@@ -546,7 +590,7 @@
 <PageHeader
   title={headerTitle}
   crumbs={headerCrumbs}
-  subtitle={product.view === 'stories' && selectedStory ? undefined : 'Analyse Jira / Confluence stories — questions, plans and test cases, published back.'}
+  subtitle={product.view === 'stories' && selectedStory ? undefined : 'Jira / Confluence stories — analyse, plan, test, publish back'}
 >
   {#snippet badge()}
     {#if product.view === 'stories' && selectedStory}
@@ -569,17 +613,19 @@
   {/snippet}
   {#snippet tabs()}
     <!-- The ONE Stories|Learnings toggle, at every breakpoint. -->
-    <div class="segmented m-view-toggle" role="tablist" aria-label="View">
+    <div class="segmented m-view-toggle" role="tablist" aria-label="View" tabindex="-1" onkeydown={onTabKey}>
       <button
         class:active={product.view === 'stories'}
         role="tab"
         aria-selected={product.view === 'stories'}
+        tabindex={product.view === 'stories' ? 0 : -1}
         onclick={() => (product.view = 'stories')}
       >Stories</button>
       <button
         class:active={product.view === 'learnings'}
         role="tab"
         aria-selected={product.view === 'learnings'}
+        tabindex={product.view === 'learnings' ? 0 : -1}
         onclick={() => (product.view = 'learnings')}
       >Learnings</button>
     </div>
@@ -609,7 +655,7 @@
     {/if}
   {/snippet}
 </PageHeader>
-<div class="product-page" class:no-stories={noStories} class:m-list-open={mobileSection === 'list'} class:m-content-open={mobileSection === 'content'} style={`--product-side-w:${sideW}px`}>
+<div class="product-page" class:no-stories={noStories} class:learn-view={product.view === 'learnings'} class:m-list-open={mobileSection === 'list'} class:m-content-open={mobileSection === 'content'} style={`--product-side-w:${sideW}px`}>
   <!-- ── Mobile accordion header for the list panel (phone only) ───────── -->
   <button
     class="m-acc-head"
@@ -633,12 +679,14 @@
           <button
             class="tag-filter-btn"
             class:active={activeTagFilter === null}
+            aria-pressed={activeTagFilter === null}
             onclick={() => (activeTagFilter = null)}
           >All</button>
           {#each allTags as tag (tag)}
             <button
               class="tag-filter-btn"
               class:active={activeTagFilter === tag}
+              aria-pressed={activeTagFilter === tag}
               onclick={() => (activeTagFilter = activeTagFilter === tag ? null : tag)}
             >{tag}</button>
           {/each}
@@ -646,12 +694,21 @@
       {/if}
 
       <div class="story-list">
-        {#if product.loadingStories}
-          <div class="list-empty">Loading…</div>
+        {#if (product.loadingStories || storiesError) && product.stories.length === 0}
+          <LoadState what="stories" variant="compact" loading={product.loadingStories} error={storiesError} empty onretry={() => void loadStories()} />
         {:else if product.stories.length === 0}
           <div class="list-empty">No stories yet.</div>
+        {:else if storiesError}
+          <!-- A refresh failed: keep the last good list, say so, offer Retry. -->
+          <LoadState what="stories" variant="compact" loading={product.loadingStories} error={storiesError} onretry={() => void loadStories()} />
+        {/if}
+        {#if product.stories.length === 0}
+          <!-- the loading / error / empty states above own it -->
         {:else if filteredStories.length === 0}
-          <div class="list-empty">No stories match the selected tag.</div>
+          <div class="list-empty">
+            No stories tagged “{activeTagFilter}”.
+            <button class="btn small ghost" onclick={() => (activeTagFilter = null)}>Clear filter</button>
+          </div>
         {:else}
           {#each tree as node (node.story.id)}
             {@render storyRow(node.story, node)}
@@ -680,21 +737,6 @@
         {/if}
       </div>
 
-    {:else}
-      <!-- Learnings sidebar — filter nav -->
-      <div class="learn-nav">
-        {#each ([
-          { value: 'all', label: 'All' },
-          { value: 'pattern', label: 'Patterns to follow' },
-          { value: 'avoid', label: 'Cases to avoid' },
-        ] as const) as opt (opt.value)}
-          <button
-            class="learn-filter-btn"
-            class:active={learningsFilter === opt.value}
-            onclick={() => (learningsFilter = opt.value)}
-          >{opt.label}</button>
-        {/each}
-      </div>
     {/if}
 
     <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -738,13 +780,14 @@
          shows no pills, since the group click already navigates there. -->
     {#if product.view === 'stories' && product.selectedId}
       <div class="product-header-row2">
-        <div class="tab-strip" role="tablist" aria-label="Story tabs">
+        <div class="tab-strip" role="tablist" aria-label="Story tabs" tabindex="-1" onkeydown={onTabKey}>
           {#each visibleGroups as g (g.id)}
             <button
               class="st"
               class:active={activeGroup.id === g.id}
               role="tab"
               aria-selected={activeGroup.id === g.id}
+              tabindex={activeGroup.id === g.id ? 0 : -1}
               onclick={() => selectGroup(g)}
             >
               <Icon name={g.icon} size={13} />
@@ -756,13 +799,14 @@
           <!-- Keeps the `tab-strip` class too (on top of `sub-tab-strip`): the
                product-mockups E2E locates a sub-view button via the generic
                `.tab-strip .st` selector, matching whichever strip has it. -->
-          <div class="tab-strip sub-tab-strip" role="tablist" aria-label="{activeGroup.label} sub-tabs">
+          <div class="tab-strip sub-tab-strip" role="tablist" aria-label="{activeGroup.label} sub-tabs" tabindex="-1" onkeydown={onTabKey}>
             {#each activeGroup.subs as s (s.id)}
               <button
                 class="st"
                 class:active={product.tab === s.id}
                 role="tab"
                 aria-selected={product.tab === s.id}
+                tabindex={product.tab === s.id ? 0 : -1}
                 onclick={() => (product.tab = s.id)}
               >{s.label}</button>
             {/each}
@@ -774,17 +818,21 @@
     <!-- Content -->
     <div class="product-body">
       {#if product.view === 'learnings'}
-        <LearningsView filter={learningsFilter} />
+        <LearningsView />
+      {:else if storiesError && product.stories.length === 0}
+        <LoadState what="stories" variant="page" loading={product.loadingStories} error={storiesError} empty onretry={() => void loadStories()} />
       {:else if noStories}
         <EmptyState
           variant="page"
           icon="file"
-          title="Analyse a story"
+          title="No stories yet"
           body="Import a Jira / Confluence issue, then ask questions, draft a plan and test cases, and publish back. Or start a blank draft from New."
           actionLabel="Import story"
           actionIcon="plus"
           onaction={() => (importOpen = true)}
         />
+      {:else if product.selectedId && detailError && product.detail?.story.id !== product.selectedId}
+        <LoadState what="this story" variant="page" loading={product.loadingDetail} error={detailError} empty onretry={() => void openStory(product.selectedId!)} />
       {:else if !product.selectedId}
         <!-- No story open (a phone, or the list is still loading): a summary
              of the collection with every recent story one click away. -->
@@ -868,6 +916,11 @@
       display: none;
     }
   }
+  /* Learnings has no list pane (and no phone accordion): the view fills it. */
+  .product-page.learn-view .product-side,
+  .product-page.learn-view .m-acc-head {
+    display: none;
+  }
 
   /* ── Sidebar ─────────────────────────────────────────────────── */
   .product-side {
@@ -916,12 +969,12 @@
     min-height: 0;
   }
   .list-empty {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     padding: 8px 4px;
     line-height: 1.5;
   }
-  /* Wrapper handles hover background + shows delete btn */
+  /* Wrapper handles hover background + reveals the row's ⋯ button */
   .story-row-wrap {
     display: flex;
     align-items: center;
@@ -930,10 +983,10 @@
     position: relative;
   }
   .story-row-wrap:hover {
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+    background: var(--hover);
   }
   .story-row-wrap.active {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
   }
   .story-row {
     display: flex;
@@ -953,30 +1006,6 @@
   .story-row.active .story-title {
     font-weight: 600;
   }
-  /* Delete button — hidden until row is hovered or active */
-  .delete-btn {
-    display: grid;
-    place-items: center;
-    flex-shrink: 0;
-    width: 22px;
-    height: 22px;
-    margin-inline-end: 6px;
-    border: none;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: transparent;
-    cursor: pointer;
-    transition: color 100ms, background 100ms;
-    padding: 0;
-  }
-  .story-row-wrap:hover .delete-btn,
-  .story-row-wrap.active .delete-btn {
-    color: var(--text-dim);
-  }
-  .delete-btn:hover {
-    background: color-mix(in srgb, var(--danger) 15%, transparent) !important;
-    color: var(--danger) !important;
-  }
   /* ── Epic tree rows ─────────────────────────────────────────── */
   .row-menu-btn {
     display: grid;
@@ -989,12 +1018,21 @@
     background: transparent;
     color: transparent;
     cursor: pointer;
+    margin-inline-end: 6px;
     padding: 0;
     transition: color 100ms, background 100ms;
   }
   .story-row-wrap:hover .row-menu-btn,
-  .story-row-wrap.active .row-menu-btn {
+  .story-row-wrap:focus-within .row-menu-btn,
+  .story-row-wrap.active .row-menu-btn,
+  .row-menu-btn:focus-visible {
     color: var(--text-dim);
+  }
+  /* Touch has no hover: the ⋯ is always visible there. */
+  @media (hover: none) {
+    .row-menu-btn {
+      color: var(--text-dim);
+    }
   }
   .row-menu-btn:hover {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
@@ -1024,7 +1062,7 @@
     padding-block: 5px;
   }
   .story-row-wrap.child .story-title {
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .folder-head {
     display: flex;
@@ -1037,7 +1075,7 @@
     background: transparent;
     color: var(--text-dim);
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0.03em;
     cursor: pointer;
     text-align: start;
@@ -1058,7 +1096,7 @@
   }
   .epic-badge {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     padding: 1px 6px;
@@ -1194,7 +1232,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 500;
     cursor: pointer;
     white-space: nowrap;
@@ -1256,39 +1294,6 @@
   }
   .mono {
     font-family: var(--font-mono, monospace);
-  }
-
-  /* ── Learnings sidebar nav ───────────────────────────────────────── */
-  .learn-nav {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    padding: 6px 8px;
-    flex: 1;
-    min-height: 0;
-  }
-  .learn-filter-btn {
-    display: flex;
-    align-items: center;
-    padding: 7px 10px;
-    border: none;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 12.5px;
-    font-weight: 500;
-    cursor: pointer;
-    text-align: start;
-    transition: background 100ms, color 100ms;
-  }
-  .learn-filter-btn:hover {
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
-    color: var(--text);
-  }
-  .learn-filter-btn.active {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent-text);
-    font-weight: 600;
   }
 
   /* ── Collection summary (no story open) ──────────────────────────── */
@@ -1388,7 +1393,7 @@
       border-bottom: 1px solid var(--border);
       background: var(--bg-sidebar, var(--surface));
       color: var(--text);
-      font-size: 15px;
+      font-size: var(--fs-l);
       font-weight: 600;
       cursor: pointer;
       text-align: start;
@@ -1406,7 +1411,7 @@
     }
     .m-acc-count {
       flex-shrink: 0;
-      font-size: 12px;
+      font-size: var(--fs-s);
       font-weight: 600;
       color: var(--text-dim);
       background: color-mix(in srgb, var(--text-dim) 14%, transparent);
@@ -1447,46 +1452,41 @@
     }
 
     /* The list's own internal scroller fills the expanded panel. */
-    .m-list-open .story-list,
-    .m-list-open .learn-nav {
+    .m-list-open .story-list {
       flex: 1 1 auto;
     }
 
     /* ── Bigger, more legible text on phones ───────────────────────────── */
     .list-empty {
-      font-size: 14px;
+      font-size: var(--fs-m);
     }
     .story-title {
-      font-size: 15px;
+      font-size: var(--fs-l);
     }
     .story-key,
     .story-meta {
-      font-size: 12.5px;
+      font-size: var(--fs-s);
     }
     .tag-filter-btn,
     .story-tag-chip {
-      font-size: 12px;
+      font-size: var(--fs-s);
     }
     .st {
       height: 38px;
-      font-size: 14px;
+      font-size: var(--fs-m);
       padding: 0 13px;
     }
     /* Keep the sub-nav touch-friendly but still a notch smaller than the groups. */
     .sub-tab-strip .st {
       height: 34px;
-      font-size: 13px;
+      font-size: var(--fs-m);
       padding: 0 11px;
-    }
-    .learn-filter-btn {
-      font-size: 14.5px;
-      padding: 10px 12px;
     }
     .product-body {
       padding: 14px;
     }
-    /* Comfortable touch target for the per-row delete button. */
-    .delete-btn {
+    /* Comfortable touch target for the per-row ⋯ button. */
+    .row-menu-btn {
       width: 30px;
       height: 30px;
     }

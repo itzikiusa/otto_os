@@ -44,8 +44,37 @@
     onbody: (source: VariantSource, body: string) => void;
     onreview: () => void;
     onevaluate: () => void;
+    /** The Edit tab has unsaved changes (the browser guards skill switches). */
+    ondirty?: (dirty: boolean) => void;
+    onopenrun?: (id: string) => void;
+    /** Open one existing review in the Review tab. */
+    onopenreview?: (id: string) => void;
   }
-  let { group, source, tab, wsId, libraryBody, bodyOf, onsource, ontab, onchanged, ondeleted, onbody, onreview, onevaluate }: Props = $props();
+  let { group, source, tab, wsId, libraryBody, bodyOf, onsource, ontab, onchanged, ondeleted, onbody, onreview, onevaluate, ondirty, onopenrun, onopenreview }: Props = $props();
+
+  // Unsaved edits in the Edit tab: leaving the tab (or the copy) unmounts the
+  // editor, so ask first instead of silently dropping the draft.
+  let editorDirty = $state(false);
+  function setDirty(d: boolean): void {
+    editorDirty = d;
+    ondirty?.(d);
+  }
+  async function confirmDiscard(): Promise<boolean> {
+    if (!editorDirty) return true;
+    const ok = await confirmer.ask(`You have unsaved changes to ${group.name}. Leaving the editor discards them.`, { title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing' });
+    if (ok) setDirty(false);
+    return ok;
+  }
+  async function goTab(t: DetailTab): Promise<void> {
+    if (t === tab) return;
+    if (tab === 'edit' && !(await confirmDiscard())) return;
+    ontab(t);
+  }
+  async function goSource(s: VariantSource): Promise<void> {
+    if (s === source) return;
+    if (!(await confirmDiscard())) return;
+    onsource(s);
+  }
 
   const variant = $derived(group.variants.find((v) => v.source === source) ?? group.variants[0]);
   const isLibrary = $derived(variant.source === 'library');
@@ -102,36 +131,47 @@
 
   // ---- Compare against the reference copy ----------------------------------
   let comparing = $state<VariantSource | null>(null);
+  // A copy that can't be read ends the "Loading both copies…" wait with a
+  // reason instead of leaving it up forever.
+  let compareError = $state<string | null>(null);
   $effect(() => {
     void group.name;
     comparing = null;
+    compareError = null;
   });
   const refBody = $derived(group.reference === 'library' ? libraryBody : bodyOf(group.reference));
   async function compare(s: VariantSource): Promise<void> {
+    if (comparing !== s && tab === 'edit' && !(await confirmDiscard())) return;
     comparing = comparing === s ? null : s;
+    compareError = null;
     // The diff lives on Overview, above the rendered SKILL.md.
     if (comparing && tab !== 'overview') ontab('overview');
     if (comparing && s !== 'library' && s !== 'bundled' && bodyOf(s) == null) {
       try {
         const p = await skillLabApi.getProvider(s, group.name);
         onbody(s, p.body);
-      } catch {
-        /* the diff shows as unavailable */
+      } catch (e) {
+        compareError = `Couldn't read the ${sourceLabel(s)} copy: ${e instanceof Error ? e.message : String(e)}`;
       }
     }
     if (comparing && group.reference !== 'library' && bodyOf(group.reference) == null) {
       try {
         const p = await skillLabApi.getProvider(group.reference, group.name);
         onbody(group.reference, p.body);
-      } catch {
-        /* ditto */
+      } catch (e) {
+        compareError = `Couldn't read the ${sourceLabel(group.reference)} copy: ${e instanceof Error ? e.message : String(e)}`;
       }
     }
   }
   let bundledBody = $state<string | null>(null);
   $effect(() => {
     if (comparing === 'bundled' && bundledBody == null) {
-      void skillLabApi.getBundled(group.name).then((b) => (bundledBody = b.body)).catch(() => (bundledBody = ''));
+      // On failure don't fake an empty body (that renders as "everything was
+      // deleted"); say the bundled copy couldn't be read.
+      void skillLabApi
+        .getBundled(group.name)
+        .then((b) => (bundledBody = b.body))
+        .catch((e) => (compareError = `Couldn't read the bundled copy: ${e instanceof Error ? e.message : String(e)}`));
     }
   });
   $effect(() => {
@@ -194,7 +234,8 @@
   // ---- Tabs (roving, arrow keys) ------------------------------------------
   const TABS: { id: DetailTab; label: string }[] = [
     { id: 'overview', label: 'Overview' },
-    { id: 'edit', label: 'Edit' },
+    // "Files", not "Edit": bundled / provider copies are read-only here.
+    { id: 'edit', label: 'Files' },
     { id: 'evals', label: 'Evals' },
     { id: 'usage', label: 'Usage' },
   ];
@@ -208,8 +249,7 @@
     else if (e.key === 'End') n = TABS.length - 1;
     if (n < 0) return;
     e.preventDefault();
-    ontab(TABS[n].id);
-    queueMicrotask(() => (tablist?.querySelectorAll('[role="tab"]')[n] as HTMLElement | undefined)?.focus());
+    void goTab(TABS[n].id).then(() => (tablist?.querySelectorAll('[role="tab"]')[TABS.findIndex((x) => x.id === tab)] as HTMLElement | undefined)?.focus());
   }
 
   let editorFile = $state('SKILL.md');
@@ -251,15 +291,24 @@
     {#if group.description}<p class="d-desc" title={group.description}>{group.description}</p>{/if}
     <div class="d-meta">
       <span class="chip">{group.category}</span>
+      {#if group.variants.length === 1}
+        <!-- One copy: a plain label, not a picker that looks selected. -->
+        {@const v = group.variants[0]}
+        <span class="chip" title="The only copy of this skill">
+          {#if v.source === 'library'}<Icon name="book" size={12} />{:else if v.source === 'bundled'}<Icon name="box" size={12} />{:else}<ProviderIcon provider={v.source} size={12} />{/if}
+          {sourceLabel(v.source)}
+        </span>
+      {:else}
       <div class="variants" role="group" aria-label="Copy to show">
         {#each group.variants as v (v.source)}
-          <button class="variant" class:active={v.source === variant.source} aria-pressed={v.source === variant.source} onclick={() => onsource(v.source)} data-testid="variant-{v.source}">
+          <button class="variant" class:active={v.source === variant.source} aria-pressed={v.source === variant.source} onclick={() => goSource(v.source)} data-testid="variant-{v.source}">
             {#if v.source === 'library'}<Icon name="book" size={12} />{:else if v.source === 'bundled'}<Icon name="box" size={12} />{:else}<ProviderIcon provider={v.source} size={12} />{/if}
             {sourceLabel(v.source)}
             {#if group.driftedSources.includes(v.source)}<span class="vdot" title="Differs from {sourceLabel(group.reference)}"></span>{/if}
           </button>
         {/each}
       </div>
+      {/if}
     </div>
     {#if group.drift.length > 0}
       <div class="drift" role="note">
@@ -279,7 +328,7 @@
     {/if}
     <div class="tabs" role="tablist" aria-label="Skill detail" tabindex="-1" bind:this={tablist} onkeydown={onTabKey}>
       {#each TABS as t (t.id)}
-        <button role="tab" id="st-{t.id}" aria-selected={tab === t.id} aria-controls="sp-{t.id}" tabindex={tab === t.id ? 0 : -1} class:active={tab === t.id} onclick={() => ontab(t.id)}>{t.label}</button>
+        <button role="tab" id="st-{t.id}" aria-selected={tab === t.id} aria-controls="sp-{t.id}" tabindex={tab === t.id ? 0 : -1} class:active={tab === t.id} onclick={() => goTab(t.id)}>{t.label}</button>
       {/each}
     </div>
   </header>
@@ -291,7 +340,9 @@
           <span class="section-title">{comparing === 'bundled' ? 'Library → Bundled' : `${sourceLabel(group.reference)} → ${sourceLabel(comparing)}`}</span>
           <button class="icon-btn" onclick={() => (comparing = null)} aria-label="Close diff" title="Close diff"><Icon name="x" size={14} /></button>
         </div>
-        {#if compareBefore == null || compareAfter == null}
+        {#if compareError}
+          <p class="compare-err" role="alert">{compareError}</p>
+        {:else if compareBefore == null || compareAfter == null}
           <p class="dim" role="status">Loading both copies…</p>
         {:else}
           <DiffView before={compareBefore} after={compareAfter} mode="word" contextLines={3} />
@@ -312,10 +363,15 @@
         <div class="overview">
           <aside class="meta card" aria-label="Skill metadata">
             <dl>
-              {#if metaMap.get('description')}
+              <!-- The header already shows the description (2 lines); repeat it here
+                   only when it differs or was clipped there. -->
+              {#if metaMap.get('description') && (metaMap.get('description') !== group.description || String(metaMap.get('description')).length > 160)}
                 <div class="m-row wide"><dt>Description</dt><dd>{metaMap.get('description')}</dd></div>
               {/if}
-              <div class="m-row"><dt>Category</dt><dd>{metaMap.get('category') ?? group.category}</dd></div>
+              <!-- The header chip already shows the category; repeat only a mismatch. -->
+              {#if metaMap.get('category') && metaMap.get('category') !== group.category}
+                <div class="m-row"><dt>Category</dt><dd>{metaMap.get('category')}</dd></div>
+              {/if}
               {#if metaMap.get('version')}<div class="m-row"><dt>Version</dt><dd>v{metaMap.get('version')}</dd></div>{/if}
               {#each extraMeta as [k, v] (k)}
                 <div class="m-row wide">
@@ -372,9 +428,10 @@
         }}
         oninstall={install}
         oncopytolibrary={hasLibrary ? undefined : copyToLibrary}
+        ondirty={setDirty}
       />
     {:else}
-      <SkillActivity {group} view={tab} {wsId} {onevaluate} {onreview} />
+      <SkillActivity {group} view={tab} {wsId} {onevaluate} {onreview} {onopenrun} {onopenreview} onview={(v) => ontab(v)} />
     {/if}
   </div>
 </div>
@@ -569,6 +626,12 @@
   }
   .compare-head .section-title {
     margin: 0;
+  }
+  .compare-err {
+    margin: 0;
+    font-size: var(--fs-s);
+    color: var(--danger);
+    overflow-wrap: anywhere;
   }
   .overview {
     display: grid;

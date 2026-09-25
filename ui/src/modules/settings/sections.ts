@@ -39,9 +39,9 @@ const USERS_ADMIN: SettingsGate = { feature: 'users', level: 'admin' };
  */
 export const SETTINGS_SECTIONS = [
   // ── General ──
-  { id: 'appearance', label: 'Appearance', group: 'general', keywords: 'theme dark light accent colour color font density sidebar customize hide reorder' },
+  { id: 'appearance', label: 'Appearance', group: 'general', keywords: 'theme scheme dark light accent colour color backdrop wallpaper transparency direction rtl right-to-left terminal font size copy select floating bar isolate device close tab archive delete database vertical columns sidebar customize hide reorder favorites favourites star pin sections order' },
   { id: 'session-names', label: 'Session names', group: 'general', keywords: 'theme auto name rename agent session' },
-  { id: 'notifications', label: 'Notifications', group: 'general', keywords: 'alerts credential expiry warnings sound banner' },
+  { id: 'notifications', label: 'Notifications', group: 'general', keywords: 'alerts credential expiry warnings native macos session finished waiting banner' },
   { id: 'snipping', label: 'Snipping', group: 'general', keywords: 'snip screenshot capture annotate clipboard shortcut' },
   { id: 'browser', label: 'Browser', group: 'general', keywords: 'live tabs engine lightpanda web view reader', gate: { feature: 'browser', level: 'view' } },
   { id: 'tokens', label: 'Personal access tokens', group: 'general', keywords: 'api token pat key secret cli script ci' },

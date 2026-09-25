@@ -12,6 +12,7 @@ import '@fontsource/cousine/hebrew.css';
 import App from './App.svelte';
 import { mockEnabled, setupMock } from './lib/api/mock';
 import { setToken, getToken, baseUrl } from './lib/api/client';
+import { isEmbedded } from './lib/desktop';
 
 if (mockEnabled()) {
   setupMock();
@@ -118,9 +119,23 @@ const app = mount(App, {
 // When a NEW service worker takes control (after a deploy), reload once so the
 // fresh app shell is shown immediately — otherwise a cached SW can keep serving
 // a stale build until the user manually clears site data.
-if ('serviceWorker' in navigator) {
+// The side-by-side pane (an iframe of this window, `?embed=1`) leaves the
+// service worker to its host: a new worker taking control reloads the host,
+// and the pane with it — a second reload from inside the pane would drop it
+// back to its boot state mid-use.
+// FIRST install is not an update: nothing stale was serving this page, yet
+// sw.js's `clients.claim()` still fires `controllerchange` — reloading then
+// rebooted every fresh visit mid-boot (aborting its in-flight /auth/me and
+// doubling time-to-shell). Only a worker REPLACING one that already
+// controlled this page reloads.
+if ('serviceWorker' in navigator && !isEmbedded) {
+  let hadController = navigator.serviceWorker.controller !== null;
   let reloadingForSw = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController) {
+      hadController = true; // the first claim; a later update still reloads
+      return;
+    }
     if (reloadingForSw) return;
     reloadingForSw = true;
     window.location.reload();

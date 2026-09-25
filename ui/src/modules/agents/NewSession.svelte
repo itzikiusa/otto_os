@@ -6,6 +6,7 @@
   import AccountPicker from '../../lib/components/AccountPicker.svelte';
   import NetworkProfilePicker from '../connections/NetworkProfilePicker.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import ContextPreview from './ContextPreview.svelte';
   import { router } from '../../lib/router.svelte';
   import { ws, SCRATCH_WORKSPACE_ID } from '../../lib/stores/workspace.svelte';
@@ -83,6 +84,33 @@
   // field): pointing a session at a folder outside the workspace should not
   // require creating a workspace for it, or typing an absolute path by hand.
   let browsing: 'cwd' | 'extra' | null = $state(null);
+
+  // ── Per-device memory of the last sheet ──────────────────────────────────
+  // The sheet used to forget everything between opens: the Browser tools
+  // toggle and (when no default agent is configured) which agent was picked.
+  // Accounts are deliberately NOT remembered — a deleted account's id would
+  // be sent silently while the picker showed "Default CLI account". Settings stay authoritative — a
+  // configured default provider always wins over the remembered one.
+  const PREFS_KEY = 'otto_new_session_prefs';
+  type Prefs = { provider?: string; browser?: boolean };
+  function loadPrefs(): Prefs {
+    try {
+      const raw = localStorage.getItem(PREFS_KEY);
+      const v: unknown = raw ? JSON.parse(raw) : null;
+      return v && typeof v === 'object' ? (v as Prefs) : {};
+    } catch {
+      return {};
+    }
+  }
+  function savePrefs(p: Prefs): void {
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify(p));
+    } catch {
+      /* private window / blocked storage: nothing is remembered */
+    }
+  }
+  const prefs = loadPrefs();
+  browser = prefs.browser === true;
 
   const countOf = (p: string): number => counts[p] ?? 0;
   const total = $derived(Object.values(counts).reduce((a, b) => a + b, 0));
@@ -256,7 +284,8 @@
       // channel bridge), then fall back to the first available provider.
       const available = providers.filter((p) => providerReadiness(p).available);
       const def = defaultProvider && available.includes(defaultProvider) ? defaultProvider : null;
-      const initial = def ?? (available.includes('claude') ? 'claude' : available[0]);
+      const last = prefs.provider && available.includes(prefs.provider) ? prefs.provider : null;
+      const initial = def ?? last ?? (available.includes('claude') ? 'claude' : available[0]);
       if (initial) selectProvider(initial);
     }
     if (cwd === '') {
@@ -319,6 +348,7 @@
       // Foreground everything that started (tiled when there's more than one,
       // matching how the command palette lands a multi-agent spawn), routing to
       // the last so Back returns through them.
+      if (created.length > 0) savePrefs({ provider, browser });
       if (created.length > 1) ws.setViewMode('tiled');
       for (const id of created.slice(0, -1)) ws.openSession(id);
       if (created.length > 0) ws.navigateToSession(created[created.length - 1]);
@@ -341,7 +371,7 @@
 
 <svelte:window onkeydown={onGlobalKeydown} />
 
-<Modal title="New Session" {onclose}>
+<Modal title="New session" {onclose}>
   <!-- Workspace: the current one, or none (a workspace-less session in the
        daemon's hidden scratch workspace). With no workspace at all only "No
        workspace" exists, pre-selected. -->
@@ -382,7 +412,7 @@
 
   <div class="field">
     <div id="ns-provider-label" class="provider-label">
-      Provider <span class="dim">(← → to switch, ± for more than one)</span>
+      Provider <span class="dim">· use − / + on a card to start several at once</span>
     </div>
     <div
       bind:this={gridEl}
@@ -418,8 +448,9 @@
               class="cbtn"
               disabled={countOf(p) === 0}
               aria-label={`One less ${p} session`}
+              title={`One less ${p} session`}
               onclick={() => bump(p, -1)}
-            >−</button>
+            ><Icon name="minus" size={12} /></button>
             <span class="count" class:zero={countOf(p) === 0} aria-live="polite">
               {countOf(p)}
             </span>
@@ -428,8 +459,9 @@
               class="cbtn"
               disabled={countOf(p) >= MAX_PER_PROVIDER || !providerReadiness(p).available}
               aria-label={`One more ${p} session`}
+              title={`One more ${p} session`}
               onclick={() => bump(p, 1)}
-            >+</button>
+            ><Icon name="plus" size={12} /></button>
           </div>
         </div>
       {/each}
@@ -503,8 +535,9 @@
               type="button"
               class="dir-remove"
               title="Remove directory"
+              aria-label="Remove {dir}"
               onclick={() => removeDir(dir)}
-            >✕</button>
+            ><Icon name="x" size={11} /></button>
           </li>
         {/each}
       </ul>
@@ -544,7 +577,7 @@
         onclick={() => (showPreview = !showPreview)}
         aria-expanded={showPreview}
       >
-        <span class="chevron" class:open={showPreview}>▸</span>
+        <span class="chevron" class:open={showPreview}><Icon name="chevronRight" size={11} /></span>
         Preview context
         <span class="hint">— exactly what Otto would inject before spawning</span>
       </button>
@@ -563,7 +596,7 @@
   {#snippet footer()}
     <button class="btn" onclick={onclose}>Cancel</button>
     <button class="btn primary" disabled={busy || total === 0} onclick={create}>
-      {busy ? 'Starting…' : total > 1 ? `Start ${total} Sessions` : 'Start Session'}
+      {busy ? 'Starting…' : total > 1 ? `Start ${total} sessions` : 'Start session'}
     </button>
   {/snippet}
 </Modal>
@@ -585,7 +618,7 @@
 
 <style>
   .provider-label {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     font-weight: 500;
     color: var(--text-dim);
     margin-bottom: 4px;
@@ -609,7 +642,7 @@
     background: transparent;
     color: var(--text-dim);
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     cursor: pointer;
     overflow: hidden;
@@ -693,7 +726,7 @@
     background: var(--surface);
     color: var(--text-dim);
     font: inherit;
-    font-size: 13px;
+    font-size: var(--fs-m);
     line-height: 1;
     cursor: pointer;
   }
@@ -711,13 +744,13 @@
     .cbtn {
       width: 30px;
       height: 30px;
-      font-size: 15px;
+      font-size: var(--fs-l);
     }
   }
   .count {
     min-width: 18px;
     text-align: center;
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     font-variant-numeric: tabular-nums;
   }
@@ -730,14 +763,14 @@
     margin-top: 6px;
   }
   .provider-name {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     display: flex;
     align-items: center;
     gap: 6px;
   }
   .default-badge {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -747,7 +780,7 @@
     color: var(--accent-text);
   }
   .provider-desc {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .toggle-row {
@@ -766,7 +799,7 @@
     gap: 1px;
   }
   .toggle-title {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .dir-list {
@@ -790,7 +823,7 @@
   .dir-path {
     flex: 1;
     min-width: 0;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -798,6 +831,8 @@
   }
   .dir-remove {
     flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
     background: none;
     border: none;
     cursor: pointer;
@@ -829,7 +864,7 @@
     padding: 2px 0;
     cursor: pointer;
     font: inherit;
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
     text-align: start;
@@ -838,7 +873,7 @@
     font-weight: 400;
   }
   .preview-toggle .chevron {
-    font-size: 9px;
+    display: inline-flex;
     color: var(--text-dim);
     transition: transform 120ms ease-out;
   }

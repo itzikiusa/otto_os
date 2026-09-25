@@ -302,3 +302,13 @@ test('geometry: panel budget clamps to the window top and the 560px cap', () => 
   assert.equal(barWindowHeight(56, 120.2), 177);
   assert.equal(barWindowHeight(56, 5000), BAR_MAX_H);
 });
+
+test('ranking: "git" puts Go to Git above Open Git panel (whole-word Navigate hit)', () => {
+  const more = [
+    { id: 'core.git-panel', title: 'Open Git panel', group: 'View' },
+    { id: 'core.side-git', title: 'Open Git side by side', group: 'View', keywords: 'Build' },
+    ...cmds,
+  ];
+  const r = rankCommands(more, 'git', {}, NOW);
+  assert.equal(r[0].cmd.id, 'core.go-git');
+});

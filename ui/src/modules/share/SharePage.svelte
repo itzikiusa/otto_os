@@ -12,7 +12,8 @@
   // re-sending a fresh OTP to the locked original recipient.
   import { onMount } from 'svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
-  import { getSharedSession, openShareTerminalWs, verifyShareOtp, extendShare } from '../../lib/api/share';
+  import Icon from '../../lib/components/Icon.svelte';
+  import { getSharedSession, getShareWhoami, openShareTerminalWs, verifyShareOtp, extendShare } from '../../lib/api/share';
   import { getShareToken } from '../../lib/router.svelte';
   import type { Session, SessionStatus } from '../../lib/api/types';
   import { ApiError } from '../../lib/api/client';
@@ -50,6 +51,9 @@
   let extendBusy = $state(false);
   let extendSent = $state(false);
 
+  /** Why the OTP card shows: the first visit, or a lapsed access window. */
+  let otpReason = $state<'first' | 'lapsed'>('first');
+
   // ── load session (or detect OTP gate) ────────────────────────────────────
   async function loadSession(): Promise<void> {
     const t = token;
@@ -57,9 +61,17 @@
     viewState = 'loading';
     loadError = null;
     session = null;
+    liveStatus = null;
 
     try {
       session = await getSharedSession(sessionId, t);
+      // An Editor link may type. A failed / older-daemon whoami keeps the
+      // safe read-only default (the daemon enforces the role either way).
+      try {
+        isViewer = (await getShareWhoami(t)).role !== 'editor';
+      } catch {
+        isViewer = true;
+      }
       viewState = 'ok';
     } catch (e: unknown) {
       if (e instanceof ApiError && e.status === 403 && isOtpPending(e)) {
@@ -98,6 +110,41 @@
     void loadSession();
   });
 
+  // While attached, re-check access quietly (every minute, and when the tab
+  // comes back into focus): an OTP window that lapsed needs a fresh code, and
+  // a revoked/expired link must say so — not leave a terminal that silently
+  // stopped updating.
+  async function recheckAccess(): Promise<void> {
+    const t = token;
+    if (!t || viewState !== 'ok') return;
+    try {
+      await getSharedSession(sessionId, t);
+    } catch (e: unknown) {
+      if (viewState !== 'ok') return;
+      if (e instanceof ApiError && e.status === 403 && isOtpPending(e)) {
+        otpReason = 'lapsed';
+        otpInput = '';
+        otpError = null;
+        viewState = 'otp';
+      } else if (e instanceof ApiError && [401, 403, 404, 410].includes(e.status)) {
+        loadError = null;
+        loadCause = shareErrorCause(e);
+        viewState = 'error';
+      }
+      // A network blip keeps the terminal (it reconnects on its own).
+    }
+  }
+  $effect(() => {
+    if (viewState !== 'ok') return;
+    const timer = setInterval(() => void recheckAccess(), 60_000);
+    const onFocus = (): void => void recheckAccess();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+    };
+  });
+
   // ── OTP verification ───────────────────────────────────────────────────────
   async function submitOtp(): Promise<void> {
     const t = token;
@@ -114,15 +161,20 @@
       if (resp.verified) {
         // OTP accepted — reload the session (now unblocked).
         otpInput = '';
+        otpReason = 'first';
         await loadSession();
       } else {
-        otpError = 'Incorrect code. Please try again.';
+        otpError = 'That code didn’t match. Check the latest email and try again.';
       }
     } catch (e: unknown) {
       if (e instanceof ApiError && e.status === 429) {
-        otpError = 'Too many attempts. Please wait before trying again.';
+        otpError = 'Too many attempts. Wait a minute, then try again.';
+      } else if (e instanceof ApiError && e.status === 401) {
+        otpError = 'That code is wrong or has expired. Check the latest email, or re-send a code.';
+      } else if (e instanceof TypeError) {
+        otpError = 'Can’t reach the host. Check your connection, then try again.';
       } else {
-        otpError = e instanceof Error ? e.message : 'Verification failed. Please try again.';
+        otpError = 'Couldn’t verify the code. Try again in a moment.';
       }
     } finally {
       otpBusy = false;
@@ -144,9 +196,11 @@
       viewState = 'otp';
     } catch (e: unknown) {
       if (e instanceof ApiError && e.status === 429) {
-        otpError = 'Too many extend attempts. Please wait before trying again.';
+        otpError = 'Too many requests. Wait a minute, then re-send the code.';
+      } else if (e instanceof ApiError && e.status === 400) {
+        otpError = 'A new code can’t be sent for this link. Ask the person who shared it for a new link.';
       } else {
-        otpError = e instanceof Error ? e.message : 'Could not re-send the code. Please try again.';
+        otpError = 'Couldn’t send a new code. Try again in a moment.';
       }
     } finally {
       extendBusy = false;
@@ -159,22 +213,24 @@
     liveStatus = s;
   }
 
-  // When the terminal emits 'exited' or 'reconnectable', offer the Extend
-  // control so the guest can request a fresh window.
-  const termEnded = $derived(liveStatus === 'exited' || liveStatus === 'reconnectable');
+  // The shared PROCESS stopped (not the access window — that is caught by
+  // recheckAccess and routed to the OTP card). A new code can't bring an ended
+  // session back, so the overlay only says what happened and offers Reload.
+  const termEnded = $derived(liveStatus === 'exited');
 
   // Effective status for the header badge.
   const status = $derived<SessionStatus>(liveStatus ?? session?.status ?? 'idle');
 
-  // Is this a viewer share (read-only)?  Safe default: yes (enforcement is in the daemon).
+  // Is this a viewer share (read-only)? Safe default: yes until `/share/whoami`
+  // says Editor (enforcement is in the daemon either way).
   let isViewer = $state(true);
 
   const statusLabel: Record<SessionStatus, string> = {
-    running: 'running',
-    working: 'working',
-    idle: 'idle',
-    exited: 'exited',
-    reconnectable: 'reconnectable',
+    running: 'Running',
+    working: 'Working',
+    idle: 'Idle',
+    exited: 'Ended',
+    reconnectable: 'Disconnected',
   };
 
   // Allow submitting OTP form via Enter key.
@@ -186,9 +242,9 @@
 <!-- ── No token ─────────────────────────────────────────────────────── -->
 {#if !token}
   <div class="share-error" style={`zoom:${ui.zoom}`}>
-    <div class="error-card">
-      <div class="error-icon">&#9888;</div>
-      <h2>Link invalid or expired</h2>
+    <div class="error-card" role="alert">
+      <div class="error-icon"><Icon name="warning" size={26} /></div>
+      <h2>This link is invalid or has expired</h2>
       <p>
         This share link is missing a token or has already expired.
         Ask the owner to send you a new link.
@@ -199,9 +255,9 @@
 <!-- ── Loading ──────────────────────────────────────────────────────── -->
 {:else if viewState === 'loading'}
   <div class="share-error" style={`zoom:${ui.zoom}`}>
-    <div class="error-card">
-      <div class="sp-spinner" aria-label="Loading…"></div>
-      <p class="dim">Connecting…</p>
+    <div class="error-card" role="status">
+      <div class="sp-spinner" aria-hidden="true"></div>
+      <p class="dim">Connecting to the shared session…</p>
     </div>
   </div>
 
@@ -209,10 +265,14 @@
 {:else if viewState === 'otp'}
   <div class="share-error" style={`zoom:${ui.zoom}`}>
     <div class="error-card otp-card">
-      <div class="otp-icon">&#9993;</div>
-      <h2>Enter your access code</h2>
+      <div class="otp-icon"><Icon name="mail" size={26} /></div>
+      <h2>{otpReason === 'lapsed' ? 'Your access window ended' : 'Enter your access code'}</h2>
       <p>
-        A 6-digit code was emailed to you. Enter it below to access the shared session.
+        {#if otpReason === 'lapsed'}
+          Re-send a code to the email this link was shared with, then enter it here to keep watching.
+        {:else}
+          A 6-digit code was emailed to you. Enter it below to open the shared session.
+        {/if}
         {#if extendSent}
           <br /><strong>A fresh code has been sent.</strong>
         {/if}
@@ -235,7 +295,7 @@
         </button>
       </div>
       {#if otpError}
-        <p class="otp-error">{otpError}</p>
+        <p class="otp-error" role="alert">{otpError}</p>
       {/if}
       <div class="otp-extend-row">
         <span class="dim">Code expired or not received?</span>
@@ -249,12 +309,12 @@
 <!-- ── Error (irrecoverable) ─────────────────────────────────────────── -->
 {:else if viewState === 'error'}
   <div class="share-error" style={`zoom:${ui.zoom}`}>
-    <div class="error-card">
-      <div class="error-icon">&#9888;</div>
-      <h2>Couldn't load this session</h2>
+    <div class="error-card" role="alert">
+      <div class="error-icon"><Icon name="warning" size={26} /></div>
+      <h2>Couldn’t open this session</h2>
       <p>{loadCause}</p>
       {#if loadError}<p class="hint">{loadError}</p>{/if}
-      <button class="btn ec-retry" onclick={() => void loadSession()}>Retry</button>
+      <button class="btn ec-retry" onclick={() => void loadSession()}><Icon name="refresh" size={13} /> Retry</button>
     </div>
   </div>
 
@@ -262,13 +322,20 @@
 {:else}
   <div class="share-root" style={`zoom:${ui.zoom}`}>
     <header class="share-header">
-      <span class="session-title">{session?.title ?? 'Loading…'}</span>
+      <span class="session-title" title={session?.title ?? ''}>{session?.title ?? 'Loading…'}</span>
       <span class="header-spacer"></span>
       {#if session}
-        <span class="status-badge status-{status}">{statusLabel[status] ?? status}</span>
+        <span class="status-badge status-{status}" title="Session status">
+          <span class="status-dot" aria-hidden="true"></span>{statusLabel[status] ?? status}
+        </span>
       {/if}
-      {#if isViewer}
-        <span class="ro-badge" title="Viewer share — input disabled">read-only</span>
+      <!-- Read-only is shown once, by the Terminal's own chip (it sits on the
+           surface it applies to). An Editor link says the opposite, up here:
+           what they type runs on the host. -->
+      {#if session && !isViewer}
+        <span class="role-chip" title="This link lets you type into the shared terminal. What you type runs on the host.">
+          <Icon name="edit" size={12} /> You can type
+        </span>
       {/if}
     </header>
 
@@ -290,22 +357,19 @@
         </div>
       {/if}
 
-      <!-- Extend overlay — shown when the terminal session has ended so the
-           guest can request a fresh OTP window without reloading the page. -->
+      <!-- The shared session's process ended. Its output stays readable
+           underneath; Reload re-attaches if the owner restarts it. -->
       {#if termEnded}
-        <div class="extend-overlay">
+        <div class="extend-overlay" role="status">
           <div class="extend-card">
-            <div class="extend-icon">&#8987;</div>
-            <h3>Session window ended</h3>
+            <div class="extend-icon"><Icon name="clock" size={26} /></div>
+            <h3>This session has ended</h3>
             <p>
-              Request a new access code to be emailed to the original recipient.
-              Once you receive it, enter it below to re-attach.
+              The shared terminal stopped on the host. If the person who shared it restarts it,
+              reload to pick it up again.
             </p>
-            {#if otpError}
-              <p class="otp-error">{otpError}</p>
-            {/if}
-            <button class="btn primary" disabled={extendBusy} onclick={requestExtend}>
-              {extendBusy ? 'Sending…' : 'Extend session'}
+            <button class="btn primary" onclick={() => void loadSession()}>
+              <Icon name="refresh" size={13} /> Reload
             </button>
           </div>
         </div>
@@ -340,32 +404,37 @@
     max-width: 400px;
   }
   .error-icon {
-    font-size: 32px;
-    color: var(--status-exited);
+    display: flex;
+    justify-content: center;
+    color: var(--danger);
   }
   .otp-icon {
-    font-size: 36px;
+    display: flex;
+    justify-content: center;
     color: var(--accent-text);
   }
   .error-card h2 {
-    font-size: 17px;
+    font-size: var(--fs-l);
     font-weight: 600;
     margin: 0;
     color: var(--text);
   }
   .error-card p {
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     margin: 0;
     line-height: 1.5;
   }
   .error-card .hint {
-    font-size: 11px;
-    opacity: 0.7;
+    font-size: var(--fs-xs);
+    font-family: var(--font-mono);
     overflow-wrap: anywhere;
   }
   .ec-retry {
     align-self: center;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
   }
   .dim {
     color: var(--text-dim);
@@ -381,22 +450,21 @@
   .otp-input {
     width: 140px;
     text-align: center;
-    font-size: 22px;
-    font-family: monospace;
+    font-size: var(--fs-2xl);
+    font-family: var(--font-mono);
     letter-spacing: 0.18em;
     padding: 10px 12px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface-2);
     color: var(--text);
-    outline: none;
     transition: border-color 120ms;
   }
   .otp-input:focus {
     border-color: var(--accent);
   }
   .otp-error {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--danger);
     margin: 0;
   }
@@ -404,7 +472,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     flex-wrap: wrap;
     justify-content: center;
   }
@@ -412,7 +480,7 @@
     border: none;
     background: transparent;
     color: var(--accent-text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
     padding: 2px 4px;
     text-decoration: underline;
@@ -430,6 +498,9 @@
     border-top-color: var(--accent);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .sp-spinner { animation-duration: 2.4s; }
   }
   @keyframes spin {
     to { transform: rotate(360deg); }
@@ -455,7 +526,8 @@
     min-height: 36px;
   }
   .session-title {
-    font-size: 13px;
+    min-width: 0;
+    font-size: var(--fs-m);
     font-weight: 500;
     color: var(--text);
     overflow: hidden;
@@ -465,12 +537,27 @@
   .header-spacer {
     flex: 1;
   }
+  .role-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex-shrink: 0;
+    font-size: var(--fs-s);
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+    background: var(--warning-soft);
+    color: var(--warning);
+  }
 
   /* Status pill — mirrors the palette chip colours. */
+  /* Status: a small dot (the status colour) + a sentence-case label — the
+     same dot-and-text pattern the session rows use. */
   .status-badge {
-    font-size: var(--fs-xs);
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--fs-s);
     padding: 2px 8px;
     border-radius: 999px;
     border: 1px solid var(--border);
@@ -478,24 +565,16 @@
     color: var(--text-dim);
     flex-shrink: 0;
   }
-  .status-badge.status-running  { color: var(--status-working); }
-  .status-badge.status-working  { color: var(--status-working); }
-  .status-badge.status-idle     { color: var(--text-dim); }
-  .status-badge.status-exited   { color: var(--status-exited); }
-
-  /* Read-only badge — subtle, top-right inside the header. */
-  .ro-badge {
-    font-size: var(--fs-xs);
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: var(--text-dim);
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    padding: 2px 7px;
-    border-radius: 999px;
-    flex-shrink: 0;
-    opacity: 0.85;
+  .status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--status-idle);
   }
+  .status-badge.status-running .status-dot,
+  .status-badge.status-working .status-dot { background: var(--status-working); }
+  .status-badge.status-exited .status-dot { background: var(--status-exited); }
+  .status-badge.status-reconnectable .status-dot { background: var(--status-warn); }
 
   /* Terminal fills the remaining space. */
   .terminal-fill {
@@ -512,7 +591,7 @@
     align-items: center;
     justify-content: center;
     color: var(--text-dim);
-    font-size: 13px;
+    font-size: var(--fs-m);
     background: var(--bg);
   }
 
@@ -525,7 +604,7 @@
     justify-content: center;
     background: color-mix(in srgb, var(--bg) 88%, transparent);
     backdrop-filter: blur(4px);
-    z-index: 10;
+    z-index: var(--z-sticky);
   }
   .extend-card {
     max-width: 360px;
@@ -541,17 +620,18 @@
     align-items: center;
   }
   .extend-icon {
-    font-size: 30px;
+    display: flex;
+    justify-content: center;
     color: var(--text-dim);
   }
   .extend-card h3 {
-    font-size: 16px;
+    font-size: var(--fs-l);
     font-weight: 600;
     margin: 0;
     color: var(--text);
   }
   .extend-card p {
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     margin: 0;
     line-height: 1.5;

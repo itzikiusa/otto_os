@@ -10,6 +10,7 @@ import type { Notice, NoticeAction, NoticeSeverity, NotificationSettings } from 
 import { toasts } from '../toast.svelte';
 import { openExternal } from '../external';
 import { ws } from './workspace.svelte';
+import { isEmbedded } from '../desktop';
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
@@ -205,6 +206,11 @@ class NotificationStore {
       this.notices = notices.filter((n) => !this.isChannelSessionNotice(n));
       this.settings = settings;
       this.loaded = true;
+      try {
+        this.restoreNeedsYou();
+      } catch {
+        /* a best-effort re-derivation — never fail the load over it */
+      }
       this.error = null;
     } catch (e) {
       // Backend may not be ready yet (the events WS reloads on connect) — keep
@@ -212,6 +218,28 @@ class NotificationStore {
       this.error = (e instanceof Error ? e.message : String(e)) || 'Request failed';
     } finally {
       this.loading = false;
+    }
+  }
+
+  /** The live "needs you" flag is raised from the `:waiting` WS notice (see
+   *  events.svelte.ts), so a reload — or a waiting notice that arrived while
+   *  the app was closed — left the bell saying "Waiting for your input" while
+   *  the sidebar and Home's "Needs you" said nothing. Re-derive it from the
+   *  loaded list: a session whose LATEST notice is an unread `:waiting` one,
+   *  and that isn't working now, still needs the operator. */
+  private restoreNeedsYou(): void {
+    const latest = new Map<string, Notice>();
+    for (const n of this.notices) {
+      const parsed = parseSessionKey(n.source_key);
+      if (!parsed) continue;
+      const prev = latest.get(parsed.id);
+      if (!prev || Date.parse(n.created_at) > Date.parse(prev.created_at)) latest.set(parsed.id, n);
+    }
+    for (const [sid, n] of latest) {
+      if (n.read || !n.source_key?.endsWith(':waiting') || n.action?.type !== 'open_session') continue;
+      const st = ws.statusMap[sid];
+      if (st === 'working' || st === 'exited') continue;
+      ws.markNeedsYou(sid);
     }
   }
 
@@ -252,7 +280,9 @@ class NotificationStore {
   // ── Native OS notification (Tauri only) ───────────────────────────────────
 
   private async fireNative(notice: Notice): Promise<void> {
-    if (!isTauri) return;
+    // The side-by-side pane (an iframe) sees the same notices as its window:
+    // one native banner per notice, from the main document only.
+    if (!isTauri || isEmbedded) return;
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       // Returns true | false | null (null = "prompt", not yet decided).
@@ -349,8 +379,10 @@ class NotificationStore {
     this.settings = next;
     try {
       this.settings = await api.put<NotificationSettings>('/notifications/settings', next);
-    } catch {
+    } catch (e) {
+      // Revert AND say so — a silent revert looks like the toggle "didn't take".
       this.settings = prev;
+      toasts.error('Could not save notification settings', e instanceof Error ? e.message : String(e));
     }
   }
 

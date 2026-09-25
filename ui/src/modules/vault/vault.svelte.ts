@@ -90,6 +90,9 @@ class VaultStore {
   current = $state<Vault | null>(null);
   status = $state<VaultStatus | null>(null);
   loading = $state(false);
+  /** Why listing the vaults failed — the page shows it inline with Retry
+   *  (a failed list must never look like "no vaults yet"). */
+  loadError = $state<string | null>(null);
 
   leftMode = $state<LeftMode>('files');
   centerMode = $state<CenterMode>('empty');
@@ -128,6 +131,11 @@ class VaultStore {
   searchQuery = $state('');
   searchHits = $state<VaultSearchHit[]>([]);
   searching = $state(false);
+  /** Why the last search failed (inline in the panel with Retry, not a toast). */
+  searchError = $state<string | null>(null);
+  /** The query the current `searchHits` answer — lets the panel tell "no
+   *  results" apart from "typed but not run yet" (search runs on Enter). */
+  searchedQuery = $state('');
   tags = $state<VaultTagCount[]>([]);
 
   // Quick switcher.
@@ -223,6 +231,7 @@ class VaultStore {
     this.loading = true;
     try {
       this.vaults = await listVaults(this.wsId);
+      this.loadError = null;
       // Vaults are GLOBAL (the ws in the URL is auth context only) — the
       // last-vault choice and per-vault view keys are ws-independent too.
       const lastId = Number(
@@ -237,7 +246,7 @@ class VaultStore {
         this.centerMode = 'empty';
       }
     } catch (e) {
-      toasts.error(`Vault: ${msg(e)}`);
+      this.loadError = msg(e);
     } finally {
       this.loading = false;
     }
@@ -264,6 +273,7 @@ class VaultStore {
     this.notePath = null;
     this.backlinks = [];
     this.searchHits = [];
+    this.searchedQuery = '';
     this.okfReport = null;
     this.roots = [];
     this.docsRun = null;
@@ -348,17 +358,37 @@ class VaultStore {
 
   async unregister(id: number): Promise<void> {
     if (this.current?.id === id && !(await this.canLeaveNote())) return;
-    await deleteVault(this.wsId, id);
+    const name = this.vaults.find((v) => v.id === id)?.name ?? 'the vault';
+    try {
+      await deleteVault(this.wsId, id);
+    } catch (e) {
+      toasts.error(`Couldn’t unregister “${name}”`, msg(e));
+      return;
+    }
     this.vaults = this.vaults.filter((v) => v.id !== id);
     if (this.current?.id === id) await this.load();
-    toasts.success('Vault unregistered (files untouched)');
+    toasts.success(`Unregistered “${name}”`, 'Its files are untouched. Add the folder again (Add vault…) to bring it back.');
   }
 
   async toggleOkf(): Promise<void> {
     if (!this.current) return;
-    const v = await patchVault(this.wsId, this.current.id, { okf: !this.current.okf });
-    this.vaults = this.vaults.map((x) => (x.id === v.id ? v : x));
-    this.current = v;
+    const on = !this.current.okf;
+    try {
+      const v = await patchVault(this.wsId, this.current.id, { okf: on });
+      this.vaults = this.vaults.map((x) => (x.id === v.id ? v : x));
+      this.current = v;
+    } catch (e) {
+      toasts.error(on ? 'Couldn’t turn OKF mode on' : 'Couldn’t turn OKF mode off', msg(e));
+    }
+  }
+
+  /** Router leave-guard (VaultPage): land a pending autosave before the page
+   *  goes away, so a failed save still toasts while the user can act on it.
+   *  Never blocks and never asks — the draft is also kept on this Mac and
+   *  restored on return, and a disk conflict is resolved from its banner. */
+  async flushBeforeLeave(): Promise<boolean> {
+    if ((this.dirty || this.saving) && !this.conflict) await this.saveNow().catch(() => false);
+    return true;
   }
 
   async rescan(): Promise<void> {
@@ -368,7 +398,7 @@ class VaultStore {
       await this.refreshTree();
       toasts.success('Vault rescanned');
     } catch (e) {
-      toasts.error(`Rescan: ${msg(e)}`);
+      toasts.error('Couldn’t rescan the vault', msg(e));
     }
   }
 
@@ -506,7 +536,7 @@ class VaultStore {
       void this.reloadBacklinks();
       return true;
     } catch (e) {
-      toasts.error(`Open ${path}: ${msg(e)}`);
+      toasts.error(`Couldn’t open ${path.split('/').pop() ?? path}`, msg(e));
       return false;
     }
   }
@@ -703,17 +733,22 @@ class VaultStore {
     }
   }
 
+  /** An agent's proposed text is staged in the editor awaiting the user's
+   *  confirm (lib/uiCommands/vault.ts): no autosave until they decide. */
+  holdAutosave = $state(false);
+
   onDraftChange(content: string): void {
     this.draft = content;
     this.dirty = content !== (this.note?.raw ?? '');
     this.persistDraft();
     if (this.saveTimer) clearTimeout(this.saveTimer);
-    if (this.dirty && !this.conflict) {
+    if (this.dirty && !this.conflict && !this.holdAutosave) {
       this.saveTimer = setTimeout(() => void this.saveNow(), 800);
     }
   }
 
   async saveNow(overwrite = false): Promise<boolean> {
+    if (this.holdAutosave) return false;
     if (this.savePromise) {
       if (!(await this.savePromise)) return false;
       return this.dirty ? this.saveNow(overwrite) : true;
@@ -746,7 +781,7 @@ class VaultStore {
         const kind = vaultConflictKind(e);
         if (kind === 'disk') this.conflict = true;
         else if (kind === 'busy') this.retryBusySave(id, path);
-        else toasts.error(`Save: ${msg(e)}`);
+        else toasts.error('Couldn’t save the note', msg(e));
         return false;
       } finally {
         this.saving = false;
@@ -844,7 +879,7 @@ class VaultStore {
       }
       await this.refreshTree();
     } catch (e) {
-      toasts.error(`Rename: ${msg(e)}`);
+      toasts.error('Couldn’t rename it', msg(e));
     }
   }
 
@@ -853,7 +888,11 @@ class VaultStore {
     if (!(await this.canLeaveNote())) return;
     try {
       await deleteVaultNote(this.wsId, this.current.id, path);
-      toasts.success(`Moved to .trash: ${path}`);
+      // Reversible (Trash and restore), so no confirm up front — the toast
+      // says where it went and leads straight there.
+      toasts.push('success', 'Moved to trash', path, 6000, {
+        action: { label: 'Show trash', run: () => this.openTrash() },
+      });
       const removed = (p: string) => p === path || p.startsWith(`${path}/`);
       const active = this.tabs[this.activeTab];
       this.tabs = this.tabs.filter(t => !removed(t.path));
@@ -869,7 +908,7 @@ class VaultStore {
       await this.refreshTree();
       void this.refreshStatus();
     } catch (e) {
-      toasts.error(`Delete: ${msg(e)}`);
+      toasts.error('Couldn’t move it to trash', msg(e));
     }
   }
 
@@ -994,6 +1033,7 @@ class VaultStore {
     const q = this.searchQuery.trim();
     if (!q) {
       this.searchHits = [];
+      this.searchedQuery = '';
       return;
     }
     // Newest query + same vault only: hits from vault A (or an older query)
@@ -1001,11 +1041,15 @@ class VaultStore {
     const id = this.current.id, seq = ++this.searchSeq;
     const current = () => this.current?.id === id && this.searchSeq === seq;
     this.searching = true;
+    this.searchError = null;
     try {
       const hits = await vaultSearch(this.wsId, id, { query: q, limit: 50 });
-      if (current()) this.searchHits = hits;
+      if (current()) {
+        this.searchHits = hits;
+        this.searchedQuery = q;
+      }
     } catch (e) {
-      if (current()) toasts.error(`Search: ${msg(e)}`);
+      if (current()) this.searchError = msg(e);
     } finally {
       if (current()) this.searching = false;
     }
@@ -1046,7 +1090,7 @@ class VaultStore {
     try {
       this.okfReport = await okfValidate(this.wsId, this.current.id);
     } catch (e) {
-      toasts.error(`OKF validate: ${msg(e)}`);
+      toasts.error('Couldn’t validate OKF', msg(e));
     } finally {
       this.okfBusy = false;
     }
@@ -1061,7 +1105,7 @@ class VaultStore {
       await this.refreshTree();
       await this.validateOkf();
     } catch (e) {
-      toasts.error(`OKF indexes: ${msg(e)}`);
+      toasts.error('Couldn’t generate OKF indexes', msg(e));
     } finally {
       this.okfBusy = false;
     }

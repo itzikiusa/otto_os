@@ -7,6 +7,8 @@
   import { api } from '../../lib/api/client';
   import { gitBridge } from './gitBridge.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Skeleton from '../../lib/components/Skeleton.svelte';
 
   interface Props {
@@ -21,8 +23,10 @@
   let blame = $state<BlameResp | null>(null);
   let loading = $state(true);
   let error = $state<string | null>(null);
+  let retryRev = $state(0);
 
   $effect(() => {
+    void retryRev;
     const id = repoId;
     const p = path;
     const r = rev ?? 'HEAD';
@@ -37,7 +41,7 @@
       })
       .catch((e: unknown) => {
         blame = null;
-        error = e instanceof Error ? e.message : String(e);
+        error = loadErrorText(e);
       })
       .finally(() => {
         loading = false;
@@ -61,8 +65,8 @@
     <span class="bl-title mono" title={path}>{path}</span>
     {#if blame}<span class="chip mono">{blame.rev}</span>{/if}
     <span class="grow"></span>
-    <button class="btn ghost small" onclick={onclose} aria-label="Close blame">
-      <Icon name="x" size={12} />
+    <button class="icon-btn" onclick={onclose} aria-label="Close blame" title="Close blame">
+      <Icon name="x" size={14} />
     </button>
   </header>
 
@@ -70,7 +74,7 @@
     {#if loading}
       <div class="bl-pad"><Skeleton rows={6} height={22} /></div>
     {:else if error}
-      <p class="bl-msg err">{error}</p>
+      <div class="bl-pad"><LoadState what="blame" {error} empty onretry={() => retryRev++} variant="compact" /></div>
     {:else if !blame || blame.lines.length === 0}
       <p class="bl-msg">Nothing to blame — the file is empty at this revision.</p>
     {:else}
@@ -116,7 +120,7 @@
     border-bottom: 1px solid var(--border);
   }
   .bl-title {
-    font-size: 12px;
+    font-size: var(--fs-s);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -135,16 +139,13 @@
   .bl-msg {
     padding: 14px 12px;
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
-  }
-  .bl-msg.err {
-    color: var(--status-exited);
   }
   .bl-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .bl-table tr:hover {
     background: var(--surface-2);
@@ -171,7 +172,7 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     padding: 1px 0;
     cursor: pointer;
   }

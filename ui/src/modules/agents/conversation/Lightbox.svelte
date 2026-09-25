@@ -1,5 +1,6 @@
 <script lang="ts">
   // Full-window image viewer for transcript images. Esc / click-outside closes.
+  import Icon from '../../../lib/components/Icon.svelte';
   interface Props {
     src: string;
     alt: string;
@@ -21,7 +22,7 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div class="lb" role="dialog" tabindex="-1" aria-modal="true" aria-label={alt || 'Image'} onclick={onclose}>
-  <button class="lb-close icon-btn" aria-label="Close" onclick={onclose}>✕</button>
+  <button class="lb-close icon-btn" aria-label="Close" title="Close (Esc)" onclick={onclose}><Icon name="x" size={16} /></button>
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
   <img {src} {alt} onclick={(e) => e.stopPropagation()} />
 </div>
@@ -50,7 +51,6 @@
     position: absolute;
     top: 12px;
     inset-inline-end: 12px;
-    color: #fff;
-    font-size: 16px;
+    color: #fff; /* on the fixed dark scrim in every theme */
   }
 </style>

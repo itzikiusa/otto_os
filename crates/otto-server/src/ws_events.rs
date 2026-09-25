@@ -64,15 +64,23 @@ pub async fn events_ws(
                 ))
                 .into_response();
             }
+            // Only a person's own credential may act as an Otto window for
+            // agent UI control (`hello`); an agent session's token — which
+            // can open this socket too — only ever receives events.
+            let ui_capable = crate::ui_bridge::is_human(&auth);
             // Authorize against the effective user (== real for a normal token).
             let user = auth.effective_user;
+            // Client frames are small JSON (hello / presence): cap them.
+            let ws = ws
+                .max_message_size(crate::ui_bridge::MAX_CLIENT_FRAME)
+                .max_frame_size(crate::ui_bridge::MAX_CLIENT_FRAME);
             // Echo `otto-bearer` only when the client used the subprotocol path,
             // otherwise the browser would reject an unsolicited subprotocol.
             if used_subprotocol {
                 ws.protocols([BEARER_SUBPROTOCOL])
-                    .on_upgrade(move |socket| handle_events(socket, ctx, user))
+                    .on_upgrade(move |socket| handle_events(socket, ctx, user, ui_capable))
             } else {
-                ws.on_upgrade(move |socket| handle_events(socket, ctx, user))
+                ws.on_upgrade(move |socket| handle_events(socket, ctx, user, ui_capable))
             }
         }
         Err(_) => ApiError(Error::Unauthorized).into_response(),
@@ -105,8 +113,18 @@ fn scope_denied(auth: &AuthContext) -> bool {
     auth.is_scoped()
 }
 
-async fn handle_events(socket: WebSocket, ctx: ServerCtx, user: User) {
+async fn handle_events(socket: WebSocket, ctx: ServerCtx, user: User, ui_capable: bool) {
     let mut events = ctx.events.subscribe();
+    // Agent UI control: a human's socket is registered as a (not yet
+    // addressable) Otto document; its `hello` makes it a command target and
+    // `ui_frames` carries the per-connection frames (hello_ack, ui_command,
+    // ui_command_cancel) that never touch the broadcast bus.
+    let (ui_conn, mut ui_frames) = if ui_capable {
+        let (id, rx) = ctx.ui_bridge.register(&user.id);
+        (Some(id), Some(rx))
+    } else {
+        (None, None)
+    };
     let (mut sink, mut stream) = socket.split();
     let mut ping = tokio::time::interval(Duration::from_secs(30));
     ping.tick().await; // consume the immediate first tick
@@ -140,12 +158,35 @@ async fn handle_events(socket: WebSocket, ctx: ServerCtx, user: User) {
                     break;
                 }
             }
+            frame = async {
+                match ui_frames.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => match frame {
+                Some(text) => {
+                    if sink.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+                None => break,
+            },
             incoming = stream.next() => match incoming {
-                // Client→server messages on this socket are ignored.
+                // Client→server: only the UI-control `hello` / `presence`
+                // frames (parsed strictly, ≤ 64 KiB); everything else, and
+                // anything from a non-human socket, is ignored.
+                Some(Ok(Message::Text(text))) => {
+                    if let Some(conn) = &ui_conn {
+                        ctx.ui_bridge.on_client_frame(conn, text.as_str());
+                    }
+                }
                 Some(Ok(_)) => continue,
                 _ => break,
             },
         }
+    }
+    if let Some(conn) = &ui_conn {
+        ctx.ui_bridge.unregister(conn);
     }
 }
 
@@ -339,7 +380,10 @@ fn scope_of(event: &Event) -> Scope<'_> {
         Event::AssistantTurn { user_id, .. }
         | Event::AssistantTaskUpdate { user_id, .. }
         | Event::AssistantNeedsYou { user_id, .. }
-        | Event::AssistantLimit { user_id, .. } => Scope::Owner(user_id),
+        | Event::AssistantLimit { user_id, .. }
+        // Agent UI control asks ONLY the session's owner (the one person who
+        // can grant it) — not workspace admins, not root.
+        | Event::UiControlRequested { user_id, .. } => Scope::Owner(user_id),
     }
 }
 
@@ -835,6 +879,15 @@ mod tests {
                 suggestion: None,
                 task_id: None,
                 auto_switched: false,
+            },
+            // Agent UI control asks only the session owner.
+            Event::UiControlRequested {
+                user_id: "alice".into(),
+                workspace_id: "ws1".into(),
+                session_id: "s1".into(),
+                session_title: "t".into(),
+                module: "connections".into(),
+                command: "db_run_query".into(),
             },
         ];
         for ev in &evs {

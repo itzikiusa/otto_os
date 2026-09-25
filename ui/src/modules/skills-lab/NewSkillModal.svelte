@@ -45,6 +45,19 @@
     if (taken.has(n)) return `A skill named "${n}" already exists in the library.`;
     return null;
   });
+  // Tooltip for the disabled Create button (the inline name error only shows
+  // after the field is touched).
+  const blockReason = $derived(
+    template === 'import'
+      ? file
+        ? ''
+        : 'Choose a .zip skill package'
+      : template === 'bundled' && !fromBundled
+        ? 'Choose the bundled skill to start from'
+        : !name.trim()
+          ? 'Give the skill a name'
+          : (nameError ?? ''),
+  );
   const valid = $derived(
     template === 'import' ? !!file : !!name.trim() && !nameError && (template !== 'bundled' || !!fromBundled),
   );
@@ -79,6 +92,9 @@
         // Keep the method, rename it: rewrite `name:`/`description:` when present.
         let body = src.body.replace(/^name:.*$/m, `name: ${name.trim()}`);
         if (description.trim()) body = body.replace(/^description:.*$/m, `description: ${description.trim().replace(/\n/g, ' ')}`);
+        // The Overview reads the category from the frontmatter first, so a
+        // changed category must land there too or it looks ignored.
+        if (category.trim()) body = body.replace(/^category:.*$/m, `category: ${category.trim()}`);
         s = await skillLabApi.create({ name: name.trim(), category: category.trim(), description: description.trim(), body });
       } else {
         s = await skillLabApi.create({ name: name.trim(), category: category.trim(), description: description.trim(), body: blankBody() });
@@ -97,16 +113,29 @@
     { id: 'bundled', icon: 'box', title: 'From a bundled skill', body: 'Copy one of Otto’s skills under a new name and adapt it.' },
     { id: 'import', icon: 'download', title: 'Import a file', body: 'A skill package (.zip) with SKILL.md at its root.' },
   ];
+  // Radiogroup keyboard: ←/→ (and ↑/↓) move the choice, as native radios do.
+  let tplEl = $state<HTMLElement | null>(null);
+  function onTplKey(e: KeyboardEvent): void {
+    const i = TEMPLATES.findIndex((t) => t.id === template);
+    let n = -1;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') n = (i + 1) % TEMPLATES.length;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') n = (i - 1 + TEMPLATES.length) % TEMPLATES.length;
+    if (n < 0) return;
+    e.preventDefault();
+    template = TEMPLATES[n].id;
+    queueMicrotask(() => (tplEl?.querySelectorAll('[role="radio"]')[n] as HTMLElement | undefined)?.focus());
+  }
 </script>
 
 <Modal title="New skill" width={560} {onclose}>
-  <div class="templates" role="radiogroup" aria-label="Start from">
+  <div class="templates" role="radiogroup" aria-label="Start from" tabindex="-1" bind:this={tplEl} onkeydown={onTplKey}>
     {#each TEMPLATES as t (t.id)}
       <button
         class="tpl"
         class:active={template === t.id}
         role="radio"
         aria-checked={template === t.id}
+        tabindex={template === t.id ? 0 : -1}
         onclick={() => (template = t.id)}
         data-testid="tpl-{t.id}"
       >
@@ -168,7 +197,7 @@
 
   {#snippet footer()}
     <button class="btn" onclick={onclose}>Cancel</button>
-    <button class="btn primary" onclick={create} disabled={!valid || busy} data-testid="create-skill">
+    <button class="btn primary" onclick={create} disabled={!valid || busy} title={!valid ? blockReason : undefined} data-testid="create-skill">
       {busy ? (template === 'import' ? 'Importing…' : 'Creating…') : template === 'import' ? 'Import skill' : 'Create skill'}
     </button>
   {/snippet}

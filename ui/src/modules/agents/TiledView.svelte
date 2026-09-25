@@ -381,8 +381,10 @@
     <EmptyState
       icon="terminal"
       title="No active sessions"
-      body="Spawn an agent or a shell. In tiled view you'll see every session at once."
-      actionLabel="New Session  ⌘T"
+      body="Start an agent or a shell (⌘T). In tiled view you'll see every session at once."
+      variant="page"
+      actionIcon="plus"
+      actionLabel="New session…"
       onaction={() => (ui.newSessionOpen = true)}
     />
   </div>
@@ -416,7 +418,7 @@
       }}
       title="Turn these tiles into a free layout: every pane edge resizable, panes nestable, presets in the ⋯ menu"
       data-testid="tiled-free-layout"
-    ><Icon name="split" size={11} /> Free layout</button>
+    ><Icon name="split" size={12} /> Free layout</button>
     </div>
   {/if}
   <div class="tiled" class:resizing bind:this={gridEl} style={gridStyle}>
@@ -505,7 +507,7 @@
               ondragend={onTileDragEnd}
             >
               <StatusDot state={tileState(s)} />
-              <span class="ph-title">{s.title ?? s.id}</span>
+              <span class="ph-title" title={s.title ?? s.id}>{s.title ?? s.id}</span>
               <span class="chip ph-chip">{s.provider ?? '?'}</span>
             </header>
             <div class="ph-body">
@@ -727,7 +729,7 @@
     flex-shrink: 0;
   }
   .ph-title {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     white-space: nowrap;
     overflow: hidden;
@@ -736,7 +738,7 @@
   }
   .ph-chip {
     height: 16px;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
@@ -751,7 +753,7 @@
     color: var(--text-dim);
   }
   .ph-cta {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     color: var(--text);
   }

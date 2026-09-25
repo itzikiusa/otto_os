@@ -61,8 +61,11 @@
   const outcome = $derived.by(() => {
     if (pending) return null;
     const by = typeof task.result?.decided_by === 'string' ? ` by ${task.result.decided_by}` : ' by you';
-    if (decision === 'denied' || task.state === 'cancelled') return { tone: 'neutral' as const, label: `Denied${by}` };
-    if (decision === 'approved' || task.state === 'done' || task.state === 'running') return { tone: 'ok' as const, label: kind === 'approval' ? `Approved${by}` : 'Answered' };
+    // Outcome verbs match the buttons that decided them (Skip… / Reject / Keep).
+    if (decision === 'denied' || task.state === 'cancelled')
+      return { tone: 'neutral' as const, label: kind === 'question' ? `Skipped${by}` : kind === 'memory' ? `Rejected${by}` : `Denied${by}` };
+    if (decision === 'approved' || task.state === 'done' || task.state === 'running')
+      return { tone: 'ok' as const, label: kind === 'approval' ? `Approved${by}` : kind === 'memory' ? `Kept${by}` : 'Answered' };
     if (task.state === 'failed') return { tone: 'bad' as const, label: 'Failed' };
     return { tone: 'neutral' as const, label: 'Closed' };
   });
@@ -169,7 +172,7 @@
         <button class="btn small primary" onclick={() => void run('handback', {}, 'hand back')} disabled={busy !== null}>{busy ? 'Handing back…' : 'Hand back'}</button>
       {:else if kind === 'memory'}
         <button class="btn small" onclick={() => void run('deny', {}, 'reject')} disabled={busy !== null}>Reject</button>
-        <button class="btn small primary" onclick={() => void run('approve', {}, 'accept')} disabled={busy !== null}>Remember</button>
+        <button class="btn small primary" onclick={() => void run('approve', {}, 'accept')} disabled={busy !== null}>Keep</button>
       {:else if kind === 'question'}
         <button class="btn small ghost" onclick={() => (denying = true)} disabled={busy !== null}>Skip…</button>
       {/if}
@@ -177,7 +180,18 @@
   {/snippet}
 </ActionCard>
 {#if denying}
-  <DenySheet action={kind === 'approval' ? verb : `answer`} onclose={() => (denying = false)} ondeny={deny} />
+  {#if kind === 'question'}
+    <DenySheet
+      action="answer"
+      title="Skip question"
+      confirmLabel="Skip"
+      hint="Otto gets no answer to this question. It sees your reason and can carry on another way."
+      onclose={() => (denying = false)}
+      ondeny={deny}
+    />
+  {:else}
+    <DenySheet action={verb} onclose={() => (denying = false)} ondeny={deny} />
+  {/if}
 {/if}
 
 <style>

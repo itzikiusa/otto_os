@@ -16,7 +16,9 @@ import { openPage } from './helpers';
 let ctx: APIRequestContext;
 let base = '';
 let wsA = '';
-const TITLE = 'e2e scratch';
+// Unique per run: scratch sessions are global on the shared daemon, and a
+// failed attempt's session (or its archived row) must not match the retry's.
+const TITLE = `e2e scratch ${Date.now().toString(36)}`;
 
 test.beforeAll(async () => {
   const a = await apiCtx();
@@ -62,7 +64,7 @@ test.describe('scratch sessions', () => {
 
     // Open the sheet via ⌘T; fall back to the TabBar + button if the shortcut
     // doesn't reach the app in this browser build.
-    const dialog = page.locator('.sheet[role="dialog"][aria-label="New Session"]');
+    const dialog = page.locator('.sheet[role="dialog"][aria-label="New session"]');
     await page.keyboard.press('Meta+t');
     if (!(await dialog.isVisible().catch(() => false))) {
       await page.getByTitle('New session (⌘T)').click();
@@ -84,7 +86,7 @@ test.describe('scratch sessions', () => {
     // Pick the plain shell (no external CLI needed in the throwaway daemon).
     await dialog.locator('.provider-card', { hasText: 'shell' }).locator('.card-main').click();
     await dialog.locator('#ns-title').fill(TITLE);
-    await dialog.getByRole('button', { name: 'Start Session' }).click();
+    await dialog.getByRole('button', { name: 'Start session' }).click();
     await expect(dialog).toHaveCount(0, { timeout: 10_000 });
 
     // Sidebar: the "No workspace" group lists it (not the flat Agents list).

@@ -11,12 +11,13 @@
   import { toasts } from '../../lib/toast.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import JsonTree from '../database/JsonTree.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
   import AwsDrawer from './AwsDrawer.svelte';
   import MetricsPanel from './MetricsPanel.svelte';
-  import { fmtAgo, fmtDate } from './util';
+  import { fmtAgo, fmtDate, awsErrorText } from './util';
   import type { AwsAccount, RdsInstance, RdsInstanceDetail } from '../../lib/api/types';
 
   interface Props {
@@ -154,9 +155,9 @@
 <div class="body">
 <div class="tbl-wrap">
   {#if loading && !instances}
-    <div class="pad"><Skeleton rows={8} /></div>
+    <div class="pad" role="status"><p class="load-note">Loading RDS instances…</p><Skeleton rows={8} /></div>
   {:else if error}
-    <EmptyState icon="cloud" title="Couldn't list DB instances" body={error} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
+    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list DB instances" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
   {:else if shown.length === 0}
     <EmptyState icon="db" title={filter ? 'No matching instances' : `No DB instances in ${region}`} />
   {:else}
@@ -186,7 +187,7 @@
             <td class="mono hide-md" title={endpointOf(i)}>{endpointOf(i) || '—'}</td>
             <td class="dim hide-md" title={fmtDate(i.created)}>{fmtAgo(i.created)}</td>
             <td class="act">
-              <button class="icon-btn" onclick={(e) => menu(e, i)} aria-label={`Actions for ${i.identifier}`} title="Actions">⋯</button>
+              <button class="icon-btn" onclick={(e) => menu(e, i)} aria-label={`Actions for ${i.identifier}`} title="Actions"><Icon name="more" size={14} /></button>
             </td>
           </tr>
         {/each}
@@ -253,6 +254,11 @@
 </div>
 
 <style>
+  .load-note {
+    margin: 0 0 10px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
   .pad {
     padding: 12px;
   }
@@ -260,7 +266,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .lbl {
     color: var(--text-dim);
@@ -273,7 +279,7 @@
     background: var(--bg);
     color: var(--text);
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 0 4px;
   }
   .body {
@@ -294,7 +300,7 @@
        and let .tbl-wrap scroll sideways instead of squeezing every cell. */
     min-width: 820px;
     border-collapse: collapse;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .tbl th {
     position: sticky;
@@ -303,7 +309,7 @@
     background: var(--surface);
     text-align: left;
     font-weight: 600;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -370,7 +376,7 @@
   }
   .tag {
     margin-left: 6px;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     padding: 0 5px;
     border-radius: 999px;
@@ -380,7 +386,7 @@
   }
   .tag.pl {
     margin: 0;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     font-weight: 400;
     padding: 2px 8px;
     border: 1px solid var(--border);
@@ -406,7 +412,7 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     padding: 12px 14px;
   }
   .kv {
@@ -424,7 +430,7 @@
   }
   h3 {
     margin: 6px 0 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -435,7 +441,7 @@
     gap: 6px;
   }
   .raw {
-    font-size: 12px;
+    font-size: var(--fs-s);
     overflow: auto;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);

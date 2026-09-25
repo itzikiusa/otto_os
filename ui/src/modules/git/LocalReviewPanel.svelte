@@ -12,6 +12,9 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
+  import { rel } from '../../lib/stores/now.svelte';
   import ReviewAgents from './ReviewAgents.svelte';
   import FindingsBoard from './FindingsBoard.svelte';
   import { agentProviders } from '../../lib/providers';
@@ -74,8 +77,14 @@
     };
   });
 
+  /** Why the base-branch list or the review history failed to load — shown
+   *  inline with Retry (a silent failure left an empty "Compare to" select). */
+  let refsError = $state<string | null>(null);
+  let historyError = $state<string | null>(null);
+
   async function loadRefs(rid: string): Promise<void> {
     refsLoading = true;
+    refsError = null;
     try {
       refs = await api.get<RefsResp>(`/repos/${rid}/refs`);
       // Pick a sensible default base.
@@ -92,8 +101,8 @@
       const allNames = [...remotes.map((r) => r.name), ...locals.map((l) => l.name)];
       const hit = preferred.find((p) => allNames.includes(p));
       selectedBase = hit ?? remotes[0]?.name ?? locals[0]?.name ?? '';
-    } catch {
-      // non-blocking
+    } catch (e) {
+      refsError = loadErrorText(e);
     } finally {
       refsLoading = false;
     }
@@ -101,6 +110,7 @@
 
   async function loadExisting(rid: string): Promise<void> {
     reviewLoading = true;
+    historyError = null;
     try {
       const runs = await api.get<Review[]>(`/repos/${rid}/local-reviews`);
       history = runs;
@@ -121,7 +131,7 @@
         review = null;
         history = [];
       } else {
-        toasts.error('Could not load local review', e instanceof Error ? e.message : String(e));
+        historyError = loadErrorText(e);
       }
     } finally {
       reviewLoading = false;
@@ -272,13 +282,8 @@
   // History helpers
   // ---------------------------------------------------------------------------
 
-  function timeAgo(iso: string): string {
-    const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
-    if (diff < 60) return `${diff}s ago`;
-    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-    return `${Math.floor(diff / 86400)}d ago`;
-  }
+  // The shared, self-ticking relative time (lib/stores/now) — no local formatter.
+  const timeAgo = (iso: string): string => rel(iso);
 
   function toggleHistoryRun(idx: number): void {
     historyExpanded = { ...historyExpanded, [idx]: !historyExpanded[idx] };
@@ -303,6 +308,8 @@
     <label class="lrp-label" for="lrp-base">Compare to</label>
     {#if refsLoading}
       <div class="lrp-select-skeleton"></div>
+    {:else if refsError}
+      <LoadState what="branches" error={refsError} empty variant="compact" onretry={() => void loadRefs(repoId)} />
     {:else}
       <select id="lrp-base" class="lrp-select" bind:value={selectedBase} disabled={starting}>
         {#each allBranches as b (b)}
@@ -313,27 +320,30 @@
         {/if}
       </select>
     {/if}
+    <!-- The view's one primary until a finished review offers "Send to agent". -->
     <button
-      class="btn primary small"
+      class="btn small"
+      class:primary={review?.status !== 'done'}
       disabled={starting || !selectedBase || refsLoading}
       onclick={startReview}
     >
       {#if starting}
         <span class="spinner-xs"></span>Starting…
       {:else}
-        <Icon name="zap" size={11} />
-        Review changes
+        <Icon name="zap" size={12} />
+        {review?.status === 'done' ? 'Review again' : 'Review changes'}
       {/if}
     </button>
-    <span class="lrp-cfg-note dim">
-      Uses the same agents as
-      <a href="#/settings/pr-review" onclick={(e) => { e.preventDefault(); router.go('settings/pr-review'); }}>PR review</a>
+    <span class="lrp-cfg-note dim" title="Configure them from a pull request’s Review tab">
+      Uses the review agents configured for pull requests
     </span>
   </div>
 
   <!-- Body -->
   {#if reviewLoading}
     <div style="padding: 16px"><Skeleton rows={4} height={36} /></div>
+  {:else if historyError && !review}
+    <LoadState what="past local reviews" error={historyError} empty onretry={() => void loadExisting(repoId)} />
   {:else if !review}
     <EmptyState
       icon="zap"
@@ -350,12 +360,12 @@
     {#if review.agents && review.agents.length > 0}
       <ReviewAgents {review} view="running" onretried={onAgentRetried} />
     {:else}
-      <p class="dim" style="font-size:12px;padding:8px 0">Agents starting…</p>
+      <p class="dim" style="font-size: var(--fs-s);padding:8px 0">Agents starting…</p>
     {/if}
   {:else if review.status === 'error'}
-    <div class="lrp-error card">
-      <Icon name="zap" size={14} />
-      <span class="lrp-error-msg">{review.error ?? 'An unknown error occurred.'}</span>
+    <div class="lrp-error card" role="alert">
+      <Icon name="warning" size={14} />
+      <span class="lrp-error-msg">The review failed. <span class="dim">{review.error ?? 'No reason was reported — check Settings → Logs.'}</span></span>
       <button class="btn small" disabled={starting} onclick={startReview}>
         {starting ? 'Starting…' : 'Try again'}
       </button>
@@ -364,7 +374,7 @@
     <!-- done -->
     {#if review.summary_fallback}
       <p class="lrp-fallback-note dim" title="The claude summarizer was unavailable; these findings were deduped and ranked by the deterministic Rust-side fallback.">
-        ⚠ deterministic fallback (claude unavailable) — findings were deduped and ranked mechanically.
+        <Icon name="warning" size={12} /> The summarizer was unavailable, so findings were deduplicated and ranked mechanically.
       </p>
     {/if}
     <!-- Findings workflow board: persisted Finding rows with the 6-state status,
@@ -382,7 +392,7 @@
       <ReviewAgents {review} view="done" onretried={onAgentRetried} />
     {/if}
     {#if review.comments.length === 0}
-      <p class="dim" style="font-size: 12.5px; padding: 16px 0">
+      <p class="dim" style="font-size: var(--fs-s); padding: 16px 0">
         No findings — your changes look clean vs <strong>{selectedBase || 'base'}</strong>.
       </p>
     {:else}
@@ -392,14 +402,6 @@
           <button class="btn small ghost" onclick={selectAll} disabled={allSelected}>Select all</button>
           <button class="btn small ghost" onclick={selectNone} disabled={noneSelected}>None</button>
         </div>
-        <span class="grow"></span>
-        <button
-          class="btn small primary"
-          disabled={checkedIds.length === 0}
-          onclick={openHandoffMenu}
-        >
-          Send to agent ({checkedIds.length}) ▾
-        </button>
       </div>
 
       <div class="lrp-list">
@@ -427,13 +429,13 @@
 
       <!-- Bottom handoff bar -->
       <div class="lrp-handoff-bar">
-        <span class="dim" style="font-size:12px">{checkedIds.length} of {review.comments.length} selected</span>
+        <span class="dim" style="font-size: var(--fs-s)">{checkedIds.length} of {review.comments.length} selected</span>
         <button
           class="btn primary"
           disabled={checkedIds.length === 0}
           onclick={openHandoffMenu}
         >
-          Send to agent ({checkedIds.length}) ▾
+          Send to agent ({checkedIds.length}) <Icon name="chevronDown" size={14} />
         </button>
       </div>
     {/if}
@@ -448,7 +450,7 @@
         onclick={() => { historyExpanded = { ...historyExpanded, ['_header' as unknown as number]: !headerOpen }; }}
         aria-expanded={headerOpen}
       >
-        Past reviews ({pastRuns.length}){headerOpen ? ' ▾' : ' ▸'}
+        <Icon name={headerOpen ? 'chevronDown' : 'chevronRight'} size={12} /> Past reviews ({pastRuns.length})
       </button>
       {#if headerOpen}
         <div class="lrp-history-list">
@@ -460,19 +462,19 @@
                 onclick={() => toggleHistoryRun(i)}
                 aria-expanded={isOpen}
               >
-                <span class="dim" style="font-size:11px">{timeAgo(run.created_at)}</span>
+                <span class="dim" style="font-size: var(--fs-xs)">{timeAgo(run.created_at)}</span>
                 <StatusBadge status={runStatus(run.status)} />
                 {#if run.agents && run.agents.length > 0}
-                  <span class="dim" style="font-size:10.5px">{run.agents.filter(a => a.status === 'done').length}/{run.agents.length} agents</span>
+                  <span class="dim" style="font-size:var(--fs-xs)">{run.agents.filter(a => a.status === 'done').length}/{run.agents.length} agents</span>
                 {/if}
-                <span class="dim" style="font-size:10.5px">{run.comments.length} finding{run.comments.length === 1 ? '' : 's'}</span>
+                <span class="dim" style="font-size:var(--fs-xs)">{run.comments.length} finding{run.comments.length === 1 ? '' : 's'}</span>
                 <span class="grow"></span>
-                <span class="dim" style="font-size:10px">{isOpen ? '▾' : '▸'}</span>
+                <span class="dim" aria-hidden="true"><Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} /></span>
               </button>
               {#if isOpen}
                 <div class="lrp-history-run-body">
                   {#if run.comments.length === 0}
-                    <p class="dim" style="font-size:11.5px;padding:4px 0">No findings for this run.</p>
+                    <p class="dim" style="font-size: var(--fs-xs);padding:4px 0">No findings for this run.</p>
                   {:else}
                     {#each run.comments as c (c.id)}
                       <div class="lrp-comment card lrp-history-comment" style="cursor:default">
@@ -507,9 +509,15 @@
   }
 
   .lrp-fallback-note {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     margin: 8px 0 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
+  }
+  .lrp-fallback-note > :global(svg) {
     color: var(--warning);
+    flex-shrink: 0;
   }
 
   /* Findings workflow board section */
@@ -519,7 +527,7 @@
     border-top: 1px solid var(--border);
   }
   .lrp-findings-title {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
     margin: 0 0 4px;
   }
@@ -535,16 +543,16 @@
     margin-bottom: 4px;
   }
   .lrp-label {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     white-space: nowrap;
   }
   .lrp-select {
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     padding: 4px 8px;
     min-width: 180px;
     max-width: 260px;
@@ -557,15 +565,8 @@
     animation: pulse 1.4s ease-in-out infinite;
   }
   .lrp-cfg-note {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     margin-inline-start: auto;
-  }
-  .lrp-cfg-note a {
-    color: var(--accent-text);
-    text-decoration: none;
-  }
-  .lrp-cfg-note a:hover {
-    text-decoration: underline;
   }
 
   /* Running */
@@ -576,7 +577,7 @@
     padding: 12px 0 8px;
   }
   .lrp-running-title {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .spinner {
@@ -618,7 +619,7 @@
     gap: 8px;
   }
   .lrp-agent-name {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
   }
   .lrp-agent-chip {
@@ -626,7 +627,7 @@
   }
   .lrp-agent-note {
     margin: 4px 0 0;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1.4;
   }
@@ -644,7 +645,7 @@
     flex: 1;
     min-width: 0;
     overflow-wrap: anywhere;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
 
   /* Findings */
@@ -656,7 +657,7 @@
     flex-wrap: wrap;
   }
   .lrp-findings-count {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
   }
   .lrp-sel-btns {
@@ -699,13 +700,13 @@
   }
   .lrp-comment-text {
     margin: 0;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     line-height: 1.55;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
   .lrp-loc {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -714,22 +715,29 @@
   }
 
   /* Handoff bar at bottom */
+  /* Pinned to the bottom of the scrolling tab so the one "Send to agent"
+     action stays in reach however long the findings list is. */
   .lrp-handoff-bar {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 12px;
-    padding-top: 12px;
+    padding: 10px 0;
     margin-top: 8px;
     border-top: 1px solid var(--border);
+    background: var(--bg);
   }
 
   /* Severity chips */
   .severity-chip {
     display: inline-block;
     padding: 2px 7px;
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }
@@ -757,10 +765,13 @@
     padding-top: 10px;
   }
   .lrp-history-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     background: none;
     border: none;
     cursor: pointer;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
     padding: 0;

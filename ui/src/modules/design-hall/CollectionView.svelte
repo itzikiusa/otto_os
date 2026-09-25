@@ -109,7 +109,7 @@
     if (!project) return;
     const ok = await confirmer.ask(
       `Archive the project “${project.name}”? Its designs stay in the library (unchanged) and can be filed elsewhere.`,
-      { title: 'Archive project', confirmLabel: 'Archive' },
+      { title: 'Archive project', confirmLabel: 'Archive', danger: false },
     );
     if (!ok) return;
     try {

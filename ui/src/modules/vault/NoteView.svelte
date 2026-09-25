@@ -249,7 +249,7 @@
 {#if vault.note}
   <div class="note-view">
     <header>
-      <nav class="crumbs" aria-label="Note path">
+      <nav class="crumbs" aria-label="Note path" title={vault.notePath ?? ''}>
         {#each crumb as part, i (i)}
           {#if i < crumb.length - 1}
             <span class="c dim">{part}</span><span class="sep">/</span>
@@ -259,26 +259,32 @@
         {/each}
       </nav>
       <div class="actions">
-        <button class="mode-btn" title="Note edit history" onclick={() => void vault.openHistory(vault.notePath ?? '')}><Icon name="clock" size={14} /></button>
+        <!-- Save state sits BEFORE the tools, so it appearing/disappearing
+             never shifts the buttons under the pointer. -->
         {#if vault.saving}
-          <span class="save-state">saving…</span>
+          <span class="save-state" role="status">Saving…</span>
         {:else if vault.dirty}
-          <span class="save-state">edited</span>
+          <span class="save-state" title="Autosaves in a moment">Unsaved</span>
         {/if}
+        <button class="mode-btn" title="Note edit history" aria-label="Note edit history" onclick={() => void vault.openHistory(vault.notePath ?? '')}><Icon name="clock" size={14} /></button>
         <button
           class="mode-btn"
           class:refine-on={refineShown}
           title="Refine with AI"
+          aria-label="Refine with AI"
+          aria-pressed={refineShown}
           onclick={toggleRefine}
         >
-          <Icon name="zap" size={14} />
+          <Icon name="sparkle" size={14} />
         </button>
         <button
-          class="mode-btn"
+          class="mode-btn labelled"
           title={vault.editing ? 'Reading view (⌘E)' : 'Edit (⌘E)'}
+          aria-pressed={vault.editing}
           onclick={() => vault.setView(!vault.editing)}
         >
-          <Icon name={vault.editing ? 'eye' : 'edit'} size={14} />
+          <Icon name={vault.editing ? 'eye' : 'edit'} size={13} />
+          {vault.editing ? 'Read' : 'Edit'}
         </button>
       </div>
     </header>
@@ -286,8 +292,8 @@
     {#if vault.conflict}
       <div class="conflict" role="alert">
         This note changed on disk while you were editing. Your edits are kept until you choose.
-        <button onclick={() => void vault.conflictOverwrite()} title="Save your version; the disk version stays in History">Keep my edits</button>
-        <button class="danger" onclick={() => void vault.conflictReload()}>Discard my edits…</button>
+        <button class="btn small" onclick={() => void vault.conflictOverwrite()} title="Save your version; the disk version stays in History">Keep my edits</button>
+        <button class="btn small danger" onclick={() => void vault.conflictReload()}>Discard my edits…</button>
       </div>
     {/if}
 
@@ -338,12 +344,28 @@
     border-bottom: 1px solid var(--border);
     gap: 8px;
   }
+  /* Long paths ellipsize per segment (folders first, they shrink before the
+     note name) instead of being cut mid-glyph at the pane edge. */
   .crumbs {
     display: flex;
     gap: 4px;
-    font-size: 12.5px;
+    min-width: 0;
+    font-size: var(--fs-s);
     overflow: hidden;
     white-space: nowrap;
+  }
+  .c {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .c.dim {
+    flex-shrink: 100;
+    min-width: 1.5em;
+  }
+  .sep,
+  .actions {
+    flex-shrink: 0;
   }
   .c.dim,
   .sep {
@@ -355,50 +377,53 @@
     gap: 8px;
   }
   .save-state {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
+  /* Same quiet chrome as the header's icon buttons (no boxed outlines); the
+     Edit/Read toggle carries a label so the main verb is findable. */
   .mode-btn {
     background: none;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text);
-    padding: 4px 7px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-s);
+    color: var(--text-dim);
+    height: 28px;
+    min-width: 28px;
+    padding: 0 7px;
     cursor: pointer;
     display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    font: inherit;
+    font-size: var(--fs-s);
   }
   .mode-btn:hover {
     background: var(--hover);
+    color: var(--text);
+  }
+  .mode-btn.labelled {
+    border-color: var(--border);
+    color: var(--text);
   }
   .mode-btn.refine-on {
-    border-color: var(--accent, #7a9cff);
-    color: var(--accent, #9ab4ff);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border-color: var(--accent);
+    color: var(--accent-text);
+    background: var(--accent-soft);
   }
   .conflict {
     display: flex;
+    flex-wrap: wrap;
     gap: 10px;
     align-items: center;
     margin: 8px 14px 0;
     padding: 8px 12px;
-    border: 1px solid #b58a2c;
-    background: rgba(181, 138, 44, 0.12);
+    border: 1px solid color-mix(in srgb, var(--warning) 55%, transparent);
+    background: var(--warning-soft);
     border-radius: 8px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
-  .conflict button {
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text);
-    border-radius: 6px;
-    padding: 3px 10px;
-    cursor: pointer;
-    font-size: 12px;
-  }
-  .conflict button.danger {
-    border-color: #a33;
-    color: var(--status-exited);
-  }
+
   .editor-wrap {
     flex: 1;
     min-height: 0;
@@ -422,7 +447,7 @@
     line-height: 1.6;
   }
   .read :global(a.internal-link) {
-    color: var(--accent, #7a9cff);
+    color: var(--accent-text);
     cursor: pointer;
     text-decoration: none;
     border-bottom: 1px solid transparent;
@@ -436,7 +461,7 @@
   }
   .read :global(span.tag) {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent, #9ab4ff);
+    color: var(--accent-text);
     border-radius: 999px;
     padding: 1px 8px;
     font-size: 0.85em;
@@ -444,41 +469,41 @@
   }
   .read :global(div.note-embed) {
     border: 1px solid var(--border);
-    border-inline-start: 3px solid var(--accent, #7a9cff);
+    border-inline-start: 3px solid var(--accent);
     border-radius: 8px;
     padding: 8px 12px;
     margin: 8px 0;
   }
   .read :global(div.note-embed .embed-title) {
     font-weight: 600;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .read :global(div.note-embed.embed-error) {
     opacity: 0.5;
   }
   .read :global(blockquote.callout) {
-    border-inline-start: 3px solid var(--accent, #7a9cff);
+    border-inline-start: 3px solid var(--accent);
     background: color-mix(in srgb, var(--accent) 8%, transparent);
     border-radius: 6px;
     padding: 8px 12px;
     margin: 8px 0;
   }
   .read :global(blockquote.callout .callout-title) {
-    font-weight: 700;
-    font-size: 12px;
+    font-weight: 600;
+    font-size: var(--fs-s);
     text-transform: capitalize;
     margin-bottom: 4px;
   }
   .read :global(blockquote.callout-warning),
   .read :global(blockquote.callout-caution) {
-    border-inline-start-color: var(--status-warn);
-    background: rgba(214, 165, 72, 0.08);
+    border-inline-start-color: var(--warning);
+    background: var(--warning-soft);
   }
   .read :global(blockquote.callout-danger),
   .read :global(blockquote.callout-bug) {
-    border-inline-start-color: #d65648;
-    background: rgba(214, 86, 72, 0.08);
+    border-inline-start-color: var(--danger);
+    background: var(--danger-soft);
   }
   .read :global(img) {
     max-width: 100%;
@@ -508,12 +533,12 @@
   }
   .read :global(div.diagram-error) {
     color: var(--status-exited);
-    font-size: 12px;
+    font-size: var(--fs-s);
     margin-bottom: 8px;
   }
   .read :global(pre.diagram-src) {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .read :global(table) {
     border-collapse: collapse;

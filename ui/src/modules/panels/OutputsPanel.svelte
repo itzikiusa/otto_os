@@ -18,6 +18,7 @@
   import { authedBlobUrl, authedText } from '../../lib/api/client';
   import { renderNote } from '../vault/mdRender';
   import { toasts } from '../../lib/toast.svelte';
+  import { rel } from '../../lib/stores/now.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import type { Artifact } from '../../lib/api/types';
@@ -164,19 +165,11 @@
     }
   }
 
-  function relTime(iso: string | null): string {
+  /** Absolute time for the hover title next to the relative `rel()` label. */
+  function absTime(iso: string | null): string {
     if (!iso) return '';
-    try {
-      const secs = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
-      if (secs < 60) return 'now';
-      const mins = Math.floor(secs / 60);
-      if (mins < 60) return `${mins}m`;
-      const hrs = Math.floor(mins / 60);
-      if (hrs < 24) return `${hrs}h`;
-      return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-    } catch {
-      return '';
-    }
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? '' : d.toLocaleString();
   }
 
   function downloadName(a: Artifact): string {
@@ -216,7 +209,7 @@
               <span class="aicon"><Icon name={KIND_ICON[a.kind] ?? 'file'} size={12} /></span>
               <span class="alabel">{a.label}</span>
               <span class="ameta mono">{ext(a) || a.kind}</span>
-              <span class="ameta mono">{relTime(a.produced_at)}</span>
+              <span class="ameta mono" title={absTime(a.produced_at)}>{a.produced_at ? rel(a.produced_at) : ''}</span>
             </button>
           </li>
         {/each}
@@ -242,9 +235,15 @@
           </span>
         </div>
         {#if loading}
-          <div class="pbody dim">Loading…</div>
+          <div class="pbody dim">Loading preview…</div>
         {:else if error}
-          <div class="pbody err">{error}</div>
+          <div class="pbody err" role="alert">
+            <div class="err-head"><Icon name="warning" size={13} /> Couldn't load the preview</div>
+            <div class="err-detail">{error}</div>
+            <button class="btn small" onclick={() => void select(selected!)}>
+              <Icon name="refresh" size={12} /> Retry
+            </button>
+          </div>
         {:else if preview?.kind === 'link'}
           <div class="pbody">
             <a class="ext-link" href={preview.url} target="_blank" rel="noopener noreferrer">
@@ -311,7 +310,7 @@
     padding: 1px 7px;
   }
   .empty-line {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.4;
     margin: 2px 10px 10px;
   }
@@ -346,7 +345,7 @@
     background: transparent;
     color: var(--text);
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-s);
     text-align: start;
     cursor: pointer;
   }
@@ -387,7 +386,7 @@
     gap: 6px;
     padding: 6px 10px;
     border-bottom: 1px solid var(--border);
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
   }
   .ptitle {
@@ -422,7 +421,7 @@
     min-height: 0;
     overflow: auto;
     padding: 10px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
   }
   .pbody.media {
@@ -436,15 +435,32 @@
   }
   .pbody.text {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     white-space: pre-wrap;
     word-break: break-word;
   }
   .pbody.err {
-    color: var(--status-exited, #e5534b);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+  .err-head {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text);
+  }
+  .err-head :global(svg) {
+    color: var(--danger);
+  }
+  .err-detail {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    word-break: break-word;
   }
   .path {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     word-break: break-all;
     margin-bottom: 6px;
   }

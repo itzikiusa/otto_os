@@ -1,6 +1,8 @@
 <script lang="ts">
   import type { GraphView, GraphNode } from '../../lib/api/types';
-  import { KIND_LABEL, WORK_KINDS, statusColor } from './lib';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { sentenceCase } from '../../lib/status';
+  import { KIND_LABEL, STATUS_LABEL, WORK_KINDS, statusColor } from './lib';
 
   interface Props {
     graph: GraphView;
@@ -47,13 +49,16 @@
 
 <div class="graph-wrap">
   {#if graph.nodes.length === 0}
-    <div class="graph-empty dim">No work items match the current filters.</div>
+    <EmptyState icon="share" title="Nothing to graph" body="No work items match the current filters." />
   {:else}
+    <!-- Drawn 1:1 (px = viewBox units): scaling a 2-column graph to the pane
+         width blew its labels up to ~2× the type scale. Wide graphs scroll. -->
     <svg
       class="graph-svg"
+      width={layout.width}
+      height={layout.height}
       viewBox={`0 0 ${layout.width} ${layout.height}`}
-      preserveAspectRatio="xMidYMin meet"
-      role="img"
+      role="group"
       aria-label="Work graph"
     >
       <!-- column headers -->
@@ -68,7 +73,7 @@
         {#if a && b}
           <line class="edge" x1={a.x} y1={a.y} x2={b.x} y2={b.y} />
           <text class="edge-label" x={(a.x + b.x) / 2} y={(a.y + b.y) / 2 - 3} text-anchor="middle">
-            {e.relation.replace('_', ' ')}
+            {sentenceCase(e.relation)}
           </text>
         {/if}
       {/each}
@@ -80,6 +85,8 @@
           class:selected={p.node.id === selectedId}
           role="button"
           tabindex="0"
+          aria-label="{p.node.title} — {KIND_LABEL[p.node.kind]}, {STATUS_LABEL[p.node.status] ?? p.node.status}{p.node.needs_approval ? ', needs approval' : ''}"
+          aria-pressed={p.node.id === selectedId}
           onclick={() => onOpen(p.node.id)}
           onkeydown={(ev) => {
             if (ev.key === 'Enter' || ev.key === ' ') {
@@ -88,7 +95,7 @@
             }
           }}
         >
-          <title>{p.node.title} — {p.node.status}</title>
+          <title>{p.node.title} — {STATUS_LABEL[p.node.status] ?? p.node.status}</title>
           <circle cx={p.x} cy={p.y} r={p.r} fill={statusColor(p.node.status)} />
           {#if p.node.needs_approval}
             <circle class="approve-ring" cx={p.x} cy={p.y} r={p.r + 4} />
@@ -105,7 +112,7 @@
     width: 100%;
     overflow: auto;
     border: 1px solid var(--border);
-    border-radius: var(--radius-m, 8px);
+    border-radius: var(--radius-m);
     background:
       radial-gradient(circle at 1px 1px, color-mix(in srgb, var(--border) 60%, transparent) 1px, transparent 0)
       0 0 / 22px 22px;
@@ -113,24 +120,16 @@
   }
   .graph-svg {
     display: block;
-    width: 100%;
-    height: auto;
-    min-height: 260px;
+    margin-inline: auto;
+    max-width: none;
   }
-  .graph-empty {
-    padding: 48px 16px;
-    text-align: center;
-    min-height: 200px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
+  /* The .section-title look, drawn in SVG. */
   .col-head {
     fill: var(--text-dim);
-    font-size: 11px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.06em;
   }
   .edge {
     stroke: var(--text-dim);
@@ -139,11 +138,11 @@
   }
   .edge-label {
     fill: var(--text-dim);
-    font-size: 9px;
-    opacity: 0.8;
+    font-size: var(--fs-xs);
   }
   .node {
     cursor: pointer;
+    outline: none;
   }
   .node circle {
     stroke: var(--bg);
@@ -153,8 +152,15 @@
   .node:hover circle {
     stroke: var(--text);
   }
+  /* Keyboard focus: a visible accent ring (the <g> can't draw an outline). */
+  .node:focus-visible > circle:first-of-type {
+    stroke: var(--accent);
+    stroke-width: 3;
+    stroke-dasharray: 2 2;
+  }
+  /* Selection is the accent (foundations) — green read as "succeeded". */
   .node.selected > circle {
-    stroke: var(--success);
+    stroke: var(--accent);
     stroke-width: 3;
   }
   .approve-ring {
@@ -167,5 +173,10 @@
     fill: var(--text);
     font-size: var(--fs-xs);
     pointer-events: none;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .node circle {
+      transition: none;
+    }
   }
 </style>

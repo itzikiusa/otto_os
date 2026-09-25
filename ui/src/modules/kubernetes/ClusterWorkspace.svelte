@@ -361,18 +361,16 @@
   {#snippet actions()}
     <span class="ns-keep" data-keep><NamespacePicker allowAll={can(readOperation(kind), '')} bind:this={nsPicker} value={k8s.namespace} namespaces={k8s.namespaces} error={k8s.namespacesError} disabled={clusterScoped} onchange={(ns) => k8s.setNamespace(ns)} /></span>
 
-    <div class="filter">
-      <Icon name="search" size={12} />
-      <input bind:this={filterEl} class="filter-in" placeholder="Filter  ( / )" bind:value={k8s.filter} aria-label="Filter rows" data-testid="k8s-filter" />
-      {#if k8s.filter}<button class="icon-btn" onclick={() => (k8s.filter = '')} aria-label="Clear filter"><Icon name="x" size={11} /></button>{/if}
-    </div>
+    {#if !viewport.isPhone}
+    {@render filterBox()}
+    {/if}
 
     <span class="meta dim" title={k8s.rowsLoadedAt ? new Date(k8s.rowsLoadedAt).toLocaleTimeString() : ''}>
       {#if k8s.rowsLoading}loading…{:else if lastLoaded}{k8s.filteredRows.length}{k8s.filter ? `/${rowsForKey.length}` : ''} · {lastLoaded} ago{/if}
     </span>
     <button class="icon-btn" onclick={() => void k8s.loadResources()} title="Refresh (r)" aria-label="Refresh"><Icon name="refresh" size={14} /></button>
     <button class="pill-toggle" class:on={k8s.autoRefresh} onclick={() => k8s.setAutoRefresh(!k8s.autoRefresh)} aria-pressed={k8s.autoRefresh} title="Auto-refresh every 10 s">
-      <Icon name="clock" size={11} /> Auto
+      <Icon name="clock" size={12} /> Auto
     </button>
     <button class="btn small" onclick={() => router.go(`kubernetes/monitor/${encodeURIComponent(cluster.id)}/workloads`)} title="Monitoring dashboard for this cluster" data-testid="k8s-monitor-cluster-btn">
       <Icon name="gauge" size={12} /> Monitor
@@ -403,17 +401,20 @@
   {:else}
     <div class="body" bind:this={bodyEl} class:resizing>
       {#if viewport.isPhone}
+        <!-- Phone: the header can't hold a text field (it never collapses into ⋯),
+             so the row filter sits beside the kind picker instead. -->
         <div class="kinds-mobile">
           <select class="input" aria-label="Resource kind" value={kind} onchange={(e) => goKind((e.currentTarget as HTMLSelectElement).value as K8sResourceKind)} data-testid="k8s-kinds">
             {#each kinds as k (k.id)}<option value={k.id}>{k.label}</option>{/each}
           </select>
+          {@render filterBox()}
         </div>
       {:else}
         <nav class="kinds" aria-label="Resource kinds" data-testid="k8s-kinds">
           {#each kinds as k (k.id)}
             <button class="kind" class:active={k.id === kind} class:crd={!!k.requires} onclick={() => goKind(k.id)} aria-current={k.id === kind ? 'page' : undefined}>
               {k.label}
-              {#if k.id === kind && !k8s.rowsLoading}<span class="cnt mono">{rowsForKey.length}</span>{/if}
+              {#if k.id === kind && !k8s.rowsLoading && !(k8s.rowsError && !rowsForKey.length)}<span class="cnt mono">{rowsForKey.length}</span>{/if}
             </button>
           {/each}
         </nav>
@@ -517,6 +518,14 @@
   </Modal>
 {/if}
 
+{#snippet filterBox()}
+  <div class="filter">
+    <Icon name="search" size={12} />
+    <input bind:this={filterEl} class="filter-in" placeholder="Filter  ( / )" bind:value={k8s.filter} aria-label="Filter rows" data-testid="k8s-filter" />
+    {#if k8s.filter}<button class="icon-btn" onclick={() => (k8s.filter = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={12} /></button>{/if}
+  </div>
+{/snippet}
+
 <style>
   .wsp {
     display: flex;
@@ -543,7 +552,7 @@
     font-weight: 600;
   }
   .ver {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .filter {
@@ -569,14 +578,14 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     outline: none;
   }
   .spacer {
     flex: 1;
   }
   .meta {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     white-space: nowrap;
   }
   .body {
@@ -611,7 +620,7 @@
     text-align: left;
     padding: 5px 8px;
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     cursor: pointer;
   }
@@ -638,8 +647,17 @@
     right: 10px;
     z-index: 2;
   }
+  .kinds-mobile {
+    display: flex;
+    gap: 6px;
+  }
   .kinds-mobile .input {
-    width: 100%;
+    flex: 0 0 44%;
+    min-width: 0;
+  }
+  .kinds-mobile .filter {
+    flex: 1 1 auto;
+    height: auto;
   }
   .center {
     flex: 1;
@@ -698,7 +716,7 @@
     align-items: center;
     gap: 8px;
     padding: 4px 10px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     border-bottom: 1px solid var(--border);
   }
   .k9s-term {
@@ -711,7 +729,7 @@
     grid-template-columns: auto 1fr;
     gap: 6px 14px;
     margin: 0;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .hints dt {
     text-align: right;
@@ -727,7 +745,7 @@
     border: 1px solid var(--border);
     background: var(--surface-2);
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-align: center;
   }
   .dim {

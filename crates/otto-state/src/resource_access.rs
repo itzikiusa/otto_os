@@ -504,9 +504,13 @@ impl ResourceAccessRepo {
             ));
         }
         validate_policy(policy)?;
+        // IMMEDIATE: this reads (reference checks) and then writes. A DEFERRED
+        // transaction another connection commits under in between fails at
+        // once with SQLITE_BUSY_SNAPSHOT (code 517), which busy_timeout can't
+        // wait out — creating a connection then 500'd under concurrent writes.
         let mut tx = self
             .pool
-            .begin()
+            .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(dberr("policy update begin"))?;
         validate_policy_references(&mut tx, policy).await?;

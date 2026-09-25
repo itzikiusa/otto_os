@@ -595,7 +595,15 @@ pub async fn preview_restore(
     archive: &StateArchive,
     conflicts: ConflictPolicy,
 ) -> ApiResult<RestorePreview> {
-    let mut tx = ctx.pool.begin().await.map_err(db_error)?;
+    // IMMEDIATE: the dry run reads, then inserts. A DEFERRED transaction that
+    // another connection commits under between the two fails at once with
+    // SQLITE_BUSY_SNAPSHOT ("database is locked", code 517) — busy_timeout
+    // can't wait that out — which surfaced as a preview that can't restore.
+    let mut tx = ctx
+        .pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(db_error)?;
     let tables = validate_archive(&mut tx, archive).await?;
     let restore_id = restore_id(archive)?;
     let applied = apply_rows(&mut tx, &ctx.data_dir, archive, &tables, &restore_id).await;
@@ -643,7 +651,13 @@ async fn restore_owned(
     if !options.confirm || options.preview_token.is_empty() {
         return Err(invalid("Review a preview and confirm before restoring"));
     }
-    let mut tx = ctx.pool.begin().await.map_err(db_error)?;
+    // IMMEDIATE for the same reason as the preview: take the write lock (with
+    // busy_timeout) before the first read, never upgrade mid-transaction.
+    let mut tx = ctx
+        .pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(db_error)?;
     let tables = validate_archive(&mut tx, archive).await?;
     let id = restore_id(archive)?;
     let rows = apply_rows(&mut tx, &ctx.data_dir, archive, &tables, &id).await?;

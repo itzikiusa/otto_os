@@ -62,7 +62,7 @@ function pluginsHome(): string {
 async function pluginFrame(page: Page, slug: string): Promise<FrameLocator> {
   await page.goto(`/#/plugin/${slug}`);
   await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
-  const frame = page.frameLocator(`iframe[title="${slug}"]`);
+  const frame = page.frameLocator(`iframe[data-plugin="${slug}"]`);
   return frame;
 }
 

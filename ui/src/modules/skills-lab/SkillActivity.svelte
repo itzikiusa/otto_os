@@ -12,8 +12,10 @@
   import { skillsEvalApi } from '../../lib/api/skillsEval';
   import { skillReviewApi } from '../../lib/api/skillReview';
   import { rel } from '../../lib/stores/now.svelte';
+  import { runStatus } from '../../lib/status';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import Sparkline from '../../lib/components/Sparkline.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import { sourceLabel, type SkillGroup } from './skillGroups';
@@ -24,8 +26,14 @@
     wsId: string;
     onevaluate: () => void;
     onreview: () => void;
+    /** Open one evaluation run in the Evaluator. */
+    onopenrun?: (id: string) => void;
+    /** Open one existing review in the Review tab. */
+    onopenreview?: (id: string) => void;
+    /** Switch the detail pane to another tab (Usage → Evals). */
+    onview?: (v: 'evals' | 'usage') => void;
   }
-  let { group, view, wsId, onevaluate, onreview }: Props = $props();
+  let { group, view, wsId, onevaluate, onreview, onopenrun, onopenreview, onview }: Props = $props();
 
   let evals = $state<SkillEval[] | null>(null);
   let reviews = $state<SkillReview[] | null>(null);
@@ -44,9 +52,10 @@
     evals = e.status === 'fulfilled' ? e.value : [];
     reviews = r.status === 'fulfilled' ? r.value : [];
     golden = g.status === 'fulfilled' ? g.value : [];
-    if (e.status === 'rejected' && r.status === 'rejected') {
-      error = e.reason instanceof Error ? e.reason.message : String(e.reason);
-    }
+    // Any failed source is an error, not a zero: "Not evaluated yet" over a
+    // failed load would be a lie.
+    const failed = [e, r, g].find((x) => x.status === 'rejected') as PromiseRejectedResult | undefined;
+    if (failed) error = failed.reason instanceof Error ? failed.reason.message : String(failed.reason);
   }
   $effect(() => {
     if (!wsId || loadedFor === wsId) return;
@@ -69,12 +78,9 @@
   const passCount = $derived(myEvals.filter((e) => e.status === 'done').length);
   const failCount = $derived(myEvals.filter((e) => e.status === 'error').length);
 
-  function statusLabel(s: string): string {
-    return s === 'done' ? 'Passed' : s === 'error' ? 'Failed' : s === 'running' ? 'Running' : s === 'cancelled' ? 'Cancelled' : s;
-  }
-  function statusTone(s: string): string {
-    return s === 'done' ? 'success' : s === 'error' ? 'danger' : s === 'running' ? 'info' : 'neutral';
-  }
+  // The shared run vocabulary (lib/status.ts). A `done` run finished — it
+  // didn't necessarily *pass* (a 20/100 run is still `done`), so it must not
+  // read "Passed".
   function fmtScore(v: number): string {
     return `${Math.round(v)}`;
   }
@@ -115,7 +121,7 @@
       case 'codex':
         return '~/.codex/skills/' + group.name;
       case 'agy':
-        return '~/.agy/skills/' + group.name;
+        return '~/.gemini/skills/' + group.name;
       default:
         return `~/.${source}/skills/${group.name}`;
     }
@@ -154,12 +160,12 @@
       <div class="card stat">
         <div class="stat-label">Runs</div>
         <div class="stat-value">{myEvals.length}</div>
-        <div class="stat-sub"><span class="ok-text">{passCount} passed</span>{#if failCount} · <span class="bad-text">{failCount} failed</span>{/if}</div>
+        <div class="stat-sub"><span class="ok-text">{passCount} completed</span>{#if failCount} · <span class="bad-text">{failCount} failed</span>{/if}</div>
       </div>
       <div class="card stat">
         <div class="stat-label">Last run</div>
         <div class="stat-value small" title={latest ? new Date(latest.created_at).toLocaleString() : ''}>{latest ? rel(latest.created_at) : '—'}</div>
-        {#if latest}<div class="stat-sub"><span class="chip tone-{statusTone(latest.status)}">{statusLabel(latest.status)}</span></div>{/if}
+        {#if latest}<div class="stat-sub"><StatusBadge status={runStatus(latest.status)} /></div>{/if}
       </div>
     </div>
     <div class="list-head">
@@ -168,12 +174,15 @@
     </div>
     <ul class="rows">
       {#each [...chrono].reverse() as e (e.id)}
-        <li class="rowi">
-          <span class="chip tone-{statusTone(e.status)}">{statusLabel(e.status)}</span>
-          <span class="grow ellipsis" title={e.task}>{e.task || e.summary || 'Evaluation'}</span>
-          <span class="dim mono">{e.impl_cli}</span>
-          <span class="score">{scoreOf(e) != null ? fmtScore(scoreOf(e)!) : '—'}</span>
-          <span class="dim when" title={new Date(e.created_at).toLocaleString()}>{rel(e.created_at)}</span>
+        <li>
+          <button class="rowi run-row" onclick={() => onopenrun?.(e.id)} title="Open this run in the Evaluator" disabled={!onopenrun}>
+            <StatusBadge status={runStatus(e.status)} variant="text" />
+            <span class="grow ellipsis" title={e.task}>{e.task || e.summary || 'Evaluation'}</span>
+            <span class="dim mono">{e.impl_cli}</span>
+            <span class="score">{scoreOf(e) != null ? fmtScore(scoreOf(e)!) : '—'}</span>
+            <span class="dim when" title={new Date(e.created_at).toLocaleString()}>{rel(e.created_at)}</span>
+            <Icon name="chevronRight" size={12} />
+          </button>
         </li>
       {/each}
     </ul>
@@ -207,12 +216,20 @@
       {#if lastActivity}<span class="dim" title={new Date(lastActivity).toLocaleString()}>Last {rel(lastActivity)}</span>{/if}
     </div>
     <div class="stats">
-      <button class="card stat link" onclick={onreview}>
+      <button
+        class="card stat link"
+        onclick={() => (myReviews[0] && onopenreview ? onopenreview(myReviews[0].id) : onreview())}
+        title={myReviews[0] ? 'Open the latest review' : 'Start a review of this skill'}
+      >
         <div class="stat-label">Reviews</div>
         <div class="stat-value">{myReviews.length}</div>
         <div class="stat-sub dim">{myReviews[0] ? `Latest: ${myReviews[0].static_report?.verdict ?? myReviews[0].status}` : 'Run a multi-agent review'}</div>
       </button>
-      <button class="card stat link" onclick={onevaluate}>
+      <button
+        class="card stat link"
+        onclick={() => (myEvals.length > 0 && onview ? onview('evals') : onevaluate())}
+        title={myEvals.length > 0 ? 'See its evaluation runs' : 'Evaluate this skill on a real task'}
+      >
         <div class="stat-label">Evaluations</div>
         <div class="stat-value">{myEvals.length}</div>
         <div class="stat-sub dim">{latest ? `Last ${rel(latest.created_at)}` : 'Score it on a real task'}</div>
@@ -307,8 +324,29 @@
     font-size: var(--fs-s);
     min-width: 0;
   }
-  .rowi + .rowi {
+  .rowi + .rowi,
+  .rows > li + li {
     border-top: 1px solid var(--border);
+  }
+  .run-row {
+    width: 100%;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: var(--fs-s);
+    text-align: start;
+    cursor: pointer;
+  }
+  .run-row:hover:not(:disabled) {
+    background: var(--hover);
+  }
+  .run-row:disabled {
+    cursor: default;
+  }
+  .run-row > :global(svg) {
+    color: var(--text-dim);
+    flex: none;
   }
   .src-icon {
     display: inline-flex;
@@ -349,21 +387,6 @@
   .note :global(svg) {
     margin-top: 2px;
     flex: none;
-  }
-  .chip.tone-success {
-    color: var(--success);
-    background: var(--success-soft);
-    border-color: color-mix(in srgb, var(--success) 35%, transparent);
-  }
-  .chip.tone-danger {
-    color: var(--danger);
-    background: var(--danger-soft);
-    border-color: color-mix(in srgb, var(--danger) 35%, transparent);
-  }
-  .chip.tone-info {
-    color: var(--info);
-    background: var(--info-soft);
-    border-color: color-mix(in srgb, var(--info) 35%, transparent);
   }
   .chip.tone-warning {
     color: var(--warning);

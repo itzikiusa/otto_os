@@ -337,7 +337,7 @@
   .crumbs {
     display: flex;
     gap: 4px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     overflow: hidden;
     white-space: nowrap;
   }
@@ -355,7 +355,7 @@
     color: var(--text);
     padding: 4px 9px;
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--fs-s);
     white-space: nowrap;
   }
   .mode-btn:hover {
@@ -371,7 +371,7 @@
   .notice {
     padding: 14px;
     color: var(--text-dim);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .notice.err {
     color: var(--status-exited);
@@ -418,7 +418,7 @@
   }
   table {
     border-collapse: collapse;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   th,
   td {
@@ -438,7 +438,7 @@
   .code {
     margin: 0;
     padding: 14px 18px 40px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.55;
     overflow: auto;
     flex: 1;
@@ -448,7 +448,7 @@
     align-items: center;
     gap: 10px;
     padding: 8px 14px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     border-bottom: 1px solid var(--border);
   }
   .big-bar .dim {
@@ -462,7 +462,7 @@
     min-height: 0;
     padding: 8px 14px 40px;
     font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   /* Let long rows extend the scroll width instead of being clipped to the pane. */
   .file-view :global(.big-lines .vlist-win) {

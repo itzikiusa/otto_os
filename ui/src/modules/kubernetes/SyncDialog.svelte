@@ -52,7 +52,7 @@
     gap: 10px;
   }
   .target {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
   }
   .facts {
@@ -60,7 +60,7 @@
     grid-template-columns: auto 1fr;
     gap: 3px 12px;
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .facts dt {
     color: var(--text-dim);
@@ -73,7 +73,7 @@
   }
   .hint.danger {
     color: var(--status-exited);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .dim {
     color: var(--text-dim);

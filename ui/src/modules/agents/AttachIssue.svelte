@@ -35,7 +35,7 @@
   }
 </script>
 
-<Modal title="Attach Jira Issue" width={520} {onclose}>
+<Modal title="Attach Jira issue" width={520} {onclose}>
   <JiraIssuePicker onpick={(iss) => { void attach(iss); }} />
 
   {#snippet footer()}

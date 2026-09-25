@@ -12,6 +12,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { WorkflowRun, Review, Session } from '../../lib/api/types';
   import { api } from '../../lib/api/client';
+  import { runStatus } from '../../lib/status';
   import { reviewIds, reviewSessions, reviewAgentStatus } from './reviewAgents';
 
   interface Props {
@@ -172,15 +173,18 @@
     {#each groups as g (g.id)}
       <div class="grp">
         <div class="grp-h">
-          <span class="dot {g.status}"></span>
+          <!-- Step status in the shared run vocabulary (Succeeded / Failed /
+               Queued…), like the Steps list and timeline — not the raw
+               engine word ("success", "error", "pending"). -->
+          <span class="dot {runStatus(g.status).key}" aria-hidden="true"></span>
           <span class="grp-name" title={nodeName(g.id)}>{nodeName(g.id)}</span>
-          <span class="grp-status">{g.status}</span>
+          <span class="grp-status">{runStatus(g.status).label}</span>
           <span class="grow"></span>
           <span class="grp-count" title="{g.sessions.length} session(s)">{g.sessions.length}</span>
         </div>
         {#each g.sessions as sid (sid)}
           <div class="sess" data-sess={sid}>
-            <button class="sess-h" onclick={() => toggle(sid)} title="Show live terminal">
+            <button class="sess-h" onclick={() => toggle(sid)} aria-expanded={!!expanded[sid]} title={expanded[sid] ? 'Hide live terminal' : 'Show live terminal'}>
               <Icon name={expanded[sid] ? 'chevronDown' : 'chevronRight'} size={12} />
               <span class="s-dot {sStatus(sid)}"></span>
               <span class="s-title">{sTitle(sid)}</span>
@@ -225,7 +229,7 @@
 <style>
   .empty {
     padding: 16px 12px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.5;
   }
@@ -248,7 +252,7 @@
     align-items: center;
     gap: 7px;
     padding: 3px 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -292,7 +296,7 @@
     border: none;
     cursor: pointer;
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     text-align: start;
   }
   .sess-h:hover {
@@ -310,7 +314,7 @@
   }
   .fallback {
     padding: 4px 8px 8px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .s-status {
@@ -329,7 +333,7 @@
     margin-inline-start: 18px;
   }
   .sub {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -351,19 +355,26 @@
     border-radius: 50%;
     flex-shrink: 0;
   }
-  .dot.success,
-  .dot.running,
+  .dot.succeeded,
   .s-dot.running,
   .s-dot.working {
-    background: var(--status-working, #28c840);
+    background: var(--status-working);
   }
-  .dot.error,
+  /* A running STEP is info-blue (lib/status.ts), never the succeeded green. */
+  .dot.running {
+    background: var(--info);
+  }
+  .dot.waiting {
+    background: var(--status-warn);
+  }
+  .dot.failed,
   .s-dot.exited,
   .s-dot.error,
   .s-dot.fallback {
     background: var(--status-exited);
   }
-  .dot.pending,
+  .dot.queued,
+  .dot.cancelled,
   .dot.skipped,
   .s-dot.idle,
   .s-dot.reconnectable {

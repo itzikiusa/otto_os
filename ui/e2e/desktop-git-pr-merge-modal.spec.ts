@@ -39,7 +39,7 @@ test('merge modal blocks on failing CI + blockers, then merges with "Merge anywa
   await expect(modal.getByText('2 of 3 unresolved')).toBeVisible();
 
   // Blocked, with both reasons spelled out under the button.
-  const mergeBtn = modal.getByRole('button', { name: 'Merge', exact: true });
+  const mergeBtn = modal.getByRole('button', { name: 'Merge pull request', exact: true });
   await expect(mergeBtn).toBeDisabled();
   const reasons = modal.locator('.reasons');
   await expect(reasons).toContainText('CI failing');

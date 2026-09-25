@@ -64,12 +64,12 @@
       {@const state = local[c.id]}
       {#if state === 'undone'}
         <li class="chip-m gone" data-testid="memory-undone">
-          <Icon name="x" size={12} /><span class="t">Forgot: {body(c.turn.text)}</span>
+          <Icon name="x" size={12} /><span class="t" title={body(c.turn.text)}>Forgot: {body(c.turn.text)}</span>
           <button class="act" onclick={() => void redo(c)} disabled={busy === c.id} title="Remember it again">Restore</button>
         </li>
       {:else if action === 'remembered' || state === 'restored'}
         <li class="chip-m new" data-testid="memory-new">
-          <Icon name="plus" size={12} /><span class="t">Remembered: {body(c.turn.text)}</span>
+          <Icon name="plus" size={12} /><span class="t" title={body(c.turn.text)}>Remembered: {body(c.turn.text)}</span>
           {#if c.chip?.undo?.kind === 'delete'}
             <button class="act" onclick={() => void undo(c)} disabled={busy === c.id} aria-label={`Undo: forget “${body(c.turn.text)}”`} title="Forget this memory">
               {busy === c.id ? 'Forgetting…' : 'Undo'}
@@ -78,7 +78,7 @@
         </li>
       {:else if action === 'forgot'}
         <li class="chip-m gone">
-          <Icon name="x" size={12} /><span class="t">Forgot: {body(c.turn.text)}</span>
+          <Icon name="x" size={12} /><span class="t" title={body(c.turn.text)}>Forgot: {body(c.turn.text)}</span>
           {#if c.chip?.undo?.kind === 'restore'}
             <button class="act" onclick={() => void undo(c)} disabled={busy === c.id} title="Restore what was forgotten">{busy === c.id ? 'Restoring…' : 'Undo'}</button>
           {/if}

@@ -6,6 +6,8 @@
   import { api } from '../../lib/api/client';
   import { gitBridge } from './gitBridge.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Skeleton from '../../lib/components/Skeleton.svelte';
 
   interface Props {
@@ -18,8 +20,10 @@
   let commits = $state<CommitInfo[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
+  let retryRev = $state(0);
 
   $effect(() => {
+    void retryRev;
     const id = repoId;
     const p = path;
     loading = true;
@@ -33,7 +37,7 @@
       })
       .catch((e: unknown) => {
         commits = [];
-        error = e instanceof Error ? e.message : String(e);
+        error = loadErrorText(e);
       })
       .finally(() => {
         loading = false;
@@ -51,8 +55,8 @@
     <Icon name="clock" size={13} />
     <span class="fh-title mono" title={path}>{path}</span>
     <span class="grow"></span>
-    <button class="btn ghost small" onclick={onclose} aria-label="Close file history">
-      <Icon name="x" size={12} />
+    <button class="icon-btn" onclick={onclose} aria-label="Close file history" title="Close file history">
+      <Icon name="x" size={14} />
     </button>
   </header>
 
@@ -60,7 +64,7 @@
     {#if loading}
       <div class="fh-pad"><Skeleton rows={4} height={30} /></div>
     {:else if error}
-      <p class="fh-msg err">{error}</p>
+      <div class="fh-pad"><LoadState what="this file’s history" {error} empty onretry={() => retryRev++} variant="compact" /></div>
     {:else if commits.length === 0}
       <p class="fh-msg">No commits touch this file.</p>
     {:else}
@@ -98,7 +102,7 @@
     border-bottom: 1px solid var(--border);
   }
   .fh-title {
-    font-size: 12px;
+    font-size: var(--fs-s);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -117,11 +121,8 @@
   .fh-msg {
     padding: 14px 12px;
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
-  }
-  .fh-msg.err {
-    color: var(--status-exited);
   }
   .fh-list {
     list-style: none;
@@ -145,13 +146,13 @@
     background: var(--surface-2);
   }
   .fh-subject {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .fh-meta {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 </style>

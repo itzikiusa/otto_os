@@ -14,7 +14,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
-  import { fmtAgo, roleFromArn } from './util';
+  import { fmtAgo, roleFromArn, awsErrorText } from './util';
   import type { AwsAccount, Feature } from '../../lib/api/types';
 
   interface Props {
@@ -82,9 +82,9 @@
 
 <div class="ov">
   {#if aws.accountsLoading && !aws.accountsLoaded}
-    <div class="pad"><Skeleton rows={3} height={90} /></div>
+    <div class="pad" role="status"><p class="load-note">Loading accounts…</p><Skeleton rows={3} height={90} /></div>
   {:else if aws.accountsError && aws.accounts.length === 0}
-    <EmptyState icon="cloud" title="Couldn't load accounts" body={aws.accountsError} actionLabel="Retry" onaction={() => void aws.loadAccounts()} />
+    <EmptyState actionKind="secondary" icon="warning" title="Couldn't load accounts" body={awsErrorText(aws.accountsError)} actionLabel="Retry" onaction={() => void aws.loadAccounts()} />
   {:else if aws.accounts.length === 0}
     <EmptyState
       variant="page"
@@ -112,7 +112,7 @@
             <span class="dot" style="background:{a.color || 'var(--text-dim)'}"></span>
             <h2 class="name">{a.name}</h2>
             <EnvBadge env={a.environment} />
-            <button class="more" onclick={(e) => menu(e, a)} aria-label={`Actions for ${a.name}`} title="Actions">⋯</button>
+            <button class="icon-btn more" onclick={(e) => menu(e, a)} aria-label={`Actions for ${a.name}`} title="Actions"><Icon name="more" size={14} /></button>
           </div>
           <dl class="meta">
             <dt>Identity</dt>
@@ -165,7 +165,7 @@
             <div class="login-row">
               <span class="warn">Credentials expired or missing.</span>
               {#if a.auth_mode === 'profile' && resourceAccess.can('aws_account', a.id, 'configure', 'aws', 'edit')}
-                <button class="primary sm" onclick={() => onsignin(a)}>
+                <button class="btn primary small" onclick={() => onsignin(a)}>
                   <Icon name="key" size={12} /> Sign in
                 </button>
               {:else if a.auth_mode === 'access_keys'}
@@ -192,29 +192,17 @@
 {/if}
 
 <style>
+  .load-note {
+    margin: 0 0 10px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
   .ov {
     display: flex;
     flex-direction: column;
     min-height: 0;
     overflow: auto;
     height: 100%;
-  }
-  .primary {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 12px;
-    border-radius: var(--radius-m);
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: var(--accent-contrast);
-    font-weight: 600;
-    font-size: 12.5px;
-    cursor: pointer;
-  }
-  .primary.sm {
-    padding: 4px 10px;
-    font-size: 12px;
   }
   .pad {
     padding: 18px 20px;
@@ -251,7 +239,7 @@
   }
   .name {
     margin: 0;
-    font-size: 14px;
+    font-size: var(--fs-l);
     font-weight: 600;
     flex: 1;
     min-width: 0;
@@ -260,20 +248,14 @@
     white-space: nowrap;
   }
   .more {
-    border: 0;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    font-size: 16px;
-    line-height: 1;
-    padding: 0 4px;
+    flex-shrink: 0;
   }
   .meta {
     display: grid;
     grid-template-columns: auto 1fr;
     gap: 3px 10px;
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .meta .ep {
     overflow: hidden;
@@ -305,7 +287,7 @@
     gap: 4px;
     padding: 2px 8px;
     border-radius: 999px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     text-decoration: none;
     border: 1px solid var(--border);
     color: var(--text);
@@ -353,7 +335,7 @@
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .warn {
     color: var(--status-warn);
@@ -370,7 +352,7 @@
     border: 0;
     background: transparent;
     color: var(--accent-text);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     cursor: pointer;
     padding: 0;
   }

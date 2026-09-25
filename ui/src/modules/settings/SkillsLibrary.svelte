@@ -18,8 +18,10 @@
   import type { BundledSkill, BundledSkillState } from '../../lib/api/types';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
 
   // ---------------------------------------------------------------------------
   // State
@@ -27,6 +29,8 @@
 
   let skills: BundledSkill[] = $state([]);
   let loading = $state(true);
+  // A failed load is shown inline with Retry — never as "No bundled skills".
+  let loadError = $state('');
   // Names with an in-flight install/update/remove (disables that row's buttons).
   let busy: Set<string> = $state(new Set());
   // Category currently running "Install all" (disables that header button).
@@ -42,10 +46,17 @@
     'insights',
   ];
 
+  // Name/description filter — two dozen skills in a few categories.
+  let query = $state('');
+  const q = $derived(query.trim().toLowerCase());
+  const shown = $derived(
+    q ? skills.filter((s) => s.name.toLowerCase().includes(q) || (s.description ?? '').toLowerCase().includes(q)) : skills,
+  );
+
   // Skills grouped by category, in CATEGORY_ORDER then alphabetical for the rest.
   const groups = $derived.by(() => {
     const byCat = new Map<string, BundledSkill[]>();
-    for (const s of skills) {
+    for (const s of shown) {
       const list = byCat.get(s.category) ?? [];
       list.push(s);
       byCat.set(s.category, list);
@@ -76,9 +87,10 @@
     loading = true;
     try {
       skills = await contextApi.listBundled();
+      loadError = '';
     } catch (e) {
-      toasts.error('Could not load skills', e instanceof Error ? e.message : String(e));
-      skills = [];
+      // Keep the last good list (if any); LoadState shows a stale bar over it.
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -95,19 +107,21 @@
   // Badge / action labels per state
   // ---------------------------------------------------------------------------
 
-  function badge(s: BundledSkill): { text: string; cls: string } {
+  // Not installed carries no chip: the Install button already says so, and a
+  // grey "Not installed" on every row of a fresh library was pure noise.
+  function badge(s: BundledSkill): { text: string; cls: string } | null {
     switch (s.state) {
       case 'not_installed':
-        return { text: 'Not installed', cls: '' };
+        return null;
       case 'up_to_date':
         return { text: `Installed v${s.installed_version}`, cls: 'ok' };
       case 'update_available':
         return {
-          text: `Update available v${s.installed_version}→v${s.version}`,
-          cls: 'accent',
+          text: `Update available · v${s.installed_version} → v${s.version}`,
+          cls: 'info',
         };
       case 'ahead':
-        return { text: 'Edited (ahead)', cls: 'bad' };
+        return { text: 'Edited locally', cls: 'warn' };
       default:
         return { text: s.state, cls: '' };
     }
@@ -146,7 +160,7 @@
       }
       await load();
     } catch (e) {
-      toasts.error('Install failed', e instanceof Error ? e.message : String(e));
+      toasts.error(`Couldn’t install ${s.name}`, e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(s.name, false);
     }
@@ -158,7 +172,7 @@
 
   async function remove(s: BundledSkill): Promise<void> {
     if (
-      !(await confirmer.ask(`Remove the installed skill “${s.name}” from the library?`, {
+      !(await confirmer.ask(`Remove “${s.name}” from your library and from each agent CLI's skills folder? You can install it again from this page.`, {
         title: 'Remove skill',
         confirmLabel: 'Remove',
       }))
@@ -170,7 +184,7 @@
       toasts.info('Removed', s.name);
       await load();
     } catch (e) {
-      toasts.error('Remove failed', e instanceof Error ? e.message : String(e));
+      toasts.error(`Couldn’t remove ${s.name}`, e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(s.name, false);
     }
@@ -198,7 +212,7 @@
       }
       await load();
     } catch (e) {
-      toasts.error('Install all failed', e instanceof Error ? e.message : String(e));
+      toasts.error(`Couldn’t install the ${category} skills`, e instanceof Error ? e.message : String(e));
     } finally {
       busyCategory = null;
     }
@@ -209,10 +223,15 @@
     return skillsInCat.some((s) => s.state !== 'up_to_date');
   }
 
-  // Per-state action button label.
+  // Per-state action button label. "Replace…" asks first (edited copy).
   function actionLabel(state: BundledSkillState, name: string): string {
-    if (busy.has(name)) return '…';
-    return state === 'not_installed' ? 'Install' : 'Update';
+    if (busy.has(name)) return state === 'not_installed' ? 'Installing…' : 'Updating…';
+    if (state === 'not_installed') return 'Install';
+    return state === 'ahead' ? 'Replace…' : 'Update';
+  }
+
+  function installedCount(list: BundledSkill[]): number {
+    return list.filter((s) => s.state !== 'not_installed').length;
   }
 </script>
 
@@ -221,46 +240,67 @@
   <PageBody width="readable">
   <SectionIntro>Installing a skill adds it to your library and to each agent CLI's global skills folder, so Claude, Codex and agy can all use it. Your edited copies are always backed up before being replaced.</SectionIntro>
 
-  {#if loading}
-    <Skeleton rows={4} height={52} />
-  {:else if skills.length === 0}
-    <EmptyState
-      icon="box"
-      title="No bundled skills"
-      body="Otto did not ship any skills, or the catalogue could not be loaded."
-    />
-  {:else}
+  <LoadState what="bundled skills" {loading} error={loadError} empty={skills.length === 0} rows={5} onretry={() => void load()}>
+    {#snippet emptyView()}
+      <EmptyState
+        variant="page"
+        icon="box"
+        title="No bundled skills"
+        body="This build of Otto doesn't ship any skills. Add your own in Settings → Context library."
+      />
+    {/snippet}
+    <div class="toolbar">
+      <label class="filter">
+        <Icon name="search" size={12} />
+        <input
+          type="search"
+          class="filter-input"
+          bind:value={query}
+          placeholder="Filter skills"
+          aria-label="Filter skills"
+          autocomplete="off"
+          spellcheck="false"
+          onkeydown={(e) => { if (e.key === 'Escape' && query) { e.preventDefault(); e.stopPropagation(); query = ''; } }}
+        />
+      </label>
+      <span class="summary">{installedCount(skills)} of {skills.length} installed</span>
+    </div>
+    {#if groups.length === 0}
+      <p class="no-match">No skills match “{query.trim()}”.</p>
+    {/if}
     {#each groups as g (g.category)}
-      <section class="cat">
+      <section class="cat" aria-labelledby={`cat-${g.category}`}>
         <div class="cat-head">
-          <span class="cat-title">{g.category}</span>
+          <h2 class="section-title" id={`cat-${g.category}`}>{g.category}</h2>
+          <span class="cat-count">{installedCount(g.skills)} of {g.skills.length} installed</span>
+          <span class="grow"></span>
           <button
             class="btn small"
             disabled={busyCategory === g.category || !categoryHasWork(g.skills)}
+            title={categoryHasWork(g.skills) ? `Install or update every ${g.category} skill` : `Every ${g.category} skill is up to date`}
             onclick={() => installAll(g.category)}
           >
-            {busyCategory === g.category ? 'Installing…' : 'Install all in category'}
+            {busyCategory === g.category ? 'Installing…' : 'Install all'}
           </button>
         </div>
 
         <div class="skill-list">
           {#each g.skills as s (s.name)}
             {@const b = badge(s)}
-            <div class="skill card">
+            <div class="skill">
               <div class="grow">
                 <div class="skill-name">
                   <span class="mono">{s.name}</span>
-                  <span class="chip {b.cls}">{b.text}</span>
+                  {#if b}<span class="chip {b.cls}">{b.text}</span>{/if}
                 </div>
                 {#if s.description}
-                  <div class="skill-desc dim">{s.description}</div>
+                  <div class="skill-desc dim" title={s.description}>{s.description}</div>
                 {/if}
                 {#if s.state === 'update_available'}
                   <div class="note dim">Your installed copy is backed up first.</div>
                 {:else if s.state === 'ahead'}
                   <div class="note warn">
-                    Your copy was edited — updating backs it up, then replaces it. Doing nothing keeps
-                    your edited copy.
+                    Your copy was edited — replacing backs it up first. Doing nothing keeps your edited copy.
                   </div>
                 {/if}
               </div>
@@ -268,16 +308,15 @@
               <div class="skill-actions">
                 {#if s.state === 'up_to_date'}
                   <button
-                    class="btn small"
+                    class="btn small ghost"
                     disabled={busy.has(s.name)}
                     onclick={() => remove(s)}
                   >
-                    {busy.has(s.name) ? '…' : 'Remove'}
+                    {busy.has(s.name) ? 'Removing…' : 'Remove…'}
                   </button>
                 {:else}
                   <button
-                    class="btn small primary"
-                    class:warn-btn={s.state === 'ahead'}
+                    class="btn small"
                     disabled={busy.has(s.name)}
                     onclick={() => install(s)}
                   >
@@ -290,7 +329,7 @@
         </div>
       </section>
     {/each}
-  {/if}
+  </LoadState>
   </PageBody>
 </div>
 
@@ -302,69 +341,124 @@
     height: 100%;
     min-height: 0;
   }
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    max-width: var(--settings-col);
+    margin-bottom: 4px;
+  }
+  /* Same quiet search field as the Settings nav filter. */
+  .filter {
+    flex: 0 1 260px;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 27px;
+    padding-inline: 8px;
+    border-radius: var(--radius-s);
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text-dim);
+  }
+  .filter:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  .filter-input {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    border: none;
+    outline: none;
+    background: transparent;
+    color: var(--text);
+    font-size: var(--fs-m);
+  }
+  .summary {
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
+  .no-match {
+    margin: 12px 0 0;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
   .cat {
-    max-width: min(720px, 92vw);
-    margin-bottom: 22px;
+    max-width: var(--settings-col);
   }
   .cat-head {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    margin-bottom: 8px;
+    gap: 8px;
+    margin: 18px 0 8px;
   }
-  .cat-title {
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
+  .cat-head .section-title {
+    margin: 0;
+  }
+  .cat-count {
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-
+  .grow {
+    flex: 1;
+    min-width: 0;
+  }
+  /* One bordered list per category (hairlines between rows), not a card per
+     skill — denser, and matches the other settings lists. */
   .skill-list {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    background: var(--surface);
+    overflow: hidden;
   }
   .skill {
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 11px 14px;
+    padding: 10px 14px;
+  }
+  .skill + .skill {
+    border-top: 1px solid var(--border);
   }
   .skill-name {
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     flex-wrap: wrap;
   }
+  /* Two lines, full text in the tooltip — some descriptions run 6+ lines. */
   .skill-desc {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     margin-top: 3px;
-    line-height: 1.4;
+    line-height: 1.45;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .dim {
+    color: var(--text-dim);
   }
   .note {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     margin-top: 4px;
     line-height: 1.4;
   }
   .note.warn {
-    color: var(--status-exited);
+    color: var(--warning);
   }
-
+  /* .chip.info / .chip.warn come from app.css. */
   .skill-actions {
     flex-shrink: 0;
     display: flex;
     align-items: center;
     gap: 6px;
-  }
-  /* "ahead" update is a replace-after-backup — tint it like a warning. */
-  .btn.warn-btn {
-    background: var(--status-exited);
-  }
-  .btn.warn-btn:hover {
-    background: color-mix(in srgb, var(--status-exited) 88%, black);
   }
 </style>

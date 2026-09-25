@@ -4,7 +4,7 @@ import { mkdtempSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { apiCtx, seedWorkspace, seedShellSession } from './seed';
-import { openPage, expectFullyInViewport } from './helpers';
+import { openPage, expectFullyInViewport, openRightPanelTab } from './helpers';
 
 // Conversation view — Track C surfaces (docs/design/conversation-view.md §5.3–5.5):
 //   • History (`#/history`) lists a seeded session and opens it READ-ONLY.
@@ -105,7 +105,7 @@ async function openClaude(page: Page, tab: 'Activity' | 'Outputs'): Promise<void
   await openPage(page, 'agents');
   await page.getByRole('button', { name: new RegExp(claudeTitle) }).first().click();
   await expect(page.locator('.rpanel')).toBeVisible();
-  await page.locator('.rpanel').getByRole('tab', { name: tab, exact: true }).click();
+  await openRightPanelTab(page, tab);
 }
 
 async function tasksOf(page: Page, sid: string): Promise<{ title: string; source: string }[]> {
@@ -193,7 +193,7 @@ test.describe('tasks from the board', () => {
     await page.reload();
     await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
     await page.getByRole('button', { name: new RegExp(claudeTitle) }).first().click();
-    await panel.getByRole('tab', { name: 'Activity', exact: true }).click();
+    await openRightPanelTab(page, 'Activity');
     await expect(panel.locator('[data-testid="task-row"]', { hasText: title })).toBeVisible();
     await expect(panel.locator('[data-testid="task-row"]', { hasText: title }).locator('.badge.board')).toBeVisible();
   });

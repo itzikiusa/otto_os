@@ -6,7 +6,9 @@
   import { untrack } from 'svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
+  import Icon from '../../../lib/components/Icon.svelte';
   import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
+  import { loadErrorText } from '../../../lib/loadError';
   import { api } from '../../../lib/api/client';
   import { router } from '../../../lib/router.svelte';
   import type { UsageStatus, UsageSummary } from '../../../lib/api/usage.svelte';
@@ -49,7 +51,7 @@
       return true;
     } catch (e) {
       if (mine !== seq) return true;
-      error = e instanceof Error ? e.message : String(e);
+      error = loadErrorText(e);
       return false;
     } finally {
       if (mine === seq) loading = false;
@@ -100,9 +102,13 @@
   {#if loading && !summary}
     <Skeleton rows={3} />
   {:else if error && !summary}
-    <EmptyState icon="chart" title="Usage unavailable" body={error} />
+    <EmptyState icon="warning" title="Couldn't load Usage" body={error}>
+      <button class="btn small" onclick={() => poller?.now()}><Icon name="refresh" size={12} />Retry</button>
+    </EmptyState>
   {:else if status && !status.available}
-    <EmptyState icon="chart" title="Usage engine is off" body="Enable the embedded ClickHouse engine on the Usage page." actionLabel="Open Usage" onaction={() => router.go('usage')} />
+    <EmptyState icon="chart" title="Usage engine is off" body="Enable the embedded ClickHouse engine on the Usage page.">
+      <button class="btn small" onclick={() => router.go('usage')}>Open Usage</button>
+    </EmptyState>
   {:else if summary}
     <div class="stats">
       <div class="stat"><span class="n">{fmtUsd(summary.total_cost_usd)}</span><span class="l">spend</span></div>
@@ -142,7 +148,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .spacer {
     flex: 1;
@@ -213,7 +219,7 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .provs li {
     display: flex;

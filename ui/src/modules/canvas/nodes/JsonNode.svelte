@@ -143,7 +143,7 @@
   }
   .toggle {
     margin-left: auto;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 1px 7px;
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
@@ -168,13 +168,13 @@
   .tree {
     padding: 8px 10px;
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text);
   }
   .errline {
     padding: 6px 10px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--status-exited);
     border-bottom: 1px solid var(--border);
   }
@@ -182,7 +182,7 @@
     margin: 0;
     padding: 8px 10px;
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text);
   }
@@ -202,7 +202,7 @@
     background: var(--term-bg);
     color: var(--text);
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     padding: 8px 10px;
   }

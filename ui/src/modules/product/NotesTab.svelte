@@ -1,17 +1,31 @@
 <script lang="ts">
   // Notes tab — list, add, edit, delete internal notes for the selected story.
+  import { rel } from '../../lib/stores/now.svelte';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { renderMarkdown } from '../../lib/md';
   import { confirmer } from '../../lib/confirm.svelte';
   import Modal from '../../lib/components/Modal.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { ProductNote, NewNoteReq } from './types';
 
   // ── Load notes when story is selected / changes ────────────────────────────
+  // A failed load shows inline with Retry — never as "No notes yet".
+  let loadError = $state<string | null>(null);
+  async function load(): Promise<void> {
+    loadError = null;
+    try {
+      await product.loadNotes();
+    } catch (e) {
+      loadError = loadErrorText(e);
+    }
+  }
   $effect(() => {
     product.selectedId;
     if (product.selectedId) {
-      void product.loadNotes();
+      void load();
     }
   });
 
@@ -97,7 +111,7 @@
   // ── Helpers ────────────────────────────────────────────────────────────────
 
   function fmtDate(s: string): string {
-    try { return new Date(s).toLocaleString(); } catch { return s; }
+    try { return rel(s); } catch { return s; }
   }
 </script>
 
@@ -109,14 +123,14 @@
     <!-- ── Toolbar ──────────────────────────────────────────────────────────── -->
     <div class="toolbar">
       <span class="grow"></span>
-      <button class="btn small primary" onclick={openAdd}>+ Add note</button>
+      <button class="btn small primary" onclick={openAdd}><Icon name="plus" size={12} /> Add note</button>
     </div>
 
     <!-- ── Notes list ───────────────────────────────────────────────────────── -->
-    {#if product.loadingNotes}
-      <div class="muted">Loading notes…</div>
+    {#if (product.loadingNotes || loadError) && product.notes.length === 0}
+      <LoadState what="notes" loading={product.loadingNotes} error={loadError} empty onretry={() => void load()} />
     {:else if product.notes.length === 0}
-      <div class="muted">No notes yet. Click "+ Add note" to capture a thought.</div>
+      <div class="muted">No notes yet. Use Add note to capture a thought.</div>
     {:else}
       <div class="n-list">
         {#each product.notes as n (n.id)}
@@ -128,24 +142,23 @@
                 {#if n.section}
                   <span class="section-chip">{n.section}</span>
                 {/if}
-                <span class="n-meta">{fmtDate(n.created_at)}</span>
-                <span class="n-author dim">{n.author_id}</span>
+                <span class="n-meta" title={n.author_id ? `Author id: ${n.author_id}` : undefined}>{fmtDate(n.created_at)}</span>
               </div>
               {#if editingId !== n.id}
                 <div class="n-actions">
                   <button
-                    class="na-btn"
+                    class="btn small ghost"
                     onclick={() => startEdit(n)}
                     disabled={savingId === n.id || deletingId === n.id}
                     title="Edit"
                   >Edit</button>
                   <button
-                    class="na-btn danger-btn"
+                    class="btn small danger"
                     onclick={() => deleteNote(n)}
                     disabled={savingId === n.id || deletingId === n.id}
                     title="Delete"
                   >
-                    {deletingId === n.id ? '…' : 'Delete'}
+                    {deletingId === n.id ? 'Deleting…' : 'Delete'}
                   </button>
                 </div>
               {/if}
@@ -186,7 +199,7 @@
 
     <!-- ── Add note modal ────────────────────────────────────────────────────── -->
     {#if addOpen}
-      <Modal title="Add Note" width={480} onclose={closeAdd}>
+      <Modal title="Add note" width={480} onclose={closeAdd}>
         <div class="nt-add-body">
           <label class="form-label">Note <span class="req">*</span>
             <textarea
@@ -224,7 +237,7 @@
 <style>
   .muted {
     padding: 24px 0;
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     font-style: italic;
   }
@@ -287,7 +300,7 @@
   }
   .section-chip {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 2px 7px;
@@ -296,16 +309,8 @@
     color: var(--accent-text);
   }
   .n-meta {
-    font-size: 11px;
-    color: var(--text-dim);
-  }
-  .n-author {
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    opacity: 0.7;
-  }
-  .dim {
-    opacity: 0.6;
   }
 
   .n-actions {
@@ -314,35 +319,10 @@
     gap: 4px;
     flex-shrink: 0;
   }
-  .na-btn {
-    height: 24px;
-    padding: 0 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 11px;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 80ms, color 80ms;
-  }
-  .na-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text);
-  }
-  .na-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-  .danger-btn:hover:not(:disabled) {
-    border-color: var(--danger);
-    color: var(--danger);
-    background: color-mix(in srgb, var(--danger) 10%, transparent);
-  }
 
   /* ── Note body (markdown rendered) ───────────────────────────────── */
   .n-body.md-body {
-    font-size: 13px;
+    font-size: var(--fs-m);
     line-height: 1.65;
     color: var(--text);
   }
@@ -351,7 +331,7 @@
   .n-body :global(h3),
   .n-body :global(h4) {
     margin: 0.9em 0 0.3em;
-    font-weight: 700;
+    font-weight: 600;
     color: var(--text);
   }
   .n-body :global(h1) { font-size: 1.25em; }
@@ -369,7 +349,7 @@
     font-size: 0.87em;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     padding: 1px 5px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
   }
   .n-body :global(pre) {
     background: var(--surface);
@@ -398,7 +378,7 @@
   }
   .edit-text {
     width: 100%;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -424,7 +404,7 @@
     display: flex;
     flex-direction: column;
     gap: 5px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -432,12 +412,12 @@
   }
   .req {
     color: var(--danger);
-    font-weight: 700;
+    font-weight: 600;
   }
   .form-textarea,
   .form-input {
     width: 100%;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);

@@ -8,6 +8,9 @@
   import { onMount, onDestroy } from 'svelte';
   import { api } from '../../lib/api/client';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { reviewBus, workflowRunBus, budgetBus } from '../../lib/events.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -57,6 +60,9 @@
   let view: MissionView | null = $state(null);
   let savedViews: SavedView[] = $state([]);
   let loading = $state(false);
+  /** Why the last load failed — shown inline with Retry while there is no
+   *  data to fall back on (a failed REFRESH keeps the stale board). */
+  let loadError = $state<string | null>(null);
   let newViewName = $state('');
   let newViewFilter = $state('{}');
   let filterBucket = $state('');
@@ -106,8 +112,10 @@
       if (!current()) return;
       view = v;
       savedViews = sv;
-    } catch {
-      /* best-effort — stale data stays */
+      loadError = null;
+    } catch (e) {
+      // Best-effort — stale data stays; with none, the error shows inline.
+      if (current()) loadError = loadErrorText(e);
     } finally {
       if (current()) loading = false;
     }
@@ -157,7 +165,7 @@
       if (!alive || wsId !== owner) return;
       await load(false);
     } catch (e: unknown) {
-      toasts.error(e instanceof Error ? e.message : 'Failed to delete view');
+      toasts.error('Couldn’t delete the view', loadErrorText(e));
     }
   }
 
@@ -354,57 +362,48 @@
 <div class="mission">
   <!-- Header bar -->
   <div class="mission-header">
-    <h2>Mission Control</h2>
+    <!-- "Work Queue" — the name the tab bar gives this view; "Mission Control"
+         is the separate sidebar module (the work graph). -->
+    <h2>Work Queue</h2>
     <div class="header-actions">
-      {#if activeViewId !== null}
-        <button class="chip active" onclick={() => (activeViewId = null)}>
-          Clear filter ×
-        </button>
-      {/if}
-      <button class="chip" onclick={() => router.go('history')} title="Browse past conversations" data-testid="mission-history-btn">
+      <button class="btn small" onclick={() => router.go('history')} title="Browse past conversations" data-testid="mission-history-btn">
         <Icon name="clock" size={12} /> History
       </button>
-      <button class="icon-btn" onclick={() => load()} title="Refresh" aria-label="Refresh">
+      <button class="icon-btn" onclick={() => load()} title="Refresh" aria-label="Refresh" disabled={loading}>
         <Icon name="refresh" size={13} />
       </button>
     </div>
   </div>
 
-  <!-- Saved views bar -->
-  <div class="saved-views">
-    <span class="sv-label">Views:</span>
+  <!-- Saved views bar: one pill per view (click to filter, the × beside it
+       deletes — a sibling button, never nested inside the pill). -->
+  <div class="saved-views" role="group" aria-label="Saved views">
+    <span class="sv-label">Views</span>
     <button
-      class="chip"
+      class="wq-view solo"
       class:active={activeViewId === null}
+      aria-pressed={activeViewId === null}
       onclick={() => (activeViewId = null)}
     >All</button>
     {#each savedViews as sv (sv.id)}
-      <button
-        class="chip"
-        class:active={activeViewId === sv.id}
-        onclick={() => (activeViewId = sv.id)}
-      >
-        {sv.name}
-        <span
-          class="chip-del"
-          role="button"
-          tabindex="-1"
-          onclick={(e) => {
-            e.stopPropagation();
-            deleteView(sv.id);
-          }}
-          onkeydown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.stopPropagation();
-              deleteView(sv.id);
-            }
-          }}
-          title="Delete view"
-        >×</span>
-      </button>
+      <span class="wq-view-wrap" class:active={activeViewId === sv.id}>
+        <button
+          class="wq-view"
+          class:active={activeViewId === sv.id}
+          aria-pressed={activeViewId === sv.id}
+          onclick={() => (activeViewId = sv.id)}
+          title={sv.name}
+        ><span class="ellipsis">{sv.name}</span></button>
+        <button
+          class="wq-view-del"
+          onclick={() => void deleteView(sv.id)}
+          title="Delete view “{sv.name}”"
+          aria-label="Delete view {sv.name}"
+        ><Icon name="x" size={10} /></button>
+      </span>
     {/each}
-    <button class="chip new" onclick={() => (showNewViewForm = !showNewViewForm)}>
-      + Save view
+    <button class="btn small ghost" onclick={() => (showNewViewForm = !showNewViewForm)} aria-expanded={showNewViewForm}>
+      <Icon name="plus" size={12} /> Save view…
     </button>
   </div>
 
@@ -412,29 +411,31 @@
     <div class="new-view-form">
       <input
         type="text"
+        class="input"
         placeholder="View name"
+        aria-label="View name"
         bind:value={newViewName}
-        class="sv-input"
+        onkeydown={(e) => { if (e.key === 'Enter') void createView(); else if (e.key === 'Escape') showNewViewForm = false; }}
       />
-      <label><input type="checkbox" bind:checked={advancedFilter} /> Advanced JSON</label>
       {#if advancedFilter}
-        <input type="text" aria-label="Filter JSON" placeholder={'{"bucket":"needs_you"}'} bind:value={newViewFilter} class="sv-input wide" />
+        <input type="text" class="input wide mono" aria-label="Filter JSON" placeholder={'{"bucket":"needs_you"}'} bind:value={newViewFilter} />
       {:else}
-        <select aria-label="View status" bind:value={filterBucket}><option value="">All statuses</option>{#each ALL_BUCKETS as bucket}<option value={bucket}>{BUCKET_LABELS[bucket]}</option>{/each}</select>
-        <select aria-label="View provider" bind:value={filterProvider}><option value="">All providers</option>{#each providers as provider}<option value={provider}>{provider}</option>{/each}</select>
-        <select aria-label="View repository" bind:value={filterRepo}><option value="">All repositories</option>{#each repositories as repo}<option value={repo}>{repo}</option>{/each}</select>
+        <select class="input" aria-label="View status" bind:value={filterBucket}><option value="">All statuses</option>{#each ALL_BUCKETS as bucket}<option value={bucket}>{BUCKET_LABELS[bucket]}</option>{/each}</select>
+        <select class="input" aria-label="View provider" bind:value={filterProvider}><option value="">All providers</option>{#each providers as provider}<option value={provider}>{provider}</option>{/each}</select>
+        <select class="input" aria-label="View repository" bind:value={filterRepo}><option value="">All repositories</option>{#each repositories as repo}<option value={repo}>{repo}</option>{/each}</select>
       {/if}
-      <button class="btn-save" onclick={createView}>Save</button>
-      <button class="btn-cancel" onclick={() => (showNewViewForm = false)}>Cancel</button>
+      <label class="checkbox-row adv"><input type="checkbox" bind:checked={advancedFilter} /> Advanced (JSON)</label>
+      <span class="grow"></span>
+      <button class="btn small" onclick={() => (showNewViewForm = false)}>Cancel</button>
+      <button class="btn small primary" onclick={createView} disabled={!newViewName.trim()}>Save view</button>
     </div>
   {/if}
 
   <!-- Buckets -->
-  {#if loading && !view}
-    <div class="loading">Loading work queue…</div>
-  {:else if !view}
-    <div class="empty">No workspace selected.</div>
+  {#if !wsId}
+    <EmptyState variant="page" icon="folder" title="No workspace selected" body="Pick a workspace in the sidebar to see its sessions by what they need." />
   {:else}
+  <LoadState what="the work queue" variant="page" loading={loading} error={loadError} empty={!view} onretry={() => load()}>
     <div class="buckets">
       {#each activeBuckets() as bucket (bucket)}
         {@const items = filteredItems(bucket)}
@@ -470,10 +471,10 @@
                     }
                   }}
                 >
-                  <span class="item-title">{item.title}</span>
+                  <span class="item-title" title={item.title}>{item.title}</span>
                   <div class="item-meta">
                     {#if item.repo}
-                      <span class="meta-tag">{item.repo}</span>
+                      <span class="meta-tag repo" title={item.repo}>{item.repo}</span>
                     {/if}
                     {#if item.cost_usd !== undefined && item.cost_usd > 0}
                       <span class="meta-tag cost">${item.cost_usd.toFixed(2)}</span>
@@ -503,22 +504,22 @@
                           onkeydown={(e) => e.stopPropagation()}
                           title="Push a sub-task to this agent"
                           data-testid="subtask-btn"
-                        >+ Sub-task</button>
+                        ><Icon name="plus" size={10} /> Sub-task</button>
                       {/if}
                     </div>
                     {#if subtaskFor === item.id}
                       <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
                       <div class="subtask-form" data-subtask-for={item.id} onclick={(e) => e.stopPropagation()}>
                         <input
-                          class="sv-input subtask-input"
+                          class="input subtask-input"
                           placeholder="Sub-task for the agent…"
                           bind:value={subtaskTitle}
                           onkeydown={(e) => onSubtaskKeydown(e, item)}
                           spellcheck="false"
                           aria-label="Sub-task title"
                         />
-                        <button class="btn-save" disabled={subtaskTitle.trim() === '' || subtaskBusy} onclick={() => void submitSubtask(item)}>Add</button>
-                        <button class="btn-cancel" onclick={closeSubtask}>Cancel</button>
+                        <button class="btn small" onclick={closeSubtask}>Cancel</button>
+                        <button class="btn small primary" disabled={subtaskTitle.trim() === '' || subtaskBusy} onclick={() => void submitSubtask(item)}>Add</button>
                       </div>
                     {/if}
                   {/if}
@@ -529,6 +530,7 @@
         </section>
       {/each}
     </div>
+  </LoadState>
   {/if}
 </div>
 
@@ -546,13 +548,15 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 12px 16px 8px;
-    border-bottom: 1px solid var(--border);
+    gap: 12px;
+    min-height: 44px;
+    padding: 6px 16px;
+    border-bottom: 1px solid var(--separator);
   }
 
   .mission-header h2 {
     margin: 0;
-    font-size: 15px;
+    font-size: var(--fs-l);
     font-weight: 600;
   }
 
@@ -560,20 +564,6 @@
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-
-  .icon-btn {
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: var(--text-dim);
-    font-size: 16px;
-    padding: 2px 6px;
-    border-radius: 4px;
-  }
-  .icon-btn:hover {
-    background: var(--surface);
-    color: var(--text);
   }
 
   /* Saved views */
@@ -587,83 +577,100 @@
   }
 
   .sv-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-dim);
+    margin-inline-end: 2px;
   }
 
-  .chip {
+  /* View pills: a quiet pill, the active one in the accent (selection, not a
+     primary action). */
+  .wq-view-wrap {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    padding: 2px 10px;
+    min-width: 0;
+    max-width: 220px;
     border: 1px solid var(--border);
-    border-radius: 12px;
+    border-radius: 999px;
+    background: var(--surface);
+  }
+  .wq-view-wrap.active {
+    border-color: var(--accent-solid);
+    background: var(--accent-soft);
+  }
+  .wq-view {
+    display: inline-flex;
+    align-items: center;
+    min-width: 0;
+    height: 24px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
     background: var(--surface);
     color: var(--text-dim);
-    font-size: 12px;
-    cursor: pointer;
-    transition: background 0.12s, color 0.12s;
-  }
-  .chip:hover,
-  .chip.active {
-    background: var(--accent);
-    color: #fff;
-    border-color: var(--accent);
-  }
-  .chip.new {
-    border-style: dashed;
-  }
-  .chip-del {
-    font-size: 14px;
-    line-height: 1;
-    opacity: 0.7;
+    font: inherit;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
-  .chip-del:hover {
-    opacity: 1;
+  .wq-view-wrap .wq-view {
+    border: none;
+    background: transparent;
+    padding-inline-end: 4px;
+  }
+  .wq-view:hover {
+    color: var(--text);
+  }
+  .wq-view.active {
+    color: var(--accent-text);
+    font-weight: 500;
+  }
+  .wq-view.solo.active {
+    border-color: var(--accent-solid);
+    background: var(--accent-soft);
+  }
+  .wq-view-del {
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    margin-inline-end: 2px;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .wq-view-del:hover {
+    background: var(--surface-2);
+    color: var(--danger);
   }
 
   /* New-view form */
   .new-view-form {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
     padding: 8px 16px;
     background: var(--surface);
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--separator);
   }
-  .sv-input {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    color: var(--text);
-    padding: 4px 8px;
-    font-size: 13px;
+  .new-view-form .input {
+    width: auto;
     min-width: 140px;
   }
-  .sv-input.wide {
-    min-width: 260px;
+  .new-view-form .input.wide {
     flex: 1;
+    min-width: 240px;
   }
-  .btn-save {
-    padding: 4px 12px;
-    background: var(--accent);
-    color: #fff;
-    border: none;
-    border-radius: 4px;
-    font-size: 12px;
-    cursor: pointer;
-  }
-  .btn-cancel {
-    padding: 4px 12px;
-    background: none;
+  .new-view-form .adv {
     color: var(--text-dim);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    font-size: 12px;
-    cursor: pointer;
+    font-size: var(--fs-s);
+  }
+  .grow {
+    flex: 1;
   }
 
   /* Buckets grid */
@@ -679,7 +686,7 @@
   .bucket {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     overflow: hidden;
   }
   .bucket.empty-bucket {
@@ -692,7 +699,7 @@
     gap: 6px;
     padding: 8px 12px;
     border-bottom: 1px solid var(--border);
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -707,19 +714,18 @@
     flex: 1;
   }
   .bucket-count {
-    background: var(--accent);
-    color: #fff;
-    border-radius: 9px;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
+    border-radius: 999px;
     padding: 1px 7px;
-    font-size: 11px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
   }
 
   .bucket-empty {
     padding: 10px 12px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
-    font-style: italic;
   }
 
   .item-list {
@@ -749,7 +755,7 @@
 
   .item-title {
     display: block;
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text);
     white-space: nowrap;
     overflow: hidden;
@@ -764,11 +770,20 @@
   }
 
   .meta-tag {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface-2);
     border-radius: 4px;
     padding: 1px 5px;
+  }
+  /* A repo is a full path — truncate it inside the card instead of letting
+     the bucket's overflow:hidden chop it mid-character. */
+  .meta-tag.repo {
+    max-width: 100%;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .meta-tag.cost {
     color: var(--warning);
@@ -793,7 +808,7 @@
   }
   .strip-count {
     flex-shrink: 0;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text);
   }
   .strip-track {
@@ -813,7 +828,7 @@
   .strip-now {
     flex: 1;
     min-width: 0;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;
@@ -821,8 +836,11 @@
   }
   .subtask-btn {
     flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
     margin-inline-start: auto;
-    height: 18px;
+    height: 20px;
     padding: 0 7px;
     border: 1px dashed var(--border);
     border-radius: 999px;
@@ -845,14 +863,6 @@
   .subtask-input {
     flex: 1;
     min-width: 0;
-    font-size: 12px;
-  }
-
-  .loading,
-  .empty {
-    padding: 24px;
-    text-align: center;
-    color: var(--text-dim);
-    font-size: 13px;
+    font-size: var(--fs-s);
   }
 </style>

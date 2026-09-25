@@ -8,6 +8,11 @@
   import { api } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
+  import SectionIntro from './SectionIntro.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import { guardUnsaved } from '../../lib/leaveGuard';
   import type {
     NameThemesResp,
     NameThemeInfo,
@@ -16,6 +21,9 @@
 
   let resp = $state<NameThemesResp | null>(null);
   let loading = $state(true);
+  // A failed load renders inline with Retry (it used to toast and leave the
+  // page blank under the intro).
+  let loadError = $state('');
   let saving = $state(false);
 
   // New custom-theme form.
@@ -31,10 +39,11 @@
 
   async function load(): Promise<void> {
     loading = true;
+    loadError = '';
     try {
       resp = await api.get<NameThemesResp>('/name-themes');
     } catch (e) {
-      toasts.error('Could not load name themes', e instanceof Error ? e.message : String(e));
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -49,7 +58,7 @@
       resp = await api.put<NameThemesResp>('/name-themes/active', { theme_id: id });
     } catch (e) {
       if (resp && prev) resp.active = prev; // revert
-      toasts.error('Could not set theme', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't switch the name theme", loadErrorText(e));
     } finally {
       saving = false;
     }
@@ -61,14 +70,7 @@
       .split('\n')
       .map((n) => n.trim())
       .filter((n) => n.length > 0);
-    if (!label) {
-      toasts.warn('Name your theme', 'Give the custom theme a label first.');
-      return;
-    }
-    if (names.length === 0) {
-      toasts.warn('Add some names', 'Enter at least one name (one per line).');
-      return;
-    }
+    if (!label || names.length === 0) return;
     creating = true;
     try {
       await api.post<CustomThemeResp>('/name-themes', { label, names });
@@ -77,125 +79,128 @@
       await load();
       toasts.success('Custom theme created', `${label} · ${names.length} names`);
     } catch (e) {
-      toasts.error('Could not create theme', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't create the theme", loadErrorText(e));
     } finally {
       creating = false;
     }
   }
 
   async function deleteTheme(t: NameThemeInfo): Promise<void> {
-    if (!(await confirmer.ask(`Delete custom theme “${t.label}”?`, { title: 'Delete theme' }))) return;
+    const active = resp?.active === t.id;
+    if (
+      !(await confirmer.ask(
+        `Delete custom theme “${t.label}” and its ${t.capacity} name${t.capacity === 1 ? '' : 's'}?${active ? ' New sessions go back to numbered names.' : ''} Sessions already named from it keep their names.`,
+        { title: 'Delete theme' },
+      ))
+    )
+      return;
     try {
       await api.del(`/name-themes/${t.id}`);
       await load();
+      toasts.success('Theme deleted', t.label);
     } catch (e) {
-      toasts.error('Could not delete theme', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't delete the theme", loadErrorText(e));
     }
   }
 
   const builtins = $derived((resp?.themes ?? []).filter((t) => t.kind === 'builtin'));
   const customs = $derived((resp?.themes ?? []).filter((t) => t.kind === 'custom'));
+  const newNameCount = $derived(newNames.split('\n').filter((n) => n.trim()).length);
+  const canCreate = $derived(newLabel.trim() !== '' && newNameCount > 0);
+  // A half-typed custom theme isn't lost to a stray sidebar click.
+  $effect(() => guardUnsaved(() => !creating && (newLabel.trim() !== '' || newNames.trim() !== ''), { what: 'the new custom theme' }));
 </script>
 
 <div class="settings-section">
-  <PageHeader title={sectionLabel('session-names')} subtitle="New agent sessions are auto-named from your theme" />
+  <PageHeader title={sectionLabel('session-names')} subtitle="Auto-names for new agent sessions" />
   <PageBody width="readable">
-  <p class="section-intro">New agent sessions are auto-named from your active theme (e.g. <strong>Ronaldo</strong>) instead of <code>claude #3</code> — unique among your open sessions. Address one by name from ⌘I or Broadcast: <code>ronaldo: run the tests</code>.</p>
+  <SectionIntro>New agent sessions are named from your active theme (e.g. <strong>Ronaldo</strong>) instead of <code>claude #3</code>, unique among your open sessions. Address one by name from ⌘I or Broadcast: <code>ronaldo: run the tests</code>.</SectionIntro>
 
-  {#if loading}
-    <div class="card pad dim">Loading…</div>
-  {:else if resp}
-    <div class="section-title">Active theme</div>
-    <div class="theme-grid">
-      <!-- Numbered (legacy) -->
+  <LoadState what="name themes" {loading} error={loadError} empty={!resp} onretry={() => void load()} rows={3}>
+  {#if resp}
+    {#snippet themeCard(id: string, label: string, sample: string, cap: string, custom: boolean)}
+      {@const on = resp?.active === id}
       <button
         type="button"
         class="theme-card"
-        class:active={resp.active === NONE_ID}
+        class:active={on}
+        aria-pressed={on}
         disabled={saving}
-        onclick={() => setActive(NONE_ID)}
+        onclick={() => setActive(id)}
       >
-        <div class="theme-head">
-          <span class="theme-label">Numbered</span>
-          {#if resp.active === NONE_ID}<span class="badge-on">Active</span>{/if}
-        </div>
-        <div class="theme-sample dim">claude #1 · codex #2 · shell #3</div>
+        <span class="theme-head">
+          <span class="theme-label" title={label}>{label}</span>
+          {#if custom}<span class="chip">Custom</span>{/if}
+          {#if on}<span class="on-mark" aria-hidden="true"><Icon name="check" size={12} /></span>{/if}
+        </span>
+        <span class="theme-sample" title={sample}>{sample}</span>
+        {#if cap}<span class="theme-cap">{cap}</span>{/if}
       </button>
+    {/snippet}
 
+    <div class="section-title">Active theme</div>
+    <div class="theme-grid" role="group" aria-label="Name theme">
+      {@render themeCard(NONE_ID, 'Numbered', 'claude #1 · codex #2 · shell #3', '', false)}
       {#each builtins as t (t.id)}
-        <button
-          type="button"
-          class="theme-card"
-          class:active={resp.active === t.id}
-          disabled={saving}
-          onclick={() => setActive(t.id)}
-        >
-          <div class="theme-head">
-            <span class="theme-label">{t.label}</span>
-            {#if resp.active === t.id}<span class="badge-on">Active</span>{/if}
-          </div>
-          <div class="theme-sample dim">{t.sample.join(' · ')} …</div>
-          <div class="theme-cap dim">{t.capacity.toLocaleString()} names</div>
-        </button>
+        {@render themeCard(t.id, t.label, t.sample.join(' · '), `${t.capacity.toLocaleString()} names`, false)}
       {/each}
-
       {#each customs as t (t.id)}
-        <button
-          type="button"
-          class="theme-card"
-          class:active={resp.active === t.id}
-          disabled={saving}
-          onclick={() => setActive(t.id)}
-        >
-          <div class="theme-head">
-            <span class="theme-label">{t.label} <span class="tag">custom</span></span>
-            {#if resp.active === t.id}<span class="badge-on">Active</span>{/if}
-          </div>
-          <div class="theme-sample dim">{t.sample.join(' · ') || '(no names yet)'}</div>
-          <div class="theme-cap dim">
-            {t.capacity} name{t.capacity === 1 ? '' : 's'} · recycles with #2, #3… when exhausted
-          </div>
-        </button>
+        {@render themeCard(
+          t.id,
+          t.label,
+          t.sample.join(' · ') || 'No names yet',
+          `${t.capacity} name${t.capacity === 1 ? '' : 's'} · then #2, #3…`,
+          true,
+        )}
       {/each}
     </div>
 
-    <div class="section-title">Your custom themes</div>
-    <div class="card pad">
-      {#if customs.length > 0}
-        <ul class="custom-list">
-          {#each customs as t (t.id)}
-            <li>
-              <span class="cl-label">{t.label}</span>
-              <span class="cl-names dim">{t.sample.join(', ')}{t.capacity > t.sample.length ? '…' : ''}</span>
-              <button class="link-danger" onclick={() => deleteTheme(t)}>Delete</button>
-            </li>
-          {/each}
-        </ul>
-      {:else}
-        <div class="dim">No custom themes yet. Add one below — e.g. your family names.</div>
-      {/if}
+    <div class="section-title">Custom themes</div>
+    {#if customs.length > 0}
+      <ul class="custom-list card">
+        {#each customs as t (t.id)}
+          <li>
+            <span class="cl-label" title={t.label}>{t.label}</span>
+            <span class="cl-names" title={t.sample.join(', ')}>{t.sample.join(', ')}{t.capacity > t.sample.length ? '…' : ''}</span>
+            <button class="icon-btn" title="Delete {t.label}" aria-label="Delete {t.label}" onclick={() => deleteTheme(t)}>
+              <Icon name="trash" size={14} />
+            </button>
+          </li>
+        {/each}
+      </ul>
+    {/if}
 
-      <div class="new-form">
-        <div class="field">
-          <label for="nt-label">New custom theme</label>
-          <input id="nt-label" class="input" placeholder="e.g. Family" bind:value={newLabel} />
-        </div>
-        <div class="field">
-          <label for="nt-names">Names (one per line, most-used first)</label>
-          <textarea
-            id="nt-names"
-            class="input names-area"
-            rows="5"
-            placeholder={'Dad\nMom\nSister\nBrother'}
-            bind:value={newNames}
-          ></textarea>
-        </div>
-        <button class="btn" disabled={creating} onclick={createTheme}>
-          {creating ? 'Creating…' : 'Create theme'}
+    <div class="card s-card new-form">
+      <div class="new-title">New custom theme</div>
+      <p class="new-sub">Your own list of names — family, a team, a band. Sessions use them in order.</p>
+      <div class="field">
+        <label for="nt-label">Theme name</label>
+        <input id="nt-label" class="input" placeholder="Family" bind:value={newLabel} />
+      </div>
+      <div class="field">
+        <label for="nt-names">Names <span class="dim">(one per line, most-used first)</span></label>
+        <textarea
+          id="nt-names"
+          class="input names-area"
+          rows="5"
+          placeholder={'Dad\nMom\nSister\nBrother'}
+          bind:value={newNames}
+        ></textarea>
+        <span class="hint">{newNameCount} name{newNameCount === 1 ? '' : 's'}</span>
+      </div>
+      <div class="form-actions">
+        <button
+          class="btn primary"
+          disabled={creating || !canCreate}
+          title={canCreate ? undefined : 'Enter a theme name and at least one name'}
+          onclick={createTheme}
+        >
+          <Icon name="plus" size={13} /> {creating ? 'Creating…' : 'Create theme'}
         </button>
       </div>
     </div>
   {/if}
+  </LoadState>
   </PageBody>
 </div>
 
@@ -207,136 +212,127 @@
     height: 100%;
     min-height: 0;
   }
-  .section-intro {
-    margin: 0 0 14px;
-    font-size: 12.5px;
-    line-height: 1.5;
-    color: var(--text-dim);
-  }
-  .section-intro :global(code) {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    background: var(--surface-2);
-    padding: 1px 4px;
-    border-radius: 3px;
-  }
-  .card.pad {
+  .s-card {
     padding: 14px 16px;
-    max-width: 640px;
-    margin-bottom: 8px;
   }
   .theme-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-    gap: 10px;
-    max-width: 640px;
-    margin-bottom: 10px;
+    gap: 8px;
+    max-width: var(--settings-col);
   }
   .theme-card {
     text-align: start;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     padding: 10px 12px;
     cursor: pointer;
     display: flex;
     flex-direction: column;
     gap: 4px;
+    min-width: 0;
+    color: var(--text);
     transition: border-color 120ms ease-out, background 120ms ease-out;
   }
-  .theme-card:hover {
-    border-color: var(--accent);
+  .theme-card:hover:not(:disabled) {
+    background: var(--hover);
   }
+  /* Selection = the accent tint + a strong border (never green: green means success). */
   .theme-card.active {
-    border-color: var(--success);
-    background: color-mix(in srgb, var(--success) 12%, var(--surface));
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+  .theme-card:disabled {
+    cursor: default;
   }
   .theme-head {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 8px;
+    gap: 6px;
+    min-width: 0;
   }
   .theme-label {
-    font-size: 12.5px;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
-  .tag {
-    font-size: 9.5px;
-    font-weight: 500;
-    text-transform: uppercase;
-    color: var(--text-dim);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 0 3px;
-    vertical-align: middle;
+  .on-mark {
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 999px;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
+    flex-shrink: 0;
   }
-  .badge-on {
+  .theme-sample,
+  .theme-cap {
     font-size: var(--fs-xs);
-    font-weight: 600;
-    color: var(--success);
-    background: var(--success-soft);
-    border-radius: 4px;
-    padding: 1px 5px;
-  }
-  .theme-sample {
-    font-size: 11px;
+    color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .theme-cap {
-    font-size: var(--fs-xs);
-  }
   .custom-list {
     list-style: none;
-    margin: 0 0 10px;
-    padding: 0;
+    margin: 0 0 8px;
+    padding: 4px 8px 4px 14px;
+    max-width: var(--settings-col);
+    box-sizing: border-box;
   }
   .custom-list li {
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 6px 0;
-    border-bottom: 1px solid var(--border);
+    min-height: 32px;
+  }
+  .custom-list li + li {
+    border-top: 1px solid var(--border);
   }
   .cl-label {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 600;
-    min-width: 100px;
+    width: 140px;
+    flex-shrink: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .cl-names {
     flex: 1;
-    font-size: 11.5px;
+    min-width: 0;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .link-danger {
-    background: none;
-    border: none;
-    color: var(--danger);
-    cursor: pointer;
-    font-size: 11.5px;
-  }
   .new-form {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    max-width: 360px;
+    max-width: var(--settings-col);
+    box-sizing: border-box;
   }
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+  .new-title {
+    font-size: var(--fs-m);
+    font-weight: 600;
   }
-  .field label {
-    font-size: 11.5px;
+  .new-sub {
+    margin: 2px 0 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
+  .new-form .field {
+    max-width: 380px;
+  }
   .names-area {
-    resize: vertical;
     font-family: var(--font-mono);
-    line-height: 1.5;
+  }
+  .form-actions {
+    display: flex;
   }
 </style>

@@ -1,12 +1,25 @@
 <script lang="ts">
   import { ws } from '../../lib/stores/workspace.svelte';
   import { loops } from '../../lib/stores/loops.svelte';
+  import { loopsPagePort } from '../../lib/uiCommands/loops';
   import GoalDefineForm from './GoalDefineForm.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import LoopDetail from './LoopDetail.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { loopStatus } from './loopStatus';
+  import Icon from '../../lib/components/Icon.svelte';
+  import RelTime from '../../lib/components/RelTime.svelte';
+
+  const PHASE_LABEL: Record<string, string> = {
+    planning: 'Planning',
+    executing: 'Executing',
+    evaluating: 'Evaluating',
+    digesting: 'Digesting',
+    waiting: 'Waiting on an agent',
+  };
 
   let selectedId = $state<string | null>(null);
   let creating = $state(false);
@@ -30,23 +43,8 @@
     const id = ws.currentId;
     if (id) void loops.loadList(id);
   }
-
-  function pillClass(status: string): string {
-    switch (status) {
-      case 'running':
-        return 'pill working';
-      case 'succeeded':
-        return 'pill ok';
-      case 'failed':
-      case 'stopped':
-        return 'pill bad';
-      case 'blocked':
-      case 'exhausted':
-        return 'pill warn';
-      default:
-        return 'pill';
-    }
-  }
+  // Agent UI control (lib/uiCommands/loops.ts) opens a loop's detail here.
+  $effect(() => loopsPagePort.bind({ open, selectedId: () => selectedId }));
 </script>
 
 <div class="loops">
@@ -57,13 +55,13 @@
   {:else}
     <PageHeader
       title="Goal Loops"
-      subtitle="Give a goal + a budget; a team of agents iterates toward it on an isolated branch until the acceptance criteria are met or a limit is hit."
+      subtitle="Agents iterate toward a goal within a budget"
     >
       {#snippet actions()}
         <!-- One primary per page: while the list is empty the empty state owns
              the "New goal loop" CTA. -->
         {#if list.length > 0}
-          <button class="btn primary" onclick={() => (creating = true)}>New goal loop</button>
+          <button class="btn small primary" onclick={() => (creating = true)}><Icon name="plus" size={12} /> New goal loop</button>
         {/if}
       {/snippet}
     </PageHeader>
@@ -91,16 +89,18 @@
       <ul class="cards">
         {#each list as l (l.id)}
           <li>
-            <button class="card" onclick={() => open(l.id)}>
+            <button class="loop-card" onclick={() => open(l.id)}>
               <div class="card-top">
-                <span class="name">{l.name}</span>
-                <span class={pillClass(l.status)}>{l.status}</span>
+                <span class="name" title={l.name}>{l.name}</span>
+                <StatusBadge status={loopStatus(l.status)} />
               </div>
-              <div class="bar"><span class="bar-fill" style:width={`${l.progress_pct}%`}></span></div>
+              {#if l.definition?.summary}<span class="goal" title={l.definition.summary}>{l.definition.summary}</span>{/if}
+              <div class="bar" aria-hidden="true"><span class="bar-fill" class:done={l.status === 'succeeded'} style:width={`${l.progress_pct}%`}></span></div>
               <div class="card-meta">
-                <span>iter {l.current_iteration}/{l.limits.max_iterations}</span>
-                <span>{l.progress_pct}%</span>
-                {#if l.status === 'running'}<span class="phase">{l.phase}</span>{/if}
+                <span>Iteration {l.current_iteration} of {l.limits.max_iterations}</span>
+                <span>{l.progress_pct}% complete</span>
+                {#if l.status === 'running' && PHASE_LABEL[l.phase]}<span class="phase">{PHASE_LABEL[l.phase]}</span>
+                {:else if l.updated_at}<span class="when">Updated <RelTime iso={l.updated_at} /></span>{/if}
               </div>
             </button>
           </li>
@@ -126,9 +126,9 @@
     grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
     gap: 12px;
   }
-  .card {
+  .loop-card {
     width: 100%;
-    text-align: left;
+    text-align: start;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
@@ -138,8 +138,13 @@
     flex-direction: column;
     gap: 8px;
   }
-  .card:hover {
-    background: var(--surface-2);
+  .loop-card:hover {
+    border-color: var(--border-strong);
+    background: var(--hover);
+  }
+  .loop-card:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
   .card-top {
     display: flex;
@@ -149,17 +154,33 @@
   }
   .name {
     font-weight: 600;
-    font-size: 13px;
+    font-size: var(--fs-m);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .card-meta {
     display: flex;
-    gap: 12px;
-    font-size: 11.5px;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .phase {
-    color: var(--status-working);
-    text-transform: capitalize;
+    color: var(--text);
+  }
+  .when {
+    margin-inline-start: auto;
+  }
+  .goal {
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
   }
   .bar {
     height: 5px;
@@ -172,29 +193,7 @@
     height: 100%;
     background: var(--status-working);
   }
-  .pill {
-    font-size: 11px;
-    padding: 1px 8px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    color: var(--text-dim);
-    text-transform: capitalize;
-  }
-  .pill.working {
-    background: color-mix(in srgb, var(--status-working) 18%, transparent);
-    color: var(--status-working);
-  }
-  .pill.ok {
-    background: var(--success-soft);
-    color: var(--success);
-    font-weight: 600;
-  }
-  .pill.bad {
-    background: color-mix(in srgb, var(--status-exited) 16%, transparent);
-    color: var(--status-exited);
-  }
-  .pill.warn {
-    background: var(--status-warn-soft);
-    color: var(--status-warn);
+  .bar-fill.done {
+    background: var(--success);
   }
 </style>

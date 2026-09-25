@@ -30,6 +30,13 @@
   let busy = $state<Record<string, boolean>>({});
   let notes = $state<Record<string, string>>({});
   let showAll = $state(false);
+  /** Told after a decision so the page header's pending badge updates now, not on its next poll. */
+  let { ondecided }: { ondecided?: () => void } = $props();
+  /** Why Approve/Deny is greyed out — a disabled button never goes unexplained. */
+  const decideBlockedReason = (a: McpApproval): string =>
+    a.requested_by === auth.me?.id && !requesterMayDecide(a)
+      ? 'You raised this request yourself — another admin has to decide it'
+      : 'You don’t have approve access to this server';
 
   async function load(): Promise<void> {
     loading = true;
@@ -66,6 +73,7 @@
     try {
       await mcpCpApi.cpDecide(a.id, { approved, note: notes[a.id]?.trim() || null });
       toasts.success(approved ? 'Approved' : 'Denied', a.title);
+      ondecided?.();
       await load();
     } catch (e) {
       toasts.error('Decision failed', e instanceof Error ? e.message : String(e));
@@ -94,7 +102,7 @@
       <input type="checkbox" bind:checked={showAll} />
       <span>Show decided too</span>
     </label>
-    <button class="btn small" onclick={() => void load()} title="Refresh"><Icon name="refresh" size={13} /></button>
+    <button class="btn small" onclick={() => void load()} title="Refresh" aria-label="Refresh approvals"><Icon name="refresh" size={13} /></button>
   </div>
 
   {#if loadError && approvals.length === 0}
@@ -138,10 +146,10 @@
                 value={notes[a.id] ?? ''}
                 oninput={(e) => (notes = { ...notes, [a.id]: (e.currentTarget as HTMLInputElement).value })}
               />
-              <button class="btn small ok" disabled={busy[a.id] || !canDecide(a)} onclick={() => void decide(a, true)}>
+              <button class="btn small ok" disabled={busy[a.id] || !canDecide(a)} title={canDecide(a) ? undefined : decideBlockedReason(a)} onclick={() => void decide(a, true)}>
                 {busy[a.id] ? '…' : 'Approve'}
               </button>
-              <button class="btn small danger" disabled={busy[a.id] || !canDecide(a)} onclick={() => void decide(a, false)}>
+              <button class="btn small danger" disabled={busy[a.id] || !canDecide(a)} title={canDecide(a) ? undefined : decideBlockedReason(a)} onclick={() => void decide(a, false)}>
                 {busy[a.id] ? '…' : 'Deny'}
               </button>
             </div>
@@ -172,11 +180,11 @@
   }
   h2 {
     margin: 0;
-    font-size: 14px;
+    font-size: var(--fs-l);
     font-weight: 600;
   }
   .count {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .grow {
@@ -186,7 +194,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
   }
   .list {
@@ -217,11 +225,11 @@
     padding: 1px 6px;
   }
   .title {
-    font-size: 13.5px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .when {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .meta {
@@ -229,7 +237,7 @@
     gap: 12px;
     flex-wrap: wrap;
     margin-top: 6px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .route {
@@ -240,13 +248,13 @@
   }
   .detail {
     margin: 8px 0 0;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
   }
   .args {
     margin: 8px 0 0;
     font-family: var(--font-mono);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-s, 6px);
@@ -269,17 +277,17 @@
     border-radius: var(--radius-s, 6px);
     color: var(--text);
     padding: 6px 9px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .btn.ok {
-    color: var(--status-working, #28c840);
+    color: var(--success);
   }
   .btn.danger {
-    color: var(--status-exited, #ff5f57);
+    color: var(--danger);
   }
   .decided {
     margin-top: 8px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .muted {

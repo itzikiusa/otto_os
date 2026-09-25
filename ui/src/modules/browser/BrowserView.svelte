@@ -40,8 +40,6 @@
   let { embedded = false, targetSessionId = null }: Props = $props();
 
   let urlInput = $state('');
-  let summarizing = $state(false);
-  let summary = $state('');
   let vaultSaving = $state(false);
   let urlFocused = $state(false);
 
@@ -403,7 +401,7 @@
     if (!tab || !cred || filling) return;
     const ok = await confirmer.ask(
       `Fill the saved credentials for "${cred.username}" on ${cred.domain} into this page? Nothing is submitted automatically — review it before you sign in.`,
-      { title: 'Autofill Credentials', confirmLabel: 'Fill' },
+      { title: 'Autofill credentials', confirmLabel: 'Fill', danger: false },
     );
     if (!ok) return;
     filling = true;
@@ -522,7 +520,7 @@
     urlInput = url;
     try {
       await browser.navigate(url);
-      summary = '';
+      browser.summary = '';
     } catch (e) {
       toasts.error('Failed to load page', e instanceof Error ? e.message : undefined);
     }
@@ -570,14 +568,10 @@
   async function doSummarize(): Promise<void> {
     const url = browser.activeTab?.url;
     if (!url) return;
-    summarizing = true;
     try {
-      const resp = await browser.summarize(url);
-      summary = resp.summary;
+      await browser.runSummarize(url);
     } catch (e) {
       toasts.error('Summarize failed', e instanceof Error ? e.message : undefined);
-    } finally {
-      summarizing = false;
     }
   }
 
@@ -590,7 +584,7 @@
       // else a slice of the already-fetched page markdown. Either way this
       // keeps the daemon on the caller-supplied-summary path (no second page
       // fetch); omitting it would make vault-save re-fetch the URL server-side.
-      const derived = summary || browser.page?.markdown?.slice(0, 4000) || '';
+      const derived = browser.summary || browser.page?.markdown?.slice(0, 4000) || '';
       const resp = await browser.vaultSave(url, vaultId, derived);
       toasts.success('Saved to vault', resp.note_path);
     } catch (e) {
@@ -666,14 +660,18 @@
       type="text"
       placeholder="Enter URL"
       aria-label="Address"
+      enterkeyhint="go"
+      inputmode="url"
+      autocapitalize="off"
+      spellcheck="false"
       bind:this={urlEl}
       bind:value={urlInput}
       onkeydown={onkeydown}
       onfocus={() => (urlFocused = true)}
       onblur={() => (urlFocused = false)}
     />
-    <button class="icon-btn tool" onclick={go} title="Go" aria-label="Go">
-      <Icon name="external" size={14} />
+    <button class="icon-btn tool go-btn" onclick={go} title="Go" aria-label="Go" disabled={!urlInput.trim()}>
+      <span class="flip-rtl"><Icon name="chevronRight" size={14} /></span>
     </button>
     {#if browser.activeTab}
       <div class="mode-toggle" role="group" aria-label="Tab mode">
@@ -681,6 +679,8 @@
           class="seg"
           class:active={browser.activeTab.mode === 'reader'}
           onclick={() => toggleMode('reader')}
+          aria-label="Reader mode"
+          aria-pressed={browser.activeTab.mode === 'reader'}
           title="Reader mode — fetched and rendered as clean markdown"
         >
           <Icon name="file" size={13} />
@@ -734,33 +734,42 @@
         <Icon name="key" size={14} />
       </button>
     {/if}
-    <button
-      class="icon-btn tool"
-      onclick={doSummarize}
-      disabled={!browser.activeTab || summarizing}
-      aria-label="Summarize"
-      title="Summarize"
-    >
-      <Icon name="zap" size={14} />
-    </button>
-    <button
-      class="icon-btn tool"
-      onclick={doVaultSave}
-      disabled={!browser.activeTab || vaultSaving}
-      aria-label="Save to vault"
-      title="Save to vault"
-    >
-      <Icon name="folder" size={14} />
-    </button>
+    <!-- Page actions only exist once a page is open (no row of disabled
+         icons on the empty state). -->
+    {#if browser.activeTab}
+      <button
+        class="icon-btn tool"
+        onclick={doSummarize}
+        disabled={browser.summarizing}
+        aria-label="Summarize this page"
+        title={browser.summarizing ? 'Summarizing…' : 'Summarize this page'}
+      >
+        <Icon name="sparkle" size={14} />
+      </button>
+      <button
+        class="icon-btn tool"
+        onclick={doVaultSave}
+        disabled={vaultSaving}
+        aria-label="Save to vault"
+        title={vaultSaving ? 'Saving to vault…' : 'Save to vault'}
+      >
+        <Icon name="book" size={14} />
+      </button>
+    {/if}
   </div>
 
-  {#if summary}
+  {#if browser.summarizing && !browser.summary}
+    <div class="summary" role="status">
+      <div class="summary-head"><span>Summary · drafted by Otto</span></div>
+      <p class="dim-line">Summarizing this page…</p>
+    </div>
+  {:else if browser.summary}
     <div class="summary">
       <div class="summary-head">
-        <span>Summary</span>
-        <button class="icon-btn" onclick={() => (summary = '')} aria-label="Close summary" title="Close summary"><Icon name="x" size={12} /></button>
+        <span>Summary · drafted by Otto</span>
+        <button class="icon-btn" onclick={() => (browser.summary = '')} aria-label="Close summary" title="Close summary"><Icon name="x" size={12} /></button>
       </div>
-      <p>{summary}</p>
+      <p>{browser.summary}</p>
     </div>
   {/if}
 
@@ -791,7 +800,16 @@
           <button class="btn ghost" onclick={() => browser.activeTab && void browser.setMode(browser.activeTab.id, 'reader')}>Switch to Reader</button>
         </div>
       {/if}
-      <ReaderView page={browser.page} loading={browser.loadingPage} error={browser.pageError} />
+      <ReaderView
+        page={browser.page}
+        loading={browser.loadingPage}
+        error={browser.pageError}
+        onopenurl={focusUrl}
+        onretry={() => {
+          const url = browser.activeTab?.url;
+          if (url) void browser.loadPage(url);
+        }}
+      />
       {#if browser.page}
         <NotesRail annotations={browser.annotations} />
       {/if}
@@ -816,7 +834,13 @@
     flex: 1;
     display: flex;
     min-height: 0;
+    min-width: 0;
     position: relative;
+  }
+  @media (max-width: 640px) {
+    .body {
+      flex-direction: column;
+    }
   }
   .live-note {
     position: absolute;
@@ -824,6 +848,7 @@
     inset-block-start: 8px;
     z-index: 2;
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
     padding: 6px 8px 6px 10px;
@@ -897,6 +922,10 @@
     background: var(--surface);
     color: var(--text);
   }
+  :global([dir='rtl']) .flip-rtl {
+    display: inline-flex;
+    transform: scaleX(-1);
+  }
   .icon-btn.tool:disabled {
     opacity: 0.5;
     cursor: not-allowed;
@@ -918,6 +947,11 @@
       width: 36px;
       height: 36px;
     }
+    /* The phone keyboard's Go key submits; a lone Go button on its own row
+       was dead weight. */
+    .go-btn {
+      display: none;
+    }
   }
   .summary {
     margin: 10px 12px 0;
@@ -938,7 +972,13 @@
     letter-spacing: 0.06em;
     margin-bottom: 6px;
   }
+  .summary .dim-line {
+    color: var(--text-dim);
+  }
   .summary p {
+    /* A long summary scrolls in place instead of shoving the page off-screen. */
+    max-height: 30vh;
+    overflow-y: auto;
     margin: 0;
     color: var(--text);
     line-height: 1.5;

@@ -3,7 +3,9 @@
   // Inject tab — build/preview the inject bundle for the selected story, copy
   // markdown to clipboard, and open an agent session seeded with the bundle.
   import Icon from '../../lib/components/Icon.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import { product } from '../../lib/stores/product.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
   import { renderMarkdown } from '../../lib/md';
   import { toasts } from '../../lib/toast.svelte';
   import type { InjectBundle } from './types';
@@ -70,10 +72,9 @@
         provider: provider || undefined,
         cwd: cwd.trim() || undefined,
       });
-      toasts.success(
-        'Agent session created — open it in the Agents section',
-        session.title ? `"${session.title}" (${session.id})` : session.id,
-      );
+      toasts.success('Agent session started', session.title ? `“${session.title}” is open in Agents.` : 'It is open in Agents.');
+      // "Open in agent" means open it: land on the new session, not a toast with its id.
+      ws.navigateToSession(session.id);
     } catch (e) {
       toasts.error('Could not create agent session', product.errMsg(e));
     } finally {
@@ -109,7 +110,7 @@
           disabled={copying}
           title="Copy inject bundle markdown to clipboard"
         >
-          <Icon name="fetch" size={13} />
+          <Icon name="copy" size={13} />
           {copying ? 'Copying…' : 'Copy'}
         </button>
       {/if}
@@ -158,7 +159,7 @@
           {#each bundle.sections as sec, idx (idx)}
             <div class="section-block">
               <button class="sec-trigger" onclick={() => toggleSection(idx)}>
-                <span class="coll-arrow">{collapsed[idx] ? '▶' : '▼'}</span>
+                <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[idx] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
                 <span class="sec-heading">{sec.heading}</span>
               </button>
               {#if !collapsed[idx]}
@@ -172,14 +173,14 @@
       <!-- Full rendered markdown -->
       <div class="preview-card card">
         <div class="preview-header">
-          <span class="section-label">Full Markdown</span>
+          <span class="section-label">Full markdown</span>
           <button
             class="btn small"
             onclick={copyMarkdown}
             disabled={copying}
             title="Copy to clipboard"
           >
-            <Icon name="fetch" size={12} />
+            <Icon name="copy" size={12} />
             Copy
           </button>
         </div>
@@ -190,11 +191,11 @@
         {/if}
       </div>
     {:else if !loading}
-      <div class="empty-hint">
-        <Icon name="zap" size={28} />
-        <p>Click <strong>Build / Preview</strong> to generate the inject bundle for this story.</p>
-        <p class="dim">The bundle summarises all story context so an agent can start coding immediately.</p>
-      </div>
+      <EmptyState
+        icon="zap"
+        title="No bundle built yet"
+        body="Build / Preview assembles all of this story's context into one bundle, so an agent can start coding immediately."
+      />
     {/if}
   </div>
 {/if}
@@ -202,7 +203,7 @@
 <style>
   .muted {
     padding: 24px 0;
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     font-style: italic;
   }
@@ -243,7 +244,7 @@
     flex: 1;
   }
   .field-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -255,7 +256,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 3px 7px;
   }
   .cwd-input {
@@ -263,7 +264,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 4px 8px;
     min-width: 160px;
     max-width: 280px;
@@ -287,8 +288,8 @@
     margin-bottom: 6px;
   }
   .section-label {
-    font-size: 11px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-dim);
@@ -316,12 +317,13 @@
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .coll-arrow {
-    font-size: 9px;
+    display: inline-flex;
+    align-items: center;
     color: var(--text-dim);
     flex-shrink: 0;
   }
   .sec-heading {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
   }
@@ -343,33 +345,10 @@
   }
 
   /* Empty hint */
-  .empty-hint {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 10px;
-    padding: 48px 24px;
-    color: var(--text-dim);
-    text-align: center;
-    border: 1px dashed var(--border);
-    border-radius: var(--radius-s);
-  }
-  .empty-hint p {
-    margin: 0;
-    font-size: 13px;
-    line-height: 1.5;
-    max-width: 360px;
-  }
-  .empty-hint .dim {
-    font-size: 12px;
-    color: var(--text-dim);
-    opacity: 0.7;
-  }
 
   /* Markdown body */
   .md-body {
-    font-size: 13.5px;
+    font-size: var(--fs-m);
     line-height: 1.65;
     color: var(--text);
   }
@@ -378,7 +357,7 @@
   .md-body :global(h3),
   .md-body :global(h4) {
     margin: 1.1em 0 0.35em;
-    font-weight: 700;
+    font-weight: 600;
     line-height: 1.25;
     color: var(--text);
   }
@@ -394,7 +373,7 @@
     font-size: 0.88em;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     padding: 1px 5px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
   }
   .md-body :global(pre) {
     background: var(--surface);

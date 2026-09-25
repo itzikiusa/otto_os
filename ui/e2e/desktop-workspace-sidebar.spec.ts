@@ -107,11 +107,11 @@ test.describe('all-workspaces sidebar + workspace management', () => {
     await page.getByRole('button', { name: 'Rename' }).click();
     await expect(nav.locator('.nav-item', { hasText: `${WS_B} renamed` })).toBeVisible();
 
-    // Delete (archive) via the context menu → confirm dialog.
+    // Remove (archive — the folder is untouched) via the context menu → confirm dialog.
     await nav.locator('.nav-item', { hasText: `${WS_B} renamed` }).first()
       .click({ button: 'right' });
-    await page.getByRole('menuitem', { name: 'Delete…' }).click();
-    await page.getByRole('button', { name: 'Delete', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Remove workspace…' }).click();
+    await page.getByRole('button', { name: 'Remove', exact: true }).click();
     await expect(nav.locator('.nav-item', { hasText: `${WS_B} renamed` })).toHaveCount(0);
   });
 });

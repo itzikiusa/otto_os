@@ -44,7 +44,7 @@ export const skillLabApi = {
       `/library/bundled/${encodeURIComponent(name)}/install`,
     ),
 
-  // --- provider-global skills (~/.claude|.codex|.agy/skills), read-only -------
+  // --- provider-global skills (~/.claude, $CODEX_HOME, ~/.gemini for agy), read-only -------
   listProvider: () => api.get<ProviderSkillInfo[]>('/library/provider-skills'),
   getProvider: (provider: string, name: string) =>
     api.get<ProviderSkillContent>(

@@ -80,7 +80,7 @@
       </select>
     {/if}
     {#if working}<span class="working">working…</span>{/if}
-    <button class="close" onclick={onclose} aria-label="Close assistant">
+    <button class="close" onclick={onclose} aria-label="Close assistant" title="Close assistant">
       <Icon name="x" size={15} />
     </button>
   </header>
@@ -107,7 +107,7 @@
       rows="2"
       disabled={busy}
     ></textarea>
-    <button class="send" onclick={send} disabled={busy || !draft.trim()} aria-label="Send">
+    <button class="send" onclick={send} disabled={busy || !draft.trim()} aria-label="Send" title="Send (Enter)">
       <Icon name="arrowUp" size={16} />
     </button>
   </div>
@@ -134,7 +134,7 @@
     display: inline-flex;
     align-items: center;
     gap: 7px;
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .provider {
@@ -142,13 +142,13 @@
     background: var(--bg);
     color: var(--text);
     border-radius: 6px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 2px 5px;
     cursor: pointer;
     text-transform: capitalize;
   }
   .working {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--accent-text);
     font-weight: 600;
   }
@@ -157,7 +157,7 @@
     display: inline-flex;
     border: none;
     background: none;
-    color: var(--text-dim, #888);
+    color: var(--text-dim);
     cursor: pointer;
     padding: 4px;
     border-radius: 6px;
@@ -179,18 +179,18 @@
   .empty {
     margin: auto;
     text-align: center;
-    color: var(--text-dim, #aaa);
+    color: var(--text-dim);
     padding: 20px;
   }
   .empty .lead {
     margin: 0 0 6px;
-    font-size: 14px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: #eee;
   }
   .empty .hint {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     max-width: 320px;
   }
@@ -211,7 +211,7 @@
     background: var(--bg);
     color: var(--text);
     font: inherit;
-    font-size: 13px;
+    font-size: var(--fs-m);
     padding: 8px 10px;
     outline: none;
   }
@@ -227,8 +227,8 @@
     flex: none;
     border: none;
     border-radius: 50%;
-    background: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
     cursor: pointer;
   }
   .send:disabled {

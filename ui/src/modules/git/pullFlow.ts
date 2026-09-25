@@ -55,7 +55,7 @@ export async function runPull(
     if (isDirtyGitRefusal(e) && !opts?.autoStash) {
       const ok = await confirmer.ask(
         'Your uncommitted changes are in the way of the pull. Stash them, pull, then restore them?',
-        { title: 'Stash, pull & restore', confirmLabel: 'Stash & pull' },
+        { title: 'Stash, pull & restore', confirmLabel: 'Stash & pull', danger: false },
       );
       if (ok) await runPull(repoId, onstatus, { ...opts, autoStash: true });
       return;

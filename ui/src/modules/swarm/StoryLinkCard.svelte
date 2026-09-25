@@ -92,7 +92,7 @@
     padding: 4px 10px;
     border-bottom: 1px solid var(--border);
     background: color-mix(in srgb, var(--accent) 5%, var(--surface));
-    font-size: 12px;
+    font-size: var(--fs-s);
     flex-wrap: wrap;
   }
   .slc-label {
@@ -114,7 +114,7 @@
     flex: none;
   }
   .slc-loading {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 4px 10px;
   }
   .chip.good {

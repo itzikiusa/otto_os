@@ -126,7 +126,7 @@
         },
       })),
       { separator: true },
-      { label: 'Remove box', icon: 'trash', danger: true, action: () => home.removeBox(viewId, box.id) },
+      { label: 'Remove widget', icon: 'trash', danger: true, action: () => home.removeBox(viewId, box.id) },
     ]);
   }
 </script>
@@ -158,7 +158,7 @@
     <button class="icon-btn" onclick={() => home.toggleZoom(box.id)} title={zoomed ? 'Exit zoom (Esc)' : 'Zoom in'} aria-label={zoomed ? 'Exit zoom' : 'Zoom in'}>
       <Icon name={zoomed ? 'minimize' : 'maximize'} size={12} />
     </button>
-    <button class="icon-btn" onclick={menu} title="More" aria-label="Box menu"><Icon name="more" size={14} /></button>
+    <button class="icon-btn" onclick={menu} title="Widget options" aria-label="{def.label} widget options" aria-haspopup="menu"><Icon name="more" size={14} /></button>
   </header>
   <div class="hb-body">
     {#if box.kind === 'sessions'}

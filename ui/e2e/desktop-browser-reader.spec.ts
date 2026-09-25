@@ -74,7 +74,7 @@ async function openFixture(page: Page): Promise<void> {
 test('mark → note → rail shows it', async ({ page }) => {
   await openFixture(page);
 
-  await page.getByRole('button', { name: 'Mark element' }).click();
+  await page.getByRole('button', { name: 'Mark passage' }).click();
   await page.locator('.reader h1').click();
   await page.getByPlaceholder('Add a note').fill('interesting');
   await page.getByRole('button', { name: 'Save mark' }).click();
@@ -93,7 +93,7 @@ test('send-to-session posts the annotation id + chosen session', async ({ page }
   const sessionId = ((await sessionResp.json()) as { id: string }).id;
 
   await openFixture(page);
-  await page.getByRole('button', { name: 'Mark element' }).click();
+  await page.getByRole('button', { name: 'Mark passage' }).click();
   await page.locator('.reader h1').click();
   await page.getByPlaceholder('Add a note').fill('send me');
   await page.getByRole('button', { name: 'Save mark' }).click();

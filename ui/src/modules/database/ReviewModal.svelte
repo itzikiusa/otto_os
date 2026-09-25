@@ -39,7 +39,9 @@
   function onReviewKeydown(e: KeyboardEvent): void {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
-      onrun();
+      // Same gate as the Run button: a second ⌘↵ while the first statement is
+      // still in flight must not fire it again (an UPDATE/DELETE twice).
+      if (!running && sql.trim()) onrun();
     }
   }
 </script>
@@ -96,7 +98,7 @@
       <span class="grow"></span>
       <button class="tb-btn" onclick={onclose} disabled={running}>Cancel</button>
       <button class="tb-btn primary" onclick={onrun} disabled={running || !sql.trim()}>
-        <Icon name="play" size={11} />{running ? 'Running…' : 'Run'}
+        <Icon name="play" size={12} />{running ? 'Running…' : 'Run'}
       </button>
     </div>
   </div>
@@ -114,7 +116,7 @@
     border: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
   .tb-btn:hover {
@@ -134,7 +136,7 @@
   }
   .review-hint {
     margin: 0;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   /* ── Change table (path · before → after) ── */
@@ -147,7 +149,7 @@
   .review-diff {
     width: 100%;
     border-collapse: collapse;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .review-diff th {
     position: sticky;
@@ -224,7 +226,7 @@
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     outline: none;
     white-space: pre;

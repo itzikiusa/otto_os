@@ -72,6 +72,37 @@
     );
   }
 
+  /** Tablist keys: Enter/Space open, ←/→ (Home/End) move + open, Delete or
+   *  Backspace closes (focus moves to the neighbour). RTL flips the arrows. */
+  function onTabKey(e: KeyboardEvent, id: string): void {
+    const ids = openRepos.map((r) => r.id);
+    const i = ids.indexOf(id);
+    const focusTab = (tid: string | undefined) => {
+      if (!tid) return;
+      onopen(tid);
+      queueMicrotask(() =>
+        listEl?.querySelector<HTMLElement>(`[data-repo-id="${CSS.escape(tid)}"]`)?.focus(),
+      );
+    };
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      onopen(id);
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      const rtl = listEl ? getComputedStyle(listEl).direction === 'rtl' : false;
+      const fwd = e.key === (rtl ? 'ArrowLeft' : 'ArrowRight');
+      focusTab(ids[(i + (fwd ? 1 : -1) + ids.length) % ids.length]);
+    } else if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault();
+      focusTab(e.key === 'Home' ? ids[0] : ids[ids.length - 1]);
+    } else if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      const next = ids[i + 1] ?? ids[i - 1];
+      git.closeRepoTab(id);
+      if (next) focusTab(next);
+    }
+  }
+
   // ── Drag-to-reorder (mirrors shell/TabBar) ───────────────────────────────
   let dragId = $state<string | null>(null);
   let dragOverId = $state<string | null>(null);
@@ -101,25 +132,38 @@
     dragId = null;
     dragOverId = null;
   }
+
+  // Only the tab row scrolls; + and auto-fetch sit outside it so they are
+  // never clipped. Keep the active tab in view when it changes (opened from
+  // the picker, restored on load) — it may be off the scroller's edge.
+  let listEl = $state<HTMLDivElement | null>(null);
+  $effect(() => {
+    const id = git.activeRepoId;
+    if (!listEl || !id) return;
+    const el = listEl.querySelector<HTMLElement>(`[data-repo-id="${CSS.escape(id)}"]`);
+    el?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  });
 </script>
 
 <div class="git-tabs" class:embedded>
   <!-- The tablist must contain ONLY role="tab" children (ARIA
-       aria-required-children); `display:contents` keeps the flex layout
-       identical while moving the "new repo" button out of the tablist. -->
-  <div class="git-tablist" role="tablist">
+       aria-required-children), and it is the only part that scrolls: the
+       auto-fetch toggle and + stay pinned after it, fully visible however
+       many repos are open. -->
+  <div class="git-tablist" role="tablist" bind:this={listEl}>
   {#each openRepos as r (r.id)}
     <div
       class="git-tab"
       class:active={git.activeRepoId === r.id}
       class:drag-over={dragOverId === r.id}
       role="tab"
-      tabindex="0"
+      tabindex={git.activeRepoId === r.id || (!git.activeRepoId && r.id === openRepos[0]?.id) ? 0 : -1}
       aria-selected={git.activeRepoId === r.id}
+      data-repo-id={r.id}
       draggable="true"
-      title={r.path}
+      title={branchOf(r.id) ? `${r.path}\n${branchOf(r.id)}` : r.path}
       onclick={() => onopen(r.id)}
-      onkeydown={(e) => e.key === 'Enter' && onopen(r.id)}
+      onkeydown={(e) => onTabKey(e, r.id)}
       ondragstart={(e) => onDragStart(e, r.id)}
       ondragover={(e) => onDragOver(e, r.id)}
       ondragleave={() => onDragLeave(r.id)}
@@ -136,17 +180,18 @@
       <span class="git-tab-name">{r.name}</span>
       {#if branchOf(r.id)}
         <span class="git-tab-branch mono">
-          <Icon name="branch" size={9} />{branchOf(r.id)}
+          <Icon name="branch" size={9} /><span class="git-tab-branch-name">{branchOf(r.id)}</span>
         </span>
       {/if}
       <button
         class="git-tab-close"
-        title="Close tab"
-        aria-label="Close tab"
+        tabindex="-1"
+        title="Close {r.name}"
+        aria-label="Close {r.name}"
         onclick={(e) => {
           e.stopPropagation();
           git.closeRepoTab(r.id);
-        }}>×</button
+        }}><Icon name="x" size={9} /></button
       >
     </div>
   {/each}
@@ -164,7 +209,7 @@
     <Icon name="fetch" size={13} />
   </button>
   <button class="git-tab-new" title="Open a repository" aria-label="Open a repository" onclick={openPicker}>
-    +
+    <Icon name="plus" size={14} />
   </button>
 </div>
 
@@ -175,22 +220,28 @@
     gap: 2px;
     padding: 6px 8px 0;
     border-bottom: 1px solid var(--border);
-    overflow-x: auto;
+    /* The strip itself never scrolls or clips its buttons — only the tablist
+       below does (it shrinks first: min-width 0). */
+    min-width: 0;
     flex-shrink: 0;
+  }
+  .git-tablist {
+    display: flex;
+    align-items: stretch;
+    gap: inherit;
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow-x: auto;
     scrollbar-width: none;
   }
-  /* Layout-neutral wrapper: groups the tabs under role="tablist" without
-     introducing a box (so the flex row above is unchanged). */
-  .git-tablist {
-    display: contents;
-  }
-  .git-tabs::-webkit-scrollbar {
+  .git-tablist::-webkit-scrollbar {
     display: none;
   }
   .git-tab {
     display: flex;
     align-items: center;
     gap: 6px;
+    flex-shrink: 0;
     max-width: 230px;
     padding: 6px 8px;
     padding-inline-start: 10px;
@@ -200,7 +251,7 @@
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--fs-s);
     white-space: nowrap;
   }
   .git-tab:hover {
@@ -225,7 +276,7 @@
   }
   /* Uncommitted changes present → amber dot (a quiet "dirty" beacon). */
   .git-tab-dot.dirty {
-    background: var(--status-warn);
+    background: var(--warning);
     opacity: 1;
   }
   .git-tab-name {
@@ -236,41 +287,57 @@
     text-overflow: ellipsis;
     font-weight: 500;
   }
+  /* A short branch ("main") keeps its full width; the repo name gives way
+     first. Long branches still ellipsize at the cap. */
   .git-tab-branch {
     display: inline-flex;
     align-items: center;
     gap: 3px;
+    min-width: 0;
     flex-shrink: 0;
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    max-width: 110px;
+    max-width: 120px;
+  }
+  /* Ellipsis needs a block-level text box: on the inline-flex chip itself the
+     bare text node was cut mid-character ("release/5.02.4("). */
+  .git-tab-branch-name {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .git-tab.active .git-tab-branch {
     color: var(--accent-text);
   }
+  /* Same look as the session TabBar's close (Icon x in a 16px box). */
   .git-tab-close {
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    width: 16px;
+    height: 16px;
     border: none;
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    font-size: 15px;
-    line-height: 1;
-    padding: 0 2px;
-    border-radius: 4px;
+    padding: 0;
+    border-radius: var(--radius-s);
   }
   .git-tab-close:hover {
     background: var(--border);
     color: var(--text);
   }
   .git-tab-new {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 28px;
     border: none;
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    font-size: 18px;
-    padding: 0 10px;
+    padding: 0 7px;
     border-radius: var(--radius-s);
     flex-shrink: 0;
   }
@@ -315,6 +382,9 @@
     max-width: 100%;
     gap: 3px;
   }
+  .embedded .git-tablist {
+    align-items: center;
+  }
   .embedded .git-tab {
     border: 1px solid transparent;
     border-radius: var(--radius-s);
@@ -327,49 +397,39 @@
   .embedded .git-autofetch,
   .embedded .git-tab-new {
     height: 28px;
+    min-width: 28px;
   }
 
-  /* ── Mobile + tablet (≤1024px): the open-repo strip scrolls horizontally with
-     momentum (it already overflow-x:auto) — bump tap targets so tabs + the close
-     ✕ + the + button are comfortable, and keep + pinned to the trailing edge so
-     it stays reachable however many repos are open. ── */
+  /* ── Mobile + tablet (≤1024px): the tab row scrolls horizontally with
+     momentum — bump tap targets so tabs + the close ✕ + the + button are
+     comfortable (+ is already pinned outside the scroller). ── */
   @media (max-width: 1024px) {
     .git-tabs {
       gap: 4px;
       padding: 6px 6px 0;
+    }
+    .git-tablist {
       -webkit-overflow-scrolling: touch;
       overscroll-behavior-x: contain;
     }
     .git-tab {
       max-width: 200px;
       padding: 8px 6px 8px 12px;
-      font-size: 13px;
+      font-size: var(--fs-m);
       flex-shrink: 0;
     }
     /* ≥40px touch hit area for the close ✕ — its onclick already
        stopPropagation()s, so tapping it never also activates the tab. */
     .git-tab-close {
-      font-size: 18px;
-      padding: 0;
-      min-width: 40px;
-      min-height: 40px;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-    }
-    /* Keep the new-repo affordance glued to the end of the scroller so it never
-       disappears off-screen behind a long row of tabs. */
-    .git-autofetch {
+      width: auto;
+      height: auto;
       min-width: 40px;
       min-height: 40px;
     }
+    .git-autofetch,
     .git-tab-new {
-      position: sticky;
-      inset-inline-end: 0;
-      font-size: 22px;
-      padding: 0 12px;
       min-width: 40px;
-      background: var(--surface);
+      min-height: 40px;
     }
   }
 </style>

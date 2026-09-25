@@ -7,6 +7,7 @@
   import type { SkillReview } from '../../lib/api/types';
   import { skillReviewApi } from '../../lib/api/skillReview';
   import { toasts } from '../../lib/toast.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus } from '../../lib/status';
@@ -46,7 +47,7 @@
       onretried?.(r);
       toasts.info('Retrying agent…');
     } catch (e) {
-      toasts.error('Retry failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't re-run the agent", e instanceof Error ? e.message : String(e));
     } finally {
       retrying = { ...retrying, [index]: false };
     }
@@ -61,12 +62,12 @@
   {#each rows as agent, i (agent.name)}
     <div class="rp-agent card">
       <div class="rp-agent-top">
-        <span class="rp-agent-name">{agent.name}</span>
+        <span class="rp-agent-name" title={agent.name}>{agent.name}</span>
         <span class="chip rp-agent-chip">{agent.provider}{agent.model ? ' · ' + agent.model : ''}</span>
         <span class="grow"></span>
         {#if agent.session_id}
-          <button class="btn small ghost" onclick={() => toggleTerminal(agent.session_id)}>
-            {openTerminals.has(agent.session_id) ? 'Hide' : 'Open'}
+          <button class="btn small ghost" aria-expanded={openTerminals.has(agent.session_id)} onclick={() => toggleTerminal(agent.session_id)}>
+            {openTerminals.has(agent.session_id) ? 'Hide session' : 'Open session'}
           </button>
         {/if}
         {#if i < lastRetryable && agent.name !== 'summarizer'}
@@ -75,8 +76,8 @@
           </button>
         {/if}
         {#if agent.findings && agent.findings.length > 0}
-          <button class="btn small ghost" onclick={() => toggleAgent(agent.name)}>
-            {agentExpanded[agent.name] ? 'Hide' : `${agent.findings.length} finding${agent.findings.length === 1 ? '' : 's'}`}
+          <button class="btn small ghost" aria-expanded={!!agentExpanded[agent.name]} onclick={() => toggleAgent(agent.name)}>
+            {agentExpanded[agent.name] ? 'Hide findings' : `${agent.findings.length} finding${agent.findings.length === 1 ? '' : 's'}`}
           </button>
         {/if}
         <span class="rp-status-pill" data-status={agent.status}><StatusBadge status={runStatus(agent.status)} /></span>
@@ -86,7 +87,7 @@
       {/if}
       {#if agent.status === 'waiting'}
         <p class="rp-agent-waiting">
-          ⚠ This agent looks blocked on input. Click <strong>Open</strong> to view its session and respond.
+          <Icon name="warning" size={12} /> This agent looks blocked on input. <strong>Open session</strong> to respond.
         </p>
       {/if}
       {#if agent.session_id && openTerminals.has(agent.session_id)}
@@ -115,34 +116,34 @@
   .rp-agents { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
   .rp-agent { padding: 8px 12px; }
   .rp-agent-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .rp-agent-name { font-size: 12.5px; font-weight: 600; }
+  .rp-agent-name { font-size: var(--fs-s); font-weight: 600; }
   .rp-agent-chip { font-size: var(--fs-xs); }
-  .rp-agent-note { margin: 4px 0 0; font-size: 11.5px; color: var(--text-dim); line-height: 1.4; }
+  .rp-agent-note { margin: 4px 0 0; font-size: var(--fs-xs); color: var(--text-dim); line-height: 1.4; }
 
   /* Status pill: the shared StatusBadge; this wrapper is the layout hook. */
   .rp-status-pill { display: inline-flex; align-items: center; }
 
-  .rp-agent-waiting { margin: 6px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--warning); }
+  .rp-agent-waiting { margin: 6px 0 0; font-size: var(--fs-xs); line-height: 1.45; color: var(--warning); }
   .rp-term {
     height: min(360px, 65vh); margin: 8px 0 2px; border: 1px solid var(--border);
     border-radius: var(--radius-m); overflow: hidden; overscroll-behavior: contain; background: var(--term-bg);
   }
   .rp-agent-findings { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
-  .rp-finding { display: flex; align-items: baseline; gap: 6px; font-size: 11.5px; line-height: 1.4; }
+  .rp-finding { display: flex; align-items: baseline; gap: 6px; font-size: var(--fs-xs); line-height: 1.4; }
   .rp-finding-body { flex: 1; min-width: 0; }
-  .rp-loc { font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
+  .rp-loc { font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
 
   .severity-chip {
-    display: inline-block; padding: 2px 7px; border-radius: var(--radius-s, 4px);
-    font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+    display: inline-block; padding: 1px 8px; border-radius: 999px;
+    font-size: var(--fs-xs); font-weight: 500; text-transform: capitalize;
   }
   .sev-critical { background: var(--danger-soft); color: var(--danger); }
   .sev-high { background: var(--danger-soft); color: var(--danger); }
   .sev-medium { background: var(--warning-soft); color: var(--warning); }
-  .sev-low { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent-text); }
+  .sev-low { background: var(--info-soft); color: var(--info); }
 
   .grow { flex: 1; }
-  .mono { font-family: var(--font-mono, monospace); }
+  .mono { font-family: var(--font-mono); }
 
   @media (max-width: 1024px) {
     .rp-agent { padding: 10px 12px; }

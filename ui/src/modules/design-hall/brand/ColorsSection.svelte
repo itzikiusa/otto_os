@@ -270,9 +270,12 @@
     color: var(--text);
     text-align: end;
   }
-  .hex:hover:not(:disabled),
-  .hex:focus {
+  .hex:hover:not(:disabled) {
     border-color: var(--border);
+    background: var(--surface-2);
+  }
+  .hex:focus {
+    border-color: var(--accent);
     background: var(--surface-2);
     outline: none;
   }

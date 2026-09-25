@@ -85,20 +85,24 @@ test('delete scheduled task: in-app confirm, Cancel keeps it, Delete removes it'
   await expect(row).toBeVisible({ timeout: 15_000 });
 
   // Cancel: the dialog closes and the task is still there.
-  await row.getByRole('button', { name: 'Delete' }).click();
+  // Delete lives in the row's ⋯ menu (one action row, not six buttons).
+  await row.getByRole('button', { name: /More actions/ }).click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete…' }).click();
   const dlg = page.getByRole('dialog', { name: 'Delete scheduled task' });
   await expect(dlg).toBeVisible();
-  await expect(dlg).toContainText('Delete scheduled task "E2E confirm target"?');
+  await expect(dlg).toContainText('Delete “E2E confirm target”?');
   await dlg.getByRole('button', { name: 'Cancel' }).click();
   await expect(dlg).toBeHidden();
   await expect(row).toBeVisible();
 
   // Confirm: the destructive button (danger-styled) performs the delete.
-  await row.getByRole('button', { name: 'Delete' }).click();
+  // Delete lives in the row's ⋯ menu (one action row, not six buttons).
+  await row.getByRole('button', { name: /More actions/ }).click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete…' }).click();
   const confirmBtn = dlg.getByRole('button', { name: 'Delete', exact: true });
   await expect(confirmBtn).toHaveClass(/danger/);
   // White label on the solid danger fill stays readable (>= 4.5:1).
-  expect(await contrastOf(page, '.sheet[role="dialog"] footer .btn.danger')).toBeGreaterThanOrEqual(4.5);
+  expect(await contrastOf(page, '.sheet[role="dialog"] footer .btn.danger-solid')).toBeGreaterThanOrEqual(4.5);
   await confirmBtn.click();
   await expect(dlg).toBeHidden();
   await expect(row).toHaveCount(0, { timeout: 15_000 });
@@ -154,7 +158,7 @@ test('light: Usage "Cost Attribution" heading + Group-by select are readable', a
   // a loaded host.
   await page.goto('/#/usage');
   const title = page.locator('.attr-title');
-  await expect(title).toHaveText('Cost Attribution', { timeout: 30_000 });
+  await expect(title).toHaveText('Cost attribution', { timeout: 30_000 });
   expect(await contrastOf(page, '.attr-title')).toBeGreaterThanOrEqual(4.5);
   // The select was a solid black box (#0d1117 fallback) in light mode.
   expect(await contrastOf(page, '#attr-dim-select')).toBeGreaterThanOrEqual(4.5);

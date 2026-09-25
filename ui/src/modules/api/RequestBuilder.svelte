@@ -612,6 +612,26 @@
     cookiesOpen = true;
     void apiClient.loadCookies();
   }
+  /** Settings → "Allow private addresses". Turning it ON lifts the SSRF guard
+   *  for everyone in the workspace, so it asks first — the same confirm as the
+   *  response pane's "Allow private addresses" button. A failed save puts the
+   *  box back and says why (not always "admins only"). */
+  async function setAllowLocal(input: HTMLInputElement): Promise<void> {
+    const on = input.checked;
+    if (on && !(await confirmer.ask(
+      'API requests in this workspace will be able to reach localhost and private-network addresses (10.x, 192.168.x, …). Use this for local development servers. Everyone in the workspace is affected; you can block them again here.',
+      { title: 'Allow private addresses?', confirmLabel: 'Allow private addresses', danger: false },
+    ))) {
+      input.checked = false;
+      return;
+    }
+    try {
+      await ws.setApiAllowLocal(on);
+    } catch (e) {
+      input.checked = !on;
+      toasts.error('Couldn’t change the setting', e instanceof Error && e.message ? e.message : 'Only a workspace admin can change it.');
+    }
+  }
   async function clearCookies(): Promise<void> {
     if (!(await confirmer.ask('Delete every cookie Otto has collected for this workspace? Later requests won’t send them.', { title: 'Clear cookies', confirmLabel: 'Clear cookies' }))) return;
     await apiClient.clearCookies();
@@ -694,11 +714,11 @@
         spellcheck="false"
       />
       <span class="where" title={location ?? 'Not saved yet'}>
-        {#if location}<Icon name="folder" size={12} />{location}{:else}Not saved{/if}
+        {#if location}<Icon name="folder" size={12} /><span class="trunc">{location}</span>{:else}Not saved{/if}
         {#if dirty && saved}<span class="edited">· Edited</span>{/if}
       </span>
       <span class="grow"></span>
-      <button class="btn small" onclick={() => void save()} title="Save request (⌘S)" disabled={!canEdit}>Save</button>
+      <button class="btn small" onclick={() => void save()} title={canEdit ? 'Save request (⌘S)' : 'Viewers can’t save requests'} disabled={!canEdit}>Save</button>
       <button class="icon-btn" onclick={moreMenu} aria-label="More request actions" title="More request actions"><Icon name="more" size={14} /></button>
   </div>
 
@@ -750,7 +770,7 @@
             {#if v.kind === 'secret'}<Icon name="lock" size={12} />secret
             {:else if v.kind === 'missing'}not set
             {:else if v.kind === 'dynamic'}generated
-            {:else}{v.value === '' ? '(empty)' : v.value}{/if}
+            {:else}<span class="trunc">{v.value === '' ? '(empty)' : v.value}</span>{/if}
           </span>
         </span>
       {/each}
@@ -1080,7 +1100,7 @@
         <div class="ws-setting">
           <div class="section-title">Workspace</div>
           <label class="set-row toggle">
-            <input type="checkbox" checked={ws.apiAllowLocal} onchange={(e) => { const on = (e.currentTarget as HTMLInputElement).checked; void ws.setApiAllowLocal(on).catch(() => { (e.currentTarget as HTMLInputElement).checked = !on; toasts.error('Couldn’t change the setting', 'Only a workspace admin can change it.'); }); }} />
+            <input type="checkbox" checked={ws.apiAllowLocal} onchange={(e) => void setAllowLocal(e.currentTarget)} />
             <span class="set-label">Allow private addresses</span>
             <span class="set-unit">Lets API requests reach localhost and private networks (10.x, 192.168.x…). Off by default; admins only; applies to everyone in this workspace.</span>
           </label>
@@ -1202,6 +1222,9 @@
     flex-direction: column;
     min-height: 0;
     gap: 10px;
+    /* The builder also lives in the ~300 px Agents right panel: its layout
+       follows its own width (container query below), not the viewport. */
+    container-type: inline-size;
   }
   .name-row {
     display: flex;
@@ -1250,7 +1273,16 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  /* `.where`/`.vv` are inline-flex, so their own text-overflow never reaches a
+     bare text node — the path/value needs a real child to get its ellipsis. */
+  .trunc {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .edited {
+    flex: none;
     color: var(--warning);
   }
   .urlbar {
@@ -1759,7 +1791,9 @@
     white-space: nowrap;
   }
 
-  @media (max-width: 640px) {
+  /* Narrow builder (right panel, phone): URL gets its own full row, Send
+     sits under it; the name row wraps its location line. */
+  @container (max-width: 560px) {
     .urlbar {
       flex-wrap: wrap;
     }
@@ -1798,6 +1832,18 @@
     .where {
       order: 3;
       flex: 1 1 100%;
+    }
+  }
+  @container (max-width: 360px) {
+    /* Wrap instead of a hidden-scrollbar strip that clips the last tabs. */
+    .tabstrip {
+      flex-wrap: wrap;
+    }
+    .tab {
+      padding: 0 7px;
+    }
+    .send {
+      padding: 0 12px;
     }
   }
 </style>

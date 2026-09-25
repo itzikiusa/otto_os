@@ -83,6 +83,23 @@
     showRequest();
     requestAnimationFrame(() => document.querySelector<HTMLInputElement>('input[aria-label="Request URL"]')?.focus());
   }
+  /** Close a request tab. A SAVED request with unsaved edits asks first
+   *  (patterns §7 "Discard"); a scratch draft still closes silently — its
+   *  sends are in History. */
+  async function closeRequestTab(i: number): Promise<void> {
+    const t = apiClient.tabs[i];
+    if (t?.requestId && apiClient.isDirty(t)) {
+      const ok = await confirmer.ask(`“${apiClient.tabLabel(t)}” has unsaved changes. Close the tab and discard them? The saved request is kept.`, {
+        title: 'Discard changes?',
+        confirmLabel: 'Discard changes',
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    // The tab list may have shifted while the dialog was open.
+    const at = t?.tabId ? apiClient.tabs.findIndex((x) => x.tabId === t.tabId) : i;
+    if (at >= 0) apiClient.closeTab(at);
+  }
   function openEnvironments(envId: Id | null = null): void {
     view = { kind: 'environments', envId };
     phonePane = 'main';
@@ -103,6 +120,35 @@
         void apiClient.loadAutomations();
       });
     }
+  });
+
+  // Agent UI control: an agent editing/sending a request brings the request
+  // editor to the front (apiClient.showRequestView, lib/uiCommands/api.ts).
+  $effect(() => {
+    if (apiClient.requestViewTick > 0) untrack(() => showRequest());
+  });
+
+  // Open on an item: the first time this device opens a workspace's API client
+  // (no persisted tab slot yet — e.g. requests came from Git sync or another
+  // Mac), land on the most recently edited saved request instead of an empty
+  // "Untitled" draft. Once tabs have been persisted (including "I closed them
+  // all") they are restored as the user left them; this never overrides that.
+  // The slot key mirrors apiClient's `otto_api_tabs_v1:<workspace>`.
+  let autoOpenedFor: string | null = null;
+  $effect(() => {
+    const wid = ws.currentId;
+    const reqs = apiClient.requests;
+    if (!wid || autoOpenedFor === wid || apiClient.loading || reqs.length === 0) return;
+    if (reqs[0].workspace_id !== wid) return;
+    untrack(() => {
+      autoOpenedFor = wid;
+      let persisted = true;
+      try { persisted = localStorage.getItem(`otto_api_tabs_v1:${wid}`) !== null; } catch { /* unknown → leave as is */ }
+      const only = apiClient.tabs.length === 1 ? apiClient.tabs[0] : null;
+      if (persisted || !only || only.requestId || apiClient.isDirty(only)) return;
+      const latest = reqs.reduce((a, b) => ((b.updated_at ?? '') > (a.updated_at ?? '') ? b : a));
+      apiClient.loadRequestIntoDraft(latest);
+    });
   });
 
   // ── onboarding ─────────────────────────────────────────────────────────────
@@ -229,7 +275,7 @@
 </script>
 
 <div class="api-root">
-  <PageHeader title="API" subtitle="Build, send and save HTTP requests. They run from Otto’s daemon, not the browser.">
+  <PageHeader title="API" subtitle="Requests run from Otto’s daemon, not the browser">
     {#snippet leading()}
       {#if viewport.isPhone && phonePane === 'main' && !onboarding}
         <button class="icon-btn" onclick={() => (phonePane = 'list')} aria-label="Show saved requests" title="Show saved requests"><Icon name="chevronLeft" size={16} /></button>
@@ -244,7 +290,7 @@
         <Icon name="chevronDown" size={12} />
       </button>
       <button class="btn small" data-icon="download" data-overflow="0" onclick={() => (importOpen = true)}><Icon name="download" size={12} />Import…</button>
-      <button class="btn small" data-icon="branch" data-overflow="-1" onclick={() => (gitOpen = true)} disabled={ws.myRole === 'viewer'}><Icon name="branch" size={12} />Sync with Git…</button>
+      <button class="btn small" data-icon="branch" data-overflow="-1" onclick={() => (gitOpen = true)} disabled={ws.myRole === 'viewer'} title={ws.myRole === 'viewer' ? 'Viewers can’t sync API collections with Git' : undefined}><Icon name="branch" size={12} />Sync with Git…</button>
       {#if !onboarding}
         <button class="btn small primary" onclick={newRequest} title="New request (⌘T)" aria-label="New request"><Icon name="plus" size={12} />{#if !viewport.isPhone}New request{/if}</button>
       {/if}
@@ -318,7 +364,7 @@
                       <span class="req-tab-label">{apiClient.tabLabel(t)}</span>
                       {#if apiClient.isDirty(t)}<span class="req-tab-dirty" aria-label="Unsaved changes"></span>{/if}
                     </button>
-                    <button class="req-tab-close icon-btn" title="Close tab" aria-label="Close tab" onclick={() => apiClient.closeTab(i)}><Icon name="x" size={12} /></button>
+                    <button class="req-tab-close icon-btn" title="Close tab" aria-label="Close tab" onclick={() => void closeRequestTab(i)}><Icon name="x" size={12} /></button>
                   </div>
                 {/each}
                 {#if view.kind !== 'request'}
@@ -392,6 +438,8 @@
     color: var(--text-dim);
   }
   .env-v {
+    /* A flex item won't shrink below its text without this — the ellipsis never shows. */
+    min-width: 0;
     font-weight: 600;
     color: var(--text);
     overflow: hidden;

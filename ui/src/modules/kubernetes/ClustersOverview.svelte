@@ -16,6 +16,7 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import ClusterWizard from './ClusterWizard.svelte';
   import InstallPanel from './InstallPanel.svelte';
@@ -74,17 +75,14 @@
         ? [
             { separator: true },
             { label: 'Edit…', icon: 'edit', action: () => { editing = c; wizardOpen = true; } },
-            { label: 'Delete', icon: 'trash', danger: true, action: () => void remove(c) },
+            { label: 'Delete…', icon: 'trash', danger: true, action: () => void remove(c) },
           ]
         : []),
     ]);
   }
 
   function cardKey(e: KeyboardEvent, c: K8sCluster): void {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      open(c);
-    } else if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+    if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
       menu(e, c);
     }
   }
@@ -95,15 +93,17 @@
 <div class="k8s-overview">
 <PageHeader
   title="Kubernetes"
-  subtitle={`kubectl ${k8s.status?.kubectl.version ?? ''}${k8s.status?.k9s.installed ? ` · k9s ${k8s.status.k9s.version ?? ''}` : ''}`}
+  subtitle={k8s.status?.kubectl.version ? `kubectl ${k8s.status.kubectl.version}${k8s.status.k9s.installed && k8s.status.k9s.version ? ` · k9s ${k8s.status.k9s.version}` : ''}` : undefined}
 >
   {#snippet actions()}
     {#if !k8s.status?.k9s.installed && isAdmin}
       <button class="btn ghost" onclick={() => (k9sSheet = true)}>Install k9s</button>
     {/if}
+    {#if k8s.clusters.length > 0}
     <button class="btn" onclick={() => router.go('kubernetes/monitor')} title="Monitoring dashboard: pod metrics, restarts, health" data-testid="k8s-monitor-btn">
       <Icon name="gauge" size={14} /> Monitor
     </button>
+    {/if}
     <button class="icon-btn" onclick={() => void k8s.loadClusters()} title="Refresh" aria-label="Refresh clusters">
       <Icon name="refresh" size={14} />
     </button>
@@ -117,7 +117,7 @@
 <PageBody>
 
   {#if k8s.clustersError && !k8s.clusters.length}
-    <EmptyState icon="helm" title="Couldn't load clusters" body={k8s.clustersError} actionLabel="Retry" onaction={() => void k8s.loadClusters()} />
+    <LoadState what="clusters" variant="page" error={k8s.clustersError} empty onretry={() => void k8s.loadClusters()} />
   {:else if !k8s.clustersLoaded}
     <Skeleton rows={3} height={96} />
   {:else if !k8s.clusters.length}
@@ -136,22 +136,22 @@
     <div class="grid" data-testid="k8s-cluster-grid">
       {#each k8s.clusters as c (c.id)}
         {@const caps = k8s.capabilities[c.id]}
+        <!-- A card, not a button: the name is the one "open" control and its
+             ::after stretches over the card, so the ⋯ button isn't nested
+             inside another interactive element. -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="card cluster"
           class:prod={c.environment === 'prod'}
-          role="button"
-          tabindex="0"
           data-testid="k8s-cluster-card"
-          onclick={() => open(c)}
-          onkeydown={(e) => cardKey(e, c)}
-          oncontextmenu={(e) => menu(e, c)}
+          oncontextmenu={(e) => { e.preventDefault(); menu(e, c); }}
         >
           <div class="row1">
             <span class="dot" style="background:{c.color || 'var(--accent)'}"></span>
-            <span class="name" title={c.name}>{c.name}</span>
+            <button class="name open-link" title="Open {c.name}" onclick={() => open(c)} onkeydown={(e) => cardKey(e, c)}>{c.name}</button>
             <EnvBadge env={c.environment} />
-            <button class="icon-btn more" aria-label="Cluster actions" onclick={(e) => { e.stopPropagation(); menu(e, c); }}>
-              <Icon name="grip" size={13} />
+            <button class="icon-btn more" aria-label="Actions for {c.name}" title="Cluster actions" onclick={(e) => menu(e, c)}>
+              <Icon name="more" size={14} />
             </button>
           </div>
           <div class="row2 mono" title={c.context_name}>
@@ -166,7 +166,7 @@
               {#if caps.argo_rollouts}<span class="chip ok" title="Argo Rollouts CRD present">rollouts</span>{/if}
               {#if caps.argocd}<span class="chip ok" title="ArgoCD Application CRD present">argocd</span>{/if}
             {:else}
-              <span class="chip dim">capabilities pending</span>
+              <span class="chip dim" title="Server version and add-ons appear once the cluster is reached — open it or choose Test connection">not probed yet</span>
             {/if}
             {#if testing[c.id]}<span class="chip accent">testing…</span>{/if}
           </div>
@@ -209,6 +209,7 @@
     gap: 12px;
   }
   .cluster {
+    position: relative;
     padding: 14px 16px;
     display: flex;
     flex-direction: column;
@@ -217,7 +218,7 @@
     transition: border-color 130ms ease-out, background 130ms ease-out;
   }
   .cluster:hover,
-  .cluster:focus-visible {
+  .cluster:focus-within {
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
     background: color-mix(in srgb, var(--accent) 4%, var(--surface));
   }
@@ -237,22 +238,47 @@
     flex-shrink: 0;
   }
   .name {
+    /* Reset the button chrome: the title reads as the card's heading. */
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--text);
+    text-align: start;
+    cursor: pointer;
+    font-family: inherit;
     font-weight: 600;
-    font-size: 13.5px;
+    font-size: var(--fs-m);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     flex: 1;
     min-width: 0;
   }
+  /* The whole card opens the cluster (a click anywhere lands on this). */
+  .open-link::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+  }
+  .open-link:focus-visible {
+    outline: none;
+  }
+  .cluster:has(.open-link:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
   .more {
+    position: relative;
+    z-index: 1;
     opacity: 0.5;
   }
-  .cluster:hover .more {
+  .cluster:hover .more,
+  .cluster:focus-within .more {
     opacity: 1;
   }
   .row2 {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

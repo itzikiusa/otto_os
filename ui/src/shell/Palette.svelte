@@ -21,18 +21,23 @@
   import { ws } from '../lib/stores/workspace.svelte';
   import { storeContext } from '../lib/ask';
   import { toasts } from '../lib/toast.svelte';
+  import { confirmer } from '../lib/confirm.svelte';
+  import { applyClose } from '../lib/orchestrate';
   import Icon, { type IconName } from '../lib/components/Icon.svelte';
+  import { lsGet, lsSet } from '../lib/storage';
 
   let mode: 'commands' | 'english' = $state('commands');
   let query = $state('');
   let englishText = $state('');
-  let optimize = $state(localStorage.getItem('otto_orch_optimize') === '1');
-  let aiFallback = $state(localStorage.getItem('otto_orch_fallback') !== '0');
+  let optimize = $state(lsGet('otto_orch_optimize') === '1');
+  let aiFallback = $state(lsGet('otto_orch_fallback') !== '0');
   let selected = $state(0);
   let busy = $state(false);
   let plan: Action[] | null = $state(null);
   let optimizedText: string | null = $state(null);
   let inputEl: HTMLInputElement | null = $state(null);
+  /** The element focused when the palette opened (restored on close). */
+  let returnFocus: HTMLElement | null = null;
   let textareaEl: HTMLTextAreaElement | null = $state(null);
 
   // ---- cross-module search ----
@@ -143,6 +148,8 @@
     const open = ui.paletteOpen;
     untrack(() => {
       if (open) {
+        // Hand focus back to whatever had it (a terminal, a list row) on close.
+        returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         mode = ui.paletteMode;
         query = '';
         selected = 0;
@@ -162,6 +169,13 @@
           }
         });
       } else {
+        const back = returnFocus;
+        returnFocus = null;
+        // Only if nothing else took focus meanwhile (a command that opened a
+        // sheet or moved to another page owns focus now).
+        queueMicrotask(() => {
+          if (back?.isConnected && (document.activeElement === document.body || document.activeElement === null)) back.focus();
+        });
         // Palette closed — cancel any pending search so we don't waste a round-trip.
         if (searchTimer !== null) { clearTimeout(searchTimer); searchTimer = null; }
         searchAbort?.abort();
@@ -181,6 +195,13 @@
   $effect(() => {
     void totalRows;
     if (selected >= totalRows) selected = Math.max(0, totalRows - 1);
+  });
+  // A new query puts the selection back on the best match (row 0): without
+  // this, arrowing to row 3 and typing more made Enter run whatever landed on
+  // row 3 of the NEW list. Hits arriving later only append (see above).
+  $effect(() => {
+    void query;
+    untrack(() => (selected = 0));
   });
 
   // Keep the keyboard selection visible in the scrolling list.
@@ -218,11 +239,11 @@
 
   function setOptimize(v: boolean): void {
     optimize = v;
-    localStorage.setItem('otto_orch_optimize', v ? '1' : '0');
+    lsSet('otto_orch_optimize', v ? '1' : '0');
   }
   function setFallback(v: boolean): void {
     aiFallback = v;
-    localStorage.setItem('otto_orch_fallback', v ? '1' : '0');
+    lsSet('otto_orch_fallback', v ? '1' : '0');
   }
 
   async function run(cmd: Command): Promise<void> {
@@ -284,12 +305,13 @@
     try {
       // The shared engine (lib/orchestrate.ts): close → addressed send →
       // deterministic plan (runs at once) → AI planner (confirm below).
-      // The palette runs deletes directly (the bar asks first).
+      // A permanent delete comes back as `confirm-close` and asks first — the
+      // same guard the floating bar has (⌘I lands here).
       const out = await runEnglish(englishText, {
         ...storeContext(ws.currentId),
         optimize,
         aiFallback,
-        confirmDestructive: false,
+        confirmDestructive: true,
       });
       await applyOutcome(out, before);
     } catch (e) {
@@ -307,8 +329,20 @@
     };
     switch (out.kind) {
       case 'empty':
-      case 'confirm-close': // only the bar asks for this; the palette deletes directly
         return;
+      case 'confirm-close': {
+        const n = out.ids.length;
+        const shown = out.titles.slice(0, 5).map((t) => `• ${t}`).join('\n');
+        const more = out.titles.length > 5 ? `\n…and ${out.titles.length - 5} more` : '';
+        const ok = await confirmer.ask(
+          `Permanently delete ${plural(n, 'session')} and ${n === 1 ? 'its' : 'their'} history?\n\n${shown}${more}`,
+          { title: n === 1 ? 'Delete session?' : 'Delete sessions?', confirmLabel: 'Delete' },
+        );
+        if (!ok || !ws.currentId) return;
+        const count = await applyClose(storeContext(ws.currentId), out.ids, true);
+        toasts.success('Sessions deleted', `${plural(count, 'session')} removed`);
+        return done();
+      }
       case 'closed':
         toasts.success(
           out.permanent ? 'Sessions deleted' : 'Sessions closed',
@@ -422,7 +456,7 @@
               onmouseenter={() => (selected = i)}
               onclick={() => run(item.cmd)}
             >
-              <span class="pal-item-title">{item.cmd.title}</span>
+              <span class="pal-item-title" title={item.cmd.title.length > 48 ? item.cmd.title : undefined}>{item.cmd.title}</span>
               {#if item.cmd.detail}<span class="pal-detail">{item.cmd.detail}</span>{/if}
               <span class="grow"></span>
               {#if item.cmd.group}<span class="pal-group">{item.cmd.group}</span>{/if}
@@ -444,10 +478,10 @@
               onmouseenter={() => (selected = filtered.length)}
               onclick={askOtto}
             >
-              <Icon name="zap" size={13} />
-              <span class="pal-item-title">Ask Otto: "{query}"</span>
+              <Icon name="sparkle" size={13} />
+              <span class="pal-item-title" title={query}>Ask Otto: "{query}"</span>
               <span class="grow"></span>
-              <span class="pal-group">plain english</span>
+              <span class="pal-group">Plain English</span>
             </button>
           {/if}
 
@@ -469,9 +503,9 @@
             >
               <div class="pal-hit-main">
                 <Icon name={hitIcon(hit.kind)} size={12} />
-                <span class="pal-hit-title">{hit.title}</span>
+                <span class="pal-hit-title" title={hit.title}>{hit.title}</span>
                 {#if hit.subtitle}
-                  <span class="pal-hit-sub">{hit.subtitle}</span>
+                  <span class="pal-hit-sub" title={hit.subtitle}>{hit.subtitle}</span>
                 {/if}
                 <span class="grow"></span>
                 <span class="pal-group pal-hit-kind">{hit.kind.replace('_', ' ')}</span>
@@ -479,7 +513,7 @@
               <div class="pal-hit-actions">
                 {#each hit.actions as action}
                   <button class="pal-hit-btn" tabindex="-1" onclick={() => hitAction(hit, action)}>
-                    {action}
+                    {action.charAt(0).toUpperCase() + action.slice(1).replace(/_/g, ' ')}
                   </button>
                 {/each}
               </div>
@@ -497,21 +531,34 @@
             spellcheck="false"
           ></textarea>
           <div class="pal-english-row">
-            <button class="pill-toggle" class:on={optimize} onclick={() => setOptimize(!optimize)}>
-              <Icon name="zap" size={11} /> optimize
+            <button
+              class="pill-toggle"
+              class:on={optimize}
+              aria-pressed={optimize}
+              title="Rewrite your request into a clearer prompt before planning (remembered on this Mac)"
+              onclick={() => setOptimize(!optimize)}
+            >
+              <Icon name="zap" size={12} /> Optimize prompt
             </button>
-            <button class="pill-toggle" class:on={aiFallback} onclick={() => setFallback(!aiFallback)}>
-              AI fallback
+            <button
+              class="pill-toggle"
+              class:on={aiFallback}
+              aria-pressed={aiFallback}
+              title="When the request isn't a known command, ask the AI planner for a plan (you still confirm it)"
+              onclick={() => setFallback(!aiFallback)}
+            >
+              <Icon name="sparkle" size={12} /> AI planner fallback
             </button>
             <span class="grow"></span>
             <button class="btn primary" disabled={busy || englishText.trim() === ''} onclick={submitEnglish}>
-              {busy && !plan ? 'Planning…' : 'Plan it  ⌘↵'}
+              {busy && !plan ? 'Planning…' : 'Plan it'}
+              {#if !(busy && !plan)}<kbd class="pal-kbd-in">⌘↵</kbd>{/if}
             </button>
           </div>
 
           {#if optimizedText}
             <div class="pal-optimized">
-              <span class="dim">optimized:</span>
+              <span class="dim">Optimized:</span>
               {optimizedText}
             </div>
           {/if}
@@ -525,7 +572,7 @@
                   {describeAction(a)}
                 </div>
               {:else}
-                <div class="pal-empty">Planner returned no actions</div>
+                <div class="pal-empty">The planner found nothing to do. Try rephrasing the request.</div>
               {/each}
               <div class="pal-plan-actions">
                 <button class="btn" onclick={() => (plan = null)}>Cancel</button>
@@ -594,7 +641,7 @@
     flex: 1;
     border: none;
     background: transparent;
-    font-size: 14px;
+    font-size: var(--fs-l);
     color: var(--text);
     outline: none;
   }
@@ -612,7 +659,7 @@
     border: none;
     background: transparent;
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
     cursor: pointer;
     text-align: start;
@@ -620,12 +667,25 @@
   .pal-item.selected {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
+  /* One line per row (30px): a long "Focus session: …" title ellipsizes
+     instead of wrapping out of the row and shoving the group / shortcut. */
+  .pal-item-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pal-group,
+  .pal-item > kbd {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
   .pal-group {
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .pal-detail {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;
@@ -646,10 +706,17 @@
     border-radius: 0 0 var(--radius-s) var(--radius-s);
     color: var(--accent-text);
   }
+  /* The ⌘↵ hint inside the filled primary button reads in its own colour. */
+  .pal-kbd-in {
+    margin-inline-start: 6px;
+    background: transparent;
+    color: inherit;
+    border-color: color-mix(in srgb, currentColor 45%, transparent);
+  }
   .pal-empty {
     padding: 16px;
     text-align: center;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .pal-english {
@@ -664,7 +731,7 @@
     border-radius: var(--radius-m);
     background: var(--surface-2);
     padding: 9px 11px;
-    font-size: 13px;
+    font-size: var(--fs-m);
     line-height: 1.5;
     resize: vertical;
     color: var(--text);
@@ -679,7 +746,7 @@
     gap: 6px;
   }
   .pal-optimized {
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 8px 10px;
     border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 8%, transparent);
@@ -694,7 +761,7 @@
     gap: 6px;
   }
   .pal-plan-title {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -704,7 +771,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     padding: 4px 2px;
   }
   .pal-plan-num {
@@ -752,7 +819,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
     min-width: 0;
   }

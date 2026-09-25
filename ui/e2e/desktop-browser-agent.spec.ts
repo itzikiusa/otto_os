@@ -1,6 +1,6 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedShellSession } from './seed';
-import { openPage } from './helpers';
+import { openPage, openRightPanelTab } from './helpers';
 
 // Browser ⇄ agent embedding:
 //  - the Browser page hosts an agent dock (attach/start a session, its
@@ -65,7 +65,7 @@ async function openFixture(page: Page): Promise<void> {
 }
 
 async function markHeading(page: Page, note: string): Promise<void> {
-  await page.getByRole('button', { name: 'Mark element' }).click();
+  await page.getByRole('button', { name: 'Mark passage' }).click();
   await page.locator('.reader h1').click();
   await page.getByPlaceholder('Add a note').fill(note);
   await page.getByRole('button', { name: 'Save mark' }).click();
@@ -102,7 +102,7 @@ test('browser page: dock starts detached, attaches a session, ask sends page + m
   // and the marks chip counts it.
   await expect(ask).toBeFocused();
   await expect(ask).toHaveAttribute('placeholder', /element you just marked/);
-  await expect(page.locator('.askbar .chip')).toContainText('1 mark');
+  await expect(page.locator('.askbar .marks-chip')).toContainText('1 mark');
 
   const askReq = page.waitForRequest(
     (req) => req.url().includes('/browser/ask') && req.method() === 'POST',
@@ -170,7 +170,7 @@ test('agent mode: right panel Browser tab has a v1/v2 switch and v2 embeds the m
   await page.getByRole('button', { name: /E2E Shell/ }).first().click();
   const panel = page.locator('.rpanel');
   await expect(panel).toBeVisible();
-  await panel.getByRole('tab', { name: 'Browser', exact: true }).click();
+  await openRightPanelTab(page, 'Browser');
 
   const group = panel.getByRole('group', { name: 'Browser version' });
   await expect(group).toBeVisible();
@@ -197,7 +197,7 @@ test('agent mode: right panel Browser tab has a v1/v2 switch and v2 embeds the m
   await page.reload();
   await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
   await page.getByRole('button', { name: /E2E Shell/ }).first().click();
-  await page.locator('.rpanel').getByRole('tab', { name: 'Browser', exact: true }).click();
+  await openRightPanelTab(page, 'Browser');
   await expect(page.locator('.rpanel').getByRole('button', { name: 'v2' })).toHaveAttribute('aria-pressed', 'true');
 
   // Back to v1 restores the original panel.

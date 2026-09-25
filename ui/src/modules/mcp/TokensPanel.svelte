@@ -164,7 +164,7 @@
   <div class="tools-head">
     <h4 class="sec">Access tokens</h4>
     <button
-      class="btn xs"
+      class="btn small"
       data-testid="mcp-new-token"
       onclick={() => (showCreate = !showCreate)}
     >
@@ -181,9 +181,9 @@
         <Icon name="key" size={13} />
         <strong>New token for {createdToken.info.username} — shown once. Copy it now.</strong>
         <span class="grow"></span>
-        <button class="btn xs" onclick={() => void copy(createdToken!.secret, 'Token')}>Copy token</button>
-        <button class="btn xs" onclick={() => void copy(clientCommand(createdToken!.secret), 'Command')}>Copy command</button>
-        <button class="btn xs" onclick={() => (createdToken = null)}>Dismiss</button>
+        <button class="btn small" onclick={() => void copy(createdToken!.secret, 'Token')}>Copy token</button>
+        <button class="btn small" onclick={() => void copy(clientCommand(createdToken!.secret), 'Command')}>Copy command</button>
+        <button class="btn small" onclick={() => (createdToken = null)}>Dismiss</button>
       </div>
       <code class="token">{createdToken.secret}</code>
       <code class="token cmd">{clientCommand(createdToken.secret)}</code>
@@ -196,9 +196,9 @@
         <Icon name="key" size={13} />
         <strong>Rotated token for {rotatedToken.info.username} — shown once. Copy it now.</strong>
         <span class="grow"></span>
-        <button class="btn xs" onclick={() => void copy(rotatedToken!.secret, 'Token')}>Copy token</button>
-        <button class="btn xs" onclick={() => void copy(clientCommand(rotatedToken!.secret), 'Command')}>Copy command</button>
-        <button class="btn xs" onclick={() => (rotatedToken = null)}>Dismiss</button>
+        <button class="btn small" onclick={() => void copy(rotatedToken!.secret, 'Token')}>Copy token</button>
+        <button class="btn small" onclick={() => void copy(clientCommand(rotatedToken!.secret), 'Command')}>Copy command</button>
+        <button class="btn small" onclick={() => (rotatedToken = null)}>Dismiss</button>
       </div>
       <code class="token">{rotatedToken.secret}</code>
       <code class="token cmd">{clientCommand(rotatedToken.secret)}</code>
@@ -291,12 +291,12 @@
           <span class="tok-scope muted">{scopeSummary(tokenInfo.scope)}</span>
           <span class="tok-seen muted">{rel(tokenInfo.last_seen_at)}</span>
           <button
-            class="btn xs"
+            class="btn small"
             data-testid="mcp-token-rotate"
             onclick={() => void rotateToken(tokenInfo)}
           >Rotate</button>
           <button
-            class="btn xs danger"
+            class="btn small danger"
             data-testid="mcp-token-revoke"
             onclick={() => void revokeToken(tokenInfo)}
           >Revoke</button>
@@ -320,7 +320,7 @@
   }
   .sec {
     margin: 4px 0 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -346,11 +346,11 @@
     flex: 1 1 160px;
   }
   .lbl {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .inp {
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 5px 9px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s, 6px);
@@ -361,7 +361,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
   }
   .tool-pick {
@@ -380,7 +380,7 @@
     gap: 3px;
   }
   .grp-name {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     color: var(--text);
   }
@@ -388,7 +388,7 @@
     display: flex;
     align-items: center;
     gap: 7px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text);
   }
   .mut {
@@ -418,7 +418,7 @@
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
   }
   .grow {
@@ -426,7 +426,7 @@
   }
   .token {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-s, 6px);
@@ -435,7 +435,7 @@
     color: var(--text);
   }
   .token.cmd {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .tok-list {
     display: flex;
@@ -461,17 +461,17 @@
     flex: 1 1 auto;
   }
   .tok-label {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
   }
   .tok-prefix {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .tok-user,
   .tok-scope,
   .tok-seen {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     flex: none;
   }
   .mono {
@@ -481,14 +481,10 @@
     color: var(--text-dim);
   }
   .small {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .pad {
     padding: 16px;
-  }
-  .btn.xs {
-    font-size: 11px;
-    padding: 3px 8px;
   }
   .btn.danger {
     color: var(--danger);

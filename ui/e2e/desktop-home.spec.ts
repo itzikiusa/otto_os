@@ -219,8 +219,8 @@ test('widgets: add from the picker (max 8), resize in grid units, zoom, remove',
   await expect(boxes).toHaveCount(8);
 
   // Remove via the box menu; the resize survives a reload.
-  await boxes.nth(7).getByRole('button', { name: 'Box menu' }).click();
-  await page.getByRole('menuitem', { name: /Remove box/ }).click();
+  await boxes.nth(7).getByRole('button', { name: /widget options/ }).click();
+  await page.getByRole('menuitem', { name: /Remove widget/ }).click();
   await expect(boxes).toHaveCount(7);
   await page.reload();
   await expect(page.locator('.shell')).toBeVisible();

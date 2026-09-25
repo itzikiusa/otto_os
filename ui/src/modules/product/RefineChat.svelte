@@ -2,8 +2,11 @@
   // RefineChat — displays a single refinement thread transcript and handles
   // sending new messages to the agent.  Props: { tid } (the thread id).
   // Parent (RefineTab) controls which thread is active.
+  import Icon from '../../lib/components/Icon.svelte';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { renderMarkdown } from '../../lib/md';
   import AgentByline from '../../lib/components/AgentByline.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
@@ -39,7 +42,7 @@
       const detail = await product.getRefinementThread(threadId);
       messages = detail.messages;
     } catch (e) {
-      loadError = e instanceof Error ? e.message : String(e);
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -107,9 +110,9 @@
   <!-- ── Messages ──────────────────────────────────────────────────────────── -->
   <div class="messages-area">
     {#if loading && messages.length === 0}
-      <div class="muted center-hint">Loading…</div>
-    {:else if loadError}
-      <div class="error-msg">Could not load thread: {loadError}</div>
+      <div class="muted center-hint">Loading messages…</div>
+    {:else if loadError && messages.length === 0}
+      <LoadState what="this thread" error={loadError} empty onretry={() => void loadThread(tid)} />
     {:else if messages.length === 0}
       <div class="empty-state">
         <p>No messages yet.</p>
@@ -138,7 +141,7 @@
                 onclick={() => (product.tab = 'rewrite')}
                 title="Switch to Rewrite tab to review the suggested version"
               >
-                ✓ Story updated → v{versionNo}
+                <Icon name="check" size={12} /> Story updated to v{versionNo}
               </button>
             {/if}
           </div>
@@ -205,23 +208,18 @@
 
   .muted {
     color: var(--text-dim);
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-style: italic;
   }
   .center-hint {
     text-align: center;
     padding: 24px 0;
   }
-  .error-msg {
-    color: var(--danger);
-    font-size: 13px;
-    padding: 8px 0;
-  }
   .empty-state {
     padding: 32px 16px;
     text-align: center;
     color: var(--text-dim);
-    font-size: 13px;
+    font-size: var(--fs-m);
     line-height: 1.6;
   }
   .empty-state p {
@@ -265,7 +263,7 @@
   }
   .bubble-role {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
@@ -276,7 +274,7 @@
   }
 
   .bubble-body {
-    font-size: 13px;
+    font-size: var(--fs-m);
     line-height: 1.55;
     color: var(--text);
     overflow-wrap: break-word;
@@ -298,7 +296,7 @@
     font-family: var(--font-mono, monospace);
     font-size: 0.88em;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     padding: 1px 4px;
   }
 
@@ -308,12 +306,15 @@
     font-style: italic;
   }
   .thinking-dots {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
 
   /* Story-updated chip */
   .story-updated-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     align-self: flex-start;
     margin-top: 4px;
     padding: 2px 8px;
@@ -321,7 +322,7 @@
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     color: var(--accent-text);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
     transition: background 100ms;
@@ -344,7 +345,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     flex-basis: 100%;
   }
   .rc-provider .dim {
@@ -363,7 +364,7 @@
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-family: inherit;
     line-height: 1.5;
     transition: border-color 120ms;
@@ -383,9 +384,9 @@
     padding: 6px 14px;
     border: 1px solid var(--accent);
     border-radius: var(--radius-s);
-    background: var(--accent);
-    color: #fff;
-    font-size: 12.5px;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
+    font-size: var(--fs-s);
     font-weight: 600;
     cursor: pointer;
     white-space: nowrap;

@@ -66,6 +66,10 @@
       maxH = Math.max(120, Math.min(wantH, above - 4));
       top = Math.max(pad, r.top - 4 - maxH);
     }
+    // The 120px floor can still overrun a short window — keep the whole popup
+    // on screen (and never above the top edge).
+    maxH = Math.min(maxH, vh - 2 * pad);
+    top = Math.max(pad, Math.min(top, vh - pad - maxH));
     pos = { top, left, width, maxH };
   }
 
@@ -164,7 +168,11 @@
   </select>
 {:else}
   <div class="ns" class:has-error={!!error} data-testid="k8s-ns-picker">
-    <Icon name="layers" size={13} />
+    {#if error}
+      <span class="ns-warn" title="Namespaces couldn't be listed — type one to use it"><Icon name="warning" size={13} /></span>
+    {:else}
+      <Icon name="layers" size={13} />
+    {/if}
     <input
       bind:this={inputEl}
       class="ns-input"
@@ -178,7 +186,7 @@
       autocapitalize="off"
       autocorrect="off"
       spellcheck={false}
-      title={error ? `Namespaces couldn't be listed: ${error}` : shown}
+      title={disabled ? 'This kind is cluster-scoped — no namespace applies' : error ? `Namespaces couldn't be listed: ${error}` : shown}
       value={open ? query : shown}
       {disabled}
       onfocus={() => void show()}
@@ -212,7 +220,7 @@
           onpointerdown={(e) => { e.preventDefault(); choose(o.value); }}
           onkeydown={(e) => { if (e.key === 'Enter') choose(o.value); }}
         >
-          <span class="ns-opt-label" class:mono={o.value !== ''}>{o.label}</span>
+          <span class="ns-opt-label" class:mono={o.value !== ''} title={o.label}>{o.label}</span>
           {#if o.value === value}<Icon name="check" size={12} />{/if}
         </div>
       {/each}
@@ -239,8 +247,13 @@
     border-color: var(--accent);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
+  /* Degraded, not broken: the list failed (often RBAC) but typing still works. */
   .ns.has-error {
-    border-color: color-mix(in srgb, var(--status-exited) 50%, var(--border));
+    border-color: color-mix(in srgb, var(--warning) 55%, var(--border));
+  }
+  .ns-warn {
+    display: inline-flex;
+    color: var(--warning);
   }
   .ns-input {
     flex: 1;
@@ -248,7 +261,7 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-family: var(--font-mono);
     outline: none;
   }
@@ -276,7 +289,7 @@
     gap: 8px;
     padding: 6px 8px;
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     cursor: pointer;
   }
   .ns-opt.active {
@@ -292,7 +305,7 @@
   }
   .ns-err {
     padding: 6px 8px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .mono {

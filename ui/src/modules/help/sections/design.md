@@ -73,7 +73,7 @@ Design Hall is where your team's visual work lives. Every design is an artifact 
 - Describe what you want in **Ask AI**; the agent edits the diagram and the board redraws as it changes.
 - Edit Mermaid and D2 source in the **Code** panel. D2 has a hand-drawn sketch style.
 - Zoom, fit to screen, **Download PNG**, **Download SVG** and **Copy source**.
-- Rename, duplicate, delete or move a canvas to a section. A canvas can also be attached to an agent session.
+- Rename, duplicate, delete or move a canvas to a section from its row’s **⋯** menu (or right-click; `F2` renames). A canvas can also be attached to an agent session.
 
 **What Otto learned**
 - Otto notices choices your team repeats, such as a variant direction you keep picking or a fix you keep making after agent drafts, and proposes a team rule.

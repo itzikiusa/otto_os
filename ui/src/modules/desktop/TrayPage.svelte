@@ -12,7 +12,7 @@
   import { api } from '../../lib/api/client';
   import type { McpApproval, Notice, Session, WorkspaceWithRole } from '../../lib/api/types';
   import { auth } from '../../lib/stores/auth.svelte';
-  import { isForeground, SCRATCH_WORKSPACE_ID } from '../../lib/stores/workspace.svelte';
+  import { isForeground, SCRATCH_WORKSPACE_ID, visibleOnThisDevice } from '../../lib/stores/workspace.svelte';
   import {
     bar,
     onDesktopEvent,
@@ -79,7 +79,8 @@
 
   async function sessionsOf(wsId: string): Promise<Session[]> {
     try {
-      return await api.get<Session[]>(`/workspaces/${wsId}/sessions`);
+      // Honour "Isolate sessions to this device", like the sidebar does.
+      return (await api.get<Session[]>(`/workspaces/${wsId}/sessions`)).filter(visibleOnThisDevice);
     } catch {
       return [];
     }

@@ -21,7 +21,9 @@ import { ui, clientId } from './ui.svelte';
 import { winKey } from '../win';
 import { lsGet, lsSet } from '../storage';
 import { layout, type Axis } from './splitLayout.svelte';
-import { MAX_PANES } from './splitLayout';
+import { MAX_PANES, LS_PANES } from './splitLayout';
+import { isEmbedded } from '../desktop';
+import { SCRATCH_WORKSPACE_ID } from './sessionScope';
 
 // Layout state is per-WINDOW (multi-window): winKey() namespaces these by the
 // window's label so two windows never clobber each other's workspace/tabs/view.
@@ -33,12 +35,9 @@ const LS_TABS = 'otto_tabs_'; // + workspace id
 // current one. Default ON — a session shouldn't vanish on a workspace switch.
 const LS_ALL_WS = 'otto_nav_all_ws';
 
-/** Id of the daemon's hidden, system-owned **scratch** workspace — the home of
- *  workspace-less sessions. Mirrors `SCRATCH_WORKSPACE_ID` in
- *  `crates/otto-core/src/domain.rs`. Never in `workspaces` (hidden from
- *  `GET /workspaces`); read via `GET /workspaces/scratch`. Also the tabs/panes
- *  persistence key when no workspace is selected. */
-export const SCRATCH_WORKSPACE_ID = 'scratch';
+// The scratch ("No workspace") id lives in the rune-free `sessionScope.ts` so
+// the pure scope rules there are unit-testable; re-exported for callers.
+export { SCRATCH_WORKSPACE_ID };
 
 /** Background-spawned session sources that never surface in the sidebar's flat
  *  session lists (they live in their own panels/views). MUST stay byte-identical
@@ -77,6 +76,19 @@ const BACKGROUND_SOURCES = new Set([
 export function isForeground(s: Session): boolean {
   const src = (s.meta as { source?: string } | null)?.source;
   return src == null || !BACKGROUND_SOURCES.has(src);
+}
+
+/** Per-device session isolation (Settings → Appearance, opt-in): with it on, a
+ *  FOREGROUND session is kept only on the device that started it
+ *  (meta.client_id, stamped on create). Background engine sessions are always
+ *  kept — no user-facing list shows them, and their owning panels (reviews,
+ *  insights, assists…) must still find them. The ONE predicate every path that
+ *  admits a session into the store goes through (initial load, the
+ *  all-workspaces load, and `session_created` events), so a session started on
+ *  another device can't slip in live and vanish again on the next refresh. */
+export function visibleOnThisDevice(s: Session): boolean {
+  if (!ui.sessionIsolation || !isForeground(s)) return true;
+  return (s.meta as { client_id?: string } | null)?.client_id === clientId();
 }
 
 /** Sentinel tab/pane id for the docked DB Explorer (not a real session). Lets
@@ -282,7 +294,7 @@ class WorkspaceStore {
         }
       }),
     );
-    const flat = lists.flat().filter((s) => !s.archived);
+    const flat = lists.flat().filter((s) => !s.archived && visibleOnThisDevice(s));
     this.otherWsSessions = flat;
     // Seed statuses without clobbering fresher event-fed values.
     for (const s of flat) if (!(s.id in this.statusMap)) this.statusMap[s.id] = s.status;
@@ -569,19 +581,12 @@ class WorkspaceStore {
       // `this.sessions` so their owning panels can look them up / open them,
       // and every user-facing list filters them via `isForeground` instead —
       // one shared blacklist (`BACKGROUND_SOURCES`) rather than per-list drift.
-      let kept = all;
       // Per-device session isolation (opt-in, default off): show only sessions
-      // this device started (stamped meta.client_id on create). When off, leave
-      // the list unchanged so every device sees every session (current behavior).
-      // Drives tabs/Navigator/agents list consistently since they all derive
-      // from `this.sessions`. The setter re-runs this so flips apply live.
-      if (ui.sessionIsolation) {
-        const me = clientId();
-        kept = kept.filter(
-          (s) => (s.meta as { client_id?: string } | null)?.client_id === me,
-        );
-      }
-      this.sessions = kept;
+      // this device started. When off, leave the list unchanged so every device
+      // sees every session. Drives tabs/Navigator/agents list consistently since
+      // they all derive from `this.sessions`. The setter re-runs this so flips
+      // apply live.
+      this.sessions = all.filter(visibleOnThisDevice);
       for (const s of this.sessions) this.statusMap[s.id] = s.status;
       if (opts.reconcile !== false) this.reconcileTabs();
     } catch (e) {
@@ -625,6 +630,22 @@ class WorkspaceStore {
   private persistTabs(): void {
     if (!this.tabsHydrated) return;
     lsSet(winKey(LS_TABS + this.tabsKey), JSON.stringify(this.openTabs));
+  }
+
+  /** Is `key` (a `storage` event key) this workspace's persisted tabs or
+   *  split layout? */
+  ownsLayoutKey(key: string | null): boolean {
+    return key === winKey(LS_TABS + this.tabsKey) || key === winKey(LS_PANES + this.tabsKey);
+  }
+
+  /** Re-read the open tabs + split layout that ANOTHER document of this
+   *  window persisted — the side-by-side pane (an iframe) shares the window's
+   *  keys, so whichever pane shows Agents is the owner and the other adopts
+   *  its tabs when they change (lib/stores/sidePane.svelte.ts). A no-op until
+   *  the current workspace's layout has been restored once. */
+  adoptPersistedLayout(): void {
+    if (!this.tabsHydrated || !this.layoutReady) return;
+    this.restoreLayout(this.tabsKey);
   }
 
   /** Persist the split layout per workspace, so an arrangement of up to
@@ -848,7 +869,8 @@ class WorkspaceStore {
    * a session can never linger running behind a closed tab. The user picks
    * Archive (stop, history kept, resumable) or Delete (stop, history gone) in
    * a confirm dialog with a "remember my choice" checkbox (reset in Settings →
-   * Appearance). The DB pane and already-archived rows just close.
+   * Appearance); once remembered, a single close applies it without asking.
+   * The DB pane and already-archived rows just close.
    */
   async requestCloseTab(id: Id): Promise<void> {
     const action = await this.resolveCloseAction([id]);
@@ -894,33 +916,30 @@ class WorkspaceStore {
 
   /** Shared confirm step for {@link requestCloseTab}/{@link requestCloseTabs}:
    *  returns 'archive' | 'delete' (or 'close' when nothing needs ending), or
-   *  null for cancel. Applies (and records) the remembered preference, with
-   *  two guards so a remembered choice can't destroy work silently:
-   *   - a remembered **Delete** only picks the action — the delete itself is
-   *     always confirmed (it can't be undone);
-   *   - a close that ends **more than one** session (Close others / to the
-   *     right / all) always confirms once, naming the count, whatever the
-   *     preference. A single remembered Archive stays silent (resumable). */
+   *  null for cancel. Applies (and records) the remembered preference: a
+   *  single-tab close under "Always archive" or "Always delete" is silent —
+   *  the user opted out of the question in Settings → Appearance, and asking
+   *  anyway made the setting a lie. One guard remains: a close that ends
+   *  **more than one** session (Close others / to the right / all) always
+   *  confirms once, naming the count, whatever the preference. */
   private async resolveCloseAction(ids: Id[]): Promise<'close' | 'archive' | 'delete' | null> {
     const ending = ids.filter((id) => this.isEndable(id));
     if (ending.length === 0) return 'close';
     const n = ending.length;
     const many = n > 1;
     const pref = ui.closeTabPref;
-    if (pref === 'archive' && !many) return 'archive';
+    if ((pref === 'archive' || pref === 'delete') && !many) return pref;
     const name = this.sessions.find((s) => s.id === ending[0])?.title?.trim() || 'this session';
     if (pref === 'archive' || pref === 'delete') {
       const del = pref === 'delete';
-      const what = many
-        ? del
-          ? `Closing these tabs deletes ${n} sessions: they stop and their history is removed for good. This can't be undone.`
-          : `Closing these tabs archives ${n} sessions: they stop and keep their history (resumable from the Archived list).`
-        : `Closing this tab deletes “${name}”: it stops and its history is removed for good. This can't be undone.`;
+      const what = del
+        ? `Closing these tabs deletes ${n} sessions: they stop and their history is removed for good. This can't be undone.`
+        : `Closing these tabs archives ${n} sessions: they stop and keep their history (resumable from the Archived list).`;
       const ok = await confirmer.ask(
         `${what}\n\nYour remembered choice is “Always ${pref}” — change it in Settings → Appearance.`,
         {
-          title: many ? `${del ? 'Delete' : 'Archive'} ${n} sessions?` : 'Delete session?',
-          confirmLabel: many ? `${del ? 'Delete' : 'Archive'} ${n} sessions` : 'Delete session',
+          title: `${del ? 'Delete' : 'Archive'} ${n} sessions?`,
+          confirmLabel: `${del ? 'Delete' : 'Archive'} ${n} sessions`,
           danger: del,
         },
       );
@@ -948,7 +967,7 @@ class WorkspaceStore {
     const base = `Close ${noun} (⌘W)`;
     if (!this.isEndable(id)) return base;
     if (ui.closeTabPref === 'archive') return `${base} — archives the session (resumable)`;
-    if (ui.closeTabPref === 'delete') return `${base} — deletes the session (asks first)`;
+    if (ui.closeTabPref === 'delete') return `${base} — deletes the session and its history`;
     return `${base} — asks to archive or delete the session`;
   }
 
@@ -1143,11 +1162,40 @@ class WorkspaceStore {
     this.statusMap[id] = s.status;
   }
 
-  async restartSession(id: Id): Promise<void> {
+  /** Bumped per session on every successful restart. The embedded Terminal
+   *  watches it to drop its exited overlay and reconnect to the respawned PTY
+   *  (the session id is unchanged, so this is the only signal). Kept here so
+   *  EVERY restart path — pane header, sidebar, ⌘K, native menu, directories
+   *  save — reconnects the terminal, not just the pane header's button. */
+  restartNonces: Record<Id, number> = $state({});
+
+  async restartSession(id: Id, opts?: { quiet?: boolean }): Promise<void> {
     const s = await api.post<Session>(`/sessions/${id}/restart`);
     this.sessions = this.sessions.map((x) => (x.id === id ? s : x));
     this.statusMap[id] = s.status;
-    toasts.info('Session restarted', s.title);
+    this.restartNonces[id] = (this.restartNonces[id] ?? 0) + 1;
+    if (!opts?.quiet) toasts.info('Session restarted', s.title);
+  }
+
+  /** User-facing restart (pane header, sidebar, ⌘K, native menu). Restart
+   *  kills the live process and respawns it — a working agent loses its
+   *  in-flight turn, so that one case asks first (idle/exited don't). Only
+   *  the pane header used to ask; the other paths restarted silently.
+   *  Failures surface as a toast. */
+  async requestRestart(id: Id): Promise<void> {
+    if (this.statusMap[id] === 'working') {
+      const name = this.sessions.find((x) => x.id === id)?.title?.trim() || 'this session';
+      const ok = await confirmer.ask(
+        `“${name}” is working right now. Restarting stops its current turn and starts the agent again, resuming its saved conversation where it can.`,
+        { title: 'Restart working session?', confirmLabel: 'Restart session', danger: true },
+      );
+      if (!ok) return;
+    }
+    try {
+      await this.restartSession(id);
+    } catch (e) {
+      toasts.error('Restart failed', e instanceof Error ? e.message : String(e));
+    }
   }
 
   async renameSession(id: Id, title: string): Promise<void> {
@@ -1214,6 +1262,8 @@ class WorkspaceStore {
       case 'session_created': {
         const s = ev.session;
         this.statusMap[s.id] = s.status;
+        // Another device's session under isolation: not ours to list.
+        if (!visibleOnThisDevice(s)) break;
         if (this.belongsHere(s.workspace_id)) {
           if (!this.sessions.some((x) => x.id === s.id)) this.sessions = [...this.sessions, s];
         } else if (this.allWorkspaces && !this.otherWsSessions.some((x) => x.id === s.id)) {
@@ -1263,6 +1313,9 @@ class WorkspaceStore {
         break;
       }
       case 'notice': {
+        // The side-by-side pane gets the same event stream: the main window
+        // toasts it once.
+        if (isEmbedded) break;
         const level = ev.level === 'error' ? 'error' : ev.level === 'warn' ? 'warn' : 'info';
         toasts.push(level, ev.title, ev.body);
         break;
@@ -1306,6 +1359,9 @@ class WorkspaceStore {
     const restarted = await api.post<Session>(`/sessions/${sessionId}/restart`);
     this.sessions = this.sessions.map((x) => (x.id === sessionId ? restarted : x));
     this.statusMap[sessionId] = restarted.status;
+    // The PTY was respawned: bump the nonce so the mounted terminal reconnects
+    // (restartSession does the same) instead of staring at the dead socket.
+    this.restartNonces[sessionId] = (this.restartNonces[sessionId] ?? 0) + 1;
   }
 
   /** Save `notes` into workspace `wsId` (default: current). The PATCH replaces

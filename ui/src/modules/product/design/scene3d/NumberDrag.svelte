@@ -167,7 +167,7 @@
     border: 0;
     background: transparent;
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     padding: 0 5px;
     font-variant-numeric: tabular-nums;
     outline: none;

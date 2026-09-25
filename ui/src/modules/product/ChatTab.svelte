@@ -10,6 +10,9 @@
   import DiscoveryChat from './DiscoveryChat.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import ListPane from './ui/ListPane.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { DiscoveryChat as DiscoveryChatT } from './types';
 
   // ── State ──────────────────────────────────────────────────────────────────
@@ -50,7 +53,7 @@
         activeCid = first.id;
       }
     } catch (e) {
-      loadError = e instanceof Error ? e.message : String(e);
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -118,14 +121,12 @@
         disabled={creating}
         title="Start a new discovery chat"
       >
-        {creating ? 'Creating…' : '+ New chat'}
+        <Icon name="plus" size={12} /> {creating ? 'Creating…' : 'New chat'}
       </button>
     {/snippet}
     {#snippet children()}
-      {#if loading && chats.length === 0}
-        <div class="muted pad">Loading…</div>
-      {:else if loadError}
-        <div class="error-msg pad">Could not load chats: {loadError}</div>
+      {#if (loading || loadError) && chats.length === 0}
+        <LoadState what="chats" variant="compact" loading={loading} error={loadError} empty onretry={() => void loadChats()} />
       {:else}
         <div class="chat-list">
           {#each chats as c (c.id)}
@@ -138,7 +139,7 @@
                 <span class="chat-title">{c.title}</span>
                 <span class="chat-meta">
                   <span class="chat-status" class:status-archived={c.status === 'archived'}>
-                    {c.status}
+                    {c.status === 'archived' ? 'Archived' : 'Active'}
                   </span>
                   <span class="chat-date">{relDate(c.updated_at)}</span>
                 </span>
@@ -162,7 +163,7 @@
       <EmptyState
         icon="zap"
         title="No chats yet"
-        body="Click + New chat to start figuring out what to build."
+        body="Start a New chat to figure out what to build."
       />
     {/snippet}
   </ListPane>
@@ -172,9 +173,13 @@
     {#if activeCid}
       <DiscoveryChat cid={activeCid} />
     {:else}
-      <div class="chat-empty-state">
-        <p>Start a new chat to figure out what to build — describe the rough idea and the agent will research, ask the right questions, and turn it into a story.</p>
-      </div>
+      <EmptyState
+        icon="comment"
+        title={chats.length === 0 ? 'Figure out what to build' : 'No chat open'}
+        body={chats.length === 0
+          ? 'Start a New chat and describe the rough idea — the agent researches, asks the right questions and turns it into a story.'
+          : 'Open a chat on the left, or start a New chat.'}
+      />
     {/if}
   </div>
 </div>
@@ -227,7 +232,7 @@
     text-align: start;
   }
   .chat-title {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 500;
     line-height: 1.3;
     overflow: hidden;
@@ -245,8 +250,8 @@
     gap: 5px;
   }
   .chat-status {
-    font-size: 9.5px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 1px 5px;
@@ -277,7 +282,9 @@
     transition: opacity 100ms, background 100ms;
     white-space: nowrap;
   }
-  .chat-item:hover .archive-btn {
+  .chat-item:hover .archive-btn,
+  .chat-item.active .archive-btn,
+  .archive-btn:focus-visible {
     opacity: 1;
   }
   .archive-btn:hover {
@@ -286,19 +293,6 @@
   }
 
   /* States */
-  .muted {
-    color: var(--text-dim);
-    font-size: 13px;
-    font-style: italic;
-  }
-  .pad {
-    padding: 12px 10px;
-  }
-  .error-msg {
-    color: var(--danger);
-    font-size: 12px;
-    padding: 8px 10px;
-  }
   /* ── Right pane ─────────────────────────────────────────────────────────── */
   .chat-pane {
     flex: 1;
@@ -308,19 +302,4 @@
     flex-direction: column;
   }
 
-  .chat-empty-state {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 32px 24px;
-    text-align: center;
-    color: var(--text-dim);
-    font-size: 13px;
-    line-height: 1.6;
-  }
-  .chat-empty-state p {
-    max-width: 360px;
-    margin: 0;
-  }
 </style>

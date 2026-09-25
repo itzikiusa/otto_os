@@ -19,11 +19,36 @@
     /** The statement to run uncapped (the tab's ran statement). */
     statement: string;
     connectionId: string;
+    /**
+     * The scope the on-screen result RAN with (the tab's `ran_node`; `null` = no
+     * database). The export re-runs the statement, so it must hit the same
+     * database the rows came from — not whatever the selector shows now.
+     * Omitted → the explorer's active database.
+     */
+    node?: string | null;
     /** Export permission on the connection — re-checked before each run. */
     canExport: boolean;
+    /** Prefill (an agent's `otto.ui_db_export`): the format / row limit to
+     *  start from. The person still picks the folder + name and confirms. */
+    initialFormat?: DbExportFormat;
+    initialMaxRows?: number;
+    /** Who asked for this export — shown in the dialog so it's attributed. */
+    requestedBy?: string;
+    /** Called once when the export finished writing (before `onclose`). */
+    ondone?: (r: ExportToPathResp) => void;
     onclose: () => void;
   }
-  let { statement, connectionId, canExport, onclose }: Props = $props();
+  let {
+    statement,
+    connectionId,
+    node,
+    canExport,
+    initialFormat,
+    initialMaxRows,
+    requestedBy,
+    ondone,
+    onclose,
+  }: Props = $props();
 
   type ExportFmtOpt = { value: DbExportFormat; label: string };
   const EXPORT_FORMATS: ExportFmtOpt[] = [
@@ -63,10 +88,13 @@
   // The dialog mounts fresh on every open, so the remembered format/directory
   // and the default file name are seeded right here.
   let pickingDir = $state(false);
-  let exportFormat = $state<DbExportFormat>(loadFormat());
+  // A prefill (initialFormat / initialMaxRows) is read once, at mount.
+  // svelte-ignore state_referenced_locally
+  let exportFormat = $state<DbExportFormat>(initialFormat ?? loadFormat());
   let exportDir = $state<string>(loadDir());
   let exportName = $state(defaultExportName());
-  let exportLimit = $state('');
+  // svelte-ignore state_referenced_locally
+  let exportLimit = $state(initialMaxRows ? String(initialMaxRows) : '');
   let exportingPath = $state(false);
   // Live progress for the streaming export (bytes written so far). Null when no
   // export is running; drives the dialog's progress bar.
@@ -114,7 +142,7 @@
         `/connections/${connectionId}/db/export-to-path`,
         {
           statement,
-          node: database.activeDb ?? undefined,
+          node: (node === undefined ? database.activeDb : node) ?? undefined,
           format: exportFormat,
           local_path: localPath,
           max_rows: maxRows,
@@ -134,6 +162,7 @@
           localStorage.setItem(LS_FORMAT, exportFormat);
           localStorage.setItem(LS_DIR, dir);
         }
+        ondone?.(r);
         onclose();
         toasts.success(
           'Exported',
@@ -165,6 +194,11 @@
   }}
 >
   <div class="exp-form">
+    {#if requestedBy}
+      <p class="exp-agent" data-agent-target>
+        <Icon name="sparkle" size={12} />{requestedBy} asked for this export — you choose where it goes.
+      </p>
+    {/if}
     <p class="exp-hint">
       Runs the statement on the daemon host and <strong>streams</strong> the full result to a local
       file — for sets too large to pull into the browser. Choose the format, destination directory,
@@ -185,7 +219,7 @@
       <div class="exp-dir">
         <input class="exp-input mono" bind:value={exportDir} spellcheck="false" placeholder="~/Downloads" />
         <button class="tb-btn" onclick={() => (pickingDir = true)} title="Browse the daemon host">
-          <Icon name="folder" size={11} />Browse…
+          <Icon name="folder" size={12} />Browse…
         </button>
       </div>
     </div>
@@ -259,7 +293,7 @@
     border: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
   .tb-btn:hover {
@@ -273,9 +307,20 @@
     flex-direction: column;
     gap: 12px;
   }
+  .exp-agent {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    font-size: var(--fs-s);
+  }
   .exp-hint {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text-dim);
   }
@@ -286,7 +331,7 @@
   }
   .exp-label {
     flex: 0 0 76px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .exp-select,
@@ -294,7 +339,7 @@
     flex: 1;
     min-width: 0;
     padding: 6px 9px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
@@ -316,7 +361,7 @@
     flex: 1;
   }
   .exp-dest {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     padding: 6px 9px;
     border: 1px dashed var(--border);
@@ -354,7 +399,7 @@
     100% { left: 100%; }
   }
   .exp-prog-text {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   @media (prefers-reduced-motion: reduce) {

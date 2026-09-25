@@ -110,7 +110,7 @@
       // are STAGED, not committed. Don't imply it's done — tell the user to
       // review & commit in Changes.
       if (result.status === 'merged' && result.commit === null) {
-        toasts.success('Squash merge staged', 'Review & commit in Changes');
+        toasts.success('Squash merge staged', 'Review and commit it from the WIP row at the top of the graph');
       } else {
         const verb = result.status === 'up_to_date' ? 'Already up to date' : 'Merged';
         toasts.success(verb, `${source} → ${target}`);
@@ -209,8 +209,8 @@
     {/if}
 
     {#if error}
-      <div class="err">
-        <Icon name="x" size={13} />
+      <div class="err" role="alert">
+        <Icon name="warning" size={14} />
         <span>
           {error}
           {#if errorHint}<br /><strong>{errorHint}</strong>{/if}
@@ -255,7 +255,7 @@
     max-width: 100%;
     padding: 4px 10px;
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 500;
   }
   .bchip .mono {
@@ -264,8 +264,8 @@
     white-space: nowrap;
   }
   .bchip.src {
-    background: color-mix(in srgb, var(--status-working) 14%, transparent);
-    color: var(--status-working);
+    background: color-mix(in srgb, var(--success) 14%, transparent);
+    color: var(--success);
   }
   .bchip.tgt {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
@@ -277,7 +277,7 @@
   }
   .note {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     text-align: center;
     line-height: 1.5;
@@ -288,7 +288,7 @@
   }
   .section-label {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0.05em;
     color: var(--text-dim);
     text-transform: uppercase;
@@ -327,11 +327,11 @@
     min-width: 0;
   }
   .strat-label {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 500;
   }
   .strat-hint {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .warn {
     display: flex;
@@ -341,7 +341,7 @@
     border-radius: var(--radius-m);
     background: color-mix(in srgb, var(--warning) 14%, transparent);
     color: var(--warning);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.45;
   }
   .warn.check {
@@ -359,7 +359,7 @@
     background: color-mix(in srgb, var(--warning) 12%, transparent);
     border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
     color: var(--warning);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.5;
   }
   .block-head {
@@ -376,7 +376,7 @@
     color: var(--text);
   }
   .conflict-files li {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .conflict-files .more {
     list-style: none;
@@ -405,9 +405,9 @@
     gap: 8px;
     padding: 8px 10px;
     border-radius: var(--radius-m);
-    background: color-mix(in srgb, var(--status-exited) 14%, transparent);
-    color: var(--status-exited);
-    font-size: 11.5px;
+    background: color-mix(in srgb, var(--danger) 14%, transparent);
+    color: var(--danger);
+    font-size: var(--fs-xs);
     line-height: 1.45;
   }
   .dim {
@@ -429,7 +429,7 @@
     .note .mono { overflow-wrap: anywhere; }
     .strat { padding: 11px 12px; }
     .strat input { width: 18px; height: 18px; }
-    .strat-label { font-size: 13px; }
-    .strat-hint { font-size: 11.5px; }
+    .strat-label { font-size: var(--fs-m); }
+    .strat-hint { font-size: var(--fs-xs); }
   }
 </style>

@@ -64,7 +64,7 @@ test('New Session sheet lists the custom provider', async ({ page }) => {
 
   // Open the ⌘T sheet; fall back to the TabBar + button if the shortcut doesn't
   // reach the app in this browser build (mirrors desktop-new-session-keys).
-  const dialog = page.locator('.sheet[role="dialog"][aria-label="New Session"]');
+  const dialog = page.locator('.sheet[role="dialog"][aria-label="New session"]');
   await page.keyboard.press('Meta+t');
   if (!(await dialog.isVisible().catch(() => false))) {
     await page.getByTitle('New session (⌘T)').click();
@@ -159,14 +159,11 @@ test('Workflow node inspector docks to a resizable side panel', async ({ page })
   // Bottom dock by default (no .side).
   await expect(inspector).not.toHaveClass(/\bside\b/);
 
-  // Toggle to the side dock → the inspector becomes a right column. "Dock" is
-  // a low-priority header action: at this width (with a node selected) it may
-  // sit in the header's ⋯ overflow menu instead of the bar.
+  // Toggle to the side dock → the inspector becomes a right column. The dock
+  // toggle is a checkable row in the editor header's ⋯ menu.
   const clickDock = async (): Promise<void> => {
-    const dock = page.locator('[data-testid="page-header"] .ph-actions button', { hasText: 'Dock' });
-    if (await dock.isVisible()) return dock.click();
-    await page.getByRole('button', { name: 'More actions' }).click();
-    await page.getByRole('menuitem', { name: /^Dock/ }).click();
+    await page.locator('[data-testid="page-header"]').getByRole('button', { name: 'More actions' }).click();
+    await page.getByRole('menuitemcheckbox', { name: 'Inspector on the side' }).click();
   };
   await clickDock();
   await expect(inspector).toHaveClass(/\bside\b/);
@@ -260,7 +257,7 @@ test('Excluding a provider hides it from /meta and every picker', async ({ page 
 
     // The New Session sheet drops the agy card while keeping claude + grok.
     await openPage(page, 'agents');
-    const dialog = page.locator('.sheet[role="dialog"][aria-label="New Session"]');
+    const dialog = page.locator('.sheet[role="dialog"][aria-label="New session"]');
     await page.keyboard.press('Meta+t');
     if (!(await dialog.isVisible().catch(() => false))) {
       await page.getByTitle('New session (⌘T)').click();
@@ -284,7 +281,10 @@ test('Dock opens a persistent side panel with a working close button', async ({ 
   // centered placeholder (previously nothing happened, which is what the user hit).
   const inspector = page.locator('.inspector.side');
   await expect(inspector).toHaveCount(0);
-  await page.getByRole('button', { name: 'Dock' }).click();
+  // The dock toggle is a checkable row in the editor header's ⋯ menu.
+  const more = page.locator('[data-testid="page-header"]').getByRole('button', { name: 'More actions' });
+  await more.click();
+  await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Inspector on the side' }).click();
   await expect(inspector).toBeVisible({ timeout: 10_000 });
   await expect(inspector.locator('.insp-blank')).toContainText(/select a node/i);
 
@@ -301,6 +301,8 @@ test('Dock opens a persistent side panel with a working close button', async ({ 
   // The × close button in the side header dismisses the dock.
   await inspector.getByRole('button', { name: 'Close panel' }).click();
   await expect(page.locator('.inspector.side')).toHaveCount(0);
-  // Dock button returns to inactive (bottom mode).
-  await expect(page.getByRole('button', { name: 'Dock' })).not.toHaveClass(/\bactive\b/);
+  // The dock toggle returns to unchecked (bottom mode).
+  await more.click();
+  await expect(page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Inspector on the side' })).toHaveAttribute('aria-checked', 'false');
+  await page.keyboard.press('Escape');
 });

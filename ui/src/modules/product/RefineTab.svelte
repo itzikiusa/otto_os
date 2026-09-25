@@ -8,10 +8,15 @@
   // visible even with zero threads, so the loading/error/empty/rows branching
   // all lives in `children` (unlike ChatTab/MockupsTab, whose empty state has
   // nothing else to keep showing).
+  import { untrack } from 'svelte';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import RefineChat from './RefineChat.svelte';
   import ListPane from './ui/ListPane.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { RefinementThread, DiscoveryRunSummary } from './types';
 
   // ── State ──────────────────────────────────────────────────────────────────
@@ -30,6 +35,12 @@
   $effect(() => {
     // Re-run whenever the selected story changes.
     product.selectedId;
+    // A thread belongs to ONE story: drop the previous story's list/selection so
+    // the auto-pick below runs for the new story instead of keeping a stale id.
+    untrack(() => {
+      threads = [];
+      activeTid = null;
+    });
     void loadThreads();
     void loadDiscoveryRuns();
   });
@@ -45,7 +56,7 @@
         activeTid = first.id;
       }
     } catch (e) {
-      loadError = e instanceof Error ? e.message : String(e);
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -137,7 +148,7 @@
         disabled={creating}
         title="Start a new refinement conversation"
       >
-        {creating ? 'Creating…' : '+ New thread'}
+        <Icon name="plus" size={12} /> {creating ? 'Creating…' : 'New thread'}
       </button>
     {/snippet}
     {#snippet children()}
@@ -168,14 +179,11 @@
         </div>
       {/if}
 
-      {#if loading && threads.length === 0}
-        <div class="muted pad">Loading…</div>
-      {:else if loadError}
-        <div class="error-msg pad">Could not load threads: {loadError}</div>
+      {#if (loading || loadError) && threads.length === 0}
+        <LoadState what="threads" variant="compact" loading={loading} error={loadError} empty onretry={() => void loadThreads()} />
       {:else if threads.length === 0}
         <div class="empty-state">
           <p>No threads yet.</p>
-          <p>Click <strong>+ New thread</strong> to start chatting.</p>
         </div>
       {:else}
         <div class="thread-list">
@@ -192,7 +200,7 @@
                 <span class="thread-title">{t.title}</span>
                 <span class="thread-meta">
                   <span class="thread-status" class:status-archived={t.status === 'archived'}>
-                    {t.status}
+                    {t.status === 'archived' ? 'Archived' : 'Active'}
                   </span>
                   <span class="thread-date">{relDate(t.updated_at)}</span>
                 </span>
@@ -219,9 +227,13 @@
     {#if activeTid}
       <RefineChat tid={activeTid} />
     {:else}
-      <div class="chat-empty-state">
-        <p>Select a thread on the left, or create a new one to start refining this story with the agent.</p>
-      </div>
+      <EmptyState
+        icon="comment"
+        title={threads.length === 0 ? 'No refinement threads yet' : 'No thread open'}
+        body={threads.length === 0
+          ? 'Start a New thread to refine this story with an agent — optionally seeded from a discovery run.'
+          : 'Open a thread on the left, or start a New thread.'}
+      />
     {/if}
   </div>
 </div>
@@ -255,7 +267,7 @@
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
 
@@ -298,7 +310,7 @@
     text-align: start;
   }
   .thread-title {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 500;
     line-height: 1.3;
     overflow: hidden;
@@ -316,8 +328,8 @@
     gap: 5px;
   }
   .thread-status {
-    font-size: 9.5px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 1px 5px;
@@ -348,7 +360,9 @@
     transition: opacity 100ms, background 100ms;
     white-space: nowrap;
   }
-  .thread-item:hover .archive-btn {
+  .thread-item:hover .archive-btn,
+  .thread-item.active .archive-btn,
+  .archive-btn:focus-visible {
     opacity: 1;
   }
   .archive-btn:hover {
@@ -357,24 +371,11 @@
   }
 
   /* States */
-  .muted {
-    color: var(--text-dim);
-    font-size: 13px;
-    font-style: italic;
-  }
-  .pad {
-    padding: 12px 10px;
-  }
-  .error-msg {
-    color: var(--danger);
-    font-size: 12px;
-    padding: 8px 10px;
-  }
   .empty-state {
     padding: 24px 12px;
     text-align: center;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.6;
   }
   .empty-state p {
@@ -390,19 +391,4 @@
     flex-direction: column;
   }
 
-  .chat-empty-state {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 32px 24px;
-    text-align: center;
-    color: var(--text-dim);
-    font-size: 13px;
-    line-height: 1.6;
-  }
-  .chat-empty-state p {
-    max-width: 320px;
-    margin: 0;
-  }
 </style>

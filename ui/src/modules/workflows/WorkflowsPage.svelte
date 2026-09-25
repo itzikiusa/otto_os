@@ -28,9 +28,12 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { api } from '../../lib/api/client';
   import { workflowProgress, workflowNodeDetail, listWorkflowVersions, restoreWorkflowVersion } from '../../lib/api/workflows';
-  import { mergeRunProgress } from './runProgress';
+  import { mergeRunProgress, fmtStepMs } from './runProgress';
+  import RelTime from '../../lib/components/RelTime.svelte';
   import { workflowRunBus } from '../../lib/events.svelte';
+  import { workflowsPagePort } from '../../lib/uiCommands/workflows';
   import { copyTextOrThrow } from '../../lib/clipboard';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import type {
     Workflow,
     WorkflowGraph,
@@ -279,6 +282,7 @@
     requestedRunId = runId;
     try {
       if (current?.id !== workflowId) {
+        if (!(await discardEditsOk()) || requestedRunId !== runId) return;
         let wf = workflows.find(w => w.id === workflowId);
         if (!wf) wf = await api.get<Workflow>(`/workflows/${workflowId}`);
         if (requestedRunId !== runId) return;
@@ -289,18 +293,7 @@
       if (requestedRunId !== runId || current?.id !== workflowId || destroyed) return;
       if (result.changed) run = result.run;
       runsOpen = false;
-    } catch (e) {toasts.error('Could not open run',e instanceof Error ? e.message : String(e));}
-  }
-
-  /** Compact "5m ago" for run rows. */
-  function ago(iso: string): string {
-    const ms = Date.now() - new Date(iso).getTime();
-    if (!Number.isFinite(ms) || ms < 0) return '';
-    const s = Math.floor(ms / 1000);
-    if (s < 60) return `${s}s ago`;
-    const m = Math.floor(s / 60);
-    if (m < 60) return `${m}m ago`;
-    return `${Math.floor(m / 60)}h ago`;
+    } catch (e) {toasts.error('Couldn’t open the run',e instanceof Error ? e.message : String(e));}
   }
 
   // Never open onto an empty "build a workflow" pane when the workspace has
@@ -326,6 +319,22 @@
     if (current?.id) rememberSelection('workflows', current.id);
   });
 
+  // Layout: with no workflows (and nothing running) the list pane is hidden
+  // and the main pane's first-run form owns the page. On a phone the list and
+  // the editor are push-navigated (the list is the first screen; opening a
+  // workflow replaces it and the header gets a back button).
+  const listless = $derived(workflows.length === 0 && !current && ws.activeWorkflowRuns.length === 0);
+  const showSide = $derived(!listless && !(viewport.isPhone && current));
+  const showMain = $derived(listless || !viewport.isPhone || !!current);
+  async function backToList(): Promise<void> {
+    if (!(await discardEditsOk())) return;
+    current = null;
+    graph = { nodes: [], edges: [] };
+    selectedId = null;
+    run = null;
+    dirty = false;
+  }
+
   // The Node palette / Runs popovers hang off header buttons, but the header's
   // action row clips overflow — so they render at the top of the editor pane,
   // horizontally under their button (clamped into the pane).
@@ -340,6 +349,53 @@
       return;
     }
     popRight = Math.max(8, Math.min(m.right - b.right, m.width - width - 8));
+  }
+
+  /** A workflow row's ⋯ / right-click menu. */
+  function rowMenu(e: MouseEvent, wf: Workflow): void {
+    ctxMenu.show(e, [
+      { label: 'Rename', icon: 'edit', action: () => startRename(wf) },
+      { label: 'Duplicate', icon: 'copy', action: () => void duplicate(wf) },
+      { separator: true },
+      { label: 'Delete…', icon: 'trash', danger: true, action: () => void del(wf) },
+    ]);
+  }
+
+  /** The header's ⋯ menu: panel toggles (checked rows) and one-off tools. */
+  function wfMenu(e: MouseEvent): void {
+    const items: MenuItem[] = [];
+    if (viewport.isPhone) {
+      items.push(
+        { label: 'Add node…', icon: 'plus', action: () => { popRight = 8; paletteOpen = true; } },
+        { label: 'Save', icon: 'check', disabled: !dirty, title: dirty ? undefined : 'No unsaved changes', action: () => void save() },
+        { label: 'Runs', icon: 'clock', action: () => { popRight = 8; runsOpen = true; void loadRuns(); } },
+        { separator: true },
+      );
+    }
+    items.push(
+      { label: 'Instructions', checked: instructionsOpen, title: 'Standing rules every step follows, by the letter', action: () => (instructionsOpen = !instructionsOpen) },
+      { label: 'Triggers', checked: triggersOpen, title: 'Configure what starts this workflow', action: () => (triggersOpen = !triggersOpen) },
+      { label: 'Versions', checked: versionsOpen, title: 'Version history', action: () => { versionsOpen = !versionsOpen; if (versionsOpen) void loadVersions(); } },
+      {
+        label: 'Inspector on the side',
+        checked: sideDock,
+        title: sideDock ? 'Dock the node inspector to the bottom' : 'Dock the node inspector to a resizable side panel',
+        action: () => ui.setWfDockSide(!sideDock),
+      },
+      { separator: true },
+      {
+        label: validating ? 'Checking…' : 'Validate',
+        icon: 'shield',
+        disabled: validating,
+        title: 'Check the graph for problems before running',
+        action: async () => { if (await validateGraph()) toasts.success('Preflight passed'); },
+      },
+      { label: 'Tidy', icon: 'grid', title: 'Tidy layout into rows', action: tidy },
+    );
+    if (selectedId) {
+      items.push({ separator: true }, { label: 'Delete selected node', icon: 'trash', danger: true, action: removeSelected });
+    }
+    ctxMenu.show(e, items);
   }
 
   // The workspace `workflows` belongs to, and a token so a slow load for a
@@ -384,7 +440,7 @@
       open(wf);
       toasts.success(`Created “${wf.name}”`, 'Ready to run.');
     } catch (e) {
-      toasts.error('Could not create from template', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t create the workflow from the template', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -400,12 +456,33 @@
     runsOpen = false;
     versionsOpen = false;
     versions = [];
+    versionsError = null;
+    // Never show the previous workflow's runs under this one while they load.
+    runs = [];
+    runsError = null;
     wfInstructions = wf.instructions ?? '';
     finalOutputRunId = null;
     finalOutputHtml = '';
     finalOutputAvailable = false;
     void loadRuns();
     dirty = false;
+  }
+
+  /** Opening another workflow (or restoring a version) replaces the canvas,
+   *  so unsaved node/edge edits would vanish silently — ask first. */
+  async function discardEditsOk(): Promise<boolean> {
+    if (!dirty || !current) return true;
+    return confirmer.ask(`“${current.name}” has unsaved changes. Discard them?`, {
+      title: 'Discard unsaved changes',
+      confirmLabel: 'Discard changes',
+    });
+  }
+  /** Sidebar row click: re-clicking the open workflow keeps its unsaved edits
+   *  (it used to reload the saved graph over them). */
+  async function openGuarded(wf: Workflow): Promise<void> {
+    if (current?.id === wf.id && dirty) return;
+    if (!(await discardEditsOk())) return;
+    open(wf);
   }
 
   async function generate(): Promise<void> {
@@ -420,7 +497,7 @@
       prompt = '';
       toasts.success('Workflow generated', 'Tweak it on the canvas, then run.');
     } catch (e) {
-      toasts.error('Generation failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t generate the workflow', e instanceof Error ? e.message : String(e));
     } finally {
       generating = false;
     }
@@ -440,7 +517,7 @@
       workflows = [wf, ...workflows];
       open(wf);
     } catch (e) {
-      toasts.error('Create failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t create the workflow', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -453,7 +530,7 @@
       dirty = false;
       toasts.success('Saved');
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t save the workflow', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -470,7 +547,7 @@
       workflows = workflows.map((w) => (w.id === wf.id ? wf : w));
       toasts.success('Instructions saved');
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t save the instructions', e instanceof Error ? e.message : String(e));
     } finally {
       savingInstructions = false;
     }
@@ -487,7 +564,7 @@
       current = wf;
       workflows = workflows.map((w) => (w.id === wf.id ? wf : w));
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t save the restart policy', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -514,7 +591,7 @@
       }
       toasts.success('Workflow deleted', wf.name);
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t delete the workflow', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -534,7 +611,7 @@
       toasts.success(`Duplicated → “${copy.name}”`, 'Rename it to trigger it independently.');
       void open(copy);
     } catch (e) {
-      toasts.error('Duplicate failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t duplicate the workflow', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -570,7 +647,7 @@
       if (current?.id === wf.id) current = { ...current, name: updated.name };
       toasts.success(`Renamed to “${updated.name}”`);
     } catch (e) {
-      toasts.error('Rename failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t rename the workflow', e instanceof Error ? e.message : String(e));
     } finally {
       cancelRename();
     }
@@ -640,15 +717,23 @@
       if (current?.id !== id) return false;
       validationIssues = result.issues;
       return result.valid;
-    } catch (e) { toasts.error('Preflight failed', e instanceof Error ? e.message : String(e)); return false; }
+    } catch (e) { toasts.error('Couldn’t validate the workflow', e instanceof Error ? e.message : String(e)); return false; }
     finally { validating = false; }
   }
 
   async function execRun(body: RunWorkflowReq): Promise<void> {
-    if (!current || running) return;
-    if (!await validateGraph()) return;
+    const r = await startRun(body);
+    if (r) await followRun(r);
+  }
+
+  /** Validate, save, POST the run and show it. Null when it didn't start (the
+   *  reason is on the page: validation issues inline, a failed POST toasted).
+   *  On success `running` stays set until {@link followRun} settles it. */
+  async function startRun(body: RunWorkflowReq): Promise<WorkflowRun | null> {
+    if (!current || running) return null;
+    if (!await validateGraph()) return null;
     if (dirty) await save();
-    if (dirty) return; // failed save: never execute an older persisted graph
+    if (dirty) return null; // failed save: never execute an older persisted graph
     running = true;
     const workflowId = current.id;
     try {
@@ -657,18 +742,53 @@
       // live-run sync streams its progress in.
       requestedRunId = r.id;
       run = r;
+      return r;
+    } catch (e) {
+      toasts.error('Couldn’t start the run', e instanceof Error ? e.message : String(e));
+      running = false;
+      return null;
+    }
+  }
+
+  async function followRun(r: WorkflowRun): Promise<void> {
+    try {
       const done = await waitRunTerminal(r.id);
       if (destroyed) return;
       if (done.status === 'success') toasts.success('Run complete');
-      else if (done.status === 'canceled') toasts.info('Run stopped');
+      else if (done.status === 'canceled') toasts.info('Run cancelled');
       else toasts.error('Run finished with errors', done.error ?? '');
       void loadRuns();
     } catch (e) {
-      toasts.error('Run failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t start the run', e instanceof Error ? e.message : String(e));
     } finally {
       running = false;
     }
   }
+
+  // Agent UI control (lib/uiCommands/workflows.ts): the agent opens a
+  // workflow / run and starts runs through THIS editor, so the user watches
+  // the same canvas + run inspector their own clicks would show.
+  $effect(() =>
+    workflowsPagePort.bind({
+      list: () => workflows,
+      loading: () => wfLoading,
+      currentId: () => current?.id ?? null,
+      async open(id: string): Promise<boolean> {
+        if (current?.id === id) return true;
+        if (!(await discardEditsOk())) return false;
+        const wf = workflows.find((w) => w.id === id) ?? (await api.get<Workflow>(`/workflows/${id}`));
+        open(wf);
+        return true;
+      },
+      openRun: (workflowId: string, runId: string) => openRunById(workflowId, runId),
+      async start(body: RunWorkflowReq): Promise<WorkflowRun | null> {
+        const r = await startRun(body);
+        if (r) void followRun(r);
+        return r;
+      },
+      currentRun: () => run,
+    }),
+  );
 
   // Every node kind in the graph, including the inner steps of `loop` nodes.
   function collectKinds(): Set<string> {
@@ -712,13 +832,21 @@
     return JSON.stringify(obj, null, 2);
   }
 
+  // Invalid run-input JSON is a field error: said inline under the field (the
+  // panel opens if a "Run from here" found it), never as a toast.
+  let runInputError = $state('');
+  $effect(() => {
+    void runInputText;
+    runInputError = '';
+  });
   function parseRunInput(): Record<string, unknown> | undefined | null {
     const t = runInputText.trim();
     if (!t) return undefined;
     try {
       return JSON.parse(t);
-    } catch {
-      toasts.error('Run input is not valid JSON', 'Fix the JSON or clear the field to run with no input.');
+    } catch (e) {
+      runInputError = `Run input isn't valid JSON (${e instanceof Error ? e.message : 'parse error'}). Fix it, or clear the field to run with no input.`;
+      runInputOpen = true;
       return null; // signal: invalid
     }
   }
@@ -739,7 +867,7 @@
 
   async function confirmRun(): Promise<void> {
     const input = parseRunInput();
-    if (input === null) return; // invalid JSON; toast already shown
+    if (input === null) return; // invalid JSON; shown under the field
     const merged = mergeRunPrompt(input);
     runInputOpen = false;
     await execRun({
@@ -805,7 +933,6 @@
     graph = { ...graph, nodes: [...nodes] };
     dirty = true;
     void save();
-    toasts.success('Tidied layout');
   }
 
   // Copy-paste Slack message that triggers THIS workflow by name (shown on the
@@ -827,17 +954,26 @@
       mtCopied = true;
       setTimeout(() => (mtCopied = false), 1500);
     } catch {
-      toasts.error('Copy failed', 'Select the text and copy it manually.');
+      toasts.error('Couldn’t copy to the clipboard', 'Select the text and copy it manually.');
     }
   }
 
+  // Cancelling can't be undone (the run halts after its current step and must
+  // be started again), so it asks first — the same rule as the inspector's
+  // "Cancel run" and a Stop in Goal Loops.
   async function stop(): Promise<void> {
     if (!run) return;
+    const name = current?.name ?? 'this workflow';
+    const ok = await confirmer.ask(
+      `Cancel this run of “${name}”? It finishes the current step, then halts. Completed steps and their output are kept; to continue you start a new run.`,
+      { title: 'Cancel run', confirmLabel: 'Cancel run' },
+    );
+    if (!ok || !run) return;
     try {
       await api.post(`/workflow-runs/${run.id}/cancel`, {});
-      toasts.info('Stopping…', 'Finishes the current step, then halts.');
+      toasts.info('Cancelling run…', 'Finishes the current step, then halts.');
     } catch (e) {
-      toasts.error('Stop failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t cancel the run', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -990,14 +1126,24 @@
     document.body.style.userSelect = 'none';
   }
 
+  // Runs popover load state: a failed load says so (with Retry) instead of
+  // showing a stale or empty "No runs yet" list.
+  let runsLoading = $state(false);
+  let runsError = $state<string | null>(null);
   async function loadRuns(): Promise<void> {
     if (!current) return;
+    const workflowId = current.id;
+    runsLoading = true;
     try {
-      const workflowId = current.id;
       const rows = await api.get<typeof runs>(`/workflows/${workflowId}/runs?summary=true`);
-      if (current?.id === workflowId) runs = rows;
-    } catch {
-      /* ignore */
+      if (current?.id === workflowId) {
+        runs = rows;
+        runsError = null;
+      }
+    } catch (e) {
+      if (current?.id === workflowId) runsError = loadErrorText(e);
+    } finally {
+      if (current?.id === workflowId) runsLoading = false;
     }
   }
 
@@ -1011,7 +1157,7 @@
       });
       toasts.success(approved ? 'Approved — run resuming' : 'Rejected — run will error');
     } catch (e) {
-      toasts.error('Approval failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t record the approval', e instanceof Error ? e.message : String(e));
     } finally {
       approving = false;
     }
@@ -1021,10 +1167,7 @@
     const n = graph.nodes.find((x) => x.id === id);
     return n?.name || n?.kind || id;
   }
-  function fmtMs(ms?: number | null): string {
-    if (ms == null) return '';
-    return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
-  }
+  const fmtMs = fmtStepMs;
 
   function onParam(field: string, value: unknown): void {
     if (!selectedNode) return;
@@ -1304,14 +1447,17 @@
   let versionsOpen = $state(false);
   let versions = $state<WorkflowVersion[]>([]);
   let versionsLoading = $state(false);
+  let versionsError = $state<string | null>(null);
 
   async function loadVersions(): Promise<void> {
     if (!current) return;
     versionsLoading = true;
     try {
       versions = await listWorkflowVersions(current.id);
+      versionsError = null;
     } catch (e) {
-      toasts.error('Failed to load versions', e instanceof Error ? e.message : String(e));
+      // A failed load is shown inline in the panel, with Retry.
+      versionsError = loadErrorText(e);
     } finally {
       versionsLoading = false;
     }
@@ -1319,6 +1465,7 @@
 
   async function restoreVersion(v: WorkflowVersion): Promise<void> {
     if (!current) return;
+    if (!(await discardEditsOk())) return;
     try {
       const wf = await restoreWorkflowVersion(current.id, v.version);
       current = wf;
@@ -1327,7 +1474,7 @@
       await loadVersions();
       toasts.success(`Restored v${v.version}`);
     } catch (e) {
-      toasts.error('Restore failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t restore the version', e instanceof Error ? e.message : String(e));
     }
   }
 </script>
@@ -1348,8 +1495,113 @@
   </div>
 {/snippet}
 
+<!-- The "new workflow" form: describe it (an agent wires the graph), start
+     blank, or start from a template. Lives at the top of the list pane; with no
+     workflows yet the list pane is hidden and this form IS the page's empty
+     state (`page`), where Generate is the one primary action. -->
+{#snippet generator(mode: 'side' | 'page')}
+  <div class="gen" class:gen-page={mode === 'page'}>
+    <label for="wf-prompt">Describe the flow</label>
+    <textarea
+      id="wf-prompt"
+      bind:value={prompt}
+      rows={mode === 'page' ? 4 : 3}
+      placeholder="e.g. Ask an agent to summarize the repo, then POST the summary to our webhook."
+      onkeydown={(e) => {
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) generate();
+      }}
+    ></textarea>
+    {#if mode === 'page'}
+      <div class="gen-actions">
+        <button class="btn ghost" onclick={createBlank}><Icon name="plus" size={13} /> Start blank</button>
+        <span class="grow"></span>
+        <button
+          class="btn primary"
+          disabled={generating || prompt.trim() === ''}
+          title={prompt.trim() === '' ? 'Describe the flow first' : 'Generate the workflow (⌘↵)'}
+          onclick={generate}
+        >
+          {#if generating}<span class="spin"></span> Building…{:else}<Icon name="zap" size={13} /> Generate workflow{/if}
+        </button>
+      </div>
+      {#if templates.length > 0}
+        <div class="tpl-start">
+          <span class="tpl-start-h">Or start from a template</span>
+          <div class="tpl-grid">
+            {#each templates as t (t.id)}
+              <button class="tpl tpl-card" onclick={() => void fromTemplate(t)} title={t.description}>
+                <span class="tpl-ic"><Icon name={asIcon(t.icon, 'box')} size={14} /></span>
+                <span class="tpl-body">
+                  <span class="tpl-name">{t.name}</span>
+                  {#if t.description}<span class="tpl-sub">{t.description}</span>{/if}
+                </span>
+              </button>
+            {/each}
+          </div>
+        </div>
+      {/if}
+    {:else}
+      <!-- Secondary here: with a workflow open, the header's Run… is the
+           view's one primary action. -->
+      <button
+        class="btn full"
+        disabled={generating || prompt.trim() === ''}
+        title={prompt.trim() === '' ? 'Describe the flow first' : 'Generate the workflow (⌘↵)'}
+        onclick={generate}
+      >
+        {#if generating}<span class="spin"></span> Building…{:else}<Icon name="zap" size={13} /> Generate workflow{/if}
+      </button>
+      <button class="btn ghost full" onclick={createBlank}>
+        <Icon name="plus" size={13} /> Start blank
+      </button>
+      {#if templates.length > 0}
+        <!-- Templates collapsed into a dropdown (was an always-open list) so the
+             sidebar room goes to the Workflows + Running lists. -->
+        <div class="tpl-menu">
+          <button
+            class="btn ghost full tpl-toggle"
+            aria-expanded={templatesOpen}
+            onclick={() => (templatesOpen = !templatesOpen)}
+          >
+            <Icon name="grid" size={13} /> Templates
+            <span class="grow"></span>
+            <Icon name={templatesOpen ? 'chevronUp' : 'chevronDown'} size={12} />
+          </button>
+          {#if templatesOpen}
+            <div class="tpl-pop">
+              {#each templates as t (t.id)}
+                <button
+                  class="tpl"
+                  onclick={() => {
+                    void fromTemplate(t);
+                    templatesOpen = false;
+                  }}
+                  title={t.description}
+                >
+                  <span class="tpl-ic"><Icon name={asIcon(t.icon, 'box')} size={14} /></span>
+                  <span class="tpl-body">
+                    <span class="tpl-name">{t.name}</span>
+                    {#if t.description}<span class="tpl-sub">{t.description}</span>{/if}
+                  </span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {/if}
+    {/if}
+  </div>
+{/snippet}
+
 <div class="wf-root">
 <PageHeader class="wf-bar" title={current?.name ?? 'Workflows'}>
+  {#snippet leading()}
+    {#if viewport.isPhone && current}
+      <button class="icon-btn" onclick={() => void backToList()} aria-label="Back to workflows" title="Back to workflows">
+        <Icon name="chevronLeft" size={16} />
+      </button>
+    {/if}
+  {/snippet}
   {#snippet titleContent()}
     {#if current && renamingId === current.id && renameInBar}
       <!-- svelte-ignore a11y_autofocus -->
@@ -1374,155 +1626,65 @@
         <Icon name="edit" size={13} />
       </button>
     {/if}
-    {#if current && dirty}<span class="badge">unsaved</span>{/if}
+    {#if current && dirty}<span class="badge" title="The canvas has changes that aren't saved yet">Unsaved</span>{/if}
   {/snippet}
   {#snippet actions()}
     {#if current}
-      <button class="btn small" data-overflow="1" data-icon="plus" onclick={(e) => { anchorPop(e, 230); paletteOpen = !paletteOpen; }}>
-        <Icon name="plus" size={12} /> Node
-      </button>
-      {#if selectedId}
-        <button class="btn small" data-label="Delete selected" data-icon="trash" title="Delete selected" aria-label="Delete selected" onclick={removeSelected}><Icon name="trash" size={12} /></button>
+      <!-- Four everyday verbs stay in the bar (Node, Save, Runs, Run…); the
+           panel toggles and one-off tools live in the ⋯ menu (wfMenu) so the
+           row stays at ≤ 5 controls. On a phone Node/Save/Runs join the menu
+           too, so there is never a second, auto-generated ⋯ next to ours. -->
+      {#if !viewport.isPhone}
+        <button class="btn small" data-overflow="1" data-icon="plus" aria-expanded={paletteOpen} onclick={(e) => { anchorPop(e, 230); paletteOpen = !paletteOpen; }}>
+          <Icon name="plus" size={12} /> Node
+        </button>
+        <button class="btn small" data-overflow="2" data-icon="check" disabled={!dirty} title={dirty ? 'Save the canvas changes' : 'No unsaved changes'} onclick={save}>Save</button>
+        <button class="btn small" data-overflow="1" data-icon="clock" aria-expanded={runsOpen} onclick={(e) => { anchorPop(e, 200); runsOpen = !runsOpen; if (runsOpen) void loadRuns(); }}>
+          <Icon name="clock" size={12} /> Runs
+        </button>
       {/if}
-      <button class="btn small" data-overflow="1" disabled={!dirty} onclick={save}>Save</button>
-      <button class="btn small" data-overflow="1" data-icon="clock" onclick={(e) => { anchorPop(e, 200); runsOpen = !runsOpen; if (runsOpen) void loadRuns(); }}>
-        <Icon name="clock" size={12} /> Runs
-      </button>
-
-      <!-- Instructions toggle: standing rules every step follows -->
-      <button
-        class="btn small"
-        data-overflow="-1"
-        data-icon="note"
-        onclick={() => (instructionsOpen = !instructionsOpen)}
-        title="Standing rules every step follows, by the letter"
-        data-label="Instructions"
-      >
-        <Icon name="note" size={12} /> Instructions
-      </button>
-
-      <!-- Triggers config toggle -->
-      <button class="btn small" data-overflow="1" data-icon="clock" onclick={() => (triggersOpen = !triggersOpen)} title="Configure workflow triggers" data-label="Triggers">
-        <Icon name="clock" size={12} /> Triggers
-      </button>
-
-      <!-- Tidy: reflow the graph into a few readable rows -->
-      <button class="btn small" data-overflow="-2" data-icon="grid" onclick={tidy} title="Tidy layout into rows" data-label="Tidy">
-        <Icon name="grid" size={12} /> Tidy
-      </button>
-
-      <!-- Version history toggle -->
-      <button
-        class="btn small"
-        data-overflow="-1"
-        data-icon="commit"
-        onclick={() => { versionsOpen = !versionsOpen; if (versionsOpen) void loadVersions(); }}
-        title="Version history"
-        data-label="Versions"
-      >
-        <Icon name="commit" size={12} /> Versions
-      </button>
-
-      <!-- Inspector dock: bottom strip ⇄ resizable right column. -->
-      <button
-        class="btn small"
-        data-overflow="-2"
-        data-icon="sidebar"
-        class:active={sideDock}
-        onclick={() => ui.setWfDockSide(!sideDock)}
-        title={sideDock ? 'Dock the node inspector to the bottom' : 'Dock the node inspector to a resizable side panel'}
-        data-label={sideDock ? 'Dock inspector to the bottom' : 'Dock inspector to the side'}
-      >
-        <Icon name="sidebar" size={12} /> Dock
-      </button>
-
       <!-- Context/Agents panel toggle: the sidebar's ONLY toggle when collapsed
            (no second full-height rail beside the app shell's right rail). -->
       {#if viewport.isDesktop && run && run.context_dir}
         <button
-          class="btn small"
+          class="icon-btn wf-tog"
           data-icon="panel"
-          class:active={ui.wfCtxOpen}
+          class:on={ui.wfCtxOpen}
+          aria-pressed={ui.wfCtxOpen}
           onclick={() => ui.toggleWfCtx()}
-          title="Context files & agents panel"
+          title={ui.wfCtxOpen ? 'Hide the context files & agents panel' : 'Show the context files & agents panel'}
+          aria-label="Context panel"
           data-label="Context panel"
           data-testid="ctx-sidebar-toggle"
         >
-          <Icon name="panel" size={12} /> Panel
+          <Icon name="panel" size={14} />
         </button>
       {/if}
-
-      <button class="btn small" data-overflow="1" disabled={validating} onclick={async () => { if (await validateGraph()) toasts.success('Preflight passed'); }}>{validating ? 'Checking…' : 'Validate'}</button>
-      {#if running}
-        <button class="btn small danger" data-keep onclick={stop}><Icon name="square" size={11} /> Stop</button>
-      {/if}
-      <button
-        class="btn primary small"
-        class:active={runInputOpen}
-        disabled={running}
-        onclick={openRunInput}
-        title="Run — set the input (repo_id / story_id / goals / msg) the trigger emits"
-      >
-        {#if running}<span class="spin"></span> Running{:else}<Icon name="play" size={12} /> Run…{/if}
+      <button class="icon-btn" data-keep aria-haspopup="menu" aria-label="More actions" title="More actions" onclick={wfMenu}>
+        <Icon name="more" size={14} />
       </button>
+      {#if running}
+        <!-- While a run is live its Cancel takes the primary's place (same word as
+             the inspector's "Cancel run" and the run's final "Cancelled"). -->
+        <button class="btn small danger" data-keep onclick={stop} title="Cancel this run (finishes the current step, then halts)"><Icon name="square" size={11} /> Cancel run…</button>
+      {:else}
+        <button
+          class="btn primary small"
+          class:active={runInputOpen}
+          onclick={openRunInput}
+          title="Run — set the input (repo_id / story_id / goals / msg) the trigger emits"
+          aria-expanded={runInputOpen}
+        >
+          <Icon name="play" size={12} /> Run…
+        </button>
+      {/if}
     {/if}
   {/snippet}
 </PageHeader>
 <div class="wf">
-  <aside class="side" style="width:{ui.wfSideWidth}px">
-    <div class="gen">
-      <label for="wf-prompt">Describe the flow</label>
-      <textarea
-        id="wf-prompt"
-        bind:value={prompt}
-        rows="3"
-        placeholder="e.g. Ask an agent to summarize the repo, then POST the summary to our webhook."
-        onkeydown={(e) => {
-          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) generate();
-        }}
-      ></textarea>
-      <button class="btn primary full" disabled={generating || prompt.trim() === ''} onclick={generate}>
-        {#if generating}<span class="spin"></span> Building…{:else}<Icon name="zap" size={13} /> Generate workflow{/if}
-      </button>
-      <button class="btn ghost full" onclick={createBlank}>
-        <Icon name="plus" size={13} /> Start blank
-      </button>
-      {#if templates.length > 0}
-        <!-- Templates collapsed into a dropdown (was an always-open list) so the
-             sidebar room goes to the Workflows + Running lists. -->
-        <div class="tpl-menu">
-          <button
-            class="btn ghost full tpl-toggle"
-            aria-expanded={templatesOpen}
-            onclick={() => (templatesOpen = !templatesOpen)}
-          >
-            <Icon name="grid" size={13} /> Templates
-            <span class="grow"></span>
-            <Icon name={templatesOpen ? 'arrowUp' : 'arrowDown'} size={12} />
-          </button>
-          {#if templatesOpen}
-            <div class="tpl-pop">
-              {#each templates as t (t.id)}
-                <button
-                  class="tpl"
-                  onclick={() => {
-                    void fromTemplate(t);
-                    templatesOpen = false;
-                  }}
-                  title={t.description}
-                >
-                  <span class="tpl-ic"><Icon name={asIcon(t.icon, 'box')} size={14} /></span>
-                  <span class="tpl-body">
-                    <span class="tpl-name">{t.name}</span>
-                    <span class="tpl-sub">agent design + engine</span>
-                  </span>
-                </button>
-              {/each}
-            </div>
-          {/if}
-        </div>
-      {/if}
-    </div>
+  {#if showSide}
+  <aside class="side" class:phone={viewport.isPhone} style={viewport.isPhone ? '' : `width:${ui.wfSideWidth}px`}>
+    {@render generator('side')}
 
     {#if ws.activeWorkflowRuns.length > 0}
       <div class="running" data-testid="running-workflows">
@@ -1543,12 +1705,13 @@
               <span class="run-ord" title={`run #${activeRunOrdinals[r.run_id]} of this workflow`}>#{activeRunOrdinals[r.run_id]}</span>
             {/if}
             {#if r.waiting_approval}
-              <span class="run-badge" title="waiting for approval">⏸</span>
+              <span class="run-badge" role="img" title="Waiting for your approval" aria-label="Waiting for your approval"><Icon name="userCheck" size={12} /></span>
             {/if}
             <span class="grow"></span>
             <code class="run-id" title={r.run_id}>{shortRunId(r.run_id)}</code>
-            <span class="run-prog">{r.nodes_done}/{r.nodes_total}</span>
-            <span class="run-when">{ago(r.started_at)}</span>
+            <span class="run-prog" title={`${r.nodes_done} of ${r.nodes_total} steps done`}>{r.nodes_done}/{r.nodes_total}</span>
+            <!-- Ticks with the shared clock (a one-shot "5m ago" froze at load). -->
+            <span class="run-when"><RelTime iso={r.started_at} fallback="" /></span>
           </button>
         {/each}
       </div>
@@ -1557,7 +1720,7 @@
     <div class="list">
       <div class="list-h">Workflows</div>
       {#each workflows as wf (wf.id)}
-        <div class="row" class:active={current?.id === wf.id} data-testid={`wf-row-${wf.id}`}>
+        <div class="wf-row" class:active={current?.id === wf.id} data-testid={`wf-row-${wf.id}`}>
           {#if renamingId === wf.id && !renameInBar}
             <!-- svelte-ignore a11y_autofocus -->
             <input
@@ -1573,17 +1736,15 @@
               onblur={() => commitRename(wf)}
             />
           {:else}
-            <button class="row-main" onclick={() => open(wf)}>
+            <button class="row-main" title={wf.name} onclick={() => void openGuarded(wf)} oncontextmenu={(e) => { e.preventDefault(); rowMenu(e, wf); }}>
               <Icon name="split" size={13} />
               <span class="row-name">{wf.name}</span>
             </button>
-            <button class="row-edit" title="Rename" data-testid="wf-rename-btn" onclick={() => startRename(wf)}>
-              <Icon name="edit" size={12} />
+            <!-- One ⋯ per row (Rename / Duplicate / Delete…), like Scheduled Tasks;
+                 right-click the row opens the same menu. -->
+            <button class="row-edit" title="More actions" aria-label="More actions for “{wf.name}”" aria-haspopup="menu" data-testid="wf-row-more" onclick={(e) => rowMenu(e, wf)}>
+              <Icon name="more" size={13} />
             </button>
-            <button class="row-edit" title="Duplicate" data-testid="wf-duplicate-btn" onclick={() => duplicate(wf)}>
-              <Icon name="copy" size={12} />
-            </button>
-            <button class="row-del" title="Delete workflow…" aria-label="Delete workflow “{wf.name}”…" data-testid="wf-delete-btn" onclick={() => del(wf)}><Icon name="trash" size={12} /></button>
           {/if}
         </div>
       {/each}
@@ -1598,10 +1759,14 @@
         </LoadState>
       {/if}
     </div>
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="side-resize" onmousedown={startSideResize} title="Drag to resize"></div>
+    {#if !viewport.isPhone}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="side-resize" onmousedown={startSideResize} title="Drag to resize"></div>
+    {/if}
   </aside>
+  {/if}
 
+  {#if showMain}
   <main
     bind:this={mainEl}
     class="main"
@@ -1627,16 +1792,25 @@
       {/if}
       {#if runsOpen}
         <div class="palette runs-pop wf-pop" style="right:{popRight}px">
-          {#if runs.length === 0}<div class="runs-empty">No runs yet</div>{/if}
+          <LoadState
+            what="runs"
+            variant="compact"
+            loading={runsLoading}
+            error={runsError}
+            empty={runs.length === 0}
+            onretry={() => void loadRuns()}
+          >
+            {#snippet emptyView()}<div class="runs-empty">No runs yet — choose Run… to start one.</div>{/snippet}
           {#each runs as r (r.id)}
             <button class="run-item" data-testid="run-item" class:active={run?.id === r.id} onclick={() => void openRunById(r.workflow_id, r.id)}>
               <span class="dot {dotKey(r.status)}" aria-hidden="true"></span>
               <span class="run-status">{runStatusLabel(r.status)}</span>
-              <span class="run-when">{new Date(r.started_at).toLocaleTimeString()}</span>
+              <span class="run-when"><RelTime iso={r.started_at} fallback="" /></span>
               <span class="grow"></span>
               <code class="run-id" title={r.id}>{shortRunId(r.id)}</code>
             </button>
           {/each}
+          </LoadState>
         </div>
       {/if}
 
@@ -1664,8 +1838,12 @@
             rows="8"
             bind:value={runInputText}
             spellcheck="false"
+            aria-label="Run input (JSON)"
+            aria-invalid={runInputError ? 'true' : undefined}
+            aria-describedby={runInputError ? 'wf-run-input-err' : undefined}
             placeholder={'{\n  "repo_id": "…",\n  "goals": ["…"]\n}'}
           ></textarea>
+          {#if runInputError}<p class="ri-err" id="wf-run-input-err" role="alert">{runInputError}</p>{/if}
           <div class="ri-head">
             <strong>Review mode</strong>
             <span class="ri-hint">Overrides the execution mode of every review step in this run, including steps that set their own.</span>
@@ -1681,10 +1859,10 @@
             <option value="orchestrator">Orchestrator</option>
           </select>
           <div class="ri-actions">
+            <button class="btn small" onclick={() => (runInputOpen = false)}>Cancel</button>
             <button class="btn primary small" disabled={running} onclick={confirmRun}>
               <Icon name="play" size={12} /> Run
             </button>
-            <button class="btn small" onclick={() => (runInputOpen = false)}>Cancel</button>
           </div>
         </div>
       {/if}
@@ -1700,7 +1878,7 @@
       {#if run?.waiting_approval && run.approval_node_id}
         <div class="approval-banner">
           <Icon name="userCheck" size={14} />
-          <span>Run paused — waiting for approval at <strong>{run.approval_node_id}</strong></span>
+          <span>Run paused — waiting for approval at <strong title={run.approval_node_id}>{nodeName(run.approval_node_id)}</strong></span>
           <button class="btn primary small" disabled={approving} onclick={() => approveRun(true)}>
             Approve
           </button>
@@ -1713,7 +1891,7 @@
       {#if validationIssues.length}
         <div class="preflight" role="alert"><strong>Resolve these issues before running</strong>
           {#each validationIssues as issue}
-            <button class="btn ghost small" onclick={() => { selectedId = issue.node_id; selectedEdgeId = issue.edge_id; }}>{issue.node_id ?? issue.edge_id ?? 'Graph'}: {issue.message}</button>
+            <button class="btn ghost small" onclick={() => { selectedId = issue.node_id; selectedEdgeId = issue.edge_id; }}>{issue.node_id ? nodeName(issue.node_id) : issue.edge_id ? 'Connection' : 'Graph'}: {issue.message}</button>
           {/each}
         </div>
       {/if}
@@ -1741,8 +1919,8 @@
             <span>Instructions</span>
             {#if instructionsDirty}<span class="badge">unsaved</span>{/if}
             <span class="grow"></span>
-            <button class="btn primary small" disabled={!instructionsDirty || savingInstructions} onclick={saveInstructions}>
-              {savingInstructions ? 'Saving…' : 'Save'}
+            <button class="btn small" disabled={!instructionsDirty || savingInstructions} title={instructionsDirty ? 'Save the instructions' : 'No unsaved changes'} onclick={saveInstructions}>
+              {savingInstructions ? 'Saving…' : 'Save instructions'}
             </button>
           </div>
           <p class="instructions-hint">
@@ -1791,22 +1969,26 @@
               Refresh
             </button>
           </div>
-          {#if versionsLoading && versions.length === 0}
-            <p class="empty">Loading…</p>
-          {:else if versions.length === 0}
-            <p class="empty">No saved versions yet — edits and restores create them.</p>
-          {:else}
+          <LoadState
+            what="version history"
+            variant="compact"
+            loading={versionsLoading}
+            error={versionsError}
+            empty={versions.length === 0}
+            onretry={() => void loadVersions()}
+          >
+            {#snippet emptyView()}<p class="empty">No saved versions yet — edits and restores create them.</p>{/snippet}
             <ul class="versions">
               {#each versions as v (v.id)}
                 <li class="ver">
                   <span class="ver-num">v{v.version}</span>
-                  <span class="ver-note">{v.note || '(no note)'}</span>
-                  <span class="ver-when">{new Date(v.created_at).toLocaleString()}</span>
-                  <button class="btn small" onclick={() => restoreVersion(v)}>Restore</button>
+                  <span class="ver-note" title={v.note || undefined}>{v.note || '(no note)'}</span>
+                  <span class="ver-when"><RelTime iso={v.created_at} fallback="" /></span>
+                  <button class="btn small" title="Restore v{v.version} — saved as a new version, so nothing is lost" onclick={() => restoreVersion(v)}>Restore</button>
                 </li>
               {/each}
             </ul>
-          {/if}
+          </LoadState>
         </div>
       {/if}
 
@@ -1865,6 +2047,7 @@
                 data-testid="run-detail-max"
                 onclick={() => (runDetailMax = !runDetailMax)}
                 aria-pressed={runDetailMax}
+                aria-label={runDetailMax ? 'Restore run-detail height' : 'Maximize run detail'}
                 title={runDetailMax ? 'Restore run-detail height' : 'Maximize run detail'}
               >
                 <Icon name={runDetailMax ? 'minimize' : 'maximize'} size={13} />
@@ -1919,7 +2102,7 @@
               {#if selectedRun}<StatusBadge status={runStatus(selectedRun.status)} variant="text" />{/if}
               {#if selectedRun?.duration_ms != null}<span class="dim">· {fmtMs(selectedRun.duration_ms)}</span>{/if}
               <span class="grow"></span>
-              <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, false)} title="Run this node and everything downstream">▶ From here</button>
+              <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, false)} title="Run this node and everything downstream"><Icon name="play" size={11} /> From here</button>
               <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, true)} title="Run only this node">Only this</button>
             </div>
             <!-- Shared Provider + Model editor for every agent-running node —
@@ -2343,7 +2526,7 @@
                       value={step.name ?? ''}
                       oninput={(e) => updateLoopStep(i, { name: e.currentTarget.value || undefined })}
                     />
-                    <button class="rv-del" type="button" title="Remove step" onclick={() => removeLoopStep(i)}>
+                    <button class="rv-del" type="button" title="Remove step" aria-label="Remove step" onclick={() => removeLoopStep(i)}>
                       <Icon name="trash" size={11} />
                     </button>
                   </div>
@@ -2484,7 +2667,7 @@
                       value={r.lens ?? ''}
                       oninput={(e) => updateReviewer(i, { lens: e.currentTarget.value })}
                     />
-                    <button class="rv-del" type="button" title="Remove reviewer" onclick={() => removeReviewer(i)}>
+                    <button class="rv-del" type="button" title="Remove reviewer" aria-label="Remove reviewer" onclick={() => removeReviewer(i)}>
                       <Icon name="trash" size={11} />
                     </button>
                   </div>
@@ -2837,7 +3020,7 @@
               <strong>Connection</strong>
               <span class="mono dim">{nodeName(selectedEdge.source)} → {nodeName(selectedEdge.target)}</span>
               <span class="grow"></span>
-              <button class="btn small danger" title="Delete connection" onclick={removeSelectedEdge}>
+              <button class="btn small danger" title="Delete connection" aria-label="Delete connection" onclick={removeSelectedEdge}>
                 <Icon name="trash" size={12} />
               </button>
             </div>
@@ -2862,18 +3045,30 @@
       {/if}
     {:else if workflows.length === 0 && (wfError || wfLoading)}
       <LoadState what="workflows" variant="page" loading={wfLoading} error={wfError} empty onretry={() => void load()} />
+    {:else if workflows.length === 0}
+      <!-- First run: no list pane; describing a workflow is the page's CTA. -->
+      <div class="first-run">
+        <EmptyState
+          variant="page"
+          icon="split"
+          title="No workflows yet"
+          body="Describe an automation in plain words and an agent wires up the steps — or start blank, or from a template, and build it on the canvas."
+        >
+          {@render generator('page')}
+        </EmptyState>
+      </div>
     {:else}
-      <!-- The sidebar's Generate / Start blank form is this page's CTA. -->
+      <!-- Only while the last-opened workflow is being restored (or after
+           closing one): a summary, not a bare "pick one". -->
       <EmptyState
         variant="page"
         icon="split"
-        title={workflows.length > 0 ? 'Pick a workflow' : 'Build a workflow'}
-        body={workflows.length > 0
-          ? 'Open one from the list on the left, or describe a new one.'
-          : 'Describe what you want on the left and we’ll wire it up — or start blank and drag nodes.'}
+        title="No workflow open"
+        body={`${workflows.length} ${workflows.length === 1 ? 'workflow' : 'workflows'} in this workspace. Open one from the list, or describe a new one.`}
       />
     {/if}
   </main>
+  {/if}
 
   <!-- Right sidebar (R1 + Agents): desktop-only, for a run with a context dir.
        Tabbed — Files (the run's context-file tree) and Agents (the run's live
@@ -2959,6 +3154,23 @@
 {/if}
 
 <style>
+  /* A pressed header toggle (Context panel) reads as on. */
+  .wf-tog.on {
+    background: var(--accent-soft);
+    color: var(--accent-text);
+  }
+  .ri-err {
+    margin: 0;
+    font-size: var(--fs-s);
+    color: var(--danger);
+  }
+  /* Header toggles (Instructions, Triggers, Versions, Dock, Panel) show
+     that their panel is open: the selection tint, never a solid fill. */
+  .wf-root button[aria-pressed='true']:not(:disabled) {
+    background: var(--accent-soft);
+    border-color: var(--border-strong);
+    color: var(--text);
+  }
   .preflight { padding: 10px; display: flex; flex-direction: column; gap: 5px; border: 1px solid var(--border); }
   .wf-root {
     display: flex;
@@ -2980,6 +3192,56 @@
     flex-direction: column;
     background: var(--surface);
     min-height: 0;
+  }
+  /* Phone: the list IS the first screen (push navigation). */
+  .side.phone {
+    flex: 1;
+    width: auto;
+    border-inline-end: none;
+  }
+  /* First run: the generator form sits under the page empty state. */
+  .first-run {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+  .gen.gen-page {
+    width: min(560px, 100%);
+    margin-top: 12px;
+    padding: 0;
+    border-bottom: none;
+    text-align: start;
+    gap: 10px;
+  }
+  .gen.gen-page label {
+    font-size: var(--fs-s);
+    font-weight: 500;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .gen-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .tpl-start {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 12px;
+  }
+  .tpl-start-h {
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
+  .tpl-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 8px;
+  }
+  .tpl.tpl-card {
+    border: 1px solid var(--border);
+    background: var(--surface);
   }
   /* Drag the left panel's right edge to resize it. */
   .side-resize {
@@ -3007,7 +3269,7 @@
     border-bottom: 1px solid var(--border);
   }
   .gen label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
     text-transform: uppercase;
@@ -3017,7 +3279,7 @@
     width: 100%;
     resize: vertical;
     font: inherit;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     line-height: 1.45;
     padding: 7px 9px;
     border-radius: var(--radius-s);
@@ -3040,6 +3302,7 @@
   textarea:focus {
     outline: none;
     border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   /* Prompt-sized textareas (reviewer/summarizer instructions, goals, checks).
      `rows` alone loses to the inspector's own scroll: a 3-row box holding a
@@ -3089,15 +3352,19 @@
     text-align: start;
   }
   .tpl:hover {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--hover);
+  }
+  .tpl:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
   .tpl-ic {
     display: grid;
     place-items: center;
     width: 28px;
     height: 28px;
-    border-radius: 7px;
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    border-radius: var(--radius-s);
+    background: var(--accent-soft);
     color: var(--accent-text);
     flex-shrink: 0;
   }
@@ -3107,13 +3374,19 @@
     min-width: 0;
   }
   .tpl-name {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .tpl-sub {
     font-size: var(--fs-xs);
     color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .list {
     flex: 1;
@@ -3122,20 +3395,26 @@
     padding: 8px;
   }
   .list-h {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 4px 6px;
   }
-  .row {
+  /* Was `.row` — the global app.css class (whose gap it relied on), so it's
+     prefixed now and restates that gap. */
+  .wf-row {
     display: flex;
     align-items: center;
+    gap: 8px;
     border-radius: var(--radius-s);
   }
-  .row.active {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+  .wf-row:hover {
+    background: var(--hover);
+  }
+  .wf-row.active {
+    background: var(--accent-soft);
   }
   .row-main {
     flex: 1;
@@ -3151,36 +3430,40 @@
     text-align: start;
   }
   .row-name {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .row-del,
   .row-edit {
     background: none;
     border: none;
     color: var(--text-dim);
     cursor: pointer;
     padding: 6px;
+    border-radius: var(--radius-s);
     opacity: 0;
   }
-  .row:hover .row-del,
-  .row:hover .row-edit {
+  .wf-row:hover .row-edit,
+  .wf-row:focus-within .row-edit,
+  .wf-row.active .row-edit {
     opacity: 1;
   }
-  .row-del:hover {
-    color: var(--status-exited);
+  /* No hover on touch: the row menu would otherwise never show. */
+  @media (hover: none) {
+    .row-edit {
+      opacity: 1;
+    }
   }
   .row-edit:hover {
-    color: var(--accent-text);
+    color: var(--text);
   }
   .row-rename {
     flex: 1;
     min-width: 0;
     margin: 4px 6px;
     padding: 5px 7px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     background: var(--surface-2);
     color: var(--text);
     border: 1px solid var(--accent);
@@ -3188,7 +3471,7 @@
     outline: none;
   }
   .empty {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     padding: 8px 6px;
   }
@@ -3229,19 +3512,23 @@
     text-align: start;
     color: var(--text);
   }
-  .run-row:hover,
+  .run-row:hover {
+    background: var(--hover);
+  }
   .run-row.active {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
   }
   .run-name {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     max-width: 120px;
   }
   .run-badge {
-    font-size: 11px;
+    display: inline-flex;
+    color: var(--warning);
+    flex-shrink: 0;
   }
   /* Disambiguators for concurrent runs of the same workflow (item 8). */
   .run-ord {
@@ -3255,7 +3542,7 @@
   }
   .run-id {
     font-family: var(--font-mono);
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     flex-shrink: 0;
   }
@@ -3325,7 +3612,7 @@
     z-index: 2;
   }
   .insp-side-head strong {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
   }
   .insp-side-head .grow {
@@ -3347,7 +3634,7 @@
     opacity: 0.5;
   }
   .insp-blank p {
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     margin: 0;
   }
@@ -3372,6 +3659,10 @@
     border-radius: var(--radius-s);
     outline: none;
     min-width: 220px;
+  }
+  .wf-title-edit:focus-visible,
+  .row-rename:focus-visible {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .badge {
     font-size: var(--fs-xs);
@@ -3435,7 +3726,7 @@
     flex-direction: column;
   }
   .pal-name {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
   }
   .pal-cat {
@@ -3510,7 +3801,7 @@
   }
   .insp-note {
     margin: 0;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.5;
   }
@@ -3531,11 +3822,11 @@
   .is-snip {
     margin: 0;
     padding: 8px 10px;
-    background: var(--bg, #0d0f13);
+    background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 6px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.5;
     white-space: pre-wrap;
     color: var(--text);
@@ -3545,14 +3836,14 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .insp-h .dim {
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .inspector label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
     /* Each label opens a field group. With the panel's flat 10px gap alone, a
@@ -3578,7 +3869,7 @@
   }
   .np-label {
     display: block;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
   }
@@ -3587,7 +3878,7 @@
   .inspector input[type='number'] {
     width: 100%;
     font: inherit;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     padding: 6px 9px;
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
@@ -3599,11 +3890,12 @@
   .inspector input[type='number']:focus {
     outline: none;
     border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .inspector select {
     width: 100%;
     font: inherit;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     padding: 6px 9px;
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
@@ -3614,21 +3906,22 @@
   .inspector select:focus {
     outline: none;
     border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .err {
     color: var(--status-exited);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     background: color-mix(in srgb, var(--status-exited) 10%, transparent);
     padding: 6px 8px;
     border-radius: var(--radius-s);
   }
   .logs {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .out {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     background: var(--surface-2);
     padding: 8px;
     border-radius: var(--radius-s);
@@ -3663,7 +3956,7 @@
     align-items: center;
     gap: 6px;
     padding: 6px 10px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     cursor: pointer;
     user-select: none;
@@ -3698,7 +3991,7 @@
     align-items: center;
     gap: 6px;
     padding: 6px 10px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     cursor: pointer;
     user-select: none;
@@ -3727,7 +4020,7 @@
     border-radius: 99px;
     background: var(--surface-2);
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
   .tl-step.active {
@@ -3739,8 +4032,10 @@
   .tl-step[data-status='error'] {
     border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
   }
+  /* Running is info-blue (lib/status.ts) — the accent border is `.active`
+     (selection), so a running step no longer looks selected. */
   .tl-step[data-status='running'] {
-    border-color: var(--accent);
+    border-color: color-mix(in srgb, var(--info) 60%, var(--border));
   }
   .tl-name {
     white-space: nowrap;
@@ -3801,7 +4096,7 @@
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -3819,7 +4114,7 @@
   }
   .tab-count {
     font-family: var(--font-mono);
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     letter-spacing: 0;
     color: var(--text-dim);
@@ -3878,7 +4173,7 @@
     min-height: 60vh;
     resize: vertical;
     font-family: var(--font-mono);
-    font-size: 13px;
+    font-size: var(--fs-m);
     line-height: 1.5;
     padding: 12px;
     border: 1px solid var(--border);
@@ -3889,6 +4184,7 @@
   }
   .json-zoom:focus {
     border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
 
   /* Runs history popover */
@@ -3896,7 +4192,7 @@
     width: 200px;
   }
   .runs-empty {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     padding: 8px;
   }
@@ -3919,7 +4215,7 @@
   .run-status {
     flex: 1;
     text-align: start;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .run-when {
     font-size: var(--fs-xs);
@@ -4001,7 +4297,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -4010,7 +4306,7 @@
   }
   .instructions-hint {
     margin: 0 0 6px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .resume-toggle {
@@ -4018,7 +4314,7 @@
     align-items: flex-start;
     gap: 8px;
     margin-top: 8px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
   }
@@ -4044,8 +4340,8 @@
   .ri-hint {
     flex: 1;
     min-width: 200px;
-    font-size: 11.5px;
-    color: var(--text-dim, #9aa0aa);
+    font-size: var(--fs-s);
+    color: var(--text-dim);
   }
   /* `.ri-text` is the JSON run-input box; the prompt box above it is
      `.ri-prompt` — same tokens, its own hook (a single `.ri-text` is what
@@ -4058,9 +4354,9 @@
     padding: 8px 10px;
     border: 1px solid var(--border);
     border-radius: 6px;
-    background: var(--bg, #0d0f13);
+    background: var(--bg);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
   }
   /* Same tokens as .ri-text, but sized to its content — the popover is a
@@ -4071,9 +4367,9 @@
     padding: 6px 10px;
     border: 1px solid var(--border);
     border-radius: 6px;
-    background: var(--bg, #0d0f13);
+    background: var(--bg);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .ri-actions {
     display: flex;
@@ -4089,7 +4385,7 @@
     padding: 6px 12px;
     background: var(--surface-2);
     border-bottom: 1px solid var(--border);
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .approval-banner {
@@ -4099,7 +4395,7 @@
     padding: 8px 12px;
     background: var(--warning-soft);
     border-bottom: 1px solid var(--border);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
   }
   .approval-banner strong {
@@ -4110,7 +4406,7 @@
   }
   /* Node hint / info text in the inspector */
   .node-hint {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     margin: 2px 0 0;
   }
@@ -4119,7 +4415,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text);
     margin-top: 2px;
   }
@@ -4181,7 +4477,7 @@
     margin-top: 2px;
   }
   .ls-advanced summary {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     cursor: pointer;
     user-select: none;
@@ -4205,7 +4501,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 2px 7px;
     border: 1px solid var(--border);
     border-radius: 999px;
@@ -4223,7 +4519,7 @@
   }
   .rv-instr {
     width: 100%;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .rv-score {
     display: flex;
@@ -4233,7 +4529,7 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     flex: 1;
   }
@@ -4277,7 +4573,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -4300,7 +4596,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .ver-num {
     font-family: var(--font-mono);

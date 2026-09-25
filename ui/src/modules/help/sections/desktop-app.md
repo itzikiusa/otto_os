@@ -30,7 +30,7 @@ The app also keeps the Otto daemon running. It installs `ottod` as a background 
 **The ⌥Space bar**
 - The same command bar as inside Otto, in a floating glass panel over any app and every desktop Space. It opens centred near the bottom of the screen under your pointer.
 - It grows upward as answers arrive, up to 560 points tall, and always stays on screen.
-- Commands available there: **Open Otto**, "Go to <module>" for every module you can see, **Open Settings**, "Focus Session: …" and "Open Repo: …" for the space's workspace. Each one brings the main Otto window forward at that page.
+- Commands available there: **Open Otto**, "Go to <module>" for every module you can see, **Open Settings**, "Focus session: …" and "Open repo: …" for the space's workspace. Each one brings the main Otto window forward at that page.
 - Ask Otto works the same as in the main window. Answers have an **Open in Otto** button.
 - Spaces 01–04 are shared with the main window's bar. See [Command bar](#/walkthroughs/command-bar).
 - If you're signed out, the bar says so and offers **Open Otto**.
@@ -63,7 +63,7 @@ The app also keeps the Otto daemon running. It installs `ottod` as a background 
 - **File**: New Window (`⌘⇧N`), New Session (`⌘T`), New Workspace…, Take Snip, Close Tab (`⌘W`).
 - **Edit**: Undo, Redo, Cut, Copy, Paste, Select All.
 - **View**: Toggle Navigator (`⌘1`), Toggle Right Panel (`⌘J`), Zoom In, Zoom Out, Actual Size, full screen.
-- **Session**: Restart Session, Kill Session (for the focused session).
+- **Session**: Restart Session (asks first if the agent is mid-turn) and End Session… (for the focused session; does what closing its tab does, per Settings → Appearance → Closing a session tab).
 - **Window**: Minimise, Zoom.
 - **Help**: Otto Help, which opens this guide.
 - Menu commands act on the window you're using, never on every window at once.

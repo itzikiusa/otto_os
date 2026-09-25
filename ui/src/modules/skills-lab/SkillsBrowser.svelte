@@ -11,6 +11,7 @@
   import type { BundledSkillView, LibrarySkill, ProviderSkillInfo } from '../../lib/api/types';
   import { skillLabApi } from '../../lib/api/skillLab';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { registry } from '../../lib/commands.svelte';
@@ -43,8 +44,12 @@
     onempty?: (empty: boolean) => void;
     /** Phone push-navigation: the page shows a back button in its header. */
     onphonedetail?: (open: boolean) => void;
+    /** Open one evaluation run in the Evaluator. */
+    onopenrun?: (id: string) => void;
+    /** Open one existing review in the Review tab. */
+    onopenreview?: (id: string) => void;
   }
-  let { onreview, onevaluate, onempty, onphonedetail }: Props = $props();
+  let { onreview, onevaluate, onempty, onphonedetail, onopenrun, onopenreview }: Props = $props();
 
   // ---- Data -----------------------------------------------------------------
   let library = $state<LibrarySkill[]>([]);
@@ -52,6 +57,9 @@
   let providerSkills = $state<ProviderSkillInfo[]>([]);
   let loading = $state(true);
   let loadError = $state<string | null>(null);
+  // Some (not all) sources failed: the list still shows, with a note saying
+  // which copies are missing so they don't read as "not installed".
+  let partialError = $state<string | null>(null);
   let bodies = $state<Record<string, string>>({});
 
   async function loadAll(): Promise<void> {
@@ -64,10 +72,25 @@
     if (lib.status === 'rejected' && bun.status === 'rejected' && prov.status === 'rejected') {
       loadError = lib.reason instanceof Error ? lib.reason.message : String(lib.reason);
     }
+    const failed = [
+      lib.status === 'rejected' ? 'your library' : '',
+      bun.status === 'rejected' ? 'the bundled catalog' : '',
+      prov.status === 'rejected' ? 'the Claude / Codex / Antigravity skill folders' : '',
+    ].filter(Boolean);
+    partialError = !loadError && failed.length > 0 ? `Couldn't read ${failed.join(' or ')} — those copies are missing from the list.` : null;
     library = lib.status === 'fulfilled' ? lib.value : [];
     bundled = bun.status === 'fulfilled' ? bun.value : [];
     providerSkills = prov.status === 'fulfilled' ? prov.value : [];
     loading = false;
+  }
+  let retrying = $state(false);
+  async function retryLoad(): Promise<void> {
+    retrying = true;
+    try {
+      await loadAll();
+    } finally {
+      retrying = false;
+    }
   }
   let started = false;
   $effect(() => {
@@ -154,12 +177,32 @@
   const selected = $derived(groups.find((g) => g.name === selName) ?? null);
   $effect(() => onphonedetail?.(viewport.isPhone && phoneDetail));
   /** Phone: back from the detail to the list (the page header's back button). */
-  export function back(): void {
+  export async function back(): Promise<void> {
+    if (!(await confirmLeave())) return;
     phoneDetail = false;
+  }
+
+  // Unsaved edits in the open skill's editor (reported up by SkillDetail).
+  let editorDirty = $state(false);
+  /** Ask before an action that would unmount the editor with unsaved edits
+   *  (another skill, the page's Review / Evaluator tabs). */
+  export async function confirmLeave(): Promise<boolean> {
+    if (!editorDirty) return true;
+    const ok = await confirmer.ask(`You have unsaved changes to ${selName ?? 'this skill'}. Leaving the editor discards them.`, { title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing' });
+    if (ok) editorDirty = false;
+    return ok;
   }
 
   function defaultSource(g: SkillGroup): VariantSource {
     return g.variants.find((v) => v.source === 'library')?.source ?? g.variants.find((v) => v.source !== 'bundled')?.source ?? g.variants[0].source;
+  }
+  async function pick(g: SkillGroup): Promise<void> {
+    if (g.name === selName) {
+      if (viewport.isPhone) phoneDetail = true;
+      return;
+    }
+    if (!(await confirmLeave())) return;
+    select(g);
   }
   function select(g: SkillGroup, src?: VariantSource): void {
     selName = g.name;
@@ -239,8 +282,8 @@
     const n = e.key === 'ArrowDown' ? Math.min(shown.length - 1, i + 1) : Math.max(0, i - 1);
     if (n === i || !shown[n]) return;
     e.preventDefault();
-    select(shown[n]);
-    queueMicrotask(() => (listEl?.querySelector(`[data-name="${CSS.escape(shown[n].name)}"]`) as HTMLElement | null)?.focus());
+    const target = shown[n];
+    void pick(target).then(() => (listEl?.querySelector(`[data-name="${CSS.escape(selName ?? target.name)}"]`) as HTMLElement | null)?.focus());
   }
 
   function syncTitle(g: SkillGroup): string {
@@ -271,7 +314,7 @@
         <p class="dim">Otto couldn't read the library or the bundled catalog. Retry, or check Settings → Logs.</p>
         <p class="dim mono small">{loadError}</p>
       </div>
-      <button class="btn small" onclick={loadAll}>Retry</button>
+      <button class="btn small" onclick={retryLoad} disabled={retrying}>{retrying ? 'Retrying…' : 'Retry'}</button>
     </div>
   {:else if groups.length === 0}
     <EmptyState
@@ -319,6 +362,13 @@
             {/if}
           </div>
         </div>
+        {#if partialError}
+          <div class="partial" role="status">
+            <Icon name="warning" size={12} />
+            <span class="grow" title={partialError}>{partialError}</span>
+            <button class="btn small ghost" onclick={loadAll}>Retry</button>
+          </div>
+        {/if}
         <div class="list" bind:this={listEl} data-testid="skill-list" role="listbox" aria-label="Skills" tabindex="-1" onkeydown={onListKey}>
           {#each shownByCat as [cat, items] (cat)}
             <div class="cat" role="presentation">{cat} <span class="n">{items.length}</span></div>
@@ -331,14 +381,16 @@
                 tabindex={g.name === selName ? 0 : -1}
                 data-name={g.name}
                 data-testid="skill-row"
-                onclick={() => select(g)}
+                onclick={() => pick(g)}
               >
                 <span class="sdot {g.sync}" title={syncTitle(g)}></span>
                 <span class="row-main">
-                  <span class="row-name">{g.name}</span>
-                  {#if g.description}<span class="row-desc">{g.description}</span>{/if}
+                  <span class="row-name" title={g.name}>{g.name}</span>
+                  {#if g.description}<span class="row-desc" title={g.description}>{g.description}</span>{/if}
                 </span>
-                <span class="badges" aria-label="Copies: {g.variants.map((v) => sourceLabel(v.source)).join(', ')}">
+                <!-- The sync state rides on the copies' label (after the name, so the
+                     option still reads as the skill first). -->
+                <span class="badges" aria-label="Copies: {g.variants.map((v) => sourceLabel(v.source)).join(', ')} · {syncTitle(g).split('\n')[0]}">
                   {#each g.variants as v (v.source)}
                     <span class="badge" class:drift={g.driftedSources.includes(v.source)} title="{sourceLabel(v.source)}{g.driftedSources.includes(v.source) ? ' — differs' : ''}">
                       {#if v.source === 'library'}<Icon name="book" size={12} />{:else if v.source === 'bundled'}<Icon name="box" size={12} />{:else}<ProviderIcon provider={v.source} size={12} />{/if}
@@ -377,6 +429,9 @@
             onbody={(s, b) => (bodies = { ...bodies, [bodyKey(s, selected.name)]: b })}
             onreview={() => onreview?.(selected.name, selSource)}
             onevaluate={() => onevaluate?.(selected.name, selSource)}
+            ondirty={(d) => (editorDirty = d)}
+            {onopenrun}
+            {onopenreview}
           />
         {:else}
           <EmptyState title="No skill selected" body="Pick a skill on the left to see its method, files and history." icon="zap" />
@@ -604,6 +659,27 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
+  }
+  .partial {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--warning-soft);
+    font-size: var(--fs-xs);
+    color: var(--text);
+  }
+  .partial > :global(svg) {
+    color: var(--warning);
+    flex: none;
+  }
+  .partial .grow {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .no-match {
     padding: 16px 10px;

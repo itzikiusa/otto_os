@@ -7,6 +7,8 @@
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
   import { agentProvidersWith, defaultAgentProvider } from '../../lib/providers';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
+  import { toasts } from '../../lib/toast.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { PersonalAgent } from '../../lib/api/types';
   import { agentTemplates, templateById } from './templates';
@@ -74,6 +76,10 @@
   const PROVIDERS = $derived(agentProvidersWith(agent?.provider));
 
   function onProviderSelect(v: string): void {
+    // A model id belongs to one provider — switching clears it, so a hidden
+    // stale model (the picker hides for providers without a model flag) is
+    // never saved against the new provider.
+    if (v !== fProvider) fModel = '';
     if (v === 'custom') {
       if (PROVIDERS.includes(fProvider)) fProvider = '';
     } else {
@@ -114,8 +120,10 @@
     };
     busy = true;
     try {
-      if (agent) await personalAgents.update(agent.id, body);
-      else if (ws.currentId) {
+      if (agent) {
+        await personalAgents.update(agent.id, body);
+        toasts.success(`Saved ${body.name}`);
+      } else if (ws.currentId) {
         const created = await personalAgents.create(ws.currentId, body);
         const t = templateById(fTemplate);
         if (t) {
@@ -126,10 +134,11 @@
             enabled: true,
           });
         }
+        toasts.success(`Created ${body.name}`, body.enabled ? undefined : 'It’s paused — enable it to let its schedules fire.');
       }
       onclose();
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Save failed';
+      error = `Couldn’t save the agent. ${loadErrorText(e)}`;
     } finally {
       busy = false;
     }
@@ -151,13 +160,13 @@
       </label>
     {/if}
 
-    <div class="row">
+    <div class="fld-row">
       <label class="fld grow">
         <span>Name</span>
         <input bind:value={fName} placeholder="Daily Recap" />
       </label>
       <label class="fld narrow">
-        <span>Avatar (emoji)</span>
+        <span>Avatar (emoji, optional)</span>
         <input bind:value={fAvatar} placeholder="📰" maxlength="8" />
       </label>
     </div>
@@ -167,7 +176,7 @@
       <textarea bind:value={fSoul} rows="6" placeholder="You are a diligent chronicler…"></textarea>
     </label>
 
-    <div class="row">
+    <div class="fld-row">
       <label class="fld">
         <span>Provider</span>
         <select
@@ -195,7 +204,7 @@
       <PathField bind:value={fCwd}><input bind:value={fCwd} placeholder="defaults to the agent's own workspace" /></PathField>
     </label>
 
-    <div class="row">
+    <div class="fld-row">
       <label class="fld">
         <span>Delivery</span>
         <select bind:value={fDestType}>
@@ -223,13 +232,26 @@
         </label>
       {/if}
     </div>
+    {#if fDestType !== 'none'}
+      <p class="note dim" data-testid="delivery-note">
+        {#if fDestType === 'slack' || fDestType === 'telegram'}
+          After every run, its report is posted to {fDestType === 'slack' ? 'Slack' : 'Telegram'}
+          {fChatId.trim() ? `(${fChatId.trim()})` : '(the integration’s default channel)'} — everyone in that channel sees it.
+        {:else if fDestType === 'email'}
+          After every run, its report is emailed to {fEmailTo.trim() || 'the address above'}.
+        {:else}
+          After every run, its report is POSTed to {fUrl.trim() || 'the URL above'}.
+        {/if}
+        Unchanged reports aren’t re-sent.
+      </p>
+    {/if}
 
     <div class="toggles">
       <label class="chk">
         <input type="checkbox" bind:checked={fBrowser} />
         Browser use (attach the otto-browser MCP to runs and chat)
       </label>
-      <label class="chk"><input type="checkbox" bind:checked={fEnabled} /> Enabled</label>
+      <label class="chk"><input type="checkbox" bind:checked={fEnabled} /> Enabled — its schedules fire on their cadence</label>
     </div>
   </div>
 
@@ -240,29 +262,26 @@
 </Modal>
 
 <style>
-  .sheet { display: flex; flex-direction: column; gap: 0.75rem; }
+  .sheet { display: flex; flex-direction: column; gap: 12px; }
   .err {
-    background: color-mix(in srgb, var(--status-exited) 12%, transparent);
-    color: var(--status-exited); padding: 0.5rem 0.75rem;
-    border-radius: var(--radius-s); font-size: 0.85rem;
+    background: var(--danger-soft); color: var(--danger); padding: 8px 12px;
+    border-radius: var(--radius-s); font-size: var(--fs-s);
   }
-  .note {
-    font-size: 0.78rem;
-    color: var(--accent-text);
-  }
-  .row { display: flex; gap: 0.75rem; flex-wrap: wrap; }
-  .row .fld { flex: 1; min-width: 180px; }
-  .row .narrow { flex: 0 0 8rem; min-width: 8rem; }
-  .fld { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; color: var(--text); }
-  .fld span { color: var(--text-dim); }
+  .note { margin: 0; font-size: var(--fs-s); color: var(--accent-text); }
+  .note.dim { color: var(--text-dim); }
+  .fld-row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .fld-row .fld { flex: 1; min-width: 180px; }
+  .fld-row .narrow { flex: 0 0 10rem; min-width: 10rem; }
+  .fld { display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-m); color: var(--text); }
+  .fld span { color: var(--text-dim); font-size: var(--fs-s); }
   .fld input, .fld select, .fld textarea {
     background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    border-radius: var(--radius-s); padding: 0.45rem 0.55rem; font: inherit;
+    border-radius: var(--radius-s); padding: 6px 8px; font: inherit;
   }
   .fld input::placeholder, .fld textarea::placeholder { color: var(--text-dim); }
   .fld input:focus-visible, .fld select:focus-visible, .fld textarea:focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: 1px;
+    outline: 2px solid var(--accent); outline-offset: 1px;
   }
-  .toggles { display: flex; flex-direction: column; gap: 0.4rem; }
-  .chk { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; color: var(--text); }
+  .toggles { display: flex; flex-direction: column; gap: 6px; }
+  .chk { display: flex; align-items: center; gap: 6px; font-size: var(--fs-m); color: var(--text); }
 </style>

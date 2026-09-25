@@ -217,7 +217,7 @@
     inset: 0;
     display: grid;
     place-items: center;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     pointer-events: none;
   }

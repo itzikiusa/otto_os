@@ -67,9 +67,9 @@
   const ORIGIN: Record<AssistantMemory['source']['kind'], string> = { agent: 'Otto', user: 'You', hermes: 'Hermes' };
   const threadTitle = (id: string | null): string | null => (id ? (assistant.thread(id)?.title ?? 'a thread') : null);
 
+  // No confirm: forgetting is undoable from the bar right below (patterns.md
+  // §7: don't nag on a reversible action).
   async function forgetOne(m: AssistantMemory): Promise<void> {
-    const ok = await confirmer.ask(`Forget “${m.text}”? Otto won’t recall it in any thread again.`, { title: 'Forget memory', confirmLabel: 'Forget' });
-    if (!ok) return;
     try {
       const token = await assistant.forgetMemory(m.id);
       undoBar = { label: `Forgot “${m.text}”`, tokens: [token] };

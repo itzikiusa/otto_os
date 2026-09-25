@@ -15,7 +15,7 @@
     let alive = true;
     profiles = []; loading = true; error = ''; managing = false;
     void api.get<NetworkProfile[]>(`/workspaces/${scope}/network-profiles`).then((rows) => { if (alive) profiles = rows; })
-      .catch((e) => { if (alive) error = String(e); }).finally(() => { if (alive) loading = false; });
+      .catch((e) => { if (alive) error = e instanceof Error ? e.message : String(e); }).finally(() => { if (alive) loading = false; });
     return () => { alive = false; };
   });
   function saved(profile: NetworkProfile) {
@@ -30,13 +30,13 @@
     {#each profiles.filter((p) => !p.archived) as profile (profile.id)}<option value={profile.id}>{profile.name}</option>{/each}
     {#if value && !profiles.some((p) => p.id === value && !p.archived)}<option value={value} disabled>Selected profile unavailable</option>{/if}
   </select></label>
-  {#if editable}<button type="button" disabled={disabled || loading} onclick={() => managing = !managing}>Manage network profiles</button>{/if}
+  {#if editable}<button type="button" aria-expanded={managing} disabled={disabled || loading} onclick={() => managing = !managing}>Manage network profiles</button>{/if}
   {#if error}<p role="alert">{error} <button type="button" onclick={() => reload++}>Retry loading profiles</button></p>{/if}
   {#if managing}{#key workspaceId}<NetworkProfiles {workspaceId} {profiles} onsaved={saved} />{/key}{/if}
 </div>
 <style>
   .network-picker { display: grid; gap: 7px; min-width: 0; margin-block: 10px; }
-  label { display: grid; gap: 5px; font-size: 12px; }
-  select, button { min-width: 0; max-width: 100%; padding: 6px; color: var(--text, white); background: var(--surface-2, #30343b); border: 1px solid var(--border, #555); border-radius: 4px; }
-  p { font-size: 12px; color: var(--status-exited, #f88); overflow-wrap: anywhere; }
+  label { display: grid; gap: 5px; font-size: var(--fs-s); }
+  select, button { min-width: 0; max-width: 100%; padding: 6px; color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; }
+  p { font-size: var(--fs-s); color: var(--danger); overflow-wrap: anywhere; }
 </style>

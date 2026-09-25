@@ -46,23 +46,28 @@
       </label>
     {/if}
     {#snippet footer()}
-      <button class="btn" onclick={() => confirmer.dismiss()}>Cancel</button>
+      <button class="btn" onclick={() => confirmer.dismiss()}>{confirmer.cancelLabel}</button>
       {#if confirmer.choices}
         {#each confirmer.choices as opt (opt.value)}
           <button
             class="btn"
             class:primary={opt.kind === 'primary'}
-            class:danger={opt.kind === 'danger'}
+            class:danger-solid={opt.kind === 'danger'}
+            data-autofocus={opt.kind === 'primary' ? '' : undefined}
             onclick={() => confirmer.pick(opt.value)}
           >
             {opt.label}
           </button>
         {/each}
       {:else}
+        <!-- The default button (Return) is the primary action — except for a
+             destructive one, where focus stays on Cancel (macOS HIG), so a
+             reflexive Return never deletes. -->
         <button
           class="btn"
           class:primary={!confirmer.danger}
-          class:danger={confirmer.danger}
+          class:danger-solid={confirmer.danger}
+          data-autofocus={confirmer.danger ? undefined : ''}
           onclick={onPrimary}
         >
           {confirmer.confirmLabel}
@@ -75,10 +80,12 @@
 <style>
   .cf-msg {
     margin: 2px 0 4px;
-    font-size: 13px;
+    font-size: var(--fs-m);
     line-height: 1.5;
     color: var(--text);
     white-space: pre-wrap;
+    /* Paths / ids / branch names have no break points. */
+    overflow-wrap: anywhere;
   }
   .cf-input {
     width: 100%;
@@ -89,17 +96,9 @@
     align-items: center;
     gap: 6px;
     margin-top: 8px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
     user-select: none;
-  }
-  .btn.danger {
-    background: var(--danger-solid);
-    color: #fff;
-    border-color: transparent;
-  }
-  .btn.danger:hover {
-    filter: brightness(1.05);
   }
 </style>

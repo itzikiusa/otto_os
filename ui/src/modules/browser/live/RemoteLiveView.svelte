@@ -885,7 +885,7 @@
     {#if conn.status === 'live' && session && session.viewers > 1}<span class="dim">· {session.viewers} watching</span>{/if}
     {#if conn.status === 'live' && hasFrame}
       <span class="dim meter" data-testid="live-meter" title="Frames per second · input-to-frame latency">
-        · {fps > 0 ? `${fps} fps` : 'idle'}{#if meter.latencyMs !== null} · {meter.latencyMs} ms{/if}
+        · {fps > 0 ? `${fps} fps` : 'idle'}{#if meter.latencyMs !== null}{' · '}{meter.latencyMs} ms{/if}
       </span>
     {/if}
   </div>

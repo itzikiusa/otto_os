@@ -1,19 +1,23 @@
 // Single source of truth for the left-sidebar module list, shared by the
 // collapsed Rail, the expanded Navigator, the phone BottomNav, the ⌘K "Go to"
 // commands and the Settings → Appearance customizer. Users can reorder and hide
-// modules (persisted per-device in the `ui` store); these helpers are pure so
-// they can be reasoned about (and tested via e2e) without Svelte/auth state —
-// the caller supplies the RBAC predicate and the already-permitted plugin list.
+// modules, pin modules into a Favorites section and reorder the sections
+// themselves (all persisted per-device in the `ui` store); these helpers are
+// pure so they can be unit-tested (unit/sidebar.test.ts) without Svelte/auth
+// state — the caller supplies the RBAC predicate and the already-permitted
+// plugin list.
 
 import type { IconName } from './components/Icon.svelte';
 import type { Feature } from './api/types';
 
 /**
  * Sidebar sections, macOS source-list style: every module belongs to exactly
- * one, and the Navigator renders them in THIS order under collapsible headers
- * (the Rail draws a thin separator between them). The user's saved order only
- * ever rearranges modules WITHIN their section. Runtime plugins get their own
- * trailing section.
+ * one, and the Navigator renders them under collapsible headers (the Rail
+ * draws a thin separator between them) — in THIS order by default, or in the
+ * user's saved section order (see {@link resolveGroupOrder}). The user's saved
+ * module order only ever rearranges modules WITHIN their section. Runtime
+ * plugins get their own trailing section. A favorited module leaves its
+ * section for the pinned-first Favorites section (see {@link sidebarSections}).
  */
 export type SidebarGroupId = 'work' | 'automate' | 'build' | 'infra' | 'insight' | 'plugins';
 
@@ -215,22 +219,152 @@ export function visibleOrder(ordered: SidebarModule[], hidden: string[]): Sideba
   return ordered.filter((m) => !h.has(m.id));
 }
 
+/** The Favorites section's id. Not a module group — any module can be
+ *  favorited — so it is never a {@link SidebarModule.group}. */
+export const FAVORITES_ID = 'favorites';
+
+/** A rendered section: one of {@link SIDEBAR_GROUPS} or Favorites. */
+export type SidebarSectionId = SidebarGroupId | typeof FAVORITES_ID;
+
+export interface SidebarSectionDef {
+  id: SidebarSectionId;
+  label: string;
+}
+
+/** Favorites: always the FIRST section, and only rendered while it holds at
+ *  least one module the user can see. */
+export const FAVORITES_SECTION: SidebarSectionDef = { id: FAVORITES_ID, label: 'Favorites' };
+
 /** One rendered sidebar section: its definition + its modules in display order. */
 export interface SidebarSection {
-  group: SidebarGroupDef;
+  group: SidebarSectionDef;
   modules: SidebarModule[];
 }
 
 /**
- * Split an ordered module list into sections, in {@link SIDEBAR_GROUPS} order,
- * keeping each module's relative (saved) order inside its section. Empty
- * sections are dropped — so a section whose modules are all hidden disappears.
+ * The section order: the user's saved group ids first (duplicates, unknown ids
+ * and `favorites` — which is always first — are ignored), then every group the
+ * saved list doesn't mention in the shipped {@link SIDEBAR_GROUPS} order, so a
+ * newly-shipped section is appended and never lost.
  */
-export function groupModules(list: SidebarModule[]): SidebarSection[] {
-  return SIDEBAR_GROUPS.map((group) => ({
-    group,
-    modules: list.filter((m) => m.group === group.id),
-  })).filter((s) => s.modules.length > 0);
+export function resolveGroupOrder(saved: readonly string[]): SidebarGroupDef[] {
+  const byId = new Map(SIDEBAR_GROUPS.map((g) => [g.id as string, g]));
+  const out: SidebarGroupDef[] = [];
+  for (const id of saved) {
+    const g = byId.get(id);
+    if (g) {
+      out.push(g);
+      byId.delete(id);
+    }
+  }
+  for (const g of SIDEBAR_GROUPS) if (byId.has(g.id)) out.push(g);
+  return out;
+}
+
+/**
+ * Split an ordered module list into sections — in {@link SIDEBAR_GROUPS} order,
+ * or the user's `groupOrder` (resolved by {@link resolveGroupOrder}) — keeping
+ * each module's relative (saved) order inside its section. Empty sections are
+ * dropped — so a section whose modules are all hidden disappears.
+ */
+export function groupModules(list: SidebarModule[], groupOrder: readonly string[] = []): SidebarSection[] {
+  return resolveGroupOrder(groupOrder)
+    .map((group) => ({
+      group,
+      modules: list.filter((m) => m.group === group.id),
+    }))
+    .filter((s) => s.modules.length > 0);
+}
+
+/**
+ * The favorited modules of `list`, in the user's `favorites` order. `list` is
+ * already RBAC/feature-filtered, so a favorite the user can't see (a revoked
+ * feature, an uninstalled plugin, an unknown id) is simply skipped — its id
+ * stays saved, and it returns to its slot if it becomes available again.
+ */
+export function favoriteModules(list: SidebarModule[], favorites: readonly string[]): SidebarModule[] {
+  const byId = new Map(list.map((m) => [m.id, m]));
+  const out: SidebarModule[] = [];
+  for (const id of favorites) {
+    const m = byId.get(id);
+    if (m) {
+      out.push(m);
+      byId.delete(id); // a duplicated saved id renders once
+    }
+  }
+  return out;
+}
+
+/**
+ * The sections the sidebar renders: Favorites first (only when it holds at
+ * least one module of `list`), then every group in the user's section order.
+ * A favorited module appears ONLY in Favorites — it leaves its own group, and
+ * returns to its saved slot there when unfavorited.
+ */
+export function sidebarSections(
+  list: SidebarModule[],
+  favorites: readonly string[],
+  groupOrder: readonly string[] = [],
+): SidebarSection[] {
+  const favs = favoriteModules(list, favorites);
+  const favIds = new Set(favs.map((m) => m.id));
+  const rest = groupModules(
+    list.filter((m) => !favIds.has(m.id)),
+    groupOrder,
+  );
+  return favs.length > 0 ? [{ group: FAVORITES_SECTION, modules: favs }, ...rest] : rest;
+}
+
+/**
+ * `ids` with `id` swapped one slot up (`delta` -1) or down (+1) with its
+ * nearest neighbour that `present` accepts — so a move is always visible even
+ * when the saved list holds ids that aren't rendered (a hidden-by-RBAC
+ * favorite, an empty section). Returns null when there is no such neighbour
+ * (already first / last) or `id` isn't in `ids`.
+ */
+export function moveAmong(
+  ids: readonly string[],
+  id: string,
+  delta: -1 | 1,
+  present: (id: string) => boolean = () => true,
+): string[] | null {
+  const i = ids.indexOf(id);
+  if (i < 0) return null;
+  let j = i + delta;
+  while (j >= 0 && j < ids.length && !present(ids[j])) j += delta;
+  if (j < 0 || j >= ids.length) return null;
+  const next = [...ids];
+  [next[i], next[j]] = [next[j], next[i]];
+  return next;
+}
+
+/**
+ * Drag-reorder: `ids` with `from` pulled out and reinserted at `to`'s slot (so
+ * it lands before `to` when dragged up, after it when dragged down). Returns
+ * null when either id is missing or they're the same.
+ */
+export function reorderAmong(ids: readonly string[], from: string, to: string): string[] | null {
+  if (from === to) return null;
+  const i = ids.indexOf(from);
+  const j = ids.indexOf(to);
+  if (i < 0 || j < 0) return null;
+  const next = [...ids];
+  next.splice(i, 1);
+  next.splice(j, 0, from);
+  return next;
+}
+
+/**
+ * `favorites` with `id` added — before `beforeId` when given and present
+ * (dropping a row onto a favorite), else at the end. An id already there is
+ * moved, never duplicated.
+ */
+export function insertFavorite(favorites: readonly string[], id: string, beforeId?: string | null): string[] {
+  const next = favorites.filter((x) => x !== id);
+  const at = beforeId ? next.indexOf(beforeId) : -1;
+  if (at < 0) next.push(id);
+  else next.splice(at, 0, id);
+  return next;
 }
 
 /**

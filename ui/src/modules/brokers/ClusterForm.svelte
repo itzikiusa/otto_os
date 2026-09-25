@@ -40,6 +40,12 @@
   let readOnly = $state(init?.read_only ?? false);
   let color = $state(init?.color ?? '');
   let saving = $state(false);
+  // Inline validation: shown under the field after the first Save attempt.
+  let submitted = $state(false);
+  const nameErr = $derived(submitted && !name.trim() ? 'Give the cluster a name.' : null);
+  const bootstrapErr = $derived(
+    submitted && !bootstrap.trim() ? 'Enter at least one broker, e.g. broker1:9092.' : null,
+  );
 
   // SSH tunnel (bastion) — for private clusters like AWS MSK in a VPC.
   let tunnelOpen = $state(!!init?.ssh);
@@ -48,22 +54,19 @@
   let tunUser = $state(init?.ssh?.user ?? '');
   let tunIdentity = $state(init?.ssh?.identity_file ?? '');
   let showTunnelFilePicker = $state(false);
+  const tunHostErr = $derived(
+    submitted && tunnelOpen && !tunHost.trim() ? 'Enter the bastion host, or turn the SSH tunnel off.' : null,
+  );
 
   const usesSasl = $derived(security === 'sasl_plaintext' || security === 'sasl_ssl');
   const usesTls = $derived(security === 'ssl' || security === 'sasl_ssl');
 
   async function save() {
-    if (!name.trim() || !bootstrap.trim()) {
-      toasts.error('Name and bootstrap servers are required');
-      return;
-    }
+    submitted = true;
     // ssh: omit on create (keep) when off; send null on edit to clear. Only the
     // host is required — a blank user falls back server-side to ~/.ssh/config
     // or $USER, exactly like the connections form.
-    if (tunnelOpen && !tunHost.trim()) {
-      toasts.error('SSH tunnel needs a host');
-      return;
-    }
+    if (!name.trim() || !bootstrap.trim() || (tunnelOpen && !tunHost.trim())) return;
     let ssh: SshTunnelConfig | null | undefined;
     if (tunnelOpen && tunHost.trim()) {
       ssh = {
@@ -101,7 +104,7 @@
       toasts.success(editing ? 'Cluster updated' : 'Cluster added');
       onclose();
     } catch (e) {
-      toasts.error('Save failed', String(e));
+      toasts.error("Couldn't save the cluster", e instanceof Error ? e.message : String(e));
     } finally {
       saving = false;
     }
@@ -116,11 +119,13 @@
   <div class="form">
     <label class="field">
       <span>Name</span>
-      <input bind:value={name} placeholder="prod-kafka" />
+      <input bind:value={name} placeholder="prod-kafka" aria-invalid={nameErr ? 'true' : undefined} />
+      {#if nameErr}<span class="field-err">{nameErr}</span>{/if}
     </label>
     <label class="field">
       <span>Bootstrap servers</span>
-      <input bind:value={bootstrap} placeholder="broker1:9092,broker2:9092" />
+      <input bind:value={bootstrap} placeholder="broker1:9092,broker2:9092" aria-invalid={bootstrapErr ? 'true' : undefined} />
+      {#if bootstrapErr}<span class="field-err">{bootstrapErr}</span>{/if}
     </label>
 
     <div class="row">
@@ -205,7 +210,8 @@
         <div class="row">
           <label class="field" style="flex: 1;">
             <span>Tunnel host</span>
-            <input bind:value={tunHost} placeholder="bastion.example.com" spellcheck="false" />
+            <input bind:value={tunHost} placeholder="bastion.example.com" spellcheck="false" aria-invalid={tunHostErr ? 'true' : undefined} />
+            {#if tunHostErr}<span class="field-err">{tunHostErr}</span>{/if}
           </label>
           <label class="field" style="flex: 0 0 90px;">
             <span>Port</span>
@@ -283,8 +289,12 @@
     gap: 4px;
   }
   .field span {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
+  }
+  .field .field-err {
+    font-size: var(--fs-xs);
+    color: var(--danger);
   }
   .field span em {
     font-style: normal;
@@ -297,13 +307,13 @@
     border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
-    font-size: 13px;
+    font-size: var(--fs-m);
   }
   .check {
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .check span em {
@@ -347,7 +357,7 @@
       flex: 1 1 auto !important;
     }
     .field span {
-      font-size: 13px;
+      font-size: var(--fs-m);
     }
     .field {
       align-items: stretch;
@@ -360,7 +370,7 @@
       padding: 10px 11px;
     }
     .check {
-      font-size: 13px;
+      font-size: var(--fs-m);
       align-items: flex-start;
     }
   }

@@ -94,21 +94,31 @@
     debounceTimer = setTimeout(() => void search(q), 350);
   }
 
+  // Why the last search failed — shown in the results area with Retry (a toast
+  // plus "No issues found." read as a real empty result).
+  let searchError = $state<string | null>(null);
+  let searchSeq = 0;
+
   async function search(q: string): Promise<void> {
     if (!selectedAccountId) return;
+    const seq = ++searchSeq;
     searching = true;
+    searchError = null;
     try {
       const projectParam = selectedProjectKey
         ? `&project=${encodeURIComponent(selectedProjectKey)}`
         : '';
-      results = await api.get<IssueSummary[]>(
+      const found = await api.get<IssueSummary[]>(
         `/issue/search?account_id=${encodeURIComponent(selectedAccountId)}&q=${encodeURIComponent(q)}${projectParam}`,
       );
+      // A slower, older search must not overwrite the newer one's results.
+      if (seq === searchSeq) results = found;
     } catch (e) {
-      toasts.error('Search failed', e instanceof Error ? e.message : String(e));
+      if (seq !== searchSeq) return;
+      searchError = e instanceof Error ? e.message : String(e);
       results = [];
     } finally {
-      searching = false;
+      if (seq === searchSeq) searching = false;
     }
   }
 
@@ -152,7 +162,7 @@
     <div class="account-badge">
       <Icon name="ticket" size={13} />
       <span>{accounts[0].label}</span>
-      <span class="dim mono" style="font-size:11px">{accounts[0].base_url}</span>
+      <span class="dim mono" style="font-size: var(--fs-xs)">{accounts[0].base_url}</span>
     </div>
   {/if}
 
@@ -189,6 +199,11 @@
   <div class="picker-results">
     {#if searching}
       <Skeleton rows={3} height={44} />
+    {:else if searchError && query.trim() !== ''}
+      <div class="no-results" role="alert">
+        <span class="err">Search failed: {searchError}</span>
+        <button class="btn small" onclick={() => void search(query.trim())}>Retry</button>
+      </div>
     {:else if results.length === 0 && query.trim() !== ''}
       <div class="no-results dim">No issues found.</div>
     {:else}
@@ -211,7 +226,7 @@
     align-items: center;
     gap: 8px;
     padding: 14px 0;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .account-badge {
@@ -221,7 +236,7 @@
     padding: 6px 10px;
     background: var(--surface-2);
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     margin-bottom: 12px;
   }
   .picker-field {
@@ -231,7 +246,7 @@
     margin-bottom: 10px;
   }
   .picker-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-weight: 500;
   }
@@ -242,12 +257,12 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s, 4px);
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     padding: 4px 8px;
     box-sizing: border-box;
   }
   .picker-loading {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     padding: 4px 0;
   }
@@ -284,14 +299,14 @@
     min-width: 0;
   }
   .issue-key {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 700;
     font-family: var(--font-mono);
     color: var(--accent-text);
     flex-shrink: 0;
   }
   .issue-summary {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -306,6 +321,11 @@
   .no-results {
     padding: 16px;
     text-align: center;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
+  }
+  .no-results .err {
+    display: block;
+    margin-bottom: 8px;
+    color: var(--danger);
   }
 </style>

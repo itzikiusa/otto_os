@@ -5,6 +5,7 @@
   import PropertiesEditor from './PropertiesEditor.svelte';
   import KnowledgeMetadata from './KnowledgeMetadata.svelte';
   import { slugifyHeading } from './mdRender';
+  import Icon from '../../lib/components/Icon.svelte';
 
   let open = $state({ backlinks: true, outgoing: true, outline: false, props: false, okf: false });
 
@@ -30,8 +31,8 @@
     <section><h3 class="hdr">Knowledge provenance</h3><KnowledgeMetadata frontmatter={vault.note.meta.frontmatter} /></section>
   {/if}
   <section>
-    <button class="hdr" onclick={() => (open.backlinks = !open.backlinks)}>
-      <span class="tri" class:open={open.backlinks}>▸</span>
+    <button class="hdr" aria-expanded={open.backlinks} onclick={() => (open.backlinks = !open.backlinks)}>
+      <span class="tri" class:open={open.backlinks}><Icon name="chevronRight" size={12} /></span>
       Backlinks
       <span class="badge">{vault.backlinks.length}</span>
     </button>
@@ -40,7 +41,7 @@
         <div class="none">No linked mentions</div>
       {:else}
         {#each vault.backlinks as bl (bl.path + bl.kind)}
-          <button class="item" onclick={() => void vault.open(bl.path)}>
+          <button class="item" title={bl.path} onclick={() => void vault.open(bl.path)}>
             <div class="t">{bl.title}</div>
             {#if bl.context}<div class="ctx">{bl.context}</div>{/if}
           </button>
@@ -50,8 +51,8 @@
   </section>
 
   <section>
-    <button class="hdr" onclick={() => (open.outgoing = !open.outgoing)}>
-      <span class="tri" class:open={open.outgoing}>▸</span>
+    <button class="hdr" aria-expanded={open.outgoing} onclick={() => (open.outgoing = !open.outgoing)}>
+      <span class="tri" class:open={open.outgoing}><Icon name="chevronRight" size={12} /></span>
       Outgoing links
       <span class="badge">{vault.note?.outgoing.length ?? 0}</span>
     </button>
@@ -60,11 +61,12 @@
         <button
           class="item"
           class:unresolved={!l.dst_path}
+          title={l.dst_path ?? `${l.raw_target} (unresolved)`}
           disabled={!l.dst_path || !/\.md$/i.test(l.dst_path)}
           onclick={() => l.dst_path && void vault.open(l.dst_path)}
         >
           <div class="t">
-            {l.kind === 'embed' ? '⧉ ' : ''}{l.alias ?? l.raw_target}
+            {#if l.kind === 'embed'}<span class="embed-ic" title="Embedded"><Icon name="image" size={11} /></span>{/if}{l.alias ?? l.raw_target}
             {#if !l.dst_path}<span class="ghost">unresolved</span>{/if}
           </div>
         </button>
@@ -73,8 +75,8 @@
   </section>
 
   <section>
-    <button class="hdr" onclick={() => (open.outline = !open.outline)}>
-      <span class="tri" class:open={open.outline}>▸</span>
+    <button class="hdr" aria-expanded={open.outline} onclick={() => (open.outline = !open.outline)}>
+      <span class="tri" class:open={open.outline}><Icon name="chevronRight" size={12} /></span>
       Outline
       <span class="badge">{vault.note?.meta.headings.length ?? 0}</span>
     </button>
@@ -83,6 +85,7 @@
         <button
           class="item outline"
           style="padding-inline-start: {10 + (h.level - 1) * 12}px"
+          title={h.text}
           onclick={() => jumpToHeading(h.text)}
         >
           <div class="t">{h.text}</div>
@@ -92,8 +95,8 @@
   </section>
 
   <section>
-    <button class="hdr" onclick={() => (open.props = !open.props)}>
-      <span class="tri" class:open={open.props}>▸</span>
+    <button class="hdr" aria-expanded={open.props} onclick={() => (open.props = !open.props)}>
+      <span class="tri" class:open={open.props}><Icon name="chevronRight" size={12} /></span>
       Properties
       <span class="badge">{props.length}</span>
     </button>
@@ -120,27 +123,27 @@
 
   {#if vault.current?.okf}
     <section>
-      <button class="hdr" onclick={() => (open.okf = !open.okf)}>
-        <span class="tri" class:open={open.okf}>▸</span>
+      <button class="hdr" aria-expanded={open.okf} onclick={() => (open.okf = !open.okf)}>
+        <span class="tri" class:open={open.okf}><Icon name="chevronRight" size={12} /></span>
         OKF
         {#if vault.okfReport}
-          <span class="badge" class:err={!vault.okfReport.conformant}>
-            {vault.okfReport.conformant ? '✓' : vault.okfReport.errors.length}
+          <span class="badge" class:err={!vault.okfReport.conformant} title={vault.okfReport.conformant ? 'Conformant' : `${vault.okfReport.errors.length} errors`}>
+            {#if vault.okfReport.conformant}<Icon name="check" size={11} />{:else}{vault.okfReport.errors.length}{/if}
           </span>
         {/if}
       </button>
       {#if open.okf}
         <div class="okf-actions">
-          <button class="mini" disabled={vault.okfBusy} onclick={() => void vault.validateOkf()}>
-            Validate
+          <button class="btn small" disabled={vault.okfBusy} onclick={() => void vault.validateOkf()}>
+            {vault.okfBusy ? 'Working…' : 'Validate'}
           </button>
-          <button class="mini" disabled={vault.okfBusy} onclick={() => void vault.generateIndexes()}>
+          <button class="btn small" disabled={vault.okfBusy} onclick={() => void vault.generateIndexes()} title="Write the index.md files OKF expects in each folder">
             Generate indexes
           </button>
         </div>
         {#if vault.okfReport}
           {#if vault.okfReport.conformant}
-            <div class="none ok">✓ OKF conformant ({vault.okfReport.checked_notes} notes)</div>
+            <div class="none ok"><Icon name="check" size={11} /> OKF conformant ({vault.okfReport.checked_notes} notes)</div>
           {/if}
           {#each vault.okfReport.errors as f, i (i)}
             <button class="item finding err" onclick={() => f.path.endsWith('.md') && void vault.open(f.path)}>
@@ -184,14 +187,14 @@
     background: none;
     border: none;
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     padding: 6px 4px;
     cursor: pointer;
   }
   .tri {
+    display: inline-flex;
     transition: transform 0.12s;
-    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .tri.open {
@@ -206,8 +209,8 @@
     padding: 1px 7px;
   }
   .badge.err {
-    background: rgba(214, 86, 72, 0.25);
-    color: var(--status-exited);
+    background: var(--danger-soft);
+    color: var(--danger);
   }
   .item {
     display: block;
@@ -215,7 +218,7 @@
     text-align: start;
     background: none;
     border: none;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     padding: 5px 8px;
     cursor: pointer;
     color: var(--text);
@@ -225,46 +228,45 @@
   }
   .item:disabled {
     cursor: default;
-    opacity: 0.7;
   }
   .item .t {
-    font-size: 12px;
+    font-size: var(--fs-s);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .item .ctx {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .item.unresolved .t {
-    opacity: 0.6;
+    color: var(--text-dim);
   }
   .ghost {
     font-size: var(--fs-xs);
     border: 1px dashed var(--text-dim);
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     padding: 0 4px;
     margin-inline-start: 6px;
     color: var(--text-dim);
   }
   .none {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     padding: 4px 8px;
   }
   .none.ok {
-    color: var(--status-working);
+    color: var(--success);
   }
   .none.warn {
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .props {
     width: 100%;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     border-collapse: collapse;
   }
   .props td {
@@ -278,26 +280,32 @@
     white-space: nowrap;
   }
   .props tr.okf .k {
-    color: var(--accent, #7a9cff);
+    color: var(--accent-text);
   }
   .okf-actions {
     display: flex;
     gap: 6px;
     padding: 2px 4px 6px;
   }
-  .mini {
-    font-size: 11px;
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text);
-    border-radius: 6px;
-    padding: 3px 8px;
-    cursor: pointer;
+  .embed-ic {
+    display: inline-flex;
+    vertical-align: -1px;
+    margin-inline-end: 4px;
+    color: var(--text-dim);
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+  }
+  .none.ok {
+    display: flex;
+    align-items: center;
+    gap: 4px;
   }
   .finding.err .t b {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .finding.warn .t b {
-    color: var(--status-warn);
+    color: var(--warning);
   }
 </style>

@@ -237,7 +237,7 @@
 
   <div class="note-list">
     {#if loading}
-      <div class="note-empty">Loading…</div>
+      <div class="note-empty">Loading annotations…</div>
     {:else if notes.length === 0}
       <div class="note-empty">
         No annotations yet.{mode === 'annotate' ? ' Click the mockup to drop a pin.' : ''}
@@ -289,10 +289,10 @@
     width: 20px;
     height: 20px;
     border-radius: 999px;
-    background: var(--accent);
-    color: #fff;
-    font-size: 11px;
-    font-weight: 700;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
+    font-size: var(--fs-xs);
+    font-weight: 600;
     display: grid;
     place-items: center;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
@@ -329,7 +329,7 @@
     width: 100%;
     box-sizing: border-box;
     resize: vertical;
-    font-size: 12px;
+    font-size: var(--fs-s);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -345,7 +345,7 @@
   .mini {
     padding: 4px 10px;
     border-radius: var(--radius-s);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     font-weight: 500;
     cursor: pointer;
     border: 1px solid var(--border);
@@ -353,9 +353,9 @@
     color: var(--text);
   }
   .mini.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    border-color: var(--accent-solid);
+    color: var(--accent-contrast);
   }
   .mini.primary:disabled {
     opacity: 0.5;
@@ -392,7 +392,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     font-weight: 500;
     cursor: pointer;
   }
@@ -409,7 +409,7 @@
   }
   .note-empty {
     padding: 10px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .note {
@@ -431,10 +431,10 @@
     width: 18px;
     height: 18px;
     border-radius: 999px;
-    background: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     display: grid;
     place-items: center;
   }
@@ -444,7 +444,7 @@
   .note-body {
     flex: 1;
     min-width: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.4;
     white-space: pre-wrap;
     word-break: break-word;

@@ -121,13 +121,13 @@
       <span class="chip step-trunc" title="Output capped at 64 KB">{fmtBytes(block.result.bytes)}</span>
     {/if}
     <span class="step-dot {status}" title={status === 'ok' ? 'Succeeded' : status === 'err' ? 'Failed' : 'Running…'}></span>
-    <span class="step-caret">{open ? '▾' : '▸'}</span>
+    <span class="step-caret" aria-hidden="true"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} /></span>
   </button>
   {#if open}
     <div class="step-body">
       {#if filePath}
-        <button class="file-chip mono" onclick={openInFiles} title={ctx.sessionId && !ctx.readonly ? 'Open in Files' : 'Copy path'}>
-          <Icon name="file" size={11} /> {filePath}
+        <button class="file-chip mono" onclick={openInFiles} title={ctx.sessionId && !ctx.readonly ? `Open in Files — ${filePath}` : `Copy path — ${filePath}`}>
+          <Icon name="file" size={12} /> <span class="file-chip-path">{filePath}</span>
         </button>
       {/if}
       {#if inputJson}
@@ -202,7 +202,7 @@
     display: flex;
     align-items: baseline;
     gap: 6px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     overflow: hidden;
     white-space: nowrap;
   }
@@ -219,7 +219,7 @@
   }
   .step-sub {
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     overflow: hidden;
     text-overflow: ellipsis;
     min-width: 0;
@@ -239,13 +239,13 @@
     background: var(--text-dim);
   }
   .step-dot.ok {
-    background: var(--status-working, #3fb950);
+    background: var(--status-working);
   }
   .step-dot.err {
-    background: var(--status-exited, #e5534b);
+    background: var(--status-exited);
   }
   .step-dot.pending {
-    background: var(--status-warn, #febc2e);
+    background: var(--status-warn);
     animation: pulse 1.2s ease-in-out infinite;
   }
   @keyframes pulse {
@@ -254,8 +254,8 @@
     }
   }
   .step-caret {
+    display: inline-flex;
     color: var(--text-dim);
-    font-size: 11px;
     flex-shrink: 0;
   }
   .step-body {
@@ -273,14 +273,14 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     padding: 8px 10px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 18px;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     text-align: start;
   }
   .out.err {
-    border-color: color-mix(in srgb, var(--status-exited, #e5534b) 45%, transparent);
+    border-color: color-mix(in srgb, var(--status-exited) 45%, transparent);
   }
   :global(.out-vlist) {
     max-height: 420px;
@@ -295,7 +295,7 @@
     height: 18px;
     line-height: 18px;
     padding: 0 10px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     white-space: pre;
     /* Long lines widen the row so the windowed list scrolls horizontally
        (AGENTS.md: wide content scrolls inside its own container). */
@@ -315,14 +315,14 @@
   .diff-wrap :global(tr.dline.add),
   .diff-wrap :global(.vrow.dline.add),
   .diff-wrap :global(.code.half.add) {
-    background: color-mix(in srgb, var(--status-working, #3fb950) 22%, transparent);
-    box-shadow: inset 3px 0 0 var(--status-working, #3fb950);
+    background: color-mix(in srgb, var(--status-working) 22%, transparent);
+    box-shadow: inset 3px 0 0 var(--status-working);
   }
   .diff-wrap :global(tr.dline.del),
   .diff-wrap :global(.vrow.dline.del),
   .diff-wrap :global(.code.half.del) {
-    background: color-mix(in srgb, var(--status-exited, #e5534b) 20%, transparent);
-    box-shadow: inset 3px 0 0 var(--status-exited, #e5534b);
+    background: color-mix(in srgb, var(--status-exited) 20%, transparent);
+    box-shadow: inset 3px 0 0 var(--status-exited);
   }
   .step-stats {
     font-size: var(--fs-xs);
@@ -348,7 +348,7 @@
     align-items: center;
     gap: 5px;
     max-width: 100%;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 2px 8px;
     border-radius: 99px;
     border: 1px solid var(--border);
@@ -360,6 +360,13 @@
     white-space: nowrap;
     direction: ltr;
   }
+  /* The ellipsis lives on the TEXT span — on the inline-flex chip itself it
+     never applied and long paths were cut mid-character. */
+  .file-chip-path {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .file-chip:hover {
     color: var(--text);
     border-color: color-mix(in srgb, var(--accent) 55%, transparent);
@@ -370,16 +377,16 @@
     border: 0;
     padding: 0;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
     text-decoration: underline dotted;
   }
   .pending {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .trunc-note {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .imgs {
     display: flex;

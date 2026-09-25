@@ -19,7 +19,7 @@
   import ViewToolbar from './ViewToolbar.svelte';
   import AwsDrawer from './AwsDrawer.svelte';
   import MetricsPanel from './MetricsPanel.svelte';
-  import { fmtAgo, fmtDate } from './util';
+  import { fmtAgo, fmtDate, awsErrorText } from './util';
   import type { AwsAccount, Ec2Action, Ec2Instance, Ec2InstanceDetail } from '../../lib/api/types';
 
   interface Props {
@@ -87,12 +87,12 @@
     if (!resourceAccess.can('aws_account', account.id, `ec2_${action}`, 'aws_ec2', 'edit')) return;
     const label = i.name ? `${i.name} (${i.instance_id})` : i.instance_id;
     if (action === 'start') {
-      const ok = await confirmer.ask(`Start ${label}?`, { title: 'Start instance', confirmLabel: 'Start', danger: false });
+      const ok = await confirmer.ask(`Start ${label} in ${account.name} · ${region}?`, { title: 'Start instance', confirmLabel: 'Start', danger: false });
       if (!ok) return;
     } else {
       const typed = await confirmer.promptText(
-        `${action === 'stop' ? 'Stop' : 'Reboot'} ${label}${account.environment === 'prod' ? ' — this is PRODUCTION' : ''}? Type the instance id to confirm.`,
-        { title: `${action === 'stop' ? 'Stop' : 'Reboot'} instance`, confirmLabel: action === 'stop' ? 'Stop' : 'Reboot', placeholder: i.instance_id },
+        `${action === 'stop' ? 'Stop' : 'Reboot'} ${label} in ${account.name} · ${region}${account.environment === 'prod' ? ' — this is PRODUCTION' : ''}? Type the instance id to confirm.`,
+        { title: `${action === 'stop' ? 'Stop' : 'Reboot'} instance`, confirmLabel: action === 'stop' ? 'Stop' : 'Reboot', placeholder: i.instance_id, danger: true },
       );
       if (typed === null) return;
       if (typed !== i.instance_id) {
@@ -110,6 +110,14 @@
     } finally {
       busy = { ...busy, [i.instance_id]: false };
     }
+  }
+
+  /** Why a drawer power button is disabled (undefined when it isn't). */
+  function powerHint(allowed: boolean, i: Ec2Instance, needs: 'stopped' | 'running'): string | undefined {
+    if (!allowed) return 'You don’t have permission for this action on this account';
+    if (busy[i.instance_id]) return 'An action is already in flight';
+    if (i.state !== needs) return `Only available while the instance is ${needs} (it is ${i.state})`;
+    return undefined;
   }
 
   // Detail drawer. The drawer's `inst` is refreshed from the list after a
@@ -212,9 +220,9 @@
 <div class="body">
 <div class="tbl-wrap">
   {#if loading && !instances}
-    <div class="pad"><Skeleton rows={8} /></div>
+    <div class="pad" role="status"><p class="load-note">Loading EC2 instances…</p><Skeleton rows={8} /></div>
   {:else if error}
-    <EmptyState icon="cloud" title="Couldn't list instances" body={error} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
+    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list instances" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
   {:else if shown.length === 0}
     <EmptyState icon="box" title={filter || stateFilter ? 'No matching instances' : `No instances in ${region}`} />
   {:else}
@@ -244,7 +252,7 @@
             <td class="mono hide-md">{i.public_ip ?? '—'}</td>
             <td class="dim hide-md" title={fmtDate(i.launch_time)}>{fmtAgo(i.launch_time)}</td>
             <td class="act">
-              <button class="icon-btn" onclick={(e) => menu(e, i)} aria-label={`Actions for ${i.instance_id}`} title="Actions" disabled={busy[i.instance_id]}>⋯</button>
+              <button class="icon-btn" onclick={(e) => menu(e, i)} aria-label={`Actions for ${i.instance_id}`} title="Actions" disabled={busy[i.instance_id]}><Icon name="more" size={14} /></button>
             </td>
           </tr>
         {/each}
@@ -274,9 +282,9 @@
           <span class="mono dim">{inst.az ?? ''}</span>
           {#if canEdit}
             <span class="spacer"></span>
-            <button class="ghost sm" onclick={() => void act(inst, 'start')} disabled={!canStart || inst.state !== 'stopped' || busy[inst.instance_id]}><Icon name="play" size={12} /> Start</button>
-            <button class="ghost sm" onclick={() => void act(inst, 'reboot')} disabled={!canReboot || inst.state !== 'running' || busy[inst.instance_id]}><Icon name="refresh" size={12} /> Reboot</button>
-            <button class="ghost sm danger" onclick={() => void act(inst, 'stop')} disabled={!canStop || inst.state !== 'running' || busy[inst.instance_id]}><Icon name="x" size={12} /> Stop</button>
+            <button class="btn small" onclick={() => void act(inst, 'start')} disabled={!canStart || inst.state !== 'stopped' || busy[inst.instance_id]} title={powerHint(canStart, inst, 'stopped')}><Icon name="play" size={12} /> Start</button>
+            <button class="btn small" onclick={() => void act(inst, 'reboot')} disabled={!canReboot || inst.state !== 'running' || busy[inst.instance_id]} title={powerHint(canReboot, inst, 'running')}><Icon name="refresh" size={12} /> Reboot</button>
+            <button class="btn small danger" onclick={() => void act(inst, 'stop')} disabled={!canStop || inst.state !== 'running' || busy[inst.instance_id]} title={powerHint(canStop, inst, 'running')}><Icon name="x" size={12} /> Stop</button>
           {/if}
         </div>
         <dl class="kv">
@@ -320,6 +328,11 @@
 </div>
 
 <style>
+  .load-note {
+    margin: 0 0 10px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
   .pad {
     padding: 12px;
   }
@@ -327,7 +340,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .lbl {
     color: var(--text-dim);
@@ -340,7 +353,7 @@
     background: var(--bg);
     color: var(--text);
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 0 4px;
   }
   .body {
@@ -364,7 +377,7 @@
        and let .tbl-wrap scroll sideways instead of squeezing every cell. */
     min-width: 760px;
     border-collapse: collapse;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .tbl th {
     position: sticky;
@@ -373,7 +386,7 @@
     background: var(--surface);
     text-align: left;
     font-weight: 600;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -448,7 +461,7 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     padding: 12px 14px;
   }
   .dt-top {
@@ -475,7 +488,7 @@
   }
   h3 {
     margin: 6px 0 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -486,7 +499,7 @@
     gap: 6px;
   }
   .tag {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     padding: 2px 8px;
     border-radius: 999px;
     border: 1px solid var(--border);
@@ -497,31 +510,12 @@
     white-space: nowrap;
   }
   .raw {
-    font-size: 12px;
+    font-size: var(--fs-s);
     overflow: auto;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     padding: 8px;
     background: var(--bg);
-  }
-  .ghost {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 10px;
-    border-radius: var(--radius-m);
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
-    font-size: 12px;
-  }
-  .ghost.danger {
-    color: var(--status-exited);
-  }
-  .ghost:disabled {
-    opacity: 0.5;
-    cursor: default;
   }
   @media (max-width: 1024px) {
     .hide-md {

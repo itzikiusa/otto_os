@@ -22,6 +22,12 @@
   import Icon from '../../lib/components/Icon.svelte';
   import type { AttachedIssue } from '../../lib/api/types';
 
+  // `active` = this panel is the one on screen. The right panel keeps the
+  // browser MOUNTED while another tab (or the collapsed strip) is showing, so
+  // its tabs, pages and take-over annotations survive a tab switch; a native
+  // webview always paints above the HTML, so a hidden panel must hide them.
+  let { active = true }: { active?: boolean } = $props();
+
   const session = $derived(ws.activeSession);
   const attachedIssue = $derived(
     (session?.meta?.issue as AttachedIssue | undefined) ?? null,
@@ -38,6 +44,15 @@
   const openedUrl: Record<string, string> = {};
 
   const activeTab = $derived(tabs.find((t) => t.id === activeId) ?? null);
+
+  // The tab list scrolls horizontally with its scrollbar hidden — keep the
+  // active tab (e.g. one a page just opened) scrolled into view.
+  let stripEl = $state<HTMLDivElement | null>(null);
+  $effect(() => {
+    const id = activeId;
+    const el = stripEl?.querySelector<HTMLElement>(`[data-tab-id="${id}"]`);
+    el?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  });
   const current = $derived(activeTab?.url ?? ''); // active tab's loaded URL
 
   let urlInput = $state('');
@@ -133,7 +148,7 @@
     const list = tabs; // reactive dep
     const tab = activeTab; // reactive dep
     const overlay = ui.overlayOpen || ctxMenu.open;
-    const showActive = useNative && !!tab && !!tab.url && !overlay;
+    const showActive = active && useNative && !!tab && !!tab.url && !overlay;
     for (const t of list) {
       if (!showActive || !tab || t.id !== tab.id) void nativeBrowser.hide(t.id);
     }
@@ -151,7 +166,7 @@
 
   // Keep the active tab's webview aligned with the panel as it resizes / moves.
   $effect(() => {
-    if (!nativeBrowserAvailable || !useNative || !activeTab?.url || !hostEl) return;
+    if (!active || !nativeBrowserAvailable || !useNative || !activeTab?.url || !hostEl) return;
     const id = activeId;
     const _z = ui.zoom; // re-align immediately when the page zoom changes
     const sync = (): void => {
@@ -307,6 +322,8 @@
       if (!ev.data || typeof ev.data !== 'object') return;
 
       if (ev.data.type === 'otto-element' && takeover) {
+        // Only the take-over frame's own picker may open the comment popover.
+        if (!frame || ev.source !== frame.contentWindow) return;
         const { desc, x, y, url } = ev.data as {
           desc: string;
           x: number;
@@ -314,14 +331,19 @@
           url: string;
         };
 
-        const maxX = Math.max(0, (frame?.clientWidth ?? 400) - 320);
-        const maxY = Math.max(0, (frame?.clientHeight ?? 600) - 200);
+        // x/y are the click's clientX/Y inside the iframe; the popover is
+        // positioned in .browser, where the frame starts below the tab strip
+        // and toolbar — offset by the frame's position, then clamp to it.
+        const left = frame.offsetLeft;
+        const top = frame.offsetTop;
+        const maxX = left + Math.max(0, frame.clientWidth - 320);
+        const maxY = top + Math.max(0, frame.clientHeight - 200);
 
         popoverComment = '';
         popover = {
           open: true,
-          x: Math.min(Math.max(0, x), maxX),
-          y: Math.min(Math.max(0, y), maxY),
+          x: Math.min(Math.max(left, left + x), maxX),
+          y: Math.min(Math.max(top, top + y), maxY),
           desc,
           url,
         };
@@ -395,39 +417,44 @@
 
 <div class="browser">
   <!-- ── Tab strip ─────────────────────────────────────────────────────────── -->
-  <div class="tabstrip" role="tablist">
-    {#each tabs as t (t.id)}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div
-        class="btab"
-        class:active={t.id === activeId}
-        role="tab"
-        tabindex="0"
-        aria-selected={t.id === activeId}
-        title={t.url || 'New tab'}
-        onclick={() => setActiveTab(t.id)}
-        onkeydown={(e) => e.key === 'Enter' && setActiveTab(t.id)}
-        onauxclick={(e) => {
-          if (e.button === 1) {
-            e.preventDefault();
-            closeTab(t.id);
-          }
-        }}
-      >
-        <span class="btab-title">{t.title}</span>
-        <button
-          class="btab-close"
-          title="Close tab"
-          aria-label="Close tab"
-          onclick={(e) => {
-            e.stopPropagation();
-            closeTab(t.id);
+  <!-- The "+" sits OUTSIDE the scrolling tab list so it can never be scrolled
+       or clipped out of reach when there are many tabs. -->
+  <div class="tabstrip-row">
+    <div class="tabstrip" role="tablist" aria-label="Browser tabs" bind:this={stripEl}>
+      {#each tabs as t (t.id)}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="btab"
+          class:active={t.id === activeId}
+          role="tab"
+          tabindex="0"
+          data-tab-id={t.id}
+          aria-selected={t.id === activeId}
+          title={t.url || 'New tab'}
+          onclick={() => setActiveTab(t.id)}
+          onkeydown={(e) => e.key === 'Enter' && setActiveTab(t.id)}
+          onauxclick={(e) => {
+            if (e.button === 1) {
+              e.preventDefault();
+              closeTab(t.id);
+            }
           }}
         >
-          <Icon name="x" size={9} />
-        </button>
-      </div>
-    {/each}
+          <span class="btab-title">{t.title}</span>
+          <button
+            class="btab-close"
+            title="Close tab"
+            aria-label="Close tab"
+            onclick={(e) => {
+              e.stopPropagation();
+              closeTab(t.id);
+            }}
+          >
+            <Icon name="x" size={9} />
+          </button>
+        </div>
+      {/each}
+    </div>
     <button class="btab-new" title="New tab" aria-label="New tab" onclick={() => newTab('')}>
       <Icon name="plus" size={12} />
     </button>
@@ -439,7 +466,7 @@
       <Icon name="refresh" size={13} />
     </button>
     <button class="tb-btn" title="Start page" aria-label="Start page" disabled={!current} onclick={home}>
-      <Icon name="info" size={13} />
+      <Icon name="home" size={13} />
     </button>
     <input
       class="input url-input"
@@ -485,7 +512,7 @@
     <button
       class="tb-btn"
       title="Open in system browser"
-      aria-label="Open externally"
+      aria-label="Open in system browser"
       disabled={!(current || urlInput.trim())}
       onclick={() => openExternal(current || urlInput)}
     >
@@ -561,8 +588,10 @@
     {/if}
 
     <div class="frame-foot">
-      <span class="dim ellipsis">{current}</span>
-      <button class="link" onclick={() => openExternal(current)}>Open externally ↗</button>
+      <span class="dim ellipsis" title={current}>{current}</span>
+      <button class="link" onclick={() => openExternal(current)}>
+        <Icon name="external" size={11} /> Open externally
+      </button>
     </div>
   {:else}
     <div class="start">
@@ -570,16 +599,18 @@
         {#if nativeBrowserAvailable}
           Enter a URL above to browse any site here — including ones that block
           embedding (Google, Jira, GitHub) and local dev servers. Links that open
-          in a new tab open here as a new tab. Use ↗ to open in your system browser.
+          in a new tab open here as a new tab. Use Open in system browser (the
+          arrow button in the toolbar) for anything that should leave Otto.
         {:else}
           Enter a URL above to browse it here. Sites that block embedding (Jira,
-          Google, GitHub) open in your system browser with ↗.
+          Google, GitHub) won't load here — open them with Open in system
+          browser (the arrow button in the toolbar).
         {/if}
       </p>
 
       {#if attachedIssue}
         <section class="section">
-          <div class="section-title">Attached Issue</div>
+          <div class="section-title">Attached issue</div>
           <button class="quick-link" onclick={() => openExternal(attachedIssue.url)}>
             <Icon name="ticket" size={13} />
             <div class="ql-text">
@@ -616,14 +647,21 @@
   }
 
   /* ── Tab strip ───────────────────────────────────────────────────────────── */
-  .tabstrip {
+  .tabstrip-row {
     display: flex;
     align-items: center;
     gap: 2px;
     padding: 4px 6px 0 6px;
+    flex-shrink: 0;
+    min-width: 0;
+  }
+  .tabstrip {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
     overflow-x: auto;
     scrollbar-width: none;
-    flex-shrink: 0;
   }
   .tabstrip::-webkit-scrollbar {
     display: none;
@@ -639,7 +677,7 @@
     border-bottom: none;
     border-radius: var(--radius-s) var(--radius-s) 0 0;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
     white-space: nowrap;
     transition: background 120ms ease-out, color 120ms ease-out;
@@ -671,6 +709,7 @@
     transition: opacity 120ms ease-out, background 120ms ease-out;
   }
   .btab:hover .btab-close,
+  .btab:focus-within .btab-close,
   .btab.active .btab-close {
     opacity: 1;
   }
@@ -708,7 +747,7 @@
     flex: 1;
     min-width: 0;
     height: 28px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .tb-btn {
     width: 28px;
@@ -766,10 +805,13 @@
   }
   .link {
     flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     border: none;
     background: transparent;
     color: var(--accent-text);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .ellipsis {
@@ -786,7 +828,7 @@
   }
   .hint {
     margin: 0;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1.5;
   }
@@ -830,12 +872,12 @@
   }
   .ql-key {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     color: var(--accent-text);
   }
   .ql-label {
-    font-size: 12px;
+    font-size: var(--fs-s);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -847,7 +889,7 @@
     position: absolute;
     z-index: 200;
     width: 300px;
-    background: var(--surface, #1e1e2e);
+    background: var(--surface);
     border: 1px solid var(--accent);
     border-radius: var(--radius-s, 6px);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
@@ -871,7 +913,7 @@
   .popover-textarea {
     width: 100%;
     resize: vertical;
-    font-size: 12px;
+    font-size: var(--fs-s);
     min-height: 64px;
     box-sizing: border-box;
   }
@@ -890,25 +932,25 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    background: var(--surface, #1e1e2e);
+    background: var(--surface);
     border: 1px solid var(--accent);
     border-radius: var(--radius-s, 6px);
     padding: 5px 8px;
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
   }
   .annot-count {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 
   /* ── Generic button helpers ────────────────────────────────────────────── */
   .btn-accent {
-    background: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
     border: none;
     border-radius: var(--radius-s, 4px);
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 5px 10px;
     font-weight: 600;
   }
@@ -922,7 +964,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s, 4px);
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 5px 10px;
   }
   .btn-ghost:hover {
@@ -930,7 +972,7 @@
     border-color: var(--text-dim);
   }
   .btn-small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 3px 8px;
   }
 </style>

@@ -7,13 +7,16 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import type { IssueAccount } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
 
   let accounts: IssueAccount[] = $state([]);
   let loading = $state(true);
+  let loadError = $state('');
   let addOpen = $state(false);
   let busy = $state(false);
 
@@ -65,12 +68,35 @@
     void load();
   });
 
+  // ── Connection test ────────────────────────────────────────────────────────
+  // There's no dedicated test route for Jira; listing the projects the token
+  // can see exercises the same base URL + email + token and is read-only.
+  type TestResult = { ok: true; projects: number } | { ok: false; error: string } | 'busy';
+  let testResults: Record<string, TestResult> = $state({});
+
+  async function testAccount(a: IssueAccount): Promise<void> {
+    testResults = { ...testResults, [a.id]: 'busy' };
+    try {
+      const projects = await api.get<unknown[]>(`/issue/projects?account_id=${encodeURIComponent(a.id)}`);
+      testResults = { ...testResults, [a.id]: { ok: true, projects: Array.isArray(projects) ? projects.length : 0 } };
+    } catch (e) {
+      testResults = { ...testResults, [a.id]: { ok: false, error: loadErrorText(e) } };
+    }
+  }
+
+  function testLabel(r: Exclude<TestResult, 'busy'>): string {
+    return r.ok
+      ? `Connected · ${r.projects} project${r.projects === 1 ? '' : 's'} visible`
+      : `Couldn't connect: ${r.error}`;
+  }
+
   async function load(): Promise<void> {
     loading = true;
+    loadError = '';
     try {
       accounts = await api.get<IssueAccount[]>('/issue/accounts');
     } catch (e) {
-      toasts.error('Could not load Jira accounts', e instanceof Error ? e.message : String(e));
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -116,7 +142,7 @@
       closeModal();
       toasts.success('Jira account added', a.label);
     } catch (e) {
-      toasts.error('Add failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't add the Jira account", loadErrorText(e));
     } finally {
       busy = false;
     }
@@ -135,10 +161,13 @@
       if (token !== '') body.token = token;
       const updated = await api.patch<IssueAccount>(`/issue/accounts/${editing.id}`, body);
       accounts = accounts.map((x) => (x.id === updated.id ? updated : x));
+      // A changed token/URL makes an earlier verdict stale.
+      const { [updated.id]: _stale, ...rest } = testResults;
+      testResults = rest;
       closeModal();
       toasts.success('Jira account updated', updated.label);
     } catch (e) {
-      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't save the Jira account", loadErrorText(e));
     } finally {
       busy = false;
     }
@@ -149,78 +178,99 @@
     try {
       await api.del(`/issue/accounts/${a.id}`);
       accounts = accounts.filter((x) => x.id !== a.id);
-      toasts.info('Account deleted', a.label);
+      toasts.success('Jira account deleted', a.label);
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't delete the Jira account", loadErrorText(e));
     }
   }
 </script>
 
 <div class="settings-section">
-  <PageHeader title={sectionLabel('jira')} subtitle="Attach issues to sessions and track work in progress">
+  <PageHeader title={sectionLabel('jira')} subtitle="Search and attach Jira issues">
     {#snippet actions()}
-      <button class="btn primary" onclick={openAdd}>Add account</button>
+      <!-- While the list is empty the EmptyState owns the one "Add account". -->
+      {#if accounts.length > 0}
+        <button class="btn primary" onclick={openAdd}><Icon name="plus" size={13} /> Add account</button>
+      {/if}
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
 
-  {#if loading}
-    <Skeleton rows={2} height={48} />
-  {:else if accounts.length === 0}
-    <div class="card" style="padding: 24px; text-align: center; max-width: 520px">
-      <p class="dim" style="margin: 0 0 10px">
-        No Jira accounts yet. Add one to search and attach issues to your sessions.
-      </p>
-      <button class="btn primary" onclick={openAdd}>Add account</button>
-    </div>
-  {:else}
+  <LoadState what="Jira accounts" variant="page" {loading} error={loadError} empty={accounts.length === 0} onretry={() => void load()} rows={2}>
+    {#snippet emptyView()}
+      <EmptyState
+        variant="page"
+        icon="ticket"
+        title="No Jira accounts yet"
+        body="Add a Jira Cloud account to search issues, attach them to sessions and publish from Product. The API token is stored in the macOS Keychain."
+        actionLabel="Add account"
+        actionIcon="plus"
+        onaction={openAdd}
+      />
+    {/snippet}
     <div class="acct-list">
       {#each accounts as a (a.id)}
+        {@const warn = expiryWarning(a.token_expires_at)}
+        {@const r = testResults[a.id]}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="acct card"
           oncontextmenu={(e) => ctxMenu.show(e, [
-            { label: 'Edit', icon: 'edit', action: () => openEdit(a) },
+            { label: 'Test connection', icon: 'refresh', action: () => testAccount(a) },
+            { label: 'Edit…', icon: 'edit', action: () => openEdit(a) },
             { separator: true },
-            { label: 'Delete', icon: 'trash', danger: true, action: () => remove(a) },
+            { label: 'Delete…', icon: 'trash', danger: true, action: () => remove(a) },
           ])}
         >
           <span class="acct-icon"><Icon name="ticket" size={14} /></span>
           <div class="grow">
             <div class="acct-label">
-              {a.label}
-              <span class="chip">jira</span>
-              {#if expiryWarning(a.token_expires_at) === 'expired'}
-                <span class="expiry-badge expiry-badge-expired" title="Token has expired — re-enter it to restore access">expired</span>
-              {:else if expiryWarning(a.token_expires_at) === 'soon'}
-                <span class="expiry-badge expiry-badge-soon" title="Token expiring soon — update before it lapses">{expiryLabel(a.token_expires_at!)}</span>
+              <span class="acct-name" title={a.label}>{a.label}</span>
+              {#if warn === 'expired'}
+                <span class="chip bad" title="The token has expired — edit the account and paste a new one">Token expired</span>
+              {:else if warn === 'soon'}
+                <span class="chip chip-warn" title="Update the token before it lapses">{expiryLabel(a.token_expires_at!).replace(/^./, (c) => c.toUpperCase())}</span>
               {/if}
             </div>
-            <div class="acct-sub dim">
-              {a.email} · <span class="mono">{a.base_url}</span> · token ••••••
-              {#if a.token_expires_at}
-                · <span class="expiry" class:expired={new Date(a.token_expires_at).getTime() <= Date.now()}>{expiryLabel(a.token_expires_at)}</span>
+            <div class="acct-sub">
+              {a.email} · <span class="mono">{a.base_url}</span>
+              {#if a.token_expires_at && !warn}
+                · <span class="expiry">{expiryLabel(a.token_expires_at)}</span>
               {/if}
             </div>
+            {#if r}
+              <div class="test-result" role="status" class:ok={r !== 'busy' && r.ok} class:bad={r !== 'busy' && !r.ok}>
+                {#if r !== 'busy'}<Icon name={r.ok ? 'check' : 'warning'} size={12} />{/if}
+                {r === 'busy' ? 'Testing…' : testLabel(r)}
+              </div>
+            {/if}
           </div>
-          <button class="icon-btn" title="Edit account" aria-label="Edit account" onclick={() => openEdit(a)}>
-            <Icon name="edit" size={13} />
+          <button
+            class="btn small"
+            title="Check the stored token against {a.base_url}"
+            disabled={r === 'busy'}
+            onclick={() => testAccount(a)}
+          >
+            {r === 'busy' ? 'Testing…' : 'Test'}
           </button>
-          <button class="icon-btn" title="Delete account" aria-label="Delete account" onclick={() => remove(a)}>
-            <Icon name="trash" size={13} />
+          <button class="icon-btn acct-tool" title="Edit {a.label}" aria-label="Edit {a.label}" onclick={() => openEdit(a)}>
+            <Icon name="edit" size={14} />
+          </button>
+          <button class="icon-btn acct-tool" title="Delete {a.label}" aria-label="Delete {a.label}" onclick={() => remove(a)}>
+            <Icon name="trash" size={14} />
           </button>
         </div>
       {/each}
     </div>
-  {/if}
+  </LoadState>
   </PageBody>
 </div>
 
 {#if addOpen}
-  <Modal title={isEdit ? 'Edit Jira Account' : 'Add Jira Account'} onclose={closeModal}>
+  <Modal title={isEdit ? 'Edit Jira account' : 'Add Jira account'} onclose={closeModal}>
     <div class="field">
       <label for="ia-label">Label</label>
-      <input id="ia-label" class="input" bind:value={label} placeholder="work jira" />
+      <input id="ia-label" class="input" bind:value={label} placeholder="Work Jira" />
     </div>
     <div class="field">
       <label for="ia-base">Base URL</label>
@@ -246,7 +296,7 @@
       />
     </div>
     <div class="field">
-      <label for="ia-token">API Token</label>
+      <label for="ia-token">API token</label>
       <input
         id="ia-token"
         class="input"
@@ -305,7 +355,7 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    max-width: 560px;
+    max-width: var(--settings-col);
   }
   .acct {
     display: flex;
@@ -313,48 +363,71 @@
     gap: 12px;
     padding: 12px 14px;
   }
+  .acct .grow {
+    min-width: 0;
+  }
   .acct-icon {
-    width: 30px;
-    height: 30px;
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent-text);
+    background: var(--surface-2);
+    color: var(--text-dim);
     display: grid;
     place-items: center;
   }
   .acct-label {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     display: flex;
     align-items: center;
     gap: 6px;
+    min-width: 0;
+  }
+  .acct-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .acct-sub {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
     margin-top: 2px;
+    overflow-wrap: anywhere;
   }
-  .expiry {
+  .chip-warn {
+    color: var(--warning);
+    border-color: color-mix(in srgb, var(--warning) 35%, transparent);
+    background: var(--warning-soft);
+  }
+  .test-result {
+    display: flex;
+    align-items: flex-start;
+    gap: 5px;
+    font-size: var(--fs-s);
+    margin-top: 4px;
+    overflow-wrap: anywhere;
     color: var(--text-dim);
   }
-  .expiry.expired {
-    color: var(--danger);
-    font-weight: 600;
+  .test-result :global(svg) {
+    flex-shrink: 0;
+    margin-top: 2px;
   }
-  .expiry-badge {
-    font-size: var(--fs-xs);
-    font-weight: 700;
-    padding: 1px 6px;
-    border-radius: 999px;
-    letter-spacing: 0.03em;
-    text-transform: uppercase;
+  .test-result.ok {
+    color: var(--success);
   }
-  .expiry-badge-expired {
-    background: color-mix(in srgb, var(--danger) 15%, transparent);
+  .test-result.bad {
     color: var(--danger);
   }
-  .expiry-badge-soon {
-    background: color-mix(in srgb, var(--warning) 15%, transparent);
-    color: var(--warning);
-    text-transform: none;
+
+  @media (max-width: 1024px) {
+    .acct-list {
+      max-width: none;
+    }
+    .acct-tool {
+      min-width: 36px;
+      min-height: 36px;
+    }
   }
 </style>

@@ -33,6 +33,8 @@
   import { toasts } from '../../../lib/toast.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../../lib/loadError';
   import MockupViewer from '../MockupViewer.svelte';
   import MockupAnnotations from '../MockupAnnotations.svelte';
   import MockupAssistPanel from '../MockupAssistPanel.svelte';
@@ -295,8 +297,8 @@
         selectedId = rows[0]?.att.id ?? null;
       }
     } catch (e) {
-      loadError = e instanceof Error ? e.message : String(e);
-      if (!quiet) toasts.error('Could not load design artifacts', loadError);
+      // A load failure is shown inline in the assets pane (with Retry), not toasted.
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -348,7 +350,7 @@
         product.setContentBase(a.id, a.updated_at);
       }
     } catch (e) {
-      if (token === loadToken) sourceError = e instanceof Error ? e.message : String(e);
+      if (token === loadToken) sourceError = loadErrorText(e);
     } finally {
       if (token === loadToken) sourceLoading = false;
     }
@@ -421,12 +423,23 @@
   });
 
   /** A save came back 409: the row moved on. Take theirs (re-fetch) or keep
-   *  mine (overwrite against the fresh base) — never a silent clobber. */
+   *  mine (overwrite against the fresh base) — never a silent clobber. Two
+   *  explicit buttons: a yes/no here once mapped Cancel/Esc to "overwrite
+   *  theirs", so dismissing the dialog destroyed the other version. Dismiss
+   *  now does nothing — the edits stay pending and the next save asks again. */
   async function resolveConflict(a: ProductAttachment, mine: string): Promise<void> {
-    const takeTheirs = await confirmer.ask(
-      'Saving failed: this artifact was changed on the server since you loaded it (another editor or the agent). Take the server version (your edits are dropped) or keep yours and overwrite it?',
-      { title: 'Save conflict', confirmLabel: 'Take theirs', danger: false },
+    const { value } = await confirmer.choose(
+      'Saving failed: this artifact was changed on the server since you loaded it (another editor or the agent). Your edits aren’t saved yet.',
+      {
+        title: 'Save conflict',
+        options: [
+          { label: 'Keep mine (overwrite theirs)', value: 'mine', kind: 'primary' },
+          { label: 'Take theirs (discard my edits)', value: 'theirs', kind: 'danger' },
+        ],
+      },
     );
+    if (value !== 'mine' && value !== 'theirs') return;
+    const takeTheirs = value === 'theirs';
     try {
       const fresh = (await product.listAttachmentsOf(a.story_id)).find((x) => x.id === a.id);
       if (!fresh) return;
@@ -833,10 +846,8 @@
           onimportGlb={() => glbInput?.click()}
         />
         <input bind:this={glbInput} type="file" accept=".glb,.gltf,{GLB_MIME},{GLTF_MIME}" style="display:none" onchange={importGlb} />
-      {:else if loading}
-        <div class="list-empty">Loading…</div>
-      {:else if loadError}
-        <div class="list-empty err">{loadError}</div>
+      {:else if (loading || loadError) && rows.length === 0}
+        <LoadState what="design artifacts" variant="compact" loading={loading} error={loadError} empty onretry={() => void loadAll()} />
       {:else if rows.length === 0}
         <EmptyState
           icon="layers"
@@ -871,8 +882,8 @@
                     <Icon name="zap" size={12} />
                   </button>
                 {/if}
-                <button class="row-more" onclick={(e) => rowMenu(e, r)} aria-label="Artifact menu" title="More">
-                  <Icon name="grip" size={12} />
+                <button class="row-more" onclick={(e) => rowMenu(e, r)} aria-label="Artifact actions" title="Artifact actions">
+                  <Icon name="more" size={12} />
                 </button>
               </div>
             {/each}
@@ -893,7 +904,7 @@
         {#if kind === 'html'}
           <div class="seg-group" role="group" aria-label="Device frame">
             {#each DEVICES as d (d.id)}
-              <button class="seg" class:active={device === d.id} onclick={() => (device = d.id)}>{d.label}</button>
+              <button class="seg" class:active={device === d.id} aria-pressed={device === d.id} onclick={() => (device = d.id)}>{d.label}</button>
             {/each}
           </div>
           <button class="tb-btn" onclick={() => (scheme = scheme === 'dark' ? 'light' : 'dark')} title="Toggle light / dark backdrop" aria-label="Toggle light / dark">
@@ -901,31 +912,31 @@
           </button>
         {/if}
         {#if kind === 'excalidraw'}
-          <button class="tb-btn" class:on={annotate} onclick={() => (annotate = !annotate)} title="Annotate: pin comments on the board (read-only while on)">
+          <button class="tb-btn" class:on={annotate} aria-pressed={annotate} onclick={() => (annotate = !annotate)} title="Annotate: pin comments on the board (read-only while on)">
             <Icon name="pin" size={12} /> Annotate
           </button>
         {/if}
         {#if kind === 'scene3d'}
-          <button class="tb-btn" class:on={play} onclick={() => (play = !play)} title="Play: presentation view (doc camera, no gizmo/grid)">
+          <button class="tb-btn" class:on={play} aria-pressed={play} onclick={() => (play = !play)} title="Play: presentation view (doc camera, no gizmo/grid)">
             <Icon name="play" size={12} /> Play
           </button>
         {/if}
         {#if isText}
-          <button class="tb-btn" class:on={codeView} onclick={() => (codeView = !codeView)} title="Edit the source">
+          <button class="tb-btn" class:on={codeView} aria-pressed={codeView} onclick={() => (codeView = !codeView)} title="Edit the source">
             <Icon name="file" size={12} /> Source
           </button>
         {/if}
         <span class="st-grow"></span>
         <button class="tb-btn" onclick={exportMenu} title="Export"><Icon name="arrowDown" size={12} /> Export <Icon name="chevronDown" size={10} /></button>
-        <button class="tb-btn icon" onclick={moreMenu} aria-label="More" title="More"><Icon name="grip" size={13} /></button>
+        <button class="tb-btn icon" onclick={moreMenu} aria-label="More actions" title="More actions"><Icon name="more" size={14} /></button>
       </div>
 
       <div class="stage-body" class:split={codeView && isText}>
         <div class="viewport" bind:this={viewportEl}>
           {#if sourceLoading}
-            <div class="stage-msg">Loading…</div>
+            <div class="stage-msg">Loading {att.filename}…</div>
           {:else if sourceError}
-            <div class="stage-msg err">{sourceError}</div>
+            <LoadState what={att.filename} error={sourceError} empty onretry={() => void loadSource(att)} />
           {:else if kind === 'html'}
             <DeviceFrame {device} {scheme}>
               <MockupViewer attachment={att} {source} hideToolbar bind:allowScripts />
@@ -1162,13 +1173,13 @@
     gap: 6px;
     padding: 6px 10px;
     border-bottom: 1px solid var(--border);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .child-filter select {
     flex: 1;
     min-width: 0;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 2px 4px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -1182,15 +1193,6 @@
     display: flex;
     flex-direction: column;
   }
-  .list-empty {
-    font-size: 11.5px;
-    color: var(--text-dim);
-    padding: 10px;
-    line-height: 1.5;
-  }
-  .list-empty.err {
-    color: var(--danger);
-  }
   .group-head {
     display: flex;
     align-items: center;
@@ -1201,7 +1203,7 @@
     background: transparent;
     color: var(--text-dim);
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     cursor: pointer;
@@ -1267,8 +1269,8 @@
   }
   .mockup-type {
     flex-shrink: 0;
-    font-size: 9px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 1px 5px;
@@ -1283,7 +1285,7 @@
   .mockup-name {
     flex: 1;
     min-width: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1291,8 +1293,8 @@
   .agent-badge,
   .owner-badge {
     flex-shrink: 0;
-    font-size: 8.5px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     padding: 1px 5px;
@@ -1330,7 +1332,7 @@
     flex-wrap: wrap;
   }
   .st-name {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1339,7 +1341,7 @@
   }
   .st-type {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -1361,7 +1363,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
     white-space: nowrap;
@@ -1380,7 +1382,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
     white-space: nowrap;
@@ -1455,7 +1457,7 @@
   }
   .stage-msg {
     padding: 24px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     text-align: center;
     flex: none;
@@ -1472,7 +1474,7 @@
     list-style: none;
     text-align: start;
     max-width: 560px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.5;
     color: var(--text-dim);
   }
@@ -1482,7 +1484,7 @@
     gap: 6px;
     padding: 4px 10px;
     border-top: 1px solid var(--border);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     flex-shrink: 0;
   }
@@ -1495,7 +1497,7 @@
     background: none;
     color: var(--accent-text);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 0;
     margin-inline-start: 6px;
   }
@@ -1512,7 +1514,7 @@
   }
   .stage-empty p {
     margin: 0;
-    font-size: 13px;
+    font-size: var(--fs-m);
     max-width: 360px;
     line-height: 1.5;
   }
@@ -1551,15 +1553,15 @@
     gap: 6px;
   }
   .insp-title {
-    font-size: 11px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     color: var(--text);
   }
   .insp-row {
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .insp-row .k {
     width: 48px;
@@ -1574,7 +1576,7 @@
     white-space: nowrap;
   }
   .insp-row select.v {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 2px 4px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -1589,14 +1591,14 @@
     display: flex;
     align-items: flex-start;
     gap: 6px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1.4;
     cursor: pointer;
   }
   .insp-hint {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1.5;
     overflow-wrap: anywhere;
@@ -1635,7 +1637,7 @@
     .arena-seg .seg {
       flex: 1;
       height: 32px;
-      font-size: 13px;
+      font-size: var(--fs-m);
     }
     .arena-assets,
     .arena-stage,

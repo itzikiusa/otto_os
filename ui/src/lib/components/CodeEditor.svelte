@@ -2,7 +2,7 @@
   // CodeMirror 6 editor with LSP hover/diagnostics/completion/definitions.
   // readOnly=true by default (Files viewer is read-only; LSP still works).
   import { onDestroy } from 'svelte';
-  import { EditorView, lineNumbers, keymap, drawSelection } from '@codemirror/view';
+  import { EditorView, lineNumbers, keymap, drawSelection, placeholder as cmPlaceholder } from '@codemirror/view';
   import { EditorState, Compartment, Prec } from '@codemirror/state';
   import { defaultKeymap, history, historyKeymap, selectAll } from '@codemirror/commands';
   import { search, searchKeymap, openSearchPanel } from '@codemirror/search';
@@ -118,6 +118,9 @@
      * by the DB query editor.
      */
     findOwner?: boolean;
+    /** Hint shown while the document is EMPTY (e.g. "Write a query — ⌘↵ to
+     *  run"). Reapplied live; '' / omitted shows nothing. */
+    placeholder?: string;
   }
 
   let {
@@ -134,6 +137,7 @@
     gotoLine = null,
     gotoCol = null,
     findOwner = false,
+    placeholder = '',
   }: Props = $props();
 
   // ── Container ─────────────────────────────────────────────────────────────
@@ -144,6 +148,16 @@
   // Holds either the default autocompletion() or one overridden with the
   // caller's completionSource (DB query editor). Reconfigured reactively.
   let completionCompartment = new Compartment();
+  let placeholderCompartment = new Compartment();
+  /** The hint the live view currently carries (plain field — not reactive). */
+  let appliedPlaceholder = '';
+  // Placeholder text uses the app's dim token in BOTH schemes (oneDark ships none).
+  const placeholderTheme = EditorView.theme({
+    '.cm-placeholder': { color: 'var(--text-dim)', fontStyle: 'normal' },
+  });
+  function placeholderExt(text: string): Extension {
+    return text ? cmPlaceholder(text) : [];
+  }
 
   // ── Language extension map ─────────────────────────────────────────────────
 
@@ -409,6 +423,7 @@
     teardownEditor();
     lspCompartment = new Compartment();
     completionCompartment = new Compartment();
+    placeholderCompartment = new Compartment();
 
     const langExt = cmLangFor(filePath, language);
     // Reset selection when a new file is opened
@@ -424,6 +439,8 @@
       lintGutter(),
       drawSelection(),
       completionCompartment.of(completionExt()),
+      placeholderCompartment.of(placeholderExt((appliedPlaceholder = placeholder))),
+      placeholderTheme,
       search({ top: false }),
       themeCompartment.of(themeExt(ui.resolvedScheme)),
       lspCompartment.of([]),
@@ -574,6 +591,14 @@
     view.dispatch({ effects: completionCompartment.reconfigure(completionExt()) });
   });
 
+  // Swap the empty-doc hint live (no remount) when the caller changes it.
+  $effect(() => {
+    const text = placeholder;
+    if (!view || text === appliedPlaceholder) return;
+    appliedPlaceholder = text;
+    view.dispatch({ effects: placeholderCompartment.reconfigure(placeholderExt(text)) });
+  });
+
   // Re-theme live when the app scheme (light/dark) changes.
   $effect(() => {
     const scheme = ui.resolvedScheme;
@@ -627,11 +652,11 @@
     inset-inline-end: 10px;
     z-index: 20;
     padding: 3px 10px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-family: var(--font-ui);
     font-weight: 500;
-    color: #e2e8f0;
-    background: #2d5eff;
+    color: var(--accent-contrast);
+    background: var(--accent-solid);
     border: none;
     border-radius: 4px;
     cursor: pointer;
@@ -642,18 +667,18 @@
   }
 
   .send-to-agent-btn:hover {
-    background: #4a72ff;
+    background: color-mix(in srgb, var(--accent-solid) 88%, var(--text));
   }
 
   .send-to-agent-btn:active {
-    background: #1a43cc;
+    background: color-mix(in srgb, var(--accent-solid) 80%, var(--bg));
   }
 
   /* Make the CM editor fill the container fully */
   .code-editor-wrap :global(.cm-editor) {
     height: 100%;
     font-family: var(--font-mono, 'SF Mono', SFMono-Regular, Menlo, Monaco, 'Courier New', monospace);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.55;
   }
 

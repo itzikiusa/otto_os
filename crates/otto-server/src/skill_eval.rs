@@ -2112,36 +2112,37 @@ async fn list_sources(
             provider: None,
         });
     }
-    // Per-provider on-disk skills (~/.claude|.codex|.agy/skills).
-    if let Some(home) = dirs::home_dir() {
-        for provider in ["claude", "codex", "agy"] {
-            let dir = home.join(format!(".{provider}")).join("skills");
-            let Ok(entries) = std::fs::read_dir(&dir) else {
+    // Per-provider on-disk skills — the same dirs the Skills Lab lists
+    // (~/.claude/skills, $CODEX_HOME/skills, ~/.gemini/skills for agy).
+    for provider in otto_context::provider_skills::PROVIDERS {
+        let Some(dir) = otto_context::provider_skills::provider_root(provider) else {
+            continue;
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            if !e.path().is_dir() {
                 continue;
-            };
-            for e in entries.flatten() {
-                if !e.path().is_dir() {
-                    continue;
-                }
-                let name = e.file_name().to_string_lossy().into_owned();
-                if !is_safe_name(&name) {
-                    continue;
-                }
-                let skill_md = e.path().join("SKILL.md");
-                if !skill_md.exists() {
-                    continue;
-                }
-                let description = std::fs::read_to_string(&skill_md)
-                    .ok()
-                    .map(|b| parse_frontmatter_description(&b))
-                    .unwrap_or_default();
-                sources.push(SkillSourceInfo {
-                    kind: "provider".into(),
-                    name,
-                    description,
-                    provider: Some(provider.to_string()),
-                });
             }
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !is_safe_name(&name) {
+                continue;
+            }
+            let skill_md = e.path().join("SKILL.md");
+            if !skill_md.exists() {
+                continue;
+            }
+            let description = std::fs::read_to_string(&skill_md)
+                .ok()
+                .map(|b| parse_frontmatter_description(&b))
+                .unwrap_or_default();
+            sources.push(SkillSourceInfo {
+                kind: "provider".into(),
+                name,
+                description,
+                provider: Some(provider.to_string()),
+            });
         }
     }
     Ok(Json(SkillSourcesResp { sources }))

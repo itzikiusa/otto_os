@@ -422,7 +422,7 @@
     flex-direction: column;
     min-height: 0;
     height: 100%;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text);
   }
   .s3d-hier-head {
@@ -448,7 +448,7 @@
     border-radius: var(--radius-s, 5px);
     background: var(--bg);
     color: var(--text);
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .s3d-hier-body {
     flex: 1 1 auto;
@@ -515,7 +515,7 @@
     flex-shrink: 0;
   }
   .s3d-row-icon.light {
-    color: var(--status-warn, #e0a000);
+    color: var(--warning);
   }
   .s3d-row-name {
     flex: 1 1 auto;
@@ -535,10 +535,10 @@
     min-width: 0;
     padding: 2px 4px;
     border: 1px solid var(--accent);
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .s3d-icon-btn {
     appearance: none;

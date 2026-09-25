@@ -14,6 +14,7 @@
   import AttachProductStory from './AttachProductStory.svelte';
   import Handover from './Handover.svelte';
   import HandoverDeliveryPanel from './HandoverDeliveryPanel.svelte';
+  import ShareModal from './ShareModal.svelte';
   import { ws, isForeground } from '../../lib/stores/workspace.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { activity } from '../../lib/stores/activity.svelte';
@@ -29,6 +30,9 @@
   import { presetItems } from './SplitNode.svelte';
   import ConversationView from './conversation/ConversationView.svelte';
   import type { AttachedIssue, SessionStatus } from '../../lib/api/types';
+  import { uiControl } from '../../lib/stores/uiControl.svelte';
+  import { commandLabel, providerName } from '../../lib/uiCommands/frames';
+  import { moduleLabel } from '../../lib/sidebar';
 
   // Default idle-suspend grace period (5 minutes) used for the "suspends in N"
   // countdown hint. Reflects the backend's SUSPEND_GRACE constant; the backend
@@ -168,10 +172,6 @@
   }
 
   let renaming = $state(false);
-  // Bumped after a successful restart so the embedded <Terminal> drops its
-  // exited overlay and reconnects to the freshly respawned/resumed PTY.
-  let restartNonce = $state(0);
-
   // Keyboard follows the active pane: when this pane becomes the target one
   // (new session, tab/tile switch, sidebar navigation) move focus into its
   // terminal so typing works without a click. `focused` alone won't do — it is
@@ -188,6 +188,13 @@
   let attachIssueOpen = $state(false);
   let attachProductOpen = $state(false);
   let handoverOpen = $state(false);
+  let shareOpen = $state(false);
+  /** ⋯ → Network profile…: show the network strip for a session without a
+   *  profile (it is hidden then — see the markup). */
+  let netOpen = $state(false);
+  const networkProfileId = $derived(
+    typeof session?.meta?.network_profile_id === 'string' ? session.meta.network_profile_id : '',
+  );
 
   const attachedIssue = $derived(
     (session?.meta?.issue as AttachedIssue | undefined) ?? null,
@@ -207,6 +214,44 @@
   // --- Additional directories editor (meta.extra_dirs → `--add-dir` args) -----
   // Only agent sessions launch a CLI that honors `--add-dir`.
   const isAgent = $derived(session?.kind === 'agent');
+
+  // --- Agent UI control (stores/uiControl.svelte.ts) --------------------------
+  // The grant is server-owned (`meta.ui_control`); the header toggle flips it,
+  // and an ungranted `otto.ui_*` call raises the inline prompt under the header.
+  const uiGranted = $derived(isAgent && uiControl.granted(sessionId));
+  /** The agent asked again after a Deny: no banner, just a mark on the toggle. */
+  const uiAskedAgain = $derived(isAgent && uiControl.askedAfterDeny(sessionId));
+  const uiBusy = $derived(uiControl.busy[sessionId] === true);
+  /** Only the owner, signed in as themselves, may ALLOW it (it drives their
+   *  window); anyone who sees it on may still turn it off (the daemon also
+   *  lets a workspace admin revoke). */
+  const uiCanGrant = $derived(
+    isAgent && !readOnly && !auth.isImpersonating && !!session && session.created_by === auth.me?.id,
+  );
+  const uiToggleShown = $derived(uiCanGrant || (uiGranted && !readOnly));
+  const uiPrompt = $derived(uiCanGrant ? uiControl.promptFor(sessionId) : null);
+  /** The UI-control toggle rides in the header while there's room — and longer
+   *  while it's ON or the agent is asking (a live permission stays visible). */
+  const uiToggleInline = $derived(
+    uiToggleShown && (uiGranted || uiAskedAgain ? tier < 6 : tier < 4),
+  );
+  const agentWho = $derived(providerName(session?.provider ?? ''));
+  const uiToggleTitle = $derived(
+    uiGranted
+      ? `UI control is on — ${agentWho} can open and drive Otto beside this session. Click to turn it off.`
+      : uiAskedAgain
+        ? `${agentWho} asked to drive Otto (you denied it earlier). Click to allow it for this session.`
+        : `Allow UI control — let ${agentWho} open and drive Otto beside this session, where you can see it`,
+  );
+  function toggleUiControl(): void {
+    void uiControl.setGrant(sessionId, !uiGranted);
+  }
+  /** What the agent asked for, in words: "“Run query” in Connections". */
+  const uiAskWhat = $derived(
+    uiPrompt
+      ? `“${commandLabel(uiPrompt.command)}”${uiPrompt.module && uiPrompt.module !== 'shell' ? ` in ${moduleLabel(uiPrompt.module)}` : ''}`
+      : '',
+  );
 
   // --- Terminal · Chat · Split (docs/design/conversation-view.md §5.1) --------
   // The chat is rebuilt from the provider transcript; probing it once per agent
@@ -253,6 +298,8 @@
       gripOn,
       readOnly,
       renaming,
+      uiGranted,
+      uiAskedAgain,
     ].join('|'),
   );
   let lastFitSig = '';
@@ -300,6 +347,22 @@
       action: () => setView(m),
     }));
   }
+  /** ←/→ (Home/End) move between the Terminal · Chat · Split tabs, like any
+   *  tablist; focus follows the selection (roving tabindex). */
+  function onViewTabKey(e: KeyboardEvent): void {
+    const modes = VIEW_META.map(([m]) => m).filter((m) => m !== 'split' || wide);
+    const i = modes.indexOf(effView);
+    let next = i;
+    if (e.key === 'ArrowRight') next = (i + 1) % modes.length;
+    else if (e.key === 'ArrowLeft') next = (i - 1 + modes.length) % modes.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = modes.length - 1;
+    else return;
+    e.preventDefault();
+    setView(modes[next]);
+    const list = e.currentTarget as HTMLElement;
+    queueMicrotask(() => list.querySelector<HTMLElement>(`[data-view="${modes[next]}"]`)?.focus());
+  }
   function openViewMenu(e: MouseEvent | KeyboardEvent): void {
     ctxMenu.show(e, viewRows(false));
   }
@@ -321,6 +384,23 @@
   let bodyEl = $state<HTMLDivElement | null>(null);
   let chatFrac = $state(untrack(() => transcript.splitFrac(sessionId)));
   let splitResizing = $state(false);
+  /** Keyboard / reset path for the chat|terminal separator: a step of ±5%
+   *  (RTL-aware), or `null` to reset to an even split. */
+  function nudgeSplit(delta: number | null): void {
+    chatFrac = delta === null ? 0.5 : Math.min(0.8, Math.max(0.3, chatFrac + delta));
+    transcript.setSplitFrac(sessionId, chatFrac);
+  }
+  function onSplitKey(e: KeyboardEvent): void {
+    const rtl = getComputedStyle(e.currentTarget as Element).direction === 'rtl';
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      const grow = (e.key === 'ArrowRight') !== rtl;
+      nudgeSplit(grow ? 0.05 : -0.05);
+    } else if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault();
+      nudgeSplit(e.key === 'Home' ? -1 : 1);
+    }
+  }
   function startSplit(e: MouseEvent): void {
     e.preventDefault();
     const el = bodyEl;
@@ -393,7 +473,7 @@
       const dirs = collectDirs();
       await ws.updateSessionMeta(sessionId, { extra_dirs: dirs });
       if (alsoRestart) {
-        await ws.restartSession(sessionId);
+        await ws.restartSession(sessionId, { quiet: true });
         toasts.success('Directories saved', 'Session restarted with the new directories.');
       } else {
         toasts.success('Directories saved', 'Applies the next time this session restarts.');
@@ -406,6 +486,12 @@
     }
   }
 
+  /** The size the terminal actually draws at: below the chosen size while the
+   *  pane is too narrow for 80 columns (Terminal's column floor). The header
+   *  shows it, so "13px" never labels 10px text. */
+  let drawnFont = $state<number | null>(null);
+  const fontShrunk = $derived(drawnFont !== null && drawnFont < ui.termFontSize);
+
   function onTermStatus(s: SessionStatus): void {
     ws.statusMap[sessionId] = s;
   }
@@ -417,6 +503,10 @@
   }
 
   async function commitRename(): Promise<void> {
+    // Enter/Escape unmount the input, and WebKit fires `blur` on the removed
+    // focused node — without this guard Escape COMMITTED the draft (and Enter
+    // sent the rename twice).
+    if (!renaming) return;
     renaming = false;
     const next = draftTitle.trim();
     if (!next || next === session?.title) return;
@@ -427,25 +517,10 @@
     }
   }
 
-  async function restart(): Promise<void> {
-    // Restart kills the live process and respawns it — a working agent loses
-    // its in-flight turn, so that one case asks first (idle/exited don't).
-    if (status === 'working') {
-      const name = session?.title?.trim() || 'this session';
-      const ok = await confirmer.ask(
-        `“${name}” is working right now. Restarting stops its current turn and starts the agent again, resuming its saved conversation where it can.`,
-        { title: 'Restart working session?', confirmLabel: 'Restart session', danger: true },
-      );
-      if (!ok) return;
-    }
-    try {
-      await ws.restartSession(sessionId);
-      // Nudge the embedded Terminal to drop its exited overlay and reconnect to
-      // the now-live PTY (the session id is unchanged, so this is the only signal).
-      restartNonce++;
-    } catch (e) {
-      toasts.error('Restart failed', e instanceof Error ? e.message : String(e));
-    }
+  // Asks first when the agent is working (it loses its in-flight turn); the
+  // store bumps the restart nonce the Terminal below reconnects on.
+  function restart(): Promise<void> {
+    return ws.requestRestart(sessionId);
   }
 
   const keepAlive = $derived(session?.meta?.keep_alive === true);
@@ -467,11 +542,14 @@
     }
   }
 
-  // Always asked — even under "Always delete" (Settings → Appearance), same as
-  // the tab ×: a remembered preference never skips an irreversible delete.
+  // Always asked, like the sidebar row's Delete: this is the explicit Delete
+  // command. The "Always delete" preference (Settings → Appearance) governs
+  // CLOSING a tab (⌘W / the tab ×), which it now does silently.
   async function del(): Promise<void> {
+    // Name it — in a tiled/split view the ⋯ that opened this is one of many.
+    const name = session?.title?.trim();
     const ok = await confirmer.ask(
-      'Delete this session and its entire history? This cannot be undone.',
+      `Delete ${name ? `“${name}”` : 'this session'} and its entire history? This cannot be undone.`,
       { title: 'Delete session', confirmLabel: 'Delete' },
     );
     if (!ok) return;
@@ -547,7 +625,7 @@
       ...(tier >= 4 && handoverFromId
         ? [
             {
-              label: `Open handover source ↰ ${handoverFrom?.title ?? 'source'}`,
+              label: `Open handover source: ${handoverFrom?.title ?? 'source'}`,
               icon: 'link',
               action: () => ws.navigateToSession(handoverFromId),
             } as MenuItem,
@@ -562,8 +640,8 @@
       // tiling many sessions.
       ...(termCtlFolded
         ? [
-            { label: `Terminal font smaller (${ui.termFontSize}px)`, action: () => ui.termZoomOut() } as MenuItem,
-            { label: 'Terminal font larger', icon: 'plus', action: () => ui.termZoomIn() } as MenuItem,
+            { label: `Terminal font smaller (${ui.termFontSize}px)`, disabled: ui.termFontSize <= 8, action: () => ui.termZoomOut() } as MenuItem,
+            { label: 'Terminal font larger', icon: 'plus', disabled: ui.termFontSize >= 28, action: () => ui.termZoomIn() } as MenuItem,
             {
               label: ui.termCopyOnSelect ? 'Copy-on-select: on' : 'Copy-on-select: off',
               icon: 'copy',
@@ -587,9 +665,12 @@
       ...(readOnly
         ? []
         : [
-            { label: 'Rename…', icon: 'edit', action: startRename } as MenuItem,
+            { label: 'Rename', icon: 'edit', action: startRename } as MenuItem,
             ...(isAgent ? [{ label: 'Additional directories…', icon: 'folder', action: openDirs } as MenuItem] : []),
             ...(isAgent ? [{ label: 'Hand over to…', icon: 'send', action: openHandover } as MenuItem] : []),
+            // Parity with the tab's right-click menu — a tiled/split pane has no
+            // tab to right-click, so Share was unreachable from here.
+            { label: 'Share…', icon: 'share', action: () => (shareOpen = true) } as MenuItem,
             { separator: true } as MenuItem,
             {
               label: attachedIssue ? 'Change Jira issue…' : 'Attach Jira issue…',
@@ -599,9 +680,24 @@
             ...(attachedIssue ? [{ label: 'Detach issue', icon: 'link', action: detachIssue } as MenuItem] : []),
             { label: 'Attach product story…', icon: 'file', action: openAttachProductStory } as MenuItem,
             { label: 'Canvas…', icon: 'shapes', action: openCanvas } as MenuItem,
+            ...(auth.can('connections', 'view') && !networkProfileId
+              ? [{ label: netOpen ? 'Hide network profile' : 'Network profile…', icon: 'globe', action: () => (netOpen = !netOpen) } as MenuItem]
+              : []),
             ...(isAgent
               ? [
                   { separator: true } as MenuItem,
+                  ...(uiToggleShown
+                    ? [
+                        {
+                          label: 'Allow UI control',
+                          icon: 'cursor',
+                          checked: uiGranted,
+                          disabled: uiBusy,
+                          title: uiToggleTitle,
+                          action: toggleUiControl,
+                        } as MenuItem,
+                      ]
+                    : []),
                   {
                     label: keepAlive ? 'Unpin (allow auto-suspend)' : 'Pin (keep alive)',
                     icon: 'pin',
@@ -611,13 +707,20 @@
               : []),
             // In-progress agent only: respawn a stuck PTY (provider resume when
             // possible). Idle/exited/reconnectable sessions have their own paths.
-            ...(isAgent && (status === 'running' || status === 'working')
-              ? [{ label: 'Restart agent', icon: 'refresh', action: () => void restart() } as MenuItem]
+            // Same verb as the header ↻ button; skipped once tier 5 folded that
+            // button into this menu (it is already a row below — no duplicate).
+            ...(isAgent && tier < 5 && (status === 'running' || status === 'working')
+              ? [{ label: 'Restart session', icon: 'refresh', action: () => void restart() } as MenuItem]
               : []),
           ]),
       ...(folded.length > 0 ? [{ separator: true } as MenuItem, ...folded] : []),
       ...(showClose && tier >= 7
-        ? [{ separator: true } as MenuItem, { label: 'Close pane', icon: 'x', action: onclosepane } as MenuItem]
+        ? [
+            { separator: true } as MenuItem,
+            // Same words as the header ✕ it replaces: in a split that closes the
+            // SESSION (archive/delete per Settings), not merely the pane.
+            { label: closeTitle.split(' (')[0], icon: 'x', action: onclosepane } as MenuItem,
+          ]
         : []),
       ...(presets.length > 0 ? [{ separator: true } as MenuItem, ...presets] : []),
       ...(readOnly
@@ -677,7 +780,7 @@
         class="pane-title"
         role="button"
         tabindex="0"
-        title="Double-click to rename; right-click for options"
+        title="{session?.title ?? sessionId} — double-click to rename, right-click for options"
         ondblclick={startRename}
         oncontextmenu={(e) => openPaneMenu(e)}
       >{session?.title ?? sessionId}</span>
@@ -731,19 +834,19 @@
     {/if}
     {#if summary?.in_progress}
       <span class="now-task" title="Current task: {summary.in_progress}">
-        now: {summary.in_progress}
+        Now: {summary.in_progress}
       </span>
     {/if}
     {#if handoverFromId}
       <button
         class="handover-crumb"
-        title="Open the session this was handed over from"
+        title="Handed over from “{handoverFrom?.title ?? 'another session'}” — open it"
         onmousedown={(e) => e.stopPropagation()}
         onclick={() => ws.navigateToSession(handoverFromId)}
-      >↰ {handoverFrom?.title ?? 'source'}</button>
+       aria-label="Open handover source: {handoverFrom?.title ?? 'source'}"><Icon name="undo" size={11} /><span class="crumb-text">{handoverFrom?.title ?? 'source'}</span></button>
     {/if}
     {#if handoverPending}
-      <span class="handover-pending" title="Preparing the handover brief…">⏳ handover…</span>
+      <span class="handover-pending" title="Preparing the handover brief…"><Icon name="clock" size={11} /> Preparing handover…</span>
     {/if}
     {#if idleHint}
       <span class="idle-hint" title="Session is idle. Auto-suspend frees its RAM while keeping it resumable.">{idleHint}</span>
@@ -751,11 +854,11 @@
     {#if session?.cwd}<span class="pane-cwd mono" title={session.cwd}>{session.cwd}</span>{/if}
     <span class="grow"></span>
     {#if isAgent && tier < 5}
-      <div class="segmented view-seg" role="tablist" tabindex="-1" aria-label="Session view" onmousedown={(e) => e.stopPropagation()}>
-        <button role="tab" class:active={effView === 'terminal'} aria-selected={effView === 'terminal'} onclick={() => setView('terminal')} title="Terminal (⌘⇧C cycles)">Terminal</button>
-        <button role="tab" class:active={effView === 'chat'} aria-selected={effView === 'chat'} onclick={() => setView('chat')} title="Chat — the conversation rebuilt from the transcript">Chat</button>
+      <div class="segmented view-seg" role="tablist" tabindex="-1" aria-label="Session view" onmousedown={(e) => e.stopPropagation()} onkeydown={onViewTabKey}>
+        <button role="tab" class:active={effView === 'terminal'} aria-selected={effView === 'terminal'} tabindex={effView === 'terminal' ? 0 : -1} data-view="terminal" onclick={() => setView('terminal')} title="Terminal (⌘⇧C cycles)">Terminal</button>
+        <button role="tab" class:active={effView === 'chat'} aria-selected={effView === 'chat'} tabindex={effView === 'chat' ? 0 : -1} data-view="chat" onclick={() => setView('chat')} title="Chat — the conversation rebuilt from the transcript">Chat</button>
         {#if wide}
-          <button role="tab" class:active={effView === 'split'} aria-selected={effView === 'split'} onclick={() => setView('split')} title="Chat beside the terminal">Split</button>
+          <button role="tab" class:active={effView === 'split'} aria-selected={effView === 'split'} tabindex={effView === 'split' ? 0 : -1} data-view="split" onclick={() => setView('split')} title="Chat beside the terminal">Split</button>
         {/if}
       </div>
     {:else if isAgent && tier < 6}
@@ -777,9 +880,15 @@
            controls never float over (and hide) terminal content. The embedded
            <Terminal> gets showToolbar={false} to drop its overlay counterpart. -->
       <div class="term-ctl" role="toolbar" tabindex="-1" aria-label="Terminal controls" onmousedown={(e) => e.stopPropagation()}>
-        <button class="icon-btn" onclick={() => ui.termZoomOut()} title="Terminal font smaller (Ctrl+−)" aria-label="Zoom out">−</button>
-        <span class="term-ctl-size" title="Terminal font size">{ui.termFontSize}px</span>
-        <button class="icon-btn" onclick={() => ui.termZoomIn()} title="Terminal font larger (Ctrl+=)" aria-label="Zoom in">+</button>
+        <button class="icon-btn" onclick={() => ui.termZoomOut()} disabled={ui.termFontSize <= 8} title="Terminal font smaller (⌘− in the terminal)" aria-label="Zoom out"><Icon name="minus" size={13} /></button>
+        <span
+          class="term-ctl-size"
+          class:shrunk={fontShrunk}
+          title={fontShrunk
+            ? `Terminal font size ${ui.termFontSize}px — drawn at ${drawnFont}px so this narrow pane keeps 80 columns`
+            : 'Terminal font size'}
+        >{fontShrunk ? `${drawnFont}px` : `${ui.termFontSize}px`}</span>
+        <button class="icon-btn" onclick={() => ui.termZoomIn()} disabled={ui.termFontSize >= 28} title="Terminal font larger (⌘+ in the terminal)" aria-label="Zoom in"><Icon name="plus" size={13} /></button>
         <button
           class="icon-btn term-ctl-copy"
           class:on={ui.termCopyOnSelect}
@@ -787,7 +896,7 @@
           title={ui.termCopyOnSelect ? 'Copy-on-select: on — click to disable' : 'Copy-on-select: off — click to enable'}
           aria-pressed={ui.termCopyOnSelect}
           aria-label="Copy on select"
-        >copy</button>
+        ><Icon name="copy" size={13} /></button>
       </div>
     {/if}
     {#if showZoom && tier < 5}
@@ -800,6 +909,20 @@
       >
         <Icon name={maximized ? 'minimize' : 'maximize'} size={13} />
       </button>
+    {/if}
+    {#if uiToggleInline}
+      <button
+        class="icon-btn ui-ctl"
+        class:on={uiGranted}
+        class:asked={uiAskedAgain}
+        onmousedown={(e) => e.stopPropagation()}
+        onclick={toggleUiControl}
+        disabled={uiBusy}
+        aria-pressed={uiGranted}
+        title={uiToggleTitle}
+        aria-label="Allow UI control"
+        data-testid="ui-control-toggle"
+      ><Icon name="cursor" size={13} /></button>
     {/if}
     {#if !readOnly && isAgent && tier < 5}
       <button class="icon-btn" onclick={restart} title={status === 'working' ? 'Restart session (asks first — it is working)' : 'Restart session'} aria-label="Restart session"><Icon name="refresh" size={13} /></button>
@@ -814,14 +937,32 @@
         onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && openPaneMenu(e)}
         title="More…"
         aria-label={tier >= 7 ? `More… — ${session?.title ?? sessionId}` : 'More…'}
-      >⋯</button>
+      ><Icon name="more" size={13} /></button>
     {/if}
     {#if showClose && tier < 7}
       <button class="icon-btn" onclick={onclosepane} title={closeTitle} aria-label={closeTitle}><Icon name="x" size={12} /></button>
     {/if}
   </header>
-  {#if session && auth.can('connections', 'view')}
-    {#key sessionId}<SessionNetworkStatus {sessionId} workspaceId={session.workspace_id} selectedProfileId={typeof session.meta?.network_profile_id === 'string' ? session.meta.network_profile_id : ''} editable={!readOnly} manageEditable={!readOnly && auth.can('connections', 'edit')} onchange={async (id) => { await ws.updateSessionMeta(sessionId, { network_profile_id: id || null }); }} />{/key}
+  <!-- The network strip only takes a row when the session HAS a profile (or
+       the person asked for it from ⋯ → Network profile…) — "Network: none ·
+       Direct" in every session header was chrome with nothing to say. -->
+  {#if session && auth.can('connections', 'view') && (networkProfileId || netOpen)}
+    {#key sessionId}<SessionNetworkStatus defaultOpen={netOpen && !networkProfileId} {sessionId} workspaceId={session.workspace_id} selectedProfileId={typeof session.meta?.network_profile_id === 'string' ? session.meta.network_profile_id : ''} editable={!readOnly} manageEditable={!readOnly && auth.can('connections', 'edit')} onchange={async (id) => { await ws.updateSessionMeta(sessionId, { network_profile_id: id || null }); }} />{/key}
+  {/if}
+  {#if uiPrompt}
+    <!-- An agent called an `otto.ui_*` tool without the grant. Asked once per
+         session: Deny is remembered on this device (the toggle then only
+         carries a mark), Allow lasts for the session. -->
+    <div class="ui-ask" role="group" aria-label="UI control request" data-testid="ui-control-request">
+      <span class="ui-ask-mark" aria-hidden="true"><Icon name="cursor" size={13} /></span>
+      <span class="ui-ask-text" aria-live="polite">
+        <strong>{agentWho}{session?.title ? ` · ${session.title}` : ''} wants to drive Otto</strong> — {uiAskWhat}. Everything it does shows beside this session, and writes still ask you.
+      </span>
+      <span class="ui-ask-actions">
+        <button class="btn small" onmousedown={(e) => e.stopPropagation()} onclick={() => void uiControl.deny(sessionId)} disabled={uiBusy} data-testid="ui-control-deny">Deny</button>
+        <button class="btn small primary" onmousedown={(e) => e.stopPropagation()} onclick={() => void uiControl.allow(sessionId)} disabled={uiBusy} data-testid="ui-control-allow">Allow for this session</button>
+      </span>
+    </div>
   {/if}
   {#if session?.meta?.handover}<HandoverDeliveryPanel {session} readonly={readOnly} />{/if}
   <div class="pane-body" class:split={effView === 'split'} class:resizing={splitResizing} bind:this={bodyEl} data-view={effView}>
@@ -831,12 +972,27 @@
       </div>
     {/if}
     {#if effView === 'split'}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="pane-splitter" class:active={splitResizing} onmousedown={startSplit} title="Drag to resize"></div>
+      <!-- A focusable separator: drag it, or ←/→ when focused (double-click resets). -->
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+      <div
+        class="pane-splitter"
+        class:active={splitResizing}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize chat and terminal"
+        aria-valuemin={30}
+        aria-valuemax={80}
+        aria-valuenow={Math.round(chatFrac * 100)}
+        tabindex="0"
+        onmousedown={startSplit}
+        ondblclick={() => nudgeSplit(null)}
+        onkeydown={onSplitKey}
+        title="Drag to resize · double-click to reset"
+      ></div>
     {/if}
     {#if effView !== 'chat'}
       <div class="pane-term">
-        <Terminal bind:this={termRef} {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} {restartNonce} onstatus={onTermStatus} showToolbar={false} autoFocus={kbFocused} preferDom={isAgent} claimOnAttach={!readOnly} />
+        <Terminal bind:this={termRef} {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} restartNonce={ws.restartNonces[sessionId] ?? 0} onstatus={onTermStatus} onfontfit={(px) => (drawnFont = px)} showToolbar={false} autoFocus={kbFocused} preferDom={isAgent} claimOnAttach={!readOnly} />
       </div>
     {/if}
   </div>
@@ -854,6 +1010,10 @@
   <Handover {sessionId} onclose={() => (handoverOpen = false)} />
 {/if}
 
+{#if shareOpen}
+  <ShareModal {sessionId} onclose={() => (shareOpen = false)} />
+{/if}
+
 {#if dirsOpen}
   <Modal title="Additional directories" onclose={() => (dirsOpen = false)}>
     <div class="field">
@@ -867,8 +1027,9 @@
                 type="button"
                 class="dir-remove"
                 title="Remove directory"
+                aria-label="Remove {dir}"
                 onclick={() => removeDir(dir)}
-              >✕</button>
+              ><Icon name="x" size={11} /></button>
             </li>
           {/each}
         </ul>
@@ -900,6 +1061,52 @@
 {/if}
 
 <style>
+  /* Agent UI control: the header toggle (accent while on — it is a selected
+     state) and the one-time request strip under the header. */
+  .ui-ctl.on {
+    color: var(--accent-text);
+    background: var(--accent-soft);
+  }
+  .ui-ctl.asked {
+    position: relative;
+  }
+  .ui-ctl.asked::after {
+    content: '';
+    position: absolute;
+    inset-block-start: 3px;
+    inset-inline-end: 3px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--status-warn);
+  }
+  .ui-ask {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--separator);
+    background: var(--warning-soft);
+    color: var(--text);
+    font-size: var(--fs-s);
+  }
+  .ui-ask-mark {
+    display: inline-flex;
+    color: var(--warning);
+    flex-shrink: 0;
+  }
+  .ui-ask-text {
+    flex: 1 1 240px;
+    min-width: 0;
+    line-height: 1.4;
+  }
+  .ui-ask-actions {
+    display: inline-flex;
+    gap: 6px;
+    flex-shrink: 0;
+    margin-inline-start: auto;
+  }
   .pane {
     display: flex;
     flex-direction: column;
@@ -935,7 +1142,7 @@
     display: inline-block;
   }
   .pane-fullname {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;
@@ -944,7 +1151,7 @@
     flex-shrink: 1;
   }
   .pane-title {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     white-space: nowrap;
     overflow: hidden;
@@ -1025,11 +1232,24 @@
     border-radius: 99px;
     cursor: pointer;
   }
+  .handover-crumb {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .crumb-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .handover-crumb:hover {
     color: var(--text);
     border-color: color-mix(in srgb, var(--accent) 55%, transparent);
   }
   .handover-pending {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     flex-shrink: 0;
     font-size: var(--fs-xs);
     color: var(--accent-text);
@@ -1082,7 +1302,12 @@
     background: var(--border);
     transition: background 120ms ease-out;
   }
+  .pane-splitter:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -1px;
+  }
   .pane-splitter:hover,
+  .pane-splitter:focus-visible,
   .pane-splitter.active {
     background: color-mix(in srgb, var(--accent) 60%, var(--border));
   }
@@ -1119,7 +1344,7 @@
     cursor: text;
   }
   .rename-input {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     background: var(--surface-2);
     border: 1px solid var(--accent);
@@ -1135,6 +1360,14 @@
     align-items: center;
     gap: 2px;
   }
+  /* Auto-shrunk to keep 80 columns: a dotted underline says "there's more
+     in the tooltip" without borrowing an alert tone. */
+  .term-ctl-size.shrunk {
+    color: var(--text);
+    text-decoration: underline dotted;
+    text-underline-offset: 2px;
+    cursor: help;
+  }
   .term-ctl-size {
     font-size: var(--fs-xs);
     font-family: var(--font-mono);
@@ -1142,11 +1375,11 @@
     min-width: 30px;
     text-align: center;
   }
-  .term-ctl-copy {
-    font-size: var(--fs-xs);
-  }
+  /* Copy-on-select is a toggle: pressed reads as a soft accent fill, like the
+     view-mode toggles in the tab bar. */
   .term-ctl-copy.on {
     color: var(--accent-text);
+    background: var(--accent-soft);
   }
   /* Additional directories editor (mirrors New Session). */
   .dir-list {
@@ -1170,7 +1403,7 @@
   .dir-path {
     flex: 1;
     min-width: 0;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1178,6 +1411,8 @@
   }
   .dir-remove {
     flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
     background: none;
     border: none;
     cursor: pointer;
@@ -1234,7 +1469,7 @@
     gap: 6px;
   }
   .pane-head.t3 .pane-title {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     max-width: 130px;
   }
 

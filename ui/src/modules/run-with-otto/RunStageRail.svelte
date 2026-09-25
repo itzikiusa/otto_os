@@ -35,7 +35,7 @@
 
 {#if mini}
   <div class="rail mini" class:dead={failed || cancelled} role="img"
-    aria-label={status ? `Pipeline stage: ${STAGES[Math.max(cur, 0)]?.label ?? status}` : 'Pipeline'}>
+    aria-label={status ? (cur >= 0 ? `Pipeline stage: ${STAGES[cur].label}` : `Pipeline ${status}`) : 'Pipeline'}>
     {#each STAGES as s, i (s.key)}
       <span class="seg {stepState(i)}" title={s.label}></span>
     {/each}
@@ -68,7 +68,7 @@
     align-items: center;
     gap: 0.32rem;
     color: var(--text-dim);
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
   }
   .bubble {
     display: inline-flex;
@@ -91,6 +91,8 @@
     position: relative;
     flex: none;
   }
+  /* The flow reads inline-start → inline-end: flip the arrow in RTL. */
+  :global([dir='rtl']) .arrow { transform: scaleX(-1); }
   .arrow::after {
     content: '';
     position: absolute;

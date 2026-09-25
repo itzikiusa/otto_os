@@ -60,33 +60,25 @@
   {#each aws.accounts as a (a.id)}
     {@const open = !collapsed[a.id]}
     <div class="acct" class:active={a.id === activeId}>
-      <div
-        class="acct-row"
-        role="button"
-        tabindex="0"
-        aria-expanded={open}
-        onclick={() => (collapsed = { ...collapsed, [a.id]: open })}
-        onkeydown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            collapsed = { ...collapsed, [a.id]: open };
-          }
-        }}
-        oncontextmenu={(e) => menu(e, a)}
-      >
-        <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
-        <span class="dot" style="background:{a.color || 'var(--text-dim)'}"></span>
-        <span class="name" title={a.identity?.arn ?? a.profile ?? ''}>{a.name}</span>
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="acct-row" oncontextmenu={(e) => menu(e, a)}>
+        <button
+          class="acct-toggle"
+          aria-expanded={open}
+          title={a.identity?.arn ? `${a.name}\n${a.identity.arn}` : a.profile ? `${a.name} · profile ${a.profile}` : a.name}
+          onclick={() => (collapsed = { ...collapsed, [a.id]: open })}
+        >
+          <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
+          <span class="dot" style="background:{a.color || 'var(--text-dim)'}"></span>
+          <span class="name">{a.name}</span>
+        </button>
         <EnvBadge env={a.environment} />
         <button
-          class="more"
-          onclick={(e) => {
-            e.stopPropagation();
-            menu(e, a);
-          }}
+          class="icon-btn more"
+          onclick={(e) => menu(e, a)}
           aria-label={`Actions for ${a.name}`}
           title="Actions"
-        >⋯</button>
+        ><Icon name="more" size={14} /></button>
       </div>
       {#if open}
         <ul class="svcs">
@@ -119,7 +111,7 @@
     flex-direction: column;
     overflow-y: auto;
     padding: 6px 0;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .rail-head {
     display: flex;
@@ -135,13 +127,27 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 5px 8px 5px 10px;
-    cursor: pointer;
+    padding-block: 3px;
+    padding-inline: 8px 6px;
     color: var(--text);
-    border-left: 2px solid transparent;
+    border-inline-start: 2px solid transparent;
   }
   .acct.active .acct-row {
-    border-left-color: var(--accent);
+    border-inline-start-color: var(--accent);
+  }
+  .acct-toggle {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
   }
   .acct-row:hover {
     background: var(--surface-2);
@@ -161,13 +167,7 @@
     font-weight: 500;
   }
   .more {
-    border: 0;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    padding: 0 4px;
-    font-size: 14px;
-    line-height: 1;
+    flex-shrink: 0;
     opacity: 0;
   }
   .acct-row:hover .more,
@@ -183,25 +183,26 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 4px 10px 4px 32px;
+    padding-block: 4px;
+    padding-inline: 32px 10px;
     color: var(--text);
     text-decoration: none;
-    border-left: 2px solid transparent;
+    border-inline-start: 2px solid transparent;
   }
   .svcs a:hover {
     background: var(--surface-2);
   }
   .svcs a.active {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    border-left-color: var(--accent);
+    background: var(--accent-soft);
+    border-inline-start-color: var(--accent);
   }
   .svcs a.denied {
     color: var(--text-dim);
     opacity: 0.7;
   }
   .deny {
-    margin-left: auto;
-    font-size: 9.5px;
+    margin-inline-start: auto;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -209,6 +210,6 @@
   .empty {
     margin: 8px 12px;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
 </style>

@@ -32,7 +32,7 @@ This page covers the first run and the shape of the window. Every other section 
 - **Floating bar**: the "Type or speak…" pill at the bottom of the window. It's the command bar and Ask Otto in one. See [Command bar](#/walkthroughs/command-bar).
 
 **Workspaces and sessions**
-- A workspace is a project folder. Switch workspaces from the sidebar or with ⌘K → "Switch Workspace: …". Add one with ⌘K → "Add Workspace", or **File → New Workspace…**.
+- A workspace is a project folder. Switch workspaces from the sidebar or with ⌘K → "Switch workspace: …". Add one with ⌘K → "Add workspace…", or **File → New Workspace…**.
 - New sessions can also run with **No workspace**. They start in your home folder and are listed under "No workspace" in the sidebar.
 - Sessions survive a UI reload (`⌘⇧R`), closing the window and quitting the app. Only archiving or deleting a session ends it.
 - Choose what closing a tab does in **Settings → Appearance → Closing a session tab**: ask every time, always archive (resumable later) or always delete.

@@ -11,6 +11,7 @@
   import { api } from '../../lib/api/client';
   import type { CreateShareReq, CreateShareResp, ShareInfo, EmailSenderResp } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { router } from '../../lib/router.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
 
@@ -36,6 +37,8 @@
   // ── minted-link state (shown after POST) ────────────────────────────────────
   let mintedUrl = $state<string | null>(null);
   let mintedToken = $state<string | null>(null);
+  /** Which share the URL/QR panel shows — revoking ANOTHER link keeps it. */
+  let mintedShareId: string | null = null;
   let qrCanvas: HTMLCanvasElement | null = $state(null);
 
   // ── existing-shares state ────────────────────────────────────────────────────
@@ -115,6 +118,7 @@
       );
       mintedUrl = resp.url;
       mintedToken = resp.token;
+      mintedShareId = resp.info.id;
       // Optimistically prepend the new share to the list.
       shares = [resp.info, ...shares];
       toasts.success(
@@ -147,13 +151,13 @@
     try {
       await api.del(`/auth/shares/${encodeURIComponent(shareId)}`);
       shares = shares.filter((s) => s.id !== shareId);
-      // If the just-revoked share is the one we just minted, clear the URL panel.
-      if (mintedUrl) {
-        const minted = shares.find((s) => s.id === shareId);
-        if (!minted) {
-          mintedUrl = null;
-          mintedToken = null;
-        }
+      // If the just-revoked share is the one we just minted, clear the URL panel
+      // (the old check looked the id up AFTER filtering it out, so revoking any
+      // older link also wiped the fresh URL + QR).
+      if (shareId === mintedShareId) {
+        mintedUrl = null;
+        mintedToken = null;
+        mintedShareId = null;
       }
       toasts.success('Share revoked');
     } catch (e) {
@@ -166,20 +170,35 @@
   }
 
   // ── revoke all shares ────────────────────────────────────────────────────────
+  // "Revoke all" sits under THIS session's list, so it revokes exactly those
+  // links, one DELETE each. `POST /auth/shares/revoke-all` is caller-wide — it
+  // silently killed the links of every OTHER session too.
   async function revokeAll(): Promise<void> {
-    if (revokingAll) return;
+    if (revokingAll || shares.length === 0) return;
+    const n = shares.length;
+    const ok = await confirmer.ask(
+      `Revoke ${n === 1 ? 'the share link' : `all ${n} share links`} for this session? Guests attached through ${n === 1 ? 'it' : 'them'} are disconnected, and the link${n === 1 ? '' : 's'} can't be used again.`,
+      { title: 'Revoke share links', confirmLabel: n === 1 ? 'Revoke link' : `Revoke ${n} links` },
+    );
+    if (!ok) return;
     revokingAll = true;
-    try {
-      await api.post('/auth/shares/revoke-all');
-      shares = [];
+    const failed: string[] = [];
+    for (const share of [...shares]) {
+      try {
+        await api.del(`/auth/shares/${encodeURIComponent(share.id)}`);
+        shares = shares.filter((s) => s.id !== share.id);
+      } catch (e) {
+        failed.push(e instanceof Error ? e.message : String(e));
+      }
+    }
+    if (failed.length === 0) {
       mintedUrl = null;
       mintedToken = null;
-      toasts.success('All share links revoked');
-    } catch (e) {
-      toasts.error('Revoke all failed', e instanceof Error ? e.message : String(e));
-    } finally {
-      revokingAll = false;
+      toasts.success('Share links revoked');
+    } else {
+      toasts.error('Some links were not revoked', `${failed.length} of ${n} failed: ${failed[0]}`);
     }
+    revokingAll = false;
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────────
@@ -397,7 +416,7 @@
     gap: 4px;
   }
   .sm-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -413,7 +432,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--warning);
     padding: 4px 0;
   }
@@ -423,7 +442,7 @@
     cursor: pointer;
   }
   .sm-note {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1.45;
   }
@@ -431,7 +450,7 @@
     display: flex;
     align-items: flex-start;
     gap: 6px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--accent) 6%, var(--surface-2));
     border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
@@ -448,7 +467,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     color: var(--text);
-    font-size: 13px;
+    font-size: var(--fs-m);
     padding: 7px 10px;
     appearance: auto;
   }
@@ -480,7 +499,7 @@
   .sm-url {
     flex: 1;
     min-width: 0;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--accent-text);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -492,7 +511,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 5px 10px;
   }
   .sm-qr-wrap {
@@ -506,7 +525,7 @@
     display: block;
   }
   .sm-qr-hint {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     margin: 0;
   }
@@ -514,7 +533,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     margin: 0;
   }
@@ -529,7 +548,7 @@
     margin-top: 4px;
   }
   .sm-section-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -541,7 +560,7 @@
   .sm-link-btn {
     border: none;
     background: transparent;
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
     padding: 2px 4px;
     border-radius: var(--radius-s);
@@ -572,7 +591,7 @@
   .sm-empty {
     padding: 14px;
     text-align: center;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .sm-share-row {
@@ -581,7 +600,7 @@
     gap: 8px;
     padding: 6px 8px;
     border-radius: var(--radius-s);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .sm-share-row:hover {
     background: var(--surface-2);
@@ -596,7 +615,7 @@
   }
   .sm-share-prefix {
     font-family: monospace;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     flex-shrink: 0;
@@ -629,12 +648,12 @@
     flex-shrink: 0;
   }
   .sm-share-expiry {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
   }
   .sm-revoke-btn {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 3px 8px;
     color: var(--danger);
     border-color: color-mix(in srgb, var(--danger) 35%, transparent);

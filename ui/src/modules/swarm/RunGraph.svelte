@@ -346,7 +346,7 @@
     line-height: 1.2;
   }
   .node-label {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     white-space: nowrap;
     overflow: hidden;

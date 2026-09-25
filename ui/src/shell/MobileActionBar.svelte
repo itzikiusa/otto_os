@@ -57,8 +57,8 @@
   <button
     class="ab-btn"
     onclick={oncloseTab}
-    title="Close session (⌘W)"
-    aria-label="Close current session"
+    title="Close tab (⌘W)"
+    aria-label="Close current tab"
   >
     <Icon name="x" size={18} />
     <span class="ab-label">Close</span>
@@ -128,7 +128,7 @@
   }
 
   .ab-label {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 500;
     line-height: 1;
     overflow: hidden;

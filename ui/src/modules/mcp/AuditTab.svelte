@@ -94,7 +94,7 @@
         onclick={() => (filtersOpen = !filtersOpen)}
       >
         Filters
-        <span aria-hidden="true">{filtersOpen ? '▾' : '▸'}</span>
+        <Icon name={filtersOpen ? 'chevronDown' : 'chevronRight'} size={12} />
       </button>
       {#if filtersOpen}
         <div class="bar">
@@ -147,8 +147,8 @@
         {#each rows as r (r.id)}
           <div class="arow">
             <span class="cell when">{new Date(r.created_at).toLocaleString()}</span>
-            <span class="cell">{r.server_name ?? '—'}</span>
-            <span class="cell mono">{r.tool}{#if r.dry_run}<span class="dry">dry</span>{/if}</span>
+            <span class="cell"><span class="trunc" title={r.server_name ?? undefined}>{r.server_name ?? '—'}</span></span>
+            <span class="cell mono"><span class="trunc" title={r.tool}>{r.tool}</span>{#if r.dry_run}<span class="dry">dry</span>{/if}</span>
             <span class="cell"><McpPill kind="decision" value={r.decision} small /></span>
             <span class="cell"><McpPill kind="direction" value={r.direction} small /></span>
             <span class="cell num">
@@ -178,7 +178,7 @@
   }
   h2 {
     margin: 0;
-    font-size: 14px;
+    font-size: var(--fs-l);
     font-weight: 600;
   }
   .views {
@@ -194,7 +194,7 @@
     background: transparent;
     color: var(--text-dim);
     padding: 4px 9px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
   .views button.on {
@@ -212,7 +212,7 @@
     background: transparent;
     color: var(--text-dim);
     padding: 8px 14px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
   .bar {
@@ -227,7 +227,7 @@
     flex: 1;
   }
   .count {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   select,
@@ -237,7 +237,7 @@
     border-radius: var(--radius-s, 6px);
     color: var(--text);
     padding: 6px 8px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .grid {
     overflow: auto;
@@ -255,7 +255,7 @@
     top: 0;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--text-dim);
@@ -263,7 +263,7 @@
   }
   .arow {
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .arow:hover {
     background: color-mix(in srgb, var(--text-dim) 5%, transparent);
@@ -277,12 +277,20 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* `.cell` is a flex box, so its own text-overflow never reaches a bare text
+     node — long server/tool names need a real block child to get an ellipsis. */
+  .trunc {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .num {
     justify-content: flex-end;
     text-align: right;
   }
   .when {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .mono {
@@ -290,12 +298,13 @@
   }
   .dry {
     margin-inline-start: 5px;
-    font-size: 9px;
+    flex: none;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     color: var(--info);
   }
   .bad {
-    color: var(--status-exited, #ff5f57);
+    color: var(--danger);
     display: inline-flex;
   }
   .muted {

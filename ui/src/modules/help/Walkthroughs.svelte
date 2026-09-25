@@ -191,7 +191,7 @@
 {/snippet}
 
 <div class="help-page">
-  <PageHeader title="Help" icon="book" subtitle={pageSubtitle}>
+  <PageHeader title="Help" subtitle={pageSubtitle}>
     {#snippet leading()}
       {#if viewport.isPhone && !isDefault}
         <button class="icon-btn" onclick={() => router.go('walkthroughs')} aria-label="Back to all guides" title="Back to all guides">

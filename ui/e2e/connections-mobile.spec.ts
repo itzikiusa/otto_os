@@ -141,14 +141,15 @@ test.describe('connections hub — responsive', () => {
     // drop target) under every type filter.
     await expect(page.locator('.sec-name', { hasText: /Empty staging folder/i }).first()).toBeVisible();
 
-    // A folder whose contents are all another kind disappears while filtering.
-    await page.locator('[data-testid="connhub-filter-mysql"]').click();
-    await expect(page.locator('.sec-name', { hasText: /Production servers/i })).toHaveCount(0);
-    await expect(page.locator('.sec-name', { hasText: /Empty staging folder/i }).first()).toBeVisible();
+    // Only kinds that exist get a chip (no MySQL connection here → no chip).
+    await expect(page.locator('[data-testid="connhub-filter-mysql"]')).toHaveCount(0);
 
+    // (A folder whose contents are all another kind disappearing is covered by
+    // desktop-connections-hub, which seeds a second DB kind.)
     await page.locator('[data-testid="connhub-filter-custom"]').click();
     await expect(page.locator('.conn-name', { hasText: 'my-custom-cli' }).first()).toBeVisible();
     await expect(page.locator('.conn-name', { hasText: 'prod-web-bastion' })).toHaveCount(0);
+    await expect(page.locator('.sec-name', { hasText: /Empty staging folder/i }).first()).toBeVisible();
 
     await page.locator('[data-testid="connhub-filter-all"]').click();
     await expect(page.locator('.conn-name', { hasText: 'prod-web-bastion' }).first()).toBeVisible();

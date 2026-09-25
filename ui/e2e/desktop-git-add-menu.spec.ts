@@ -23,6 +23,9 @@ import { expectFullyInViewport, openPage } from './helpers';
 // ─────────────────────────────────────────────────────────────────────────────
 
 const REPO_COUNT = 30; // enough rows to exceed the 800px viewport height
+// One worker for the file: the repos are seeded in beforeAll, and a second
+// worker would re-run it and register every repo twice.
+test.describe.configure({ mode: 'serial' });
 
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
@@ -72,4 +75,35 @@ test('add-repo picker stays inside the viewport and every entry is reachable', a
   await expect(last).toBeVisible();
   await last.click();
   await expect(page.locator('.git-tab-name', { hasText: lastName })).toBeVisible();
+});
+
+// Regression 2: with several repos open, the tab strip overflowed the header's
+// inline-tabs slot and the trailing + (the last child of the SAME scroller) was
+// clipped at its edge. Only the tab row scrolls now; + and auto-fetch are
+// pinned after it and must be fully inside the slot, however many tabs.
+test('+ stays fully visible when many repo tabs are open', async ({ page }) => {
+  await openPage(page, 'git');
+  for (let i = 0; i < 8; i++) {
+    await page.locator('.git-tab-new').click();
+    const menu = page.locator('.ctx-menu');
+    await menu.locator('.ctx-search-input').fill(`e2e-menu-${String(i).padStart(2, '0')}`);
+    await menu.getByRole('menuitem').filter({ hasText: 'e2e-menu-' }).first().click();
+    await expect(menu).toBeHidden();
+  }
+  // ≥ 8: the previous test's opened tab may persist.
+  await expect.poll(() => page.locator('.git-tab').count(), { timeout: 10_000 }).toBeGreaterThanOrEqual(8);
+  // The tab row really does overflow (otherwise this proves nothing)…
+  const overflows = await page
+    .locator('.git-tablist')
+    .evaluate((el) => el.scrollWidth > el.clientWidth + 1);
+  expect(overflows).toBe(true);
+  // …yet + sits wholly inside the header's inline-tabs slot.
+  const within = await page.locator('.git-tab-new').evaluate((btn) => {
+    const slot = btn.closest('.ph-tabs-inline') ?? btn.parentElement!;
+    const b = btn.getBoundingClientRect();
+    const s = slot.getBoundingClientRect();
+    return b.left >= s.left - 0.5 && b.right <= s.right + 0.5 && b.width >= 20;
+  });
+  expect(within).toBe(true);
+  await expectFullyInViewport(page, page.locator('.git-tab-new'), 'open-repo + button');
 });

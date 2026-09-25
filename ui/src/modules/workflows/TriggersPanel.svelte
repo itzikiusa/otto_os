@@ -4,8 +4,11 @@
   // sidebar when the "Triggers" tab is active.
   import { onDestroy } from 'svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import type { WorkflowTrigger, TriggerKind } from '../../lib/api/types';
   import { buildTriggerSpec, defaultTriggerForm, formFromTrigger, EVENT_KINDS } from './triggerForm';
   import { copyTextOrThrow } from '../../lib/clipboard';
@@ -46,7 +49,7 @@
       copied = true;
       setTimeout(() => (copied = false), 1500);
     } catch {
-      toasts.error('Copy failed', 'Select the text and copy manually.');
+      toasts.error('Couldn’t copy to the clipboard', 'Select the text and copy it manually.');
     }
   }
 
@@ -72,22 +75,39 @@
       if (!alive) return;
       previewTimezone = timezone;
       preview = result.next_fire_times;
-    } catch (e) { toasts.error('Trigger preview failed', e instanceof Error ? e.message : String(e)); }
+    } catch (e) { toasts.error('Couldn’t preview the trigger', e instanceof Error ? e.message : String(e)); }
     finally { previewing = false; }
   }
 
+  // A preview describes the form as it WAS: any later edit hides it, so a stale
+  // "Next fires" list never sits under a changed cadence/timezone.
+  $effect(() => {
+    JSON.stringify(form);
+    preview = null;
+  });
+
   let saving = $state(false);
 
+  // A failed load is shown inline with Retry (never as "No triggers", which
+  // would claim the workflow only runs manually when we simply don't know).
+  let loading = $state(true);
+  let loadError = $state<string | null>(null);
   async function load(): Promise<void> {
+    loading = true;
     try {
       const ts = await api.get<WorkflowTrigger[]>(`/workflows/${workflowId}/triggers`);
       if (!alive) return;
       triggers = ts;
+      loadError = null;
       ontriggers?.(ts);
     } catch (e) {
-      toasts.error('Could not load triggers', e instanceof Error ? e.message : String(e));
+      if (alive) loadError = loadErrorText(e);
+    } finally {
+      if (alive) loading = false;
     }
   }
+
+  const KIND_LABEL: Record<string, string> = { schedule: 'Schedule', webhook: 'Webhook', event: 'Event', chat: 'Chat binding' };
 
   $effect(() => {
     if (workflowId) void load();
@@ -108,7 +128,7 @@
       adding = false;
       toasts.success(editingId ? 'Trigger updated' : 'Trigger added');
     } catch (e) {
-      toasts.error('Could not add trigger', e instanceof Error ? e.message : String(e));
+      toasts.error(editingId ? 'Couldn’t update the trigger' : 'Couldn’t add the trigger', e instanceof Error ? e.message : String(e));
     } finally {
       saving = false;
     }
@@ -123,11 +143,19 @@
       triggers = triggers.map((x) => (x.id === t.id ? updated : x));
       ontriggers?.(triggers);
     } catch (e) {
-      toasts.error('Could not update trigger', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t update the trigger', e instanceof Error ? e.message : String(e));
     }
   }
 
+  // Deleting is irreversible — a webhook trigger's token goes with it, so any
+  // external caller breaks — so it asks first, like deleting the workflow.
+  // (Pausing is the reversible option: the on/off toggle.)
   async function remove(t: WorkflowTrigger): Promise<void> {
+    const ok = await confirmer.ask(
+      `Delete this ${t.kind} trigger (${describeSpec(t)})?${t.kind === 'webhook' ? ' Its webhook URL stops working.' : ''} To pause it instead, switch it off.`,
+      { title: 'Delete trigger', confirmLabel: 'Delete trigger' },
+    );
+    if (!ok) return;
     try {
       await api.del(`/workflow-triggers/${t.id}`);
       if (!alive) return;
@@ -135,7 +163,7 @@
       ontriggers?.(triggers);
       toasts.success('Trigger removed');
     } catch (e) {
-      toasts.error('Could not remove trigger', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t remove the trigger', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -215,7 +243,7 @@
           <label class="fl"><span>Cron (5 fields)</span><input bind:value={form.cron} placeholder="0 9 * * 1-5" /></label>
         {:else}
           <label class="fl">
-            <span>At (local HH:MM)</span>
+            <span>At (HH:MM, in the timezone below)</span>
             <input type="text" placeholder="09:00" bind:value={form.atTime} />
           </label>
           {#if form.cadence === 'weekly'}
@@ -282,38 +310,47 @@
         <div class="hint">{#if preview.length}Next fires ({previewTimezone}):<ul>{#each preview as at}<li>{new Date(at).toLocaleString(undefined, { timeZone: previewTimezone })}</li>{/each}</ul>{:else}Trigger configuration is valid.{/if}</div>
       {/if}
       <div class="add-btns">
-        <button class="btn primary small" disabled={saving} onclick={addTrigger}>
-          {saving ? 'Saving…' : 'Save trigger'}
-        </button>
         <button class="btn ghost small" onclick={() => (adding = false)}>Cancel</button>
+        <button class="btn primary small" disabled={saving} onclick={addTrigger}>
+          {saving ? 'Saving…' : editingId ? 'Save trigger' : 'Add trigger'}
+        </button>
       </div>
     </div>
   {/if}
 
-  {#if triggers.length === 0 && !adding}
-    <p class="empty">No triggers — the workflow only runs manually.</p>
-  {/if}
-
+  <LoadState
+    what="triggers"
+    variant="compact"
+    {loading}
+    error={loadError}
+    empty={triggers.length === 0}
+    onretry={() => void load()}
+  >
+    {#snippet emptyView()}
+      {#if !adding}<p class="empty">No triggers — the workflow only runs manually.</p>{/if}
+    {/snippet}
   {#each triggers as t (t.id)}
     <div class="trig-row" class:disabled={!t.enabled}>
       <span class="trig-ic"><Icon name={kindIcon(t.kind)} size={13} /></span>
       <div class="trig-body">
-        <span class="trig-kind">{t.kind}</span>
-        <span class="trig-spec">{describeSpec(t)}</span>
+        <span class="trig-kind">{KIND_LABEL[t.kind] ?? t.kind}</span>
+        <span class="trig-spec" title={describeSpec(t)}>{describeSpec(t)}</span>
       </div>
       <button
         class="toggle"
-        title={t.enabled ? 'Disable' : 'Enable'}
+        aria-pressed={t.enabled}
+        title={t.enabled ? 'On — click to pause this trigger' : 'Off — click to enable this trigger'}
         onclick={() => toggle(t)}
       >
-        {t.enabled ? 'on' : 'off'}
+        {t.enabled ? 'On' : 'Off'}
       </button>
-      <button class="btn ghost small" title="Edit trigger" onclick={() => edit(t)}><Icon name="edit" size={12} /></button>
-      <button class="row-del" title="Delete" onclick={() => remove(t)}>
+      <button class="icon-btn" title="Edit trigger" aria-label="Edit trigger" onclick={() => edit(t)}><Icon name="edit" size={12} /></button>
+      <button class="row-del" title="Delete trigger…" aria-label="Delete trigger…" onclick={() => remove(t)}>
         <Icon name="trash" size={12} />
       </button>
     </div>
   {/each}
+  </LoadState>
 
   <!-- Trigger from chat: a copy-paste message that starts this workflow by name.
        Copy → paste into Slack/Telegram → pin it for one-click reuse. -->
@@ -356,18 +393,18 @@
   }
   .st-hint {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1.5;
   }
   .st-snip {
     margin: 0;
     padding: 8px 10px;
-    background: var(--bg, #0d0f13);
+    background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: 6px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
+    border-radius: var(--radius-s);
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
     line-height: 1.5;
     white-space: pre-wrap;
     color: var(--text);
@@ -387,7 +424,7 @@
     margin-bottom: 4px;
   }
   .tp-title {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
     text-transform: uppercase;
@@ -409,14 +446,15 @@
     gap: 3px;
   }
   .fl span {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-weight: 600;
   }
   .fl input,
-  .fl select {
+  .fl select,
+  .fl textarea {
     font: inherit;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     padding: 4px 7px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -427,7 +465,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text);
     cursor: pointer;
   }
@@ -440,19 +478,20 @@
   }
   .add-btns {
     display: flex;
+    justify-content: flex-end;
     gap: 6px;
   }
   .hint {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     margin: 0;
   }
   code {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     background: var(--surface);
     padding: 1px 4px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
   }
   .trig-row {
     display: flex;
@@ -478,28 +517,33 @@
     gap: 1px;
   }
   .trig-kind {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text);
     text-transform: capitalize;
   }
   .trig-spec {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .toggle {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
     background: none;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     padding: 2px 6px;
     cursor: pointer;
     flex-shrink: 0;
+  }
+  .toggle[aria-pressed='true'] {
+    color: var(--success);
+    background: var(--success-soft);
+    border-color: transparent;
   }
   .toggle:hover {
     background: var(--hover);
@@ -512,11 +556,12 @@
     padding: 4px;
     flex-shrink: 0;
   }
-  .row-del:hover {
+  .row-del:hover,
+  .row-del:focus-visible {
     color: var(--danger);
   }
   .empty {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     margin: 4px 0;
   }

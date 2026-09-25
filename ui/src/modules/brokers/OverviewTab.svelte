@@ -1,6 +1,8 @@
 <script lang="ts">
   import { api } from '../../lib/api/client';
-  import { toasts } from '../../lib/toast.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { ClusterMetrics, ClusterOverview, Id } from '../../lib/api/types';
 
   interface Props {
@@ -11,6 +13,12 @@
   let overview = $state<ClusterOverview | null>(null);
   let metrics = $state<ClusterMetrics | null>(null);
   let loading = $state(true);
+  /** Failed overview load — inline with Retry (it used to toast and leave a blank pane). */
+  let error = $state<string | null>(null);
+  /** The first load has taken long enough to be worth explaining. */
+  let slow = $state(false);
+  /** Bumped by Retry to re-run the load effect. */
+  let attempt = $state(0);
 
   function fmtBytes(n: number | null): string {
     if (n === null || !isFinite(n)) return '—';
@@ -30,7 +38,9 @@
 
   $effect(() => {
     const id = clusterId;
+    void attempt;
     loading = true;
+    error = null;
     overview = null;
     metrics = null;
     let alive = true;
@@ -40,7 +50,9 @@
       .then((o) => {
         if (alive) overview = o;
       })
-      .catch((e) => toasts.error('Overview failed', String(e)))
+      .catch((e) => {
+        if (alive) error = loadErrorText(e);
+      })
       .finally(() => {
         if (alive) loading = false;
       });
@@ -54,10 +66,15 @@
         .catch(() => {});
     void poll();
     const timer = setInterval(() => void poll(), 4000);
+    // An unreachable broker can hang the first metadata call for a long time;
+    // say so instead of an open-ended "Connecting…".
+    slow = false;
+    const slowTimer = setTimeout(() => { if (alive) slow = true; }, 8000);
 
     return () => {
       alive = false;
       clearInterval(timer);
+      clearTimeout(slowTimer);
     };
   });
 
@@ -68,7 +85,18 @@
 
 <div class="overview">
   {#if loading && !overview}
-    <p class="muted">Connecting to cluster…</p>
+    <div class="connecting" role="status">
+      <p class="muted">Connecting to the cluster…</p>
+      {#if slow}
+        <p class="muted slow-note">
+          Still waiting on the brokers. Check the bootstrap servers and your network, or
+          <button class="btn small" onclick={() => attempt++}>Try again</button>
+        </p>
+      {/if}
+      <Skeleton rows={2} height={64} />
+    </div>
+  {:else if error && !overview}
+    <LoadState what="the cluster overview" {loading} {error} empty onretry={() => attempt++} />
   {:else if overview}
     <div class="cards">
       <div class="card">
@@ -188,6 +216,21 @@
 </div>
 
 <style>
+  .connecting {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .connecting p {
+    margin: 0;
+  }
+  .slow-note {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    font-size: var(--fs-s);
+  }
   .overview {
     padding: 16px;
     display: flex;
@@ -216,30 +259,30 @@
     border-color: color-mix(in srgb, var(--warning) 50%, transparent);
   }
   .card .k {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
   }
   .card .v {
-    font-size: 26px;
+    font-size: var(--fs-2xl);
     font-weight: 600;
   }
   .card .v.warn-v {
     color: var(--warning);
   }
   .card .v small {
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     font-weight: 400;
   }
   .card .sub {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   h4 {
     margin: 0 0 8px;
-    font-size: 13px;
+    font-size: var(--fs-m);
   }
   .spark {
     display: flex;
@@ -278,11 +321,11 @@
     gap: 8px;
   }
   .broker-head .host {
-    font-size: 13px;
+    font-size: var(--fs-m);
   }
   .broker-head .leaders {
     margin-inline-start: auto;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .metric {
@@ -292,7 +335,7 @@
   }
   .metric .ml {
     width: 30px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .metric .track {
@@ -306,27 +349,27 @@
     height: 100%;
   }
   .metric .fill.cpu {
-    background: var(--status-working, #28c840);
+    background: var(--success);
   }
   .metric .fill.ram {
     background: var(--accent);
   }
   .metric .mv {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     min-width: 80px;
     text-align: end;
   }
   .mono {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .muted {
     color: var(--text-dim);
   }
   .muted.small,
   .small {
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   code {
     font-family: var(--font-mono);

@@ -2,6 +2,7 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
+  import SettingToggle from './SettingToggle.svelte';
   // Theme (native / pro-dark / warm), scheme (auto / light / dark), accent.
   import {
     ui,
@@ -20,10 +21,13 @@
   import type { BarPref } from '../../lib/floatingBar';
   import { plugins } from '../../lib/stores/plugins.svelte';
   import {
+    FAVORITES_ID,
     availableModules,
-    groupModules,
+    moveAmong,
     moveWithinGroup,
+    resolveGroupOrder,
     resolveOrder,
+    sidebarSections,
     type SidebarPluginEntry,
   } from '../../lib/sidebar';
 
@@ -46,14 +50,35 @@
   const sidebarResolved = $derived(
     resolveOrder(availableModules((f) => auth.can(f, 'view'), sidebarPlugins), ui.sidebarOrder),
   );
-  /** Up/down within the module's sidebar section (same rule as the Navigator). */
+  // Section by section exactly as the sidebar shows them: Favorites first
+  // (while it has any), then the sections in the user's order.
+  const sidebarSecs = $derived(sidebarSections(sidebarResolved, ui.sidebarFavorites, ui.sidebarGroupOrder));
+  const sidebarFavIds = $derived(
+    sidebarSecs[0]?.group.id === FAVORITES_ID ? sidebarSecs[0].modules.map((m) => m.id) : [],
+  );
+  const sidebarMovableSecs = $derived(
+    sidebarSecs.filter((s) => s.group.id !== FAVORITES_ID).map((s) => s.group.id as string),
+  );
+  /** Up/down within the module's sidebar section (same rule as the Navigator);
+   *  a favorite moves among the favorites. */
   function moveSidebarItem(id: string, delta: -1 | 1): void {
+    if (sidebarFavIds.includes(id)) {
+      const favs = moveAmong(ui.sidebarFavorites, id, delta, (x) => sidebarFavIds.includes(x));
+      if (favs) ui.setSidebarFavorites(favs);
+      return;
+    }
     const next = moveWithinGroup(sidebarResolved, id, delta);
     if (next) ui.setSidebarOrder(next);
   }
+  /** Up/down for a whole section (Favorites always stays first). */
+  function moveSidebarSection(id: string, delta: -1 | 1): void {
+    const all = resolveGroupOrder(ui.sidebarGroupOrder).map((g) => g.id as string);
+    const next = moveAmong(all, id, delta, (g) => sidebarMovableSecs.includes(g));
+    if (next) ui.setSidebarGroupOrder(next);
+  }
 
   const themes: { id: ThemeName; name: string; desc: string }[] = [
-    { id: 'native', name: 'Native', desc: 'macOS vibrancy, system accent' },
+    { id: 'native', name: 'Native', desc: 'macOS vibrancy, blue accent' },
     { id: 'pro-dark', name: 'Pro Dark', desc: 'Always-dark, violet accent' },
     { id: 'warm', name: 'Warm', desc: 'Paper tones, green accent' },
   ];
@@ -113,7 +138,7 @@
   <div class="section-title">Theme</div>
   <div class="theme-grid">
     {#each themes as t (t.id)}
-      <button class="theme-card" class:selected={ui.theme === t.id} onclick={() => ui.setTheme(t.id)}>
+      <button class="theme-card" class:selected={ui.theme === t.id} aria-pressed={ui.theme === t.id} onclick={() => ui.setTheme(t.id)}>
         <div class="theme-preview" style="background: {swatches[t.id].bg}">
           <div class="tp-bar" style="background: {swatches[t.id].acc}"></div>
           <div class="tp-line" style="background: {swatches[t.id].fg}; opacity: 0.8"></div>
@@ -126,31 +151,43 @@
   </div>
 
   <div class="section-title">Scheme</div>
-  <div class="segmented">
+  <!-- Pro Dark resolves to dark whatever the scheme says (ui.applyTheme), so
+       the picker is shown as not applying instead of silently doing nothing. -->
+  <div class="segmented" class:off={ui.theme === 'pro-dark'} role="group" aria-label="Scheme">
     {#each schemes as s (s.id)}
-      <button class:active={ui.scheme === s.id} onclick={() => ui.setScheme(s.id)}>{s.label}</button>
+      <button
+        class:active={ui.scheme === s.id}
+        aria-pressed={ui.scheme === s.id}
+        disabled={ui.theme === 'pro-dark'}
+        title={ui.theme === 'pro-dark' ? 'Pro Dark is always dark' : undefined}
+        onclick={() => ui.setScheme(s.id)}>{s.label}</button
+      >
     {/each}
   </div>
-  <p class="hint-line">Auto follows the system light/dark preference.</p>
+  <p class="hint-line">
+    {ui.theme === 'pro-dark'
+      ? 'Pro Dark is always dark. Pick Native or Warm to use a light scheme.'
+      : 'Auto follows the system light/dark preference.'}
+  </p>
 
   <div class="section-title">Direction</div>
-  <div class="segmented">
+  <div class="segmented" role="group" aria-label="Direction">
     {#each directions as d (d.id)}
-      <button class:active={ui.direction === d.id} onclick={() => ui.setDirection(d.id)}>{d.label}</button>
+      <button class:active={ui.direction === d.id} aria-pressed={ui.direction === d.id} onclick={() => ui.setDirection(d.id)}>{d.label}</button>
     {/each}
   </div>
   <p class="hint-line">Right-to-left mirrors the layout for RTL languages (Hebrew, Arabic).</p>
 
-  <div class="section-title">Accent color</div>
+  <div class="section-title">Accent colour</div>
   <div class="row">
     <input
       type="color"
       class="accent-input"
-      value={ui.accent || '#0a84ff'}
+      value={ui.accent || (/^#[0-9a-f]{6}$/i.test(accentNow) ? accentNow : '#0a84ff')}
       oninput={(e) => ui.setAccent(e.currentTarget.value)}
-      aria-label="Accent color"
+      aria-label="Accent colour"
     />
-    <span class="mono dim">{ui.accent || 'theme default'}</span>
+    <span class="accent-val">{ui.accent ? ui.accent.toUpperCase() : 'Theme default'}</span>
     {#if ui.accent}
       <button class="btn small" onclick={() => ui.setAccent('')}>Reset</button>
     {/if}
@@ -191,24 +228,21 @@
     Pages, tables, editors and terminals stay solid. A photo never leaves this device: Otto
     blurs it and tones it for light and dark so the text over it stays readable.
   </p>
-  <label class="switch-row reduce-row">
-    <input
-      type="checkbox"
+  <div class="toggle-block">
+    <SettingToggle
+      label="Reduce transparency"
+      hint="Solid sidebar, toolbar and menus with no backdrop. Otto also follows the macOS “Reduce transparency” accessibility setting."
       checked={ui.reduceTransparency}
-      onchange={(e) => ui.setReduceTransparency(e.currentTarget.checked)}
+      onchange={(v) => ui.setReduceTransparency(v)}
     />
-    <span>Reduce transparency</span>
-  </label>
-  <p class="hint-line">
-    Solid sidebar, toolbar and menus with no backdrop. Otto also follows the macOS “Reduce
-    transparency” accessibility setting.
-  </p>
+  </div>
 
   <div class="section-title">Terminal font</div>
-  <div class="segmented">
+  <div class="segmented" role="group" aria-label="Terminal font">
     {#each TERM_FONT_OPTIONS as f (f.id)}
       <button
         class:active={ui.termFontFamily === f.id}
+        aria-pressed={ui.termFontFamily === f.id}
         title={f.desc}
         onclick={() => ui.setTermFontFamily(f.id)}>{f.name}</button
       >
@@ -218,22 +252,45 @@
     Hebrew &amp; other right-to-left text renders crisply via the bundled Cousine font in every
     option. Change applies to open terminals instantly.
   </p>
-
-  <div class="section-title">Right-to-left text <span class="exp-tag">Experimental</span></div>
-  <label class="switch-row">
-    <input
-      type="checkbox"
-      checked={ui.rtlBidi}
-      onchange={(e) => ui.setRtlBidi(e.currentTarget.checked)}
+  <!-- Same store setters as the session header's terminal controls, so the
+       two can't drift; also the only way back when those controls are hidden. -->
+  <div class="row term-size-row" role="group" aria-label="Terminal font size">
+    <span class="term-size-label">Font size</span>
+    <button class="sb-btn" onclick={() => ui.termZoomOut()} disabled={ui.termFontSize <= 8} title="Smaller (⌘− in a terminal)" aria-label="Terminal font smaller"><Icon name="minus" size={12} /></button>
+    <span class="mono term-size-val" aria-live="polite">{ui.termFontSize}px</span>
+    <button class="sb-btn" onclick={() => ui.termZoomIn()} disabled={ui.termFontSize >= 28} title="Larger (⌘+ in a terminal)" aria-label="Terminal font larger"><Icon name="plus" size={12} /></button>
+    {#if ui.termFontSize !== 13}
+      <button class="btn small ghost" onclick={() => ui.termZoomReset()}>Reset</button>
+    {/if}
+  </div>
+  <div class="toggle-block">
+    <SettingToggle
+      label="Copy on select"
+      hint="Selecting text in a terminal copies it to the clipboard."
+      checked={ui.termCopyOnSelect}
+      onchange={(v) => ui.setTermCopyOnSelect(v)}
     />
-    <span>Right-to-left text in the terminal</span>
-  </label>
-  <p class="hint-line warn">
-    ⚠ Lays out Hebrew right-to-left with English embedded left-to-right, using the browser's bidi
-    engine (switches the terminal off the GPU renderer). Because text is reflowed for reading, the
-    monospace grid no longer lines up exactly — great for chat-style output, imperfect for TUI
-    tables or box art. Toggling reloads open terminals.
-  </p>
+    <SettingToggle
+      label="Terminal toolbar"
+      hint="Show the font-size and copy-on-select controls on each terminal."
+      checked={ui.termToolbar}
+      onchange={(v) => ui.setTermToolbar(v)}
+    />
+  </div>
+
+  <div class="section-title">Right-to-left text <span class="chip exp-tag">Experimental</span></div>
+  <div class="toggle-block">
+    <SettingToggle
+      label="Right-to-left text in the terminal"
+      checked={ui.rtlBidi}
+      onchange={(v) => ui.setRtlBidi(v)}
+    >
+      Lays out Hebrew right-to-left with English embedded left-to-right, using the browser's bidi
+      engine (it switches the terminal off the GPU renderer). Text is reflowed for reading, so the
+      monospace grid no longer lines up exactly: good for chat-style output, imperfect for TUI
+      tables or box art. Toggling reloads open terminals.
+    </SettingToggle>
+  </div>
 
   <div class="section-title">Floating bar</div>
   <div class="segmented" role="radiogroup" aria-label="Floating bar">
@@ -252,23 +309,20 @@
   </p>
 
   <div class="section-title">Sessions on this device</div>
-  <label class="switch-row">
-    <input
-      type="checkbox"
+  <div class="toggle-block">
+    <SettingToggle
+      label="Isolate sessions to this device"
+      hint="Only show sessions started on this device. Other devices' sessions stay hidden here (they still run on the daemon)."
       checked={ui.sessionIsolation}
-      onchange={(e) => ui.setSessionIsolation(e.currentTarget.checked)}
+      onchange={(v) => ui.setSessionIsolation(v)}
+      testid="session-isolation-toggle"
     />
-    <span>Isolate sessions to this device</span>
-  </label>
-  <p class="hint-line">
-    Only show sessions started on this device. Other devices' sessions stay hidden here (they
-    still run on the daemon).
-  </p>
+  </div>
   <div class="section-title">Closing a session tab</div>
   <p class="hint-line">
     Closing a tab (×, ⌘W, sidebar ×) ends the session — the same as Archive or Delete from its
-    menu. Choose what happens, or be asked each time. Deleting always asks first, and so does
-    closing several session tabs at once.
+    menu. Choose what happens, or be asked each time. A remembered choice applies without asking;
+    closing several session tabs at once still asks once, naming the count.
   </p>
   <div class="radio-col" role="radiogroup" aria-label="When closing a session tab">
     <label class="switch-row">
@@ -281,7 +335,7 @@
     </label>
     <label class="switch-row">
       <input type="radio" name="close-tab-pref" checked={ui.closeTabPref === 'delete'} onchange={() => ui.setCloseTabPref('delete')} />
-      <span>Always delete — stop it and remove its history (asks to confirm)</span>
+      <span>Always delete — stop it and remove its history for good (can't be undone)</span>
     </label>
   </div>
 
@@ -289,7 +343,9 @@
   <p class="hint-line">
     Open wide results in the Vertical view (one record per block) instead of the grid. Set per
     engine: on for MongoDB, whose documents are nested; off for the SQL engines, where a wide
-    table is what the grid is for.
+    table is what the grid is for. MongoDB results open in Vertical anyway until you pick Grid
+    or JSON on one of the connection's tabs — this threshold then still sends wide ones back to
+    Vertical.
   </p>
   <div class="av-table" role="group" aria-label="Auto-Vertical by engine" data-testid="db-auto-vertical">
     {#each AUTO_VERTICAL_ENGINES as eng (eng.id)}
@@ -319,6 +375,12 @@
               const v = e.currentTarget.value;
               if (v !== '' && Number(v) > 0) ui.setDbAutoVertical(eng.id, Number(v));
             }}
+            onchange={(e) => {
+              // Leaving the box: show what was actually saved (a cleared box,
+              // 0, a decimal or a value past 500 would otherwise keep showing
+              // a number that isn't in effect).
+              e.currentTarget.value = String(ui.dbAutoVertical[eng.id] || '');
+            }}
             aria-label="{eng.label}: column threshold"
           />
           <span>columns</span>
@@ -333,18 +395,56 @@
 
   <div class="section-title">Sidebar</div>
   <p class="hint-line">
-    Show, hide and reorder the items in the left sidebar — keep only what you use. Hidden items
-    can be brought back here anytime. You can also reorder by dragging directly in the sidebar
-    (“Customize sidebar” at the bottom of the expanded sidebar). Saved per device.
+    Show, hide and reorder the items and sections of the left sidebar — keep only what you use. Star
+    an item to pin it to Favorites at the top. Hidden items can be brought back here anytime. You
+    can also drag directly in the sidebar (“Customize sidebar” at the bottom of the expanded
+    sidebar). Saved per device.
   </p>
   <div class="sidebar-list" data-testid="settings-sidebar-list">
-    <!-- Section by section, as the sidebar shows them; moves stay in-section. -->
-    {#each groupModules(sidebarResolved) as sec (sec.group.id)}
-      <div class="sidebar-group-label">{sec.group.label}</div>
+    <!-- Section by section, as the sidebar shows them; item moves stay
+         in-section (a favorite moves among the favorites). -->
+    {#each sidebarSecs as sec (sec.group.id)}
+      {@const isFavSec = sec.group.id === FAVORITES_ID}
+      {@const si = sidebarMovableSecs.indexOf(sec.group.id)}
+      <div class="sidebar-group-label">
+        {#if isFavSec}<span class="sb-group-star"><Icon name="star" size={12} /></span>{/if}
+        <span class="grow">{sec.group.label}</span>
+        {#if !isFavSec}
+          <button
+            class="sb-btn"
+            onclick={() => moveSidebarSection(sec.group.id, -1)}
+            disabled={si <= 0}
+            title="Move section up"
+            aria-label={`Move ${sec.group.label} section up`}
+          >
+            <Icon name="arrowUp" size={12} />
+          </button>
+          <button
+            class="sb-btn"
+            onclick={() => moveSidebarSection(sec.group.id, 1)}
+            disabled={si >= sidebarMovableSecs.length - 1}
+            title="Move section down"
+            aria-label={`Move ${sec.group.label} section down`}
+          >
+            <Icon name="arrowDown" size={12} />
+          </button>
+        {/if}
+      </div>
       {#each sec.modules as m, i (m.id)}
+        {@const fav = sidebarFavIds.includes(m.id)}
         <div class="sidebar-row" class:row-hidden={ui.sidebarHidden.includes(m.id)}>
           <Icon name={m.icon} size={14} />
           <span class="grow">{m.label}</span>
+          <button
+            class="sb-btn sb-star"
+            class:on={fav}
+            onclick={() => ui.toggleSidebarFavorite(m.id)}
+            title={fav ? 'Remove from Favorites' : 'Add to Favorites'}
+            aria-label={`Favorite ${m.label}`}
+            aria-pressed={fav}
+          >
+            <Icon name="star" size={13} />
+          </button>
           <button
             class="sb-btn"
             onclick={() => moveSidebarItem(m.id, -1)}
@@ -391,9 +491,9 @@
   }
   .theme-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
     gap: 12px;
-    max-width: min(620px, 92vw);
+    max-width: var(--settings-col);
   }
   .theme-card {
     text-align: start;
@@ -402,10 +502,10 @@
     background: var(--surface);
     padding: 10px;
     cursor: pointer;
-    transition: border-color 130ms ease-out, transform 130ms ease-out;
+    transition: border-color 130ms ease-out;
   }
-  .theme-card:hover {
-    transform: translateY(-1px);
+  .theme-card:hover:not(.selected) {
+    border-color: var(--border-strong);
   }
   .theme-card.selected {
     border-color: var(--accent);
@@ -465,8 +565,37 @@
     clip: rect(0 0 0 0);
     white-space: nowrap;
   }
-  .reduce-row {
+  /* SettingToggle rows under a picker or hint (their own 8px padding sets
+     the rhythm; the block only separates them from what's above). */
+  .toggle-block {
+    max-width: var(--settings-col);
+    margin-top: 6px;
+  }
+  /* A control that doesn't apply under the current theme (Scheme on Pro Dark). */
+  .segmented.off {
+    opacity: 0.55;
+  }
+  .segmented.off > button {
+    cursor: default;
+  }
+  .term-size-row {
     margin-top: 12px;
+    gap: 4px;
+  }
+  .term-size-label {
+    font-size: var(--fs-m);
+    color: var(--text);
+    margin-inline-end: 6px;
+  }
+  .term-size-val {
+    min-width: 40px;
+    text-align: center;
+  }
+  .term-size-row .sb-btn {
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    font-size: var(--fs-m);
+    color: var(--text);
   }
   .tp-bar {
     width: 34px;
@@ -482,27 +611,30 @@
     width: 55%;
   }
   .theme-name {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .theme-desc {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .hint-line {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
+    line-height: 1.5;
     color: var(--text-dim);
     margin: 8px 0 0;
-    max-width: min(620px, 92vw);
+    max-width: var(--settings-col);
   }
-  .hint-line.warn {
-    color: var(--status-exited);
+  .accent-val {
+    font-family: var(--font-mono);
+    font-size: var(--fs-s);
+    color: var(--text-dim);
   }
   .switch-row {
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
     cursor: pointer;
     user-select: none;
@@ -511,7 +643,7 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-    margin-bottom: 10px;
+    margin: 10px 0;
   }
   .switch-row input {
     width: 15px;
@@ -519,15 +651,10 @@
     accent-color: var(--accent);
     cursor: pointer;
   }
+  /* A sentence-case chip inside the uppercase section title. */
   .exp-tag {
-    font-size: 9.5px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    font-weight: 700;
-    color: var(--accent-text);
-    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
-    border-radius: 999px;
-    padding: 1px 6px;
+    text-transform: none;
+    letter-spacing: normal;
     margin-inline-start: 6px;
     vertical-align: middle;
   }
@@ -536,21 +663,21 @@
     text-align: end;
   }
   /* Auto-Vertical per engine: toggle · "more than N columns", one row each. */
+  /* Two columns (engine · threshold) so every "more than N columns" sits in
+     one aligned column right beside its engine, instead of being flung to
+     the far edge of the box by space-between. */
   .av-table {
     display: grid;
-    gap: 4px;
+    grid-template-columns: max-content max-content;
+    column-gap: 20px;
+    row-gap: 4px;
     margin-top: 8px;
-    max-width: min(460px, 92vw);
   }
   .av-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    min-height: 30px;
+    display: contents;
   }
   .av-toggle {
-    min-width: 120px;
+    min-height: 30px;
   }
   .av-num {
     display: inline-flex;
@@ -589,25 +716,59 @@
     height: 32px;
     padding: 0 4px 0 8px;
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
   }
   .sidebar-row:hover {
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+    background: var(--hover);
   }
   .sidebar-group-label {
-    padding: 8px 8px 2px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 24px;
+    padding: 8px 4px 2px 8px;
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.07em;
     color: var(--text-dim);
   }
+  .sidebar-group-label .grow {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* Section moves sit in the same column as the rows' up/down buttons. */
+  .sidebar-group-label .sb-btn {
+    width: 24px;
+    height: 22px;
+  }
+  .sidebar-group-label .sb-btn:last-child {
+    /* align with the rows' down arrow: skip the Show checkbox column
+       (row gap 8px + the 19px checkbox label) */
+    margin-inline-end: 27px;
+  }
+  .sb-group-star {
+    display: grid;
+    place-items: center;
+  }
+  /* Favorites toggle: an outline star, filled in the accent when on. */
+  .sb-star.on {
+    color: var(--accent-text);
+  }
+  .sb-star.on :global(svg path),
+  .sb-group-star :global(svg path) {
+    fill: currentColor;
+  }
   .sidebar-group-label:first-child {
     padding-top: 2px;
   }
   .sidebar-row .grow {
     flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -643,6 +804,9 @@
     padding-inline-start: 4px;
   }
   .sb-toggle input {
+    /* No UA margins (they differ between WebKit and Chromium): the section
+       arrows' column offset above depends on this column's exact width. */
+    margin: 0;
     width: 15px;
     height: 15px;
     accent-color: var(--accent);

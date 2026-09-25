@@ -142,7 +142,7 @@
     </select>
 
     {#if canEdit}
-      <button class="btn small" onclick={newDashboard}><Icon name="plus" size={11} />New</button>
+      <button class="btn small" onclick={newDashboard}><Icon name="plus" size={12} />New</button>
     {/if}
 
     {#if dashboard}
@@ -167,7 +167,7 @@
         </select>
       </div>
       {#if canEdit}
-        <button class="btn small primary" onclick={openAdd}><Icon name="plus" size={11} />Add widget</button>
+        <button class="btn small primary" onclick={openAdd}><Icon name="plus" size={12} />Add widget</button>
       {/if}
     {/if}
   </div>
@@ -302,7 +302,7 @@
     border-radius: 999px;
     border: 1px solid var(--border);
     background: var(--surface-2);
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
     text-transform: capitalize;
@@ -318,12 +318,12 @@
     gap: 12px;
   }
   .conn-note {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     margin: 0 0 10px;
   }
   .axes-hint {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     margin: 0 0 8px;
   }

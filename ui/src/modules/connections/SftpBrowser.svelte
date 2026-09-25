@@ -3,7 +3,7 @@
   // browses, transfers, and edits files over the connection's existing SSH
   // auth (the daemon drives the system `sftp` binary). Opened from the
   // Connections page; no terminal session required.
-  import type { Connection, SftpEntry } from '../../lib/api/types';
+  import type { Connection, SftpEntry, SftpTransfer } from '../../lib/api/types';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { sftp } from '../../lib/stores/sftp.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -53,7 +53,7 @@
       try {
         await sftp.loadTransfers(id);
         if (!stopped) timer = setTimeout(() => void poll(), 1500);
-      } catch (error) { if (!stopped) toasts.error('Could not refresh transfers', String(error)); }
+      } catch (error) { if (!stopped) toasts.error('Could not refresh transfers', error instanceof Error ? error.message : String(error)); }
     }
     void poll();
     return () => { stopped = true; if (timer) clearTimeout(timer); };
@@ -69,6 +69,13 @@
     // Offer the viewer for small-ish files; the backend caps at 1 MiB anyway.
     return e.kind === 'file' && e.size <= 1024 * 1024;
   }
+
+  // Transfer status enum → words (the raw value read "timed_out").
+  const TRANSFER_STATUS: Record<SftpTransfer['status'], string> = {
+    running: 'Running', finalizing: 'Finalizing', completed: 'Completed', cancelled: 'Cancelled',
+    failed: 'Failed', timed_out: 'Timed out', outcome_unknown: 'Outcome unknown',
+  };
+  const WRITE_DENIED = "You don't have write access to this connection's files";
 
   function humanSize(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
@@ -162,6 +169,7 @@
     const next = await confirmer.promptText(`Rename “${e.name}” to`, {
       title: 'Rename',
       confirmLabel: 'Rename',
+      initial: e.name,
     });
     if (!next || next === e.name) return;
     const path = sftp.childPath(conn.id, e.name);
@@ -177,7 +185,7 @@
     const isDir = e.kind === 'dir';
     const ok = await confirmer.ask(
       `Delete ${isDir ? 'directory' : 'file'} “${e.name}”${isDir ? ' (must be empty)' : ''}?`,
-      { title: 'Delete', confirmLabel: 'Delete' },
+      { title: isDir ? 'Delete directory?' : 'Delete file?', confirmLabel: 'Delete' },
     );
     if (!ok) return;
     const path = sftp.childPath(conn.id, e.name);
@@ -204,7 +212,13 @@
   <div class="sftp">
     <!-- Toolbar: up / refresh / new folder / upload -->
     <div class="toolbar">
-      <button class="btn small" title="Up" aria-label="Up" onclick={() => sftp.up(conn.id)}>
+      <button
+        class="btn small"
+        title="Up one folder"
+        aria-label="Up one folder"
+        disabled={!view.cwd || view.cwd === '/'}
+        onclick={() => sftp.up(conn.id)}
+      >
         <Icon name="arrowUp" size={13} />
       </button>
       <button
@@ -215,10 +229,10 @@
       >
         <Icon name="refresh" size={13} />
       </button>
-      <button class="btn small" disabled={!canWrite} onclick={newFolder}>
+      <button class="btn small" disabled={!canWrite} title={canWrite ? undefined : WRITE_DENIED} onclick={newFolder}>
         <Icon name="plus" size={12} /> New folder
       </button>
-      <button class="btn small primary" disabled={!canWrite} onclick={() => (uploadOpen = true)}>
+      <button class="btn small primary" disabled={!canWrite} title={canWrite ? undefined : WRITE_DENIED} onclick={() => (uploadOpen = true)}>
         <Icon name="arrowUp" size={12} /> Upload
       </button>
       <span class="grow"></span>
@@ -235,11 +249,11 @@
       <div class="transfers" aria-label="File transfers">
         {#each view.transfers as transfer (transfer.id)}
           <div class="transfer">
-            <span class="ellipsis">{transfer.direction === 'upload' ? 'Upload' : 'Download'} {transfer.remote_path}</span>
-            <span>{transfer.status} · {humanSize(transfer.bytes)}{transfer.total_bytes !== null ? ` / ${humanSize(transfer.total_bytes)}` : ''} · {transfer.elapsed_secs}s</span>
+            <span class="ellipsis" title={transfer.remote_path}>{transfer.direction === 'upload' ? 'Upload' : 'Download'} {transfer.remote_path}</span>
+            <span>{TRANSFER_STATUS[transfer.status] ?? transfer.status} · {humanSize(transfer.bytes)}{transfer.total_bytes !== null ? ` / ${humanSize(transfer.total_bytes)}` : ''} · {transfer.elapsed_secs}s</span>
             {#if transfer.status === 'running'}
               <progress max={transfer.total_bytes ?? undefined} value={transfer.total_bytes ? transfer.bytes : undefined} aria-label="Transferred bytes"></progress>
-              <button class="btn small" onclick={() => void sftp.cancelTransfer(conn.id, transfer.id).catch(e => toasts.error('Cancel failed', String(e)))}>Cancel</button>
+              <button class="btn small" onclick={() => void sftp.cancelTransfer(conn.id, transfer.id).catch(e => toasts.error('Cancel failed', e instanceof Error ? e.message : String(e)))}>Cancel</button>
             {/if}
             {#if transfer.error}<span class="err">{transfer.error}</span>{/if}
           </div>
@@ -258,7 +272,7 @@
     <!-- Listing -->
     <div class="list">
       {#if view.loading}
-        <div class="dim pad">Loading…</div>
+        <div class="dim pad">Loading files…</div>
       {:else if view.error}
         <div class="err pad">{view.error} <button class="btn small" onclick={() => sftp.refresh(conn.id)}>Retry</button></div>
       {:else if view.entries.length === 0}
@@ -283,8 +297,8 @@
               }}
             >
               <Icon name={iconFor(e)} size={13} />
-              <span class="ellipsis">{e.name}</span>
-              {#if e.symlink_target}<span class="link-to dim">→ {e.symlink_target}</span>{/if}
+              <span class="ellipsis" title={e.name}>{e.name}</span>
+              {#if e.symlink_target}<span class="link-to dim ellipsis" title={e.symlink_target}>→ {e.symlink_target}</span>{/if}
             </button>
             <span class="cell size mono">{e.kind === 'dir' ? '' : humanSize(e.size)}</span>
             <span class="cell mtime dim">{e.mtime ?? ''}</span>
@@ -314,7 +328,7 @@
               {/if}
               <button
                 class="icon-btn"
-                title="Rename"
+                title={canWrite ? 'Rename' : WRITE_DENIED}
                 aria-label="Rename"
                 disabled={!canWrite} onclick={() => renameEntry(e)}
               >
@@ -322,7 +336,7 @@
               </button>
               <button
                 class="icon-btn"
-                title="Delete"
+                title={canWrite ? 'Delete' : WRITE_DENIED}
                 aria-label="Delete"
                 disabled={!canWrite} onclick={() => deleteEntry(e)}
               >
@@ -369,7 +383,7 @@
 
 <style>
   .transfers { max-height: 180px; overflow: auto; padding: 8px 12px; border-bottom: 1px solid var(--border); }
-  .transfer { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 4px 0; font-size: 12px; }
+  .transfer { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 4px 0; font-size: var(--fs-s); }
   .transfer > .ellipsis { max-width: 45%; }
   .transfer progress { width: 100px; }
   .sftp {
@@ -392,7 +406,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 4px 8px;
   }
   .sftp-search:focus {
@@ -407,7 +421,7 @@
     align-items: center;
     flex-wrap: wrap;
     gap: 2px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     padding: 2px 0;
   }
@@ -458,7 +472,7 @@
     z-index: 1;
   }
   .cell {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     min-width: 0;
     overflow: hidden;
   }
@@ -483,8 +497,16 @@
     color: var(--accent-text);
   }
   .link-to {
-    font-size: 11px;
-    flex-shrink: 0;
+    font-size: var(--fs-xs);
+    max-width: 45%;
+  }
+  /* Long names / paths / link targets truncate with an ellipsis (the full
+     value is in the title). Not a global class — defined here. */
+  .ellipsis {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .cell.actions {
     display: flex;
@@ -494,7 +516,7 @@
   }
   .pad {
     padding: 16px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .err {
     color: var(--danger);
@@ -504,7 +526,7 @@
     overflow: auto;
     margin: 0;
     padding: 10px 12px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     background: var(--surface-2);
     border: 1px solid var(--border);
@@ -512,7 +534,7 @@
     white-space: pre;
   }
   .trunc {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     padding: 0 2px 8px;
   }

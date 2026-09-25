@@ -17,9 +17,9 @@
   import { plugins } from '../lib/stores/plugins.svelte';
   import {
     availableModules,
-    groupModules,
     activeNavId,
     resolveOrder,
+    sidebarSections,
     visibleOrder,
   } from '../lib/sidebar';
 
@@ -31,9 +31,10 @@
       .filter((p) => auth.canPlugin(p.slug, 'view'))
       .map((p) => ({ id: `plugin/${p.slug}`, icon: p.icon, label: p.name })),
   );
-  // Flattened section by section, so the bar's order matches the sidebar's.
+  // Flattened section by section, so the bar's order matches the sidebar's —
+  // Favorites first, so a user's favorites become the phone's primary tabs.
   const modules = $derived(
-    groupModules(
+    sidebarSections(
       visibleOrder(
         resolveOrder(
           availableModules((f) => auth.can(f, 'view'), pluginEntries),
@@ -41,6 +42,8 @@
         ),
         ui.sidebarHidden,
       ),
+      ui.sidebarFavorites,
+      ui.sidebarGroupOrder,
     ).flatMap((s) => s.modules),
   );
   // The entry the current route highlights (plugin slug, '' → Agents, …).
@@ -78,12 +81,12 @@
     </button>
   {/each}
 
-  {#if overflow.length > 0}
-    <button class="bn-btn" class:active={moreActive} onclick={() => (moreOpen = true)}>
-      <span class="bn-icon"><Icon name="command" size={20} /></span>
-      <span class="bn-label">More</span>
-    </button>
-  {/if}
+  <!-- Always present: besides the spilled modules it holds Commands (the
+       phone's only palette entry off the Agents page) and Settings. -->
+  <button class="bn-btn" class:active={moreActive} onclick={() => (moreOpen = true)}>
+    <span class="bn-icon"><Icon name="command" size={20} /></span>
+    <span class="bn-label">More</span>
+  </button>
 </nav>
 
 {#if moreOpen}
@@ -94,6 +97,16 @@
   <div class="more-sheet" role="dialog" aria-modal="true" aria-label="More modules">
     <div class="sheet-grip"></div>
     <div class="sheet-grid">
+      <button
+        class="sheet-item"
+        onclick={() => {
+          moreOpen = false;
+          ui.openPalette('commands');
+        }}
+      >
+        <Icon name="search" size={22} />
+        <span>Commands</span>
+      </button>
       {#each overflow as m (m.id)}
         <button class="sheet-item" class:active={current === m.id} onclick={() => go(m.id)}>
           <Icon name={m.icon} size={22} />
@@ -163,19 +176,21 @@
     position: absolute;
     top: -4px;
     inset-inline-end: -8px;
-    min-width: 14px;
-    height: 14px;
+    min-width: 15px;
+    height: 15px;
     padding: 0 3px;
     border-radius: 999px;
-    background: var(--status-working);
-    color: #fff;
-    font-size: 9px;
+    /* Count-chip language (tint + semantic text), opaque over the bar —
+       white on the bright working-green was ~2:1. */
+    background: color-mix(in srgb, var(--success) 24%, var(--bg-sidebar));
+    color: var(--success);
+    font-size: var(--fs-xs);
     font-weight: 700;
     display: grid;
     place-items: center;
   }
   .bn-badge.needs {
-    background: var(--warning-soft);
+    background: color-mix(in srgb, var(--warning) 24%, var(--bg-sidebar));
     color: var(--warning);
   }
 
@@ -228,7 +243,7 @@
     border-radius: var(--radius-m);
     background: var(--surface);
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .sheet-item.active {

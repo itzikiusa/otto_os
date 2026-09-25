@@ -74,8 +74,8 @@ anywhere else.
 }
 ```
 
-- **Groups** (`SIDEBAR_GROUPS`, rendered in this order, macOS source-list
-  style):
+- **Groups** (`SIDEBAR_GROUPS`, rendered in this order by default, macOS
+  source-list style):
 
   | Group id | Label |
   |---|---|
@@ -88,11 +88,29 @@ anywhere else.
 
   Put a new module in the group whose verb fits it. **A new group needs design
   review.** Five sections is the budget.
+- **Favorites** is a user-made section, always rendered **first** (star
+  icon, label "Favorites"), and only while it holds at least one module the
+  user can see. A module is favorited from its row's context menu ("Add to
+  Favorites"), the star toggle in "Customize sidebar", Settings → Appearance,
+  or ⌘K on its page. A favorite is listed **only** in Favorites — it leaves
+  its own section and returns to its saved slot there when unfavorited.
+  Favorites keep RBAC: an id the user can't see is skipped, never shown.
+  Stored per device in `ui.sidebarFavorites`; `sidebarSections()` builds the
+  layout (Navigator, Rail, BottomNav and Settings all use it). Favorites
+  reorder by drag at any time (not only while customizing) and with ⌥↑ / ⌥↓.
+- **Section order** is the user's (`ui.sidebarGroupOrder`, resolved by
+  `resolveGroupOrder()`: unknown ids are ignored and new sections append in
+  default order). Sections move with the header's context menu ("Move section
+  up/down") or, while customizing, the header's arrows and grip. Favorites
+  never moves.
 - **Section headers** fold (a chevron on hover, stored per device in
   `ui.sidebarCollapsedGroups`). The section that holds the active route is
   pinned open. The Rail draws a thin separator between sections instead.
 - **User order and hiding** only rearrange modules *within* their section
-  (`moveWithinGroup`). Hidden modules stay reachable with ⌘K.
+  (`moveWithinGroup`); the one crossing is favoriting (a drop onto a favorite
+  favorites the dragged module at that slot). Hidden modules stay reachable
+  with ⌘K. "Reset to default" clears order, hiding, folds, favorites and
+  section order.
 - **Active item:**
   - an `--accent` tint at 16%
   - `--text` at weight 600
@@ -468,6 +486,34 @@ Breakpoints live in `lib/stores/viewport.svelte.ts` (`PHONE_MAX = 640`,
   in-app windows, an MDI area, or a taskbar.
 - Sheets (`Modal`) are for short, blocking tasks. Anything the user works in
   for minutes is a page, a pane or a window, not a modal.
+
+### Side by side
+
+Two sections of the sidebar can share the content column, like a split view:
+`[sidebar] [main pane │ side pane]`. It is a split, not an inner window: no
+title bar of its own, no dragging, no overlap, never more than two panes.
+
+- **Entry points.** A sidebar row's context menu ("Open side by side", or
+  "Show in side pane" while one is open), ⌥-click on a row, `⌘\` (a module
+  picker; `⌘\` again closes the pane) and the ⌘K "Open <Module> side by side"
+  / "Close side pane" / "Swap panes" commands. Desktop main window only: on
+  phone and tablet, and in pop-outs, the entry points aren't offered and a
+  pane that no longer fits is hidden, never cleared.
+- **One module per pane.** A navigation to the module the other pane shows
+  is delivered to that pane (a session opened from Home appears in a side
+  Agents pane), so a module is never open twice.
+- **Chrome.** The side pane has no bar of its own: its Swap / Open in main
+  pane / Close buttons sit at the end of the page's own top row (`PageHeader`,
+  or the Agents `TabBar`), so both panes' toolbars line up. The divider is a
+  1px `--separator` hairline with a 9px grab area, a keyboard-operable
+  `role="separator"` (←/→, ⇧ for a big step, Home/End, Enter or double-click
+  for 50/50), clamped to 25–75% and a 360px floor per pane.
+- **Mechanics.** The side pane is the app in a same-origin iframe
+  (`?embed=1`, `lib/sidePane.ts`): its own router and stores, so any module
+  works there unchanged. Anything that must run once per window (the native
+  menu bridge, native notifications, notice toasts, route restore, window-key
+  GC, the service worker) is skipped in the embedded document. See
+  [multi-window.md → Side by side](../../features/multi-window.md#side-by-side).
 
 ## 7. Floating command bar
 

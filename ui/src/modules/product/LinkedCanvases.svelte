@@ -41,7 +41,9 @@
 
   async function openPicker(): Promise<void> {
     picking = !picking;
-    if (picking && !canvas.scenes.length) await canvas.loadScenes().catch(() => {});
+    if (picking && !canvas.scenes.length) {
+      await canvas.loadScenes().catch((e) => toasts.error("Couldn't load your canvases", e instanceof Error ? e.message : String(e)));
+    }
   }
 
   async function link(sceneId: string): Promise<void> {
@@ -159,14 +161,14 @@
           <button class="lc-cand" onclick={() => link(c.id)} disabled={!!linkingId}>
             <Icon name="shapes" size={12} />
             <span class="lc-name">{label(c)}</span>
-            {#if linkingId === c.id}<span class="lc-busy">…</span>{:else}<Icon name="plus" size={12} />{/if}
+            {#if linkingId === c.id}<span class="lc-busy">Linking…</span>{:else}<Icon name="plus" size={12} />{/if}
           </button>
         {/each}
       {/if}
     </div>
   {/if}
   {#if loading && !scenes.length}
-    <p class="lc-empty">Loading…</p>
+    <p class="lc-empty">Loading linked canvases…</p>
   {:else if !scenes.length}
     <p class="lc-empty">No canvases linked yet. Create one to design this story visually.</p>
   {:else}
@@ -200,7 +202,7 @@
   }
   .lc-sub {
     margin: 6px 0 2px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.5;
     color: var(--text-dim);
   }
@@ -214,9 +216,9 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
-    font-weight: 700;
-    color: var(--text-dim, #888);
+    font-size: var(--fs-s);
+    font-weight: 600;
+    color: var(--text-dim);
     text-transform: uppercase;
     letter-spacing: 0.02em;
   }
@@ -233,7 +235,7 @@
     color: var(--text);
     border-radius: 7px;
     padding: 3px 9px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     cursor: pointer;
   }
@@ -275,18 +277,18 @@
     border-radius: var(--radius-s);
     cursor: pointer;
     text-align: start;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .lc-cand:hover {
     background: var(--surface-2);
   }
   .lc-busy {
-    color: var(--text-dim, #888);
+    color: var(--text-dim);
   }
   .lc-empty {
     margin: 4px 0 2px;
-    font-size: 12px;
-    color: var(--text-dim, #888);
+    font-size: var(--fs-s);
+    color: var(--text-dim);
   }
   .lc-list {
     list-style: none;
@@ -318,15 +320,15 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 13px;
+    font-size: var(--fs-m);
   }
   .lc-format-chip {
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    font-size: 9.5px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.03em;
     padding: 2px 6px;
@@ -336,7 +338,7 @@
   }
   .lc-updated {
     flex-shrink: 0;
-    font-size: 11px;
-    color: var(--text-dim, #888);
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
 </style>

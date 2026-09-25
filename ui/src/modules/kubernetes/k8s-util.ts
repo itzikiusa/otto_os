@@ -134,3 +134,18 @@ export function clusterLabel(c: K8sCluster | null): string {
 export function safeName(s: string): string {
   return s.replace(/[^A-Za-z0-9._-]+/g, '_');
 }
+
+/** kubectl stderr is a wall of repeated klog lines (`E0925 10:41:59 … memcache.go:265] …`)
+ *  ending in one human sentence. Return that sentence for the headline; the
+ *  caller keeps the raw text behind a disclosure. */
+export function kubectlErrorSummary(raw: string | null | undefined): string {
+  const text = (raw ?? '').replace(/^(invalid|forbidden|internal):\s*/i, '').replace(/^kubectl:\s*/i, '').trim();
+  if (!text) return 'kubectl failed without a message.';
+  const lines = text
+    .split(/\n|(?=\b[EWI]\d{4} \d{2}:\d{2}:\d{2}\.\d+ )/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const human = lines.filter((l) => !/^[EWI]\d{4} \d{2}:\d{2}:\d{2}/.test(l));
+  const pick = (human.length ? human[human.length - 1] : lines[lines.length - 1]) ?? text;
+  return pick.length > 240 ? `${pick.slice(0, 237)}…` : pick;
+}

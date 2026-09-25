@@ -23,8 +23,11 @@
     selectedServerId: string | null;
     onSelect: (id: string) => void;
     embedded?: boolean;
+    /** After a re-discovery, so the parent's per-server tool count isn't stale. */
+    ondiscovered?: () => void;
   }
-  let { wsId, servers, selectedServerId, onSelect, embedded = false }: Props = $props();
+  let { wsId, servers, selectedServerId, onSelect, embedded = false, ondiscovered }: Props = $props();
+  const NO_CONFIGURE = 'You need configure access to this server';
 
   const can = (operation:string, child?:string) => !!selectedServerId && resourceAccess.can('mcp_server',selectedServerId,operation,'mcp',operation==='invoke'?'edit':'admin',child);
   let tools = $state<McpToolView[]>([]);
@@ -102,6 +105,7 @@
     try {
       tools = await mcpCpApi.cpDiscover(id);
       toasts.success('Discovered tools', `${tools.length} found`);
+      ondiscovered?.();
     } catch (e) {
       toasts.error('Discovery failed', e instanceof Error ? e.message : String(e));
     } finally {
@@ -183,14 +187,14 @@
     {#if server}
       <McpPill kind="injection" value={server.injection_risk} />
       <span class="grow"></span>
-      <button class="btn small" onclick={() => void discover()} disabled={loading || !can('configure')}>
+      <button class="btn small" onclick={() => void discover()} disabled={loading || !can('configure')} title={can('configure') ? undefined : NO_CONFIGURE}>
         {loading ? 'Discovering…' : 'Discover'}
       </button>
     {/if}
   </div>
 
   {#if !server}
-    <p class="muted pad">Pick a server above (or add one on the Servers tab) to manage its tools.</p>
+    <p class="muted pad">Pick a server above (or add one under External servers) to manage its tools.</p>
   {:else if loadError && tools.length === 0}
     <LoadState what="tools" {loading} error={loadError} empty onretry={() => void loadTools()} />
   {:else if loading && tools.length === 0}
@@ -199,7 +203,7 @@
     <div class="empty">
       <Icon name="zap" size={24} />
       <p>No tools discovered yet for <strong>{server.name}</strong>.</p>
-      <button class="btn primary" disabled={!can('configure')} onclick={() => void discover()}>Discover tools</button>
+      <button class="btn primary" disabled={!can('configure')} title={can('configure') ? undefined : NO_CONFIGURE} onclick={() => void discover()}>Discover tools</button>
     </div>
   {:else}
     <div class="grid">
@@ -216,7 +220,7 @@
           <div class="tname">
             <span class="nm">{t.title || t.name}</span>
             <code class="code">{t.name}</code>
-            {#if t.description}<span class="desc">{t.description}</span>{/if}
+            {#if t.description}<span class="desc" title={t.description}>{t.description}</span>{/if}
           </div>
           <span class="cell">
             <McpPill kind="risk" value={t.risk_label} small />
@@ -231,7 +235,8 @@
               aria-checked={t.enabled}
               disabled={busyTool[t.id] || !can('configure',t.name)}
               onclick={() => void patchTool(t, { enabled: !t.enabled })}
-              title={t.enabled ? 'Enabled' : 'Disabled'}
+              aria-label={`Enable ${t.name}`}
+              title={!can('configure', t.name) ? NO_CONFIGURE : t.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}
             ><span class="knob"></span></button>
           </span>
           <span class="cell">
@@ -242,12 +247,14 @@
               aria-checked={t.require_approval}
               disabled={busyTool[t.id] || !can('configure',t.name)}
               onclick={() => void patchTool(t, { require_approval: !t.require_approval })}
-              title={t.require_approval ? 'Requires approval' : 'No approval required'}
+              aria-label={`Require approval for ${t.name}`}
+              title={!can('configure', t.name) ? NO_CONFIGURE : t.require_approval ? 'Requires approval — click to allow without approval' : 'No approval required — click to require it'}
             ><span class="knob"></span></button>
           </span>
           <span class="cell">
             <select
               value={t.risk_label}
+              aria-label={`Risk label for ${t.name}`}
               disabled={busyTool[t.id] || !can('configure',t.name)}
               onchange={(e) =>
                 void patchTool(t, {
@@ -318,7 +325,7 @@
             </div>
             {#if result.decision === 'pending_approval'}
               <p class="pending">
-                ⏳ Pending approval — review it on the <strong>Approvals</strong> tab.
+                <Icon name="clock" size={12} /> Pending approval — review it under <strong>Activity → Approvals</strong>.
                 {#if result.approval_id}<br />Approval id: <code class="code">{result.approval_id}</code>{/if}
               </p>
             {:else if result.preview !== undefined && result.preview !== null}
@@ -361,7 +368,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .grid {
@@ -377,7 +384,7 @@
   }
   .thead {
     border-bottom: 1px solid var(--border);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--text-dim);
@@ -395,7 +402,7 @@
     min-width: 0;
   }
   .tname .nm {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .code {
@@ -404,7 +411,7 @@
     color: var(--text-dim);
   }
   .desc {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -425,7 +432,7 @@
     border-radius: var(--radius-s, 6px);
     color: var(--text);
     padding: 5px 8px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .switch {
     width: 30px;
@@ -439,7 +446,7 @@
     flex: none;
   }
   .switch.on {
-    background: var(--status-working, #28c840);
+    background: var(--success);
   }
   .switch .knob {
     position: absolute;
@@ -473,7 +480,7 @@
     border: none;
     background: transparent;
     color: var(--accent-text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
   .tester-head {
@@ -485,7 +492,7 @@
     color: var(--text-dim);
   }
   .tester-head .th {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
   }
@@ -505,7 +512,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
   }
   .field {
@@ -514,7 +521,7 @@
     gap: 4px;
   }
   .field > span {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   textarea {
@@ -523,7 +530,7 @@
   }
   .mono {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .result {
     border: 1px solid var(--border);
@@ -539,7 +546,7 @@
     margin-bottom: 8px;
   }
   .reason {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .tag {
@@ -552,13 +559,13 @@
     padding: 1px 6px;
   }
   .tag.bad {
-    color: var(--status-exited, #ff5f57);
-    background: color-mix(in srgb, var(--status-exited, #ff5f57) 18%, transparent);
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 18%, transparent);
   }
   .json {
     margin: 0;
     font-family: var(--font-mono);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     white-space: pre-wrap;
     word-break: break-word;
     max-height: 320px;
@@ -567,19 +574,19 @@
   }
   .pending {
     margin: 0;
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--warning);
   }
   .warn {
     margin: 0;
-    font-size: 12px;
-    color: var(--status-exited, #ff5f57);
+    font-size: var(--fs-s);
+    color: var(--danger);
   }
   .muted {
     color: var(--text-dim);
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .pad {
     padding: 16px;

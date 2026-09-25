@@ -284,7 +284,7 @@
   .settings-nav {
     width: 200px;
     flex-shrink: 0;
-    border-inline-end: 1px solid var(--border);
+    border-inline-end: 1px solid var(--separator);
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -300,7 +300,7 @@
     justify-content: space-between;
     padding-block: 0;
     padding-inline: 18px 10px;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--separator);
     font-size: var(--fs-l);
     font-weight: 600;
     letter-spacing: -0.01em;
@@ -405,14 +405,26 @@
     color: var(--text);
     font-weight: 600;
   }
-  /* Each section owns its chrome (PageHeader) and scroll (PageBody). */
+  /* Each section owns its chrome (PageHeader) and scroll (PageBody).
+     --settings-col: the ONE column width every Settings page caps its form
+     cards, intros and hints at, so all 28 pages line up on the same right
+     edge (full-width data tables — Sessions, audit log, logs — ignore it). */
   .settings-body {
+    --settings-col: 760px;
     flex: 1;
     min-width: 0;
     min-height: 0;
     display: flex;
     flex-direction: column;
     overflow: hidden;
+  }
+
+  /* app.css gives .section-title an 18px top margin; a page that opens on
+     one (Appearance, Notifications, Daemon…) would start 18px lower than a
+     page that opens on a SectionIntro. Every page starts on the same line. */
+  .settings-body :global(.page-body-inner > .section-title:first-child),
+  .settings-body :global(.page-body-inner > :first-child > .section-title:first-child) {
+    margin-top: 0;
   }
 
   @media (prefers-reduced-motion: reduce) {

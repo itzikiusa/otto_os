@@ -76,7 +76,7 @@
 
   // ── Roving focus ───────────────────────────────────────────────────────────
   function itemEls(): HTMLButtonElement[] {
-    return menuEl ? Array.from(menuEl.querySelectorAll<HTMLButtonElement>('.ctx-item:not(:disabled)')) : [];
+    return menuEl ? Array.from(menuEl.querySelectorAll<HTMLButtonElement>('.ctx-item:not([aria-disabled="true"])')) : [];
   }
   function focusAt(i: number): void {
     const els = itemEls();
@@ -161,6 +161,33 @@
     }
   }
 
+  /** The menu caps at 260px: a long repo / branch / session name ellipsizes,
+   *  so hovering a clipped label shows it whole (unclipped rows get none). An
+   *  item's own `title` (e.g. why it is disabled) always wins. */
+  function titleIfClipped(e: MouseEvent, item: MenuItem): void {
+    const row = e.currentTarget as HTMLElement;
+    if (item.title) {
+      row.title = item.title;
+      return;
+    }
+    const el = row.querySelector<HTMLElement>('.ctx-label');
+    if (!el) return;
+    row.title = el.scrollWidth > el.clientWidth + 1 ? (el.textContent ?? '') : '';
+  }
+
+  /** Conditional rows (`...(cond ? [...] : [])`) leave separators at the
+   *  edges or doubled up; drop those so every menu reads clean. */
+  function tidy(items: MenuItem[]): MenuItem[] {
+    const out: MenuItem[] = [];
+    for (const it of items) {
+      const sep = it.separator || !it.label;
+      if (sep && (out.length === 0 || out[out.length - 1].separator || !out[out.length - 1].label)) continue;
+      out.push(it);
+    }
+    while (out.length && (out[out.length - 1].separator || !out[out.length - 1].label)) out.pop();
+    return out;
+  }
+
   function clickItem(item: MenuItem): void {
     if (item.disabled) return;
     // Close FIRST: an action may open another menu (a ⋯ row that clicks a
@@ -175,7 +202,7 @@
   // rest collapse into a "+N more" hint until the query narrows the list).
   const view = $derived.by(() => {
     const items = ctxMenu.items;
-    if (!ctxMenu.filter) return { items, hidden: 0 };
+    if (!ctxMenu.filter) return { items: tidy(items), hidden: 0 };
     const q = ctxMenu.query.trim().toLowerCase();
     const cap = ctxMenu.maxVisible > 0 ? ctxMenu.maxVisible : Infinity;
     const out: typeof items = [];
@@ -194,7 +221,7 @@
         hidden++;
       }
     }
-    return { items: out, hidden };
+    return { items: tidy(out), hidden };
   });
 
   let searchEl: HTMLInputElement | null = $state(null);
@@ -252,14 +279,17 @@
           class="ctx-item"
           class:danger={item.danger}
           class:disabled={item.disabled}
-          disabled={item.disabled}
+          aria-disabled={item.disabled ? 'true' : undefined}
           role={item.checked === undefined ? 'menuitem' : 'menuitemcheckbox'}
           aria-checked={item.checked === undefined ? undefined : item.checked}
           tabindex="-1"
           onclick={() => clickItem(item)}
+          onmouseenter={(e) => titleIfClipped(e, item)}
           onmousemove={(e) => {
-            // Pointer and keyboard share one highlight: hovering moves focus.
+            // Pointer and keyboard share one highlight: hovering moves focus
+            // (not onto a disabled row — it only shows its tooltip).
             const el = e.currentTarget;
+            if (item.disabled) return;
             if (document.activeElement !== el && document.activeElement !== searchEl) el.focus({ preventScroll: true });
           }}
         >
@@ -277,6 +307,7 @@
             <span class="ctx-icon-gap"></span>
           {/if}
           <span class="ctx-label">{item.label}</span>
+          {#if item.hint}<span class="ctx-hint">{item.hint}</span>{/if}
         </button>
       {/if}
     {/each}
@@ -385,6 +416,17 @@
     white-space: nowrap;
   }
 
+  /* Trailing shortcut / qualifier (never shrinks the label away first). */
+  .ctx-hint {
+    flex-shrink: 0;
+    margin-inline-start: 12px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .ctx-item.disabled .ctx-hint {
+    opacity: 1;
+  }
   .ctx-sep {
     height: 1px;
     background: var(--border);

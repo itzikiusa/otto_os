@@ -7,7 +7,10 @@
 //              unread warnings
 //   Running    assistant tasks running · working agent sessions · in-flight
 //              workflow runs
-//   Up next    the assistant's reminders due in the next 24 h · today's notices
+//   Up next    the assistant's reminders and scheduled-task runs due in the
+//              next 24 h — forward-looking only. Past notices live in the bell
+//              (warnings already surface under Needs you); a "session awaiting
+//              input" notice here contradicted an empty Needs you card.
 //   Recent     Design Hall artifacts · pull requests from the work graph
 //
 // The live parts (ws, notifications) are derived; the fetched parts poll on a
@@ -16,8 +19,9 @@
 import { api } from '../../lib/api/client';
 import { listArtifacts } from '../../lib/api/design';
 import { missionControlApi } from '../../lib/api/missionControl';
+import { scheduledTasksApi } from '../../lib/api/scheduledTasks';
 import type { IconName } from '../../lib/components/Icon.svelte';
-import type { AssistantTask, DesignArtifact, McpApproval, Notice, WorkItem } from '../../lib/api/types';
+import type { AssistantTask, DesignArtifact, McpApproval, Notice, ScheduledTask, WorkItem } from '../../lib/api/types';
 import { router } from '../../lib/router.svelte';
 import { auth } from '../../lib/stores/auth.svelte';
 import { assistant } from '../../lib/stores/assistant.svelte';
@@ -61,12 +65,6 @@ function timeOfDay(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-function isToday(iso: string): boolean {
-  const d = new Date(iso);
-  const n = new Date();
-  return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate();
-}
-
 function sessionIdOf(n: Notice): string | null {
   if (n.action?.type === 'open_session') return n.action.session_id;
   const key = n.source_key ?? '';
@@ -78,8 +76,13 @@ class TodayStore {
   workApprovals = $state(0);
   designs: DesignArtifact[] = $state([]);
   prs: WorkItem[] = $state([]);
+  /** Enabled scheduled tasks (their `next_run_at` feeds Up next). */
+  scheduled: ScheduledTask[] = $state([]);
   /** First fetch settled (success or not) — the fetched rows stop skeletoning. */
   loaded = $state(false);
+  /** The last fetch had a failing source — the cards say so (with Retry)
+   *  instead of passing a broken backend off as "nothing here". */
+  failed = $state(false);
   /** The assistant's reminders due soon, earliest first — see {@link Reminder}. */
   reminders: Reminder[] = $derived.by(() => {
     const now = Date.now();
@@ -202,9 +205,10 @@ class TodayStore {
     return [...tasks, ...rows];
   });
 
-  /** Today's notices not already under Needs you, newest first. */
+  /** What happens next, soonest first: reminders + scheduled-task runs due
+   *  within UP_NEXT_MS. */
   upNext: TodayRow[] = $derived.by(() => {
-    const needIds = new Set(this.needs.map((r) => r.id));
+    const now = Date.now();
     const reminders: TodayRow[] = this.reminders.map((r) => ({
       id: `reminder:${r.id}`,
       title: r.title,
@@ -214,19 +218,22 @@ class TodayStore {
       at: r.due,
       open: r.open ?? (() => {}),
     }));
-    const notices: TodayRow[] = notifications.notices
-      .filter((n) => isToday(n.created_at) && !needIds.has(`notice:${n.id}`))
-      .slice(0, 6)
-      .map((n) => ({
-        id: `notice:${n.id}`,
-        title: n.title,
-        detail: n.body,
-        icon: 'bell',
-        tone: 'idle',
-        at: n.created_at,
-        open: () => void notifications.runAction(n),
+    const runs: TodayRow[] = this.scheduled
+      .filter((t) => {
+        if (!t.enabled || !t.next_run_at) return false;
+        const d = Date.parse(t.next_run_at) - now;
+        return Number.isFinite(d) && d < UP_NEXT_MS;
+      })
+      .map((t) => ({
+        id: `scheduled:${t.id}`,
+        title: t.name,
+        detail: `Scheduled task · ${timeOfDay(t.next_run_at ?? '')}`,
+        icon: 'calendar' as IconName,
+        tone: 'idle' as const,
+        at: t.next_run_at ?? undefined,
+        open: () => router.go('scheduled-tasks'),
       }));
-    return [...reminders, ...notices];
+    return [...reminders, ...runs].sort((a, b) => Date.parse(a.at ?? '') - Date.parse(b.at ?? ''));
   });
 
   recent: TodayRow[] = $derived.by(() => {
@@ -263,19 +270,22 @@ class TodayStore {
     const can = (f: Parameters<typeof auth.can>[0]) => auth.can(f, 'view');
     const settle = <T>(p: Promise<T>, fallback: T): Promise<{ ok: boolean; v: T }> =>
       p.then((v) => ({ ok: true, v })).catch(() => ({ ok: false, v: fallback }));
-    const [appr, summary, designs, prs] = await Promise.all([
+    const [appr, summary, designs, prs, sched] = await Promise.all([
       can('mcp') ? settle(api.get<McpApproval[]>('/mcp/approvals?status=pending'), [] as McpApproval[]) : { ok: true, v: [] as McpApproval[] },
       wsId && can('mission_control') ? settle(missionControlApi.summary(wsId), null) : { ok: true, v: null },
       can('design') ? settle(listArtifacts({ workspace_id: wsId ?? undefined, limit: 4 }), [] as DesignArtifact[]) : { ok: true, v: [] as DesignArtifact[] },
       wsId && can('mission_control') ? settle(missionControlApi.items(wsId, { kind: 'pr', limit: 3 }), [] as WorkItem[]) : { ok: true, v: [] as WorkItem[] },
+      wsId && can('scheduled_tasks') ? settle(scheduledTasksApi.list(wsId), [] as ScheduledTask[]) : { ok: true, v: [] as ScheduledTask[] },
     ]);
     if (mine !== this.seq) return true;
     this.approvals = appr.v.filter((a) => !a.workspace_id || !wsId || a.workspace_id === wsId);
     this.workApprovals = summary.v?.needs_approval ?? 0;
     this.designs = designs.v;
     this.prs = prs.v;
+    this.scheduled = sched.v;
     this.loaded = true;
-    return appr.ok && summary.ok && designs.ok && prs.ok;
+    this.failed = !(appr.ok && summary.ok && designs.ok && prs.ok && sched.ok);
+    return !this.failed;
   }
 
   /** Home mounted: start polling (and load notices if nothing has yet). */

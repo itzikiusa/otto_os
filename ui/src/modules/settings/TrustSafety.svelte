@@ -12,6 +12,11 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { copyAsJson } from '../../lib/components/exporters';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { router } from '../../lib/router.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { loadErrorText } from '../../lib/loadError';
 
   const PAGE_SIZE = 100;
 
@@ -31,6 +36,7 @@
 
   let posture: SecurityPostureResp | null = $state(null);
   let postureLoading = $state(true);
+  let postureError = $state('');
 
   let entries: AuditEntry[] = $state([]);
   let total = $state(0);
@@ -65,8 +71,10 @@
     postureLoading = true;
     try {
       posture = await api.get<SecurityPostureResp>('/security-posture');
+      postureError = '';
     } catch (e) {
-      toasts.error('Could not load security posture', e instanceof Error ? e.message : String(e));
+      // Inline, with Retry — a toast vanished and left an empty strip.
+      postureError = loadErrorText(e);
     } finally {
       postureLoading = false;
     }
@@ -108,7 +116,7 @@
       entries = resp.entries;
       total = resp.total;
     } catch (e) {
-      logError = e instanceof Error ? e.message : String(e);
+      logError = loadErrorText(e);
     } finally {
       logLoading = false;
     }
@@ -130,34 +138,54 @@
     return `${y}-${m}-${day}`;
   }
 
-  function applyPreset(days: number): void {
+  // Presets are whole calendar days (the date inputs have day granularity):
+  // "Last 7 days" is today plus the six days before it — a "Last 24h" label
+  // over a two-calendar-day range claimed a precision the filter doesn't have.
+  const PRESETS: { days: number; label: string }[] = [
+    { days: 1, label: 'Today' },
+    { days: 7, label: 'Last 7 days' },
+    { days: 30, label: 'Last 30 days' },
+  ];
+  function presetRange(days: number): { from: string; to: string } {
     const now = new Date();
     const from = new Date(now);
-    from.setDate(from.getDate() - days);
-    fromDate = toYmd(from);
-    toDate = toYmd(now);
+    from.setDate(from.getDate() - (days - 1));
+    return { from: toYmd(from), to: toYmd(now) };
+  }
+  function applyPreset(days: number): void {
+    const r = presetRange(days);
+    fromDate = r.from;
+    toDate = r.to;
     offset = 0;
   }
+  // The preset the current range matches (so the segment shows as selected).
+  const activePreset = $derived(
+    PRESETS.find((p) => {
+      const r = presetRange(p.days);
+      return r.from === fromDate && r.to === toDate;
+    })?.days ?? null,
+  );
 
   // Per-entry copy: tracks which entry is being copied (for brief feedback).
   let copyingId: string | null = $state(null);
 
   async function copyEntry(e: AuditEntry): Promise<void> {
-    copyingId = e.id;
     try {
       await copyAsJson(e);
-    } catch {
-      toasts.error('Copy failed', 'The browser blocked the clipboard write.');
-    } finally {
-      // Brief flash so the user sees the button change.
+      copyingId = e.id;
+      // Brief check mark so the user sees it landed.
       setTimeout(() => {
-        copyingId = null;
-      }, 800);
+        if (copyingId === e.id) copyingId = null;
+      }, 1200);
+    } catch {
+      toasts.error('Couldn’t copy the entry', 'The clipboard write was blocked.');
     }
   }
 
+  const filtered = $derived(!!action || !!fromDate || !!toDate);
+
   function actorLabel(e: AuditEntry): string {
-    if (!e.user_id) return 'anonymous';
+    if (!e.user_id) return 'Anonymous';
     return usernames[e.user_id] ? `@${usernames[e.user_id]}` : e.user_id;
   }
 
@@ -186,59 +214,66 @@
 </script>
 
 <div class="settings-section trust-section">
-  <PageHeader title={sectionLabel('trust-safety')} subtitle="Security posture and the append-only audit log">
+  <PageHeader title={sectionLabel('trust-safety')} subtitle="Security posture and audit log">
     {#snippet actions()}
       <button
-        class="btn"
+        class="btn small"
+        data-icon="refresh"
         disabled={logLoading || postureLoading}
         onclick={() => {
           void loadPosture();
           void loadLog();
         }}
       >
-        <Icon name="refresh" size={13} />
-        Refresh
+        <Icon name="refresh" size={12} />
+        {logLoading || postureLoading ? 'Refreshing…' : 'Refresh'}
       </button>
     {/snippet}
   </PageHeader>
   <PageBody padded={false} fill>
 
   <!-- Security posture summary -->
-  <section class="posture">
-    {#if postureLoading}
+  <section class="posture" aria-label="Security posture">
+    {#if postureLoading && !posture}
       <Skeleton rows={1} height={64} />
+    {:else if postureError && !posture}
+      <LoadState what="the security posture" error={postureError} empty variant="compact" onretry={() => void loadPosture()} />
     {:else if posture}
       <div class="cards">
-        <div class="card" class:warn={posture.network_listener}>
+        <div class="card">
           <div class="card-label">Network listener</div>
           <div class="card-value">
             {#if posture.network_listener}
-              <Icon name="globe" size={14} /> On
-              {#if posture.network_listener_port}
-                <span class="card-note">:{posture.network_listener_port}</span>
-              {/if}
+              <StatusBadge tone="warning" label={posture.network_listener_port ? `On · port ${posture.network_listener_port}` : 'On'} />
             {:else}
-              <Icon name="check" size={14} /> Off
+              <StatusBadge tone="success" label="Off" />
             {/if}
           </div>
-        </div>
-        <div class="card" class:ok={posture.loopback_only}>
-          <div class="card-label">Binding</div>
-          <div class="card-value">
-            {posture.loopback_only ? 'Loopback only (127.0.0.1)' : 'Network (0.0.0.0)'}
+          <div class="card-note">
+            {posture.network_listener ? 'Reachable from your network' : 'Only this Mac can connect'} ·
+            <button class="link-btn" onclick={() => router.go('settings/daemon')}>Daemon settings</button>
           </div>
         </div>
         <div class="card">
+          <div class="card-label">Binding</div>
+          <div class="card-value mono-val">{posture.loopback_only ? '127.0.0.1' : '0.0.0.0'}</div>
+          <div class="card-note">{posture.loopback_only ? 'Loopback only' : 'All network interfaces'}</div>
+        </div>
+        <div class="card">
           <div class="card-label">Active API tokens</div>
-          <div class="card-value">{posture.active_api_tokens}</div>
+          <div class="card-value num">{posture.active_api_tokens}</div>
+          <div class="card-note">
+            Personal access tokens that can call the API ·
+            <button class="link-btn" onclick={() => router.go('settings/tokens')}>Manage</button>
+          </div>
         </div>
       </div>
     {/if}
   </section>
 
   <!-- Audit log -->
-  <div class="toolbar">
-    <label class="field">
+  <div class="toolbar" role="group" aria-label="Filter the audit log">
+    <label class="tfield">
       <span>Action</span>
       <select class="input" bind:value={action} onchange={() => (offset = 0)}>
         {#each KNOWN_ACTIONS as a (a.value)}
@@ -246,61 +281,80 @@
         {/each}
       </select>
     </label>
-    <label class="field">
+    <label class="tfield">
       <span>From</span>
       <input class="input" type="date" bind:value={fromDate} onchange={() => (offset = 0)} />
     </label>
-    <label class="field">
+    <label class="tfield">
       <span>To</span>
       <input class="input" type="date" bind:value={toDate} onchange={() => (offset = 0)} />
     </label>
     <!-- Quick time-range presets -->
-    <div class="presets">
-      <button class="btn ghost preset" onclick={() => applyPreset(1)}>Last 24h</button>
-      <button class="btn ghost preset" onclick={() => applyPreset(7)}>Last 7d</button>
-      <button class="btn ghost preset" onclick={() => applyPreset(30)}>Last 30d</button>
+    <div class="segmented presets" role="group" aria-label="Quick range">
+      {#each PRESETS as p (p.days)}
+        <button class:active={activePreset === p.days} aria-pressed={activePreset === p.days} onclick={() => applyPreset(p.days)}>
+          {p.label}
+        </button>
+      {/each}
     </div>
-    <button class="btn ghost" onclick={resetFilters} disabled={!action && !fromDate && !toDate}>
-      Clear
-    </button>
+    {#if filtered}
+      <button class="btn small ghost" onclick={resetFilters}>Clear filters</button>
+    {/if}
   </div>
 
+  <!-- The count bar only while there is something to count; an empty log says
+     so once, in the body below. -->
+  {#if total > 0}
   <div class="log-meta">
-    <span>
-      {#if total > 0}
-        {pageStart}–{pageEnd} of {total}
-      {:else}
-        No entries
-      {/if}
+    <span aria-live="polite">
+      {pageStart}–{pageEnd} of {total} entr{total === 1 ? 'y' : 'ies'}
     </span>
-    <div class="pager">
-      <button class="btn ghost" disabled={!canPrev} onclick={() => (offset = Math.max(0, offset - PAGE_SIZE))}>
-        Prev
-      </button>
-      <button class="btn ghost" disabled={!canNext} onclick={() => (offset = offset + PAGE_SIZE)}>
-        Next
-      </button>
-    </div>
+    {#if total > PAGE_SIZE}
+      <div class="pager">
+        <button class="btn small ghost" disabled={!canPrev} onclick={() => (offset = Math.max(0, offset - PAGE_SIZE))}>
+          <Icon name="chevronLeft" size={12} /> Previous
+        </button>
+        <button class="btn small ghost" disabled={!canNext} onclick={() => (offset = offset + PAGE_SIZE)}>
+          Next <Icon name="chevronRight" size={12} />
+        </button>
+      </div>
+    {/if}
   </div>
+  {/if}
 
   <div class="log-body">
-    {#if logLoading}
+    {#if logLoading && entries.length === 0}
       <Skeleton rows={8} height={34} />
     {:else if logError}
-      <div class="empty error">{logError}</div>
+      <LoadState what="the audit log" error={logError} empty onretry={() => void loadLog()} />
     {:else if entries.length === 0}
-      <div class="empty">No audit entries match these filters.</div>
+      {#if filtered}
+        <EmptyState
+          icon="filter"
+          title="No entries match these filters"
+          body="Widen the date range or pick another action."
+          actionLabel="Clear filters"
+          actionKind="secondary"
+          onaction={resetFilters}
+        />
+      {:else}
+        <EmptyState
+          icon="shield"
+          title="No audit entries yet"
+          body="Sign-ins, API token changes and security settings changes are recorded here, and can't be edited or deleted."
+        />
+      {/if}
     {:else}
       <table class="audit-table">
         <thead>
           <tr>
-            <th class="col-time">Time</th>
-            <th class="col-action">Action</th>
-            <th class="col-actor">Actor</th>
-            <th class="col-target">Target</th>
-            <th class="col-ip">IP</th>
-            <th class="col-detail">Detail</th>
-            <th class="col-copy"></th>
+            <th class="col-time" scope="col">Time</th>
+            <th class="col-action" scope="col">Action</th>
+            <th class="col-actor" scope="col">Actor</th>
+            <th class="col-target" scope="col">Target</th>
+            <th class="col-ip" scope="col">IP</th>
+            <th class="col-detail" scope="col">Detail</th>
+            <th class="col-copy" scope="col"><span class="sr-only">Copy</span></th>
           </tr>
         </thead>
         <tbody>
@@ -308,21 +362,22 @@
             <tr>
               <td class="col-time mono">{fmtTime(e.ts)}</td>
               <td class="col-action">
-                <span class="badge" class:danger={e.action === 'login.failure' || e.action === 'login.lockout'}>
+                <span class="chip" class:bad={e.action === 'login.failure' || e.action === 'login.lockout'}>
                   {actionLabel(e.action)}
                 </span>
               </td>
-              <td class="col-actor mono">{actorLabel(e)}</td>
+              <td class="col-actor mono" title={e.user_id ?? undefined}>{actorLabel(e)}</td>
               <td class="col-target mono" title={e.target ?? ''}>{e.target ?? '—'}</td>
               <td class="col-ip mono">{e.ip ?? '—'}</td>
               <td class="col-detail mono" title={detailText(e)}>{detailText(e) || '—'}</td>
               <td class="col-copy">
                 <button
-                  class="copy-btn"
-                  title="Copy entry as JSON"
+                  class="icon-btn copy-btn"
+                  title={copyingId === e.id ? 'Copied' : 'Copy entry as JSON'}
+                  aria-label={copyingId === e.id ? 'Copied' : 'Copy entry as JSON'}
                   onclick={() => void copyEntry(e)}
                 >
-                  {copyingId === e.id ? '✓' : 'JSON'}
+                  <Icon name={copyingId === e.id ? 'check' : 'copy'} size={14} />
                 </button>
               </td>
             </tr>
@@ -342,67 +397,78 @@
     height: 100%;
     min-height: 0;
   }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
   .posture {
     padding: 16px 20px 14px;
   }
   .cards {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
     gap: 12px;
   }
   .card {
-    flex: 1;
-    min-width: 180px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m, 8px);
+    min-width: 0;
     padding: 12px 14px;
-    background: var(--surface-2);
-  }
-  .card.warn {
-    border-color: color-mix(in srgb, var(--warning) 50%, var(--border));
-  }
-  .card.ok {
-    border-color: color-mix(in srgb, var(--success) 40%, var(--border));
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
   }
   .card-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.06em;
     color: var(--text-dim);
-    margin-bottom: 6px;
   }
   .card-value {
-    font-size: 15px;
+    font-size: var(--fs-l);
     font-weight: 600;
     display: inline-flex;
     align-items: center;
     gap: 6px;
+    min-height: 24px;
+  }
+  .card-value.mono-val {
+    font-family: var(--font-mono);
+    font-size: var(--fs-m);
+  }
+  .card-value.num {
+    font-size: var(--fs-xl);
+    font-variant-numeric: tabular-nums;
   }
   .card-note {
-    font-weight: 400;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .toolbar {
     display: flex;
     flex-wrap: wrap;
-    align-items: end;
-    gap: 10px;
-    padding: 0 20px 12px;
+    align-items: flex-end;
+    gap: 8px 12px;
+    padding: 12px 20px;
     border-top: 1px solid var(--border);
     border-bottom: 1px solid var(--border);
-    padding-top: 12px;
   }
-  .field {
+  .tfield {
     display: flex;
     flex-direction: column;
     gap: 4px;
   }
-  .field span {
-    font-size: 11px;
+  .tfield span {
+    font-size: var(--fs-xs);
+    font-weight: 500;
     color: var(--text-dim);
   }
-  .btn.ghost {
-    background: transparent;
+  .presets {
+    align-self: flex-end;
+    margin-bottom: 1px;
   }
   .log-meta {
     min-height: 32px;
@@ -412,12 +478,12 @@
     gap: 12px;
     padding: 0 20px;
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     border-bottom: 1px solid var(--border);
   }
   .pager {
     display: flex;
-    gap: 6px;
+    gap: 4px;
   }
   .log-body {
     flex: 1;
@@ -425,36 +491,43 @@
     overflow: auto;
     padding: 4px 20px 32px;
   }
-  .empty {
-    padding: 24px;
-    color: var(--text-dim);
-    font-size: 12.5px;
+  .link-btn {
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--accent-text);
+    font: inherit;
+    cursor: pointer;
   }
-  .empty.error {
-    color: var(--danger);
+  .link-btn:hover {
+    text-decoration: underline;
   }
   .audit-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .audit-table th {
     text-align: start;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
     font-weight: 600;
-    padding: 8px 8px;
+    padding: 8px;
     border-bottom: 1px solid var(--border);
     position: sticky;
     top: 0;
-    background: var(--surface);
+    z-index: 1;
+    background: var(--bg);
   }
   .audit-table td {
-    padding: 7px 8px;
+    padding: 6px 8px;
     border-bottom: 1px solid var(--border);
-    vertical-align: top;
+    vertical-align: middle;
+  }
+  .audit-table tbody tr:hover {
+    background: var(--hover);
   }
   .col-target,
   .col-detail {
@@ -463,65 +536,28 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .col-time {
+    white-space: nowrap;
+  }
   .mono {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
-    font-size: 11.5px;
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
   }
-  .badge {
-    display: inline-block;
-    padding: 1px 7px;
-    border-radius: 10px;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    font-size: 11px;
-  }
-  .badge.danger {
-    border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
-    color: var(--danger);
-  }
-
-  /* Quick time-range preset buttons */
-  .presets {
-    display: flex;
-    gap: 4px;
-    align-self: flex-end;
-  }
-  .btn.preset {
-    font-size: 11.5px;
-    padding: 0 8px;
-    height: 28px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-  }
-  .btn.preset:hover {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    border-color: var(--accent);
-  }
-
-  /* Per-row copy-JSON button */
+  /* Per-row copy-JSON button: quiet until the row is hovered or focused. */
   .col-copy {
-    width: 28px;
+    width: 32px;
     padding: 0 4px !important;
   }
   .copy-btn {
-    display: grid;
-    place-items: center;
-    width: 22px;
-    height: 22px;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    border-radius: var(--radius-s);
-    cursor: pointer;
-    font-size: 11px;
     opacity: 0;
-    transition: opacity 120ms ease-out;
   }
-  tr:hover .copy-btn {
+  tr:hover .copy-btn,
+  .copy-btn:focus-visible {
     opacity: 1;
   }
-  .copy-btn:hover {
-    color: var(--text);
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+  @media (hover: none) {
+    .copy-btn {
+      opacity: 1;
+    }
   }
 </style>

@@ -1,58 +1,74 @@
 <script lang="ts">
   // Personal Agents module. Routes: `#/personal-agents` (agent cards),
-  // `#/personal-agents/rooms` (agent rooms), `#/personal-agents/<agentId>`
+  // `#/personal-agents/rooms` (agent rooms), `#/personal-agents/<agentId>[/<tab>]`
   // (one agent's page). The first list GET seeds four disabled example agents
-  // server-side — they render as normal rows.
+  // server-side — they render as normal cards, marked "Example".
   import RelTime from '../../lib/components/RelTime.svelte';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { toasts } from '../../lib/toast.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
+  import AgentAvatar from './AgentAvatar.svelte';
   import AgentEditSheet from './AgentEditSheet.svelte';
   import AgentPage from './AgentPage.svelte';
   import RoomsView from './RoomsView.svelte';
+  import { loadErrorOf } from './loadError';
   import type { PersonalAgent } from '../../lib/api/types';
 
   const sub = $derived(router.parts[1] ?? '');
   const agentId = $derived(sub && sub !== 'rooms' ? sub : null);
 
   let creating = $state(false);
-  let error = $state('');
+  /** Agent id whose Run now / Enable / Pause is in flight (no double fire). */
+  let busyId = $state<string | null>(null);
 
   $effect(() => {
     if (ws.currentId) void personalAgents.loadAgents(ws.currentId);
   });
 
   const agents = $derived(personalAgents.agents);
+  const loadError = $derived(loadErrorOf(personalAgents, 'agentsError'));
 
   async function toggle(a: PersonalAgent): Promise<void> {
+    busyId = a.id;
     try {
       await personalAgents.setEnabled(a.id, !a.enabled);
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Toggle failed';
+      toasts.error(a.enabled ? `Couldn’t pause ${a.name}` : `Couldn’t enable ${a.name}`, loadErrorText(e));
+    } finally {
+      busyId = null;
     }
   }
 
   async function runNow(a: PersonalAgent): Promise<void> {
-    error = '';
+    busyId = a.id;
     try {
       await personalAgents.runNow(a.id);
-      router.go(`personal-agents/${a.id}`);
+      toasts.success(`${a.name} is running`, 'Its report lands in Runs when it finishes.');
+      router.go(`personal-agents/${a.id}/runs`);
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Run failed';
+      toasts.error(`Couldn’t run ${a.name}`, loadErrorText(e));
+    } finally {
+      busyId = null;
     }
   }
 
   async function remove(a: PersonalAgent): Promise<void> {
-    if (!(await confirmer.ask(`Delete personal agent "${a.name}"? Its schedules and run history go with it.`, { title: 'Delete personal agent' }))) return;
+    if (!(await confirmer.ask(`Delete personal agent “${a.name}”? Its schedules, memory and run history go with it.`, { title: 'Delete personal agent', confirmLabel: 'Delete' }))) return;
     try {
       await personalAgents.remove(a.id);
+      toasts.success(`Deleted ${a.name}`);
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Delete failed';
+      toasts.error(`Couldn’t delete ${a.name}`, loadErrorText(e));
     }
   }
 
@@ -60,15 +76,28 @@
     ctxMenu.show(e, [
       { label: 'Open', icon: 'user', action: () => router.go(`personal-agents/${a.id}`) },
       { label: 'Run now', icon: 'play', action: () => void runNow(a) },
-      { label: a.enabled ? 'Pause' : 'Enable', icon: a.enabled ? 'clock' : 'play', action: () => void toggle(a) },
+      { label: a.enabled ? 'Pause' : 'Enable', icon: a.enabled ? 'clock' : 'check', action: () => void toggle(a) },
       { separator: true },
-      { label: 'Delete', icon: 'trash', danger: true, action: () => void remove(a) },
+      { label: 'Delete…', icon: 'trash', danger: true, action: () => void remove(a) },
     ]);
   }
 
   /** A seeded example: disabled, never run, still carrying its shipped persona. */
   function isExample(a: PersonalAgent): boolean {
     return !a.enabled && !a.chat_session_id && (personalAgents.runsByAgent[a.id]?.length ?? 0) === 0;
+  }
+
+  function providerText(a: PersonalAgent): string {
+    return a.model ? `${a.provider} · ${a.model}` : a.provider;
+  }
+
+  // Tab list keyboard: ←/→ switch between Agents and Rooms.
+  function onTabKey(e: KeyboardEvent): void {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft' && e.key !== 'Home' && e.key !== 'End') return;
+    e.preventDefault();
+    const toRooms = e.key === 'End' || ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && sub !== 'rooms');
+    router.go(toRooms ? 'personal-agents/rooms' : 'personal-agents');
+    queueMicrotask(() => (e.currentTarget as HTMLElement | null)?.querySelector<HTMLButtonElement>('[aria-selected="true"]')?.focus());
   }
 </script>
 
@@ -80,85 +109,95 @@
   <div class="pa-page">
   <PageHeader
     title="Personal Agents"
-    subtitle="Named personas with a pinned provider + model, their own schedules, memory, and delivery — chat with them anytime, and let them talk to each other in rooms you can always read."
+    subtitle="Named agents with their own persona, schedules and memory — they talk to each other only in rooms you can read."
   >
     {#snippet tabs()}
-      <div class="segmented" role="tablist" aria-label="Personal agents view">
-        <button role="tab" aria-selected={sub !== 'rooms'} class:active={sub !== 'rooms'} onclick={() => router.go('personal-agents')}>Agents</button>
-        <button role="tab" aria-selected={sub === 'rooms'} class:active={sub === 'rooms'} onclick={() => router.go('personal-agents/rooms')}>Rooms</button>
+      <div class="segmented" role="tablist" aria-label="Personal agents view" tabindex="-1" onkeydown={onTabKey}>
+        <button role="tab" aria-selected={sub !== 'rooms'} tabindex={sub !== 'rooms' ? 0 : -1} class:active={sub !== 'rooms'} onclick={() => router.go('personal-agents')}>Agents</button>
+        <button role="tab" aria-selected={sub === 'rooms'} tabindex={sub === 'rooms' ? 0 : -1} class:active={sub === 'rooms'} onclick={() => router.go('personal-agents/rooms')}>Rooms</button>
       </div>
     {/snippet}
     {#snippet actions()}
-      {#if sub === 'rooms' || agents.length > 0 || personalAgents.loadingAgents}
-        <button class="btn primary" onclick={() => (creating = true)}>New agent</button>
+      <!-- One primary per view: Rooms has its own create (the list's name
+           field / the empty state's "Create a room"). -->
+      {#if sub !== 'rooms' && agents.length > 0}
+        <button class="btn primary" data-icon="plus" onclick={() => (creating = true)}><Icon name="plus" size={12} /> New agent</button>
       {/if}
     {/snippet}
   </PageHeader>
   <PageBody fill={sub === 'rooms'}>
   <div class="pa">
-
-    {#if error}<div class="err" role="alert">{error}</div>{/if}
-
     {#if sub === 'rooms'}
       <RoomsView />
-    {:else if agents.length === 0}
-      {#if personalAgents.loadingAgents}
-        <div class="muted">Loading…</div>
-      {:else}
-        <EmptyState
-          icon="user"
-          title="No personal agents"
-          body="Create a named agent with its own persona, schedules and memory."
-          actionLabel="New agent"
-          actionIcon="plus"
-          variant="page"
-          onaction={() => (creating = true)}
-        />
-      {/if}
     {:else}
-      <ul class="cards">
-        {#each agents as a (a.id)}
-          <li>
-            <div
-              class="card"
-              class:paused={!a.enabled}
-              role="button"
-              tabindex="0"
-              onclick={() => router.go(`personal-agents/${a.id}`)}
-              onkeydown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  router.go(`personal-agents/${a.id}`);
-                }
-              }}
-              oncontextmenu={(e) => cardMenu(e, a)}
-            >
+      <LoadState
+        what="personal agents"
+        loading={personalAgents.loadingAgents}
+        error={loadError}
+        empty={agents.length === 0}
+        variant="page"
+        rows={3}
+        onretry={() => ws.currentId && void personalAgents.loadAgents(ws.currentId)}
+      >
+        {#snippet emptyView()}
+          <EmptyState
+            icon="user"
+            title="No personal agents yet"
+            body="A personal agent is a named persona on a pinned provider and model, with its own schedules, memory and delivery. Start blank or from a template."
+            actionLabel="New agent"
+            actionIcon="plus"
+            variant="page"
+            onaction={() => (creating = true)}
+          />
+        {/snippet}
+        <ul class="cards" data-testid="pa-cards">
+          {#each agents as a (a.id)}
+            {@const example = isExample(a)}
+            <li class="pa-card" class:paused={!a.enabled} oncontextmenu={(e) => cardMenu(e, a)}>
               <div class="card-top">
-                <span class="avatar" aria-hidden="true">{a.avatar || a.name.slice(0, 1)}</span>
+                <AgentAvatar avatar={a.avatar} name={a.name} size={36} />
                 <div class="card-id">
-                  <strong class="name">{a.name}</strong>
-                  <span class="chip mono">{a.provider}{a.model ? ` · ${a.model}` : ''}</span>
+                  <!-- The name is the card's one link; ::after stretches its hit
+                       area over the whole card, so the buttons stay real buttons
+                       (no button-in-button) and still sit on top. -->
+                  <button class="name" title={a.name} onclick={() => router.go(`personal-agents/${a.id}`)}>{a.name}</button>
+                  <span class="prov" title={providerText(a)}>
+                    <ProviderIcon provider={a.provider} size={12} /><span class="prov-t">{providerText(a)}</span>
+                  </span>
                 </div>
+                <button
+                  class="icon-btn card-more"
+                  aria-label="More actions for {a.name}"
+                  title="More actions"
+                  onclick={(e) => cardMenu(e, a)}><Icon name="more" size={14} /></button>
               </div>
               <div class="card-meta">
-                {#if !a.enabled}
-                  <span class="pill">{isExample(a) ? 'example — enable to use' : 'paused'}</span>
+                {#if example}
+                  <span class="chip" title="A shipped example — it stays off until you enable it. Run now still runs it once.">Example</span>
+                {:else if !a.enabled}
+                  <span class="chip" title="Schedules don’t fire while paused. Run now and chat still work.">Paused</span>
                 {:else}
-                  <span class="pill ok">enabled</span>
+                  <span class="chip ok">Enabled</span>
                 {/if}
-                {#if a.browser}<span class="pill">browser</span>{/if}
-                <span class="meta">next run <RelTime iso={personalAgents.nextRunAt(a.id)} /></span>
+                {#if a.browser}<span class="chip" title="Runs and chat can drive the in-app browser">Browser</span>{/if}
+                <!-- A paused agent's schedules never fire — don't promise a next run. -->
+                {#if a.enabled}
+                  <span class="meta">Next run <RelTime iso={personalAgents.nextRunAt(a.id)} fallback="not scheduled" /></span>
+                {/if}
               </div>
               <div class="card-actions">
-                <button class="btn small" onclick={(e) => { e.stopPropagation(); void runNow(a); }}>Run now</button>
-                <button class="btn small" onclick={(e) => { e.stopPropagation(); void toggle(a); }}>
-                  {a.enabled ? 'Pause' : 'Enable'}
-                </button>
+                {#if a.enabled}
+                  <button class="btn small" disabled={busyId === a.id} onclick={() => void runNow(a)}><Icon name="play" size={12} /> Run now</button>
+                  <button class="btn small" disabled={busyId === a.id} onclick={() => void toggle(a)}>Pause</button>
+                {:else}
+                  <button class="btn small" disabled={busyId === a.id} onclick={() => void toggle(a)}><Icon name="check" size={12} /> Enable</button>
+                  <button class="btn small" disabled={busyId === a.id} onclick={() => void runNow(a)} title="Run it once without enabling its schedules">Run once</button>
+                {/if}
               </div>
-            </div>
-          </li>
-        {/each}
-      </ul>
+            </li>
+          {/each}
+        </ul>
+      </LoadState>
     {/if}
 
     {#if creating}
@@ -172,34 +211,36 @@
 <style>
   .pa-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   .pa { display: flex; flex-direction: column; min-height: 0; flex: 1; }
-  .muted { color: var(--text-dim); padding: 0.75rem 0; font-size: 0.9rem; }
-  .err {
-    background: color-mix(in srgb, var(--status-exited) 12%, transparent);
-    color: var(--status-exited); padding: 0.5rem 0.75rem;
-    border-radius: var(--radius-s); margin-bottom: 0.75rem; font-size: 0.85rem;
+  .cards {
+    list-style: none; margin: 0; padding: 0; display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px;
   }
-  .cards { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 0.6rem; }
-  .card {
+  .pa-card {
+    position: relative;
     border: 1px solid var(--border); background: var(--surface); border-radius: var(--radius-m);
-    padding: 0.7rem 0.8rem; color: var(--text); cursor: pointer; display: flex; flex-direction: column; gap: 0.5rem;
-    height: 100%; box-sizing: border-box;
+    padding: 12px; color: var(--text); display: flex; flex-direction: column; gap: 10px;
+    box-sizing: border-box; min-width: 0;
   }
-  .card:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
-  .card:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: 1px; }
-  .card.paused { opacity: 0.75; }
-  .card-top { display: flex; align-items: center; gap: 0.6rem; }
-  .avatar {
-    width: 2.2rem; height: 2.2rem; flex: 0 0 auto; border-radius: var(--radius-m); display: inline-flex;
-    align-items: center; justify-content: center; font-size: 1.2rem;
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+  .pa-card:hover { border-color: var(--border-strong); }
+  .pa-card:focus-within { border-color: var(--border-strong); }
+  .card-top { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .card-id { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+  .name {
+    all: unset; cursor: pointer; font-size: var(--fs-l); font-weight: 600; color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: var(--radius-s);
   }
-  .card-id { min-width: 0; display: flex; flex-direction: column; gap: 0.2rem; }
-  .name { font-size: 0.95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .chip { font-size: 0.72rem; padding: 0.05rem 0.45rem; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); align-self: flex-start; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .mono { font-family: var(--font-mono); }
-  .card-meta { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
-  .meta { color: var(--text-dim); font-size: 0.75rem; }
-  .pill { font-size: 0.7rem; padding: 0.05rem 0.45rem; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); }
-  .pill.ok { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-text); border-color: transparent; }
-  .card-actions { display: flex; gap: 0.35rem; margin-top: auto; }
+  /* Stretch the name's hit area over the whole card (the "card link" pattern). */
+  .name::after { content: ''; position: absolute; inset: 0; border-radius: var(--radius-m); }
+  .name:focus-visible { outline: none; }
+  .name:focus-visible::after { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .paused .name { color: var(--text-dim); }
+  .prov { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: var(--fs-s); color: var(--text-dim); }
+  .prov :global(svg) { flex-shrink: 0; }
+  .prov-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Positioned + later in the DOM than .name::after, so they paint above it
+     (and chips with a tooltip still get their hover). */
+  .card-more, .card-actions, .card-meta [title] { position: relative; }
+  .card-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-height: 20px; }
+  .meta { color: var(--text-dim); font-size: var(--fs-s); }
+  .card-actions { display: flex; gap: 6px; margin-top: auto; }
 </style>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { CLUSTER_VIEWS, clusterViewKey, type ClusterView } from './types';
   // Embeddable Kafka cluster viewer: the header + per-cluster tab strip
   // (Overview / Topics / Consumer Groups / Schema Registry / Replay / Lag Alerts)
   // that the standalone Message Brokers page renders, factored out so the unified
@@ -25,7 +26,7 @@
   }
   let { cluster, onEdit, onRemove }: Props = $props();
 
-  type Tab = 'overview' | 'topics' | 'groups' | 'schema' | 'replay' | 'alerts';
+  type Tab = ClusterView;
   let tab = $state<Tab>('overview');
   let testing = $state(false);
 
@@ -62,7 +63,7 @@
       if (r.ok) toasts.success('Connected', `${r.message} · ${r.latency_ms}ms`);
       else toasts.error('Connection failed', r.message);
     } catch (e) {
-      toasts.error('Test failed', String(e));
+      toasts.error('Test failed', e instanceof Error ? e.message : String(e));
     } finally {
       testing = false;
     }
@@ -73,7 +74,7 @@
   <header class="cv-head">
     <div class="cv-title">
       <span class="dot" style="background: {cluster.color || 'var(--accent)'}"></span>
-      <span class="name ellipsis">{cluster.name}</span>
+      <span class="name ellipsis" title={cluster.name}>{cluster.name}</span>
       <EnvBadge env={cluster.environment} />
       {#if cluster.read_only}<span class="ro">read-only</span>{/if}
       {#if cluster.ssh}
@@ -85,7 +86,7 @@
           <Icon name="zap" size={10} /> {tunnelReady ? 'Tunnel' : 'Connecting…'}
         </span>
       {/if}
-      <span class="boot mono ellipsis">{cluster.bootstrap_servers}</span>
+      <span class="boot mono ellipsis" title={cluster.bootstrap_servers}>{cluster.bootstrap_servers}</span>
     </div>
     <div class="cv-actions">
       <button class="btn small" onclick={testConn} disabled={testing}>
@@ -96,14 +97,11 @@
     </div>
   </header>
 
-  <div class="cv-tabs" role="tablist" aria-label="Kafka cluster views">
-    <button class:on={tab === 'overview'} role="tab" aria-selected={tab === 'overview'} onclick={() => (tab = 'overview')}>Overview</button>
-    <button class:on={tab === 'topics'} role="tab" aria-selected={tab === 'topics'} onclick={() => (tab = 'topics')}>Topics</button>
-    <button class:on={tab === 'groups'} role="tab" aria-selected={tab === 'groups'} onclick={() => (tab = 'groups')}>Consumer Groups</button>
-    <button class:on={tab === 'schema'} role="tab" aria-selected={tab === 'schema'} onclick={() => (tab = 'schema')}>Schema Registry</button>
-    <button class:on={tab === 'replay'} role="tab" aria-selected={tab === 'replay'} onclick={() => (tab = 'replay')}>Replay</button>
-    <button class:on={tab === 'alerts'} role="tab" aria-selected={tab === 'alerts'} onclick={() => (tab = 'alerts')}>Lag Alerts</button>
-  </div>
+  <div class="cv-tabs" role="tablist" aria-label="Kafka cluster views" tabindex="-1" onkeydown={(e) => { const next = clusterViewKey(e, tab); if (next) tab = next; }}>
+        {#each CLUSTER_VIEWS as v (v.id)}
+          <button class:on={tab === v.id} role="tab" aria-selected={tab === v.id} tabindex={tab === v.id ? 0 : -1} onclick={() => (tab = v.id)}>{v.label}</button>
+        {/each}
+      </div>
 
   <div class="cv-body">
     {#key cluster.id}
@@ -179,7 +177,7 @@
     border-color: color-mix(in srgb, var(--success) 35%, transparent);
   }
   .boot {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     max-width: 380px;
   }
@@ -202,7 +200,7 @@
     border-bottom: 2px solid transparent;
     color: var(--text-dim);
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 6px 10px;
     cursor: pointer;
     white-space: nowrap;
@@ -223,28 +221,5 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .btn {
-    background: var(--surface-2, var(--surface));
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    font: inherit;
-    cursor: pointer;
-  }
-  .btn.small {
-    font-size: 12px;
-    padding: 3px 10px;
-  }
-  .btn:hover {
-    border-color: var(--accent);
-  }
-  .btn:disabled {
-    opacity: 0.6;
-    cursor: default;
-  }
-  .btn.danger:hover {
-    border-color: var(--danger);
-    color: var(--danger);
   }
 </style>

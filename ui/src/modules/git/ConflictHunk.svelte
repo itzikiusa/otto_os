@@ -303,7 +303,7 @@
     padding: 5px 10px;
     background: var(--surface-2);
     border-bottom: 1px solid var(--border);
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .hunk-label {
     display: inline-flex;
@@ -332,7 +332,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 3px 9px;
     cursor: pointer;
     transition: background 100ms, color 100ms;
@@ -362,7 +362,7 @@
     gap: 6px;
     padding: 4px 10px;
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0.05em;
     color: var(--text-dim);
     cursor: pointer;
@@ -373,7 +373,7 @@
   }
   .side-head.ours {
     border-inline-end: 1px solid var(--border);
-    background: color-mix(in srgb, var(--status-working) 7%, transparent);
+    background: color-mix(in srgb, var(--success) 7%, transparent);
   }
   .side-heads.stacked .side-head.ours {
     border-inline-end: none;
@@ -386,13 +386,13 @@
     place-items: center;
     width: 14px;
     height: 14px;
-    border-radius: 3px;
-    font-size: 9px;
-    font-weight: 800;
+    border-radius: var(--radius-s);
+    font-size: var(--fs-xs);
+    font-weight: 600;
   }
   .tag-a {
-    background: color-mix(in srgb, var(--status-working) 28%, transparent);
-    color: var(--status-working);
+    background: color-mix(in srgb, var(--success) 28%, transparent);
+    color: var(--success);
   }
   .tag-b {
     background: color-mix(in srgb, var(--accent) 26%, transparent);
@@ -429,7 +429,7 @@
   }
   .split-col.ours {
     border-inline-end: 1px solid var(--border);
-    background: color-mix(in srgb, var(--status-working) 5%, transparent);
+    background: color-mix(in srgb, var(--success) 5%, transparent);
   }
   .split-col.theirs {
     background: color-mix(in srgb, var(--accent) 6%, transparent);
@@ -450,7 +450,7 @@
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
   }
   .pick-line.picked.ours {
-    background: color-mix(in srgb, var(--status-working) 18%, transparent);
+    background: color-mix(in srgb, var(--success) 18%, transparent);
   }
   .pick-line.picked.theirs {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
@@ -462,7 +462,7 @@
     height: 13px;
     margin-top: 2px;
     border: 1px solid var(--border);
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--accent-text);
     flex-shrink: 0;
@@ -472,7 +472,7 @@
     background: color-mix(in srgb, var(--accent) 16%, var(--surface));
   }
   .pick-code {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.55;
     white-space: pre-wrap;
     word-break: break-all;
@@ -480,7 +480,7 @@
   }
   .empty-side {
     padding: 4px 10px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-style: italic;
   }
   .dim {
@@ -516,7 +516,7 @@
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     cursor: pointer;
     text-align: start;
   }
@@ -524,7 +524,7 @@
     color: var(--text);
   }
   .base-label {
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0.06em;
   }
   .base-hint {
@@ -536,7 +536,7 @@
     margin: 0;
     padding: 4px 10px 6px;
     padding-inline-start: 24px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.55;
     color: var(--text-dim);
     white-space: pre-wrap;
@@ -550,7 +550,7 @@
     flex-direction: column;
   }
   .stack-side.ours {
-    background: color-mix(in srgb, var(--status-working) 5%, transparent);
+    background: color-mix(in srgb, var(--success) 5%, transparent);
   }
   .stack-side.theirs {
     background: color-mix(in srgb, var(--accent) 6%, transparent);
@@ -564,11 +564,11 @@
       padding: 7px 10px;
     }
     .hunk-label {
-      font-size: 12px;
+      font-size: var(--fs-s);
     }
     .side-head {
       min-height: 38px;
-      font-size: 11px;
+      font-size: var(--fs-xs);
     }
     .side-head input[type='checkbox'] {
       width: 17px;
@@ -583,19 +583,19 @@
       margin-top: 1px;
     }
     .pick-code {
-      font-size: 12.5px;
+      font-size: var(--fs-s);
       word-break: break-word;
       overflow-wrap: anywhere;
     }
     .base-toggle {
       min-height: 36px;
-      font-size: 11px;
+      font-size: var(--fs-xs);
     }
     .edit-btn,
     .edit-done {
       min-height: 36px;
       padding: 6px 12px;
-      font-size: 12px;
+      font-size: var(--fs-s);
     }
   }
 </style>

@@ -64,6 +64,47 @@ ui/src/lib/win.ts                          per-window identity + key namespacing
 - Window state is macOS-desktop-only (the shell owns it); the web/remote UI is
   untouched.
 
+## Side by side
+
+Inside one window, any two sidebar sections can sit side by side — e.g. Agents
+beside Connections. Right-click a sidebar row → **Open side by side** (or
+⌥-click it, or `⌘\` for a picker); `⌘\` again, or the pane's ✕, closes it.
+
+```
+ui/src/lib/sidePane.ts                  pure rules + the postMessage protocol (unit/sidePane.test.ts)
+ui/src/lib/stores/sidePane.svelte.ts    host: route/split/placement, router delegate, message bridge
+ui/src/lib/embedGuest.ts                the pane's half (?embed=1): hands window verbs to the host
+ui/src/shell/SidePane.svelte            the iframe + its loading/error cover
+ui/src/shell/SplitDivider.svelte        the resizable, keyboard-operable divider
+```
+
+- **The pane is the app in a same-origin iframe** (`?embed=1#/<route>`) — its
+  own router, stores and event socket, the same token. It renders chrome-less
+  and keeps this window's keys (it is part of the window, not a new one).
+- **One module per pane.** Either document's router hands a navigation to the
+  module the OTHER pane shows over to that pane (`RouteDelegate` in
+  `router.svelte.ts`); back/forward skip those entries.
+- **Keys.** Window verbs pressed in the pane (⌘K, ⌘T, ⌘1, ⌘,, zoom…) run in the
+  window; find, history and terminal zoom stay in the pane; session verbs stay
+  there while it shows Agents. ⌘W / ⌘A / End Session from the native menu act
+  on the pane when it has focus (⌘W closes a non-Agents pane). The pane's own
+  ⌘K commands are mirrored into the window's palette.
+- **Sync.** The pane follows the window's workspace; theme/terminal settings
+  changed in one pane reach the other (`storage` events); whichever pane shows
+  Agents owns the session tabs and the other adopts them.
+- **Persisted per device** (`otto_side_pane`): the pane's last route, the
+  split (25–75%, 360px floor per pane) and which side it's on. Swap is visual
+  (CSS order) — neither pane reloads.
+- **Once per window, never in the pane:** the native menu bridge, native
+  notifications, WS notice toasts, last-route restore, window-key GC, the
+  service worker, git auto-fetch (unless the pane shows Git), the palette's
+  own command sets.
+- **Limits.** Desktop width and the main window only (not pop-outs, phone or
+  tablet). The pane's document has no Tauri bridge: it can't drag the window,
+  and native-only features in it fall back to their web behaviour (external
+  links are opened by the window). Each pane is a full app instance — a second
+  event socket and store set while it's open.
+
 ## Troubleshooting
 
 - **A window reopened off-screen** — shouldn't happen (frames are clamped to

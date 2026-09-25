@@ -120,12 +120,12 @@
     color: var(--text);
   }
   .ring-label .num {
-    font-size: 17px;
+    font-size: var(--fs-xl);
     font-weight: 700;
     font-variant-numeric: tabular-nums;
   }
   .ring-label .den {
-    font-size: 9px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .contract {
@@ -140,7 +140,7 @@
     margin-bottom: 8px;
   }
   .contract-head .title {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -148,7 +148,7 @@
   }
   .dim {
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .empty {
     margin: 0;
@@ -196,14 +196,14 @@
     flex-wrap: wrap;
   }
   .item-label {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 500;
   }
   .item.miss .item-label {
     color: var(--text-dim);
   }
   .tag {
-    font-size: 9px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     border-radius: 999px;
@@ -221,7 +221,7 @@
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
   }
   .item-detail {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1.4;
     word-break: break-word;

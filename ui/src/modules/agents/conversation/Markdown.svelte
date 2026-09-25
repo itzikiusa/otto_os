@@ -20,14 +20,14 @@
 
 <style>
   .md {
-    font-size: 13.5px;
+    font-size: var(--fs-m);
     line-height: 1.55;
     color: var(--text);
     overflow-wrap: anywhere;
     min-width: 0;
   }
   .md.small {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .md :global(p) {
     margin: 0 0 0.6em;
@@ -42,7 +42,7 @@
     padding: 8px 10px;
     overflow-x: auto;
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.45;
     direction: ltr;
     text-align: start;
@@ -94,7 +94,7 @@
     display: block;
     max-width: 100%;
     overflow-x: auto;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     margin: 0.5em 0;
   }
   .md :global(th),

@@ -247,7 +247,7 @@
     flex-shrink: 0;
   }
   .vt-name {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
     color: var(--text);
     overflow: hidden;
@@ -265,7 +265,7 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     cursor: pointer;
     white-space: nowrap;
@@ -278,7 +278,7 @@
     align-items: center;
     gap: 6px;
     padding: 6px 10px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--warning);
     background: color-mix(in srgb, var(--warning) 14%, transparent);
     border-bottom: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
@@ -304,7 +304,7 @@
   }
   .render-msg {
     padding: 24px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     text-align: center;
   }

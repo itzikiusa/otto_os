@@ -12,11 +12,25 @@ export interface ChoiceOption {
   kind?: 'primary' | 'danger' | 'normal';
 }
 
+/** A confirm whose verb destroys, detaches or overrides something paints its
+ *  button red; any other verb ("Start", "Fill", "Import", "Stash & pull") is a
+ *  normal primary. Callers that pass `danger` explicitly always win — this
+ *  only replaces the old blanket default (red for everything), which made
+ *  harmless confirms look destructive. */
+const DESTRUCTIVE =
+  /^(delete|remove|discard|revoke|purge|drop|terminate|force|reset|roll back|revert|stop|cancel|reject|deny|forget|replace|overwrite|clear|kill|unregister|uninstall|disconnect|end\b)/i;
+export function isDestructiveVerb(label: string): boolean {
+  return DESTRUCTIVE.test(label.trim());
+}
+
 class ConfirmStore {
   open = $state(false);
   title = $state('Confirm');
   message = $state('');
   confirmLabel = $state('Delete');
+  /** The dismiss button's label — override when "Cancel" would sit next to a
+   *  confirm that itself cancels something ("Cancel" beside "Cancel run"). */
+  cancelLabel = $state('Cancel');
   danger = $state(true);
   // Prompt (text-input) mode.
   isPrompt = $state(false);
@@ -32,14 +46,16 @@ class ConfirmStore {
 
   ask(
     message: string,
-    opts?: { title?: string; confirmLabel?: string; danger?: boolean },
+    opts?: { title?: string; confirmLabel?: string; cancelLabel?: string; danger?: boolean },
   ): Promise<boolean> {
+    this.supersede();
     this.isPrompt = false;
     this.choices = null;
     this.message = message;
     this.title = opts?.title ?? 'Confirm';
     this.confirmLabel = opts?.confirmLabel ?? 'Delete';
-    this.danger = opts?.danger ?? true;
+    this.cancelLabel = opts?.cancelLabel ?? 'Cancel';
+    this.danger = opts?.danger ?? isDestructiveVerb(this.confirmLabel);
     this.open = true;
     return new Promise<boolean>((resolve) => {
       this.resolver = resolve as (v: boolean | string | null) => void;
@@ -48,18 +64,29 @@ class ConfirmStore {
 
   /**
    * Prompt for a single line of text. Resolves the trimmed value, or `null` if
-   * the user cancels or leaves it empty.
+   * the user cancels or leaves it empty. `danger` paints the confirm button
+   * red — for typed-name confirms of destructive actions (delete a topic,
+   * purge a queue, a prod write), which are the most dangerous dialogs of all.
    */
   promptText(
     message: string,
-    opts?: { title?: string; confirmLabel?: string; initial?: string; placeholder?: string; browseFolder?: boolean },
+    opts?: {
+      title?: string;
+      confirmLabel?: string;
+      initial?: string;
+      placeholder?: string;
+      browseFolder?: boolean;
+      danger?: boolean;
+    },
   ): Promise<string | null> {
+    this.supersede();
     this.isPrompt = true;
     this.choices = null;
     this.message = message;
     this.title = opts?.title ?? 'Enter a value';
-    this.confirmLabel = opts?.confirmLabel ?? 'OK';
-    this.danger = false;
+    this.confirmLabel = opts?.confirmLabel ?? 'Continue';
+    this.cancelLabel = 'Cancel';
+    this.danger = opts?.danger ?? false;
     this.inputValue = opts?.initial ?? '';
     this.placeholder = opts?.placeholder ?? '';
     this.browseFolder = opts?.browseFolder ?? false;
@@ -78,9 +105,11 @@ class ConfirmStore {
     message: string,
     opts: { title?: string; options: ChoiceOption[]; checkboxLabel?: string },
   ): Promise<{ value: string | null; remember: boolean }> {
+    this.supersede();
     this.isPrompt = false;
     this.message = message;
     this.title = opts.title ?? 'Confirm';
+    this.cancelLabel = 'Cancel';
     this.choices = opts.options;
     this.checkboxLabel = opts.checkboxLabel ?? '';
     this.checkboxChecked = false;
@@ -118,6 +147,13 @@ class ConfirmStore {
   }
 
   /** Backdrop / X / Cancel — false for a confirm, null for a prompt/choice. */
+  /** A new dialog while one is still open replaces it — settle the old one
+   *  as cancelled first. Overwriting its resolver left the first caller's
+   *  promise pending forever (that flow just hung). */
+  private supersede(): void {
+    if (this.resolver || this.choiceResolver) this.dismiss();
+  }
+
   dismiss(): void {
     if (this.choiceResolver) {
       this.open = false;

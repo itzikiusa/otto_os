@@ -17,6 +17,7 @@ function fixture() {
       calls.push({ id: url.split('/')[2], result });
       return result.promise;
     } } },
+    '../loadError': { loadErrorText: (e: unknown) => (e instanceof Error ? e.message : String(e)) },
   }, {
     document, Date: { now: () => now },
     setTimeout: (fn: () => void, ms: number) => { timers.set(++timerId, { at: now + ms, run: fn }); return timerId; },

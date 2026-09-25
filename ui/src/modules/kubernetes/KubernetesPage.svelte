@@ -87,7 +87,7 @@
     />
   {:else if !k8s.status && k8s.statusError}
     <PageHeader title="Kubernetes" />
-    <EmptyState variant="page" icon="helm" title="Couldn't reach the daemon" body={k8s.statusError} actionLabel="Retry" onaction={() => void k8s.loadStatus()} />
+    <EmptyState actionKind="secondary" variant="page" icon="warning" title="Couldn't reach the daemon" body={k8s.statusError} actionLabel="Retry" onaction={() => void k8s.loadStatus()} />
   {:else if !k8s.status}
     <PageHeader title="Kubernetes" />
     <div class="k8s-boot"><Skeleton rows={4} height={48} /></div>

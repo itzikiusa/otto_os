@@ -167,7 +167,7 @@
     background: none;
     color: var(--text);
     border-radius: var(--radius-s, 6px);
-    font-size: 13px;
+    font-size: var(--fs-m);
     cursor: pointer;
     white-space: nowrap;
   }

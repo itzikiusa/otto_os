@@ -23,7 +23,10 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Modal from '../../lib/components/Modal.svelte';
+  import { rel } from '../../lib/stores/now.svelte';
   import JiraIssuePicker from '../agents/JiraIssuePicker.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { router } from '../../lib/router.svelte';
@@ -71,6 +74,9 @@
   // History: all past runs (newest first); review is always history[0] when set
   let history: Review[] = $state([]);
   let loading = $state(true);
+  /** A failed history load — shown inline with Retry instead of falling
+   *  through to "No review yet" (which offered to start a duplicate run). */
+  let loadError = $state<string | null>(null);
   let starting = $state(false);
   let cancelling = $state(false);
   // Fallback poll (visibility-gated) used only while the review is running and
@@ -322,6 +328,7 @@
 
   async function load(rid: string, num: number): Promise<void> {
     loading = true;
+    loadError = null;
     diffData = null;
     mergeReadiness = null;
     findings = [];
@@ -343,7 +350,7 @@
         review = null;
         history = [];
       } else {
-        toasts.error('Could not load review', e instanceof Error ? e.message : String(e));
+        loadError = loadErrorText(e);
       }
     } finally {
       loading = false;
@@ -925,13 +932,8 @@
   });
 
   /** Format an ISO timestamp as "X ago" */
-  function timeAgo(iso: string): string {
-    const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
-    if (diff < 60) return `${diff}s ago`;
-    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-    return `${Math.floor(diff / 86400)}d ago`;
-  }
+  // The shared, self-ticking relative time (lib/stores/now) — no local formatter.
+  const timeAgo = (iso: string): string => rel(iso);
 
   function toggleHistoryRun(idx: number): void {
     historyExpanded = { ...historyExpanded, [idx]: !historyExpanded[idx] };
@@ -943,22 +945,25 @@
        The user can still run a review with whatever is installed. -->
   {#if showPrecheck}
     <div class="rp-precheck" role="status">
-      <span class="rp-precheck-icon">&#9888;</span>
+      <span class="rp-precheck-icon"><Icon name="warning" size={14} /></span>
       <span class="rp-precheck-msg">
-        {#if missingReviewSkills > 0}{missingReviewSkills} review skill{missingReviewSkills === 1 ? " isn't" : "s aren't"} installed{/if}{#if missingReviewSkills > 0 && outdatedReviewSkills > 0} · {/if}{#if outdatedReviewSkills > 0}{outdatedReviewSkills} {outdatedReviewSkills === 1 ? 'has an update' : 'have updates'}{/if}
+        {#if missingReviewSkills > 0}{missingReviewSkills} review skill{missingReviewSkills === 1 ? " isn't" : "s aren't"} installed{/if}{#if missingReviewSkills > 0 && outdatedReviewSkills > 0}{' · '}{/if}{#if outdatedReviewSkills > 0}{outdatedReviewSkills} {outdatedReviewSkills === 1 ? 'has an update' : 'have updates'}{/if}
       </span>
       <button class="btn small ghost rp-precheck-btn" onclick={openSkillSettings}>
-        Settings → Skills
+        Open skill settings
       </button>
       <button
-        class="rp-precheck-dismiss"
+        class="icon-btn rp-precheck-dismiss"
         onclick={() => (precheckDismissed = true)}
-        aria-label="Dismiss"
-      >&#10005;</button>
+        aria-label="Dismiss skill notice"
+        title="Dismiss skill notice"
+      ><Icon name="x" size={12} /></button>
     </div>
   {/if}
   {#if loading}
     <div style="padding: 16px"><Skeleton rows={4} height={36} /></div>
+  {:else if loadError}
+    <LoadState what="this pull request’s reviews" error={loadError} empty onretry={() => void load(repoId, prNumber)} />
   {:else if !review}
     <div class="rp-no-review">
       <EmptyState
@@ -971,11 +976,12 @@
       <div class="rp-jira-row">
         {#if attachedIssue}
           <span class="chip rp-jira-chip">
-            JIRA: {attachedIssue.key} — {attachedIssue.summary}
-            <button class="rp-jira-remove" onclick={removeAttachedIssue} aria-label="Remove Jira story">&#10005;</button>
+            <Icon name="ticket" size={12} />
+            <span class="rp-jira-text" title="{attachedIssue.key} — {attachedIssue.summary}">{attachedIssue.key} — {attachedIssue.summary}</span>
+            <button class="rp-jira-remove" onclick={removeAttachedIssue} aria-label="Remove Jira story {attachedIssue.key}" title="Remove Jira story"><Icon name="x" size={12} /></button>
           </span>
         {:else}
-          <button class="btn small ghost" onclick={openJiraPicker}>+ Attach Jira story</button>
+          <button class="btn small ghost" onclick={openJiraPicker}><Icon name="ticket" size={12} /> Attach Jira story…</button>
         {/if}
       </div>
       <div class="rp-context-row">
@@ -987,7 +993,7 @@
         ></textarea>
       </div>
       <button class="btn small ghost rp-cfg-btn" onclick={openConfig}>
-        &#9881; Configure agents
+        <Icon name="gear" size={12} /> Configure agents…
         {#if repoCfgBadge !== ''}
           <span class="chip rp-cfg-chip" title="This repository has its own review config">{repoCfgBadge}</span>
         {/if}
@@ -1006,13 +1012,13 @@
       >
         {cancelling ? 'Cancelling…' : 'Cancel'}
       </button>
-      <button class="btn small ghost" onclick={openConfig}>&#9881; Configure</button>
+      <button class="btn small ghost" onclick={openConfig}><Icon name="gear" size={12} /> Configure…</button>
     </div>
     <!-- Live agent cards (shared with the local review) -->
     {#if review.agents && review.agents.length > 0}
       <ReviewAgents {review} view="running" onretried={onAgentRetried} />
     {:else}
-      <p class="dim" style="font-size:12px;padding:8px 0">Agents starting…</p>
+      <p class="dim" style="font-size: var(--fs-s);padding:8px 0">Agents starting…</p>
     {/if}
   {:else if review.status === 'cancelled'}
     <div class="rp-error card" data-testid="review-cancelled">
@@ -1023,9 +1029,9 @@
       </button>
     </div>
   {:else if review.status === 'error'}
-    <div class="rp-error card">
-      <Icon name="zap" size={14} />
-      <span class="rp-error-msg">{review.error ?? 'An unknown error occurred.'}</span>
+    <div class="rp-error card" role="alert">
+      <Icon name="warning" size={14} />
+      <span class="rp-error-msg">The review failed. <span class="dim">{review.error ?? 'No reason was reported — check Settings → Logs.'}</span></span>
       <button class="btn small" disabled={starting} onclick={startReview}>
         {starting ? 'Starting…' : 'Try again'}
       </button>
@@ -1033,11 +1039,12 @@
     <div class="rp-jira-row">
       {#if attachedIssue}
         <span class="chip rp-jira-chip">
-          JIRA: {attachedIssue.key} — {attachedIssue.summary}
-          <button class="rp-jira-remove" onclick={removeAttachedIssue} aria-label="Remove Jira story">&#10005;</button>
+          <Icon name="ticket" size={12} />
+          <span class="rp-jira-text" title="{attachedIssue.key} — {attachedIssue.summary}">{attachedIssue.key} — {attachedIssue.summary}</span>
+          <button class="rp-jira-remove" onclick={removeAttachedIssue} aria-label="Remove Jira story {attachedIssue.key}" title="Remove Jira story"><Icon name="x" size={12} /></button>
         </span>
       {:else}
-        <button class="btn small ghost" onclick={openJiraPicker}>+ Attach Jira story</button>
+        <button class="btn small ghost" onclick={openJiraPicker}><Icon name="ticket" size={12} /> Attach Jira story…</button>
       {/if}
     </div>
   {:else}
@@ -1066,23 +1073,24 @@
         </button>
       {/if}
       <button class="btn small ghost" onclick={openConfig}>
-        &#9881; Configure
+        <Icon name="gear" size={12} /> Configure…
         {#if repoCfgBadge !== ''}
           <span class="chip rp-cfg-chip" title="This repository has its own review config">{repoCfgBadge}</span>
         {/if}
       </button>
       <button class="btn small ghost" disabled={starting} onclick={startReview}>
-        <Icon name="refresh" size={11} /> {starting ? 'Starting…' : 'Re-run review'}
+        <Icon name="refresh" size={12} /> {starting ? 'Starting…' : 'Re-run review'}
       </button>
     </div>
     <div class="rp-jira-row">
       {#if attachedIssue}
         <span class="chip rp-jira-chip">
-          JIRA: {attachedIssue.key} — {attachedIssue.summary}
-          <button class="rp-jira-remove" onclick={removeAttachedIssue} aria-label="Remove Jira story">&#10005;</button>
+          <Icon name="ticket" size={12} />
+          <span class="rp-jira-text" title="{attachedIssue.key} — {attachedIssue.summary}">{attachedIssue.key} — {attachedIssue.summary}</span>
+          <button class="rp-jira-remove" onclick={removeAttachedIssue} aria-label="Remove Jira story {attachedIssue.key}" title="Remove Jira story"><Icon name="x" size={12} /></button>
         </span>
       {:else}
-        <button class="btn small ghost" onclick={openJiraPicker}>+ Attach Jira story</button>
+        <button class="btn small ghost" onclick={openJiraPicker}><Icon name="ticket" size={12} /> Attach Jira story…</button>
       {/if}
     </div>
     <div class="rp-context-row">
@@ -1115,7 +1123,7 @@
         <div class="rp-readiness-row">
           <span class="rp-readiness-label">Merge readiness</span>
           {#if mergeReadinessLoading}
-            <span class="dim" style="font-size:11px">Loading…</span>
+            <span class="dim" style="font-size: var(--fs-xs)">Loading…</span>
           {:else if mergeReadiness !== null}
             <!-- CI status pill -->
             {@const ciState = (mergeReadiness as any).ci_status ?? 'none'}
@@ -1167,7 +1175,7 @@
     {/if}
 
     {#if review.comments.length === 0}
-      <p class="dim" style="font-size: 12.5px; padding: 16px 0">No comments generated.</p>
+      <p class="dim" style="font-size: var(--fs-s); padding: 16px 0">No comments generated.</p>
     {:else}
       {#if draftedBy}
         <!-- Attribution: the comments are the summarizer's merge of every
@@ -1229,7 +1237,7 @@
                   onclick={() => toggleDiff(c.id, defaultExpanded)}
                   aria-expanded={expanded}
                 >
-                  {expanded ? 'hide diff ▾' : 'show diff ▸'}
+                  <Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={12} /> {expanded ? 'Hide diff' : 'Show diff'}
                 </button>
               </div>
               {#if expanded}
@@ -1264,7 +1272,7 @@
         onclick={() => { historyExpanded = { ...historyExpanded, ['_header' as unknown as number]: !headerOpen }; }}
         aria-expanded={headerOpen}
       >
-        Past reviews ({history.length - 1}){headerOpen ? ' ▾' : ' ▸'}
+        <Icon name={headerOpen ? 'chevronDown' : 'chevronRight'} size={12} /> Past reviews ({history.length - 1})
       </button>
       {#if headerOpen}
         <div class="rp-history-list">
@@ -1276,19 +1284,19 @@
                 onclick={() => toggleHistoryRun(i)}
                 aria-expanded={isOpen}
               >
-                <span class="dim" style="font-size:11px">{timeAgo(run.created_at)}</span>
+                <span class="dim" style="font-size: var(--fs-xs)">{timeAgo(run.created_at)}</span>
                 <StatusBadge status={runStatus(run.status)} />
                 {#if run.agents && run.agents.length > 0}
-                  <span class="dim" style="font-size:10.5px">{run.agents.filter(a => a.status === 'done').length}/{run.agents.length} agents</span>
+                  <span class="dim" style="font-size:var(--fs-xs)">{run.agents.filter(a => a.status === 'done').length}/{run.agents.length} agents</span>
                 {/if}
-                <span class="dim" style="font-size:10.5px">{run.comments.length} comment{run.comments.length === 1 ? '' : 's'}</span>
+                <span class="dim" style="font-size:var(--fs-xs)">{run.comments.length} comment{run.comments.length === 1 ? '' : 's'}</span>
                 <span class="grow"></span>
-                <span class="dim" style="font-size:10px">{isOpen ? '▾' : '▸'}</span>
+                <span class="dim" aria-hidden="true"><Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} /></span>
               </button>
               {#if isOpen}
                 <div class="rp-history-run-body">
                   {#if run.comments.length === 0}
-                    <p class="dim" style="font-size:11.5px;padding:4px 0">No comments for this run.</p>
+                    <p class="dim" style="font-size: var(--fs-xs);padding:4px 0">No comments for this run.</p>
                   {:else}
                     {#each run.comments as c (c.id)}
                       <div class="rp-comment card rp-history-comment">
@@ -1432,14 +1440,14 @@
                 class="btn small ghost cfg-save-preset"
                 title="Save as preset"
                 onclick={() => saveAsPreset(i)}
-              >&#9734; Save as preset</button>
-              <button class="btn small ghost cfg-remove" onclick={() => removeAgent(i)} aria-label="Remove agent">&#10005;</button>
+              ><Icon name="star" size={12} /> Save as preset</button>
+              <button class="icon-btn cfg-remove" onclick={() => removeAgent(i)} aria-label="Remove agent {editAgents[i].name || i + 1}" title="Remove agent"><Icon name="x" size={12} /></button>
             </div>
           </div>
         {/each}
         <div class="cfg-add-row">
-          <button class="btn small ghost" onclick={addAgent}>+ Add agent</button>
-          <button class="btn small ghost" onclick={openPresetMenu}>+ Add preset ▾</button>
+          <button class="btn small ghost" onclick={addAgent}><Icon name="plus" size={12} /> Add agent</button>
+          <button class="btn small ghost" onclick={openPresetMenu}><Icon name="plus" size={12} /> Add preset <Icon name="chevronDown" size={12} /></button>
         </div>
 
         <!-- Your presets section -->
@@ -1453,14 +1461,14 @@
                   class="cfg-preset-action"
                   title="Add to agents"
                   onclick={() => addPresetToAgents(preset)}
-                  aria-label="Add preset to agents"
-                >&#43;</button>
+                  aria-label="Add preset {preset.name} to agents"
+                ><Icon name="plus" size={12} /></button>
                 <button
                   class="cfg-preset-action cfg-preset-del"
                   title="Delete preset"
                   onclick={() => removePreset(i)}
-                  aria-label="Delete preset"
-                >&#10005;</button>
+                  aria-label="Delete preset {preset.name}"
+                ><Icon name="x" size={12} /></button>
               </div>
             {/each}
           </div>
@@ -1522,7 +1530,7 @@
     border-top: 1px solid var(--border);
   }
   .rp-findings-title {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
     margin: 0 0 4px;
   }
@@ -1533,8 +1541,8 @@
     gap: 8px;
     padding: 7px 10px;
     margin: 0 0 8px;
-    border-radius: var(--radius-s, 4px);
-    font-size: 11.5px;
+    border-radius: var(--radius-s);
+    font-size: var(--fs-xs);
     font-weight: 500;
     flex-wrap: wrap;
   }
@@ -1551,7 +1559,7 @@
   .rp-verdict {
     margin-inline-start: auto;
     font-weight: 400;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     opacity: 0.8;
   }
 
@@ -1567,7 +1575,7 @@
     flex-wrap: wrap;
   }
   .rp-readiness-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
     white-space: nowrap;
@@ -1591,12 +1599,13 @@
     margin: 0 0 10px;
     border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border));
     background: var(--warning-soft);
-    border-radius: var(--radius-s, 4px);
-    font-size: 11.5px;
+    border-radius: var(--radius-s);
+    font-size: var(--fs-xs);
     line-height: 1.4;
     flex-wrap: wrap;
   }
   .rp-precheck-icon {
+    display: inline-flex;
     color: var(--warning);
     flex-shrink: 0;
   }
@@ -1607,21 +1616,12 @@
   }
   .rp-precheck-btn {
     flex-shrink: 0;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     white-space: nowrap;
   }
+  /* .icon-btn; nothing local beyond not shrinking. */
   .rp-precheck-dismiss {
-    background: none;
-    border: none;
-    cursor: pointer;
-    padding: 0 2px;
-    font-size: 11px;
-    color: var(--text-dim);
-    line-height: 1;
     flex-shrink: 0;
-  }
-  .rp-precheck-dismiss:hover {
-    color: var(--text);
   }
 
   /* No-review state with configure button */
@@ -1632,7 +1632,7 @@
     position: absolute;
     top: 0;
     inset-inline-end: 0;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
 
   /* Running state */
@@ -1644,7 +1644,7 @@
     flex-wrap: wrap;
   }
   .rp-running-title {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .spinner {
@@ -1692,7 +1692,7 @@
     gap: 8px;
   }
   .rp-agent-name {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
   }
   .rp-agent-chip {
@@ -1700,12 +1700,12 @@
   }
   .rp-agent-note {
     margin: 4px 0 0;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1.4;
   }
   .rp-agent-count {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     display: block;
     margin-top: 3px;
   }
@@ -1714,7 +1714,7 @@
   /* Per-agent: "waiting for input" callout + expandable findings */
   .rp-agent-waiting {
     margin: 6px 0 0;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.45;
     color: var(--warning);
   }
@@ -1739,7 +1739,7 @@
     display: flex;
     align-items: baseline;
     gap: 6px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.4;
   }
   .rp-finding-body {
@@ -1760,7 +1760,7 @@
     flex: 1;
     min-width: 0;
     overflow-wrap: anywhere;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
 
   /* Done: header row */
@@ -1780,7 +1780,7 @@
     min-width: 0;
   }
   .rp-stat {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
   }
 
@@ -1810,12 +1810,12 @@
   }
   .rp-comment-body {
     margin: 0;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     line-height: 1.55;
     white-space: pre-wrap;
   }
   .rp-loc {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1823,7 +1823,7 @@
     max-width: 280px;
   }
   .rp-badge {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     display: inline-flex;
     align-items: center;
     gap: 3px;
@@ -1833,9 +1833,9 @@
   .severity-chip {
     display: inline-block;
     padding: 2px 7px;
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }
@@ -1857,6 +1857,9 @@
     margin-top: 6px;
   }
   .rp-diff-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     background: none;
     border: none;
     cursor: pointer;
@@ -1871,10 +1874,10 @@
   .rp-diff-snippet {
     margin-top: 4px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     overflow-x: auto;
     font-family: var(--font-mono, monospace);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.45;
   }
   .rp-diff-line {
@@ -1921,7 +1924,7 @@
 
   /* Config modal */
   .cfg-note {
-    font-size: 12px;
+    font-size: var(--fs-s);
     margin: 0 0 14px;
   }
   /* Scope switch (global vs. this repo) + preset row */
@@ -1943,7 +1946,7 @@
     min-width: 0;
   }
   .cfg-scope-note {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     margin: 0 0 14px;
   }
   /* Override badge on the Configure buttons */
@@ -1959,7 +1962,7 @@
     gap: 8px;
   }
   .cfg-section-title {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
     margin: 0 0 8px;
   }
@@ -1994,7 +1997,7 @@
     gap: 3px;
   }
   .cfg-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-weight: 500;
   }
@@ -2004,22 +2007,20 @@
     width: 100%;
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     padding: 4px 8px;
     box-sizing: border-box;
   }
   .cfg-textarea {
     resize: vertical;
     font-family: var(--font-mono, monospace);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.5;
   }
   .cfg-remove {
     flex-shrink: 0;
-    font-size: 11px;
-    padding: 2px 6px;
   }
   .cfg-provider-checks {
     display: flex;
@@ -2031,7 +2032,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
     user-select: none;
   }
@@ -2074,7 +2075,7 @@
     border: 1px solid var(--border);
     border-radius: 20px;
     padding: 3px 8px 3px 10px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .cfg-preset-name {
     max-width: 180px;
@@ -2087,7 +2088,7 @@
     border: none;
     cursor: pointer;
     padding: 0 2px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1;
     display: inline-flex;
@@ -2112,20 +2113,27 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     max-width: 100%;
+    min-width: 0;
+  }
+  .rp-jira-chip > :global(svg) {
+    flex-shrink: 0;
+  }
+  .rp-jira-text {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .rp-jira-remove {
+    display: inline-flex;
+    flex-shrink: 0;
     background: none;
     border: none;
     cursor: pointer;
     padding: 0 2px;
-    font-size: var(--fs-xs);
     color: var(--text-dim);
-    line-height: 1;
   }
   .rp-jira-remove:hover {
     color: var(--text);
@@ -2140,9 +2148,9 @@
     width: 100%;
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     padding: 6px 8px;
     box-sizing: border-box;
@@ -2218,10 +2226,13 @@
     padding-top: 10px;
   }
   .rp-history-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     background: none;
     border: none;
     cursor: pointer;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
     padding: 0;

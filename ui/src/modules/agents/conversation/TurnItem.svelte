@@ -202,8 +202,8 @@
     gap: 6px;
     min-width: 0;
     max-width: 920px;
-    background: color-mix(in srgb, var(--status-working, #3fb950) 7%, var(--surface));
-    border: 1px solid color-mix(in srgb, var(--status-working, #3fb950) 28%, var(--border));
+    background: color-mix(in srgb, var(--status-working) 7%, var(--surface));
+    border: 1px solid color-mix(in srgb, var(--status-working) 28%, var(--border));
     border-radius: 4px 14px 14px 14px;
     padding: 8px 12px;
   }
@@ -240,11 +240,11 @@
   }
   .turn.hit .bubble,
   .turn.hit .resp {
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-warn, #e0a000) 45%, transparent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-warn) 45%, transparent);
   }
   .turn.current .bubble,
   .turn.current .resp {
-    box-shadow: 0 0 0 2px var(--status-warn, #e0a000);
+    box-shadow: 0 0 0 2px var(--status-warn);
   }
   .meta {
     display: flex;
@@ -290,7 +290,7 @@
     max-width: min(78%, 720px);
   }
   .sys-note {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface-2);
     border: 1px dashed var(--border);
@@ -309,7 +309,7 @@
   }
   .sys-note pre {
     margin: 4px 0 2px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     max-height: 260px;
@@ -323,16 +323,16 @@
     align-self: stretch;
     padding: 6px 10px;
     border-radius: var(--radius-m);
-    background: color-mix(in srgb, var(--status-warn, #e0a000) 16%, var(--surface));
-    border: 1px dashed color-mix(in srgb, var(--status-warn, #e0a000) 70%, var(--border));
-    font-size: 12.5px;
+    background: color-mix(in srgb, var(--status-warn) 16%, var(--surface));
+    border: 1px dashed color-mix(in srgb, var(--status-warn) 70%, var(--border));
+    font-size: var(--fs-s);
     min-width: 0;
   }
   .pending-dot {
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: var(--status-warn, #e0a000);
+    background: var(--status-warn);
     flex-shrink: 0;
     align-self: center;
     animation: pending-pulse 1.2s ease-in-out infinite;
@@ -369,13 +369,13 @@
     display: flex;
     align-items: baseline;
     gap: 5px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     padding: 4px 8px;
     border-inline-start: 2px solid var(--border);
     overflow-wrap: anywhere;
   }
   .empty {
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
 </style>

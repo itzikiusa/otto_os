@@ -396,7 +396,8 @@ test('D2: export buttons (PNG + SVG) render; Duplicate creates a "(copy)" scene'
   await openCanvas(page);
   const row = page.locator('.scene-list .row', { hasText: 'D2 Export' }).first();
   await row.hover();
-  await row.getByRole('button', { name: 'Duplicate' }).click();
+  await row.locator('.row-more').click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Duplicate' }).click();
   await expect(page.locator('.scene-list .row', { hasText: 'D2 Export (copy)' })).toBeVisible({
     timeout: 15_000,
   });
@@ -431,8 +432,9 @@ test('deleting the OPEN scene opens another (no endless loading pane)', async ({
   const row = page.locator('.scene-list .row.active', { hasText: title });
   await expect(row).toBeVisible({ timeout: 20_000 });
   await row.hover();
-  await row.locator('button.del').click();
-  await page.locator('button.btn.danger', { hasText: 'Delete' }).click();
+  await row.locator('.row-more').click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete…' }).click();
+  await page.locator('.sheet button.btn.danger-solid', { hasText: 'Delete' }).click();
   await expect(page.locator('.scene-list .row', { hasText: title })).toHaveCount(0, { timeout: 10_000 });
   // The auto-pick re-opens a remaining scene instead of a skeleton forever.
   await expect(page.locator('.editor-split')).toBeVisible({ timeout: 15_000 });
@@ -470,7 +472,8 @@ test('rename: inline rename updates the scene title', async ({ page }) => {
   await openCanvas(page);
   const row = page.locator('.scene-list .row', { hasText: 'Before Rename' }).first();
   await row.hover();
-  await row.getByRole('button', { name: 'Rename' }).click();
+  await row.locator('.row-more').click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Rename…' }).click();
   // The shared prompt dialog appears — type the new name + confirm.
   const input = page.locator('.cf-input, dialog input, [role="dialog"] input').first();
   await input.fill('After Rename');
@@ -682,5 +685,9 @@ test.describe('canvas on a phone', () => {
     await ctx.dispose();
     await openScene(page, 'Phone Ex');
     await expect(page.locator('.excali .excalidraw').first()).toBeVisible({ timeout: 30_000 });
+    // Push navigation: Back returns to the full-width scene list (no dead end).
+    await page.getByRole('button', { name: 'Back to scenes' }).click();
+    await expect(page.locator('.scene-list .row', { hasText: 'Phone Ex' }).first()).toBeVisible();
+    await expect(page.locator('.excali .excalidraw')).toHaveCount(0);
   });
 });

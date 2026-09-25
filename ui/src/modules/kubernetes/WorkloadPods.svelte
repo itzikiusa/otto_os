@@ -86,7 +86,7 @@
     <button class="icon-btn" onclick={() => void load(true)} title="Refresh" aria-label="Refresh pods"><Icon name="refresh" size={13} /></button>
   </div>
   {#if error}
-    <div class="err">{error}</div>
+    <div class="err">{error} <button class="btn small" onclick={() => void load()}>Retry</button></div>
   {:else if loading && !pods.length}
     <div class="pad"><Skeleton rows={4} height={22} /></div>
   {:else if !pods.length}
@@ -101,7 +101,7 @@
       <div class="wp-row {healthClass(p.health, p.status)}" class:metrics={hasMetrics} role="button" tabindex="0" onclick={() => onopenpod(p.name)} onkeydown={(e) => { if (e.key === 'Enter') onopenpod(p.name); }} title={p.name}>
         <span class="mono ell">{p.name}</span>
         <span class="num mono">{p.ready ?? ''}</span>
-        <span class="status-pill ell"><span class="hdot"></span>{p.status}</span>
+        <span class="status-pill"><span class="hdot"></span><span class="ell">{p.status}</span></span>
         <span class="num mono" class:warn={(p.restarts ?? 0) > 0}>{p.restarts ?? ''}</span>
         {#if hasMetrics}
           <span class="num mono">{p.cpu == null ? '' : formatMillicores(p.cpu)}</span>
@@ -122,7 +122,7 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .wp-sum {
     display: flex;
@@ -181,10 +181,10 @@
   }
   .mono {
     font-family: var(--font-mono);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .warn {
-    color: var(--status-warn, #e0a000);
+    color: var(--status-warn);
   }
   .acts {
     display: inline-flex;
@@ -216,22 +216,22 @@
     background: var(--success);
   }
   .health-bad {
-    color: var(--status-exited, #f85149);
+    color: var(--status-exited);
   }
   .health-bad .hdot {
-    background: var(--status-exited, #f85149);
+    background: var(--status-exited);
   }
   .health-progressing {
-    color: var(--status-working, #d29922);
+    color: var(--accent-text);
   }
   .health-progressing .hdot {
-    background: var(--status-working, #d29922);
+    background: var(--accent);
   }
   .health-warn {
-    color: var(--status-warn, #e0a000);
+    color: var(--status-warn);
   }
   .health-warn .hdot {
-    background: var(--status-warn, #e0a000);
+    background: var(--status-warn);
   }
   .err {
     padding: 8px 12px;

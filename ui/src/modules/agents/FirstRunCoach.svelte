@@ -181,7 +181,7 @@
 
 <div class="coach-wrap">
   <div class="coach card">
-    <button class="coach-close" title="Dismiss" onclick={dismiss}><Icon name="x" size={13} /></button>
+    <button class="coach-close" title="Dismiss" aria-label="Dismiss the getting-started guide" onclick={dismiss}><Icon name="x" size={13} /></button>
 
     <div class="coach-head">
       <div class="coach-mark"><Icon name="zap" size={20} /></div>
@@ -370,11 +370,11 @@
   }
   .coach-head h2 {
     margin: 0 0 2px;
-    font-size: 16px;
+    font-size: var(--fs-l);
   }
   .coach-head p {
     margin: 0;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.45;
   }
@@ -398,7 +398,7 @@
     background: var(--surface-2);
     border: 1px solid var(--border);
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .step-mark.ok {
     background: color-mix(in srgb, var(--status-working) 18%, transparent);
@@ -413,14 +413,14 @@
     min-width: 0;
   }
   .step-title {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     display: flex;
     align-items: center;
     gap: 8px;
   }
   .opt-tag {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -430,7 +430,7 @@
     color: var(--text-dim);
   }
   .step-hint {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1.5;
     margin-top: 3px;
@@ -454,7 +454,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 2px 8px;
     border-radius: 99px;
     background: var(--surface-2);
@@ -495,7 +495,7 @@
     gap: 10px;
   }
   .skill-name {
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
 
   .coach-launch {
@@ -516,7 +516,7 @@
   }
   .launch-hint {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     text-align: center;
   }

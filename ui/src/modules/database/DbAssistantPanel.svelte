@@ -183,14 +183,14 @@
           onclick={() => database.insertAssistSql()}
           title="Put this query into the active editor tab"
         >
-          <Icon name="send" size={11} /> Insert into editor
+          <Icon name="send" size={12} /> Insert into editor
         </button>
         <button
           class="da-sql-btn primary"
           onclick={() => void database.runAssistSql()}
           title="Insert this query into the editor and run it"
         >
-          <Icon name="play" size={11} /> Run
+          <Icon name="play" size={12} /> Run
         </button>
       </div>
       <pre class="da-sql-text mono">{database.assistProposedSql}</pre>
@@ -225,7 +225,7 @@
     display: inline-flex;
     align-items: center;
     gap: 7px;
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     white-space: nowrap;
   }
@@ -234,13 +234,13 @@
     background: var(--bg);
     color: var(--text);
     border-radius: 6px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 2px 5px;
     cursor: pointer;
     text-transform: capitalize;
   }
   .da-working {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--accent-text);
     font-weight: 600;
   }
@@ -253,7 +253,7 @@
     background: var(--surface-2);
     color: var(--text);
     border-radius: var(--radius-s);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     padding: 3px 8px;
     cursor: pointer;
   }
@@ -274,14 +274,14 @@
     border-color: var(--danger);
   }
   .da-empty .sub.warn {
-    color: var(--status-warn, #d9a03f);
+    color: var(--warning);
     opacity: 1;
   }
   .da-close {
     display: inline-flex;
     border: none;
     background: none;
-    color: var(--text-dim, #888);
+    color: var(--text-dim);
     cursor: pointer;
     padding: 4px;
     border-radius: 6px;
@@ -321,18 +321,18 @@
   }
   .da-empty .lead {
     margin: 0;
-    font-size: 14px;
+    font-size: var(--fs-l);
     font-weight: 600;
     color: var(--text);
   }
   .da-empty .hint {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
   }
   .da-empty .sub {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.45;
     opacity: 0.8;
   }
@@ -347,7 +347,7 @@
     background: var(--surface-2);
     color: var(--text-dim);
     border-radius: 999px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     padding: 3px 11px;
     cursor: pointer;
     text-transform: capitalize;
@@ -376,7 +376,7 @@
     background: var(--surface-2);
     color: var(--text);
     font: inherit;
-    font-size: 13px;
+    font-size: var(--fs-m);
     padding: 8px 10px;
     outline: none;
   }
@@ -393,7 +393,7 @@
     border-radius: 999px;
     background: var(--accent);
     color: var(--accent-contrast);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 600;
     padding: 6px 16px;
     cursor: pointer;
@@ -423,7 +423,7 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
     color: var(--text-dim);
   }
@@ -438,7 +438,7 @@
     background: var(--surface);
     color: var(--text);
     border-radius: var(--radius-s);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     padding: 3px 9px;
     cursor: pointer;
   }
@@ -446,15 +446,15 @@
     border-color: var(--accent);
   }
   .da-sql-btn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    border-color: var(--accent-solid);
+    color: var(--accent-contrast);
   }
   .da-sql-text {
     margin: 0;
     padding: 8px 10px;
     overflow: auto;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.45;
     white-space: pre-wrap;
     word-break: break-word;
@@ -464,7 +464,7 @@
   .da-sql-note {
     flex: none;
     padding: 6px 10px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     line-height: 1.45;
     color: var(--text-dim);
     border-top: 1px solid var(--border);

@@ -470,7 +470,8 @@
     font: inherit;
   }
   .kind:hover {
-    border-color: var(--accent);
+    border-color: var(--border-strong);
+    background: var(--hover);
   }
   .ki {
     display: grid;
@@ -479,8 +480,11 @@
     height: 30px;
     flex: none;
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent-text);
+    /* Neutral like the widget header's icon tile: accent means selection or
+       the primary action, not "this is a widget kind". */
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
   }
   .kt {
     display: flex;

@@ -19,13 +19,25 @@
   let query = $state('');
   let attaching = $state(false);
 
-  $effect(() => {
-    const wsId = ws.currentId;
-    if (!wsId) { loading = false; return; }
+  // A failed load used to fall through to "No product stories in this
+  // workspace." — say it failed, with Retry.
+  let loadError = $state<string | null>(null);
+  function load(wsId: string): void {
+    loading = true;
+    loadError = null;
     void api
       .get<ProductStory[]>(`/workspaces/${wsId}/product/stories`)
       .then((s) => { stories = s; loading = false; })
-      .catch(() => { loading = false; });
+      .catch((e) => {
+        loadError = e instanceof Error ? e.message : String(e);
+        loading = false;
+      });
+  }
+
+  $effect(() => {
+    const wsId = ws.currentId;
+    if (!wsId) { loading = false; return; }
+    load(wsId);
   });
 
   const filtered = $derived(
@@ -52,7 +64,7 @@
   }
 </script>
 
-<Modal title="Attach Product Story" width={540} {onclose}>
+<Modal title="Attach product story" width={540} {onclose}>
   <div class="hint">
     Injects the full refined context — story, analysis, Q&amp;A, approved tests, and learnings —
     into the running agent session.
@@ -69,6 +81,11 @@
 
   {#if loading}
     <p class="dim">Loading stories…</p>
+  {:else if loadError}
+    <p class="dim" role="alert">
+      Couldn’t load product stories: {loadError}
+      <button class="btn small" onclick={() => ws.currentId && load(ws.currentId)}>Retry</button>
+    </p>
   {:else if filtered.length === 0}
     <p class="dim">{stories.length === 0 ? 'No product stories in this workspace.' : 'No stories match your filter.'}</p>
   {:else}
@@ -96,7 +113,7 @@
 
 <style>
   .hint {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     margin-bottom: 10px;
     line-height: 1.5;
@@ -109,7 +126,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     color: var(--text);
-    font-size: 13px;
+    font-size: var(--fs-m);
     margin-bottom: 10px;
     outline: none;
   }
@@ -138,7 +155,7 @@
     padding: 7px 10px;
     cursor: pointer;
     color: var(--text);
-    font-size: 13px;
+    font-size: var(--fs-m);
   }
   .story-row:hover:not(:disabled) {
     background: color-mix(in srgb, var(--accent) 10%, transparent);
@@ -149,7 +166,7 @@
     cursor: default;
   }
   .story-key {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--accent-text);
     white-space: nowrap;
@@ -164,14 +181,14 @@
   }
   .story-stage {
     flex-shrink: 0;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     height: 16px;
   }
   .dim {
     color: var(--text-dim);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     text-align: center;
     padding: 20px 0;
   }

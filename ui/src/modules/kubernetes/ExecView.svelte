@@ -125,7 +125,7 @@
     gap: 10px;
     padding: 4px 10px;
     border-bottom: 1px solid var(--border);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .spacer {
     flex: 1;
@@ -144,11 +144,11 @@
   }
   .launch p {
     margin: 0;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     line-height: 1.5;
   }
   .lbl {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .note {
@@ -157,11 +157,11 @@
     align-items: center;
     padding: 16px;
     color: var(--text-dim);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .err {
     color: var(--status-exited);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .dim {
     color: var(--text-dim);

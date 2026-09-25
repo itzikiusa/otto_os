@@ -8,6 +8,7 @@
   // Desktop never renders this: callers gate it behind viewport.isMobile, so
   // there is no z-index or layout cost on the unchanged ≥1025px layout.
   import type { Snippet } from 'svelte';
+  import Icon from '../lib/components/Icon.svelte';
 
   interface Props {
     /** Bound: whether the drawer is shown. */
@@ -62,7 +63,9 @@
   >
     <!-- Always-visible close affordance: tapping the thin backdrop sliver left by
          a wide drawer is hard on a phone, so give an explicit ✕. -->
-    <button class="drawer-close" onclick={close} aria-label="Close {label}" title="Close">✕</button>
+    <button class="drawer-close" onclick={close} aria-label="Close {label}" title="Close">
+      <Icon name="x" size={14} />
+    </button>
     {@render children()}
   </div>
 {/if}
@@ -72,14 +75,14 @@
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.45);
-    z-index: 90;
+    z-index: var(--z-drawer);
     animation: drawer-fade 140ms ease-out;
   }
   .drawer {
     position: fixed;
     top: 0;
     bottom: 0;
-    z-index: 91;
+    z-index: calc(var(--z-drawer) + 1);
     display: flex;
     flex-direction: column;
     background: var(--bg);
@@ -100,7 +103,6 @@
     border-radius: 999px;
     background: color-mix(in srgb, var(--surface) 88%, transparent);
     color: var(--text);
-    font-size: 15px;
     line-height: 1;
     cursor: pointer;
     backdrop-filter: blur(4px);
@@ -108,15 +110,23 @@
   .drawer-close:hover {
     background: var(--surface-2);
   }
+  /* `side` is the reading-direction side: in RTL the Navigator drawer comes
+     from the right (logical insets + a mirrored slide). */
   .drawer.left {
-    left: 0;
-    border-right: 1px solid var(--border);
+    inset-inline-start: 0;
+    border-inline-end: 1px solid var(--border);
     animation: drawer-in-left 160ms ease-out;
   }
   .drawer.right {
-    right: 0;
-    border-left: 1px solid var(--border);
+    inset-inline-end: 0;
+    border-inline-start: 1px solid var(--border);
     animation: drawer-in-right 160ms ease-out;
+  }
+  :global([dir='rtl']) .drawer.left {
+    animation-name: drawer-in-right;
+  }
+  :global([dir='rtl']) .drawer.right {
+    animation-name: drawer-in-left;
   }
   @keyframes drawer-fade {
     from {

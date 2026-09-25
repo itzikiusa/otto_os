@@ -7,6 +7,8 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import CreatePr from './CreatePr.svelte';
+  import { rel } from '../../lib/stores/now.svelte';
+  import type { IconName } from '../../lib/components/Icon.svelte';
 
   interface Props {
     repoId: string;
@@ -25,6 +27,10 @@
   let query = $state('');
   let loading = $state(true);
   let error = $state('');
+  /** A failed "Load more" — shown inline beside the button. It used to write
+   *  `error`, which swapped the WHOLE list for the error state and wiped the
+   *  rows already on screen (the opposite of what loadMore promises). */
+  let moreError = $state('');
   /** Headline for the error state — distinguishes "your token is bad" from
    *  "the provider is down" instead of labelling every failure "unreachable". */
   let errorTitle = $state('Provider unreachable');
@@ -38,6 +44,7 @@
     void retryRev;
     loading = true;
     error = '';
+    moreError = '';
     void api
       .get<PrListResp>(`/repos/${id}/prs?state=${st}&page=1&per_page=${PER_PAGE}`)
       .then((r) => {
@@ -59,11 +66,13 @@
       .finally(() => (loading = false));
   });
 
-  /** Append the next page. Failures toast nothing — the button simply stays,
-   *  so a flaky provider never wipes the rows already on screen. */
+  /** Append the next page. Failures toast nothing — the button simply stays
+   *  (with an inline note), so a flaky provider never wipes the rows already
+   *  on screen. */
   async function loadMore(): Promise<void> {
     if (loadingMore || !hasMore) return;
     loadingMore = true;
+    moreError = '';
     try {
       const next = page + 1;
       const r = await api.get<PrListResp>(
@@ -73,7 +82,7 @@
       hasMore = r.has_more;
       page = next;
     } catch (e) {
-      error = e instanceof Error ? e.message : 'failed to load more PRs';
+      moreError = e instanceof Error ? e.message : 'failed to load more PRs';
     } finally {
       loadingMore = false;
     }
@@ -90,16 +99,19 @@
   });
 
   /** CI chip for a row; `null` when the provider reported no CI at all. */
-  function ciChip(state: string | null | undefined): { glyph: string; cls: string } | null {
-    if (state === 'passing' || state === 'success') return { glyph: '✓', cls: 'ok' };
-    if (state === 'failing' || state === 'failure') return { glyph: '✗', cls: 'bad' };
-    if (state === 'pending') return { glyph: '●', cls: 'warn' };
+  function ciChip(state: string | null | undefined): { icon: IconName; cls: string; label: string } | null {
+    if (state === 'passing' || state === 'success') return { icon: 'check', cls: 'ok', label: 'CI passing' };
+    if (state === 'failing' || state === 'failure') return { icon: 'x', cls: 'bad', label: 'CI failing' };
+    if (state === 'pending') return { icon: 'clock', cls: 'warn', label: 'CI running' };
     return null;
   }
 
-  function fmtDate(iso: string): string {
-    return new Date(iso).toLocaleDateString([], { month: 'short', day: 'numeric' });
-  }
+  const STATE_LABEL: Record<PrState, string> = {
+    open: 'Open',
+    merged: 'Merged',
+    declined: 'Declined',
+    all: 'All',
+  };
 
   const stateColors: Record<string, string> = {
     open: 'ok',
@@ -110,10 +122,14 @@
 
 <div class="prlist">
   <div class="pr-toolbar">
-    <div class="row">
+    <div class="segmented" role="group" aria-label="Pull request state">
       {#each states as s (s)}
-        <button class="chip filter-chip" class:active={stateFilter === s} onclick={() => (stateFilter = s)}>
-          {s}
+        <button
+          class:active={stateFilter === s}
+          aria-pressed={stateFilter === s}
+          onclick={() => (stateFilter = s)}
+        >
+          {STATE_LABEL[s]}
         </button>
       {/each}
     </div>
@@ -125,27 +141,32 @@
       aria-label="Search pull requests"
     />
     <span class="grow"></span>
-    <button class="btn primary small" onclick={() => (createOpen = true)}>
-      <Icon name="pr" size={11} /> New PR
-    </button>
+    <!-- While the list is empty the empty state carries the one "New" CTA. -->
+    {#if loading || error || prs.length > 0}
+      <button class="btn primary small" onclick={() => (createOpen = true)}>
+        <Icon name="pr" size={12} /> New pull request
+      </button>
+    {/if}
   </div>
 
   {#if loading}
     <Skeleton rows={4} height={48} />
   {:else if error}
     <EmptyState
-      icon="pr"
+      icon="warning"
       title={errorTitle}
       body={error}
       actionLabel="Retry"
+      actionIcon="refresh"
       onaction={() => retryRev++}
     />
   {:else if prs.length === 0}
     <EmptyState
       icon="pr"
-      title="No {stateFilter === 'all' ? '' : stateFilter} pull requests"
-      body="Create one from your current branch, or change the filter."
-      actionLabel="New Pull Request"
+      title={stateFilter === 'all' ? 'No pull requests' : `No ${stateFilter} pull requests`}
+      body="Open one from your current branch, or pick another state above."
+      actionLabel="New pull request"
+      actionIcon="pr"
       onaction={() => (createOpen = true)}
     />
   {:else}
@@ -159,14 +180,14 @@
               {pr.title}
             </div>
             <div class="pr-meta">
-              <span class="chip {stateColors[pr.state] ?? ''}">{pr.state}</span>
+              <span class="chip {stateColors[pr.state] ?? ''}">{STATE_LABEL[pr.state] ?? pr.state}</span>
               {#if ci}
-                <span class="ci-chip {ci.cls}" title="CI {pr.ci_status}">{ci.glyph}</span>
+                <span class="ci-chip {ci.cls}" title={ci.label} role="img" aria-label={ci.label}><Icon name={ci.icon} size={12} /></span>
               {/if}
               <span class="dim">{pr.author}</span>
-              <span class="mono dim">{pr.source_branch} <span class="dir-arrow">→</span> {pr.target_branch}</span>
+              <span class="mono dim pr-branches" title="{pr.source_branch} → {pr.target_branch}">{pr.source_branch} <span class="dir-arrow">→</span> {pr.target_branch}</span>
               <span class="grow"></span>
-              <span class="dim">updated {fmtDate(pr.updated_at)}</span>
+              <span class="dim pr-updated" title={new Date(pr.updated_at).toLocaleString()}>updated {rel(pr.updated_at)}</span>
             </div>
           </div>
         </button>
@@ -178,8 +199,9 @@
     {#if hasMore}
       <div class="pr-more">
         <button class="btn small" disabled={loadingMore} onclick={loadMore}>
-          {loadingMore ? 'Loading…' : 'Load more'}
+          {loadingMore ? 'Loading…' : moreError ? 'Retry' : 'Load more'}
         </button>
+        {#if moreError}<span class="pr-more-err" role="status">Couldn't load more: {moreError}</span>{/if}
       </div>
     {/if}
   {/if}
@@ -207,21 +229,11 @@
     align-items: center;
     margin-bottom: 12px;
   }
-  .filter-chip {
-    cursor: pointer;
-    height: 22px;
-    background: transparent;
-  }
-  .filter-chip.active {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent-text);
-  }
   .pr-search {
-    height: 22px;
-    width: 200px;
+    height: 26px;
+    width: 220px;
     margin-inline-start: 10px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .pr-rows {
     display: flex;
@@ -230,17 +242,34 @@
   }
   .pr-nomatch {
     padding: 14px 2px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .pr-more {
     display: flex;
+    align-items: center;
     justify-content: center;
+    gap: 10px;
     margin-top: 10px;
   }
+  .pr-more-err {
+    color: var(--danger);
+    font-size: var(--fs-s);
+  }
+  /* A long source → target pair ellipsizes (full pair in the title) instead of
+     pushing "updated …" out of the card. */
+  .pr-branches {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pr-updated {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
   .ci-chip {
-    font-weight: 700;
-    font-size: 12px;
-    line-height: 1;
+    display: inline-flex;
+    align-items: center;
   }
   /* CI glyph tones: passing = success, failing = danger, pending = warning
      (the glyph shape carries the meaning too: ✓ ✗ ●). */
@@ -266,7 +295,7 @@
     border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
   }
   .pr-title {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .pr-num {
@@ -278,7 +307,7 @@
     align-items: center;
     gap: 10px;
     margin-top: 5px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   /* source→target separator mirrors in place under RTL. */
   .dir-arrow {
@@ -293,16 +322,16 @@
   @media (max-width: 1024px) {
     .prlist { padding: 12px; }
     .pr-toolbar { flex-wrap: wrap; gap: 8px; }
-    .pr-toolbar .row { flex-wrap: wrap; gap: 6px; }
-    .filter-chip { height: 32px; padding: 0 12px; font-size: 13px; }
+    .pr-toolbar .segmented > button { height: 32px; padding: 0 12px; }
     /* Full-width search on its own row so the chips + New PR stay reachable. */
-    .pr-search { height: 32px; width: 100%; margin-inline-start: 0; font-size: 13px; }
+    .pr-search { height: 32px; width: 100%; margin-inline-start: 0; font-size: var(--fs-m); }
     .pr-toolbar .btn.small { height: 32px; }
     .pr-row { padding: 12px 14px; }
-    .pr-title { font-size: 14px; overflow-wrap: anywhere; }
-    .pr-meta { flex-wrap: wrap; gap: 6px 10px; font-size: 12.5px; min-width: 0; }
+    .pr-title { font-size: var(--fs-l); overflow-wrap: anywhere; }
+    .pr-meta { flex-wrap: wrap; gap: 6px 10px; font-size: var(--fs-s); min-width: 0; }
     .pr-meta .grow { display: none; }
     /* Long branch names break instead of forcing horizontal overflow. */
     .pr-meta .mono { overflow-wrap: anywhere; min-width: 0; }
+    .pr-branches { white-space: normal; }
   }
 </style>

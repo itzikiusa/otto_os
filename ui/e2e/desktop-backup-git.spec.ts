@@ -25,18 +25,58 @@ test('Git backup preview commits only snapshot files and supports reviewed impor
     await card.getByLabel('Existing local repository').fill(repo);
     await card.getByRole('button', { name: 'Check repository', exact: true }).click();
     await expect(card.getByText('Local changes present', { exact: false })).toBeVisible();
-    await card.getByRole('button', { name: 'Preview snapshot', exact: true }).click();
-    await expect(card.getByLabel('Git snapshot preview')).toContainText('config/workflows.json');
-    await card.getByRole('button', { name: 'Write snapshot', exact: true }).click();
-    await expect(card.getByRole('button', { name: 'Snapshot written', exact: true })).toBeDisabled();
-    await card.getByLabel('Snapshot commit message').fill('chore: save portable configuration');
-    await card.getByRole('button', { name: 'Commit snapshot', exact: true }).click();
-    await expect(card.getByRole('status')).toContainText('Snapshot committed');
-    expect(git('diff', '--cached', '--name-only')).toBe('unrelated.txt');
+    const panel = card.getByLabel('Git snapshot preview');
+    const previewButton = card.getByRole('button', { name: 'Preview snapshot', exact: true });
+    // A preview is bound to the daemon state it showed: Write refuses a stale
+    // one ("Couldn't write the snapshot…") — the product working. The snapshot
+    // is daemon-wide, and on this shared e2e daemon other workers seed and
+    // rename workspaces at any moment (config/workspaces.json), so a
+    // Preview → Write they disturbed is simply redone.
+    const writeSnapshot = () => expect(async () => {
+      await previewButton.click();
+      await card.getByRole('button', { name: 'Write snapshot', exact: true }).click();
+      await expect(card.getByRole('button', { name: 'Snapshot written', exact: true })).toBeDisabled({ timeout: 5_000 });
+    }).toPass({ timeout: 45_000 });
+    const commitSnapshot = async (message: string) => {
+      await card.getByLabel('Snapshot commit message').fill(message);
+      await card.getByRole('button', { name: 'Commit snapshot', exact: true }).click();
+      await expect(card.getByRole('status')).toContainText('Snapshot committed');
+      // Only the snapshot was committed, all of it, and staged user work stays staged.
+      expect(git('diff', '--cached', '--name-only')).toBe('unrelated.txt');
+      expect(git('status', '--porcelain', '--', '.otto-sync')).toBe('');
+    };
+    await previewButton.click();
+    await expect(panel).toContainText('config/workflows.json');
+    await writeSnapshot();
+    await commitSnapshot('chore: save portable configuration');
     expect(git('show', 'HEAD:.otto-sync/config/workflows.json')).toContain('Git archived workflow');
     expect(readFileSync(join(repo, 'unrelated.txt'), 'utf8')).toBe('Keep this staged user work\n');
-    await card.getByRole('button', { name: 'Preview snapshot', exact: true }).click();
-    await expect(card.getByLabel('Git snapshot preview')).toContainText('0 changed files');
+    // Right after a commit, a fresh preview has nothing left to write. The
+    // snapshot is daemon-wide and other workers add a workspace every second
+    // or two here, which a multi-second UI cycle can't outrun. So bring the
+    // repository level with the daemon over the API (a sub-second preview →
+    // export → commit) and then look from the UI. A snapshot that never
+    // settles (a volatile field, unstable ordering) still fails this.
+    const gitApi = async (step: string, data: object) => {
+      const r = await ctx.post(`${base}/api/v1/state/git/${step}`, { data });
+      expect(r.ok(), `${step}: ${r.status()} ${await r.text()}`).toBeTruthy();
+      return r.json();
+    };
+    await expect(async () => {
+      const fresh = await gitApi('preview', { repo_path: repo });
+      if (fresh.changes.some((c: { action: string }) => c.action !== 'unchanged')) {
+        const written = await gitApi('export', { repo_path: repo, preview_token: fresh.token });
+        await gitApi('commit', {
+          repo_path: repo, expected_head: written.status.head, snapshot_digest: written.snapshot_digest,
+          message: 'chore: follow concurrent configuration changes',
+        });
+      }
+      await previewButton.click();
+      await expect(panel.locator('strong').first()).toHaveText('0 changed files', { timeout: 3_000 });
+    }).toPass({ timeout: 60_000 });
+    await expect(panel).toContainText('The snapshot matches this repository.');
+    expect(git('diff', '--cached', '--name-only')).toBe('unrelated.txt');
+    expect(git('status', '--porcelain', '--', '.otto-sync')).toBe('');
     await card.getByRole('button', { name: 'Preview Git restore', exact: true }).click();
     await expect(card.getByLabel('Restore preview')).toBeVisible();
     await card.getByLabel('I reviewed the contents, conflicts, and reconnect requirements.').check();

@@ -22,6 +22,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { confirmOutward } from '../../lib/confirmOutward';
   import { ui } from '../../lib/stores/ui.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -144,6 +145,9 @@
   // ── Refs ──────────────────────────────────────────────────────────────────
   let refs: RefsResp | null = $state(null);
   let refsLoading = $state(true);
+  /** Human cause of a failed `/refs` load — the sidebar shows it with Retry
+   *  instead of passing an empty tree off as "No local branches". */
+  let refsError = $state<string | null>(null);
 
   // Section collapse state
   let localOpen = $state(true);
@@ -178,6 +182,17 @@
     name: string;
     leaves: BranchLeaf[];
   }
+  /** `refs/remotes/origin/HEAD` is a symref, not a branch — but `for-each-ref
+   *  %(refname:short)` shortens it to the bare remote name ("origin"), which
+   *  slips past the daemon's `/HEAD` suffix filter and rendered as a stray
+   *  "origin" leaf under REMOTE. Every real remote-tracking ref is
+   *  `<remote>/<branch>`, so a slash-less remote name is always that symref. */
+  function withoutRemoteHeads(r: RefsResp): RefsResp {
+    return r.remote.some((b) => !b.name.includes('/'))
+      ? { ...r, remote: r.remote.filter((b) => b.name.includes('/')) }
+      : r;
+  }
+
   function groupBranches(list: RefBranch[]): { loose: BranchLeaf[]; folders: BranchFolder[] } {
     const loose: BranchLeaf[] = [];
     const folderMap = new Map<string, BranchLeaf[]>();
@@ -258,6 +273,25 @@
     return p;
   }
 
+  /** (Re)load the refs tree. A failure keeps an empty tree (the graph's chip
+   *  lookups need one) but records the cause so the sidebar can say so. */
+  function loadRefs(id: string): void {
+    refsLoading = true;
+    refsError = null;
+    void api
+      .get<RefsResp>(`/repos/${id}/refs`)
+      .then((r) => {
+        if (id !== repoId) return;
+        refs = withoutRemoteHeads(r);
+      })
+      .catch((e) => {
+        if (id !== repoId) return;
+        refs = { local: [], remote: [], tags: [] };
+        refsError = loadErrorText(e);
+      })
+      .finally(() => (refsLoading = false));
+  }
+
   /** Retry a failed first page (the inline error's Retry). */
   function retryCommits(): void {
     commitsLoading = true;
@@ -299,9 +333,15 @@
   // Only the rows near the viewport are put in the DOM. Every row is a button +
   // an SVG lane gutter, so rendering a whole 6k-commit history cost seconds on
   // mount; with a window it is flat no matter how deep history goes. Rows are a
-  // FIXED 28px pitch, which is what makes the arithmetic (and the jump-to-ref
-  // scroll target) exact — keep `.graph-row { height }` and ROW_H in lockstep.
-  const ROW_H = 28;
+  // FIXED pitch, which is what makes the arithmetic (and the jump-to-ref
+  // scroll target) exact. The pitch is applied INLINE on every row (and the SVG
+  // gutter is drawn at the same height), so there is one source of truth:
+  //  - desktop 32px: two text lines (subject + sha/author/date) need ~29px; the
+  //    old 28px pitch jammed them together.
+  //  - ≤1024px 46px touch rows: these used to be CSS-only while the windowing
+  //    math and the gutter stayed at 28 — lanes broke into dashes between rows
+  //    and the spacers / jump-to-ref target drifted by 18px per row.
+  const ROW_H = $derived(isMobile ? 46 : 32);
   const OVERSCAN = 25; // rows rendered beyond each edge, so scrolling isn't bare
   let viewTop = $state(0);
   let viewH = $state(0);
@@ -356,6 +396,8 @@
 
   // ── Stashes (read-only `git stash list`) ──────────────────────────────────
   let stashes: StashInfo[] = $state([]);
+  /** The stash list has been read for the current repo (vs the reset `[]`). */
+  let stashesKnown = $state(false);
 
   // ── Worktrees + submodules (sidebar sections; best-effort like stashes) ───
   let worktrees: WorktreeInfo[] = $state([]);
@@ -400,6 +442,16 @@
     }
   });
 
+  // Agent UI control: `git.requestWip` (lib/uiCommands/git.ts) opens this
+  // repo's WIP panel; WipPanel then takes the request (file / composer).
+  $effect(() => {
+    const r = git.wipRequest;
+    if (!r || r.repoId !== repoId || status.changes.length === 0) return;
+    untrack(() => {
+      if (!wipSelected) selectWip();
+    });
+  });
+
   $effect(() => {
     const id = repoId;
     refsLoading = true;
@@ -415,11 +467,7 @@
     skipCursor = 0;
     inflight = null;
 
-    void api
-      .get<RefsResp>(`/repos/${id}/refs`)
-      .then((r) => (refs = r))
-      .catch(() => (refs = { local: [], remote: [], tags: [] }))
-      .finally(() => (refsLoading = false));
+    loadRefs(id);
 
     // UNTRACKED: loadMore() reads `hasMore` (and pages write it). Reading that
     // inside the effect would subscribe this loader to it — so the first short
@@ -432,9 +480,13 @@
 
     // Stashes are best-effort: a failure (or empty list) just leaves the section
     // empty; it must never block the graph from rendering.
+    stashesKnown = false;
     void api
       .get<StashInfo[]>(`/repos/${id}/stashes`)
-      .then((s) => (stashes = s))
+      .then((s) => {
+        stashes = s;
+        stashesKnown = true;
+      })
       .catch(() => (stashes = []));
 
     // Worktrees + submodules: same best-effort contract as stashes.
@@ -496,8 +548,9 @@
    *  cheap-vs-expensive split is visible (investigation H4/WP3). */
   async function resyncRefs(): Promise<void> {
     const id = repoId;
-    const next = await api.get<RefsResp>(`/repos/${id}/refs`).catch(() => null);
-    if (!next || id !== repoId) return; // transient failure — keep what we have, try next round
+    const raw = await api.get<RefsResp>(`/repos/${id}/refs`).catch(() => null);
+    if (!raw || id !== repoId) return; // transient failure — keep what we have, try next round
+    const next = withoutRemoteHeads(raw);
     const before = refsFingerprint(refs);
     const after = refsFingerprint(next);
     refs = next; // Tracking config/counts can change without moving any commit SHA.
@@ -522,7 +575,7 @@
     if (status) onstatus(status);
     const refsCall = api
       .get<RefsResp>(`/repos/${repoId}/refs`)
-      .then((r) => (refs = r))
+      .then((r) => (refs = withoutRemoteHeads(r)))
       .catch(() => {});
     await Promise.all([refsCall, reloadGraph()]);
   }
@@ -550,7 +603,13 @@
         .catch((e) => {
           if (commits.length === 0) commitsError = loadErrorText(e);
         }),
-      api.get<StashInfo[]>(`/repos/${repoId}/stashes`).then((s) => (stashes = s)).catch(() => {}),
+      api
+        .get<StashInfo[]>(`/repos/${repoId}/stashes`)
+        .then((s) => {
+          stashes = s;
+          stashesKnown = true;
+        })
+        .catch(() => {}),
       api.get<WorktreeInfo[]>(`/repos/${repoId}/worktrees`).then((w) => (worktrees = w)).catch(() => {}),
     ]);
   }
@@ -742,7 +801,7 @@
   async function revertCommit(c: CommitInfo): Promise<void> {
     const ok = await confirmer.ask(
       `Revert commit ${c.short_sha} — "${c.subject}"? This creates a new commit undoing its changes.`,
-      { title: 'Revert commit', confirmLabel: 'Revert', danger: true },
+      { title: 'Revert commit', confirmLabel: 'Revert', danger: false },
     );
     if (!ok) return;
     await mutate('/revert', { sha: c.sha }, 'Reverted', c.short_sha);
@@ -1080,6 +1139,12 @@
   }
 
   async function pushTag(name: string): Promise<void> {
+    const ok = await confirmOutward({
+      verb: 'Push tag',
+      where: `origin · tag ${name}`,
+      who: 'Everyone with access to the remote sees the tag; CI or release jobs may react to it.',
+    });
+    if (!ok) return;
     await mutate('/tag/push', { name }, 'Tag pushed', name);
   }
 
@@ -1382,7 +1447,7 @@
       // Preview is advisory — a repo whose daemon predates it still rebases.
     }
     const ok = await confirmer.ask(
-      `Rebase \`${currentBranch}\` onto \`${onto}\`? ${commits} commits will be replayed; conflicts open the resolver. Uncommitted changes are stashed and restored afterwards.`,
+      `Rebase \`${currentBranch}\` onto \`${onto}\`? ${commits} commit${commits === 1 ? '' : 's'} will be replayed; conflicts open the resolver. Uncommitted changes are stashed and restored afterwards.`,
       { title: 'Rebase', confirmLabel: 'Rebase', danger: false },
     );
     if (ok) await mutate('/rebase', { onto, auto_stash: true }, 'Rebased', onto);
@@ -1434,10 +1499,12 @@
   }
 
   // ── Lane / graph algorithm ────────────────────────────────────────────────
-  // palette of 8 colors (CSS vars so they adapt to theme)
+  // Lane palette: the categorical series tokens (graphics only, tuned per
+  // scheme for >= 3:1 on --surface) — the old fixed hex set was dark-only and
+  // washed out on light.
   const PALETTE = [
-    '#5B8BF5', '#E06C75', '#56B6C2', '#E5C07B',
-    '#98C379', '#C678DD', '#61AFEF', '#D19A66',
+    'var(--cat-1)', 'var(--cat-2)', 'var(--cat-3)',
+    'var(--cat-4)', 'var(--cat-5)', 'var(--cat-6)',
   ];
 
   interface LaneRow {
@@ -1692,6 +1759,13 @@
   // commits (the index/untracked parents = parents[1..]; parents[0] is the base
   // commit = real history, left alone). Commits in the log matching either get a
   // dashed, de-emphasised "stash plumbing" treatment instead of a normal node.
+  // Publish the stash count for the toolbar's Pop (see gitBridge.stashCount).
+  // Only once the list is known for THIS repo — the loader resets it to [].
+  $effect(() => {
+    const id = repoId;
+    const n = stashes.length;
+    if (stashesKnown) gitBridge.stashCount[id] = n;
+  });
   const stashShas = $derived(new Set(stashes.map((s) => s.sha)));
   const stashHelperShas = $derived.by(() => {
     const set = new Set<string>();
@@ -2141,13 +2215,22 @@
   // Middle-ellipsize a long branch leaf so the DISTINGUISHING SUFFIX stays visible
   // (e.g. "PROJ-1234-really-long…-retry-fix"). Returns null for short names (render
   // plain). The head span shrinks + ellipsizes; the tail span is pinned (see CSS).
+  //
+  // The tail starts at a WORD boundary (after a `-` `_` `.` `/`) so the pinned
+  // suffix reads as whole words — a fixed 14-char cut chopped mid-word
+  // ("…maintaining…nd-fixes-todos"). Falls back to the fixed cut when the name
+  // has no separator in range.
   function midParts(label: string): { head: string; tail: string } | null {
     if (label.length <= 18) return null;
-    const tailLen = Math.min(14, Math.floor(label.length / 2));
-    return {
-      head: label.slice(0, label.length - tailLen),
-      tail: label.slice(label.length - tailLen),
-    };
+    const maxTail = Math.min(16, Math.floor(label.length / 2));
+    let cut = label.length - Math.min(14, maxTail);
+    for (let i = label.length - maxTail; i <= label.length - 5; i++) {
+      if ('-_./'.includes(label[i - 1] ?? '')) {
+        cut = i;
+        break;
+      }
+    }
+    return { head: label.slice(0, cut), tail: label.slice(cut) };
   }
 
   // ── Cleanup base branch (drives the "merged → safe to delete" indicators) ────
@@ -2188,6 +2271,20 @@
   // Drag-to-resize the commit-list column while the detail panel is open
   // (desktop only; persisted via ui.gitGraphListWidth).
   let listResizing = $state(false); // suspends the panel's flex transition
+  /** Keyboard for a focused resizer (the ARIA window-splitter pattern):
+   *  ←/→ move it (⇧ for a big step), Home/End jump to the ends, Enter resets. */
+  function resizerKey(e: KeyboardEvent, get: () => number, set: (w: number) => void, def: number, mirror = false): void {
+    const step = e.shiftKey ? 64 : 16;
+    const rtl = mirror && document.dir === 'rtl' ? -1 : 1;
+    if (e.key === 'ArrowRight') set(get() + step * rtl);
+    else if (e.key === 'ArrowLeft') set(get() - step * rtl);
+    else if (e.key === 'Home') set(0);
+    else if (e.key === 'End') set(10_000);
+    else if (e.key === 'Enter') set(def);
+    else return;
+    e.preventDefault();
+  }
+
   function startListResize(e: MouseEvent): void {
     e.preventDefault();
     listResizing = true;
@@ -2360,6 +2457,10 @@
   >
     {#if refsLoading}
       <div style="padding: 10px"><Skeleton rows={6} height={22} /></div>
+    {:else if refsError}
+      <div class="refs-error">
+        <LoadState what="branches" error={refsError} empty variant="compact" onretry={() => loadRefs(repoId)} />
+      </div>
     {:else if refs}
       <!-- Branch leaf name with MIDDLE ellipsis so the distinguishing suffix
            (e.g. "…-retry-fix") stays visible; short names render plain. -->
@@ -2445,7 +2546,7 @@
               <span class="ref-upstream mono dim" title={`upstream: ${b.upstream}`}>{b.upstream}</span>
             {/if}
           {/if}
-          {#if checkoutBusy === b.name || openWtBusy === (wtElsewhere?.path ?? '')}<span class="dim">…</span>{/if}
+          {#if checkoutBusy === b.name || (wtElsewhere && openWtBusy === wtElsewhere.path)}<span class="dim" title="Working…">…</span>{/if}
         </button>
       {/snippet}
 
@@ -2462,7 +2563,7 @@
           onclick={() => selectBranchRow(b)}
           ondblclick={() => checkoutRemote(b)}
           oncontextmenu={(e) => branchMenu(e, b)}
-          title="Click to highlight · double-click to checkout as a local tracking branch · drag onto a local branch to merge"
+          title="{b.name} — click to highlight · double-click to checkout as a local tracking branch · drag onto a local branch to merge"
         >
           <Icon name="dot" size={10} />
           {@render refName(leaf.label)}
@@ -2485,7 +2586,7 @@
 
       <!-- LOCAL -->
       <div class="ref-section">
-        <button class="ref-header" onclick={() => (localOpen = !localOpen)}>
+        <button class="ref-header" onclick={() => (localOpen = !localOpen)} aria-expanded={localOpen}>
           <Icon name={localOpen ? 'chevronDown' : 'chevronRight'} size={11} />
           <Icon name="branch" size={12} />
           <span>LOCAL</span>
@@ -2514,7 +2615,7 @@
 
       <!-- REMOTE -->
       <div class="ref-section">
-        <button class="ref-header" onclick={() => (remoteOpen = !remoteOpen)}>
+        <button class="ref-header" onclick={() => (remoteOpen = !remoteOpen)} aria-expanded={remoteOpen}>
           <Icon name={remoteOpen ? 'chevronDown' : 'chevronRight'} size={11} />
           <Icon name="globe" size={12} />
           <span>REMOTE</span>
@@ -2543,7 +2644,7 @@
 
       <!-- TAGS -->
       <div class="ref-section">
-        <button class="ref-header" onclick={() => (tagsOpen = !tagsOpen)}>
+        <button class="ref-header" onclick={() => (tagsOpen = !tagsOpen)} aria-expanded={tagsOpen}>
           <Icon name={tagsOpen ? 'chevronDown' : 'chevronRight'} size={11} />
           <Icon name="tag" size={12} />
           <span>TAGS</span>
@@ -2582,7 +2683,7 @@
                     tagMenu(e, t);
                   }
                 }}
-              >⋯</span>
+              ><Icon name="more" size={13} /></span>
             </div>
           {:else}
             <div class="dim ref-empty">No tags</div>
@@ -2592,7 +2693,7 @@
 
       <!-- STASHES — read-only `git stash list`; right-click for Apply / Drop. -->
       <div class="ref-section">
-        <button class="ref-header" onclick={() => (stashesOpen = !stashesOpen)}>
+        <button class="ref-header" onclick={() => (stashesOpen = !stashesOpen)} aria-expanded={stashesOpen}>
           <Icon name={stashesOpen ? 'chevronDown' : 'chevronRight'} size={11} />
           <Icon name="stash" size={12} />
           <span>STASHES</span>
@@ -2625,7 +2726,7 @@
            branch-switch). Right-click to remove/prune. Shows agent-created
            trees (swarm, Run-with-Otto, goal loops) too. -->
       <div class="ref-section">
-        <button class="ref-header" onclick={() => (worktreesOpen = !worktreesOpen)}>
+        <button class="ref-header" onclick={() => (worktreesOpen = !worktreesOpen)} aria-expanded={worktreesOpen}>
           <Icon name={worktreesOpen ? 'chevronDown' : 'chevronRight'} size={11} />
           <Icon name="worktree" size={12} />
           <span>WORKTREES</span>
@@ -2689,7 +2790,7 @@
       <!-- SUBMODULES — `git submodule status`; right-click to init/update. -->
       {#if submodules.length > 0}
         <div class="ref-section">
-          <button class="ref-header" onclick={() => (submodulesOpen = !submodulesOpen)}>
+          <button class="ref-header" onclick={() => (submodulesOpen = !submodulesOpen)} aria-expanded={submodulesOpen}>
             <Icon name={submodulesOpen ? 'chevronDown' : 'chevronRight'} size={11} />
             <Icon name="shapes" size={12} />
             <span>SUBMODULES</span>
@@ -2723,12 +2824,20 @@
   <!-- Drag handle on the sidebar's right edge (desktop): widen it to read long
        branch names. Double-click resets to the default width. -->
   {#if !isMobile}
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <!-- A focusable separator is the ARIA window-splitter widget; Svelte files
+         every separator as non-interactive (same as shell/SplitDivider). -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
     <div
       class="refs-resizer"
+      role="separator"
+      tabindex="0"
+      aria-orientation="vertical"
+      aria-label="Resize the branch list"
+      aria-valuenow={ui.gitGraphSideWidth}
       onmousedown={startSideResize}
       ondblclick={() => ui.setGitGraphSideWidth(220)}
-      title="Drag to resize · double-click to reset"
+      onkeydown={(e) => resizerKey(e, () => ui.gitGraphSideWidth, (w) => ui.setGitGraphSideWidth(w), 220, true)}
+      title="Drag or use ←/→ to resize · double-click to reset"
     ></div>
   {/if}
 
@@ -2759,16 +2868,16 @@
     {#if commitsError && commits.length === 0}
       <LoadState what="commits" error={commitsError} empty loading={commitsLoading} onretry={retryCommits} />
     {:else if commitsLoading}
-      <div style="padding: 10px"><Skeleton rows={12} height={28} /></div>
+      <div style="padding: 10px"><Skeleton rows={12} height={ROW_H} /></div>
     {:else if commits.length === 0}
-      <div class="dim" style="padding: 18px; font-size: 12px">No commits found.</div>
+      <div class="dim" style="padding: 18px; font-size: var(--fs-s)">No commits yet — changes you commit from the WIP row appear here.</div>
     {:else}
       <div class="graph-list">
         <!-- Column header — orients the three zones (which column holds refs,
              which holds the graph) so the ref gutter isn't read as part of the
              commit text. Sticky so it survives scrolling a long history. -->
         <div class="graph-head" aria-hidden="true">
-          <span class="gh-branch">BRANCH / TAG</span>
+          <span class="gh-branch" title="Branch / tag">BRANCH / TAG</span>
           <!-- The label is hidden (not clipped to "GRA") when a 1-lane gutter is
                too narrow to hold it at the readable size. -->
           <span class="gh-graph" class:gh-label-hidden={gutterWidth < 40} style="width: {gutterWidth}px" title="Graph">GRAPH</span>
@@ -2780,6 +2889,7 @@
           {@const cx = wipCol * LANE_W + LANE_W / 2}
           <button
             class="graph-row wip-row"
+            style:height="{ROW_H}px"
             class:graph-row-selected={wipSelected}
             onclick={selectWip}
             title="Uncommitted changes — click to stage & commit"
@@ -2791,26 +2901,26 @@
             <svg
               class="gutter"
               width={gutterWidth}
-              height={28}
+              height={ROW_H}
               style="flex-shrink: 0; width: {gutterWidth}px;"
             >
               <!-- dashed stub hanging toward the HEAD commit's lane -->
               <line
                 x1={cx}
-                y1={14 + NODE_R}
+                y1={ROW_H / 2 + NODE_R}
                 x2={cx}
-                y2={28}
+                y2={ROW_H}
                 stroke="var(--accent)"
                 stroke-width="1.5"
                 stroke-dasharray="2 2"
                 opacity="0.7"
               />
               {#if wipSelected}
-                <circle cx={cx} cy={14} r={NODE_R + 3} fill="none" stroke="var(--accent)" stroke-width="1.5" opacity="0.55" />
+                <circle cx={cx} cy={ROW_H / 2} r={NODE_R + 3} fill="none" stroke="var(--accent)" stroke-width="1.5" opacity="0.55" />
               {/if}
               <circle
                 cx={cx}
-                cy={14}
+                cy={ROW_H / 2}
                 r={NODE_R}
                 fill="var(--surface)"
                 stroke="var(--accent)"
@@ -2830,7 +2940,7 @@
                 </span>
                 {#if wipConflictCount > 0}
                   <span class="wip-conflicts" title="{wipConflictCount} conflicted file{wipConflictCount === 1 ? '' : 's'} — open the WIP panel to resolve">
-                    ⚠ {wipConflictCount} conflicted
+                    <Icon name="warning" size={12} /> {wipConflictCount} conflicted
                   </span>
                 {/if}
               </div>
@@ -2849,8 +2959,8 @@
         {#each visibleRows as row (row.commit.sha)}
           {@const svgW = gutterWidth}
           {@const cx = row.col * LANE_W + LANE_W / 2}
-          {@const cy = 14}
-          {@const totalH = 28}
+          {@const cy = ROW_H / 2}
+          {@const totalH = ROW_H}
           {@const isSelected = selectedSha === row.commit.sha}
           {@const isHead = isHeadCommit(row.commit)}
           {@const isStash = isStashNode(row.commit.sha)}
@@ -2859,6 +2969,7 @@
           {@const onSpine = highlightSpine !== null && highlightSpine.has(row.commit.sha)}
           <button
             class="graph-row"
+            style:height="{ROW_H}px"
             class:graph-row-selected={isSelected}
             class:graph-row-head={isHead}
             class:dimmed
@@ -2889,7 +3000,7 @@
                   onkeydown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') openRefMenu(e as unknown as MouseEvent, row.commit, chips);
                   }}
-                >▾ +{chips.length - 1}</span>
+                ><Icon name="chevronDown" size={9} />+{chips.length - 1}</span>
               {:else}
                 {#each chips as chip (chip.kind + chip.label)}
                   {@const label = chip.kind === 'stash'
@@ -3010,11 +3121,11 @@
           {#if loadingMore}
             <span class="dim">Loading more history…</span>
           {:else if hasMore}
-            <button class="more-btn" onclick={() => void loadMore()}>
+            <button class="btn small" onclick={() => void loadMore()}>
               Load older commits
             </button>
           {:else}
-            <span class="dim">{commits.length} commits · beginning of history</span>
+            <span class="dim">{commits.length} commit{commits.length === 1 ? '' : 's'} · beginning of history</span>
           {/if}
         </div>
       </div>
@@ -3036,12 +3147,18 @@
 
   <!-- ── RIGHT: commit detail + diff / WIP staging panel ─────────────────── -->
   {#if detailOpen && !isMobile}
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
     <div
       class="graph-resizer"
+      role="separator"
+      tabindex="0"
+      aria-orientation="vertical"
+      aria-label="Resize the commit list"
+      aria-valuenow={ui.gitGraphListWidth}
       onmousedown={startListResize}
       ondblclick={() => ui.setGitGraphListWidth(420)}
-      title="Drag to resize · double-click to reset"
+      onkeydown={(e) => resizerKey(e, () => ui.gitGraphListWidth, (w) => ui.setGitGraphListWidth(w), 420)}
+      title="Drag or use ←/→ to resize · double-click to reset"
     ></div>
   {/if}
 
@@ -3058,7 +3175,7 @@
       {:else if diffResp}
         <span class="mob-sec-count">{diffResp.files.length} file{diffResp.files.length === 1 ? '' : 's'}</span>
       {/if}
-      <span class="mob-close">✕</span>
+      <span class="mob-close" aria-hidden="true"><Icon name="x" size={14} /></span>
     </button>
   {/if}
   <div
@@ -3085,35 +3202,33 @@
       <!-- Header -->
       <div class="detail-header">
         <div class="detail-header-main">
+          <!-- One line that never wraps: sha, the refs (each ellipsizes its own
+               label, the group shrinks first), then close pinned at the end. -->
           <div class="detail-title-row">
             <span class="mono detail-sha">{selectedCommit.short_sha}</span>
-            {#each chipsFor(selectedCommit) as chip}
-              <span
-                class="ref-chip kind-{chip.kind}"
-                class:current-chip={chip.current}
-                class:is-worktree={chip.worktree && !chip.current}
-                title={chip.worktree && !chip.current
-                  ? `Worktree · ${chip.label}`
-                  : chip.current
-                    ? `Checked out · ${chip.label}`
-                    : chip.label}
-              >
-                {#if chip.current}<Icon name="check" size={8} />{/if}
-                {#if chip.worktree && !chip.current}<Icon name="worktree" size={8} />{/if}
-                {#if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={8} />{/if}
-                {#if chip.kind === 'tag'}<Icon name="tag" size={8} />{/if}
-                {#if chip.kind === 'stash'}<Icon name="stash" size={8} />{/if}
-                {chip.kind === 'stash' ? (stashMsgBySha.get(selectedCommit.sha) ?? 'stash') : chip.label}
-              </span>
-            {/each}
-            {#if selectedBranch}
-              <span class="on-branch-hint" title="On branch {selectedBranch}">
-                <Icon name="branch" size={9} /> {selectedBranch}
-              </span>
-            {/if}
-            <span class="grow"></span>
-            <button class="detail-close" onclick={clearSelection} title="Close" aria-label="Close commit detail">
-              ✕
+            <span class="detail-refs">
+              {#each chipsFor(selectedCommit) as chip}
+                <span
+                  class="ref-chip kind-{chip.kind}"
+                  class:current-chip={chip.current}
+                  class:is-worktree={chip.worktree && !chip.current}
+                  title={chip.worktree && !chip.current
+                    ? `Worktree · ${chip.label}`
+                    : chip.current
+                      ? `Checked out · ${chip.label}`
+                      : chip.label}
+                >
+                  {#if chip.current}<Icon name="check" size={8} />{/if}
+                  {#if chip.worktree && !chip.current}<Icon name="worktree" size={8} />{/if}
+                  {#if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={8} />{/if}
+                  {#if chip.kind === 'tag'}<Icon name="tag" size={8} />{/if}
+                  {#if chip.kind === 'stash'}<Icon name="stash" size={8} />{/if}
+                  <span class="chip-label">{chip.kind === 'stash' ? (stashMsgBySha.get(selectedCommit.sha) ?? 'stash') : chip.label}</span>
+                </span>
+              {/each}
+            </span>
+            <button class="icon-btn detail-close" onclick={clearSelection} title="Close commit detail" aria-label="Close commit detail">
+              <Icon name="x" size={14} />
             </button>
           </div>
           <div class="detail-subject">{selectedCommit.subject}</div>
@@ -3121,6 +3236,11 @@
             <span class="detail-author">{selectedCommit.author}</span>
             <span class="dim detail-dot">·</span>
             <span class="dim detail-date">{fmtDate(selectedCommit.date)}</span>
+            {#if selectedBranch && !chipsFor(selectedCommit).some((c) => c.label === selectedBranch)}
+              <span class="on-branch-hint" title="On branch {selectedBranch}">
+                <Icon name="branch" size={12} /><span class="chip-label">{selectedBranch}</span>
+              </span>
+            {/if}
           </div>
         </div>
       </div>
@@ -3133,11 +3253,11 @@
           </div>
         {:else if diffResp !== null}
           {#if diffResp.files.length === 0}
-            <div class="dim" style="padding: 18px; font-size: 12px; text-align: center">No file changes.</div>
+            <div class="dim" style="padding: 18px; font-size: var(--fs-s); text-align: center">No file changes.</div>
           {:else}
             <!-- Diff summary bar -->
             <div class="diff-summary-bar">
-              <span class="dim" style="font-size: 11px">{diffResp.files.length} file{diffResp.files.length === 1 ? '' : 's'}</span>
+              <span class="dim" style="font-size: var(--fs-xs)">{diffResp.files.length} file{diffResp.files.length === 1 ? '' : 's'}</span>
               <span class="ds-add">+{detailTotals.add}</span>
               <span class="ds-del">−{detailTotals.del}</span>
             </div>
@@ -3154,7 +3274,7 @@
                     onclick={() => toggleFileCollapse(file.path)}
                     title={file.path}
                   >
-                    <span class="df-chevron dim" class:collapsed={isCollapsed} aria-hidden="true"></span>
+                    <span class="df-chevron dim" aria-hidden="true"><Icon name={isCollapsed ? 'chevronRight' : 'chevronDown'} size={12} /></span>
                     <span class="mono df-path">
                       {#if file.old_path}<span class="df-rename-from">{file.old_path}</span><span class="df-rename-arrow"> → </span>{/if}{file.path}
                     </span>
@@ -3167,7 +3287,7 @@
                     title="File actions"
                     aria-label="File actions"
                     onclick={(e) => { e.stopPropagation(); fileToolsMenu(e, file.path); }}
-                  >⋯</button>
+                  ><Icon name="more" size={13} /></button>
                 </div>
 
                 {#if !isCollapsed}
@@ -3314,7 +3434,7 @@
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
-    color: var(--status-working, #98c379);
+    color: var(--success);
     opacity: 0.85;
   }
   .ref-row:hover .merged-mark {
@@ -3333,8 +3453,8 @@
     background: transparent;
     color: var(--text-dim);
     font-size: var(--fs-xs);
-    font-weight: 700;
-    letter-spacing: 0.04em;
+    font-weight: 600;
+    letter-spacing: 0.06em;
     cursor: pointer;
     text-transform: uppercase;
     text-align: start;
@@ -3360,17 +3480,25 @@
     align-items: center;
     gap: 6px;
     width: 100%;
-    padding: 4px 10px 4px 11px;
+    /* Starts on the SAME indent as a loose branch row (22px): a folder is a
+       sibling of the loose branches, not of the LOCAL/REMOTE section header —
+       it used to sit 11px further out than the rows beside it. */
+    padding-block: 4px;
+    padding-inline: 22px 10px;
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     cursor: pointer;
     text-align: start;
     transition: background 100ms ease-out, color 100ms ease-out;
   }
   .ref-folder:hover {
     background: var(--surface-2);
+  }
+  /* The count pill is surface-2 too — lift it so it doesn't vanish on hover. */
+  .ref-folder:hover .ref-count {
+    background: var(--surface-3);
   }
   /* The folder glyph picks up the accent so the grouping is obvious at a glance. */
   .ref-folder :global(svg:nth-of-type(2)) {
@@ -3386,7 +3514,9 @@
   /* Children of a folder: indented under a vertical tree guide so the nesting is
      visually unmistakable. */
   .folder-children {
-    margin-inline-start: 21px;
+    /* The guide drops from the centre of the folder's 11px chevron (22 + 5.5),
+       and nested rows' dots then line up under the folder icon. */
+    margin-inline-start: 27px;
     border-inline-start: 1.5px solid var(--border);
   }
   .ref-row {
@@ -3400,7 +3530,7 @@
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
     text-align: start;
     overflow: hidden;
@@ -3421,11 +3551,12 @@
   /* Tag actions: revealed on hover/focus so the row stays clean, but always
      present for pointers that have no right-click. */
   .ref-more {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
     margin-inline-start: auto;
     padding-inline: 4px;
     color: var(--text-dim);
-    font-size: 13px;
-    line-height: 1;
     opacity: 0;
     cursor: pointer;
     transition: opacity 100ms ease-out, color 100ms ease-out;
@@ -3439,7 +3570,7 @@
   }
   /* Folder children sit just inside the tree guide of `.folder-children`. */
   .ref-row.nested {
-    padding-inline-start: 14px;
+    padding-inline-start: 10px;
   }
   /* The checked-out branch: accent text + a leading accent rail and faint wash so
      the row itself is unmistakable, not just the check pip. */
@@ -3483,7 +3614,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   /* Compact "also tracked on remote" glyph that replaces a redundant
      origin/<same-name> upstream string, so the branch NAME keeps the row width. */
@@ -3536,7 +3667,7 @@
     gap: 3px;
     flex-shrink: 0;
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     font-variant-numeric: tabular-nums;
   }
   .ref-upstream {
@@ -3549,7 +3680,7 @@
   }
   .ref-empty {
     padding: 4px 22px 6px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
 
   /* ── graph panel ── */
@@ -3566,7 +3697,7 @@
   /* When detail is open, the commit list becomes a fixed-width column and the
      detail panel flexes to fill the rest of the page (see .detail-visible). */
   .graph-panel.panel-shrunk {
-    --branch-col-w: 88px;
+    --branch-col-w: 108px;
     flex: 0 0 420px; /* basis overridden by the inline ui.gitGraphListWidth */
     width: auto;
     min-width: 300px;
@@ -3603,7 +3734,7 @@
     background: var(--surface);
     border-bottom: 1px solid var(--border);
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0.04em;
     color: var(--text-dim);
     user-select: none;
@@ -3615,6 +3746,7 @@
     padding-inline: 6px;
     overflow: hidden;
     white-space: nowrap;
+    text-overflow: ellipsis;
   }
   .graph-head .gh-graph {
     flex-shrink: 0;
@@ -3636,7 +3768,7 @@
     display: flex;
     align-items: center;
     width: 100%;
-    height: 28px;
+    height: 32px; /* overridden inline by ROW_H — keep them equal */
     padding-inline-end: 12px;
     border: none;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
@@ -3703,21 +3835,10 @@
     display: flex;
     justify-content: center;
     padding: 10px 12px 16px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
-  .more-btn {
-    padding: 5px 12px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--surface);
-    color: var(--text-dim);
-    font-size: 11px;
-    cursor: pointer;
-    transition: background 100ms ease-out, color 100ms ease-out;
-  }
-  .more-btn:hover {
-    background: var(--surface-2);
-    color: var(--text);
+  .refs-error {
+    padding: 8px;
   }
   /* ── WIP row (uncommitted changes, GitKraken-style) ── */
   .wip-row:not(.graph-row-selected) {
@@ -3733,9 +3854,9 @@
     align-items: center;
     flex-shrink: 0;
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     padding: 1px 5px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     border: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
     color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 10%, transparent);
@@ -3743,13 +3864,16 @@
   /* Conflicted-files chip on the WIP row — conflicts must be visible from the
      graph itself, not only after opening the WIP panel. */
   .wip-conflicts {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
     flex-shrink: 0;
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     padding: 0 5px;
-    border-radius: 3px;
-    color: var(--status-warn);
-    background: var(--status-warn-soft);
+    border-radius: var(--radius-s);
+    color: var(--warning);
+    background: var(--warning-soft);
   }
 
   /* The HEAD commit ("you are here") — a leading accent rail + faint wash so the
@@ -3766,13 +3890,16 @@
   .head-badge {
     flex-shrink: 0;
     font-size: var(--fs-xs);
-    font-weight: 800;
+    font-weight: 600;
     letter-spacing: 0.06em;
     line-height: 1;
     padding: 2px 5px;
-    border-radius: 3px;
-    background: var(--accent);
-    color: var(--accent-contrast);
+    border-radius: var(--radius-s);
+    /* Quiet marker: the checked-out branch chip beside it already carries the
+       one solid accent fill in the row. */
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
     white-space: nowrap;
   }
   .gutter {
@@ -3787,7 +3914,8 @@
     display: flex;
     flex-direction: column;
     justify-content: center;
-    gap: 1px;
+    gap: 2px;
+    line-height: 1.2;
   }
   .ci-top {
     display: flex;
@@ -3796,7 +3924,7 @@
     overflow: hidden;
   }
   .ci-subject {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 500;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -3813,7 +3941,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     padding: 1px 5px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text-dim);
     border: 1px solid transparent;
@@ -3833,25 +3961,25 @@
   }
   /* Remote-tracking branch — distinct teal/cyan so it never reads as local. */
   .ref-chip.kind-remote {
-    background: color-mix(in srgb, #56b6c2 18%, transparent);
-    color: var(--accent-text);
+    background: color-mix(in srgb, var(--cat-6) 18%, transparent);
+    color: var(--text);
   }
   /* Tag — amber. */
   .ref-chip.kind-tag {
-    background: var(--status-warn-soft);
-    color: var(--status-warn);
+    background: var(--warning-soft);
+    color: var(--warning);
   }
   /* Detached HEAD — muted warning. */
   .ref-chip.kind-detached {
-    background: color-mix(in srgb, var(--status-exited) 18%, transparent);
-    color: var(--status-exited);
+    background: color-mix(in srgb, var(--danger) 18%, transparent);
+    color: var(--danger);
   }
   /* The checked-out branch — the most prominent chip (filled accent). */
   .ref-chip.kind-head,
   .ref-chip.current-chip {
-    background: var(--accent);
+    background: var(--accent-solid);
     color: var(--accent-contrast);
-    border-color: color-mix(in srgb, var(--accent) 60%, #000);
+    border-color: var(--accent-solid);
   }
   /* Branch checked out in another worktree — violet, not local-branch blue. */
   .ref-chip.is-worktree {
@@ -3861,6 +3989,7 @@
   }
   .chip-ab {
     display: inline-flex;
+    flex-shrink: 0;
     gap: 2px;
     margin-inline-start: 2px;
     padding-inline-start: 3px;
@@ -3868,10 +3997,10 @@
     font-variant-numeric: tabular-nums;
   }
   .ab-ahead {
-    color: var(--status-working, #98c379);
+    color: var(--success);
   }
   .ab-behind {
-    color: var(--status-exited, #e06c75);
+    color: var(--danger);
   }
   .current-chip .ab-ahead,
   .current-chip .ab-behind,
@@ -3922,6 +4051,18 @@
     white-space: nowrap;
     min-width: 0;
   }
+  /* In the fixed-width column a chip SHRINKS to fit and ellipsizes its own
+     label at the end. Left rigid (flex-shrink:0, max-width 160px) a long chip
+     overflowed a 156px (or 76px with the detail open) cell and, being
+     end-aligned, got clipped at its START — "gin/CS3-15178-goo…" lost both
+     ends. The HEAD badge and the +N expander stay rigid. */
+  .branch-cell .ref-chip {
+    flex-shrink: 1;
+    min-width: 0;
+  }
+  .ref-chip > :global(svg) {
+    flex-shrink: 0;
+  }
   /* Stash decoration — dashed + muted so it reads as plumbing, not a branch. */
   .ref-chip.kind-stash {
     background: transparent;
@@ -3931,12 +4072,15 @@
 
   /* ── Multi-ref collapse: the "▾ +N" expander + its grouped popover ──────────── */
   .ref-expander {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
     flex-shrink: 0;
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     line-height: 1;
     padding: 2px 5px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text-dim);
     border: 1px solid var(--border);
@@ -3970,12 +4114,12 @@
     padding: 4px;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   }
   .ref-pop-group {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -3989,10 +4133,10 @@
     text-align: start;
     padding: 5px 8px;
     border: 0;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     background: transparent;
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
   .ref-pop-row:hover,
@@ -4011,7 +4155,7 @@
   .ref-pop-tag {
     flex-shrink: 0;
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.03em;
     padding: 1px 6px;
@@ -4056,6 +4200,7 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
+    min-width: 0;
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
@@ -4075,7 +4220,7 @@
     color: var(--text);
   }
   .stash-msg {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .stash-branch {
     flex-shrink: 0;
@@ -4107,7 +4252,7 @@
     border: none;
     cursor: pointer;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
 
   /* ── detail panel ── */
@@ -4140,13 +4285,13 @@
   }
   .detail-empty-label {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0.1em;
     color: var(--text-dim);
     text-transform: uppercase;
   }
   .detail-empty-hint {
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
 
   /* Detail header */
@@ -4165,16 +4310,31 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    flex-wrap: wrap;
+    min-width: 0;
   }
   .detail-sha {
-    font-size: 11px;
+    flex-shrink: 0;
+  }
+  .detail-refs {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .detail-refs .ref-chip {
+    flex-shrink: 1;
+    min-width: 0;
+  }
+  .detail-sha {
+    font-size: var(--fs-xs);
     color: var(--accent-text);
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0.04em;
   }
   .detail-subject {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
     line-height: 1.35;
@@ -4184,11 +4344,12 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 11px;
+    min-width: 0;
+    font-size: var(--fs-xs);
   }
   .detail-author {
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -4199,24 +4360,13 @@
     flex-shrink: 0;
   }
   .detail-date {
-    font-size: 11px;
-  }
-  .detail-close {
+    font-size: var(--fs-xs);
     flex-shrink: 0;
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: var(--text-dim);
-    font-size: 13px;
-    line-height: 1;
-    padding: 2px 4px;
-    border-radius: var(--radius-s, 3px);
-    margin-inline-start: auto;
-    transition: color 100ms, background 100ms;
   }
-  .detail-close:hover {
-    color: var(--text);
-    background: var(--surface-2);
+  /* An .icon-btn; only its placement is local. */
+  .detail-close {
+    margin-inline-start: auto;
+    flex-shrink: 0;
   }
 
   /* Diff area */
@@ -4236,20 +4386,20 @@
     padding: 6px 12px;
     border-bottom: 1px solid var(--border);
     background: var(--surface-2);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     position: sticky;
     top: 0;
     z-index: 1;
   }
   .ds-add {
-    color: var(--status-working);
+    color: var(--success);
     font-weight: 600;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .ds-del {
-    color: var(--status-exited);
+    color: var(--danger);
     font-weight: 600;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
 
   /* Per-file diff block */
@@ -4265,12 +4415,14 @@
     background: var(--surface-2);
   }
   .df-tools {
+    display: inline-flex;
+    align-items: center;
     flex-shrink: 0;
     padding: 0 9px;
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font-size: 13px;
+    font-size: var(--fs-m);
     line-height: 1;
     cursor: pointer;
   }
@@ -4289,7 +4441,7 @@
     border: none;
     background: var(--surface-2);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text);
     text-align: start;
     transition: background 80ms;
@@ -4298,19 +4450,12 @@
     background: color-mix(in srgb, var(--accent) 7%, var(--surface-2));
   }
   .df-chevron {
-    font-size: 8px;
+    display: inline-flex;
     flex-shrink: 0;
   }
-  /* Open glyph points down; collapsed points in the reading direction (right in
-     LTR, left in RTL) via the dir-aware override below. */
-  .df-chevron::before {
-    content: '▼';
-  }
-  .df-chevron.collapsed::before {
-    content: '▶';
-  }
-  :global([dir='rtl']) .df-chevron.collapsed::before {
-    content: '◀';
+  /* Collapsed points in the reading direction: flip the chevron under RTL. */
+  :global([dir='rtl']) .df-chevron {
+    transform: scaleX(-1);
   }
   /* Rename separator: a logical arrow that flips with reading direction so a
      "from → to" rename reads correctly in RTL too. */
@@ -4320,7 +4465,7 @@
     transform: scaleX(-1);
   }
   .df-path {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -4330,7 +4475,7 @@
   }
   .df-binary {
     padding: 10px 12px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .df-hunks {
     overflow-x: auto;
@@ -4350,7 +4495,7 @@
   .dl-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.5;
   }
   .dl-gut {
@@ -4371,7 +4516,7 @@
     color: var(--text-dim);
     user-select: none;
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     vertical-align: top;
     padding: 0 1px;
   }
@@ -4380,23 +4525,23 @@
     white-space: pre;
     word-break: normal;
     user-select: text;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-family: var(--font-mono);
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
   }
   tr.dl-row.dl-add {
-    background: color-mix(in srgb, var(--status-working) 11%, transparent);
+    background: color-mix(in srgb, var(--success) 11%, transparent);
   }
   tr.dl-row.dl-add .dl-sign {
-    color: var(--status-working);
+    color: var(--success);
   }
   tr.dl-row.dl-del {
-    background: color-mix(in srgb, var(--status-exited) 10%, transparent);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
   }
   tr.dl-row.dl-del .dl-sign {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   tr.dl-row.dl-ctx {
     /* context lines: slightly dimmed */
@@ -4427,7 +4572,7 @@
     border-bottom: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 14px;
+    font-size: var(--fs-l);
     font-weight: 600;
     cursor: pointer;
     text-align: start;
@@ -4438,8 +4583,8 @@
     background: color-mix(in srgb, var(--accent) 10%, var(--surface-2));
   }
   .mob-sec-count {
-    font-size: 11px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     padding: 1px 7px;
     border-radius: 999px;
     background: var(--surface);
@@ -4452,14 +4597,13 @@
     z-index: 3;
   }
   .mob-diff-title {
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--accent-text);
-    font-weight: 700;
+    font-weight: 600;
   }
   .mob-close {
-    font-size: 16px;
+    display: inline-flex;
     color: var(--text-dim);
-    line-height: 1;
     padding-inline-start: 6px;
   }
 
@@ -4518,13 +4662,13 @@
     }
 
     /* Bigger touch targets + legible text on the commit rows. */
-    .mobile .graph-row { height: 46px; }
-    .mobile .ci-subject { font-size: 14px; }
-    .mobile .ci-meta { font-size: 12px; }
-    .mobile .ci-sha { font-size: 12px; }
-    .mobile .ci-author { font-size: 12px; max-width: 110px; }
-    .mobile .ci-date { font-size: 12px; }
-    .mobile .ref-chip { font-size: 11px; max-width: 120px; }
+    /* Row height (46px here) is ROW_H, applied inline — see "Row windowing". */
+    .mobile .ci-subject { font-size: var(--fs-l); }
+    .mobile .ci-meta { font-size: var(--fs-s); }
+    .mobile .ci-sha { font-size: var(--fs-s); }
+    .mobile .ci-author { font-size: var(--fs-s); max-width: 110px; }
+    .mobile .ci-date { font-size: var(--fs-s); }
+    .mobile .ref-chip { font-size: var(--fs-xs); max-width: 120px; }
     /* Branch/tag column stays a compact, aligned column on phones; chips clip on
        the left and the full refs are available in the detail header on tap. */
     .mobile .graph-panel { --branch-col-w: 108px; }
@@ -4535,7 +4679,7 @@
     .mobile .detail-close {
       min-width: 40px;
       min-height: 40px;
-      font-size: 18px;
+      font-size: var(--fs-xl);
       padding: 8px;
       display: inline-flex;
       align-items: center;
@@ -4543,30 +4687,30 @@
     }
 
     /* Refs rows: bigger tap targets + legible text. */
-    .mobile .ref-row { height: 36px; font-size: 14px; }
-    .mobile .ref-name { font-size: 13px; }
-    .mobile .ref-header { font-size: 12px; padding: 8px 12px; }
+    .mobile .ref-row { height: 36px; font-size: var(--fs-l); }
+    .mobile .ref-name { font-size: var(--fs-m); }
+    .mobile .ref-header { font-size: var(--fs-s); padding: 8px 12px; }
 
     /* Diff: bump the tiny code + gutter text so it's legible on a phone. */
     .mobile .detail-diff { -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
-    .mobile .diff-summary-bar { font-size: 13px; padding: 9px 12px; }
-    .mobile .diff-summary-bar .dim { font-size: 13px !important; }
+    .mobile .diff-summary-bar { font-size: var(--fs-m); padding: 9px 12px; }
+    .mobile .diff-summary-bar .dim { font-size: var(--fs-m) !important; }
     .mobile .ds-add,
-    .mobile .ds-del { font-size: 13px; }
-    .mobile .df-head { font-size: 13px; padding: 9px 12px; }
-    .mobile .df-path { font-size: 13px; }
-    .mobile .hunk-header { font-size: 12px; padding: 4px 10px; }
+    .mobile .ds-del { font-size: var(--fs-m); }
+    .mobile .df-head { font-size: var(--fs-m); padding: 9px 12px; }
+    .mobile .df-path { font-size: var(--fs-m); }
+    .mobile .hunk-header { font-size: var(--fs-s); padding: 4px 10px; }
     /* table-layout:fixed pins the gutter/sign columns to their declared widths
        and hands the rest to the code column, so a long unbroken line wraps
        INSIDE that column instead of widening the table past the viewport (the
        auto layout otherwise sizes to the content's min-width and overflows). */
     .mobile .df-hunks { overflow-x: hidden; }
-    .mobile .dl-table { font-size: 12.5px; table-layout: fixed; width: 100%; }
+    .mobile .dl-table { font-size: var(--fs-s); table-layout: fixed; width: 100%; }
     /* Wrap long code lines so they're readable without horizontal scrolling.
        break-word keeps whole words together when they fit; overflow-wrap +
        a width:auto cell let a 140-char unbroken token still break to fit. */
     .mobile .dl-code {
-      font-size: 12.5px;
+      font-size: var(--fs-s);
       width: auto;
       white-space: pre-wrap;
       word-break: break-word;
@@ -4574,11 +4718,11 @@
       overflow: visible;
       text-overflow: clip;
     }
-    .mobile .dl-gut { font-size: 11px; width: 30px; min-width: 30px; }
-    .mobile .dl-sign { font-size: 12.5px; }
-    .mobile .detail-subject { font-size: 14px; }
-    .mobile .detail-sha { font-size: 12px; }
+    .mobile .dl-gut { font-size: var(--fs-xs); width: 30px; min-width: 30px; }
+    .mobile .dl-sign { font-size: var(--fs-s); }
+    .mobile .detail-subject { font-size: var(--fs-l); }
+    .mobile .detail-sha { font-size: var(--fs-s); }
     .mobile .detail-author,
-    .mobile .detail-date { font-size: 12px; }
+    .mobile .detail-date { font-size: var(--fs-s); }
   }
 </style>

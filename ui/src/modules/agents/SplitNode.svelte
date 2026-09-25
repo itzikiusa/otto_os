@@ -7,11 +7,11 @@
   /** The five layout presets as flat ctxMenu rows (the menu has no submenus). */
   export function presetItems(): PresetMenuItem[] {
     const rows: [PresetOp, string][] = [
-      ['cols', 'Layout: Equal columns'],
-      ['rows', 'Layout: Equal rows'],
-      ['one-two-below', 'Layout: One above two'],
-      ['one-two-beside', 'Layout: One beside two'],
-      ['grid', 'Layout: Grid'],
+      ['cols', 'Layout: equal columns'],
+      ['rows', 'Layout: equal rows'],
+      ['one-two-below', 'Layout: one above two'],
+      ['one-two-beside', 'Layout: one beside two'],
+      ['grid', 'Layout: grid'],
     ];
     return rows.map(([p, label]) => ({ label, icon: 'split', action: () => layoutStore.applyPreset(p) }));
   }
@@ -31,6 +31,7 @@
   import DatabasePage from '../database/DatabasePage.svelte';
   import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import {
     layout,
     MIN_PANE_PX,
@@ -161,11 +162,13 @@
       role="separator"
       tabindex="0"
       aria-orientation={node.axis === 'col' ? 'vertical' : 'horizontal'}
-      aria-label="Resize split (arrow keys)"
+      aria-label="Resize split (arrow keys; double-click resets)"
+      title="Drag to resize · double-click to split evenly"
       aria-valuenow={Math.round(node.frac * 100)}
       aria-valuemin={10}
       aria-valuemax={90}
       onpointerdown={startDrag}
+      ondblclick={() => node.kind === 'split' && layout.setFrac(node.key, 0.5)}
       onkeydown={gutterKeydown}
     ></div>
     <Self node={node.b} depth={depth + 1} />
@@ -188,7 +191,7 @@
             aria-label="Close pane"
             onclick={() => ws.closePane(idx)}
             oncontextmenu={(e) => ctxMenu.show(e, presetItems())}
-          >✕</button>
+          ><Icon name="x" size={12} /></button>
         {/if}
         <DatabasePage />
       </div>
@@ -269,8 +272,10 @@
     background: var(--surface);
     color: var(--text-dim);
     cursor: pointer;
-    font-size: 11px;
-    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
   }
   .db-pane-close:hover {
     color: var(--text);
@@ -374,10 +379,10 @@
     position: relative;
     padding: 2px 10px;
     border-radius: 99px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
-    color: var(--accent-contrast, #fff);
-    background: var(--accent);
+    color: var(--accent-contrast);
+    background: var(--accent-solid);
     box-shadow: var(--shadow);
     pointer-events: none;
   }

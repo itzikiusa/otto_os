@@ -4,6 +4,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { copyAsJson, downloadJson, exportCsv } from '../../lib/components/exporters';
   import type {
     BrokerCluster,
@@ -18,6 +19,7 @@
     ValueFormat,
   } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { brokersTopicPort } from '../../lib/uiCommands/brokers';
   import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
 
   // ── Send-to-agent dialog (B2a) ─────────────────────────────────────────────
@@ -75,19 +77,56 @@
   // Extra headers for produce: list of {key, value} pairs.
   let pHeaders = $state<{ key: string; value: string }[]>([]);
   let producing = $state(false);
+  /** Inline field error for the produce form (shown under Value, not a toast). */
+  let pValueErr = $state<string | null>(null);
+
+  // Agent UI control (lib/uiCommands/brokers.ts): the agent's peek runs in
+  // THIS form (the user sees the options and the grid), and a produce is
+  // prefilled here while the user confirms it.
+  $effect(() =>
+    brokersTopicPort.bind({
+      clusterId: cluster.id,
+      topic,
+      async peek(o) {
+        tab = 'messages';
+        startMode = o.start ?? 'latest';
+        partition = o.partition ?? '';
+        limit = o.limit ?? 50;
+        keyFilter = o.key_filter ?? '';
+        valueFilter = o.value_filter ?? '';
+        result = null;
+        await consume();
+        return result;
+      },
+      showProduce(o) {
+        tab = 'produce';
+        pKey = o.key ?? '';
+        pValue = o.value;
+        pPartition = o.partition ?? '';
+        pTombstone = false;
+      },
+      produced() {
+        pValue = '';
+        pKey = '';
+        loadDetail(true);
+      },
+    }),
+  );
 
   // ---- config editing ----
   let cfgName = $state('');
   let cfgValue = $state('');
   let cfgSaving = $state(false);
 
-  function loadDetail() {
-    detail = null;
+  /** `keep` refreshes in place (after a produce) instead of blanking the
+   *  header counts, the partitions table and the partition pickers. */
+  function loadDetail(keep = false) {
+    if (!keep) detail = null;
     detailErr = null;
     void api
       .get<TopicDetail>(`/brokers/clusters/${cluster.id}/topics/${encodeURIComponent(topic)}`)
       .then((d) => (detail = d))
-      .catch((e) => (detailErr = String(e)));
+      .catch((e) => (detailErr = loadErrorText(e)));
   }
 
   $effect(() => {
@@ -253,9 +292,10 @@
       );
       // Reset tail cursors: a manual peek replaces the view and reseeds offsets.
       tailOffsets = new Map();
-      if (result.messages.length === 0) toasts.info('No messages in the selected range');
+      // An empty range renders inline ("No messages in the selected range.");
+      // no toast for what is already on screen.
     } catch (e) {
-      toasts.error('Consume failed', String(e));
+      toasts.error("Couldn't read messages", e instanceof Error ? e.message : String(e));
     } finally {
       consuming = false;
     }
@@ -283,9 +323,10 @@
 
   async function produce() {
     if (!pTombstone && !pValue) {
-      toasts.error('Value is required (or enable Tombstone)');
+      pValueErr = 'Enter a value, or tick Tombstone to send a null value.';
       return;
     }
+    pValueErr = null;
     if (guarded) {
       const ok = await confirmer.ask(
         `Produce to "${topic}" on guarded cluster "${cluster.name}"?`,
@@ -314,9 +355,9 @@
       pKey = '';
       pTombstone = false;
       pHeaders = [];
-      loadDetail();
+      loadDetail(true);
     } catch (e) {
-      toasts.error('Produce failed', String(e));
+      toasts.error("Couldn't produce the message", e instanceof Error ? e.message : String(e));
     } finally {
       producing = false;
     }
@@ -344,7 +385,7 @@
       cfgName = '';
       cfgValue = '';
     } catch (e) {
-      toasts.error('Config update failed', String(e));
+      toasts.error("Couldn't update the config", e instanceof Error ? e.message : String(e));
     } finally {
       cfgSaving = false;
     }
@@ -353,9 +394,14 @@
   async function deleteTopic() {
     const typed = await confirmer.promptText(
       `Type the topic name to confirm deletion. This is irreversible.`,
-      { title: `Delete topic "${topic}"`, confirmLabel: 'Delete', placeholder: topic },
+      { title: `Delete topic "${topic}"`, confirmLabel: 'Delete', placeholder: topic, danger: true },
     );
-    if (typed !== topic) return;
+    if (typed === null) return;
+    if (typed !== topic) {
+      // A mistyped name must not look like a silent no-op.
+      toasts.warn('Topic not deleted', `The name you typed didn't match "${topic}".`);
+      return;
+    }
     try {
       await api.del(
         `/brokers/clusters/${cluster.id}/topics/${encodeURIComponent(topic)}?confirm=${guarded}`,
@@ -363,7 +409,7 @@
       toasts.success(`Deleted ${topic}`);
       ondeleted();
     } catch (e) {
-      toasts.error('Delete failed', String(e));
+      toasts.error("Couldn't delete the topic", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -409,7 +455,7 @@
   <header>
     <div class="title">
       <Icon name="box" size={15} />
-      <span class="name">{topic}</span>
+      <span class="name" title={topic}>{topic}</span>
       {#if detail}<span class="muted">· {detail.partitions.length}p · {detail.message_count.toLocaleString()} msgs</span>{/if}
     </div>
     <button class="btn small danger" onclick={deleteTopic}>Delete topic</button>
@@ -423,31 +469,37 @@
   </nav>
 
   {#if detailErr}
-    <p class="err">{detailErr}</p>
+    <div class="err" role="alert">
+      <Icon name="warning" size={13} />
+      <span class="err-text">Couldn't load topic details. <span class="muted">{detailErr}</span></span>
+      <button class="btn small" onclick={() => loadDetail(detail !== null)}>
+        <Icon name="refresh" size={12} /> Retry
+      </button>
+    </div>
   {/if}
 
   {#if tab === 'messages'}
     <div class="consume-bar">
-      <select bind:value={startMode}>
+      <select bind:value={startMode} aria-label="Start position" title="Start position">
         <option value="latest">Latest</option>
         <option value="beginning">From beginning</option>
         <option value="offset">From offset</option>
         <option value="timestamp">From time</option>
       </select>
       {#if startMode === 'offset'}
-        <input class="sm" type="number" bind:value={startOffset} placeholder="offset" />
+        <input class="sm" type="number" bind:value={startOffset} placeholder="offset" aria-label="Start offset" />
       {/if}
       {#if startMode === 'timestamp'}
-        <input class="sm" type="datetime-local" bind:value={startTs} />
+        <input class="sm" type="datetime-local" bind:value={startTs} aria-label="Start time" />
       {/if}
-      <select bind:value={partition}>
+      <select bind:value={partition} aria-label="Partition" title="Partition">
         <option value="">All partitions</option>
         {#each detail?.partitions ?? [] as p (p.id)}
           <option value={p.id}>P{p.id}</option>
         {/each}
       </select>
-      <input class="sm" type="number" bind:value={limit} min="1" max="5000" title="Max messages" />
-      <select bind:value={decode} title="Decode value as">
+      <input class="sm" type="number" bind:value={limit} min="1" max="5000" title="Max messages" aria-label="Max messages" />
+      <select bind:value={decode} title="Decode value as" aria-label="Decode value as">
         <option value="auto">Auto</option>
         <option value="json">JSON</option>
         <option value="utf8">UTF-8</option>
@@ -457,14 +509,14 @@
         <option value="base64">Base64</option>
       </select>
       <div class="filter-group">
-        <input class="grow" bind:value={keyFilter} placeholder="filter key…" title="Server-side key filter (case-insensitive substring)" />
+        <input class="grow" bind:value={keyFilter} placeholder="filter key…" aria-label="Filter by key" title="Server-side key filter (case-insensitive substring)" />
         {#if keyFilter.trim()}
           <label class="chk-small" title="Scan from beginning to find older matching messages">
             <input type="checkbox" bind:checked={keyFromBeginning} /> From start
           </label>
         {/if}
       </div>
-      <input class="grow" bind:value={valueFilter} placeholder="filter value…" />
+      <input class="grow" bind:value={valueFilter} placeholder="filter value…" aria-label="Filter by value" />
       <label class="auto" class:on={autoPoll} title="Append new messages every minute (incremental, capped at {TAIL_CAP})">
         <input type="checkbox" bind:checked={autoPoll} /> Live · 1m
       </label>
@@ -474,7 +526,7 @@
         title="Mask PII/prod — server redacts sensitive values (emails, tokens, keys) before returning messages"
       >
         <input type="checkbox" bind:checked={maskPayloads} />
-        <Icon name="lock" size={11} /> Mask
+        <Icon name="lock" size={12} /> Mask
       </label>
       <button class="btn primary small" onclick={consume} disabled={consuming}>
         {consuming ? 'Reading…' : 'Peek'}
@@ -516,15 +568,17 @@
                     <span class="muted">—</span>
                   {/if}
                 </td>
-                <td class="key">{m.key?.text ?? '∅'}</td>
+                <td class="key" title={m.key?.text ?? undefined}>{m.key?.text ?? '∅'}</td>
                 <td class="muted nowrap">{fmtTs(m.timestamp_ms)}</td>
                 <td class="muted">{m.size_bytes}</td>
               </tr>
             {/each}
           </tbody>
         </table>
-        {#if result && result.messages.length === 0}
-          <p class="muted pad">No messages.</p>
+        {#if !result && !consuming}
+          <p class="muted pad">Pick a start position and press <strong>Peek</strong> to read messages.</p>
+        {:else if result && result.messages.length === 0}
+          <p class="muted pad">No messages in the selected range.</p>
         {/if}
         {#if result?.truncated}
           <p class="muted pad small">Showing first {result.messages.length} — increase the limit for more.</p>
@@ -557,16 +611,16 @@
               {/if}
             {/if}
             {#if selected.value?.raw_base64}
-              <button class="btn tiny" onclick={() => (rawView = !rawView)}>
+              <button class="btn small" onclick={() => (rawView = !rawView)}>
                 {rawView ? 'Decoded' : 'Raw'}
               </button>
             {/if}
-            <button class="btn tiny" onclick={copySelectedAsJson} title="Copy message as JSON">
-              <Icon name="copy" size={11} /> Copy
+            <button class="btn small" onclick={copySelectedAsJson} title="Copy message as JSON">
+              <Icon name="copy" size={12} /> Copy
             </button>
             {#if ws.current}
-              <button class="btn tiny" onclick={() => (sendToAgentOpen = true)} title="Send message to a running agent (redacted preview)">
-                <Icon name="send" size={11} /> To agent
+              <button class="btn small" onclick={() => (sendToAgentOpen = true)} title="Send message to a running agent (redacted preview)">
+                <Icon name="send" size={12} /> To agent
               </button>
             {/if}
           </div>
@@ -582,7 +636,7 @@
             <h5>Headers</h5>
             <table class="headers">
               <tbody>
-                {#each selected.headers as h (h.key)}
+                {#each selected.headers as h, i (i)}
                   <tr><td class="mono">{h.key}</td><td>{h.value}</td></tr>
                 {/each}
               </tbody>
@@ -594,6 +648,9 @@
       </div>
     </div>
   {:else if tab === 'partitions'}
+    {#if !detail && !detailErr}
+      <p class="muted pad">Loading partitions…</p>
+    {/if}
     <table class="grid">
       <thead>
         <tr><th>Partition</th><th>Leader</th><th>Replicas</th><th>ISR</th><th>Low</th><th>High</th><th>Messages</th></tr>
@@ -614,10 +671,18 @@
     </table>
   {:else if tab === 'config'}
     <div class="cfg-set">
-      <input class="grow" bind:value={cfgName} placeholder="config name (e.g. retention.ms)" />
-      <input class="grow" bind:value={cfgValue} placeholder="value" />
-      <button class="btn small" onclick={setConfig} disabled={cfgSaving}>Set</button>
+      <input class="grow" bind:value={cfgName} placeholder="config name (e.g. retention.ms)" aria-label="Config name" />
+      <input class="grow" bind:value={cfgValue} placeholder="value" aria-label="Config value" />
+      <button
+        class="btn small"
+        onclick={setConfig}
+        disabled={cfgSaving || !cfgName.trim()}
+        title={cfgName.trim() ? `Set ${cfgName.trim()}` : 'Enter a config name first'}
+      >{cfgSaving ? 'Setting…' : 'Set'}</button>
     </div>
+    {#if !detail && !detailErr}
+      <p class="muted pad">Loading config…</p>
+    {/if}
     <table class="grid">
       <thead><tr><th>Name</th><th>Value</th><th>Source</th></tr></thead>
       <tbody>
@@ -653,19 +718,33 @@
       {#if !pTombstone}
         <label class="field grow">
           <span>Value{pValueBase64 ? ' — base64' : ''}</span>
-          <textarea bind:value={pValue} rows="6" placeholder={pValueBase64 ? 'base64-encoded bytes' : '{ "hello": "world" }'}></textarea>
+          <textarea
+            bind:value={pValue}
+            rows="6"
+            placeholder={pValueBase64 ? 'base64-encoded bytes' : '{ "hello": "world" }'}
+            aria-invalid={pValueErr ? 'true' : undefined}
+            oninput={() => (pValueErr = null)}
+          ></textarea>
+          {#if pValueErr}<span class="field-err">{pValueErr}</span>{/if}
         </label>
       {/if}
       <div class="headers-section">
         <div class="headers-title">
           <span class="dim-label">Headers</span>
-          <button class="btn tiny" onclick={addHeader}>+ Add</button>
+          <button class="btn small" onclick={addHeader}><Icon name="plus" size={12} /> Add</button>
         </div>
         {#each pHeaders as h, i (i)}
           <div class="header-row">
-            <input bind:value={h.key} placeholder="key" class="header-key" />
-            <input bind:value={h.value} placeholder="value" class="header-val" />
-            <button class="btn tiny danger-tiny" onclick={() => removeHeader(i)} title="Remove header">×</button>
+            <input bind:value={h.key} placeholder="key" class="header-key" aria-label="Header {i + 1} key" />
+            <input bind:value={h.value} placeholder="value" class="header-val" aria-label="Header {i + 1} value" />
+            <button
+              class="icon-btn danger-tiny"
+              onclick={() => removeHeader(i)}
+              aria-label="Remove header {i + 1}"
+              title="Remove header"
+            >
+              <Icon name="x" size={12} />
+            </button>
           </div>
         {/each}
       </div>
@@ -709,14 +788,31 @@
     padding: 10px 14px;
     border-bottom: 1px solid var(--border);
   }
+  header {
+    gap: 12px;
+  }
   header .title {
     display: flex;
     align-items: baseline;
     gap: 8px;
+    /* Long topic names truncate instead of shoving "Delete topic" off-screen. */
+    min-width: 0;
+  }
+  header .title > :global(svg),
+  header .title > .muted {
+    flex: none;
+    white-space: nowrap;
   }
   header .name {
     font-weight: 600;
     font-family: var(--font-mono);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  header > .btn {
+    flex: none;
   }
   .subtabs {
     display: flex;
@@ -736,7 +832,7 @@
     padding: 6px 12px;
     border-radius: var(--radius-s) var(--radius-s) 0 0;
     cursor: pointer;
-    font-size: 13px;
+    font-size: var(--fs-m);
     white-space: nowrap;
     flex: none;
   }
@@ -759,7 +855,7 @@
     border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .sm {
     width: 110px;
@@ -779,7 +875,7 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     cursor: pointer;
@@ -788,7 +884,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     cursor: pointer;
@@ -824,13 +920,13 @@
   table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   th {
     text-align: start;
     font-weight: 500;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     padding: 6px 10px;
@@ -919,7 +1015,7 @@
   }
   h5 {
     margin: 12px 0 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--text-dim);
@@ -931,7 +1027,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
     white-space: pre-wrap;
     word-break: break-word;
     max-height: 40vh;
@@ -943,7 +1039,7 @@
   table.headers td {
     border: none;
     padding: 2px 8px 2px 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .cfg-set {
     display: flex;
@@ -957,7 +1053,7 @@
     border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .produce {
     display: flex;
@@ -976,7 +1072,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
     white-space: nowrap;
@@ -992,7 +1088,7 @@
     gap: 8px;
   }
   .dim-label {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .header-row {
@@ -1007,7 +1103,7 @@
     border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .header-val {
     flex: 1;
@@ -1016,13 +1112,14 @@
     border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .danger-tiny {
-    color: var(--status-exited, #ff5f57);
-    padding: 2px 7px;
-    font-size: 14px;
-    line-height: 1;
+    color: var(--danger);
+  }
+  .field .field-err {
+    font-size: var(--fs-xs);
+    color: var(--danger);
   }
   .muted-badge {
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
@@ -1034,7 +1131,7 @@
     gap: 4px;
   }
   .field span {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .field input,
@@ -1045,7 +1142,7 @@
     border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-family: inherit;
   }
   .field textarea {
@@ -1059,22 +1156,26 @@
     color: var(--text-dim);
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .pad {
     padding: 14px;
   }
   .err {
-    color: var(--status-exited, #ff5f57);
-    padding: 10px 14px;
-    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    font-size: var(--fs-m);
+    color: var(--text);
+    border-bottom: 1px solid var(--border);
   }
-  .btn.danger {
-    color: var(--status-exited, #ff5f57);
+  .err > :global(svg) {
+    color: var(--danger);
   }
-  .btn.tiny {
-    padding: 2px 8px;
-    font-size: 11px;
+  .err-text {
+    flex: 1;
+    min-width: 0;
   }
 
   /* Phone (≤640px): the message list + detail are side-by-side on desktop, which

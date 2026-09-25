@@ -19,6 +19,7 @@
     type ViewMode,
   } from '../../lib/stores/database.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { buildFilteredQuery, type FilterMode } from './query-filter';
@@ -95,6 +96,13 @@
      * the owner — this component is also mounted where there is no tab to write.
      */
     onviewmode?: (m: ViewMode | null) => void;
+    /**
+     * Cancel the in-flight query behind `running`. A DB Explorer tab (a
+     * `connectionId` is set) defaults to `database.abortQuery()`; a host with no
+     * tab (Athena) passes its own — without one the running card has no Cancel,
+     * rather than a button that would stop some OTHER query in the explorer.
+     */
+    oncancel?: () => void;
   }
   let {
     result: resultProp,
@@ -109,7 +117,20 @@
     viewReason,
     tabPick = null,
     onviewmode,
+    oncancel,
   }: Props = $props();
+
+  // A result from a DB Explorer query tab (vs a dashboard mini widget or the
+  // Athena view). Everything that reads or writes the explorer's store — its
+  // engine, quick-filter chips, pager, statement splicing, the DB Assistant —
+  // is gated on this, so another page's grid can't show the explorer's filter
+  // chips, label an Athena error "MYSQL", or rewrite the explorer's editor.
+  const hosted = $derived(!!connectionId);
+  /** The DB Assistant spawns an agent — the editor's Ask AI buttons need this too. */
+  const canAssist = $derived(auth.can('agents', 'edit'));
+  const cancelQuery = $derived<(() => void) | null>(
+    oncancel ?? (hosted ? () => void database.abortQuery() : null),
+  );
 
   // ── Multi-result switcher (multi-statement batches) ──────────────────────────
   // The server returns the first statement's result at top level and the rest in
@@ -162,7 +183,7 @@
   // `auto_limited` (the server's applied LIMIT) lives on the top-level result and
   // is present only for a single paginatable SELECT / Mongo find — never batches.
   const pageSize = $derived(resultSets.length === 1 ? (resultProp?.auto_limited ?? 0) : 0);
-  const showPager = $derived(!mini && pageSize > 0 && !!result);
+  const showPager = $derived(!mini && hosted && pageSize > 0 && !!result);
   const pageRowCount = $derived(result?.rows.length ?? 0);
   const pageFrom = $derived(pageRowCount === 0 ? 0 : offset + 1);
   const pageTo = $derived(offset + pageRowCount);
@@ -208,7 +229,7 @@
   });
 
   // Engine behind this result (drives dialect for inline edits).
-  const engine = $derived(database.capabilities?.engine ?? null);
+  const engine = $derived(hosted ? (database.capabilities?.engine ?? null) : null);
 
   // "Expand JSON" mode pretty-prints complex grid cells inline (GridView grows
   // its rows to a fixed taller height so the virtualization math stays exact).
@@ -225,7 +246,23 @@
   // Controlled by the `viewMode` prop when the owner has a query tab to keep it
   // on; otherwise (mini widgets, Athena) a local pick that starts at Grid.
   let localMode = $state<ViewMode>('grid');
-  const mode = $derived<ViewMode>(viewMode ?? localMode);
+  // The owner resolves the view against the tab's FIRST result set, but a
+  // multi-statement batch shows one set at a time (the switcher above), each with
+  // its own width. Without a tab pick, re-resolve against the SHOWN set so the
+  // Settings → Appearance "Auto-Vertical by engine" threshold applies to Result 2
+  // as it does to Result 1 — and the tooltip says why for the set on screen.
+  const autoInputs = $derived({
+    tabPick: null,
+    connPick: database.connView,
+    columnCount: result?.columns.length ?? 0,
+    autoVerticalCols: ui.dbAutoVerticalFor(database.capabilities?.engine),
+    engine: database.capabilities?.engine ?? null,
+  });
+  const ownerAuto = $derived(!!onviewmode && viewMode !== undefined && tabPick === null);
+  const mode = $derived<ViewMode>(
+    ownerAuto ? effectiveViewMode(autoInputs) : (viewMode ?? localMode),
+  );
+  const modeReason = $derived(ownerAuto ? viewModeReason(autoInputs) : viewReason);
   function pickView(m: ViewMode | null): void {
     if (onviewmode) onviewmode(m);
     else localMode = m ?? 'grid';
@@ -235,16 +272,9 @@
   const showAutoChip = $derived(!!onviewmode && tabPick !== null);
   // What clearing the pick would land on (same resolution minus the tab pick).
   const VIEW_LABEL: Record<ViewMode, string> = { grid: 'Grid', vertical: 'Vertical', json: 'JSON' };
-  const autoTitle = $derived.by(() => {
-    const a = {
-      tabPick: null,
-      connPick: database.connView,
-      columnCount: result?.columns.length ?? 0,
-      autoVerticalCols: ui.dbAutoVerticalFor(database.capabilities?.engine),
-      engine: database.capabilities?.engine ?? null,
-    };
-    return `Back to automatic: ${VIEW_LABEL[effectiveViewMode(a)]} (${viewModeReason(a)})`;
-  });
+  const autoTitle = $derived(
+    `Back to automatic: ${VIEW_LABEL[effectiveViewMode(autoInputs)]} (${viewModeReason(autoInputs)})`,
+  );
   // Non-grid views aren't virtualized, and one document can be enormous on its
   // own (a `lobby_format_history` doc is ~88KB, so 100 rows ≈ 9MB). A flat 500-row
   // cap is therefore no protection at all — rendering is BATCHED instead: draw
@@ -305,7 +335,7 @@
   });
   // A chip is "active" (worth filtering on) only when it has at least one value.
   const activeChips = $derived(
-    database.filters.filter((c) => c.kind === 'col' && c.values.length > 0),
+    (hosted ? database.filters : []).filter((c) => c.kind === 'col' && c.values.length > 0),
   );
   function cellMatchesVal(cell: unknown, val: { raw: string; isNull: boolean }): boolean {
     if (val.isNull) return cell === null || cell === undefined;
@@ -605,10 +635,12 @@
     const col = result?.columns[ci]?.name;
     if (!col) return;
     const short = shortLabel(v);
-    const items: import('../../lib/contextmenu.svelte').MenuItem[] = [
-      { label: `Filter:  ${col} = ${short}`, icon: 'search', action: () => database.addQuickFilter(col, v, 'include') },
-      { label: `Exclude:  ${col} ≠ ${short}`, icon: 'x', action: () => database.addQuickFilter(col, v, 'exclude') },
-    ];
+    const items: import('../../lib/contextmenu.svelte').MenuItem[] = hosted
+      ? [
+          { label: `Filter:  ${col} = ${short}`, icon: 'search', action: () => database.addQuickFilter(col, v, 'include') },
+          { label: `Exclude:  ${col} ≠ ${short}`, icon: 'x', action: () => database.addQuickFilter(col, v, 'exclude') },
+        ]
+      : [];
     // In-grid foreign-key navigation (0003a): a cell in an FK column gets a
     // "→ Go to <ref_table>" jump opening a new tab with the referenced row.
     const fk = fkForColumn(col);
@@ -650,8 +682,8 @@
         }
       }
     }
+    if (items.length > 0) items.push({ separator: true });
     items.push(
-      { separator: true },
       { label: 'Expand value', icon: 'maximize', action: () => flow.openCell(v, rowIdx, ci) },
       { label: 'Copy value', icon: 'file', action: () => copyText(v === null || v === undefined ? '' : cellStr(v)) },
     );
@@ -697,7 +729,7 @@
       { label: 'Sort descending', icon: 'arrowDown', action: () => { sortCol = ci; sortDir = 'desc'; } },
       { label: 'Clear sort', disabled: sortCol !== ci, action: () => { sortCol = null; sortDir = null; } },
       { separator: true },
-      { label: `Filter by ${col}…`, icon: 'search', action: () => database.addColumnFilter(col) },
+      ...(hosted ? [{ label: `Filter by ${col}…`, icon: 'search', action: () => database.addColumnFilter(col) }] : []),
       { label: 'Copy column name', icon: 'file', action: () => copyText(col) },
     ]);
   }
@@ -852,8 +884,10 @@
       items.push({ label: 'Aggregate pipeline…', icon: 'layers', action: () => (pipelineOpen = true) });
     }
     if (mode !== 'grid') {
+      // Row checkboxes live in the Grid view only — here the per-record ⋯ menu
+      // ("Compare with…") is the way in, so a disabled item names it.
       items.push({
-        label: 'Compare two records…',
+        label: flow.selected.size === 2 ? 'Compare two records…' : 'Compare two records… (use a record’s ⋯ → Compare with…)',
         icon: 'columns',
         disabled: flow.selected.size !== 2,
         action: () => (compare = [...flow.selected] as [number, number]),
@@ -875,7 +909,8 @@
     }
     if (items.length) items.push({ separator: true });
     items.push({ label: 'Send to running agent…', icon: 'send', action: sendToRunningAgent });
-    if (connectionId) items.push({ label: 'Examine with AI', icon: 'sparkle', action: examineWithAi });
+    // Same gate as the editor's Ask AI buttons: the DB Assistant runs an agent.
+    if (connectionId && canAssist) items.push({ label: 'Examine with AI', icon: 'sparkle', action: examineWithAi });
     ctxMenu.show(e, items);
   }
 
@@ -955,9 +990,11 @@
     <div class="rg-overlay-card">
       <span class="rg-spin"><Icon name="refresh" size={16} /></span>
       <span class="rg-overlay-text">Running… {elapsed}s</span>
-      <button class="rg-cancel" onclick={() => database.abortQuery()} title="Cancel the running query">
-        <Icon name="x" size={11} />Cancel
-      </button>
+      {#if cancelQuery}
+        <button class="rg-cancel" onclick={cancelQuery} title="Cancel the running query">
+          <Icon name="x" size={11} />Cancel
+        </button>
+      {/if}
     </div>
   </div>
 {/snippet}
@@ -982,7 +1019,9 @@
     <div class="grid-foot">
       <span class="rg-spin sm"><Icon name="refresh" size={11} /></span>
       <span class="rg-overlay-text">Running… {elapsed}s</span>
-      <button class="pg-btn" onclick={() => database.abortQuery()} title="Cancel the running query">Cancel</button>
+      {#if cancelQuery}
+        <button class="pg-btn" onclick={cancelQuery} title="Cancel the running query">Cancel</button>
+      {/if}
     </div>
   </div>
 {/snippet}
@@ -1015,7 +1054,7 @@
       <span>{error}</span>
     </div>
   {:else}
-    <ErrorPanel {error} {engine} statement={statement ?? ''} onAskAi={askAiToFix} />
+    <ErrorPanel {error} {engine} statement={statement ?? ''} onAskAi={hosted && canAssist ? askAiToFix : undefined} />
   {/if}
 {:else if !resultProp}
   {#if !mini}
@@ -1067,7 +1106,7 @@
             </button>
           {/if}
         </div>
-        <div class="view-seg" title={viewReason}>
+        <div class="view-seg" title={modeReason}>
           <div class="view-tabs" role="tablist" aria-label="Result view">
             <button class="vs" class:on={mode === 'grid'} role="tab" aria-selected={mode === 'grid'} onclick={() => pickView('grid')} title="Columnar grid">Grid</button>
             <button class="vs" class:on={mode === 'vertical'} role="tab" aria-selected={mode === 'vertical'} onclick={() => pickView('vertical')} title="One record per block (field: value)">Vertical</button>
@@ -1143,7 +1182,7 @@
       </div>
     {/if}
 
-    {#if !mini && database.filters.length > 0}
+    {#if !mini && hosted && database.filters.length > 0}
       <div class="filter-bar">
         <span class="fb-label"><Icon name="search" size={11} />Filters</span>
         {#each database.filters as cond, ci (ci)}
@@ -1163,7 +1202,7 @@
               {#each cond.values as val, vi (vi)}
                 <span class="chip-val mono">
                   {val.isNull ? 'NULL' : val.raw}
-                  <button class="val-x" aria-label="Remove value" onclick={() => database.removeFilterValue(ci, vi)}>×</button>
+                  <button class="val-x" aria-label="Remove value" title="Remove value" onclick={() => database.removeFilterValue(ci, vi)}><Icon name="x" size={9} /></button>
                 </span>
               {/each}
               <input
@@ -1281,8 +1320,9 @@
           <span><strong>{result.stats.row_count.toLocaleString()}</strong> row{result.stats.row_count === 1 ? '' : 's'}</span>
         {/if}
         {#if sorting && sortCol !== null}
-          <button class="sort-chip" title="Clear sort" onclick={() => { sortCol = null; sortDir = null; }}>
-            {sortDir === 'asc' ? '▲' : '▼'} {result.columns[sortCol].name}
+          <button class="sort-chip" title="Clear sort on {result.columns[sortCol].name}" onclick={() => { sortCol = null; sortDir = null; }}>
+            <Icon name={sortDir === 'asc' ? 'arrowUp' : 'arrowDown'} size={10} />
+            <span class="sort-chip-name">{result.columns[sortCol].name}</span>
             <Icon name="x" size={9} />
           </button>
         {/if}
@@ -1306,9 +1346,9 @@
         {#if showPager}
           <span class="dot">·</span>
           <span class="pager">
-            <button class="pg-btn" disabled={offset <= 0} onclick={() => database.runPage(-1)} title="Previous page" aria-label="Previous page">‹ Prev</button>
+            <button class="pg-btn" disabled={offset <= 0} onclick={() => database.runPage(-1)} title="Previous page" aria-label="Previous page"><Icon name="chevronLeft" size={10} />Prev</button>
             <span class="pg-range mono">rows {pageFrom.toLocaleString()}–{pageTo.toLocaleString()}</span>
-            <button class="pg-btn" disabled={!hasNextPage} onclick={() => database.runPage(1)} title="Next page" aria-label="Next page">Next ›</button>
+            <button class="pg-btn" disabled={!hasNextPage} onclick={() => database.runPage(1)} title="Next page" aria-label="Next page">Next<Icon name="chevronRight" size={10} /></button>
             {#if !hasOrderBy}<span class="pg-unordered" title="Without an ORDER BY, row order can shift between pages">unordered</span>{/if}
           </span>
         {/if}
@@ -1339,9 +1379,11 @@
         <div class="rg-overlay-card">
           <span class="rg-spin"><Icon name="refresh" size={16} /></span>
           <span class="rg-overlay-text">Running… {elapsed}s</span>
-          <button class="rg-cancel" onclick={() => database.abortQuery()} title="Cancel the running query">
-            <Icon name="x" size={11} />Cancel
-          </button>
+          {#if cancelQuery}
+            <button class="rg-cancel" onclick={cancelQuery} title="Cancel the running query">
+              <Icon name="x" size={11} />Cancel
+            </button>
+          {/if}
         </div>
       </div>
     {/if}
@@ -1357,7 +1399,7 @@
 {/if}
 
 {#if showExportDialog && connectionId && statement}
-  <ExportDialog {statement} {connectionId} {canExport} onclose={() => (showExportDialog = false)} />
+  <ExportDialog {statement} {connectionId} node={ranNode} {canExport} onclose={() => (showExportDialog = false)} />
 {/if}
 
 {#if compare && result}
@@ -1435,7 +1477,7 @@
     border-radius: 999px;
     background: var(--surface-2);
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
     white-space: nowrap;
   }
@@ -1483,7 +1525,7 @@
     border-radius: var(--radius-m);
     background: var(--surface);
     box-shadow: var(--shadow);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
   }
   .rg-spin {
@@ -1508,7 +1550,7 @@
     background: color-mix(in srgb, var(--status-exited) 14%, transparent);
     color: var(--status-exited);
     border-radius: var(--radius-s);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
     padding: 3px 9px;
     cursor: pointer;
@@ -1523,11 +1565,14 @@
     gap: 6px;
   }
   .pg-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
     border: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text);
     border-radius: var(--radius-s);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 1px 8px;
     cursor: pointer;
   }
@@ -1540,12 +1585,12 @@
     cursor: default;
   }
   .pg-range {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
   .pg-unordered {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--status-warn);
@@ -1680,7 +1725,7 @@
   }
   /* Notice shown above results (e.g. the Mongo command a SQL query translated to). */
   .grid-notice {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--accent) 9%, transparent);
     border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
@@ -1707,7 +1752,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
   }
@@ -1720,7 +1765,7 @@
     border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
     border-radius: 999px;
     background: var(--surface);
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .chip.exclude {
     border-color: color-mix(in srgb, var(--status-exited) 45%, transparent);
@@ -1761,15 +1806,20 @@
     color: var(--text);
   }
   .val-x {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
     border: none;
+    border-radius: 999px;
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    font-size: 13px;
-    line-height: 1;
-    padding: 0 1px;
+    padding: 0;
   }
   .val-x:hover {
+    background: color-mix(in srgb, var(--status-exited) 20%, transparent);
     color: var(--status-exited);
   }
   .chip-add {
@@ -1779,7 +1829,7 @@
     border-bottom: 1px dashed var(--border);
     background: transparent;
     color: var(--text);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     outline: none;
   }
   .chip-text {
@@ -1812,7 +1862,7 @@
     border-radius: 999px;
     background: var(--surface);
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .fb-clear:hover {
@@ -1820,7 +1870,7 @@
     border-color: color-mix(in srgb, var(--status-exited) 40%, transparent);
   }
   .fb-hint {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-style: italic;
     margin-inline-start: auto;
@@ -1849,7 +1899,7 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     outline: none;
     padding: 0;
   }
@@ -1968,7 +2018,7 @@
     border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     color: var(--accent-text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
   }
   /* Selection action bar (shown when ≥1 row is selected). */
@@ -1979,7 +2029,7 @@
     padding: 5px 10px;
     border-bottom: 1px solid var(--border);
     background: color-mix(in srgb, var(--accent) 6%, var(--surface-2));
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .sel-count {
     font-weight: 600;
@@ -2029,7 +2079,7 @@
   }
   .sel-hint {
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .pending-bar {
     display: flex;
@@ -2040,7 +2090,7 @@
     border: 1px solid color-mix(in srgb, var(--status-warn) 45%, transparent);
     background: color-mix(in srgb, var(--status-warn) 10%, transparent);
     border-radius: var(--radius-s);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text);
     flex-shrink: 0;
   }
@@ -2091,7 +2141,7 @@
     padding: 0 6px;
     border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
     border-radius: 999px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
@@ -2099,6 +2149,12 @@
   }
   .sort-chip:hover {
     background: color-mix(in srgb, var(--accent) 20%, transparent);
+  }
+  .sort-chip-name {
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .trunc-badge {
     padding: 0 7px;
@@ -2163,11 +2219,11 @@
       min-height: 320px;
     }
     .gt-search-input {
-      font-size: 13px;
+      font-size: var(--fs-m);
     }
     .grid-empty,
     .grid-error {
-      font-size: 13.5px;
+      font-size: var(--fs-m);
     }
   }
 </style>

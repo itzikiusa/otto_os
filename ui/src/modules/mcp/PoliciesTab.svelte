@@ -106,6 +106,16 @@
       toasts.error('Expected a policies array or an exported {version, policies} document');
       return;
     }
+    // Replace wipes every existing rule — name the loss before doing it.
+    if (
+      importReplace &&
+      policies.length > 0 &&
+      !(await confirmer.ask(
+        `Replace all ${policies.length} existing rule${policies.length === 1 ? '' : 's'} with the ${list.length} imported? The current rules are deleted.`,
+        { title: 'Replace policy rules', danger: true, confirmLabel: 'Replace' },
+      ))
+    )
+      return;
     importing = true;
     try {
       const res = await mcpCpApi.cpImportPolicies({
@@ -243,16 +253,16 @@
         <div class="prow">
           <div class="pname">
             <span class="nm">{p.name}</span>
-            {#if p.reason}<span class="desc">{p.reason}</span>{/if}
+            {#if p.reason}<span class="desc" title={p.reason}>{p.reason}</span>{/if}
           </div>
           <span class="cell"><span class="scope">{p.workspace_id == null ? 'global' : 'workspace'}</span></span>
           <span class="cell num">{p.priority}</span>
           <span class="cell"><McpPill kind="decision" value={p.effect === 'allow' ? 'allowed' : p.effect === 'deny' ? 'denied' : p.effect === 'require_approval' ? 'pending_approval' : 'dry_run'} small /></span>
-          <span class="cell match mono">{matchSummary(p.match)}</span>
+          <span class="cell mono"><span class="match" title={matchSummary(p.match)}>{matchSummary(p.match)}</span></span>
           <span class="cell">{#if p.enabled}<Icon name="check" size={14} />{:else}<span class="off">off</span>{/if}</span>
           <span class="cell actions">
-            <button class="btn xs" onclick={() => openEdit(p)}>Edit</button>
-            <button class="btn xs danger" onclick={() => void remove(p)}>Delete</button>
+            <button class="btn small" onclick={() => openEdit(p)}>Edit</button>
+            <button class="btn small danger" onclick={() => void remove(p)}>Delete</button>
           </span>
         </div>
       {/each}
@@ -283,7 +293,7 @@
     border-bottom: 1px solid var(--border);
   }
   .count {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .grow {
@@ -315,12 +325,12 @@
     color: var(--text-dim);
   }
   .eval-row .el {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
   }
   .reason {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .grid {
@@ -336,7 +346,7 @@
   }
   .thead {
     border-bottom: 1px solid var(--border);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--text-dim);
@@ -350,6 +360,10 @@
   .num {
     text-align: right;
   }
+  /* `.cell` is a flex box — text-align doesn't move its content. */
+  .cell.num {
+    justify-content: flex-end;
+  }
   .pname {
     display: flex;
     flex-direction: column;
@@ -357,11 +371,11 @@
     min-width: 0;
   }
   .pname .nm {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .desc {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -374,18 +388,19 @@
     min-width: 0;
   }
   .scope {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .match {
-    font-size: 11px;
+    min-width: 0;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .off {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .actions {
@@ -399,7 +414,7 @@
     border-radius: var(--radius-s, 6px);
     color: var(--text);
     padding: 6px 8px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   textarea {
     width: 100%;
@@ -412,15 +427,11 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
   }
-  .btn.xs {
-    font-size: 11px;
-    padding: 3px 8px;
-  }
   .btn.danger {
-    color: var(--status-exited, #ff5f57);
+    color: var(--danger);
   }
   .muted {
     color: var(--text-dim);

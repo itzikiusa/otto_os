@@ -190,11 +190,11 @@
     gap: 10px;
   }
   .avatar {
-    font-size: 22px;
+    font-size: var(--fs-2xl);
   }
   .name {
     font-weight: 600;
-    font-size: 13px;
+    font-size: var(--fs-m);
   }
   .row {
     display: flex;
@@ -202,7 +202,7 @@
     gap: 8px;
   }
   .verdict {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.05em;
     padding: 2px 8px;
@@ -246,7 +246,7 @@
     border: 1px solid transparent;
     border-radius: 6px;
     padding: 5px 6px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
     color: inherit;
   }
@@ -285,21 +285,21 @@
     max-height: 70vh;
   }
   .md :global(h1) {
-    font-size: 15px;
+    font-size: var(--fs-l);
     margin: 0 0 8px;
   }
   .md :global(h2) {
-    font-size: 13px;
+    font-size: var(--fs-m);
     margin: 14px 0 6px;
   }
   .md :global(p),
   .md :global(li) {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     line-height: 1.5;
   }
   .md :global(code) {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     background: var(--surface-2);
     padding: 0 3px;
     border-radius: 3px;
@@ -312,7 +312,7 @@
   }
   .md :global(table) {
     border-collapse: collapse;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .md :global(td),
   .md :global(th) {
@@ -323,11 +323,11 @@
     color: var(--text-dim);
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .error {
     color: var(--status-exited);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   @media (max-width: 760px) {
     .body {

@@ -12,6 +12,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { activity } from '../../lib/stores/activity.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { rel } from '../../lib/stores/now.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import type { TaskStatus, TrailKind, TrailSource } from '../../lib/api/types';
@@ -96,6 +97,8 @@
     if (sid && w) void activity.load(w, sid);
   });
 
+  const loadError = $derived(session ? (activity.loadErrorBySession[session.id] ?? null) : null);
+
   let note = $state('');
   let adding = $state(false);
   let expanded = $state<Record<string, boolean>>({});
@@ -157,20 +160,10 @@
     return s === 'user' ? 'you' : s === 'otto' ? 'otto' : 'agent';
   }
 
-  /** Relative time: "now", "3m", "2h", else a short date. */
-  function relTime(iso: string): string {
-    try {
-      const then = new Date(iso).getTime();
-      const secs = Math.max(0, Math.round((Date.now() - then) / 1000));
-      if (secs < 10) return 'now';
-      if (secs < 60) return `${secs}s`;
-      const mins = Math.floor(secs / 60);
-      if (mins < 60) return `${mins}m`;
-      const hrs = Math.floor(mins / 60);
-      if (hrs < 24) return `${hrs}h`;
-      return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-    } catch {
-      return '';
+  function onRowKeydown(e: KeyboardEvent, id: string): void {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      toggle(id);
     }
   }
 
@@ -191,6 +184,17 @@
   />
 {:else}
   <div class="activity">
+    {#if loadError}
+      <!-- The trail + tasks didn't load: say so (an empty board would read as
+           "the agent has done nothing"), with Retry. -->
+      <div class="load-error" role="alert">
+        <Icon name="warning" size={14} />
+        <span class="grow">Couldn't load this session's activity. {loadError}</span>
+        <button class="btn small" onclick={() => session && wsId && void activity.load(wsId, session.id, true)}>
+          <Icon name="refresh" size={12} /> Retry
+        </button>
+      </div>
+    {/if}
     <!-- Task tracker ------------------------------------------------------- -->
     <section class="section">
       <div class="section-title">
@@ -209,7 +213,7 @@
               title={sessionEnded ? 'The session has exited — the task is kept and handed over on resume' : 'Push a task to this agent'}
               data-testid="add-task-btn"
             >
-              <Icon name="plus" size={11} /> Add task
+              <Icon name="plus" size={12} /> Add task
             </button>
           {/if}
         </span>
@@ -269,10 +273,10 @@
               <span class="task-glyph">{TASK_GLYPH[t.status]}</span>
               <span class="task-title">{t.title}</span>
               {#if t.source === 'user'}
-                <span class="badge board" title="Added from the board / Activity panel">from board</span>
+                <span class="badge board" title="Added from the board / Activity panel">From board</span>
               {/if}
               {#if t.nudge_pending}
-                <span class="badge queued" title="Waiting to be handed to the agent">queued</span>
+                <span class="badge queued" title="Waiting to be handed to the agent">Queued</span>
               {/if}
             </li>
           {/each}
@@ -293,23 +297,35 @@
       <div class="filters">
         <div class="tabs">
           {#each SOURCE_TABS as t (t.id)}
-            <button class="tab" class:on={sourceFilter === t.id} onclick={() => (sourceFilter = t.id)}>
+            <button
+              class="tab"
+              class:on={sourceFilter === t.id}
+              aria-pressed={sourceFilter === t.id}
+              onclick={() => (sourceFilter = t.id)}
+            >
               {t.label}
             </button>
           {/each}
         </div>
-        <input class="search" placeholder="Filter…" bind:value={query} spellcheck="false" />
+        <input class="search" placeholder="Filter…" aria-label="Filter the trail" bind:value={query} spellcheck="false" />
       </div>
 
       <div class="note-add">
         <input
           class="note-input"
           placeholder="Add a note to this session…"
+          aria-label="Note"
           bind:value={note}
           onkeydown={onNoteKeydown}
           spellcheck="false"
         />
-        <button class="note-btn" title="Add note" disabled={note.trim() === '' || adding} onclick={addNote}>
+        <button
+          class="note-btn"
+          title={note.trim() === '' ? 'Type a note first' : 'Add note'}
+          aria-label="Add note"
+          disabled={note.trim() === '' || adding}
+          onclick={addNote}
+        >
           <Icon name="plus" size={13} />
         </button>
       </div>
@@ -322,14 +338,22 @@
         <ul class="trail">
           {#each filtered as e (e.id)}
             <li class="row src-{e.source} kind-{e.kind} lvl-{e.level}">
-              <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
-              <div class="row-main" class:clickable={e.detail != null} onclick={() => e.detail != null && toggle(e.id)}>
+              <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events, a11y_no_noninteractive_tabindex -->
+              <div
+                class="row-main"
+                class:clickable={e.detail != null}
+                role={e.detail != null ? 'button' : undefined}
+                tabindex={e.detail != null ? 0 : undefined}
+                aria-expanded={e.detail != null ? !!expanded[e.id] : undefined}
+                onclick={() => e.detail != null && toggle(e.id)}
+                onkeydown={(ev) => e.detail != null && onRowKeydown(ev, e.id)}
+              >
                 <span class="row-icon"><Icon name={KIND_ICON[e.kind] ?? 'dot'} size={12} /></span>
                 <div class="row-body">
                   <div class="row-summary">{e.summary}</div>
                   <div class="row-meta">
                     <span class="row-src">{sourceLabel(e.source)}</span>
-                    <span class="row-time mono">{relTime(e.ts)}</span>
+                    <span class="row-time mono" title={new Date(e.ts).toLocaleString()}>{rel(e.ts)}</span>
                     {#if e.detail != null}
                       <Icon name={expanded[e.id] ? 'chevronDown' : 'chevronRight'} size={10} />
                     {/if}
@@ -385,7 +409,7 @@
     padding: 1px 7px;
   }
   .empty-line {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 1.4;
     margin: 2px 0;
   }
@@ -397,8 +421,8 @@
     gap: 6px;
   }
   .count.nudge {
-    color: var(--status-warn, #d29922);
-    background: color-mix(in srgb, var(--status-warn, #d29922) 14%, transparent);
+    color: var(--status-warn);
+    background: color-mix(in srgb, var(--status-warn) 14%, transparent);
   }
   .add-task-btn {
     display: inline-flex;
@@ -435,7 +459,7 @@
     background: var(--surface-2);
     color: var(--text);
     font: inherit;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     padding: 4px 8px;
     outline: none;
     resize: vertical;
@@ -459,13 +483,13 @@
     background: var(--surface-2);
     color: var(--text);
     font: inherit;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .tbtn.primary {
     background: var(--accent);
     border-color: var(--accent);
-    color: var(--accent-contrast, #fff);
+    color: var(--accent-contrast);
   }
   .tbtn:disabled {
     opacity: 0.5;
@@ -473,7 +497,7 @@
   }
   .badge {
     flex-shrink: 0;
-    font-size: 9px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -487,8 +511,8 @@
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .badge.queued {
-    color: var(--status-warn, #d29922);
-    background: color-mix(in srgb, var(--status-warn, #d29922) 14%, transparent);
+    color: var(--status-warn);
+    background: color-mix(in srgb, var(--status-warn) 14%, transparent);
   }
   .task.nudge-pending .task-glyph {
     animation: pulse 1.4s ease-in-out infinite;
@@ -521,6 +545,10 @@
     list-style: none;
     margin: 2px 0 0;
     padding: 0;
+    /* A long plan scrolls on its own instead of squeezing the live trail
+       below it down to nothing. */
+    max-height: 240px;
+    overflow-y: auto;
     display: flex;
     flex-direction: column;
     gap: 3px;
@@ -529,7 +557,7 @@
     display: flex;
     align-items: baseline;
     gap: 7px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.35;
   }
   .task-glyph {
@@ -551,14 +579,14 @@
     font-weight: 600;
   }
   .task-completed .task-glyph {
-    color: var(--status-working, #3fb950);
+    color: var(--status-working);
   }
   .task-completed .task-title {
     color: var(--text-dim);
     text-decoration: line-through;
   }
   .task-blocked .task-glyph {
-    color: var(--status-exited, #e5534b);
+    color: var(--status-exited);
   }
   .task-cancelled .task-title {
     color: var(--text-dim);
@@ -583,7 +611,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .tab:hover {
@@ -602,7 +630,7 @@
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 0 7px;
     outline: none;
   }
@@ -622,7 +650,7 @@
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     padding: 4px 8px;
     outline: none;
   }
@@ -671,6 +699,10 @@
   .row-main.clickable {
     cursor: pointer;
   }
+  .row-main.clickable:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
   .row-main:hover {
     background: var(--surface-2);
   }
@@ -686,30 +718,31 @@
     color: var(--accent-text);
   }
   .lvl-warn .row-icon {
-    color: var(--status-warn, #d29922);
+    color: var(--status-warn);
   }
   .lvl-error .row-icon {
-    color: var(--status-exited, #e5534b);
+    color: var(--status-exited);
   }
   .row-body {
     min-width: 0;
     flex: 1;
   }
   .row-summary {
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.35;
     color: var(--text);
     word-break: break-word;
   }
   .kind-command .row-summary {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
+  /* Text uses the text-safe semantic tokens (the --status-* ones are for dots). */
   .lvl-warn .row-summary {
-    color: var(--status-warn, #d29922);
+    color: var(--warning);
   }
   .lvl-error .row-summary {
-    color: var(--status-exited, #e5534b);
+    color: var(--danger);
   }
   .row-meta {
     display: flex;
@@ -718,7 +751,7 @@
     margin-top: 1px;
   }
   .row-src {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
@@ -727,7 +760,7 @@
     color: var(--accent-text);
   }
   .row-time {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .row-detail {
@@ -742,5 +775,24 @@
     word-break: break-word;
     max-height: 220px;
     overflow: auto;
+  }
+  .load-error {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-block-end: 10px;
+    padding: 8px 10px;
+    border-radius: var(--radius-m);
+    background: var(--danger-soft);
+    color: var(--text);
+    font-size: var(--fs-s);
+  }
+  .load-error > :global(svg) {
+    color: var(--danger);
+    flex-shrink: 0;
+  }
+  .load-error .grow {
+    flex: 1;
+    min-width: 0;
   }
 </style>

@@ -23,7 +23,7 @@
   let listEl = $state<HTMLElement | null>(null);
   function onKey(e: KeyboardEvent): void {
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-    const rows = Array.from(listEl?.querySelectorAll<HTMLButtonElement>('button.row') ?? []);
+    const rows = Array.from(listEl?.querySelectorAll<HTMLButtonElement>('button.th-row') ?? []);
     const at = rows.indexOf(document.activeElement as HTMLButtonElement);
     if (at < 0) return;
     e.preventDefault();
@@ -40,14 +40,14 @@
       {@const t = groups.spaces[slot - 1]}
       <li>
         {#if t}
-          <button class="row" onkeydown={onKey} class:on={selected === t.id} aria-current={selected === t.id ? 'page' : undefined} onclick={() => onopen(t.id)} title={t.title}>
+          <button class="th-row" onkeydown={onKey} class:on={selected === t.id} aria-current={selected === t.id ? 'page' : undefined} onclick={() => onopen(t.id)} title={t.title}>
             <span class="num mono">{spaceLabel(slot)}</span>
             <span class="title">{t.title}</span>
             {#if t.incognito}<Icon name="eyeOff" size={12} />{/if}
             {#if needs[t.id]}<span class="needs" title={`${needs[t.id]} waiting on you`}>{needs[t.id]}</span>{/if}
           </button>
         {:else}
-          <button class="row empty-slot" onkeydown={onKey} onclick={() => onnewspace(slot)} disabled={creating} title={`Start space ${spaceLabel(slot)}`}>
+          <button class="th-row empty-slot" onkeydown={onKey} onclick={() => onnewspace(slot)} disabled={creating} title={`Start space ${spaceLabel(slot)}`}>
             <span class="num mono">{spaceLabel(slot)}</span>
             <span class="title">Empty space</span>
             <Icon name="plus" size={12} />
@@ -66,7 +66,7 @@
     <ul class="rows">
       {#each groups.recent as t (t.id)}
         <li>
-          <button class="row" onkeydown={onKey} class:on={selected === t.id} aria-current={selected === t.id ? 'page' : undefined} onclick={() => onopen(t.id)} title={t.title}>
+          <button class="th-row" onkeydown={onKey} class:on={selected === t.id} aria-current={selected === t.id ? 'page' : undefined} onclick={() => onopen(t.id)} title={t.title}>
             <span class="title">{t.title}</span>
             {#if t.incognito}<Icon name="eyeOff" size={12} />{/if}
             {#if needs[t.id]}
@@ -109,7 +109,7 @@
     flex-direction: column;
     gap: 1px;
   }
-  .row {
+  .th-row {
     width: 100%;
     display: flex;
     align-items: center;
@@ -125,14 +125,14 @@
     text-align: start;
     cursor: pointer;
   }
-  .row:hover:not(:disabled) {
+  .th-row:hover:not(:disabled) {
     background: var(--hover);
   }
-  .row.on {
+  .th-row.on {
     background: var(--accent-soft);
     font-weight: 600;
   }
-  .row :global(svg) {
+  .th-row :global(svg) {
     color: var(--text-dim);
     flex-shrink: 0;
   }
@@ -142,7 +142,7 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  .row.on .num {
+  .th-row.on .num {
     color: var(--text);
   }
   .mono {
@@ -182,7 +182,7 @@
     color: var(--text-dim);
   }
   @media (max-width: 640px) {
-    .row {
+    .th-row {
       min-height: 40px;
     }
   }

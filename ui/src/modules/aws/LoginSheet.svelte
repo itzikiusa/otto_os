@@ -66,14 +66,14 @@
   </div>
   <p class="status" class:ok={done} aria-live="polite">{lastMsg}</p>
   {#snippet footer()}
-    <button class="ghost" onclick={onclose}>Close</button>
+    <button class="btn" onclick={onclose}>Close</button>
   {/snippet}
 </Modal>
 
 <style>
   .hint {
     margin: 0 0 8px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
   }
   .term {
@@ -86,18 +86,10 @@
   }
   .status {
     margin: 8px 0 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .status.ok {
     color: var(--status-working);
-  }
-  .ghost {
-    padding: 6px 12px;
-    border-radius: var(--radius-m);
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
   }
 </style>

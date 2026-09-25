@@ -18,7 +18,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import JsonTree from '../database/JsonTree.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
-  import { fmtAgo, fmtBytes, fmtDate, splitBucketSegment } from './util';
+  import { fmtAgo, fmtBytes, fmtDate, splitBucketSegment, awsErrorText } from './util';
   import type { AwsAccount, S3Object, S3PreviewResp } from '../../lib/api/types';
 
   interface Props {
@@ -224,7 +224,7 @@
 {#if !bucket}
   <ViewToolbar
     title="S3"
-    subtitle={`${buckets?.length ?? 0} buckets`}
+    subtitle={buckets ? `${buckets.length} bucket${buckets.length === 1 ? '' : 's'}` : ''}
     bind:filter={bucketFilter}
     filterPlaceholder="Filter buckets…"
     loading={bucketsLoading}
@@ -232,9 +232,9 @@
     onrefresh={() => void loadBuckets()}
   />
   {#if bucketsLoading && !buckets}
-    <div class="pad"><Skeleton rows={6} /></div>
+    <div class="pad" role="status"><p class="load-note">Loading buckets…</p><Skeleton rows={6} /></div>
   {:else if bucketsError}
-    <EmptyState icon="cloud" title="Couldn't list buckets" body={bucketsError} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void loadBuckets()} />
+    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list buckets" body={awsErrorText(bucketsError)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void loadBuckets()} />
   {:else if bucketsShown.length === 0}
     <EmptyState icon="archive" title={bucketFilter ? 'No matching buckets' : 'No buckets'} body={bucketFilter ? '' : 'This account has no S3 buckets (or s3:ListAllMyBuckets is denied).'} />
   {:else}
@@ -253,7 +253,7 @@
                 { label: 'Copy S3 URI', icon: 'copy', action: () => void copy(`s3://${b.name}/`, 'S3 URI') },
               ])}
             >
-              <td class="name"><Icon name="archive" size={13} /> {b.name}</td>
+              <td class="name" title={b.name}><Icon name="archive" size={13} /> {b.name}</td>
               <td class="mono hide-sm">{b.region ?? '—'}</td>
               <td class="dim hide-sm" title={fmtDate(b.creation_date)}>{fmtAgo(b.creation_date)}</td>
             </tr>
@@ -272,7 +272,7 @@
     onrefresh={() => void loadObjects()}
   >
     <nav class="crumbs" aria-label="Prefix">
-      <button class="crumb" onclick={() => goTo('', '')} title="All buckets"><Icon name="archive" size={12} /></button>
+      <button class="crumb" onclick={() => goTo('', '')} title="All buckets" aria-label="All buckets"><Icon name="archive" size={12} /></button>
       <span class="sep">/</span>
       <button class="crumb" class:cur={!prefix} onclick={() => goTo(bucket, '')}>{bucket}</button>
       {#each crumbs as c (c.prefix)}
@@ -285,9 +285,9 @@
   <div class="split" class:with-drawer={preview !== null && !viewport.isMobile}>
     <div class="tbl-wrap">
       {#if objLoading && objects.length === 0 && prefixes.length === 0}
-        <div class="pad"><Skeleton rows={8} /></div>
+        <div class="pad" role="status"><p class="load-note">Loading objects…</p><Skeleton rows={8} /></div>
       {:else if objError}
-        <EmptyState icon="cloud" title="Couldn't list objects" body={objError} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void loadObjects()} />
+        <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list objects" body={awsErrorText(objError)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void loadObjects()} />
       {:else if rowsShown.length === 0}
         <EmptyState icon="folder" title="Empty" body={objFilter ? 'Nothing matches the filter.' : 'No objects under this prefix.'} />
       {:else}
@@ -312,7 +312,7 @@
                 <td class="dim mono hide-sm">{r.kind === 'file' ? (r.obj.storage_class ?? '') : ''}</td>
                 <td class="act">
                   {#if r.kind === 'file'}
-                    <button class="icon-btn" onclick={(e) => { e.stopPropagation(); void download(r.obj); }} disabled={!canRead} title="Download" aria-label={`Download ${r.name}`}><Icon name="arrowDown" size={13} /></button>
+                    <button class="icon-btn" onclick={(e) => { e.stopPropagation(); void download(r.obj); }} disabled={!canRead} title={canRead ? 'Download' : 'You don’t have read access to this bucket'} aria-label={`Download ${r.name}`}><Icon name="arrowDown" size={13} /></button>
                   {/if}
                 </td>
               </tr>
@@ -321,7 +321,7 @@
         </table>
         {#if nextToken}
           <div class="more-row">
-            <button class="ghost" onclick={() => void loadObjects(true)} disabled={objLoading}>{objLoading ? 'Loading…' : 'Load more'}</button>
+            <button class="btn" onclick={() => void loadObjects(true)} disabled={objLoading}>{objLoading ? 'Loading…' : 'Load more'}</button>
           </div>
         {/if}
       {/if}
@@ -346,7 +346,7 @@
     <span class="mono">{leaf(dl.key)}</span>
     <progress max={dl.total ?? undefined} value={dl.total ? dl.received : undefined}></progress>
     <span class="dim">{fmtBytes(dl.received)}{dl.total ? ` / ${fmtBytes(dl.total)}` : ''}</span>
-    <button class="ghost sm" onclick={() => dl?.ctrl.abort()}>Cancel</button>
+    <button class="btn small" onclick={() => dl?.ctrl.abort()}>Cancel</button>
   </div>
 {/if}
 
@@ -356,10 +356,10 @@
       <strong class="mono" title={preview.obj.key}>{leaf(preview.obj.key)}</strong>
       <span class="dim">{fmtBytes(preview.obj.size)} · {fmtDate(preview.obj.last_modified)}</span>
       <div class="pv-actions">
-        <button class="ghost sm" onclick={() => preview && void download(preview.obj)}><Icon name="arrowDown" size={12} /> Download</button>
-        <button class="ghost sm" onclick={() => preview && void copy(`s3://${bucket}/${preview.obj.key}`, 'S3 URI')}><Icon name="copy" size={12} /> URI</button>
+        <button class="btn small" onclick={() => preview && void download(preview.obj)}><Icon name="arrowDown" size={12} /> Download</button>
+        <button class="btn small" onclick={() => preview && void copy(`s3://${bucket}/${preview.obj.key}`, 'S3 URI')}><Icon name="copy" size={12} /> URI</button>
         {#if !viewport.isMobile}
-          <button class="icon-btn" onclick={() => (preview = null)} aria-label="Close preview"><Icon name="x" size={13} /></button>
+          <button class="icon-btn" onclick={() => (preview = null)} aria-label="Close preview" title="Close preview"><Icon name="x" size={13} /></button>
         {/if}
       </div>
     </div>
@@ -392,6 +392,11 @@
 {/snippet}
 
 <style>
+  .load-note {
+    margin: 0 0 10px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
   .pad {
     padding: 12px;
   }
@@ -404,7 +409,7 @@
   .tbl {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .tbl th {
     position: sticky;
@@ -413,7 +418,7 @@
     background: var(--surface);
     text-align: left;
     font-weight: 600;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -456,14 +461,14 @@
   }
   .err {
     color: var(--status-exited);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .crumbs {
     display: flex;
     align-items: center;
     gap: 2px;
     flex-wrap: wrap;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .crumb {
     border: 0;
@@ -473,7 +478,7 @@
     padding: 2px 4px;
     border-radius: 4px;
     font: inherit;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     display: inline-flex;
     align-items: center;
   }
@@ -511,7 +516,7 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .pv-head strong {
     word-break: break-all;
@@ -523,7 +528,7 @@
     flex-wrap: wrap;
   }
   .pv-body {
-    font-size: 12px;
+    font-size: var(--fs-s);
     overflow: auto;
     max-height: 60vh;
   }
@@ -539,7 +544,7 @@
   }
   .csv {
     border-collapse: collapse;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     font-family: var(--font-mono);
   }
   .csv th,
@@ -557,22 +562,6 @@
     display: flex;
     justify-content: center;
     padding: 10px;
-  }
-  .ghost {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 6px 12px;
-    border-radius: var(--radius-m);
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
-    font-size: 12.5px;
-  }
-  .ghost.sm {
-    padding: 3px 8px;
-    font-size: 12px;
   }
   .icon-btn {
     display: inline-grid;
@@ -594,7 +583,7 @@
     padding: 6px 12px;
     border-top: 1px solid var(--border);
     background: var(--surface);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .dl-bar progress {
     flex: 1;

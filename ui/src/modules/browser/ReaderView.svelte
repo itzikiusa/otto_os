@@ -25,11 +25,24 @@
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { buildSelector } from './selector';
   import type { BrowserPage } from '../../lib/api/types';
 
-  let { page, loading, error }: { page: BrowserPage | null; loading: boolean; error: string } =
-    $props();
+  let {
+    page,
+    loading,
+    error,
+    onretry,
+    onopenurl,
+  }: {
+    page: BrowserPage | null;
+    loading: boolean;
+    error: string;
+    onretry?: () => void;
+    /** Empty state's next step: focus the address bar (⌘L). */
+    onopenurl?: () => void;
+  } = $props();
 
   const html = $derived(
     page ? renderNote(page.markdown, { resolve: () => null, assetUrl: () => null }) : '',
@@ -114,16 +127,19 @@
 </script>
 
 <div class="reader">
-  {#if loading}
-    <p class="muted">Loading…</p>
-  {:else if error}
-    <div class="error">{error}</div>
+  {#if loading || error}
+    <!-- Loading → skeleton; a failed fetch → inline cause + Retry (never a
+         dead end, never a raw toast). -->
+    <LoadState what="this page" variant="page" {loading} {error} empty {onretry} />
   {:else if !page}
     <EmptyState
       variant="page"
       icon="compass"
       title="Open a page"
-      body="Enter a URL above to read it here. Mark passages to hand them to an agent."
+      body="Type a URL in the address bar to read it here as clean text. Mark passages to hand them to an agent."
+      actionLabel={onopenurl ? 'Enter a URL' : undefined}
+      actionIcon="search"
+      onaction={onopenurl}
     />
   {:else}
     {#if page.degraded}
@@ -133,14 +149,16 @@
     {/if}
 
     <div class="toolbar">
+      {#if markMode}<span class="mark-hint" role="status">Click a passage to mark it · Esc to stop</span>{/if}
       <button
-        class="mark-toggle"
-        class:active={markMode}
+        class="btn small"
+        class:mark-on={markMode}
         onclick={toggleMark}
         aria-pressed={markMode}
+        title={markMode ? 'Stop marking' : 'Mark a passage to hand to an agent'}
       >
-        <Icon name="note" size={13} />
-        {markMode ? 'Marking…' : 'Mark element'}
+        <Icon name="target" size={12} />
+        {markMode ? 'Stop marking' : 'Mark passage'}
       </button>
     </div>
 
@@ -163,13 +181,18 @@
         <p class="composer-excerpt">{pending.text.slice(0, 140)}</p>
         <textarea
           bind:value={noteText}
-          placeholder="Add a note"
+          placeholder="Add a note for the agent (optional)"
+          aria-label="Note for this mark"
           rows="2"
           spellcheck="false"
+          onkeydown={(e) => {
+            if (e.key === 'Escape') { e.preventDefault(); cancelMark(); }
+            else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void saveMark(); }
+          }}
         ></textarea>
         <div class="composer-actions">
           <button class="btn" onclick={cancelMark}>Cancel</button>
-          <button class="btn primary" disabled={saving} onclick={saveMark}>
+          <button class="btn primary" disabled={saving} onclick={saveMark} title="Save mark (⌘↩)">
             {saving ? 'Saving…' : 'Save mark'}
           </button>
         </div>
@@ -178,55 +201,39 @@
   {/if}
 </div>
 
+<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && markMode && !pending) { markMode = false; } }} />
+
 <style>
   .reader {
     flex: 1;
+    min-width: 0;
     overflow-y: auto;
-    padding: 1rem 1.25rem 2rem;
+    padding: 16px 20px 32px;
     position: relative;
   }
-  .muted {
-    color: var(--text-dim);
-    padding: 0.75rem 0;
-  }
-  .error {
-    color: var(--status-exited);
-    background: color-mix(in srgb, var(--status-exited) 12%, transparent);
-    border-radius: var(--radius-s);
-    padding: 0.6rem 0.75rem;
-    font-size: 0.85rem;
-  }
   .degraded {
-    background: color-mix(in srgb, var(--status-warn) 16%, transparent);
-    color: var(--status-warn);
+    max-width: 72ch;
+    margin: 0 auto 12px;
+    background: var(--warning-soft);
+    color: var(--text);
     border-radius: var(--radius-s);
-    padding: 0.5rem 0.75rem;
-    font-size: 0.82rem;
-    margin-bottom: 0.75rem;
+    padding: 8px 12px;
+    font-size: var(--fs-s);
   }
   .toolbar {
     display: flex;
-    justify-content: flex-end;
-    max-width: 72ch;
-    margin: 0 auto 0.5rem;
-  }
-  .mark-toggle {
-    display: flex;
     align-items: center;
-    gap: 0.35rem;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface);
-    color: var(--text-dim);
-    font-size: 0.78rem;
-    padding: 0.3rem 0.6rem;
-    cursor: pointer;
+    justify-content: flex-end;
+    gap: 8px;
+    max-width: 72ch;
+    margin: 0 auto 8px;
   }
-  .mark-toggle:hover {
-    color: var(--text);
+  .mark-hint {
+    color: var(--accent-text);
+    font-size: var(--fs-s);
   }
-  .mark-toggle.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+  .btn.mark-on {
+    background: var(--accent-soft);
     color: var(--accent-text);
     border-color: var(--accent);
   }
@@ -235,6 +242,7 @@
     margin: 0 auto;
     color: var(--text);
     line-height: 1.6;
+    overflow-wrap: anywhere;
   }
   .page.mark-armed {
     cursor: crosshair;
@@ -244,27 +252,32 @@
     outline-offset: 2px;
   }
   .page :global(.marked) {
-    background: color-mix(in srgb, yellow 35%, transparent);
+    background: color-mix(in srgb, var(--warning) 30%, transparent);
     border-radius: 2px;
   }
   .page-title {
-    font-size: 1.4rem;
-    margin: 0 0 1rem;
+    font-size: var(--fs-2xl);
+    font-weight: 600;
+    line-height: 1.25;
+    margin: 0 0 16px;
   }
   .mark-composer {
+    position: sticky;
+    bottom: 0;
     max-width: 72ch;
-    margin: 0.75rem auto 0;
-    padding: 0.6rem 0.75rem;
+    margin: 12px auto 0;
+    padding: 10px 12px;
     border: 1px solid var(--accent);
     border-radius: var(--radius-m);
     background: var(--surface);
+    box-shadow: var(--shadow);
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
+    gap: 6px;
   }
   .composer-excerpt {
     margin: 0;
-    font-size: 0.8rem;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -277,32 +290,14 @@
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 0.4rem 0.6rem;
+    padding: 6px 10px;
     font: inherit;
-    font-size: 0.85rem;
+    font-size: var(--fs-m);
     resize: vertical;
   }
   .composer-actions {
     display: flex;
     justify-content: flex-end;
-    gap: 0.4rem;
-  }
-  .btn {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface);
-    color: var(--text);
-    font-size: 0.8rem;
-    padding: 0.3rem 0.65rem;
-    cursor: pointer;
-  }
-  .btn.primary {
-    background: var(--accent);
-    color: var(--accent-contrast, #fff);
-    border-color: var(--accent);
-  }
-  .btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
+    gap: 6px;
   }
 </style>

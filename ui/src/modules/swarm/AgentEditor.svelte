@@ -9,6 +9,7 @@
   import type { AgentSchedule, AgentSkill, CreateAgentReq, SwarmAgent } from './types';
   import { agentProvidersWith, defaultAgentProvider } from '../../lib/providers';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
 
   interface Props {
     agent?: SwarmAgent | null;
@@ -104,7 +105,7 @@
       toasts.success(editing ? 'Agent updated' : 'Agent hired');
       onclose();
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error(editing ? "Couldn't save the agent" : "Couldn't hire the agent", e instanceof Error ? e.message : String(e));
     } finally {
       busy = false;
     }
@@ -132,7 +133,7 @@
     <div class="field">
       <label for="ag-reports">Reports to</label>
       <select id="ag-reports" class="input" bind:value={reportsTo}>
-        <option value="">— top of org —</option>
+        <option value="">Top of the org</option>
         {#each (swarm.detail?.agents ?? []).filter((a) => a.id !== agent?.id) as a (a.id)}
           <option value={a.id}>{a.name} ({a.title})</option>
         {/each}
@@ -177,20 +178,20 @@
       {#each skills as s, i (s.name)}
         <span class="skill-chip" class:must={s.must_use}>
           <button
-            class="link"
+            class="link must-toggle"
             aria-label={s.must_use ? `Make ${s.name} optional` : `Require ${s.name} (must use)`}
             aria-pressed={s.must_use}
             title={s.must_use ? 'Must use — click to make optional' : 'Optional — click to require'}
             onclick={() => (skills[i] = { ...s, must_use: !s.must_use })}
           >
-            {s.must_use ? '★' : '☆'}
+            <Icon name="star" size={12} />
           </button>
           {s.name}
           <button
             class="link"
             aria-label="Remove skill {s.name}"
             title="Remove skill"
-            onclick={() => (skills = skills.filter((_, j) => j !== i))}>×</button>
+            onclick={() => (skills = skills.filter((_, j) => j !== i))}><Icon name="x" size={12} /></button>
         </span>
       {/each}
     </div>
@@ -211,7 +212,10 @@
           <input class="input small" type="number" min="1" bind:value={everyMin} /> min
         {/if}
         {#if cadence === 'daily' || cadence === 'weekly'}
-          <input class="input small" type="time" bind:value={at} />
+          <!-- The swarm scheduler matches `at` against UTC (swarm_scheduler.rs),
+               not the Mac's local clock — say so, or 09:00 fires at 09:00 UTC. -->
+          <input class="input small" type="time" bind:value={at} aria-label="Run time (UTC)" title="Time of day in UTC" />
+          <span class="dim" title="The swarm scheduler runs on UTC time">UTC</span>
         {/if}
         {#if cadence === 'weekly'}
           <select class="input small" bind:value={weekday}>
@@ -235,6 +239,18 @@
 </Modal>
 
 <style>
+  /* Must-use toggle: an outline star; filled while the skill is required. */
+  .must-toggle {
+    display: inline-grid;
+    place-items: center;
+    color: var(--text-dim);
+  }
+  .skill-chip.must .must-toggle {
+    color: var(--warning);
+  }
+  .skill-chip.must .must-toggle :global(svg path) {
+    fill: currentColor;
+  }
   .grid2 {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -257,13 +273,15 @@
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 2px 8px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .skill-chip.must {
     border-color: var(--accent);
     color: var(--accent-text);
   }
   .link {
+    display: inline-grid;
+    place-items: center;
     border: none;
     background: transparent;
     color: inherit;

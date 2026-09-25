@@ -3,6 +3,7 @@
 // the Git module manages its own deeper state on top).
 
 import { api } from '../api/client';
+import { loadErrorText } from '../loadError';
 import type {
   ConflictFile,
   Id,
@@ -12,6 +13,8 @@ import type {
   MergeResult,
   PrListResp,
   PrSummary,
+  PullMode,
+  PullReq,
   PullResp,
   Repo,
   RepoStatusResp,
@@ -146,12 +149,18 @@ class GitStore {
   subTab: Record<string, string> = $state({});
   /** True once the page has loaded the global repo list at least once. */
   allReposLoaded = $state(false);
+  /** Last failed {@link loadAllRepos} (human text). While set, `allRepos` is the
+   *  last KNOWN list (or empty on a first failure) — never "you have no repos". */
+  allReposError: string | null = $state(null);
 
   // ── Per-repo status (single source of truth) ───────────────────────────────
   // Each open tab's branch chip (GitTabs), the active repo's toolbar (RepoView)
   // and the auto-fetch loop all read/write THIS map, so one fetch updates every
   // view. `null` is an in-flight / load-attempted marker.
   statusById: Record<string, RepoStatusResp | null> = $state({});
+  /** Per-repo status-load failure (human text); cleared on the next success. A
+   *  stale `statusById` entry stays in place alongside it. */
+  statusErrorById: Record<string, string> = $state({});
 
   // ── Auto-fetch: a quiet background `git fetch` for the OPEN tabs so each tab's
   // ahead/behind chip stays live. Polls only the repos the user has open
@@ -206,8 +215,10 @@ class GitStore {
     try {
       this.allRepos = await api.get<Repo[]>('/git/repos');
       this.allReposLoaded = true;
-    } catch {
-      this.allRepos = [];
+      this.allReposError = null;
+    } catch (e) {
+      // Keep the last known list; the page shows the error with Retry.
+      this.allReposError = loadErrorText(e);
     } finally {
       this.loading = false;
     }
@@ -429,8 +440,13 @@ class GitStore {
     try {
       const s = await api.get<RepoStatusResp>(`/repos/${repoId}/status`);
       this.setStatus(repoId, s);
-    } catch {
-      /* keep stale status */
+      if (repoId in this.statusErrorById) {
+        const { [repoId]: _cleared, ...rest } = this.statusErrorById;
+        this.statusErrorById = rest;
+      }
+    } catch (e) {
+      // Keep the stale status on screen, but say it couldn't be refreshed.
+      this.statusErrorById = { ...this.statusErrorById, [repoId]: loadErrorText(e) };
     }
   }
 
@@ -576,8 +592,11 @@ class GitStore {
 
   /** Pull the repo. `autoStash` wraps a dirty tree in stash → pull → pop (the
    *  retry offered after a 409 "commit or stash first" refusal). */
-  pull(repoId: Id, autoStash = false): Promise<PullResp> {
-    return api.post<PullResp>(`/repos/${repoId}/pull`, autoStash ? { auto_stash: true } : undefined);
+  pull(repoId: Id, autoStash = false, mode?: PullMode): Promise<PullResp> {
+    const body: PullReq = {};
+    if (autoStash) body.auto_stash = true;
+    if (mode) body.mode = mode;
+    return api.post<PullResp>(`/repos/${repoId}/pull`, Object.keys(body).length ? body : undefined);
   }
 
   /** Merge `req.source` into `req.target`. Conflicts are a normal 200 result. */
@@ -614,6 +633,81 @@ class GitStore {
   abortMerge(repoId: Id): Promise<RepoStatusResp> {
     return api.post<RepoStatusResp>(`/repos/${repoId}/merge/abort`);
   }
+
+  // ── Commit (lifted from WipPanel so an agent-driven commit — agent UI
+  // control, lib/uiCommands/git.ts — takes the exact same path) ─────────────
+
+  /** Commit the index. `sign` absent → the repo's `commit.gpgsign` decides.
+   *  Refreshes the shared status and bumps `refsRev` so an open graph re-syncs
+   *  (the branch ref moved). Throws on failure; the caller reports it. */
+  async commit(
+    repoId: Id,
+    opts: { message: string; amend?: boolean; sign?: boolean },
+  ): Promise<{ sha: string; status: RepoStatusResp }> {
+    const body: { message: string; amend: boolean; sign?: boolean } = {
+      message: opts.message,
+      amend: opts.amend ?? false,
+    };
+    if (opts.sign !== undefined) body.sign = opts.sign;
+    const r = await api.post<{ sha: string }>(`/repos/${repoId}/commit`, body);
+    const status = await api.get<RepoStatusResp>(`/repos/${repoId}/status`);
+    this.setStatus(repoId, status);
+    this.refsRev[repoId] = (this.refsRev[repoId] ?? 0) + 1;
+    return { sha: r.sha, status };
+  }
+
+  /** Stage (or unstage) paths; the fresh status is stored and returned. */
+  async stage(repoId: Id, paths: string[], stage = true): Promise<RepoStatusResp> {
+    const s = await api.post<RepoStatusResp>(`/repos/${repoId}/${stage ? 'stage' : 'unstage'}`, { paths });
+    this.setStatus(repoId, s);
+    return s;
+  }
+
+  /** Push (or publish) the current branch; stores the fresh status. */
+  async push(repoId: Id): Promise<RepoStatusResp> {
+    const s = await api.post<RepoStatusResp>(`/repos/${repoId}/push`, {});
+    this.setStatus(repoId, s);
+    this.refsRev[repoId] = (this.refsRev[repoId] ?? 0) + 1;
+    return s;
+  }
+
+  // ── WIP-panel requests (agent UI control) ──────────────────────────────────
+  // The WIP panel's selection and commit composer are component state. An
+  // agent command asks for them through this one-slot mailbox: GraphView opens
+  // the WIP row for `repoId`, WipPanel then TAKES the request (selecting `path`,
+  // filling the composer). A request not taken within WIP_REQUEST_TTL_MS (the
+  // tree was clean, the tab closed) is dropped, never applied later.
+
+  wipRequest: WipRequest | null = $state(null);
+
+  /** Ask the Git page to open `repoId`'s WIP panel (and select / prefill). */
+  requestWip(repoId: Id, opts: Omit<WipRequest, 'repoId' | 'at'> = {}): void {
+    this.wipRequest = { ...opts, repoId, at: Date.now() };
+  }
+
+  /** WipPanel: consume the pending request for `repoId` (null when none/stale). */
+  takeWipRequest(repoId: Id): WipRequest | null {
+    const r = this.wipRequest;
+    if (!r || r.repoId !== repoId) return null;
+    this.wipRequest = null;
+    return Date.now() - r.at <= WIP_REQUEST_TTL_MS ? r : null;
+  }
 }
+
+/** A pending WIP-panel request — see {@link GitStore.requestWip}. */
+export interface WipRequest {
+  repoId: Id;
+  /** Select this file's diff. */
+  path?: string | null;
+  /** With `path`: show the staged side of a partially staged file. */
+  staged?: boolean;
+  /** Prefill the commit composer. */
+  subject?: string;
+  body?: string;
+  at: number;
+}
+
+/** How long an untaken {@link WipRequest} stays applicable. */
+const WIP_REQUEST_TTL_MS = 15_000;
 
 export const git = new GitStore();

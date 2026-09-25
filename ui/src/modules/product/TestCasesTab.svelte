@@ -3,6 +3,7 @@
   // per-case approve/request-changes/edit, bulk-select + bulk-approve, drag-to-
   // reorder (persists order_idx), approve a run (triggers skill learning), and
   // publish to Confluence.
+  import { rel } from '../../lib/stores/now.svelte';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type {
@@ -14,6 +15,8 @@
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
 
   // The rewrite/tests/inject run spawns an agent CLI session via the live
   // registry, so the provider must be a real registered agent (built-in or
@@ -199,6 +202,20 @@
     pollTimer = setInterval(() => { void pollTestcases(); }, POLL_INTERVAL_MS);
   }
 
+  /** A failed load — inline with Retry, never as "No test cases yet". */
+  let loadError = $state<string | null>(null);
+  async function loadRuns(): Promise<void> {
+    loadError = null;
+    try {
+      await product.loadTestcases();
+      if (product.testcaseRuns.length > 0 && !activeRunId) {
+        activeRunId = product.testcaseRuns[0].run.id;
+      }
+    } catch (e) {
+      loadError = loadErrorText(e);
+    }
+  }
+
   // Reset on story change.
   $effect(() => {
     product.selectedId;
@@ -208,13 +225,7 @@
     selected = new Set();
     orderedIds = [];
     clearPoll();
-    if (product.selectedId) {
-      void product.loadTestcases().then(() => {
-        if (product.testcaseRuns.length > 0 && !activeRunId) {
-          activeRunId = product.testcaseRuns[0].run.id;
-        }
-      });
-    }
+    if (product.selectedId) void loadRuns();
     return () => { clearPoll(); };
   });
 
@@ -236,6 +247,20 @@
   );
   const activeRun = $derived<ProductTestcaseRun | null>(activeRunDetail?.run ?? null);
   const activeCases = $derived<ProductTestcase[]>(activeRunDetail?.cases ?? []);
+
+  // What a Confluence publish actually sends (mirrors `publish_testcases`): only
+  // APPROVED cases, on a "Test Cases — <title>" page. A Jira story has no space
+  // to fall back to, so its space key is required, and the daemon also comments
+  // the page link on the issue — say all of that before the user hits Publish.
+  const approvedCount = $derived(activeCases.filter((c) => c.status === 'approved').length);
+  const storyIsJira = $derived(story?.source_kind === 'jira');
+  const publishBlocked = $derived(
+    approvedCount === 0
+      ? 'Approve at least one case — only approved cases are published'
+      : storyIsJira && !publishSpaceKey.trim()
+        ? 'Enter a space key — a Jira story has no Confluence space to publish into'
+        : '',
+  );
 
   // Cases in the locally-applied display order (reflects drag-and-drop before
   // the next store reload, which will bring the persisted order_idx back).
@@ -538,7 +563,7 @@
   }
 
   function fmtDate(s: string): string {
-    try { return new Date(s).toLocaleString(); } catch { return s; }
+    try { return rel(s); } catch { return s; }
   }
 </script>
 
@@ -564,8 +589,11 @@
           </select>
         </div>
 
+        <!-- Primary only before the first run: once cases exist, reviewing them
+             (Approve run) is the view's one primary. -->
         <button
-          class="btn primary"
+          class="btn"
+          class:primary={product.testcaseRuns.length === 0}
           onclick={generate}
           disabled={generating || pollTimer !== null}
         >
@@ -603,8 +631,8 @@
     {/if}
 
     <!-- ── Active run area ────────────────────────────────────────────────────── -->
-    {#if product.loadingTestcases && product.testcaseRuns.length === 0}
-      <div class="muted">Loading test cases…</div>
+    {#if (product.loadingTestcases || loadError) && product.testcaseRuns.length === 0}
+      <LoadState what="test cases" loading={product.loadingTestcases} error={loadError} empty onretry={() => void loadRuns()} />
     {:else if activeRunDetail && activeRun}
       <!-- Run header -->
       <section class="tc-card run-header">
@@ -662,7 +690,7 @@
                 id="pf-space"
                 class="text-input"
                 type="text"
-                placeholder="e.g. TEAM (optional)"
+                placeholder={storyIsJira ? 'e.g. TEAM (required)' : 'e.g. TEAM (default: the source page’s space)'}
                 bind:value={publishSpaceKey}
                 disabled={publishingRun}
               />
@@ -678,13 +706,19 @@
                 disabled={publishingRun}
               />
             </div>
+            <p class="pf-summary" data-testid="tc-publish-summary">
+              Publishes {approvedCount} approved case{approvedCount !== 1 ? 's' : ''} as the page
+              “Test Cases — {story?.title ?? ''}”{storyIsJira ? `, and comments its link on ${story?.source_key ?? 'the issue'}` : ''}.
+              Everyone with access to the space can see it.
+            </p>
             <div class="pf-actions">
               <button
                 class="btn small primary"
                 onclick={publishTests}
-                disabled={publishingRun}
+                disabled={publishingRun || !!publishBlocked}
+                title={publishBlocked || undefined}
               >
-                {publishingRun ? 'Publishing…' : 'Publish'}
+                {publishingRun ? 'Publishing…' : 'Publish to Confluence'}
               </button>
               <button
                 class="btn small ghost"
@@ -1005,7 +1039,7 @@
     {:else if !product.loadingTestcases}
       <div class="muted">No test cases yet. Click "Generate test cases" above.</div>
     {:else}
-      <div class="muted">Loading…</div>
+      <div class="muted">Loading test cases…</div>
     {/if}
   </div>
 {/if}
@@ -1013,7 +1047,7 @@
 <style>
   .muted {
     padding: 24px 0;
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     font-style: italic;
   }
@@ -1094,7 +1128,7 @@
     flex-wrap: wrap;
   }
   .rh-count {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .rh-actions {
@@ -1113,7 +1147,7 @@
     border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 10%, transparent);
     color: var(--accent-text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     text-decoration: none;
     cursor: pointer;
@@ -1137,6 +1171,11 @@
     align-items: center;
     gap: 8px;
   }
+  .pf-summary {
+    margin: 0;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
   .pf-actions {
     display: flex;
     gap: 8px;
@@ -1149,7 +1188,7 @@
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     max-width: 300px;
   }
   .text-input:focus {
@@ -1164,7 +1203,7 @@
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     resize: vertical;
     font-family: inherit;
@@ -1254,7 +1293,7 @@
   /* ── Drag handle + checkbox ──────────────────────────────────────────── */
   .drag-handle {
     flex-shrink: 0;
-    font-size: 13px;
+    font-size: var(--fs-m);
     line-height: 1;
     color: var(--text-dim);
     opacity: 0.45;
@@ -1288,7 +1327,7 @@
     min-width: 0;
   }
   .case-title {
-    font-size: 13.5px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
     flex: 1;
@@ -1300,7 +1339,7 @@
   .priority-badge {
     flex-shrink: 0;
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     padding: 2px 7px;
@@ -1323,7 +1362,7 @@
   .pill {
     flex-shrink: 0;
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     padding: 2px 8px;
@@ -1361,14 +1400,14 @@
     display: flex;
     gap: 6px;
     align-items: flex-start;
-    font-size: 12px;
+    font-size: var(--fs-s);
     background: color-mix(in srgb, var(--warning) 8%, transparent);
     border: 1px solid color-mix(in srgb, var(--warning) 25%, transparent);
     border-radius: var(--radius-s);
     padding: 6px 10px;
   }
   .rn-label {
-    font-weight: 700;
+    font-weight: 600;
     color: var(--warning);
     flex-shrink: 0;
   }
@@ -1393,7 +1432,7 @@
   }
   .steps-label {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-dim);
@@ -1406,12 +1445,12 @@
     gap: 3px;
   }
   .steps-list li {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text);
   }
   .expected-body {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text);
     background: color-mix(in srgb, var(--status-working) 6%, transparent);
@@ -1429,7 +1468,7 @@
     gap: 8px;
   }
   .if-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -1487,7 +1526,7 @@
       min-height: 34px;
     }
     .case-title {
-      font-size: 14.5px;
+      font-size: var(--fs-l);
     }
   }
 </style>

@@ -40,7 +40,7 @@
 {#snippet row(t: AssistantTask)}
   <li class="task">
     <div class="line1">
-      <span class="title">{t.title}</span>
+      <span class="title" title={t.title}>{t.title}</span>
       <StatePill tone={taskTone(t)} label={taskStateLabel(t)} live={t.state === 'running'} />
     </div>
     {#if t.detail}<div class="detail">{t.detail}</div>{/if}

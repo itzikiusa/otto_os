@@ -162,7 +162,7 @@
     border-radius: var(--radius-m);
     background: var(--surface-2);
     padding: 9px 11px;
-    font-size: 13px;
+    font-size: var(--fs-m);
     line-height: 1.5;
     resize: vertical;
     color: var(--text);
@@ -176,7 +176,7 @@
     align-items: center;
   }
   .bc-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -189,7 +189,7 @@
     border: none;
     background: transparent;
     color: var(--accent-text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
     padding: 2px 4px;
   }
@@ -209,7 +209,7 @@
     gap: 8px;
     padding: 6px 8px;
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
   .bc-row:hover {
@@ -237,7 +237,7 @@
   .bc-empty {
     padding: 16px;
     text-align: center;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
 </style>

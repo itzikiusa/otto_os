@@ -42,7 +42,7 @@
       <ul>
         {#each needs as n (n.id)}
           <li>
-            <button class="item" onclick={() => (n.thread_id ? onopenthread(n.thread_id) : onopentasks())}>
+            <button class="item" title={n.title} onclick={() => (n.thread_id ? onopenthread(n.thread_id) : onopentasks())}>
               <StatusDot status="idle" needsYou size={8} />
               <span class="t"><span class="name">{n.title}</span><span class="sub">{threadTitle(n.thread_id)}</span></span>
             </button>
@@ -64,7 +64,7 @@
       <ul>
         {#each running as t (t.id)}
           <li>
-            <button class="item" onclick={onopentasks}>
+            <button class="item" title={t.title} onclick={onopentasks}>
               <StatusDot status="working" size={8} />
               <span class="t"><span class="name">{t.title}</span><span class="sub">{TASK_KIND[t.kind] ?? t.kind} · {threadTitle(t.thread_id)}</span></span>
             </button>

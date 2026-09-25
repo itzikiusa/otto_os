@@ -2,7 +2,7 @@
   // Reusable run detail: every step of a WorkflowRun with its status, duration,
   // logs, error, and rendered "work product" (agent reply / JSON).
   import {untrack, onDestroy} from 'svelte';
-  import {RunBodyCache, mergeCheckpointPage} from './runProgress';
+  import {RunBodyCache, mergeCheckpointPage, fmtStepMs} from './runProgress';
   import {api} from '../../lib/api/client';
   import Icon from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -65,10 +65,7 @@
     return Number.isFinite(t) ? Math.max(0, now - t) : null;
   }
 
-  function fmtMs(ms?: number | null): string {
-    if (ms == null) return '';
-    return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
-  }
+  const fmtMs = fmtStepMs;
 
   // Phase lines the step engine emits (turn oracle): muted, so the ▶/✓/⚠/↻
   // lines around them stay the ones that read as events.
@@ -135,7 +132,7 @@
       await copyTextOrThrow(text);
       toasts.success(`Copied ${label}`);
     } catch {
-      toasts.error('Copy failed');
+      toasts.error('Couldn’t copy to the clipboard', 'Select the text and copy it manually.');
     }
   }
   function asText(out: unknown): string {
@@ -168,7 +165,7 @@
       onRunUpdated?.(nr); // flips the run back to running; WS keeps it live
       toasts.info(includeDownstream ? 'Re-running from step…' : 'Step retrying…', nodeName(ns.node_id));
     } catch (e) {
-      toasts.error('Retry failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t retry the step', e instanceof Error ? e.message : String(e));
     } finally {
       retryingId = null;
     }
@@ -338,7 +335,7 @@
         <span class="dot {runStatus(ns.status).key}" aria-hidden="true"></span>
         <span class="name">{nodeName(ns.node_id)}</span>
         <StatusBadge status={runStatus(ns.status)} variant="text" dot={false} />
-        {#if (ns.attempts ?? 1) > 1}<span class="chip" title="step was retried">×{ns.attempts} attempts</span>{/if}
+        {#if (ns.attempts ?? 1) > 1}<span class="chip" title="This step was retried">{ns.attempts} attempts</span>{/if}
         <span class="sp-grow"></span>
         {#if ns.duration_ms != null}
           <span class="ms">{fmtMs(ns.duration_ms)}</span>
@@ -434,7 +431,7 @@
               <span>Work product</span>
               <span class="ph-grow"></span>
               <button class="copy-btn" title="Copy to clipboard" onclick={() => copy(asText(ns.output), 'output')}>
-                <Icon name="file" size={11} /> Copy
+                <Icon name="copy" size={11} /> Copy
               </button>
             </div>
             {#if txt}
@@ -469,7 +466,7 @@
           <span>Work product</span>
           <span class="ph-grow"></span>
           <button class="copy-btn" title="Copy to clipboard" onclick={() => copy(asText(z.output), 'output')}>
-            <Icon name="file" size={11} /> Copy
+            <Icon name="copy" size={11} /> Copy
           </button>
         </div>
         {#if zt}
@@ -525,7 +522,7 @@
     flex-basis: 100%;
     margin-top: -2px;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .links {
     display: flex;
@@ -572,7 +569,7 @@
     padding: 9px 12px;
     cursor: pointer;
     list-style: none;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   summary::-webkit-details-marker {
     display: none;
@@ -598,7 +595,7 @@
   }
   .err {
     color: var(--danger);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     background: var(--danger-soft);
     padding: 7px 9px;
     border-radius: var(--radius-s);
@@ -607,7 +604,7 @@
   .text,
   .json {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface);
     border-radius: var(--radius-s);
@@ -690,7 +687,7 @@
   .zh {
     display: flex;
     align-items: center;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -698,7 +695,7 @@
   }
   .zbig {
     font-family: var(--font-mono);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     line-height: 1.5;
     color: var(--text);
     background: var(--surface);
@@ -712,7 +709,7 @@
     word-break: break-word;
   }
   .muted {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   /* Leading step dot — the shared run vocabulary (lib/status.ts): running is

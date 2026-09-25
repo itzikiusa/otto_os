@@ -78,7 +78,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 1px 8px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1.6;
     max-width: 80%;

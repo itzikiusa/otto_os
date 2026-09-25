@@ -2,11 +2,16 @@
   // Skills Evaluator module: a left list of past runs + "New evaluation", and a
   // right pane showing either the start form or a selected run's live report.
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { router } from '../../lib/router.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
+  import { registry } from '../../lib/commands.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { skillsEvalApi } from '../../lib/api/skillsEval';
   import type { SkillEval, StartSkillEvalReq } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import { runStatus } from '../../lib/status';
+  import { rel } from '../../lib/stores/now.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import StartEvalForm from './StartEvalForm.svelte';
   import RunDetail from './RunDetail.svelte';
@@ -17,17 +22,74 @@
   type Mode = 'form' | 'detail';
   type Tab = 'runs' | 'golden' | 'matrix';
 
+  interface Props {
+    /** "Evaluate <skill>" hand-off from the Skills tab: open the start form
+     *  with this skill pre-selected. */
+    initialSkill?: { name: string; source: string } | null;
+    onconsumed?: () => void;
+    /** "Open run" hand-off (a skill's Evals tab): select this run. */
+    initialRun?: string | null;
+    onrunconsumed?: () => void;
+  }
+  let { initialSkill = null, onconsumed, initialRun = null, onrunconsumed }: Props = $props();
+  // The skill the start form should pre-select (kept until the form is left).
+  let formSkill = $state<{ name: string; source: string } | null>(null);
+  $effect(() => {
+    if (!initialSkill) return;
+    formSkill = initialSkill;
+    setTab('runs');
+    compareMode = false;
+    selectedId = null;
+    mode = 'form';
+    onconsumed?.();
+  });
+
+  $effect(() => {
+    if (!initialRun) return;
+    const id = initialRun;
+    onrunconsumed?.();
+    formSkill = null;
+    compareMode = false;
+    void openRunById(id);
+  });
+
   let runs: SkillEval[] = $state([]);
   let loading = $state(true);
+  // Inline load failure (with Retry) instead of a toast over an empty list.
+  let loadError: string | null = $state(null);
   let mode: Mode = $state('form');
   let selectedId: string | null = $state(null);
   let starting = $state(false);
-  let tab: Tab = $state('runs');
+  // The view is part of the route (`#/skills-eval/evaluator[/golden|/matrix]`)
+  // so back/forward and deep links land on it.
+  const TABS: { id: Tab; label: string; icon: 'zap' | 'target' | 'grid' }[] = [
+    { id: 'runs', label: 'Runs', icon: 'zap' },
+    { id: 'golden', label: 'Golden tasks', icon: 'target' },
+    { id: 'matrix', label: 'Matrix', icon: 'grid' },
+  ];
+  const tab = $derived<Tab>(router.parts[2] === 'golden' ? 'golden' : router.parts[2] === 'matrix' ? 'matrix' : 'runs');
+  function setTab(t: Tab): void {
+    if (t === tab) return;
+    router.go(t === 'runs' ? 'skills-eval/evaluator' : `skills-eval/evaluator/${t}`);
+  }
+  let tabsEl = $state<HTMLElement | null>(null);
+  function onTabKey(e: KeyboardEvent): void {
+    const i = TABS.findIndex((t) => t.id === tab);
+    let n = -1;
+    if (e.key === 'ArrowRight') n = (i + 1) % TABS.length;
+    else if (e.key === 'ArrowLeft') n = (i - 1 + TABS.length) % TABS.length;
+    else if (e.key === 'Home') n = 0;
+    else if (e.key === 'End') n = TABS.length - 1;
+    if (n < 0) return;
+    e.preventDefault();
+    setTab(TABS[n].id);
+    queueMicrotask(() => (tabsEl?.querySelectorAll('[role="tab"]')[n] as HTMLElement | undefined)?.focus());
+  }
 
   // Open a run from another tab (golden task run, matrix cell): switch to Runs,
   // reload, and select it.
   async function openRunById(id: string): Promise<void> {
-    tab = 'runs';
+    setTab('runs');
     const wsId = ws.currentId;
     if (wsId) await loadList(wsId);
     selectedId = id;
@@ -37,6 +99,15 @@
     runs = [e, ...runs.filter((r) => r.id !== e.id)];
     void openRunById(e.id);
   }
+
+  // ⌘K: the Evaluator's verbs while it's on screen.
+  $effect(() =>
+    registry.register('skills-eval', [
+      { id: 'skills-eval.new', title: 'New skill evaluation', group: 'Skills Lab', keywords: 'evaluate eval start run score', run: () => { setTab('runs'); compareMode = false; newRun(); } },
+      { id: 'skills-eval.golden', title: 'Open golden tasks', group: 'Skills Lab', keywords: 'regression corpus eval', run: () => setTab('golden') },
+      { id: 'skills-eval.matrix', title: 'Open eval matrix', group: 'Skills Lab', keywords: 'provider skill prompt grid compare', run: () => setTab('matrix') },
+    ]),
+  );
 
   // Compare mode: pick 2+ runs from the list to view side by side.
   let compareMode = $state(false);
@@ -57,6 +128,13 @@
 
   $effect(() => {
     const wsId = ws.currentId;
+    // A workspace switch must not keep the previous workspace's run open
+    // (RunDetail would fetch an id that isn't in this list) or its compare
+    // selection.
+    selectedId = null;
+    mode = 'form';
+    compareMode = false;
+    compareSel = new Set();
     if (wsId) {
       void loadList(wsId);
     } else {
@@ -69,26 +147,29 @@
 
   async function loadList(wsId: string): Promise<void> {
     loading = true;
+    loadError = null;
     try {
       runs = await skillsEvalApi.list(wsId);
       // Default to the newest run's detail if one exists; else the start form.
-      if (runs.length > 0 && selectedId === null) {
+      if (runs.length > 0 && selectedId === null && !formSkill) {
         selectedId = runs[0].id;
         mode = 'detail';
       }
     } catch (e) {
-      toasts.error('Could not load evaluations', e instanceof Error ? e.message : String(e));
+      loadError = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
     }
   }
 
   function newRun(): void {
+    formSkill = null;
     selectedId = null;
     mode = 'form';
   }
 
   function selectRun(id: string): void {
+    formSkill = null;
     selectedId = id;
     mode = 'detail';
   }
@@ -100,11 +181,12 @@
     try {
       const created = await skillsEvalApi.start(wsId, req);
       runs = [created, ...runs];
+      formSkill = null;
       selectedId = created.id;
       mode = 'detail';
       toasts.success('Evaluation started', 'Watch progress in the report.');
     } catch (e) {
-      toasts.error('Could not start evaluation', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't start the evaluation", e instanceof Error ? e.message : String(e));
     } finally {
       starting = false;
     }
@@ -123,24 +205,18 @@
     }
   }
 
-  function ago(iso: string): string {
-    const d = Date.parse(iso);
-    if (Number.isNaN(d)) return '';
-    const s = Math.floor((Date.now() - d) / 1000);
-    if (s < 60) return `${s}s ago`;
-    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-    if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-    return `${Math.floor(s / 86400)}d ago`;
-  }
-
   // Resizable run list: drag the divider between the list and the report to
   // resize it; the chosen width survives reloads. Mirrors the Database page's
   // sidebar resizer (double-click resets).
   const SIDE_W_DEFAULT = 280;
   let sideW = $state(loadSideW());
   function loadSideW(): number {
-    if (typeof localStorage === 'undefined') return SIDE_W_DEFAULT;
-    const v = Number(localStorage.getItem('skillsEval.sideW'));
+    let v = NaN;
+    try {
+      v = Number(localStorage.getItem('skillsEval.sideW'));
+    } catch {
+      /* storage unavailable — use the default */
+    }
     return Number.isFinite(v) && v >= 220 ? Math.min(480, v) : SIDE_W_DEFAULT;
   }
   function persistSideW(): void {
@@ -170,19 +246,29 @@
     sideW = SIDE_W_DEFAULT;
     persistSideW();
   }
+  // Keyboard resize for the divider (←/→, ⇧ for a big step, Home/End).
+  function onResizeKey(e: KeyboardEvent): void {
+    const step = e.shiftKey ? 48 : 16;
+    let next = sideW;
+    if (e.key === 'ArrowLeft') next -= step;
+    else if (e.key === 'ArrowRight') next += step;
+    else if (e.key === 'Home') next = 220;
+    else if (e.key === 'End') next = 480;
+    else if (e.key === 'Enter') next = SIDE_W_DEFAULT;
+    else return;
+    e.preventDefault();
+    sideW = Math.max(220, Math.min(480, next));
+    persistSideW();
+  }
 </script>
 
 <div class="se-wrap">
-  <div class="se-tabs" role="tablist" aria-label="Evaluator view" data-testid="eval-tabs">
-    <button class="se-tab" role="tab" aria-selected={tab === 'runs'} class:active={tab === 'runs'} onclick={() => (tab = 'runs')} data-testid="tab-runs">
-      <Icon name="zap" size={12} /> Runs
-    </button>
-    <button class="se-tab" role="tab" aria-selected={tab === 'golden'} class:active={tab === 'golden'} onclick={() => (tab = 'golden')} data-testid="tab-golden">
-      <Icon name="target" size={12} /> Golden tasks
-    </button>
-    <button class="se-tab" role="tab" aria-selected={tab === 'matrix'} class:active={tab === 'matrix'} onclick={() => (tab = 'matrix')} data-testid="tab-matrix">
-      <Icon name="grid" size={12} /> Matrix
-    </button>
+  <div class="se-tabs" role="tablist" aria-label="Evaluator view" data-testid="eval-tabs" tabindex="-1" bind:this={tabsEl} onkeydown={onTabKey}>
+    {#each TABS as t (t.id)}
+      <button class="se-tab" role="tab" aria-selected={tab === t.id} tabindex={tab === t.id ? 0 : -1} class:active={tab === t.id} onclick={() => setTab(t.id)} data-testid="tab-{t.id}">
+        <Icon name={t.icon} size={12} /> {t.label}
+      </button>
+    {/each}
   </div>
   <div class="se-content">
     {#if tab === 'golden'}
@@ -191,20 +277,22 @@
       <MatrixView onopenrun={openRunById} />
     {:else}
 <div class="se-page">
-  <aside class="se-side" style="width:{sideW}px">
+  <aside class="se-side" style={viewport.isPhone ? undefined : `width:${sideW}px`}>
     <div class="se-side-head">
       <span class="se-side-title">Evaluations</span>
       <button
         class="btn small ghost"
         class:active={compareMode}
+        aria-pressed={compareMode}
         onclick={toggleCompare}
-        title="Compare runs side by side"
+        title={runs.length < 2 ? 'Needs at least two runs to compare' : compareMode ? 'Leave compare mode' : 'Compare runs side by side'}
         disabled={runs.length < 2}
       >
-        <Icon name="grid" size={13} /> Compare
+        <Icon name="columns" size={12} /> {compareMode ? 'Done' : 'Compare'}
       </button>
-      <button class="btn small primary" onclick={newRun}>
-        <Icon name="plus" size={13} /> New
+      <!-- Not .primary: the start form's "Start evaluation" is this view's primary. -->
+      <button class="btn small" onclick={newRun} aria-pressed={mode === 'form' && !compareMode} title="New evaluation">
+        <Icon name="plus" size={12} /> New
       </button>
     </div>
     {#if compareMode}
@@ -216,13 +304,21 @@
       {#if !ws.currentId}
         <div class="se-muted">No workspace selected.</div>
       {:else if loading && runs.length === 0}
-        <div class="se-muted">Loading…</div>
+        <div aria-busy="true" aria-label="Loading evaluations"><Skeleton rows={4} height={56} /></div>
+      {:else if loadError && runs.length === 0}
+        <div class="se-muted se-err" role="alert">
+          <span><Icon name="warning" size={12} /> <strong>Couldn't load evaluations.</strong></span>
+          <span class="se-err-detail">{loadError}</span>
+          <button class="btn small" onclick={() => ws.currentId && loadList(ws.currentId)} disabled={loading}>{loading ? 'Retrying…' : 'Retry'}</button>
+        </div>
       {:else if runs.length === 0}
-        <div class="se-muted">No evaluations yet.</div>
+        <div class="se-muted">No evaluations yet. Fill in the form to run the first one.</div>
       {:else}
         {#each runs as r (r.id)}
           <button
             class="se-item"
+            aria-pressed={compareMode ? compareSel.has(r.id) : undefined}
+            aria-current={!compareMode && mode === 'detail' && selectedId === r.id ? 'true' : undefined}
             class:active={compareMode ? compareSel.has(r.id) : mode === 'detail' && selectedId === r.id}
             onclick={() => (compareMode ? toggleCompareSel(r.id) : selectRun(r.id))}
           >
@@ -232,17 +328,16 @@
                   {#if compareSel.has(r.id)}<Icon name="check" size={11} />{/if}
                 </span>
               {/if}
-              <span class="se-item-name">{r.source_skill}</span>
+              <span class="se-item-name" title={r.source_skill}>{r.source_skill}</span>
               <span class="se-dot st-{r.status}" role="img" aria-label={runStatus(r.status).label} title={runStatus(r.status).label}></span>
             </div>
             <div class="se-item-sub">
-              <span class="se-task">{r.task}</span>
+              <span class="se-task" title={r.task}>{r.task}</span>
             </div>
             <div class="se-item-meta">
-              <span>{r.impl_cli}</span>
-              {#if r.best_score != null}<span class="se-score">· best {r.best_score.toFixed(0)}</span>{/if}
+              <span class="se-meta-main">{[r.impl_cli || 'Score only', r.best_score != null ? `best ${r.best_score.toFixed(0)}` : ''].filter(Boolean).join(' · ')}</span>
               <span class="grow"></span>
-              <span>{ago(r.created_at)}</span>
+              <span title={new Date(r.created_at).toLocaleString()}>{rel(r.created_at)}</span>
             </div>
           </button>
         {/each}
@@ -250,15 +345,20 @@
     </div>
   </aside>
 
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
   <div
     class="side-resizer"
     role="separator"
+    tabindex="0"
     aria-orientation="vertical"
-    aria-label="Drag to resize the evaluations list (double-click to reset)"
-    title="Drag to resize · double-click to reset"
+    aria-valuenow={Math.round(sideW)}
+    aria-valuemin={220}
+    aria-valuemax={480}
+    aria-label="Resize the evaluations list"
+    title="Drag or use ←/→ to resize · double-click to reset"
     ondblclick={resetSideW}
     onpointerdown={startSideResize}
+    onkeydown={onResizeKey}
   ></div>
 
   <main class="se-main">
@@ -275,7 +375,7 @@
         />
       {/if}
     {:else if mode === 'form'}
-      <StartEvalForm {starting} onstart={start} />
+      <StartEvalForm {starting} onstart={start} initialSkill={formSkill} />
     {:else if selectedId}
       {#key selectedId}
         <RunDetail evalId={selectedId} onupdate={onRunUpdate} ondeleted={onRunDeleted} />
@@ -314,13 +414,13 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    height: 34px;
+    height: 32px;
     margin-bottom: -1px;
     border: none;
     border-bottom: 2px solid transparent;
     background: transparent;
     color: var(--text-dim);
-    font-size: var(--fs-m);
+    font: inherit;
     font-weight: 500;
     padding: 0 12px;
     cursor: pointer;
@@ -366,6 +466,10 @@
     z-index: 2;
     touch-action: none;
   }
+  .side-resizer:focus-visible {
+    outline: none;
+    background: color-mix(in srgb, var(--accent) 70%, transparent);
+  }
   .side-resizer:hover {
     background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
@@ -396,11 +500,27 @@
     color: var(--text-dim);
     font-size: var(--fs-s);
   }
+  .se-err {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    color: var(--text);
+    overflow-wrap: anywhere;
+  }
+  .se-err :global(svg) {
+    color: var(--danger);
+    vertical-align: -1px;
+  }
+  .se-err-detail {
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
+  }
   .se-item {
     text-align: start;
     border: 1px solid transparent;
     background: transparent;
-    border-radius: var(--radius-m, 8px);
+    border-radius: var(--radius-m);
     padding: 8px 10px;
     cursor: pointer;
     display: flex;
@@ -408,10 +528,10 @@
     gap: 3px;
   }
   .se-item:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
   }
   .se-item.active {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     border-color: color-mix(in srgb, var(--accent) 30%, transparent);
   }
   .se-item-top {
@@ -423,6 +543,7 @@
     font-size: var(--fs-m);
     font-weight: 500;
     flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -442,8 +563,11 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  .se-score {
-    color: var(--text);
+  .se-meta-main {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .se-dot {
     width: 8px;
@@ -461,10 +585,33 @@
     animation: pulse 1.2s ease-in-out infinite;
   }
   .se-dot.st-done {
-    background: var(--success);
+    background: var(--status-working);
   }
   .se-dot.st-error {
     background: var(--status-exited);
+  }
+  /* Phone: the run list stacks above the report (no room for a side pane). */
+  @media (max-width: 640px) {
+    .se-page {
+      flex-direction: column;
+    }
+    .se-side {
+      width: 100%;
+      max-height: 40%;
+      border-inline-end: none;
+      border-bottom: 1px solid var(--border);
+    }
+    .side-resizer {
+      display: none;
+    }
+    .se-main {
+      flex: 1;
+      min-height: 0;
+    }
+    .se-tabs {
+      overflow-x: auto;
+      padding: 0 8px;
+    }
   }
   @media (prefers-reduced-motion: reduce) {
     .se-dot.st-running {
@@ -483,7 +630,7 @@
   }
   .se-compare-hint {
     padding: 6px 12px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     border-bottom: 1px solid var(--border);
   }
@@ -491,19 +638,19 @@
     width: 14px;
     height: 14px;
     border: 1px solid var(--border);
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     display: grid;
     place-items: center;
     flex-shrink: 0;
   }
   .se-check.on {
-    background: var(--accent);
-    color: #fff;
-    border-color: var(--accent);
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
+    border-color: var(--accent-solid);
   }
   .btn.active {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent-text);
+    background: var(--accent-soft);
+    color: var(--text);
   }
   .grow {
     flex: 1;

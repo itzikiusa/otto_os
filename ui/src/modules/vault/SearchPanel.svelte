@@ -23,19 +23,30 @@
   <input
     bind:this={input}
     bind:value={vault.searchQuery}
+    type="search"
     placeholder="Search… (tag:x path:y type:z)"
+    aria-label="Search this vault"
+    title="Full-text search. Narrow with tag:, path: or type:. Press Enter to search."
     onkeydown={(e) => e.key === 'Enter' && void vault.runSearch()}
   />
   {#if vault.searching}
-    <div class="dim">Searching…</div>
-  {:else if vault.searchQuery && vault.searchHits.length === 0}
-    <div class="dim">No results</div>
+    <div class="dim" role="status">Searching…</div>
+  {:else if vault.searchError}
+    <div class="err" role="alert">
+      <span>Search failed: {vault.searchError}</span>
+      <button class="btn small" onclick={() => void vault.runSearch()}>Retry</button>
+    </div>
+  {:else if vault.searchQuery.trim() && vault.searchQuery.trim() !== vault.searchedQuery}
+    <!-- Search runs on Enter: "No results" before it ran was a lie. -->
+    <div class="dim">Press Enter to search</div>
+  {:else if vault.searchQuery.trim() && vault.searchHits.length === 0}
+    <div class="dim">No notes match “{vault.searchQuery.trim()}”.</div>
   {/if}
   <div class="hits">
     {#each vault.searchHits as h (h.path)}
       <button class="hit" class:reserved={h.reserved} onclick={() => void vault.open(h.path)}>
         <div class="t">{h.title}</div>
-        <div class="p">{h.path}</div>
+        <div class="p" title={h.path}>{h.path}</div>
         {#if h.snippet}
           <!-- Escaped above; only <mark> tags are injected. -->
           <div class="s">{@html renderSnippet(h.snippet)}</div>
@@ -57,15 +68,15 @@
   input {
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: 7px;
+    border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     padding: 6px 10px;
     width: 100%;
   }
   .dim {
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 4px 2px;
   }
   .hits {
@@ -79,7 +90,7 @@
     text-align: start;
     background: none;
     border: none;
-    border-radius: 7px;
+    border-radius: var(--radius-s);
     padding: 6px 8px;
     cursor: pointer;
     color: var(--text);
@@ -87,19 +98,33 @@
   .hit:hover {
     background: var(--hover);
   }
-  .hit.reserved {
-    opacity: 0.7;
+  .hit.reserved .t {
+    color: var(--text-dim);
+    font-style: italic;
+  }
+  .err {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 6px 8px;
+    border-radius: var(--radius-s);
+    background: var(--danger-soft);
+    color: var(--text);
+    font-size: var(--fs-s);
+    overflow-wrap: anywhere;
   }
   .t {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
   }
   .p {
     font-size: var(--fs-xs);
     color: var(--text-dim);
+    overflow-wrap: anywhere;
   }
   .s {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     margin-top: 2px;
   }

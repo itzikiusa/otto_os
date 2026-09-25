@@ -135,6 +135,11 @@
     await Promise.all([detailP, ctrP]);
   }
 
+  function retry(): void {
+    current?.abort();
+    void load();
+  }
+
   $effect(() => {
     void clusterId;
     void kind;
@@ -217,11 +222,11 @@
           {#if isPod || selector || (canEdit && actions.length)}
             <div class="ov-actions">
               {#if isPod}
-                <button class="btn small" disabled={!canLogs} onclick={() => ontab('logs')}><Icon name="file" size={12} /> Logs</button>
+                <button class="btn small" disabled={!canLogs} title={canLogs ? undefined : "You don't have permission to read logs in this namespace"} onclick={() => ontab('logs')}><Icon name="file" size={12} /> Logs</button>
                 {#if canExec}<button class="btn small" onclick={() => ontab('terminal')}><Icon name="terminal" size={12} /> Shell</button>{/if}
               {:else if selector}
                 <button class="btn small" onclick={() => ontab('pods')}><Icon name="box" size={12} /> Pods</button>
-                <button class="btn small" disabled={!canLogs} onclick={() => ontab('logs')}><Icon name="file" size={12} /> Logs</button>
+                <button class="btn small" disabled={!canLogs} title={canLogs ? undefined : "You don't have permission to read logs in this namespace"} onclick={() => ontab('logs')}><Icon name="file" size={12} /> Logs</button>
               {/if}
               {#if canEdit}
                 {#each actions as a (a.id + a.label)}
@@ -263,14 +268,14 @@
         {:else if detailLoading}
           <Skeleton rows={4} height={22} />
         {:else if detailError}
-          <div class="err">{detailError}</div>
+          <div class="err">{detailError} <button class="btn small" onclick={retry}>Retry</button></div>
         {:else}
           <div class="dim">This object isn't in the current list any more. The manifest / describe tabs show its last known state, if the API still has it.</div>
         {/if}
       </div>
     {:else if tab === 'manifest'}
       {#if detailLoading}<div class="pad"><Skeleton rows={8} height={16} /></div>
-      {:else if detailError}<div class="err pad">{detailError}</div>
+      {:else if detailError}<div class="err pad">{detailError} <button class="btn small" onclick={retry}>Retry</button></div>
       {:else}
         <div class="code-tools">
           <span class="dim">{kind === 'secrets' ? 'Secret values are redacted by the daemon.' : 'managedFields stripped.'}</span>
@@ -284,7 +289,7 @@
       {/if}
     {:else if tab === 'describe'}
       {#if detailLoading}<div class="pad"><Skeleton rows={8} height={16} /></div>
-      {:else if detailError}<div class="err pad">{detailError}</div>
+      {:else if detailError}<div class="err pad">{detailError} <button class="btn small" onclick={retry}>Retry</button></div>
       {:else}
         <div class="code-tools">
           <span class="dim mono">kubectl describe {def.singular.toLowerCase()} {name}</span>
@@ -294,7 +299,7 @@
       {/if}
     {:else if tab === 'events'}
       {#if detailLoading}<div class="pad"><Skeleton rows={4} height={22} /></div>
-      {:else if detailError}<div class="err pad">{detailError}</div>
+      {:else if detailError}<div class="err pad">{detailError} <button class="btn small" onclick={retry}>Retry</button></div>
       {:else if !detail?.events.length}<div class="dim pad">No events for this object.</div>
       {:else}
         <table class="events">
@@ -349,7 +354,7 @@
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .dr-kind {
     font-size: var(--fs-xs);
@@ -366,13 +371,13 @@
   }
   .dr-ns {
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .status-pill {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .hdot {
     width: 7px;
@@ -409,7 +414,7 @@
     border: none;
     background: transparent;
     padding: 6px 10px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
     border-bottom: 2px solid transparent;
@@ -442,7 +447,7 @@
     grid-template-columns: minmax(80px, auto) 1fr;
     gap: 4px 14px;
     margin: 0;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .facts dt {
     color: var(--text-dim);
@@ -467,7 +472,12 @@
     gap: 4px;
     flex-wrap: wrap;
   }
+  /* The global .chip is inline-flex, where text-overflow never applies to its
+     bare text — long label values were cut mid-character. Inline-block lets the
+     ellipsis render (line-height matches the chip's 20px box less borders). */
   .labels .chip {
+    display: inline-block;
+    line-height: 18px;
     max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -479,7 +489,7 @@
     gap: 8px;
     padding: 6px 10px;
     border-bottom: 1px solid var(--border);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .code {
     flex: 1;
@@ -488,7 +498,7 @@
   .describe {
     margin: 0;
     padding: 10px 12px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     white-space: pre;
     overflow: auto;
@@ -497,7 +507,7 @@
   .events {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .events th {
     position: sticky;
@@ -533,7 +543,7 @@
     padding: 12px 14px;
   }
   .small {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .ell {
     overflow: hidden;
@@ -542,12 +552,12 @@
   }
   .err {
     color: var(--status-exited);
-    font-size: 12px;
+    font-size: var(--fs-s);
     white-space: pre-wrap;
   }
   .dim {
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
   }
   .mono {

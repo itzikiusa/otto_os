@@ -23,6 +23,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { downloadJson, downloadText } from '../../lib/components/exporters';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -112,7 +114,7 @@
       reports = await insightsApi.listReports();
       void loadIndex();
     } catch (e) {
-      loadError = e instanceof Error ? e.message : String(e);
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -353,7 +355,10 @@
   let runFailReason: string | null = $state(null);
   let pollRunId: string | null = $state(null);
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
-  const POLL_MAX = 20;
+  // 3 s × 100 ≈ 5 min: the banner promises "a few minutes", and the old 20
+  // checks (one minute) dropped the banner silently while the agent was still
+  // writing — the report then never appeared until a manual reload.
+  const POLL_MAX = 100;
   let pollCount = $state(0);
 
   async function runNow(choice = runChoice): Promise<void> {
@@ -384,6 +389,9 @@
 
   function schedulePoll(): void {
     if (pollCount >= POLL_MAX || !pollRunId) {
+      if (pollRunId) {
+        toasts.info('Still generating the insights report', 'It will show up in the list once the agent finishes — reopen Insights to check.');
+      }
       pollRunId = null;
       void load();
       return;
@@ -532,7 +540,7 @@
             <div class="banner" role="status">
               <Icon name="refresh" size={14} />
               <span>Generating the report — an agent is reading your transcripts. This can take a few minutes; it appears in the list when it's done.</span>
-              <span class="dim">Checked {pollCount} of {POLL_MAX}</span>
+              <span class="dim">{Math.floor((pollCount * 3) / 60)}:{String((pollCount * 3) % 60).padStart(2, '0')} elapsed</span>
             </div>
           {/if}
         </div>
@@ -544,15 +552,8 @@
           <section class="detail-pane"><p class="dim loading-text" role="status">Loading insight reports…</p></section>
         </div>
       {:else if loadError && reports.length === 0}
-        <div class="load-error" role="alert">
-          <Icon name="warning" size={16} />
-          <div>
-            <strong>Couldn't load insight reports.</strong>
-            <p class="dim">Otto couldn't read the reports from the daemon. Retry, or check Settings → Logs.</p>
-            <p class="dim mono err-detail">{loadError}</p>
-          </div>
-          <button class="btn small" onclick={load}>Retry</button>
-        </div>
+        <!-- Same inline error + Retry as every other module's failed load. -->
+        <LoadState what="insight reports" variant="page" {loading} error={loadError} empty onretry={load} />
       {:else if reports.length === 0}
         <EmptyState
           variant="page"
@@ -580,7 +581,7 @@
                 {#each filtered as r (keyOf(r))}
                   {@const p = parsedByKey.get(keyOf(r))}
                   {@const acts = actionSummary(r)}
-                  <button class="row" class:active={keyOf(r) === selectedKey} aria-current={keyOf(r) === selectedKey ? 'true' : undefined} onclick={() => select(r)}>
+                  <button class="rep-row" class:active={keyOf(r) === selectedKey} aria-current={keyOf(r) === selectedKey ? 'true' : undefined} onclick={() => select(r)}>
                     <div class="row-top">
                       <span class="chip">{kindLabel(r.kind)}</span>
                       <span class="row-date">{periodShort(r)}</span>
@@ -760,7 +761,7 @@
     flex-direction: column;
     gap: 2px;
   }
-  .row {
+  .rep-row {
     display: flex;
     flex-direction: column;
     align-items: stretch;
@@ -775,10 +776,10 @@
     cursor: pointer;
     font: inherit;
   }
-  .row:hover {
+  .rep-row:hover {
     background: var(--hover);
   }
-  .row.active {
+  .rep-row.active {
     background: var(--accent-soft);
     border-color: color-mix(in srgb, var(--accent) 28%, transparent);
   }
@@ -856,33 +857,6 @@
   .list-empty {
     padding: 12px;
     font-size: var(--fs-s);
-  }
-
-  .load-error {
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
-    margin: 20px;
-    padding: 14px 16px;
-    max-width: 720px;
-    border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
-    border-radius: var(--radius-m);
-    background: var(--surface);
-  }
-  .load-error > :global(svg) {
-    color: var(--danger);
-    margin-top: 2px;
-  }
-  .load-error > div {
-    flex: 1;
-    min-width: 0;
-  }
-  .load-error p {
-    margin: 4px 0 0;
-  }
-  .err-detail {
-    font-size: var(--fs-xs);
-    overflow-wrap: anywhere;
   }
 
   @media (max-width: 1024px) {

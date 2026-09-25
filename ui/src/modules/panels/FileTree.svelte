@@ -3,6 +3,7 @@
   // for the right-panel Files tab.
   import { onDestroy } from 'svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { openFile as openFileSignal } from '../../lib/stores/openfile.svelte';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
@@ -135,7 +136,7 @@
           node.loaded = true;
         } catch (e) {
           if (generation !== rootGeneration) return;
-          toasts.error('Cannot open folder', e instanceof Error ? e.message : String(e));
+          toasts.error(`Couldn't open ${node.entry.name}`, e instanceof Error ? e.message : String(e));
           node.open = false;
         } finally {
           node.loading = false;
@@ -222,16 +223,26 @@
       return `<pre>${src.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c] ?? c))}</pre>`;
     }
   }
-  const PREVIEW_CSS = `
-    :root { color-scheme: light dark; }
-    body { font: 14px/1.6 -apple-system, system-ui, sans-serif; margin: 16px; color: #ddd; background: transparent; }
-    h1,h2,h3 { line-height: 1.25; } h1,h2 { border-bottom: 1px solid #ffffff22; padding-bottom: .2em; }
-    a { color: #6ea8fe; } code { background: #ffffff14; padding: .15em .35em; border-radius: 4px; font-family: ui-monospace, monospace; }
-    pre { background: #ffffff10; padding: 12px; border-radius: 6px; overflow: auto; } pre code { background: none; padding: 0; }
-    table { border-collapse: collapse; } th,td { border: 1px solid #ffffff22; padding: 4px 8px; }
-    blockquote { border-left: 3px solid #ffffff33; margin: 0; padding-left: 12px; color: #aaa; }
+  // The srcdoc is an isolated, script-less document: it can't see the app's
+  // tokens, so it gets a palette per resolved scheme (it used to be dark-only
+  // — light grey text on a hard-coded near-black box in the light theme).
+  const PREVIEW_PALETTE = {
+    dark: { text: '#dddddd', dim: '#aaaaaa', link: '#6ea8fe', line: '#ffffff22', fill: '#ffffff12' },
+    light: { text: '#1d1d1f', dim: '#6e6e73', link: '#0a60d0', line: '#00000022', fill: '#0000000d' },
+  } as const;
+  const PREVIEW_CSS = $derived.by(() => {
+    const p = PREVIEW_PALETTE[ui.resolvedScheme];
+    return `
+    :root { color-scheme: ${ui.resolvedScheme}; }
+    body { font: 14px/1.6 -apple-system, system-ui, sans-serif; margin: 16px; color: ${p.text}; background: transparent; }
+    h1,h2,h3 { line-height: 1.25; } h1,h2 { border-bottom: 1px solid ${p.line}; padding-bottom: .2em; }
+    a { color: ${p.link}; } code { background: ${p.fill}; padding: .15em .35em; border-radius: 4px; font-family: ui-monospace, monospace; }
+    pre { background: ${p.fill}; padding: 12px; border-radius: 6px; overflow: auto; } pre code { background: none; padding: 0; }
+    table { border-collapse: collapse; } th,td { border: 1px solid ${p.line}; padding: 4px 8px; }
+    blockquote { border-left: 3px solid ${p.line}; margin: 0; padding-left: 12px; color: ${p.dim}; }
     img { max-width: 100%; }
   `;
+  });
 
   // Collect flattened visible nodes for rendering (DFS walk).
   function flatten(nodes: TreeNode[]): TreeNode[] {
@@ -275,9 +286,22 @@
         <Icon name="folder" size={11} />
         <span class="ft-root-text">{basename(effectiveRoot)}</span>
       </span>
+      {#if effectiveRoot}
+        <!-- The tree is loaded once per root; files the agent writes afterwards
+             only show up on a re-list, so give that a button. -->
+        <button
+          class="icon-btn ft-change-btn"
+          title="Refresh folder"
+          aria-label="Refresh folder"
+          disabled={rootLoading}
+          onclick={() => void loadRoot(effectiveRoot)}
+        >
+          <Icon name="refresh" size={12} />
+        </button>
+      {/if}
       <button
         class="icon-btn ft-change-btn"
-        title="Change folder…"
+        title="Change folder"
         aria-label="Change folder"
         onclick={() => (showPicker = true)}
       >
@@ -296,11 +320,27 @@
     </div>
 
     {#if !effectiveRoot}
-      <EmptyState icon="folder" title="Choose a folder" body="Choose a folder to browse, or open a file from a terminal link." />
+      <EmptyState
+        icon="folder"
+        title="No folder to browse"
+        body="Choose a folder to browse, or open a file from a terminal link."
+        actionLabel="Choose folder"
+        actionIcon="folder"
+        onaction={() => (showPicker = true)}
+      />
     {:else if rootLoading}
-      <div class="loading dim">Loading…</div>
+      <div class="loading dim">Loading files…</div>
     {:else if rootError}
-      <div class="error-msg">{rootError}</div>
+      <div class="load-error" role="alert">
+        <div class="error-head">
+          <Icon name="warning" size={13} />
+          <span>Couldn't list {basename(effectiveRoot)}</span>
+        </div>
+        <div class="error-detail">{rootError}</div>
+        <button class="btn small" onclick={() => void loadRoot(effectiveRoot)}>
+          <Icon name="refresh" size={12} /> Retry
+        </button>
+      </div>
     {:else}
       <!-- Tree pane -->
       <div class="tree-pane" class:has-viewer={!!viewerFile}>
@@ -345,17 +385,18 @@
       {#if viewerFile || viewerLoading || viewerError}
         <div class="viewer-pane">
           <div class="viewer-header">
-            <span class="viewer-name">
+            <span class="viewer-name" title={viewerFile?.path ?? viewerName}>
               <Icon name="file" size={11} />
-              {viewerName}
+              <!-- ellipsis only applies to a block box, not a bare text node in a flex row -->
+              <span class="viewer-name-text">{viewerName}</span>
             </span>
             {#if viewerFile?.truncated}
               <span class="truncated-badge dim" title="File truncated at ~400 KB">truncated</span>
             {/if}
             {#if canPreview}
               <div class="preview-toggle">
-                <button class="pv" class:active={!previewMode} onclick={() => (previewMode = false)}>Source</button>
-                <button class="pv" class:active={previewMode} onclick={() => (previewMode = true)}>Preview</button>
+                <button class="pv" class:active={!previewMode} aria-pressed={!previewMode} onclick={() => (previewMode = false)}>Source</button>
+                <button class="pv" class:active={previewMode} aria-pressed={previewMode} onclick={() => (previewMode = true)}>Preview</button>
               </div>
             {/if}
             <button class="close-btn icon-btn" onclick={closeViewer} title="Close viewer" aria-label="Close viewer">
@@ -363,7 +404,7 @@
             </button>
           </div>
           {#if viewerLoading}
-            <div class="loading dim">Loading…</div>
+            <div class="loading dim">Loading {viewerName}…</div>
           {:else if viewerError}
             <div class="error-msg" role="alert">{viewerError}</div>
           {:else if viewerFile}
@@ -431,7 +472,7 @@
     opacity: 0.55;
     padding: 2px 4px;
   }
-  .ft-change-btn:hover {
+  .ft-change-btn:hover:not(:disabled) {
     opacity: 1;
   }
 
@@ -469,7 +510,7 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
     text-align: start;
     white-space: nowrap;
@@ -493,6 +534,9 @@
   .chevron {
     display: flex;
     align-items: center;
+    justify-content: center;
+    /* Same width as .file-spacer so folder and file icons line up per depth. */
+    width: 14px;
     flex-shrink: 0;
     color: var(--text-dim);
   }
@@ -522,7 +566,7 @@
 
   .empty-dir {
     padding: 8px 12px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
 
   /* ── viewer ───────────────────────────── */
@@ -548,13 +592,19 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     font-family: var(--font-mono);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     flex: 1;
+    min-width: 0;
     color: var(--text);
+  }
+  .viewer-name-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .truncated-badge {
     font-size: var(--fs-xs);
@@ -584,7 +634,7 @@
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
     border-radius: var(--radius-s);
   }
@@ -597,17 +647,41 @@
     min-height: 0;
     width: 100%;
     border: none;
-    background: #1a1a1a; /* PREVIEW_CSS in the srcdoc is dark-only */
+    /* The srcdoc body is transparent over this; its palette follows the scheme. */
+    background: var(--bg);
   }
 
   /* ── misc ─────────────────────────────── */
   .loading {
     padding: 12px;
-    font-size: 12px;
+    font-size: var(--fs-s);
+  }
+  .load-error {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 12px;
+    font-size: var(--fs-s);
+  }
+  .error-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text);
+  }
+  .error-head :global(svg) {
+    color: var(--danger);
+    flex-shrink: 0;
+  }
+  .error-detail {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    word-break: break-all;
   }
   .error-msg {
     padding: 12px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--danger);
     word-break: break-all;
   }

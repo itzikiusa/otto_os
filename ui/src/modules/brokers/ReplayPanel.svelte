@@ -33,6 +33,17 @@
   let running = $state(false);
   let result = $state<ReplayResp | null>(null);
 
+  // Why Replay is disabled, in words (a disabled button must say why).
+  const blockReason = $derived(
+    !sourceTopic.trim() || !targetTopic.trim()
+      ? 'Enter a source and a target topic first'
+      : sourceTopic.trim() === targetTopic.trim()
+        ? 'Source and target must be different topics'
+        : selectorType === 'offset_range' && Number(toOffset) < Number(fromOffset)
+          ? '"To offset" must be at or after "From offset"'
+          : null,
+  );
+
   function buildSelector(): ReplaySelector {
     if (selectorType === 'offset_range') {
       return { type: 'offset_range', partition, from: fromOffset, to: toOffset };
@@ -81,7 +92,7 @@
         `${result.count} message${result.count === 1 ? '' : 's'} replayed to "${result.target_topic}"`,
       );
     } catch (e) {
-      toasts.error('Replay failed', String(e));
+      toasts.error("Couldn't replay messages", e instanceof Error ? e.message : String(e));
     } finally {
       running = false;
     }
@@ -170,10 +181,14 @@
     <button
       class="btn primary"
       onclick={runReplay}
-      disabled={running || !sourceTopic.trim() || !targetTopic.trim()}
+      disabled={running || blockReason !== null}
+      title={blockReason ?? 'Re-publish the selected messages to the target topic'}
     >
       {running ? 'Replaying…' : 'Replay'}
     </button>
+    {#if blockReason && sourceTopic.trim() && targetTopic.trim()}
+      <p class="field-err">{blockReason}</p>
+    {/if}
   </div>
 
   <!-- Evidence table -->
@@ -215,7 +230,7 @@
   }
   h5 {
     margin: 0 0 6px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--text-dim);
@@ -231,7 +246,7 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   label input,
@@ -241,7 +256,7 @@
     border-radius: var(--radius-s);
     padding: 5px 7px;
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .narrow {
     width: 100px;
@@ -252,7 +267,7 @@
     flex-wrap: wrap;
   }
   .transform-details {
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .transform-details summary {
     cursor: pointer;
@@ -270,14 +285,14 @@
   table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     margin-top: 6px;
   }
   th {
     text-align: start;
     font-weight: 500;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 4px 8px;
     border-bottom: 1px solid var(--border);
   }
@@ -287,19 +302,24 @@
   }
   .mono {
     font-family: var(--font-mono);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   code {
     font-family: var(--font-mono);
     background: var(--surface-2);
     padding: 0 4px;
     border-radius: 3px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
+  }
+  .field-err {
+    margin: 0;
+    font-size: var(--fs-xs);
+    color: var(--danger);
   }
   .muted {
     color: var(--text-dim);
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
 </style>

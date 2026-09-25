@@ -24,10 +24,10 @@
 <style>
   .tasks {
     padding: 6px 10px 8px 31px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .tasks-head {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     margin-bottom: 3px;
   }
   ul {

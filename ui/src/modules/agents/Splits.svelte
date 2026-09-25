@@ -10,6 +10,7 @@
   import { registry } from '../../lib/commands.svelte';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import type { BroadcastResp } from '../../lib/api/types';
 
   /** Live pane geometry, read at call time — the keyboard move picks the
@@ -66,13 +67,13 @@
     };
     window.addEventListener('keydown', h, { capture: true });
     const unregister = registry.register('pane-layout', [
-      { id: 'layout.move-left', title: 'Move Pane Left', group: 'Layout', shortcut: '⌘⌥←', keywords: 'split pane arrange tile', run: () => move('left') },
-      { id: 'layout.move-right', title: 'Move Pane Right', group: 'Layout', shortcut: '⌘⌥→', keywords: 'split pane arrange tile', run: () => move('right') },
-      { id: 'layout.move-up', title: 'Move Pane Up', group: 'Layout', shortcut: '⌘⌥↑', keywords: 'split pane arrange tile', run: () => move('up') },
-      { id: 'layout.move-down', title: 'Move Pane Down', group: 'Layout', shortcut: '⌘⌥↓', keywords: 'split pane arrange tile', run: () => move('down') },
+      { id: 'layout.move-left', title: 'Move pane left', group: 'Layout', shortcut: '⌘⌥←', keywords: 'split pane arrange tile', run: () => move('left') },
+      { id: 'layout.move-right', title: 'Move pane right', group: 'Layout', shortcut: '⌘⌥→', keywords: 'split pane arrange tile', run: () => move('right') },
+      { id: 'layout.move-up', title: 'Move pane up', group: 'Layout', shortcut: '⌘⌥↑', keywords: 'split pane arrange tile', run: () => move('up') },
+      { id: 'layout.move-down', title: 'Move pane down', group: 'Layout', shortcut: '⌘⌥↓', keywords: 'split pane arrange tile', run: () => move('down') },
       {
         id: 'layout.swap-next',
-        title: 'Swap Pane With Next',
+        title: 'Swap pane with next',
         group: 'Layout',
         shortcut: '⌘⌥S',
         keywords: 'split pane arrange tile',
@@ -81,11 +82,11 @@
           ws.focusPane(layout.focusedIndex);
         },
       },
-      { id: 'layout.preset-cols', title: 'Layout: Equal Columns', group: 'Layout', keywords: 'split pane arrange tile', run: () => preset('cols') },
-      { id: 'layout.preset-rows', title: 'Layout: Equal Rows', group: 'Layout', keywords: 'split pane arrange tile', run: () => preset('rows') },
-      { id: 'layout.preset-one-two-below', title: 'Layout: One Above Two', group: 'Layout', keywords: 'split pane arrange tile', run: () => preset('one-two-below') },
-      { id: 'layout.preset-one-two-beside', title: 'Layout: One Beside Two', group: 'Layout', keywords: 'split pane arrange tile', run: () => preset('one-two-beside') },
-      { id: 'layout.preset-grid', title: 'Layout: Grid', group: 'Layout', keywords: 'split pane arrange tile', run: () => preset('grid') },
+      { id: 'layout.preset-cols', title: 'Layout: equal columns', group: 'Layout', keywords: 'split pane arrange tile', run: () => preset('cols') },
+      { id: 'layout.preset-rows', title: 'Layout: equal rows', group: 'Layout', keywords: 'split pane arrange tile', run: () => preset('rows') },
+      { id: 'layout.preset-one-two-below', title: 'Layout: one above two', group: 'Layout', keywords: 'split pane arrange tile', run: () => preset('one-two-below') },
+      { id: 'layout.preset-one-two-beside', title: 'Layout: one beside two', group: 'Layout', keywords: 'split pane arrange tile', run: () => preset('one-two-beside') },
+      { id: 'layout.preset-grid', title: 'Layout: grid', group: 'Layout', keywords: 'split pane arrange tile', run: () => preset('grid') },
     ]);
     return () => {
       window.removeEventListener('keydown', h, { capture: true });
@@ -130,7 +131,8 @@
         { text, session_ids: broadcastTargets },
       );
       if (targetWorkspace === scope && broadcastText.trim() === text) broadcastText = '';
-      toasts.info('Broadcast sent', `Delivered to ${resp.session_ids.length} session(s).`);
+      const n = resp.session_ids.length;
+      toasts.info('Broadcast sent', `Delivered to ${n} session${n === 1 ? '' : 's'}.`);
     } catch (e) {
       toasts.error('Broadcast failed', e instanceof Error ? e.message : String(e));
     } finally {
@@ -157,16 +159,17 @@
   {#if ws.panes.length >= 2 && broadcastTargets.length >= 2 && broadcastable}
     <div class="broadcast-bar-wrap">
       <button
-        class="broadcast-toggle"
+        class="btn small broadcast-toggle"
         class:active={broadcastMode}
         onclick={() => { broadcastMode = !broadcastMode; }}
-        title={broadcastMode ? 'Exit broadcast mode' : 'Broadcast input to all visible sessions'}
+        title={broadcastMode ? 'Exit broadcast mode (Esc)' : 'Type once, send to every visible session'}
         aria-pressed={broadcastMode}
-      >{broadcastMode ? '↗ exit broadcast' : '↗ broadcast'}</button>
+      ><Icon name="send" size={12} />{broadcastMode ? 'Exit broadcast' : 'Broadcast'}</button>
       {#if broadcastMode}
         <!-- svelte-ignore a11y_autofocus -->
         <input
           class="broadcast-input"
+          aria-label="Broadcast message"
           bind:value={broadcastText}
           placeholder="Send to all visible sessions — Enter to send"
           disabled={broadcastBusy}
@@ -174,10 +177,10 @@
           onkeydown={onBroadcastKeydown}
         />
         <button
-          class="broadcast-send"
+          class="btn small primary"
           disabled={broadcastBusy || broadcastText.trim() === ''}
           onclick={() => void sendBroadcast()}
-        >{broadcastBusy ? '…' : 'Send'}</button>
+        >{broadcastBusy ? 'Sending…' : `Send to ${broadcastTargets.length}`}</button>
       {/if}
     </div>
   {/if}
@@ -207,52 +210,23 @@
     flex-shrink: 0;
   }
   .broadcast-toggle {
-    flex-shrink: 0;
-    font-size: 11px;
-    padding: 2px 8px;
-    border-radius: var(--radius-s);
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text-dim);
-    cursor: pointer;
-    transition: background 120ms, color 120ms, border-color 120ms;
+    gap: 5px;
   }
   .broadcast-toggle.active {
     border-color: var(--accent);
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 10%, var(--surface-2));
-  }
-  .broadcast-toggle:hover {
-    color: var(--text);
-    border-color: var(--accent);
+    background: var(--accent-soft);
   }
   .broadcast-input {
     flex: 1;
     min-width: 0;
     height: 26px;
     padding: 0 8px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     background: var(--surface);
     border: 1px solid var(--accent);
     border-radius: var(--radius-s);
     color: var(--text);
-    outline: none;
-  }
-  .broadcast-send {
-    flex-shrink: 0;
-    height: 26px;
-    padding: 0 12px;
-    font-size: 12px;
-    border-radius: var(--radius-s);
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: #fff;
-    cursor: pointer;
-    transition: opacity 120ms;
-  }
-  .broadcast-send:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
   }
   /* The root fills the host; every nested track is sized by SplitNode. */
   .tree {

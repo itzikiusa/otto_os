@@ -18,6 +18,8 @@ test.describe('sidebar customize', () => {
     await page.evaluate(() => {
       localStorage.removeItem('otto_sidebar_order');
       localStorage.removeItem('otto_sidebar_hidden');
+      localStorage.removeItem('otto_sidebar_favorites');
+      localStorage.removeItem('otto_sidebar_group_order');
       localStorage.setItem('otto_rail_expanded', '1');
     });
     await page.reload();
@@ -75,6 +77,8 @@ test.describe('sidebar customize', () => {
     expect(i).toBeGreaterThan(0); // not already first
 
     // Move "Usage" up one slot.
+    // The arrows open up on row hover / focus (the label keeps its room).
+    await page.getByTestId('sidebar-edit-row-usage').hover();
     await page.getByRole('button', { name: 'Move Usage up' }).click();
 
     const after = await rowIds();

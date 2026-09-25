@@ -36,7 +36,7 @@ test.beforeEach(async ({ page }, testInfo) => {
 
 /** Open the New Session sheet (⌘T, falling back to the TabBar + button). */
 async function openSheet(page: import('@playwright/test').Page) {
-  const dialog = page.locator('.sheet[role="dialog"][aria-label="New Session"]');
+  const dialog = page.locator('.sheet[role="dialog"][aria-label="New session"]');
   await page.keyboard.press('Meta+t');
   if (!(await dialog.isVisible().catch(() => false))) {
     await page.getByTitle('New session (⌘T)').click();
@@ -62,7 +62,7 @@ test.describe('new-session batch', () => {
     await shell.locator('.card-main').click();
     await expect(shell.locator('.count')).toHaveText('1');
     // A single session reads as it always did — no batch language.
-    await expect(page.getByRole('button', { name: 'Start Session', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Start session', exact: true })).toBeVisible();
 
     // Ask for three of them.
     await dialog.getByLabel('One more shell session').click();
@@ -72,7 +72,7 @@ test.describe('new-session batch', () => {
     await expect(dialog.locator('.batch')).toContainText('3 shell');
 
     // One click starts all three, and the count is what the button promised.
-    const start = page.getByRole('button', { name: 'Start 3 Sessions' });
+    const start = page.getByRole('button', { name: 'Start 3 sessions' });
     await expect(start).toBeVisible();
     await start.click();
     await expect(dialog).toHaveCount(0, { timeout: 15_000 });

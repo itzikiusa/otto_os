@@ -8,6 +8,7 @@
 // avoid the state_unsafe_mutation footgun.
 
 import { listProofPacks, proofSummary, getProofPack, type ProofPackFilter } from '../api/proof';
+import { loadErrorText } from '../loadError';
 import type { OttoEvent, ProofPackDetail, ProofPackResp, ProofSummaryRow } from '../api/types';
 
 class ProofStore {
@@ -19,6 +20,10 @@ class ProofStore {
   summaryByWorkItem: Record<string, ProofSummaryRow> = $state({});
   /** Whether the list/detail is loading. */
   loading = $state(false);
+  /** Last failed list load (human text) — inline with Retry, never "no packs". */
+  error: string | null = $state(null);
+  /** Last failed detail load (human text) — inline with Retry in the right pane. */
+  detailError: string | null = $state(null);
   /** The workspace the current data belongs to. */
   wsId: string | null = $state(null);
   /** The filter last used by loadPacks, so an event reload preserves the view. */
@@ -31,13 +36,18 @@ class ProofStore {
 
   /** Load the workspace's packs (optionally filtered) into `packs`. */
   async loadPacks(wsId: string, filter?: ProofPackFilter): Promise<void> {
+    // Another workspace's packs are never "stale data" for this one.
+    if (this.wsId !== wsId) this.packs = [];
     this.wsId = wsId;
     this.lastFilter = filter;
     this.loading = true;
     try {
-      this.packs = await listProofPacks(wsId, filter);
-    } catch {
-      this.packs = [];
+      const packs = await listProofPacks(wsId, filter);
+      if (this.wsId !== wsId) return; // a newer workspace switch won the race
+      this.packs = packs;
+      this.error = null;
+    } catch (e) {
+      if (this.wsId === wsId) this.error = loadErrorText(e);
     } finally {
       this.loading = false;
     }
@@ -61,8 +71,12 @@ class ProofStore {
     this.loading = true;
     try {
       this.detail = await getProofPack(id);
-    } catch {
-      this.detail = null;
+      this.detailError = null;
+    } catch (e) {
+      // A refresh failure of the SAME pack keeps it on screen; another pack's
+      // detail never stands in for the one that failed to open.
+      if (this.detail?.pack.id !== id) this.detail = null;
+      this.detailError = loadErrorText(e);
     } finally {
       this.loading = false;
     }
@@ -75,6 +89,7 @@ class ProofStore {
 
   closeDetail(): void {
     this.detail = null;
+    this.detailError = null;
   }
 
   /** Route the proof-related WS events. Returns true when handled. */

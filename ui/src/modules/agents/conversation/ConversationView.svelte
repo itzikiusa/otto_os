@@ -359,7 +359,7 @@
         title="Conversation actions"
         onclick={openHeadMenu}
         onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && openHeadMenu(e)}
-      >⋯</button>
+      ><Icon name="more" size={12} /></button>
     {:else if headTier >= 2}
       <!-- Narrow: the labelled checkbox becomes an icon toggle. -->
       <button
@@ -486,7 +486,7 @@
     border-bottom: 1px solid var(--border);
     background: var(--surface);
     flex-shrink: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     min-width: 0;
   }
   .conv-title {
@@ -497,7 +497,7 @@
     max-width: 40%;
   }
   .stats {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -521,7 +521,7 @@
     background: none;
     color: var(--text);
     font: inherit;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     width: 180px;
     min-width: 0;
   }
@@ -553,7 +553,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     cursor: pointer;
     white-space: nowrap;
@@ -585,13 +585,13 @@
     gap: 8px;
     text-align: center;
     padding: 48px 24px;
-    font-size: 13px;
+    font-size: var(--fs-m);
     max-width: 480px;
     margin: 0 auto;
   }
   .empty-title {
     font-weight: 600;
-    font-size: 14px;
+    font-size: var(--fs-m);
   }
   .live-artifacts {
     display: flex;
@@ -606,7 +606,7 @@
   }
   .inline-err {
     color: var(--danger);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     padding: 4px 16px;
   }
   .new-pill {
@@ -619,7 +619,7 @@
     border: 0;
     border-radius: 99px;
     padding: 4px 12px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
     box-shadow: var(--shadow);

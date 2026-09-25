@@ -106,34 +106,51 @@
   function go(id: Section): void {
     router.go('mcp/' + id);
   }
+
+  const SECTIONS: { id: Section; label: string }[] = [
+    { id: 'otto', label: 'Otto server' },
+    { id: 'servers', label: 'External servers' },
+    { id: 'activity', label: 'Activity' },
+  ];
+  function onTabKey(e: KeyboardEvent): void {
+    const i = SECTIONS.findIndex((s) => s.id === section);
+    let next = -1;
+    if (e.key === 'ArrowRight') next = (i + 1) % SECTIONS.length;
+    else if (e.key === 'ArrowLeft') next = (i - 1 + SECTIONS.length) % SECTIONS.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = SECTIONS.length - 1;
+    if (next < 0) return;
+    e.preventDefault();
+    go(SECTIONS[next].id);
+    queueMicrotask(() =>
+      (e.currentTarget as HTMLElement | null)?.querySelector<HTMLButtonElement>(`[data-testid="mcp-nav-${SECTIONS[next].id}"]`)?.focus(),
+    );
+  }
 </script>
 
 <div class="mcp-page">
-  <PageHeader title="MCP Control Plane" icon="plug">
+  <PageHeader title="MCP Control Plane">
     {#snippet badge()}
-      {#if ws.current}<span class="wsname">{ws.current.name}</span>{/if}
+      {#if ws.current}<span class="wsname" title="Workspace: {ws.current.name}">{ws.current.name}</span>{/if}
     {/snippet}
     {#snippet tabs()}
-      <nav class="tabs" aria-label="MCP sections">
-        <button
-          class:on={section === 'otto'}
-          data-testid="mcp-nav-otto"
-          onclick={() => go('otto')}
-        >Otto server</button>
-        <button
-          class:on={section === 'servers'}
-          data-testid="mcp-nav-servers"
-          onclick={() => go('servers')}
-        >External servers{wsId ? ` (${servers.length})` : ''}</button>
-        <button
-          class:on={section === 'activity'}
-          data-testid="mcp-nav-activity"
-          onclick={() => go('activity')}
-        >
-          Activity
-          {#if pending > 0}<span class="badge" data-testid="mcp-pending-badge">{pending}</span>{/if}
-        </button>
-      </nav>
+      <!-- A route-backed tablist (←/→/Home/End move between sections). -->
+      <div class="segmented tabs" role="tablist" aria-label="MCP sections" tabindex="-1" onkeydown={onTabKey}>
+        {#each SECTIONS as s (s.id)}
+          <button
+            class:active={section === s.id}
+            role="tab"
+            aria-selected={section === s.id}
+            tabindex={section === s.id ? 0 : -1}
+            data-testid="mcp-nav-{s.id}"
+            onclick={() => go(s.id)}
+          >
+            {s.label}
+            {#if s.id === 'servers' && wsId && !loading && !loadError}<span class="count">{servers.length}</span>{/if}
+            {#if s.id === 'activity' && pending > 0}<span class="badge" data-testid="mcp-pending-badge" title="{pending} approval{pending === 1 ? '' : 's'} waiting for you">{pending}</span>{/if}
+          </button>
+        {/each}
+      </div>
     {/snippet}
   </PageHeader>
 
@@ -163,7 +180,7 @@
         {/if}
       {:else}
         <div class="activity">
-          <ApprovalsTab />
+          <ApprovalsTab ondecided={() => void loadPending()} />
           <AuditTab {servers} />
         </div>
       {/if}
@@ -179,20 +196,19 @@
     min-height: 0;
   }
   .wsname {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    border-radius: 6px;
-    padding: 1px 8px;
-  }
-  /* Section switch: a segmented control in the page header (native toolbar). */
-  .tabs {
-    display: inline-flex;
-    gap: 2px;
-    padding: 2px;
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: var(--radius-s);
+    border-radius: 999px;
+    padding: 1px 8px;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* Section switch: the shared segmented control in the page header. */
+  .tabs {
     flex-wrap: nowrap;
     flex: none;
   }
@@ -200,28 +216,21 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    height: 24px;
-    border: none;
-    border-radius: 4px;
-    background: transparent;
-    color: var(--text-dim);
-    padding: 0 10px;
-    cursor: pointer;
-    font-size: 12px;
     white-space: nowrap;
     flex: none;
   }
-  .tabs button.on {
-    background: var(--surface);
-    color: var(--text);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+  .count {
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
   }
   .badge {
     min-width: 16px;
     padding: 1px 5px;
     border-radius: 999px;
-    background: var(--danger-solid);
-    color: white;
+    /* A pending queue is "needs you" — the amber state, not an error (patterns §5). */
+    background: var(--warning-soft);
+    color: var(--warning);
+    font-weight: 600;
     font-size: var(--fs-xs);
     line-height: 14px;
     text-align: center;
@@ -234,8 +243,7 @@
   @media (max-width: 640px) {
     .tabs button {
       height: 30px;
-      padding: 0 10px;
-      font-size: 13px;
+      font-size: var(--fs-m);
     }
   }
 </style>

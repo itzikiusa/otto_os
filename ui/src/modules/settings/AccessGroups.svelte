@@ -11,6 +11,11 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { accessOperations, operationLabel, resourceLabels } from '../../lib/access-options';
   import type { AccessGroup, AccessRole, User, ResourceKind } from '../../lib/api/types';
+  import { toasts } from '../../lib/toast.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import { loadErrorText } from '../../lib/loadError';
+  import { guardUnsaved } from '../../lib/leaveGuard';
   let groups = $state<AccessGroup[]>([]),
     roles = $state<AccessRole[]>([]),
     users = $state<User[]>([]);
@@ -22,6 +27,7 @@
     error = $state('');
   let busy = $state(false),
     loading = $state(true);
+  let loadError = $state('');
   let roleId = $state(''),
     roleName = $state(''),
     roleDescription = $state('');
@@ -30,6 +36,24 @@
     grantable = $state<string[]>([]);
   let membershipGeneration = 0;
   let loadGeneration = 0;
+  // Groups and role presets are two list/detail editors; showing one at a
+  // time (like Context library's Skills | Souls | Context) keeps ONE primary
+  // action on screen instead of two stacked forms each with its own.
+  let tab = $state<'groups' | 'presets'>('groups');
+  // Save stays disabled until something changed (layout.md → Settings form).
+  const groupDirty = $derived(
+    !selected || name.trim() !== selected.name || description.trim() !== (selected.description ?? ''),
+  );
+  const savedRole = $derived(roles.find((r) => r.id === roleId));
+  const sameSet = (a: string[], b: string[]) => a.length === b.length && a.every((x) => b.includes(x));
+  const roleDirty = $derived(
+    !savedRole ||
+      roleName.trim() !== savedRole.name ||
+      roleDescription.trim() !== (savedRole.description ?? '') ||
+      roleKind !== savedRole.kind ||
+      !sameSet(operations, savedRole.operations ?? []) ||
+      !sameSet(grantable, savedRole.grantable_operations ?? []),
+  );
   async function load() {
     const generation = ++loadGeneration;
     loading = true;
@@ -40,16 +64,28 @@
         accessApi.roles(),
         api.get<User[]>('/users'),
       ]);
-      if (generation === loadGeneration) [groups, roles, users] = loaded;
+      if (generation === loadGeneration) {
+        [groups, roles, users] = loaded;
+        loadError = '';
+        // Open on an item, not on a blank form: the first group / preset.
+        if (!selected && groups[0]) void selectGroup(groups[0]);
+        if (!roleId && roles[0]) editRole(roles[0]);
+      }
     } catch (e) {
-      error = String(e);
+      if (generation === loadGeneration) loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (generation === loadGeneration) loading = false;
     }
   }
   onMount(() => {
     if (auth.isRoot) void load();
   });
+  // Typed-but-unsaved group or preset edits (a blank new form isn't "dirty").
+  const leaveDirty = $derived(
+    (selected ? groupDirty : !!(name.trim() || description.trim())) ||
+      (savedRole ? roleDirty : !!(roleName.trim() || roleDescription.trim() || operations.length)),
+  );
+  $effect(() => guardUnsaved(() => leaveDirty, { what: 'this group or preset' }));
   $effect(() =>
     resourceAccess.subscribe((change) => {
       if (change.type === 'reset' && change.identity) {
@@ -78,36 +114,40 @@
       const result = await accessApi.members(group.id);
       if (generation === membershipGeneration) members = result;
     } catch (e) {
-      if (generation === membershipGeneration) error = String(e);
+      if (generation === membershipGeneration) error = `Couldn’t load the members of ${group.name}. ${e instanceof Error ? e.message : String(e)}`;
     }
   }
   function newGroup() {
     membershipGeneration++;
+    error = '';
     selected = null;
     name = '';
     description = '';
     members = [];
   }
-  async function mutate(action: () => Promise<unknown>) {
+  async function mutate(what: string, action: () => Promise<unknown>, done?: string) {
     busy = true;
     error = '';
     try {
       await action();
       resourceAccess.invalidate();
+      if (done) toasts.success(done);
     } catch (e) {
-      error = String(e);
+      // Inline, next to the form — the fix is usually in the fields above.
+      error = `Couldn’t ${what}. ${e instanceof Error ? e.message : String(e)}`;
     } finally {
       busy = false;
     }
   }
   async function saveGroup() {
-    await mutate(async () => {
+    const creating = !selected;
+    await mutate(creating ? 'create the group' : 'save the group', async () => {
       const g = selected
         ? await accessApi.updateGroup(selected.id, name.trim(), description.trim() || undefined)
         : await accessApi.createGroup(name.trim(), description.trim() || undefined);
       groups = await accessApi.groups();
       await selectGroup(g);
-    });
+    }, creating ? 'Group created' : 'Group saved');
   }
   async function removeGroup() {
     const g = selected;
@@ -117,11 +157,12 @@
       { title: 'Delete access group', confirmLabel: 'Delete group', danger: true },
     );
     if (ok)
-      await mutate(async () => {
+      await mutate('delete the group', async () => {
         await accessApi.deleteGroup(g.id);
         newGroup();
         groups = await accessApi.groups();
-      });
+        if (groups[0]) void selectGroup(groups[0]);
+      }, `Deleted ${g.name}`);
   }
   async function membership(userId: string, add: boolean) {
     const g = selected;
@@ -129,12 +170,12 @@
     if (
       !add &&
       !(await confirmer.ask(
-        'Remove this member? Both Allow and Deny rules from this group stop applying.',
+        `Remove ${users.find((u) => u.id === userId)?.display_name ?? 'this member'} from ${g.name}? Both Allow and Deny rules from this group stop applying to them.`,
         { title: 'Remove group member', confirmLabel: 'Remove member' },
       ))
     )
       return;
-    await mutate(async () => {
+    await mutate(add ? 'add the member' : 'remove the member', async () => {
       if (add) await accessApi.addMember(g.id, userId);
       else await accessApi.removeMember(g.id, userId);
       if (selected?.id === g.id) members = await accessApi.members(g.id);
@@ -150,7 +191,8 @@
     grantable = [...(role?.grantable_operations ?? [])];
   }
   async function saveRole() {
-    await mutate(async () => {
+    const creating = !roleId;
+    await mutate(creating ? 'create the preset' : 'save the preset', async () => {
       const input = {
         name: roleName.trim(),
         description: roleDescription.trim() || null,
@@ -158,11 +200,14 @@
         operations,
         grantable_operations: grantable,
       };
+      const name = input.name;
       if (roleId) await accessApi.updateRole(roleId, input);
       else await accessApi.createRole(input);
       roles = await accessApi.roles();
-      editRole();
-    });
+      // Stay on the preset just saved (it used to reset to a blank form).
+      const saved = roles.find((r) => r.name === name);
+      editRole(saved);
+    }, creating ? 'Preset created' : 'Preset saved');
   }
   async function removeRole() {
     if (!roleId) return;
@@ -173,11 +218,11 @@
       ))
     )
       return;
-    await mutate(async () => {
+    await mutate('delete the preset', async () => {
       await accessApi.deleteRole(roleId);
       roles = await accessApi.roles();
-      editRole();
-    });
+      editRole(roles[0]);
+    }, 'Preset deleted');
   }
 </script>
 
@@ -187,55 +232,103 @@
     subtitle="Reusable access rules across resources"
   />
   <PageBody width="readable">
-  <SectionIntro>Groups grant access to resources, not pages: <strong>users still need page access in Settings → Users.</strong></SectionIntro>
+  <SectionIntro>
+    Groups grant access to resources, not pages: <strong>users still need page access in Settings → Users.</strong>
+    Role presets are reusable sets of operations you copy into a resource rule.
+  </SectionIntro>
 <section class="access-groups">
-  {#if !auth.isRoot}<p>Only root can manage groups and role presets.</p>
-  {:else if loading}<p>Loading groups…</p>
+  {#if !auth.isRoot}<p class="hint">Only the root account can manage groups and role presets.</p>
   {:else}
-    {#if error}<p role="alert" class="error">{error}</p>{/if}
-    <section>
-      <h3>Groups</h3>
-      <div class="layout">
-        <nav aria-label="Access groups">
-          <button class="btn" onclick={newGroup}>New group</button>{#each groups as group}<button
-              class="btn"
-              class:primary={selected?.id === group.id}
-              disabled={busy}
-              onclick={() => selectGroup(group)}>{group.name}</button
-            >{/each}
-        </nav>
-        <fieldset disabled={busy}>
-          <label>Group name<input bind:value={name} maxlength="120" /></label><label
-            >Description<textarea bind:value={description} rows="2"></textarea></label
-          >
-          <div class="actions">
-            <button class="btn primary" disabled={!name.trim()} onclick={saveGroup}
-              >{selected ? 'Save group' : 'Create group'}</button
-            >{#if selected}<button class="btn danger" onclick={removeGroup}>Delete group</button
-              >{/if}
+  <LoadState what="groups and role presets" {loading} error={loadError} empty={loading || !!loadError} rows={4} onretry={() => void load()}>
+    <div class="segmented tabs" role="group" aria-label="Show">
+      <button class:active={tab === 'groups'} aria-pressed={tab === 'groups'} onclick={() => { tab = 'groups'; error = ''; }}>
+        Groups <span class="count">{groups.length}</span>
+      </button>
+      <button class:active={tab === 'presets'} aria-pressed={tab === 'presets'} onclick={() => { tab = 'presets'; error = ''; }}>
+        Role presets <span class="count">{roles.length}</span>
+      </button>
+    </div>
+    {#if error}<p role="alert" class="error"><Icon name="warning" size={12} /> {error}</p>{/if}
+    {#if tab === 'groups'}
+    <section aria-label="Groups">
+      <!-- An empty list hides its pane: the page opens on the create form. -->
+      <div class="layout" class:single={groups.length === 0}>
+        {#if groups.length}
+        <div class="list-pane">
+          <div class="list-head">
+            <span class="list-label">{groups.length ? 'All groups' : 'No groups yet'}</span>
+            <button class="icon-btn" aria-label="New group" title="New group" disabled={busy} onclick={newGroup}><Icon name="plus" size={14} /></button>
           </div>
-          {#if selected}<h4>Members</h4>
+          <nav class="list" aria-label="Access groups">
+            {#if !selected}
+              <div class="lrow active new" aria-current="true"><span class="row-name">{name.trim() || 'New group'}</span><span class="row-meta">Not created yet</span></div>
+            {/if}
+            {#each groups as group (group.id)}
+              <button
+                class="lrow"
+                class:active={selected?.id === group.id}
+                aria-current={selected?.id === group.id ? 'true' : undefined}
+                aria-label={group.name}
+                title={group.description ?? group.name}
+                disabled={busy}
+                onclick={() => selectGroup(group)}
+              >
+                <span class="row-name">{group.name}</span>
+                {#if group.description}<span class="row-meta">{group.description}</span>{/if}
+              </button>
+            {/each}
+          </nav>
+        </div>
+        {/if}
+        <fieldset disabled={busy} class="detail">
+          <legend class="detail-title">{selected ? selected.name : 'New group'}</legend>
+          <div class="field"><label for="ag-name">Group name</label><input id="ag-name" class="input" bind:value={name} maxlength="120" placeholder="Database readers" /></div>
+          <div class="field"><label for="ag-desc">Description</label><textarea id="ag-desc" class="input" bind:value={description} rows="2" placeholder="Read-only access to production databases"></textarea></div>
+          <div class="actions">
+            {#if selected}<button class="btn small danger" onclick={removeGroup}><Icon name="trash" size={12} /> Delete group…</button>{/if}
+            <span class="grow"></span>
+            <button
+              class="btn primary"
+              disabled={!name.trim() || !groupDirty}
+              title={!name.trim() ? 'Enter a group name' : !groupDirty ? 'No changes to save' : undefined}
+              onclick={saveGroup}
+              >{selected ? 'Save group' : 'Create group'}</button
+            >
+          </div>
+          {#if selected}
+            <h3 class="sub-title">Members <span class="count">{members.length}</span></h3>
             <p class="hint">
               Membership changes affect all resource rules for this group immediately. Removing
               membership also removes this group’s restrictions.
             </p>
-            {#each members as id}<div class="member">
-                <span>{users.find((u) => u.id === id)?.display_name ?? id}</span><button
-                  class="btn small"
-                  aria-label={`Remove ${users.find((u) => u.id === id)?.display_name ?? id}`}
-                  onclick={() => membership(id, false)}>Remove</button
-                >
-              </div>{/each}
-            {#if !members.length}<p class="hint">No members yet.</p>{/if}
-            <div class="actions">
-              <label
-                >Add user<select bind:value={memberId}
-                  ><option value="">Choose user</option
-                  >{#each users.filter((u) => !u.disabled && !members.includes(u.id)) as user}<option
+            {#if members.length}
+              <div class="members">
+                {#each members as id (id)}
+                  {@const u = users.find((x) => x.id === id)}
+                  <div class="member">
+                    <span class="row-name" title={u ? `${u.display_name} (@${u.username})` : id}>{u?.display_name ?? id}{#if u}<span class="dim"> @{u.username}</span>{/if}</span>
+                    <button
+                      class="btn small ghost"
+                      aria-label={`Remove ${u?.display_name ?? id}`}
+                      onclick={() => membership(id, false)}>Remove…</button
+                    >
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <p class="hint">No members yet — add a user below.</p>
+            {/if}
+            <div class="actions add">
+              <div class="field grow">
+                <label for="ag-add">Add user</label>
+                <select id="ag-add" class="input" bind:value={memberId}
+                  ><option value="">Choose a user…</option
+                  >{#each users.filter((u) => !u.disabled && !members.includes(u.id)) as user (user.id)}<option
                       value={user.id}>{user.display_name} (@{user.username})</option
                     >{/each}</select
-                ></label
-              ><button class="btn" disabled={!memberId} onclick={() => membership(memberId, true)}
+                >
+              </div>
+              <button class="btn" disabled={!memberId} onclick={() => membership(memberId, true)}
                 >Add member</button
               >
             </div>
@@ -243,40 +336,57 @@
         </fieldset>
       </div>
     </section>
-    <section>
-      <h3>Role presets</h3>
+    {:else}
+    <section aria-label="Role presets">
       <p class="hint">
         Copy a preset into a resource rule. Editing a preset does not change existing rules.
       </p>
-      <div class="layout">
-        <nav aria-label="Role presets">
-          <button class="btn" onclick={() => editRole()}>New preset</button
-          >{#each roles as role}<button
-              class="btn"
-              class:primary={roleId === role.id}
-              disabled={busy}
-              onclick={() => editRole(role)}
-              >{role.name}<small>{resourceLabels[role.kind]}</small></button
-            >{/each}
-        </nav>
-        <fieldset disabled={busy}>
-          <label>Preset name<input bind:value={roleName} maxlength="120" /></label><label
-            >Preset description<textarea bind:value={roleDescription} rows="2"></textarea></label
-          ><label
-            >Resource type<select
+      <div class="layout" class:single={roles.length === 0}>
+        {#if roles.length}
+        <div class="list-pane">
+          <div class="list-head">
+            <span class="list-label">{roles.length ? 'All presets' : 'No presets yet'}</span>
+            <button class="icon-btn" aria-label="New preset" title="New preset" disabled={busy} onclick={() => editRole()}><Icon name="plus" size={14} /></button>
+          </div>
+          <nav class="list" aria-label="Role presets">
+            {#if !roleId}
+              <div class="lrow active new" aria-current="true"><span class="row-name">{roleName.trim() || 'New preset'}</span><span class="row-meta">Not created yet</span></div>
+            {/if}
+            {#each roles as role (role.id)}
+              <button
+                class="lrow"
+                class:active={roleId === role.id}
+                aria-current={roleId === role.id ? 'true' : undefined}
+                aria-label={role.name}
+                disabled={busy}
+                onclick={() => editRole(role)}
+              >
+                <span class="row-name">{role.name}</span>
+                <span class="row-meta">{resourceLabels[role.kind]}</span>
+              </button>
+            {/each}
+          </nav>
+        </div>
+        {/if}
+        <fieldset disabled={busy} class="detail">
+          <legend class="detail-title">{roleId ? roleName || 'Preset' : 'New preset'}</legend>
+          <div class="field"><label for="rp-name">Preset name</label><input id="rp-name" class="input" bind:value={roleName} maxlength="120" placeholder="Read-only analyst" /></div>
+          <div class="field"><label for="rp-desc">Preset description</label><textarea id="rp-desc" class="input" bind:value={roleDescription} rows="2"></textarea></div>
+          <div class="field"><label for="rp-kind">Resource type</label><select
+              id="rp-kind"
+              class="input"
               bind:value={roleKind}
               onchange={() => {
                 operations = [];
                 grantable = [];
               }}
-              >{#each Object.entries(resourceLabels) as [kind, label]}<option value={kind}
+              >{#each Object.entries(resourceLabels) as [kind, label] (kind)}<option value={kind}
                   >{label}</option
                 >{/each}</select
-            ></label
-          >
-          <h4>Operations</h4>
+            ></div>
+          <h3 class="sub-title">Operations</h3>
           <div class="operations">
-            {#each accessOperations[roleKind] as op}<label
+            {#each accessOperations[roleKind] as op (op)}<label class="checkbox-row"
                 ><input type="checkbox" value={op} bind:group={operations} />{operationLabel(
                   op,
                 )}</label
@@ -286,7 +396,7 @@
             <summary>Grantable operations</summary>
             <p class="hint">Operations the subject can delegate to others.</p>
             <div class="operations">
-              {#each accessOperations[roleKind] as op}<label
+              {#each accessOperations[roleKind] as op (op)}<label class="checkbox-row"
                   ><input type="checkbox" value={op} bind:group={grantable} />{operationLabel(
                     op,
                   )}</label
@@ -294,15 +404,20 @@
             </div>
           </details>
           <div class="actions">
+            {#if roleId}<button class="btn small danger" onclick={removeRole}><Icon name="trash" size={12} /> Delete preset…</button>{/if}
+            <span class="grow"></span>
             <button
               class="btn primary"
-              disabled={!roleName.trim() || !operations.length}
+              disabled={!roleName.trim() || !operations.length || !roleDirty}
+              title={!roleName.trim() ? 'Enter a preset name' : !operations.length ? 'Pick at least one operation' : !roleDirty ? 'No changes to save' : undefined}
               onclick={saveRole}>{roleId ? 'Save preset' : 'Create preset'}</button
-            >{#if roleId}<button class="btn danger" onclick={removeRole}>Delete preset</button>{/if}
+            >
           </div>
         </fieldset>
       </div>
     </section>
+    {/if}
+  </LoadState>
   {/if}
 </section>
   </PageBody>
@@ -319,122 +434,201 @@
   .access-groups {
     display: flex;
     flex-direction: column;
-    gap: 18px;
+    gap: 24px;
     color: var(--text);
+    max-width: var(--settings-col);
   }
-  h3,
-  h4,
+  .tabs {
+    align-self: flex-start;
+  }
+  .tabs .count {
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .access-groups :global(section) {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
   p {
     margin: 0;
   }
-  h3 {
-    font-size: 16px;
+  .count {
+    font-weight: 500;
   }
-  h4 {
-    font-size: 13px;
+  .sub-title {
+    margin: 8px 0 0;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    font-size: var(--fs-m);
+    font-weight: 600;
   }
   .hint {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.5;
     max-width: 78ch;
   }
-  section > section {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    border-block-start: 1px solid var(--border);
-    padding-top: 18px;
+  .dim {
+    color: var(--text-dim);
   }
   .layout {
     display: grid;
-    grid-template-columns: minmax(150px, 220px) 1fr;
-    gap: 20px;
+    grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
+    gap: 16px;
+    align-items: start;
   }
-  nav {
+  .layout.single {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .list-pane {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    max-height: 400px;
-    overflow: auto;
+    gap: 4px;
+    min-width: 0;
   }
-  nav button {
-    text-align: start;
-    overflow-wrap: anywhere;
-    white-space: normal;
+  .list-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 24px;
   }
-  nav small {
-    display: block;
+  .list-label {
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  fieldset {
+  .list {
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    border: 0;
-    min-width: 0;
-    padding: 0;
-    margin: 0;
-  }
-  label {
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-    font-size: 12px;
-  }
-  input,
-  textarea,
-  select {
-    min-width: 0;
-    max-width: 100%;
-    padding: 7px;
     border: 1px solid var(--border);
-    background: var(--surface-2);
+    border-radius: var(--radius-m);
+    background: var(--surface);
+    overflow: hidden auto;
+    max-height: 400px;
+  }
+  .lrow {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 6px 10px;
+    text-align: start;
+    border: none;
+    background: transparent;
     color: var(--text);
-    border-radius: var(--radius-s);
+    font: inherit;
+    cursor: pointer;
+    min-width: 0;
+  }
+  .lrow + .lrow {
+    border-top: 1px solid var(--border);
+  }
+  .lrow:hover:not(:disabled):not(.active) {
+    background: var(--hover);
+  }
+  .lrow.active {
+    background: var(--accent-soft);
+  }
+  .row-name {
+    font-size: var(--fs-m);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .row-meta {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .detail {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 0;
+    padding: 14px 16px;
+    margin: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    background: var(--surface);
+  }
+  .detail-title {
+    float: left;
+    width: 100%;
+    padding: 0;
+    margin: 0 0 2px;
+    font-size: var(--fs-m);
+    font-weight: 600;
+  }
+  .detail-title + * {
+    clear: both;
+  }
+  .detail .field {
+    margin: 0;
   }
   textarea {
     resize: vertical;
   }
-  .actions,
-  .member {
+  .actions {
     display: flex;
     gap: 8px;
-    align-items: end;
+    align-items: flex-end;
     flex-wrap: wrap;
   }
+  .grow {
+    flex: 1;
+    min-width: 0;
+  }
+  .members {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    overflow: hidden;
+  }
   .member {
+    display: flex;
+    align-items: center;
     justify-content: space-between;
-    font-size: 12px;
+    gap: 8px;
+    min-height: 32px;
+    padding: 2px 6px 2px 10px;
+    font-size: var(--fs-s);
+  }
+  .member + .member {
+    border-top: 1px solid var(--border);
   }
   .operations {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
     gap: 8px;
   }
-  .operations label {
-    flex-direction: row;
-    align-items: center;
+  .operations .checkbox-row {
+    font-size: var(--fs-s);
   }
-  .error,
-  .danger {
-    color: var(--status-exited, #ed635c);
+  .error {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--fs-s);
+    color: var(--danger);
   }
   details summary {
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   details[open] .operations {
-    margin-top: 12px;
+    margin-top: 8px;
+  }
+  details .hint {
+    margin-top: 6px;
   }
   @media (max-width: 640px) {
-    .access-groups {
-      padding: 14px;
-    }
     .layout {
       grid-template-columns: 1fr;
     }
-    nav {
+    .list {
       max-height: 180px;
     }
   }

@@ -3,6 +3,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import type { BrokerCluster, GroupDetail, GroupOffset, GroupSummary } from '../../lib/api/types';
   import type { DryRunResp } from './types';
@@ -97,6 +98,8 @@
         groups = g;
         accessDenied = false;
         loadError = null;
+        // List/detail opens on an item, never on an empty "pick one" pane.
+        if (!selected && g.length > 0) open(g[0].group_id);
       })
       .catch((e) => {
         if (e instanceof ApiError && e.status === 403 && /consumer-group access/i.test(e.message)) {
@@ -187,7 +190,7 @@
         buildResetBody(false),
       );
     } catch (e) {
-      toasts.error('Dry-run failed', String(e));
+      toasts.error("Couldn't preview the reset", e instanceof Error ? e.message : String(e));
     } finally {
       dryRunLoading = false;
     }
@@ -204,9 +207,14 @@
     if (!selected) return;
     const typed = await confirmer.promptText(
       `Type the group name to confirm offset reset.`,
-      { title: `Reset offsets for "${selected}"`, confirmLabel: 'Reset', placeholder: selected },
+      { title: `Reset offsets for "${selected}"`, confirmLabel: 'Reset', placeholder: selected, danger: true },
     );
-    if (typed !== selected) return;
+    if (typed === null) return;
+    if (typed !== selected) {
+      // A mistyped name must not look like a silent no-op.
+      toasts.warn('Offsets not reset', `The name you typed didn't match "${selected}".`);
+      return;
+    }
 
     resetting = true;
     try {
@@ -217,7 +225,7 @@
       detail = updated;
       toasts.success(`Offsets reset for "${selected}"`);
     } catch (e) {
-      toasts.error('Offset reset failed', String(e));
+      toasts.error("Couldn't reset offsets", e instanceof Error ? e.message : String(e));
     } finally {
       resetting = false;
     }
@@ -232,7 +240,7 @@
     {#if loadError && groups.length === 0}
       <!-- rendered above -->
     {:else if loading}
-      <p class="muted pad">Loading…</p>
+      <p class="muted pad">Loading consumer groups…</p>
     {:else if accessDenied}
       <div class="acl-denied pad">
         <p class="acl-title">Consumer-group access not granted</p>
@@ -248,7 +256,7 @@
     {:else}
       {#each groups as g (g.group_id)}
         <button class="grow-row" class:sel={selected === g.group_id} onclick={() => open(g.group_id)}>
-          <span class="gid">{g.group_id}</span>
+          <span class="gid" title={g.group_id}>{g.group_id}</span>
           <span class="badges">
             <span class="state {stateClass(g.state)}">{g.state}</span>
             <span class="muted">{g.members} member{g.members === 1 ? '' : 's'}</span>
@@ -282,6 +290,17 @@
         <span class="lag-total" class:has-lag={detail.total_lag > 0}>
           total lag {detail.total_lag.toLocaleString()}
         </span>
+        {#if selected}
+          {@const gid = selected}
+          <button
+            class="icon-btn"
+            onclick={() => open(gid)}
+            aria-label="Refresh lag"
+            title="Refresh lag"
+          >
+            <Icon name="refresh" size={13} />
+          </button>
+        {/if}
       </header>
 
       {#if detail.members.length > 0}
@@ -355,7 +374,7 @@
       <!-- Offset reset panel (Editor only; dry-run preview then typed confirm) -->
       <h5>Reset offsets</h5>
       <div class="reset-bar">
-        <select bind:value={resetMode} onchange={() => (dryRunResult = null)}>
+        <select bind:value={resetMode} aria-label="Reset to" title="Reset to" onchange={() => (dryRunResult = null)}>
           <option value="earliest">Earliest</option>
           <option value="latest">Latest</option>
           <option value="offset">Specific offset</option>
@@ -363,15 +382,15 @@
         </select>
         {#if resetMode === 'offset'}
           <input type="number" class="sm-input" bind:value={resetOffset} placeholder="offset"
-            oninput={() => (dryRunResult = null)} />
+            aria-label="Target offset" oninput={() => (dryRunResult = null)} />
         {/if}
         {#if resetMode === 'timestamp'}
           <input type="datetime-local" class="sm-input wide" bind:value={resetTs}
-            oninput={() => (dryRunResult = null)} />
+            aria-label="Target time" oninput={() => (dryRunResult = null)} />
         {/if}
         {#if groupTopics.length > 1}
           <select bind:value={resetTopic} title="Scope to one topic (blank = all)"
-            onchange={() => (dryRunResult = null)}>
+            aria-label="Topic scope" onchange={() => (dryRunResult = null)}>
             <option value="">All topics</option>
             {#each groupTopics as t (t)}<option value={t}>{t}</option>{/each}
           </select>
@@ -404,7 +423,14 @@
               {dryRunResult.total_lag_after.toLocaleString()}</strong>
             ({dryRunResult.partitions.length} partition{dryRunResult.partitions.length === 1 ? '' : 's'} affected)
             </span>
-            <button class="close-dry" onclick={() => (dryRunResult = null)} title="Close preview">✕</button>
+            <button
+              class="icon-btn close-dry"
+              onclick={() => (dryRunResult = null)}
+              aria-label="Close preview"
+              title="Close preview"
+            >
+              <Icon name="x" size={12} />
+            </button>
           </div>
           <table class="dryrun-table">
             <thead><tr><th>Topic</th><th>P</th><th>Current</th><th>Target</th><th>Lag Δ</th></tr></thead>
@@ -482,17 +508,17 @@
   }
   .gid {
     font-family: var(--font-mono);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     word-break: break-all;
   }
   .gid.big {
-    font-size: 14px;
+    font-size: var(--fs-l);
   }
   .badges {
     display: flex;
     gap: 8px;
     align-items: center;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .state {
     font-size: var(--fs-xs);
@@ -502,8 +528,8 @@
     border-radius: 4px;
   }
   .state.ok {
-    background: color-mix(in srgb, var(--status-working, #28c840) 22%, transparent);
-    color: var(--status-working, #28c840);
+    background: var(--success-soft);
+    color: var(--success);
   }
   .state.warn {
     background: color-mix(in srgb, var(--warning) 22%, transparent);
@@ -528,7 +554,7 @@
   }
   .lag-total {
     margin-inline-start: auto;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .lag-total.has-lag,
@@ -545,7 +571,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     cursor: pointer;
     white-space: nowrap;
@@ -583,7 +609,7 @@
     border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .sm-input {
     width: 120px;
@@ -593,7 +619,7 @@
   }
   h5 {
     margin: 16px 0 6px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--text-dim);
@@ -601,13 +627,13 @@
   table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   th {
     text-align: start;
     font-weight: 500;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 5px 8px;
   }
   td {
@@ -618,7 +644,7 @@
     font-family: var(--font-mono);
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .muted {
     color: var(--text-dim);
@@ -646,9 +672,6 @@
     padding: 0 4px;
     border-radius: 3px;
   }
-  .btn.danger {
-    color: var(--status-exited, #ff5f57);
-  }
   /* Dry-run preview */
   .dryrun-preview {
     margin-top: 8px;
@@ -661,33 +684,29 @@
     align-items: center;
     padding: 6px 10px;
     background: color-mix(in srgb, var(--accent) 8%, transparent);
-    font-size: 12px;
+    font-size: var(--fs-s);
     gap: 8px;
   }
   .dryrun-summary .ok {
-    color: var(--status-working, #28c840);
+    color: var(--success);
   }
   .dryrun-summary .warn {
     color: var(--warning);
   }
   .close-dry {
     margin-inline-start: auto;
-    border: none;
-    background: transparent;
-    cursor: pointer;
-    color: var(--text-dim);
-    font-size: 12px;
+    flex: none;
   }
   .dryrun-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .dryrun-table th {
     text-align: start;
     padding: 4px 8px;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 500;
     border-bottom: 1px solid var(--border);
   }
@@ -696,7 +715,7 @@
     border-top: 1px solid var(--border);
   }
   .dryrun-table td.ok {
-    color: var(--status-working, #28c840);
+    color: var(--success);
   }
   .dryrun-table td.warn {
     color: var(--warning);

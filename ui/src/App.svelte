@@ -10,6 +10,7 @@
   import { auth } from './lib/stores/auth.svelte';
   import { router } from './lib/router.svelte';
   import { ui } from './lib/stores/ui.svelte';
+  import { isEmbedded } from './lib/desktop';
 
   ui.applyTheme();
 
@@ -39,6 +40,10 @@
 {:else if router.module === 'tray'}
   <!-- Desktop shell's menu-bar popover (`otto-tray`); same rules as the bar. -->
   <TrayPage />
+{:else if auth.phase === 'loading' && isEmbedded}
+  <!-- The side-by-side pane boots under its host's loading cover: no second
+       "Otto" splash inside the pane. -->
+  <div class="boot" aria-busy="true"></div>
 {:else if auth.phase === 'loading'}
   <div class="boot">
     <div class="boot-mark">Otto</div>

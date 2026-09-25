@@ -53,13 +53,13 @@
 
   {#if annotations.length === 0}
     <p class="empty">
-      No marks yet. Enable "Mark element" (reader) or the picker (live) and click something.
+      No marks yet. Turn on Mark passage above the page, then click a passage to mark it.
     </p>
   {:else}
     <ul class="list">
       {#each annotations as a (a.id)}
         <li class="row">
-          <span class="swatch" style:background={a.color || 'yellow'}></span>
+          <span class="swatch" style:background={a.color || 'var(--warning)'}></span>
           <div class="body">
             <p class="excerpt">{a.text}</p>
             {#if editingId === a.id}
@@ -67,12 +67,17 @@
                 <textarea
                   bind:value={editText}
                   placeholder="Add a note"
+                  aria-label="Note for this mark"
                   rows="2"
                   spellcheck="false"
+                  onkeydown={(e) => {
+                    if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
+                    else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void saveEdit(a.id); }
+                  }}
                 ></textarea>
                 <div class="edit-actions">
-                  <button class="btn" onclick={cancelEdit}>Cancel</button>
-                  <button class="btn primary" onclick={() => saveEdit(a.id)}>Save mark</button>
+                  <button class="btn small" onclick={cancelEdit}>Cancel</button>
+                  <button class="btn small primary" onclick={() => saveEdit(a.id)} title="Save note (⌘↩)">Save note</button>
                 </div>
               </div>
             {:else if a.comment}
@@ -81,12 +86,12 @@
           </div>
           <div class="actions">
             {#if editingId !== a.id}
-              <button class="icon-btn" title="Edit note" onclick={() => startEdit(a)}>
+              <button class="icon-btn" title="Edit note" aria-label="Edit note" onclick={() => startEdit(a)}>
                 <Icon name="edit" size={12} />
               </button>
             {/if}
             <SendToSession annotationId={a.id} />
-            <button class="icon-btn" title="Delete mark" onclick={() => remove(a.id)}>
+            <button class="icon-btn" title="Delete mark" aria-label="Delete mark" onclick={() => remove(a.id)}>
               <Icon name="trash" size={12} />
             </button>
           </div>
@@ -100,31 +105,32 @@
   .notes-rail {
     width: 260px;
     flex-shrink: 0;
-    border-left: 1px solid var(--border);
+    border-inline-start: 1px solid var(--border);
     overflow-y: auto;
-    padding: 0.6rem;
+    padding: 10px;
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: 8px;
   }
   .rail-head {
     display: flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: 6px;
     color: var(--text-dim);
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 0 0.15rem;
+    font-size: var(--fs-s);
+    font-weight: 600;
+    padding: 0 2px;
   }
   .count {
     margin-inline-start: auto;
     color: var(--text-dim);
+    font-weight: 400;
   }
   .empty {
+    margin: 0;
     color: var(--text-dim);
-    font-size: 0.8rem;
-    padding: 0.5rem 0.15rem;
+    font-size: var(--fs-s);
+    padding: 8px 2px;
     line-height: 1.5;
   }
   .list {
@@ -133,12 +139,12 @@
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: 8px;
   }
   .row {
     display: flex;
-    gap: 0.4rem;
-    padding: 0.5rem;
+    gap: 6px;
+    padding: 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface);
@@ -147,7 +153,7 @@
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    margin-top: 0.35rem;
+    margin-top: 6px;
     flex-shrink: 0;
   }
   .body {
@@ -155,11 +161,11 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.3rem;
+    gap: 4px;
   }
   .excerpt {
     margin: 0;
-    font-size: 0.82rem;
+    font-size: var(--fs-m);
     color: var(--text);
     overflow: hidden;
     display: -webkit-box;
@@ -169,14 +175,14 @@
   }
   .comment {
     margin: 0;
-    font-size: 0.78rem;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     white-space: pre-wrap;
   }
   .edit {
     display: flex;
     flex-direction: column;
-    gap: 0.3rem;
+    gap: 4px;
   }
   .edit textarea {
     width: 100%;
@@ -185,50 +191,33 @@
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 0.35rem 0.5rem;
+    padding: 6px 8px;
     font: inherit;
-    font-size: 0.8rem;
+    font-size: var(--fs-s);
     resize: vertical;
   }
   .edit-actions {
     display: flex;
     justify-content: flex-end;
-    gap: 0.3rem;
+    gap: 4px;
   }
   .actions {
     display: flex;
     flex-direction: column;
-    gap: 0.2rem;
+    gap: 2px;
     flex-shrink: 0;
   }
-  .icon-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 22px;
-    height: 22px;
-    border-radius: var(--radius-s);
-    border: 1px solid transparent;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
+  .actions :global(.icon-btn) {
+    width: 24px;
+    height: 24px;
   }
-  .icon-btn:hover {
-    background: var(--surface-2);
-    color: var(--text);
-  }
-  .btn {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface);
-    color: var(--text);
-    font-size: 0.75rem;
-    padding: 0.25rem 0.55rem;
-    cursor: pointer;
-  }
-  .btn.primary {
-    background: var(--accent);
-    color: var(--accent-contrast, #fff);
-    border-color: var(--accent);
+  /* Phone: the rail drops under the page (BrowserView stacks .body). */
+  @media (max-width: 640px) {
+    .notes-rail {
+      width: auto;
+      max-height: 40%;
+      border-inline-start: none;
+      border-top: 1px solid var(--border);
+    }
   }
 </style>

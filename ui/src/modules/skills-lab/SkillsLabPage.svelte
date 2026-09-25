@@ -17,6 +17,9 @@
   type Tab = 'skills' | 'review' | 'evaluator';
   const tab = $derived<Tab>(router.parts[1] === 'review' ? 'review' : router.parts[1] === 'evaluator' ? 'evaluator' : 'skills');
   function go(t: Tab): void {
+    if (t === tab) return;
+    // Leaving Skills unmounts an open editor with unsaved edits: the editor's
+    // router leave-guard (guardUnsaved) asks once — no second local prompt.
     router.go(t === 'skills' ? 'skills-eval' : `skills-eval/${t}`);
   }
   const TABS: { id: Tab; label: string }[] = [
@@ -33,8 +36,10 @@
     else if (e.key === 'End') next = TABS.length - 1;
     if (next < 0) return;
     e.preventDefault();
-    go(TABS[next].id);
-    queueMicrotask(() => (document.querySelector(`[data-testid="tab-${TABS[next].id}"]`) as HTMLElement | null)?.focus());
+    const to = TABS[next].id;
+    go(to);
+    // The route changes on the next hashchange: move focus to the target tab now.
+    (document.querySelector(`[data-testid="tab-${to}"]`) as HTMLElement | null)?.focus();
   }
 
   // Cross-tab intent: "Review this skill" from the Skills tab pre-fills the
@@ -42,10 +47,28 @@
   let reviewTarget = $state<{ name: string; source: string } | null>(null);
   function reviewSkill(name: string, source: string): void {
     reviewTarget = { name, source };
+    reviewOpen = null;
     go('review');
   }
-  function evaluateSkill(_name: string, _source: string): void {
-    // The evaluator's start form picks the skill itself; just navigate there.
+  // "Reviews" on a skill's Usage tab: open that skill's latest review.
+  let reviewOpen = $state<string | null>(null);
+  function openReview(id: string): void {
+    reviewTarget = null;
+    reviewOpen = id;
+    go('review');
+  }
+  // "Evaluate <skill>" opens the Evaluator's start form with that skill
+  // pre-selected (it used to land on the form with whatever came first).
+  let evalTarget = $state<{ name: string; source: string } | null>(null);
+  function evaluateSkill(name: string, source: string): void {
+    evalTarget = { name, source };
+    go('evaluator');
+  }
+
+  // "Open run" from a skill's Evals tab: the Evaluator opens on that run.
+  let runTarget = $state<string | null>(null);
+  function openRun(id: string): void {
+    runTarget = id;
     go('evaluator');
   }
 
@@ -90,11 +113,11 @@
 
   <div class="lab-body">
     {#if tab === 'skills'}
-      <SkillsBrowser bind:this={browser} onreview={reviewSkill} onevaluate={evaluateSkill} onempty={(empty) => (canCreate = !empty)} onphonedetail={(o) => (phoneDetail = o)} />
+      <SkillsBrowser bind:this={browser} onreview={reviewSkill} onevaluate={evaluateSkill} onopenrun={openRun} onempty={(empty) => (canCreate = !empty)} onphonedetail={(o) => (phoneDetail = o)} onopenreview={openReview} />
     {:else if tab === 'review'}
-      <SkillReviewPanel {wsId} initialTarget={reviewTarget} onconsumed={() => (reviewTarget = null)} />
+      <SkillReviewPanel {wsId} initialTarget={reviewTarget} onconsumed={() => (reviewTarget = null)} initialReview={reviewOpen} onreviewconsumed={() => (reviewOpen = null)} />
     {:else}
-      <SkillsEvalPage />
+      <SkillsEvalPage initialSkill={evalTarget} onconsumed={() => (evalTarget = null)} initialRun={runTarget} onrunconsumed={() => (runTarget = null)} />
     {/if}
   </div>
 </div>

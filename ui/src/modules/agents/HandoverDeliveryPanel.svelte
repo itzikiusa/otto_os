@@ -40,7 +40,7 @@
 {/if}
 
 <style>
-  .handover-delivery { padding: 6px 12px; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .handover-delivery { padding: 6px 12px; border-bottom: 1px solid var(--border); font-size: var(--fs-s); }
   summary { cursor: pointer; }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; }
   p { margin: 8px 0; }

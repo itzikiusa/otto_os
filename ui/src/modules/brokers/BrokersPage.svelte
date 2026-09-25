@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { CLUSTER_VIEWS, clusterViewKey, type ClusterView } from './types';
   import Icon from '../../lib/components/Icon.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -7,6 +8,7 @@
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import { api } from '../../lib/api/client';
   import { brokers } from '../../lib/stores/brokers.svelte';
+  import { brokersPagePort } from '../../lib/uiCommands/brokers';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -20,7 +22,7 @@
   import ReplayPanel from './ReplayPanel.svelte';
   import LagAlertsPanel from './LagAlertsPanel.svelte';
 
-  type Tab = 'overview' | 'topics' | 'groups' | 'schema' | 'replay' | 'alerts';
+  type Tab = ClusterView;
   let tab = $state<Tab>('overview');
   let formOpen = $state(false);
   let editTarget = $state<BrokerCluster | null>(null);
@@ -88,6 +90,8 @@
     void brokers.selectedId;
     tab = 'overview';
   });
+  // Agent UI control (lib/uiCommands/brokers.ts) switches the sub-tab here.
+  $effect(() => brokersPagePort.bind({ setTab: (v) => (tab = v) }));
 
   const selected = $derived(brokers.selected);
 
@@ -123,7 +127,7 @@
       if (r.ok) toasts.success('Connected', `${r.message} · ${r.latency_ms}ms`);
       else toasts.error('Connection failed', r.message);
     } catch (e) {
-      toasts.error('Test failed', String(e));
+      toasts.error('Test failed', e instanceof Error ? e.message : String(e));
     } finally {
       testing = false;
     }
@@ -139,7 +143,7 @@
       await brokers.remove(c.id);
       toasts.success('Cluster removed');
     } catch (e) {
-      toasts.error('Remove failed', String(e));
+      toasts.error('Remove failed', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -209,7 +213,7 @@
         { label: 'Open in tab', action: () => brokers.select(c.id) },
         { label: 'Test', action: () => void testConn(c) },
         { label: 'Edit…', action: () => openEdit(c) },
-        { label: 'Remove', danger: true, action: () => void removeCluster(c) },
+        { label: 'Remove…', icon: 'trash', danger: true, action: () => void removeCluster(c) },
       ]);
     } else {
       const s = brokers.sections.find((x) => x.id === id);
@@ -332,6 +336,7 @@
         class="content-toggle"
         onclick={() => (contentOpen = !contentOpen)}
         aria-expanded={contentOpen}
+        aria-label={contentOpen ? 'Collapse details' : 'Expand details'}
         title={contentOpen ? 'Collapse details' : 'Expand details'}
       >
         <Icon name={contentOpen ? 'chevronDown' : 'chevronRight'} size={14} />
@@ -355,7 +360,7 @@
   {/snippet}
   {#snippet actions()}
     {#if selected}
-      <button class="btn small danger" data-overflow="-1" onclick={() => removeCluster(selected)}>Remove</button>
+      <button class="btn small danger" data-overflow="-1" onclick={() => removeCluster(selected)} title="Remove this cluster profile from Otto (topics on the broker are untouched)">Remove…</button>
       <button class="btn small" onclick={() => openEdit(selected)}>Edit</button>
       <button class="btn small" data-keep onclick={() => testConn(selected)} disabled={testing}>
         {testing ? 'Testing…' : 'Test'}
@@ -378,21 +383,24 @@
         {#if brokers.clusters.length > 0}<span class="hcount">{brokers.clusters.length}</span>{/if}
       </button>
       <div class="head-btns">
-        <button class="btn small" onclick={() => newSection(null)} title="New section">
+        <button class="icon-btn" onclick={() => newSection(null)} aria-label="New section" title="New section">
           <Icon name="folder" size={13} />
         </button>
-        <button class="btn small" onclick={openAdd} title="Add cluster"><Icon name="plus" size={13} /></button>
+        <button class="icon-btn" onclick={openAdd} aria-label="Add cluster" title="Add cluster"><Icon name="plus" size={13} /></button>
       </div>
     </div>
     <div class="cluster-list">
       {#if brokers.loading && brokers.clusters.length === 0}
-        <p class="muted pad">Loading…</p>
+        <p class="muted pad">Loading clusters…</p>
       {:else}
         {#each tree as node (node.sec.id)}
           {@render sectionNode(node, 0)}
         {/each}
 
-        <!-- Ungrouped doubles as the top-level / no-section drop target. -->
+        <!-- Ungrouped doubles as the top-level / no-section drop target. With no
+             sections at all it is just noise, so it only shows once a section
+             exists (or while something is being dragged). -->
+        {#if brokers.sections.length > 0 || draggedClusterId || draggedSectionId}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="sec-head plain"
@@ -410,8 +418,9 @@
           <span class="sec-name grow">Ungrouped</span>
           {#if ungrouped.length > 0}<span class="count">{ungrouped.length}</span>{/if}
         </div>
+        {/if}
         {#each ungrouped as c (c.id)}
-          {@render clusterRow(c, 1)}
+          {@render clusterRow(c, brokers.sections.length > 0 ? 1 : 0)}
         {/each}
 
         {#if brokers.clusters.length === 0 && brokers.sections.length === 0}
@@ -435,13 +444,15 @@
 
   <main class="cluster-main" class:collapsed={!contentOpen}>
     {#if brokers.openClusters.length > 0}
-      <div class="tabstrip">
+      <div class="tabstrip" role="tablist" aria-label="Open clusters">
         {#each brokers.openClusters as c (c.id)}
           <div
             class="ctab"
             class:on={brokers.selectedId === c.id}
             role="tab"
+            aria-selected={brokers.selectedId === c.id}
             tabindex="0"
+            title={c.name}
             onclick={() => brokers.select(c.id)}
             onkeydown={(e) => e.key === 'Enter' && brokers.select(c.id)}
           >
@@ -449,27 +460,25 @@
             <span class="ctab-name">{c.name}</span>
             <button
               class="ctab-x"
+              aria-label="Close {c.name}"
               title="Close tab"
               onclick={(e) => {
                 e.stopPropagation();
                 brokers.close(c.id);
               }}
             >
-              <Icon name="x" size={11} />
+              <Icon name="x" size={12} />
             </button>
           </div>
         {/each}
       </div>
     {/if}
     {#if selected}
-      <nav class="tabs">
-        <button class:on={tab === 'overview'} onclick={() => (tab = 'overview')}>Overview</button>
-        <button class:on={tab === 'topics'} onclick={() => (tab = 'topics')}>Topics</button>
-        <button class:on={tab === 'groups'} onclick={() => (tab = 'groups')}>Consumer Groups</button>
-        <button class:on={tab === 'schema'} onclick={() => (tab = 'schema')}>Schema Registry</button>
-        <button class:on={tab === 'replay'} onclick={() => (tab = 'replay')}>Replay</button>
-        <button class:on={tab === 'alerts'} onclick={() => (tab = 'alerts')}>Lag Alerts</button>
-      </nav>
+      <div class="tabs" role="tablist" aria-label="Kafka cluster views" tabindex="-1" onkeydown={(e) => { const next = clusterViewKey(e, tab); if (next) tab = next; }}>
+        {#each CLUSTER_VIEWS as v (v.id)}
+          <button class:on={tab === v.id} role="tab" aria-selected={tab === v.id} tabindex={tab === v.id ? 0 : -1} onclick={() => (tab = v.id)}>{v.label}</button>
+        {/each}
+      </div>
 
       <div class="tab-body">
         {#key selected.id}
@@ -499,8 +508,9 @@
           actionIcon="plus"
           onaction={openAdd}
         />
-      {:else if !brokers.loading}
-        <!-- Clusters exist: the list pane (with its own "+") is right there, so
+      {:else if !brokers.loading && !viewport.isPhone}
+        <!-- (Phone: the list above IS the page — no second "pick one" pane.)
+             Clusters exist: the list pane (with its own "+") is right there, so
              no duplicate "Add a cluster" CTA. -->
         <EmptyState
           variant="page"
@@ -567,6 +577,8 @@
 {/snippet}
 
 {#snippet clusterRow(c: BrokerCluster, depth: number)}
+  <!-- The row drags; its name button opens the cluster and ⋯ holds the same
+       menu as right-click (no button nested inside a button). -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="cluster"
@@ -578,15 +590,16 @@
       e.stopPropagation();
     }}
     ondragend={() => (draggedClusterId = null)}
-    onclick={() => brokers.select(c.id)}
-    onkeydown={(e) => e.key === 'Enter' && brokers.select(c.id)}
     oncontextmenu={(e) => openMenu(e, 'cluster', c.id)}
-    role="button"
-    tabindex="0"
   >
-    <span class="dot" style="background: {c.color || 'var(--accent)'}"></span>
-    <span class="cn">{c.name}</span>
+    <button class="cluster-open" onclick={() => brokers.select(c.id)} aria-current={brokers.selectedId === c.id ? 'true' : undefined} title={c.name}>
+      <span class="dot" style="background: {c.color || 'var(--accent)'}"></span>
+      <span class="cn">{c.name}</span>
+    </button>
     <EnvBadge env={c.environment} />
+    <button class="icon-btn cluster-more" aria-label={`Actions for ${c.name}`} title="Actions" onclick={(e) => openMenu(e, 'cluster', c.id)}>
+      <Icon name="more" size={14} />
+    </button>
   </div>
 {/snippet}
 
@@ -640,7 +653,7 @@
     padding: 12px 12px 8px;
   }
   .aside-head .title {
-    font-size: 12px;
+    font-size: var(--fs-s);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -675,14 +688,14 @@
   }
   .sec-head.plain {
     cursor: default;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     opacity: 0.8;
     margin-top: 4px;
   }
   .sec-name {
-    font-size: 12px;
+    font-size: var(--fs-s);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -716,21 +729,45 @@
   }
   .cluster {
     width: 100%;
-    text-align: start;
-    border: none;
-    background: transparent;
-    padding: 8px 12px;
+    padding-block: 4px;
+    padding-inline-end: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    border-inline-start: 2px solid transparent;
+  }
+  .cluster-open {
+    flex: 1;
+    min-width: 0;
     display: flex;
     align-items: center;
     gap: 8px;
+    padding: 4px 6px;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    text-align: start;
     cursor: pointer;
-    border-inline-start: 2px solid transparent;
+  }
+  .cluster-more {
+    flex-shrink: 0;
+    opacity: 0;
+  }
+  .cluster:hover .cluster-more,
+  .cluster:focus-within .cluster-more {
+    opacity: 1;
+  }
+  @media (hover: none) {
+    .cluster-more {
+      opacity: 1;
+    }
   }
   .cluster:hover {
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .cluster.sel {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     border-inline-start-color: var(--accent);
   }
   .dot {
@@ -741,7 +778,7 @@
   }
   .cn {
     flex: 1;
-    font-size: 13px;
+    font-size: var(--fs-m);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -769,7 +806,7 @@
     padding: 0 10px;
     cursor: pointer;
     border-inline-end: 1px solid var(--border);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     white-space: nowrap;
     border-top: 2px solid transparent;
@@ -806,10 +843,11 @@
   .name {
     font-weight: 600;
   }
+  /* Read-only is a property, not a failure: neutral, matching ClusterViewer. */
   .ro {
     font-size: var(--fs-xs);
-    color: var(--status-exited, #ff5f57);
-    border: 1px solid currentColor;
+    color: var(--text-dim);
+    border: 1px solid var(--border);
     border-radius: 4px;
     padding: 0 5px;
   }
@@ -824,8 +862,8 @@
     color: var(--text-dim);
   }
   .tunnel-pill.ready {
-    background: color-mix(in srgb, var(--status-working, #28c840) 18%, transparent);
-    color: var(--status-working, #28c840);
+    background: var(--success-soft);
+    color: var(--success);
   }
   .tabs {
     display: flex;
@@ -846,7 +884,7 @@
     color: var(--text-dim);
     padding: 8px 14px;
     cursor: pointer;
-    font-size: 13px;
+    font-size: var(--fs-m);
     border-bottom: 2px solid transparent;
     white-space: nowrap;
     flex: none;
@@ -867,10 +905,7 @@
     padding: 12px;
   }
   .small {
-    font-size: 11px;
-  }
-  .btn.danger {
-    color: var(--status-exited, #ff5f57);
+    font-size: var(--fs-xs);
   }
 
   /* Collapse toggles. On desktop the cluster-list toggle is a plain inert label
@@ -950,15 +985,15 @@
     }
     .sec-toggle .hcount {
       display: inline-block;
-      font-size: 11px;
+      font-size: var(--fs-xs);
       color: var(--text-dim);
       background: color-mix(in srgb, var(--text-dim) 14%, transparent);
       border-radius: 9px;
       padding: 1px 8px;
     }
-    .head-btns .btn.small {
-      font-size: 13px;
-      padding: 6px 8px;
+    .head-btns .icon-btn {
+      width: 36px;
+      height: 36px;
     }
     /* Expanded: scroll within a capped height. Collapsed: hidden. */
     .cluster-list {
@@ -971,10 +1006,10 @@
     }
     /* Bigger sidebar text + roomier tap targets. */
     .cluster {
-      padding: 11px 14px;
+      padding-block: 7px;
     }
     .cn {
-      font-size: 15px;
+      font-size: var(--fs-l);
     }
     .sec-name {
       font-size: 14px;
@@ -983,10 +1018,10 @@
       padding: 8px 10px 8px 8px;
     }
     .count {
-      font-size: 11px;
+      font-size: var(--fs-xs);
     }
     .sec-head.plain {
-      font-size: 12px;
+      font-size: var(--fs-s);
     }
 
     /* Content section. */

@@ -2,6 +2,8 @@
   // PublishDialog — shared modal for both "Publish as Jira Story" and
   // "Publish as Confluence RFC" actions. Also used for "Convert RFC → Story".
   import Modal from '../../lib/components/Modal.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import { router } from '../../lib/router.svelte';
   import { api, ApiError } from '../../lib/api/client';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -223,15 +225,25 @@
   {#snippet children()}
     {#if accountsLoading}
       <div class="loading">Loading accounts…</div>
+    {:else if accounts.length === 0 && formError}
+      <!-- A failed accounts load is an error with Retry, not "no accounts yet". -->
+      <div class="field-error">
+        {formError}
+        {#if formErrorDetail}<div class="pd-error-detail">{formErrorDetail}</div>{/if}
+      </div>
+      <button class="btn small" onclick={() => { formError = ''; formErrorDetail = ''; void loadAccounts(); }}>Retry</button>
     {:else if accounts.length === 0}
-      <div class="no-accounts">No Jira or Confluence account yet. Add one in Settings → Integrations → Jira.</div>
+      <div class="no-accounts">No Jira or Confluence account is connected yet — add one to publish.</div>
+      <button class="btn small" onclick={() => { onclose(); router.go('settings/jira'); }}>
+        <Icon name="plus" size={12} /> Add account in Settings
+      </button>
     {:else}
       <!-- Account -->
       <div class="field">
         <label class="label" for="pd-account">Account</label>
         <select
           id="pd-account"
-          class="select"
+          class="input"
           bind:value={accountId}
           onchange={onAccountChange}
           disabled={submitting}
@@ -251,7 +263,7 @@
           {:else}
             <select
               id="pd-project"
-              class="select"
+              class="input"
               bind:value={projectKey}
               onchange={loadIssueTypes}
               disabled={submitting || projects.length === 0}
@@ -275,7 +287,7 @@
           {:else}
             <select
               id="pd-issuetype"
-              class="select"
+              class="input"
               bind:value={issueType}
               disabled={submitting}
             >
@@ -299,7 +311,7 @@
           {:else}
             <select
               id="pd-space"
-              class="select"
+              class="input"
               bind:value={spaceKey}
               disabled={submitting || spaces.length === 0}
             >
@@ -387,11 +399,11 @@
 <style>
   .loading {
     padding: 12px 0;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .loading-inline {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     font-style: italic;
     padding: 4px 0;
@@ -400,22 +412,9 @@
     padding: 12px 14px;
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.5;
-  }
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    margin-bottom: 14px;
-  }
-  .label {
-    font-size: 11px;
-    font-weight: 500;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
   }
   .dim {
     font-weight: 400;
@@ -423,23 +422,6 @@
     letter-spacing: 0;
     font-size: var(--fs-xs);
   }
-  .select,
-  .input {
-    width: 100%;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    color: var(--text);
-    font-size: 12.5px;
-    padding: 5px 9px;
-    box-sizing: border-box;
-    outline: none;
-  }
-  .select:focus,
-  .input:focus {
-    border-color: var(--accent);
-  }
-  .select:disabled,
   .input:disabled {
     opacity: 0.55;
     cursor: not-allowed;
@@ -455,14 +437,14 @@
     background: color-mix(in srgb, var(--text-dim) 5%, transparent);
   }
   .pd-preview-title {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
   }
   .pd-preview-body {
     margin: 0;
     font-family: inherit;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.45;
     color: var(--text-dim);
     white-space: pre-wrap;
@@ -484,41 +466,11 @@
     overflow-wrap: anywhere;
   }
   .field-error {
-    font-size: 12px;
-    color: var(--status-exited, #e53e3e);
+    font-size: var(--fs-s);
+    color: var(--danger);
     margin-bottom: 8px;
     padding: 6px 10px;
-    background: color-mix(in srgb, var(--status-exited, #e53e3e) 10%, transparent);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
     border-radius: var(--radius-s);
-  }
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: 32px;
-    padding: 0 16px;
-    border-radius: var(--radius-s);
-    font-size: 12.5px;
-    font-weight: 500;
-    cursor: pointer;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text);
-    transition: background 110ms, border-color 110ms, color 110ms;
-  }
-  .btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .btn.ghost:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-  }
-  .btn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
-  }
-  .btn.primary:hover:not(:disabled) {
-    opacity: 0.88;
   }
 </style>

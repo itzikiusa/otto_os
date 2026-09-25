@@ -140,7 +140,7 @@
           </div>
         {/each}
         {#if pack.findings.length === 0}
-          <p class="dim" style="font-size:12.5px">No findings in this review.</p>
+          <p class="dim" style="font-size: var(--fs-s)">No findings in this review.</p>
         {/if}
       </div>
 
@@ -178,9 +178,9 @@
     flex-wrap: wrap;
     gap: 12px;
     padding: 4px 0 10px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
-  .pp-stat strong { font-size: 14px; }
+  .pp-stat strong { font-size: var(--fs-l); }
   .pp-ok { color: var(--success); }
   .pp-breakdown {
     display: flex;
@@ -202,21 +202,21 @@
     flex-wrap: wrap;
     margin-bottom: 4px;
   }
-  .pp-title { font-size: 12.5px; font-weight: 600; }
-  .pp-loc { font-size: 11px; color: var(--text-dim); margin-bottom: 6px; }
+  .pp-title { font-size: var(--fs-s); font-weight: 600; }
+  .pp-loc { font-size: var(--fs-xs); color: var(--text-dim); margin-bottom: 6px; }
   .pp-evidence {
     margin: 4px 0;
     padding: 6px 8px;
     background: var(--surface-2);
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     font-family: var(--font-mono, monospace);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.45;
     white-space: pre-wrap;
     overflow-x: auto;
     max-height: 180px;
   }
-  .pp-reason { margin: 4px 0; font-size: 12px; line-height: 1.5; }
+  .pp-reason { margin: 4px 0; font-size: var(--fs-s); line-height: 1.5; }
   .pp-artifacts { display: flex; flex-wrap: wrap; gap: 5px; margin: 4px 0; }
   .pp-artifact {
     font-size: var(--fs-xs);
@@ -224,39 +224,39 @@
     color: var(--text);
   }
   .pp-timeline { list-style: none; margin: 6px 0 0; padding: 0; }
-  .pp-event { font-size: 11px; line-height: 1.5; display: flex; gap: 6px; flex-wrap: wrap; }
+  .pp-event { font-size: var(--fs-xs); line-height: 1.5; display: flex; gap: 6px; flex-wrap: wrap; }
   .pp-event-kind { font-weight: 600; }
-  .pp-section { font-size: 12.5px; font-weight: 600; margin: 14px 0 6px; }
+  .pp-section { font-size: var(--fs-s); font-weight: 600; margin: 14px 0 6px; }
   .pp-rules { margin: 0; padding-inline-start: 18px; }
-  .pp-rule { font-size: 12px; line-height: 1.5; margin-bottom: 3px; }
+  .pp-rule { font-size: var(--fs-s); line-height: 1.5; margin-bottom: 3px; }
   .pp-export {
     margin: 0;
     padding: 8px 10px;
     background: var(--surface-2);
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     font-family: var(--font-mono, monospace);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.45;
     white-space: pre-wrap;
     overflow-x: auto;
     max-height: 220px;
   }
-  .pp-err { color: var(--status-exited); font-size: 12.5px; }
+  .pp-err { color: var(--danger); font-size: var(--fs-s); }
   .dim { color: var(--text-dim); }
   .mono { font-family: var(--font-mono, monospace); }
 
   /* Status chips (shared vocabulary; high-contrast for verified). */
   .status-open { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
   .status-accepted { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-text); }
-  .status-fixed { background: color-mix(in srgb, var(--status-warn) 18%, transparent); color: var(--status-warn); }
+  .status-fixed { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
   .status-verified { background: var(--success-soft); color: var(--success); }
   .status-false_positive { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
   .status-waived { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
 
   /* Severity chips (red for blocker severities). */
-  .sev2-critical { background: var(--status-exited); color: #fff; }
-  .sev2-high { background: color-mix(in srgb, var(--status-exited) 18%, transparent); color: var(--status-exited); }
-  .sev2-medium { background: color-mix(in srgb, var(--status-warn) 18%, transparent); color: var(--status-warn); }
+  .sev2-critical { background: var(--danger-soft); color: var(--danger); font-weight: 600; }
+  .sev2-high { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
+  .sev2-medium { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
   .sev2-low { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-text); }
   .sev2-info { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
 </style>

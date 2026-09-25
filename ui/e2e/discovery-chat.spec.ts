@@ -56,7 +56,7 @@ test('discovery-chat: new chat → starter prompt → agent reply with action ca
   await openChatTab(page);
 
   // Start a chat.
-  await page.getByRole('button', { name: '+ New chat' }).click();
+  await page.getByRole('button', { name: 'New chat' }).click();
 
   // Empty state offers starter chips that prefill (not auto-send) the composer.
   const chip = page.locator('.starter-chip').first();
@@ -90,7 +90,7 @@ test.describe('discovery-chat on a phone', () => {
   test('discovery-chat: starter chips render on a phone', async ({ page }) => {
     test.setTimeout(60_000);
     await openChatTab(page);
-    await page.getByRole('button', { name: '+ New chat' }).click();
+    await page.getByRole('button', { name: 'New chat' }).click();
     // Chips are present (as a horizontal scroll row on a phone).
     await expect(page.locator('.starter-chip').first()).toBeVisible({ timeout: 15_000 });
   });

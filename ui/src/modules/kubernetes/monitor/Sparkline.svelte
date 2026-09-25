@@ -48,6 +48,6 @@
   }
   .spark-empty {
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
 </style>

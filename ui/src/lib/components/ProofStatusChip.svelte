@@ -48,9 +48,9 @@
     color: var(--text-dim);
   }
   .proof-status.compact {
-    height: 14px;
+    height: 16px;
     padding: 0 5px;
-    font-size: 9px;
+    font-size: var(--fs-xs);
   }
   .proof-status .risk {
     font-variant-numeric: tabular-nums;

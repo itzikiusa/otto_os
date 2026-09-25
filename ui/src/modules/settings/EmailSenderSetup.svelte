@@ -3,6 +3,7 @@
   import { sectionLabel } from './sections';
   import SectionIntro from './SectionIntro.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   // Settings → Sharing: configure a Gmail App Password sender for email-OTP shares.
   // The app password is write-only (never echoed back from the server); the form
   // always shows an empty password field so the user can update it without seeing the
@@ -11,6 +12,9 @@
   import { api } from '../../lib/api/client';
   import type { SetEmailSenderReq, EmailSenderResp } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
+  import { loadErrorText } from '../../lib/loadError';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { guardUnsaved } from '../../lib/leaveGuard';
 
   // ── state ─────────────────────────────────────────────────────────────────────
   let status = $state<EmailSenderResp | null>(null);
@@ -31,7 +35,17 @@
   /** The operator-configured public domain used to build share links + the link
    *  emailed with the OTP code. Empty ⇒ links fall back to the request host. */
   let fBaseUrl = $state('');
+  /** The value last loaded/saved — Save stays disabled until the field differs. */
+  let savedBaseUrl = $state('');
   let savingBaseUrl = $state(false);
+  /** Set when the saved domain couldn't be read: an empty box would otherwise
+   *  look like "not set", one Save away from clearing the real value. */
+  let baseUrlError = $state('');
+  /** Set when the sender status couldn't be read (inline, with Retry). */
+  let loadError = $state('');
+  /** Inline field errors, shown on Save (not as toasts). */
+  let gmailError = $state('');
+  let pwError = $state('');
 
   // ── load current sender on mount ──────────────────────────────────────────────
   onMount(() => {
@@ -41,34 +55,49 @@
 
   async function load(): Promise<void> {
     loading = true;
+    loadError = '';
     try {
       status = await api.get<EmailSenderResp>('/email-sender');
       // Pre-fill the address so the user can update the password without re-typing it.
       if (status.gmail_address) fGmail = status.gmail_address;
-    } catch {
-      // Non-fatal: just show the empty form.
+    } catch (e) {
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
   }
 
   async function loadBaseUrl(): Promise<void> {
+    baseUrlError = '';
     try {
       const settings = await api.get<Record<string, unknown>>('/settings');
       const v = settings.share_base_url;
-      if (typeof v === 'string') fBaseUrl = v;
-    } catch {
-      // Non-fatal: just show the empty field.
+      fBaseUrl = savedBaseUrl = typeof v === 'string' ? v : '';
+    } catch (e) {
+      baseUrlError = loadErrorText(e);
     }
   }
 
+  const baseUrlDirty = $derived(fBaseUrl.trim() !== savedBaseUrl.trim());
+  // Typed-but-unsaved edits (an app password, or a changed domain) ask
+  // before a navigation drops them.
+  $effect(() =>
+    guardUnsaved(() => !saving && !savingBaseUrl && (fPassword.trim() !== '' || baseUrlDirty), {
+      what: 'the sharing settings',
+    }),
+  );
+  const baseUrlInvalid = $derived(fBaseUrl.trim() !== '' && !/^https?:\/\/[^\s/]+/i.test(fBaseUrl.trim()));
+
   async function saveBaseUrl(): Promise<void> {
+    if (baseUrlInvalid) return;
     savingBaseUrl = true;
     try {
-      await api.put('/settings', { share_base_url: fBaseUrl.trim() });
-      toasts.success('Public link domain saved', 'Share links will use this domain.');
+      const v = fBaseUrl.trim();
+      await api.put('/settings', { share_base_url: v });
+      fBaseUrl = savedBaseUrl = v;
+      toasts.success('Public link domain saved', v ? 'New share links use this domain.' : 'Share links use the request host again.');
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't save the public link domain", loadErrorText(e));
     } finally {
       savingBaseUrl = false;
     }
@@ -78,14 +107,9 @@
   async function save(): Promise<void> {
     const gmail = fGmail.trim();
     const pw = fPassword.trim();
-    if (!gmail) {
-      toasts.error('Missing address', 'Enter your Gmail address.');
-      return;
-    }
-    if (!pw) {
-      toasts.error('Missing app password', 'Enter the 16-character App Password.');
-      return;
-    }
+    gmailError = gmail ? '' : 'Enter the Gmail address Otto sends from.';
+    pwError = pw.replace(/\s/g, '').length === 16 ? '' : 'Enter the 16-character App Password (spaces are fine).';
+    if (gmailError || pwError) return;
     saving = true;
     smtpError = null;
     try {
@@ -98,10 +122,10 @@
         toasts.success('Email sender saved', 'Gmail SMTP verified — you can now create OTP-gated share links.');
       } else {
         smtpError = 'SMTP verification failed. Check that (1) the password is exactly 16 characters with no spaces, (2) it was generated for "Mail" not another app, and (3) 2-Step Verification is still enabled on your Google account.';
-        toasts.warn('Saved — SMTP unverified', 'See the error hint below the form.');
+        toasts.warn('Saved — SMTP unverified', 'The error is shown under the sender address.');
       }
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't save the email sender", loadErrorText(e));
     } finally {
       saving = false;
     }
@@ -118,10 +142,10 @@
         toasts.success('SMTP verified', 'Gmail connection is working.');
       } else {
         smtpError = 'Re-verification failed. Your App Password may have been revoked. Generate a new one in Google Account → Security → App passwords, then re-enter it below.';
-        toasts.warn('SMTP still unverified', 'See the error hint below.');
+        toasts.warn('SMTP still unverified', 'The error is shown under the sender address.');
       }
     } catch (e) {
-      toasts.error('Verify failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't verify the email sender", loadErrorText(e));
     } finally {
       verifying = false;
     }
@@ -129,7 +153,7 @@
 
   // ── badge helpers ─────────────────────────────────────────────────────────────
   const verifiedBadge = $derived(
-    status?.verified ? 'badge verified' : status?.gmail_address ? 'badge unverified' : 'badge none',
+    status?.verified ? 'chip ok' : status?.gmail_address ? 'chip chip-warn' : 'chip',
   );
   const verifiedLabel = $derived(
     status?.verified
@@ -146,49 +170,37 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('sharing')} subtitle="Emails one-time codes to guests of shared sessions" />
   <PageBody width="readable">
-  <SectionIntro>Configure a Gmail sender so Otto can email one-time codes to guests before they attach to a shared session.</SectionIntro>
+  <SectionIntro>Configure a Gmail sender so Otto can email a one-time code to each guest before they attach to a shared session. A leaked link alone is useless without the guest's mailbox.</SectionIntro>
 
-  <!-- ── Status card ── -->
-  <div class="section-title">Current sender</div>
-  <div class="card pad">
-    {#if loading}
-      <span class="dim">Loading…</span>
-    {:else}
-      <div class="status-row">
-        <span class="status-address">
-          {status?.gmail_address ?? 'No sender configured'}
-        </span>
-        <span class={verifiedBadge}>{verifiedLabel}</span>
-        {#if status?.gmail_address && !status.verified}
-          <button class="btn small" disabled={verifying} onclick={reverify}>
-            {verifying ? 'Verifying…' : 'Re-verify'}
-          </button>
-        {/if}
+  <!-- ── Gmail sender: status + setup form in one card ── -->
+  <div class="section-title">Gmail sender</div>
+  <LoadState what="the email sender" {loading} error={loadError} empty={!status} onretry={() => void load()} rows={2}>
+  <div class="card s-card">
+    <div class="status-row">
+      <span class="status-address" class:unset={!status?.gmail_address} title={status?.gmail_address ?? undefined}>
+        {status?.gmail_address ?? 'No sender configured'}
+      </span>
+      <!-- "Not configured" beside "No sender configured" said it twice. -->
+      {#if status?.gmail_address}<span class={verifiedBadge}>{verifiedLabel}</span>{/if}
+      {#if status?.gmail_address && !status.verified}
+        <button class="btn small" disabled={verifying} onclick={reverify}>
+          {verifying ? 'Verifying…' : 'Re-verify'}
+        </button>
+      {/if}
+    </div>
+    {#if smtpError}
+      <div class="smtp-error" role="alert">
+        <strong>SMTP error:</strong> {smtpError}
       </div>
-      {#if status?.gmail_address}
-        <p class="hint dim" style="margin-top: 6px">
-          App password: <span class="pw-placeholder">●●●●&nbsp;●●●●&nbsp;●●●●&nbsp;●●●●</span>
-          (stored in Keychain, never displayed)
-        </p>
-      {/if}
-      {#if smtpError}
-        <div class="smtp-error">
-          <strong>SMTP error:</strong> {smtpError}
-        </div>
-      {/if}
     {/if}
-  </div>
 
-  <!-- ── Setup form ── -->
-  <div class="section-title">Set up or update</div>
-  <div class="card pad">
-    <p class="card-intro dim">
+    <p class="card-intro">
       Create a Gmail <strong>App Password</strong> in
       <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer">
         Google Account → Security → App passwords
       </a>
-      (requires 2-Step Verification). Paste the 16-character password below.
-      Otto stores it in the macOS Keychain — it is never written to disk or the DB.
+      (needs 2-Step Verification) and paste it below. Otto keeps it in the macOS Keychain — never on
+      disk or in its database.
     </p>
 
     <div class="field">
@@ -199,86 +211,102 @@
         type="email"
         placeholder="you@gmail.com"
         autocomplete="email"
+        aria-invalid={!!gmailError}
+        disabled={hasStoredPassword && !editingPassword}
+        title={hasStoredPassword && !editingPassword ? 'Replace the app password to change the sender' : undefined}
         bind:value={fGmail}
+        oninput={() => (gmailError = '')}
       />
+      {#if gmailError}<span class="field-error">{gmailError}</span>{/if}
     </div>
 
     <div class="field">
-      <label for="es-pw">
-        App Password
-        {#if hasStoredPassword && !editingPassword}
-          <button class="inline-link" onclick={() => (editingPassword = true)}>Change</button>
-        {/if}
-      </label>
+      <label for="es-pw">App password</label>
       {#if hasStoredPassword && !editingPassword}
-        <!-- Placeholder affordance so the user knows a password is set. -->
+        <!-- Write-only: a password is stored, but never sent back. -->
         <div class="pw-set-row">
-          <span class="pw-placeholder input-like">●●●●&nbsp;●●●●&nbsp;●●●●&nbsp;●●●●</span>
-          <span class="hint dim">(16-char App Password stored in Keychain)</span>
+          <span class="stored"><Icon name="lock" size={12} /> Stored in Keychain</span>
+          <button class="btn small ghost" onclick={() => (editingPassword = true)}>Replace…</button>
         </div>
       {:else}
         <input
           id="es-pw"
           class="input"
           type="password"
-          placeholder="xxxx xxxx xxxx xxxx  (16 characters)"
+          placeholder="xxxx xxxx xxxx xxxx"
           autocomplete="new-password"
           maxlength={19}
+          aria-invalid={!!pwError}
           bind:value={fPassword}
+          oninput={() => (pwError = '')}
         />
-        <span class="hint dim">
-          Enter exactly 16 characters (groups of 4, with or without spaces).
-          Never use your Google account password — create a dedicated App Password.
-        </span>
+        {#if pwError}
+          <span class="field-error">{pwError}</span>
+        {:else}
+          <span class="hint">16 characters, with or without spaces. Never your Google account password.</span>
+        {/if}
       {/if}
     </div>
 
-    <button class="btn primary" disabled={saving} onclick={save}>
-      {saving ? 'Saving…' : 'Save and verify'}
-    </button>
+    <div class="form-actions">
+      {#if editingPassword}
+        <button class="btn ghost" onclick={() => { editingPassword = false; fPassword = ''; pwError = ''; gmailError = ''; fGmail = status?.gmail_address ?? fGmail; }}>Cancel</button>
+      {/if}
+      <button
+        class="btn primary"
+        disabled={saving || (hasStoredPassword && !editingPassword)}
+        title={hasStoredPassword && !editingPassword ? 'Replace the app password to save a new one' : undefined}
+        onclick={save}
+      >
+        {saving ? 'Saving…' : 'Save and verify'}
+      </button>
+    </div>
   </div>
+  </LoadState>
 
   <!-- ── Public link domain ── -->
   <div class="section-title">Public link domain</div>
-  <div class="card pad">
+  <div class="card s-card">
+    {#if baseUrlError}
+      <div class="inline-error" role="alert">
+        <span>Couldn't read the saved domain: {baseUrlError}</span>
+        <button class="btn small" onclick={() => void loadBaseUrl()}>Retry</button>
+      </div>
+    {/if}
     <div class="field">
-      <label for="es-base-url">Public link domain</label>
+      <label for="es-base-url">Domain for share links</label>
       <input
         id="es-base-url"
         class="input"
         type="url"
         placeholder="https://otto.example.com"
+        aria-invalid={baseUrlInvalid}
+        disabled={!!baseUrlError}
         bind:value={fBaseUrl}
       />
-      <span class="hint dim">
-        Used to build share links + the link emailed with the code (otherwise links
-        use the request host / 127.0.0.1).
-      </span>
+      {#if baseUrlInvalid}
+        <span class="field-error">Start with https:// (or http://) followed by the host.</span>
+      {:else}
+        <span class="hint">
+          Used in share links and in the link emailed with the code. Leave empty to use the host the
+          request came in on (127.0.0.1 by default).
+        </span>
+      {/if}
     </div>
-
-    <button class="btn primary" disabled={savingBaseUrl} onclick={saveBaseUrl}>
-      {savingBaseUrl ? 'Saving…' : 'Save'}
-    </button>
+    <div class="form-actions">
+      <button class="btn" disabled={savingBaseUrl || !baseUrlDirty || baseUrlInvalid || !!baseUrlError} onclick={saveBaseUrl}>
+        {savingBaseUrl ? 'Saving…' : 'Save domain'}
+      </button>
+    </div>
   </div>
 
   <!-- ── How it works ── -->
   <div class="section-title">How it works</div>
-  <div class="card pad">
-    <ol class="how-list dim">
-      <li>
-        When you create a share link with a <strong>Recipient email</strong>, Otto
-        emails a 6-digit code to that address.
-      </li>
-      <li>
-        The guest opens the link and must enter the code before the terminal
-        attaches. A leaked link alone is useless without the mailbox.
-      </li>
-      <li>
-        Sessions expire (max 12 hours). Use <strong>Extend</strong> to re-send a
-        fresh code to the same locked address.
-      </li>
-    </ol>
-  </div>
+  <ol class="how-list">
+    <li>When you create a share link with a <strong>Recipient email</strong>, Otto emails a 6-digit code to that address.</li>
+    <li>The guest opens the link and enters the code before the terminal attaches.</li>
+    <li>Shares expire after at most 12 hours. <strong>Extend</strong> re-sends a fresh code to the same address.</li>
+  </ol>
   </PageBody>
 </div>
 
@@ -290,103 +318,98 @@
     height: 100%;
     min-height: 0;
   }
+  .s-card {
+    padding: 14px 16px;
+    max-width: var(--settings-col);
+    margin-bottom: 8px;
+  }
   .status-row {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     flex-wrap: wrap;
+    min-width: 0;
   }
   .status-address {
-    font-size: 13px;
-    color: var(--text);
-    font-family: monospace;
-  }
-
-  /* Verified / unverified / not-configured badge */
-  .badge {
-    font-size: var(--fs-xs);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--fs-m);
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    padding: 2px 8px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    flex-shrink: 0;
+    color: var(--text);
   }
-  .badge.verified {
-    color: var(--success);
-    border-color: color-mix(in srgb, var(--success) 35%, transparent);
-    background: color-mix(in srgb, var(--success) 10%, transparent);
-  }
-  .badge.unverified {
-    color: var(--warning);
-    border-color: color-mix(in srgb, var(--warning) 35%, transparent);
-    background: color-mix(in srgb, var(--warning) 10%, transparent);
-  }
-  .badge.none {
+  .status-address.unset {
+    font-weight: 500;
     color: var(--text-dim);
   }
-
+  .chip-warn {
+    color: var(--warning);
+    border-color: color-mix(in srgb, var(--warning) 35%, transparent);
+    background: var(--warning-soft);
+  }
   .card-intro {
-    font-size: 12.5px;
-    line-height: 1.55;
-    margin: 0 0 14px;
+    font-size: var(--fs-s);
+    line-height: 1.5;
+    color: var(--text-dim);
+    margin: 12px 0;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
   }
   .card-intro a {
     color: var(--accent-text);
     text-decoration: underline;
   }
-
   .how-list {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     line-height: 1.6;
+    color: var(--text-dim);
     margin: 0;
+    max-width: var(--settings-col);
     padding-inline-start: 18px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 4px;
   }
-
-  .pw-placeholder {
-    font-family: monospace;
-    color: var(--text-dim);
-    letter-spacing: 0.05em;
-  }
-
   .pw-set-row {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     flex-wrap: wrap;
+    min-height: 27px;
   }
-
-  .input-like {
-    display: inline-block;
-    padding: 6px 10px;
-    border-radius: var(--radius-s, 5px);
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    font-size: 13px;
+  .stored {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
   }
-
-  .inline-link {
-    border: none;
-    background: none;
-    color: var(--accent-text);
-    font-size: 11.5px;
-    cursor: pointer;
-    padding: 0 0 0 6px;
-    text-decoration: underline;
+  .form-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
   }
-
+  .field-error {
+    font-size: var(--fs-xs);
+    color: var(--danger);
+  }
+  .inline-error {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    font-size: var(--fs-s);
+    color: var(--danger);
+  }
   .smtp-error {
-    margin-top: 8px;
+    margin-top: 10px;
     padding: 8px 10px;
-    border-radius: var(--radius-s, 5px);
-    background: color-mix(in srgb, var(--danger) 10%, transparent);
+    border-radius: var(--radius-s);
+    background: var(--danger-soft);
     border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     line-height: 1.5;
   }
 </style>

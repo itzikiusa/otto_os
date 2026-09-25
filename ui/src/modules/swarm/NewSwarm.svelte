@@ -25,7 +25,7 @@
       toasts.success('Swarm created');
       onclose();
     } catch (e) {
-      toasts.error('Could not create swarm', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't create the swarm", e instanceof Error ? e.message : String(e));
     } finally {
       busy = false;
     }
@@ -46,7 +46,7 @@
     </button>
     {#each swarm.presets as p (p.slug)}
       <button class="preset" class:sel={selected === p.slug} onclick={() => (selected = p.slug)}>
-        <div class="p-name">{p.name} <span class="dim">· {p.agents.length} agents</span></div>
+        <div class="p-name">{p.name} <span class="dim">· {p.agents.length} agent{p.agents.length === 1 ? '' : 's'}</span></div>
         <div class="p-desc dim">{p.description}</div>
       </button>
     {/each}
@@ -54,7 +54,7 @@
 
   {#snippet footer()}
     <button class="btn ghost" onclick={onclose}>Cancel</button>
-    <button class="btn primary" onclick={create} disabled={!name.trim() || busy}>Create</button>
+    <button class="btn primary" onclick={create} disabled={!name.trim() || busy} title={name.trim() ? undefined : 'Name the swarm first'}>{busy ? 'Creating…' : 'Create'}</button>
   {/snippet}
 </Modal>
 
@@ -83,10 +83,10 @@
   }
   .p-name {
     font-weight: 600;
-    font-size: 13px;
+    font-size: var(--fs-m);
     margin-bottom: 2px;
   }
   .p-desc {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
 </style>

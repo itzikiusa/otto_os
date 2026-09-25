@@ -7,6 +7,7 @@
   //   • advisory — instruction files / skills: guidance the model MAY ignore.
   //   • enforced — hooks / settings the runtime imposes regardless.
   // See docs/contracts/api.md (POST /workspaces/{id}/context/preview).
+  import Icon from '../../lib/components/Icon.svelte';
   import { onDestroy } from 'svelte';
   import { contextApi } from '../../lib/api/context';
   import type {
@@ -150,7 +151,7 @@
               <span class="file-name mono" title={f.path}>{leaf(f.path)}</span>
               <span class="badge {f.enforcement}">{f.enforcement}</span>
               <span class="file-size dim">{fmtBytes(f.size)}</span>
-              <span class="chevron" class:open={openFile === f.path}>▸</span>
+              <span class="chevron" class:open={openFile === f.path}><Icon name="chevronRight" size={10} /></span>
             </button>
             {#if openFile === f.path}
               <pre class="file-body mono">{f.first_lines}{f.truncated ? '\n…' : ''}</pre>
@@ -197,11 +198,11 @@
     flex-wrap: wrap;
   }
   .hint {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .skipped {
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 8px 10px;
     border: 1px dashed var(--border);
     border-radius: var(--radius-s);
@@ -213,7 +214,7 @@
     align-items: center;
     gap: 6px;
     flex-wrap: wrap;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 6px 8px;
     border-radius: var(--radius-s);
     background: var(--surface-2);
@@ -223,7 +224,7 @@
     margin-inline-end: 8px;
   }
   .badge {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -252,7 +253,7 @@
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .summary-lbl {
     font-weight: 600;
@@ -264,7 +265,7 @@
     flex-wrap: wrap;
   }
   .chip {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 1px 7px;
     border-radius: 99px;
     background: var(--surface-2);
@@ -273,14 +274,14 @@
   .chip .ver {
     margin-inline-start: 4px;
     color: var(--text-dim);
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
   }
 
   .files-head {
     margin-top: 2px;
   }
   .files-title {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
   }
   .files {
@@ -325,7 +326,7 @@
     min-width: 78px;
   }
   .file-name {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     flex: 1;
     min-width: 0;
     overflow: hidden;
@@ -337,7 +338,7 @@
     flex-shrink: 0;
   }
   .chevron {
-    font-size: 9px;
+    display: inline-flex;
     color: var(--text-dim);
     transition: transform 120ms ease-out;
     flex-shrink: 0;
@@ -350,7 +351,7 @@
     padding: 8px 10px;
     border-top: 1px solid var(--border);
     background: var(--surface);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.45;
     white-space: pre-wrap;
     word-break: break-word;
@@ -360,7 +361,7 @@
 
   .generated summary {
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     display: flex;
     align-items: center;
@@ -373,7 +374,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.5;
     white-space: pre-wrap;
     word-break: break-word;

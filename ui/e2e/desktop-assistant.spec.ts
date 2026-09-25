@@ -170,8 +170,8 @@ test('Memory tab: profile save, forget with Undo, review queue, Hermes only queu
   await expect(mem.getByText('Saved', { exact: true })).toBeVisible();
   expect(lastCall(s, 'PUT', '/assistant/memory')?.body).toEqual({ profile: { content: '- Prefers aisle seats', version: 'v1' } });
 
+  // Forgetting one memory is undoable, so it doesn't confirm first.
   await mem.getByRole('button', { name: 'Forget “Prefers quiet rooms, high floor”' }).click();
-  await page.getByRole('dialog').getByRole('button', { name: 'Forget' }).click();
   await expect(mem.getByText('Forgot “Prefers quiet rooms, high floor”')).toBeVisible();
   await mem.getByRole('button', { name: 'Undo' }).click();
   expect(lastCall(s, 'POST', '/assistant/memory/undo')?.body).toEqual({ undo_token: 'undo-mem-quiet' });
@@ -211,7 +211,7 @@ test('Settings → Assistant saves routing rules and limit behaviour', async ({ 
   await form.getByLabel('Extra words that mean “code”').fill('terraform, jq');
   await form.getByRole('radio', { name: /Switch automatically/ }).check();
   await save.click();
-  await expect(form.getByText('Saved. New turns use these rules.')).toBeVisible();
+  await expect(page.getByText('Routing saved')).toBeVisible();
   const body = lastCall(s, 'PUT', '/assistant/routing')?.body as Record<string, unknown>;
   expect(body.auto_failover).toBe(true);
   expect(body.extra_keywords).toEqual({ code: ['terraform', 'jq'], hard: [] });
@@ -223,7 +223,7 @@ test('a failed thread list shows inline with Retry; a missing API says so', asyn
   const s = assistantState();
   s.fail['/assistant/threads'] = 500;
   await open(page, 'assistant', s);
-  await expect(page.getByText('Couldn’t load your threads.')).toBeVisible();
+  await expect(page.getByRole('heading', { name: /Couldn.t load your threads/ })).toBeVisible();
   delete s.fail['/assistant/threads'];
   await page.getByRole('button', { name: 'Retry' }).click();
   await expect(page.locator('[data-testid="page-header"] h1')).toHaveText('Lisbon weekend');

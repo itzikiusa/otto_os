@@ -109,7 +109,7 @@
     margin-bottom: 8px;
   }
   .group-title {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -123,17 +123,17 @@
   }
   .note {
     height: 26px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     width: 200px;
     max-width: 48vw;
   }
   .dim {
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .empty {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .snap-list {
     display: flex;
@@ -148,7 +148,7 @@
     border-radius: var(--radius-s);
     padding: 6px 10px;
     background: var(--surface);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .seq {
     font-variant-numeric: tabular-nums;
@@ -175,7 +175,7 @@
   }
   .time {
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     white-space: nowrap;
   }
   .grow {
@@ -192,7 +192,7 @@
     background: transparent;
     color: var(--accent-text);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 0 2px;
     white-space: nowrap;
   }

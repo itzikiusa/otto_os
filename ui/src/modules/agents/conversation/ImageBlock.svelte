@@ -93,7 +93,7 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     border: 1px dashed var(--border);
     border-radius: var(--radius-s);

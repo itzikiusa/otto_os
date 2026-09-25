@@ -160,7 +160,7 @@
     display: grid;
     place-items: center;
     pointer-events: none;
-    font-size: 13px;
+    font-size: var(--fs-m);
     line-height: 1.3;
     color: var(--text);
     text-align: center;

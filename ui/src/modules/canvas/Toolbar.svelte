@@ -116,7 +116,7 @@
   }
   .title {
     font-weight: 600;
-    font-size: 14px;
+    font-size: var(--fs-m);
     color: var(--text);
     background: none;
     border: none;
@@ -132,7 +132,7 @@
     background: var(--surface-2);
   }
   .title-input {
-    font-size: 14px;
+    font-size: var(--fs-m);
     font-weight: 600;
     padding: 4px 6px;
     border: 1px solid var(--accent);
@@ -142,8 +142,8 @@
     min-width: 200px;
   }
   .saved {
-    font-size: 11px;
-    color: var(--text-dim, #888);
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
     white-space: nowrap;
   }
   .saved.active {
@@ -188,7 +188,7 @@
     background: var(--surface);
     color: var(--text);
     border-radius: var(--radius-s, 6px);
-    font-size: 13px;
+    font-size: var(--fs-m);
     cursor: pointer;
   }
   .btn:hover {

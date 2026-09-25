@@ -3,6 +3,7 @@
   // (swarm config) and project skills. Loads the library on mount; renders the
   // current selection as removable chips with an autocompleting add input.
   import { swarm } from '../../lib/stores/swarm.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
 
   interface Props {
     /** Currently-selected skill names. */
@@ -68,7 +69,7 @@
       {#each selected as s (s)}
         <span class="chip">
           {s}
-          <button class="x" onclick={() => remove(s)} aria-label="Remove {s}">×</button>
+          <button class="x" onclick={() => remove(s)} aria-label="Remove {s}" title="Remove {s}"><Icon name="x" size={12} /></button>
         </span>
       {/each}
     </div>
@@ -84,7 +85,7 @@
     gap: 6px;
   }
   .lbl {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .add {
@@ -103,7 +104,7 @@
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 2px 8px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .x {
     border: none;
@@ -111,14 +112,14 @@
     color: var(--text-dim);
     cursor: pointer;
     padding: 0;
-    font-size: 13px;
-    line-height: 1;
+    display: inline-grid;
+    place-items: center;
   }
   .x:hover {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .none {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     margin: 0;
   }
 </style>

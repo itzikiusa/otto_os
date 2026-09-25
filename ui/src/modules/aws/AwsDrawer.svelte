@@ -132,7 +132,7 @@
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .dr-kind {
     font-size: var(--fs-xs);
@@ -149,7 +149,7 @@
   }
   .dr-id {
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -199,7 +199,7 @@
     border: none;
     background: transparent;
     padding: 6px 10px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
     border-bottom: 2px solid transparent;

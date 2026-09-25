@@ -156,14 +156,17 @@ test('policy activation binds preview to exact rules, shows child impact and sav
   }, workspaceId);
   await page.goto('/#/connections');
   await expect(
-    page.getByRole('button', { name: `Access for ${fixtureName}`, exact: true }),
-  ).toBeVisible();
+    page.getByRole('button', { name: `Actions for ${fixtureName}`, exact: true }),
+  ).toBeAttached();
   const backdrop = page.locator('.drawer-backdrop');
   if (await backdrop.isVisible()) {
     const bounds = await backdrop.boundingBox();
     await backdrop.click({ position: { x: (bounds?.width ?? 430) - 5, y: 10 } });
   }
-  await page.getByRole('button', { name: `Access for ${fixtureName}`, exact: true }).click();
+  // Row actions live in the row's ⋯ menu (same as right-click).
+  await page.locator('.conn-row', { hasText: fixtureName }).first().hover();
+  await page.getByRole('button', { name: `Actions for ${fixtureName}`, exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Access', exact: true }).click();
   const editor = page.getByRole('region', { name: 'Resource access' });
   await editor.getByLabel('Access mode').selectOption('enforced');
   await editor.getByRole('button', { name: 'Add rule', exact: true }).click();

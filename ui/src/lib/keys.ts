@@ -6,7 +6,8 @@
 // which reserves the ⌘ pair for itself) ·
 // ⌃Tab / ⌃⇧Tab cycle tabs · ⌘[ / ⌘] prev/next session · ⌃1…⌃9 jump to session N ·
 // ⌘D / ⌘⇧D splits · ⌘F find (terminal) ·
-// ⌘+ / ⌘- / ⌘0 zoom (app zoom, or terminal font-size when a terminal is focused)
+// ⌘+ / ⌘- / ⌘0 zoom (app zoom, or terminal font-size when a terminal is focused) ·
+// ⌘\ side-by-side pane (open a picker / close)
 
 export type KeyAction =
   | 'palette'
@@ -36,6 +37,7 @@ export type KeyAction =
   | 'termZoomReset'
   | 'navBack'
   | 'navForward'
+  | 'toggleSidePane'
   | 'snip';
 
 /** Mutable context the Terminal component updates on focus/blur. */
@@ -241,6 +243,13 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
         return;
     }
 
+    // ⌘\ → open the side-by-side pane (a module picker) or close it.
+    if (e.key === '\\' && !e.shiftKey) {
+      e.preventDefault();
+      dispatch('toggleSidePane', e);
+      return;
+    }
+
     // ⌘[ / ⌘] → previous / next session tab.
     if (e.key === '[' || e.key === ']') {
       e.preventDefault();
@@ -339,6 +348,9 @@ export const KEYMAP: ShortcutGroup[] = [
       { keys: '⌘J', label: 'Toggle right panel' },
       { keys: '⌘⇧←', label: 'Navigate back' },
       { keys: '⌘⇧→', label: 'Navigate forward' },
+      { keys: '⌘\\', label: 'Open or close the side-by-side pane' },
+      { keys: '⌥-click', label: 'A sidebar item: open it side by side' },
+      { keys: '⌥↑ / ⌥↓', label: 'Sidebar: move a Favorite (any row while customizing)' },
     ],
   },
   {

@@ -371,6 +371,13 @@
   }
 
   const canQuery = $derived(!!database.selectedConnId && ['db_query','db_data','db_schema'].some(op=>resourceAccess.can('connection',database.selectedConnId!,op,'database','edit',databaseAccessChild(database.activeDb))));
+  // Why Run is disabled — a disabled button must say why (the normal tooltip
+  // describes what Run WOULD do, which reads as a dead button here).
+  const noQueryReason = $derived(
+    database.selectedConnId
+      ? 'You have no query access to this connection (or this database) — ask its owner for access'
+      : 'Pick a connection first',
+  );
   $effect(()=>{if(database.selectedConnId)void resourceAccess.load('connection',database.selectedConnId,databaseAccessChild(database.activeDb));});
   function run(): void {
     if (!canQuery) return;
@@ -735,6 +742,8 @@
       <div
         class="qe-tab"
         class:active={i === database.activeTab}
+        class:agent={!!t.agent}
+        data-db-tab-id={t.id}
         role="tab"
         tabindex="0"
         aria-selected={i === database.activeTab}
@@ -750,6 +759,12 @@
       >
         {#if t.pinned}
           <span class="qe-tab-pin" title="Pinned"><Icon name="pin" size={10} /></span>
+        {/if}
+        {#if t.agent}
+          <!-- Opened by an agent session over UI control: always attributed. -->
+          <span class="qe-tab-agent" title="Opened by {t.agent.label}" aria-label="Opened by {t.agent.label}">
+            <Icon name="sparkle" size={10} />
+          </span>
         {/if}
         {#if renaming === i}
           <!-- svelte-ignore a11y_autofocus -->
@@ -802,7 +817,9 @@
         class="btn small primary"
         onclick={run}
         disabled={!canQuery}
-        title={isMongoshScript
+        title={!canQuery
+          ? noQueryReason
+          : isMongoshScript
           ? 'Run the WHOLE script through mongosh — a script is indivisible, so Run never sends a single ;-delimited fragment (⌘↵)'
           : 'Run the selection, else the statement under the cursor (⌘↵)'}
       >
@@ -815,7 +832,7 @@
           class="btn small"
           onclick={runAll}
           disabled={!canQuery}
-          title="Run all {stmtCount} statements as one batch — one result set per statement (⇧⌘↵)"
+          title={!canQuery ? noQueryReason : `Run all ${stmtCount} statements as one batch — one result set per statement (⇧⌘↵)`}
         >
           <Icon name="play" size={12} />
           Run all
@@ -830,7 +847,7 @@
         disabled={!tab.statement.trim()}
         title={savedLinked ? 'Update the saved query (or Save as new)' : 'Save this query'}
       >
-        <Icon name="check" size={11} />{savedLinked ? 'Update' : 'Save'}
+        <Icon name="check" size={12} />{savedLinked ? 'Update' : 'Save'}
       </button>
     {/if}
     {#if database.capabilities?.explain !== false}
@@ -840,8 +857,9 @@
         onclick={() => void database.explainPlan()}
         disabled={!tab.statement.trim() || tab.running}
         title="Show the query plan (EXPLAIN) — a normalized tree with cost warnings"
+        aria-label="Explain"
       >
-        <Icon name="zap" size={11} /><span class="btn-label">Explain</span>
+        <Icon name="zap" size={12} /><span class="btn-label">Explain</span>
       </button>
     {/if}
     <button
@@ -849,18 +867,20 @@
       class:on={database.assistOpen && database.assistMode === 'ask'}
       onclick={() => database.openAssist('ask')}
       disabled={!canQuery || !auth.can('agents','edit')}
-      title="Requires host agent access and query permission — opens the DB Assistant beside the editor"
+      title={!canQuery || !auth.can('agents','edit') ? 'Needs agent access and query permission on this connection' : 'Ask the DB Assistant about this connection — it opens beside the editor'}
+      aria-label="Ask AI"
     >
-      <Icon name="sparkle" size={11} /><span class="btn-label">Ask AI</span>
+      <Icon name="sparkle" size={12} /><span class="btn-label">Ask AI</span>
     </button>
     <button
       class="btn small ghost"
       class:on={database.assistOpen && database.assistMode === 'nl'}
       onclick={() => database.openAssist('nl')}
       disabled={!canQuery || !auth.can('agents','edit')}
-      title="Requires host agent access and query permission — the DB Assistant drafts a query you can insert or run"
+      title={!canQuery || !auth.can('agents','edit') ? 'Needs agent access and query permission on this connection' : 'Describe what you want in plain English — the DB Assistant drafts a query you can insert or run'}
+      aria-label="Ask in English"
     >
-      <Icon name="comment" size={11} /><span class="btn-label">Ask in English</span>
+      <Icon name="comment" size={12} /><span class="btn-label">Ask in English</span>
     </button>
     {#if database.queryLanguage !== 'redis'}
       <button
@@ -873,8 +893,9 @@
         title={isMongoshScript
           ? 'Format is disabled for mongosh scripts — reflowing real JavaScript breaks its statement boundaries'
           : 'Format / beautify the SQL'}
+        aria-label="Format"
       >
-        <Icon name="format" size={11} /><span class="btn-label">Format</span>
+        <Icon name="format" size={12} /><span class="btn-label">Format</span>
       </button>
     {/if}
     <div class="qe-kbd" bind:this={kbdWrapEl}>
@@ -902,7 +923,7 @@
     <div class="qe-settings">
     {#if database.capabilities?.sql && database.databaseNames.length > 0}
       <label class="qe-db" title="Active database — queries run scoped to it, so you don't need a db. prefix">
-        <Icon name="db" size={11} />
+        <Icon name="db" size={12} />
         <select
           class="input"
           value={database.activeDb ?? ''}
@@ -916,7 +937,7 @@
       </label>
     {:else if database.isRedis && database.keyspaces.length > 0}
       <label class="qe-db" title="Active Redis database — commands (GET, HGETALL, …) run against this DB">
-        <Icon name="db" size={11} />
+        <Icon name="db" size={12} />
         <select
           class="input"
           value={database.activeDb ?? database.keyspaces[0]?.id ?? ''}
@@ -940,7 +961,7 @@
         {/each}
       </select>
     </label>
-    <label class="qe-timeout" title="Per-statement timeout (ms) — 0 or blank = no limit; MySQL only">
+    <label class="qe-timeout" title="Per-statement timeout (ms) — the engine stops the statement past it; 0 or blank = no limit">
       <span>Timeout</span>
       <input
         class="input qe-timeout-input"
@@ -966,7 +987,7 @@
         checked={tab.mask}
         onchange={(e) => { database.tab.mask = (e.currentTarget as HTMLInputElement).checked; }}
       />
-      <Icon name="lock" size={11} />
+      <Icon name="lock" size={12} />
       {#if tab.mask}<span class="qe-masked-badge">Masked</span>{:else}<span>Mask</span>{/if}
     </label>
     <span class="qe-lang mono" title="Query language">{database.queryLanguage}</span>
@@ -975,7 +996,7 @@
 
   {#if queryVars.length > 0}
     <div class="qe-vars" bind:this={varsBarEl}>
-      <Icon name="tag" size={11} />
+      <Icon name="tag" size={12} />
       <span class="qe-vars-label">Variables</span>
       {#each queryVars as name (name)}
         {@const spec = tab.vars[name] ?? defaultVarSpec()}
@@ -1023,7 +1044,7 @@
 
   {#if isMongoshScript}
     <div class="qe-script" class:missing={mongoshInfo?.available === false} data-testid="mongosh-script-bar">
-      <Icon name="zap" size={11} />
+      <Icon name="zap" size={12} />
       <span>
         mongosh script detected — Run executes the WHOLE file through the real
         <code class="mono">mongosh</code> CLI against this connection (counts as a write).
@@ -1090,6 +1111,7 @@
       readOnly={false}
       minimal={true}
       findOwner={true}
+      placeholder={lang === 'redis' ? 'Write a command — ⌘↵ to run' : 'Write a query — ⌘↵ to run'}
       completionSource={database.selectedConnId ? completionSource : null}
       onchange={(v) => database.setStatement(v)}
       onsubmit={run}
@@ -1168,6 +1190,17 @@
        than the window). */
     container: qe / inline-size;
   }
+  /* Chrome rows (query tabs, toolbar, vars/script bars, splitter) keep their
+     natural height; only the editor yields. Its height is a remembered px value
+     that can exceed a short pane (a prod banner + a wrapped toolbar), and the
+     tab strip — an overflow-x scroller, so its min-height is 0 — used to be the
+     one squashed to a sliver instead. */
+  .query-editor > :global(*) {
+    flex-shrink: 0;
+  }
+  .query-editor > .qe-edit {
+    flex-shrink: 1;
+  }
   .qe-tabs {
     display: flex;
     align-items: stretch;
@@ -1191,7 +1224,7 @@
     border-top-right-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
     white-space: nowrap;
     user-select: none;
@@ -1219,7 +1252,7 @@
     height: 18px;
     width: 130px;
     padding: 0 4px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     border: 1px solid var(--accent);
     border-radius: var(--radius-s);
     background: var(--surface);
@@ -1230,6 +1263,15 @@
     color: var(--accent-text);
     flex: 0 0 auto;
     margin-inline-end: -2px;
+  }
+  .qe-tab-agent {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 3px;
+    border-radius: 4px;
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    flex: 0 0 auto;
   }
   .qe-tab-dot {
     width: 6px;
@@ -1326,6 +1368,14 @@
       display: none;
     }
   }
+  /* Too narrow for actions + settings on one row: the settings wrap to a
+     second row that starts at the leading edge (a right-floated half row
+     read as orphaned). */
+  @container qe (max-width: 1010px) {
+    .qe-settings {
+      margin-inline-start: 0;
+    }
+  }
   /* Query-level variables bar — shown only when the statement references
      :name / {name}. One labelled input per variable, values remembered per tab. */
   .qe-vars {
@@ -1344,7 +1394,7 @@
     gap: 8px;
     margin-bottom: 8px;
     padding: 5px 10px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text);
     border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
     background: color-mix(in srgb, var(--accent) 8%, transparent);
@@ -1355,7 +1405,7 @@
     background: color-mix(in srgb, var(--status-warn) 10%, transparent);
   }
   .qe-script-state {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .qe-script-state.ok {
     color: var(--status-working);
@@ -1377,7 +1427,7 @@
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .qe-script-retry:hover {
@@ -1385,7 +1435,7 @@
     color: var(--accent-text);
   }
   .qe-vars-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
@@ -1398,7 +1448,7 @@
     padding: 2px 6px;
   }
   .qe-var-name {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--accent-text);
   }
   .qe-var-name::before {
@@ -1408,11 +1458,11 @@
   .qe-var-input {
     height: 22px;
     width: 120px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .qe-var-type {
     height: 22px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 0 2px;
   }
   .qe-var-esc {
@@ -1471,12 +1521,12 @@
     justify-content: space-between;
     gap: 12px;
     padding: 2px 4px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text);
   }
   .qe-kbd-keys {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface-2);
     border: 1px solid var(--border);
@@ -1494,7 +1544,7 @@
     background: color-mix(in srgb, var(--status-exited) 26%, transparent);
   }
   .kbd {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     opacity: 0.7;
     font-variant-numeric: tabular-nums;
   }
@@ -1515,21 +1565,21 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .qe-limit select,
   .qe-db select {
     height: 24px;
     padding: 0 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     width: auto;
     max-width: 160px;
   }
   .qe-timeout-input {
     height: 24px;
     padding: 0 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     width: 72px;
   }
   /* Mask PII/prod toggle — styled like a small button, highlights when active. */
@@ -1537,7 +1587,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     height: 24px;
     padding: 0 7px;
@@ -1578,7 +1628,7 @@
     padding: 0 0 8px;
   }
   .qe-edit {
-    flex: 0 0 auto;
+    flex: 0 1 auto;
     min-height: 100px;
     /* Edge-to-edge: only a hairline separating it from the results below. The
        inset rounded box cost ~20px of writing space and made the editor read as
@@ -1673,16 +1723,16 @@
     .qe-timeout-input,
     .qe-mask {
       height: 32px;
-      font-size: 12.5px;
+      font-size: var(--fs-m);
     }
     .qe-limit,
     .qe-db,
     .qe-timeout {
-      font-size: 12.5px;
+      font-size: var(--fs-m);
     }
     .qe-tab {
       height: 32px;
-      font-size: 13px;
+      font-size: var(--fs-m);
       max-width: 60vw;
     }
     /* Collapsible Editor / Results accordion headers. */
@@ -1701,13 +1751,13 @@
       text-align: start;
     }
     .qe-acc-title {
-      font-size: 12.5px;
+      font-size: var(--fs-m);
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.04em;
     }
     .qe-acc-count {
-      font-size: 11.5px;
+      font-size: var(--fs-s);
       color: var(--text-dim);
       background: var(--surface-2);
       border-radius: 999px;

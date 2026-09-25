@@ -85,7 +85,7 @@
   }
   .vp-hint {
     margin: 0 0 4px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text-dim);
   }
@@ -96,7 +96,7 @@
   }
   .vp-name {
     flex: 0 0 110px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -113,7 +113,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 </style>

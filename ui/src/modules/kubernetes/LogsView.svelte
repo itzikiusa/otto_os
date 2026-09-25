@@ -227,7 +227,7 @@
         {#each pods as p (p)}<option value={p}>{p}</option>{/each}
       </select>
       {#if podFilter && onopenpod}
-        <button class="btn small" onclick={() => onopenpod?.(podFilter)} title="Open this pod's details"><Icon name="chevronRight" size={11} /> Open pod</button>
+        <button class="btn small" onclick={() => onopenpod?.(podFilter)} title="Open this pod's details"><Icon name="chevronRight" size={12} /> Open pod</button>
       {/if}
     {/if}
     {#if containers.length > 1 || (multi && containers.length)}
@@ -243,10 +243,10 @@
       {#each SINCES as s (s.v)}<option value={s.v}>since {s.l}</option>{/each}
     </select>
     <button class="pill-toggle" class:on={follow} onclick={() => (follow = !follow)} aria-pressed={follow} title="Stream new lines (kubectl logs -f)">
-      <Icon name="play" size={11} /> Follow
+      <Icon name="play" size={12} /> Follow
     </button>
     <button class="pill-toggle" class:on={timestamps} onclick={() => (timestamps = !timestamps)} aria-pressed={timestamps}>
-      <Icon name="clock" size={11} /> Timestamps
+      <Icon name="clock" size={12} /> Timestamps
     </button>
     <button class="pill-toggle" class:on={previous} onclick={() => (previous = !previous)} aria-pressed={previous} title="Logs of the previous (crashed) container instance">
       Previous
@@ -262,7 +262,7 @@
   </div>
 
   {#if error}
-    <div class="err">{error}</div>
+    <div class="err">{error} <button class="btn small" onclick={() => void start()}>Retry</button></div>
   {/if}
 
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -273,7 +273,7 @@
       <VirtualList items={shown} estimateHeight={LINE_H} class="logs-vlist">
         {#snippet row(line, i)}
           {@const pl = parse(line)}
-          <div class="ln" style="height:{LINE_H}px" data-i={i}>{#if pl.pod}<button class="podtag" style="--h:{hue(pl.pod)}" title="{pl.pod} · {pl.ctr}\nClick: only this pod · ⌥-click: open pod" onclick={(e) => { if (e.altKey) onopenpod?.(pl.pod); else podFilter = podFilter === pl.pod ? '' : pl.pod; }}>{pl.pod.length > 22 ? '…' + pl.pod.slice(-21) : pl.pod}{#if !container}<span class="ctr">/{pl.ctr}</span>{/if}</button>{/if}{#each segments(pl.text) as s, k (k)}{#if s.m}<mark>{s.t}</mark>{:else}{s.t}{/if}{/each}</div>
+          <div class="ln" style="height:{LINE_H}px" data-i={i}>{#if pl.pod}<button class="podtag" style="--h:{hue(pl.pod)}" title={`${pl.pod} · ${pl.ctr}\nClick: only this pod · ⌥-click: open pod`} onclick={(e) => { if (e.altKey) onopenpod?.(pl.pod); else podFilter = podFilter === pl.pod ? '' : pl.pod; }}>{pl.pod.length > 22 ? '…' + pl.pod.slice(-21) : pl.pod}{#if !container}<span class="ctr">/{pl.ctr}</span>{/if}</button>{/if}{#each segments(pl.text) as s, k (k)}{#if s.m}<mark>{s.t}</mark>{:else}{s.t}{/if}{/each}</div>
         {/snippet}
       </VirtualList>
     {/if}
@@ -305,7 +305,7 @@
   }
   .input.sm {
     height: 24px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     padding: 0 6px;
   }
   .spacer {
@@ -326,12 +326,12 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     width: 140px;
     outline: none;
   }
   .count {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .logs-body {
     flex: 1;
@@ -343,7 +343,7 @@
   }
   .ln {
     font-family: var(--font-mono);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     line-height: 18px;
     white-space: pre;
     padding: 0 10px;
@@ -380,7 +380,7 @@
     gap: 10px;
     padding: 3px 10px;
     border-top: 1px solid var(--border);
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .live {
     display: inline-flex;
@@ -403,7 +403,7 @@
   .err {
     padding: 8px 10px;
     color: var(--status-exited);
-    font-size: 12px;
+    font-size: var(--fs-s);
     white-space: pre-wrap;
   }
   .dim {
@@ -411,7 +411,7 @@
   }
   .pad {
     padding: 14px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .mono {
     font-family: var(--font-mono);

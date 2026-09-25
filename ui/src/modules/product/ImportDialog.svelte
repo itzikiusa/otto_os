@@ -4,10 +4,12 @@
   // then selects the new story and closes.
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import FolderPicker from '../../lib/components/FolderPicker.svelte';
+  import PathField from '../../lib/components/PathField.svelte';
   import { api } from '../../lib/api/client';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { router } from '../../lib/router.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { IssueAccount } from '../../lib/api/types';
   import SourceSearch from './SourceSearch.svelte';
 
@@ -38,7 +40,6 @@
   let submitting = $state(false);
   let formError = $state('');
 
-  let folderPickerOpen = $state(false);
 
   // ── load accounts on mount ────────────────────────────────────────────────
   $effect(() => {
@@ -52,7 +53,7 @@
       accounts = await api.get<IssueAccount[]>('/issue/accounts');
       if (accounts.length > 0) accountId = accounts[0].id;
     } catch (e) {
-      accountsError = e instanceof Error ? e.message : String(e);
+      accountsError = loadErrorText(e);
     } finally {
       accountsLoading = false;
     }
@@ -96,8 +97,8 @@
   async function submit(): Promise<void> {
     formError = '';
     const key = effectiveKey;
-    if (!accountId) { formError = 'Please select an account.'; return; }
-    if (!key) { formError = 'Please pick an issue/page or enter an ID manually.'; return; }
+    if (!accountId) { formError = 'Pick an account.'; return; }
+    if (!key) { formError = 'Pick an issue or page, or enter its key manually.'; return; }
 
     submitting = true;
     try {
@@ -125,17 +126,21 @@
     {#if accountsLoading}
       <div class="loading">Loading accounts…</div>
     {:else if accountsError}
-      <div class="field-error">Could not load accounts: {accountsError}</div>
+      <div class="field-error" role="alert">Couldn't load your Jira / Confluence accounts. {accountsError}</div>
+      <button class="btn small" onclick={() => void loadAccounts()}>Retry</button>
     {:else if accounts.length === 0}
       <div class="no-accounts">
         <Icon name="ticket" size={16} />
-        <span>No issue accounts configured. Add one in <strong>Settings → Jira / Confluence</strong>.</span>
+        <span>No Jira or Confluence account is connected yet. Add one to import issues and pages.</span>
       </div>
+      <button class="btn small" onclick={() => { onclose(); router.go('settings/jira'); }}>
+        <Icon name="plus" size={12} /> Add account in Settings
+      </button>
     {:else}
       <!-- Account -->
       <div class="field">
         <label class="label" for="import-account">Account</label>
-        <select id="import-account" class="select" bind:value={accountId} onchange={resetSelection}>
+        <select id="import-account" class="input" bind:value={accountId} onchange={resetSelection}>
           {#each accounts as a (a.id)}
             <option value={a.id}>{a.label} ({a.base_url})</option>
           {/each}
@@ -189,9 +194,10 @@
         <button
           class="manual-toggle"
           type="button"
+          aria-expanded={showManual}
           onclick={() => (showManual = !showManual)}
         >
-          {showManual ? '▾' : '▸'}
+          <Icon name={showManual ? 'chevronDown' : 'chevronRight'} size={11} />
           Enter {sourceKind === 'jira' ? 'issue key' : 'page ID'} manually
         </button>
       </div>
@@ -215,7 +221,7 @@
       <!-- Repo path (cwd) -->
       <div class="field">
         <label class="label" for="import-cwd">Repo path <span class="dim">(optional)</span></label>
-        <div class="cwd-row">
+        <PathField bind:value={cwd}>
           <input
             id="import-cwd"
             class="input"
@@ -224,15 +230,7 @@
             spellcheck="false"
             autocomplete="off"
           />
-          <button
-            class="icon-btn"
-            title="Browse folder"
-            aria-label="Browse folder"
-            onclick={() => (folderPickerOpen = true)}
-          >
-            <Icon name="folder" size={13} />
-          </button>
-        </div>
+        </PathField>
       </div>
 
       <!-- Watch toggle -->
@@ -259,18 +257,11 @@
   {/snippet}
 </Modal>
 
-{#if folderPickerOpen}
-  <FolderPicker
-    title="Select repo folder"
-    onpick={(p) => { cwd = p; folderPickerOpen = false; }}
-    onclose={() => (folderPickerOpen = false)}
-  />
-{/if}
 
 <style>
   .loading {
     padding: 12px 0;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .no-accounts {
@@ -280,47 +271,25 @@
     padding: 12px 14px;
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.5;
   }
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    margin-bottom: 14px;
+  /* A `<span>` label (no single control to point at) matches the global
+     `.field > label` style. */
+  .field > span.label {
+    font-size: var(--fs-s);
+    font-weight: 500;
+    color: var(--text-dim);
   }
   .search-field {
     margin-bottom: 4px;
-  }
-  .label {
-    font-size: 11px;
-    font-weight: 500;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
   }
   .dim {
     font-weight: 400;
     text-transform: none;
     letter-spacing: 0;
     font-size: var(--fs-xs);
-  }
-  .select,
-  .input {
-    width: 100%;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    color: var(--text);
-    font-size: 12.5px;
-    padding: 5px 9px;
-    box-sizing: border-box;
-    outline: none;
-  }
-  .select:focus,
-  .input:focus {
-    border-color: var(--accent);
   }
   .kind-row {
     display: flex;
@@ -333,7 +302,7 @@
     padding: 6px 12px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
     color: var(--text-dim);
     transition: border-color 110ms, color 110ms, background 110ms;
@@ -362,7 +331,7 @@
     background: color-mix(in srgb, var(--accent) 10%, transparent);
     border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .selected-label {
     color: var(--text);
@@ -374,7 +343,7 @@
   }
   .change-btn {
     flex-shrink: 0;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--accent-text);
     background: transparent;
     border: none;
@@ -393,7 +362,7 @@
     background: transparent;
     border: none;
     cursor: pointer;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     padding: 0;
     display: flex;
@@ -403,76 +372,22 @@
   .manual-toggle:hover {
     color: var(--text);
   }
-  .cwd-row {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-  }
-  .cwd-row .input {
-    flex: 1;
-  }
   .watch-row {
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text);
     cursor: pointer;
     margin-bottom: 14px;
     user-select: none;
   }
   .field-error {
-    font-size: 12px;
-    color: var(--status-exited, #e53e3e);
+    font-size: var(--fs-s);
+    color: var(--danger);
     margin-bottom: 8px;
     padding: 6px 10px;
-    background: color-mix(in srgb, var(--status-exited, #e53e3e) 10%, transparent);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
     border-radius: var(--radius-s);
-  }
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: 32px;
-    padding: 0 16px;
-    border-radius: var(--radius-s);
-    font-size: 12.5px;
-    font-weight: 500;
-    cursor: pointer;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text);
-    transition: background 110ms, border-color 110ms, color 110ms;
-  }
-  .btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .btn.ghost:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-  }
-  .btn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
-  }
-  .btn.primary:hover:not(:disabled) {
-    opacity: 0.88;
-  }
-  .icon-btn {
-    display: grid;
-    place-items: center;
-    width: 32px;
-    height: 32px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-  .icon-btn:hover {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text);
   }
 </style>

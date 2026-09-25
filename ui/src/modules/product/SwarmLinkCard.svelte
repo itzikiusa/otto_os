@@ -128,11 +128,11 @@
     flex-direction: column;
     gap: 8px;
     margin-top: 12px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .swarm-link-card.dim {
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 8px 12px;
   }
   .slc-head {
@@ -142,7 +142,7 @@
     flex-wrap: wrap;
   }
   .slc-title {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -169,7 +169,7 @@
     align-items: center;
     gap: 4px;
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .task-pills {
     display: flex;
@@ -177,7 +177,7 @@
     gap: 4px;
   }
   .task-pill {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 1px 8px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);

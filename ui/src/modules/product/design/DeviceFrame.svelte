@@ -96,7 +96,7 @@
   .device.desktop {
     border: 1px solid #333;
     border-top-width: 28px;
-    border-radius: 10px;
+    border-radius: var(--radius-m);
   }
   .device.desktop::before {
     /* window traffic lights */

@@ -73,33 +73,36 @@ test.beforeEach(async ({ page }, testInfo) => {
 test('collections search filters by name / URL / method and restores on clear', async ({ page }) => {
   await openPage(page, 'api');
   const input = page.getByLabel('Search collections and requests');
-  const rows = page.locator('.req-row');
+  // The page reopens the most recently edited request as a tab on first visit,
+  // so its name also shows in the tab strip — assert inside the tree only.
+  const tree = page.locator('.tree-wrap');
+  const rows = tree.locator('.req-row');
   await expect(rows).toHaveCount(3);
 
   // Name match keeps the ancestor chain (Payments ▸ Refunds) visible.
   await input.fill('refund');
   await expect(rows).toHaveCount(1);
-  await expect(page.getByText('Create refund')).toBeVisible();
-  await expect(page.getByText('Payments')).toBeVisible();
-  await expect(page.getByText('Refunds')).toBeVisible();
-  await expect(page.getByText('List users')).toBeHidden();
+  await expect(tree.getByText('Create refund')).toBeVisible();
+  await expect(tree.getByText('Payments')).toBeVisible();
+  await expect(tree.getByText('Refunds')).toBeVisible();
+  await expect(tree.getByText('List users')).toBeHidden();
 
   // URL/domain match reaches an ungrouped request.
   await input.fill('ops.internal');
   await expect(rows).toHaveCount(1);
-  await expect(page.getByText('Health check')).toBeVisible();
+  await expect(tree.getByText('Health check')).toBeVisible();
 
   // Multi-token: method + URL fragment must BOTH match.
   await input.fill('post staging');
   await expect(rows).toHaveCount(1);
-  await expect(page.getByText('Create refund')).toBeVisible();
+  await expect(tree.getByText('Create refund')).toBeVisible();
 
   // Collection-name match keeps the whole branch.
   await input.fill('payments');
   await expect(rows).toHaveCount(2);
 
   await input.fill('no-such-request-zzqx');
-  await expect(page.locator('.no-match')).toBeVisible();
+  await expect(tree.locator('.no-match')).toBeVisible();
 
   await input.fill('');
   await expect(rows).toHaveCount(3);

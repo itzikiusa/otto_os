@@ -2,12 +2,15 @@
   // All runs/iterations as a filterable list (per assignee / project / status).
   import Icon from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
-  import { runStatus } from '../../lib/status';
+  import { runStatus, sentenceCase } from '../../lib/status';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import RunInspector from './RunInspector.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { rel } from '../../lib/stores/now.svelte';
+  import { formatCount } from '../../lib/metric-format';
+  import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import type { RecruitedAgent, RunStatus, SwarmRun } from './types';
 
   // `onhire` lets a completed recruit run open the Recruiter wizard pre-filled
@@ -34,6 +37,31 @@
     ),
   );
 
+  const filtering = $derived(!!(agentFilter || projectFilter || statusFilter));
+
+  // Stopping can't be undone (the agent's session is closed and its work in
+  // progress is lost; a new run starts over), so it asks first — the same rule
+  // as Abort all, a workflow's Cancel run and a goal loop's Stop. A failed stop
+  // must surface instead of rejecting silently (the row would just keep
+  // showing Running with no explanation).
+  async function stop(r: SwarmRun) {
+    const who = swarm.agentById(r.agent_id)?.name ?? 'this agent';
+    const ok = await confirmer.ask(
+      `Stop ${who}'s ${sentenceCase(r.kind).toLowerCase()} run? Its session is closed and work in progress is lost.`,
+      { title: 'Stop run', confirmLabel: 'Stop run', danger: true },
+    );
+    if (!ok) return;
+    try {
+      await swarm.stopRun(r.id);
+    } catch (e) {
+      toasts.error("Couldn't stop the run", e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function tokenTitle(r: SwarmRun): string {
+    return `${(r.tokens_input ?? 0).toLocaleString()} input · ${(r.tokens_output ?? 0).toLocaleString()} output tokens`;
+  }
+
   function active(r: SwarmRun): boolean {
     return r.status === 'queued' || r.status === 'running' || r.status === 'waiting';
   }
@@ -41,32 +69,42 @@
 
 <div class="runs">
   <div class="filters">
-    <select class="input small" bind:value={agentFilter}>
+    <select class="input small" aria-label="Filter by assignee" bind:value={agentFilter}>
       <option value="">All assignees</option>
       {#each swarm.detail?.agents ?? [] as a (a.id)}
         <option value={a.id}>{a.name}</option>
       {/each}
     </select>
-    <select class="input small" bind:value={projectFilter}>
+    <select class="input small" aria-label="Filter by project" bind:value={projectFilter}>
       <option value="">All projects</option>
       {#each swarm.detail?.projects ?? [] as p (p.id)}
         <option value={p.id}>{p.name}</option>
       {/each}
     </select>
-    <div class="chips">
-      <button class="chip" class:accent={statusFilter === ''} onclick={() => (statusFilter = '')}>all</button>
+    <div class="chips" role="group" aria-label="Filter by status">
+      <button class="chip" class:accent={statusFilter === ''} aria-pressed={statusFilter === ''} onclick={() => (statusFilter = '')}>All</button>
       {#each STATUSES as s (s)}
-        <button class="chip" class:accent={statusFilter === s} onclick={() => (statusFilter = s)}>{runStatus(s).label}</button>
+        <button class="chip" class:accent={statusFilter === s} aria-pressed={statusFilter === s} onclick={() => (statusFilter = s)}>{runStatus(s).label}</button>
       {/each}
     </div>
     <span class="grow"></span>
-    <button class="icon-btn" onclick={() => swarm.detail && swarm.loadRuns({ swarm_id: swarm.detail.id })} aria-label="refresh">
+    <button class="icon-btn" onclick={() => swarm.detail && swarm.loadRuns({ swarm_id: swarm.detail.id })} aria-label="Refresh runs" title="Refresh runs">
       <Icon name="refresh" size={14} />
     </button>
   </div>
 
   {#if filtered.length === 0}
-    <EmptyState icon="clock" title="No runs" body="Runs appear here as agents work tasks." />
+    {#if filtering && swarm.runs.length > 0}
+      <EmptyState
+        icon="clock"
+        title="No runs match these filters"
+        body="Clear the assignee, project or status filter to see all {swarm.runs.length} runs."
+        actionLabel="Clear filters"
+        onaction={() => { agentFilter = ''; projectFilter = ''; statusFilter = ''; }}
+      />
+    {:else}
+      <EmptyState icon="clock" title="No runs yet" body="Runs appear here as agents work tasks. Start one from the Board (Run now) or an agent's menu in Org." />
+    {/if}
   {:else}
     <div class="table">
       <div class="thead">
@@ -74,37 +112,39 @@
         <span class="c-kind">Work</span>
         <span class="c-status">Status</span>
         <span class="c-time">Started</span>
-        <span class="c-tok">Tokens</span>
+        <span class="c-tok" title="Input / output tokens">Tokens in/out</span>
         <span class="c-act"></span>
       </div>
       <VirtualList items={filtered} estimateHeight={37} class="vlist-runs">
         {#snippet row(r: SwarmRun)}
           {@const agent = swarm.agentById(r.agent_id)}
-          <div class="trow" role="button" tabindex="0" onclick={() => (inspecting = r)} onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (inspecting = r)}>
-            <span class="c-agent">
+          <!-- The Work cell is a real button stretched over the whole row (click
+               anywhere to inspect); the row's own actions sit above it. -->
+          <div class="trow">
+            <span class="c-agent" title={agent ? `${agent.name}${agent.title ? ` — ${agent.title}` : ''}` : r.agent_id}>
               <span class="agent-name">{agent?.name ?? r.agent_id.slice(0, 6)}</span>
               {#if agent?.title}<span class="agent-title dim">{agent.title}</span>{/if}
             </span>
-            <span class="c-kind dim">{r.kind}{r.summary ? ` · ${r.summary}` : ''}</span>
+            <button class="c-kind dim run-open" title={r.summary ? `${sentenceCase(r.kind)} · ${r.summary}` : sentenceCase(r.kind)} onclick={() => (inspecting = r)}
+              aria-label="Inspect {agent?.name ?? 'agent'}'s {sentenceCase(r.kind).toLowerCase()} run">{sentenceCase(r.kind)}{r.summary ? ` · ${r.summary}` : ''}</button>
             <span class="c-status"><StatusBadge status={runStatus(r.status)} /></span>
             <span class="c-time dim">{rel(r.started_at ?? r.enqueued_at ?? '')}</span>
-            <span class="c-tok mono dim">
+            <span class="c-tok mono dim" title={r.tokens_input != null || r.tokens_output != null ? tokenTitle(r) : 'No usage recorded'}>
               {r.tokens_input != null || r.tokens_output != null
-                ? `${r.tokens_input ?? 0}/${r.tokens_output ?? 0}`
+                ? `${formatCount(r.tokens_input ?? 0)}/${formatCount(r.tokens_output ?? 0)}`
                 : '—'}
             </span>
             <span class="c-act">
-              <button class="icon-btn" title="Inspect run" aria-label="inspect run" onclick={(e) => { e.stopPropagation(); inspecting = r; }}>
-                <Icon name="eye" size={14} />
-              </button>
               {#if r.session_id}
-                <button class="btn small ghost" onclick={(e) => { e.stopPropagation(); swarm.selectedSessionId = r.session_id!; }}>Open</button>
+                <button class="icon-btn" title="Open this run's session beside the view" aria-label="Open session" onclick={() => (swarm.selectedSessionId = r.session_id!)}>
+                  <Icon name="terminal" size={14} />
+                </button>
               {/if}
               {#if r.kind === 'recruit' && r.status === 'done' && r.result && onhire && !swarm.recruitHired.has(r.id)}
-                <button class="btn small primary" title="Review & hire this proposed agent" onclick={(e) => { e.stopPropagation(); onhire?.(r.result as unknown as RecruitedAgent, r.id); }}>Hire</button>
+                <button class="btn small primary" title="Review & hire this proposed agent" onclick={() => onhire?.(r.result as unknown as RecruitedAgent, r.id)}>Hire</button>
               {/if}
               {#if active(r)}
-                <button class="btn small danger" onclick={(e) => { e.stopPropagation(); swarm.stopRun(r.id); }}>Stop</button>
+                <button class="btn small danger" title="Stop this run; its session is closed" onclick={() => void stop(r)}>Stop…</button>
               {/if}
             </span>
           </div>
@@ -161,24 +201,60 @@
     gap: 8px;
     align-items: center;
     padding: 6px 10px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .thead {
     position: sticky;
     top: 0;
     background: var(--surface-2);
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     border-bottom: 1px solid var(--border);
   }
   .trow {
+    position: relative;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-    cursor: pointer;
   }
   .trow:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
+  }
+  .run-open {
+    border: none;
+    background: none;
+    padding: 0;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+  }
+  .run-open::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+  }
+  .run-open:focus-visible {
+    outline: none;
+  }
+  .trow:has(.run-open:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+  /* Later in the DOM + positioned → painted above the stretched button. */
+  .c-act > :global(*) {
+    position: relative;
+  }
+  /* Grid cells default to min-width:auto — without 0 a long agent name/title
+     pushes the row wider instead of truncating. */
+  .c-agent {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .agent-title {
+    margin-inline-start: 4px;
   }
   .c-kind {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

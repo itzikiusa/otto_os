@@ -77,6 +77,6 @@
   }
   .empty {
     fill: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
 </style>

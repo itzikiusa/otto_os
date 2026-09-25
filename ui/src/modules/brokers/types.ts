@@ -77,3 +77,30 @@ export interface LagAlert {
   /** Lag at last evaluation if the alert is breached; absent when not breached. */
   breach_lag?: number;
 }
+
+/** The per-cluster views, in tab order (BrokersPage + the embedded ClusterViewer). */
+export type ClusterView = 'overview' | 'topics' | 'groups' | 'schema' | 'replay' | 'alerts';
+export const CLUSTER_VIEWS: { id: ClusterView; label: string }[] = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'topics', label: 'Topics' },
+  { id: 'groups', label: 'Consumer Groups' },
+  { id: 'schema', label: 'Schema Registry' },
+  { id: 'replay', label: 'Replay' },
+  { id: 'alerts', label: 'Lag Alerts' },
+];
+
+/** ←/→/Home/End across a view tablist: returns the next view (and moves focus
+ *  to its tab), or null when the key isn't a tablist key. */
+export function clusterViewKey(e: KeyboardEvent, current: ClusterView): ClusterView | null {
+  const i = CLUSTER_VIEWS.findIndex((v) => v.id === current);
+  let j = -1;
+  if (e.key === 'ArrowRight') j = (i + 1) % CLUSTER_VIEWS.length;
+  else if (e.key === 'ArrowLeft') j = (i - 1 + CLUSTER_VIEWS.length) % CLUSTER_VIEWS.length;
+  else if (e.key === 'Home') j = 0;
+  else if (e.key === 'End') j = CLUSTER_VIEWS.length - 1;
+  if (j < 0) return null;
+  e.preventDefault();
+  const list = e.currentTarget as HTMLElement | null;
+  queueMicrotask(() => list?.querySelectorAll<HTMLElement>('[role=tab]')[j]?.focus());
+  return CLUSTER_VIEWS[j].id;
+}

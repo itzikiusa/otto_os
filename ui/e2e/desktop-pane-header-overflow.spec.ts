@@ -56,7 +56,7 @@ async function columnsUntil(page: Page, maxW: number): Promise<number> {
   for (let i = 0; i < 14 && w > maxW; i++) {
     await page.keyboard.press('Meta+d');
     await expect(page.locator('[data-pane-key]')).toHaveCount(i + 2, { timeout: 15_000 });
-    await runCommand(page, 'Layout: Equal Columns');
+    await runCommand(page, 'Layout: equal columns');
     w = await page.locator('.pane-head').first().evaluate((el) => el.clientWidth);
   }
   expect(w, `could not reach a ${maxW}px header before the pane cap`).toBeLessThanOrEqual(maxW);
@@ -130,7 +130,7 @@ test('tier 7 folds the title and close into ⋯', async ({ page }) => {
 
   // …and the ✕ is reachable from the same menu. Every pane here holds the SAME
   // session (⌘D clones the focused one), so closing its tab empties the split.
-  await menu.getByRole('menuitem', { name: 'Close pane' }).click();
+  await menu.getByRole('menuitem', { name: 'Close session' }).click();
   await page.getByRole('button', { name: 'Delete session' }).click();
   await expect(page.locator('[data-pane-key]')).toHaveCount(0, { timeout: 15_000 });
 });

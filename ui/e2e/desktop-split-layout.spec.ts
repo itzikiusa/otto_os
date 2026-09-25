@@ -207,7 +207,7 @@ test('⌘D stops at 15 panes and Layout: Grid re-equalises them', async ({ page 
   await page.keyboard.press('Meta+d');
   await expect(leaves(page)).toHaveCount(15);
 
-  await runCommand(page, 'Layout: Grid');
+  await runCommand(page, 'Layout: grid');
   const boxes = await leafBoxes(page);
   expect(boxes).toHaveLength(15);
   // 15 tiles ⇒ 4 columns (the same rule the tiled view uses): the top row holds

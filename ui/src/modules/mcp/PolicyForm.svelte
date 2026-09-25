@@ -182,7 +182,7 @@
     gap: 4px;
   }
   .field > span {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .row3 {
@@ -200,20 +200,20 @@
     border-radius: var(--radius-s, 6px);
     color: var(--text);
     padding: 7px 9px;
-    font-size: 13px;
+    font-size: var(--fs-m);
   }
   textarea {
     resize: vertical;
   }
   .mono {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .check {
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text);
   }
   .check.tall {
@@ -223,11 +223,11 @@
     width: auto;
   }
   .hint {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .field-error {
-    font-size: 11px;
-    color: var(--status-exited, #ff5f57);
+    font-size: var(--fs-xs);
+    color: var(--danger);
   }
 </style>

@@ -53,31 +53,10 @@
 <button
   class="icon-btn"
   title="Send to session"
+  aria-label="Send to session"
+  aria-haspopup="menu"
   disabled={sending}
   onclick={open}
 >
-  <Icon name="terminal" size={12} />
+  <Icon name="send" size={12} />
 </button>
-
-<style>
-  .icon-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 22px;
-    height: 22px;
-    border-radius: var(--radius-s);
-    border: 1px solid transparent;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-  .icon-btn:hover:not(:disabled) {
-    background: var(--surface-2);
-    color: var(--text);
-  }
-  .icon-btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-</style>

@@ -5,6 +5,9 @@
 // appears to do nothing. We route external links through the shell plugin's
 // `open` command instead. On the plain web build we fall back to an anchor.
 
+import { isEmbedded } from './desktop';
+import { postToHost } from './embedGuest';
+
 /** True for absolute http(s) URLs that should be handed to the OS browser. */
 export function isExternalUrl(href: string | null | undefined): boolean {
   return !!href && /^https?:\/\//i.test(href.trim());
@@ -14,6 +17,13 @@ export function isExternalUrl(href: string | null | undefined): boolean {
 export async function openExternal(url: string | null | undefined): Promise<void> {
   const href = url?.trim();
   if (!href) return;
+
+  // The side-by-side pane is an iframe without the Tauri bridge (it is
+  // injected into the main frame only): the host window opens the link.
+  if (isEmbedded && isExternalUrl(href)) {
+    postToHost({ type: 'open-external', url: href });
+    return;
+  }
 
   if ('__TAURI_INTERNALS__' in window) {
     const { invoke } = await import('@tauri-apps/api/core');

@@ -15,7 +15,9 @@
   import { activity } from '../lib/stores/activity.svelte';
   import { proof } from '../lib/stores/proof.svelte';
   import ProofStatusChip from '../lib/components/ProofStatusChip.svelte';
-  import { ctxMenu } from '../lib/contextmenu.svelte';
+  import ShareModal from '../modules/agents/ShareModal.svelte';
+  import { ctxMenu, type MenuItem } from '../lib/contextmenu.svelte';
+  import { sidePane, splitMenuItems, navClick, SPLIT_HINT } from '../lib/stores/sidePane.svelte';
   import { popoutItems } from '../lib/popoutMenu';
   import { sessionOrder, applyOrder } from '../lib/stores/sessionOrder.svelte';
   import { viewport } from '../lib/stores/viewport.svelte';
@@ -24,11 +26,15 @@
   import type { WorkspaceWithRole } from '../lib/api/types';
   import { tick, untrack } from 'svelte';
   import {
+    FAVORITES_ID,
     activeNavId,
     availableModules,
-    groupModules,
+    moveAmong,
     moveWithinGroup,
+    reorderAmong,
+    resolveGroupOrder,
     resolveOrder,
+    sidebarSections,
     visibleOrder,
     type SidebarModule,
     type SidebarPluginEntry,
@@ -136,6 +142,8 @@
   }
   let renamingId: string | null = $state(null);
   let draft = $state('');
+  /** The session whose Share sheet is open (same sheet as the tab / pane menus). */
+  let shareSessionId = $state<string | null>(null);
 
   // When a channel group is expanded, show only the most recent N sessions with
   // a "show more" expander, so a busy day's worth of tickets doesn't flood the
@@ -236,19 +244,16 @@
     ws.navigateToSession(id);
   }
 
-  /** Respawn a stuck in-progress agent's PTY (the terminal reconnects itself). */
-  async function restartAgent(id: string): Promise<void> {
-    try {
-      await ws.restartSession(id);
-    } catch (e) {
-      toasts.error('Restart failed', e instanceof Error ? e.message : String(e));
-    }
+  /** Respawn a stuck in-progress agent's PTY (the terminal reconnects itself).
+   *  Asks first when it is working, same as the pane header. */
+  function restartAgent(id: string): Promise<void> {
+    return ws.requestRestart(id);
   }
 
   /** Delete = PTY killed, row + full history gone — confirm first (mirrors
    *  the workspace-delete confirm; one mis-click must not destroy a session's
-   *  history). Always asked — even under "Always delete" for closing tabs:
-   *  a remembered preference never skips an irreversible delete. */
+   *  history). An explicit Delete command always asks; "Always delete" in
+   *  Settings covers closing a tab, not this menu row. */
   async function deleteSession(id: string): Promise<void> {
     const ok = await confirmer.ask(
       'Delete this session and its entire history? This cannot be undone.',
@@ -294,17 +299,20 @@
     }
   }
 
-  async function deleteWorkspace(w: WorkspaceWithRole): Promise<void> {
+  /** "Remove", not "Delete": the workspace is archived (off the sidebar) and
+   *  its folder and files are never touched (patterns.md §7 — Remove detaches,
+   *  the thing still exists). */
+  async function removeWorkspace(w: WorkspaceWithRole): Promise<void> {
     const ok = await confirmer.ask(
-      `Delete workspace “${w.name}”? It is archived (removed from the sidebar) — its folder and files are NOT touched.`,
-      { title: 'Delete workspace', confirmLabel: 'Delete' },
+      `Remove “${w.name}” from Otto? It leaves the sidebar with its sessions; the folder and its files on disk are not touched.`,
+      { title: 'Remove workspace', confirmLabel: 'Remove' },
     );
     if (!ok) return;
     try {
       await ws.archiveWorkspace(w.id);
-      toasts.info('Workspace deleted', w.name);
+      toasts.info('Workspace removed', w.name);
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t remove the workspace', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -343,9 +351,17 @@
   );
   const visible = $derived(visibleOrder(resolved, ui.sidebarHidden));
   const navList = $derived(ui.sidebarEditMode ? resolved : visible);
-  // Sections (Work / Automate / Build / …) in fixed order; the saved order
-  // applies within each. A section whose modules are all hidden drops out.
-  const sections = $derived(groupModules(navList));
+  // Sections: Favorites first (only while it holds something), then Work /
+  // Automate / Build / … in the user's section order; the saved module order
+  // applies within each. A favorited module shows ONLY under Favorites. A
+  // section whose modules are all hidden (or all favorited) drops out.
+  const sections = $derived(sidebarSections(navList, ui.sidebarFavorites, ui.sidebarGroupOrder));
+  /** The favorites as rendered right now (RBAC-filtered; hidden ones only
+   *  while editing), in order — what the move/drag bounds are measured on. */
+  const favIds = $derived(sections[0]?.group.id === FAVORITES_ID ? sections[0].modules.map((m) => m.id) : []);
+  function isFav(id: string): boolean {
+    return favIds.includes(id);
+  }
 
   // The sidebar id the current route highlights (plugin slug / default route /
   // database+brokers → Connections are resolved in activeNavId).
@@ -353,7 +369,12 @@
   function isActive(id: string): boolean {
     return activeId === id;
   }
-  const activeGroup = $derived(resolved.find((m) => m.id === activeId)?.group ?? null);
+  // The section holding the current page — Favorites when it's favorited.
+  const activeGroup = $derived(
+    ui.sidebarFavorites.includes(activeId) && resolved.some((m) => m.id === activeId)
+      ? FAVORITES_ID
+      : (resolved.find((m) => m.id === activeId)?.group ?? null),
+  );
 
   function isHidden(id: string): boolean {
     return ui.sidebarHidden.includes(id);
@@ -396,44 +417,224 @@
     });
   });
 
-  // ── Edit mode: drag-to-reorder (HTML5 DnD, like TabBar) + up/down buttons
-  // (touch-reliable + keyboard-accessible). Both persist the full module order.
+  // ── Reordering ─────────────────────────────────────────────────────────
+  // Edit mode: every row drags (HTML5 DnD, like TabBar) and has up/down
+  // buttons (touch-reliable + keyboard-accessible). Moves stay inside a
+  // section; the one crossing is a drop ONTO a favorite, which favorites the
+  // dragged module at that slot. Favorites also drag outside edit mode and
+  // move with ⌥↑ / ⌥↓ (Finder's sidebar Favorites are always reorderable),
+  // except on phones where HTML5 DnD is inert. Section headers get up/down
+  // (and drag) while editing, and "Move section up/down" in their menu.
   let dragId = $state<string | null>(null);
   let dragOverId = $state<string | null>(null);
+  /** Where the dragged row would land relative to the hovered one. */
+  let dropSide = $state<'before' | 'after'>('before');
 
+  /** Can the dragged module `from` be dropped on the row `to`? */
+  function canDrop(from: string | null, to: string): boolean {
+    if (!from || from === to) return false;
+    if (isFav(to)) return true; // reorder inside Favorites, or favorite-at-slot
+    return !isFav(from) && sameGroup(from, to);
+  }
   function onDragStart(e: DragEvent, id: string): void {
     dragId = id;
     e.dataTransfer?.setData('text/plain', id);
     if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
   }
   function onDragOver(e: DragEvent, id: string): void {
-    if (!dragId || id === dragId || !sameGroup(dragId, id)) return;
+    if (!canDrop(dragId, id)) return;
     e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
     dragOverId = id;
+    dropSide = dropSideFor(dragId!, id);
   }
   function onDragLeave(id: string): void {
     if (dragOverId === id) dragOverId = null;
   }
   function onDrop(e: DragEvent, id: string): void {
     e.preventDefault();
-    if (dragId && sameGroup(dragId, id)) ui.reorderSidebar(resolved.map((m) => m.id), dragId, id);
+    const from = dragId;
     dragId = null;
     dragOverId = null;
+    if (!from || !canDrop(from, id)) return;
+    if (isFav(id)) {
+      if (isFav(from)) {
+        const next = reorderAmong(ui.sidebarFavorites, from, id);
+        if (next) ui.setSidebarFavorites(next);
+      } else ui.addSidebarFavorite(from, id);
+    } else ui.reorderSidebar(resolved.map((m) => m.id), from, id);
   }
   function onDragEnd(): void {
     dragId = null;
     dragOverId = null;
   }
+  /** A drop lands before the target when dragging up (or in from another
+   *  section), after it when dragging down — the indicator says which. */
+  function dropSideFor(from: string, to: string): 'before' | 'after' {
+    const list = isFav(to) ? favIds : resolved.map((m) => m.id);
+    const a = list.indexOf(from);
+    return a >= 0 && a < list.indexOf(to) ? 'after' : 'before';
+  }
+  /** Drag + keyboard reorder props for a Favorites row OUTSIDE edit mode
+   *  (spread onto the row's button; nothing for other rows or on phones). */
+  function favRowProps(id: string): Record<string, unknown> {
+    if (ui.sidebarEditMode || viewport.isPhone || !isFav(id)) return {};
+    return {
+      draggable: true,
+      'aria-keyshortcuts': 'Alt+ArrowUp Alt+ArrowDown',
+      ondragstart: (e: DragEvent) => onDragStart(e, id),
+      ondragover: (e: DragEvent) => onDragOver(e, id),
+      ondragleave: () => onDragLeave(id),
+      ondrop: (e: DragEvent) => onDrop(e, id),
+      ondragend: onDragEnd,
+      onkeydown: (e: KeyboardEvent) => {
+        if (!e.altKey || e.metaKey || e.ctrlKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+        e.preventDefault();
+        moveFavorite(id, e.key === 'ArrowUp' ? -1 : 1, `[data-nav-id="${CSS.escape(id)}"]`);
+      },
+    };
+  }
+
+  /** After a move re-renders the list, put focus back where it was: a keyed
+   *  row that the DOM moved loses focus otherwise. Falls back to the sibling
+   *  control when the moved-to end disables the one that was pressed. */
+  function refocus(selector: string, fallback?: string): void {
+    const root = scrollEl;
+    if (!root) return;
+    void tick().then(() => {
+      const el = root.querySelector<HTMLElement>(selector);
+      if (el && !(el as HTMLButtonElement).disabled) el.focus();
+      else if (fallback) root.querySelector<HTMLElement>(fallback)?.focus();
+    });
+  }
+  /** Selector for one of an edit row's move buttons (by its aria-label). */
+  const moveBtn = (label: string, dir: 'up' | 'down') => `[aria-label="${CSS.escape(`Move ${label} ${dir}`)}"]`;
+
   // Reordering stays inside a section: up/down swap with the nearest
   // same-section neighbour, and a drag only targets rows of its own section.
-  function move(id: string, delta: -1 | 1): void {
-    const next = moveWithinGroup(resolved, id, delta);
+  function move(m: SidebarModule, delta: -1 | 1): void {
+    if (isFav(m.id)) {
+      moveFavorite(m.id, delta, moveBtn(m.label, delta < 0 ? 'up' : 'down'), moveBtn(m.label, delta < 0 ? 'down' : 'up'));
+      return;
+    }
+    const next = moveWithinGroup(resolved, m.id, delta);
     if (next) ui.setSidebarOrder(next);
+    refocus(moveBtn(m.label, delta < 0 ? 'up' : 'down'), moveBtn(m.label, delta < 0 ? 'down' : 'up'));
+  }
+  /** Star toggle (edit mode): the row jumps between Favorites and its own
+   *  section, so keep keyboard focus on its star. */
+  function toggleFavorite(id: string): void {
+    ui.toggleSidebarFavorite(id);
+    refocus(`[data-testid="sidebar-fav-${CSS.escape(id)}"]`);
+  }
+  /** Move a favorite among the RENDERED favorites (saved ids the user can't
+   *  see keep their slots and are hopped over). */
+  function moveFavorite(id: string, delta: -1 | 1, focusSel?: string, fallback?: string): void {
+    const next = moveAmong(ui.sidebarFavorites, id, delta, isFav);
+    if (next) ui.setSidebarFavorites(next);
+    if (focusSel) refocus(focusSel, fallback);
   }
   function sameGroup(a: string | null, b: string): boolean {
     const ga = resolved.find((m) => m.id === a)?.group;
     return ga != null && ga === resolved.find((m) => m.id === b)?.group;
+  }
+
+  // ── Sections: order ─────────────────────────────────────────────────────
+  // Favorites is always first and never moves. The others swap with their
+  // nearest RENDERED neighbour (an empty section — no plugins, all hidden —
+  // isn't a visible slot), persisted as the full resolved section order.
+  const movableSections = $derived(sections.filter((s) => s.group.id !== FAVORITES_ID).map((s) => s.group.id as string));
+  function canMoveSection(id: string, delta: -1 | 1): boolean {
+    const i = movableSections.indexOf(id);
+    return i >= 0 && i + delta >= 0 && i + delta < movableSections.length;
+  }
+  function moveSection(id: string, delta: -1 | 1, focusSel?: string, fallback?: string): void {
+    const all = resolveGroupOrder(ui.sidebarGroupOrder).map((g) => g.id as string);
+    const next = moveAmong(all, id, delta, (g) => movableSections.includes(g));
+    if (next) ui.setSidebarGroupOrder(next);
+    if (focusSel) refocus(focusSel, fallback);
+  }
+  const sectionBtn = (label: string, dir: 'up' | 'down') =>
+    `[aria-label="${CSS.escape(`Move ${label} section ${dir}`)}"]`;
+  // Section drag (edit mode): the header row is the handle; any other
+  // movable section's block is a target.
+  let secDragId = $state<string | null>(null);
+  let secDragOverId = $state<string | null>(null);
+  let secDropSide = $state<'before' | 'after'>('before');
+  function onSecDragStart(e: DragEvent, id: string): void {
+    secDragId = id;
+    e.dataTransfer?.setData('text/plain', `section:${id}`);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+  }
+  function onSecDragOver(e: DragEvent, id: string): void {
+    if (!secDragId || secDragId === id || !movableSections.includes(id)) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    secDragOverId = id;
+    secDropSide = movableSections.indexOf(secDragId) < movableSections.indexOf(id) ? 'after' : 'before';
+  }
+  function onSecDrop(e: DragEvent, id: string): void {
+    if (!secDragId) return;
+    e.preventDefault();
+    const from = secDragId;
+    secDragId = null;
+    secDragOverId = null;
+    if (from === id || !movableSections.includes(id)) return;
+    const next = reorderAmong(resolveGroupOrder(ui.sidebarGroupOrder).map((g) => g.id as string), from, id);
+    if (next) ui.setSidebarGroupOrder(next);
+  }
+  function onSecDragEnd(): void {
+    secDragId = null;
+    secDragOverId = null;
+  }
+
+  // ── Context menus ───────────────────────────────────────────────────────
+  /** A module row's Favorites entries (+ in-Favorites moves). Shared by the
+   *  plain rows and the Agents row, which prepends its own session verbs. */
+  function favoriteMenuItems(m: SidebarModule): MenuItem[] {
+    if (!isFav(m.id)) {
+      return [{ label: 'Add to Favorites', icon: 'star', action: () => ui.addSidebarFavorite(m.id) }];
+    }
+    const i = favIds.indexOf(m.id);
+    return [
+      { label: 'Remove from Favorites', icon: 'star', action: () => ui.removeSidebarFavorite(m.id) },
+      { label: 'Move up', icon: 'arrowUp', hint: '⌥↑', disabled: i <= 0, action: () => moveFavorite(m.id, -1) },
+      { label: 'Move down', icon: 'arrowDown', hint: '⌥↓', disabled: i >= favIds.length - 1, action: () => moveFavorite(m.id, 1) },
+    ];
+  }
+  const customizeItem = (): MenuItem => ({
+    label: 'Customize sidebar',
+    icon: 'edit',
+    action: () => (ui.sidebarEditMode = true),
+  });
+  /** "Open side by side" & co. (stores/sidePane.svelte.ts), then a separator. */
+  function splitItems(m: SidebarModule): MenuItem[] {
+    const items = splitMenuItems(m.id, m.label);
+    return items.length ? [...items, { separator: true }] : [];
+  }
+  function moduleMenu(e: MouseEvent, m: SidebarModule): void {
+    ctxMenu.show(e, [...splitItems(m), ...favoriteMenuItems(m), { separator: true }, customizeItem()]);
+  }
+  function sectionMenu(e: MouseEvent, sec: SidebarSection): void {
+    const id = sec.group.id;
+    const open = sectionOpen(sec);
+    const items: MenuItem[] = [
+      {
+        label: open ? 'Collapse section' : 'Expand section',
+        icon: open ? 'chevronRight' : 'chevronDown',
+        disabled: sectionPinned(sec),
+        action: () => ui.toggleSidebarGroup(id),
+      },
+    ];
+    if (id !== FAVORITES_ID) {
+      items.push(
+        { separator: true },
+        { label: 'Move section up', icon: 'arrowUp', disabled: !canMoveSection(id, -1), action: () => moveSection(id, -1) },
+        { label: 'Move section down', icon: 'arrowDown', disabled: !canMoveSection(id, 1), action: () => moveSection(id, 1) },
+      );
+    }
+    items.push({ separator: true }, customizeItem());
+    ctxMenu.show(e, items);
   }
 </script>
 
@@ -449,6 +650,9 @@
     <img class="nav-logo" src="/otto-mark-64.png" alt="" width="20" height="20" />
     <span class="nav-title">Otto</span>
     <span class="grow"></span>
+    <!-- Phone / tablet: the top bar carries Back / Forward (NavButtons) — a
+         second pair here was duplicate chrome. -->
+    {#if viewport.isDesktop}
     <button
       class="icon-btn nav-back"
       onclick={() => router.back()}
@@ -467,6 +671,7 @@
     >
       <Icon name="chevronRight" size={14} />
     </button>
+    {/if}
     <!-- The one notification bell on desktop/tablet: same spot on every page,
          so no module has to reserve room for a floating one. It sits at the
          header's inline-end, next to the sidebar edge its panel opens beside,
@@ -474,6 +679,9 @@
     <NotificationBell />
     <!-- On phone the Navigator is the off-canvas drawer: this closes it (the
          desktop collapse-to-Rail preference means nothing there). -->
+    <!-- Tablet: the Navigator is a fixed column (no Rail to collapse to), so
+         the button would do nothing there. -->
+    {#if !viewport.isTablet}
     <button
       class="icon-btn"
       onclick={() => (viewport.isPhone ? (ui.navDrawerOpen = false) : ui.toggleRail())}
@@ -482,6 +690,7 @@
     >
       <Icon name="sidebar" size={14} />
     </button>
+    {/if}
   </div>
 
   <div class="nav-scroll" bind:this={scrollEl}>
@@ -493,10 +702,13 @@
         <input
           class="nav-search-input"
           placeholder="Search all sessions…"
+          aria-label="Search all sessions"
           bind:value={sessionQuery}
         />
         {#if sessionQuery}
-          <button class="search-clear" onclick={() => (sessionQuery = '')} aria-label="Clear search">×</button>
+          <button class="search-clear" onclick={() => (sessionQuery = '')} aria-label="Clear search" title="Clear search">
+            <Icon name="x" size={11} />
+          </button>
         {/if}
       </div>
 
@@ -518,9 +730,9 @@
       {/if}
     {/if}
 
-    <div class="nav-section" data-testid="sidebar-modules">
+    <div class="nav-section modules" data-testid="sidebar-modules">
       {#if ui.sidebarEditMode}
-        <p class="edit-hint">Drag to reorder · tap the eye to hide. Hidden items stay listed here while you edit.</p>
+        <p class="edit-hint">Drag rows and section headers to reorder (or ⌥↑ / ⌥↓). Star to add to Favorites, eye to hide.</p>
       {/if}
 
       <!-- Modules render section by section (macOS source list), each section
@@ -534,29 +746,77 @@
       {#each sections as sec (sec.group.id)}
         {@const open = sectionOpen(sec)}
         {@const pinned = sectionPinned(sec)}
-        <div class="nav-group" data-testid={`sidebar-group-${sec.group.id}`} data-open={open}>
-          <button
-            class="group-head"
-            class:pinned
-            aria-expanded={open}
-            onclick={() => !pinned && ui.toggleSidebarGroup(sec.group.id)}
-            title={pinned ? undefined : open ? `Hide ${sec.group.label}` : `Show ${sec.group.label}`}
-            data-testid={`sidebar-group-head-${sec.group.id}`}
+        {@const fav = sec.group.id === FAVORITES_ID}
+        {@const secMovable = ui.sidebarEditMode && !fav}
+        <div
+          class="nav-group"
+          class:favorites={fav}
+          class:sec-dragging={secDragId === sec.group.id}
+          class:drop-before={secDragOverId === sec.group.id && secDropSide === 'before'}
+          class:drop-after={secDragOverId === sec.group.id && secDropSide === 'after'}
+          role="group"
+          aria-label={sec.group.label}
+          data-testid={`sidebar-group-${sec.group.id}`}
+          data-open={open}
+          ondragover={secMovable ? (e) => onSecDragOver(e, sec.group.id) : undefined}
+          ondragleave={secMovable ? () => { if (secDragOverId === sec.group.id) secDragOverId = null; } : undefined}
+          ondrop={secMovable ? (e) => onSecDrop(e, sec.group.id) : undefined}
+        >
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="group-head-row"
+            draggable={secMovable}
+            ondragstart={secMovable ? (e) => onSecDragStart(e, sec.group.id) : undefined}
+            ondragend={secMovable ? onSecDragEnd : undefined}
           >
-            <span class="group-label">{sec.group.label}</span>
-            {#if !open && sec.modules.some((m) => m.id === 'agents') && ws.workingCount > 0}
-              <span class="count-chip working" title="working sessions">{ws.workingCount}</span>
+            {#if secMovable}
+              <span class="grip sec-grip" title="Drag to reorder sections" aria-hidden="true"><Icon name="grip" size={12} /></span>
             {/if}
-            {#if !pinned}
-              <span class="group-chev"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={11} /></span>
+            <button
+              class="group-head"
+              class:pinned
+              aria-expanded={open}
+              onclick={() => !pinned && ui.toggleSidebarGroup(sec.group.id)}
+              oncontextmenu={(e) => sectionMenu(e, sec)}
+              title={pinned ? undefined : open ? `Hide ${sec.group.label}` : `Show ${sec.group.label}`}
+              data-testid={`sidebar-group-head-${sec.group.id}`}
+            >
+              <span class="group-label">{sec.group.label}</span>
+              {#if fav}<span class="group-star" aria-hidden="true"><Icon name="star" size={11} /></span>{/if}
+              {#if !open && sec.modules.some((m) => m.id === 'agents') && ws.workingCount > 0}
+                <span class="count-chip working" title="working sessions">{ws.workingCount}</span>
+              {/if}
+              {#if !pinned}
+                <span class="group-chev"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={11} /></span>
+              {/if}
+            </button>
+            {#if secMovable}
+              <button
+                class="row-action mv"
+                onclick={() => moveSection(sec.group.id, -1, sectionBtn(sec.group.label, 'up'), sectionBtn(sec.group.label, 'down'))}
+                disabled={!canMoveSection(sec.group.id, -1)}
+                title="Move section up"
+                aria-label={`Move ${sec.group.label} section up`}
+              >
+                <Icon name="arrowUp" size={12} />
+              </button>
+              <button
+                class="row-action mv"
+                onclick={() => moveSection(sec.group.id, 1, sectionBtn(sec.group.label, 'down'), sectionBtn(sec.group.label, 'up'))}
+                disabled={!canMoveSection(sec.group.id, 1)}
+                title="Move section down"
+                aria-label={`Move ${sec.group.label} section down`}
+              >
+                <Icon name="arrowDown" size={12} />
+              </button>
             {/if}
-          </button>
+          </div>
           {#if open}
             {#each sec.modules as m, i (m.id)}
               {#if ui.sidebarEditMode}
                 {@render editRow(m, i === 0, i === sec.modules.length - 1)}
               {:else if m.id === 'agents'}
-                {@render agentsBlock()}
+                {@render agentsBlock(m)}
               {:else}
                 {@render simpleRow(m)}
               {/if}
@@ -589,7 +849,7 @@
             ...(w.my_role === 'admin' ? [
               { label: 'Rename…', icon: 'edit', action: () => void renameWorkspace(w) },
               { label: 'Change folder…', icon: 'folder', action: () => void changeWorkspaceDir(w) },
-              { label: 'Delete…', icon: 'trash', danger: true as const, action: () => void deleteWorkspace(w) },
+              { label: 'Remove workspace…', icon: 'trash', danger: true as const, action: () => void removeWorkspace(w) },
               { separator: true as const },
             ] : []),
             { label: 'Add workspace…', icon: 'plus', action: () => (ui.newWorkspaceOpen = true) },
@@ -607,21 +867,33 @@
 
   <div class="nav-foot">
     {#if ui.sidebarEditMode}
-      <button class="nav-item subtle" onclick={() => ui.resetSidebar()} data-testid="sidebar-reset">
-        <Icon name="refresh" size={14} />
-        <span class="grow">Reset to default</span>
+      <!-- Customizing: a button row, not a nav row — "Done" drawn as the
+           selected page read as if it were one. -->
+      <div class="edit-foot">
+        <button class="btn small" onclick={() => ui.resetSidebar()} data-testid="sidebar-reset" title="Restore the default order, sections and visibility, and clear Favorites">
+          <Icon name="refresh" size={12} /> Reset to default
+        </button>
+        <span class="grow"></span>
+        <button
+          class="btn small primary"
+          onclick={() => ui.toggleSidebarEdit()}
+          title="Finish customizing the sidebar"
+          data-testid="sidebar-edit-toggle"
+        >
+          Done
+        </button>
+      </div>
+    {:else}
+      <button
+        class="nav-item subtle"
+        onclick={() => ui.toggleSidebarEdit()}
+        title="Show, hide and reorder sidebar items"
+        data-testid="sidebar-edit-toggle"
+      >
+        <Icon name="edit" size={14} />
+        <span class="grow">Customize sidebar</span>
       </button>
     {/if}
-    <button
-      class="nav-item subtle"
-      class:active={ui.sidebarEditMode}
-      onclick={() => ui.toggleSidebarEdit()}
-      title="Show, hide and reorder sidebar items"
-      data-testid="sidebar-edit-toggle"
-    >
-      <Icon name={ui.sidebarEditMode ? 'check' : 'edit'} size={14} />
-      <span class="grow">{ui.sidebarEditMode ? 'Done' : 'Customize sidebar'}</span>
-    </button>
     <button
       class="nav-item"
       class:active={router.module === 'walkthroughs'}
@@ -640,23 +912,46 @@
     </button>
     <div class="nav-user">
       <span class="avatar">{(auth.me?.display_name ?? '?').slice(0, 1).toUpperCase()}</span>
-      <div class="grow">
-        <div class="user-name">{auth.me?.display_name}</div>
-        <div class="user-sub">{auth.isRoot ? 'root' : auth.me?.username}</div>
+      <div class="grow" title={auth.me?.display_name}>
+        <div class="user-name ellipsis">{auth.me?.display_name}</div>
+        <div class="user-sub ellipsis">{auth.isRoot ? 'root' : auth.me?.username}</div>
       </div>
-      <button class="icon-btn" onclick={() => auth.logout()} title="Sign out" aria-label="Sign out">⎋</button>
+      <button class="icon-btn" onclick={() => auth.logout()} title="Sign out" aria-label="Sign out">
+        <Icon name="logout" size={14} />
+      </button>
     </div>
   </div>
 </nav>
+
+{#if shareSessionId}
+  <ShareModal sessionId={shareSessionId} onclose={() => (shareSessionId = null)} />
+{/if}
+
+<!-- The module the side-by-side pane shows: a quiet trailing glyph. -->
+{#snippet sideMark(id: string)}
+  {#if sidePane.showing && sidePane.key === id}
+    <span class="side-mark" role="img" title="Open in the side pane" aria-label="Open in the side pane" data-testid={`side-mark-${id}`}>
+      <Icon name="columns" size={12} />
+    </span>
+  {/if}
+{/snippet}
 
 {#snippet simpleRow(m: SidebarModule)}
   <button
     class="nav-item"
     class:active={isActive(m.id)}
-    onclick={() => router.go(m.id)}
+    class:drop-before={dragOverId === m.id && dropSide === 'before'}
+    class:drop-after={dragOverId === m.id && dropSide === 'after'}
+    class:dragging={dragId === m.id}
+    data-nav-id={m.id}
+    title={sidePane.supported ? SPLIT_HINT : undefined}
+    onclick={(e) => navClick(e, m.id, m.label)}
+    oncontextmenu={(e) => moduleMenu(e, m)}
+    {...favRowProps(m.id)}
   >
     <Icon name={m.icon} size={14} />
     <span class="grow">{m.label}</span>
+    {@render sideMark(m.id)}
     {#if m.id === 'workflows' && ws.activeWorkflowRuns.length > 0}
       <span class="count-chip working" title="running workflows">{ws.activeWorkflowRuns.length}</span>
     {/if}
@@ -667,66 +962,105 @@
 {/snippet}
 
 {#snippet editRow(m: SidebarModule, first: boolean, last: boolean)}
+  {@const fav = isFav(m.id)}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="edit-row"
     class:hidden-row={isHidden(m.id)}
-    class:drag-over={dragOverId === m.id}
+    class:dragging={dragId === m.id}
+    class:drop-before={dragOverId === m.id && dropSide === 'before'}
+    class:drop-after={dragOverId === m.id && dropSide === 'after'}
     draggable={true}
     ondragstart={(e) => onDragStart(e, m.id)}
     ondragover={(e) => onDragOver(e, m.id)}
     ondragleave={() => onDragLeave(m.id)}
     ondrop={(e) => onDrop(e, m.id)}
     ondragend={onDragEnd}
+    oncontextmenu={(e) => ctxMenu.show(e, favoriteMenuItems(m))}
+    onkeydown={(e) => {
+      // ⌥↑ / ⌥↓ from any control in the row (the arrows show on hover /
+      // focus, so the label keeps its room).
+      if (!e.altKey || e.metaKey || e.ctrlKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+      if ((e.key === 'ArrowUp' && first) || (e.key === 'ArrowDown' && last)) return;
+      e.preventDefault();
+      move(m, e.key === 'ArrowUp' ? -1 : 1);
+    }}
     data-testid={`sidebar-edit-row-${m.id}`}
   >
     <span class="grip" title="Drag to reorder" aria-hidden="true"><Icon name="grip" size={14} /></span>
     <Icon name={m.icon} size={14} />
     <span class="grow ellipsis">{m.label}</span>
-    <button
-      class="row-action"
-      onclick={() => move(m.id, -1)}
-      disabled={first}
-      title="Move up"
-      aria-label={`Move ${m.label} up`}
-    >
-      <Icon name="arrowUp" size={12} />
-    </button>
-    <button
-      class="row-action"
-      onclick={() => move(m.id, 1)}
-      disabled={last}
-      title="Move down"
-      aria-label={`Move ${m.label} down`}
-    >
-      <Icon name="arrowDown" size={12} />
-    </button>
-    <button
-      class="row-action"
-      onclick={() => ui.toggleSidebarHidden(m.id)}
-      title={isHidden(m.id) ? 'Show' : 'Hide'}
-      aria-label={isHidden(m.id) ? `Show ${m.label}` : `Hide ${m.label}`}
-      data-testid={`sidebar-hide-${m.id}`}
-    >
-      <Icon name={isHidden(m.id) ? 'eyeOff' : 'eye'} size={13} />
-    </button>
+    <span class="edit-actions">
+      <button
+        class="row-action star-toggle"
+        class:on={fav}
+        onclick={() => toggleFavorite(m.id)}
+        title={fav ? 'Remove from Favorites' : 'Add to Favorites'}
+        aria-label={`Favorite ${m.label}`}
+        aria-pressed={fav}
+        data-testid={`sidebar-fav-${m.id}`}
+      >
+        <Icon name="star" size={13} />
+      </button>
+      <button
+        class="row-action mv"
+        onclick={() => move(m, -1)}
+        disabled={first}
+        title="Move up (⌥↑)"
+        aria-label={`Move ${m.label} up`}
+      >
+        <Icon name="arrowUp" size={12} />
+      </button>
+      <button
+        class="row-action mv"
+        onclick={() => move(m, 1)}
+        disabled={last}
+        title="Move down (⌥↓)"
+        aria-label={`Move ${m.label} down`}
+      >
+        <Icon name="arrowDown" size={12} />
+      </button>
+      <button
+        class="row-action"
+        onclick={() => ui.toggleSidebarHidden(m.id)}
+        title={isHidden(m.id) ? 'Show' : 'Hide'}
+        aria-label={isHidden(m.id) ? `Show ${m.label}` : `Hide ${m.label}`}
+        data-testid={`sidebar-hide-${m.id}`}
+      >
+        <Icon name={isHidden(m.id) ? 'eyeOff' : 'eye'} size={13} />
+      </button>
+    </span>
   </div>
 {/snippet}
 
-{#snippet agentsBlock()}
-  <div class="nav-item-row">
+{#snippet agentsBlock(m: SidebarModule)}
+  <div
+    class="nav-item-row agents-row"
+    class:drop-before={dragOverId === m.id && dropSide === 'before'}
+    class:drop-after={dragOverId === m.id && dropSide === 'after'}
+    class:dragging={dragId === m.id}
+  >
     <button
       class="nav-item"
       class:active={router.module === 'agents' || router.module === ''}
-      onclick={() => router.go('agents')}
+      data-nav-id={m.id}
+      title={sidePane.supported ? SPLIT_HINT : undefined}
+      onclick={(e) => navClick(e, 'agents', m.label)}
       oncontextmenu={(e) => ctxMenu.show(e, [
         { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
         { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
         { label: 'Add workspace…', icon: 'folder', action: () => (ui.newWorkspaceOpen = true) },
+        { separator: true },
+        ...splitItems(m),
+        ...favoriteMenuItems(m),
+        { separator: true },
+        customizeItem(),
       ])}
+      {...favRowProps(m.id)}
     >
       <Icon name="terminal" size={14} />
       <span class="grow">Agents</span>
+      {@render sideMark('agents')}
       {#if ws.workingCount > 0}
         <span class="count-chip working">{ws.workingCount}</span>
       {/if}
@@ -773,6 +1107,8 @@
       class="icon-btn twisty"
       onclick={() => (agentsOpen = !agentsOpen)}
       aria-label="Toggle session list"
+      aria-expanded={agentsOpen}
+      title={agentsOpen ? 'Hide sessions' : 'Show sessions'}
     >
       <Icon name={agentsOpen ? 'chevronDown' : 'chevronRight'} size={12} />
     </button>
@@ -862,6 +1198,8 @@
           class="icon-btn twisty"
           onclick={() => (telegramOpen = !telegramOpen)}
           aria-label="Toggle Telegram list"
+          aria-expanded={telegramOpen}
+          title={telegramOpen ? 'Hide Telegram sessions' : 'Show Telegram sessions'}
         >
           <Icon name={telegramOpen ? 'chevronDown' : 'chevronRight'} size={12} />
         </button>
@@ -893,6 +1231,8 @@
           class="icon-btn twisty"
           onclick={() => (slackOpen = !slackOpen)}
           aria-label="Toggle Slack list"
+          aria-expanded={slackOpen}
+          title={slackOpen ? 'Hide Slack sessions' : 'Show Slack sessions'}
         >
           <Icon name={slackOpen ? 'chevronDown' : 'chevronRight'} size={12} />
         </button>
@@ -1022,17 +1362,20 @@
         onclick={() => (otherWs ? void ws.openInWorkspace(otherWs, s.id) : openSession(s.id))}
         ondblclick={() => startRename(s.id, s.title)}
         oncontextmenu={(e) => ctxMenu.show(e, [
-          { label: 'Rename', icon: 'edit', action: () => startRename(s.id, s.title) },
-          ...(reorderable && fAgents.length > 1
-            ? [{ label: 'Move to top', icon: 'arrowUp', action: () => { const ids = fAgents.map((x) => x.id); sessionOrder.dragTo(ids, s.id, ids[0]); } }]
-            : []),
+          // Same order as the tab and pane menus: Rename · Share… · Open in
+          // new window, then Restart · Archive · Delete, then New session.
+          ...(ws.canEditSession(s) ? [{ label: 'Rename', icon: 'edit', action: () => startRename(s.id, s.title) }] : []),
+          ...(otherWs ? [] : [{ label: 'Share…', icon: 'share', action: () => (shareSessionId = s.id) }]),
           ...(otherWs ? [] : popoutItems(`agents/${s.id}`, s.title)),
+          ...(reorderable && fAgents.length > 1
+            ? [{ separator: true }, { label: 'Move to top', icon: 'arrowUp', action: () => { const ids = fAgents.map((x) => x.id); sessionOrder.dragTo(ids, s.id, ids[0]); } }]
+            : []),
           { separator: true },
           ...(ws.canEditSession(s) ? [
             // In-progress agent only: respawn a stuck PTY (provider resume when
             // possible). Idle/exited/reconnectable sessions have their own paths.
             ...(s.kind === 'agent' && (status === 'running' || status === 'working')
-              ? [{ label: 'Restart agent', icon: 'refresh', action: () => void restartAgent(s.id) }]
+              ? [{ label: 'Restart session', icon: 'refresh', action: () => void restartAgent(s.id) }]
               : []),
             { label: 'Archive', icon: 'archive', action: () => ws.archiveSession(s.id) },
             { label: 'Delete', icon: 'trash', danger: true as const, action: () => void deleteSession(s.id) },
@@ -1084,7 +1427,7 @@
       {#if ws.canEditSession(s)}
         <button
           class="row-action"
-          title="Close session (archive or delete)"
+          title={ws.closeTabTitle(s.id, 'session')}
           aria-label="Close session"
           onclick={() => void ws.requestCloseTab(s.id)}
         >
@@ -1117,7 +1460,7 @@
     bottom: 0;
     width: 7px;
     cursor: col-resize;
-    z-index: 20;
+    z-index: var(--z-sticky);
   }
   .rail-resize:hover,
   .navigator.resizing .rail-resize {
@@ -1147,7 +1490,7 @@
   .nav-back :global(svg) {
     transform: scaleX(-1);
   }
-  .nav-head .icon-btn:disabled {
+  .nav-head :global(.icon-btn:disabled) {
     opacity: 0.3;
     cursor: default;
   }
@@ -1212,13 +1555,23 @@
     background: transparent;
     border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     cursor: pointer;
     text-align: start;
     transition: background 120ms ease-out;
   }
   .nav-item:hover {
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+  }
+  /* Module / group labels ellipsize in a narrow (resized) sidebar instead of
+     running under the count chips and toggles beside them. */
+  .nav-item > .grow {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .nav-item > .count-chip {
+    flex-shrink: 0;
   }
   /* Selection = the theme accent as a TINT (never a solid fill: --text on a
      solid --accent is unreadable in several themes) + a short accent bar at the
@@ -1228,6 +1581,12 @@
     background: var(--accent-soft);
     color: var(--text);
     font-weight: 600;
+  }
+  /* The module shown in the side-by-side pane (not the page itself). */
+  .side-mark {
+    display: inline-flex;
+    flex-shrink: 0;
+    color: var(--text-dim);
   }
   .nav-item.active::before {
     content: '';
@@ -1283,9 +1642,77 @@
   .group-head.pinned {
     cursor: default;
   }
-  .group-label {
+  /* Header row: the fold button, plus (while editing) a grip and the section
+     up/down controls. */
+  .group-head-row {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    border-radius: var(--radius-s);
+  }
+  .group-head-row > .group-head {
     flex: 1;
     min-width: 0;
+  }
+  .group-head-row[draggable='true'] {
+    cursor: grab;
+  }
+  .group-head-row[draggable='true']:hover {
+    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+  }
+  /* Section arrows line up with the rows' up/down columns: the last one
+     skips the rows' eye column (22px) + their inline-end padding + border. */
+  .group-head-row .row-action {
+    width: 22px;
+    height: 20px;
+    opacity: 1;
+  }
+  .group-head-row .row-action:last-child {
+    margin-inline-end: 27px;
+  }
+  /* The module list is a size container so edit mode can make room for the
+     label in a narrow (resized) sidebar: the module glyph (the grip + label
+     identify the row) goes, and the controls tighten. */
+  .nav-section.modules {
+    container: navmods / inline-size;
+  }
+  @container navmods (max-width: 220px) {
+    .edit-row > :global(svg) {
+      display: none;
+    }
+    .edit-actions .row-action,
+    .group-head-row .row-action {
+      width: 20px;
+    }
+    .group-head-row .row-action:last-child {
+      margin-inline-end: 25px;
+    }
+  }
+  .group-head-row .row-action:disabled {
+    opacity: 0.25;
+    cursor: default;
+  }
+  .sec-grip {
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    margin-inline-start: 4px;
+    color: var(--text-dim);
+  }
+  .group-head-row .sec-grip + .group-head {
+    padding-inline-start: 2px;
+  }
+  /* Favorites' star trails its label, so every section label starts on the
+     same x (a leading star pushed "FAVORITES" 18px in from "WORK"). */
+  .group-star {
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    color: var(--text-dim);
+  }
+  .group-label {
+    min-width: 0;
+    margin-inline-end: auto;
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
@@ -1293,6 +1720,14 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* The label (or Favorites' trailing star) pushes the count + chevron to
+     the inline end. */
+  .group-label:has(+ .group-star) {
+    margin-inline-end: 0;
+  }
+  .group-star {
+    margin-inline-end: auto;
   }
   /* Chevron appears on hover / keyboard focus (like Finder's "Hide"), and
      stays visible while the section is folded so the state reads at a glance. */
@@ -1317,7 +1752,7 @@
   .edit-hint {
     margin: 2px 6px 8px;
     padding: 6px 8px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.4;
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
@@ -1331,15 +1766,87 @@
     padding: 0 4px 0 6px;
     border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     cursor: grab;
     border: 1px solid transparent;
+  }
+  /* The up/down arrows show on hover / keyboard focus (⌥↑ / ⌥↓ work from
+     any control in the row), so the label isn't squeezed to "Connectio…" by
+     four always-on buttons. Touch screens have no hover: always shown. */
+  /* Collapsed, not display:none: they stay in the accessibility tree and in
+     the Tab order (focusing one opens the row up). */
+  /* `.row-action.mv` out-specifies the generic `.row-action` sizes/opacity
+     below (and the narrow-sidebar container query) — those used to win,
+     leaving a 0-width button whose arrow was squashed into a sliver. */
+  .edit-row .row-action.mv,
+  .group-head-row .row-action.mv {
+    width: 0;
+    min-width: 0;
+    padding: 0;
+    opacity: 0;
+    overflow: hidden;
+  }
+  .edit-row:hover .row-action.mv,
+  .edit-row:focus-within .row-action.mv,
+  .group-head-row:hover .row-action.mv,
+  .group-head-row:focus-within .row-action.mv {
+    width: 22px;
+    opacity: 1;
+  }
+  .edit-row:hover .row-action.mv:disabled,
+  .edit-row:focus-within .row-action.mv:disabled,
+  .group-head-row:hover .row-action.mv:disabled,
+  .group-head-row:focus-within .row-action.mv:disabled {
+    opacity: 0.25;
+  }
+  @media (hover: none) {
+    .edit-row .row-action.mv,
+    .group-head-row .row-action.mv {
+      width: 22px;
+      opacity: 1;
+    }
+    .edit-row .row-action.mv:disabled,
+    .group-head-row .row-action.mv:disabled {
+      opacity: 0.25;
+    }
   }
   .edit-row:hover {
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
   }
-  .edit-row.drag-over {
-    border-inline-start: 2px solid var(--accent);
+  /* Drop indicator: an accent line on the edge the dragged row will land
+     on (before when dragging up / in from another section, after when
+     dragging down); the row being dragged dims. Shared by module rows, the
+     Agents row and whole sections. */
+  .drop-before {
+    box-shadow: inset 0 2px 0 var(--accent);
+  }
+  .drop-after {
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+  .edit-row.dragging,
+  .nav-item.dragging,
+  .nav-item-row.dragging,
+  .nav-group.sec-dragging {
+    opacity: 0.5;
+  }
+  .edit-row .grow {
+    min-width: 0;
+  }
+  /* The row's controls sit tight together so the label keeps its room in a
+     narrow (resized) sidebar. */
+  .edit-actions {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  /* Favorites toggle: an outline star, filled in the accent when on (the
+     state is also aria-pressed + the tooltip, never colour alone). */
+  .star-toggle.on {
+    color: var(--accent-text);
+  }
+  .star-toggle.on :global(svg path),
+  .group-star :global(svg path) {
+    fill: currentColor;
   }
   /* Hidden modules stay listed while editing, dimmed, so they can be re-shown. */
   .edit-row.hidden-row {
@@ -1389,14 +1896,25 @@
     min-width: 0;
   }
   .all-ws-toggle.on {
-    color: var(--accent);
+    color: var(--accent-text);
   }
-  .all-ws-toggle:not(.on) {
-    opacity: 0.55;
+  /* Agents' row tools (select / sort / all workspaces) show on hover or
+     keyboard focus, like Finder's row accessories — ON states stay visible,
+     since they change what the list below shows. The fold chevron stays. */
+  .agents-row > .twisty:not(.on):not([aria-expanded]) {
+    opacity: 0;
+    transition: opacity 120ms ease-out;
   }
-  .all-ws-toggle:not(.on):hover {
+  .agents-row:hover > .twisty:not(.on):not([aria-expanded]),
+  .agents-row:focus-within > .twisty:not(.on):not([aria-expanded]) {
     opacity: 1;
   }
+  @media (hover: none) {
+    .agents-row > .twisty:not(.on):not([aria-expanded]) {
+      opacity: 1;
+    }
+  }
+
   .nested-row {
     display: flex;
     align-items: center;
@@ -1408,7 +1926,7 @@
   }
   .nested-item {
     height: 26px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .nested-item.archived {
     opacity: 0.65;
@@ -1445,11 +1963,11 @@
   .nested-item.active .row-secondary {
     display: inline-flex;
   }
-  .arch-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; padding: 2px 6px 4px 8px; font-size: 11px; color: var(--text-dim); }
+  .arch-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; padding: 2px 6px 4px 8px; font-size: var(--fs-xs); color: var(--text-dim); }
   .arch-all { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; cursor: pointer; }
   .arch-all input, .arch-check { margin: 0; accent-color: var(--accent); }
   .arch-check { flex-shrink: 0; }
-  .sel-toggle.on { color: var(--accent); }
+  .sel-toggle.on { color: var(--accent-text); }
   .nested-row.selected .nested-item { background: color-mix(in srgb, var(--accent) 8%, transparent); }
   .row-action {
     display: grid;
@@ -1465,6 +1983,11 @@
     transition: opacity 120ms ease-out;
   }
   .nested-row:hover .row-action {
+    opacity: 1;
+  }
+  /* Hover-revealed, but a keyboard user tabbing onto one must see it (and
+     its focus ring) — it was an invisible focused button. */
+  .row-action:focus-visible {
     opacity: 1;
   }
   .row-action:hover {
@@ -1490,7 +2013,7 @@
   .nav-rename {
     flex: 1;
     height: 24px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     background: var(--surface-2);
     border: 1px solid var(--accent);
     border-radius: var(--radius-s);
@@ -1516,24 +2039,28 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     outline: none;
   }
   .search-clear {
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
     border: none;
+    border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    font-size: 15px;
-    line-height: 1;
-    padding: 0 2px;
+    padding: 0;
+    flex-shrink: 0;
   }
   .search-clear:hover {
     color: var(--text);
   }
   .nested-empty {
     padding: 4px 10px 6px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .show-more {
@@ -1541,7 +2068,7 @@
     width: 100%;
     text-align: start;
     padding: 4px 10px 6px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: none;
     border: none;
@@ -1608,7 +2135,7 @@
     background: color-mix(in srgb, var(--status-warn) 8%, transparent);
     border-radius: var(--radius-s);
     color: var(--warning);
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     cursor: pointer;
     transition: background 120ms ease-out;
@@ -1628,8 +2155,10 @@
     font-weight: 700;
     display: grid;
     place-items: center;
-    color: #1a1407;
-    background: var(--status-warn);
+    /* The Navigator's count-chip language (tint + semantic text), same as
+       the Assistant's needs-you chip. */
+    color: var(--warning);
+    background: var(--warning-soft);
   }
   .ellipsis {
     overflow: hidden;
@@ -1659,6 +2188,12 @@
     border-top: 1px solid var(--border);
     padding: 6px 8px 8px;
   }
+  .edit-foot {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 4px 6px;
+  }
   .nav-user {
     display: flex;
     align-items: center;
@@ -1670,15 +2205,15 @@
     height: 24px;
     border-radius: 50%;
     background: color-mix(in srgb, var(--accent) 28%, transparent);
-    color: var(--accent);
-    font-size: 11px;
+    color: var(--accent-text);
+    font-size: var(--fs-xs);
     font-weight: 600;
     display: grid;
     place-items: center;
     flex-shrink: 0;
   }
   .user-name {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 500;
     line-height: 1.2;
   }

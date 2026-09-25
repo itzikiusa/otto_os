@@ -34,7 +34,7 @@
       onclick={() => (rawMode = !rawMode)}
       title="Toggle the engine's raw EXPLAIN JSON"
     >
-      <Icon name="grid" size={11} />{rawMode ? 'Tree' : 'Raw JSON'}
+      <Icon name="grid" size={12} />{rawMode ? 'Tree' : 'Raw JSON'}
     </button>
     <button class="plan-close" onclick={onclose} aria-label="Close plan"><Icon name="x" size={13} /></button>
   </div>
@@ -53,7 +53,7 @@
   <div class="plan-row" style="padding-inline-start: {depth * 16 + 6}px">
     {#if kids.length > 0}
       <button class="plan-caret" onclick={() => toggle(id)} aria-label="Toggle node">
-        <Icon name={open ? 'chevronDown' : 'chevronRight'} size={11} />
+        <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
       </button>
     {:else}
       <span class="plan-caret-spacer"></span>
@@ -93,7 +93,7 @@
     flex-shrink: 0;
   }
   .plan-title {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     color: var(--text);
   }
@@ -118,7 +118,7 @@
     background: var(--surface);
     color: var(--text-dim);
     border-radius: var(--radius-s);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 2px 8px;
     cursor: pointer;
   }
@@ -152,7 +152,7 @@
   }
   .plan-raw {
     padding: 10px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text);
     white-space: pre;
@@ -162,7 +162,7 @@
     align-items: center;
     gap: 7px;
     min-height: 24px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text);
     flex-wrap: wrap;
   }
@@ -189,7 +189,7 @@
     font-weight: 600;
   }
   .plan-object {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--accent-text);
   }
   .plan-rows {
@@ -198,7 +198,7 @@
     font-variant-numeric: tabular-nums;
   }
   .plan-detail {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;

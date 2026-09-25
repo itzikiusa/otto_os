@@ -15,7 +15,7 @@ function setup() {
     let wsId = 'A', view = null, savedViews = [], loading = false;
     let newViewName = 'A view', newViewFilter = '{}', advancedFilter = false;
     let filterBucket = '', filterProvider = '', filterRepo = '', showNewViewForm = true;
-    let loadGeneration = 0, alive = true;
+    let loadGeneration = 0, alive = true, loadError = '';
     ${methods}
     return { load, createView, switchTo(id) { wsId = id; newViewName = id + ' view'; },
       read() { return { view, savedViews, loading, newViewName, showNewViewForm }; } };

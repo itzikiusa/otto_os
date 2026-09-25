@@ -40,7 +40,12 @@
   import { ui, isTauri } from '../stores/ui.svelte';
   import { viewport } from '../stores/viewport.svelte';
   import { startWindowDrag } from '../windowDrag';
-  import { isPopout } from '../desktop';
+  import { isPopout, isEmbedded } from '../desktop';
+  import { sidePane } from '../stores/sidePane.svelte';
+  import { embedChrome } from '../stores/embedChrome.svelte';
+  import PaneControls from './PaneControls.svelte';
+  import AgentDrivingBar from './AgentDrivingBar.svelte';
+  import { uiControl } from '../stores/uiControl.svelte';
   import { ctxMenu, type MenuItem } from '../contextmenu.svelte';
 
   interface Props {
@@ -90,8 +95,25 @@
   /** The controls currently collapsed into the "⋯" menu (DOM order). */
   let collapsed: HTMLElement[] = $state([]);
 
+  // Inside the side-by-side pane the page's top row also carries the pane's
+  // controls (Swap / Open in main pane / Close — lib/stores/embedChrome).
+  $effect(() => (rootEl ? embedChrome.claim(rootEl) : undefined));
+  const hostsPane = $derived(isEmbedded && !!rootEl && embedChrome.owner === rootEl);
+  // Agent UI control: the page's top header hosts the "‹agent› is driving…"
+  // strip under its row (lib/components/AgentDrivingBar.svelte).
+  $effect(() => (rootEl ? uiControl.claimBar(rootEl) : undefined));
+  const hostsBar = $derived(!!rootEl && uiControl.barOwner === rootEl);
   // A pop-out window's traffic lights live in its own title strip (shell).
-  const padTraffic = $derived(isTauri && viewport.isDesktop && !ui.railExpanded && !isPopout);
+  // In a side-by-side split they sit over whichever pane leads: the main
+  // pane's header when the side pane trails, the side pane's when it leads.
+  const padTraffic = $derived(
+    (isTauri &&
+      viewport.isDesktop &&
+      !ui.railExpanded &&
+      !isPopout &&
+      !(sidePane.showing && sidePane.placement === 'leading')) ||
+      (hostsPane && embedChrome.padTraffic),
+  );
   // A phone row has no room for title + tabs + actions: tabs drop to the
   // second row there regardless of the requested placement.
   const tabsBelow = $derived(!!tabs && (tabsPlacement === 'below' || viewport.isPhone));
@@ -99,6 +121,9 @@
   const FIELD = 'select, input, textarea';
   const GAP = 6; // keep in sync with .ph-actions gap
   const MORE_W = 28; // "⋯" button width (lives inside the wrap, after the actions)
+  // Focus-ring room each side of a scroller (.ph-actions-wrap padding): the
+  // global :focus-visible ring is a 2px outline at a 1px offset, so 3px.
+  const RING = 3;
 
   function canCollapse(el: HTMLElement): boolean {
     if (el.hasAttribute('data-keep')) return false;
@@ -138,13 +163,32 @@
       const row = wrapEl.parentElement;
       const lead = row?.querySelector<HTMLElement>(':scope > .ph-leading');
       const inlineTabs = row?.querySelector<HTMLElement>(':scope > .ph-tabs-inline');
+      const pane = row?.querySelector<HTMLElement>(':scope > .pane-controls');
       const room = row
-        ? row.clientWidth - 48 - titleMin - (lead ? lead.offsetWidth + 12 : 0) - (inlineTabs ? inlineTabs.offsetWidth + 12 : 0)
+        ? row.clientWidth -
+          48 -
+          titleMin -
+          (lead ? lead.offsetWidth + 12 : 0) -
+          (inlineTabs ? inlineTabs.offsetWidth + 12 : 0) -
+          (pane ? pane.offsetWidth + 12 : 0)
         : Infinity;
-      wrapEl.style.minWidth = `${Math.max(0, Math.min(Math.ceil(keepW) + 4, room))}px`;
+      wrapEl.style.minWidth = `${Math.max(0, Math.min(Math.ceil(keepW) + RING * 2, room))}px`;
       let need = visible.reduce((s, k) => s + (widthOf.get(k) ?? 0), 0) + GAP * Math.max(0, visible.length - 1);
-      // clientWidth includes the wrap's 2px focus-ring padding on each side.
-      let avail = wrapEl.clientWidth - 4;
+      // The title block's cap: 45% of the row by default, but a header with
+      // only one or two actions lets a long title use the room they leave
+      // instead of ellipsizing next to an empty stretch of toolbar.
+      if (row && rootEl) {
+        const others =
+          48 +
+          (lead ? lead.offsetWidth + 12 : 0) +
+          (inlineTabs ? inlineTabs.offsetWidth + 12 : 0) +
+          (pane ? pane.offsetWidth + 12 : 0) +
+          (visible.length ? need + RING * 2 + 12 : 0);
+        const cap = Math.max(row.clientWidth * 0.45, row.clientWidth - others);
+        rootEl.style.setProperty('--ph-title-max', `${Math.floor(cap)}px`);
+      }
+      // clientWidth includes the wrap's focus-ring padding on each side.
+      let avail = wrapEl.clientWidth - RING * 2;
       if (need <= avail + 0.5) {
         if (collapsed.length) collapsed = [];
         return;
@@ -197,22 +241,33 @@
   });
 
   function labelOf(el: HTMLElement): string {
+    // A button's visible text beats its `title`: the title is usually a
+    // sentence of explanation ("Tidy layout into rows"), which made a long,
+    // clipped menu row where the button itself read "Tidy". Text with no
+    // letters (a bare count, a glyph) still defers to the title.
+    const text = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
     return (
       el.dataset.label ||
       el.getAttribute('aria-label') ||
+      (/\p{L}/u.test(text) ? text : '') ||
       el.getAttribute('title') ||
-      (el.textContent ?? '').replace(/\s+/g, ' ').trim() ||
+      text ||
       'Action'
     );
   }
 
   function rowFor(el: HTMLElement): MenuItem {
     const disabled = (el as HTMLButtonElement).disabled === true || el.getAttribute('aria-disabled') === 'true';
+    const label = labelOf(el);
+    // The control's tooltip rides along (it usually says WHY a disabled
+    // button is disabled — that reason was lost in the ⋯ menu).
+    const tip = el.getAttribute('title');
     return {
-      label: labelOf(el),
+      label,
       icon: el.dataset.icon,
       danger: el.classList.contains('danger'),
       disabled,
+      title: tip && tip !== label ? tip : undefined,
       action: () => el.click(),
     };
   }
@@ -280,10 +335,12 @@
         </button>
       {/if}
     </div>
+    {#if hostsPane}<PaneControls />{/if}
   </div>
   {#if tabs && tabsBelow}
     <div class="ph-tabs-below">{@render tabs()}</div>
   {/if}
+  {#if hostsBar}<AgentDrivingBar />{/if}
 </header>
 
 <style>
@@ -322,12 +379,13 @@
     align-items: center;
     gap: 8px;
     /* Natural width (no reserved minimum, so short titles don't leave a gap
-       before inline tabs), capped at 45%. When the actions need the room it
-       shrinks — the subtitle ellipsizes — but never below its title line
-       (--ph-title-min, measured in JS). */
+       before inline tabs), capped at --ph-title-max (measured in JS: 45% of
+       the row, or everything the actions leave free when there are few of
+       them). When the actions need the room it shrinks — the subtitle
+       ellipsizes — but never below its title line (--ph-title-min). */
     flex: 0 1 auto;
-    min-width: min(var(--ph-title-min, 0px), 45%);
-    max-width: 45%;
+    min-width: min(var(--ph-title-min, 0px), var(--ph-title-max, 45%));
+    max-width: var(--ph-title-max, 45%);
   }
   /* A snippet whose content is conditional can render nothing; the empty slot
      must not eat a flex gap. */
@@ -419,6 +477,10 @@
     min-width: 0;
     overflow-x: auto;
     scrollbar-width: none;
+    /* A scroller clips on both axes: leave room for the tabs' focus rings
+       (and a badge's overhang) instead of shaving them off. */
+    padding: 3px;
+    margin: -3px;
   }
   .ph-tabs-inline::-webkit-scrollbar {
     display: none;
@@ -434,9 +496,10 @@
     overflow-x: auto;
     overflow-y: hidden;
     scrollbar-width: none;
-    /* Room for focus rings on the edge buttons. */
-    padding: 3px 2px;
-    margin: -3px -2px;
+    /* Room for focus rings on the edge buttons (2px outline + 1px offset =
+       3px; keep in sync with RING in the script). */
+    padding: 3px;
+    margin: -3px;
   }
   .ph-actions-wrap::-webkit-scrollbar {
     display: none;
@@ -473,7 +536,8 @@
   .ph-tabs-below {
     display: flex;
     align-items: center;
-    padding: 0 16px 0 20px;
+    /* Block padding: focus-ring room (this row scrolls, so it clips). */
+    padding: 3px 16px 3px 20px;
     min-width: 0;
     overflow-x: auto;
     scrollbar-width: none;
@@ -493,7 +557,7 @@
       display: none;
     }
     .ph-tabs-below {
-      padding: 0 10px;
+      padding: 3px 10px;
     }
   }
 </style>

@@ -7,6 +7,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import GoalEditor from './GoalEditor.svelte';
   import SkillPicker from './SkillPicker.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
@@ -23,28 +24,43 @@
   // -- Standing goals (edited as a local draft set, PUT on Save) --------------
   let draftGoals = $state<CreateGoalReq[]>([]);
   let goalsLoaded = $state(false);
+  // True once the saved set has landed in the draft. Save PUTs the WHOLE set,
+  // so saving before that would replace the swarm's goals with an empty list.
+  let goalsReady = $state(false);
   let savingGoals = $state(false);
   let goalEditorOpen = $state(false);
   let goalEditIndex = $state<number>(-1);
 
+  let goalsLoading = $state(false);
+  /** (Re)load the saved set into the draft. A failed load leaves the draft NOT
+   *  ready (Save stays off): saving a list we never loaded would clobber it. */
+  async function loadGoals(sid: string): Promise<void> {
+    goalsLoading = true;
+    await swarm.loadStandingGoals(sid);
+    goalsLoading = false;
+    if (swarm.standingGoalsError) {
+      goalsReady = false;
+      return;
+    }
+    draftGoals = swarm.standingGoals.map((g) => ({
+      title: g.title,
+      description: g.description,
+      metric: g.metric ?? undefined,
+      comparator: g.comparator ?? undefined,
+      target_value: g.target_value ?? undefined,
+      block_value: g.block_value ?? undefined,
+      verify_cmd: g.verify_cmd ?? undefined,
+      max_retries: g.max_retries,
+      blocking: g.blocking,
+      order_idx: g.order_idx,
+    }));
+    goalsReady = true;
+  }
   $effect(() => {
     const sid = detail?.id;
     if (!sid || goalsLoaded) return;
     goalsLoaded = true;
-    void swarm.loadStandingGoals(sid).then(() => {
-      draftGoals = swarm.standingGoals.map((g) => ({
-        title: g.title,
-        description: g.description,
-        metric: g.metric ?? undefined,
-        comparator: g.comparator ?? undefined,
-        target_value: g.target_value ?? undefined,
-        block_value: g.block_value ?? undefined,
-        verify_cmd: g.verify_cmd ?? undefined,
-        max_retries: g.max_retries,
-        blocking: g.blocking,
-        order_idx: g.order_idx,
-      }));
-    });
+    void loadGoals(sid);
   });
 
   function addGoal() {
@@ -69,7 +85,7 @@
       await swarm.putStandingGoals(detail.id, draftGoals);
       toasts.success('Standing goals saved');
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't save the standing goals", e instanceof Error ? e.message : String(e));
     } finally {
       savingGoals = false;
     }
@@ -83,7 +99,7 @@
     try {
       await swarm.updateSwarm(detail.id, { config: cfg } as Partial<Swarm>);
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't save the team skills", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -92,12 +108,18 @@
   let triggerForm = $state<CreateTriggerReq | null>(null);
   let triggerEditId = $state<string | null>(null);
   let savingTrigger = $state(false);
+  let triggersLoading = $state(false);
+  async function loadTriggers(sid: string): Promise<void> {
+    triggersLoading = true;
+    await swarm.loadTriggers(sid);
+    triggersLoading = false;
+  }
 
   $effect(() => {
     const sid = detail?.id;
     if (!sid || triggersLoaded) return;
     triggersLoaded = true;
-    void swarm.loadTriggers(sid);
+    void loadTriggers(sid);
   });
 
   function newTrigger() {
@@ -135,7 +157,7 @@
       triggerForm = null;
       triggerEditId = null;
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't save the trigger", e instanceof Error ? e.message : String(e));
     } finally {
       savingTrigger = false;
     }
@@ -144,15 +166,21 @@
     try {
       await swarm.updateTrigger(t.id, { enabled: !t.enabled });
     } catch (e) {
-      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't update the trigger", e instanceof Error ? e.message : String(e));
     }
   }
   async function delTrigger(t: SwarmChannelTrigger) {
-    if (await confirmer.ask(`Delete this ${t.channel} trigger?`, { title: 'Delete trigger?' })) {
+    if (
+      await confirmer.ask(`Delete this ${t.channel} trigger? Matching messages stop launching swarm work.`, {
+        title: 'Delete trigger',
+        confirmLabel: 'Delete',
+        danger: true,
+      })
+    ) {
       try {
         await swarm.deleteTrigger(t.id);
       } catch (e) {
-        toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+        toasts.error("Couldn't delete the trigger", e instanceof Error ? e.message : String(e));
       }
     }
   }
@@ -165,9 +193,23 @@
 </script>
 
 <Modal title="Swarm settings{detail ? ` — ${detail.name}` : ''}" width={640} {onclose}>
-  <div class="tabs">
+  <div
+    class="tabs"
+    role="tablist"
+    aria-label="Swarm settings section"
+    tabindex="-1"
+    onkeydown={(e) => {
+      const i = TABS.findIndex((t) => t.id === tab);
+      const n = e.key === 'ArrowRight' ? i + 1 : e.key === 'ArrowLeft' ? i - 1 : e.key === 'Home' ? 0 : e.key === 'End' ? TABS.length - 1 : null;
+      if (n === null) return;
+      e.preventDefault();
+      const j = (n + TABS.length) % TABS.length;
+      tab = TABS[j].id;
+      (e.currentTarget as HTMLElement).querySelectorAll<HTMLButtonElement>('[role="tab"]')[j]?.focus();
+    }}
+  >
     {#each TABS as t (t.id)}
-      <button class="tab" class:active={tab === t.id} onclick={() => (tab = t.id)}>
+      <button class="tab" class:active={tab === t.id} role="tab" aria-selected={tab === t.id} tabindex={tab === t.id ? 0 : -1} onclick={() => (tab = t.id)}>
         <Icon name={t.icon} size={13} /> {t.label}
       </button>
     {/each}
@@ -178,11 +220,15 @@
     <div class="bar">
       <button class="btn small" onclick={addGoal}><Icon name="plus" size={12} /> Add standing goal</button>
       <span class="grow"></span>
-      <button class="btn small primary" onclick={saveGoals} disabled={savingGoals}>
+      <button class="btn small primary" onclick={saveGoals} disabled={savingGoals || !goalsReady}
+        title={goalsReady ? undefined : swarm.standingGoalsError ? 'Load the saved standing goals first — saving now would replace them' : 'Loading the saved standing goals…'}>
         {savingGoals ? 'Saving…' : 'Save standing goals'}
       </button>
     </div>
-    {#if draftGoals.length === 0}
+    {#if !goalsReady}
+      <LoadState what="standing goals" variant="compact" loading={goalsLoading || !swarm.standingGoalsError} error={swarm.standingGoalsError} empty
+        onretry={() => detail && void loadGoals(detail.id)} />
+    {:else if draftGoals.length === 0}
       <EmptyState icon="check" title="No standing goals" body="Add goals the whole swarm must hit — e.g. tests pass, no new clippy warnings." />
     {:else}
       <div class="list">
@@ -190,11 +236,11 @@
           <div class="row-item">
             <div class="ri-main">
               <span class="ri-title">{g.title}</span>
-              {#if g.blocking}<span class="blocking">blocking</span>{/if}
+              {#if g.blocking}<span class="blocking" title="Blocks task completion until it passes">Blocking</span>{/if}
               {#if g.metric}<span class="dim">· {g.metric}{g.comparator ? ` ${g.comparator}` : ''}{g.target_value != null ? ` ${g.target_value}` : ''}</span>{/if}
             </div>
-            <button class="icon-btn small" onclick={() => editGoal(i)} aria-label="Edit"><Icon name="edit" size={13} /></button>
-            <button class="icon-btn small" onclick={() => removeGoal(i)} aria-label="Remove"><Icon name="trash" size={13} /></button>
+            <button class="icon-btn small" onclick={() => editGoal(i)} aria-label="Edit standing goal" title="Edit standing goal"><Icon name="edit" size={13} /></button>
+            <button class="icon-btn small" onclick={() => removeGoal(i)} aria-label="Remove standing goal" title="Remove (takes effect on Save)"><Icon name="trash" size={13} /></button>
           </div>
         {/each}
       </div>
@@ -235,7 +281,8 @@
         </div>
         <div class="form-actions">
           <button class="btn small ghost" onclick={() => { triggerForm = null; triggerEditId = null; }}>Cancel</button>
-          <button class="btn small primary" onclick={saveTrigger} disabled={savingTrigger}>
+          <button class="btn small primary" onclick={saveTrigger} disabled={savingTrigger || !!swarm.triggersError}
+            title={swarm.triggersError ? 'Reload the triggers first' : undefined}>
             {triggerEditId ? 'Save trigger' : 'Add trigger'}
           </button>
         </div>
@@ -245,28 +292,30 @@
         <span class="grow"></span>
         <button class="btn small" onclick={newTrigger}><Icon name="plus" size={12} /> Add trigger</button>
       </div>
-      {#if swarm.triggers.length === 0}
-        <EmptyState icon="comment" title="No triggers" body="Add a trigger to launch swarm work from a Slack/Telegram message or a webhook." />
-      {:else}
+      <LoadState what="triggers" variant="compact" loading={triggersLoading} error={swarm.triggersError} empty={swarm.triggers.length === 0}
+        onretry={() => detail && void loadTriggers(detail.id)}>
+        {#snippet emptyView()}
+          <EmptyState icon="comment" title="No triggers" body="Add a trigger to launch swarm work from a Slack/Telegram message or a webhook." />
+        {/snippet}
         <div class="list">
           {#each swarm.triggers as t (t.id)}
             <div class="row-item">
               <div class="ri-main">
-                <span class="tchip">{t.channel}</span>
-                <span class="ri-title">{t.keyword || 'any'}</span>
+                <span class="chip">{t.channel === 'webhook' ? 'Webhook' : t.channel === 'slack' ? 'Slack' : t.channel === 'telegram' ? 'Telegram' : t.channel}</span>
+                <span class="ri-title">{t.keyword || 'Any message'}</span>
                 <span class="dim">{t.match_chat ? `in ${t.match_chat}` : 'any chat'}</span>
                 {#if t.auto_start}<span class="dim">· auto-start</span>{/if}
                 {#if t.reply}<span class="dim">· reply</span>{/if}
               </div>
-              <button class="toggle" class:on={t.enabled} onclick={() => toggleEnabled(t)} title={t.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}>
+              <button class="toggle" class:on={t.enabled} aria-pressed={t.enabled} onclick={() => toggleEnabled(t)} title={t.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}>
                 {t.enabled ? 'On' : 'Off'}
               </button>
-              <button class="icon-btn small" onclick={() => editTrigger(t)} aria-label="Edit"><Icon name="edit" size={13} /></button>
-              <button class="icon-btn small" onclick={() => delTrigger(t)} aria-label="Delete"><Icon name="trash" size={13} /></button>
+              <button class="icon-btn small" onclick={() => editTrigger(t)} aria-label="Edit trigger" title="Edit trigger"><Icon name="edit" size={13} /></button>
+              <button class="icon-btn small" onclick={() => delTrigger(t)} aria-label="Delete trigger" title="Delete trigger"><Icon name="trash" size={13} /></button>
             </div>
           {/each}
         </div>
-      {/if}
+      </LoadState>
     {/if}
   {/if}
 
@@ -299,7 +348,7 @@
     background: transparent;
     color: var(--text-dim);
     padding: 6px 10px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
   .tab:hover {
@@ -310,7 +359,7 @@
     border-bottom-color: var(--accent);
   }
   .hint {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     margin: 0 0 10px;
   }
@@ -340,7 +389,7 @@
     gap: 6px;
     flex: 1;
     min-width: 0;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     flex-wrap: wrap;
   }
   .ri-title {
@@ -348,17 +397,8 @@
   }
   .blocking {
     font-size: var(--fs-xs);
-    color: var(--status-exited);
-    border: 1px solid color-mix(in srgb, var(--status-exited) 40%, transparent);
-    border-radius: 999px;
-    padding: 0 6px;
-  }
-  .tchip {
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--accent-text);
-    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    color: var(--danger);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
     border-radius: 999px;
     padding: 0 6px;
   }
@@ -368,7 +408,7 @@
     color: var(--text-dim);
     border-radius: 999px;
     padding: 1px 10px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .toggle.on {
@@ -393,7 +433,7 @@
     gap: 6px;
   }
   .field label {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .toggles {
@@ -405,7 +445,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .form-actions {
     display: flex;

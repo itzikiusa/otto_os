@@ -249,6 +249,9 @@ test('matrix: provider × skill × prompt fans out to scored cells', async () =>
 
 // UI smoke — the eval lab renders its tabs, the golden corpus, and a scorecard.
 test('UI: eval-lab tabs, golden tasks, and scorecard render', async ({ page }) => {
+  // Same budget as the Skills Lab UI smoke: the first cold Vite load of the
+  // whole app can exceed the 45 s default on a loaded machine.
+  test.setTimeout(150_000);
   await page.addInitScript((id) => {
     localStorage.setItem('otto_workspace', id as string);
     localStorage.setItem('otto_rail_expanded', '0');

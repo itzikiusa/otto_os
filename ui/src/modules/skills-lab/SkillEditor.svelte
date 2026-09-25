@@ -1,14 +1,19 @@
 <script lang="ts">
-  // Skills Lab → Skills → Edit: the multi-file viewer/editor for one copy of a
-  // skill. Library copies are editable (add / delete files, edit + save);
-  // bundled and provider copies are read-only, with the way to make them
-  // editable spelled out.
+  // Skills Lab → Skills → Files: the multi-file viewer/editor for one copy of a
+  // skill, on the shared CodeEditor (line numbers, markdown highlighting — the
+  // same editor as Settings → Context library). Library copies are editable in
+  // place (type, then Save / ⌘S; Revert drops the draft); bundled and provider
+  // copies are read-only, with the way to make them editable spelled out.
+  import { untrack } from 'svelte';
   import type { SkillFileEntry } from '../../lib/api/types';
   import { confirmer } from '../../lib/confirm.svelte';
   import { skillLabApi } from '../../lib/api/skillLab';
   import { toasts } from '../../lib/toast.svelte';
   import { formatBytes } from '../../lib/metric-format';
   import Icon from '../../lib/components/Icon.svelte';
+  import CodeEditor from '../../lib/components/CodeEditor.svelte';
+  import { sourceLabel } from './skillGroups';
+  import { guardUnsaved } from '../../lib/leaveGuard';
 
   interface Props {
     name: string;
@@ -23,8 +28,11 @@
     /** Read-only copies: what makes them editable. */
     oninstall?: () => void;
     oncopytolibrary?: () => void;
+    /** Unsaved-edit state, so the parents can ask before a tab / skill switch
+     *  unmounts the editor and drops the draft. */
+    ondirty?: (dirty: boolean) => void;
   }
-  let { name, source, files, skillMd, initialFile = 'SKILL.md', onsaved, oninstall, oncopytolibrary }: Props = $props();
+  let { name, source, files, skillMd, initialFile = 'SKILL.md', onsaved, oninstall, oncopytolibrary, ondirty }: Props = $props();
 
   const editable = $derived(source === 'library');
 
@@ -33,19 +41,27 @@
   let content = $state('');
   let original = $state('');
   let binary = $state(false);
-  let editing = $state(false);
   let saving = $state(false);
   let loadError = $state<string | null>(null);
-  const dirty = $derived(editing && content !== original);
+  // Bumped whenever the text is replaced from outside (another file, Revert,
+  // a reload) so the uncontrolled CodeEditor remounts on the new document.
+  let docKey = $state(0);
+  const dirty = $derived(editable && content !== original);
+  $effect(() => {
+    ondirty?.(dirty);
+  });
+  $effect(() => () => ondirty?.(false));
+  // Leaving the page (sidebar, link, back) with an unsaved edit asks first.
+  $effect(() => guardUnsaved(() => dirty, { what: currentFile }));
 
   async function open(path: string): Promise<void> {
-    if (dirty && !(await confirmer.ask(`Discard your unsaved changes to ${currentFile}?`, { title: 'Discard changes', confirmLabel: 'Discard' }))) return;
+    if (dirty && !(await confirmer.ask(`You have unsaved changes to ${currentFile}. Opening another file discards them.`, { title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing' }))) return;
     currentFile = path;
-    editing = false;
     loadError = null;
     binary = false;
     if (path === 'SKILL.md') {
       content = original = skillMd;
+      docKey++;
       return;
     }
     try {
@@ -53,6 +69,7 @@
         const r = await skillLabApi.getFile(name, path);
         content = original = r.content;
         binary = r.binary;
+        docKey++;
       } else if (source === 'bundled') {
         content = original = '';
         loadError = 'Install this skill to the library to open its other files.';
@@ -60,6 +77,7 @@
         const r = await skillLabApi.getProviderFile(source, name, path);
         content = original = r.content;
         binary = r.binary;
+        docKey++;
       }
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);
@@ -72,14 +90,21 @@
     const key = `${source}:${name}:${initialFile}`;
     if (key === openedFor) return;
     openedFor = key;
-    editing = false;
     currentFile = files.some((f) => f.path === initialFile) ? initialFile : 'SKILL.md';
     void open(currentFile);
   });
-  // Keep SKILL.md in step when the parent reloads it.
+  // Keep SKILL.md in step when the parent reloads it (never over a draft).
   $effect(() => {
-    if (currentFile === 'SKILL.md' && !editing) content = original = skillMd;
+    const md = skillMd;
+    if (currentFile === 'SKILL.md' && md !== original && !untrack(() => dirty)) {
+      content = original = md;
+      docKey++;
+    }
   });
+  function revert(): void {
+    content = original;
+    docKey++;
+  }
 
   async function save(): Promise<void> {
     if (!editable || saving) return;
@@ -87,7 +112,6 @@
     try {
       const next = await skillLabApi.putFile(name, { path: currentFile, content });
       original = content;
-      editing = false;
       onsaved(next, currentFile === 'SKILL.md' ? content : null);
       toasts.success('Saved', currentFile);
     } catch (e) {
@@ -108,7 +132,6 @@
       const next = await skillLabApi.putFile(name, { path, content: '' });
       onsaved(next, null);
       await open(path);
-      editing = true;
     } catch (e) {
       toasts.error("Couldn't add the file", e instanceof Error ? e.message : String(e));
     }
@@ -126,8 +149,16 @@
     }
   }
 
+  // ⌘S inside the editor saves (captured before CodeMirror / the app keymap).
+  let codeEl = $state<HTMLElement | null>(null);
+  $effect(() => {
+    const el = codeEl;
+    if (!el) return;
+    el.addEventListener('keydown', onKey, true);
+    return () => el.removeEventListener('keydown', onKey, true);
+  });
   function onKey(e: KeyboardEvent): void {
-    if ((e.metaKey || e.ctrlKey) && e.key === 's' && editing) {
+    if ((e.metaKey || e.ctrlKey) && e.key === 's' && editable) {
       e.preventDefault();
       void save();
     }
@@ -142,7 +173,7 @@
         {#if source === 'bundled'}
           Bundled skills are read-only. Install it to the library to edit your own copy.
         {:else}
-          This is the {source} copy on disk, shown read-only. Copy it to the library to edit it in Otto.
+          This is the {sourceLabel(source)} copy on disk, shown read-only. Copy it to the library to edit it in Otto.
         {/if}
       </span>
       {#if source === 'bundled' && oninstall}
@@ -177,26 +208,39 @@
 
     <section class="pane">
       <div class="pane-head">
-        <span class="mono path" dir="ltr">{currentFile}</span>
+        <span class="mono path" dir="ltr" title={currentFile}>{currentFile}</span>
         {#if dirty}<span class="chip tone-warning">Unsaved</span>{/if}
         <span class="grow"></span>
         {#if editable && !binary && !loadError}
-          {#if editing}
-            <button class="btn small ghost" onclick={() => { content = original; editing = false; }}>Cancel</button>
-            <button class="btn small primary" disabled={saving || !dirty} onclick={save} data-testid="save-skill">{saving ? 'Saving…' : 'Save'}</button>
+          {#if dirty}
+            <button class="btn small ghost" onclick={revert} title="Drop your changes to {currentFile}">Revert</button>
           {:else}
-            <button class="btn small" onclick={() => (editing = true)} data-testid="edit-skill"><Icon name="edit" size={12} /> Edit</button>
+            <span class="dim save-hint">Edit in place · ⌘S saves</span>
           {/if}
+          <button class="btn small primary" disabled={saving || !dirty} title={dirty ? 'Save (⌘S)' : 'No changes to save'} onclick={save} data-testid="save-skill">{saving ? 'Saving…' : 'Save'}</button>
         {/if}
       </div>
       {#if loadError}
-        <p class="dim msg">{loadError}</p>
+        <div class="msg load-err" role="alert">
+          <Icon name="warning" size={14} />
+          <span class="grow">{source === 'bundled' ? loadError : `Couldn't open ${currentFile}. ${loadError}`}</span>
+          {#if source !== 'bundled'}<button class="btn small" onclick={() => open(currentFile)}>Retry</button>{/if}
+        </div>
       {:else if binary}
         <p class="dim msg">Binary file — not editable here.</p>
-      {:else if editing && editable}
-        <textarea class="text" bind:value={content} spellcheck="false" dir="ltr" onkeydown={onKey} aria-label="Contents of {currentFile}" data-testid="skill-editor"></textarea>
       {:else}
-        <pre class="text view" dir="ltr" data-testid="skill-view">{content}</pre>
+        <div class="code" dir="ltr" bind:this={codeEl} data-testid={editable ? 'skill-editor' : 'skill-view'}>
+          {#key docKey}
+            <CodeEditor
+              path={`${name}/${currentFile}`}
+              root=""
+              content={original}
+              language={currentFile.toLowerCase().endsWith('.md') ? 'md' : undefined}
+              readOnly={!editable}
+              onchange={(v) => (content = v)}
+            />
+          {/key}
+        </div>
       {/if}
     </section>
   </div>
@@ -323,32 +367,34 @@
     background: var(--warning-soft);
     border-color: color-mix(in srgb, var(--warning) 35%, transparent);
   }
-  .text {
+  .code {
     flex: 1;
     min-height: 0;
-    margin: 0;
-    padding: 12px 14px;
-    border: none;
-    resize: none;
-    background: var(--surface);
-    color: var(--text);
-    font-family: var(--font-mono);
-    font-size: var(--fs-s);
-    line-height: 1.6;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
-  textarea.text:focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
-    outline-offset: -2px;
+  .code > :global(*) {
+    flex: 1;
+    min-height: 0;
   }
-  .view {
-    overflow: auto;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    user-select: text;
+  .save-hint {
+    font-size: var(--fs-xs);
   }
   .msg {
     padding: 14px;
     margin: 0;
+  }
+  .load-err {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--fs-s);
+    overflow-wrap: anywhere;
+  }
+  .load-err > :global(svg) {
+    color: var(--text-dim);
+    flex: none;
   }
   @media (max-width: 640px) {
     .editor {

@@ -10,6 +10,9 @@
   import { toasts } from '../../lib/toast.svelte';
   import { authedBlobUrl } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { ProductAttachment } from './types';
 
   // ── Props ─────────────────────────────────────────────────────────────────
@@ -37,6 +40,7 @@
 
   // Upload-in-progress count (for optimistic thumbnails).
   let uploading = $state(false);
+  let filePicker = $state<HTMLInputElement | null>(null);
 
   // Drag-over styling toggle.
   let dragOver = $state(false);
@@ -92,8 +96,11 @@
   }
 
   /** Load the attachment list from the server. */
+  /** A failed load — inline with Retry, never as the "drop files here" hint. */
+  let loadError = $state<string | null>(null);
   async function loadAttachments(): Promise<void> {
     localAttLoading = true;
+    loadError = null;
     try {
       localAtts = await product.listAttachments();
       // Eagerly fetch preview URLs for images.
@@ -101,7 +108,7 @@
         if (att.mime.startsWith('image/')) void loadAttUrl(att.id);
       }
     } catch (e) {
-      toasts.error('Could not load attachments', e instanceof Error ? e.message : String(e));
+      loadError = loadErrorText(e);
     } finally {
       localAttLoading = false;
     }
@@ -241,7 +248,7 @@
       localAttUrls = rest;
       toasts.info('Attachment deleted');
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Delete failed', loadErrorText(e));
     }
   }
 </script>
@@ -260,24 +267,28 @@
   <!-- Header row -->
   <div class="att-header-row">
     <span class="att-panel-title">Attachments</span>
-    <label class="att-pick-btn" title="Attach files">
-      {uploading ? 'Uploading…' : '+ File'}
-      <input
-        type="file"
-        multiple
-        style="display:none"
-        onchange={handleFileInput}
-        disabled={uploading}
-      />
-    </label>
+    <!-- A real button (keyboard-reachable) drives the hidden file input. -->
+    <button class="btn small" title="Attach files" disabled={uploading} onclick={() => filePicker?.click()}>
+      <Icon name="plus" size={12} /> {uploading ? 'Uploading…' : 'File'}
+    </button>
+    <input
+      bind:this={filePicker}
+      class="att-file-input"
+      type="file"
+      multiple
+      tabindex="-1"
+      aria-hidden="true"
+      onchange={handleFileInput}
+      disabled={uploading}
+    />
   </div>
 
   <!-- Drop-zone hint when empty -->
-  {#if localAttLoading}
-    <div class="att-empty">Loading…</div>
+  {#if (localAttLoading || loadError) && localAtts.length === 0}
+    <LoadState what="attachments" variant="compact" loading={localAttLoading} error={loadError} empty onretry={() => void loadAttachments()} />
   {:else if localAtts.length === 0 && !uploading}
     <div class="att-drop-hint">
-      Drop files here, use + File, or paste a screenshot (⌘⌃⇧4)
+      Drop files here, choose File, or paste a screenshot (⌘⌃⇧4)
     </div>
   {/if}
 
@@ -407,36 +418,24 @@
     margin-bottom: 8px;
   }
   .att-panel-title {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-dim);
   }
-  .att-pick-btn {
-    font-size: 11px;
-    padding: 2px 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s, 4px);
-    cursor: pointer;
-    color: var(--text-dim);
-    background: transparent;
-    transition: border-color 100ms, color 100ms;
-  }
-  .att-pick-btn:hover {
-    border-color: var(--accent);
-    color: var(--accent-text);
+  .att-file-input {
+    display: none;
   }
 
-  .att-empty,
   .att-uploading {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     font-style: italic;
     padding: 4px 0;
   }
   .att-drop-hint {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     text-align: center;
     padding: 10px 0;
@@ -462,7 +461,7 @@
     margin-bottom: 4px;
   }
   .att-fname {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 500;
     flex: 1;
     overflow: hidden;
@@ -476,7 +475,7 @@
     flex-shrink: 0;
   }
   .att-kind-badge {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     padding: 1px 5px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 14%, transparent);
@@ -512,12 +511,12 @@
     border-radius: var(--radius-s, 4px);
   }
   .att-loading-hint {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-style: italic;
   }
   .att-load-btn {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 2px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s, 4px);
@@ -542,10 +541,10 @@
     padding: 4px 0;
   }
   .att-chip-icon {
-    font-size: 14px;
+    font-size: var(--fs-m);
   }
   .att-chip-name {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     flex: 1;
     overflow: hidden;
@@ -553,7 +552,7 @@
     white-space: nowrap;
   }
   .att-dl-link {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--accent-text);
     text-decoration: underline;
     cursor: pointer;

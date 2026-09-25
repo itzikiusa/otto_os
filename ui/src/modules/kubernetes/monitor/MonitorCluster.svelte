@@ -237,7 +237,7 @@
       <span class="dot" style="background: {cluster.color ?? 'var(--accent)'}"></span>
       {cluster.name}
       <EnvBadge env={cluster.environment} />
-      <Icon name="chevronDown" size={11} />
+      <Icon name="chevronDown" size={12} />
     </button>
   {/snippet}
   {#snippet actions()}
@@ -272,12 +272,12 @@
           <option value={c}>{c === '' ? 'Restarts + churn' : c === 'k8s_event' ? 'Raw cluster events' : classLabel(c)}</option>
         {/each}
       </select>
-      <button class="btn ghost small" onclick={() => void loadEvents()} aria-label="Refresh events"><Icon name="refresh" size={13} /></button>
+      <button class="btn ghost small" onclick={() => void loadEvents()} aria-label="Refresh events" title="Refresh events"><Icon name="refresh" size={13} /></button>
     </div>
     {#if eventsLoading && !events.length}
       <Skeleton rows={6} height={28} />
     {:else if eventsError}
-      <EmptyState icon="helm" title="Couldn't load events" body={eventsError} actionLabel="Retry" onaction={() => void loadEvents()} />
+      <EmptyState actionKind="secondary" icon="warning" title="Couldn't load events" body={eventsError} actionLabel="Retry" onaction={() => void loadEvents()} />
     {:else if !events.length}
       <EmptyState icon="check" title="Nothing in this window" body={enabled ? 'No restarts or pod replacements were recorded. Widen the window or check the raw cluster events.' : 'Monitoring is off for this cluster.'} />
     {:else}
@@ -310,14 +310,14 @@
         <span class="chip" title="Metrics-server probing is off in Settings">metrics-server off</span>
       {/if}
       <span class="spacer"></span>
-      <button class="btn ghost small" onclick={() => void loadWorkloads()} aria-label="Refresh workloads"><Icon name="refresh" size={13} /></button>
+      <button class="btn ghost small" onclick={() => void loadWorkloads()} aria-label="Refresh workloads" title="Refresh workloads"><Icon name="refresh" size={13} /></button>
     </div>
     {#if !enabled && !loading}
       <EmptyState icon="helm" title="Monitoring is off" body="Enable it in Settings: pick a preset, adjust ports, test the probes, save." actionLabel={canEdit ? 'Open settings' : undefined} onaction={canEdit ? () => goTab('settings') : undefined} />
     {:else if loading && !rows.length}
       <Skeleton rows={8} height={30} />
     {:else if error}
-      <EmptyState icon="helm" title="Couldn't load workloads" body={error} actionLabel="Retry" onaction={() => void loadWorkloads()} />
+      <EmptyState actionKind="secondary" icon="warning" title="Couldn't load workloads" body={error} actionLabel="Retry" onaction={() => void loadWorkloads()} />
     {:else if !rows.length}
       <EmptyState icon="clock" title="No data yet" body="The first cycle runs within the configured interval. Use “Run once” in Settings to collect immediately." />
     {:else}
@@ -356,7 +356,7 @@
                   {#if r.mem_sampled > 0}
                     <span title="average per pod">{formatBytes(r.mem_avg)}</span>
                     {#if r.pods > 1}<span class="dim"> · max </span><span title="hungriest pod: {r.mem_max_pod}">{formatBytes(r.mem_max)}</span>{/if}
-                    <div class="pct" class:warn={r.mem_pct >= 85}>{fmtPct(r.mem_pct, 0)} of limit{#if r.pods > 1} (worst pod){/if}{#if r.mem_sampled < r.pods} · {r.mem_sampled}/{r.pods} sampled{/if}</div>
+                    <div class="pct" class:warn={r.mem_pct >= 85}>{fmtPct(r.mem_pct, 0)} of limit{#if r.pods > 1}{' '}(worst pod){/if}{#if r.mem_sampled < r.pods}{' '}· {r.mem_sampled}/{r.pods} sampled{/if}</div>
                   {:else}
                     <span class="dim" title="No memory sample yet — configure a memory probe (e.g. the Go actuator preset) or grant metrics-server">—</span>
                     {#if r.mem_limit > 0}<div class="pct">limit {formatBytes(r.mem_limit / Math.max(1, r.pods))}/pod</div>{/if}
@@ -416,7 +416,7 @@
                         <div class="chart">
                           <div class="ct">Requests/s</div>
                           <Sparkline points={series.rps?.points.map((p) => p.v) ?? []} width={420} height={80} stroke="var(--status-working)" label="requests" />
-                          <div class="dim small">baseline {fmtRate(r.rps_baseline)} · 5xx baseline {fmtPct(r.err_pct_baseline, 2)}{#if r.latency_baseline_ms} · latency baseline {fmtMs(r.latency_baseline_ms)}{/if}</div>
+                          <div class="dim small">baseline {fmtRate(r.rps_baseline)} · 5xx baseline {fmtPct(r.err_pct_baseline, 2)}{#if r.latency_baseline_ms}{' '}· latency baseline {fmtMs(r.latency_baseline_ms)}{/if}</div>
                         </div>
                       </div>
                     {/if}
@@ -476,7 +476,7 @@
     background: none;
     border: none;
     padding: 3px 10px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
   }
@@ -494,7 +494,7 @@
     border: none;
     border-bottom: 2px solid transparent;
     padding: 6px 12px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     cursor: pointer;
   }
@@ -521,7 +521,7 @@
   .wl {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .wl th {
     text-align: left;
@@ -596,7 +596,7 @@
   .pods {
     width: 100%;
     border-collapse: collapse;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     margin-bottom: 12px;
   }
   .pods th {
@@ -629,7 +629,7 @@
     gap: 4px;
   }
   .ct {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .timeline {
@@ -647,7 +647,7 @@
     align-items: baseline;
     padding: 5px 8px;
     border-radius: 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .timeline li:hover {
     background: var(--surface-2);
@@ -659,13 +659,13 @@
     align-self: center;
   }
   .tts {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
   }
   .tclass {
     font-weight: 600;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .twl,
   .tmsg {
@@ -677,7 +677,7 @@
     color: var(--text-dim);
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .mono {
     font-family: var(--font-mono);

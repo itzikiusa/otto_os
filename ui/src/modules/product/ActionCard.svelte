@@ -12,6 +12,7 @@
   //                   Undo deletes the created note ids.
   //   create_canvas → lazy Mermaid thumbnail (if any), "Open in Canvas";
   //                   navigates on canvas_id, then toasts.
+  import Icon from '../../lib/components/Icon.svelte';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -240,7 +241,7 @@
 {#if applied}
   <!-- Sticky post-apply confirmation row -->
   <div class="action-card applied-row">
-    <span class="applied-text">✓ {appliedLabel}</span>
+    <span class="applied-text"><Icon name="check" size={12} /> {appliedLabel}</span>
     {#if undoApplicable()}
       <button class="btn small" onclick={onUndo} disabled={undoing}>
         {undoing ? 'Undoing…' : 'Undo'}
@@ -400,7 +401,7 @@
     flex-shrink: 0;
   }
   .card-title {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
     color: var(--text);
     overflow: hidden;
@@ -422,7 +423,7 @@
     border: none;
     background: transparent;
     color: var(--accent-text);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
   }
@@ -476,13 +477,13 @@
     min-width: 0;
   }
   .item-text {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     line-height: 1.45;
     color: var(--text);
     overflow-wrap: break-word;
   }
   .item-sub {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.4;
     color: var(--text-dim);
   }
@@ -515,7 +516,7 @@
   }
   .mmd-err,
   .mmd-loading {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-style: italic;
     padding: 8px;
@@ -540,6 +541,9 @@
     border-color: color-mix(in srgb, var(--success) 35%, transparent);
   }
   .applied-text {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     font-size: var(--fs-s);
     font-weight: 600;
     color: var(--success);

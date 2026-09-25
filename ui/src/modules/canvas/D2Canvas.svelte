@@ -398,6 +398,7 @@
           <button
             class="code-toggle"
             class:on={codeOpen}
+            aria-pressed={codeOpen}
             onclick={() => (codeOpen = !codeOpen)}
             title="Edit the D2 source"
           >
@@ -408,9 +409,11 @@
 
       {#if svgHtml}
         <div class="zoombar">
-          <button onclick={() => zoomBy(1 / 1.2)} title="Zoom out" aria-label="Zoom out">−</button>
-          <button class="pct" onclick={fitView} title="Fit to screen">{Math.round(scale * 100)}%</button>
-          <button onclick={() => zoomBy(1.2)} title="Zoom in" aria-label="Zoom in">+</button>
+          <button onclick={() => zoomBy(1 / 1.2)} title="Zoom out" aria-label="Zoom out">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3.5 8h9" /></svg>
+          </button>
+          <button class="pct" onclick={fitView} title="Fit to screen" aria-label="Zoom {Math.round(scale * 100)}% — fit to screen">{Math.round(scale * 100)}%</button>
+          <button onclick={() => zoomBy(1.2)} title="Zoom in" aria-label="Zoom in"><Icon name="plus" size={14} /></button>
           <span class="sep"></span>
           <button onclick={downloadSvg} title="Download SVG" aria-label="Download SVG">
             <Icon name="file" size={15} />
@@ -458,7 +461,7 @@
     gap: 8px;
     padding: 8px 12px;
     border-bottom: 1px solid var(--border);
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
     color: var(--text);
     flex: none;
@@ -469,9 +472,9 @@
     gap: 6px;
   }
   .code-hint {
-    color: var(--text-dim, #888);
+    color: var(--text-dim);
     font-weight: 500;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .code-body {
     flex: 1 1 auto;
@@ -521,19 +524,19 @@
     justify-content: center;
     gap: 8px;
     text-align: center;
-    color: var(--text-dim, #888);
+    color: var(--text-dim);
     padding: 24px;
     pointer-events: none;
   }
   .empty .lead {
     margin: 6px 0 0;
-    font-size: 15px;
+    font-size: var(--fs-l);
     font-weight: 600;
     color: var(--text);
   }
   .empty .hint {
     margin: 0;
-    font-size: 13px;
+    font-size: var(--fs-m);
     max-width: 360px;
     line-height: 1.5;
   }
@@ -551,7 +554,7 @@
     background: color-mix(in srgb, var(--danger) 16%, var(--surface));
     border: 1px solid var(--danger);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .mode-bar {
     position: absolute;
@@ -570,10 +573,10 @@
     border-radius: 999px;
     background: var(--surface);
     border: 1px solid var(--border);
-    color: var(--text-dim, #888);
-    font-size: 11px;
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
     font-weight: 600;
-    box-shadow: var(--shadow, 0 2px 8px rgba(0, 0, 0, 0.12));
+    box-shadow: var(--shadow);
   }
   .sketch-toggle,
   .code-toggle {
@@ -585,10 +588,10 @@
     background: var(--surface);
     border: 1px solid var(--border);
     color: var(--text);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
-    box-shadow: var(--shadow, 0 2px 8px rgba(0, 0, 0, 0.12));
+    box-shadow: var(--shadow);
   }
   .sketch-toggle:hover,
   .sketch-toggle.on,
@@ -609,7 +612,7 @@
     border-radius: 999px;
     background: var(--surface);
     border: 1px solid var(--border);
-    box-shadow: var(--shadow, 0 4px 16px rgba(0, 0, 0, 0.2));
+    box-shadow: var(--shadow);
   }
   .zoombar button {
     display: inline-flex;
@@ -621,7 +624,7 @@
     border: none;
     background: none;
     color: var(--text);
-    font-size: 16px;
+    font-size: var(--fs-l);
     font-weight: 600;
     cursor: pointer;
     border-radius: 999px;
@@ -630,7 +633,7 @@
     background: color-mix(in srgb, var(--text) 8%, transparent);
   }
   .zoombar .pct {
-    font-size: 12px;
+    font-size: var(--fs-s);
     min-width: 48px;
   }
   .zoombar .sep {

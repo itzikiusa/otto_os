@@ -6,6 +6,8 @@
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import DiffView from '../../lib/components/DiffView.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { BrokerCluster } from '../../lib/api/types';
   import type { SchemaVersion, CompatCheckResp } from './types';
 
@@ -17,6 +19,8 @@
 
   let versions = $state<SchemaVersion[]>([]);
   let loading = $state(true);
+  /** Failed load — inline with Retry (it used to toast AND claim "No versions found."). */
+  let loadError = $state<string | null>(null);
   // The two versions selected for the diff.
   let diffA = $state<SchemaVersion | null>(null);
   let diffB = $state<SchemaVersion | null>(null);
@@ -30,7 +34,12 @@
   $effect(() => {
     void cluster.id;
     void subject;
+    loadVersions();
+  });
+
+  function loadVersions(): void {
     loading = true;
+    loadError = null;
     versions = [];
     diffA = null;
     diffB = null;
@@ -45,9 +54,9 @@
         if (v.length >= 1) diffB = v[v.length - 1];
         if (v.length >= 2) diffA = v[v.length - 2];
       })
-      .catch((e) => toasts.error('Failed to load versions', String(e)))
+      .catch((e) => (loadError = loadErrorText(e)))
       .finally(() => (loading = false));
-  });
+  }
 
   function pretty(schema: string): string {
     try {
@@ -67,7 +76,7 @@
         { schema: compatSchema },
       );
     } catch (e) {
-      toasts.error('Compatibility check failed', String(e));
+      toasts.error("Couldn't check compatibility", e instanceof Error ? e.message : String(e));
     } finally {
       compatLoading = false;
     }
@@ -77,6 +86,8 @@
 <div class="svp">
   {#if loading}
     <p class="muted pad">Loading versions…</p>
+  {:else if loadError}
+    <LoadState what="schema versions" error={loadError} empty onretry={loadVersions} />
   {:else if versions.length === 0}
     <p class="muted pad">No versions found.</p>
   {:else}
@@ -142,7 +153,7 @@
           </span>
           {#if compatResult.messages.length > 0}
             <ul class="compat-msgs">
-              {#each compatResult.messages as m (m)}<li>{m}</li>{/each}
+              {#each compatResult.messages as m, i (i)}<li>{m}</li>{/each}
             </ul>
           {/if}
         {/if}
@@ -159,7 +170,7 @@
   }
   h5 {
     margin: 14px 0 6px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--text-dim);
@@ -174,7 +185,7 @@
     align-items: center;
     gap: 8px;
     padding: 3px 0;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .vnum {
     font-family: var(--font-mono);
@@ -183,11 +194,11 @@
   }
   .vid {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     min-width: 38px;
   }
   .vtype {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     flex: 1;
   }
   .vbtns {
@@ -209,7 +220,7 @@
     width: 100%;
     box-sizing: border-box;
     font-family: var(--font-mono);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     padding: 6px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -227,25 +238,25 @@
   }
   .compat-result {
     font-weight: 600;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .compat-result.ok {
-    color: var(--status-working, #28c840);
+    color: var(--success);
   }
   .compat-result.fail {
-    color: var(--status-exited, #ff5f57);
+    color: var(--danger);
   }
   .compat-msgs {
     margin: 4px 0 0;
     padding-inline-start: 18px;
-    font-size: 11.5px;
-    color: var(--status-exited, #ff5f57);
+    font-size: var(--fs-s);
+    color: var(--danger);
   }
   .muted {
     color: var(--text-dim);
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .pad {
     padding: 12px;

@@ -45,6 +45,8 @@
   // Step 1 — tool list.
   let sources = $state<SourceStatus[]>([]);
   let loadingSources = $state(true);
+  // A failed load must not read as "no tools found" — shown inline with Retry.
+  let sourcesError = $state('');
 
   // Step 2 — scan of one tool.
   let activeSource = $state<ImportSource | null>(null);
@@ -67,6 +69,15 @@
   const selectableCount = $derived(rows.filter((r) => r.supported).length);
   const selectedCount = $derived(keep.filter(Boolean).length);
   const allSelected = $derived(selectableCount > 0 && selectedCount === selectableCount);
+  // Selected rows that will actually do something (a kept row set to "Skip"
+  // imports nothing, so it isn't counted on the Import button).
+  const actionableCount = $derived(
+    rows.filter((r, i) => r.supported && keep[i] && (actions[i] ?? 'create') !== 'skip').length,
+  );
+  // An "Update existing" row with no target picked can't be sent.
+  const missingTarget = $derived(
+    rows.some((r, i) => r.supported && keep[i] && actions[i] === 'update' && !targets[i]),
+  );
 
   $effect(() => {
     void loadSources();
@@ -74,10 +85,11 @@
 
   async function loadSources(): Promise<void> {
     loadingSources = true;
+    sourcesError = '';
     try {
       sources = await importSources(wsId);
     } catch (e) {
-      toasts.error('Could not read tools', e instanceof Error ? e.message : String(e));
+      sourcesError = e instanceof Error ? e.message : String(e);
       sources = [];
     } finally {
       loadingSources = false;
@@ -137,7 +149,7 @@
   function summarize(c: ParsedConnection): string {
     const p = (c.params ?? {}) as Record<string, unknown>;
     if (c.kind === 'mongodb') return String(p.conn_string ?? '');
-    if (c.kind === 'custom') return String(p.template ?? '');
+    if (c.kind === 'custom') return String(p.command_template ?? '');
     const host = p.host !== undefined && p.host !== '' ? String(p.host) : '';
     if (!host) return '';
     const port = p.port !== undefined && p.port !== '' ? `:${p.port}` : '';
@@ -206,6 +218,11 @@
           <div class="imp-bar"><div class="imp-bar-fill"></div></div>
           <span class="imp-loading-text">Looking for installed tools…</span>
         </div>
+      {:else if sourcesError}
+        <div class="imp-error" role="alert">
+          <span>Couldn't look for installed tools. {sourcesError}</span>
+          <button class="btn small" onclick={() => void loadSources()}>Retry</button>
+        </div>
       {:else}
         <div class="tool-grid">
           {#each sources as s (s.source)}
@@ -247,7 +264,7 @@
     <div class="imp">
       <div class="prev-head">
         <button class="btn small" onclick={backToPick} disabled={creating}>
-          <Icon name="chevronRight" size={11} /> Back
+          <Icon name="chevronLeft" size={12} /> Back
         </button>
         <span class="prev-title">{activeLabel}</span>
         {#if scanPath}
@@ -264,7 +281,7 @@
         {#if warnings.length > 0}
           <div class="prev-warn">
             {#each warnings as w (w)}
-              <div class="prev-warn-line"><Icon name="info" size={11} /> {w}</div>
+              <div class="prev-warn-line"><Icon name="info" size={12} /> {w}</div>
             {/each}
           </div>
         {/if}
@@ -326,10 +343,10 @@
                       {#each existing.filter(e => e.kind === c.kind) as target (target.id)}<option value={target.id}>{target.name}</option>{/each}
                     </select>
                   {/if}
-                                    {#if c.kind}<span class="kind-badge">{c.kind}</span>{/if}
+                  {#if c.kind}<span class="kind-badge">{c.kind}</span>{/if}
                   {#if c.needs_password}
                     <span class="pill warn" title="No password was imported — set it before connecting">
-                      needs password
+                      Needs password
                     </span>
                   {/if}
                 {:else}
@@ -342,7 +359,7 @@
           </div>
 
           <p class="imp-note">
-            <Icon name="key" size={11} /> Passwords are never imported — set them on each
+            <Icon name="key" size={12} /> Passwords are never imported — set them on each
             connection before connecting.
           </p>
         {/if}
@@ -358,9 +375,14 @@
       <button
         class="btn primary"
         onclick={() => void create()}
-        disabled={creating || scanning || selectedCount === 0}
+        disabled={creating || scanning || actionableCount === 0 || missingTarget}
+        title={missingTarget
+          ? 'Choose which connection to update for every "Update existing" row'
+          : actionableCount === 0 && !scanning
+            ? 'Select at least one connection to create or update'
+            : undefined}
       >
-        {creating ? 'Importing…' : `Import ${selectedCount} selected`}
+        {creating ? 'Importing…' : `Import ${actionableCount} selected`}
       </button>
     {/if}
   {/snippet}
@@ -374,13 +396,21 @@
   }
   .imp-hint {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
+    line-height: 1.5;
+  }
+  .imp-error {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--fs-s);
+    color: var(--danger);
     line-height: 1.5;
   }
   .imp-empty {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     font-style: italic;
     line-height: 1.5;
@@ -433,11 +463,11 @@
     flex: 1;
   }
   .tool-name {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .tool-sub {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .tool-sub.found {
@@ -456,7 +486,7 @@
     padding: 8px 0;
   }
   .imp-loading-text {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .imp-bar {
@@ -488,16 +518,12 @@
     gap: 10px;
     min-width: 0;
   }
-  /* The Back button reuses chevronRight rotated to point left. */
-  .prev-head .btn.small :global(svg) {
-    transform: scaleX(-1);
-  }
   .prev-title {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .prev-path {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     min-width: 0;
     flex: 0 1 auto;
@@ -514,7 +540,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--warning);
     line-height: 1.4;
   }
@@ -524,18 +550,18 @@
     gap: 6px;
   }
   .prev-count {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .dot-sep {
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .link-btn {
     border: none;
     background: transparent;
     color: var(--accent-text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
     padding: 2px 4px;
     border-radius: 3px;
@@ -564,7 +590,6 @@
     align-items: center;
     gap: 8px;
     padding: 8px 10px;
-    cursor: pointer;
   }
   .row:hover:not(.disabled) {
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
@@ -600,11 +625,11 @@
     min-width: 0;
   }
   .row-name {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .row-desc {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .ellipsis {
@@ -613,7 +638,7 @@
     white-space: nowrap;
   }
   .kind-badge {
-    font-size: 9px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -643,7 +668,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .grow {

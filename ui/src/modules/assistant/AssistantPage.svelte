@@ -9,6 +9,7 @@
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import { router } from '../../lib/router.svelte';
@@ -128,7 +129,7 @@
         ]
           .filter(Boolean)
           .join(' · ')
-      : 'Your personal assistant — chats, remembers, reminds and asks before anything leaves your Mac',
+      : 'Chats, remembers, reminds — and asks before anything leaves your Mac',
   );
   const needsCount = $derived(assistant.needsYouCount);
   const showList = $derived(!viewport.isPhone || (tab === 'chat' && !selectedId));
@@ -183,11 +184,7 @@
     {#if listState === 'unsupported'}
       <EmptyState variant="page" icon="assistant" title="The assistant isn’t available yet" body="This Otto daemon doesn’t include the assistant. Update Otto, then come back here." />
     {:else if listState === 'error' && !threads.length}
-      <div class="page-error" role="alert">
-        <Icon name="warning" size={14} />
-        <div class="error-t"><strong>Couldn’t load your threads.</strong><span class="dim">{assistant.threads.error}</span></div>
-        <button class="btn small" onclick={() => void assistant.loadThreads()}>Retry</button>
-      </div>
+      <LoadState variant="page" what="your threads" error={assistant.threads.error || 'Something went wrong.'} empty onretry={() => void assistant.loadThreads()} />
     {:else if listState === 'ready' && !threads.length && tab === 'chat'}
       <EmptyState
         variant="page"
@@ -312,31 +309,6 @@
   }
   .pad {
     padding: 12px;
-  }
-  .page-error {
-    margin: 20px;
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 12px;
-    max-width: 640px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface);
-  }
-  .page-error > :global(svg) {
-    color: var(--danger);
-    margin-top: 2px;
-  }
-  .error-t {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    font-size: var(--fs-s);
-  }
-  .dim {
-    color: var(--text-dim);
   }
   /* The rail needs room: drop it when the split is narrower than list +
      a readable conversation + rail (≈ a 1100 px window with the sidebar). */

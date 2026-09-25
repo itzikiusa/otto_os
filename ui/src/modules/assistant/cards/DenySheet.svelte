@@ -1,14 +1,20 @@
 <script lang="ts">
   // Deny with an optional reason (patterns §5). The reason goes back to the
-  // agent so it can adjust; leaving it empty is fine.
+  // agent so it can adjust; leaving it empty is fine. A skipped question uses
+  // the same sheet with its own title / verb / hint.
   import Modal from '../../../lib/components/Modal.svelte';
 
   interface Props {
     action: string;
     onclose: () => void;
     ondeny: (reason: string | null) => void;
+    title?: string;
+    /** The confirm button's verb. */
+    confirmLabel?: string;
+    /** Overrides the "Otto won't {action}" line under the reason. */
+    hint?: string;
   }
-  let { action, onclose, ondeny }: Props = $props();
+  let { action, onclose, ondeny, title = 'Deny request', confirmLabel = 'Deny', hint }: Props = $props();
   let reason = $state('');
 
   function submit(): void {
@@ -17,7 +23,7 @@
   }
 </script>
 
-<Modal title="Deny request" width={440} {onclose}>
+<Modal {title} width={440} {onclose}>
   <div class="field">
     <label for="deny-reason">Reason (optional)</label>
     <textarea
@@ -33,11 +39,11 @@
         }
       }}
     ></textarea>
-    <span class="hint">Otto won’t {action.toLowerCase()}. It sees your reason and can suggest something else.</span>
+    <span class="hint">{hint ?? `Otto won’t ${action.toLowerCase()}. It sees your reason and can suggest something else.`}</span>
   </div>
   {#snippet footer()}
     <button class="btn" onclick={onclose}>Cancel</button>
-    <button class="btn primary" onclick={submit}>Deny</button>
+    <button class="btn primary" onclick={submit}>{confirmLabel}</button>
   {/snippet}
 </Modal>
 

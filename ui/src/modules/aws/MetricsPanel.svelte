@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { awsErrorText } from './util';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // CloudWatch metrics for ONE resource (an SQS queue, EC2 instance or RDS
   // instance): range picker (1h … 30d), refresh + auto-refresh every 60 s
@@ -125,7 +126,7 @@
     </div>
     <span class="meta dim">
       {#if resp}period {periodLabel}{/if}
-      {#if updatedAt} · updated {fmtUpdated(updatedAt)}{/if}
+      {#if updatedAt}{' '}· updated {fmtUpdated(updatedAt)}{/if}
       · auto-refresh 60 s
     </span>
     <button class="icon-btn" class:spin={loading} onclick={() => void load()} disabled={loading} title="Refresh" aria-label="Refresh metrics">
@@ -146,13 +147,13 @@
       <EmptyState
         icon="chart"
         title="Couldn't load metrics"
-        body={error}
+        body={awsErrorText(error)}
         actionLabel={loginNeeded && onsignin ? 'Sign in' : 'Retry'}
         onaction={loginNeeded && onsignin ? onsignin : () => void load()}
       />
     {/if}
   {:else if !resp}
-    <div class="pad"><Skeleton rows={4} height={120} /></div>
+    <div class="pad" role="status"><p class="load-note">Loading metrics…</p><Skeleton rows={4} height={120} /></div>
   {:else}
     {#if error}
       <p class="stale">Showing the last successful load — refresh failed: {error}</p>
@@ -187,6 +188,11 @@
 </div>
 
 <style>
+  .load-note {
+    margin: 0 0 10px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
   .mp {
     display: flex;
     flex-direction: column;
@@ -199,7 +205,7 @@
     align-items: center;
     gap: 10px;
     flex-wrap: wrap;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .ranges {
     display: inline-flex;
@@ -213,7 +219,7 @@
     color: var(--text-dim);
     padding: 4px 9px;
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
   .ranges button + button {
@@ -225,7 +231,7 @@
     font-weight: 600;
   }
   .meta {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     flex: 1;
     min-width: 0;
     overflow: hidden;
@@ -258,7 +264,7 @@
   }
   .stale {
     margin: 0;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--status-warn);
   }
   .grid {
@@ -278,13 +284,13 @@
   }
   h4 {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
   }
   .stats {
     width: 100%;
     border-collapse: collapse;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     table-layout: fixed;
   }
   .stats th {
@@ -294,7 +300,7 @@
     padding: 2px 4px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
   }
   .stats th:first-child {
     width: 34%;

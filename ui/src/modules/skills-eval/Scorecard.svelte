@@ -6,6 +6,7 @@
   import { skillsEvalApi } from '../../lib/api/skillsEval';
   import Icon from '../../lib/components/Icon.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { sentenceCase } from '../../lib/status';
 
   interface Props {
     score?: EvalScore | null;
@@ -40,9 +41,11 @@
   };
   const proofTone = $derived(score ? (PROOF[score.proof_status] ?? grey) : grey);
 
+  // Same bands as the score chips in RunDetail / CompareView (85 / 60), so a
+  // bar never reads green next to an amber chip for the same number.
   function barColor(s: number): string {
-    if (s >= 80) return 'var(--status-working)';
-    if (s >= 50) return 'var(--status-warn)';
+    if (s >= 85) return 'var(--status-working)';
+    if (s >= 60) return 'var(--status-warn)';
     return 'var(--status-exited)';
   }
 
@@ -86,7 +89,7 @@
       artifacts = pack.artifacts ?? [];
       loaded = true;
     } catch (e) {
-      toasts.error('Proof pack', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't load the proof pack", e instanceof Error ? e.message : String(e));
       expanded = false;
     } finally {
       loading = false;
@@ -106,10 +109,11 @@
           class="proof"
           data-testid="scorecard-proof"
           style="background:{proofTone.bg};color:{proofTone.fg}"
+          title="Proof pack status"
         >
-          {(score.proof_status || 'missing').toUpperCase()}
+          Proof: {sentenceCase(score.proof_status || 'missing')}
         </span>
-        <span class="done">done {score.done_score}</span>
+        <span class="done" title="How much of the done contract (tests, lint, proof) this iteration met">Done contract {score.done_score}/100</span>
       </div>
     </div>
 
@@ -123,7 +127,7 @@
             </span>
             <span class="rscore">{r.score.toFixed(0)}</span>
           {:else}
-            <span class="track"><span class="notrun">not run</span></span>
+            <span class="notrun">{r.label === 'Human' ? 'Not rated' : 'Not run'}</span>
             <span class="rscore">—</span>
           {/if}
           {#if r.detail}<span class="rdetail" title={r.detail}>{r.detail}</span>{/if}
@@ -132,17 +136,17 @@
     </div>
 
     {#if !compact}
-      <button class="proofpack-btn" data-testid="scorecard-proofpack-btn" onclick={toggleProof}>
-        <Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={13} />
-        View proof pack
+      <button class="btn small ghost proofpack-btn" data-testid="scorecard-proofpack-btn" aria-expanded={expanded} onclick={toggleProof}>
+        <Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={12} />
+        {expanded ? 'Hide proof pack' : 'View proof pack'}
       </button>
 
       {#if expanded}
         <div class="pack">
           {#if loading}
-            <div class="pmsg">Loading…</div>
+            <div class="pmsg" role="status">Loading proof pack…</div>
           {:else if artifacts.length === 0}
-            <div class="pmsg">No proof artifacts.</div>
+            <div class="pmsg">No proof artifacts were captured for this iteration.</div>
           {:else}
             {#each artifacts as a, i (i)}
               <div class="artifact">
@@ -152,7 +156,7 @@
                   <span class="sep">·</span>
                   <span class="atitle">{a.title}</span>
                   <span class="sep">·</span>
-                  <span class="astatus">{a.status}</span>
+                  <span class="astatus">{sentenceCase(a.status)}</span>
                 </div>
                 {#if a.preview}
                   <pre class="apreview">{clip(a.preview)}{a.truncated ? '\n…' : ''}</pre>
@@ -172,29 +176,28 @@
   .scorecard { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-m); }
   .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .composite { display: flex; align-items: baseline; gap: 6px; }
-  .composite .num { font-size: 28px; font-weight: 700; line-height: 1; color: var(--text); font-variant-numeric: tabular-nums; }
-  .composite .lbl, .done, .rlabel, .pmsg { font-size: 11px; color: var(--text-dim); }
+  .composite .num { font-size: var(--fs-2xl); font-weight: 600; line-height: 1; color: var(--text); font-variant-numeric: tabular-nums; }
+  .composite .lbl, .done, .rlabel, .pmsg { font-size: var(--fs-xs); color: var(--text-dim); }
   .composite .lbl { text-transform: uppercase; letter-spacing: 0.04em; }
   .meta { display: flex; align-items: center; gap: 8px; }
-  .proof { padding: 2px 8px; border-radius: 999px; font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.03em; white-space: nowrap; }
+  .proof { padding: 2px 8px; border-radius: 999px; font-size: var(--fs-xs); font-weight: 500; white-space: nowrap; }
   .done { font-variant-numeric: tabular-nums; }
   .signals { display: flex; flex-direction: column; gap: 5px; }
   .row { display: grid; grid-template-columns: 54px 1fr 28px; align-items: center; gap: 8px; }
   .row.dim { opacity: 0.55; }
-  .track { position: relative; height: 7px; border-radius: 999px; overflow: hidden; background: var(--surface-2, color-mix(in srgb, var(--text-dim) 18%, transparent)); }
+  .track { position: relative; height: 7px; border-radius: 999px; overflow: hidden; background: var(--surface-2); }
   .fill { display: block; height: 100%; border-radius: 999px; }
-  .notrun { position: absolute; left: 6px; top: -4px; font-size: 9px; color: var(--text-dim); }
-  .rscore { font-size: 11px; font-weight: 600; text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+  /* Replaces the bar (a 7px track can't hold readable text). */
+  .notrun { font-size: var(--fs-xs); line-height: 1; color: var(--text-dim); }
+  .rscore { font-size: var(--fs-xs); font-weight: 600; text-align: end; color: var(--text); font-variant-numeric: tabular-nums; }
   .row.dim .rscore { color: var(--text-dim); }
   .rdetail { grid-column: 2 / -1; font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .proofpack-btn { align-self: flex-start; display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; font-size: 11px; color: var(--text-dim); background: transparent; border: 1px solid var(--border); border-radius: var(--radius-m); cursor: pointer; }
-  .proofpack-btn:hover { color: var(--text); border-color: var(--accent); }
+  .proofpack-btn { align-self: flex-start; }
   .pack { display: flex; flex-direction: column; gap: 8px; }
   .artifact { border: 1px solid var(--border); border-radius: var(--radius-m); padding: 6px 8px; }
-  .ahead { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text); }
+  .ahead { display: flex; align-items: center; gap: 5px; font-size: var(--fs-xs); color: var(--text); }
   .adot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
   .akind { font-weight: 600; }
   .sep, .atitle, .astatus { color: var(--text-dim); }
-  .astatus { text-transform: uppercase; letter-spacing: 0.02em; }
-  .apreview { margin: 6px 0 0; padding: 6px 8px; max-height: 160px; overflow: auto; font-size: var(--fs-xs); line-height: 1.4; color: var(--text-dim); background: var(--surface-2, color-mix(in srgb, var(--text-dim) 10%, transparent)); border-radius: var(--radius-m); white-space: pre-wrap; word-break: break-word; }
+  .apreview { margin: 6px 0 0; padding: 6px 8px; max-height: 160px; overflow: auto; font-size: var(--fs-xs); line-height: 1.4; color: var(--text-dim); background: var(--surface-2); border-radius: var(--radius-m); white-space: pre-wrap; word-break: break-word; }
 </style>

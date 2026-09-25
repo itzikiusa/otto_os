@@ -150,7 +150,7 @@
                 {#if env.is_active}<Icon name="check" size={10} />{/if}
               </span>
               <span class="env-name ellipsis grow">{env.name}</span>
-              <span class="env-count">{Object.keys(env.variables).length + env.secret_keys.length} variables{#if env.secret_keys.length} · {env.secret_keys.length} secret{/if}</span>
+              <span class="env-count">{Object.keys(env.variables).length + env.secret_keys.length} variables{#if env.secret_keys.length}{' '}· {env.secret_keys.length} secret{/if}</span>
             </button>
             {#if !compact && canEdit}
               <button class="icon-btn" title="Edit variables" aria-label="Edit variables" onclick={() => startEdit(env)}><Icon name="edit" size={12} /></button>
@@ -177,7 +177,7 @@
                 </div>
               {/each}
               <div class="var-actions">
-                <button class="btn small ghost" onclick={addRow}><Icon name="plus" size={11} />Add</button>
+                <button class="btn small ghost" onclick={addRow}><Icon name="plus" size={12} />Add</button>
                 <span class="grow"></span>
                 <button class="btn small primary" onclick={() => saveVars(env)}>Save vars</button>
               </div>

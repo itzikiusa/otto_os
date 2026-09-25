@@ -66,6 +66,16 @@ test.afterEach(async () => {
 });
 
 test('⌘I: close a session by NAME, then close ALL of a provider', async ({ page }) => {
+  // A workspace-less ("No workspace") shell: the store holds it for the
+  // sidebar group in every workspace, but it is not this workspace's session.
+  const scratchTitle = `Scratch bystander ${Date.now().toString(36)}`;
+  const sr = await ctx.post(`${base}/api/v1/workspaces/scratch/sessions`, {
+    data: { kind: 'agent', provider: 'shell', title: scratchTitle, cwd: '/tmp', meta: { origin: 'e2e' } },
+  });
+  expect(sr.ok(), await sr.text()).toBeTruthy();
+  const scratchId = (await sr.json()).id as string;
+  await expect(page.locator('.navigator .nested-item', { hasText: scratchTitle })).toBeVisible({ timeout: 20_000 });
+
   // "close zlatan" → only that session is archived.
   await runOttoCommand(page, 'please close zlatan');
   await expect.poll(() => isArchived(idByTitle.Zlatan), { timeout: 15_000 }).toBe(true);
@@ -77,10 +87,25 @@ test('⌘I: close a session by NAME, then close ALL of a provider', async ({ pag
   await runOttoCommand(page, 'please close all shell sessions');
   await expect.poll(() => isArchived(idByTitle.Pirlo), { timeout: 15_000 }).toBe(true);
   await expect.poll(() => isArchived(idByTitle.Buffon), { timeout: 15_000 }).toBe(true);
+  // …but only THIS workspace's: the scratch shell is left running.
+  expect(await isArchived(scratchId)).toBe(false);
+  await ctx.delete(`${base}/api/v1/sessions/${scratchId}`);
 });
 
-test('⌘I: "delete <name>" removes the session permanently (not just archive)', async ({ page }) => {
-  await runOttoCommand(page, 'please delete pirlo');
+test('⌘I: "delete <name>" asks first, then removes the session permanently (not just archive)', async ({ page }) => {
+  await page.keyboard.press('Meta+i');
+  const box = page.locator('.pal-english textarea');
+  await expect(box).toBeVisible({ timeout: 10_000 });
+  await box.fill('please delete pirlo');
+  await page.keyboard.press('Meta+Enter');
+  // A permanent delete confirms first (the floating bar's guard, now in ⌘I
+  // too) and names what goes; nothing is deleted until it's confirmed.
+  const dialog = page.getByRole('dialog', { name: 'Delete session?' });
+  await expect(dialog).toBeVisible({ timeout: 10_000 });
+  await expect(dialog).toContainText('Pirlo');
+  expect(await sessionExists(idByTitle.Pirlo)).toBe(true);
+  await dialog.getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect(box).toBeHidden({ timeout: 10_000 });
   // Gone entirely — a GET returns 404, unlike archive which keeps the row.
   await expect.poll(() => sessionExists(idByTitle.Pirlo), { timeout: 15_000 }).toBe(false);
   // The others are untouched.
@@ -202,9 +227,10 @@ test('shell reconnect: an exited shell offers Reconnect and comes back live', as
   const overlay = page.locator('.term-overlay');
   await expect(overlay).toBeVisible({ timeout: 20_000 });
 
-  // A plain shell isn't WS-resumable, so the overlay offers "Reconnect"
-  // (respawn) rather than "Resume". Clicking it brings the session back live.
-  const reconnect = page.getByRole('button', { name: 'Reconnect' });
+  // A plain shell isn't WS-resumable, so the overlay offers "Restart session"
+  // (a respawn — it used to be mislabelled "Reconnect") rather than "Resume".
+  // Clicking it brings the session back live.
+  const reconnect = overlay.getByRole('button', { name: /^(Restart session|Reconnect)$/ });
   await expect(reconnect).toBeVisible({ timeout: 10_000 });
   await reconnect.click();
 

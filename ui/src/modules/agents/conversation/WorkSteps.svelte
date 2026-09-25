@@ -46,7 +46,7 @@
         {#if thinking}<span class="dim"> · Thought ({thinking})</span>{/if}
       </span>
       {#if failed}<span class="chip bad steps-fail">has failures</span>{/if}
-      <span class="steps-caret">{open ? '▾' : '▸'}</span>
+      <span class="steps-caret" aria-hidden="true"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} /></span>
     </button>
     {#if open}
       <div class="steps-list">
@@ -86,7 +86,7 @@
     border: 0;
     color: var(--text);
     font: inherit;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
     text-align: start;
   }
@@ -98,7 +98,7 @@
     color: var(--text-dim);
   }
   .steps-icon.pending {
-    color: var(--status-warn, #febc2e);
+    color: var(--status-warn);
     animation: pulse 1.2s ease-in-out infinite;
   }
   @keyframes pulse {
@@ -118,8 +118,8 @@
     font-size: var(--fs-xs);
   }
   .steps-caret {
+    display: inline-flex;
     color: var(--text-dim);
-    font-size: 11px;
   }
   .steps-list {
     border-top: 1px solid var(--border);
@@ -127,7 +127,7 @@
     flex-direction: column;
   }
   .thought {
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 5px 10px 5px 31px;
     font-style: italic;
   }

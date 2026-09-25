@@ -58,7 +58,7 @@ async function liveIsPhone(page: Page): Promise<boolean> {
  *  never collides with the pane header's "Restart session" control (which a loose
  *  /start session/i regex would also match). */
 function startSessionBtn(page: Page) {
-  return page.locator('.sheet[role="dialog"]').getByRole('button', { name: 'Start Session', exact: true });
+  return page.locator('.sheet[role="dialog"]').getByRole('button', { name: 'Start session', exact: true });
 }
 
 /** Poll a locator's bounding box until it STOPS MOVING (two consecutive samples
@@ -148,7 +148,7 @@ async function openSession(page: Page, id: string): Promise<void> {
   await expect(page.locator('.term-host').first()).toBeVisible({ timeout: 30_000 });
   await page.waitForLoadState('networkidle').catch(() => {});
   // Wait until the "connecting…/reconnecting…" overlay is gone (WS attached).
-  await expect(page.locator('.term-overlay .badge').filter({ hasText: /connecting|reconnecting/ }))
+  await expect(page.locator('.term-overlay .badge').filter({ hasText: /[Cc]onnecting|[Rr]econnecting/ }))
     .toHaveCount(0, { timeout: 20_000 });
 }
 
@@ -269,7 +269,7 @@ test('New Session sheet fits the viewport and Start is reachable', async ({ page
   // fold on a short landscape phone).
   const start = startSessionBtn(page);
   await expect(start).toBeVisible();
-  await expectOnScreen(page, await start.boundingBox(), 'Start Session button');
+  await expectOnScreen(page, await start.boundingBox(), 'Start session button');
 
   // Tap targets in the provider grid are comfortable.
   const firstCard = await providers.first().boundingBox();

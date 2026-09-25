@@ -47,7 +47,13 @@ async function boot(
   await page.addInitScript((r) => {
     if (sessionStorage.getItem('sg-reset')) return;
     sessionStorage.setItem('sg-reset', '1');
-    for (const k of ['otto_sidebar_order', 'otto_sidebar_hidden', 'otto_sidebar_groups_collapsed']) {
+    for (const k of [
+      'otto_sidebar_order',
+      'otto_sidebar_hidden',
+      'otto_sidebar_groups_collapsed',
+      'otto_sidebar_favorites',
+      'otto_sidebar_group_order',
+    ]) {
       localStorage.removeItem(k);
     }
     localStorage.setItem('otto_rail_expanded', r);
@@ -173,6 +179,8 @@ test('customize: moves stay in-section, hidden stays hidden, empty sections vani
       .locator('[data-testid^="sidebar-edit-row-"]')
       .evaluateAll((els) => els.map((e) => e.getAttribute('data-testid')!.replace('sidebar-edit-row-', '')));
   expect((await automateRows()).slice(0, 3)).toEqual(['swarm', 'loops', 'workflows']);
+  // The arrows open up on row hover / focus (the label keeps its room).
+  await page.getByTestId('sidebar-edit-row-workflows').hover();
   await page.getByRole('button', { name: 'Move Workflows up' }).click();
   expect((await automateRows()).slice(0, 3)).toEqual(['swarm', 'workflows', 'loops']);
 
@@ -258,7 +266,9 @@ test('⌘K reaches Vault, Workflows and Mission Control (derived from the regist
     await expect(item).toBeVisible();
     await expect(item.locator('.opt-detail')).toHaveText(section);
     await item.click();
-    await expect.poll(() => page.evaluate(() => window.location.hash)).toBe(`#/${route}`);
+    // The module, or the item a list/detail module opens on (Mission Control
+    // lands on its first work item when the daemon has any: `#/mission-control/<id>`).
+    await expect.poll(() => page.evaluate(() => window.location.hash)).toMatch(new RegExp(`^#/${route}(?:/[^/]+)?$`));
     await expect(row(page, label)).toHaveClass(/active/);
   }
   // Tools no longer masquerade as session commands.

@@ -456,6 +456,10 @@ fn normalize_codex(p: &Value) -> Option<TrailDraft> {
 }
 
 /// Persist + broadcast a per-session notice, de-duped on a stable source key.
+/// Gated by Settings → Notifications "session events", like the monitor's
+/// notices (`monitor.rs`) — these hook-driven ones ("finished its tasks",
+/// "needs attention") used to fire even with the setting off. Re-read per
+/// event so toggling it takes effect live.
 async fn notify(
     ctx: &ServerCtx,
     session: &Session,
@@ -464,6 +468,14 @@ async fn notify(
     body: String,
     key_suffix: &str,
 ) {
+    match ctx.notifications().repo().get_settings().await {
+        Ok(s) if !s.session_events => return,
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!("session notice: read settings: {e}");
+            return;
+        }
+    }
     let _ = ctx
         .notifications()
         .create(NewNotice {

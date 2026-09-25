@@ -6,13 +6,19 @@
   import { product } from '../../lib/stores/product.svelte';
   import { renderMarkdown } from '../../lib/md';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { ProductLearning, NewLearningReq, UpdateLearningReq } from './types';
 
-  // ── Props ─────────────────────────────────────────────────────────────────────
-  interface Props {
-    filter?: 'all' | 'pattern' | 'avoid';
-  }
-  let { filter = 'all' }: Props = $props();
+  // ── Filter (the view's own segmented control — no side rail) ─────────────────
+  type LearningFilter = 'all' | 'pattern' | 'avoid';
+  let filter = $state<LearningFilter>('all');
+  const FILTERS: { value: LearningFilter; label: string }[] = [
+    { value: 'all', label: 'All' },
+    { value: 'pattern', label: 'Patterns to follow' },
+    { value: 'avoid', label: 'Cases to avoid' },
+  ];
 
   // Ref shape parsed from refs_json.
   interface LearningRef {
@@ -47,8 +53,6 @@
   let deletingId = $state<string | null>(null);
   let togglingId = $state<string | null>(null);
 
-  // Confirm-delete
-  let confirmDeleteId = $state<string | null>(null);
 
   // Load all learnings on mount / when workspace changes.
   $effect(() => {
@@ -57,12 +61,15 @@
     }
   });
 
+  /** A failed load — inline with Retry, never as "No patterns yet". */
+  let loadError = $state<string | null>(null);
   async function loadAll(): Promise<void> {
+    loadError = null;
     try {
       await product.loadLearnings(); // load ALL (active + inactive)
       loaded = true;
     } catch (e) {
-      toasts.error('Could not load learnings', product.errMsg(e));
+      loadError = loadErrorText(e);
     }
   }
 
@@ -212,14 +219,17 @@
     }
   }
 
-  function askDelete(id: string): void {
-    confirmDeleteId = id;
-  }
-
-  async function confirmDelete(): Promise<void> {
-    if (!confirmDeleteId || deletingId) return;
-    deletingId = confirmDeleteId;
-    confirmDeleteId = null;
+  /** Delete one learning — confirmed in the shared dialog, naming it (the old
+   *  inline bar sat at the top of the page, far from the card it deleted). */
+  async function askDelete(id: string): Promise<void> {
+    if (deletingId) return;
+    const l = product.learnings.find((x) => x.id === id);
+    const ok = await confirmer.ask(
+      `Delete the learning “${l?.title ?? 'untitled'}”? Future analyses stop using it. This can't be undone.`,
+      { title: 'Delete learning', confirmLabel: 'Delete', danger: true },
+    );
+    if (!ok) return;
+    deletingId = id;
     try {
       await product.deleteLearning(deletingId);
       toasts.info('Learning deleted');
@@ -235,11 +245,15 @@
   <!-- ── Header ────────────────────────────────────────────────────────────── -->
   <div class="lv-header">
     <div class="lv-title-row">
-      <h2 class="lv-title">Knowledge Base</h2>
+      <div class="segmented" role="group" aria-label="Show learnings">
+        {#each FILTERS as f (f.value)}
+          <button class:active={filter === f.value} aria-pressed={filter === f.value} onclick={() => (filter = f.value)}>{f.label}</button>
+        {/each}
+      </div>
       <span class="lv-count">{product.learnings.length} learning{product.learnings.length !== 1 ? 's' : ''}</span>
       <span class="spacer"></span>
       <button
-        class="add-btn"
+        class="btn small"
         onclick={() => (addOpen = !addOpen)}
         title="Add a new learning"
       >
@@ -257,15 +271,12 @@
       </button>
     </div>
 
-    {#if product.loadingLearnings}
-      <div class="dim-sm">Loading…</div>
-    {/if}
   </div>
 
   <!-- ── Add form ───────────────────────────────────────────────────────────── -->
   {#if addOpen}
     <div class="form-card">
-      <div class="form-head">Add Learning</div>
+      <div class="form-head">Add learning</div>
       <div class="form-row">
         <label class="field-label" for="add-kind">Kind</label>
         <select id="add-kind" class="mini-select" bind:value={addKind}>
@@ -298,15 +309,10 @@
     </div>
   {/if}
 
-  <!-- ── Confirm delete overlay ─────────────────────────────────────────────── -->
-  {#if confirmDeleteId}
-    <div class="confirm-bar">
-      <span>Delete this learning? This cannot be undone.</span>
-      <button class="btn danger" onclick={confirmDelete}>Delete</button>
-      <button class="btn ghost" onclick={() => (confirmDeleteId = null)}>Cancel</button>
-    </div>
-  {/if}
-
+  <!-- ── First load / failed load (nothing to show yet) ────────────────────── -->
+  {#if (loadError || (product.loadingLearnings && !loaded)) && product.learnings.length === 0}
+    <LoadState what="learnings" loading={product.loadingLearnings} error={loadError} empty onretry={() => void loadAll()} />
+  {:else}
   <!-- ── Two-column layout ─────────────────────────────────────────────────── -->
   <div class="two-col" class:single-col={!showPatterns || !showAvoids}>
 
@@ -376,7 +382,7 @@
                       disabled={acceptingId === l.id}
                       title="Accept this suggested learning"
                     >
-                      {acceptingId === l.id ? '…' : 'Accept'}
+                      {acceptingId === l.id ? 'Accepting…' : 'Accept'}
                     </button>
                   {/if}
                   <label class="toggle-wrap" title={l.active ? 'Active — click to deactivate' : 'Inactive — click to activate'}>
@@ -500,7 +506,7 @@
                       disabled={acceptingId === l.id}
                       title="Accept this suggested learning"
                     >
-                      {acceptingId === l.id ? '…' : 'Accept'}
+                      {acceptingId === l.id ? 'Accepting…' : 'Accept'}
                     </button>
                   {/if}
                   <label class="toggle-wrap" title={l.active ? 'Active — click to deactivate' : 'Inactive — click to activate'}>
@@ -558,6 +564,7 @@
     </div>
     {/if}
   </div>
+  {/if}
 </div>
 
 <style>
@@ -584,125 +591,36 @@
   }
   .lv-title {
     margin: 0;
-    font-size: 16px;
-    font-weight: 700;
+    font-size: var(--fs-l);
+    font-weight: 600;
     color: var(--text);
   }
   .lv-count {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
     padding: 2px 8px;
     border-radius: 999px;
   }
   .spacer { flex: 1; }
-  .dim-sm { font-size: 11.5px; color: var(--text-dim); }
+  .dim-sm { font-size: var(--fs-xs); color: var(--text-dim); }
 
-  /* Buttons */
-  .add-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 28px;
-    padding: 0 11px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background 100ms, color 100ms, border-color 100ms;
-  }
-  .add-btn:hover {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    border-color: var(--accent);
-    color: var(--accent-text);
-  }
-  .icon-btn {
-    display: grid;
-    place-items: center;
-    width: 26px;
-    height: 26px;
-    border: none;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-  .icon-btn:hover { background: color-mix(in srgb, var(--text-dim) 12%, transparent); color: var(--text); }
-  .icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 28px;
-    padding: 0 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text);
-    font-size: 12.5px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background 100ms, border-color 100ms;
-  }
-  .btn.primary {
-    border-color: var(--accent);
-    color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-  }
-  .btn.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 20%, transparent); }
-  .btn.ghost:hover { background: color-mix(in srgb, var(--text-dim) 10%, transparent); }
-  .btn.danger {
-    border-color: var(--danger);
-    color: var(--danger);
-    background: color-mix(in srgb, var(--danger) 10%, transparent);
-  }
-  .btn.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 20%, transparent); }
-  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .btn.small { height: 24px; padding: 0 9px; font-size: 11.5px; }
 
   .accept-btn {
-    border-color: var(--status-working, #22c55e);
-    color: var(--status-working, #22c55e);
-    background: color-mix(in srgb, var(--status-working, #22c55e) 12%, transparent);
-    font-weight: 700;
+    border-color: var(--success);
+    color: var(--success);
+    background: color-mix(in srgb, var(--success) 12%, transparent);
+    font-weight: 600;
   }
   .accept-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--status-working, #22c55e) 22%, transparent);
+    background: color-mix(in srgb, var(--success) 22%, transparent);
   }
 
   /* Confirm bar */
-  .confirm-bar {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 14px;
-    border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
-    border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--danger) 8%, var(--surface));
-    font-size: 12.5px;
-    color: var(--text);
-    flex-shrink: 0;
-  }
-  .confirm-bar span { flex: 1; }
-
-  /* Add form card */
-  .form-card {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    padding: 14px;
-    background: var(--surface);
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    flex-shrink: 0;
-  }
   .form-head {
-    font-size: 12px;
-    font-weight: 700;
+    font-size: var(--fs-s);
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
@@ -717,7 +635,7 @@
     align-items: flex-start;
   }
   .field-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -731,7 +649,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     padding: 5px 9px;
     box-sizing: border-box;
   }
@@ -743,7 +661,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     padding: 6px 9px;
     resize: vertical;
     box-sizing: border-box;
@@ -751,13 +669,13 @@
     line-height: 1.5;
   }
   .field-textarea:focus { outline: none; border-color: var(--accent); }
-  .field-textarea.mono { font-family: var(--font-mono, monospace); font-size: 11.5px; }
+  .field-textarea.mono { font-family: var(--font-mono, monospace); font-size: var(--fs-xs); }
   .mini-select {
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 3px 7px;
   }
   .form-actions {
@@ -804,20 +722,20 @@
     color: var(--danger);
   }
   .col-title {
-    font-size: 12px;
-    font-weight: 700;
+    font-size: var(--fs-s);
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
   .col-count {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     opacity: 0.7;
     background: color-mix(in srgb, currentColor 15%, transparent);
     padding: 1px 7px;
     border-radius: 999px;
   }
   .empty-col {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     padding: 16px 12px;
     text-align: center;
@@ -856,7 +774,7 @@
     color: var(--warning);
     background: color-mix(in srgb, var(--warning) 14%, transparent);
     border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     padding: 3px 8px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -870,7 +788,7 @@
   }
   .card-title {
     flex: 1;
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
     line-height: 1.35;
@@ -907,7 +825,7 @@
     width: 22px;
     height: 22px;
     border: none;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
@@ -919,7 +837,7 @@
 
   /* Card body (markdown) */
   .card-body {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     line-height: 1.55;
     color: var(--text-dim);
   }
@@ -960,19 +878,13 @@
     transition: opacity 100ms;
   }
   .ref-badge:hover { opacity: 0.8; }
-  .ref-jira {
-    background: color-mix(in srgb, #3b82f6 12%, transparent);
-    border-color: color-mix(in srgb, #3b82f6 25%, transparent);
-    color: #1d4ed8;
-  }
-  .ref-confluence {
-    background: color-mix(in srgb, #60a5fa 12%, transparent);
-    border-color: color-mix(in srgb, #60a5fa 25%, transparent);
-    color: #1e40af;
-  }
+  /* Sources are kinds, not states: neutral chips (components.md §4 — no
+     per-source hues); links read as links in --accent-text. */
+  .ref-jira,
+  .ref-confluence,
   .ref-url {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 25%, transparent);
+    background: var(--surface-2);
+    border-color: var(--border);
     color: var(--accent-text);
   }
   .ref-other {
@@ -993,7 +905,7 @@
   .md-body :global(h2),
   .md-body :global(h3) {
     margin: 0.8em 0 0.3em;
-    font-weight: 700;
+    font-weight: 600;
     color: var(--text);
   }
   .md-body :global(p) { margin: 0 0 0.5em; }
@@ -1005,7 +917,7 @@
     font-size: 0.88em;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     padding: 1px 4px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
   }
   .md-body :global(a) { color: var(--accent-text); text-decoration: none; }
   .md-body :global(a:hover) { text-decoration: underline; }

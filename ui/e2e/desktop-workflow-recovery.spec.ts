@@ -21,9 +21,12 @@ test('workflow preflight identifies a broken step and cron editing preserves dis
     await page.addInitScript((id) => { localStorage.setItem('otto_workspace', id); localStorage.setItem('otto_rail_expanded', '0'); }, workspace);
     await page.goto('/#/workflows');
     await page.getByTestId(`wf-row-${workflow}`).click();
-    await page.getByRole('button', { name: 'Validate', exact: true }).click();
+    // Validate + Triggers live in the editor header's ⋯ menu.
+    await page.locator('[data-testid="page-header"]').getByRole('button', { name: 'More actions' }).click();
+    await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Validate', exact: true }).click();
     await expect(page.locator('.preflight[role="alert"]')).toContainText('url');
-    await page.getByRole('button', { name: 'Triggers', exact: true }).click();
+    await page.locator('[data-testid="page-header"]').getByRole('button', { name: 'More actions' }).click();
+    await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Triggers', exact: true }).click();
     await page.getByTitle('Edit trigger', { exact: true }).click();
     await page.getByLabel('Cron (5 fields)', { exact: true }).fill('15 10 * * 1-5');
     await page.getByLabel('Timezone (IANA)', { exact: true }).fill('Asia/Jerusalem');

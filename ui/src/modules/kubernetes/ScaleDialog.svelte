@@ -51,7 +51,7 @@
     gap: 10px;
   }
   .target {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
   }
   .stepper {

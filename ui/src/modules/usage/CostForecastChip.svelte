@@ -23,7 +23,6 @@
 
   let resp: ForecastResp | null = $state(null);
   let loading = $state(false);
-  let expanded = $state(false);
 
   // Request token: a newer load supersedes any in-flight one, so a slow
   // response for stale inputs can never overwrite the current forecast.
@@ -63,105 +62,22 @@
   }
 </script>
 
-{#if loading}
-  <span class="forecast-chip loading" title="Estimating run cost…">
-    ≈ …
-  </span>
-{:else if resp && resp.projected_cost_usd > 0}
-  <button
-    class="forecast-chip ready"
-    onclick={() => (expanded = !expanded)}
-    title={resp.basis}
-    aria-expanded={expanded}
-  >
-    ≈ {fmtCost(resp.projected_cost_usd)}
-  </button>
-  {#if expanded}
-    <div class="forecast-tooltip" role="tooltip">
-      <span class="forecast-label">Estimated cost</span>
-      <span class="forecast-value">{fmtCost(resp.projected_cost_usd)}</span>
-      <p class="forecast-basis">{resp.basis}</p>
-    </div>
-  {/if}
-{:else if resp && resp.projected_cost_usd === 0}
-  <span class="forecast-chip no-data" title={resp.basis}>
-    ≈ no data
+<!-- A quiet, one-line projection under a figure: sans + tabular-nums like
+     the figure it annotates. The basis (what the estimate is built from) is
+     the tooltip. Nothing renders while loading or when there's no history to
+     project from — "no data" next to a KPI was noise. -->
+{#if !loading && resp && resp.projected_cost_usd > 0}
+  <span class="forecast" title="Estimated cost of the next {feature === 'agent' ? 'agent run' : `${feature} run`} on {provider}. {resp.basis}">
+    · next run ≈ {fmtCost(resp.projected_cost_usd)}
   </span>
 {/if}
 
 <style>
-  .forecast-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 11px;
-    padding: 2px 7px;
-    border-radius: 10px;
-    font-family: var(--font-mono);
-    vertical-align: middle;
-    line-height: 1.4;
-    cursor: default;
-    user-select: none;
-  }
-  .forecast-chip.loading {
-    background: var(--surface-3);
+  .forecast {
+    font-size: var(--fs-s);
     color: var(--text-dim);
-    border: 1px solid var(--border);
-    animation: pulse 1.2s ease-in-out infinite;
-  }
-  .forecast-chip.ready {
-    background: var(--surface-3);
-    color: var(--accent-text);
-    border: 1px solid var(--accent-soft);
-    cursor: pointer;
-    position: relative;
-  }
-  .forecast-chip.ready:hover {
-    border-color: var(--accent);
-    background: var(--accent-soft);
-  }
-  .forecast-chip.no-data {
-    background: var(--surface-3);
-    color: var(--text-dim);
-    border: 1px dashed var(--border);
-  }
-
-  .forecast-tooltip {
-    position: absolute;
-    z-index: 100;
-    margin-top: 4px;
-    padding: 10px 12px;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-    min-width: 200px;
-    max-width: 320px;
-  }
-  .forecast-label {
-    display: block;
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-dim);
-    margin-bottom: 2px;
-  }
-  .forecast-value {
-    display: block;
-    font-size: 18px;
-    font-weight: 700;
-    color: var(--text);
-    font-family: var(--font-mono);
-  }
-  .forecast-basis {
-    margin: 6px 0 0;
-    font-size: 11px;
-    color: var(--text-dim);
-    line-height: 1.4;
-  }
-
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    cursor: help;
   }
 </style>

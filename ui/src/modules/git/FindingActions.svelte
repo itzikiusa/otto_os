@@ -1,7 +1,9 @@
 <script lang="ts">
-  // The per-finding action bar for the Findings workflow board: the 7 headline
-  // buttons (fix / verify / jira / false-positive / require-approval / repo-rule /
-  // regression-test) plus an overflow menu (accept / waive / approve / reject).
+  // The per-finding action bar for the Findings workflow board: the two headline
+  // actions (ask an agent to fix / verify resolved) inline, and everything else
+  // (jira / false-positive / require-approval / repo-rule / regression-test,
+  // then accept / waive / approve / reject) in one ⋯ menu — seven equal buttons
+  // on every card was a wall nobody could scan.
   // Each button is disabled per the legal status transitions (mirrors
   // FindingStatus::can_transition in crates/otto-core/src/finding.rs); on click it
   // calls the client method and reports the updated finding back to the board (the
@@ -21,7 +23,9 @@
   } from '../../lib/api/client';
   import type { Finding } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
-  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { confirmOutward } from '../../lib/confirmOutward';
+  import Icon from '../../lib/components/Icon.svelte';
 
   interface Props {
     finding: Finding;
@@ -166,6 +170,14 @@
       return;
     }
     if (busy) return;
+    // Creating an issue is outward-facing: say where it lands and who sees it.
+    const ok = await confirmOutward({
+      verb: 'Create Jira issue',
+      where: `Jira project ${key}`,
+      what: finding.title || finding.body.split('\n')[0],
+      who: 'Everyone with access to the project; watchers may be notified.',
+    });
+    if (!ok) return;
     busy = 'convert to Jira';
     try {
       const f = await findingToJira(finding.id, { project_key: key });
@@ -184,7 +196,39 @@
 
   // --- Overflow menu (accept / waive / approve / reject) ---------------------
   function openOverflow(e: MouseEvent): void {
-    const items: { label: string; disabled?: boolean; action: () => void }[] = [];
+    const items: MenuItem[] = [
+      {
+        label: finding.jira_key ? `In Jira as ${finding.jira_key}` : 'Convert to Jira issue…',
+        icon: 'ticket',
+        disabled: !canJira || !!busy,
+        action: openJira,
+      },
+      {
+        label: finding.linked_test ? 'Regression test added' : 'Add regression test',
+        icon: 'check',
+        disabled: !canRegressionTest || !!busy,
+        action: doRegressionTest,
+      },
+      {
+        label: finding.repo_rule_id ? 'In repo rules' : 'Add to repo rules',
+        icon: 'book',
+        disabled: !canRepoRule || !!busy,
+        action: doRepoRule,
+      },
+      {
+        label: finding.requires_human_approval ? 'Approval required' : 'Require human approval',
+        icon: 'userCheck',
+        disabled: !canRequireApproval || !!busy,
+        action: doRequireApproval,
+      },
+      {
+        label: 'Mark false positive',
+        icon: 'eyeOff',
+        disabled: !canFalsePositive || !!busy,
+        action: doFalsePositive,
+      },
+      { separator: true },
+    ];
     items.push({
       label: 'Accept',
       disabled: !canAccept || !!busy,
@@ -214,45 +258,51 @@
 </script>
 
 <div class="fa">
-  <button class="btn xs" disabled={!canFix || !!busy} onclick={doFix}>
+  <button
+    class="btn small"
+    disabled={!canFix || !!busy}
+    onclick={doFix}
+    title={canFix ? 'Start an agent session that fixes this finding' : 'Only open or accepted findings can be sent for a fix'}
+  >
+    <Icon name="zap" size={12} />
     {busy === 'ask agent to fix' ? 'Starting…' : 'Ask agent to fix'}
   </button>
-  <button class="btn xs" disabled={!canVerify || !!busy} onclick={doVerify}>
+  <button
+    class="btn small"
+    disabled={!canVerify || !!busy}
+    onclick={doVerify}
+    title={canVerify ? 'Check the evidence that this finding is resolved' : 'Accept or fix the finding first'}
+  >
+    <Icon name="check" size={12} />
     {busy === 'verify' ? 'Verifying…' : 'Verify resolved'}
   </button>
-  <button class="btn xs" disabled={!canJira || !!busy} onclick={openJira}>
-    {finding.jira_key ? `Jira: ${finding.jira_key}` : 'Convert to Jira'}
-  </button>
-  <button class="btn xs" disabled={!canFalsePositive || !!busy} onclick={doFalsePositive}>
-    {busy === 'mark false positive' ? 'Marking…' : 'Mark false positive'}
-  </button>
-  <button class="btn xs" disabled={!canRequireApproval || !!busy} onclick={doRequireApproval}>
-    {finding.requires_human_approval ? 'Approval required' : 'Require human approval'}
-  </button>
-  <button class="btn xs" disabled={!canRepoRule || !!busy} onclick={doRepoRule}>
-    {finding.repo_rule_id ? 'In repo rules' : 'Add to repo rule'}
-  </button>
-  <button class="btn xs" disabled={!canRegressionTest || !!busy} onclick={doRegressionTest}>
-    {finding.linked_test ? 'Test added' : 'Add regression test'}
-  </button>
-  <button class="btn xs ghost fa-overflow" onclick={openOverflow} aria-label="More actions">⋯</button>
+  {#if busy && busy !== 'ask agent to fix' && busy !== 'verify'}
+    <span class="fa-busy dim" role="status">Working…</span>
+  {/if}
+  <button
+    class="icon-btn fa-overflow"
+    onclick={openOverflow}
+    aria-label="More actions for this finding"
+    title="More actions for this finding"
+  ><Icon name="more" size={14} /></button>
 </div>
 
 {#if jiraOpen}
   <div class="fa-jira">
     <input
       class="fa-jira-input"
-      placeholder="Jira project key (e.g. PROJ)"
+      placeholder="PROJ"
+      aria-label="Jira project key"
       bind:value={jiraKey}
       onkeydown={(e) => {
         if (e.key === 'Enter') void submitJira();
         if (e.key === 'Escape') cancelJira();
       }}
     />
-    <button class="btn xs primary" disabled={!!busy} onclick={() => void submitJira()}>
-      {busy === 'convert to Jira' ? 'Creating…' : 'Create'}
+    <button class="btn small ghost" disabled={!!busy} onclick={cancelJira}>Cancel</button>
+    <button class="btn small primary" disabled={!!busy || !jiraKey.trim()} onclick={() => void submitJira()}>
+      {busy === 'convert to Jira' ? 'Creating…' : 'Create issue…'}
     </button>
-    <button class="btn xs ghost" disabled={!!busy} onclick={cancelJira}>Cancel</button>
   </div>
 {/if}
 
@@ -263,17 +313,11 @@
     gap: 5px;
     margin-top: 8px;
   }
-  /* Compact action button — denser than .btn small for the 7-button bar. */
-  .btn.xs {
-    font-size: 11px;
-    padding: 3px 8px;
-    min-height: 26px;
-    border-radius: var(--radius-s, 4px);
+  .fa {
+    align-items: center;
   }
-  .fa-overflow {
-    font-weight: 700;
-    letter-spacing: 0.05em;
-    padding-inline: 6px;
+  .fa-busy {
+    font-size: var(--fs-xs);
   }
   .fa-jira {
     display: flex;
@@ -285,9 +329,9 @@
   .fa-jira-input {
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 4px 8px;
     min-width: 200px;
     flex: 1 1 200px;
@@ -295,6 +339,7 @@
   }
   /* Touch targets on phone/tablet. */
   @media (max-width: 1024px) {
-    .btn.xs { min-height: 34px; }
+    .fa .btn.small,
+    .fa .icon-btn { min-height: 36px; min-width: 36px; }
   }
 </style>

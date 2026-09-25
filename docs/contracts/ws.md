@@ -239,8 +239,59 @@ event's workspace **and** is the session's owner (`created_by`), a workspace
 every member (`viewer`+) of the workspace. Root receives all. `Notice` events
 are delivered to all authenticated clients.
 
-Client→server messages on this socket are ignored. Ping/pong handled by the
-transport layer (axum auto-responds to pings; server sends a ping every 30s).
+Ping/pong handled by the transport layer (axum auto-responds to pings; server
+sends a ping every 30s).
+
+### Agent UI control frames (per connection)
+
+The socket is otherwise server → client. The exceptions are the **agent UI
+control** frames (`api.md` "Agent UI control"): an Otto document (the main
+window, or the side-pane iframe — each has its own socket) announces itself so
+the daemon can address ONE document. These frames are per-connection: they are
+never `Event` variants and never enter the broadcast.
+
+Client → server (text JSON, each frame ≤ 64 KiB — a larger frame closes the
+socket; malformed frames, frames with out-of-bounds fields and unknown `type`s
+are ignored; frames from a non-human credential — an agent session's token, an
+MCP token, a share link — are ignored, so such a socket is never a target):
+
+```json
+{"type":"hello","client_id":"…","window_id":"…","pane":"main","host_window_id":null,"route":"database","module":"connections","focused":true,"visible":true,"capabilities":["state","open","db_run_query"]}
+{"type":"presence","route":"git","module":"git","focused":false,"visible":true}
+```
+
+- `hello` — sent after open, and AGAIN on the same socket whenever the
+  document's registered command set changes (an update of the same `conn_id`).
+  `client_id` = the device id (`session.meta.client_id` of sessions it starts),
+  `window_id` = the window; the side pane sends `pane:"side"` with `window_id`
+  and `host_window_id` both = its host window's id. `module` is the paneKey of
+  `route` (`ui/src/lib/sidePane.ts`). `capabilities` = the catalog command names
+  this document implements — a command is only ever sent to a document listing
+  it (daemon/UI version skew). Ids ≤ 128 chars, `route` ≤ 2048, ≤ 1024
+  capabilities; no control characters.
+- `presence` — debounced (250 ms) on a route, focus or visibility change.
+
+Server → that ONE connection:
+
+```json
+{"type":"hello_ack","conn_id":"01J…"}
+{"type":"ui_command","id":"01J…","session_id":"…","agent":{"session_id":"…","title":"Fix the report","provider":"claude"},"command":"db_run_query","args":{"tab_id":"…"},"deadline_ms":45000}
+{"type":"ui_command_cancel","id":"01J…","reason":"timeout"}
+```
+
+- `hello_ack` — `conn_id` is ephemeral (this socket only); the document sends it
+  back as `X-Otto-Ui-Conn` on `POST /ui/commands/{id}/result|progress`.
+- `ui_command` — `command` is the bare catalog name (no `ui_` prefix); `args`
+  are validated against the entry's schema, with `connection_id` already
+  resolved to the canonical id; `deadline_ms` is the DURATION (ms) the daemon
+  waits before cancelling (extendable by `progress {awaiting_human:true}`).
+- `ui_command_cancel` — stop the command and post nothing. `reason`:
+  `timeout`, `revoked` (Stop / Deny — `POST /sessions/{id}/ui-control
+  {enabled:false}`), `session_removed`, `caller_gone` (the agent's call ended).
+
+The one broadcast event of the feature is `ui_control_requested` (owner-scoped,
+below); a grant change arrives as the session-family `session_meta_updated`
+(`meta.ui_control = {enabled, granted_at, granted_by}`).
 
 ### Full event catalog
 
@@ -254,9 +305,9 @@ Delivery scope: **session-family events** (`session_status`, `session_created`,
 `api_history_appended`) reach
 every member with `viewer`+ on the event's `workspace_id` (root receives all);
 **owner-scoped events** (`assistant_turn`, `assistant_task_update`,
-`assistant_needs_you`, `assistant_limit`) reach only the user named by their
-`user_id` (not root);
-**broadcast events** (`Notice`) reach every authenticated client. There are 69
+`assistant_needs_you`, `assistant_limit`, `ui_control_requested`) reach only the
+user named by their `user_id` (not root);
+**broadcast events** (`Notice`) reach every authenticated client. There are 70
 variants (the sections below cover them; each `## …`/`### …` heading is one
 feature family).
 
@@ -1199,3 +1250,20 @@ assistant's own index and queue.
   thread already moved (a `route` turn follows); otherwise nothing switches until
   the user answers.
 - TypeScript types live in `ui/src/lib/api/types.ts` (`// ── Otto Assistant`).
+
+### `ui_control_requested`
+
+Agent UI control (`api.md` "Agent UI control"). An agent in `session_id` called
+an `otto.ui_*` tool but the session has no grant. **Owner-scoped**: delivered
+ONLY to the session owner's connections (`user_id`) — not workspace admins, not
+root — at most once per 10 s per session. The UI shows an inline prompt beside
+the session — **Allow for this session** (`POST /sessions/{id}/ui-control
+{enabled:true}`) / **Deny** (`{enabled:false}`); the waiting call (≤ 15 s)
+proceeds on Allow and otherwise answers `pending_grant`.
+
+```json
+{"type":"ui_control_requested","user_id":"…","workspace_id":"…","session_id":"…","session_title":"Fix the report","module":"connections","command":"db_run_query"}
+```
+
+`module` is the paneKey the command targets (`shell` for navigation), `command`
+the bare catalog name. Emitted by `crates/otto-server/src/ui_bridge.rs`.

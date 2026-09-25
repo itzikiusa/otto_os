@@ -33,15 +33,15 @@
             onclick={() => (flow.viewer && (flow.viewer.formatted = !flow.viewer.formatted))}
             title="Toggle SQL formatting"
           >
-            <Icon name="grid" size={11} />{flow.viewer.formatted ? 'Formatted' : 'Raw'}
+            <Icon name="grid" size={12} />{flow.viewer.formatted ? 'Formatted' : 'Raw'}
           </button>
         {/if}
         {#if flow.viewer.edit && !flow.viewerEditing}
           <button class="tb-btn" onclick={() => flow.startViewerEdit()} title="Edit this cell value">
-            <Icon name="edit" size={11} />Edit
+            <Icon name="edit" size={12} />Edit
           </button>
         {/if}
-        <button class="tb-btn" onclick={() => copyText(flow.viewerText, ['Copied', 'Full cell value copied'])} title="Copy full value"><Icon name="file" size={11} />Copy</button>
+        <button class="tb-btn" onclick={() => copyText(flow.viewerText, ['Copied', 'Full cell value copied'])} title="Copy full value"><Icon name="file" size={12} />Copy</button>
       </div>
       {#if nestedPending}
         <div class="cv-pending">Nested change pending on this field — saving a whole value here replaces it.</div>
@@ -85,7 +85,7 @@
     border: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
   }
   .tb-btn:hover {
@@ -112,7 +112,7 @@
   .cv-body {
     margin: 0;
     overflow: auto;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.55;
     user-select: text;
     white-space: pre-wrap;
@@ -123,7 +123,7 @@
     flex: 1;
     min-height: 220px;
     padding: 10px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.55;
     background: var(--surface-2);
     color: var(--text);
@@ -139,14 +139,14 @@
   }
   .cv-err {
     color: var(--status-exited);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .cv-pending {
     padding: 4px 8px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--status-warn);
     background: color-mix(in srgb, var(--status-warn) 12%, transparent);
     border-radius: var(--radius-s);

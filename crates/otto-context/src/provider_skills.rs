@@ -1,5 +1,6 @@
 //! Read-only access to on-disk **provider-global** skills — the ones the coding
-//! CLIs discover from `~/.claude/skills`, `~/.codex/skills`, `~/.agy/skills`.
+//! CLIs discover from `~/.claude/skills`, `~/.codex/skills`, `~/.gemini/skills`
+//! (agy's home is `~/.gemini` — see [`crate::user_skills`]).
 //!
 //! The Skills Lab surfaces these alongside the Otto library + bundled catalog so
 //! a user can view and review a skill that lives in a provider's dir (installed
@@ -17,11 +18,13 @@ use crate::library::{
 /// Largest single provider-skill file returned to the viewer (2 MiB).
 const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
 
-/// The providers whose `~/.<provider>/skills` dir we enumerate.
+/// The providers whose skills dir we enumerate (see [`provider_root`]).
 pub const PROVIDERS: [&str; 3] = ["claude", "codex", "agy"];
 
-/// `~/.<provider>/skills` (codex honors `$CODEX_HOME`), only for a recognized
-/// provider. Uses `$HOME` directly to avoid a `dirs` dependency, mirroring
+/// The provider's skills dir, only for a recognized provider: `~/.claude/skills`,
+/// `$CODEX_HOME/skills` (default `~/.codex`), and `~/.gemini/skills` for agy —
+/// where Otto installs agy skills. It used to read `~/.agy/skills`, a dir
+/// nothing writes, so agy skills never showed up in the Skills Lab. Uses `$HOME` directly to avoid a `dirs` dependency, mirroring
 /// [`crate::user_skills`].
 pub fn provider_root(provider: &str) -> Option<PathBuf> {
     if !PROVIDERS.contains(&provider) {
@@ -38,6 +41,8 @@ pub fn provider_root(provider: &str) -> Option<PathBuf> {
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".codex"));
         Some(base.join("skills"))
+    } else if provider == "agy" {
+        Some(home.join(".gemini").join("skills"))
     } else {
         Some(home.join(format!(".{provider}")).join("skills"))
     }
@@ -144,6 +149,10 @@ mod tests {
             if let Some(root) = provider_root(p) {
                 assert!(root.ends_with("skills"), "{p} root should end in skills");
             }
+        }
+        // agy lives under ~/.gemini (where user_skills installs it).
+        if let Some(root) = provider_root("agy") {
+            assert!(root.ends_with(".gemini/skills"), "{root:?}");
         }
     }
 

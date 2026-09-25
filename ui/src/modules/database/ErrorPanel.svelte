@@ -11,7 +11,8 @@
      *  label; parsing is pattern-based so it works for all of them. */
     engine: string | null;
     statement: string;
-    onAskAi: () => void;
+    /** Omitted where there is no DB Assistant to open (e.g. the Athena view). */
+    onAskAi?: () => void;
   }
   let { error, engine, statement, onAskAi }: Props = $props();
 
@@ -31,6 +32,16 @@
     return { code, lineNo };
   });
 
+  // Policy refusals from the daemon read `forbidden: <code>: <why>`. They are
+  // not query mistakes: say so, show the code as the chip, and don't offer an
+  // AI "fix" for something only an administrator can change.
+  const policy = $derived.by(() => {
+    const m = error.match(/^\s*forbidden:\s*(?:([a-z0-9_]+):\s*)?([\s\S]*)$/i);
+    if (!m) return null;
+    const why = m[2].trim();
+    return { code: m[1] ?? null, message: why ? why.charAt(0).toUpperCase() + why.slice(1) : error };
+  });
+
   // The offending statement line + a caret under its first non-space char.
   const excerpt = $derived.by(() => {
     const n = parsed.lineNo;
@@ -46,17 +57,22 @@
 </script>
 
 <div class="err-panel">
-  <div class="err-head">
-    <Icon name="x" size={13} />
-    <span class="err-title">Query failed</span>
-    {#if parsed.code}<span class="err-code mono">{parsed.code}</span>{/if}
+  <div class="err-head" role="alert">
+    <span class="err-icon"><Icon name="warning" size={14} /></span>
+    <span class="err-title">{policy ? 'Not allowed on this connection' : 'Query failed'}</span>
+    {#if policy?.code}<span class="err-code mono">{policy.code}</span>{:else if parsed.code}<span class="err-code mono">{parsed.code}</span>{/if}
     <span class="err-engine mono">{label}</span>
     <span class="err-grow"></span>
-    <button class="err-ai" onclick={onAskAi} title="Open the DB Assistant to investigate and fix this error">
-      <Icon name="zap" size={12} /> Ask AI to fix
-    </button>
+    {#if onAskAi && !policy}
+      <button class="btn small" onclick={onAskAi} title="Open the DB Assistant to investigate and fix this error">
+        <Icon name="zap" size={12} /> Ask AI to fix
+      </button>
+    {/if}
   </div>
-  <pre class="err-msg mono">{error}</pre>
+  {#if policy}<p class="err-policy">{policy.message}</p>{:else}<pre class="err-msg mono">{error}</pre>{/if}
+  {#if policy}
+    <p class="err-hint">An administrator decides what this connection may run: in the Connections list, open its ⋯ menu and choose Access.</p>
+  {/if}
   {#if excerpt}
     <div class="err-excerpt">
       <div class="err-excerpt-label mono">line {excerpt.n}</div>
@@ -78,18 +94,28 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    color: var(--status-exited);
+    min-width: 0;
+    color: var(--text);
+  }
+  .err-icon {
+    display: inline-flex;
+    color: var(--danger);
+    flex-shrink: 0;
   }
   .err-title {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .err-code {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 1px 7px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--status-exited) 18%, transparent);
-    border: 1px solid color-mix(in srgb, var(--status-exited) 40%, transparent);
+    color: var(--danger);
+    background: var(--danger-soft);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .err-engine {
     font-size: var(--fs-xs);
@@ -103,33 +129,29 @@
   .err-grow {
     flex: 1;
   }
-  .err-ai {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--accent-text);
-    border-radius: var(--radius-s);
-    font-size: 11.5px;
-    padding: 3px 9px;
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-  .err-ai:hover {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
-  }
   .err-msg {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     white-space: pre-wrap;
     word-break: break-word;
-    color: var(--status-exited);
+    color: var(--text);
     user-select: text;
   }
+  .err-policy {
+    margin: 0;
+    font-size: var(--fs-m);
+    line-height: 1.5;
+    color: var(--text);
+    user-select: text;
+  }
+  .err-hint {
+    margin: 0;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
   .err-excerpt {
-    border-top: 1px solid color-mix(in srgb, var(--status-exited) 25%, transparent);
+    border-top: 1px solid var(--border);
     padding-top: 6px;
   }
   .err-excerpt-label {
@@ -141,7 +163,7 @@
   }
   .err-excerpt-code {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.4;
     color: var(--text);
     white-space: pre;

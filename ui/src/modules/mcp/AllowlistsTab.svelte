@@ -147,7 +147,7 @@
     border-bottom: 1px solid var(--border);
   }
   .hint {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     max-width: 540px;
   }
@@ -167,7 +167,7 @@
   }
   .thead {
     border-bottom: 1px solid var(--border);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--text-dim);
@@ -187,7 +187,7 @@
     border-radius: var(--radius-s, 6px);
     color: var(--text);
     padding: 6px 8px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .mono {
     font-family: var(--font-mono);
@@ -203,7 +203,7 @@
     padding: 4px;
   }
   .icon.danger:hover {
-    color: var(--status-exited, #ff5f57);
+    color: var(--danger);
   }
   .muted {
     color: var(--text-dim);

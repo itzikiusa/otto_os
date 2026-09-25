@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { api, ApiError } from '../../lib/api/client';
+  import { api } from '../../lib/api/client';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { BrokerCluster, SchemaSubject } from '../../lib/api/types';
   import SchemaVersionsPanel from './SchemaVersionsPanel.svelte';
 
@@ -23,8 +25,7 @@
     }
   }
 
-  $effect(() => {
-    void cluster.id;
+  function load(): void {
     loading = true;
     error = null;
     selected = null;
@@ -36,9 +37,14 @@
         if (s.length > 0) selected = s[0];
       })
       .catch((e) => {
-        error = e instanceof ApiError ? e.message : String(e);
+        error = loadErrorText(e);
       })
       .finally(() => (loading = false));
+  }
+
+  $effect(() => {
+    void cluster.id;
+    load();
   });
 </script>
 
@@ -47,10 +53,15 @@
     <p class="muted pad">Loading subjects…</p>
   {:else if error}
     <div class="empty">
-      <p>{error}</p>
-      <p class="muted small">
-        Configure a Schema Registry URL on the cluster to browse Avro/Protobuf/JSON schemas.
-      </p>
+      {#if cluster.schema_registry_url}
+        <!-- A registry IS configured: this is a real failure — say so, with Retry. -->
+        <LoadState what="schema subjects" {loading} {error} empty onretry={load} />
+      {:else}
+        <p>{error}</p>
+        <p class="muted small">
+          Configure a Schema Registry URL on the cluster to browse Avro/Protobuf/JSON schemas.
+        </p>
+      {/if}
     </div>
   {:else}
     <div class="list">
@@ -60,7 +71,7 @@
           class:sel={selected?.subject === s.subject}
           onclick={() => { selected = s; showVersions = false; }}
         >
-          <span class="sn">{s.subject}</span>
+          <span class="sn" title={s.subject}>{s.subject}</span>
           <span class="muted small">v{s.version} · {s.schema_type} · #{s.id}</span>
         </button>
       {/each}
@@ -70,9 +81,9 @@
       {#if selected}
         <div class="view-head">
           <span class="sn-big">{selected.subject}</span>
-          <div class="view-tabs">
-            <button class:on={!showVersions} onclick={() => (showVersions = false)}>Schema</button>
-            <button class:on={showVersions} onclick={() => (showVersions = true)}>Versions &amp; Compat</button>
+          <div class="view-tabs" role="tablist" aria-label="Subject views">
+            <button class:on={!showVersions} role="tab" aria-selected={!showVersions} onclick={() => (showVersions = false)}>Schema</button>
+            <button class:on={showVersions} role="tab" aria-selected={showVersions} onclick={() => (showVersions = true)}>Versions &amp; Compat</button>
           </div>
         </div>
         {#if showVersions}
@@ -117,7 +128,7 @@
   }
   .sn {
     font-family: var(--font-mono);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     word-break: break-all;
   }
   .view {
@@ -137,7 +148,7 @@
   }
   .sn-big {
     font-family: var(--font-mono);
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     word-break: break-all;
   }
@@ -150,7 +161,7 @@
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 6px 10px;
     cursor: pointer;
     border-bottom: 2px solid transparent;
@@ -165,7 +176,7 @@
     margin: 0;
     padding: 14px;
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
     white-space: pre-wrap;
     word-break: break-word;
   }
@@ -178,7 +189,7 @@
     color: var(--text-dim);
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .pad {
     padding: 12px;

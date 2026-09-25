@@ -20,9 +20,9 @@
   import Modal from '../../lib/components/Modal.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
 
   // Route awareness is now limited to PR detail + deep-links into a repo tab.
   const routeRepoId = $derived(router.parts[1] ?? null);
@@ -68,6 +68,13 @@
 
   const accountsWithNs = $derived(accounts.filter((a) => a.namespace));
 
+  /** Display name for the forge chip (the enum is lowercase: "bitbucket"). */
+  const PROVIDER_LABEL: Record<string, string> = {
+    github: 'GitHub',
+    bitbucket: 'Bitbucket',
+    gitlab: 'GitLab',
+  };
+
   // Landing-hub repo filter: matches name, local path, or remote URL.
   let repoFilter = $state('');
   const filteredRepos = $derived.by(() => {
@@ -91,6 +98,13 @@
   // changes. `restoreOpenTabs` prunes ids that no longer exist. Guarded so it
   // runs a single time even if the effect re-fires.
   let restored = false;
+  // A failed list load is `git.allReposError` (the store keeps the last known
+  // list), so the landing shows Retry instead of "No repositories yet" — an
+  // empty state one click from registering a duplicate.
+  async function retryRepos(): Promise<void> {
+    await git.loadAllRepos(true);
+    if (git.allReposLoaded) await git.initializeOpenTabs();
+  }
   $effect(() => {
     if (restored) return;
     restored = true;
@@ -139,6 +153,7 @@
       remoteRepos = await api.get<RemoteRepoSummary[]>(`/git/accounts/${browseAccount}/remote-repos${q}`);
     } catch (e) {
       remoteError = e instanceof Error ? e.message : String(e);
+      if (remoteError === '') remoteError = 'The account’s host did not answer.';
       remoteRepos = [];
     } finally {
       remoteLoading = false;
@@ -232,14 +247,14 @@
   }
 
   async function removeRepo(r: Repo): Promise<void> {
-    if (!(await confirmer.ask(`Unregister “${r.name}”? Files on disk are not touched.`, { title: 'Unregister repo', confirmLabel: 'Unregister' }))) return;
+    if (!(await confirmer.ask(`Remove “${r.name}” from Otto? Its tab closes and its saved review findings are deleted. The folder and its git history on disk are not touched, so you can add it again later.`, { title: 'Remove repository', confirmLabel: 'Remove' }))) return;
     try {
       await api.del(`/repos/${r.id}`);
       git.closeRepoTab(r.id);
       await git.loadAllRepos(true);
-      toasts.info('Repo unregistered', r.name);
+      toasts.info('Repository removed', r.name);
     } catch (e) {
-      toasts.error('Remove failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t remove the repository', e instanceof Error ? e.message : String(e));
     }
   }
 </script>
@@ -262,11 +277,11 @@
       {/snippet}
       {#snippet actions()}
         {#if !activeRepo && !landingFocus && git.allRepos.length > 0}
-          <button class="btn ghost" onclick={() => (landingFocus = true)} title="My pull requests + my Jira work">
-            <Icon name="zap" size={12} /> Focus
+          <button class="btn ghost" data-icon="zap" onclick={() => (landingFocus = true)} title="Your pull requests and Jira work across repositories">
+            <Icon name="zap" size={14} /> Focus
           </button>
           <button class="btn primary" onclick={() => (addOpen = true)}>
-            <Icon name="plus" size={12} /> Add Repository
+            <Icon name="plus" size={14} /> Add repository
           </button>
         {/if}
       {/snippet}
@@ -280,6 +295,8 @@
             tab={git.subTabFor(activeRepo.id)}
             embedded
             onTab={(t) => git.setSubTab(activeRepo.id, t)}
+            onopenrepo={openRepo}
+            onaddrepo={(mode) => { addMode = mode; addOpen = true; }}
           />
         </div>
       {/key}
@@ -291,23 +308,30 @@
       <!-- ── Compact, centered hub (no tab open). Adding/opening also live in
            the + tab, so this is just a tidy launcher, not a separate screen. ── -->
       <div class="landing">
-        {#if git.loading && !git.allReposLoaded}
-          <Skeleton rows={3} height={56} />
-        {:else if git.allRepos.length === 0}
-          <EmptyState
-            variant="page"
-            icon="branch"
-            title="No repositories yet"
-            body="Register an existing local repo or clone one from GitHub, Bitbucket or GitLab."
-            actionLabel="Add Repository"
-            actionIcon="plus"
-            onaction={() => (addOpen = true)}
-          />
-        {:else}
+        <LoadState
+          what="repositories"
+          variant="page"
+          loading={!git.allReposLoaded && (git.loading || !git.allReposError)}
+          error={git.allReposError}
+          empty={git.allRepos.length === 0}
+          rows={3}
+          onretry={() => void retryRepos()}
+        >
+          {#snippet emptyView()}
+            <EmptyState
+              variant="page"
+              icon="branch"
+              title="No repositories yet"
+              body="Register an existing local repo or clone one from GitHub, Bitbucket or GitLab."
+              actionLabel="Add repository"
+              actionIcon="plus"
+              onaction={() => (addOpen = true)}
+            />
+          {/snippet}
           <div class="landing-inner">
             <div class="landing-hint">
-              No repository open — pick one below, or use the <strong>+</strong> tab (you can
-              also add a new repository there).
+              <span class="section-title landing-count">Repositories · {git.allRepos.length}</span>
+              <span class="dim">Open one to see its graph, pull requests and reviews.</span>
             </div>
             <div class="repo-search">
               <Icon name="search" size={13} />
@@ -341,15 +365,15 @@
                 <button class="repo-main" onclick={() => openRepo(r.id)}>
                   <div class="repo-name">
                     <Icon name="branch" size={14} />
-                    {r.name}
-                    {#if r.provider}<span class="chip">{r.provider}</span>{/if}
+                    <span class="repo-name-text" title={r.name}>{r.name}</span>
+                    {#if r.provider}<span class="chip repo-provider">{PROVIDER_LABEL[r.provider] ?? r.provider}</span>{/if}
                   </div>
-                  <div class="repo-path mono">{r.path}</div>
-                  {#if r.remote_url}<div class="repo-remote mono dim">{r.remote_url}</div>{/if}
+                  <div class="repo-path mono" title={r.path}>{r.path}</div>
+                  {#if r.remote_url}<div class="repo-remote mono dim" title={r.remote_url}>{r.remote_url}</div>{/if}
                 </button>
                 <div class="repo-actions">
-                  <button class="btn small" onclick={() => git.openRepoTab(r.id, 'prs')}>
-                    <Icon name="pr" size={11} /> PRs
+                  <button class="btn small" onclick={() => git.openRepoTab(r.id, 'prs')} title="Open {r.name} on its pull requests">
+                    <Icon name="pr" size={12} /> Pull requests
                   </button>
                   {#if r.provider}
                     <!-- Which hosting credential this repo talks to. Unbound is a
@@ -360,7 +384,7 @@
                       class:unbound={!r.git_account_id}
                       title={r.git_account_id
                         ? 'Git account used for pull requests'
-                        : `No ${r.provider} account linked — pull requests will fail`}
+                        : `No ${PROVIDER_LABEL[r.provider] ?? r.provider} account linked — pull requests will fail`}
                       aria-label="Git account for {r.name}"
                       value={r.git_account_id ?? ''}
                       onchange={(e) => setRepoAccount(r, e.currentTarget.value)}
@@ -372,30 +396,30 @@
                     </select>
                   {/if}
                   <span class="grow"></span>
-                  <button class="icon-btn" title="Unregister" onclick={() => removeRepo(r)}>
-                    <Icon name="trash" size={13} />
+                  <button class="icon-btn" title="Remove {r.name} from Otto" aria-label="Remove {r.name} from Otto" onclick={() => removeRepo(r)}>
+                    <Icon name="trash" size={14} />
                   </button>
                 </div>
               </div>
             {/each}
             </div>
           </div>
-        {/if}
+        </LoadState>
       </div>
     {/if}
   </div>
 {/if}
 
 {#if addOpen}
-  <Modal title="Add Repository" onclose={() => (addOpen = false)}>
-    <div class="segmented" style="margin-bottom: 14px">
-      <button class:active={addMode === 'register'} onclick={() => (addMode = 'register')}>
-        Register local path
+  <Modal title="Add repository" onclose={() => (addOpen = false)}>
+    <div class="segmented add-mode" role="tablist" aria-label="How to add the repository">
+      <button role="tab" aria-selected={addMode === 'register'} class:active={addMode === 'register'} onclick={() => (addMode = 'register')}>
+        Local folder
       </button>
-      <button class:active={addMode === 'browse'} onclick={() => { addMode = 'browse'; if (remoteRepos.length === 0) void runRemoteSearch(); }}>
+      <button role="tab" aria-selected={addMode === 'browse'} class:active={addMode === 'browse'} onclick={() => { addMode = 'browse'; if (remoteRepos.length === 0) void runRemoteSearch(); }}>
         Browse remote
       </button>
-      <button class:active={addMode === 'clone'} onclick={() => (addMode = 'clone')}>Clone URL</button>
+      <button role="tab" aria-selected={addMode === 'clone'} class:active={addMode === 'clone'} onclick={() => (addMode = 'clone')}>Clone URL</button>
     </div>
 
     {#if addMode === 'register'}
@@ -411,7 +435,10 @@
         <EmptyState
           icon="key"
           title="No namespace configured"
-          body="Add a git account with an organisation / workspace / group in Settings → Git Accounts to browse its repositories."
+          body="Add a Git account with an organization, workspace or group to browse its repositories."
+          actionLabel="Open Git accounts"
+          actionIcon="key"
+          onaction={() => { addOpen = false; router.go('settings/git-accounts'); }}
         />
       {:else}
         <div class="field">
@@ -424,15 +451,19 @@
         </div>
         <div class="field">
           <label for="ar-bq">Search repositories</label>
-          <input id="ar-bq" class="input" bind:value={browseQuery} oninput={scheduleRemoteSearch} placeholder="filter by name…" spellcheck="false" />
+          <input id="ar-bq" class="input" bind:value={browseQuery} oninput={scheduleRemoteSearch} placeholder="api-gateway" spellcheck="false" />
         </div>
         <div class="remote-list">
           {#if remoteLoading}
-            <div class="dim pad">Searching…</div>
+            <div class="dim pad">Searching repositories…</div>
           {:else if remoteError}
-            <div class="err pad">{remoteError}</div>
+            <div class="err pad" role="alert">
+              <Icon name="warning" size={14} />
+              <span class="grow">Couldn’t search the account’s repositories. <span class="dim">{remoteError}</span></span>
+              <button class="btn small" onclick={() => void runRemoteSearch()}>Retry</button>
+            </div>
           {:else if remoteRepos.length === 0}
-            <div class="dim pad">No repositories found.</div>
+            <div class="dim pad">{browseQuery.trim() ? `No repositories match “${browseQuery.trim()}”.` : 'This account has no repositories.'}</div>
           {:else}
             {#each remoteRepos as r (r.full_name)}
               <div class="remote-row">
@@ -444,7 +475,7 @@
                   {#if r.description}<div class="remote-desc dim ellipsis">{r.description}</div>{/if}
                   <div class="remote-full mono dim ellipsis">{r.full_name}</div>
                 </div>
-                <button class="btn small" disabled={busy} onclick={() => cloneRemote(r)}>Clone</button>
+                <button class="btn small" disabled={busy} onclick={() => cloneRemote(r)} title="Clone {r.full_name}">Clone</button>
               </div>
             {/each}
           {/if}
@@ -456,9 +487,9 @@
         <input id="ar-url" class="input mono" bind:value={addUrl} placeholder="git@github.com:org/repo.git" spellcheck="false" />
       </div>
       <div class="field">
-        <label for="ar-acct">Git account <span class="dim">(for https auth)</span></label>
+        <label for="ar-acct">Git account <span class="dim">(for HTTPS auth)</span></label>
         <select id="ar-acct" class="input" bind:value={addAccount}>
-          <option value="">none (public / ssh agent)</option>
+          <option value="">None (public, or SSH agent)</option>
           {#each accounts as a (a.id)}
             <option value={a.id}>{a.label} ({a.provider})</option>
           {/each}
@@ -468,17 +499,18 @@
 
     {#if addMode !== 'register'}
       <div class="field">
-        <label for="ar-clonedir">Clone to <span class="dim">(directory — remembered)</span></label>
+        <label for="ar-clonedir">Clone into</label>
         <div class="path-row">
           <input
             id="ar-clonedir"
             class="input mono"
             bind:value={cloneDir}
-            placeholder="~/code  ·  defaults to the workspace folder"
+            placeholder="~/code"
             spellcheck="false"
           />
           <button class="btn" type="button" onclick={() => (cloneDirPickerOpen = true)}>Browse…</button>
         </div>
+        <span class="hint">Empty uses the workspace folder. Otto remembers the last folder you pick.</span>
       </div>
     {/if}
 
@@ -497,7 +529,7 @@
           disabled={busy || (addMode === 'register' ? addPath.trim() === '' : addUrl.trim() === '')}
           onclick={addRepo}
         >
-          {busy ? 'Working…' : addMode === 'clone' ? 'Clone' : 'Register'}
+          {busy ? (addMode === 'clone' ? 'Cloning…' : 'Adding…') : addMode === 'clone' ? 'Clone' : 'Add repository'}
         </button>
       {/if}
     {/snippet}
@@ -565,9 +597,18 @@
     width: 100%;
   }
   .landing-hint {
-    font-size: 12px;
-    color: var(--text-dim);
-    margin-bottom: 12px;
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    font-size: var(--fs-s);
+    margin-bottom: 10px;
+  }
+  .landing-count {
+    margin: 0;
+  }
+  .add-mode {
+    margin-bottom: 14px;
   }
   .path-row {
     display: flex;
@@ -601,11 +642,11 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .remote-desc {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     margin-top: 1px;
   }
   .remote-full {
@@ -614,12 +655,23 @@
   }
   .pad {
     padding: 14px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .err {
-    padding: 14px;
-    font-size: 12px;
-    color: var(--status-exited);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px;
+    font-size: var(--fs-s);
+    color: var(--text);
+  }
+  .err > :global(svg) {
+    color: var(--danger);
+    flex-shrink: 0;
+  }
+  .err .grow {
+    flex: 1;
+    min-width: 0;
   }
   /* Filter row above the repo grid — styled like an input but with an inline
      leading icon + live match count, so it reads as part of the hub chrome. */
@@ -645,16 +697,16 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     outline: none;
   }
   .repo-search-count {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
   }
   .repo-search-empty {
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 18px 4px;
     text-align: center;
   }
@@ -671,7 +723,10 @@
   .repo-card:hover {
     border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
   }
+  /* Grows so every card's action row sits on the same baseline, whether or
+     not the repo has a remote line. */
   .repo-main {
+    flex: 1;
     text-align: start;
     border: none;
     background: transparent;
@@ -683,16 +738,24 @@
     display: flex;
     align-items: center;
     gap: 7px;
-    font-size: 13.5px;
+    font-size: var(--fs-m);
     font-weight: 600;
-    /* Long repo names clip with an ellipsis instead of widening the card. */
+    min-width: 0;
+  }
+  .repo-name > :global(svg),
+  .repo-provider {
+    flex-shrink: 0;
+  }
+  /* Long repo names clip with an ellipsis instead of widening the card (on the
+     text span: a bare text node in a flex row is cut mid-character). */
+  .repo-name-text {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .repo-path {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     margin-top: 4px;
     overflow: hidden;
@@ -720,17 +783,17 @@
     max-width: 140px;
     height: 24px;
     padding: 0 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: 5px;
+    border-radius: var(--radius-s);
   }
 
   .repo-account.unbound {
-    color: var(--status-warn);
-    border-color: var(--status-warn);
-    background: var(--status-warn-soft);
+    color: var(--warning);
+    border-color: var(--warning);
+    background: var(--warning-soft);
   }
 
   /* ── Mobile + tablet (≤1024px): tighten the landing hub so the repo cards +

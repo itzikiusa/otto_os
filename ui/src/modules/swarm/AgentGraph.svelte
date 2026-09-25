@@ -3,6 +3,7 @@
   // radially around the coordinator by `reports_to`. Click a node → open that
   // agent's session; hover → its live sessions. A side rail shows a per-member
   // brief (completed / live) and the currently active tasks.
+  import { sentenceCase } from '../../lib/status';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
@@ -118,7 +119,9 @@
       case 'working':
         return 'working…';
       case 'waiting':
-        return 'queued…';
+        // `waiting` folds a queued run (no slot yet) and a run that is waiting
+        // on a person/approval — name which one instead of calling both queued.
+        return activeRun(a.id)?.status === 'waiting' ? 'waiting…' : 'queued…';
       case 'open':
         return 'session open';
       default:
@@ -186,8 +189,10 @@
   // manual pan/zoom sets it true so we stop fighting the user's gesture.
   let userTouched = $state(false);
 
-  // Fit ALL nodes into view (with padding); never zoom IN past 1:1.
-  function fit(): void {
+  const AUTO_FIT_MIN = 1;
+  // Fit ALL nodes into view (with padding); never zoom IN past 1:1, nor out
+  // past legibility (AUTO_FIT_MIN) unless `all` (the Fit to view button).
+  function fit(all = false): void {
     if (!wrapEl || positions.size === 0) return;
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
     for (const p of positions.values()) {
@@ -202,10 +207,19 @@
     const h = wrapEl.clientHeight;
     if (w === 0 || h === 0) return;
     const pad = 44;
-    const s = Math.min(1, Math.max(0.2, Math.min((w - pad * 2) / bw, (h - pad * 2) / bh)));
+    const fitS = Math.min((w - pad * 2) / bw, (h - pad * 2) / bh);
+    // Scaled below 1:1 the node text drops under 11px (the legibility floor),
+    // so the auto-fit stops at 1:1: a wide org then opens top-anchored and
+    // centred on its root, readable, and pans for the rest (Fit to view still
+    // shows the whole org, small).
+    const s = Math.min(1, Math.max(all ? 0.2 : AUTO_FIT_MIN, fitS));
     scale = s;
-    tx = w / 2 - ((minX + maxX) / 2) * s;
-    ty = h / 2 - ((minY + maxY) / 2) * s;
+    const clamped = !all && fitS < AUTO_FIT_MIN;
+    // The root(s): the top row of the layout.
+    const top = [...positions.values()].filter((p) => p.y - NODE_H / 2 <= minY + 1);
+    const rootX = top.reduce((a, p) => a + p.x, 0) / Math.max(1, top.length);
+    tx = w / 2 - (clamped ? rootX : (minX + maxX) / 2) * s;
+    ty = clamped ? pad - minY * s : h / 2 - ((minY + maxY) / 2) * s;
   }
 
   // Auto-fit on first layout, when the node set changes, and on container resize
@@ -251,18 +265,20 @@
     userTouched = true;
     scale = Math.min(2, Math.max(0.2, scale * f));
   }
+  /** Fit to view: the whole org, however small (then holds — a resize won't
+   *  snap it back to the legible auto-fit). */
   function recenter() {
-    userTouched = false;
-    fit();
+    userTouched = true;
+    fit(true);
   }
 </script>
 
 <div class="agent-graph">
   <div class="graph-col">
     <div class="controls">
-      <button class="icon-btn" onclick={() => zoomBy(1.15)} aria-label="zoom in"><Icon name="plus" size={14} /></button>
-      <button class="icon-btn" onclick={() => zoomBy(0.87)} aria-label="zoom out"><Icon name="minimize" size={14} /></button>
-      <button class="icon-btn" onclick={recenter} aria-label="fit to view"><Icon name="maximize" size={14} /></button>
+      <button class="icon-btn" onclick={() => zoomBy(1.15)} aria-label="Zoom in" title="Zoom in"><Icon name="plus" size={14} /></button>
+      <button class="icon-btn" onclick={() => zoomBy(0.87)} aria-label="Zoom out" title="Zoom out"><Icon name="minimize" size={14} /></button>
+      <button class="icon-btn" onclick={recenter} aria-label="Fit to view" title="Fit to view"><Icon name="maximize" size={14} /></button>
     </div>
 
     {#if agents.length === 0}
@@ -313,8 +329,8 @@
                     <span class="node-status dim">{statusLine(a)}</span>
                     <span class="node-foot">
                       <span class="role">{a.specialization || a.title}</span>
-                      {#if el}<span class="el"><Icon name="clock" size={9} /> {el}</span>{/if}
-                      {#if sess.length > 0}<span class="sess"><Icon name="terminal" size={9} /> {sess.length}</span>{/if}
+                      {#if el}<span class="el"><Icon name="clock" size={12} /> {el}</span>{/if}
+                      {#if sess.length > 0}<span class="sess"><Icon name="terminal" size={12} /> {sess.length}</span>{/if}
                     </span>
                   </span>
                 </button>
@@ -324,10 +340,11 @@
                   <div class="tooltip" onmouseenter={() => (hoverAgentId = a.id)}>
                     <div class="tip-head dim">Sessions ({sess.length})</div>
                     {#each sess as s (s.id)}
+                      {@const sst = ws.statusMap[s.id] ?? s.status}
                       <button class="tip-row" onclick={() => (swarm.selectedSessionId = s.id)}>
-                        <Icon name="terminal" size={11} />
+                        <Icon name="terminal" size={12} />
                         <span class="grow ellipsis">{s.title || s.provider}</span>
-                        <span class="node-state st-{(ws.statusMap[s.id] ?? s.status) === 'running' ? 'working' : 'idle'}"></span>
+                        <span class="node-state st-{sst === 'running' || sst === 'working' ? 'working' : 'idle'}"></span>
                       </button>
                     {/each}
                   </div>
@@ -350,8 +367,8 @@
           <button class="brief-row" onclick={() => openAgent(a)} title="Open session">
             <span class="avatar sm">{a.avatar || a.name.slice(0, 1)}</span>
             <span class="grow ellipsis">{a.name}</span>
-            <span class="stat done" title="completed runs"><Icon name="check" size={10} /> {completedCount(a.id)}</span>
-            <span class="stat addr" class:has={addr > 0} title="tasks / runs to address"><Icon name="zap" size={10} /> {addr}</span>
+            <span class="stat done" title="Completed runs"><Icon name="check" size={12} /> {completedCount(a.id)}</span>
+            <span class="stat addr" class:has={addr > 0} title="Tasks or runs that need attention"><Icon name="zap" size={12} /> {addr}</span>
           </button>
         {/each}
       </div>
@@ -361,9 +378,9 @@
       <div class="side-head"><Icon name="zap" size={12} /> Live tasks</div>
       <div class="search">
         <Icon name="search" size={12} />
-        <input class="search-input" placeholder="Search tasks…" bind:value={taskQuery} />
+        <input class="search-input" aria-label="Search tasks" placeholder="Search tasks…" bind:value={taskQuery} />
       </div>
-      <div class="task-list">
+      <div class="task-list" role="list" aria-label="Live tasks">
         {#each shownTasks as t (t.id)}
           {@const ag = swarm.agentById(t.assignee_agent_id)}
           <div
@@ -372,10 +389,10 @@
           >
             <Icon name="zap" size={12} />
             <span class="task-main">
-              <span class="task-title ellipsis2">{t.title}</span>
+              <span class="task-title ellipsis2" title={t.title}>{t.title}</span>
               <span class="task-meta dim">
-                <span class="pchip prio-{t.priority}">{t.priority}</span>
-                <span>{t.status.replace('_', ' ')}</span>
+                <span class="pchip prio-{t.priority}" title="Priority">{sentenceCase(t.priority)}</span>
+                <span>{sentenceCase(t.status)}</span>
                 {#if ag}<span>· {ag.name}</span>{/if}
               </span>
             </span>
@@ -470,14 +487,15 @@
     border-radius: 50%;
     display: grid;
     place-items: center;
-    font-size: 14px;
+    font-size: var(--fs-l);
     flex: none;
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
   }
   .avatar.sm {
     width: 20px;
     height: 20px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .node-body {
     display: flex;
@@ -492,7 +510,7 @@
     gap: 6px;
   }
   .node-name {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -555,6 +573,16 @@
     box-shadow: var(--shadow, 0 4px 16px rgba(0, 0, 0, 0.28));
     padding: 5px;
   }
+  /* Invisible bridge over the 6px gap: the tooltip lives inside `.node`, so
+     without it the pointer "leaves" the node while crossing the gap and the
+     session list vanishes before it can be clicked. */
+  .tooltip::before {
+    content: '';
+    position: absolute;
+    inset-inline: 0;
+    bottom: 100%;
+    height: 8px;
+  }
   .tip-head {
     font-size: var(--fs-xs);
     padding: 2px 6px 4px;
@@ -572,7 +600,7 @@
     border-radius: var(--radius-s);
     padding: 5px 6px;
     cursor: pointer;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     text-align: start;
   }
   .tip-row:hover {
@@ -606,7 +634,7 @@
     align-items: center;
     gap: 6px;
     padding: 8px 10px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text);
     border-bottom: 1px solid var(--border);
@@ -629,7 +657,7 @@
     border-radius: var(--radius-s);
     padding: 5px 7px;
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--fs-s);
     text-align: start;
   }
   .brief-row:hover {
@@ -664,8 +692,13 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--fs-s);
+    /* The focus ring is drawn on the .search wrapper (:focus-within). */
     outline: none;
+  }
+  .search:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .task-list {
     overflow-y: auto;
@@ -684,16 +717,12 @@
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text-dim);
-    cursor: grab;
-  }
-  .task-card:hover {
-    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   }
   .task-card.prio-urgent {
-    border-inline-start-color: var(--status-exited);
+    border-inline-start-color: var(--danger);
   }
   .task-card.prio-high {
-    border-inline-start-color: #e6883c;
+    border-inline-start-color: var(--warning);
   }
   .task-card.prio-medium {
     border-inline-start-color: var(--accent);
@@ -709,7 +738,7 @@
     flex: 1;
   }
   .task-title {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text);
   }
   .task-meta {
@@ -732,8 +761,8 @@
     color: var(--danger);
   }
   .pchip.prio-high {
-    background: color-mix(in srgb, #e6883c 22%, transparent);
-    color: #e6883c;
+    background: var(--warning-soft);
+    color: var(--warning);
   }
   .ellipsis {
     overflow: hidden;
@@ -749,7 +778,7 @@
   }
   .empty {
     padding: 8px 4px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
 
   /* Stack the rail under the graph on narrow viewports. */

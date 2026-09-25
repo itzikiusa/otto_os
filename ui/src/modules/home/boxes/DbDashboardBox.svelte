@@ -60,13 +60,10 @@
   {#if loading && database.dashboards.length === 0}
     <Skeleton rows={3} />
   {:else if database.dashboards.length === 0}
-    <EmptyState
-      icon="db"
-      title="No DB dashboards yet"
-      body="Create one in Connections → a database → Dashboards, then pick it here."
-      actionLabel="Open Connections"
-      onaction={() => router.go('connections')}
-    />
+    <!-- Secondary CTAs inside widgets: the page's one primary is "Add widget". -->
+    <EmptyState icon="db" title="No DB dashboards yet" body="Create one in Connections → a database → Dashboards, then pick it here.">
+      <button class="btn small" onclick={() => router.go('connections')}>Open Connections</button>
+    </EmptyState>
   {:else if !dashboard}
     <div class="picker">
       <p>Choose the dashboard this box shows:</p>
@@ -99,7 +96,7 @@
     flex-direction: column;
     gap: 8px;
     padding: 8px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .picker p {

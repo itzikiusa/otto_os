@@ -40,6 +40,8 @@
     sigma: 'M12 3.5H4.5L8.6 8l-4.1 4.5H12',
     // two side-by-side panes — Compare
     columns: 'M2.5 3h4.5v10H2.5V3Zm6.5 0h4.5v10H9V3Z',
+    // two opposed arrows — swap the side-by-side panes
+    swap: 'M2.5 5.5h10M10 3l2.5 2.5L10 8M13.5 10.5h-10M6 8l-2.5 2.5L6 13',
     // stored procedure — a runnable block (rounded card + play glyph)
     procedure: 'M3.5 3h9a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm2.3 2.7 3.4 2.3-3.4 2.3V5.7Z',
     // stored function — curly braces { } denoting a callable routine
@@ -48,6 +50,7 @@
     sidebar: 'M3 3h10a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm3 0v10',
     panel: 'M3 3h10a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm7 0v10',
     plus: 'M8 3.5v9M3.5 8h9',
+    minus: 'M3.5 8h9',
     x: 'M4 4l8 8M12 4l-8 8',
     copy: 'M6 6h6.5a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1Zm-1.5 4.5H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h6.5a1 1 0 0 1 1 1v.5',
     search: 'M7 2.5a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9Zm3.4 7.9 3.1 3.1',
@@ -63,6 +66,7 @@
     file: 'M4 2.5h5l3 3v8H4v-11Zm5 0v3h3',
     note: 'M3.5 2.5h9v9l-2 2h-7v-11Zm7 11v-2h2',
     play: 'M5 3.5l7 4.5-7 4.5v-9Z',
+    pause: 'M5.5 3.5v9M10.5 3.5v9',
     refresh: 'M13 8a5 5 0 1 1-1.5-3.6M13 2.5V5h-2.5',
     trash: 'M3 4.5h10m-8.5 0V3a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1.5m1.8 0-.6 8a1 1 0 0 1-1 .9H6.3a1 1 0 0 1-1-.9l-.6-8',
     edit: 'M9.5 3.5l3 3-6.5 6.5-3.4.4.4-3.4 6.5-6.5ZM8.5 4.5l3 3',
@@ -113,6 +117,9 @@
     download: 'M8 2.5v7.5M4.8 7 8 10.2 11.2 7M3 13h10',
     share: 'M11.5 2.5a2 2 0 1 1 0 4 2 2 0 0 1 0-4ZM4.5 6a2 2 0 1 1 0 4 2 2 0 0 1 0-4Zm7 4a2 2 0 1 1 0 4 2 2 0 0 1 0-4Zm-7-1.5 7-3M4.5 8l7 3',
     pin: 'M9 2.5 13.5 7l-2 .5-3.5-3.5L9 2.5ZM6 4l6 6M4 8l4 4-3.5 1.5L3 12l1.5-3.5ZM8 12l-6 2',
+    // five-point star — Favorites (sidebar section + add/remove toggles; a
+    // "favorited" state fills it via CSS `fill: currentColor` on the path)
+    star: 'M8 2.4 9.5 6.24l4.1.24-3.17 2.61 1.04 3.98L8 10.85l-3.47 2.22 1.04-3.98L2.4 6.48l4.1-.24L8 2.4Z',
     radar: 'M8 2.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11Zm0 2.6a2.9 2.9 0 1 0 2.9 2.9M8 8l3.4-2.1M8 8h.01',
     image: 'M2.5 3.5h11a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1Zm2.2 2.7a1 1 0 1 1 0 .01M3.5 11.5l3.2-3.4 2 2 2-2.3 3.3 3.7',
     layers: 'M8 2.5 14 5.5 8 8.5 2 5.5 8 2.5Zm-6 5.5 6 3 6-3M2 10.8l6 3 6-3',
@@ -132,6 +139,18 @@
     undo: 'M5.2 3.8 2.5 6.5l2.7 2.7M2.5 6.5h7a3.5 3.5 0 0 1 0 7H7',
     // Raised hand — an approval or a question waiting on you.
     hand: 'M5.5 8V3.8a1 1 0 0 1 2 0V7.5m0-4.7a1 1 0 0 1 2 0v4.7m0-3.7a1 1 0 0 1 2 0V9a4.5 4.5 0 0 1-4.5 4.5H7a3.5 3.5 0 0 1-2.9-1.6L2.6 9.6a1 1 0 0 1 1.6-1.2L5.5 10',
+    // Door + outward arrow — Sign out.
+    logout: 'M6.5 13.5h-3a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1h3M10.5 5l3 3-3 3M13.5 8H6',
+    // Stop — end a running thing (a solid-cornered square, smaller than `square`).
+    stop: 'M5.2 4.5h5.6a.7.7 0 0 1 .7.7v5.6a.7.7 0 0 1-.7.7H5.2a.7.7 0 0 1-.7-.7V5.2a.7.7 0 0 1 .7-.7Z',
+    // Annotation tools (Snip editor, Canvas): shape / stroke / label / step.
+    rectangle: 'M3 4h10a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-.5.5H3a.5.5 0 0 1-.5-.5v-7A.5.5 0 0 1 3 4Z',
+    ellipse: 'M8 3.5c3 0 5.5 2 5.5 4.5S11 12.5 8 12.5 2.5 10.5 2.5 8 5 3.5 8 3.5Z',
+    arrow: 'M3 13 12.5 3.5M7 3.5h5.5V9',
+    line: 'M3 13 13 3',
+    marker: 'M2.5 13.5h11M5 11l5.5-7.5 2.3 1.7L7.3 12.7H5Z',
+    text: 'M3.5 3.5h9M8 3.5v9M6 12.5h4',
+    step: 'M8 2.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11ZM7 6.3 8.4 5.3v5.4',
   } satisfies Record<string, string>;
 
   export type IconName = keyof typeof paths;

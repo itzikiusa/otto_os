@@ -9,19 +9,19 @@
   import GoalsPanel from './GoalsPanel.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { isAbortError } from '../../lib/api/client';
-  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { sentenceCase } from '../../lib/status';
   import { TASK_COLUMNS, type SwarmProject, type SwarmTask, type TaskStatus } from './types';
 
-  // `onrecruit` lets the board surface the existing Recruiter (the agent
-  // configurator) without owning its modal — SwarmPage flips `showRecruit`.
-  // `oneditproject` hands the selected project up so SwarmPage opens its
-  // create/edit modal (where project skills live).
+  // `onnewproject` / `oneditproject` hand off to SwarmPage, which owns the
+  // project create/edit modal (where project skills live). New project lives
+  // here — beside the project picker — rather than in the page header.
   let {
-    onrecruit,
+    onnewproject,
     oneditproject,
-  }: { onrecruit?: () => void; oneditproject?: (p: SwarmProject) => void } = $props();
+  }: { onnewproject?: () => void; oneditproject?: (p: SwarmProject) => void } = $props();
 
   const projects = $derived(swarm.detail?.projects ?? []);
   // Fall back to the first project so the board is never wedged when
@@ -102,32 +102,47 @@
       ...agents.map((a) => ({ label: a.name, action: () => bulkAssign(a.id) })),
     ]);
   }
+  // Every board mutation reports a failure (a rejected promise from a menu
+  // action or button used to vanish, leaving the card where it was).
+  async function attempt(failed: string, fn: () => Promise<unknown>): Promise<boolean> {
+    try {
+      await fn();
+      return true;
+    } catch (e) {
+      toasts.error(failed, e instanceof Error ? e.message : String(e));
+      return false;
+    }
+  }
   async function bulkMove(status: TaskStatus) {
-    await swarm.bulkUpdateTasks(selectedTasks, { status });
-    clearSelection();
+    if (await attempt("Couldn't move the tasks", () => swarm.bulkUpdateTasks(selectedTasks, { status }))) clearSelection();
   }
   async function bulkAssign(agentId: string | null) {
-    await swarm.bulkUpdateTasks(selectedTasks, { assignee_agent_id: agentId });
-    clearSelection();
+    if (await attempt("Couldn't reassign the tasks", () => swarm.bulkUpdateTasks(selectedTasks, { assignee_agent_id: agentId })))
+      clearSelection();
   }
   async function bulkDelete() {
     const n = selectedTasks.length;
     if (!n) return;
-    if (await confirmer.ask(`Delete ${n} selected task${n === 1 ? '' : 's'}?`, { title: 'Delete tasks' })) {
-      await swarm.bulkDeleteTasks(selectedTasks);
-      clearSelection();
+    if (
+      await confirmer.ask(`Delete ${n} selected task${n === 1 ? '' : 's'}? This cannot be undone.`, {
+        title: 'Delete tasks',
+        confirmLabel: 'Delete',
+        danger: true,
+      })
+    ) {
+      if (await attempt(`Couldn't delete the task${n === 1 ? '' : 's'}`, () => swarm.bulkDeleteTasks(selectedTasks))) clearSelection();
     }
   }
   async function clearBoard() {
     if (!pid || !tasks.length) return;
+    const board = pid;
     if (
       await confirmer.ask(
         `Delete ALL ${tasks.length} tasks on this board? In-flight agent runs are stopped and the project's feed is cleared too. This cannot be undone.`,
-        { title: 'Clear board' },
+        { title: 'Clear board', confirmLabel: 'Clear board', danger: true },
       )
     ) {
-      await swarm.clearProject(pid);
-      clearSelection();
+      if (await attempt("Couldn't clear the board", () => swarm.clearProject(board))) clearSelection();
     }
   }
 
@@ -135,9 +150,11 @@
   let newTitle = $state('');
   async function addTask() {
     if (!pid || !newTitle.trim()) return;
-    await swarm.createTask(pid, { title: newTitle.trim(), priority: 'medium' });
-    newTitle = '';
-    adding = false;
+    const project = pid;
+    if (await attempt("Couldn't add the task", () => swarm.createTask(project, { title: newTitle.trim(), priority: 'medium' }))) {
+      newTitle = '';
+      adding = false;
+    }
   }
 
   // -- Goal view + edit ------------------------------------------------------
@@ -161,7 +178,7 @@
       editingGoal = false;
       toasts.success('Goal saved');
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't save the goal", e instanceof Error ? e.message : String(e));
     } finally {
       savingGoal = false;
     }
@@ -191,7 +208,7 @@
       if (isAbortError(e)) {
         toasts.info('Plan stopped', 'The planner may still finish in the background.');
       } else {
-        toasts.error('Plan failed', e instanceof Error ? e.message : String(e));
+        toasts.error("Couldn't plan tasks from the goal", e instanceof Error ? e.message : String(e));
       }
     } finally {
       planning = false;
@@ -208,11 +225,11 @@
   function cardMenu(e: MouseEvent, t: SwarmTask) {
     const moves = TASK_COLUMNS.filter((s) => s !== t.status).map((s) => ({
       label: `Move to ${COLUMN_LABEL[s]}`,
-      action: () => swarm.updateTask(t, { status: s }),
+      action: () => void attempt("Couldn't move the task", () => swarm.updateTask(t, { status: s })),
     }));
     const assigns = agents.map((a) => ({
       label: `Assign to ${a.name}`,
-      action: () => swarm.updateTask(t, { assignee_agent_id: a.id }),
+      action: () => void attempt("Couldn't reassign the task", () => swarm.updateTask(t, { assignee_agent_id: a.id })),
     }));
     ctxMenu.show(e, [
       { label: 'Run now', icon: 'play', action: () => runNow(t) },
@@ -227,7 +244,14 @@
         icon: 'trash',
         danger: true,
         action: async () => {
-          if (await confirmer.ask(t.title, { title: 'Delete task?' })) swarm.deleteTask(t);
+          if (
+            await confirmer.ask(`Delete task “${t.title}”? This cannot be undone.`, {
+              title: 'Delete task',
+              confirmLabel: 'Delete',
+              danger: true,
+            })
+          )
+            await attempt("Couldn't delete the task", () => swarm.deleteTask(t));
         },
       },
     ]);
@@ -238,7 +262,35 @@
       await swarm.runTask(t);
       toasts.success('Task queued');
     } catch (e) {
-      toasts.error('Run failed', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't queue the task", e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // Board-level actions that aren't used every minute (and the destructive
+  // Clear board) live in one ⋯ menu, keeping the toolbar to picker · Plan · Add.
+  function boardMenu(e: MouseEvent) {
+    const items: MenuItem[] = [
+      { label: goal ? 'Edit goal…' : 'Set goal…', icon: 'note', action: openGoalEditor },
+    ];
+    if (oneditproject && selectedProject) {
+      const p = selectedProject;
+      items.push({ label: 'Project settings…', icon: 'gear', action: () => oneditproject?.(p) });
+    }
+    if (tasks.length) {
+      items.push({ separator: true }, { label: 'Clear board…', icon: 'trash', danger: true, action: clearBoard });
+    }
+    ctxMenu.show(e, items);
+  }
+
+  // Keyboard: Enter/Space on a focused card opens its menu (the same actions a
+  // right-click or the ⋯ button gives); x toggles its selection.
+  function onCardKey(e: KeyboardEvent, t: SwarmTask) {
+    if (e.target !== e.currentTarget) return;
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      cardMenu(e as unknown as MouseEvent, t);
+    } else if (e.key === 'x') {
+      toggleSelect(t.id);
     }
   }
 
@@ -286,7 +338,7 @@
     try {
       await swarm.updateTask(t, { status: col });
     } catch (err) {
-      toasts.error('Move failed', err instanceof Error ? err.message : String(err));
+      toasts.error("Couldn't move the task", err instanceof Error ? err.message : String(err));
     }
   }
 </script>
@@ -294,46 +346,35 @@
 <div class="kanban">
   <div class="kb-toolbar">
     {#if projects.length > 1}
-      <select class="input" bind:value={swarm.selectedProjectId}>
+      <select class="input small kb-project" aria-label="Project" title="Project shown on the board" bind:value={swarm.selectedProjectId}>
         {#each projects as p (p.id)}
           <option value={p.id}>{p.name}</option>
         {/each}
       </select>
     {:else if projects[0]}
-      <span class="section-title">{projects[0].name}</span>
+      <span class="kb-project-name" title={projects[0].name}>{projects[0].name}</span>
+    {/if}
+    {#if onnewproject && projects.length > 0}
+      <button class="icon-btn" onclick={onnewproject} aria-label="New project" title="New project"><Icon name="plus" size={14} /></button>
     {/if}
     <span class="grow"></span>
-    {#if onrecruit}
-      <button class="btn small" onclick={onrecruit} title="Let the Recruiter propose an agent — role, soul & skills — for you to edit and hire">
-        <Icon name="plus" size={13} /> Recruit agent
+    {#if pid}
+      {#if planning}
+        <span class="planning" role="status"><span class="spinner-xs" aria-hidden="true"></span> Planning… <span class="dim">watch live in Runs</span></span>
+        <button class="btn small" onclick={stopPlan} title="Stop the planner agents">
+          <Icon name="square" size={12} /> Stop
+        </button>
+      {:else}
+        <button class="btn small" onclick={planFromGoal} title="Break the project goal into tasks with several planner agents and a summarizer">
+          <Icon name="zap" size={12} /> Plan from goal
+        </button>
+      {/if}
+      <button class="icon-btn" onclick={boardMenu} aria-label="Board actions" title="Board actions"><Icon name="more" size={14} /></button>
+      <!-- Secondary: the page header's lifecycle button is the view's one primary. -->
+      <button class="btn small" onclick={() => (adding = !adding)} aria-expanded={adding}>
+        <Icon name="plus" size={12} /> Add task
       </button>
     {/if}
-    <button class="btn small" onclick={openGoalEditor} disabled={!pid} title="View or edit the project goal">
-      <Icon name="note" size={13} /> {goal ? 'Edit goal' : 'Set goal'}
-    </button>
-    {#if oneditproject && selectedProject}
-      <button class="btn small" onclick={() => selectedProject && oneditproject?.(selectedProject)} title="Project settings (name, repo, goal, skills)">
-        <Icon name="gear" size={13} /> Project
-      </button>
-    {/if}
-    {#if planning}
-      <span class="planning"><span class="spinner-xs"></span> Planning… <span class="dim">watch live in Runs</span></span>
-      <button class="btn small" onclick={stopPlan} title="Stop waiting for the planner">
-        <Icon name="x" size={13} /> Stop
-      </button>
-    {:else}
-      <button class="btn small" onclick={planFromGoal} disabled={!pid} title="Break the project goal into tasks with multiple planner agents + a summarizer">
-        <Icon name="zap" size={13} /> Plan from goal
-      </button>
-    {/if}
-    {#if pid && tasks.length}
-      <button class="btn small ghost" onclick={clearBoard} title="Delete every task on this board">
-        <Icon name="trash" size={13} /> Clear board
-      </button>
-    {/if}
-    <button class="btn small primary" onclick={() => (adding = !adding)} disabled={!pid}>
-      <Icon name="plus" size={13} /> Add task
-    </button>
   </div>
 
   {#if selectedCount > 0}
@@ -361,19 +402,32 @@
 
   {#if adding}
     <div class="add-row">
+      <!-- svelte-ignore a11y_autofocus -->
       <input
         class="input grow"
+        aria-label="New task title"
         placeholder="Task title…"
+        autofocus
         bind:value={newTitle}
-        onkeydown={(e) => e.key === 'Enter' && addTask()}
+        onkeydown={(e) => {
+          if (e.key === 'Enter') addTask();
+          else if (e.key === 'Escape') adding = false;
+        }}
       />
-      <button class="btn small primary" onclick={addTask}>Add</button>
+      <button class="btn small primary" onclick={addTask} disabled={!newTitle.trim()} title={newTitle.trim() ? undefined : 'Type a task title first'}>Add task</button>
       <button class="btn small ghost" onclick={() => (adding = false)}>Cancel</button>
     </div>
   {/if}
 
   {#if !pid}
-    <EmptyState icon="note" title="No project selected" body="Create a project to start a board." />
+    <EmptyState
+      icon="note"
+      title="No projects yet"
+      body="A project holds the board's tasks and its goal. Create one, then add tasks or plan them from the goal."
+      actionLabel={onnewproject ? 'New project' : undefined}
+      actionIcon="plus"
+      onaction={onnewproject}
+    />
   {:else}
     <!-- Story back-link: shown when this project was seeded from a Product story. -->
     {#if selectedProject?.story_id}
@@ -391,22 +445,24 @@
         >
           <div class="col-head">
             <span>{COLUMN_LABEL[col]}</span>
-            <span class="count">{byStatus(col).length}</span>
+            <span class="count" aria-label="{byStatus(col).length} tasks">{byStatus(col).length}</span>
           </div>
           <div class="col-body">
             {#each byStatus(col) as t (t.id)}
               {@const agent = swarm.agentById(t.assignee_agent_id)}
               {@const gs = goalSummary(t.id)}
               <div
-                class="card"
+                class="card kb-card"
                 class:dragging={draggingId === t.id}
                 class:selected={selected.has(t.id)}
                 draggable="true"
                 ondragstart={(e) => onDragStart(e, t)}
                 ondragend={onDragEnd}
                 oncontextmenu={(e) => cardMenu(e, t)}
+                onkeydown={(e) => onCardKey(e, t)}
                 role="button"
                 tabindex="0"
+                aria-label="{t.title} — {agent ? agent.name : 'unassigned'}, {t.priority} priority. Enter for actions."
               >
                 <div class="card-title">
                   <input
@@ -415,40 +471,41 @@
                     checked={selected.has(t.id)}
                     onclick={(e) => e.stopPropagation()}
                     onchange={() => toggleSelect(t.id)}
-                    aria-label="Select task"
+                    aria-label="Select “{t.title}”"
                   />
-                  <span>{t.title}</span>
+                  <span class="card-title-text">{t.title}</span>
                 </div>
                 <div class="card-meta">
                   {#if agent}
                     <span class="assignee" title={agent.title}>{agent.avatar || agent.name.slice(0, 1)} {agent.name}</span>
                   {:else}
-                    <span class="assignee dim">unassigned</span>
+                    <span class="assignee dim">Unassigned</span>
                   {/if}
                   <span class="grow"></span>
                   {#if t.status === 'verifying'}
-                    <span class="vchip" title="Verifying goals">verifying</span>
+                    <span class="vchip" title="The Coordinator is checking this task's goals">Verifying</span>
                   {/if}
                   {#if gs}
                     <button
                       class="gchip"
                       class:all-passed={gs.passed === gs.total}
                       onclick={(e) => { e.stopPropagation(); goalsTask = t; }}
-                      title="View goals"
+                      title="{gs.passed} of {gs.total} goals passed — view goals"
+                      aria-label="Goals: {gs.passed} of {gs.total} passed"
                     >
-                      <Icon name="check" size={10} /> {gs.passed}/{gs.total}
+                      <Icon name="check" size={12} /> {gs.passed}/{gs.total}
                     </button>
                   {:else}
-                    <button class="icon-btn small" onclick={(e) => { e.stopPropagation(); goalsTask = t; }} aria-label="goals" title="Goals">
+                    <button class="icon-btn small" onclick={(e) => { e.stopPropagation(); goalsTask = t; }} aria-label="Goals" title="Goals">
                       <Icon name="check" size={13} />
                     </button>
                   {/if}
-                  <span class="chip {PRIORITY_CLASS[t.priority]}">{t.priority}</span>
-                  <button class="icon-btn small" onclick={(e) => cardMenu(e, t)} aria-label="task menu">
-                    <Icon name="dot" size={14} />
+                  <span class="chip {PRIORITY_CLASS[t.priority]}" title="Priority">{sentenceCase(t.priority)}</span>
+                  <button class="icon-btn small" onclick={(e) => cardMenu(e, t)} aria-label="Task actions" title="Task actions">
+                    <Icon name="more" size={14} />
                   </button>
                 </div>
-                {#if t.delegated}<span class="tag">delegated</span>{/if}
+                {#if t.delegated}<span class="tag" title="Handed to this agent by another agent">Delegated</span>{/if}
               </div>
             {/each}
           </div>
@@ -493,18 +550,31 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 10px;
-    border-bottom: 1px solid var(--border);
+    padding: 6px 12px;
+    border-block-end: 1px solid var(--border);
+    min-height: 40px;
+  }
+  .kb-project {
+    max-width: 240px;
+  }
+  .kb-project-name {
+    font-size: var(--fs-m);
+    font-weight: 600;
+    min-width: 0;
+    max-width: 280px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .goal-bar {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 10px;
-    font-size: 12px;
+    padding: 6px 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--accent) 6%, transparent);
-    border-bottom: 1px solid var(--border);
+    background: var(--surface-2);
+    border-block-end: 1px solid var(--border);
   }
   .goal-bar.empty {
     background: transparent;
@@ -531,7 +601,7 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .spinner-xs {
@@ -553,7 +623,7 @@
     gap: 6px;
   }
   .field label {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .columns {
@@ -577,15 +647,16 @@
     display: flex;
     justify-content: space-between;
     padding: 8px 10px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     font-weight: 600;
     color: var(--text-dim);
-    border-bottom: 1px solid var(--border);
+    border-block-end: 1px solid var(--border);
   }
   .count {
     background: color-mix(in srgb, var(--text-dim) 18%, transparent);
     border-radius: 999px;
     padding: 0 6px;
+    font-variant-numeric: tabular-nums;
   }
   .col-body {
     padding: 8px;
@@ -597,21 +668,25 @@
        column past the viewport (the flex-child height-collapse rule). */
     min-height: 0;
   }
-  .card {
+  .kb-card {
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 8px;
     cursor: grab;
   }
-  .card:hover {
-    border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  .kb-card:hover {
+    border-color: var(--border-strong);
   }
-  .card.dragging {
+  .kb-card:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  .kb-card.dragging {
     opacity: 0.4;
     cursor: grabbing;
   }
-  .card.selected {
+  .kb-card.selected {
     border-color: var(--accent);
     box-shadow: inset 0 0 0 1px var(--accent);
   }
@@ -624,10 +699,10 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 10px;
-    border-bottom: 1px solid var(--border);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    font-size: 12px;
+    padding: 6px 12px;
+    border-block-end: 1px solid var(--border);
+    background: var(--accent-soft);
+    font-size: var(--fs-s);
   }
   .bulk-count {
     font-weight: 600;
@@ -638,14 +713,18 @@
     border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
   }
   .card-title {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     margin-bottom: 6px;
+  }
+  /* A long unbroken title (a path, a URL) used to overflow the 240px column. */
+  .card-title-text {
+    overflow-wrap: anywhere;
   }
   .card-meta {
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .assignee {
     color: var(--text-dim);
@@ -656,7 +735,7 @@
   }
   .tag {
     display: inline-block;
-    margin-top: 6px;
+    margin-block-start: 6px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     border: 1px solid var(--border);
@@ -674,6 +753,12 @@
   @keyframes kb-pulse {
     50% {
       opacity: 0.5;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .vchip,
+    .spinner-xs {
+      animation: none;
     }
   }
   .gchip {

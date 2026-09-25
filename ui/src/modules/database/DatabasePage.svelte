@@ -27,6 +27,8 @@
   import ClusterViewer from '../brokers/ClusterViewer.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import ImportDialog from './ImportDialog.svelte';
+  import ExportDialog from './ExportDialog.svelte';
+  import { databaseAccessChild } from '../../lib/access-options';
   import { database, engineGlyph, type DbMainTab } from '../../lib/stores/database.svelte';
   import { brokers } from '../../lib/stores/brokers.svelte';
   import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
@@ -91,6 +93,17 @@
     filterKind = id;
     if (typeof localStorage !== 'undefined') localStorage.setItem(FILTER_KEY, id);
   }
+  // Only offer kinds that exist (plus the active one, so a remembered filter
+  // can always be cleared). One kind or none → no chip row at all: a filter
+  // that can't narrow anything is noise.
+  const presentKinds = $derived.by(() => {
+    const kinds = new Set<string>([...database.connections, ...database.otherConnections].map((c) => c.kind));
+    if (brokers.clusters.length > 0) kinds.add('kafka');
+    return kinds;
+  });
+  const visibleChips = $derived(
+    FILTER_CHIPS.filter((chip) => chip.id === 'all' || chip.id === filterKind || presentKinds.has(chip.id)),
+  );
   const filtering = $derived(filterKind !== 'all');
   const connMatchesKind = (c: Connection): boolean => !filtering || c.kind === filterKind;
   const clusterMatchesKind = (): boolean => !filtering || filterKind === 'kafka';
@@ -187,6 +200,16 @@
       ...(connectionAccess(c,'configure','admin') ? [{ label: 'Edit', icon: 'edit', action: () => editConnection(c) }, { label: 'Delete', icon: 'trash', danger: true, action: () => void deleteConnection(c) }] : []),
       ...(auth.isRoot && connectionAccess(c,'configure','admin') ? [{ label: 'Duplicate without password', icon: 'copy', action: () => void duplicateConnection(c) }] : []),
       ...(auth.isRoot || connectionAccess(c,'manage_access','admin') ? [{ label: 'Access', icon: 'key', action: () => {accessFor=c;} }] : []),
+    ]);
+  }
+
+  function clusterMenu(e: MouseEvent, cl: BrokerCluster): void {
+    ctxMenu.show(e, [
+      { label: 'Open', icon: 'split', action: () => openCluster(cl) },
+      { label: 'Open in Message Brokers page', icon: 'split', action: () => openClusterStandalone(cl) },
+      { separator: true },
+      { label: 'Edit', icon: 'edit', action: () => editCluster(cl) },
+      { label: 'Remove…', icon: 'trash', danger: true, action: () => void deleteCluster(cl) },
     ]);
   }
 
@@ -555,15 +578,18 @@
   }
   async function deleteCluster(cl: BrokerCluster): Promise<void> {
     if (
-      !(await confirmer.ask(`Delete cluster “${cl.name}”? Its Keychain secrets are removed too.`, {
-        title: 'Delete cluster',
-      }))
+      // Same verb + consequence as the Message Brokers page and ClusterViewer's
+      // "Remove" button, which lands here.
+      !(await confirmer.ask(
+        `Remove cluster “${cl.name}”? Its saved settings and Keychain secrets are removed from Otto; topics on the broker are not touched.`,
+        { title: 'Remove cluster', confirmLabel: 'Remove' },
+      ))
     )
       return;
     try {
       await brokers.remove(cl.id);
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Remove failed', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -635,6 +661,7 @@
     if (ws.currentId) {
       void (async () => {
         await database.loadConnections();
+        connsSettled = true;
         await database.restoreWorkbench();
         // `#/database/<connId>` (a pop-out window, a link) opens that tab.
         const deep = router.module === 'database' ? router.parts[1] : undefined;
@@ -646,6 +673,21 @@
       void database.loadDashboards();
     }
   });
+
+  /** The first connection load has finished (so "nothing listed" is real, not
+   *  "not fetched yet") — gates the empty-hub layout below. */
+  let connsSettled = $state(false);
+  /** Nothing to list at all: the list pane is hidden and one page-level
+   *  EmptyState owns the "New connection" CTA (no duplicate link in the list). */
+  const hubEmpty = $derived(
+    connsSettled &&
+      !database.connectionsLoading &&
+      !database.connectionsError &&
+      database.connections.length === 0 &&
+      database.otherConnections.length === 0 &&
+      brokers.clusters.length === 0 &&
+      sections.length === 0,
+  );
 
   /** Tooltip for the connection health chip: "Connected · <version> · <ms> ms". */
   function healthTitle(st: { serverVersion?: string; latencyMs?: number }): string {
@@ -788,6 +830,24 @@
       : null,
   );
 
+  // The open-connections strip scrolls sideways with its scrollbar hidden, so a
+  // tab opened (or focused) past the right edge would be selected but invisible —
+  // with nothing hinting the strip scrolls. Bring the active tab into view
+  // whenever the selection or the set of open tabs changes.
+  let connTabsEl = $state<HTMLElement | null>(null);
+  $effect(() => {
+    void database.selectedConnId;
+    void database.activePane;
+    void openConns.length;
+    void brokers.openClusters.length;
+    void database.sshTabs.length;
+    const strip = connTabsEl;
+    if (!strip) return;
+    requestAnimationFrame(() =>
+      strip.querySelector<HTMLElement>('.conn-tab.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }),
+    );
+  });
+
   // Close a Kafka cluster tab; follow the brokers store's neighbour reselection
   // (or drop back to the DB workbench when no clusters remain open).
   function closeKafkaTab(id: string): void {
@@ -832,11 +892,13 @@
 <PageHeader title="Connections">
   {#snippet actions()}
     {#if !viewport.isPhone}
-      <button class="btn ghost" disabled={!auth.isRoot} onclick={() => (connImportOpen = true)} title="Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster">
+      {#if !hubEmpty}
+      <button class="btn ghost" disabled={!auth.isRoot} onclick={() => (connImportOpen = true)} title={auth.isRoot ? 'Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster' : 'Only the owner can import connections'}>
         <Icon name="arrowDown" size={12} /> Import
       </button>
-      {#if database.connections.length > 0 || brokers.clusters.length > 0}
-        <button class="btn primary" disabled={!auth.isRoot} onclick={newConnectionFromStrip} title="New connection (SSH, database or custom CLI)">
+      {/if}
+      {#if database.connections.length > 0 || database.otherConnections.length > 0 || brokers.clusters.length > 0}
+        <button class="btn primary" disabled={!auth.isRoot} onclick={newConnectionFromStrip} title={auth.isRoot ? 'New connection (SSH, database or custom CLI)' : 'Only the owner can create connections'}>
           <Icon name="plus" size={12} /> New connection
         </button>
       {/if}
@@ -844,7 +906,7 @@
   {/snippet}
 </PageHeader>
 <div class="db-page">
-  {#if !viewport.isPhone && database.sidebarCollapsed}
+  {#if !viewport.isPhone && database.sidebarCollapsed && !hubEmpty}
     <!-- Collapsed rail: never zero-width — an invisible sidebar is unrecoverable. -->
     <div class="side-rail">
       <button
@@ -860,7 +922,7 @@
   {/if}
   <aside
     class="db-side"
-    class:collapsed={!viewport.isPhone && database.sidebarCollapsed}
+    class:collapsed={!viewport.isPhone && (database.sidebarCollapsed || hubEmpty)}
     style={viewport.isPhone || database.sidebarCollapsed ? '' : `width:${sideW}px`}
   >
     {#if viewport.isPhone}
@@ -874,8 +936,8 @@
         </button>
         <div class="head-btns">
           <button class="icon-btn" onclick={() => createSection(null)} aria-label="New section" title="New section"><Icon name="folder" size={13} /></button>
-          <button class="icon-btn" disabled={!auth.isRoot} onclick={newConnection} aria-label="New connection" title="New connection"><Icon name="plus" size={13} /></button>
-          <button class="icon-btn" disabled={!auth.isRoot} onclick={() => (connImportOpen = true)} aria-label="Import connections" title="Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster"><Icon name="arrowDown" size={13} /></button>
+          <button class="icon-btn" disabled={!auth.isRoot} onclick={newConnection} aria-label="New connection" title={auth.isRoot ? 'New connection' : 'Only the owner can create connections'}><Icon name="plus" size={13} /></button>
+          <button class="icon-btn" disabled={!auth.isRoot} onclick={() => (connImportOpen = true)} aria-label="Import connections" title={auth.isRoot ? 'Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster' : 'Only the owner can import connections'}><Icon name="arrowDown" size={13} /></button>
         </div>
       </div>
       <div class="conn-list" class:acc-collapsed={!connOpen}>
@@ -940,7 +1002,7 @@
             <div class="list-empty">Open a connection to browse its schema.</div>
             <div class="side-empty-actions">
               <button class="btn small" onclick={() => database.setSideTab('connections')}>Browse connections</button>
-              <button class="btn small ghost" disabled={!auth.isRoot} onclick={newConnection}>New connection</button>
+              <button class="btn small ghost" disabled={!auth.isRoot} onclick={newConnection} title={auth.isRoot ? undefined : 'Only the owner can create connections'}>New connection</button>
             </div>
           </div>
         {/if}
@@ -948,7 +1010,7 @@
     {/if}
   </aside>
 
-  {#if !viewport.isPhone && !database.sidebarCollapsed}
+  {#if !viewport.isPhone && !database.sidebarCollapsed && !hubEmpty}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
       class="side-resizer"
@@ -969,22 +1031,41 @@
            connection, or reveal a picker that is hidden (collapsed rail /
            another side tab). With the list already on screen there is no
            button — "Show connections" next to the visible list was noise. -->
-      <EmptyState
-        variant={viewport.isPhone ? 'panel' : 'page'}
-        icon="db"
-        title="Open a connection"
-        body={database.connections.length === 0 && brokers.clusters.length === 0
-          ? 'No database, Kafka, SSH or custom connections in this workspace yet.'
-          : `Choose a connection, Kafka cluster or SSH host ${viewport.isPhone ? 'above' : 'on the left'} to open it here.`}
-        actionLabel={database.connections.length === 0 && brokers.clusters.length === 0
-          ? auth.isRoot ? 'New connection' : undefined
-          : database.sidebarCollapsed || database.sideTab !== 'connections' ? 'Show connections' : undefined}
-        actionIcon={database.connections.length === 0 && brokers.clusters.length === 0 ? 'plus' : undefined}
-        onaction={database.connections.length === 0 && brokers.clusters.length === 0 ? newConnection : showConnections}
-      />
+      {#if database.connections.length === 0 && database.otherConnections.length === 0 && brokers.clusters.length === 0}
+        <EmptyState
+          variant={viewport.isPhone ? 'panel' : 'page'}
+          icon="plug"
+          title="No connections yet"
+          body="Add a database (MySQL, PostgreSQL, Redis, MongoDB, ClickHouse), an SSH host or a custom CLI, then open it here to query, browse its schema or get a terminal."
+          actionLabel={auth.isRoot ? 'New connection' : undefined}
+          actionIcon="plus"
+          onaction={auth.isRoot ? newConnection : undefined}
+        >
+          {#if auth.isRoot}
+            <div class="empty-alt">
+              <button class="btn ghost small" onclick={newCluster}><Icon name={engineGlyph('kafka')} size={12} /> Add a Kafka cluster</button>
+              <button class="btn ghost small" onclick={() => (connImportOpen = true)}><Icon name="arrowDown" size={12} /> Import from another tool…</button>
+            </div>
+          {:else}
+            <p class="empty-note">Only the owner can add connections.</p>
+          {/if}
+        </EmptyState>
+      {:else}
+        <!-- One CTA, and only when it does something: reveal a picker that is
+             hidden (collapsed rail / another side tab). With the list already
+             on screen there is no button. -->
+        <EmptyState
+          variant={viewport.isPhone ? 'panel' : 'page'}
+          icon="db"
+          title="Open a connection"
+          body={`Choose a connection, Kafka cluster or SSH host ${viewport.isPhone ? 'above' : 'on the left'} to open it here.`}
+          actionLabel={database.sidebarCollapsed || database.sideTab !== 'connections' ? 'Show connections' : undefined}
+          onaction={showConnections}
+        />
+      {/if}
     {:else}
       <!-- Unified tab strip: DB connections, Kafka clusters, and SSH/custom terminals -->
-      <div class="conn-tabs" role="tablist" aria-label="Open connections">
+      <div class="conn-tabs" role="tablist" aria-label="Open connections" bind:this={connTabsEl}>
         {#each openConns as c (c.id)}
           {@const st = database.connStatus.get(c.id)}
           <div class="conn-tab" class:active={database.activePane === null && database.selectedConnId === c.id} class:prod={isProdConn(c)} class:guarded={isGuardedConn(c) && !isProdConn(c)} role="tab" tabindex="-1" aria-selected={database.activePane === null && database.selectedConnId === c.id} oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}>
@@ -1008,7 +1089,7 @@
               aria-label="Close connection tab"
               title="Close"
             >
-              <Icon name="x" size={11} />
+              <Icon name="x" size={12} />
             </button>
           </div>
         {/each}
@@ -1017,7 +1098,7 @@
               { label: 'Open in Message Brokers page', icon: 'split', action: () => openClusterStandalone(cl) },
               { separator: true },
               { label: 'Edit', icon: 'edit', action: () => editCluster(cl) },
-              { label: 'Delete', icon: 'trash', danger: true, action: () => void deleteCluster(cl) },
+              { label: 'Remove…', icon: 'trash', danger: true, action: () => void deleteCluster(cl) },
             ]); }}>
             <button class="conn-tab-main" onclick={() => openCluster(cl)} title={cl.name}>
               <span class="conn-tab-glyph kafka"><Icon name={engineGlyph('kafka')} size={12} /></span>
@@ -1025,7 +1106,7 @@
               {#if envBadge(cl)}<EnvBadge env={cl.environment} readOnly={cl.read_only} />{/if}
             </button>
             <button class="conn-tab-close" onclick={(e) => { e.stopPropagation(); closeKafkaTab(cl.id); }} aria-label="Close cluster tab" title="Close">
-              <Icon name="x" size={11} />
+              <Icon name="x" size={12} />
             </button>
           </div>
         {/each}
@@ -1036,7 +1117,7 @@
               <span class="conn-tab-name ellipsis">{s.name}</span>
             </button>
             <button class="conn-tab-close" onclick={(e) => { e.stopPropagation(); void closeSshTerminal(s.connId); }} aria-label="Close terminal tab" title="Close">
-              <Icon name="x" size={11} />
+              <Icon name="x" size={12} />
             </button>
           </div>
         {/each}
@@ -1072,7 +1153,7 @@
         </div>
       {/if}
 
-      <div class="main-tabs">
+      <div class="main-tabs" class:many={visibleTabs.length > 3}>
         <!-- The workbench views: a segmented control (selection = surface
              lift), ←/→ move between them like any tablist. -->
         <div class="segmented view-switch" role="tablist" aria-label="Workbench view" tabindex="-1" onkeydown={onViewKey}>
@@ -1083,6 +1164,7 @@
               role="tab"
               aria-selected={database.mainTab === t.id}
               tabindex={database.mainTab === t.id ? 0 : -1}
+              title={t.label}
               onclick={() => database.setMainTab(t.id)}
             >
               <Icon name={t.icon} size={12} />{t.label}
@@ -1095,7 +1177,7 @@
             <span class="cap-chip mono" title="Engine">{database.capabilities.engine}</span>
           {/if}
           {#if database.activeConnStatus?.phase === 'connecting'}
-            <span class="conn-state"><span class="conn-tab-spin spin"><Icon name="refresh" size={11} /></span>Connecting…</span>
+            <span class="conn-state" title="Connecting…"><span class="conn-tab-spin spin"><Icon name="refresh" size={12} /></span><span class="lbl">Connecting…</span></span>
           {:else if database.activeConnStatus?.phase === 'error'}
             <span class="conn-state err" title={database.activeConnStatus.error}>Disconnected</span>
           {:else if database.activeConnStatus?.phase === 'ready'}
@@ -1110,12 +1192,12 @@
             </span>
           {/if}
           {#if ['mysql','postgres'].includes(database.connections.find(c=>c.id===database.selectedConnId)?.kind ?? '')}
-            <button class="btn small ghost" onclick={()=>changesOpen=true} title="Reviewed schema changes for this connection">
-              <Icon name="branch" size={11} />Changes
+            <button class="btn small ghost" onclick={()=>changesOpen=true} title="Reviewed schema changes for this connection" aria-label="Schema changes">
+              <Icon name="branch" size={12} /><span class="lbl">Changes</span>
             </button>
           {/if}
-          <button class="btn small ghost" onclick={() => database.testConnection()} disabled={database.testing}>
-            <Icon name="plug" size={11} />{database.testing ? 'Testing…' : 'Test'}
+          <button class="btn small ghost" onclick={() => database.testConnection()} disabled={database.testing} title="Test this connection" aria-label={database.testing ? 'Testing connection' : 'Test connection'}>
+            <Icon name="plug" size={12} /><span class="lbl">{database.testing ? 'Testing…' : 'Test'}</span>
           </button>
           {#if database.testResult}
             <span class="test-dot" class:ok={database.testResult.ok} title={database.testResult.message}></span>
@@ -1213,13 +1295,13 @@
       {#if nodeCount(node) > 0}<span class="count">{nodeCount(node)}</span>{/if}
       <div class="sec-actions">
         <button class="icon-btn" title="Add sub-section" aria-label="Add sub-section" onclick={() => createSection(node.sec.id)}>
-          <Icon name="plus" size={11} />
+          <Icon name="plus" size={12} />
         </button>
         <button class="icon-btn" title="Rename section" aria-label="Rename section" onclick={() => renameSection(node.sec)}>
-          <Icon name="edit" size={11} />
+          <Icon name="edit" size={12} />
         </button>
         <button class="icon-btn" title="Delete section" aria-label="Delete section" onclick={() => deleteSection(node.sec)}>
-          <Icon name="trash" size={11} />
+          <Icon name="trash" size={12} />
         </button>
       </div>
     </div>
@@ -1266,12 +1348,10 @@
       {#if envBadge(c)}<EnvBadge env={c.environment} readOnly={c.read_only} />{/if}
     </button>
     <div class="conn-actions">
-      {#if auth.isRoot || connectionAccess(c,'manage_access','admin')}<button class="icon-btn" aria-label={`Access for ${c.name}`} title="Access" onclick={() => accessFor=c}><Icon name="key" size={11} /></button>{/if}
-      <button class="icon-btn" disabled={!connectionAccess(c,'configure','admin')} aria-label="Edit connection" title="Edit" onclick={() => editConnection(c)}>
-        <Icon name="edit" size={11} />
-      </button>
-      <button class="icon-btn" disabled={!connectionAccess(c,'configure','admin')} aria-label="Delete connection" title="Delete" onclick={() => deleteConnection(c)}>
-        <Icon name="trash" size={11} />
+      <!-- One ⋯ per row (same menu as right-click), like every other list in
+           Infrastructure — not a row of per-action icons. -->
+      <button class="icon-btn" aria-label={`Actions for ${c.name}`} title="Actions" onclick={(e) => connMenu(e, c)}>
+        <Icon name="more" size={14} />
       </button>
     </div>
   </div>
@@ -1289,16 +1369,7 @@
       e.stopPropagation();
     }}
     ondragend={() => (draggedClusterId = null)}
-    oncontextmenu={(e) => {
-      e.preventDefault();
-      ctxMenu.show(e, [
-        { label: 'Open', icon: 'split', action: () => openCluster(cl) },
-        { label: 'Open in Message Brokers page', icon: 'split', action: () => openClusterStandalone(cl) },
-        { separator: true },
-        { label: 'Edit', icon: 'edit', action: () => editCluster(cl) },
-        { label: 'Delete', icon: 'trash', danger: true, action: () => void deleteCluster(cl) },
-      ]);
-    }}
+    oncontextmenu={(e) => { e.preventDefault(); clusterMenu(e, cl); }}
   >
     <button
       class="conn-item"
@@ -1311,11 +1382,8 @@
       {#if envBadge(cl)}<EnvBadge env={cl.environment} readOnly={cl.read_only} />{/if}
     </button>
     <div class="conn-actions">
-      <button class="icon-btn" aria-label="Edit cluster" title="Edit" onclick={() => editCluster(cl)}>
-        <Icon name="edit" size={11} />
-      </button>
-      <button class="icon-btn" aria-label="Delete cluster" title="Delete" onclick={() => void deleteCluster(cl)}>
-        <Icon name="trash" size={11} />
+      <button class="icon-btn" aria-label={`Actions for ${cl.name}`} title="Actions" onclick={(e) => clusterMenu(e, cl)}>
+        <Icon name="more" size={14} />
       </button>
     </div>
   </div>
@@ -1323,7 +1391,7 @@
 
 {#snippet connSearchBox()}
   <div class="tree-search">
-    <Icon name="search" size={11} />
+    <Icon name="search" size={12} />
     <input
       class="tree-search-input"
       type="text"
@@ -1339,14 +1407,15 @@
       <!-- New section / connection live here on tablet/desktop (the phone keeps
            them in the accordion header), so the tab strip never overflows. -->
       <button class="icon-btn" onclick={() => createSection(null)} aria-label="New section" title="New section"><Icon name="folder" size={12} /></button>
-      <button class="icon-btn" disabled={!auth.isRoot} onclick={newConnection} aria-label="New connection" title="New connection (SSH, database or custom CLI)"><Icon name="plus" size={12} /></button>
+      <button class="icon-btn" disabled={!auth.isRoot} onclick={newConnection} aria-label="New connection" title={auth.isRoot ? 'New connection (SSH, database or custom CLI)' : 'Only the owner can create connections'}><Icon name="plus" size={12} /></button>
       <button class="icon-btn" onclick={newCluster} aria-label="New Kafka cluster" title="New Kafka cluster"><Icon name="split" size={12} /></button>
-      <button class="icon-btn" disabled={!auth.isRoot} onclick={() => (connImportOpen = true)} aria-label="Import connections" title="Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster"><Icon name="arrowDown" size={12} /></button>
+      <button class="icon-btn" disabled={!auth.isRoot} onclick={() => (connImportOpen = true)} aria-label="Import connections" title={auth.isRoot ? 'Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster' : 'Only the owner can import connections'}><Icon name="arrowDown" size={12} /></button>
     {/if}
   </div>
   <!-- Type-filter chips: one tree, narrowed by connection type. -->
+  {#if visibleChips.length > 2 || filtering}
   <div class="type-chips" role="group" aria-label="Filter by connection type">
-    {#each FILTER_CHIPS as chip (chip.id)}
+    {#each visibleChips as chip (chip.id)}
       <button
         class="type-chip"
         class:on={filterKind === chip.id}
@@ -1356,6 +1425,7 @@
       >{chip.label}</button>
     {/each}
   </div>
+  {/if}
 {/snippet}
 
 {#snippet connListBody()}
@@ -1443,7 +1513,7 @@
         aria-label="Search saved queries"
       />
       {#if savedSearch}
-        <button class="icon-btn" onclick={() => (savedSearch = '')} aria-label="Clear search"><Icon name="x" size={11} /></button>
+        <button class="icon-btn" onclick={() => (savedSearch = '')} aria-label="Clear search"><Icon name="x" size={12} /></button>
       {/if}
     </div>
     {#if database.savedQueries.length === 0}
@@ -1471,7 +1541,7 @@
               <Icon name="file" size={12} />
               <span class="ellipsis">{q.name}</span>
             </button>
-            <button class="icon-btn row-del" onclick={() => startRename(q)} aria-label="Rename saved query" title="Rename"><Icon name="edit" size={11} /></button>
+            <button class="icon-btn row-del" onclick={() => startRename(q)} aria-label="Rename saved query" title="Rename"><Icon name="edit" size={12} /></button>
             <button
               class="icon-btn row-del"
               onclick={async () => {
@@ -1482,7 +1552,7 @@
                 if (ok) void database.deleteSavedQuery(q.id);
               }}
               aria-label="Delete saved query “{q.name}”…"
-              title="Delete…"><Icon name="trash" size={11} /></button>
+              title="Delete…"><Icon name="trash" size={12} /></button>
           {/if}
         </div>
       {/each}
@@ -1497,7 +1567,7 @@
         aria-label="Search query history"
       />
       {#if historySearch}
-        <button class="icon-btn" onclick={() => (historySearch = '')} aria-label="Clear search"><Icon name="x" size={11} /></button>
+        <button class="icon-btn" onclick={() => (historySearch = '')} aria-label="Clear search"><Icon name="x" size={12} /></button>
       {/if}
     </div>
     {#if database.history.length === 0}
@@ -1575,6 +1645,29 @@
   {/key}
 {/if}
 
+<!-- "Export all rows…" an agent asked for (otto.ui_db_export): prefilled, but
+     the person picks the folder + file and confirms. Closing without exporting
+     reports `exported:false` back to the agent. -->
+{#if database.exportRequest}
+  {@const req = database.exportRequest}
+  <ExportDialog
+    statement={req.statement}
+    connectionId={req.connId}
+    node={req.node}
+    canExport={resourceAccess.can('connection', req.connId, 'db_export', 'database', 'view', databaseAccessChild(req.node ?? undefined))}
+    initialFormat={req.format}
+    initialMaxRows={req.maxRows}
+    requestedBy={req.agentLabel}
+    ondone={(r) => {
+      req.done({ exported: true, path: r.local_path, rows: r.rows, bytes: r.bytes });
+    }}
+    onclose={() => {
+      if (database.exportRequest === req) database.exportRequest = null;
+      req.done({ exported: false });
+    }}
+  />
+{/if}
+
 <style>
   .db-root {
     height: 100%;
@@ -1632,7 +1725,7 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     outline: none;
     min-width: 0;
   }
@@ -1654,7 +1747,7 @@
   }
   .conn-empty,
   .list-empty {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     padding: 8px 6px;
     line-height: 1.5;
@@ -1687,7 +1780,7 @@
     color: var(--text);
     border-radius: var(--radius-s);
     padding: 4px 7px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .list-search-input:focus {
     outline: none;
@@ -1702,7 +1795,7 @@
     border-radius: var(--radius-s);
     padding: 4px 7px;
     margin: 0 2px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .rename-input:focus {
     outline: none;
@@ -1713,7 +1806,7 @@
     background: transparent;
     color: var(--accent-text);
     cursor: pointer;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     padding: 8px 6px;
     text-align: center;
   }
@@ -1729,7 +1822,7 @@
     background: none;
     color: var(--accent-text);
     cursor: pointer;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     padding: 0;
   }
   .conn-item {
@@ -1750,10 +1843,10 @@
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
   }
   .conn-row.open:not(.active) .conn-item {
-    background: color-mix(in srgb, var(--text-dim) 7%, transparent);
+    background: var(--hover);
   }
   .conn-row.active .conn-item {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
   }
   .conn-head {
     display: flex;
@@ -1886,32 +1979,30 @@
   .conn-row:focus-within .conn-actions {
     opacity: 1;
   }
+  /* Touch has no hover: keep the ⋯ in the row's flow, always visible. */
+  @media (hover: none) {
+    .conn-actions {
+      position: static;
+      transform: none;
+      background: none;
+      box-shadow: none;
+      opacity: 1;
+    }
+  }
   .conn-glyph {
     display: grid;
     place-items: center;
     flex-shrink: 0;
     color: var(--text-dim);
   }
-  .conn-glyph.mysql,
-  .conn-glyph.clickhouse {
-    color: var(--accent-text);
-  }
-  .conn-glyph.postgres {
-    color: #336791;
-  }
-  .conn-glyph.redis {
-    color: #d2691e;
-  }
-  .conn-glyph.mongodb {
-    color: var(--status-working);
-  }
+  /* Engine glyphs stay neutral (no per-source hues); the kind tag names it. */
   .conn-row.active .conn-item .conn-glyph {
     color: var(--accent-text);
   }
   .conn-name {
     flex: 1;
     min-width: 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 500;
     line-height: 1.35;
     /* Show the FULL connection name instead of clipping it: wrap onto extra lines
@@ -1947,7 +2038,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     font-weight: 500;
     cursor: pointer;
   }
@@ -1995,7 +2086,7 @@
     height: 28px;
     padding: 0 6px;
     border-radius: var(--radius-s);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .saved-row:hover,
   .hist-row:hover {
@@ -2023,7 +2114,7 @@
   .hist-stmt {
     flex: 1;
     min-width: 0;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .hist-meta {
     font-size: var(--fs-xs);
@@ -2053,7 +2144,7 @@
     align-items: center;
     gap: 8px;
     padding: 7px 14px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.4;
     color: var(--status-working);
     background: color-mix(in srgb, var(--status-working) 12%, transparent);
@@ -2144,7 +2235,7 @@
     display: none;
   }
   .conn-tab-path {
-    font-size: 9px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--accent-text);
@@ -2185,7 +2276,7 @@
     background: transparent;
     color: inherit;
     cursor: pointer;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 500;
     padding: 0;
     height: 100%;
@@ -2196,19 +2287,7 @@
     flex-shrink: 0;
     color: var(--text-dim);
   }
-  .conn-tab-glyph.mysql,
-  .conn-tab-glyph.clickhouse {
-    color: var(--accent-text);
-  }
-  .conn-tab-glyph.postgres {
-    color: #336791;
-  }
-  .conn-tab-glyph.redis {
-    color: #d2691e;
-  }
-  .conn-tab-glyph.mongodb {
-    color: var(--status-working);
-  }
+  /* Engine glyphs stay neutral (no per-source hues); the kind tag names it. */
   .conn-tab.active .conn-tab-glyph {
     color: var(--accent-text);
   }
@@ -2286,7 +2365,20 @@
       display: none;
     }
   }
-  @container dbmain (max-width: 600px) {
+  /* Five views (SQL engines) + status + Changes + Test don't fit a ~740px
+     workbench: the status/utility buttons go icon-only first (they carry a
+     title + aria-label), so nothing is ever clipped off the trailing edge. */
+  @container dbmain (max-width: 900px) {
+    .main-tabs.many .conn-status .lbl {
+      display: none;
+    }
+  }
+  @container dbmain (max-width: 700px) {
+    .conn-status .lbl {
+      display: none;
+    }
+  }
+  @container dbmain (max-width: 640px) {
     .view-switch .mt {
       font-size: 0;
       gap: 0;
@@ -2328,7 +2420,7 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .conn-state.err {
@@ -2440,13 +2532,24 @@
   }
   .rail-label {
     writing-mode: vertical-rl;
-    font-size: 9px;
+    font-size: var(--fs-xs);
     letter-spacing: 0.12em;
     color: var(--text-dim);
     user-select: none;
   }
   .db-side.collapsed {
     display: none;
+  }
+  .empty-alt {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 6px;
+  }
+  .empty-note {
+    margin: 0;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
   }
 
   .side-resizer {
@@ -2537,10 +2640,10 @@
       text-align: start;
     }
     .acc-toggle .conn-head-title {
-      font-size: 12.5px;
+      font-size: var(--fs-m);
     }
     .acc-count {
-      font-size: 11px;
+      font-size: var(--fs-xs);
       color: var(--text-dim);
       background: var(--surface-2);
       border-radius: 999px;
@@ -2553,24 +2656,24 @@
     }
     /* Larger, legible text for the connection rows + tiny meta on phones. */
     .conn-name {
-      font-size: 15px;
+      font-size: var(--fs-l);
     }
     .conn-item {
       min-height: 40px;
     }
     .conn-head-title {
-      font-size: 12px;
+      font-size: var(--fs-s);
     }
     .conn-empty,
     .list-empty {
-      font-size: 13.5px;
+      font-size: var(--fs-m);
     }
     .hist-stmt {
-      font-size: 13px;
+      font-size: var(--fs-m);
     }
     .hist-meta,
     .count {
-      font-size: 12px;
+      font-size: var(--fs-s);
     }
     .saved-open {
       font-size: 14px;
@@ -2637,7 +2740,7 @@
     }
     .ss {
       height: 30px;
-      font-size: 13px;
+      font-size: var(--fs-m);
     }
     /* The status row (engine chip + Test) can wrap rather than overflow. */
     .conn-status {

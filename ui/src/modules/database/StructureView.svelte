@@ -686,10 +686,10 @@
       <div class="st-head-actions">
         {#if isSql && detail.kind === 'table'}
           <button class="btn small ghost" disabled={!canSchema} onclick={() => (designerOpen = true)} title="Edit columns → generates ALTER TABLE for review">
-            <Icon name="edit" size={11} />Design
+            <Icon name="edit" size={12} />Design
           </button>
         {/if}
-        <button class="btn small ghost" onclick={explain}><Icon name="zap" size={11} />Explain</button>
+        <button class="btn small ghost" onclick={explain}><Icon name="zap" size={12} />Explain</button>
       </div>
     </div>
 
@@ -791,7 +791,7 @@
           <span class="grow"></span>
           {#if canIndex}
             <button class="mini-btn" disabled={!canSchema} onclick={startNewIndex}>
-              <Icon name="plus" size={11} />New index
+              <Icon name="plus" size={12} />New index
             </button>
           {/if}
         </div>
@@ -808,7 +808,7 @@
                     title={defText != null ? 'View full definition' : undefined}
                     onclick={() => (openIdxDef = openIdxDef === i ? null : i)}
                   >
-                    <Icon name="key" size={11} />
+                    <Icon name="key" size={12} />
                     <span class="idx-name mono" title={idx.name}>{idx.name}</span>
                     {#if idx.unique}<span class="tag unique">unique</span>{/if}
                     {#if idx.method}<span class="tag">{idx.method}</span>{/if}
@@ -830,7 +830,7 @@
                           : 'Edit — prepares a drop + recreate for you to review and run'}
                         onclick={() => editIndex(idx)}
                       >
-                        <Icon name="edit" size={11} />
+                        <Icon name="edit" size={12} />
                       </button>
                       <button
                         class="idx-act danger"
@@ -841,7 +841,7 @@
                           : 'Drop — prepares the statement for you to review and run'}
                         onclick={() => dropIndex(idx)}
                       >
-                        <Icon name="trash" size={11} />
+                        <Icon name="trash" size={12} />
                       </button>
                     </div>
                   {/if}
@@ -852,11 +852,11 @@
                     <div class="idx-def-actions">
                       {#if snippet}
                         <button class="copy-ddl" onclick={() => copyText(snippet, 'createIndex')}>
-                          <Icon name="file" size={11} />Copy createIndex
+                          <Icon name="file" size={12} />Copy createIndex
                         </button>
                       {/if}
                       <button class="copy-ddl" onclick={() => copyText(defText, 'definition')}>
-                        <Icon name="file" size={11} />Copy
+                        <Icon name="file" size={12} />Copy
                       </button>
                     </div>
                     <pre class="ddl mono">{defText}</pre>
@@ -974,7 +974,7 @@
                       aria-label="Remove condition {ci + 1}"
                       onclick={() => removeIdxCond(ci)}
                     >
-                      <Icon name="trash" size={11} />
+                      <Icon name="trash" size={12} />
                     </button>
                   </div>
                 {/each}
@@ -1083,7 +1083,7 @@
           Details
           <span class="grow"></span>
           <button class="copy-ddl" onclick={() => copyText(prettyExtra(detail.extra), 'details')}>
-            <Icon name="file" size={11} />Copy
+            <Icon name="file" size={12} />Copy
           </button>
         </div>
         <!-- Collapsible: `extra.sample` carries a WHOLE document, which for a
@@ -1097,13 +1097,13 @@
       <div class="block">
         <div class="ddl-head">
           <button class="block-title toggle" onclick={() => (ddlOpen = !ddlOpen)}>
-            <Icon name={ddlOpen ? 'chevronDown' : 'chevronRight'} size={11} />
+            <Icon name={ddlOpen ? 'chevronDown' : 'chevronRight'} size={12} />
             DDL
           </button>
           <span class="grow"></span>
           {#if ddlOpen}
             <button class="copy-ddl" onclick={copyDdl}>
-              <Icon name="file" size={11} />Copy
+              <Icon name="file" size={12} />Copy
             </button>
           {/if}
         </div>
@@ -1183,7 +1183,7 @@
   }
   .st-title h2 {
     margin: 0;
-    font-size: 15px;
+    font-size: var(--fs-l);
     font-weight: 600;
     color: var(--text);
   }
@@ -1197,7 +1197,7 @@
     border-radius: 999px;
   }
   .rowcount {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .block {
@@ -1207,7 +1207,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -1227,7 +1227,7 @@
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
     text-transform: none;
     letter-spacing: 0;
@@ -1255,7 +1255,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -1274,7 +1274,7 @@
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     text-transform: none;
     letter-spacing: 0;
   }
@@ -1302,7 +1302,7 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     text-align: start;
     cursor: pointer;
   }
@@ -1389,7 +1389,7 @@
   .nested-tag {
     margin-left: 6px;
     padding: 0 4px;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
     border-radius: var(--radius-s);
@@ -1404,7 +1404,7 @@
   }
   .ib-empty {
     padding: 8px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .ib-cond {
     display: flex;
@@ -1420,7 +1420,7 @@
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .ib-cond select:first-child {
     max-width: 260px;
@@ -1436,11 +1436,11 @@
     border-color: var(--accent);
   }
   .ib-cond-hint {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-family: var(--font-mono, monospace);
   }
   .ib-warn {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     line-height: 1.5;
     color: var(--text-dim);
     border-inline-start: 2px solid var(--danger);
@@ -1457,7 +1457,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text);
   }
   .ib-name input {
@@ -1470,14 +1470,14 @@
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .ib-name input:focus {
     outline: none;
     border-color: var(--accent);
   }
   .ib-editing {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text-dim);
     border-inline-start: 2px solid var(--accent);
@@ -1488,7 +1488,7 @@
     gap: 6px;
   }
   .ib-hint {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .stats-grid {
     display: grid;
@@ -1503,7 +1503,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .stat .sk {
     color: var(--text-dim);
@@ -1563,7 +1563,7 @@
   .tbl td {
     padding: 5px 10px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     vertical-align: top;
   }
   .tbl tbody tr:hover td {
@@ -1575,10 +1575,7 @@
     white-space: nowrap;
   }
   .ty {
-    color: #0e8a8a;
-  }
-  :global(html[data-scheme='dark']) .ty {
-    color: #56c8d8;
+    color: var(--info);
   }
   .nullable {
     color: var(--text-dim);
@@ -1586,7 +1583,7 @@
   }
   .pk {
     margin-inline-start: 6px;
-    font-size: 9px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
@@ -1600,7 +1597,7 @@
   .comment {
     color: var(--text-dim);
     font-style: italic;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .chips,
   .idx-list,
@@ -1617,7 +1614,7 @@
     flex-wrap: wrap;
   }
   .key-chip {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     background: var(--surface-2);
     border: 1px solid var(--border);
     padding: 2px 9px;
@@ -1635,7 +1632,7 @@
     background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     min-width: 0;
   }
   .idx-row:hover {
@@ -1704,7 +1701,7 @@
   button.idx {
     min-width: 0;
     font: inherit;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     text-align: start;
     cursor: default;
@@ -1746,7 +1743,7 @@
     overflow: hidden;
   }
   .tag {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 16%, transparent);
@@ -1763,7 +1760,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 12px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     overflow: auto;
     max-height: 360px;
@@ -1781,7 +1778,7 @@
     user-select: text;
   }
   .ddl-missing {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text-dim);
     background: var(--surface-2);
@@ -1790,7 +1787,7 @@
     padding: 10px 12px;
   }
   .ddl-missing code {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
     padding: 0 4px;
     border-radius: 3px;

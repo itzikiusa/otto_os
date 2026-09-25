@@ -18,6 +18,7 @@
   import { vaultGraph, vaultSwitcher, type VaultGraphQuery } from '../../lib/api/vault';
   import type { VaultGraphPayload, VaultSwitchHit } from '../../lib/api/types';
   import { vault } from './vault.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import type { GraphWorkerIn, GraphWorkerOut } from './graph.worker';
 
@@ -1289,7 +1290,7 @@
     ></div>
     <button class="panel-head" onclick={() => (panelOpen = !panelOpen)} aria-expanded={panelOpen}>
       <span>Graph</span>
-      <span class="tri">{panelOpen ? '▾' : '▸'}</span>
+      <span class="tri"><Icon name={panelOpen ? 'chevronDown' : 'chevronRight'} size={12} /></span>
     </button>
     {#if panelOpen}
       <div class="panel-body">
@@ -1311,7 +1312,8 @@
                 title={a}
                 onclick={() => (anchorPaths = anchorPaths.filter((x) => x !== a))}
               >
-                {a.split('/').pop()?.replace(/\.md$/, '')} ×
+                <span class="pill-t">{a.split('/').pop()?.replace(/\.md$/, '')}</span>
+                <Icon name="x" size={10} />
               </button>
             {/each}
           </div>
@@ -1434,7 +1436,7 @@
           {#if expandedGroups.length}
             <div class="chips">
               {#each expandedGroups as g (g)}
-                <button class="pill" onclick={() => toggleGroup(g)}>{g} ×</button>
+                <button class="pill" title="Collapse {g}" onclick={() => toggleGroup(g)}><span class="pill-t">{g}</span> <Icon name="x" size={10} /></button>
               {/each}
             </div>
           {/if}
@@ -1519,7 +1521,7 @@
     width: 100%;
     height: 100%;
     overflow: hidden;
-    background: var(--bg, #1e1e23);
+    background: var(--bg);
   }
   canvas {
     position: absolute;
@@ -1539,8 +1541,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    color: var(--text-dim, #98989f);
-    font-size: 13px;
+    color: var(--text-dim);
+    font-size: var(--fs-m);
     pointer-events: none;
     padding: 20px;
     text-align: center;
@@ -1557,10 +1559,10 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 11px;
-    color: var(--text-dim, #98989f);
-    background: color-mix(in srgb, var(--surface, #1c1c1e) 82%, transparent);
-    border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--surface) 82%, transparent);
+    border: 1px solid var(--border);
     border-radius: var(--radius-m, 8px);
     padding: 4px 8px;
     backdrop-filter: blur(8px);
@@ -1568,27 +1570,27 @@
   .chip {
     padding: 1px 6px;
     border-radius: 999px;
-    background: var(--surface-2, #323238);
+    background: var(--surface-2);
     font-size: var(--fs-xs);
   }
   .chip.warn {
-    color: var(--status-warn, #e0a000);
-    background: var(--status-warn-soft, rgba(224, 160, 0, 0.16));
+    color: var(--status-warn);
+    background: var(--status-warn-soft);
   }
   .chip.sim {
-    color: var(--accent, #0a84ff);
+    color: var(--accent-text);
   }
   .mini {
     font-size: var(--fs-xs);
     padding: 2px 7px;
-    border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+    border: 1px solid var(--border);
     border-radius: var(--radius-s, 5px);
-    background: var(--surface-2, #323238);
-    color: var(--text, #f2f2f5);
+    background: var(--surface-2);
+    color: var(--text);
     cursor: pointer;
   }
   .mini:hover {
-    border-color: var(--accent, #0a84ff);
+    border-color: var(--accent);
   }
 
   .panel {
@@ -1597,13 +1599,13 @@
     right: 8px;
     /* Width comes from the store (drag-resizable); this is the fallback. */
     width: 210px;
-    background: color-mix(in srgb, var(--surface, #1c1c1e) 92%, transparent);
-    border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+    background: color-mix(in srgb, var(--surface) 92%, transparent);
+    border: 1px solid var(--border);
     border-radius: var(--radius-m, 8px);
-    box-shadow: var(--shadow, 0 8px 30px rgba(0, 0, 0, 0.45));
+    box-shadow: var(--shadow);
     backdrop-filter: blur(10px);
-    font-size: 11px;
-    color: var(--text, #f2f2f5);
+    font-size: var(--fs-xs);
+    color: var(--text);
     /* Never taller than the view — the body scrolls (floating-UI rule). */
     max-height: calc(100% - 16px);
     display: flex;
@@ -1617,13 +1619,14 @@
     padding: 6px 10px;
     background: none;
     border: none;
-    color: var(--text, #f2f2f5);
-    font-size: 11px;
+    color: var(--text);
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
   }
   .tri {
-    color: var(--text-dim, #98989f);
+    display: inline-flex;
+    color: var(--text-dim);
   }
   .panel-body {
     padding: 0 10px 10px;
@@ -1659,7 +1662,7 @@
   }
   .panel-resizer:hover,
   .panel.resizing .panel-resizer {
-    background: color-mix(in srgb, var(--accent, #0a84ff) 45%, transparent);
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   /* Suspend hover affordances mid-drag so the pointer doesn't flicker. */
   .panel.resizing {
@@ -1668,11 +1671,11 @@
   .filter {
     width: 100%;
     padding: 4px 6px;
-    font-size: 11px;
-    background: var(--surface-2, #323238);
-    border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+    font-size: var(--fs-xs);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
     border-radius: var(--radius-s, 5px);
-    color: var(--text, #f2f2f5);
+    color: var(--text);
   }
   .sec {
     display: flex;
@@ -1680,11 +1683,11 @@
     justify-content: space-between;
     gap: 6px;
     margin-top: 6px;
-    font-size: 9px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     letter-spacing: 0.06em;
     text-transform: uppercase;
-    color: var(--text-dim, #98989f);
+    color: var(--text-dim);
     /* Now that the panel is one long scroller, pin the section label so you can
        always tell which group the rows under the pointer belong to. Needs an
        opaque background or rows would show through as it sticks. */
@@ -1692,7 +1695,7 @@
     top: 0;
     z-index: 1;
     padding-block: 3px;
-    background: var(--surface, #1c1c1e);
+    background: var(--surface);
   }
   .sec.sub {
     margin-top: 8px;
@@ -1702,14 +1705,14 @@
     padding: 0;
     border: none;
     background: none;
-    color: var(--accent, #0a84ff);
-    font-size: 9px;
+    color: var(--accent-text);
+    font-size: var(--fs-xs);
     letter-spacing: 0.06em;
     text-transform: uppercase;
     cursor: pointer;
   }
   .hint {
-    color: var(--text-dim, #98989f);
+    color: var(--text-dim);
     font-size: var(--fs-xs);
     line-height: 1.35;
   }
@@ -1738,7 +1741,7 @@
   }
   .fc {
     flex: 0 0 auto;
-    color: var(--text-dim, #98989f);
+    color: var(--text-dim);
     font-variant-numeric: tabular-nums;
     font-size: var(--fs-xs);
   }
@@ -1748,21 +1751,29 @@
     flex-wrap: wrap;
     gap: 3px;
   }
+  /* Label ellipsizes in its own span; the × icon stays whole (ellipsis on
+     the button itself would clip the icon, not the text). */
   .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     max-width: 100%;
     padding: 1px 6px;
-    border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+    border: 1px solid var(--border);
     border-radius: 999px;
-    background: var(--surface-2, #323238);
-    color: var(--text, #f2f2f5);
+    background: var(--surface-2);
+    color: var(--text);
     font-size: var(--fs-xs);
     cursor: pointer;
-    overflow: hidden;
-    text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .pill-t {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .pill:hover {
-    border-color: var(--accent, #0a84ff);
+    border-color: var(--accent);
   }
 
   .typeahead {
@@ -1774,9 +1785,9 @@
     padding: 0;
     max-height: 150px;
     overflow-y: auto;
-    border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+    border: 1px solid var(--border);
     border-radius: var(--radius-s, 5px);
-    background: var(--surface-2, #323238);
+    background: var(--surface-2);
   }
   .hits button {
     display: block;
@@ -1784,8 +1795,8 @@
     padding: 3px 6px;
     border: none;
     background: none;
-    color: var(--text, #f2f2f5);
-    font-size: 11px;
+    color: var(--text);
+    font-size: var(--fs-xs);
     text-align: left;
     cursor: pointer;
     overflow: hidden;
@@ -1793,7 +1804,7 @@
     white-space: nowrap;
   }
   .hits button:hover {
-    background: color-mix(in srgb, var(--accent, #0a84ff) 22%, transparent);
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .chk {
     display: flex;
@@ -1811,7 +1822,7 @@
   }
   .row > span:first-child {
     flex: 0 0 62px;
-    color: var(--text-dim, #98989f);
+    color: var(--text-dim);
   }
   .row input[type='range'] {
     flex: 1;
@@ -1819,17 +1830,17 @@
   }
   .row select {
     flex: 1;
-    font-size: 11px;
-    background: var(--surface-2, #323238);
-    border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+    font-size: var(--fs-xs);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
     border-radius: var(--radius-s, 5px);
-    color: var(--text, #f2f2f5);
+    color: var(--text);
     padding: 2px 4px;
   }
   .val {
     flex: 0 0 30px;
     text-align: right;
-    color: var(--text-dim, #98989f);
+    color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
 
@@ -1837,12 +1848,12 @@
     position: absolute;
     max-width: 260px;
     padding: 3px 8px;
-    font-size: 11px;
-    color: var(--text, #f2f2f5);
-    background: color-mix(in srgb, var(--surface, #1c1c1e) 94%, transparent);
-    border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+    font-size: var(--fs-xs);
+    color: var(--text);
+    background: color-mix(in srgb, var(--surface) 94%, transparent);
+    border: 1px solid var(--border);
     border-radius: var(--radius-s, 5px);
-    box-shadow: var(--shadow, 0 8px 30px rgba(0, 0, 0, 0.45));
+    box-shadow: var(--shadow);
     pointer-events: none;
     white-space: nowrap;
     overflow: hidden;
@@ -1851,6 +1862,6 @@
   }
   .tmeta {
     margin-left: 6px;
-    color: var(--text-dim, #98989f);
+    color: var(--text-dim);
   }
 </style>

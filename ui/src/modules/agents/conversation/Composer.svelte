@@ -20,6 +20,7 @@
   import { events } from '../../../lib/events.svelte';
   import { sessionState } from '../../../lib/status';
   import StatusDot from '../../../lib/components/StatusDot.svelte';
+  import Icon from '../../../lib/components/Icon.svelte';
 
   interface Props {
     sessionId: string;
@@ -276,14 +277,14 @@
           onpaste={onPaste}
           aria-autocomplete="list"
         ></textarea>
-        <button class="send icon-btn" onclick={() => void send()} disabled={!canSend} title="Send (⏎)" aria-label="Send">➤</button>
+        <button class="send icon-btn" onclick={() => void send()} disabled={!canSend} title="Send (⏎)" aria-label="Send"><Icon name="send" size={14} /></button>
       </div>
       {#if attachments.length}
         <div class="thumbs" data-attachments={attachments.length}>
           {#each attachments as a (a.path)}
             <div class="thumb" title={a.path}>
               <img src={a.url} alt={a.name} />
-              <button class="thumb-x" onclick={() => removeAttachment(a)} title="Remove" aria-label="Remove {a.name}">×</button>
+              <button class="thumb-x" onclick={() => removeAttachment(a)} title="Remove" aria-label="Remove {a.name}"><Icon name="x" size={12} /></button>
             </div>
           {/each}
         </div>
@@ -351,7 +352,7 @@
     background: none;
     color: var(--text);
     font: inherit;
-    font-size: 13.5px;
+    font-size: var(--fs-m);
     line-height: 1.5;
     min-height: 62px;
     max-height: 40vh;
@@ -368,7 +369,6 @@
   .send {
     flex-shrink: 0;
     color: var(--accent-text);
-    font-size: 14px;
   }
   .send:disabled {
     opacity: 0.4;
@@ -401,7 +401,7 @@
     padding: 5px 8px;
     border-radius: var(--radius-s);
     cursor: pointer;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     min-width: 0;
   }
   .cmd-row.active {
@@ -416,7 +416,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .cmd-src {
     font-size: var(--fs-xs);
@@ -458,9 +458,9 @@
     border-radius: 50%;
     border: 0;
     background: rgba(0, 0, 0, 0.6);
-    color: #fff;
-    font-size: 13px;
-    line-height: 18px;
+    color: #fff; /* on the fixed dark scrim over the image, in every theme */
+    display: grid;
+    place-items: center;
     padding: 0;
     cursor: pointer;
   }
@@ -498,11 +498,11 @@
   }
   .term-input {
     margin-top: 6px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     padding: 4px 10px;
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--status-warn, #e0a000) 12%, var(--surface));
-    border: 1px dashed color-mix(in srgb, var(--status-warn, #e0a000) 50%, var(--border));
+    background: color-mix(in srgb, var(--status-warn) 12%, var(--surface));
+    border: 1px dashed color-mix(in srgb, var(--status-warn) 50%, var(--border));
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -518,7 +518,7 @@
     justify-content: center;
     gap: 10px;
     padding: 6px 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   /* ≤420px: the slash-command hint is the first thing to go (it is a one-off
      tip, not state). Replaces the old window media query — a wide window with a

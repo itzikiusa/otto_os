@@ -189,7 +189,7 @@ test('goals panel: a task’s goals render with status', async ({ page }) => {
   // The seeded goals are on the "Design data model" task — open THAT card's panel.
   const card = page.locator('.card', { hasText: 'Design data model' }).first();
   await expect(card).toBeVisible({ timeout: 15_000 });
-  await card.locator('[aria-label="goals"]').click();
+  await card.locator('[aria-label="Goals"]').click();
   const panel = page.locator('[role="dialog"]', { hasText: 'Goals' }).first();
   await expect(panel).toBeVisible({ timeout: 10_000 });
   await expect(panel.getByText('Runs under 2 minutes', { exact: false }).first()).toBeVisible({ timeout: 10_000 });

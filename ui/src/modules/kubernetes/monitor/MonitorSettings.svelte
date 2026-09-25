@@ -336,14 +336,14 @@
           </div>
           {#if p.format === 'json'}
             <div class="sub-block">
-              <div class="row between"><span class="dim small">Field mappings</span>{#if canEdit}<button class="btn small ghost" onclick={() => addMapping(p)}><Icon name="plus" size={11} /> Mapping</button>{/if}</div>
+              <div class="row between"><span class="dim small">Field mappings</span>{#if canEdit}<button class="btn small ghost" onclick={() => addMapping(p)}><Icon name="plus" size={12} /> Mapping</button>{/if}</div>
               {#each p.mappings ?? [] as m, j (j)}
                 <div class="map">
                   <input class="input mono" placeholder="memory_stats.sys" bind:value={m.field} disabled={!canEdit} title="Dotted path; numbers index arrays" />
                   <input class="input mono" placeholder="metric name" bind:value={m.metric} disabled={!canEdit} />
                   <input class="input mono" placeholder="or label" bind:value={m.label} disabled={!canEdit} />
                   <button class="input picker" onclick={(e) => unitMenu(e, m)} disabled={!canEdit}>{m.unit ?? 'number'}</button>
-                  {#if canEdit}<button class="icon-btn" onclick={() => removeMapping(p, j)} aria-label="Remove mapping"><Icon name="x" size={12} /></button>{/if}
+                  {#if canEdit}<button class="icon-btn" onclick={() => removeMapping(p, j)} aria-label="Remove mapping" title="Remove mapping"><Icon name="x" size={12} /></button>{/if}
                   {#if errors[`probe.${i}.map.${j}`]}<em class="err span">{errors[`probe.${i}.map.${j}`]}</em>{/if}
                 </div>
               {/each}
@@ -372,7 +372,7 @@
           {:else}
             <input class="input mono" placeholder={x.kind === 'workload' ? 'cronjob:*' : '*-confsrv-*'} bind:value={x.match} disabled={!canEdit} />
           {/if}
-          {#if canEdit}<button class="icon-btn" onclick={() => removeExclusion(i)} aria-label="Remove exclusion"><Icon name="x" size={12} /></button>{/if}
+          {#if canEdit}<button class="icon-btn" onclick={() => removeExclusion(i)} aria-label="Remove exclusion" title="Remove exclusion"><Icon name="x" size={12} /></button>{/if}
           {#if errors[`ex.${i}`]}<em class="err span">{errors[`ex.${i}`]}</em>{/if}
         </div>
       {/each}
@@ -395,7 +395,7 @@
           <div class="tp" class:bad={!pr.ok} data-testid="k8s-monitor-test-probe">
             <div class="row between">
               <span><b>{pr.name}</b> {#if pr.port}<span class="dim">:{pr.port}</span>{/if}</span>
-              <span class="dim small">{pr.ok ? `HTTP ${pr.status} · ${pr.ms} ms · ${pr.sample_count ?? 0} sample(s)` : (pr.error ?? `HTTP ${pr.status}`)}{#if pr.parse_errors} · {pr.parse_errors} parse error(s){/if}{#if pr.capped} · capped{/if}</span>
+              <span class="dim small">{pr.ok ? `HTTP ${pr.status} · ${pr.ms} ms · ${pr.sample_count ?? 0} sample(s)` : (pr.error ?? `HTTP ${pr.status}`)}{#if pr.parse_errors}{' '}· {pr.parse_errors} parse error(s){/if}{#if pr.capped}{' '}· capped{/if}</span>
             </div>
             {#if pr.labels && Object.keys(pr.labels).length}
               <div class="row wrap">{#each Object.entries(pr.labels) as [k, v] (k)}<span class="chip accent">{k}={v}</span>{/each}</div>
@@ -432,7 +432,7 @@
   }
   h3 {
     margin: 0;
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .row {
@@ -456,10 +456,10 @@
     font-weight: 600;
   }
   .status {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .rbac {
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     padding: 8px;
     border-radius: 6px;
     background: color-mix(in srgb, orange 8%, var(--surface));
@@ -488,7 +488,7 @@
     display: flex;
     flex-direction: column;
     gap: 3px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     min-width: 0;
   }
   .field > span {
@@ -504,14 +504,14 @@
   .err {
     color: var(--status-exited);
     font-style: normal;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .err.span {
     grid-column: 1 / -1;
   }
   .help {
     margin: 0;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .probe {
     border: 1px solid var(--border);
@@ -550,7 +550,7 @@
     align-items: center;
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .dim {
     color: var(--text-dim);
@@ -560,7 +560,7 @@
   }
   .error {
     color: var(--status-exited);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .test {
     display: flex;
@@ -579,7 +579,7 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .tp.bad {
     border-color: color-mix(in srgb, var(--status-exited) 40%, var(--border));
@@ -587,7 +587,7 @@
   .samples {
     width: 100%;
     border-collapse: collapse;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .samples td {
     padding: 2px 6px;

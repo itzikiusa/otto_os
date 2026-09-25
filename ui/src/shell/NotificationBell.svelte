@@ -528,12 +528,12 @@
   .bell-backdrop {
     position: fixed;
     inset: 0;
-    z-index: 9000;
+    z-index: calc(var(--z-popover-backdrop) - 2);
   }
   .nb-pop {
     /* top/left/width/max-height come from place() — clamped to the viewport. */
     position: fixed;
-    z-index: 9001;
+    z-index: calc(var(--z-popover-backdrop) - 1);
     display: flex;
     flex-direction: column;
   }

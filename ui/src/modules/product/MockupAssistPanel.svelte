@@ -203,7 +203,7 @@
     display: inline-flex;
     align-items: center;
     gap: 7px;
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
   }
   .ma-format {
@@ -216,7 +216,7 @@
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 3px 10px;
     cursor: pointer;
@@ -242,7 +242,7 @@
     align-items: center;
   }
   .ma-provider select {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 2px 5px;
     border: 1px solid var(--border);
     border-radius: 999px;
@@ -255,7 +255,7 @@
     opacity: 0.55;
   }
   .ma-working {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--accent-text);
     font-weight: 600;
   }
@@ -267,7 +267,7 @@
     color: var(--text-dim);
     cursor: pointer;
     padding: 4px;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
   }
   .ma-close:hover {
     background: color-mix(in srgb, var(--text) 8%, transparent);
@@ -305,7 +305,9 @@
     min-height: 0;
     display: flex;
     position: relative;
-    background: #1e1e1e;
+    /* The Terminal paints its own (forced-dark) background; the empty state
+       sits on the normal surface so its text uses the scheme's tokens. */
+    background: var(--surface-2);
   }
   .embedded .ma-shell {
     min-height: 180px;
@@ -317,7 +319,7 @@
   .ma-empty {
     margin: auto;
     text-align: center;
-    color: var(--text-dim, #aaa);
+    color: var(--text-dim);
     padding: 20px;
   }
   .embedded .ma-empty {
@@ -325,21 +327,21 @@
   }
   .ma-empty .lead {
     margin: 0 0 6px;
-    font-size: 14px;
+    font-size: var(--fs-m);
     font-weight: 600;
-    color: #eee;
+    color: var(--text);
   }
   .embedded .ma-empty .lead {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .ma-empty .hint {
     margin: 0 0 14px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     max-width: 320px;
   }
   .embedded .ma-empty .hint {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .ma-starters {
     display: flex;
@@ -347,11 +349,11 @@
     gap: 6px;
   }
   .ma-starter {
-    border: 1px solid color-mix(in srgb, #fff 18%, transparent);
-    background: color-mix(in srgb, #fff 6%, transparent);
-    color: #ddd;
-    border-radius: 8px;
-    font-size: 11.5px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    border-radius: var(--radius-m);
+    font-size: var(--fs-xs);
     padding: 6px 9px;
     cursor: pointer;
     text-align: start;
@@ -359,7 +361,7 @@
   }
   .ma-starter:hover {
     border-color: var(--accent);
-    color: #fff;
+    background: var(--hover);
   }
   .ma-composer {
     flex: none;
@@ -377,11 +379,11 @@
     min-width: 0;
     resize: none;
     border: 1px solid var(--border);
-    border-radius: 10px;
+    border-radius: var(--radius-m);
     background: var(--bg);
     color: var(--text);
     font: inherit;
-    font-size: 13px;
+    font-size: var(--fs-m);
     padding: 8px 10px;
     outline: none;
   }
@@ -397,8 +399,8 @@
     flex: none;
     border: none;
     border-radius: 50%;
-    background: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
     cursor: pointer;
   }
   .ma-send:disabled {

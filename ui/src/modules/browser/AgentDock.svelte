@@ -23,6 +23,13 @@
   const status = $derived(sessionId ? (ws.statusMap[sessionId] ?? session?.status ?? null) : null);
   const readOnly = $derived(ws.myRole === 'viewer');
   const open = $derived(ui.browserAgentOpen);
+  /** Sentence-case status words (the same ones the share view and session rows use). */
+  const STATUS_LABEL: Record<string, string> = {
+    running: 'Running',
+    idle: 'Idle',
+    exited: 'Ended',
+    reconnectable: 'Disconnected — resume it in Agents',
+  };
 
   // Drop a stale binding once the session list is loaded: the session was
   // archived/deleted, or isn't an agent session any more.
@@ -117,41 +124,43 @@
   {/if}
 
   <header class="head">
-    <button
-      class="collapse"
-      onclick={() => ui.setBrowserAgentOpen(!open)}
-      title={open ? 'Collapse agent' : 'Expand agent'}
-      aria-label={open ? 'Collapse agent' : 'Expand agent'}
-      aria-expanded={open}
-      disabled={!sessionId}
-    >
-      <Icon name={open && sessionId ? 'chevronDown' : 'chevronUp'} size={12} />
-    </button>
+    {#if sessionId}
+      <button
+        class="icon-btn collapse"
+        onclick={() => ui.setBrowserAgentOpen(!open)}
+        title={open ? 'Collapse agent' : 'Expand agent'}
+        aria-label={open ? 'Collapse agent' : 'Expand agent'}
+        aria-expanded={open}
+      >
+        <Icon name={open ? 'chevronDown' : 'chevronUp'} size={12} />
+      </button>
+    {/if}
     <span class="title"><Icon name="terminal" size={14} /> Agent</span>
     {#if session}
       <span class="name" title={session.title}>{session.title}</span>
-      {#if status === 'working'}<span class="working">working…</span>{:else if status}<span class="dim">{status}</span>{/if}
-      <button class="act" onclick={pick} title="Attach a different session">
-        <Icon name="grid" size={12} /> Switch
+      {#if status === 'working'}<span class="working">Working…</span>{:else if status}<span class="dim">{STATUS_LABEL[status] ?? status}</span>{/if}
+      <span class="spacer"></span>
+      <button class="btn small" onclick={pick} title="Attach a different session">
+        <Icon name="swap" size={12} /> Switch
       </button>
-      <button class="close" onclick={() => browser.setAgentSession(null)} aria-label="Detach session" title="Detach — the session keeps running in Agents">
+      <button class="icon-btn" onclick={() => browser.setAgentSession(null)} aria-label="Detach session" title="Detach — the session keeps running in Agents">
         <Icon name="x" size={14} />
       </button>
     {:else}
-      <span class="dim">No session attached</span>
+      <span class="dim no-session">No session attached</span>
       {#if !readOnly}
         <span class="spacer"></span>
         {#if providers.length > 1}
-          <select class="provider" bind:value={provider} title="Which agent to start" disabled={creating}>
+          <select class="provider" bind:value={provider} title="Which agent to start" aria-label="Agent to start" disabled={creating}>
             {#each providers as p (p)}
               <option value={p}>{p}</option>
             {/each}
           </select>
         {/if}
-        <button class="act" onclick={pick} disabled={creating}>
-          <Icon name="terminal" size={12} /> Attach…
+        <button class="btn small" onclick={pick} disabled={creating} title="Attach an agent session that's already running">
+          <Icon name="link" size={12} /> Attach…
         </button>
-        <button class="act primary" onclick={() => void createAgent()} disabled={creating}>
+        <button class="btn small" onclick={() => void createAgent()} disabled={creating} title="Start a new agent session for this page">
           <Icon name="plus" size={12} /> {creating ? 'Starting…' : 'New agent'}
         </button>
       {/if}
@@ -168,7 +177,7 @@
     </div>
   {/if}
 
-  <AskBar {sessionId} unboundHint="Attach or start an agent to ask about this page." />
+  <AskBar {sessionId} terminalVisible={open && !!sessionId} unboundHint="Attach or start an agent to ask about this page." />
 </aside>
 
 <style>
@@ -193,7 +202,7 @@
     right: 0;
     height: 6px;
     cursor: row-resize;
-    z-index: 2;
+    z-index: var(--z-sticky);
   }
   .resize-handle:hover,
   .assistant.resizing .resize-handle {
@@ -203,33 +212,38 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 10px;
+    padding: 6px 12px;
     border-bottom: 1px solid var(--border);
     flex: none;
-    min-height: 34px;
+    min-height: 40px;
+    min-width: 0;
   }
   .title {
     display: inline-flex;
     align-items: center;
-    gap: 7px;
-    font-size: 13px;
+    gap: 6px;
+    font-size: var(--fs-m);
     font-weight: 600;
+    flex-shrink: 0;
   }
   .name {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     max-width: 260px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .dim {
-    font-size: 11px;
-    color: var(--text-dim, #888);
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    white-space: nowrap;
   }
   .working {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--accent-text);
     font-weight: 600;
+    white-space: nowrap;
   }
   .spacer {
     flex: 1;
@@ -238,77 +252,34 @@
     border: 1px solid var(--border);
     background: var(--bg);
     color: var(--text);
-    border-radius: 6px;
-    font-size: 11px;
-    padding: 2px 5px;
+    border-radius: var(--radius-s);
+    font-size: var(--fs-s);
+    padding: 2px 6px;
+    height: 24px;
     cursor: pointer;
     text-transform: capitalize;
   }
   .collapse {
-    display: inline-flex;
-    align-items: center;
-    border: none;
-    background: none;
-    color: var(--text-dim, #888);
-    cursor: pointer;
-    padding: 4px;
-    border-radius: 6px;
-  }
-  .collapse:disabled {
-    opacity: 0.4;
-    cursor: default;
-  }
-  .act {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
+    width: 24px;
     height: 24px;
-    padding: 0 8px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    font-size: 11px;
-    cursor: pointer;
-  }
-  .act:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text) 8%, transparent);
-  }
-  .act.primary {
-    border-color: var(--accent);
-    color: var(--accent-text);
-  }
-  .act:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-  .close {
-    margin-inline-start: 4px;
-    display: inline-flex;
-    border: none;
-    background: none;
-    color: var(--text-dim, #888);
-    cursor: pointer;
-    padding: 4px;
-    border-radius: 6px;
-  }
-  .close:hover {
-    background: color-mix(in srgb, var(--text) 8%, transparent);
-  }
-  /* With a session bound, Switch + Detach sit at the trailing edge. */
-  .name ~ .act {
-    margin-inline-start: auto;
   }
   .agent-shell {
     flex: 1 1 auto;
     min-height: 0;
     display: flex;
     position: relative;
-    background: #1e1e1e;
+    /* The Terminal is forceDark; this only shows for a frame while it mounts. */
+    background: var(--bg);
   }
   .agent-shell > :global(*) {
     flex: 1 1 auto;
     min-height: 0;
+  }
+  /* Phone: the ask bar's placeholder already says nothing is attached, so the
+     label goes and the actions keep one row. */
+  @media (max-width: 640px) {
+    .no-session {
+      display: none;
+    }
   }
 </style>

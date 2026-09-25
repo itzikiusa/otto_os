@@ -24,6 +24,14 @@ import { aws } from './stores/aws.svelte';
 import { transcript } from './stores/transcript.svelte';
 import { apiClient } from './stores/apiClient.svelte';
 import { assistant } from './stores/assistant.svelte';
+import { uiControl } from './stores/uiControl.svelte';
+import {
+  handleUiFrame,
+  helloFrame,
+  onUiCapabilitiesChanged,
+  presenceFrame,
+  uiSocketClosed,
+} from './uiCommands';
 
 // ---------------------------------------------------------------------------
 // improvement_updated — simple reactive counter so subscribed pages refresh.
@@ -357,6 +365,61 @@ class EventsClient {
   // True once any connection has opened — distinguishes a RE-connect (which
   // must resync event-driven stores; events were lost) from the first connect.
   private everConnected = false;
+  // Agent UI control (ws.md §2): this socket is no longer receive-only — it
+  // introduces the document (`hello`) and keeps the daemon's picture of it
+  // current (`presence`, debounced), so an agent's `ui_command` reaches the
+  // pane the user can see. Listeners live for the client's lifetime.
+  private presenceTimer: ReturnType<typeof setTimeout> | null = null;
+  private presenceWired = false;
+  private lastPresence = '';
+
+  /** Send a client frame on the open socket (dropped while disconnected —
+   *  the next `hello` carries the current state anyway). */
+  private sendFrame(frame: object): void {
+    if (this.sock?.readyState !== WebSocket.OPEN) return;
+    try {
+      this.sock.send(JSON.stringify(frame));
+    } catch {
+      /* closing */
+    }
+  }
+
+  private sendHello(): void {
+    const hello = helloFrame();
+    this.lastPresence = JSON.stringify({ r: hello.route, f: hello.focused, v: hello.visible });
+    this.sendFrame(hello);
+  }
+
+  /** Route / focus / visibility changed: one `presence` 250 ms later, and only
+   *  when something the daemon ranks by actually changed. */
+  private schedulePresence = (): void => {
+    if (this.presenceTimer) clearTimeout(this.presenceTimer);
+    this.presenceTimer = setTimeout(() => {
+      this.presenceTimer = null;
+      const p = presenceFrame();
+      const sig = JSON.stringify({ r: p.route, f: p.focused, v: p.visible });
+      if (sig === this.lastPresence) return;
+      this.lastPresence = sig;
+      this.sendFrame(p);
+    }, 250);
+  };
+
+  private wirePresence(): void {
+    if (this.presenceWired || typeof window === 'undefined') return;
+    this.presenceWired = true;
+    window.addEventListener('hashchange', this.schedulePresence);
+    window.addEventListener('focus', this.schedulePresence);
+    window.addEventListener('blur', this.schedulePresence);
+    // Focus moving between this document and the side pane's iframe.
+    document.addEventListener('focusin', this.schedulePresence);
+    document.addEventListener('visibilitychange', this.schedulePresence);
+    // A module that registers its handlers late: re-introduce the document.
+    let t: ReturnType<typeof setTimeout> | null = null;
+    onUiCapabilitiesChanged(() => {
+      if (t) clearTimeout(t);
+      t = setTimeout(() => this.sendHello(), 100);
+    });
+  }
 
   start(): void {
     this.stopped = false;
@@ -366,6 +429,7 @@ class EventsClient {
   stop(): void {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
+    uiSocketClosed();
     this.sock?.close();
     this.sock = null;
     this.state = 'offline';
@@ -393,6 +457,7 @@ class EventsClient {
       this.sock.close();
     }
     this.sock = null;
+    uiSocketClosed();
     this.connect();
   }
 
@@ -423,6 +488,7 @@ class EventsClient {
 
   private connect(): void {
     if (this.stopped) return;
+    this.wirePresence();
     this.state = 'connecting';
     try {
       // Bearer token travels in Sec-WebSocket-Protocol, not the URL query.
@@ -440,6 +506,7 @@ class EventsClient {
       this.everConnected = true;
       this.state = 'connected';
       this.backoff = 1000;
+      this.sendHello();
       if (reconnected) this.resyncAfterReconnect();
       // The Assistant's needs-you badge lives in the sidebar, so it loads on
       // first connect too (quietly: an older daemon without the route → no badge).
@@ -448,7 +515,11 @@ class EventsClient {
     this.sock.onmessage = (ev: MessageEvent) => {
       if (typeof ev.data !== 'string') return;
       try {
-        const parsed = JSON.parse(ev.data) as OttoEvent;
+        const data: unknown = JSON.parse(ev.data);
+        // Per-connection UI-control frames (hello_ack / ui_command /
+        // ui_command_cancel) never reach the event stores.
+        if (handleUiFrame(data)) return;
+        const parsed = data as OttoEvent;
         if (parsed.type === 'notification') {
           notifications.ingest(parsed.notice);
           // A "waiting"/blocked notice (Claude's Notification hook) means a
@@ -646,8 +717,13 @@ class EventsClient {
           // also takes the artifact / index events (Outputs panel + rescan bar).
           transcript.applyEvent(parsed);
           if (parsed.type !== 'transcript_appended' && parsed.type !== 'transcript_live') activity.applyEvent(parsed);
+        } else if (parsed.type === 'ui_control_requested') {
+          // An agent asked to drive the UI: the session's pane shows the prompt.
+          uiControl.applyEvent(parsed);
         } else {
           if (parsed.type === 'session_removed') activity.forget(parsed.session_id);
+          // The grant lives in session meta; a removed session drops its prompt.
+          if (parsed.type === 'session_meta_updated' || parsed.type === 'session_removed') uiControl.applyEvent(parsed);
           ws.applyEvent(parsed);
         }
       } catch {
@@ -656,6 +732,7 @@ class EventsClient {
     };
     this.sock.onclose = () => {
       this.state = 'offline';
+      uiSocketClosed();
       this.scheduleReconnect();
     };
     this.sock.onerror = () => {

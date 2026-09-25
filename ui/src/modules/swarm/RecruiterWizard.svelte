@@ -10,6 +10,7 @@
   import type { AgentSkill, CreateAgentReq, RecruitedAgent } from './types';
   import { agentProvidersWith, defaultAgentProvider } from '../../lib/providers';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
 
   interface Props {
     onclose: () => void;
@@ -107,7 +108,7 @@
       step = 1;
     } catch (e) {
       if (isAbortError(e)) toasts.info('Recruiting stopped');
-      else toasts.error('Recruiter failed', e instanceof Error ? e.message : String(e));
+      else toasts.error("The Recruiter couldn't propose an agent", e instanceof Error ? e.message : String(e));
     } finally {
       busy = false;
       recruitCtl = null;
@@ -137,17 +138,23 @@
       skills,
       schedule: scheduleRaw ?? null,
     };
+    let hired = 0;
     try {
       for (let i = 0; i < n; i++) {
         // Suffix names when hiring multiple so they're distinguishable.
         const body = n > 1 ? { ...base, name: `${base.name} ${i + 1}` } : base;
         await swarm.createAgent(swarm.detail.id, body);
+        hired += 1;
       }
       toasts.success(n > 1 ? `Hired ${n}× ${name}` : `${name} hired`);
       if (proposalRunId) swarm.markRecruitHired(proposalRunId);
       onclose();
     } catch (e) {
-      toasts.error('Hire failed', e instanceof Error ? e.message : String(e));
+      // A mid-batch failure still hired the first copies — say how many, so a
+      // retry doesn't silently double them.
+      const msg = e instanceof Error ? e.message : String(e);
+      if (hired > 0) toasts.error(`Hired ${hired} of ${n} — the rest failed`, msg);
+      else toasts.error("Couldn't hire the agent", msg);
     } finally {
       busy = false;
     }
@@ -193,7 +200,7 @@
       <div class="field">
         <label for="rc-rep">Reports to</label>
         <select id="rc-rep" class="input" bind:value={reportsTo}>
-          <option value="">— top of org —</option>
+          <option value="">Top of the org</option>
           {#each swarm.detail?.agents ?? [] as a (a.id)}<option value={a.id}>{a.name} ({a.title})</option>{/each}
         </select>
       </div>
@@ -202,28 +209,28 @@
     <div class="field"><label for="rc-soul">Soul</label><textarea id="rc-soul" class="input" rows="3" bind:value={soulMd}></textarea></div>
     <div class="field"><label for="rc-scope">Scope</label><textarea id="rc-scope" class="input" rows="2" bind:value={scopeMd}></textarea></div>
     <div class="field">
-      <span class="label">Skills (★ = must use)</span>
+      <span class="label">Skills <span class="dim">(filled star = must use)</span></span>
       <div class="skills">
         {#each skills as s, i (s.name)}
           <span class="skill-chip" class:must={s.must_use}>
             <button
-              class="link"
+              class="link must-toggle"
               aria-label={s.must_use ? `Make ${s.name} optional` : `Require ${s.name} (must use)`}
               aria-pressed={s.must_use}
               title={s.must_use ? 'Must use — click to make optional' : 'Optional — click to require'}
-              onclick={() => (skills[i] = { ...s, must_use: !s.must_use })}>{s.must_use ? '★' : '☆'}</button>
+              onclick={() => (skills[i] = { ...s, must_use: !s.must_use })}><Icon name="star" size={12} /></button>
             {s.name}
             <button
               class="link"
               aria-label="Remove skill {s.name}"
               title="Remove skill"
-              onclick={() => (skills = skills.filter((_, j) => j !== i))}>×</button>
+              onclick={() => (skills = skills.filter((_, j) => j !== i))}><Icon name="x" size={12} /></button>
           </span>
         {/each}
         {#if skills.length === 0}<span class="dim small">no library skills proposed</span>{/if}
       </div>
     </div>
-    {#if scheduleRaw}<p class="dim small">Suggested schedule: {scheduleRaw.cadence}{scheduleRaw.at ? ` @ ${scheduleRaw.at}` : ''} — editable later in the agent editor.</p>{/if}
+    {#if scheduleRaw}<p class="dim small">Suggested schedule: {scheduleRaw.cadence}{scheduleRaw.at ? ` @ ${scheduleRaw.at} UTC` : ''} — editable later in the agent editor.</p>{/if}
   {/if}
 
   {#snippet footer()}
@@ -238,7 +245,7 @@
     {:else}
       <button class="btn ghost" onclick={() => (step = 0)}>Back</button>
       <label class="count" title="Hire this many copies (e.g. the same role on different models)">
-        ×<input class="input num" type="number" min="1" max="20" bind:value={count} />
+        Copies <input class="input num" type="number" min="1" max="20" bind:value={count} />
       </label>
       <button class="btn primary" onclick={hire} disabled={!name.trim() || busy}>
         {busy ? 'Hiring…' : count > 1 ? `Hire ${count}` : 'Hire'}
@@ -248,6 +255,18 @@
 </Modal>
 
 <style>
+  /* Must-use toggle: an outline star; filled while the skill is required. */
+  .must-toggle {
+    display: inline-grid;
+    place-items: center;
+    color: var(--text-dim);
+  }
+  .skill-chip.must .must-toggle {
+    color: var(--warning);
+  }
+  .skill-chip.must .must-toggle :global(svg path) {
+    fill: currentColor;
+  }
   .grid2 {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -265,13 +284,15 @@
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 2px 8px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .skill-chip.must {
     border-color: var(--accent);
     color: var(--accent-text);
   }
   .link {
+    display: inline-grid;
+    place-items: center;
     border: none;
     background: transparent;
     color: inherit;
@@ -279,15 +300,15 @@
     padding: 0;
   }
   .small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
   .count {
     display: inline-flex;
     align-items: center;
     gap: 2px;
     color: var(--text-dim);
-    font-size: 12px;
-    margin-right: auto;
+    font-size: var(--fs-s);
+    margin-inline-end: auto;
   }
   .count .num {
     width: 52px;

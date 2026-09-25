@@ -87,3 +87,23 @@ export function splitBucketSegment(seg: string | undefined): [string, string] {
   const m = /(?:^|&)prefix=([^&]*)/.exec(seg.slice(q + 1));
   return [bucket, m ? m[1] : ''];
 }
+
+/** A daemon/CLI error made readable for an inline error state: drops the
+ *  daemon's error-kind prefix ("invalid: ") and the CLI's "An error occurred
+ *  (Code) when calling the Op operation:" boilerplate, keeps the code, and
+ *  points credential failures at the fix. Display only — `isLoginRequired`
+ *  still reads the raw text. */
+export function awsErrorText(raw: string | null | undefined): string {
+  let s = (raw ?? '').trim().replace(/^[a-z_]+:\s+/, '');
+  const m = /An error occurred \(([^)]+)\) when calling the (\w+) operation:\s*([\s\S]*)/.exec(s);
+  if (m) {
+    const code = m[1];
+    s = `${m[3].trim().replace(/\.?$/, '.')} (${code})`;
+    if (/InvalidAccessKeyId|AuthFailure|InvalidClientTokenId|SignatureDoesNotMatch|UnrecognizedClient/.test(code)) {
+      s += ' Check this account’s access keys: right-click it in the list and choose Edit account…';
+    } else if (/ExpiredToken/.test(code)) {
+      s += ' The session expired: sign in again.';
+    }
+  }
+  return s;
+}

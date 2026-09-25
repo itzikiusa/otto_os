@@ -149,6 +149,16 @@ a:hover {
   background: var(--danger-soft);
   border-color: color-mix(in srgb, var(--danger) 40%, transparent);
 }
+/* The COMMIT of a destructive action (the confirm sheet's red button that
+   repeats the verb — patterns.md §7). The request itself stays .btn.danger. */
+.btn.danger-solid {
+  background: var(--danger-solid);
+  border-color: transparent;
+  color: var(--danger-contrast);
+}
+.btn.danger-solid:hover {
+  filter: brightness(1.06);
+}
 .btn.small {
   height: 22px;
   padding: 0 8px;
@@ -262,6 +272,39 @@ textarea.input {
 .chip.accent {
   color: var(--accent-text);
   border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.chip.warn {
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 35%, transparent);
+  background: var(--warning-soft);
+}
+.chip.info {
+  color: var(--info);
+  border-color: color-mix(in srgb, var(--info) 35%, transparent);
+  background: var(--info-soft);
+}
+
+/* One-line truncation for a TEXT span (pair it with a `title` for the full
+   value). Several components used the class without defining it. */
+.ellipsis {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Visually hidden, still read by screen readers (live regions, input labels). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 .segmented {
@@ -468,6 +511,32 @@ html[data-scheme='dark'] .hljs-attr {
 html[data-scheme='dark'] .hljs-built_in,
 html[data-scheme='dark'] .hljs-type {
   color: #56c8d8;
+}
+
+/* Agent UI control: the element an agent just acted on (lib/uiCommands.ts
+   `ctx.highlight`) — a focus-style ring that fades out after ~2.4 s. An
+   outline, never a border, so layout never shifts under the agent's hand. */
+[data-agent-target] {
+  outline: 2px solid var(--accent) !important;
+  outline-offset: 2px;
+  border-radius: var(--radius-s);
+  animation: agent-target-fade 2.4s ease-out forwards;
+}
+@keyframes agent-target-fade {
+  0%,
+  70% {
+    outline-color: var(--accent);
+  }
+  100% {
+    outline-color: transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* No fade: the ring simply shows, then goes when the attribute is removed
+     (the app-wide block below would otherwise jump straight to the end). */
+  [data-agent-target] {
+    animation: none !important;
+  }
 }
 
 /* Reduced motion, app-wide (foundations §8): with the OS setting on, every

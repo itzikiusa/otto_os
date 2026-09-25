@@ -14,7 +14,7 @@
 <style>
   .settings-intro {
     margin: 0 0 14px;
-    max-width: 78ch;
+    max-width: var(--settings-col);
     font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text-dim);
