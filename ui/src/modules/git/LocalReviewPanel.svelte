@@ -708,10 +708,12 @@
   .lrp-loc {
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 280px;
+    /* Findings must retain their complete file identity on touch as well as
+       desktop. Wrap the path instead of hiding its filename behind ellipsis. */
+    overflow-wrap: anywhere;
+    white-space: normal;
+    max-width: 100%;
+    direction: ltr;
   }
 
   /* Handoff bar at bottom */

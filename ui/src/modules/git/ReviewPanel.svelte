@@ -1111,7 +1111,7 @@
           <Icon name="zap" size={13} /> {blockerCount} blocker{blockerCount === 1 ? '' : 's'} before merge
         {/if}
         {#if review.verdict}
-          <span class="rp-verdict">Verdict: {review.verdict}</span>
+          <span class="rp-verdict">Verdict: {review.verdict.replaceAll('_', ' ')}</span>
         {/if}
       </div>
     {/if}
