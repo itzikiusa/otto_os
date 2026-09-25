@@ -100,6 +100,12 @@ test.describe('desktop terminal copy', () => {
     await page.mouse.move(box.x + box.width - 40, box.y + 120, { steps: 25 });
     await page.mouse.up();
 
+    // Keep the selection across the delayed post-resize compact (900 ms after
+    // resize confirmation). It must not reset the terminal under a user who
+    // pauses between selecting text and copying it.
+    await page.waitForTimeout(1600);
+    await expect(page.locator('.xterm-helper-textarea')).toHaveValue(/OTTOCOPY/);
+
     // Arm a listener, then press the REAL chord. This is the assertion that
     // matters: if the keydown handler preventDefaults and routes through the
     // async API, the browser never runs its copy command, no `copy` event fires

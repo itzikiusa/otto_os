@@ -373,6 +373,8 @@
     closedByUs = false;
     disconnected = false;
     connectedSid = sessionId;
+    compactPending = false;
+    snapshotEpoch = null;
     // When a shareToken is supplied (guest share view) use the otto-bearer
     // subprotocol so the token travels in Sec-WebSocket-Protocol instead of
     // the URL query string (keeps it out of access logs). The stored owner
@@ -420,6 +422,13 @@
         const msg = JSON.parse(ev.data);
         switch (msg.type) {
           case 'scrollback': {
+            // A delayed optional compact must not erase a selection started
+            // after its request. A new process/connection still rebuilds: its
+            // epoch differs (or was cleared on connect).
+            const compact = compactPending && snapshotEpoch === msg.epoch;
+            compactPending = false;
+            snapshotEpoch = msg.epoch;
+            if (compact && term?.hasSelection()) break;
             // A snapshot fully reconstructs terminal state: history rows +
             // coherent current-screen frame + input modes (bracketed paste,
             // keypad). ALWAYS reset and rebuild from it — appending under the
@@ -558,8 +567,11 @@
   // (unlike the old mid-resize resync): geometry is stability-confirmed
   // first, codex's 3J keeps the emulator duplicate-free, and the rebuild is
   // skipped while the user is scrolled up reading (it would yank the
-  // viewport to the bottom). Agent panes only — shells never leave gaps.
+  // viewport to the bottom). Applies to DOM-rendered panes, including shells
+  // in browser mode; selection guards below protect copy in both cases.
   const RESIZE_COMPACT_MS = 900;
+  let compactPending = false;
+  let snapshotEpoch: number | null = null;
   let resizeCompactTimer: ReturnType<typeof setTimeout> | null = null;
   function scheduleResizeCompact(): void {
     if (!preferDom) return;
@@ -578,9 +590,12 @@
       return;
     }
     const buf = term.buffer.active;
-    // Skip only when the user is CLEARLY reading scrollback — a TUI repaint
+    // Preserve an active selection: rebuilding resets xterm's selection and
+    // would erase a drag just before the user copies it.
+    // Skip also when the user is CLEARLY reading scrollback — a TUI repaint
     // routinely leaves the viewport a row or two shy of the bottom.
-    if (buf.baseY - buf.viewportY > 3) return;
+    if (buf.baseY - buf.viewportY > 3 || term.hasSelection()) return;
+    compactPending = true;
     sendJson({ type: 'scrollback', lines: term.options.scrollback ?? 10_000 });
   }
 

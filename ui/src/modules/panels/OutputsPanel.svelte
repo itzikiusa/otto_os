@@ -13,6 +13,7 @@
   //
   // Hosted two ways: as the right-panel **Outputs** tab (no props → the focused
   // agent session) and embedded under the History conversation (`embedded`).
+  import { untrack } from 'svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { activity } from '../../lib/stores/activity.svelte';
   import { authedBlobUrl, authedText } from '../../lib/api/client';
@@ -39,8 +40,11 @@
   const sid = $derived(sessionId ?? focused?.id ?? null);
   const list = $derived<Artifact[]>(artifacts ?? activity.artifacts(sid));
 
+  const listLoading = $derived(!artifacts && sid ? activity.artifactsLoadingBySession[sid] : false);
+  const listError = $derived(!artifacts && sid ? activity.artifactsErrorBySession[sid] : null);
   $effect(() => {
-    if (!artifacts && sid) void activity.loadArtifacts(sid);
+    const session = sid;
+    if (!artifacts && session) untrack(() => void activity.loadArtifacts(session));
   });
 
   // ── Selection + preview ──────────────────────────────────────────────────────
@@ -52,6 +56,7 @@
   let loading = $state(false);
   let error = $state<string | null>(null);
   let createdUrls: string[] = [];
+  let previewRequest = 0;
 
   function revokeCreated(): void {
     for (const u of createdUrls.splice(0)) URL.revokeObjectURL(u);
@@ -93,9 +98,11 @@
   const TEXT_CAP = 200 * 1024;
 
   async function select(a: Artifact): Promise<void> {
+    const request = ++previewRequest;
     selectedId = a.id;
     preview = null;
     error = null;
+    loading = false;
     revokeCreated();
     const kind = classify(a);
     if (kind === 'link') {
@@ -111,7 +118,7 @@
     // still the selection, else the earlier fetch would land its bytes (and
     // the Download link) under the later label.
     const mine = a.id;
-    const stale = (): boolean => selectedId !== mine;
+    const stale = (): boolean => selectedId !== mine || request !== previewRequest;
     const route = `/sessions/${sid}/artifacts/${encodeURIComponent(a.id)}`;
     loading = true;
     try {
@@ -149,11 +156,26 @@
   $effect(() => {
     void sid;
     void artifacts;
+    previewRequest++;
+    loading = false;
     selectedId = null;
     preview = null;
     error = null;
     revokeCreated();
   });
+
+  function onArtifactKey(e: KeyboardEvent, index: number): void {
+    let next: number;
+    if (e.key === 'ArrowDown') next = Math.min(index + 1, list.length - 1);
+    else if (e.key === 'ArrowUp') next = Math.max(index - 1, 0);
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = list.length - 1;
+    else return;
+    e.preventDefault();
+    const row = e.currentTarget as HTMLButtonElement;
+    row.closest('ul')?.querySelectorAll<HTMLButtonElement>('[role="option"]')[next]?.focus();
+    void select(list[next]);
+  }
 
   async function copyPath(a: Artifact): Promise<void> {
     const v = a.path ?? a.url ?? '';
@@ -190,19 +212,32 @@
       {#if list.length > 0}<span class="count">{list.length}</span>{/if}
     </div>
 
-    {#if list.length === 0}
+    {#if listLoading}
+      <p class="empty-line dim" role="status">Loading outputs…</p>
+    {:else if listError}
+      <div class="pbody err" role="alert">
+        <div class="err-head"><Icon name="warning" size={13} /> Couldn't load outputs</div>
+        <div class="err-detail">{listError}</div>
+        <button class="btn small" onclick={() => sid && void activity.loadArtifacts(sid, true)}>
+          <Icon name="refresh" size={12} /> Retry
+        </button>
+      </div>
+    {/if}
+    {#if !listLoading && !listError && list.length === 0}
       <p class="empty-line dim">
         Nothing produced yet. Files the agent writes, PRs it opens and images it captures show up here.
       </p>
-    {:else}
+    {:else if list.length > 0}
       <ul class="alist" role="listbox" aria-label="Artifacts">
-        {#each list as a (a.id)}
+        {#each list as a, index (a.id)}
           <li>
             <button
               class="arow"
               class:on={selectedId === a.id}
               role="option"
               aria-selected={selectedId === a.id}
+              tabindex={selectedId === a.id || (!selected && index === 0) ? 0 : -1}
+              onkeydown={(e) => onArtifactKey(e, index)}
               onclick={() => void select(a)}
               title={a.path ?? a.url ?? a.label}
             >
