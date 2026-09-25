@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { expectFullyInViewport } from './helpers';
 
 for (const direction of ['ltr', 'rtl']) {
-  test(`first-run setup keeps controls reachable on a phone (${direction})`, async ({ page }) => {
+  test(`first-run setup keeps controls reachable on a phone (${direction})`, async ({ page }, info) => {
     await page.setViewportSize({ width: 375, height: 812 });
     await page.addInitScript((dir) => localStorage.setItem('otto_direction', dir), direction);
     await page.route('**/api/v1/workspaces', (route) => route.fulfill({ json: [] }));
@@ -16,5 +16,7 @@ for (const direction of ['ltr', 'rtl']) {
     await expectFullyInViewport(page, browse);
     await expect(coach.getByPlaceholder('my-project', { exact: true })).toHaveAccessibleName('Workspace name');
     await expect(coach.getByPlaceholder('~/code/my-project')).toHaveAccessibleName('Workspace folder');
+    await page.locator('.coach-wrap').evaluate((el) => { el.scrollTop = 0; });
+    await page.screenshot({ path: info.outputPath('onboarding.png') });
   });
 }
