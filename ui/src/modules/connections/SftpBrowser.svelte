@@ -294,12 +294,12 @@
               onclick={() => onRowActivate(e)}
             >
               <Icon name={iconFor(e)} size={13} />
-              <span class="ellipsis" title={e.name}>{e.name}</span>
-              {#if e.symlink_target}<span class="link-to dim ellipsis" title={e.symlink_target}>→ {e.symlink_target}</span>{/if}
+              <span class="ellipsis" dir="ltr" title={e.name}>{e.name}</span>
+              {#if e.symlink_target}<span class="link-to dim ellipsis" dir="ltr" title={e.symlink_target}>→ {e.symlink_target}</span>{/if}
             </button>
-            <span class="cell size mono">{e.kind === 'dir' ? '' : humanSize(e.size)}</span>
-            <span class="cell mtime dim">{e.mtime ?? ''}</span>
-            <span class="cell perms mono dim">{e.perms}</span>
+            <span class="cell size mono" dir="ltr">{e.kind === 'dir' ? '' : humanSize(e.size)}</span>
+            <span class="cell mtime dim" dir="ltr">{e.mtime ?? ''}</span>
+            <span class="cell perms mono dim" dir="ltr">{e.perms}</span>
             <span class="cell actions">
               {#if isTextLike(e)}
                 <button

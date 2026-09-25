@@ -42,7 +42,9 @@
     catch (e) { if (alive) error = e instanceof Error ? e.message : String(e); }
     finally { busy = false; }
   }
+  const invalidEndpoints = $derived(endpoints.some((e) => !e.name.trim() || !e.remote_host.trim() || !Number.isInteger(e.remote_port) || e.remote_port < 1 || e.remote_port > 65535));
   async function save() {
+    if (busy || invalidEndpoints || !name.trim() || !sshId) return;
     busy = true; error = '';
     const payload: NetworkProfileInput = { name: name.trim(), ssh_connection_id: sshId, archived,
       endpoints: endpoints.map((e) => ({...e, name: e.name.trim(), remote_host: e.remote_host.trim(), remote_port: Number(e.remote_port), host_env: e.host_env?.trim() || null, port_env: e.port_env?.trim() || null})) };
@@ -71,10 +73,10 @@
   {#each endpoints as endpoint, i (i)}
     <fieldset disabled={busy}><legend>Endpoint {i + 1}</legend>
       <label>Name<input aria-label={`Endpoint ${i + 1} name`} bind:value={endpoint.name} placeholder="DB" /></label>
-      <label>Remote host<input aria-label={`Endpoint ${i + 1} remote host`} bind:value={endpoint.remote_host} placeholder="db.internal" /></label>
+      <label>Remote host<input dir="ltr" aria-label={`Endpoint ${i + 1} remote host`} bind:value={endpoint.remote_host} placeholder="db.internal" /></label>
       <label>Remote port<input aria-label={`Endpoint ${i + 1} remote port`} type="number" min="1" max="65535" bind:value={endpoint.remote_port} /></label>
-      <label>Host environment (optional)<input aria-label={`Endpoint ${i + 1} host environment`} bind:value={endpoint.host_env} placeholder="PGHOST or APP_HOST" /></label>
-      <label>Port environment (optional)<input aria-label={`Endpoint ${i + 1} port environment`} bind:value={endpoint.port_env} placeholder="PGPORT or APP_PORT" /></label>
+      <label>Host environment (optional)<input dir="ltr" aria-label={`Endpoint ${i + 1} host environment`} bind:value={endpoint.host_env} placeholder="PGHOST or APP_HOST" /></label>
+      <label>Port environment (optional)<input dir="ltr" aria-label={`Endpoint ${i + 1} port environment`} bind:value={endpoint.port_env} placeholder="PGPORT or APP_PORT" /></label>
       <button type="button" disabled={endpoints.length === 1} title={endpoints.length === 1 ? 'A profile needs at least one endpoint' : undefined} onclick={() => endpoints = endpoints.filter((_, n) => n !== i)}>Remove endpoint {i + 1}</button>
     </fieldset>
   {/each}
@@ -82,7 +84,7 @@
   <p>Otto also sets OTTO_TUNNEL_&lt;NAME&gt;_HOST and _PORT. TLS server names and topology discovery may need application configuration.</p>
   {#if editing}<label class="archive"><input type="checkbox" bind:checked={archived} disabled={busy} />Archived (unavailable for new launches)</label>{/if}
   {#if error}<p class="error" role="alert">{error}</p>{/if}
-  <div class="profiles"><button type="button" disabled={busy || connectionsLoading || !!connectionsError || !name.trim() || !sshId || endpoints.some((e) => !e.name.trim() || !e.remote_host.trim() || !e.remote_port)} onclick={save}>{busy ? 'Saving…' : 'Save network profile'}</button>
+  <div class="profiles"><button type="button" disabled={busy || connectionsLoading || !!connectionsError || !name.trim() || !sshId || invalidEndpoints} onclick={save}>{busy ? 'Saving…' : 'Save network profile'}</button>
   {#if editing}<button type="button" disabled={busy} onclick={reloadSaved}>Reload saved profile</button>{/if}
   <button type="button" disabled={busy} onclick={() => edit(null)}>Cancel edits</button></div>
 </div>
