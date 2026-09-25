@@ -576,8 +576,8 @@
               <tr class="wl-row" onclick={() => drillRow(r)} title={group === 'workload' ? "Show this workload's pods" : "Show this pod's events"} data-testid="k8s-fleet-row">
                 <td><span class="dot" style="background: {r.cluster.color ?? 'var(--accent)'}"></span> {r.cluster.name} <EnvBadge env={r.cluster.environment} /></td>
                 <td class="dim">{r.namespace}</td>
-                <td><b>{r.workload}</b></td>
-                {#if group === 'pod'}<td class="mono small">{r.pod}</td>{:else}<td class="num mono">{r.pods}</td>{/if}
+                <td>{#if group === 'workload'}<button class="drill-btn" aria-label={`Show pods for ${r.workload}`} onclick={(e) => { e.stopPropagation(); drillRow(r); }}>{r.workload}</button>{:else}<b>{r.workload}</b>{/if}</td>
+                {#if group === 'pod'}<td class="mono small"><button class="drill-btn" aria-label={`Show events for ${r.pod}`} onclick={(e) => { e.stopPropagation(); drillRow(r); }}>{r.pod}</button></td>{:else}<td class="num mono">{r.pods}</td>{/if}
                 <td class="num mono" class:bad={restartsTotal(r) > 0}>
                   {restartsTotal(r)}
                   {#if restartsTotal(r) > 0}<span class="dim small"> ({[r.restarts.oom && `oom ${r.restarts.oom}`, r.restarts.crash && `crash ${r.restarts.crash}`, r.restarts.probe && `probe ${r.restarts.probe}`, r.restarts.unknown && `? ${r.restarts.unknown}`].filter(Boolean).join(' · ')})</span>{/if}
@@ -901,6 +901,15 @@
     padding: 7px 10px;
     border-bottom: 1px solid var(--border);
     vertical-align: top;
+  }
+  .drill-btn {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
   }
   .wl-row {
     cursor: pointer;
