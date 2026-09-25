@@ -542,22 +542,9 @@
     }
   }
 
-  // Always asked, like the sidebar row's Delete: this is the explicit Delete
-  // command. The "Always delete" preference (Settings → Appearance) governs
-  // CLOSING a tab (⌘W / the tab ×), which it now does silently.
-  async function del(): Promise<void> {
-    // Name it — in a tiled/split view the ⋯ that opened this is one of many.
-    const name = session?.title?.trim();
-    const ok = await confirmer.ask(
-      `Delete ${name ? `“${name}”` : 'this session'} and its entire history? This cannot be undone.`,
-      { title: 'Delete session', confirmLabel: 'Delete' },
-    );
-    if (!ok) return;
-    try {
-      await ws.killSession(sessionId);
-    } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
-    }
+  // Asks first unless the user chose "Always delete" (ws.requestDeleteSession).
+  function del(): Promise<void> {
+    return ws.requestDeleteSession(sessionId);
   }
 
   async function detachIssue(): Promise<void> {

@@ -1104,6 +1104,28 @@ class WorkspaceStore {
   }
 
   /** Delete: remove the session entirely (PTY killed, row + history gone). */
+  /** User-facing Delete of ONE session (tab menu, pane ⋯, sidebar row).
+   *  Asks first — unless the user chose "Always delete" in Settings →
+   *  Appearance: they opted out of the question, so an explicit Delete is
+   *  honoured just like closing its tab (asking anyway is what made the
+   *  setting feel broken). Bulk deletes keep their own one-time confirm.
+   *  Failures surface as a toast. */
+  async requestDeleteSession(id: Id): Promise<void> {
+    if (ui.closeTabPref !== 'delete') {
+      const name = this.sessions.find((s) => s.id === id)?.title?.trim();
+      const ok = await confirmer.ask(
+        `Delete ${name ? `“${name}”` : 'this session'} and its entire history? This cannot be undone.`,
+        { title: 'Delete session', confirmLabel: 'Delete' },
+      );
+      if (!ok) return;
+    }
+    try {
+      await this.killSession(id);
+    } catch (e) {
+      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
   async killSession(id: Id): Promise<void> {
     await api.del(`/sessions/${id}`);
     this.closeTab(id);

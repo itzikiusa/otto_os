@@ -250,21 +250,10 @@
     return ws.requestRestart(id);
   }
 
-  /** Delete = PTY killed, row + full history gone — confirm first (mirrors
-   *  the workspace-delete confirm; one mis-click must not destroy a session's
-   *  history). An explicit Delete command always asks; "Always delete" in
-   *  Settings covers closing a tab, not this menu row. */
-  async function deleteSession(id: string): Promise<void> {
-    const ok = await confirmer.ask(
-      'Delete this session and its entire history? This cannot be undone.',
-      { title: 'Delete session', confirmLabel: 'Delete' },
-    );
-    if (!ok) return;
-    try {
-      await ws.killSession(id);
-    } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
-    }
+  /** Delete = PTY killed, row + full history gone. Asks first unless the
+   *  user chose "Always delete" (see ws.requestDeleteSession). */
+  function deleteSession(id: string): Promise<void> {
+    return ws.requestDeleteSession(id);
   }
 
   // ── Workspace management (context menu on the Workspaces rows) ──────────────
