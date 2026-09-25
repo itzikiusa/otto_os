@@ -9,11 +9,11 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { now } from '../../lib/stores/now.svelte';
-  import { router } from '../../lib/router.svelte';
   import { relTime } from '../mission-control/lib';
   import { today, type TodayRow } from './today.svelte';
 
   const ROWS = 3;
+  let expanded = $state<Record<string, boolean>>({});
 
   $effect(() => {
     today.start();
@@ -58,24 +58,21 @@
     icon: IconName;
     rows: TodayRow[];
     empty: string;
-    /** Where "N more" goes. */
-    more: () => void;
     /** Rows come from a fetch (skeleton until it settles). */
     fetched?: boolean;
   }
   const cards: Card[] = $derived([
-    { id: 'needs', title: 'Needs you', icon: 'bell', rows: today.needs, empty: 'Nothing needs you right now.', more: () => router.go('agents') },
-    { id: 'running', title: 'Working', icon: 'play', rows: today.running, empty: 'No agent, task or workflow is working right now.', more: () => router.go('mission-control') },
+    { id: 'needs', title: 'Needs you', icon: 'bell', rows: today.needs, empty: 'Nothing needs you right now.' },
+    { id: 'running', title: 'Working', icon: 'play', rows: today.running, empty: 'No agent, task or workflow is working right now.' },
     {
       id: 'next',
       title: 'Up next',
       icon: 'calendar',
       rows: today.upNext,
       empty: 'Nothing due in the next 24 hours. Reminders and scheduled tasks land here.',
-      more: () => router.go(today.upNext.some((r) => r.id.startsWith('scheduled:')) ? 'scheduled-tasks' : 'assistant/tasks'),
       fetched: true,
     },
-    { id: 'recent', title: 'Recent', icon: 'clock', rows: today.recent, empty: 'Designs and pull requests you touch show up here.', more: () => router.go('design'), fetched: true },
+    { id: 'recent', title: 'Recent', icon: 'clock', rows: today.recent, empty: 'Designs and pull requests you touch show up here.', fetched: true },
   ]);
 </script>
 
@@ -110,7 +107,7 @@
           </div>
         {:else}
           <ul class="gc-rows">
-            {#each c.rows.slice(0, ROWS) as r (r.id)}
+            {#each c.rows.slice(0, expanded[c.id] ? undefined : ROWS) as r (r.id)}
               <li>
                 <button class="gc-row" onclick={r.open} title={r.title}>
                   <span class="gc-mark">
@@ -129,7 +126,7 @@
             {/each}
           </ul>
           {#if c.rows.length > ROWS}
-            <button class="gc-more" onclick={c.more}>{c.rows.length - ROWS} more</button>
+            <button class="gc-more" aria-expanded={!!expanded[c.id]} onclick={() => (expanded[c.id] = !expanded[c.id])}>{expanded[c.id] ? 'Show less' : `${c.rows.length - ROWS} more`}</button>
           {/if}
         {/if}
       </article>

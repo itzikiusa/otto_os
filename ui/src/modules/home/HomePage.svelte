@@ -13,6 +13,7 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Modal from '../../lib/components/Modal.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -52,6 +53,7 @@
 
   // ── Keyboard + swipe ─────────────────────────────────────────────────────
   function onKey(e: KeyboardEvent): void {
+    if (e.defaultPrevented || ui.overlayOpen || ui.navDrawerOpen || ctxMenu.open) return;
     const t = e.target as HTMLElement | null;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
     if (e.key === 'Escape' && home.zoomedId) {

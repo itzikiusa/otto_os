@@ -8,6 +8,7 @@
   // Desktop never renders this: callers gate it behind viewport.isMobile, so
   // there is no z-index or layout cost on the unchanged ≥1025px layout.
   import type { Snippet } from 'svelte';
+  import { dialogFocus } from '../lib/dialogFocus';
   import Icon from '../lib/components/Icon.svelte';
 
   interface Props {
@@ -34,18 +35,6 @@
     open = false;
   }
 
-  // Esc closes the drawer while it's open (mirrors modal dismissal elsewhere).
-  $effect(() => {
-    if (!open) return;
-    function onKey(e: KeyboardEvent): void {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        close();
-      }
-    }
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  });
 </script>
 
 {#if open}
@@ -56,6 +45,7 @@
   <div class="drawer-backdrop" onclick={close}></div>
   <div
     class="drawer {side}"
+    use:dialogFocus={close}
     style="width:{width}"
     role="dialog"
     aria-modal="true"

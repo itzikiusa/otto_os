@@ -5,6 +5,7 @@
   // Commands mode also fans out to GET /workspaces/{id}/search when the query
   // is ≥ 2 chars and a workspace is active; cross-module hits appear as a
   // second "Results" section below commands.
+  import { dialogFocus } from '../lib/dialogFocus';
   import { api, isAbortError } from '../lib/api/client';
   import type { Action, SearchHit } from '../lib/api/types';
   import { untrack } from 'svelte';
@@ -275,6 +276,8 @@
       else if (askRow && selected === filtered.length) askOtto();
       else if (searchHits[selected - hitBase]) hitDefault(searchHits[selected - hitBase]);
     } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
       close();
     }
   }
@@ -287,6 +290,8 @@
       e.preventDefault();
       void submitEnglish();
     } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
       if (plan) plan = null;
       else close();
     }
@@ -414,7 +419,7 @@
       if (e.target === e.currentTarget) close();
     }}
   >
-    <div class="palette glass-raised" role="dialog" aria-modal="true" aria-label="Command palette">
+    <div class="palette glass-raised" use:dialogFocus={() => { if (plan) plan = null; else close(); }} role="dialog" aria-modal="true" aria-label="Command palette">
       <div class="pal-mode-row">
         <div class="segmented">
           <button class:active={mode === 'commands'} onclick={() => mode !== 'commands' && toggleMode()}>
@@ -523,6 +528,7 @@
       {:else}
         <div class="pal-english">
           <textarea
+            aria-label="Describe what you want Otto to do"
             bind:this={textareaEl}
             bind:value={englishText}
             placeholder="Describe what you want… e.g. 'spawn 3 claude agents and tell them to fix the failing tests'"
