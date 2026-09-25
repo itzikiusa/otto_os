@@ -242,7 +242,7 @@
     align-items: center;
     gap: 6px;
     flex-shrink: 0;
-    max-width: 230px;
+    max-width: 280px;
     padding: 6px 8px;
     padding-inline-start: 10px;
     border: 1px solid transparent;
@@ -283,18 +283,21 @@
     /* min-width:0 lets this flex item shrink so the ellipsis actually engages
        (flex default min-width:auto would otherwise refuse to clip the name). */
     min-width: 0;
+    flex-shrink: 1;
     overflow: hidden;
     text-overflow: ellipsis;
     font-weight: 500;
   }
-  /* A short branch ("main") keeps its full width; the repo name gives way
-     first. Long branches still ellipsize at the cap. */
+  /* The repo name is the tab's identity, the branch is context: when a tab
+     is at its cap the branch gives way first (shrinks 4× faster), so "bo_common_ui" stays readable instead of
+     "bo_co…" next to a full "feature/kyb-co…". Short branches ("main") are
+     untouched. The full name + branch are in the tab's tooltip. */
   .git-tab-branch {
     display: inline-flex;
     align-items: center;
     gap: 3px;
     min-width: 0;
-    flex-shrink: 0;
+    flex-shrink: 4;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     max-width: 120px;
