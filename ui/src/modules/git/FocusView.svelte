@@ -87,17 +87,20 @@
 
   // ── MY WORK (Jira) ──────────────────────────────────────────────────────────
   let issueAccounts = $state<IssueAccount[]>([]);
+  let accountsError = $state<string | null>(null);
   let issueAccountId = $state<string>('');
   let work = $state<MyWorkIssue[]>([]);
   let workLoading = $state(true);
   let workError = $state<string | null>(null);
 
   async function loadAccounts(): Promise<void> {
+    accountsError = null;
+    workLoading = true;
     try {
       issueAccounts = await api.get<IssueAccount[]>('/issue/accounts');
       if (!issueAccountId && issueAccounts[0]) issueAccountId = issueAccounts[0].id;
-    } catch {
-      issueAccounts = [];
+    } catch (e) {
+      accountsError = (e instanceof Error ? e.message : String(e)) || 'The account service did not answer.';
     } finally {
       if (issueAccounts.length === 0) workLoading = false;
     }
@@ -368,7 +371,13 @@
         {/if}
       </header>
 
-      {#if issueAccounts.length === 0 && !workLoading}
+      {#if accountsError}
+        <div class="fx-empty fx-empty-row" role="alert">
+          <Icon name="warning" size={14} />
+          <span class="grow">Couldn’t load Jira accounts. <span class="dim">{accountsError}</span></span>
+          <button class="btn small" onclick={() => void loadAccounts()}>Retry</button>
+        </div>
+      {:else if issueAccounts.length === 0 && !workLoading}
         <div class="fx-empty dim fx-empty-row">
           <span>Connect a Jira account to see the issues assigned to you here.</span>
           <button class="btn small" onclick={() => router.go('settings/jira')}><Icon name="ticket" size={12} /> Add Jira account…</button>

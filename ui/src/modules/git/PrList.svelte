@@ -37,22 +37,28 @@
   let createOpen = $state(false);
   // Bumped by the Retry button to re-run the load effect.
   let retryRev = $state(0);
+  let loadRevision = 0;
 
   $effect(() => {
     const id = repoId;
     const st = stateFilter;
     void retryRev;
+    const revision = ++loadRevision;
+    let active = true;
+    loadingMore = false;
     loading = true;
     error = '';
     moreError = '';
     void api
       .get<PrListResp>(`/repos/${id}/prs?state=${st}&page=1&per_page=${PER_PAGE}`)
       .then((r) => {
+        if (!active) return;
         prs = r.items;
         hasMore = r.has_more;
         page = 1;
       })
       .catch((e) => {
+        if (!active) return;
         prs = [];
         hasMore = false;
         error = e instanceof Error ? e.message : 'failed to load PRs';
@@ -63,7 +69,11 @@
               ? 'Repository not found on the provider'
               : 'Provider unreachable';
       })
-      .finally(() => (loading = false));
+      .finally(() => { if (active) loading = false; });
+    return () => {
+      active = false;
+      if (loadRevision === revision) loadRevision++;
+    };
   });
 
   /** Append the next page. Failures toast nothing — the button simply stays
@@ -71,6 +81,7 @@
    *  on screen. */
   async function loadMore(): Promise<void> {
     if (loadingMore || !hasMore) return;
+    const revision = loadRevision;
     loadingMore = true;
     moreError = '';
     try {
@@ -78,13 +89,15 @@
       const r = await api.get<PrListResp>(
         `/repos/${repoId}/prs?state=${stateFilter}&page=${next}&per_page=${PER_PAGE}`,
       );
+      if (revision !== loadRevision) return;
       prs = [...prs, ...r.items];
       hasMore = r.has_more;
       page = next;
     } catch (e) {
+      if (revision !== loadRevision) return;
       moreError = e instanceof Error ? e.message : 'failed to load more PRs';
     } finally {
-      loadingMore = false;
+      if (revision === loadRevision) loadingMore = false;
     }
   }
 

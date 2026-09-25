@@ -408,6 +408,8 @@
   let selectedCommit = $state<CommitInfo | null>(null);
   let diffResp = $state<DiffResp | null>(null);
   let diffLoading = $state(false);
+  let diffError = $state<string | null>(null);
+  let diffRequest = 0;
   // Track which files are collapsed (path → true = collapsed)
   let fileCollapsed = $state<Record<string, boolean>>({});
 
@@ -425,6 +427,8 @@
       return;
     }
     wipSelected = true;
+    diffRequest++;
+    diffError = null;
     selectedSha = null;
     selectedCommit = null;
     diffResp = null;
@@ -1462,17 +1466,24 @@
     wipSelected = false;
     selectedSha = commit.sha;
     selectedCommit = commit;
-    diffResp = null;
-    diffLoading = true;
-    fileCollapsed = {};
     // On a phone, collapse the commit list so the diff section gets the room.
     if (isMobile) secCommitsOpen = false;
+    await loadCommitDiff(commit);
+  }
+
+  async function loadCommitDiff(commit: CommitInfo): Promise<void> {
+    const request = ++diffRequest;
+    diffResp = null;
+    diffError = null;
+    diffLoading = true;
+    fileCollapsed = {};
     try {
       const resp = await api.get<DiffResp>(
-        `/repos/${repoId}/diff?target=${encodeURIComponent('commit:' + commit.sha)}`
+        `/repos/${repoId}/diff?target=${encodeURIComponent('commit:' + commit.sha)}`,
       );
+      // A different commit, WIP, or closing the detail invalidates this load.
+      if (request !== diffRequest) return;
       diffResp = resp;
-      // Auto-collapse files with >400 changed lines
       const next: Record<string, boolean> = {};
       for (const f of resp.files) {
         const { add, del } = changedLinesCount(f);
@@ -1480,14 +1491,16 @@
       }
       fileCollapsed = next;
     } catch (e) {
-      toasts.error('Failed to load diff', e instanceof Error ? e.message : String(e));
-      diffResp = { files: [] };
+      if (request !== diffRequest) return;
+      diffError = (e instanceof Error ? e.message : String(e)) || 'The diff could not be loaded.';
     } finally {
-      diffLoading = false;
+      if (request === diffRequest) diffLoading = false;
     }
   }
 
   function clearSelection(): void {
+    diffRequest++;
+    diffError = null;
     wipSelected = false;
     selectedSha = null;
     selectedCommit = null;
@@ -2494,6 +2507,7 @@
         {@const b = leaf.b}
         {@const tracking = branchTracking(b, status)}
         {@const wtElsewhere = worktreeByBranch.get(b.name)}
+        <div class="ref-action-row">
         <button
           class="ref-row"
           class:nested
@@ -2548,10 +2562,20 @@
           {/if}
           {#if checkoutBusy === b.name || (wtElsewhere && openWtBusy === wtElsewhere.path)}<span class="dim" title="Working…">…</span>{/if}
         </button>
+        <button
+          class="icon-btn ref-action"
+          aria-label="Actions for branch {b.name}"
+          title="Actions for branch {b.name}"
+          aria-haspopup="menu"
+          disabled={checkoutBusy !== '' || openWtBusy !== ''}
+          onclick={(e) => branchMenu(e, b)}
+        ><Icon name="more" size={13} /></button>
+        </div>
       {/snippet}
 
       {#snippet remoteRow(leaf: BranchLeaf, nested: boolean)}
         {@const b = leaf.b}
+        <div class="ref-action-row">
         <button
           class="ref-row remote"
           class:nested
@@ -2570,6 +2594,15 @@
           {#if showMerged(b)}{@render mergedMark()}{/if}
           {#if checkoutBusy === b.name.replace(/^[^/]+\//, '')}<span class="dim">…</span>{/if}
         </button>
+        <button
+          class="icon-btn ref-action"
+          aria-label="Actions for branch {b.name}"
+          title="Actions for branch {b.name}"
+          aria-haspopup="menu"
+          disabled={checkoutBusy !== '' || openWtBusy !== ''}
+          onclick={(e) => branchMenu(e, b)}
+        ><Icon name="more" size={13} /></button>
+        </div>
       {/snippet}
 
       <!-- A collapsible branch FOLDER header (feature/, release/, …). -->
@@ -3251,6 +3284,8 @@
           <div class="detail-diff-loading">
             <Skeleton rows={8} height={20} />
           </div>
+        {:else if diffError}
+          <LoadState what="this commit’s changes" error={diffError} empty onretry={() => selectedCommit && void loadCommitDiff(selectedCommit)} />
         {:else if diffResp !== null}
           {#if diffResp.files.length === 0}
             <div class="dim" style="padding: 18px; font-size: var(--fs-s); text-align: center">No file changes.</div>
@@ -3275,7 +3310,7 @@
                     title={file.path}
                   >
                     <span class="df-chevron dim" aria-hidden="true"><Icon name={isCollapsed ? 'chevronRight' : 'chevronDown'} size={12} /></span>
-                    <span class="mono df-path">
+                    <span class="mono df-path" dir="ltr">
                       {#if file.old_path}<span class="df-rename-from">{file.old_path}</span><span class="df-rename-arrow"> → </span>{/if}{file.path}
                     </span>
                     <span class="grow"></span>
@@ -3294,7 +3329,7 @@
                   {#if file.is_binary}
                     <div class="df-binary dim">Binary file — no text diff.</div>
                   {:else}
-                    <div class="df-hunks">
+                    <div class="df-hunks" dir="ltr">
                       {#each file.hunks as hunk, hi (hi)}
                         <div class="hunk-header mono">{hunk.header}</div>
                         <table class="dl-table">
@@ -3518,6 +3553,23 @@
        and nested rows' dots then line up under the folder icon. */
     margin-inline-start: 27px;
     border-inline-start: 1.5px solid var(--border);
+  }
+  .ref-action-row {
+    display: flex;
+    align-items: stretch;
+    min-width: 0;
+  }
+  .ref-action-row .ref-row {
+    flex: 1;
+    min-width: 0;
+    width: 0;
+  }
+  .ref-action {
+    flex-shrink: 0;
+    align-self: center;
+  }
+  @media (max-width: 1024px) {
+    .ref-action { min-width: 36px; min-height: 36px; }
   }
   .ref-row {
     display: flex;
