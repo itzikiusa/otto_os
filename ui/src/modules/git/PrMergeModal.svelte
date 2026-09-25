@@ -4,6 +4,7 @@
   // per-check CI, approvals, mergeability, open blocker findings, and the two
   // facts only the local checkout knows (unpushed commits, branch freshness).
   // Blocking reasons disable Merge until "Merge anyway" is ticked.
+  import { onDestroy } from 'svelte';
   import { api, ApiError } from '../../lib/api/client';
   import type { MergeStrategy, PrChecksResp, PrDetail, PrReadiness } from '../../lib/api/types';
   import { router } from '../../lib/router.svelte';
@@ -20,6 +21,9 @@
     onmerged: () => void;
   }
   let { repoId, number, pr, onclose, onmerged }: Props = $props();
+
+  let disposed = false;
+  onDestroy(() => { disposed = true; });
 
   let strategy: MergeStrategy = $state('merge');
   let deleteSource = $state(false);
@@ -98,6 +102,7 @@
 
   async function doMerge(): Promise<void> {
     if (!canMerge) return;
+    const mergedNumber = number;
     merging = true;
     error = null;
     try {
@@ -105,12 +110,14 @@
         strategy,
         delete_source_branch: deleteSource,
       });
-      toasts.success('PR merged', `#${number}`);
-      onmerged();
+      toasts.success('PR merged', `#${mergedNumber}`);
+      if (!disposed) onmerged();
     } catch (e) {
       // Keep the provider's own words — "Required status check failing" and
       // friends are the actionable text.
-      error = e instanceof ApiError || e instanceof Error ? e.message : String(e);
+      const detail = e instanceof ApiError || e instanceof Error ? e.message : String(e);
+      if (disposed) toasts.error(`Couldn’t merge PR #${mergedNumber}`, detail);
+      else error = detail;
     } finally {
       merging = false;
     }

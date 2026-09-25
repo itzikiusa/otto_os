@@ -159,11 +159,13 @@
   }
 
   async function requestChanges(): Promise<void> {
+    if (busy !== '') return;
     busy = 'request-changes';
     try {
       await api.post(`/repos/${repoId}/prs/${number}/request-changes`, {
         body: requestChangesBody.trim() || null,
       });
+      if (disposed) return;
       toasts.success('Changes requested', `PR #${number}`);
       showRequestChanges = false;
       requestChangesBody = '';
@@ -171,7 +173,7 @@
     } catch (e) {
       toasts.error('Request changes failed', e instanceof Error ? e.message : String(e));
     } finally {
-      busy = '';
+      if (!disposed) busy = '';
     }
   }
 
@@ -226,13 +228,14 @@
       line: line ?? null,
       in_reply_to: inReplyTo ?? null,
     });
-    await load(repoId, number);
+    if (!disposed) await load(repoId, number);
   }
 
   /** Resolve or reopen a review thread on the provider, then refresh statuses. */
   async function resolveThread(threadId: string, resolved: boolean): Promise<void> {
     try {
       await api.post(`/repos/${repoId}/prs/${number}/comments/${encodeURIComponent(threadId)}/resolve`, { resolved });
+      if (disposed) return;
       toasts.success(resolved ? 'Thread resolved' : 'Thread reopened');
       await load(repoId, number);
     } catch (e) {
@@ -249,15 +252,15 @@
   }
 
   async function addGeneralComment(): Promise<void> {
-    if (newComment.trim() === '') return;
+    if (busy !== '' || newComment.trim() === '') return;
     busy = 'comment';
     try {
       await postComment(newComment.trim());
-      newComment = '';
+      if (!disposed) newComment = '';
     } catch (e) {
       toasts.error('Couldn’t post the comment', e instanceof Error ? e.message : String(e));
     } finally {
-      busy = '';
+      if (!disposed) busy = '';
     }
   }
 
@@ -277,16 +280,17 @@
       who: `${pr?.author ? `${pr.author} (the author)` : 'The author'} and the PR's reviewers are notified.`,
       danger: !approve,
     });
-    if (!ok) return;
+    if (!ok || disposed || busy !== '') return;
     busy = kind;
     try {
       await api.post(`/repos/${repoId}/prs/${number}/${kind}`);
+      if (disposed) return;
       toasts.success(`PR ${kind === 'approve' ? 'approved' : kind + 'd'}`, `#${number}`);
       await load(repoId, number);
     } catch (e) {
       toasts.error(approve ? "Couldn't approve the PR" : "Couldn't decline the PR", e instanceof Error ? e.message : String(e));
     } finally {
-      busy = '';
+      if (!disposed) busy = '';
     }
   }
 
@@ -317,7 +321,7 @@
     } catch (e) {
       toasts.error('Could not open session', e instanceof Error ? e.message : String(e));
     } finally {
-      busy = '';
+      if (!disposed) busy = '';
     }
   }
 </script>
@@ -524,12 +528,13 @@
               class="input"
               rows="3"
               bind:value={requestChangesBody}
+              disabled={busy === 'request-changes'}
               aria-label="What needs to change"
               placeholder="The retry loop needs a cap before this can merge."
             ></textarea>
             <div class="row prd-compose-foot">
               <span class="hint dim">Posted to {repoLabel} PR #{number} under your account; {pr.author || 'the author'} and the reviewers are notified.</span>
-              <button class="btn small ghost" onclick={() => (showRequestChanges = false)}>Cancel</button>
+              <button class="btn small ghost" disabled={busy === 'request-changes'} onclick={() => (showRequestChanges = false)}>Cancel</button>
               <button
                 class="btn small warn"
                 disabled={busy === 'request-changes'}
@@ -555,7 +560,7 @@
         {/each}
 
         <div class="new-comment card">
-          <textarea class="input" rows="3" bind:value={newComment} aria-label="New comment" placeholder="Leave a comment…" onfocus={scrollIntoViewOnFocus}></textarea>
+          <textarea class="input" rows="3" bind:value={newComment} disabled={busy === 'comment'} aria-label="New comment" placeholder="Leave a comment…" onfocus={scrollIntoViewOnFocus}></textarea>
           <div class="row prd-compose-foot">
             <span class="hint dim">Posted to {repoLabel} PR #{number} under your account; everyone on the pull request sees it.</span>
             <button
