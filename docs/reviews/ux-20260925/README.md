@@ -2,7 +2,7 @@
 
 Status: in progress. Scores are reviewer judgments supported by the linked evidence, not an automated quality guarantee. The target is at least 9.5 for each reviewed surface; known defects and untested main flows lower the score. No whole-app completion claim is made here.
 
-The audit uses ten fresh reviewers per round, up to five rounds. Because only three reviewers can run concurrently, independent scopes are queued in batches; a later-round scope starts only after its preceding review and repairs finish. Each new reviewer verifies prior repairs and examines deeper loaded, error, keyboard, long-content, theme and device states. Browser tests use isolated daemon state and intercepted external services; production user data is not used.
+The audit uses ten fresh reviewers per round, five mandatory rounds. Because only three reviewers can run concurrently, independent scopes are queued in batches; a later-round scope starts only after its preceding review and repairs finish. Each new reviewer verifies prior repairs and examines deeper loaded, error, keyboard, long-content, theme and device states. Browser tests use isolated daemon state and intercepted external services; production user data is not modified.
 
 ## Round 1
 
@@ -17,7 +17,7 @@ The audit uses ten fresh reviewers per round, up to five rounds. Because only th
 | AWS and Kubernetes | 8.47 | [Review](r1-cloud.md) |
 | Assistant, History, Usage, Insights | 8.90 | [Review](r1-insights.md) |
 | Help and walkthrough player | 9.40 | [Review](r1-help.md) |
-| Shared accessibility and variants | Pending | Review in progress |
+| Shared accessibility and variants | 9.2–9.6 by surface | [Review](r1-access.md) |
 
 Per-page ratings and exact coverage limits are in each report. A group mean does not establish that every page meets the target. All documented feasible residuals are assigned to the next fresh review.
 
