@@ -458,6 +458,8 @@
     margin-top: 6px;
   }
   .chip {
+    height: auto;
+    min-height: 20px;
     max-width: 100%;
     white-space: normal;
     display: inline-flex;

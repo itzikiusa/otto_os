@@ -9,8 +9,13 @@ for (const direction of ['ltr', 'rtl']) {
     await page.goto('/#/agents');
     const coach = page.locator('.coach');
     await expect(coach).toBeVisible();
-    expect((await coach.boundingBox())!.width).toBeLessThanOrEqual(375);
+    // Session bootstrap may briefly replace the coach with its loading state.
+    await expect.poll(async () => (await coach.boundingBox())?.width ?? Infinity).toBeLessThanOrEqual(375);
     await expect.poll(async () => coach.evaluate((el) => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(2);
+    await expect(coach.locator('.tool-chips .chip').first()).toBeVisible();
+    await expect.poll(() => coach.locator('.tool-chips .chip').evaluateAll((chips) =>
+      Math.max(0, ...chips.map((chip) => chip.scrollHeight - chip.clientHeight)),
+    )).toBeLessThanOrEqual(2);
     const browse = coach.getByRole('button', { name: 'Browse…', exact: true });
     await browse.scrollIntoViewIfNeeded();
     await expectFullyInViewport(page, browse);
