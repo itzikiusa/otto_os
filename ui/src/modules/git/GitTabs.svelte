@@ -242,7 +242,10 @@
     align-items: center;
     gap: 6px;
     flex-shrink: 0;
-    max-width: 280px;
+    /* Keep natural widths on desktop: a fixed cap truncated identities even
+       when the header had hundreds of unused pixels. Overflow stays in the
+       tablist, and short identities never stretch just to fill the row. */
+    max-width: none;
     padding: 6px 8px;
     padding-inline-start: 10px;
     border: 1px solid transparent;
@@ -289,7 +292,7 @@
     font-weight: 500;
   }
   /* The repo name is the tab's identity, the branch is context: when a tab
-     is at its cap the branch gives way first (shrinks 4× faster), so "bo_common_ui" stays readable instead of
+     is constrained on mobile the branch gives way first (shrinks 4× faster), so "bo_common_ui" stays readable instead of
      "bo_co…" next to a full "feature/kyb-co…". Short branches ("main") are
      untouched. The full name + branch are in the tab's tooltip. */
   .git-tab-branch {
@@ -300,7 +303,7 @@
     flex-shrink: 4;
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    max-width: 120px;
+    max-width: none;
   }
   /* Ellipsis needs a block-level text box: on the inline-flex chip itself the
      bare text node was cut mid-character ("release/5.02.4("). */
@@ -421,6 +424,7 @@
       font-size: var(--fs-m);
       flex-shrink: 0;
     }
+    .git-tab-branch { max-width: 120px; }
     /* ≥40px touch hit area for the close ✕ — its onclick already
        stopPropagation()s, so tapping it never also activates the tab. */
     .git-tab-close {
