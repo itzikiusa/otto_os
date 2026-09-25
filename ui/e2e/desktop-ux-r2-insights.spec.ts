@@ -61,7 +61,7 @@ test('Insights phone report deep link opens detail and Back reveals list', async
 test('Insights regenerated period completes without increasing report count', async ({ page }) => {
   let replaced = false;
   await page.route('**/api/v1/insights/reports', r => r.fulfill({ json: [{ ...report, ...(replaced ? { summary: '# Daily review\n\nReplacement headline.', created_at: '2026-09-25T09:00:00Z' } : {}) }] }));
-  await page.route('**/api/v1/insights/run', r => { replaced = true; return r.fulfill({ json: { started: true, run_id: 'synthetic-run' } }); });
+  await page.route('**/api/v1/insights/run', r => { replaced = true; return r.fulfill({ json: { started: true, run_id: 'synthetic-run', report_key: 'daily:20260924_20260924' } }); });
   await page.goto('/#/insights');
   await page.getByRole('button', { name: 'Run now', exact: true }).click();
   await expect(page.getByText('Insights report ready', { exact: true })).toBeVisible({ timeout: 10_000 });
