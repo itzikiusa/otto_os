@@ -98,7 +98,6 @@
     "src/modules/canvas/nodes/JsonTree.svelte": 1,
     "src/modules/connections/ConnectionForm.svelte": 2,
     "src/modules/connections/ConnectionImportDialog.svelte": 4,
-    "src/modules/connections/SftpBrowser.svelte": 3,
     "src/modules/database/Dashboards.svelte": 1,
     "src/modules/database/QueryBuilder.svelte": 5,
     "src/modules/database/QueryEditor.svelte": 3,
