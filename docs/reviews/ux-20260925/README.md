@@ -61,7 +61,14 @@ Content verification passed 73 scoped checks plus four diagnostic reload repetit
 
 ## Round 4 (in progress)
 
-Three fresh reviewers have started: Settings, automation and content. The next scopes cover shared access, shell, data, Git, cloud, Insights and Help. Each receives the earlier evidence and concrete remaining layout/main-flow gaps; scores will be recorded only after executed checks and visual inspection.
+Five fresh reviewers have started. Settings and automation completed their scoped reviews; content, shell and shared access are active. Data, Git, cloud, Insights and Help follow. The parent independently verified new automation and settings regressions; a mid-round full UI check passed with zero errors/warnings. The round is not complete.
+
+| Completed scope | Verified dimensions / 10 | Evidence |
+|---|---:|---|
+| Settings, MCP, Plugins, Skills Lab | 9.3–9.5; loaded Review reaches9.5 across inspected dimensions | [Review](r4-settings.md) |
+| Automation and agent coordination | 9.1–9.5 on steady layouts; desktop/tablet transition was7.0–8.0 and is assigned to shell integration | [Review](r4-automation.md) |
+
+The shell reviewer has already passed the unchanged transition regression in both engines after preserving the mounted page; broader panel/terminal checks remain underway. The content reviewer reproduced Product failed-save recovery and D2 WebKit worker initialization failures. Their repairs and production verification remain in progress. [Parent cross-checks](r4-parent.md) record independent draft and identity checks.
 
 ## Integration and broad evidence
 
