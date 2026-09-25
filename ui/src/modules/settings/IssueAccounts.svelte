@@ -246,7 +246,7 @@
             {/if}
           </div>
           <button
-            class="btn small"
+            class="btn small acct-test"
             title="Check the stored token against {a.base_url}"
             disabled={r === 'busy'}
             onclick={() => testAccount(a)}
@@ -352,6 +352,7 @@
     min-height: 0;
   }
   .acct-list {
+    container-type: inline-size;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -419,6 +420,14 @@
   }
   .test-result.bad {
     color: var(--danger);
+  }
+
+  @container (max-width: 480px) {
+    .acct { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; }
+    .acct .grow { grid-column: 2 / -1; }
+    .acct-test { grid-column: 2; justify-self: end; }
+    .acct-label { flex-wrap: wrap; }
+    .acct-name { white-space: normal; overflow-wrap: anywhere; }
   }
 
   @media (max-width: 1024px) {
