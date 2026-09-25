@@ -154,7 +154,8 @@ test.describe('loaded automation visual and interaction fixtures', () => {
       };
       await page.goto('/#/swarm');
       if (rtl) await page.evaluate(() => document.documentElement.dir = 'rtl');
-      await page.locator('.swarm-item', { hasText: 'E2E Swarm' }).first().click();
+      if (width <= 640 || width > 1024) await page.locator('.swarm-item', { hasText: 'E2E Swarm' }).first().click();
+      await expect(page.getByRole('tab', { name: 'Org', exact: true })).toBeVisible();
       for (const view of ['Graph', 'Board', 'Feed']) {
         const tab = page.locator('.switcher .seg', { hasText: view }).first();
         await tab.click();

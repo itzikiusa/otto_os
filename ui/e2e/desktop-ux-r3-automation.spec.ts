@@ -298,7 +298,8 @@ test.describe('Swarm organization keyboard flow in five themes', () => {
         localStorage.setItem('otto_scheme', scheme);
       }, { workspaceId, theme, scheme });
       await page.goto('/#/swarm');
-      await page.locator('.swarm-item', { hasText: 'E2E Swarm' }).click();
+      if (width <= 640 || width > 1024) await page.locator('.swarm-item', { hasText: 'E2E Swarm' }).click();
+      await expect(page.getByRole('tab', { name: 'Org', exact: true })).toBeVisible();
       if (rtl) await page.evaluate(() => document.documentElement.dir = 'rtl');
       if (width === 834) {
         await expect(page.locator('.switcher')).toHaveCSS('overflow-x', 'auto');
@@ -308,6 +309,7 @@ test.describe('Swarm organization keyboard flow in five themes', () => {
         await expectFullyInViewport(page, page.getByRole('tab', { name: 'Org', exact: true }));
       }
       const toggle = page.locator('.org-row .twist').first();
+      await expect(toggle).toBeVisible();
       const rows = await page.locator('.org-row').count();
       await toggle.focus(); await page.keyboard.press('Enter');
       await expect(toggle).toHaveAttribute('aria-expanded', 'false');
