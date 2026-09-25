@@ -88,23 +88,25 @@
   /** workspace id → its full member list. Loaded for the by-user view. */
   let allMembers: Record<string, MemberEntry[]> = $state({});
   let allMembersLoading = $state(false);
+  let allMembersError = $state('');
   /** Workspace ids currently mid-save (disables that row's buttons). */
   let savingWs: string[] = $state([]);
 
   /** Load every workspace's member list (by-user view needs them all). */
   async function loadAllMembers(): Promise<void> {
     allMembersLoading = true;
+    allMembersError = '';
     try {
       const pairs = await Promise.all(
-        ws.workspaces.map(async (w) => {
-          try {
-            return [w.id, await api.get<MemberEntry[]>(`/workspaces/${w.id}/members`)] as const;
-          } catch {
-            return [w.id, [] as MemberEntry[]] as const;
-          }
-        }),
+        ws.workspaces.map(async (w) =>
+          [w.id, await api.get<MemberEntry[]>(`/workspaces/${w.id}/members`)] as const,
+        ),
       );
       allMembers = Object.fromEntries(pairs);
+    } catch (e) {
+      // Membership updates replace the full list. Never substitute an empty
+      // list for an unreadable workspace, or the next edit removes its users.
+      allMembersError = loadErrorText(e);
     } finally {
       allMembersLoading = false;
     }
@@ -120,6 +122,7 @@
     userId: string,
     role: WorkspaceRole | 'none',
   ): Promise<void> {
+    if (allMembersLoading || allMembersError || !allMembers[wsId] || savingWs.includes(wsId)) return;
     if (roleIn(wsId, userId) === role) return;
     const current = allMembers[wsId] ?? [];
     const next = current.filter((m) => m.user_id !== userId);
@@ -559,6 +562,8 @@
       {/if}
     {:else if allMembersLoading}
       <Skeleton rows={4} height={32} />
+    {:else if allMembersError}
+      <LoadState what="workspace memberships" error={allMembersError} empty onretry={() => void loadAllMembers()} />
     {:else}
       <div class="urow controls">
         <span class="dim">
