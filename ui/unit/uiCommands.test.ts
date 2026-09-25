@@ -60,7 +60,7 @@ function walk(dir: string, out: string[] = []): string[] {
 function sourceOf(file: string): string {
   const text = readFileSync(file, 'utf8');
   if (!file.endsWith('.svelte')) return text;
-  return [...text.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join('\n');
+  return [...text.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi)].map((m) => m[1]).join('\n');
 }
 
 function propName(p: ts.ObjectLiteralElementLike, sf: ts.SourceFile): string | null {

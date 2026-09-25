@@ -240,7 +240,10 @@ async fn read_only_run_refuses_a_write_on_an_unguarded_connection() {
                 m.starts_with(READ_ONLY_PREFIX) && !m.starts_with(MCP_READ_ONLY_PREFIX),
                 "{stmt:?}: wrong marker: {m}"
             ),
-            other => panic!("{stmt:?}: expected a read_only Forbidden, got {other:?}"),
+            // Only the outcome's shape — never a row/connection value — goes
+            // into the panic message.
+            Ok(_) => panic!("{stmt:?}: expected a read_only Forbidden, got Ok"),
+            Err(_) => panic!("{stmt:?}: expected a read_only Forbidden, got another error kind"),
         }
     }
 }
