@@ -1,22 +1,29 @@
 // Keyboard ownership for custom modal surfaces (drawers and the palette).
 // Inner controls handle their own keys first; only the top dialog traps Tab.
 // Safari does not focus pointer-clicked buttons. Remember the activating
-// control through the click's render flush so sheets can return to it, without
-// changing normal pointer focus behavior throughout the app.
+// control until focus or another user interaction moves on. File choosers and
+// async reads can open a sheet well after the click's initial render flush.
 let activatingControl: HTMLElement | null = null;
 if (typeof document !== 'undefined') {
+  document.addEventListener('pointerdown', () => { activatingControl = null; }, true);
+  document.addEventListener('keydown', () => { activatingControl = null; }, true);
+  document.addEventListener('focusin', () => { activatingControl = null; }, true);
   document.addEventListener('click', (event) => {
     const control = event.target instanceof Element
       ? event.target.closest<HTMLElement>('button, a[href], input, select, textarea, [tabindex]')
       : null;
-    activatingControl = control;
-    setTimeout(() => { if (activatingControl === control) activatingControl = null; }, 0);
+    // A visible button may call hiddenFileInput.click(). Keep the real trigger.
+    if (control && control.getClientRects().length > 0 && !control.matches(':disabled') && !control.closest('[inert]')) {
+      activatingControl = control;
+    }
   }, true);
 }
 
 export function dialogReturnTarget(): HTMLElement | null {
-  return activatingControl?.isConnected ? activatingControl
+  const target = activatingControl?.isConnected ? activatingControl
     : document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  activatingControl = null;
+  return target;
 }
 
 export function dialogFocus(node: HTMLElement, onEscape: () => void) {
