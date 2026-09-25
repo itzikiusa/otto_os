@@ -3401,6 +3401,8 @@ class DatabaseStore {
   /** Create a NEW saved query, associating the active tab with it so a later
    *  "Save" updates it in place. Used by "Save as new" and first-time saves. */
   async saveQuery(name: string, statement: string): Promise<DbSavedQuery | null> {
+    const tab = this.tab;
+    const accessEpoch = this.accessEpoch;
     const base = this.wsBase();
     if (!base) return null;
     try {
@@ -3409,11 +3411,12 @@ class DatabaseStore {
         name,
         statement,
       });
+      if (accessEpoch !== this.accessEpoch || base !== this.wsBase()) return saved;
       this.savedQueries = [saved, ...this.savedQueries.filter((q) => q.id !== saved.id)];
-      const t = this.tab;
-      if (t) {
-        t.savedQueryId = saved.id;
-        t.name = saved.name;
+      // The save belongs to the initiating tab, even if focus changed in flight.
+      if (tab && this.tabs.includes(tab)) {
+        tab.savedQueryId = saved.id;
+        tab.name = saved.name;
         this.persistTabs();
       }
       toasts.success('Query saved', saved.name);

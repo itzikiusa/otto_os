@@ -3,6 +3,8 @@
   // keys; collections → fields). Mirrors CollectionsTree: chevron expand, indent
   // by depth, an icon per node kind, dimmed `detail`. Clicking a leaf object
   // opens its Structure; right-click offers "Explain with agent".
+  import { tick } from 'svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import RedisKeyFilter from './RedisKeyFilter.svelte';
   import { database } from '../../lib/stores/database.svelte';
@@ -55,12 +57,23 @@
 
   /** Open a search hit exactly as a browsed node would open. */
   function openHit(hit: { path: string; name: string; kind: DbNodeKind }): void {
-    void database.openObject({
+    openStructure({
       id: hit.path,
       label: hit.name,
       kind: hit.kind,
       has_children: true,
     });
+  }
+
+  function openStructure(node: SchemaNode): void {
+    const page = treeEl?.closest('.db-page');
+    void database.openObject(node);
+    // Tablet list/detail navigation gives the structure its usable width. The
+    // schema stays mounted, retaining its query and selection for the return.
+    if (viewport.isTablet && !database.sidebarCollapsed) {
+      database.toggleSidebar();
+      void tick().then(() => page?.querySelector<HTMLButtonElement>('.view-switch [aria-selected="true"]')?.focus());
+    }
   }
 
   // Node kinds that, when clicked, open the Structure view (vs. just expanding).
@@ -122,7 +135,7 @@
 
   function onClick(node: SchemaNode): void {
     if (OBJECT_KINDS.has(node.kind)) {
-      void database.openObject(node);
+      openStructure(node);
     } else if (node.kind === 'database') {
       // Clicking a database makes it the active one (queries scope to it, like
       // Workbench's bold default schema) and expands it.
@@ -356,7 +369,7 @@
     }
 
     if (isObject) {
-      items.push({ label: 'Open structure', icon: 'eye', action: () => database.openObject(node) });
+      items.push({ label: 'Open structure', icon: 'eye', action: () => openStructure(node) });
     }
     items.push({ label: 'Explain with agent', icon: 'zap', action: () => explain(node) });
 
@@ -496,6 +509,9 @@
       {#each hits as hit (hit.path)}
         <button
           class="hit"
+          class:selected={database.selectedObjectPath === hit.path}
+          aria-current={database.selectedObjectPath === hit.path ? 'true' : undefined}
+          data-node-id={hit.path}
           onclick={() => openHit(hit)}
           oncontextmenu={(e) => showMenu(e, hitNode(hit))}
           title={hit.path}
@@ -846,6 +862,10 @@
     font-size: var(--fs-s);
     text-align: left;
     cursor: pointer;
+  }
+  .hit.selected {
+    background: var(--accent-soft);
+    color: var(--text);
   }
   .hit:hover {
     background: color-mix(in srgb, var(--accent) 16%, transparent);

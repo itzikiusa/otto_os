@@ -2,6 +2,7 @@
   // DB Explorer page (mirrors ApiPage): left sidebar = connection picker +
   // SchemaTree + a Saved/History switch; main = a tab strip (Query / Builder /
   // Structure / Dashboards) over the active view.
+  import { tick } from 'svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
@@ -532,6 +533,16 @@
     editingConn = null;
     connFormOpen = true;
   }
+  async function showSchemaSidebar(e: MouseEvent): Promise<void> {
+    const page = (e.currentTarget as HTMLElement).closest('.db-page');
+    database.toggleSidebar();
+    await tick();
+    const selected = [...(page?.querySelectorAll<HTMLElement>('[data-node-id]') ?? [])]
+      .find((node) => node.dataset.nodeId === database.selectedObjectPath);
+    (selected?.querySelector<HTMLButtonElement>('.node-label') ?? selected
+      ?? page?.querySelector<HTMLInputElement>('[aria-label="Find an object"]'))?.focus();
+  }
+
   // Point the user at the connection list from anywhere: make sure the sidebar
   // rail is actually visible (it may be collapsed) and land on the picker tab.
   function showConnections(): void {
@@ -713,8 +724,9 @@
     const i = tabs.indexOf(e.target as HTMLButtonElement);
     if (i < 0) return;
     let j = i;
-    if (e.key === 'ArrowRight') j = (i + 1) % tabs.length;
-    else if (e.key === 'ArrowLeft') j = (i - 1 + tabs.length) % tabs.length;
+    const forward = getComputedStyle(bar).direction === 'rtl' ? 'ArrowLeft' : 'ArrowRight';
+    if (e.key === forward) j = (i + 1) % tabs.length;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') j = (i - 1 + tabs.length) % tabs.length;
     else if (e.key === 'Home') j = 0;
     else if (e.key === 'End') j = tabs.length - 1;
     else return;
@@ -726,8 +738,9 @@
   function onViewKey(e: KeyboardEvent): void {
     const i = visibleTabs.findIndex((t) => t.id === database.mainTab);
     let j = i;
-    if (e.key === 'ArrowRight') j = (i + 1) % visibleTabs.length;
-    else if (e.key === 'ArrowLeft') j = (i - 1 + visibleTabs.length) % visibleTabs.length;
+    const forward = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl' ? 'ArrowLeft' : 'ArrowRight';
+    if (e.key === forward) j = (i + 1) % visibleTabs.length;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') j = (i - 1 + visibleTabs.length) % visibleTabs.length;
     else if (e.key === 'Home') j = 0;
     else if (e.key === 'End') j = visibleTabs.length - 1;
     else return;
@@ -927,7 +940,7 @@
     <div class="side-rail">
       <button
         class="rail-btn"
-        onclick={() => database.toggleSidebar()}
+        onclick={showSchemaSidebar}
         title="Show schema (⌘B)"
         aria-label="Show schema sidebar"
       >
@@ -974,7 +987,7 @@
           {/if}
         </div>
         <div class="side-switch" class:acc-collapsed={!schemaOpen} role="tablist" aria-label="Sidebar view" tabindex="-1" onkeydown={onSidebarKey}>
-          <button class="ss" class:active={database.sideTab === 'schema' || database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'schema'} tabindex={database.sideTab === 'schema' ? 0 : -1} onclick={() => database.setSideTab('schema')}>Schema</button>
+          <button class="ss" class:active={database.sideTab === 'schema' || database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'schema' || database.sideTab === 'connections'} tabindex={database.sideTab === 'schema' || database.sideTab === 'connections' ? 0 : -1} onclick={() => database.setSideTab('schema')}>Schema</button>
           <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} tabindex={database.sideTab === 'saved' ? 0 : -1} onclick={() => database.setSideTab('saved')}>Saved</button>
           <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} tabindex={database.sideTab === 'history' ? 0 : -1} onclick={() => database.setSideTab('history')}>History</button>
         </div>

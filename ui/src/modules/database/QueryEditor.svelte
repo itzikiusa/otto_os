@@ -753,8 +753,9 @@
         onkeydown={(e) => {
           if (e.target !== e.currentTarget) return;
           let next = i;
-          if (e.key === 'ArrowRight') next = (i + 1) % database.tabs.length;
-          else if (e.key === 'ArrowLeft') next = (i - 1 + database.tabs.length) % database.tabs.length;
+          const forward = getComputedStyle(e.currentTarget).direction === 'rtl' ? 'ArrowLeft' : 'ArrowRight';
+          if (e.key === forward) next = (i + 1) % database.tabs.length;
+          else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') next = (i - 1 + database.tabs.length) % database.tabs.length;
           else if (e.key === 'Home') next = 0;
           else if (e.key === 'End') next = database.tabs.length - 1;
           if (next !== i) {
