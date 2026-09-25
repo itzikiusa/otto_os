@@ -40,9 +40,9 @@ All ten fresh reviewers completed their repairs and verification. The combined r
 
 Ratings above describe tested browser behavior, not a guarantee of every application path. The broader session test run exposed a real terminal selection loss during resize compaction; the shell reviewer repaired and rechecked it, including delayed responses and native clipboard fallback. Production-build LSP and nested-focus checks passed in both Chromium and WebKit (6 tests). One confirmed terminal readability issue remains assigned to round three: Split view can shrink text below 11px.
 
-## Round 3 (in progress)
+## Round 3
 
-All ten fresh reviewers have started. Eight have completed repairs and scoped checks; Assistant/Insights and Help/onboarding remain active. This round includes terminal sizing, save races, installed plugin routes, Snip editor, auth/share boot states, desktop auxiliary surfaces and complete onboarding flows. Ten fresh reviewers will run before the combined round gate. Rounds four and five are also mandatory.
+All ten fresh reviewers completed their repairs and scoped checks. The combined gate passed: full UI check with zero errors/warnings, 454 unit tests, and production build. This round found further terminal sizing, mutation ownership, startup draft, media-control and monitoring layout defects. Rounds four and five remain mandatory.
 
 | Completed scope | Verified dimensions / 10 | Evidence |
 |---|---:|---|
@@ -54,8 +54,14 @@ All ten fresh reviewers have started. Eight have completed repairs and scoped ch
 | Git, graph, PRs, Focus | 9.4–9.6 by dimension; active review flows remain unscored | [Review](r3-git.md) |
 | Database, API, connections, brokers | 9.5 on verified main flows; network-profile composition remains 9.4 | [Review](r3-data.md) |
 | AWS and Kubernetes | 9.3–9.5 by dimension; deeper fleet and cloud operations remain unscored | [Review](r3-cloud.md) |
+| Assistant, History, Usage, Insights | 9.4–9.6 by dimension; History mean9.48, other reviewed families9.50–9.56 | [Review](r3-insights.md) |
+| Help, walkthrough, guides, hotkeys and coach | 9.5–9.6 on individually inspected variants | [Review](r3-help.md) |
 
-Content verification passed 73 scoped checks plus four diagnostic reload repetitions. One intermittent Product reload rejection did not reproduce with tracing and remains an explicit next-round investigation. This is not a clean-runtime claim. Mid-round UI checking passed with zero errors or warnings. The complete Rust rerun passed 3,562 tests with zero failures (66 ignored), and full clippy passed after repairing a stale macOS browser-install test with an isolated fixture. These gates precede the later Git normalization repair; the updated Git crate separately passed 236 tests. Final gates will verify the integrated revision. [Parent cross-checks](r3-parent.md) document a newly reproduced Canvas queue identity regression, its repair and both-engine validation, plus workflow response compatibility.
+Content verification passed 73 scoped checks plus four diagnostic reload repetitions. One intermittent Product reload rejection did not reproduce with tracing and remains an explicit next-round investigation. This is not a clean-runtime claim. Mid-round UI checking passed with zero errors or warnings. The complete Rust rerun after Git normalization passed 3,563 tests with zero failures (66 ignored); the later Insights calendar extension separately passed12 focused tests. Full clippy passed with both Rust changes. Final gates will verify the final integrated revision. [Parent cross-checks](r3-parent.md) document a newly reproduced Canvas queue identity regression, its repair and both-engine validation, plus workflow response compatibility.
+
+## Round 4 (in progress)
+
+Three fresh reviewers have started: Settings, automation and content. The next scopes cover shared access, shell, data, Git, cloud, Insights and Help. Each receives the earlier evidence and concrete remaining layout/main-flow gaps; scores will be recorded only after executed checks and visual inspection.
 
 ## Integration and broad evidence
 
