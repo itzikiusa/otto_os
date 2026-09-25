@@ -205,6 +205,30 @@ pub fn due_period(kind: Kind, now: DateTime<Utc>) -> (NaiveDate, NaiveDate) {
     }
 }
 
+/// Resolve the collector's host-local calendar window for a manual run. Unlike
+/// the scheduler's UTC due check, this mirrors Python `datetime.now()` and
+/// supports older offsets. The UI must not infer this in a remote browser's zone.
+fn requested_period(kind: Kind, offset: i64, today: NaiveDate) -> Option<(NaiveDate, NaiveDate)> {
+    let offset = u64::try_from(offset).ok()?;
+    match kind {
+        Kind::Day => {
+            let day = today.checked_sub_days(Days::new(offset))?;
+            Some((day, day))
+        }
+        Kind::Week => {
+            let monday = today.checked_sub_days(Days::new(today.weekday().num_days_from_monday().into()))?;
+            let start = monday.checked_sub_days(Days::new(offset.checked_mul(7)?))?;
+            Some((start, start.checked_add_days(Days::new(6))?))
+        }
+        Kind::Month => {
+            let first = today.with_day(1)?;
+            let start = first.checked_sub_months(Months::new(u32::try_from(offset).ok()?))?;
+            let end = start.checked_add_months(Months::new(1))?.pred_opt()?;
+            Some((start, end))
+        }
+    }
+}
+
 /// `YYYYMMDD` for a date (the on-disk file-name component).
 fn ymd(d: NaiveDate) -> String {
     d.format("%Y%m%d").to_string()
@@ -542,6 +566,9 @@ pub struct RunResp {
     pub started: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
+    /// Requested collector period, resolved in the daemon's local timezone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report_key: Option<String>,
     /// Set when `started == false` to explain why (e.g. skill not installed).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -622,16 +649,20 @@ async fn post_run(
         )))
     })?;
     let offset = req.offset.max(0);
+    let (start, end) = requested_period(kind, offset, chrono::Local::now().date_naive())
+        .ok_or_else(|| ApiError(otto_core::Error::Invalid("report offset is out of range".into())))?;
 
     match run_insights(&ctx, kind, offset).await {
         Ok(Some(id)) => Ok(Json(RunResp {
             started: true,
             run_id: Some(id.to_string()),
+            report_key: Some(period_key(kind, start, end)),
             reason: None,
         })),
         Ok(None) => Ok(Json(RunResp {
             started: false,
             run_id: None,
+            report_key: None,
             reason: Some(format!(
                 "the '{INSIGHTS_SKILL}' skill is not installed, or no workspace is available to host the run"
             )),
@@ -798,6 +829,24 @@ mod tests {
 
     fn at(y: i32, m: u32, d: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(y, m, d, 12, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn requested_period_matches_collector_calendar_and_offset() {
+        let today = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let key = |kind, offset| {
+            let (start, end) = requested_period(kind, offset, today).unwrap();
+            period_key(kind, start, end)
+        };
+        assert_eq!(key(Kind::Day, 2), "daily:20251230_20251230");
+        assert_eq!(key(Kind::Week, 1), "weekly:20251222_20251228");
+        assert_eq!(key(Kind::Month, 2), "monthly:20251101_20251130");
+        assert_eq!(key(Kind::Day, 0), "daily:20260101_20260101");
+        let leap = NaiveDate::from_ymd_opt(2024, 3, 31).unwrap();
+        let (start, end) = requested_period(Kind::Month, 1, leap).unwrap();
+        assert_eq!(period_key(Kind::Month, start, end), "monthly:20240201_20240229");
+        assert!(requested_period(Kind::Week, i64::MAX, today).is_none());
+        assert!(requested_period(Kind::Day, -1, today).is_none());
     }
 
     #[test]

@@ -111,11 +111,13 @@
   let fullMd: Record<string, string> = $state({});
 
   let loaded = false;
+  let disposed = false;
   $effect(() => {
     if (loaded) return;
     loaded = true;
     void load();
     return () => {
+      disposed = true;
       if (pollTimer) clearTimeout(pollTimer);
     };
   });
@@ -133,12 +135,15 @@
     }
   }
 
+  let indexRequest = 0;
   async function loadIndex(): Promise<void> {
+    const request = ++indexRequest;
     const html = reports.find((r) => r.html_path)?.html_path;
     const path = html ? indexPathFrom(html) : null;
     if (!path) return;
     try {
-      index = parseIndex(JSON.parse(await insightsApi.readText(path)));
+      const next = parseIndex(JSON.parse(await insightsApi.readText(path)));
+      if (!disposed && request === indexRequest) index = next;
     } catch {
       /* no index yet / unreadable — KPIs fall back to the summaries alone */
     }
@@ -214,14 +219,16 @@
     if (fullMd[k] != null) return;
     const path = siblingPath(r.html_path, 'summary');
     if (!path) return;
+    let current = true;
     void insightsApi
       .readText(path)
       .then((text) => {
-        if (text.trim()) fullMd = { ...fullMd, [k]: text };
+        if (current && text.trim()) fullMd = { ...fullMd, [k]: text };
       })
       .catch(() => {
-        fullMd = { ...fullMd, [k]: r.summary };
+        if (current) fullMd = { ...fullMd, [k]: r.summary };
       });
+    return () => { current = false; };
   });
 
   // ---------------------------------------------------------------------------
@@ -355,6 +362,21 @@
   // Run now — with run_id polling
   // ---------------------------------------------------------------------------
 
+  // Compatibility for older daemons without report_key. New daemons resolve
+  // this in their own local timezone, matching the skill collector.
+  function localReportKey(period: InsightRunPeriod, offset: number): string {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    if (period === 'day') start.setDate(start.getDate() - offset);
+    else if (period === 'week') start.setDate(start.getDate() - (start.getDay() + 6) % 7 - offset * 7);
+    else { start.setDate(1); start.setMonth(start.getMonth() - offset); }
+    const end = new Date(start);
+    if (period === 'week') end.setDate(end.getDate() + 6);
+    else if (period === 'month') { end.setMonth(end.getMonth() + 1); end.setDate(0); }
+    const ymd = (d: Date) => `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+    return `${period === 'day' ? 'daily' : period === 'week' ? 'weekly' : 'monthly'}:${ymd(start)}_${ymd(end)}`;
+  }
+
   const RUN_OPTIONS: { value: string; label: string }[] = [
     { value: 'day:1', label: 'Yesterday' },
     { value: 'day:2', label: '2 days ago' },
@@ -368,6 +390,8 @@
   /** Reason the last run did not start (e.g. skill not installed). */
   let runFailReason: string | null = $state(null);
   let pollRunId: string | null = $state(null);
+  let pollReportKey: string | null = null;
+  let reportBeforeRun: string | undefined;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   // 3 s × 100 ≈ 5 min: the banner promises "a few minutes", and the old 20
   // checks (one minute) dropped the banner silently while the agent was still
@@ -381,14 +405,21 @@
     running = true;
     runFailReason = null;
     pollCount = 0;
+    const period = p as InsightRunPeriod;
+    const offset = Number(o) || 1;
+    const before = new Map(reports.map((r) => [keyOf(r), JSON.stringify(r)]));
+    const fallbackKey = localReportKey(period, offset);
     try {
-      const resp = await insightsApi.run({ period: p as InsightRunPeriod, offset: Number(o) || 1 });
+      const resp = await insightsApi.run({ period, offset });
+      if (disposed) return;
       if (!resp.started) {
         runFailReason = resp.reason ?? 'Check that the insights skill is installed.';
         return;
       }
       if (resp.run_id) {
         pollRunId = resp.run_id;
+        pollReportKey = resp.report_key ?? fallbackKey;
+        reportBeforeRun = before.get(pollReportKey);
         schedulePoll();
       } else {
         setTimeout(() => void load(), 2500);
@@ -402,6 +433,7 @@
   }
 
   function schedulePoll(): void {
+    if (disposed) return;
     if (pollCount >= POLL_MAX || !pollRunId) {
       if (pollRunId) {
         toasts.info('Still generating the insights report', 'It will show up in the list once the agent finishes — reopen Insights to check.');
@@ -412,13 +444,14 @@
     }
     pollTimer = setTimeout(async () => {
       pollCount += 1;
-      const prev = new Map(reports.map((r) => [keyOf(r), JSON.stringify(r)]));
       try {
-        reports = await insightsApi.listReports();
+        const next = await insightsApi.listReports();
+        if (disposed) return;
+        reports = next;
       } catch {
         /* keep polling; the next tick retries */
       }
-      const ready = reports.find((r) => prev.get(keyOf(r)) !== JSON.stringify(r));
+      const ready = reports.find((r) => keyOf(r) === pollReportKey && reportBeforeRun !== JSON.stringify(r));
       if (ready) {
         pollRunId = null;
         fullMd = {};
