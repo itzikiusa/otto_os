@@ -228,6 +228,6 @@
   }
   .field-error {
     font-size: 11px;
-    color: var(--status-exited, #ff5f57);
+    color: var(--danger);
   }
 </style>

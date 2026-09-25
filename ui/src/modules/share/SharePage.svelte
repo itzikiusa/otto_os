@@ -12,6 +12,7 @@
   // re-sending a fresh OTP to the locked original recipient.
   import { onMount } from 'svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import { getSharedSession, openShareTerminalWs, verifyShareOtp, extendShare } from '../../lib/api/share';
   import { getShareToken } from '../../lib/router.svelte';
   import type { Session, SessionStatus } from '../../lib/api/types';
@@ -187,7 +188,7 @@
 {#if !token}
   <div class="share-error" style={`zoom:${ui.zoom}`}>
     <div class="error-card">
-      <div class="error-icon">&#9888;</div>
+      <div class="error-icon"><Icon name="warning" size={30} /></div>
       <h2>Link invalid or expired</h2>
       <p>
         This share link is missing a token or has already expired.
@@ -209,7 +210,7 @@
 {:else if viewState === 'otp'}
   <div class="share-error" style={`zoom:${ui.zoom}`}>
     <div class="error-card otp-card">
-      <div class="otp-icon">&#9993;</div>
+      <div class="otp-icon"><Icon name="mail" size={32} /></div>
       <h2>Enter your access code</h2>
       <p>
         A 6-digit code was emailed to you. Enter it below to access the shared session.
@@ -250,7 +251,7 @@
 {:else if viewState === 'error'}
   <div class="share-error" style={`zoom:${ui.zoom}`}>
     <div class="error-card">
-      <div class="error-icon">&#9888;</div>
+      <div class="error-icon"><Icon name="warning" size={30} /></div>
       <h2>Couldn't load this session</h2>
       <p>{loadCause}</p>
       {#if loadError}<p class="hint">{loadError}</p>{/if}
@@ -295,7 +296,7 @@
       {#if termEnded}
         <div class="extend-overlay">
           <div class="extend-card">
-            <div class="extend-icon">&#8987;</div>
+            <div class="extend-icon"><Icon name="clock" size={28} /></div>
             <h3>Session window ended</h3>
             <p>
               Request a new access code to be emailed to the original recipient.
@@ -340,11 +341,13 @@
     max-width: 400px;
   }
   .error-icon {
-    font-size: 32px;
-    color: var(--status-exited);
+    display: flex;
+    justify-content: center;
+    color: var(--danger);
   }
   .otp-icon {
-    font-size: 36px;
+    display: flex;
+    justify-content: center;
     color: var(--accent-text);
   }
   .error-card h2 {
@@ -541,7 +544,8 @@
     align-items: center;
   }
   .extend-icon {
-    font-size: 30px;
+    display: flex;
+    justify-content: center;
     color: var(--text-dim);
   }
   .extend-card h3 {

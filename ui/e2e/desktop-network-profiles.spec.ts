@@ -70,5 +70,5 @@ test('workspace changes ignore delayed profile responses and archived profiles c
   await staleResponse;
   await expect(page.getByRole('option', {name:'Old workspace',exact:true})).toHaveCount(0);
   await expect(page.getByRole('option', {name:'Archived profile',exact:true})).toHaveCount(0);
-  await expect(page.getByTestId('network-status')).toContainText('stopped');
+  await expect(page.getByTestId('network-status')).toContainText(/stopped/i);
 });

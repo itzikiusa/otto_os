@@ -400,6 +400,8 @@
     white-space: nowrap;
     transition: background 120ms ease-out, color 120ms ease-out;
     max-width: 200px;
+    /* Tabs keep their width and the strip scrolls (never squeezed). */
+    flex-shrink: 0;
   }
   .tab:hover {
     background: var(--surface-2);
@@ -446,7 +448,12 @@
     flex-shrink: 0;
     color: var(--text-dim);
   }
+  /* min-width: 0 is what lets the ellipsis happen: a flex item's automatic
+     minimum is its full text width, so a long title overflowed the 200px tab
+     and pushed the × out past its edge. */
   .tab-title {
+    flex: 1 1 auto;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
   }
@@ -462,6 +469,7 @@
     cursor: pointer;
     opacity: 0;
     transition: opacity 120ms ease-out, background 120ms ease-out;
+    flex-shrink: 0;
   }
   .tab:hover .tab-close,
   .tab.active .tab-close,

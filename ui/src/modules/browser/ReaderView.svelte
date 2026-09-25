@@ -28,8 +28,12 @@
   import { buildSelector } from './selector';
   import type { BrowserPage } from '../../lib/api/types';
 
-  let { page, loading, error }: { page: BrowserPage | null; loading: boolean; error: string } =
-    $props();
+  let {
+    page,
+    loading,
+    error,
+    onretry,
+  }: { page: BrowserPage | null; loading: boolean; error: string; onretry?: () => void } = $props();
 
   const html = $derived(
     page ? renderNote(page.markdown, { resolve: () => null, assetUrl: () => null }) : '',
@@ -117,7 +121,11 @@
   {#if loading}
     <p class="muted">Loading…</p>
   {:else if error}
-    <div class="error">{error}</div>
+    <!-- A failed fetch shows inline with Retry (not a dead end). -->
+    <div class="error" role="alert">
+      <span>Couldn't load this page: {error}</span>
+      {#if onretry}<button class="btn" onclick={onretry}>Retry</button>{/if}
+    </div>
   {:else if !page}
     <EmptyState
       variant="page"
@@ -190,8 +198,13 @@
     padding: 0.75rem 0;
   }
   .error {
-    color: var(--status-exited);
-    background: color-mix(in srgb, var(--status-exited) 12%, transparent);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    color: var(--danger);
+    background: var(--danger-soft);
     border-radius: var(--radius-s);
     padding: 0.6rem 0.75rem;
     font-size: 0.85rem;
@@ -297,9 +310,9 @@
     cursor: pointer;
   }
   .btn.primary {
-    background: var(--accent);
-    color: var(--accent-contrast, #fff);
-    border-color: var(--accent);
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
+    border-color: var(--accent-solid);
   }
   .btn:disabled {
     opacity: 0.6;

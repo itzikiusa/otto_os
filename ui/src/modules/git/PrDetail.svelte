@@ -475,7 +475,7 @@
             title="More PR actions"
             onclick={moreMenu}
             onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && moreMenu(e)}
-          >⋯</button>
+          ><Icon name="more" size={14} /></button>
         </section>
         {#if showRequestChanges}
           <section class="prd-request-changes card">

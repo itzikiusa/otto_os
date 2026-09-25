@@ -5,6 +5,7 @@
   //   [SSH section: jump host + identity file] / first command.
   import { auth } from '../../lib/stores/auth.svelte';
   import Modal from '../../lib/components/Modal.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import { api } from '../../lib/api/client';
   import type {
@@ -30,6 +31,12 @@
     onsaved,
     kinds = ['ssh', 'mysql', 'postgres', 'redis', 'mongodb', 'clickhouse', 'custom'],
   }: Props = $props();
+
+  // Display names for the kind chips / toasts (the raw enum is lowercase).
+  const kindLabels: Record<ConnectionKind, string> = {
+    ssh: 'SSH', mysql: 'MySQL', postgres: 'PostgreSQL', redis: 'Redis',
+    mongodb: 'MongoDB', clickhouse: 'ClickHouse', custom: 'Custom',
+  };
 
   // Which kinds support the db field
   const hasDatabaseField = new Set<ConnectionKind>(['mysql', 'postgres', 'clickhouse', 'redis', 'mongodb']);
@@ -173,6 +180,8 @@
   let showFilePicker = $state(false);
 
   function setKind(k: ConnectionKind): void {
+    // A test outcome belongs to the kind it probed — don't leave a stale ✓/✗.
+    if (k !== kind) testResult = null;
     kind = k;
     // Auto-enable SSH for the ssh kind; auto-disable when switching away
     // (unless jump/identity already filled).
@@ -310,7 +319,7 @@
       name = dbPart ? `${url.hostname}/${dbPart}` : url.hostname;
     }
 
-    toasts.success('URI parsed', `${mapped} — fields populated`);
+    toasts.success('URI parsed', `${kindLabels[mapped]} — fields populated`);
   }
 
   let showDsnInput = $state(false);
@@ -385,7 +394,7 @@
   }
 </script>
 
-<Modal title={existing ? `Edit ${existing.name}` : 'New Connection'} width={500} {onclose}>
+<Modal title={existing ? `Edit ${existing.name}` : 'New connection'} width={500} {onclose}>
   <!-- DSN / URI paste import -->
   {#if !existing}
     {#if showDsnInput}
@@ -455,7 +464,7 @@
               <option value={opt.id}>{opt.label}</option>
             {/each}
           </select>
-          <button class="btn small" onclick={() => (creatingSection = true)}>＋ New</button>
+          <button class="btn small" onclick={() => (creatingSection = true)}><Icon name="plus" size={12} /> New</button>
         </div>
       {/if}
     </div>
@@ -465,23 +474,24 @@
   <fieldset class="native-fields" disabled={!auth.isRoot}>
   <!-- Kind -->
   <div class="field">
-    <label for="cf-kind">Kind</label>
-    <div class="kind-row" id="cf-kind">
+    <span class="group-label" id="cf-kind-label">Kind</span>
+    <div class="kind-row" role="group" aria-labelledby="cf-kind-label">
       {#each kinds as k (k)}
-        <button class="kind-chip" class:selected={kind === k} onclick={() => setKind(k)}>{k}</button>
+        <button class="kind-chip" class:selected={kind === k} aria-pressed={kind === k} onclick={() => setKind(k)}>{kindLabels[k]}</button>
       {/each}
     </div>
   </div>
 
   <!-- Environment + write guardrail -->
   <div class="field">
-    <label for="cf-env">Environment</label>
-    <div class="env-row" id="cf-env">
+    <span class="group-label" id="cf-env-label">Environment</span>
+    <div class="env-row" role="group" aria-labelledby="cf-env-label">
       {#each (['dev', 'staging', 'prod'] as Environment[]) as e (e)}
         <button
           class="env-chip"
           class:selected={environment === e}
           class:prod={e === 'prod'}
+          aria-pressed={environment === e}
           onclick={() => (environment = e)}
         >{e}</button>
       {/each}
@@ -554,10 +564,10 @@
           class="input mono"
           type="number"
           bind:value={fPort}
-          placeholder={kind === 'ssh' ? '22' : kind === 'redis' ? '6379' : kind === 'clickhouse' ? '8443' : kind === 'postgres' ? '5432' : '3306'}
+          placeholder={kind === 'ssh' ? '22' : kind === 'redis' ? '6379' : kind === 'clickhouse' ? '8123' : kind === 'postgres' ? '5432' : '3306'}
         />
         {#if kind === 'clickhouse'}
-          <span class="hint">Use the HTTP interface — 8123 (plain) or 8443 (TLS). The native ports 9000 / 9440 aren't supported.</span>
+          <span class="hint">Use the HTTP interface — 8123 (plain, the default when empty) or 8443 (TLS). The native ports 9000 / 9440 aren't supported.</span>
         {/if}
       </div>
       <div class="field grow">
@@ -682,7 +692,7 @@
     <div class="field ssh-toggle-row">
       <label class="toggle-label">
         <input type="checkbox" bind:checked={tunnelOpen} />
-        SSH tunnel <span class="dim">(reach the DB through a bastion)</span>
+        SSH tunnel <span class="dim">(Database Explorer reaches the DB through a bastion)</span>
       </label>
     </div>
     {#if tunnelOpen}
@@ -691,6 +701,9 @@
           <div class="field grow">
             <label for="cf-tun-host">Tunnel host</label>
             <input id="cf-tun-host" class="input mono" bind:value={tunHost} placeholder="bastion.example.com" spellcheck="false" />
+            {#if !tunHost.trim()}
+              <span class="hint">Required — without a host the tunnel isn't saved.</span>
+            {/if}
           </div>
           <div class="field tun-port">
             <label for="cf-tun-port">Port <span class="dim">(opt)</span></label>
@@ -718,7 +731,7 @@
     <div class="field ssh-toggle-row">
       <label class="toggle-label">
         <input type="checkbox" bind:checked={sshEnabled} />
-        Connect via SSH <span class="dim">(jump host + identity)</span>
+        Connect via SSH <span class="dim">(terminal runs the client on the jump host)</span>
       </label>
     </div>
   {/if}
@@ -752,7 +765,7 @@
           />
           <button class="btn browse-btn" onclick={() => (showFilePicker = true)}>Browse…</button>
         </div>
-        <span class="hint">Identity OR password — both optional. Key file must be private (<span class="mono">chmod 600</span>) or ssh ignores it.</span>
+        <span class="hint">Leave empty to use ssh-agent / <span class="mono">~/.ssh/config</span>; otherwise ssh asks for a password in the terminal. Key file must be private (<span class="mono">chmod 600</span>) or ssh ignores it.</span>
       </div>
     </div>
   {/if}
@@ -774,18 +787,28 @@
 
   {#snippet footer()}
     {#if testResult}
-      <span class="test-result {testResult.ok ? 'ok' : 'err'}" title={testResult.detail}>
-        {testResult.ok ? '✓' : '✗'} {testResult.detail}
+      <span class="test-result {testResult.ok ? 'ok' : 'err'}" title={testResult.detail} role="status">
+        <Icon name={testResult.ok ? 'check' : 'x'} size={12} /> {testResult.detail}
       </span>
     {/if}
     <button class="btn" onclick={onclose}>Cancel</button>
     {#if testableKinds.has(kind)}
-      <button class="btn" disabled={!auth.isRoot || testing || busy} onclick={testUnsaved}>
+      <button
+        class="btn"
+        disabled={!auth.isRoot || testing || busy}
+        title={!auth.isRoot ? 'Only the owner can test connection settings' : 'Test these settings without saving'}
+        onclick={testUnsaved}
+      >
         {testing ? 'Testing…' : 'Test'}
       </button>
     {/if}
-    <button class="btn primary" disabled={(!existing && !auth.isRoot) || busy || name.trim() === ''} onclick={save}>
-      {busy ? 'Saving…' : existing ? 'Save Changes' : 'Create Connection'}
+    <button
+      class="btn primary"
+      disabled={(!existing && !auth.isRoot) || busy || name.trim() === ''}
+      title={!existing && !auth.isRoot ? 'Only the owner can create connections' : name.trim() === '' ? 'Enter a name first' : undefined}
+      onclick={save}
+    >
+      {busy ? 'Saving…' : existing ? 'Save changes' : 'Create connection'}
     </button>
   {/snippet}
 </Modal>
@@ -793,7 +816,7 @@
 <!-- Identity file picker (file-pick mode) -->
 {#if showFilePicker}
   <FolderPicker
-    title="Choose Identity File"
+    title="Choose identity file"
     start={fIdentity ? fIdentity.replace(/\/[^/]+$/, '') : ''}
     files={true}
     onpick={(path) => { fIdentity = path; showFilePicker = false; }}
@@ -804,7 +827,7 @@
 <!-- SSH tunnel identity file picker -->
 {#if showTunnelFilePicker}
   <FolderPicker
-    title="Choose Identity File"
+    title="Choose identity file"
     start={tunIdentity ? tunIdentity.replace(/\/[^/]+$/, '') : ''}
     files={true}
     onpick={(path) => { tunIdentity = path; showTunnelFilePicker = false; }}
@@ -814,6 +837,9 @@
 
 <style>
   .native-fields { border:0; padding:0; margin:0; min-width:0; }
+  /* Same look as `.field > label` for a group caption that labels a chip row
+     (a <label> must point at a single form control). */
+  .group-label { font-size: var(--fs-s); font-weight: 500; color: var(--text-dim); }
   .kind-row {
     display: flex;
     flex-wrap: wrap;
@@ -860,12 +886,12 @@
   }
   /* Production selected → red danger styling. */
   .env-chip.prod.selected {
-    background: color-mix(in srgb, var(--status-exited) 18%, transparent);
-    border-color: color-mix(in srgb, var(--status-exited) 55%, transparent);
-    color: var(--status-exited);
+    background: var(--danger-soft);
+    border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+    color: var(--danger);
   }
   .hint.danger {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .warn-banner {
     font-size: 11.5px;
@@ -960,6 +986,9 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     margin-right: auto;
+  }
+  .test-result :global(svg) {
+    vertical-align: -2px;
   }
   .test-result.ok {
     color: var(--success);

@@ -417,6 +417,14 @@
       selected = null;
     } else if (e.key === 'Escape') {
       selected = null;
+    } else if (!mod && !e.altKey && e.key.length === 1 && !isTypingTarget(e.target)) {
+      // Single-letter tool keys — the toolbar tooltips always advertised
+      // them (V, R, O…) but nothing listened.
+      const t = TOOLS.find((x) => x.key === e.key.toLowerCase());
+      if (t) {
+        e.preventDefault();
+        pickTool(t.id);
+      }
     } else if (e.key.startsWith('Arrow') && selected !== null) {
       e.preventDefault();
       const d = e.shiftKey ? 10 : 1;
@@ -425,6 +433,17 @@
       snapshot();
       commit(annos.map((a) => (a.id === selected ? moveAnno(a, dx, dy) : a)));
     }
+  }
+
+  /** A keystroke meant for a field (⌘K palette, a dialog) — not a tool key. */
+  function isTypingTarget(t: EventTarget | null): boolean {
+    const el = t as HTMLElement | null;
+    return !!el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
+  }
+
+  function pickTool(id: Tool): void {
+    tool = id;
+    if (id !== 'select') selected = null;
   }
 
   // ── Chrome actions ─────────────────────────────────────────────────────────
@@ -458,17 +477,17 @@
     }
   }
 
-  const TOOLS: { id: Tool; label: string; icon: string; title: string }[] = [
-    { id: 'select', label: 'Select', icon: '⬚', title: 'Select / move (V)' },
-    { id: 'rect', label: 'Box', icon: '▭', title: 'Rectangle (R)' },
-    { id: 'ellipse', label: 'Ellipse', icon: '◯', title: 'Ellipse (O)' },
-    { id: 'arrow', label: 'Arrow', icon: '↗', title: 'Arrow (A)' },
-    { id: 'line', label: 'Line', icon: '╱', title: 'Line (L)' },
-    { id: 'pen', label: 'Pen', icon: '✎', title: 'Freehand (P)' },
-    { id: 'highlight', label: 'Mark', icon: '▆', title: 'Highlighter (H)' },
-    { id: 'text', label: 'Text', icon: 'T', title: 'Text (T)' },
-    { id: 'pixelate', label: 'Blur', icon: '▩', title: 'Pixelate region (B)' },
-    { id: 'badge', label: 'Step', icon: '➊', title: 'Numbered step (N)' },
+  const TOOLS: { id: Tool; label: string; icon: string; title: string; key: string }[] = [
+    { id: 'select', label: 'Select', icon: '⬚', title: 'Select / move (V)', key: 'v' },
+    { id: 'rect', label: 'Box', icon: '▭', title: 'Rectangle (R)', key: 'r' },
+    { id: 'ellipse', label: 'Ellipse', icon: '◯', title: 'Ellipse (O)', key: 'o' },
+    { id: 'arrow', label: 'Arrow', icon: '↗', title: 'Arrow (A)', key: 'a' },
+    { id: 'line', label: 'Line', icon: '╱', title: 'Line (L)', key: 'l' },
+    { id: 'pen', label: 'Pen', icon: '✎', title: 'Freehand (P)', key: 'p' },
+    { id: 'highlight', label: 'Mark', icon: '▆', title: 'Highlighter (H)', key: 'h' },
+    { id: 'text', label: 'Text', icon: 'T', title: 'Text (T)', key: 't' },
+    { id: 'pixelate', label: 'Blur', icon: '▩', title: 'Pixelate region (B)', key: 'b' },
+    { id: 'badge', label: 'Step', icon: '➊', title: 'Numbered step (N)', key: 'n' },
   ];
 
   const copyLabel = $derived.by(() => {
@@ -497,10 +516,9 @@
           class:active={tool === t.id}
           data-tool={t.id}
           title={t.title}
-          onclick={() => {
-            tool = t.id;
-            if (t.id !== 'select') selected = null;
-          }}
+          aria-label={t.title}
+          aria-pressed={tool === t.id}
+          onclick={() => pickTool(t.id)}
         >
           <span class="icon">{t.icon}</span><span class="lbl">{t.label}</span>
         </button>
@@ -534,8 +552,12 @@
       {/each}
     </div>
     <div class="group history">
-      <button class="tb" data-act="undo" title="Undo (⌘Z)" disabled={!undoStack.length} onclick={undo}>↺</button>
-      <button class="tb" data-act="redo" title="Redo (⇧⌘Z)" disabled={!redoStack.length} onclick={redo}>↻</button>
+      <button class="tb" data-act="undo" title="Undo (⌘Z)" aria-label="Undo" disabled={!undoStack.length} onclick={undo}>
+        <Icon name="undo" size={13} />
+      </button>
+      <button class="tb" data-act="redo" title="Redo (⇧⌘Z)" aria-label="Redo" disabled={!redoStack.length} onclick={redo}>
+        <span class="mirror"><Icon name="undo" size={13} /></span>
+      </button>
     </div>
     <!-- Delete lives in its own group, away from the primary Copy, and asks first. -->
     <div class="group">
@@ -644,10 +666,21 @@
     border-color: var(--accent);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
+  /* White-on-fill needs the --accent-solid fill (--text on --accent was dark
+     text on the accent in dark mode). */
   .tb.primary {
-    color: var(--text);
-    border-color: var(--accent);
-    background: var(--accent);
+    color: var(--accent-contrast);
+    border-color: var(--accent-solid);
+    background: var(--accent-solid);
+  }
+  .tb.primary:hover {
+    color: var(--accent-contrast);
+    background: color-mix(in srgb, var(--accent-solid) 88%, var(--text));
+  }
+  /* The icon set has no redo glyph: redo is undo, mirrored. */
+  .mirror {
+    display: inline-flex;
+    transform: scaleX(-1);
   }
   .tb.snip-del:hover {
     color: var(--danger);

@@ -57,8 +57,8 @@
   <button
     class="ab-btn"
     onclick={oncloseTab}
-    title="Close session (⌘W)"
-    aria-label="Close current session"
+    title="Close tab (⌘W)"
+    aria-label="Close current tab"
   >
     <Icon name="x" size={18} />
     <span class="ab-label">Close</span>

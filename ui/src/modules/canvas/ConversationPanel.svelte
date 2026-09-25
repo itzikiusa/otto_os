@@ -80,7 +80,7 @@
       </select>
     {/if}
     {#if working}<span class="working">working…</span>{/if}
-    <button class="close" onclick={onclose} aria-label="Close assistant">
+    <button class="close" onclick={onclose} aria-label="Close assistant" title="Close assistant">
       <Icon name="x" size={15} />
     </button>
   </header>
@@ -107,7 +107,7 @@
       rows="2"
       disabled={busy}
     ></textarea>
-    <button class="send" onclick={send} disabled={busy || !draft.trim()} aria-label="Send">
+    <button class="send" onclick={send} disabled={busy || !draft.trim()} aria-label="Send" title="Send (Enter)">
       <Icon name="arrowUp" size={16} />
     </button>
   </div>
@@ -227,8 +227,8 @@
     flex: none;
     border: none;
     border-radius: 50%;
-    background: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
     cursor: pointer;
   }
   .send:disabled {

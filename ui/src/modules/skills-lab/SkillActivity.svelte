@@ -12,6 +12,7 @@
   import { skillsEvalApi } from '../../lib/api/skillsEval';
   import { skillReviewApi } from '../../lib/api/skillReview';
   import { rel } from '../../lib/stores/now.svelte';
+  import { runStatus } from '../../lib/status';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Sparkline from '../../lib/components/Sparkline.svelte';
@@ -69,11 +70,14 @@
   const passCount = $derived(myEvals.filter((e) => e.status === 'done').length);
   const failCount = $derived(myEvals.filter((e) => e.status === 'error').length);
 
+  // The shared run vocabulary (lib/status.ts). A `done` run finished — it
+  // didn't necessarily *pass* (a 20/100 run is still `done`), so it must not
+  // read "Passed".
   function statusLabel(s: string): string {
-    return s === 'done' ? 'Passed' : s === 'error' ? 'Failed' : s === 'running' ? 'Running' : s === 'cancelled' ? 'Cancelled' : s;
+    return runStatus(s).label;
   }
   function statusTone(s: string): string {
-    return s === 'done' ? 'success' : s === 'error' ? 'danger' : s === 'running' ? 'info' : 'neutral';
+    return runStatus(s).tone;
   }
   function fmtScore(v: number): string {
     return `${Math.round(v)}`;
@@ -115,7 +119,7 @@
       case 'codex':
         return '~/.codex/skills/' + group.name;
       case 'agy':
-        return '~/.agy/skills/' + group.name;
+        return '~/.gemini/skills/' + group.name;
       default:
         return `~/.${source}/skills/${group.name}`;
     }
@@ -154,7 +158,7 @@
       <div class="card stat">
         <div class="stat-label">Runs</div>
         <div class="stat-value">{myEvals.length}</div>
-        <div class="stat-sub"><span class="ok-text">{passCount} passed</span>{#if failCount} · <span class="bad-text">{failCount} failed</span>{/if}</div>
+        <div class="stat-sub"><span class="ok-text">{passCount} completed</span>{#if failCount} · <span class="bad-text">{failCount} failed</span>{/if}</div>
       </div>
       <div class="card stat">
         <div class="stat-label">Last run</div>

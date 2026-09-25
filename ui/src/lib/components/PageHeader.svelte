@@ -99,6 +99,9 @@
   const FIELD = 'select, input, textarea';
   const GAP = 6; // keep in sync with .ph-actions gap
   const MORE_W = 28; // "⋯" button width (lives inside the wrap, after the actions)
+  // Focus-ring room each side of a scroller (.ph-actions-wrap padding): the
+  // global :focus-visible ring is a 2px outline at a 1px offset, so 3px.
+  const RING = 3;
 
   function canCollapse(el: HTMLElement): boolean {
     if (el.hasAttribute('data-keep')) return false;
@@ -141,10 +144,10 @@
       const room = row
         ? row.clientWidth - 48 - titleMin - (lead ? lead.offsetWidth + 12 : 0) - (inlineTabs ? inlineTabs.offsetWidth + 12 : 0)
         : Infinity;
-      wrapEl.style.minWidth = `${Math.max(0, Math.min(Math.ceil(keepW) + 4, room))}px`;
+      wrapEl.style.minWidth = `${Math.max(0, Math.min(Math.ceil(keepW) + RING * 2, room))}px`;
       let need = visible.reduce((s, k) => s + (widthOf.get(k) ?? 0), 0) + GAP * Math.max(0, visible.length - 1);
-      // clientWidth includes the wrap's 2px focus-ring padding on each side.
-      let avail = wrapEl.clientWidth - 4;
+      // clientWidth includes the wrap's focus-ring padding on each side.
+      let avail = wrapEl.clientWidth - RING * 2;
       if (need <= avail + 0.5) {
         if (collapsed.length) collapsed = [];
         return;
@@ -197,11 +200,17 @@
   });
 
   function labelOf(el: HTMLElement): string {
+    // A button's visible text beats its `title`: the title is usually a
+    // sentence of explanation ("Tidy layout into rows"), which made a long,
+    // clipped menu row where the button itself read "Tidy". Text with no
+    // letters (a bare count, a glyph) still defers to the title.
+    const text = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
     return (
       el.dataset.label ||
       el.getAttribute('aria-label') ||
+      (/\p{L}/u.test(text) ? text : '') ||
       el.getAttribute('title') ||
-      (el.textContent ?? '').replace(/\s+/g, ' ').trim() ||
+      text ||
       'Action'
     );
   }
@@ -419,6 +428,10 @@
     min-width: 0;
     overflow-x: auto;
     scrollbar-width: none;
+    /* A scroller clips on both axes: leave room for the tabs' focus rings
+       (and a badge's overhang) instead of shaving them off. */
+    padding: 3px;
+    margin: -3px;
   }
   .ph-tabs-inline::-webkit-scrollbar {
     display: none;
@@ -434,9 +447,10 @@
     overflow-x: auto;
     overflow-y: hidden;
     scrollbar-width: none;
-    /* Room for focus rings on the edge buttons. */
-    padding: 3px 2px;
-    margin: -3px -2px;
+    /* Room for focus rings on the edge buttons (2px outline + 1px offset =
+       3px; keep in sync with RING in the script). */
+    padding: 3px;
+    margin: -3px;
   }
   .ph-actions-wrap::-webkit-scrollbar {
     display: none;
@@ -473,7 +487,8 @@
   .ph-tabs-below {
     display: flex;
     align-items: center;
-    padding: 0 16px 0 20px;
+    /* Block padding: focus-ring room (this row scrolls, so it clips). */
+    padding: 3px 16px 3px 20px;
     min-width: 0;
     overflow-x: auto;
     scrollbar-width: none;
@@ -493,7 +508,7 @@
       display: none;
     }
     .ph-tabs-below {
-      padding: 0 10px;
+      padding: 3px 10px;
     }
   }
 </style>

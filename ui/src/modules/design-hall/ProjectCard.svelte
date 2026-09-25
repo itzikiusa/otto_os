@@ -31,7 +31,7 @@
   <div class="body">
     <div class="name" title={project.name}>{project.name}</div>
     {#if epicLabel}
-      <span class="chip epic"><Icon name="ticket" size={12} /> {epicLabel}</span>
+      <span class="chip epic" title={epicLabel}><Icon name="ticket" size={12} /> <span class="epic-t">{epicLabel}</span></span>
     {/if}
     <div class="meta">
       {stats.artifacts} artifact{stats.artifacts === 1 ? '' : 's'} · {stats.studios.length}
@@ -93,8 +93,14 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* .chip is inline-flex: ellipsis only works on the label's own box, so a
+     long "KEY · epic title" was cut mid-glyph at the card edge. */
   .epic {
     max-width: 100%;
+    overflow: hidden;
+  }
+  .epic-t {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
   }

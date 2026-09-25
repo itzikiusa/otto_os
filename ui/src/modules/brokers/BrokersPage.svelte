@@ -123,7 +123,7 @@
       if (r.ok) toasts.success('Connected', `${r.message} · ${r.latency_ms}ms`);
       else toasts.error('Connection failed', r.message);
     } catch (e) {
-      toasts.error('Test failed', String(e));
+      toasts.error('Test failed', e instanceof Error ? e.message : String(e));
     } finally {
       testing = false;
     }
@@ -139,7 +139,7 @@
       await brokers.remove(c.id);
       toasts.success('Cluster removed');
     } catch (e) {
-      toasts.error('Remove failed', String(e));
+      toasts.error('Remove failed', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -332,6 +332,7 @@
         class="content-toggle"
         onclick={() => (contentOpen = !contentOpen)}
         aria-expanded={contentOpen}
+        aria-label={contentOpen ? 'Collapse details' : 'Expand details'}
         title={contentOpen ? 'Collapse details' : 'Expand details'}
       >
         <Icon name={contentOpen ? 'chevronDown' : 'chevronRight'} size={14} />
@@ -378,15 +379,15 @@
         {#if brokers.clusters.length > 0}<span class="hcount">{brokers.clusters.length}</span>{/if}
       </button>
       <div class="head-btns">
-        <button class="btn small" onclick={() => newSection(null)} title="New section">
+        <button class="btn small" onclick={() => newSection(null)} aria-label="New section" title="New section">
           <Icon name="folder" size={13} />
         </button>
-        <button class="btn small" onclick={openAdd} title="Add cluster"><Icon name="plus" size={13} /></button>
+        <button class="btn small" onclick={openAdd} aria-label="Add cluster" title="Add cluster"><Icon name="plus" size={13} /></button>
       </div>
     </div>
     <div class="cluster-list">
       {#if brokers.loading && brokers.clusters.length === 0}
-        <p class="muted pad">Loading…</p>
+        <p class="muted pad">Loading clusters…</p>
       {:else}
         {#each tree as node (node.sec.id)}
           {@render sectionNode(node, 0)}
@@ -435,13 +436,15 @@
 
   <main class="cluster-main" class:collapsed={!contentOpen}>
     {#if brokers.openClusters.length > 0}
-      <div class="tabstrip">
+      <div class="tabstrip" role="tablist" aria-label="Open clusters">
         {#each brokers.openClusters as c (c.id)}
           <div
             class="ctab"
             class:on={brokers.selectedId === c.id}
             role="tab"
+            aria-selected={brokers.selectedId === c.id}
             tabindex="0"
+            title={c.name}
             onclick={() => brokers.select(c.id)}
             onkeydown={(e) => e.key === 'Enter' && brokers.select(c.id)}
           >
@@ -449,6 +452,7 @@
             <span class="ctab-name">{c.name}</span>
             <button
               class="ctab-x"
+              aria-label="Close {c.name}"
               title="Close tab"
               onclick={(e) => {
                 e.stopPropagation();
@@ -462,14 +466,14 @@
       </div>
     {/if}
     {#if selected}
-      <nav class="tabs">
-        <button class:on={tab === 'overview'} onclick={() => (tab = 'overview')}>Overview</button>
-        <button class:on={tab === 'topics'} onclick={() => (tab = 'topics')}>Topics</button>
-        <button class:on={tab === 'groups'} onclick={() => (tab = 'groups')}>Consumer Groups</button>
-        <button class:on={tab === 'schema'} onclick={() => (tab = 'schema')}>Schema Registry</button>
-        <button class:on={tab === 'replay'} onclick={() => (tab = 'replay')}>Replay</button>
-        <button class:on={tab === 'alerts'} onclick={() => (tab = 'alerts')}>Lag Alerts</button>
-      </nav>
+      <div class="tabs" role="tablist" aria-label="Kafka cluster views">
+        <button class:on={tab === 'overview'} role="tab" aria-selected={tab === 'overview'} onclick={() => (tab = 'overview')}>Overview</button>
+        <button class:on={tab === 'topics'} role="tab" aria-selected={tab === 'topics'} onclick={() => (tab = 'topics')}>Topics</button>
+        <button class:on={tab === 'groups'} role="tab" aria-selected={tab === 'groups'} onclick={() => (tab = 'groups')}>Consumer Groups</button>
+        <button class:on={tab === 'schema'} role="tab" aria-selected={tab === 'schema'} onclick={() => (tab = 'schema')}>Schema Registry</button>
+        <button class:on={tab === 'replay'} role="tab" aria-selected={tab === 'replay'} onclick={() => (tab = 'replay')}>Replay</button>
+        <button class:on={tab === 'alerts'} role="tab" aria-selected={tab === 'alerts'} onclick={() => (tab = 'alerts')}>Lag Alerts</button>
+      </div>
 
       <div class="tab-body">
         {#key selected.id}
@@ -585,7 +589,7 @@
     tabindex="0"
   >
     <span class="dot" style="background: {c.color || 'var(--accent)'}"></span>
-    <span class="cn">{c.name}</span>
+    <span class="cn" title={c.name}>{c.name}</span>
     <EnvBadge env={c.environment} />
   </div>
 {/snippet}
@@ -806,10 +810,11 @@
   .name {
     font-weight: 600;
   }
+  /* Read-only is a property, not a failure: neutral, matching ClusterViewer. */
   .ro {
     font-size: var(--fs-xs);
-    color: var(--status-exited, #ff5f57);
-    border: 1px solid currentColor;
+    color: var(--text-dim);
+    border: 1px solid var(--border);
     border-radius: 4px;
     padding: 0 5px;
   }
@@ -824,8 +829,8 @@
     color: var(--text-dim);
   }
   .tunnel-pill.ready {
-    background: color-mix(in srgb, var(--status-working, #28c840) 18%, transparent);
-    color: var(--status-working, #28c840);
+    background: var(--success-soft);
+    color: var(--success);
   }
   .tabs {
     display: flex;
@@ -868,9 +873,6 @@
   }
   .small {
     font-size: 11px;
-  }
-  .btn.danger {
-    color: var(--status-exited, #ff5f57);
   }
 
   /* Collapse toggles. On desktop the cluster-list toggle is a plain inert label

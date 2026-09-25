@@ -205,7 +205,7 @@ test('Graph view: the agent org graph renders + the task rail; canvas pans/fits'
   expect(touch).toBe('none');
 
   // The fit-to-view control re-fits without error.
-  await page.locator('.agent-graph .controls [aria-label="fit to view"]').click();
+  await page.locator('.agent-graph .controls [aria-label="Fit to view"]').click();
   await expect(page.locator('.agent-graph .node').first()).toBeVisible();
 
   // The side rail shows the per-member brief + live-only task search. Seeded
@@ -228,7 +228,7 @@ test('Runs view: filters + (empty/idle) list render and fit', async ({ page }) =
   await expect(page.locator('.runs')).toBeVisible();
   // Filter controls render (assignee/project selects + status chips).
   await expect(page.locator('.runs .filters')).toBeVisible();
-  await expect(page.locator('.runs .chip', { hasText: 'all' }).first()).toBeVisible();
+  await expect(page.locator('.runs .chip', { hasText: 'All' }).first()).toBeVisible();
   // No live runs in the test daemon → the empty state shows. The view must fit
   // either way (empty state OR a populated table).
   await expectFitsWidth(page);

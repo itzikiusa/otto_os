@@ -30,8 +30,13 @@
      *  state) instead of routing, and hide the "← Repos" back button. */
     embedded?: boolean;
     onTab?: (tab: string) => void;
+    /** Git page (tab-store owned navigation): open another repo as a tab. The
+     *  route-based fallback below is a no-op there once the route is `#/git`. */
+    onopenrepo?: (repoId: string) => void;
+    /** Git page: open its Add Repository sheet in the given mode. */
+    onaddrepo?: (mode: 'register' | 'clone' | 'browse') => void;
   }
-  let { repo, tab, embedded = false, onTab }: Props = $props();
+  let { repo, tab, embedded = false, onTab, onopenrepo, onaddrepo }: Props = $props();
 
   // Legacy deep links / persisted state may still say 'changes' or 'history';
   // both render the graph now, and the Graph tab must read as active for them.
@@ -210,17 +215,39 @@
   const repoPool = $derived(git.allRepos.length ? git.allRepos : git.repos);
   function openRepoSwitcher(e: MouseEvent): void {
     const others = repoPool.filter((r) => r.id !== repo.id);
-    ctxMenu.show(e, [
-      ...others.map((r) => ({
-        label: r.name,
-        icon: 'branch',
-        action: () => router.go(`git/${r.id}/${tab}`),
-      })),
-      ...(others.length > 0 ? [{ separator: true }] : []),
-      { label: 'Add repository…', icon: 'plus', action: () => router.go('git') },
-      { label: 'All repositories…', icon: 'folder', action: () => router.go('git') },
-    ]);
+    // On the Git page the tab store owns navigation, so `router.go('git')` is a
+    // no-op there (the route already IS `#/git`) — "Add repository…" / "All
+    // repositories…" used to do nothing. Use the page's own callbacks when given.
+    const tail = onaddrepo
+      ? [
+          { label: 'Clone a repository…', icon: 'download', pinned: true, action: () => onaddrepo('clone') },
+          { label: 'Add a local repository…', icon: 'folder', pinned: true, action: () => onaddrepo('register') },
+        ]
+      : [
+          { label: 'Add repository…', icon: 'plus', action: () => router.go('git') },
+          { label: 'All repositories…', icon: 'folder', action: () => router.go('git') },
+        ];
+    ctxMenu.show(
+      e,
+      [
+        ...others.map((r) => ({
+          label: r.name,
+          icon: 'branch',
+          action: () => (onopenrepo ? onopenrepo(r.id) : router.go(`git/${r.id}/${tab}`)),
+        })),
+        ...(others.length > 0 ? [{ separator: true }] : []),
+        ...tail,
+      ],
+      others.length > 8 ? { filter: true, filterPlaceholder: 'Search repositories…', maxVisible: 12 } : undefined,
+    );
   }
+
+  /** Display name for the forge chip (the enum is lowercase: "bitbucket"). */
+  const PROVIDER_LABEL: Record<string, string> = {
+    github: 'GitHub',
+    bitbucket: 'Bitbucket',
+    gitlab: 'GitLab',
+  };
 </script>
 
 <div class="repoview">
@@ -230,20 +257,22 @@
     {/if}
     <button
       class="rv-name rv-switch"
-      title="Switch repository"
+      title="{repo.name} · {repo.path} — switch repository{repoPool.length > 1 ? ` (${repoPool.length} registered)` : ''}"
       onclick={openRepoSwitcher}
       oncontextmenu={openRepoSwitcher}
     >
       <Icon name="branch" size={13} />
-      {repo.name}
+      <span class="rv-name-text">{repo.name}</span>
       {#if repoPool.length > 1}<span class="rv-count">{repoPool.length}</span>{/if}
       <Icon name="chevronDown" size={11} />
     </button>
-    {#if repo.provider}<span class="chip">{repo.provider}</span>{/if}
-    <button class="btn ghost small" onclick={() => (remotesOpen = true)} title="Manage remotes">
+    {#if repo.provider}<span class="chip rv-provider" title="Hosted on {PROVIDER_LABEL[repo.provider] ?? repo.provider}">{PROVIDER_LABEL[repo.provider] ?? repo.provider}</span>{/if}
+    <button class="btn ghost small rv-headbtn" onclick={() => (remotesOpen = true)} title="Manage remotes">
       <Icon name="globe" size={12} /> Remotes
     </button>
-    <button class="btn ghost small" onclick={() => gitBridge.openRecovery(repo.id)} title="Reflog recovery, interactive rebase and bisect">Recovery tools</button>
+    <button class="btn ghost small rv-headbtn" onclick={() => gitBridge.openRecovery(repo.id)} title="Reflog recovery, interactive rebase and bisect">
+      <Icon name="undo" size={12} /> Recovery tools
+    </button>
     <span class="grow"></span>
     {#if status}
       <GitToolbar repoId={repo.id} {status} onstatus={setStatus} onrefresh={() => graphKey++} />
@@ -268,7 +297,7 @@
           <span class="count" title="{status.changes.length} uncommitted change{status.changes.length === 1 ? '' : 's'} (WIP)">{status.changes.length}</span>
         {/if}
         {#if t.id === 'graph' && conflictedPaths.length > 0}
-          <span class="count conflict-count" title="{conflictedPaths.length} conflicted file{conflictedPaths.length === 1 ? '' : 's'}">⚠ {conflictedPaths.length}</span>
+          <span class="count conflict-count" title="{conflictedPaths.length} conflicted file{conflictedPaths.length === 1 ? '' : 's'}"><Icon name="warning" size={10} />{conflictedPaths.length}</span>
         {/if}
       </button>
     {/each}
@@ -395,19 +424,46 @@
     height: 100%;
     min-height: 0;
   }
+  /* Wraps rather than overflowing: on a narrow desktop window the toolbar used
+     to run off the trailing edge (Stash / Pop clipped, unreachable). When it
+     wraps, the toolbar keeps to the trailing edge of its own line. */
   .rv-head {
     display: flex;
     align-items: center;
-    gap: 10px;
+    flex-wrap: wrap;
+    gap: 8px 10px;
     padding: 10px 14px;
     border-bottom: 1px solid var(--border);
+  }
+  .rv-head :global(.toolbar) {
+    margin-inline-start: auto;
+    min-width: 0;
+  }
+  .rv-headbtn {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .rv-provider {
+    flex-shrink: 0;
   }
   .rv-name {
     display: inline-flex;
     align-items: center;
     gap: 6px;
+    min-width: 0;
+    max-width: 320px;
     font-size: 13.5px;
     font-weight: 600;
+  }
+  .rv-name > :global(svg),
+  .rv-name .rv-count {
+    flex-shrink: 0;
+  }
+  .rv-name-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .rv-switch {
     border: 1px solid transparent;
@@ -466,8 +522,10 @@
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 20%, transparent);
     color: var(--accent-text);
-    display: grid;
-    place-items: center;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
   }
   .conflict-tab {
     margin-inline-start: auto;

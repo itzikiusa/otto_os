@@ -42,7 +42,7 @@
   import { barStore } from '../stores/bar.svelte';
   import { auth } from '../stores/auth.svelte';
   import { ui } from '../stores/ui.svelte';
-  import { isForeground, ws } from '../stores/workspace.svelte';
+  import { isForeground, visibleOnThisDevice, ws } from '../stores/workspace.svelte';
   import { router } from '../router.svelte';
   import { keyContext } from '../keys';
   import { agentProviders, defaultAgentProvider } from '../providers';
@@ -166,7 +166,7 @@
     windowCommands = [
       ...base,
       ...sessions
-        .filter((s) => !s.archived && isForeground(s))
+        .filter((s) => !s.archived && isForeground(s) && visibleOnThisDevice(s))
         .map((s) => ({
           id: `session.${s.id}`,
           title: `Focus Session: ${s.title}`,
@@ -532,13 +532,15 @@
     const onFocusChange = (): void => {
       workFocus = isWorkTarget(document.activeElement);
     };
+    const onFocusOut = (): void => queueMicrotask(onFocusChange);
     document.addEventListener('scroll', onScroll, { capture: true, passive: true });
     document.addEventListener('focusin', onFocusChange);
-    document.addEventListener('focusout', () => queueMicrotask(onFocusChange));
+    document.addEventListener('focusout', onFocusOut);
     return () => {
       if (scrollTimer) clearTimeout(scrollTimer);
       document.removeEventListener('scroll', onScroll, { capture: true });
       document.removeEventListener('focusin', onFocusChange);
+      document.removeEventListener('focusout', onFocusOut);
     };
   });
 
@@ -554,13 +556,15 @@
   function rowIcon(row: BarRow<Command, SearchHit>): IconName {
     if (row.kind === 'ask') return 'sparkle';
     if (row.kind === 'hit') {
+      // Same glyph per kind as the ⌘K palette's results (Palette.svelte
+      // hitIcon) — one search, one vocabulary.
       switch (row.hit.kind) {
         case 'repo': return 'branch';
-        case 'workflow': return 'split';
+        case 'workflow': return 'merge';
         case 'story': return 'ticket';
-        case 'api_request': return 'send';
-        case 'swarm_task':
-        case 'swarm_project': return 'grid';
+        case 'api_request': return 'zap';
+        case 'swarm_task': return 'check';
+        case 'swarm_project': return 'layers';
         case 'broker_cluster': return 'box';
         case 'memory': return 'db';
         default: return 'file';

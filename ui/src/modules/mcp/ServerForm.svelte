@@ -7,6 +7,7 @@
   // are never returned — responses only carry their key names + has_secret.
   import { auth } from '../../lib/stores/auth.svelte';
   import Modal from '../../lib/components/Modal.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import { mcpCpApi } from '../../lib/api/mcp';
   import { toasts } from '../../lib/toast.svelte';
   import type {
@@ -216,7 +217,7 @@
       onclick={() => (advancedOpen = !advancedOpen)}
     >
       <span>Advanced</span>
-      <span aria-hidden="true">{advancedOpen ? '▾' : '▸'}</span>
+      <Icon name={advancedOpen ? 'chevronDown' : 'chevronRight'} size={12} />
     </button>
     {#if advancedOpen}
       <div class="row2">

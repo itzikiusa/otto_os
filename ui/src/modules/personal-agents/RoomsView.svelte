@@ -10,6 +10,7 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import type { AgentRoomMessage, AgentRoomWithMembers } from '../../lib/api/types';
 
   let selectedId = $state<string | null>(null);
@@ -77,7 +78,10 @@
         icon: 'edit',
         action: async () => {
           const name = await confirmer.promptText('Room name', { title: 'Rename room', confirmLabel: 'Rename', initial: r.room.name });
-          if (name) void personalAgents.renameRoom(r.room.id, name).catch(() => {});
+          if (name) {
+            error = '';
+            void personalAgents.renameRoom(r.room.id, name).catch((e) => (error = e instanceof Error ? e.message : 'Rename failed'));
+          }
         },
       },
       {
@@ -86,7 +90,8 @@
         danger: true,
         action: async () => {
           if (await confirmer.ask(`Delete room "${r.room.name}" and its transcript?`, { title: 'Delete room' })) {
-            void personalAgents.deleteRoom(r.room.id).catch(() => {});
+            error = '';
+            void personalAgents.deleteRoom(r.room.id).catch((e) => (error = e instanceof Error ? e.message : 'Delete failed'));
           }
         },
       },
@@ -146,7 +151,7 @@
             onclick={() => (selectedId = r.room.id)}
             oncontextmenu={(e) => roomMenu(e, r)}
           >
-            <span class="room-name">{r.room.name}</span>
+            <span class="room-name" title={r.room.name}>{r.room.name}</span>
             <span class="meta">{r.members.length} agent{r.members.length === 1 ? '' : 's'}</span>
           </button>
         </li>
@@ -166,10 +171,10 @@
       <header class="detail-head">
         <strong>{selected.room.name}</strong>
         <button
-          class="btn small"
+          class="icon-btn"
           aria-label="Room actions for {selected.room.name}"
           title="Room actions"
-          onclick={(e) => roomMenu(e, selected)}>⋯</button>
+          onclick={(e) => roomMenu(e, selected)}><Icon name="more" size={14} /></button>
       </header>
 
       <div class="members">
@@ -178,7 +183,11 @@
           <span class="member">
             <span aria-hidden="true">{a?.avatar || '🤖'}</span>
             {a?.name ?? mid}
-            <button class="unlink" title="Remove from room" onclick={() => removeMember(mid)}>×</button>
+            <button
+              class="unlink"
+              aria-label="Remove {a?.name ?? mid} from room"
+              title="Remove from room"
+              onclick={() => removeMember(mid)}><Icon name="x" size={11} /></button>
           </span>
         {/each}
         {#if nonMembers.length > 0}
@@ -256,7 +265,10 @@
     border: 1px solid var(--border); border-radius: 999px; padding: 0.1rem 0.3rem 0.1rem 0.5rem;
     background: var(--surface);
   }
-  .unlink { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 0.85rem; padding: 0 0.2rem; }
+  .unlink {
+    background: none; border: none; color: var(--text-dim); cursor: pointer; padding: 0 0.2rem;
+    display: inline-flex; align-items: center; border-radius: var(--radius-s);
+  }
   .unlink:hover { color: var(--status-exited); }
   .add-member {
     background: var(--bg); color: var(--text-dim); border: 1px dashed var(--border);
@@ -287,8 +299,8 @@
     outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: 1px;
   }
   .err {
-    background: color-mix(in srgb, var(--status-exited) 12%, transparent);
-    color: var(--status-exited); padding: 0.5rem 0.75rem;
+    background: var(--danger-soft);
+    color: var(--danger); padding: 0.5rem 0.75rem;
     border-radius: var(--radius-s); font-size: 0.85rem;
   }
   @media (max-width: 700px) {

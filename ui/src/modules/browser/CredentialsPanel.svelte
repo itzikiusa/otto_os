@@ -337,13 +337,13 @@
     color: var(--text);
   }
   .badge {
-    font-size: 0.68rem;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     padding: 0.1rem 0.35rem;
     border-radius: var(--radius-s);
-    background: var(--accent);
-    color: var(--accent-contrast, #fff);
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
   }
   .username {
     font-size: 0.8rem;
@@ -408,9 +408,9 @@
     font-size: 0.72rem;
   }
   .btn.primary {
-    background: var(--accent);
-    color: var(--accent-contrast, #fff);
-    border-color: var(--accent);
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
+    border-color: var(--accent-solid);
   }
   .btn:disabled {
     opacity: 0.6;

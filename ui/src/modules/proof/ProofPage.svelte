@@ -211,7 +211,8 @@
 
   async function removeArtifact(id: string): Promise<void> {
     if (!detail) return;
-    if (!(await confirmer.ask('Delete this artifact?', { title: 'Delete artifact?' }))) return;
+    const name = detail.artifacts.find((x) => x.id === id)?.title;
+    if (!(await confirmer.ask(name ? `Delete the artifact “${name}” from this proof pack?` : 'Delete this artifact from the proof pack?', { title: 'Delete artifact?' }))) return;
     try {
       await deleteArtifact(id);
       await proof.refreshDetail();
@@ -604,7 +605,7 @@
       {#each proof.packs as p (p.id)}
         <button class="pack-item" class:active={detail?.pack.id === p.id} onclick={() => open(p.id)}>
           <div class="pack-top">
-            <span class="grow ellipsis pack-title">{p.title || p.work_item_id}</span>
+            <span class="grow ellipsis pack-title" title={p.title || p.work_item_id}>{p.title || p.work_item_id}</span>
             <span class="done-pill" title={`Done score ${p.done_score}/100`}>{p.done_score}</span>
             <ProofStatusChip status={p.status} risk={p.risk_score} />
           </div>
@@ -690,7 +691,7 @@
                 <div class="art-row">
                   <div class="art-top">
                     <span class="art-status {a.status}" title={a.status}></span>
-                    <span class="grow ellipsis art-title">{a.title}</span>
+                    <span class="grow ellipsis art-title" title={a.title}>{a.title}</span>
                     {#if a.content_sha256}
                       <span class="sha-chip" title={`content sha256: ${a.content_sha256}`}>sha:{a.content_sha256.slice(0, 8)}…</span>
                     {/if}
@@ -701,7 +702,7 @@
                       </button>
                     {/if}
                     <button class="link-btn" onclick={() => loadFull(a.id)}>Load full</button>
-                    <button class="icon-btn small" onclick={() => removeArtifact(a.id)} aria-label="Delete artifact"><Icon name="trash" size={12} /></button>
+                    <button class="icon-btn small" onclick={() => removeArtifact(a.id)} aria-label="Delete artifact" title="Delete artifact"><Icon name="trash" size={12} /></button>
                   </div>
                   {#if MEDIA_KINDS.has(a.kind)}
                     {#if mediaUrls[a.id]}
@@ -727,7 +728,7 @@
                         <ul class="pr-checks">
                           {#each rep.checks as c (c.label)}
                             <li class={c.passed ? 'ok' : 'miss'}>
-                              <span class="tick">{c.passed ? '✓' : '✗'}</span>
+                              <span class="tick" aria-label={c.passed ? 'Passed' : 'Missing'}><Icon name={c.passed ? 'check' : 'x'} size={12} /></span>
                               <span class="lbl">{c.label}</span>
                               <span class="dim">— {c.detail}</span>
                             </li>
@@ -754,7 +755,7 @@
             <h3 class="group-title">Child packs <span class="dim">· {detail.children.length}</span></h3>
             {#each detail.children as c (c.id)}
               <button class="child-link" onclick={() => open(c.id)}>
-                <span class="grow ellipsis">{c.title || c.work_item_id}</span>
+                <span class="grow ellipsis" title={c.title || c.work_item_id}>{c.title || c.work_item_id}</span>
                 <span class="kind-tag">{c.work_item_kind}</span>
                 <ProofStatusChip status={c.status} risk={c.risk_score} />
               </button>
@@ -1135,6 +1136,8 @@
     align-items: baseline;
   }
   .pr-checks .tick {
+    display: inline-flex;
+    align-self: center;
     width: 12px;
     flex: none;
   }

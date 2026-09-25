@@ -8,6 +8,7 @@
   import { missionControlBus } from '../../lib/events.svelte';
   import { missionControlApi } from '../../lib/api/missionControl';
   import { ApiError } from '../../lib/api/client';
+  import { router } from '../../lib/router.svelte';
   import type {
     GraphView,
     MissionSummary,
@@ -31,6 +32,14 @@
 
   let view = $state<'list' | 'graph'>('list');
   let selectedId = $state<string | null>(null);
+
+  // Deep link `#/mission-control/<item id>` (the Home Mission Control box's
+  // rows go there): open that item's detail. Without this the row click
+  // landed on the page with nothing selected.
+  $effect(() => {
+    const [mod, itemId] = router.parts;
+    if (mod === 'mission-control' && itemId) untrack(() => (selectedId = itemId));
+  });
 
   // filters
   let kindF = $state<WorkKind | ''>('');
@@ -242,12 +251,24 @@
     </div>
   </div>
 
-  {#if err}<div class="banner-err">{err}</div>{/if}
+  {#if err && items.length > 0}<div class="banner-err">{err}</div>{/if}
 
   <!-- body -->
   <div class="mc-body">
     <div class="mc-main">
-      {#if items.length === 0 && !loading}
+      {#if items.length === 0 && !loading && err}
+        <!-- A failed load is not "no work items yet": say so, with Retry. -->
+        <div class="card">
+          <EmptyState
+            icon="radar"
+            title="Couldn't load Mission Control"
+            body={err}
+            actionLabel="Retry"
+            actionIcon="refresh"
+            onaction={() => ws.currentId && void reload(ws.currentId)}
+          />
+        </div>
+      {:else if items.length === 0 && !loading}
         <div class="card">
           <EmptyState
             icon="radar"

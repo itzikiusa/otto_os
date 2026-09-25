@@ -8,7 +8,6 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import { toasts } from '../../lib/toast.svelte';
 
   // ---------------------------------------------------------------------------
   // State
@@ -16,6 +15,9 @@
 
   let caps: ModuleCapability[] = $state([]);
   let loading = $state(true);
+  /** Last load failure — shown inline (with Retry) instead of a toast plus a
+   *  generic "no capability data" page that hid the actual reason. */
+  let loadErr = $state('');
   /** Which feature is expanded (showing dep breakdown). */
   let expanded = $state<Set<string>>(new Set());
 
@@ -32,10 +34,11 @@
 
   async function load(): Promise<void> {
     loading = true;
+    loadErr = '';
     try {
       caps = await capabilitiesApi.list();
     } catch (e) {
-      toasts.error('Could not load capabilities', e instanceof Error ? e.message : String(e));
+      loadErr = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
     }
@@ -93,9 +96,10 @@
     <EmptyState
       icon="gauge"
       variant="page"
-      title="No capability data"
-      body="Could not load capability information. Make sure you are logged in as root."
+      title={loadErr ? "Couldn't load capabilities" : 'No capability data'}
+      body={loadErr || 'The daemon reported no capability information. Make sure you are logged in as root.'}
       actionLabel="Retry"
+      actionIcon="refresh"
       onaction={load}
     />
   {:else}
@@ -105,9 +109,14 @@
         {@const cls = statusClass(cap.status)}
         <div class="cap-card card" class:has-issues={cap.status !== 'ready'}>
           <!-- Header row -->
-          <div class="cap-head" role="button" tabindex="0"
+          <div class="cap-head" role="button" tabindex="0" aria-expanded={open}
                onclick={() => toggle(cap.feature)}
-               onkeydown={(e) => e.key === 'Enter' && toggle(cap.feature)}>
+               onkeydown={(e) => {
+                 if (e.key === 'Enter' || e.key === ' ') {
+                   e.preventDefault();
+                   toggle(cap.feature);
+                 }
+               }}>
             <span class="status-dot {cls}" title={statusLabel(cap.status)}></span>
             <span class="feature-label">{featureLabel(cap.feature)}</span>
             <span class="status-badge badge-{cls}">{statusLabel(cap.status)}</span>
@@ -122,7 +131,7 @@
                 Fix
               </button>
             {/if}
-            <Icon name={open ? 'arrowUp' : 'arrowDown'} size={14} />
+            <Icon name={open ? 'chevronUp' : 'chevronDown'} size={14} />
           </div>
 
           <!-- Issues (reasons + fixes) -->
@@ -145,7 +154,7 @@
             <div class="dep-list">
               {#each cap.deps as dep (dep.name + dep.kind)}
                 <div class="dep-row">
-                  <span class="dep-ok" title={dep.ok ? 'OK' : 'Not OK'}>
+                  <span class="dep-ok" class:bad={!dep.ok} title={dep.ok ? 'OK' : 'Not OK'}>
                     {#if dep.ok}
                       <Icon name="check" size={12} />
                     {:else}
@@ -231,7 +240,8 @@
     display: flex; align-items: center; gap: 8px;
     padding: 3px 0; font-size: 12px;
   }
-  .dep-ok  { display: flex; align-items: center; flex-shrink: 0; }
+  .dep-ok  { display: flex; align-items: center; flex-shrink: 0; color: var(--success); }
+  .dep-ok.bad { color: var(--danger); }
   .dep-kind  { text-transform: uppercase; font-size: var(--fs-xs); letter-spacing: .04em; width: 56px; flex-shrink: 0; }
   .dep-name  { font-weight: 500; }
   .dep-detail { font-size: 11px; }

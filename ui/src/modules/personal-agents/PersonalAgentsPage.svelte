@@ -30,6 +30,7 @@
   const agents = $derived(personalAgents.agents);
 
   async function toggle(a: PersonalAgent): Promise<void> {
+    error = '';
     try {
       await personalAgents.setEnabled(a.id, !a.enabled);
     } catch (e) {
@@ -49,6 +50,7 @@
 
   async function remove(a: PersonalAgent): Promise<void> {
     if (!(await confirmer.ask(`Delete personal agent "${a.name}"? Its schedules and run history go with it.`, { title: 'Delete personal agent' }))) return;
+    error = '';
     try {
       await personalAgents.remove(a.id);
     } catch (e) {
@@ -126,6 +128,9 @@
               tabindex="0"
               onclick={() => router.go(`personal-agents/${a.id}`)}
               onkeydown={(e) => {
+                // Only the card itself: Enter/Space on its Run now / Pause
+                // buttons must press THAT button, not navigate away.
+                if (e.target !== e.currentTarget) return;
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault();
                   router.go(`personal-agents/${a.id}`);
@@ -136,8 +141,8 @@
               <div class="card-top">
                 <span class="avatar" aria-hidden="true">{a.avatar || a.name.slice(0, 1)}</span>
                 <div class="card-id">
-                  <strong class="name">{a.name}</strong>
-                  <span class="chip mono">{a.provider}{a.model ? ` · ${a.model}` : ''}</span>
+                  <strong class="name" title={a.name}>{a.name}</strong>
+                  <span class="chip mono" title="{a.provider}{a.model ? ` · ${a.model}` : ''}">{a.provider}{a.model ? ` · ${a.model}` : ''}</span>
                 </div>
               </div>
               <div class="card-meta">
@@ -147,7 +152,10 @@
                   <span class="pill ok">enabled</span>
                 {/if}
                 {#if a.browser}<span class="pill">browser</span>{/if}
-                <span class="meta">next run <RelTime iso={personalAgents.nextRunAt(a.id)} /></span>
+                <!-- A paused agent's schedules never fire — don't promise a next run. -->
+                {#if a.enabled}
+                  <span class="meta">next run <RelTime iso={personalAgents.nextRunAt(a.id)} fallback="not scheduled" /></span>
+                {/if}
               </div>
               <div class="card-actions">
                 <button class="btn small" onclick={(e) => { e.stopPropagation(); void runNow(a); }}>Run now</button>
@@ -174,8 +182,8 @@
   .pa { display: flex; flex-direction: column; min-height: 0; flex: 1; }
   .muted { color: var(--text-dim); padding: 0.75rem 0; font-size: 0.9rem; }
   .err {
-    background: color-mix(in srgb, var(--status-exited) 12%, transparent);
-    color: var(--status-exited); padding: 0.5rem 0.75rem;
+    background: var(--danger-soft);
+    color: var(--danger); padding: 0.5rem 0.75rem;
     border-radius: var(--radius-s); margin-bottom: 0.75rem; font-size: 0.85rem;
   }
   .cards { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 0.6rem; }

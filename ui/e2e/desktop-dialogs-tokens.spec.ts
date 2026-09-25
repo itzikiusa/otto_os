@@ -154,7 +154,7 @@ test('light: Usage "Cost Attribution" heading + Group-by select are readable', a
   // a loaded host.
   await page.goto('/#/usage');
   const title = page.locator('.attr-title');
-  await expect(title).toHaveText('Cost Attribution', { timeout: 30_000 });
+  await expect(title).toHaveText('Cost attribution', { timeout: 30_000 });
   expect(await contrastOf(page, '.attr-title')).toBeGreaterThanOrEqual(4.5);
   // The select was a solid black box (#0d1117 fallback) in light mode.
   expect(await contrastOf(page, '#attr-dim-select')).toBeGreaterThanOrEqual(4.5);

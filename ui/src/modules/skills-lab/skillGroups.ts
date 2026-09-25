@@ -3,7 +3,7 @@
 //
 // The same skill can live in up to five places: the editable Otto library,
 // the bundled catalog (compiled into ottod), and each provider's global skills
-// dir (~/.claude/skills, ~/.codex/skills, ~/.agy/skills). The old list showed
+// dir (~/.claude/skills, ~/.codex/skills, ~/.gemini/skills for agy). The old list showed
 // one row per PLACE (vault-api-review ×3); this groups them into one row per
 // NAME with a variant per place and a sync state:
 //

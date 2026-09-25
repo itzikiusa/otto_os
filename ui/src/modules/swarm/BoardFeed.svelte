@@ -4,6 +4,8 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { rel } from '../../lib/stores/now.svelte';
+  import { sentenceCase } from '../../lib/status';
+  import { toasts } from '../../lib/toast.svelte';
   import type { MessageKind } from './types';
 
   let kindFilter = $state<string>('');
@@ -65,15 +67,24 @@
     escalation: '🚫',
   };
 
+  let posting = $state(false);
   async function post() {
-    if (!draft.trim()) return;
-    await swarm.postBoard({
-      body: draft.trim(),
-      kind: draftKind,
-      project_id: swarm.selectedProjectId ?? undefined,
-      to_agent_id: draftTo || undefined,
-    });
-    draft = '';
+    if (!draft.trim() || posting) return;
+    posting = true;
+    try {
+      await swarm.postBoard({
+        body: draft.trim(),
+        kind: draftKind,
+        project_id: swarm.selectedProjectId ?? undefined,
+        to_agent_id: draftTo || undefined,
+      });
+      draft = '';
+    } catch (e) {
+      // Keep the draft so nothing typed is lost; say why it didn't post.
+      toasts.error("Couldn't post to the board", e instanceof Error ? e.message : String(e));
+    } finally {
+      posting = false;
+    }
   }
 
   // Reply to a message: target its author and focus the composer.
@@ -86,24 +97,28 @@
 
 <div class="board">
   <div class="b-filters">
-    <button class="chip" class:accent={kindFilter === ''} onclick={() => (kindFilter = '')}>all</button>
+    <button class="chip" class:accent={kindFilter === ''} onclick={() => (kindFilter = '')}>All</button>
     {#each ['idea', 'review', 'decision', 'concern', 'status', 'worktree', 'shared', 'merge', 'verify', 'escalation'] as k (k)}
       <button class="chip" class:accent={kindFilter === k} onclick={() => (kindFilter = k)}>
-        {KIND_ICON[k] ?? ''} {k}
+        {KIND_ICON[k] ?? ''} {sentenceCase(k)}
       </button>
     {/each}
     <span class="grow"></span>
-    <button class="icon-btn" onclick={() => swarm.loadBoard()} aria-label="refresh"><Icon name="refresh" size={14} /></button>
+    <button class="icon-btn" onclick={() => swarm.loadBoard()} aria-label="Refresh board" title="Refresh board"><Icon name="refresh" size={14} /></button>
   </div>
 
   <div class="feed">
     {#if filtered.length === 0}
-      <EmptyState icon="comment" title="Quiet board" body="Agents post ideas, reviews and decisions here as they work." />
+      {#if kindFilter}
+        <EmptyState icon="comment" title="No {sentenceCase(kindFilter).toLowerCase()} posts" body="Nothing of this kind on the board yet — pick All to see every post." />
+      {:else}
+        <EmptyState icon="comment" title="Quiet board" body="Agents post ideas, reviews and decisions here as they work." />
+      {/if}
     {/if}
     {#each filtered as m (m.id)}
       <div class="msg">
         <div class="msg-head">
-          <span class="chip {KIND_CLASS[m.kind] ?? ''}">{KIND_ICON[m.kind] ?? ''} {m.kind}</span>
+          <span class="chip {KIND_CLASS[m.kind] ?? ''}">{KIND_ICON[m.kind] ?? ''} {sentenceCase(m.kind)}</span>
           <span class="who">{author(m)}</span>
           {#if m.to_agent_id}<span class="dim">→ {swarm.agentById(m.to_agent_id)?.name ?? 'agent'}</span>{/if}
           <span class="grow"></span>
@@ -122,8 +137,8 @@
       <option value="">— team —</option>
       {#each agents as a (a.id)}<option value={a.id}>{a.name}</option>{/each}
     </select>
-    <select class="input small" bind:value={draftKind}>
-      {#each KINDS as k (k)}<option value={k}>{k}</option>{/each}
+    <select class="input small" bind:value={draftKind} title="Kind of post">
+      {#each KINDS as k (k)}<option value={k}>{sentenceCase(k)}</option>{/each}
     </select>
     <input
       bind:this={composerEl}
@@ -132,7 +147,9 @@
       bind:value={draft}
       onkeydown={(e) => e.key === 'Enter' && post()}
     />
-    <button class="btn small primary" onclick={post}>Post</button>
+    <button class="btn small primary" onclick={post} disabled={!draft.trim() || posting} title={draft.trim() ? undefined : 'Type a message to post'}>
+      {posting ? 'Posting…' : 'Post'}
+    </button>
   </div>
 </div>
 

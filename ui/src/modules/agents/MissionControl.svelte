@@ -57,6 +57,9 @@
   let view: MissionView | null = $state(null);
   let savedViews: SavedView[] = $state([]);
   let loading = $state(false);
+  /** Why the last load failed — shown inline with Retry while there is no
+   *  data to fall back on (a failed REFRESH keeps the stale board). */
+  let loadError = $state<string | null>(null);
   let newViewName = $state('');
   let newViewFilter = $state('{}');
   let filterBucket = $state('');
@@ -106,8 +109,10 @@
       if (!current()) return;
       view = v;
       savedViews = sv;
-    } catch {
-      /* best-effort — stale data stays */
+      loadError = null;
+    } catch (e) {
+      // Best-effort — stale data stays; with none, the error shows inline.
+      if (current()) loadError = e instanceof Error ? e.message : String(e);
     } finally {
       if (current()) loading = false;
     }
@@ -354,7 +359,9 @@
 <div class="mission">
   <!-- Header bar -->
   <div class="mission-header">
-    <h2>Mission Control</h2>
+    <!-- "Work Queue" — the name the tab bar gives this view; "Mission Control"
+         is the separate sidebar module (the work graph). -->
+    <h2>Work Queue</h2>
     <div class="header-actions">
       {#if activeViewId !== null}
         <button class="chip active" onclick={() => (activeViewId = null)}>
@@ -432,6 +439,11 @@
   <!-- Buckets -->
   {#if loading && !view}
     <div class="loading">Loading work queue…</div>
+  {:else if !view && loadError && wsId}
+    <div class="empty" role="alert">
+      Couldn’t load the work queue: {loadError}
+      <button class="btn" onclick={() => load()}>Retry</button>
+    </div>
   {:else if !view}
     <div class="empty">No workspace selected.</div>
   {:else}
@@ -470,10 +482,10 @@
                     }
                   }}
                 >
-                  <span class="item-title">{item.title}</span>
+                  <span class="item-title" title={item.title}>{item.title}</span>
                   <div class="item-meta">
                     {#if item.repo}
-                      <span class="meta-tag">{item.repo}</span>
+                      <span class="meta-tag repo" title={item.repo}>{item.repo}</span>
                     {/if}
                     {#if item.cost_usd !== undefined && item.cost_usd > 0}
                       <span class="meta-tag cost">${item.cost_usd.toFixed(2)}</span>
@@ -608,9 +620,9 @@
   }
   .chip:hover,
   .chip.active {
-    background: var(--accent);
-    color: #fff;
-    border-color: var(--accent);
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
+    border-color: var(--accent-solid);
   }
   .chip.new {
     border-style: dashed;
@@ -649,8 +661,8 @@
   }
   .btn-save {
     padding: 4px 12px;
-    background: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
     border: none;
     border-radius: 4px;
     font-size: 12px;
@@ -707,8 +719,8 @@
     flex: 1;
   }
   .bucket-count {
-    background: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
     border-radius: 9px;
     padding: 1px 7px;
     font-size: 11px;
@@ -769,6 +781,15 @@
     background: var(--surface-2);
     border-radius: 4px;
     padding: 1px 5px;
+  }
+  /* A repo is a full path — truncate it inside the card instead of letting
+     the bucket's overflow:hidden chop it mid-character. */
+  .meta-tag.repo {
+    max-width: 100%;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .meta-tag.cost {
     color: var(--warning);

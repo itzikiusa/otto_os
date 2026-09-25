@@ -141,20 +141,21 @@
         oninput={schedule}
         onkeydown={onInputKeydown}
         onfocus={() => (listOpen = results.length > 0)}
-        placeholder="Search commits — ⌘F"
-        aria-label="Search commits"
+        placeholder={byAuthor ? 'Search commits by author — ⌘F' : 'Search commit messages — ⌘F'}
+        aria-label={byAuthor ? 'Search commits by author' : 'Search commit messages'}
         spellcheck="false"
       />
       <button
         class="gsb-chip"
         class:on={byAuthor}
+        aria-pressed={byAuthor}
         onclick={toggleAuthor}
-        title="Match the author instead of the subject"
+        title={byAuthor ? 'Matching the author — click to search commit messages instead' : 'Match the author instead of the commit message'}
       >
         Author
       </button>
       {#if q}
-        <button class="gsb-x" onclick={clear} aria-label="Clear search">
+        <button class="gsb-x" onclick={clear} aria-label="Clear search" title="Clear search">
           <Icon name="x" size={11} />
         </button>
       {/if}
@@ -165,7 +166,10 @@
         {#if searching}
           Searching…
         {:else}
-          {results.length} match{results.length === 1 ? '' : 'es'} for "{ran}"
+          <!-- The daemon caps a search at 200 hits — say so rather than
+               implying those are ALL the matches. -->
+          {results.length >= 200 ? '200+ matches' : `${results.length} match${results.length === 1 ? '' : 'es'}`}
+          for "{ran}"
         {/if}
         <button class="gsb-link" onclick={clear}>Clear</button>
       </div>
@@ -269,8 +273,7 @@
     position: absolute;
     z-index: 30;
     top: calc(100% - 4px);
-    left: 10px;
-    right: 10px;
+    inset-inline: 10px;
     max-width: 640px;
     margin: 0;
     padding: 4px;

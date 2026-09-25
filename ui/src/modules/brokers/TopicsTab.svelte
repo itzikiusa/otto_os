@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
@@ -206,6 +207,16 @@
 
   async function createTopic() {
     if (!newName.trim()) return;
+    // Same guard rail as produce / config edits in TopicDetail: a write to a
+    // guarded (prod or read-only) cluster asks first instead of silently
+    // sending `confirm: true`.
+    if (guarded) {
+      const ok = await confirmer.ask(
+        `Create topic "${newName.trim()}" on guarded cluster "${cluster.name}"?`,
+        { title: 'Create topic on guarded cluster', confirmLabel: 'Create', danger: true },
+      );
+      if (!ok) return;
+    }
     const req: CreateTopicReq = {
       name: newName.trim(),
       partitions: Number(newParts),
@@ -220,7 +231,7 @@
       load();
       selected = req.name;
     } catch (e) {
-      toasts.error('Create failed', String(e));
+      toasts.error("Couldn't create the topic", e instanceof Error ? e.message : String(e));
     }
   }
 </script>
@@ -230,7 +241,7 @@
     <button class="crumb" onclick={() => (selected = null)}>
       <Icon name="chevronLeft" size={13} /> Topics
       <span class="sep">/</span>
-      <span class="cur">{selected}</span>
+      <span class="cur" title={selected}>{selected}</span>
     </button>
     {#key selected}
       <TopicDetail
@@ -246,7 +257,7 @@
 {:else}
   <div class="topics">
     <div class="toolbar">
-      <input class="search" bind:value={query} placeholder="Search topics…" />
+      <input class="search" bind:value={query} placeholder="Search topics…" aria-label="Search topics" />
       <label class="chk"><input type="checkbox" bind:checked={showInternal} /> Show internal</label>
       {#if cleanupOptions.length}
         <select bind:value={cleanupFilter} title="Cleanup policy">
@@ -261,6 +272,15 @@
           <Icon name="refresh" size={12} /> Retry counts
         </button>
       {/if}
+      <button
+        class="icon-btn"
+        onclick={load}
+        disabled={loading}
+        aria-label="Refresh topics"
+        title="Refresh topics"
+      >
+        <Icon name="refresh" size={13} />
+      </button>
       <button class="btn small" onclick={() => (creating = !creating)} title="New topic">
         <Icon name="plus" size={13} /> New
       </button>
@@ -268,10 +288,15 @@
 
     {#if creating}
       <div class="create">
-        <input bind:value={newName} placeholder="topic name" />
-        <label>Parts <input type="number" min="1" bind:value={newParts} /></label>
-        <label>RF <input type="number" min="1" bind:value={newRf} /></label>
-        <button class="btn primary small" onclick={createTopic}>Create</button>
+        <input bind:value={newName} placeholder="topic name" aria-label="Topic name" />
+        <label title="Partitions">Parts <input type="number" min="1" bind:value={newParts} /></label>
+        <label title="Replication factor">RF <input type="number" min="1" bind:value={newRf} /></label>
+        <button
+          class="btn primary small"
+          onclick={createTopic}
+          disabled={!newName.trim()}
+          title={newName.trim() ? 'Create topic' : 'Enter a topic name first'}
+        >Create</button>
         <button class="btn small" onclick={() => (creating = false)}>Cancel</button>
       </div>
     {/if}
@@ -284,9 +309,22 @@
       {#if loadError && topics.length === 0}
         <!-- rendered above -->
       {:else if loading}
-        <p class="muted pad">Loading…</p>
+        <p class="muted pad">Loading topics…</p>
+      {:else if topics.length === 0}
+        <p class="muted pad">No topics on this cluster yet.</p>
       {:else if filtered.length === 0}
-        <p class="muted pad">No topics.</p>
+        <!-- Filtered empty ≠ empty: say why and offer the way back. -->
+        <p class="muted pad">
+          No topics match the current filters.
+          <button
+            class="btn small ghost"
+            onclick={() => {
+              query = '';
+              cleanupFilter = '';
+              showInternal = true;
+            }}>Clear filters</button
+          >
+        </p>
       {:else}
         <table class="grid">
           <thead>
@@ -302,7 +340,7 @@
           <tbody>
             {#each visible as t (t.name)}
               <tr onclick={() => (selected = t.name)}>
-                <td class="tname" class:internal={t.internal}>{t.name}</td>
+                <td class="tname" class:internal={t.internal} title={t.internal ? `${t.name} (internal)` : undefined}>{t.name}</td>
                 <td class="num">{t.partitions}</td>
                 <td class="num">{t.replication_factor}</td>
                 <td
@@ -376,12 +414,21 @@
   .crumb:hover {
     color: var(--text);
   }
+  .crumb > :global(svg),
+  .crumb .sep {
+    flex: none;
+  }
   .crumb .sep {
     opacity: 0.5;
   }
   .crumb .cur {
     color: var(--text);
     font-family: var(--font-mono);
+    /* Long topic names end in an ellipsis (full name in the title). */
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .toolbar {
     display: flex;

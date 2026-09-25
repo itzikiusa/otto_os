@@ -421,12 +421,23 @@
   });
 
   /** A save came back 409: the row moved on. Take theirs (re-fetch) or keep
-   *  mine (overwrite against the fresh base) — never a silent clobber. */
+   *  mine (overwrite against the fresh base) — never a silent clobber. Two
+   *  explicit buttons: a yes/no here once mapped Cancel/Esc to "overwrite
+   *  theirs", so dismissing the dialog destroyed the other version. Dismiss
+   *  now does nothing — the edits stay pending and the next save asks again. */
   async function resolveConflict(a: ProductAttachment, mine: string): Promise<void> {
-    const takeTheirs = await confirmer.ask(
-      'Saving failed: this artifact was changed on the server since you loaded it (another editor or the agent). Take the server version (your edits are dropped) or keep yours and overwrite it?',
-      { title: 'Save conflict', confirmLabel: 'Take theirs', danger: false },
+    const { value } = await confirmer.choose(
+      'Saving failed: this artifact was changed on the server since you loaded it (another editor or the agent). Your edits aren’t saved yet.',
+      {
+        title: 'Save conflict',
+        options: [
+          { label: 'Keep mine (overwrite theirs)', value: 'mine', kind: 'primary' },
+          { label: 'Take theirs (discard my edits)', value: 'theirs', kind: 'danger' },
+        ],
+      },
     );
+    if (value !== 'mine' && value !== 'theirs') return;
+    const takeTheirs = value === 'theirs';
     try {
       const fresh = (await product.listAttachmentsOf(a.story_id)).find((x) => x.id === a.id);
       if (!fresh) return;
@@ -1267,7 +1278,7 @@
   }
   .mockup-type {
     flex-shrink: 0;
-    font-size: 9px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;

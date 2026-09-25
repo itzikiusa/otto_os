@@ -341,7 +341,12 @@
       Learning: {learned?.mode === 'off' ? 'Off' : 'Suggest only'} <Icon name="chevronDown" size={12} />
     </button>
     <button class="btn small primary" onclick={() => void lookNow()} disabled={!wsId || !canEdit || extracting || learned?.mode === 'off'}
-      data-testid="design-learned-extract" title="Look at recent signals and propose any rule that is ready">
+      data-testid="design-learned-extract"
+      title={learned?.mode === 'off'
+        ? 'Learning is off — switch it to Suggest only to look for rules'
+        : !canEdit
+          ? 'You need edit access to this workspace to look for rules'
+          : 'Look at recent signals and propose any rule that is ready'}>
       <Icon name="bulb" size={12} /> {extracting ? 'Looking…' : 'Look for rules now'}
     </button>
   {/snippet}

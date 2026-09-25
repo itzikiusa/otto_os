@@ -94,7 +94,7 @@ test('readable file stays visible when its own parent cannot be listed', async (
   await page.route('**/api/v1/fs/browse?**', route => route.fulfill({ status: 400, json: { code: 'invalid', message: 'parent listing denied by OS' } }));
   await page.getByRole('button', { name: 'External file' }).click();
   await expect(page.locator('.cm-content')).toContainText('/outside/Application Support/report.ts');
-  await expect(page.locator('.error-msg')).toContainText('parent listing denied by OS');
+  await expect(page.locator('.load-error')).toContainText('parent listing denied by OS');
 });
 
 

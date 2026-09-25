@@ -135,7 +135,7 @@
           node.loaded = true;
         } catch (e) {
           if (generation !== rootGeneration) return;
-          toasts.error('Cannot open folder', e instanceof Error ? e.message : String(e));
+          toasts.error(`Couldn't open ${node.entry.name}`, e instanceof Error ? e.message : String(e));
           node.open = false;
         } finally {
           node.loading = false;
@@ -275,9 +275,22 @@
         <Icon name="folder" size={11} />
         <span class="ft-root-text">{basename(effectiveRoot)}</span>
       </span>
+      {#if effectiveRoot}
+        <!-- The tree is loaded once per root; files the agent writes afterwards
+             only show up on a re-list, so give that a button. -->
+        <button
+          class="icon-btn ft-change-btn"
+          title="Refresh folder"
+          aria-label="Refresh folder"
+          disabled={rootLoading}
+          onclick={() => void loadRoot(effectiveRoot)}
+        >
+          <Icon name="refresh" size={12} />
+        </button>
+      {/if}
       <button
         class="icon-btn ft-change-btn"
-        title="Change folder…"
+        title="Change folder"
         aria-label="Change folder"
         onclick={() => (showPicker = true)}
       >
@@ -296,11 +309,27 @@
     </div>
 
     {#if !effectiveRoot}
-      <EmptyState icon="folder" title="Choose a folder" body="Choose a folder to browse, or open a file from a terminal link." />
+      <EmptyState
+        icon="folder"
+        title="No folder to browse"
+        body="Choose a folder to browse, or open a file from a terminal link."
+        actionLabel="Choose folder"
+        actionIcon="folder"
+        onaction={() => (showPicker = true)}
+      />
     {:else if rootLoading}
-      <div class="loading dim">Loading…</div>
+      <div class="loading dim">Loading files…</div>
     {:else if rootError}
-      <div class="error-msg">{rootError}</div>
+      <div class="load-error" role="alert">
+        <div class="error-head">
+          <Icon name="warning" size={13} />
+          <span>Couldn't list {basename(effectiveRoot)}</span>
+        </div>
+        <div class="error-detail">{rootError}</div>
+        <button class="btn small" onclick={() => void loadRoot(effectiveRoot)}>
+          <Icon name="refresh" size={12} /> Retry
+        </button>
+      </div>
     {:else}
       <!-- Tree pane -->
       <div class="tree-pane" class:has-viewer={!!viewerFile}>
@@ -345,17 +374,18 @@
       {#if viewerFile || viewerLoading || viewerError}
         <div class="viewer-pane">
           <div class="viewer-header">
-            <span class="viewer-name">
+            <span class="viewer-name" title={viewerFile?.path ?? viewerName}>
               <Icon name="file" size={11} />
-              {viewerName}
+              <!-- ellipsis only applies to a block box, not a bare text node in a flex row -->
+              <span class="viewer-name-text">{viewerName}</span>
             </span>
             {#if viewerFile?.truncated}
               <span class="truncated-badge dim" title="File truncated at ~400 KB">truncated</span>
             {/if}
             {#if canPreview}
               <div class="preview-toggle">
-                <button class="pv" class:active={!previewMode} onclick={() => (previewMode = false)}>Source</button>
-                <button class="pv" class:active={previewMode} onclick={() => (previewMode = true)}>Preview</button>
+                <button class="pv" class:active={!previewMode} aria-pressed={!previewMode} onclick={() => (previewMode = false)}>Source</button>
+                <button class="pv" class:active={previewMode} aria-pressed={previewMode} onclick={() => (previewMode = true)}>Preview</button>
               </div>
             {/if}
             <button class="close-btn icon-btn" onclick={closeViewer} title="Close viewer" aria-label="Close viewer">
@@ -363,7 +393,7 @@
             </button>
           </div>
           {#if viewerLoading}
-            <div class="loading dim">Loading…</div>
+            <div class="loading dim">Loading {viewerName}…</div>
           {:else if viewerError}
             <div class="error-msg" role="alert">{viewerError}</div>
           {:else if viewerFile}
@@ -431,7 +461,7 @@
     opacity: 0.55;
     padding: 2px 4px;
   }
-  .ft-change-btn:hover {
+  .ft-change-btn:hover:not(:disabled) {
     opacity: 1;
   }
 
@@ -493,6 +523,9 @@
   .chevron {
     display: flex;
     align-items: center;
+    justify-content: center;
+    /* Same width as .file-spacer so folder and file icons line up per depth. */
+    width: 14px;
     flex-shrink: 0;
     color: var(--text-dim);
   }
@@ -554,7 +587,13 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     flex: 1;
+    min-width: 0;
     color: var(--text);
+  }
+  .viewer-name-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .truncated-badge {
     font-size: var(--fs-xs);
@@ -604,6 +643,29 @@
   .loading {
     padding: 12px;
     font-size: 12px;
+  }
+  .load-error {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 12px;
+    font-size: 12px;
+  }
+  .error-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text);
+  }
+  .error-head :global(svg) {
+    color: var(--danger);
+    flex-shrink: 0;
+  }
+  .error-detail {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    word-break: break-all;
   }
   .error-msg {
     padding: 12px;

@@ -335,8 +335,8 @@
               >
                 <span class="sdot {g.sync}" title={syncTitle(g)}></span>
                 <span class="row-main">
-                  <span class="row-name">{g.name}</span>
-                  {#if g.description}<span class="row-desc">{g.description}</span>{/if}
+                  <span class="row-name" title={g.name}>{g.name}</span>
+                  {#if g.description}<span class="row-desc" title={g.description}>{g.description}</span>{/if}
                 </span>
                 <span class="badges" aria-label="Copies: {g.variants.map((v) => sourceLabel(v.source)).join(', ')}">
                   {#each g.variants as v (v.source)}

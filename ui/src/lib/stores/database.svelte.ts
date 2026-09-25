@@ -2578,6 +2578,7 @@ class DatabaseStore {
         title: blockingKeys ? '⚠ Confirm blocking command' : '⚠ Confirm production write',
         confirmLabel: blockingKeys ? 'Run KEYS' : 'Run write',
         placeholder: conn.name,
+        danger: true,
       },
     );
     return typed != null && typed.trim().toLowerCase() === conn.name.trim().toLowerCase();

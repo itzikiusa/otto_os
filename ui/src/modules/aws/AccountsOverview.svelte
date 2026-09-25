@@ -112,7 +112,7 @@
             <span class="dot" style="background:{a.color || 'var(--text-dim)'}"></span>
             <h2 class="name">{a.name}</h2>
             <EnvBadge env={a.environment} />
-            <button class="more" onclick={(e) => menu(e, a)} aria-label={`Actions for ${a.name}`} title="Actions">⋯</button>
+            <button class="more" onclick={(e) => menu(e, a)} aria-label={`Actions for ${a.name}`} title="Actions"><Icon name="more" size={14} /></button>
           </div>
           <dl class="meta">
             <dt>Identity</dt>
@@ -260,6 +260,8 @@
     white-space: nowrap;
   }
   .more {
+    display: inline-flex;
+    align-items: center;
     border: 0;
     background: transparent;
     color: var(--text-dim);

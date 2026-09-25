@@ -6,6 +6,8 @@
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import { toasts } from '../../lib/toast.svelte';
   import type { SwarmAgent } from './types';
 
   interface Props {
@@ -19,7 +21,13 @@
   let { onedit, onruntask, onadd, onduplicate }: Props = $props();
 
   const agents = $derived(swarm.detail?.agents ?? []);
-  const roots = $derived(agents.filter((a) => !a.reports_to));
+  // Orphans (reports_to names an agent that no longer exists — the daemon does
+  // not cascade a manager's delete) are roots too; otherwise they vanished from
+  // the tree entirely while still showing in the Graph view.
+  const roots = $derived.by(() => {
+    const ids = new Set(agents.map((a) => a.id));
+    return agents.filter((a) => !a.reports_to || !ids.has(a.reports_to));
+  });
   const childrenOf = (id: string) => agents.filter((a) => a.reports_to === id);
 
   // Hide finished (exited) task sessions by default — show only active work.
@@ -46,6 +54,39 @@
     open = { ...open };
   }
 
+  // Reparent from the menu or a drop; a failed PATCH must not vanish silently
+  // (the row would just snap back with no explanation).
+  async function reparent(aid: string, reportsTo: string | null) {
+    try {
+      await swarm.updateAgent(aid, { reports_to: reportsTo });
+    } catch (e) {
+      toasts.error("Couldn't move the agent", e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // Deleting an agent is irreversible (its config, soul and schedule go with
+  // it), so it confirms like every other swarm delete does.
+  async function deleteAgent(a: SwarmAgent) {
+    const reports = childrenOf(a.id).length;
+    const extra =
+      reports === 0
+        ? ''
+        : reports === 1
+          ? ' Its direct report moves to the top level.'
+          : ` Its ${reports} direct reports move to the top level.`;
+    const ok = await confirmer.ask(`Delete agent “${a.name}”?${extra} This cannot be undone.`, {
+      title: 'Delete agent',
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await swarm.deleteAgent(a.id);
+    } catch (e) {
+      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
   function menu(e: MouseEvent, a: SwarmAgent) {
     ctxMenu.show(e, [
       { label: 'Edit agent', icon: 'edit', action: () => onedit(a) },
@@ -53,9 +94,9 @@
       { label: 'Run a task…', icon: 'play', action: () => onruntask(a) },
       { label: 'Add direct report', icon: 'plus', action: () => onadd?.(a) },
       { separator: true },
-      { label: 'Move to top level', icon: 'user', action: () => swarm.updateAgent(a.id, { reports_to: null }) },
+      { label: 'Move to top level', icon: 'user', action: () => reparent(a.id, null) },
       { separator: true },
-      { label: 'Delete agent', icon: 'trash', danger: true, action: () => swarm.deleteAgent(a.id) },
+      { label: 'Delete agent', icon: 'trash', danger: true, action: () => deleteAgent(a) },
     ]);
   }
 
@@ -97,7 +138,7 @@
     if (!a) return;
     if (a.reports_to === newParentId) return; // no change
     if (newParentId !== null && isDescendant(aid, newParentId)) return; // cycle guard
-    await swarm.updateAgent(aid, { reports_to: newParentId });
+    await reparent(aid, newParentId);
   }
 
   /** Returns true if `potentialChild` is a descendant of `ancestorId`. */
@@ -154,7 +195,7 @@
     class="row"
     class:drag-over={dropTargetId === a.id}
     class:dragging-self={draggingAgentId === a.id}
-    style="padding-left:{depth * 14 + 6}px"
+    style="padding-inline-start:{depth * 14 + 6}px"
     draggable="true"
     ondragstart={(e) => onAgentDragStart(e, a)}
     ondragend={onAgentDragEnd}
@@ -167,29 +208,29 @@
     tabindex="-1"
   >
     {#if kids.length > 0 || sessions.length > 0}
-      <button class="twist" onclick={() => toggle(a.id)} aria-label="toggle">
+      <button class="twist" onclick={() => toggle(a.id)} aria-label={isOpen ? `Collapse ${a.name}` : `Expand ${a.name}`} aria-expanded={isOpen}>
         <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
       </button>
     {:else}
       <span class="twist-spacer"></span>
     {/if}
     <span class="avatar">{a.avatar || a.name.slice(0, 1)}</span>
-    <span class="who grow">
+    <span class="who grow" title={a.title ? `${a.name} — ${a.title}` : a.name}>
       <span class="name">{a.name}</span>
       <span class="title dim">{a.title}</span>
     </span>
     {#if a.schedule?.enabled}
-      <span class="badge" title="scheduled"><Icon name="clock" size={11} /></span>
+      <span class="badge" title="Runs on a schedule"><Icon name="clock" size={11} /></span>
     {/if}
     {#if running > 0}
-      <span class="chip accent" title="active runs">{running}●</span>
+      <span class="chip accent" title="{running} active run{running === 1 ? '' : 's'}">{running}●</span>
     {/if}
-    <span class="state {a.status}" title={a.status}></span>
-    <button class="icon-btn small" onclick={() => onadd?.(a)} aria-label="add direct report" title="Add direct report">
+    <span class="state {a.status}" title={a.status === 'paused' ? 'Paused' : 'Active'}></span>
+    <button class="icon-btn small" onclick={() => onadd?.(a)} aria-label="Add direct report" title="Add direct report">
       <Icon name="plus" size={11} />
     </button>
-    <button class="icon-btn small" onclick={(e) => menu(e, a)} aria-label="agent menu">
-      <Icon name="dot" size={14} />
+    <button class="icon-btn small" onclick={(e) => menu(e, a)} aria-label="Agent actions" title="Agent actions">
+      <Icon name="more" size={14} />
     </button>
   </div>
   {#if isOpen}
@@ -197,11 +238,12 @@
       <button
         class="session-row"
         class:selected={swarm.selectedSessionId === s.id}
-        style="padding-left:{depth * 14 + 30}px"
+        style="padding-inline-start:{depth * 14 + 30}px"
         onclick={() => (swarm.selectedSessionId = s.id)}
+        title={s.title || s.provider}
       >
         <Icon name="terminal" size={12} />
-        <span class="grow mono">{s.title || s.provider}</span>
+        <span class="grow mono ellipsis">{s.title || s.provider}</span>
         <span class="state {ws.statusMap[s.id] ?? s.status}"></span>
       </button>
     {/each}
@@ -312,6 +354,18 @@
     line-height: 1.1;
     overflow: hidden;
   }
+  .who {
+    min-width: 0;
+  }
+  /* One line each — a long name/title used to wrap inside the fixed 30px row
+     and get clipped vertically with no ellipsis (full text is in the title). */
+  .name,
+  .title,
+  .ellipsis {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .name {
     font-size: 12.5px;
     font-weight: 600;
@@ -335,8 +389,12 @@
   .state.reconnectable {
     background: var(--status-idle, var(--text-dim));
   }
-  .state.exited,
+  /* A paused agent is parked, not failed — same idle tone the swarm rail uses
+     for a paused swarm (red stays for an exited session). */
   .state.paused {
+    background: var(--status-idle, var(--text-dim));
+  }
+  .state.exited {
     background: var(--status-exited);
   }
   .badge {

@@ -5,6 +5,9 @@
   import { toasts } from '../../lib/toast.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { events } from '../../lib/events.svelte';
+  import { sessionState } from '../../lib/status';
   import AttachIssue from '../agents/AttachIssue.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import type { AttachedIssue } from '../../lib/api/types';
@@ -14,6 +17,15 @@
   const workspace = $derived(ws.current);
   const attachedIssue = $derived(
     (session?.meta?.issue as AttachedIssue | undefined) ?? null,
+  );
+  // The same live state the tab strip and navigator show (events-fed status,
+  // needs-you flag, reconnecting) — not the row's raw `status` enum.
+  const liveState = $derived(
+    session
+      ? sessionState(session, ws.statusMap[session.id], ws.needsYou[session.id] === true, {
+          stale: events.state !== 'connected',
+        })
+      : null,
   );
 
   // Per-workspace default agent (overrides the global default). '' = inherit.
@@ -125,7 +137,7 @@
       </div>
       <div class="row">
         <span class="key">Status</span>
-        <span class="val chip">{session.status}</span>
+        <span class="val">{#if liveState}<StatusBadge status={liveState} variant="text" />{/if}</span>
       </div>
       {#if session.cwd}
         <div class="row">
@@ -148,10 +160,13 @@
               <li class="dir-row">
                 <span class="dir-path mono" title={dir}>{dir}</span>
                 <button
-                  class="dir-remove"
-                  title="Remove folder"
+                  class="icon-btn dir-remove"
+                  title="Remove folder (restarts the session)"
+                  aria-label="Remove folder (restarts the session)"
                   onclick={() => removeDir(dir)}
-                >✕</button>
+                >
+                  <Icon name="x" size={12} />
+                </button>
               </li>
             {/each}
           </ul>
@@ -159,13 +174,14 @@
           <p class="dim no-dirs">No extra folders.</p>
         {/if}
         <button class="btn btn-sm add-dir-btn" onclick={() => (folderPickerOpen = true)}>
-          + Add folder…
+          <Icon name="plus" size={12} /> Add folder…
         </button>
+        <p class="hint">Adding or removing a folder restarts the session.</p>
       </section>
     {/if}
 
     <section class="section">
-      <div class="section-title">Jira Issue</div>
+      <div class="section-title">Jira issue</div>
       {#if attachedIssue}
         <div class="issue-card">
           <div class="issue-head">
@@ -243,7 +259,8 @@
     min-height: 20px;
   }
   .key {
-    width: 58px;
+    /* Wide enough for "Default agent" on one line. */
+    width: 76px;
     flex-shrink: 0;
     color: var(--text-dim);
     font-size: 11.5px;
@@ -251,7 +268,8 @@
   .val {
     flex: 1;
     min-width: 0;
-    word-break: break-all;
+    /* Wrap long tokens (paths, ids) without splitting ordinary words mid-word. */
+    overflow-wrap: anywhere;
   }
   .ws-select {
     width: 100%;
@@ -358,14 +376,8 @@
   }
   .dir-remove {
     flex-shrink: 0;
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-    padding: 2px 4px;
-    border-radius: 3px;
-    line-height: 1;
+    width: 20px;
+    height: 20px;
   }
   .dir-remove:hover {
     color: var(--danger);
@@ -377,5 +389,8 @@
   }
   .add-dir-btn {
     align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
   }
 </style>

@@ -46,23 +46,28 @@
       </label>
     {/if}
     {#snippet footer()}
-      <button class="btn" onclick={() => confirmer.dismiss()}>Cancel</button>
+      <button class="btn" onclick={() => confirmer.dismiss()}>{confirmer.cancelLabel}</button>
       {#if confirmer.choices}
         {#each confirmer.choices as opt (opt.value)}
           <button
             class="btn"
             class:primary={opt.kind === 'primary'}
             class:danger={opt.kind === 'danger'}
+            data-autofocus={opt.kind === 'primary' ? '' : undefined}
             onclick={() => confirmer.pick(opt.value)}
           >
             {opt.label}
           </button>
         {/each}
       {:else}
+        <!-- The default button (Return) is the primary action — except for a
+             destructive one, where focus stays on Cancel (macOS HIG), so a
+             reflexive Return never deletes. -->
         <button
           class="btn"
           class:primary={!confirmer.danger}
           class:danger={confirmer.danger}
+          data-autofocus={confirmer.danger ? undefined : ''}
           onclick={onPrimary}
         >
           {confirmer.confirmLabel}
@@ -79,6 +84,8 @@
     line-height: 1.5;
     color: var(--text);
     white-space: pre-wrap;
+    /* Paths / ids / branch names have no break points. */
+    overflow-wrap: anywhere;
   }
   .cf-input {
     width: 100%;

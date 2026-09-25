@@ -7,6 +7,7 @@
   // Opened via the `findInPage` store (Cmd+F when no terminal is focused).
 
   import { findInPage } from '../findinpage.svelte';
+  import Icon from './Icon.svelte';
 
   // ---- state ----
   let query = $state('');
@@ -222,7 +223,7 @@
       title="Previous match (Shift+Enter)"
       aria-label="Previous match"
     >
-      ↑
+      <Icon name="chevronUp" size={12} />
     </button>
     <button
       class="find-nav-btn"
@@ -231,10 +232,10 @@
       title="Next match (Enter)"
       aria-label="Next match"
     >
-      ↓
+      <Icon name="chevronDown" size={12} />
     </button>
     <button class="find-close-btn" onclick={close} title="Close (Esc)" aria-label="Close find bar">
-      ✕
+      <Icon name="x" size={11} />
     </button>
   </div>
 {/if}

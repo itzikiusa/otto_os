@@ -3967,7 +3967,7 @@ export interface CreateLibrarySkillReq {
   body?: string;
 }
 
-/** One on-disk provider-global skill (~/.claude|.codex|.agy/skills), read-only. */
+/** One on-disk provider-global skill (~/.claude, $CODEX_HOME, ~/.gemini for agy), read-only. */
 export interface ProviderSkillInfo {
   provider: string;
   name: string;

@@ -306,7 +306,7 @@
           <button class="jrec-copy" title="Edit this record (opens a review before running)" aria-label="Edit record" onclick={() => flow.openDocEditor(idx)}><Icon name="edit" size={10} /></button>
         {/if}
         {#if !mini}
-          <button class="jrec-copy vrec-more" title="Record actions" aria-label="Record actions" onclick={(e) => recordMenu(e, obj, idx, ri)}>⋯</button>
+          <button class="jrec-copy vrec-more" title="Record actions" aria-label="Record actions" onclick={(e) => recordMenu(e, obj, idx, ri)}><Icon name="more" size={14} /></button>
         {/if}
       </div>
       {#each result.columns as c, vci (vci)}

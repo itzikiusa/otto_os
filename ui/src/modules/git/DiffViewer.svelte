@@ -845,7 +845,7 @@
                 e.stopPropagation();
                 fileToolsMenu(e, file);
               }}
-            >⋯</button>
+            ><Icon name="more" size={13} /></button>
           {/if}
         </div>
 
@@ -1297,7 +1297,7 @@
   }
   .nav-comment-badge {
     flex-shrink: 0;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     color: var(--accent-text);
     white-space: nowrap;
   }
@@ -1429,6 +1429,8 @@
     min-width: 0;
   }
   .dfile-tools {
+    display: inline-flex;
+    align-items: center;
     flex-shrink: 0;
     padding: 0 10px;
     border: none;

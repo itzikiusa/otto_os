@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
+use chrono::Utc;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -16,7 +17,7 @@ use otto_core::{Error, Id};
 use otto_state::WorkspacesRepo;
 use serde::Deserialize;
 
-use crate::config::{effective_config, write_config};
+use crate::config::{effective_config, next_run, write_config};
 use crate::engine::{ImprovementEngine, RUN_LIST_LIMIT};
 
 pub trait ImproveCtx: Clone + Send + Sync + 'static {
@@ -98,6 +99,7 @@ async fn put_config<S: ImproveCtx>(
         .await?;
     let ws = s.workspaces().get(&ws_id).await?;
     let mut cfg = effective_config(&ws.settings);
+    let reschedule = cfg.enabled != req.enabled || cfg.cadence_minutes != req.cadence_minutes;
     cfg.enabled = req.enabled;
     cfg.cadence_minutes = req.cadence_minutes;
     cfg.lookback_hours = req.lookback_hours;
@@ -109,8 +111,14 @@ async fn put_config<S: ImproveCtx>(
         req.providers
     };
     cfg.live_evolve = req.live_evolve;
-    // Changing config recomputes the next run lazily (clear so it's due soon if
-    // enabled; the scheduler will set next_run after the next pass).
+    // A new cadence (or re-enabling) re-anchors the next run on the last one:
+    // `last_run + cadence`, or one cadence from now if it never ran. Before,
+    // `next_run_at` was left alone, so dropping "Run every" from 1440 to 60
+    // minutes still waited out the old 24h slot. A slot already in the past
+    // makes the run due on the scheduler's next pass.
+    if reschedule {
+        cfg.next_run_at = Some(next_run(&cfg, cfg.last_run_at.unwrap_or_else(Utc::now)));
+    }
     let merged = write_config(&ws.settings, &cfg);
     s.workspaces()
         .update(&ws_id, None, None, Some(&merged), None)

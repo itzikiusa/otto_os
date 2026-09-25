@@ -349,8 +349,10 @@ class NotificationStore {
     this.settings = next;
     try {
       this.settings = await api.put<NotificationSettings>('/notifications/settings', next);
-    } catch {
+    } catch (e) {
+      // Revert AND say so — a silent revert looks like the toggle "didn't take".
       this.settings = prev;
+      toasts.error('Could not save notification settings', e instanceof Error ? e.message : String(e));
     }
   }
 

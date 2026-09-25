@@ -95,7 +95,7 @@
               {@const v = c.value(r)}
               <div class="rt-cell" class:num={c.num} class:mono={c.mono} title={v}>
                 {#if c.status}
-                  <span class="status-pill"><span class="hdot"></span>{v}</span>
+                  <span class="status-pill"><span class="hdot"></span><span class="st-txt">{v}</span></span>
                 {:else}
                   {v}
                 {/if}
@@ -196,7 +196,14 @@
     gap: 6px;
     max-width: 100%;
     overflow: hidden;
+  }
+  /* Ellipsis only applies to a block-level text box, not to a bare text node
+     inside an inline-flex pill (long statuses were cut mid-character). */
+  .st-txt {
+    min-width: 0;
+    overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .hdot {
     width: 7px;
@@ -218,10 +225,10 @@
     color: var(--status-exited);
   }
   .health-warn .hdot {
-    background: var(--status-idle, #d9a400);
+    background: var(--status-warn);
   }
   .health-warn .status-pill {
-    color: var(--status-idle, #d9a400);
+    color: var(--status-warn);
   }
   .health-progressing .hdot {
     background: var(--accent);
@@ -233,6 +240,11 @@
   @keyframes pulse {
     50% {
       opacity: 0.35;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .health-progressing .hdot {
+      animation: none;
     }
   }
   .rt-state {

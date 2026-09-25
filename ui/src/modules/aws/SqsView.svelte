@@ -98,9 +98,12 @@
     }
   }
 
+  /** Appended to destructive confirms so a prod queue reads as such (EC2 does the same). */
+  const prodNote = $derived(account.environment === 'prod' ? ' — this is PRODUCTION' : '');
+
   async function deleteMessage(m: SqsMessage): Promise<void> {
     if (!selected) return;
-    const ok = await confirmer.ask(`Delete message ${m.message_id} from “${selected.name}”? This cannot be undone.`, {
+    const ok = await confirmer.ask(`Delete message ${m.message_id} from “${selected.name}” in ${account.name}${prodNote}? This cannot be undone.`, {
       title: 'Delete message',
     });
     if (!ok) return;
@@ -156,8 +159,8 @@
   // ── purge / redrive ──
   async function purge(q: SqsQueue): Promise<void> {
     const typed = await confirmer.promptText(
-      `Purge ALL messages from “${q.name}”? Type the queue name to confirm.`,
-      { title: 'Purge queue', confirmLabel: 'Purge', placeholder: q.name },
+      `Purge ALL messages from “${q.name}” in ${account.name}${prodNote}? Type the queue name to confirm.`,
+      { title: 'Purge queue', confirmLabel: 'Purge', placeholder: q.name, danger: true },
     );
     if (typed === null) return;
     if (typed !== q.name) {
@@ -179,7 +182,7 @@
     const src = attrs?.attributes.QueueArn;
     if (!src || !selected) return;
     const ok = await confirmer.ask(
-      `Move every message from “${selected.name}” back to ${redriveDest.trim() || 'its original source queue(s)'}?`,
+      `Move every message from “${selected.name}” in ${account.name}${prodNote} back to ${redriveDest.trim() || 'its original source queue(s)'}?`,
       { title: 'Start redrive', confirmLabel: 'Start', danger: false },
     );
     if (!ok) return;
@@ -284,12 +287,12 @@
       {:else}
         <div class="dhead">
           {#if viewport.isMobile}
-            <button class="back" onclick={() => (selectedUrl = null)} aria-label="Back to queues"><Icon name="chevronLeft" size={14} /></button>
+            <button class="back" onclick={() => (selectedUrl = null)} aria-label="Back to queues" title="Back to queues"><Icon name="chevronLeft" size={14} /></button>
           {/if}
           <strong class="qname" title={selected.url}>{selected.name}</strong>
           {#if selected.fifo}<span class="tag">FIFO</span>{/if}
           {#if attrs}<span class="dim counts mono">{attrs.approx_messages} avail · {attrs.approx_not_visible} in-flight · {attrs.approx_delayed} delayed</span>{/if}
-          <button class="more" onclick={(e) => selected && queueMenu(e, selected)} aria-label="Queue actions" title="Actions">⋯</button>
+          <button class="more" onclick={(e) => selected && queueMenu(e, selected)} aria-label="Queue actions" title="Actions"><Icon name="more" size={14} /></button>
         </div>
         <div class="tabs" role="tablist">
           {#each [['messages', 'Messages'], ['send', 'Send'], ['attributes', 'Attributes'], ['metrics', 'Metrics'], ['redrive', 'Redrive']] as const as [id, label] (id)}
@@ -301,7 +304,7 @@
           {#if tab === 'messages'}
             <div class="bar">
               <label>Peek <select bind:value={peekN}>{#each [1, 2, 5, 10] as n (n)}<option value={n}>{n}</option>{/each}</select></label>
-              <button class="primary sm" onclick={() => void peek()} disabled={!canReceive || peeking}>{peeking ? 'Peeking…' : 'Peek'}</button>
+              <button class="primary sm" onclick={() => void peek()} disabled={!canReceive || peeking} title={canReceive ? undefined : 'Needs Edit on SQS'}>{peeking ? 'Peeking…' : 'Peek'}</button>
               <span class="dim">Non-destructive (visibility timeout 0). Messages may appear in any order.</span>
             </div>
             {#if messages.length === 0}
@@ -356,7 +359,7 @@
                   <div class="kv">
                     <input placeholder="name" bind:value={a.k} />
                     <input placeholder="value" bind:value={a.v} />
-                    <button class="icon-btn" onclick={() => (sendAttrs = sendAttrs.filter((_, j) => j !== i))} aria-label="Remove attribute"><Icon name="x" size={12} /></button>
+                    <button class="icon-btn" onclick={() => (sendAttrs = sendAttrs.filter((_, j) => j !== i))} aria-label="Remove attribute" title="Remove attribute"><Icon name="x" size={12} /></button>
                   </div>
                 {/each}
                 <button class="ghost sm self" onclick={() => (sendAttrs = [...sendAttrs, { k: '', v: '' }])}><Icon name="plus" size={12} /> Attribute</button>
@@ -494,7 +497,7 @@
     text-overflow: ellipsis;
   }
   .tag {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     padding: 0 5px;
     border-radius: 999px;
@@ -535,6 +538,8 @@
     padding: 2px;
   }
   .more {
+    display: inline-flex;
+    align-items: center;
     margin-left: auto;
     border: 0;
     background: transparent;

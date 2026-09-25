@@ -7,6 +7,7 @@
   import type { SkillEval, StartSkillEvalReq } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import { runStatus } from '../../lib/status';
+  import { rel } from '../../lib/stores/now.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import StartEvalForm from './StartEvalForm.svelte';
   import RunDetail from './RunDetail.svelte';
@@ -17,8 +18,29 @@
   type Mode = 'form' | 'detail';
   type Tab = 'runs' | 'golden' | 'matrix';
 
+  interface Props {
+    /** "Evaluate <skill>" hand-off from the Skills tab: open the start form
+     *  with this skill pre-selected. */
+    initialSkill?: { name: string; source: string } | null;
+    onconsumed?: () => void;
+  }
+  let { initialSkill = null, onconsumed }: Props = $props();
+  // The skill the start form should pre-select (kept until the form is left).
+  let formSkill = $state<{ name: string; source: string } | null>(null);
+  $effect(() => {
+    if (!initialSkill) return;
+    formSkill = initialSkill;
+    tab = 'runs';
+    compareMode = false;
+    selectedId = null;
+    mode = 'form';
+    onconsumed?.();
+  });
+
   let runs: SkillEval[] = $state([]);
   let loading = $state(true);
+  // Inline load failure (with Retry) instead of a toast over an empty list.
+  let loadError: string | null = $state(null);
   let mode: Mode = $state('form');
   let selectedId: string | null = $state(null);
   let starting = $state(false);
@@ -57,6 +79,13 @@
 
   $effect(() => {
     const wsId = ws.currentId;
+    // A workspace switch must not keep the previous workspace's run open
+    // (RunDetail would fetch an id that isn't in this list) or its compare
+    // selection.
+    selectedId = null;
+    mode = 'form';
+    compareMode = false;
+    compareSel = new Set();
     if (wsId) {
       void loadList(wsId);
     } else {
@@ -69,26 +98,29 @@
 
   async function loadList(wsId: string): Promise<void> {
     loading = true;
+    loadError = null;
     try {
       runs = await skillsEvalApi.list(wsId);
       // Default to the newest run's detail if one exists; else the start form.
-      if (runs.length > 0 && selectedId === null) {
+      if (runs.length > 0 && selectedId === null && !formSkill) {
         selectedId = runs[0].id;
         mode = 'detail';
       }
     } catch (e) {
-      toasts.error('Could not load evaluations', e instanceof Error ? e.message : String(e));
+      loadError = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
     }
   }
 
   function newRun(): void {
+    formSkill = null;
     selectedId = null;
     mode = 'form';
   }
 
   function selectRun(id: string): void {
+    formSkill = null;
     selectedId = id;
     mode = 'detail';
   }
@@ -100,6 +132,7 @@
     try {
       const created = await skillsEvalApi.start(wsId, req);
       runs = [created, ...runs];
+      formSkill = null;
       selectedId = created.id;
       mode = 'detail';
       toasts.success('Evaluation started', 'Watch progress in the report.');
@@ -123,24 +156,18 @@
     }
   }
 
-  function ago(iso: string): string {
-    const d = Date.parse(iso);
-    if (Number.isNaN(d)) return '';
-    const s = Math.floor((Date.now() - d) / 1000);
-    if (s < 60) return `${s}s ago`;
-    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-    if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-    return `${Math.floor(s / 86400)}d ago`;
-  }
-
   // Resizable run list: drag the divider between the list and the report to
   // resize it; the chosen width survives reloads. Mirrors the Database page's
   // sidebar resizer (double-click resets).
   const SIDE_W_DEFAULT = 280;
   let sideW = $state(loadSideW());
   function loadSideW(): number {
-    if (typeof localStorage === 'undefined') return SIDE_W_DEFAULT;
-    const v = Number(localStorage.getItem('skillsEval.sideW'));
+    let v = NaN;
+    try {
+      v = Number(localStorage.getItem('skillsEval.sideW'));
+    } catch {
+      /* storage unavailable — use the default */
+    }
     return Number.isFinite(v) && v >= 220 ? Math.min(480, v) : SIDE_W_DEFAULT;
   }
   function persistSideW(): void {
@@ -198,7 +225,7 @@
         class="btn small ghost"
         class:active={compareMode}
         onclick={toggleCompare}
-        title="Compare runs side by side"
+        title={runs.length < 2 ? 'Needs at least two runs to compare' : 'Compare runs side by side'}
         disabled={runs.length < 2}
       >
         <Icon name="grid" size={13} /> Compare
@@ -217,6 +244,11 @@
         <div class="se-muted">No workspace selected.</div>
       {:else if loading && runs.length === 0}
         <div class="se-muted">Loading…</div>
+      {:else if loadError && runs.length === 0}
+        <div class="se-muted se-err" role="alert">
+          Couldn't load evaluations: {loadError}
+          <button class="btn small" onclick={() => ws.currentId && loadList(ws.currentId)}>Retry</button>
+        </div>
       {:else if runs.length === 0}
         <div class="se-muted">No evaluations yet.</div>
       {:else}
@@ -232,17 +264,17 @@
                   {#if compareSel.has(r.id)}<Icon name="check" size={11} />{/if}
                 </span>
               {/if}
-              <span class="se-item-name">{r.source_skill}</span>
+              <span class="se-item-name" title={r.source_skill}>{r.source_skill}</span>
               <span class="se-dot st-{r.status}" role="img" aria-label={runStatus(r.status).label} title={runStatus(r.status).label}></span>
             </div>
             <div class="se-item-sub">
-              <span class="se-task">{r.task}</span>
+              <span class="se-task" title={r.task}>{r.task}</span>
             </div>
             <div class="se-item-meta">
               <span>{r.impl_cli}</span>
               {#if r.best_score != null}<span class="se-score">· best {r.best_score.toFixed(0)}</span>{/if}
               <span class="grow"></span>
-              <span>{ago(r.created_at)}</span>
+              <span title={new Date(r.created_at).toLocaleString()}>{rel(r.created_at)}</span>
             </div>
           </button>
         {/each}
@@ -275,7 +307,7 @@
         />
       {/if}
     {:else if mode === 'form'}
-      <StartEvalForm {starting} onstart={start} />
+      <StartEvalForm {starting} onstart={start} initialSkill={formSkill} />
     {:else if selectedId}
       {#key selectedId}
         <RunDetail evalId={selectedId} onupdate={onRunUpdate} ondeleted={onRunDeleted} />
@@ -396,6 +428,14 @@
     color: var(--text-dim);
     font-size: var(--fs-s);
   }
+  .se-err {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    color: var(--danger);
+    overflow-wrap: anywhere;
+  }
   .se-item {
     text-align: start;
     border: 1px solid transparent;
@@ -423,6 +463,7 @@
     font-size: var(--fs-m);
     font-weight: 500;
     flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -497,9 +538,9 @@
     flex-shrink: 0;
   }
   .se-check.on {
-    background: var(--accent);
-    color: #fff;
-    border-color: var(--accent);
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
+    border-color: var(--accent-solid);
   }
   .btn.active {
     background: color-mix(in srgb, var(--accent) 18%, transparent);

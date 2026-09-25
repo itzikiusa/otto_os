@@ -63,7 +63,7 @@ The app also keeps the Otto daemon running. It installs `ottod` as a background 
 - **File**: New Window (`⌘⇧N`), New Session (`⌘T`), New Workspace…, Take Snip, Close Tab (`⌘W`).
 - **Edit**: Undo, Redo, Cut, Copy, Paste, Select All.
 - **View**: Toggle Navigator (`⌘1`), Toggle Right Panel (`⌘J`), Zoom In, Zoom Out, Actual Size, full screen.
-- **Session**: Restart Session, Kill Session (for the focused session).
+- **Session**: Restart Session (asks first if the agent is mid-turn) and End Session… (for the focused session; does what closing its tab does, per Settings → Appearance → Closing a session tab).
 - **Window**: Minimise, Zoom.
 - **Help**: Otto Help, which opens this guide.
 - Menu commands act on the window you're using, never on every window at once.

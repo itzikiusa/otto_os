@@ -7,6 +7,7 @@
   import { router } from '../../../lib/router.svelte';
   import { k8s } from '../../../lib/stores/k8s.svelte';
   import { toasts } from '../../../lib/toast.svelte';
+  import { copyTextOrThrow } from '../../../lib/clipboard';
   import { k8sApi } from '../../../lib/api/k8s';
   import type { K8sMonitorOverviewRow } from '../../../lib/api/types';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
@@ -68,7 +69,9 @@
 
   async function copy(text: string): Promise<void> {
     try {
-      await navigator.clipboard.writeText(text);
+      // The shared helper falls back to execCommand when the async Clipboard
+      // API is refused (unfocused / insecure webview) — the raw call failed there.
+      await copyTextOrThrow(text);
       toasts.success('Copied', 'RBAC message copied to the clipboard.');
     } catch {
       toasts.error('Copy failed', text);

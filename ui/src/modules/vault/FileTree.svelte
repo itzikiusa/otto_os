@@ -105,6 +105,11 @@
   }
 
   function commitRename(n: TreeNode): void {
+    // Enter/Escape unmount the input, and WebKit (the desktop webview) fires
+    // blur on a removed focused element — without this guard Enter renamed
+    // twice (the second call failing with a "not found" toast) and Escape
+    // COMMITTED the rename it was meant to cancel.
+    if (renaming !== n.entry.path) return;
     const name = renameValue.trim();
     renaming = null;
     if (!name || name === n.entry.name) return;
@@ -219,7 +224,10 @@
 
 <div class="tree" role="tree">
   {#if flat.length === 0}
-    <div class="empty">No notes yet — create one.</div>
+    <div class="empty">
+      No notes yet.
+      <button class="btn ghost" onclick={() => onNewNote('')}>New note</button>
+    </div>
   {:else}
     <VirtualList items={flat} estimateHeight={26} class="tree-list">
       {#snippet row(n: TreeNode)}
@@ -249,7 +257,7 @@
           ondrop={(e) => onDrop(e, n)}
         >
           {#if n.entry.kind === 'dir'}
-            <span class="chev" class:open={n.open}>▸</span>
+            <span class="chev" class:open={n.open}><Icon name="chevronRight" size={12} /></span>
             <Icon name="folder" size={14} />
           {:else}
             <input
@@ -363,6 +371,10 @@
     overflow-y: auto;
   }
   .empty {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
     padding: 16px 12px;
     color: var(--text-dim);
     font-size: 12px;
@@ -392,11 +404,13 @@
     font-style: italic;
   }
   .row.drag-over {
-    outline: 1px dashed var(--accent, #7a9cff);
+    outline: 1px dashed var(--accent);
     outline-offset: -1px;
   }
   .chev {
     display: inline-flex;
+    flex-shrink: 0;
+    color: var(--text-dim);
     transition: transform 0.12s;
     width: 12px;
   }
@@ -414,7 +428,7 @@
     margin: 0;
     flex-shrink: 0;
     visibility: hidden;
-    accent-color: var(--accent, #7a9cff);
+    accent-color: var(--accent);
     cursor: pointer;
   }
   .row:hover .sel,
@@ -477,8 +491,8 @@
     cursor: pointer;
   }
   .sel-bar .ghost:hover {
-    border-color: var(--accent, #7a9cff);
-    color: var(--accent, #9ab4ff);
+    border-color: var(--accent);
+    color: var(--accent-text);
   }
   .sel-bar .ghost.dim {
     color: var(--text-dim);
@@ -495,7 +509,7 @@
   }
   .prov {
     font-size: var(--fs-xs);
-    color: var(--accent, #9ab4ff);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     border-radius: 999px;
     padding: 0 7px;
@@ -509,7 +523,7 @@
     inset-inline-start: 40px;
     inset-inline-end: 8px;
     background: var(--surface-2);
-    border: 1px solid var(--accent, #7a9cff);
+    border: 1px solid var(--accent);
     border-radius: 4px;
     color: var(--text);
     font-size: 12px;

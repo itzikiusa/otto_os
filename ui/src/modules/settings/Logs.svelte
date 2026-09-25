@@ -80,7 +80,7 @@
       nextOffset = data.next_offset;
       await maybeFollow();
     } catch (e) {
-      toasts.error('Refresh failed', e instanceof Error ? e.message : String(e));
+      failed('Refresh failed', e);
     } finally {
       refreshing = false;
     }
@@ -103,9 +103,21 @@
       nextOffset = data.next_offset;
       await maybeFollow();
     } catch (e) {
-      toasts.error('Log update failed', e instanceof Error ? e.message : String(e));
+      failed('Log update failed', e);
     } finally {
       refreshing = false;
+    }
+  }
+
+  /** A failed read. While Live is on this ran every 1.5 s and stacked a toast
+   *  per tick; pause Live instead and say so once. */
+  function failed(title: string, e: unknown): void {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (autoRefresh) {
+      autoRefresh = false;
+      toasts.error(`${title} — Live paused`, `${msg} Turn Live back on to retry.`);
+    } else {
+      toasts.error(title, msg);
     }
   }
 
@@ -119,6 +131,7 @@
   }
 
   async function onFileChange(): Promise<void> {
+    if (selected === ALL_FILES) mode = 'all';
     await refreshFull();
   }
 
@@ -160,7 +173,15 @@
 
       <label class="field compact">
         <span>Read</span>
-        <select class="input" bind:value={mode} onchange={onModeChange}>
+        <!-- The daemon reads every file in full for "All log files" whatever
+             the mode, so Tail is only offered for a single file. -->
+        <select
+          class="input"
+          bind:value={mode}
+          onchange={onModeChange}
+          disabled={selected === ALL_FILES}
+          title={selected === ALL_FILES ? 'Pick one file to tail it — all files are always read in full' : undefined}
+        >
           <option value="all">Full file</option>
           <option value="tail">Tail</option>
         </select>
@@ -175,6 +196,7 @@
             min="1"
             max="50000"
             bind:value={tailLines}
+            title="Up to 50,000 lines — press Enter or Refresh to apply"
             onkeydown={(e) => e.key === 'Enter' && refreshFull()}
           />
         </label>

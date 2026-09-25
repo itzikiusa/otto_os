@@ -72,8 +72,8 @@
       </div>
       {#each stats as s (`${s.server_id ?? ''}:${s.tool}`)}
         <div class="srow">
-          <span class="cell mono">{s.tool}</span>
-          <span class="cell">{s.server_name ?? '—'}</span>
+          <span class="cell mono" title={s.tool}>{s.tool}</span>
+          <span class="cell" title={s.server_name ?? undefined}>{s.server_name ?? '—'}</span>
           <span class="cell num">{s.calls}</span>
           <span class="cell num">{s.errors}</span>
           <span class="cell num {errClass(s.error_rate)}">{(s.error_rate * 100).toFixed(1)}%</span>
@@ -146,13 +146,13 @@
     text-align: right;
   }
   .num.ok {
-    color: var(--status-working, #28c840);
+    color: var(--success);
   }
   .num.warn {
     color: var(--warning);
   }
   .num.bad {
-    color: var(--status-exited, #ff5f57);
+    color: var(--danger);
   }
   .when {
     font-size: 11px;

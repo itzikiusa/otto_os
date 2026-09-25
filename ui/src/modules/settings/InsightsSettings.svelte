@@ -13,10 +13,17 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
 
   let cfg: InsightsConfig | null = $state(null);
   let loading = $state(true);
+  let loadError = $state('');
   let saving = $state(false);
+  // A provider/model change made while another save is in flight is queued
+  // (merged) and sent right after — it used to be dropped while the picker
+  // kept showing it, so the reports ran on the old model.
+  let queuedAgent: Partial<InsightsConfig> | null = null;
   // Local model draft — the picker's free-text path fires per keystroke, so we
   // debounce the PUT instead of racing saveAgent's `saving` guard.
   let modelDraft = $state('');
@@ -40,11 +47,13 @@
     if (loaded) return;
     loaded = true;
     loading = true;
+    loadError = '';
     try {
       cfg = await insightsApi.getConfig();
       modelDraft = cfg.model || '';
     } catch (e) {
-      toasts.error('Could not load insights settings', e instanceof Error ? e.message : String(e));
+      loaded = false; // let Retry load again
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -56,18 +65,32 @@
 
   /** Persist a provider/model change (which agent generates the reports). */
   async function saveAgent(patch: Partial<InsightsConfig>): Promise<void> {
-    if (!cfg || saving) return;
+    if (!cfg) return;
+    if (saving) {
+      queuedAgent = { ...(queuedAgent ?? {}), ...patch };
+      return;
+    }
     const next: InsightsConfig = { ...cfg, ...patch };
     const prev = cfg;
     cfg = next;
     saving = true;
     try {
       cfg = await insightsApi.putConfig(next);
+      toasts.success(
+        'Report agent saved',
+        `${cfg.provider || `default (${defaultAgentProvider()})`}${cfg.model ? ` · ${cfg.model}` : ''}`,
+      );
     } catch (e) {
       cfg = prev;
+      modelDraft = prev.model || '';
       toasts.error('Update failed', e instanceof Error ? e.message : String(e));
     } finally {
       saving = false;
+    }
+    if (queuedAgent) {
+      const q = queuedAgent;
+      queuedAgent = null;
+      await saveAgent(q);
     }
   }
 
@@ -99,12 +122,14 @@
 
   {#if loading && !cfg}
     <Skeleton rows={3} height={64} />
-  {:else if cfg}
+  {:else if !cfg}
+    <LoadState what="insights settings" error={loadError} empty onretry={() => void load()} />
+  {:else}
     <div class="card toggles">
       <label class="toggle-row">
         <div class="toggle-text">
           <span class="toggle-title">Daily</span>
-          <span class="toggle-desc">Covers the previous day, generated the next morning.</span>
+          <span class="toggle-desc">Covers the previous day (UTC), generated once it has ended.</span>
         </div>
         <input
           type="checkbox"
@@ -117,7 +142,7 @@
       <label class="toggle-row">
         <div class="toggle-text">
           <span class="toggle-title">Weekly</span>
-          <span class="toggle-desc">Runs on Sunday, covering the previous week.</span>
+          <span class="toggle-desc">Runs on Monday (UTC), covering the previous Monday–Sunday.</span>
         </div>
         <input
           type="checkbox"
@@ -130,7 +155,7 @@
       <label class="toggle-row">
         <div class="toggle-text">
           <span class="toggle-title">Monthly</span>
-          <span class="toggle-desc">Runs on the 1st, covering the previous month.</span>
+          <span class="toggle-desc">Runs on the 1st (UTC), covering the previous month.</span>
         </div>
         <input
           type="checkbox"
@@ -147,7 +172,12 @@
         <select
           value={cfg.provider || ''}
           disabled={saving}
-          onchange={(e) => saveAgent({ provider: e.currentTarget.value })}
+          onchange={(e) => {
+            // A model belongs to its provider — drop it rather than send a
+            // Claude model id to codex.
+            modelDraft = '';
+            void saveAgent({ provider: e.currentTarget.value, model: '' });
+          }}
         >
           <option value="">default ({defaultAgentProvider()})</option>
           {#each agentProviders() as p (p)}<option value={p}>{p}</option>{/each}
@@ -159,6 +189,7 @@
         <ModelPicker
           provider={cfg.provider || defaultAgentProvider()}
           value={modelDraft}
+          hint="Model the report agent runs with (blank = the provider's default)."
           onchange={onModelChange}
         />
       </div>

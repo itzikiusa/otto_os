@@ -249,7 +249,7 @@
 {#if vault.note}
   <div class="note-view">
     <header>
-      <nav class="crumbs" aria-label="Note path">
+      <nav class="crumbs" aria-label="Note path" title={vault.notePath ?? ''}>
         {#each crumb as part, i (i)}
           {#if i < crumb.length - 1}
             <span class="c dim">{part}</span><span class="sep">/</span>
@@ -259,7 +259,7 @@
         {/each}
       </nav>
       <div class="actions">
-        <button class="mode-btn" title="Note edit history" onclick={() => void vault.openHistory(vault.notePath ?? '')}><Icon name="clock" size={14} /></button>
+        <button class="mode-btn" title="Note edit history" aria-label="Note edit history" onclick={() => void vault.openHistory(vault.notePath ?? '')}><Icon name="clock" size={14} /></button>
         {#if vault.saving}
           <span class="save-state">saving…</span>
         {:else if vault.dirty}
@@ -269,6 +269,8 @@
           class="mode-btn"
           class:refine-on={refineShown}
           title="Refine with AI"
+          aria-label="Refine with AI"
+          aria-pressed={refineShown}
           onclick={toggleRefine}
         >
           <Icon name="zap" size={14} />
@@ -276,6 +278,7 @@
         <button
           class="mode-btn"
           title={vault.editing ? 'Reading view (⌘E)' : 'Edit (⌘E)'}
+          aria-label={vault.editing ? 'Reading view' : 'Edit'}
           onclick={() => vault.setView(!vault.editing)}
         >
           <Icon name={vault.editing ? 'eye' : 'edit'} size={14} />
@@ -338,12 +341,28 @@
     border-bottom: 1px solid var(--border);
     gap: 8px;
   }
+  /* Long paths ellipsize per segment (folders first, they shrink before the
+     note name) instead of being cut mid-glyph at the pane edge. */
   .crumbs {
     display: flex;
     gap: 4px;
+    min-width: 0;
     font-size: 12.5px;
     overflow: hidden;
     white-space: nowrap;
+  }
+  .c {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .c.dim {
+    flex-shrink: 100;
+    min-width: 1.5em;
+  }
+  .sep,
+  .actions {
+    flex-shrink: 0;
   }
   .c.dim,
   .sep {
@@ -371,18 +390,19 @@
     background: var(--hover);
   }
   .mode-btn.refine-on {
-    border-color: var(--accent, #7a9cff);
-    color: var(--accent, #9ab4ff);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border-color: var(--accent);
+    color: var(--accent-text);
+    background: var(--accent-soft);
   }
   .conflict {
     display: flex;
+    flex-wrap: wrap;
     gap: 10px;
     align-items: center;
     margin: 8px 14px 0;
     padding: 8px 12px;
-    border: 1px solid #b58a2c;
-    background: rgba(181, 138, 44, 0.12);
+    border: 1px solid color-mix(in srgb, var(--warning) 55%, transparent);
+    background: var(--warning-soft);
     border-radius: 8px;
     font-size: 12.5px;
   }
@@ -396,8 +416,8 @@
     font-size: 12px;
   }
   .conflict button.danger {
-    border-color: #a33;
-    color: var(--status-exited);
+    border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+    color: var(--danger);
   }
   .editor-wrap {
     flex: 1;
@@ -422,7 +442,7 @@
     line-height: 1.6;
   }
   .read :global(a.internal-link) {
-    color: var(--accent, #7a9cff);
+    color: var(--accent-text);
     cursor: pointer;
     text-decoration: none;
     border-bottom: 1px solid transparent;
@@ -436,7 +456,7 @@
   }
   .read :global(span.tag) {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent, #9ab4ff);
+    color: var(--accent-text);
     border-radius: 999px;
     padding: 1px 8px;
     font-size: 0.85em;
@@ -444,7 +464,7 @@
   }
   .read :global(div.note-embed) {
     border: 1px solid var(--border);
-    border-inline-start: 3px solid var(--accent, #7a9cff);
+    border-inline-start: 3px solid var(--accent);
     border-radius: 8px;
     padding: 8px 12px;
     margin: 8px 0;
@@ -458,7 +478,7 @@
     opacity: 0.5;
   }
   .read :global(blockquote.callout) {
-    border-inline-start: 3px solid var(--accent, #7a9cff);
+    border-inline-start: 3px solid var(--accent);
     background: color-mix(in srgb, var(--accent) 8%, transparent);
     border-radius: 6px;
     padding: 8px 12px;
@@ -472,13 +492,13 @@
   }
   .read :global(blockquote.callout-warning),
   .read :global(blockquote.callout-caution) {
-    border-inline-start-color: var(--status-warn);
-    background: rgba(214, 165, 72, 0.08);
+    border-inline-start-color: var(--warning);
+    background: var(--warning-soft);
   }
   .read :global(blockquote.callout-danger),
   .read :global(blockquote.callout-bug) {
-    border-inline-start-color: #d65648;
-    background: rgba(214, 86, 72, 0.08);
+    border-inline-start-color: var(--danger);
+    background: var(--danger-soft);
   }
   .read :global(img) {
     max-width: 100%;

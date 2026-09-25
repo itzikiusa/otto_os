@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { api, ApiError } from '../../lib/api/client';
+  import { api } from '../../lib/api/client';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { BrokerCluster, SchemaSubject } from '../../lib/api/types';
   import SchemaVersionsPanel from './SchemaVersionsPanel.svelte';
 
@@ -23,8 +25,7 @@
     }
   }
 
-  $effect(() => {
-    void cluster.id;
+  function load(): void {
     loading = true;
     error = null;
     selected = null;
@@ -36,9 +37,14 @@
         if (s.length > 0) selected = s[0];
       })
       .catch((e) => {
-        error = e instanceof ApiError ? e.message : String(e);
+        error = loadErrorText(e);
       })
       .finally(() => (loading = false));
+  }
+
+  $effect(() => {
+    void cluster.id;
+    load();
   });
 </script>
 
@@ -47,10 +53,15 @@
     <p class="muted pad">Loading subjects…</p>
   {:else if error}
     <div class="empty">
-      <p>{error}</p>
-      <p class="muted small">
-        Configure a Schema Registry URL on the cluster to browse Avro/Protobuf/JSON schemas.
-      </p>
+      {#if cluster.schema_registry_url}
+        <!-- A registry IS configured: this is a real failure — say so, with Retry. -->
+        <LoadState what="schema subjects" {loading} {error} empty onretry={load} />
+      {:else}
+        <p>{error}</p>
+        <p class="muted small">
+          Configure a Schema Registry URL on the cluster to browse Avro/Protobuf/JSON schemas.
+        </p>
+      {/if}
     </div>
   {:else}
     <div class="list">
@@ -60,7 +71,7 @@
           class:sel={selected?.subject === s.subject}
           onclick={() => { selected = s; showVersions = false; }}
         >
-          <span class="sn">{s.subject}</span>
+          <span class="sn" title={s.subject}>{s.subject}</span>
           <span class="muted small">v{s.version} · {s.schema_type} · #{s.id}</span>
         </button>
       {/each}
@@ -70,9 +81,9 @@
       {#if selected}
         <div class="view-head">
           <span class="sn-big">{selected.subject}</span>
-          <div class="view-tabs">
-            <button class:on={!showVersions} onclick={() => (showVersions = false)}>Schema</button>
-            <button class:on={showVersions} onclick={() => (showVersions = true)}>Versions &amp; Compat</button>
+          <div class="view-tabs" role="tablist" aria-label="Subject views">
+            <button class:on={!showVersions} role="tab" aria-selected={!showVersions} onclick={() => (showVersions = false)}>Schema</button>
+            <button class:on={showVersions} role="tab" aria-selected={showVersions} onclick={() => (showVersions = true)}>Versions &amp; Compat</button>
           </div>
         </div>
         {#if showVersions}

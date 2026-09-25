@@ -571,18 +571,18 @@
       <div class="ctx-chips" aria-label="Context Otto will see">
         {#if sel}
           <span class="chip ctx" data-testid="design-otto-selection">
-            <Icon name="target" size={11} /> {selLabel}
+            <Icon name="target" size={11} /> <span class="ct" title={selLabel}>{selLabel}</span>
             <button class="x" onclick={() => (useSelection = false)} aria-label="Don’t focus the selection" title="Don’t focus the selection"><Icon name="x" size={10} /></button>
           </span>
         {/if}
         {#if brandKit}
-          <span class="chip ctx" title="The brand kit is always part of Otto’s context brief"><Icon name="palette" size={11} /> {brandKit.title}</span>
+          <span class="chip ctx" title="The brand kit is always part of Otto’s context brief"><Icon name="palette" size={11} /> <span class="ct">{brandKit.title}</span></span>
         {/if}
         {#each stories as s (s.link.id)}
-          <span class="chip ctx" title="The story this design implements is always part of the brief"><Icon name="ticket" size={11} /> {s.label}</span>
+          <span class="chip ctx" title="The story this design implements is always part of the brief"><Icon name="ticket" size={11} /> <span class="ct">{s.label}</span></span>
         {/each}
         {#each refs.slice(0, 4) as r (r.link.id)}
-          <span class="chip ctx" title="Linked as a reference — Otto may cite it as [R…]"><Icon name="link" size={11} /> {r.label}</span>
+          <span class="chip ctx" title="Linked as a reference — Otto may cite it as [R…]"><Icon name="link" size={11} /> <span class="ct">{r.label}</span></span>
         {/each}
         {#if refs.length > 4}<span class="chip ctx">+{refs.length - 4} references</span>{/if}
       </div>
@@ -790,14 +790,24 @@
     margin: 0;
     font-size: var(--fs-s);
   }
+  /* Ellipsis lives on the label span: on the inline-flex chip itself it never
+     applied, so a long selection label was cut hard and pushed its × button
+     out of the chip. Icon and × never shrink. */
   .ctx {
     display: inline-flex;
     align-items: center;
     gap: 4px;
     max-width: 100%;
     overflow: hidden;
-    text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .ctx .ct {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ctx > .x {
+    flex-shrink: 0;
   }
   .msg .ctx {
     align-self: flex-start;

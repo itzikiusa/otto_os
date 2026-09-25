@@ -63,3 +63,17 @@ export function mergeCheckpointPage<T extends {node_id:string}>(
   });
   return {items,known:[...rows.values()]};
 }
+
+/** A step/run duration a person can read at a glance: "840ms", "12.4s",
+ *  "3m 05s", "1h 12m". Seconds alone ("4325.0s") hid how long a long agent
+ *  step really ran. Empty for a missing value. */
+export function fmtStepMs(ms?: number | null): string {
+  if (ms == null || !Number.isFinite(ms)) return '';
+  if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const totalS = Math.floor(ms / 1000);
+  const h = Math.floor(totalS / 3600);
+  const m = Math.floor((totalS % 3600) / 60);
+  const s = totalS % 60;
+  return h > 0 ? `${h}h ${String(m).padStart(2, '0')}m` : `${m}m ${String(s).padStart(2, '0')}s`;
+}

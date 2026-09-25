@@ -35,7 +35,7 @@
 
 {#if mini}
   <div class="rail mini" class:dead={failed || cancelled} role="img"
-    aria-label={status ? `Pipeline stage: ${STAGES[Math.max(cur, 0)]?.label ?? status}` : 'Pipeline'}>
+    aria-label={status ? (cur >= 0 ? `Pipeline stage: ${STAGES[cur].label}` : `Pipeline ${status}`) : 'Pipeline'}>
     {#each STAGES as s, i (s.key)}
       <span class="seg {stepState(i)}" title={s.label}></span>
     {/each}

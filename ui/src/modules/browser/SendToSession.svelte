@@ -53,6 +53,8 @@
 <button
   class="icon-btn"
   title="Send to session"
+  aria-label="Send to session"
+  aria-haspopup="menu"
   disabled={sending}
   onclick={open}
 >

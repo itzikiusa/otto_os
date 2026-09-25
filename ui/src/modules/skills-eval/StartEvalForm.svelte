@@ -19,8 +19,23 @@
   interface Props {
     starting: boolean;
     onstart: (req: StartSkillEvalReq) => void;
+    /** Pre-select this skill ("Evaluate <skill>" from the Skills tab). `source`
+     *  is "library" | "bundled" | a provider name. */
+    initialSkill?: { name: string; source: string } | null;
   }
-  let { starting, onstart }: Props = $props();
+  let { starting, onstart, initialSkill = null }: Props = $props();
+
+  // The matching source row: the same copy when listed (a provider copy, or
+  // the library), else any copy with that name. Bundled skills aren't eval
+  // sources, so a bundled hand-off falls back to the library copy if present.
+  function matchSource(list: SkillSourceInfo[], want: { name: string; source: string }): number {
+    const isProvider = want.source !== 'library' && want.source !== 'bundled';
+    let i = list.findIndex((s) =>
+      s.name === want.name && (isProvider ? s.kind === 'provider' && s.provider === want.source : s.kind === 'library'),
+    );
+    if (i < 0) i = list.findIndex((s) => s.name === want.name);
+    return i;
+  }
 
   // Agent CLIs available for implementation / validation / improvement.
   const providerOpts = $derived(agentProviders());
@@ -40,6 +55,10 @@
   // Repo-specific commands → scored as tests/lint signals + proof-pack evidence.
   let testCmd = $state('');
   let lintCmd = $state('');
+  // Saved defaults (Settings → Skill eval). A blank field falls back to these
+  // on the daemon, so the placeholder shows what will actually run.
+  let testDefault = $state('');
+  let lintDefault = $state('');
   let validations: SkillEvalValidationCfg[] = $state([]);
 
   let loaded = $state(false);
@@ -58,10 +77,14 @@
       validations = cfg.validations.map((v) => ({ ...v, providers: [...v.providers] }));
       iterations = cfg.iterations ?? 2;
       validatorPasses = cfg.validator_passes ?? 1;
+      testDefault = cfg.default_test_cmd ?? '';
+      lintDefault = cfg.default_lint_cmd ?? '';
       sources = src.sources;
       implCli = defaultAgentProvider();
       improverProvider = cfg.improver?.provider || implCli;
-      if (sources.length > 0) sourceSel = 0;
+      const want = initialSkill ? matchSource(sources, initialSkill) : -1;
+      if (want >= 0) sourceSel = want;
+      else if (sources.length > 0) sourceSel = 0;
     } catch (e) {
       toasts.error('Could not load evaluator defaults', e instanceof Error ? e.message : String(e));
     } finally {
@@ -93,6 +116,17 @@
       validations.length > 0 &&
       validations.every((v) => v.name.trim() && v.criteria.trim()),
   );
+
+  // Why Start is disabled, for its tooltip (a greyed button with no reason
+  // leaves the user hunting through the form).
+  const blockReason = $derived.by(() => {
+    if (starting) return 'Starting…';
+    if (sourceSel === 'custom' ? !customPath.trim() : sources.length === 0) return 'Choose the skill under test';
+    if (!task.trim()) return 'Describe the task to implement';
+    if (validations.length === 0) return 'Add at least one validation';
+    if (!validations.every((v) => v.name.trim() && v.criteria.trim())) return 'Every validation needs a name and criteria';
+    return '';
+  });
 
   // Rough agent-session count so the user sees the scope before launching.
   // Per iteration: 1 implementation + Σ(validation providers) × passes; plus
@@ -215,11 +249,11 @@
   <section class="card block grid4">
     <div style="grid-column: span 2;">
       <label class="field-label" for="se-test">Test command <span class="hint-inline">(scored + proof)</span></label>
-      <input id="se-test" class="input" bind:value={testCmd} placeholder="e.g. cargo test  /  npm test" data-testid="eval-test-cmd" />
+      <input id="se-test" class="input" bind:value={testCmd} placeholder={testDefault ? `Default: ${testDefault}` : 'e.g. cargo test  /  npm test'} data-testid="eval-test-cmd" />
     </div>
     <div style="grid-column: span 2;">
       <label class="field-label" for="se-lint">Lint command <span class="hint-inline">(optional)</span></label>
-      <input id="se-lint" class="input" bind:value={lintCmd} placeholder="e.g. cargo clippy  /  npm run check" data-testid="eval-lint-cmd" />
+      <input id="se-lint" class="input" bind:value={lintCmd} placeholder={lintDefault ? `Default: ${lintDefault}` : 'e.g. cargo clippy  /  npm run check'} data-testid="eval-lint-cmd" />
     </div>
   </section>
 
@@ -281,7 +315,7 @@
       ≈ {estAgents} agent session{estAgents === 1 ? '' : 's'}
     </span>
     <span class="grow"></span>
-    <button class="btn primary" disabled={!canStart} onclick={submit}>
+    <button class="btn primary" disabled={!canStart} onclick={submit} title={canStart ? undefined : blockReason}>
       {starting ? 'Starting…' : 'Start evaluation'}
     </button>
   </div>
@@ -380,6 +414,7 @@
     gap: 6px;
   }
   .chip-toggle {
+    position: relative;
     display: inline-flex;
     align-items: center;
     gap: 5px;
@@ -395,8 +430,21 @@
     border-color: color-mix(in srgb, var(--accent) 40%, transparent);
     color: var(--accent-text);
   }
+  /* Visually hidden but still focusable (display:none dropped the chips out
+     of the tab order); the label shows the focus ring instead. */
   .chip-toggle input {
-    display: none;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    border: 0;
+  }
+  .chip-toggle:has(input:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
   }
   .hint {
     margin: 0;

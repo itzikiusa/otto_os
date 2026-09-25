@@ -216,7 +216,7 @@
     gap: 6px;
     font-size: 12px;
     font-weight: 700;
-    color: var(--text-dim, #888);
+    color: var(--text-dim);
     text-transform: uppercase;
     letter-spacing: 0.02em;
   }
@@ -281,12 +281,12 @@
     background: var(--surface-2);
   }
   .lc-busy {
-    color: var(--text-dim, #888);
+    color: var(--text-dim);
   }
   .lc-empty {
     margin: 4px 0 2px;
     font-size: 12px;
-    color: var(--text-dim, #888);
+    color: var(--text-dim);
   }
   .lc-list {
     list-style: none;
@@ -325,7 +325,7 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.03em;
@@ -337,6 +337,6 @@
   .lc-updated {
     flex-shrink: 0;
     font-size: 11px;
-    color: var(--text-dim, #888);
+    color: var(--text-dim);
   }
 </style>

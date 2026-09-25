@@ -21,10 +21,16 @@
   let loading = $state(true);
   let busy = $state('');
   let error = $state<string | null>(null);
+  /** The initial list load failed — rendered as an error with Retry instead of
+   *  the misleading "This repository has no remotes" empty state. */
+  let loadFailed = $state(false);
+  let loadRev = $state(0);
 
   $effect(() => {
     const id = repoId;
+    void loadRev;
     loading = true;
+    loadFailed = false;
     api
       .get<RemoteInfo[]>(`/repos/${id}/remotes`)
       .then((rows) => {
@@ -33,6 +39,7 @@
       })
       .catch((e: unknown) => {
         error = e instanceof Error ? e.message : String(e);
+        loadFailed = true;
       })
       .finally(() => {
         loading = false;
@@ -44,6 +51,7 @@
     error = null;
     try {
       remotes = await api.post<RemoteInfo[]>(`/repos/${repoId}/remotes`, req);
+      loadFailed = false;
       toasts.success(label, req.name);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -84,6 +92,7 @@
     const ok = await confirmer.ask(`Remove remote \`${r.name}\`? Local branches are kept.`, {
       title: 'Remove remote',
       confirmLabel: 'Remove',
+      danger: true,
     });
     if (!ok) return;
     await send({ op: 'remove', name: r.name }, 'Remote removed');
@@ -94,6 +103,12 @@
   <div class="rp">
     {#if loading}
       <Skeleton rows={2} height={38} />
+    {:else if loadFailed}
+      <div class="rp-err" role="alert">
+        <Icon name="warning" size={12} />
+        <span>Couldn't load remotes: {error}</span>
+        <button class="btn small" onclick={() => loadRev++}>Retry</button>
+      </div>
     {:else if remotes.length === 0}
       <p class="rp-empty">This repository has no remotes. Add one to fetch, pull or push.</p>
     {:else}
@@ -122,8 +137,8 @@
       </ul>
     {/if}
 
-    {#if error}
-      <p class="rp-err"><Icon name="x" size={12} /> {error}</p>
+    {#if error && !loadFailed}
+      <p class="rp-err" role="alert"><Icon name="warning" size={12} /> {error}</p>
     {/if}
   </div>
 

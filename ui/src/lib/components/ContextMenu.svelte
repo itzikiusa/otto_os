@@ -161,6 +161,15 @@
     }
   }
 
+  /** The menu caps at 260px: a long repo / branch / session name ellipsizes,
+   *  so hovering a clipped label shows it whole (unclipped rows get none). */
+  function titleIfClipped(e: MouseEvent): void {
+    const row = e.currentTarget as HTMLElement;
+    const el = row.querySelector<HTMLElement>('.ctx-label');
+    if (!el) return;
+    row.title = el.scrollWidth > el.clientWidth + 1 ? (el.textContent ?? '') : '';
+  }
+
   function clickItem(item: MenuItem): void {
     if (item.disabled) return;
     // Close FIRST: an action may open another menu (a ⋯ row that clicks a
@@ -257,6 +266,7 @@
           aria-checked={item.checked === undefined ? undefined : item.checked}
           tabindex="-1"
           onclick={() => clickItem(item)}
+          onmouseenter={titleIfClipped}
           onmousemove={(e) => {
             // Pointer and keyboard share one highlight: hovering moves focus.
             const el = e.currentTarget;

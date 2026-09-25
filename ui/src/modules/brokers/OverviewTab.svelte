@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api } from '../../lib/api/client';
-  import { toasts } from '../../lib/toast.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { ClusterMetrics, ClusterOverview, Id } from '../../lib/api/types';
 
   interface Props {
@@ -11,6 +12,10 @@
   let overview = $state<ClusterOverview | null>(null);
   let metrics = $state<ClusterMetrics | null>(null);
   let loading = $state(true);
+  /** Failed overview load — inline with Retry (it used to toast and leave a blank pane). */
+  let error = $state<string | null>(null);
+  /** Bumped by Retry to re-run the load effect. */
+  let attempt = $state(0);
 
   function fmtBytes(n: number | null): string {
     if (n === null || !isFinite(n)) return '—';
@@ -30,7 +35,9 @@
 
   $effect(() => {
     const id = clusterId;
+    void attempt;
     loading = true;
+    error = null;
     overview = null;
     metrics = null;
     let alive = true;
@@ -40,7 +47,9 @@
       .then((o) => {
         if (alive) overview = o;
       })
-      .catch((e) => toasts.error('Overview failed', String(e)))
+      .catch((e) => {
+        if (alive) error = loadErrorText(e);
+      })
       .finally(() => {
         if (alive) loading = false;
       });
@@ -69,6 +78,8 @@
 <div class="overview">
   {#if loading && !overview}
     <p class="muted">Connecting to cluster…</p>
+  {:else if error && !overview}
+    <LoadState what="the cluster overview" {loading} {error} empty onretry={() => attempt++} />
   {:else if overview}
     <div class="cards">
       <div class="card">
@@ -306,7 +317,7 @@
     height: 100%;
   }
   .metric .fill.cpu {
-    background: var(--status-working, #28c840);
+    background: var(--success);
   }
   .metric .fill.ram {
     background: var(--accent);

@@ -53,7 +53,7 @@
   }
 
   const themes: { id: ThemeName; name: string; desc: string }[] = [
-    { id: 'native', name: 'Native', desc: 'macOS vibrancy, system accent' },
+    { id: 'native', name: 'Native', desc: 'macOS vibrancy, blue accent' },
     { id: 'pro-dark', name: 'Pro Dark', desc: 'Always-dark, violet accent' },
     { id: 'warm', name: 'Warm', desc: 'Paper tones, green accent' },
   ];
@@ -126,12 +126,23 @@
   </div>
 
   <div class="section-title">Scheme</div>
-  <div class="segmented">
+  <!-- Pro Dark resolves to dark whatever the scheme says (ui.applyTheme), so
+       the picker is shown as not applying instead of silently doing nothing. -->
+  <div class="segmented" class:off={ui.theme === 'pro-dark'}>
     {#each schemes as s (s.id)}
-      <button class:active={ui.scheme === s.id} onclick={() => ui.setScheme(s.id)}>{s.label}</button>
+      <button
+        class:active={ui.scheme === s.id}
+        disabled={ui.theme === 'pro-dark'}
+        title={ui.theme === 'pro-dark' ? 'Pro Dark is always dark' : undefined}
+        onclick={() => ui.setScheme(s.id)}>{s.label}</button
+      >
     {/each}
   </div>
-  <p class="hint-line">Auto follows the system light/dark preference.</p>
+  <p class="hint-line">
+    {ui.theme === 'pro-dark'
+      ? 'Pro Dark is always dark. Pick Native or Warm to use a light scheme.'
+      : 'Auto follows the system light/dark preference.'}
+  </p>
 
   <div class="section-title">Direction</div>
   <div class="segmented">
@@ -146,7 +157,7 @@
     <input
       type="color"
       class="accent-input"
-      value={ui.accent || '#0a84ff'}
+      value={ui.accent || (/^#[0-9a-f]{6}$/i.test(accentNow) ? accentNow : '#0a84ff')}
       oninput={(e) => ui.setAccent(e.currentTarget.value)}
       aria-label="Accent color"
     />
@@ -218,6 +229,33 @@
     Hebrew &amp; other right-to-left text renders crisply via the bundled Cousine font in every
     option. Change applies to open terminals instantly.
   </p>
+  <!-- Same store setters as the session header's terminal controls, so the
+       two can't drift; also the only way back when those controls are hidden. -->
+  <div class="row term-size-row" role="group" aria-label="Terminal font size">
+    <span class="term-size-label">Font size</span>
+    <button class="sb-btn" onclick={() => ui.termZoomOut()} disabled={ui.termFontSize <= 8} title="Smaller (⌘− in a terminal)" aria-label="Terminal font smaller">−</button>
+    <span class="mono term-size-val" aria-live="polite">{ui.termFontSize}px</span>
+    <button class="sb-btn" onclick={() => ui.termZoomIn()} disabled={ui.termFontSize >= 28} title="Larger (⌘+ in a terminal)" aria-label="Terminal font larger">+</button>
+    {#if ui.termFontSize !== 13}
+      <button class="btn small ghost" onclick={() => ui.termZoomReset()}>Reset</button>
+    {/if}
+  </div>
+  <label class="switch-row term-opt-row">
+    <input
+      type="checkbox"
+      checked={ui.termCopyOnSelect}
+      onchange={(e) => ui.setTermCopyOnSelect(e.currentTarget.checked)}
+    />
+    <span>Copy to the clipboard when you select text in a terminal</span>
+  </label>
+  <label class="switch-row term-opt-row">
+    <input
+      type="checkbox"
+      checked={ui.termToolbar}
+      onchange={(e) => ui.setTermToolbar(e.currentTarget.checked)}
+    />
+    <span>Show font-size and copy-on-select controls on terminals</span>
+  </label>
 
   <div class="section-title">Right-to-left text <span class="exp-tag">Experimental</span></div>
   <label class="switch-row">
@@ -267,8 +305,8 @@
   <div class="section-title">Closing a session tab</div>
   <p class="hint-line">
     Closing a tab (×, ⌘W, sidebar ×) ends the session — the same as Archive or Delete from its
-    menu. Choose what happens, or be asked each time. Deleting always asks first, and so does
-    closing several session tabs at once.
+    menu. Choose what happens, or be asked each time. A remembered choice applies without asking;
+    closing several session tabs at once still asks once, naming the count.
   </p>
   <div class="radio-col" role="radiogroup" aria-label="When closing a session tab">
     <label class="switch-row">
@@ -281,7 +319,7 @@
     </label>
     <label class="switch-row">
       <input type="radio" name="close-tab-pref" checked={ui.closeTabPref === 'delete'} onchange={() => ui.setCloseTabPref('delete')} />
-      <span>Always delete — stop it and remove its history (asks to confirm)</span>
+      <span>Always delete — stop it and remove its history for good (can't be undone)</span>
     </label>
   </div>
 
@@ -289,7 +327,9 @@
   <p class="hint-line">
     Open wide results in the Vertical view (one record per block) instead of the grid. Set per
     engine: on for MongoDB, whose documents are nested; off for the SQL engines, where a wide
-    table is what the grid is for.
+    table is what the grid is for. MongoDB results open in Vertical anyway until you pick Grid
+    or JSON on one of the connection's tabs — this threshold then still sends wide ones back to
+    Vertical.
   </p>
   <div class="av-table" role="group" aria-label="Auto-Vertical by engine" data-testid="db-auto-vertical">
     {#each AUTO_VERTICAL_ENGINES as eng (eng.id)}
@@ -318,6 +358,12 @@
               // A cleared box is mid-edit, not "off" — keep the setting until a number lands.
               const v = e.currentTarget.value;
               if (v !== '' && Number(v) > 0) ui.setDbAutoVertical(eng.id, Number(v));
+            }}
+            onchange={(e) => {
+              // Leaving the box: show what was actually saved (a cleared box,
+              // 0, a decimal or a value past 500 would otherwise keep showing
+              // a number that isn't in effect).
+              e.currentTarget.value = String(ui.dbAutoVertical[eng.id] || '');
             }}
             aria-label="{eng.label}: column threshold"
           />
@@ -468,6 +514,35 @@
   .reduce-row {
     margin-top: 12px;
   }
+  /* A control that doesn't apply under the current theme (Scheme on Pro Dark). */
+  .segmented.off {
+    opacity: 0.55;
+  }
+  .segmented.off > button {
+    cursor: default;
+  }
+  .term-size-row {
+    margin-top: 12px;
+    gap: 4px;
+  }
+  .term-size-label {
+    font-size: 12.5px;
+    color: var(--text);
+    margin-inline-end: 6px;
+  }
+  .term-size-val {
+    min-width: 40px;
+    text-align: center;
+  }
+  .term-size-row .sb-btn {
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    font-size: var(--fs-m);
+    color: var(--text);
+  }
+  .term-opt-row {
+    margin-top: 8px;
+  }
   .tp-bar {
     width: 34px;
     height: 8px;
@@ -496,7 +571,7 @@
     max-width: min(620px, 92vw);
   }
   .hint-line.warn {
-    color: var(--status-exited);
+    color: var(--warning);
   }
   .switch-row {
     display: flex;
@@ -520,7 +595,7 @@
     cursor: pointer;
   }
   .exp-tag {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     font-weight: 700;
@@ -536,21 +611,21 @@
     text-align: end;
   }
   /* Auto-Vertical per engine: toggle · "more than N columns", one row each. */
+  /* Two columns (engine · threshold) so every "more than N columns" sits in
+     one aligned column right beside its engine, instead of being flung to
+     the far edge of the box by space-between. */
   .av-table {
     display: grid;
-    gap: 4px;
+    grid-template-columns: max-content max-content;
+    column-gap: 20px;
+    row-gap: 4px;
     margin-top: 8px;
-    max-width: min(460px, 92vw);
   }
   .av-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    min-height: 30px;
+    display: contents;
   }
   .av-toggle {
-    min-width: 120px;
+    min-height: 30px;
   }
   .av-num {
     display: inline-flex;

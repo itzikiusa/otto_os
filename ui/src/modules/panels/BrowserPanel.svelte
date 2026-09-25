@@ -38,6 +38,15 @@
   const openedUrl: Record<string, string> = {};
 
   const activeTab = $derived(tabs.find((t) => t.id === activeId) ?? null);
+
+  // The tab list scrolls horizontally with its scrollbar hidden — keep the
+  // active tab (e.g. one a page just opened) scrolled into view.
+  let stripEl = $state<HTMLDivElement | null>(null);
+  $effect(() => {
+    const id = activeId;
+    const el = stripEl?.querySelector<HTMLElement>(`[data-tab-id="${id}"]`);
+    el?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  });
   const current = $derived(activeTab?.url ?? ''); // active tab's loaded URL
 
   let urlInput = $state('');
@@ -307,6 +316,8 @@
       if (!ev.data || typeof ev.data !== 'object') return;
 
       if (ev.data.type === 'otto-element' && takeover) {
+        // Only the take-over frame's own picker may open the comment popover.
+        if (!frame || ev.source !== frame.contentWindow) return;
         const { desc, x, y, url } = ev.data as {
           desc: string;
           x: number;
@@ -314,14 +325,19 @@
           url: string;
         };
 
-        const maxX = Math.max(0, (frame?.clientWidth ?? 400) - 320);
-        const maxY = Math.max(0, (frame?.clientHeight ?? 600) - 200);
+        // x/y are the click's clientX/Y inside the iframe; the popover is
+        // positioned in .browser, where the frame starts below the tab strip
+        // and toolbar — offset by the frame's position, then clamp to it.
+        const left = frame.offsetLeft;
+        const top = frame.offsetTop;
+        const maxX = left + Math.max(0, frame.clientWidth - 320);
+        const maxY = top + Math.max(0, frame.clientHeight - 200);
 
         popoverComment = '';
         popover = {
           open: true,
-          x: Math.min(Math.max(0, x), maxX),
-          y: Math.min(Math.max(0, y), maxY),
+          x: Math.min(Math.max(left, left + x), maxX),
+          y: Math.min(Math.max(top, top + y), maxY),
           desc,
           url,
         };
@@ -395,39 +411,44 @@
 
 <div class="browser">
   <!-- ── Tab strip ─────────────────────────────────────────────────────────── -->
-  <div class="tabstrip" role="tablist">
-    {#each tabs as t (t.id)}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div
-        class="btab"
-        class:active={t.id === activeId}
-        role="tab"
-        tabindex="0"
-        aria-selected={t.id === activeId}
-        title={t.url || 'New tab'}
-        onclick={() => setActiveTab(t.id)}
-        onkeydown={(e) => e.key === 'Enter' && setActiveTab(t.id)}
-        onauxclick={(e) => {
-          if (e.button === 1) {
-            e.preventDefault();
-            closeTab(t.id);
-          }
-        }}
-      >
-        <span class="btab-title">{t.title}</span>
-        <button
-          class="btab-close"
-          title="Close tab"
-          aria-label="Close tab"
-          onclick={(e) => {
-            e.stopPropagation();
-            closeTab(t.id);
+  <!-- The "+" sits OUTSIDE the scrolling tab list so it can never be scrolled
+       or clipped out of reach when there are many tabs. -->
+  <div class="tabstrip-row">
+    <div class="tabstrip" role="tablist" aria-label="Browser tabs" bind:this={stripEl}>
+      {#each tabs as t (t.id)}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="btab"
+          class:active={t.id === activeId}
+          role="tab"
+          tabindex="0"
+          data-tab-id={t.id}
+          aria-selected={t.id === activeId}
+          title={t.url || 'New tab'}
+          onclick={() => setActiveTab(t.id)}
+          onkeydown={(e) => e.key === 'Enter' && setActiveTab(t.id)}
+          onauxclick={(e) => {
+            if (e.button === 1) {
+              e.preventDefault();
+              closeTab(t.id);
+            }
           }}
         >
-          <Icon name="x" size={9} />
-        </button>
-      </div>
-    {/each}
+          <span class="btab-title">{t.title}</span>
+          <button
+            class="btab-close"
+            title="Close tab"
+            aria-label="Close tab"
+            onclick={(e) => {
+              e.stopPropagation();
+              closeTab(t.id);
+            }}
+          >
+            <Icon name="x" size={9} />
+          </button>
+        </div>
+      {/each}
+    </div>
     <button class="btab-new" title="New tab" aria-label="New tab" onclick={() => newTab('')}>
       <Icon name="plus" size={12} />
     </button>
@@ -439,7 +460,7 @@
       <Icon name="refresh" size={13} />
     </button>
     <button class="tb-btn" title="Start page" aria-label="Start page" disabled={!current} onclick={home}>
-      <Icon name="info" size={13} />
+      <Icon name="home" size={13} />
     </button>
     <input
       class="input url-input"
@@ -485,7 +506,7 @@
     <button
       class="tb-btn"
       title="Open in system browser"
-      aria-label="Open externally"
+      aria-label="Open in system browser"
       disabled={!(current || urlInput.trim())}
       onclick={() => openExternal(current || urlInput)}
     >
@@ -561,8 +582,10 @@
     {/if}
 
     <div class="frame-foot">
-      <span class="dim ellipsis">{current}</span>
-      <button class="link" onclick={() => openExternal(current)}>Open externally ↗</button>
+      <span class="dim ellipsis" title={current}>{current}</span>
+      <button class="link" onclick={() => openExternal(current)}>
+        <Icon name="external" size={11} /> Open externally
+      </button>
     </div>
   {:else}
     <div class="start">
@@ -570,16 +593,18 @@
         {#if nativeBrowserAvailable}
           Enter a URL above to browse any site here — including ones that block
           embedding (Google, Jira, GitHub) and local dev servers. Links that open
-          in a new tab open here as a new tab. Use ↗ to open in your system browser.
+          in a new tab open here as a new tab. Use Open in system browser (the
+          arrow button in the toolbar) for anything that should leave Otto.
         {:else}
           Enter a URL above to browse it here. Sites that block embedding (Jira,
-          Google, GitHub) open in your system browser with ↗.
+          Google, GitHub) won't load here — open them with Open in system
+          browser (the arrow button in the toolbar).
         {/if}
       </p>
 
       {#if attachedIssue}
         <section class="section">
-          <div class="section-title">Attached Issue</div>
+          <div class="section-title">Attached issue</div>
           <button class="quick-link" onclick={() => openExternal(attachedIssue.url)}>
             <Icon name="ticket" size={13} />
             <div class="ql-text">
@@ -616,14 +641,21 @@
   }
 
   /* ── Tab strip ───────────────────────────────────────────────────────────── */
-  .tabstrip {
+  .tabstrip-row {
     display: flex;
     align-items: center;
     gap: 2px;
     padding: 4px 6px 0 6px;
+    flex-shrink: 0;
+    min-width: 0;
+  }
+  .tabstrip {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
     overflow-x: auto;
     scrollbar-width: none;
-    flex-shrink: 0;
   }
   .tabstrip::-webkit-scrollbar {
     display: none;
@@ -671,6 +703,7 @@
     transition: opacity 120ms ease-out, background 120ms ease-out;
   }
   .btab:hover .btab-close,
+  .btab:focus-within .btab-close,
   .btab.active .btab-close {
     opacity: 1;
   }
@@ -766,6 +799,9 @@
   }
   .link {
     flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     border: none;
     background: transparent;
     color: var(--accent-text);
@@ -903,8 +939,8 @@
 
   /* ── Generic button helpers ────────────────────────────────────────────── */
   .btn-accent {
-    background: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
     border: none;
     border-radius: var(--radius-s, 4px);
     cursor: pointer;

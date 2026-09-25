@@ -6,6 +6,7 @@
   import AccountPicker from '../../lib/components/AccountPicker.svelte';
   import NetworkProfilePicker from '../connections/NetworkProfilePicker.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import ContextPreview from './ContextPreview.svelte';
   import { router } from '../../lib/router.svelte';
   import { ws, SCRATCH_WORKSPACE_ID } from '../../lib/stores/workspace.svelte';
@@ -503,8 +504,9 @@
               type="button"
               class="dir-remove"
               title="Remove directory"
+              aria-label="Remove {dir}"
               onclick={() => removeDir(dir)}
-            >✕</button>
+            ><Icon name="x" size={11} /></button>
           </li>
         {/each}
       </ul>
@@ -544,7 +546,7 @@
         onclick={() => (showPreview = !showPreview)}
         aria-expanded={showPreview}
       >
-        <span class="chevron" class:open={showPreview}>▸</span>
+        <span class="chevron" class:open={showPreview}><Icon name="chevronRight" size={11} /></span>
         Preview context
         <span class="hint">— exactly what Otto would inject before spawning</span>
       </button>
@@ -737,7 +739,7 @@
     gap: 6px;
   }
   .default-badge {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -798,6 +800,8 @@
   }
   .dir-remove {
     flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
     background: none;
     border: none;
     cursor: pointer;
@@ -838,7 +842,7 @@
     font-weight: 400;
   }
   .preview-toggle .chevron {
-    font-size: 9px;
+    display: inline-flex;
     color: var(--text-dim);
     transition: transform 120ms ease-out;
   }

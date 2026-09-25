@@ -74,6 +74,10 @@
   const PROVIDERS = $derived(agentProvidersWith(agent?.provider));
 
   function onProviderSelect(v: string): void {
+    // A model id belongs to one provider — switching clears it, so a hidden
+    // stale model (the picker hides for providers without a model flag) is
+    // never saved against the new provider.
+    if (v !== fProvider) fModel = '';
     if (v === 'custom') {
       if (PROVIDERS.includes(fProvider)) fProvider = '';
     } else {
@@ -242,8 +246,8 @@
 <style>
   .sheet { display: flex; flex-direction: column; gap: 0.75rem; }
   .err {
-    background: color-mix(in srgb, var(--status-exited) 12%, transparent);
-    color: var(--status-exited); padding: 0.5rem 0.75rem;
+    background: var(--danger-soft);
+    color: var(--danger); padding: 0.5rem 0.75rem;
     border-radius: var(--radius-s); font-size: 0.85rem;
   }
   .note {

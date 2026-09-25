@@ -383,8 +383,8 @@
     padding: 6px 14px;
     border: 1px solid var(--accent);
     border-radius: var(--radius-s);
-    background: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
     font-size: 12.5px;
     font-weight: 600;
     cursor: pointer;

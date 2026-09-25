@@ -27,6 +27,7 @@
   import { toasts } from '../toast.svelte';
   import { registerSelectAll } from '../selectall';
   import TermKeysBar from './TermKeysBar.svelte';
+  import Icon from './Icon.svelte';
 
   interface Props {
     sessionId: string;
@@ -1436,9 +1437,15 @@
             {serverMatchIdx >= 0 ? serverMatchIdx + 1 : '?'}/{serverMatches.length}
           </span>
         {/if}
-        <button class="icon-btn" onclick={() => findNext(true)} title="Previous (⇧↵)">↑</button>
-        <button class="icon-btn" onclick={() => findNext(false)} title="Next (↵)">↓</button>
-        <button class="icon-btn" onclick={closeFind} title="Close (esc)">✕</button>
+        <button class="icon-btn" onclick={() => findNext(true)} title="Previous (⇧↵)" aria-label="Previous match">
+          <Icon name="chevronUp" size={12} />
+        </button>
+        <button class="icon-btn" onclick={() => findNext(false)} title="Next (↵)" aria-label="Next match">
+          <Icon name="chevronDown" size={12} />
+        </button>
+        <button class="icon-btn" onclick={closeFind} title="Close (Esc)" aria-label="Close find">
+          <Icon name="x" size={12} />
+        </button>
       </div>
       {#if serverMatches.length > 0}
         <!-- Server ring-buffer match list: up to 8 rows shown, scroll for more.
@@ -1474,14 +1481,14 @@
         <button
           class="tb-btn"
           onclick={() => ui.termZoomOut()}
-          title="Zoom out (Ctrl+−)"
+          title="Zoom out (⌘−)"
           aria-label="Zoom out"
         >−</button>
         <span class="tb-size" title="Terminal font size">{ui.termFontSize}px</span>
         <button
           class="tb-btn"
           onclick={() => ui.termZoomIn()}
-          title="Zoom in (Ctrl+=)"
+          title="Zoom in (⌘+)"
           aria-label="Zoom in"
         >+</button>
         <span class="tb-sep" aria-hidden="true"></span>

@@ -312,7 +312,7 @@
 
   /* A1: finding lifecycle state chips */
   .rp-state-chip {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     padding: 1px 5px;
     text-transform: uppercase;
     font-weight: 700;

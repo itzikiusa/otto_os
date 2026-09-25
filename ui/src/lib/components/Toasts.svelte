@@ -1,16 +1,20 @@
 <script lang="ts">
   import { toasts } from '../toast.svelte';
+  import Icon from './Icon.svelte';
 </script>
 
 <div class="toasts" aria-live="polite">
   {#each toasts.toasts as t (t.id)}
-    <div class="toast {t.level}">
+    <!-- An error interrupts (assertive); everything else waits its turn. -->
+    <div class="toast {t.level}" role={t.level === 'error' ? 'alert' : 'status'}>
       <div class="toast-stripe"></div>
       <div class="toast-content">
         <div class="toast-title">{t.title}</div>
         {#if t.body}<div class="toast-body">{t.body}</div>{/if}
       </div>
-      <button class="icon-btn" onclick={() => toasts.dismiss(t.id)} aria-label="Dismiss">✕</button>
+      <button class="icon-btn" onclick={() => toasts.dismiss(t.id)} aria-label="Dismiss" title="Dismiss">
+        <Icon name="x" size={12} />
+      </button>
     </div>
   {/each}
 </div>
@@ -67,14 +71,27 @@
     min-width: 0;
   }
   .toast-title {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 600;
+    overflow-wrap: anywhere;
   }
   .toast-body {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     margin-top: 2px;
-    word-break: break-word;
+    /* Multi-line causes (git's "your changes remain stashed — …") keep their
+       line breaks; long paths still wrap. */
+    white-space: pre-line;
+    overflow-wrap: anywhere;
+  }
+  /* Phone: the bottom nav owns the window's bottom edge (the status bar is
+     usually gone there), so the stack sits above it and spans the width. */
+  @media (max-width: 640px) {
+    .toasts {
+      bottom: calc(var(--mobile-bottomnav-h) + env(safe-area-inset-bottom, 0px) + 8px);
+      inset-inline: 12px;
+      width: auto;
+    }
   }
   @keyframes toast-in {
     from {

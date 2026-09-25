@@ -182,11 +182,11 @@
         {#each chips as c (c.key)}
           {#if c.verified && c.artifactId}
             <button class="chip as-btn" class:brand={c.kind === 'brand'} title={c.title} onclick={() => onopenref(c)} data-testid="design-prov-chip">
-              <Icon name={asIcon(c.kind === 'brand' ? 'palette' : 'link')} size={11} /> {c.label}
+              <Icon name={asIcon(c.kind === 'brand' ? 'palette' : 'link')} size={11} /> <span class="ct">{c.label}</span>
             </button>
           {:else}
             <span class="chip unverified" title={c.title} data-testid="design-prov-unverified">
-              <Icon name="warning" size={11} /> {c.label} · not verified
+              <Icon name="warning" size={11} /> <span class="ct">{c.label} · not verified</span>
             </span>
           {/if}
         {/each}
@@ -389,14 +389,19 @@
     color: var(--text-dim);
     margin-inline-end: 2px;
   }
+  /* Ellipsis on the label span (it never applies to the inline-flex chip). */
   .prov .chip {
     display: inline-flex;
     align-items: center;
     gap: 4px;
     max-width: 100%;
     overflow: hidden;
-    text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .prov .ct {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .unverified {
     color: var(--warning);

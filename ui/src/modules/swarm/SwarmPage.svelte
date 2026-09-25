@@ -212,7 +212,7 @@
       const q = queued === 1 ? '1 queued run is' : `${queued} queued runs are`;
       const ok = await confirmer.ask(
         `Abort “${detail.name}”? ${agents} stopped and their sessions closed, and ${q} cancelled. Work in progress is lost.`,
-        { title: 'Abort swarm', confirmLabel: 'Abort all' },
+        { title: 'Abort swarm', confirmLabel: 'Abort all', danger: true },
       );
       if (!ok) return;
     }
@@ -223,9 +223,22 @@
     }
   }
 
-  async function setCap(v: number) {
-    if (!detail || v < 1) return;
-    await swarm.setParallelCap(detail.id, v);
+  async function setCap(input: HTMLInputElement) {
+    if (!detail) return;
+    const v = Math.floor(Number(input.value));
+    // An invalid entry (blank, 0, negative) used to be dropped silently while
+    // the field kept showing it — snap back to the saved cap and say why.
+    if (!Number.isFinite(v) || v < 1) {
+      input.value = String(cap);
+      toasts.warn('Parallel sessions must be 1 or more');
+      return;
+    }
+    try {
+      await swarm.setParallelCap(detail.id, v);
+    } catch (e) {
+      input.value = String(cap);
+      toasts.error("Couldn't change parallel sessions", e instanceof Error ? e.message : String(e));
+    }
   }
 
   // Edit the total-run budget cap (blank/0 = unlimited). The 300 default is a
@@ -242,8 +255,15 @@
     if (v === null) return;
     const t = v.trim();
     const next = t === '' || Number(t) <= 0 ? null : Math.floor(Number(t));
-    if (next !== null && !Number.isFinite(next)) return;
-    await swarm.updateSwarm(detail.id, { max_total_runs: next } as Partial<Swarm>);
+    if (next !== null && !Number.isFinite(next)) {
+      toasts.warn('Run budget not changed', `“${t}” isn't a number — enter a whole number, or leave it blank for unlimited.`);
+      return;
+    }
+    try {
+      await swarm.updateSwarm(detail.id, { max_total_runs: next } as Partial<Swarm>);
+    } catch (e) {
+      toasts.error("Couldn't change the run budget", e instanceof Error ? e.message : String(e));
+    }
   }
 
   function openProjectCreate() {
@@ -319,8 +339,19 @@
 
   async function deleteSwarm() {
     if (!detail) return;
-    if (await confirmer.ask(`Delete swarm "${detail.name}" and all its agents/projects?`, { title: 'Delete swarm?' })) {
-      await swarm.deleteSwarm(detail.id);
+    const d = detail;
+    if (
+      await confirmer.ask(
+        `Delete swarm "${d.name}" and all its agents, projects and tasks? This cannot be undone.`,
+        { title: 'Delete swarm', confirmLabel: 'Delete', danger: true },
+      )
+    ) {
+      try {
+        await swarm.deleteSwarm(d.id);
+        toasts.success('Swarm deleted');
+      } catch (e) {
+        toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      }
     }
   }
 
@@ -330,11 +361,15 @@
       toasts.warn('Create a project first');
       return;
     }
-    const title = await confirmer.promptText('Task for ' + a.name, { title: 'Run a task', confirmLabel: 'Create & run' });
+    const title = (await confirmer.promptText('Task for ' + a.name, { title: 'Run a task', confirmLabel: 'Create & run' }))?.trim();
     if (!title) return;
-    const created = await swarm.createTask(pid, { title, assignee_agent_id: a.id });
-    await swarm.runTask(created);
-    view = 'kanban';
+    try {
+      const created = await swarm.createTask(pid, { title, assignee_agent_id: a.id });
+      await swarm.runTask(created);
+      view = 'kanban';
+    } catch (e) {
+      toasts.error("Couldn't run the task", e instanceof Error ? e.message : String(e));
+    }
   }
 
   // `editorPrefill` seeds the editor when creating (not editing) an agent —
@@ -386,17 +421,24 @@
     const patch: Partial<Swarm> = {};
     if (detail.max_total_runs != null) patch.max_total_runs = detail.max_total_runs + extraRuns;
     if (detail.max_cost_usd != null) patch.max_cost_usd = detail.max_cost_usd + extraCostUsd;
-    await swarm.updateSwarm(detail.id, patch);
+    try {
+      await swarm.updateSwarm(detail.id, patch);
+    } catch (e) {
+      toasts.error("Couldn't raise the budget", e instanceof Error ? e.message : String(e));
+      return;
+    }
     await lifecycle('resume');
     showBudgetModal = false;
   }
+
+  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 </script>
 
 <div class="swarm-page" class:phone={viewport.isPhone}>
   <PageHeader
     class="swarm-head"
     title={detail?.name ?? 'Swarm'}
-    subtitle={detail ? `${detail.counts.agents} agents · ${detail.counts.projects} projects · ${running} running · ${queued} queued` : undefined}
+    subtitle={detail ? `${plural(detail.counts.agents, 'agent')} · ${plural(detail.counts.projects, 'project')} · ${running} running · ${queued} queued` : undefined}
   >
     {#snippet badge()}
       {#if detail}
@@ -413,7 +455,7 @@
         <button class="btn small" onclick={() => (showRecruit = true)} data-icon="plus"><Icon name="plus" size={12} /> Recruit</button>
         <button class="btn small" onclick={openProjectCreate} data-icon="note"><Icon name="note" size={12} /> Project</button>
         <button class="btn small" data-overflow="-1" data-icon="gear" onclick={() => (showSettings = true)} title="Standing goals, team skills & channel triggers" data-label="Settings"><Icon name="gear" size={12} /> Settings</button>
-        <button class="icon-btn" data-overflow="-2" data-icon="trash" data-label="Delete swarm" onclick={deleteSwarm} aria-label="delete swarm" title="Delete swarm"><Icon name="trash" size={14} /></button>
+        <button class="icon-btn" data-overflow="-2" data-icon="trash" data-label="Delete swarm" onclick={deleteSwarm} aria-label="Delete swarm" title="Delete swarm"><Icon name="trash" size={14} /></button>
         {#if detail.status === 'active'}
           <button class="btn small danger" data-overflow="1" onclick={() => lifecycle('abort')}><Icon name="x" size={12} /> Abort all…</button>
           <button class="btn small" data-keep onclick={() => lifecycle('pause')}><Icon name="square" size={12} /> Pause</button>
@@ -450,13 +492,13 @@
           <span class="rail-current ellipsis">· {detail.name}</span>
         {/if}
       </button>
-      <button class="icon-btn" onclick={() => (showNew = true)} aria-label="New swarm"><Icon name="plus" size={15} /></button>
+      <button class="icon-btn" onclick={() => (showNew = true)} aria-label="New swarm" title="New swarm"><Icon name="plus" size={15} /></button>
     </div>
     <div class="rail-list">
       {#each swarm.swarms as s (s.id)}
-        <button class="swarm-item" class:active={detail?.id === s.id} onclick={() => { swarm.openSwarm(s.id); if (viewport.isPhone) railOpen = false; }}>
+        <button class="swarm-item" class:active={detail?.id === s.id} title={s.name} onclick={() => { swarm.openSwarm(s.id); if (viewport.isPhone) railOpen = false; }}>
           <span class="grow ellipsis">{s.name}</span>
-          <span class="dot {s.status}" title={s.status}></span>
+          <span class="dot {s.status}" title={sentenceCase(s.status)}></span>
         </button>
       {/each}
       {#if swarm.swarms.length === 0}
@@ -559,15 +601,15 @@
           {/if}
           {#if detail.max_cost_usd != null}
             {@const pct = Math.min(100, (detail.counts.cost_usd / detail.max_cost_usd) * 100)}
-            <span class="budget-label dim">cost ${detail.counts.cost_usd.toFixed(2)}/${detail.max_cost_usd.toFixed(2)}</span>
+            <span class="budget-label dim" title="Cost so far / cost budget (USD)">cost ${detail.counts.cost_usd.toFixed(2)}/${detail.max_cost_usd.toFixed(2)}</span>
             <div class="budget-bar" title="Cost budget: ${detail.counts.cost_usd.toFixed(2)}/${detail.max_cost_usd.toFixed(2)}">
               <div class="budget-fill" class:budget-warn={pct > 80} style="width:{pct}%"></div>
             </div>
           {/if}
         </div>
         <div class="cap">
-          <label for="cap">parallel</label>
-          <input id="cap" class="input small num" type="number" min="1" value={cap} onchange={(e) => setCap(Number((e.target as HTMLInputElement).value))} />
+          <label for="cap" title="Most agent sessions this swarm runs at once">parallel</label>
+          <input id="cap" class="input small num" type="number" min="1" step="1" value={cap} title="Most agent sessions this swarm runs at once" onchange={(e) => setCap(e.currentTarget)} />
         </div>
       </div>
 
@@ -643,7 +685,7 @@
     <div class="field"><SkillPicker label="Project skills (optional)" selected={projSkills} onchange={(s) => (projSkills = s)} /></div>
     {#snippet footer()}
       {#if projEditId}
-        <button class="btn danger" style="margin-right:auto" onclick={deleteProject} title="Delete this project, its tasks and feed">
+        <button class="btn danger" style="margin-inline-end:auto" onclick={deleteProject} title="Delete this project, its tasks and feed">
           Delete project…
         </button>
       {/if}
@@ -667,13 +709,13 @@
       {/if}
       {#if detail.max_cost_usd != null}
         <div class="field">
-          <label for="extra-cost">Add budget $USD (current max: ${detail.max_cost_usd})</label>
+          <label for="extra-cost">Add budget in USD (current max: ${detail.max_cost_usd.toFixed(2)})</label>
           <input id="extra-cost" class="input" type="number" min="0" step="1" bind:value={extraCostUsd} />
         </div>
       {/if}
       {#snippet footer()}
         <button class="btn" class:ghost={true} onclick={() => (showBudgetModal = false)}>Cancel</button>
-        <button class="btn" class:primary={true} onclick={raiseBudgetAndResume}>Raise &amp; resume</button>
+        <button class="btn" class:primary={true} onclick={raiseBudgetAndResume} disabled={!(extraRuns > 0) && !(extraCostUsd > 0)}>Raise &amp; resume</button>
       {/snippet}
     </Modal>
   {/if}
@@ -802,10 +844,12 @@
     min-width: 0;
     min-height: 0;
   }
+  /* Paused (usually a budget stop) is an attention state, not a failure —
+     warning tone, matching the neutral "Paused" badge beside it. */
   .pause-reason {
     font-size: 11px;
-    color: var(--status-exited);
-    background: color-mix(in srgb, var(--status-exited) 10%, transparent);
+    color: var(--warning);
+    background: var(--warning-soft);
     border-radius: var(--radius-s);
     padding: 2px 8px;
     max-width: 200px;
@@ -847,8 +891,9 @@
     background: var(--accent);
     transition: width 0.3s;
   }
+  /* >80% of the budget: warn (amber), don't alarm — the run isn't failing. */
   .budget-fill.budget-warn {
-    background: var(--status-exited);
+    background: var(--warning);
   }
   .status-pill {
     display: inline-flex;

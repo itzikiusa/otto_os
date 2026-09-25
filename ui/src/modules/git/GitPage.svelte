@@ -68,6 +68,13 @@
 
   const accountsWithNs = $derived(accounts.filter((a) => a.namespace));
 
+  /** Display name for the forge chip (the enum is lowercase: "bitbucket"). */
+  const PROVIDER_LABEL: Record<string, string> = {
+    github: 'GitHub',
+    bitbucket: 'Bitbucket',
+    gitlab: 'GitLab',
+  };
+
   // Landing-hub repo filter: matches name, local path, or remote URL.
   let repoFilter = $state('');
   const filteredRepos = $derived.by(() => {
@@ -280,6 +287,8 @@
             tab={git.subTabFor(activeRepo.id)}
             embedded
             onTab={(t) => git.setSubTab(activeRepo.id, t)}
+            onopenrepo={openRepo}
+            onaddrepo={(mode) => { addMode = mode; addOpen = true; }}
           />
         </div>
       {/key}
@@ -342,7 +351,7 @@
                   <div class="repo-name">
                     <Icon name="branch" size={14} />
                     {r.name}
-                    {#if r.provider}<span class="chip">{r.provider}</span>{/if}
+                    {#if r.provider}<span class="chip">{PROVIDER_LABEL[r.provider] ?? r.provider}</span>{/if}
                   </div>
                   <div class="repo-path mono">{r.path}</div>
                   {#if r.remote_url}<div class="repo-remote mono dim">{r.remote_url}</div>{/if}
@@ -360,7 +369,7 @@
                       class:unbound={!r.git_account_id}
                       title={r.git_account_id
                         ? 'Git account used for pull requests'
-                        : `No ${r.provider} account linked — pull requests will fail`}
+                        : `No ${PROVIDER_LABEL[r.provider] ?? r.provider} account linked — pull requests will fail`}
                       aria-label="Git account for {r.name}"
                       value={r.git_account_id ?? ''}
                       onchange={(e) => setRepoAccount(r, e.currentTarget.value)}
@@ -372,7 +381,7 @@
                     </select>
                   {/if}
                   <span class="grow"></span>
-                  <button class="icon-btn" title="Unregister" onclick={() => removeRepo(r)}>
+                  <button class="icon-btn" title="Unregister" aria-label="Unregister {r.name}" onclick={() => removeRepo(r)}>
                     <Icon name="trash" size={13} />
                   </button>
                 </div>

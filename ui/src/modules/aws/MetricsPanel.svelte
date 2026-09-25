@@ -294,7 +294,7 @@
     padding: 2px 4px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
   }
   .stats th:first-child {
     width: 34%;

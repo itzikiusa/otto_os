@@ -10,7 +10,8 @@ import { k8sApi } from '../../lib/api/k8s';
 import type { K8sAction, K8sActionResp, K8sResourceKind, K8sRow } from '../../lib/api/types';
 import { confirmer } from '../../lib/confirm.svelte';
 import { toasts } from '../../lib/toast.svelte';
-import { kindDef } from './k8s-util';
+import { k8s } from '../../lib/stores/k8s.svelte';
+import { clusterLabel, kindDef } from './k8s-util';
 
 export interface ActionDef {
   id: K8sAction;
@@ -84,6 +85,7 @@ export async function typedConfirm(
       title: opts?.title ?? 'Confirm',
       confirmLabel: opts?.confirmLabel ?? 'Confirm',
       placeholder: name,
+      danger: true,
     },
   );
   if (typed === null) return false;
@@ -109,14 +111,33 @@ export async function runAction(
     def.confirm ||
     (def.id === 'scale' && Number(merged.replicas) === 0) ||
     (def.id === 'argocd_sync' && merged.prune === true);
+  // Name the cluster (and flag prod) in every confirm, so a delete fired from
+  // the wrong cluster tab reads as such before it's sent.
+  const cl = k8s.clusters.find((c) => c.id === clusterId) ?? null;
+  const where =
+    `${row.namespace ? ` in ${row.namespace}` : ''}` +
+    `${cl ? ` on ${clusterLabel(cl)}` : ''}${cl?.environment === 'prod' ? ' (PRODUCTION)' : ''}`;
+  const verb = def.label.replace(/…$/, '');
+  // "Delete pod Pod “x”" read twice — drop the kind when the label already has it,
+  // and say what a scale actually does when it's the destructive 0.
+  const noun = verb.toLowerCase().includes(singular.toLowerCase()) ? '' : ` ${singular}`;
+  const what = def.id === 'scale' ? `Scale${noun} “${row.name}”${where} to 0 replicas` : `${verb}${noun} “${row.name}”${where}`;
   if (destructive) {
-    const ok = await typedConfirm(
-      `${def.label.replace(/…$/, '')} ${singular} “${row.name}”${row.namespace ? ` in ${row.namespace}` : ''}?`,
-      row.name,
-      { title: def.label.replace(/…$/, ''), confirmLabel: def.label.replace(/…$/, '') },
-    );
+    const ok = await typedConfirm(`${what}?`, row.name, {
+      title: verb,
+      confirmLabel: verb,
+    });
     if (!ok) return null;
     merged.confirm_name = row.name;
+  } else if (def.danger) {
+    // Danger-flagged entries without a typed confirm (rollout abort, ArgoCD
+    // terminate operation) were one click from the red menu item — ask once.
+    const ok = await confirmer.ask(`${what}?`, {
+      title: verb,
+      confirmLabel: verb,
+      danger: true,
+    });
+    if (!ok) return null;
   }
   try {
     const resp = await k8sApi.action(clusterId, {

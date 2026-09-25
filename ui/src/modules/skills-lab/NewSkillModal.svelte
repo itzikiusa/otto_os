@@ -45,6 +45,19 @@
     if (taken.has(n)) return `A skill named "${n}" already exists in the library.`;
     return null;
   });
+  // Tooltip for the disabled Create button (the inline name error only shows
+  // after the field is touched).
+  const blockReason = $derived(
+    template === 'import'
+      ? file
+        ? ''
+        : 'Choose a .zip skill package'
+      : template === 'bundled' && !fromBundled
+        ? 'Choose the bundled skill to start from'
+        : !name.trim()
+          ? 'Give the skill a name'
+          : (nameError ?? ''),
+  );
   const valid = $derived(
     template === 'import' ? !!file : !!name.trim() && !nameError && (template !== 'bundled' || !!fromBundled),
   );
@@ -79,6 +92,9 @@
         // Keep the method, rename it: rewrite `name:`/`description:` when present.
         let body = src.body.replace(/^name:.*$/m, `name: ${name.trim()}`);
         if (description.trim()) body = body.replace(/^description:.*$/m, `description: ${description.trim().replace(/\n/g, ' ')}`);
+        // The Overview reads the category from the frontmatter first, so a
+        // changed category must land there too or it looks ignored.
+        if (category.trim()) body = body.replace(/^category:.*$/m, `category: ${category.trim()}`);
         s = await skillLabApi.create({ name: name.trim(), category: category.trim(), description: description.trim(), body });
       } else {
         s = await skillLabApi.create({ name: name.trim(), category: category.trim(), description: description.trim(), body: blankBody() });
@@ -168,7 +184,7 @@
 
   {#snippet footer()}
     <button class="btn" onclick={onclose}>Cancel</button>
-    <button class="btn primary" onclick={create} disabled={!valid || busy} data-testid="create-skill">
+    <button class="btn primary" onclick={create} disabled={!valid || busy} title={!valid ? blockReason : undefined} data-testid="create-skill">
       {busy ? (template === 'import' ? 'Importing…' : 'Creating…') : template === 'import' ? 'Import skill' : 'Create skill'}
     </button>
   {/snippet}

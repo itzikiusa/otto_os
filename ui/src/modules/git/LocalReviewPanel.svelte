@@ -463,9 +463,9 @@
                 <span class="dim" style="font-size:11px">{timeAgo(run.created_at)}</span>
                 <StatusBadge status={runStatus(run.status)} />
                 {#if run.agents && run.agents.length > 0}
-                  <span class="dim" style="font-size:10.5px">{run.agents.filter(a => a.status === 'done').length}/{run.agents.length} agents</span>
+                  <span class="dim" style="font-size:var(--fs-xs)">{run.agents.filter(a => a.status === 'done').length}/{run.agents.length} agents</span>
                 {/if}
-                <span class="dim" style="font-size:10.5px">{run.comments.length} finding{run.comments.length === 1 ? '' : 's'}</span>
+                <span class="dim" style="font-size:var(--fs-xs)">{run.comments.length} finding{run.comments.length === 1 ? '' : 's'}</span>
                 <span class="grow"></span>
                 <span class="dim" style="font-size:10px">{isOpen ? '▾' : '▸'}</span>
               </button>

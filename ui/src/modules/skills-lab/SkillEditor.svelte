@@ -9,6 +9,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { formatBytes } from '../../lib/metric-format';
   import Icon from '../../lib/components/Icon.svelte';
+  import { sourceLabel } from './skillGroups';
 
   interface Props {
     name: string;
@@ -142,7 +143,7 @@
         {#if source === 'bundled'}
           Bundled skills are read-only. Install it to the library to edit your own copy.
         {:else}
-          This is the {source} copy on disk, shown read-only. Copy it to the library to edit it in Otto.
+          This is the {sourceLabel(source)} copy on disk, shown read-only. Copy it to the library to edit it in Otto.
         {/if}
       </span>
       {#if source === 'bundled' && oninstall}
@@ -177,7 +178,7 @@
 
     <section class="pane">
       <div class="pane-head">
-        <span class="mono path" dir="ltr">{currentFile}</span>
+        <span class="mono path" dir="ltr" title={currentFile}>{currentFile}</span>
         {#if dirty}<span class="chip tone-warning">Unsaved</span>{/if}
         <span class="grow"></span>
         {#if editable && !binary && !loadError}

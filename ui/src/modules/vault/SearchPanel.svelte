@@ -28,14 +28,17 @@
   />
   {#if vault.searching}
     <div class="dim">Searching…</div>
-  {:else if vault.searchQuery && vault.searchHits.length === 0}
+  {:else if vault.searchQuery.trim() && vault.searchQuery.trim() !== vault.searchedQuery}
+    <!-- Search runs on Enter: "No results" before it ran was a lie. -->
+    <div class="dim">Press Enter to search</div>
+  {:else if vault.searchQuery.trim() && vault.searchHits.length === 0}
     <div class="dim">No results</div>
   {/if}
   <div class="hits">
     {#each vault.searchHits as h (h.path)}
       <button class="hit" class:reserved={h.reserved} onclick={() => void vault.open(h.path)}>
         <div class="t">{h.title}</div>
-        <div class="p">{h.path}</div>
+        <div class="p" title={h.path}>{h.path}</div>
         {#if h.snippet}
           <!-- Escaped above; only <mark> tags are injected. -->
           <div class="s">{@html renderSnippet(h.snippet)}</div>
@@ -97,6 +100,7 @@
   .p {
     font-size: var(--fs-xs);
     color: var(--text-dim);
+    overflow-wrap: anywhere;
   }
   .s {
     font-size: 11.5px;

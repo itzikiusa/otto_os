@@ -505,7 +505,7 @@
               ondragend={onTileDragEnd}
             >
               <StatusDot state={tileState(s)} />
-              <span class="ph-title">{s.title ?? s.id}</span>
+              <span class="ph-title" title={s.title ?? s.id}>{s.title ?? s.id}</span>
               <span class="chip ph-chip">{s.provider ?? '?'}</span>
             </header>
             <div class="ph-body">
@@ -736,7 +736,7 @@
   }
   .ph-chip {
     height: 16px;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }

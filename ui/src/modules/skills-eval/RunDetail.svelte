@@ -44,6 +44,9 @@
 
   let run: SkillEval | null = $state(null);
   let loading = $state(true);
+  // First-load failure: shown inline with Retry (a toast over a blank pane
+  // left nothing to act on).
+  let loadError: string | null = $state(null);
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let pollCount = $state(0);
 
@@ -89,6 +92,7 @@
 
   async function load(id: string): Promise<void> {
     loading = true;
+    loadError = null;
     if (pollTimer !== null) clearTimeout(pollTimer);
     pollCount = 0;
     try {
@@ -97,7 +101,11 @@
       onupdate?.(r);
       if (isActive(r)) schedulePoll();
     } catch (e) {
-      toasts.error('Could not load evaluation', e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      // Keep a loaded report on screen and just toast; with nothing to show,
+      // put the error (and Retry) in the pane itself.
+      if (run) toasts.error('Could not load evaluation', msg);
+      else loadError = msg;
     } finally {
       loading = false;
     }
@@ -237,6 +245,8 @@
         implDiffs[it.id] = await skillsEvalApi.implDiff(run.id, it.id);
       } catch (e) {
         toasts.error('Could not load diff', e instanceof Error ? e.message : String(e));
+        // Collapse again so the toggle doesn't read "Hide code diff" over nothing.
+        openImplDiffs = toggle(openImplDiffs, it.id);
       } finally {
         implDiffLoading = new Set([...implDiffLoading].filter((k) => k !== it.id));
       }
@@ -362,12 +372,17 @@
 
 {#if loading && !run}
   <div class="rd-loading"><span class="spinner-xs"></span> Loading…</div>
+{:else if loadError && !run}
+  <div class="rd-loading rd-load-err" role="alert">
+    <p>Couldn't load this evaluation: {loadError}</p>
+    <button class="btn small" onclick={() => load(evalId)}>Retry</button>
+  </div>
 {:else if run}
   <div class="rd">
     <header class="rd-head">
       <div class="rd-title-row">
         <Icon name="zap" size={16} />
-        <h2 class="rd-title">{run.source_skill}</h2>
+        <h2 class="rd-title" title={run.source_skill}>{run.source_skill}</h2>
         <StatusBadge status={evalStatus(run.status)} />
         <span class="grow"></span>
         {#if run.best_score != null}
@@ -680,7 +695,7 @@
     padding: 0 1px;
   }
   .star.on {
-    color: #f0c000;
+    color: var(--warning);
   }
   .star:disabled {
     cursor: default;
@@ -737,6 +752,15 @@
   .rd-title {
     margin: 0;
     font-size: 15px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .rd-load-err {
+    color: var(--danger);
+    overflow-wrap: anywhere;
+  }
+  .rd-load-err p {
+    margin: 0 0 10px;
   }
   .rd-actions {
     display: flex;
@@ -922,7 +946,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     overflow: hidden;
-    background: #1b1b1b;
+    background: var(--term-bg);
   }
 
   .diff {

@@ -74,18 +74,18 @@
     title={resp.basis}
     aria-expanded={expanded}
   >
-    ≈ {fmtCost(resp.projected_cost_usd)}
+    next run ≈ {fmtCost(resp.projected_cost_usd)}
   </button>
   {#if expanded}
     <div class="forecast-tooltip" role="tooltip">
-      <span class="forecast-label">Estimated cost</span>
+      <span class="forecast-label">Estimated next-run cost</span>
       <span class="forecast-value">{fmtCost(resp.projected_cost_usd)}</span>
       <p class="forecast-basis">{resp.basis}</p>
     </div>
   {/if}
 {:else if resp && resp.projected_cost_usd === 0}
   <span class="forecast-chip no-data" title={resp.basis}>
-    ≈ no data
+    next run ≈ no data
   </span>
 {/if}
 
@@ -160,6 +160,9 @@
     line-height: 1.4;
   }
 
+  @media (prefers-reduced-motion: reduce) {
+    .forecast-chip.loading { animation: none; }
+  }
   @keyframes pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.4; }

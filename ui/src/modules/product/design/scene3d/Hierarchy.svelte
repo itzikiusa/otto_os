@@ -515,7 +515,7 @@
     flex-shrink: 0;
   }
   .s3d-row-icon.light {
-    color: var(--status-warn, #e0a000);
+    color: var(--warning);
   }
   .s3d-row-name {
     flex: 1 1 auto;

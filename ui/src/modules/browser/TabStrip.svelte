@@ -17,7 +17,11 @@
   }
 </script>
 
+<!-- The tabs scroll in their own box and "+" sits OUTSIDE it: as the last
+     child of the scroller (inside PageHeader's width-capped tab slot) it was
+     scrolled/clipped off the edge once a few tabs were open. -->
 <div class="strip" class:inbar>
+  <div class="tabs-scroll">
   {#each browser.tabs as tab (tab.id)}
     <button
       class="tab"
@@ -27,12 +31,13 @@
     >
       <Icon name="globe" size={12} />
       <span class="title">{tab.title || tab.url}</span>
-      <span class="close" onclick={(e) => close(e, tab.id)} role="presentation">
+      <span class="close" onclick={(e) => close(e, tab.id)} role="presentation" title="Close tab">
         <Icon name="x" size={11} />
       </span>
     </button>
   {/each}
-  <button class="new" onclick={onnew} title="New tab">
+  </div>
+  <button class="new" onclick={onnew} title="New tab" aria-label="New tab">
     <Icon name="plus" size={13} />
   </button>
 </div>
@@ -44,12 +49,21 @@
     gap: 0.25rem;
     padding: 0.35rem 0.5rem;
     border-bottom: 1px solid var(--border);
-    overflow-x: auto;
+    min-width: 0;
   }
   .strip.inbar {
     padding: 0;
     border-bottom: none;
+    max-width: 100%;
+  }
+  .tabs-scroll {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    flex: 0 1 auto;
     min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: thin;
   }
   .tab {
     display: flex;
@@ -74,11 +88,13 @@
     color: var(--text);
   }
   .title {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .close {
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     border-radius: var(--radius-s);

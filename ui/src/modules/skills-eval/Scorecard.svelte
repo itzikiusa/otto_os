@@ -40,9 +40,11 @@
   };
   const proofTone = $derived(score ? (PROOF[score.proof_status] ?? grey) : grey);
 
+  // Same bands as the score chips in RunDetail / CompareView (85 / 60), so a
+  // bar never reads green next to an amber chip for the same number.
   function barColor(s: number): string {
-    if (s >= 80) return 'var(--status-working)';
-    if (s >= 50) return 'var(--status-warn)';
+    if (s >= 85) return 'var(--status-working)';
+    if (s >= 60) return 'var(--status-warn)';
     return 'var(--status-exited)';
   }
 
@@ -86,7 +88,7 @@
       artifacts = pack.artifacts ?? [];
       loaded = true;
     } catch (e) {
-      toasts.error('Proof pack', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't load the proof pack", e instanceof Error ? e.message : String(e));
       expanded = false;
     } finally {
       loading = false;
@@ -123,7 +125,7 @@
             </span>
             <span class="rscore">{r.score.toFixed(0)}</span>
           {:else}
-            <span class="track"><span class="notrun">not run</span></span>
+            <span class="notrun">not run</span>
             <span class="rscore">—</span>
           {/if}
           {#if r.detail}<span class="rdetail" title={r.detail}>{r.detail}</span>{/if}
@@ -183,7 +185,8 @@
   .row.dim { opacity: 0.55; }
   .track { position: relative; height: 7px; border-radius: 999px; overflow: hidden; background: var(--surface-2, color-mix(in srgb, var(--text-dim) 18%, transparent)); }
   .fill { display: block; height: 100%; border-radius: 999px; }
-  .notrun { position: absolute; left: 6px; top: -4px; font-size: 9px; color: var(--text-dim); }
+  /* Replaces the bar (a 7px track can't hold readable text). */
+  .notrun { font-size: 11px; line-height: 1; color: var(--text-dim); }
   .rscore { font-size: 11px; font-weight: 600; text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
   .row.dim .rscore { color: var(--text-dim); }
   .rdetail { grid-column: 2 / -1; font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

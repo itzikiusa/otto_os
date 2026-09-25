@@ -417,7 +417,7 @@
     color: var(--text-dim);
   }
   .badge {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;

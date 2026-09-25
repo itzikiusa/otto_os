@@ -8,6 +8,8 @@
   import { api } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type {
     NameThemesResp,
     NameThemeInfo,
@@ -16,6 +18,9 @@
 
   let resp = $state<NameThemesResp | null>(null);
   let loading = $state(true);
+  // A failed load renders inline with Retry (it used to toast and leave the
+  // page blank under the intro).
+  let loadError = $state('');
   let saving = $state(false);
 
   // New custom-theme form.
@@ -31,10 +36,11 @@
 
   async function load(): Promise<void> {
     loading = true;
+    loadError = '';
     try {
       resp = await api.get<NameThemesResp>('/name-themes');
     } catch (e) {
-      toasts.error('Could not load name themes', e instanceof Error ? e.message : String(e));
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -102,9 +108,8 @@
   <PageBody width="readable">
   <p class="section-intro">New agent sessions are auto-named from your active theme (e.g. <strong>Ronaldo</strong>) instead of <code>claude #3</code> — unique among your open sessions. Address one by name from ⌘I or Broadcast: <code>ronaldo: run the tests</code>.</p>
 
-  {#if loading}
-    <div class="card pad dim">Loading…</div>
-  {:else if resp}
+  <LoadState what="name themes" {loading} error={loadError} empty={!resp} onretry={() => void load()} rows={3}>
+  {#if resp}
     <div class="section-title">Active theme</div>
     <div class="theme-grid">
       <!-- Numbered (legacy) -->
@@ -196,6 +201,7 @@
       </div>
     </div>
   {/if}
+  </LoadState>
   </PageBody>
 </div>
 

@@ -4,6 +4,7 @@
   // coloring. Pure SVG + absolutely-positioned cards inside one transformed
   // viewport, so everything works in graph coordinates.
   import Icon, { asIcon } from '../../lib/components/Icon.svelte';
+  import { runStatus } from '../../lib/status';
   import type { WorkflowGraph, WorkflowNode, NodeTypeSpec, NodeRunState } from '../../lib/api/types';
 
   interface Props {
@@ -81,7 +82,7 @@
     return typeMap.get(kind);
   }
   function color(kind: string): string {
-    return spec(kind)?.color ?? '#7a8190';
+    return spec(kind)?.color ?? 'var(--text-dim)';
   }
 
   // Graph coords from a client (screen) point.
@@ -296,10 +297,10 @@
         <div class="head">
           <span class="ic"><Icon name={asIcon(spec(n.kind)?.icon, 'box')} size={14} /></span>
           <span class="body">
-            <span class="title">{n.name || spec(n.kind)?.label || n.kind}</span>
+            <span class="title" title={n.name || spec(n.kind)?.label || n.kind}>{n.name || spec(n.kind)?.label || n.kind}</span>
             <span class="kind">{spec(n.kind)?.label ?? n.kind}</span>
           </span>
-          {#if st}<span class="dot {st}" title={st}></span>{/if}
+          {#if st}<span class="dot {st}" role="img" title={runStatus(st).label} aria-label={runStatus(st).label}></span>{/if}
         </div>
 
         {#if n.kind === 'loop'}
@@ -308,7 +309,7 @@
             {#each loopSteps(n) as s, i}
               <div class="step">
                 <span class="si">{i + 1}</span>
-                <span class="sn">{s.name}</span>
+                <span class="sn" title={s.name}>{s.name}</span>
                 <span class="sk">{spec(s.kind)?.label ?? s.kind}</span>
               </div>
             {/each}
@@ -336,16 +337,16 @@
   </div>
 
   <div class="hud">
-    <button class="zbtn" onclick={() => (scale = Math.min(2, scale * 1.15))} title="Zoom in">+</button>
-    <button class="zbtn" onclick={() => (scale = Math.max(0.3, scale * 0.87))} title="Zoom out">−</button>
-    <button class="zbtn" onclick={fit} title="Reset view"><Icon name="maximize" size={12} /></button>
+    <button class="zbtn" onclick={() => (scale = Math.min(2, scale * 1.15))} title="Zoom in" aria-label="Zoom in">+</button>
+    <button class="zbtn" onclick={() => (scale = Math.max(0.3, scale * 0.87))} title="Zoom out" aria-label="Zoom out">−</button>
+    <button class="zbtn" onclick={fit} title="Reset view" aria-label="Reset view"><Icon name="maximize" size={12} /></button>
     <span class="zpct">{Math.round(scale * 100)}%</span>
   </div>
 </div>
 
 <style>
-  .node.invalid { outline: 2px solid var(--status-exited, #e55); }
-  .edge.invalid { stroke: var(--status-exited, #e55); stroke-width: 3; }
+  .node.invalid { outline: 2px solid var(--status-exited); }
+  .edge.invalid { stroke: var(--status-exited); stroke-width: 3; }
   .canvas {
     position: relative;
     width: 100%;
@@ -470,7 +471,7 @@
     width: 15px;
     height: 15px;
     border-radius: 4px;
-    font-size: 9px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     background: color-mix(in srgb, var(--accent) 18%, transparent);
     color: var(--accent-text);
@@ -483,7 +484,7 @@
     color: var(--text);
   }
   .sk {
-    font-size: 8.5px;
+    font-size: var(--fs-xs);
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: var(--text-dim);
@@ -508,11 +509,14 @@
     border-color: var(--accent);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent), var(--shadow);
   }
+  /* Run status uses the shared run vocabulary (lib/status.ts): running is
+     info-blue and pulses, succeeded is green — they used to share one green,
+     so a finished step looked like a running one. */
   .node[data-status='running'] {
-    border-color: var(--status-working, #28c840);
+    border-color: var(--info);
   }
   .node[data-status='error'] {
-    border-color: var(--status-exited, #ff5f57);
+    border-color: var(--status-exited);
   }
   .stripe {
     position: absolute;
@@ -551,6 +555,9 @@
     color: var(--text-dim);
     text-transform: uppercase;
     letter-spacing: 0.04em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .dot {
     width: 8px;
@@ -560,14 +567,14 @@
     flex-shrink: 0;
   }
   .dot.running {
-    background: var(--status-working, #28c840);
-    animation: pulse 1s infinite;
+    background: var(--info);
+    animation: pulse 1.6s ease-in-out infinite;
   }
   .dot.success {
-    background: var(--status-working, #28c840);
+    background: var(--status-working);
   }
   .dot.error {
-    background: var(--status-exited, #ff5f57);
+    background: var(--status-exited);
   }
   .dot.skipped {
     background: var(--text-dim);
@@ -578,6 +585,11 @@
   @keyframes pulse {
     50% {
       opacity: 0.35;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .dot.running {
+      animation: none;
     }
   }
   .port {

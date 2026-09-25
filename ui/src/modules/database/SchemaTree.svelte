@@ -451,8 +451,8 @@
     </div>
   {/if}
   {#if database.schemaLoading || database.activeConnStatus?.phase === 'connecting'}
-    <div class="tree-loading">
-      <Icon name="refresh" size={13} />
+    <div class="tree-loading" role="status">
+      <span class="spin"><Icon name="refresh" size={13} /></span>
       <span>Loading schema…</span>
     </div>
   {:else if database.activeConnStatus?.phase === 'error'}
@@ -469,7 +469,7 @@
     <!-- Server-side results: a flat list, each hit labelled with its schema so
          you can tell two same-named tables apart. -->
     {#if database.objectSearching && hits.length === 0}
-      <div class="tree-loading"><Icon name="refresh" size={13} /><span>Searching…</span></div>
+      <div class="tree-loading" role="status"><span class="spin"><Icon name="refresh" size={13} /></span><span>Searching…</span></div>
     {:else if hits.length === 0}
       <div class="tree-empty">
         No object matching "{database.objectSearchQuery}"{database.objectSearchScope === 'schema'
@@ -537,7 +537,7 @@
     oncontextmenu={(e) => showMenu(e, node)}
   >
     {#if node.has_children}
-      <button class="caret" tabindex="-1" onclick={() => expandNode(node)} aria-label="Toggle">
+      <button class="caret" tabindex="-1" onclick={() => expandNode(node)} aria-label={open ? `Collapse ${node.label}` : `Expand ${node.label}`}>
         {#if database.isLoadingNode(node.id)}
           <span class="spin"><Icon name="refresh" size={10} /></span>
         {:else}
@@ -825,7 +825,7 @@
     border-radius: var(--radius-s, 5px);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     cursor: pointer;

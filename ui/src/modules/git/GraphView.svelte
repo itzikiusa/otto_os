@@ -178,6 +178,17 @@
     name: string;
     leaves: BranchLeaf[];
   }
+  /** `refs/remotes/origin/HEAD` is a symref, not a branch — but `for-each-ref
+   *  %(refname:short)` shortens it to the bare remote name ("origin"), which
+   *  slips past the daemon's `/HEAD` suffix filter and rendered as a stray
+   *  "origin" leaf under REMOTE. Every real remote-tracking ref is
+   *  `<remote>/<branch>`, so a slash-less remote name is always that symref. */
+  function withoutRemoteHeads(r: RefsResp): RefsResp {
+    return r.remote.some((b) => !b.name.includes('/'))
+      ? { ...r, remote: r.remote.filter((b) => b.name.includes('/')) }
+      : r;
+  }
+
   function groupBranches(list: RefBranch[]): { loose: BranchLeaf[]; folders: BranchFolder[] } {
     const loose: BranchLeaf[] = [];
     const folderMap = new Map<string, BranchLeaf[]>();
@@ -299,9 +310,15 @@
   // Only the rows near the viewport are put in the DOM. Every row is a button +
   // an SVG lane gutter, so rendering a whole 6k-commit history cost seconds on
   // mount; with a window it is flat no matter how deep history goes. Rows are a
-  // FIXED 28px pitch, which is what makes the arithmetic (and the jump-to-ref
-  // scroll target) exact — keep `.graph-row { height }` and ROW_H in lockstep.
-  const ROW_H = 28;
+  // FIXED pitch, which is what makes the arithmetic (and the jump-to-ref
+  // scroll target) exact. The pitch is applied INLINE on every row (and the SVG
+  // gutter is drawn at the same height), so there is one source of truth:
+  //  - desktop 32px: two text lines (subject + sha/author/date) need ~29px; the
+  //    old 28px pitch jammed them together.
+  //  - ≤1024px 46px touch rows: these used to be CSS-only while the windowing
+  //    math and the gutter stayed at 28 — lanes broke into dashes between rows
+  //    and the spacers / jump-to-ref target drifted by 18px per row.
+  const ROW_H = $derived(isMobile ? 46 : 32);
   const OVERSCAN = 25; // rows rendered beyond each edge, so scrolling isn't bare
   let viewTop = $state(0);
   let viewH = $state(0);
@@ -417,7 +434,7 @@
 
     void api
       .get<RefsResp>(`/repos/${id}/refs`)
-      .then((r) => (refs = r))
+      .then((r) => (refs = withoutRemoteHeads(r)))
       .catch(() => (refs = { local: [], remote: [], tags: [] }))
       .finally(() => (refsLoading = false));
 
@@ -496,8 +513,9 @@
    *  cheap-vs-expensive split is visible (investigation H4/WP3). */
   async function resyncRefs(): Promise<void> {
     const id = repoId;
-    const next = await api.get<RefsResp>(`/repos/${id}/refs`).catch(() => null);
-    if (!next || id !== repoId) return; // transient failure — keep what we have, try next round
+    const raw = await api.get<RefsResp>(`/repos/${id}/refs`).catch(() => null);
+    if (!raw || id !== repoId) return; // transient failure — keep what we have, try next round
+    const next = withoutRemoteHeads(raw);
     const before = refsFingerprint(refs);
     const after = refsFingerprint(next);
     refs = next; // Tracking config/counts can change without moving any commit SHA.
@@ -522,7 +540,7 @@
     if (status) onstatus(status);
     const refsCall = api
       .get<RefsResp>(`/repos/${repoId}/refs`)
-      .then((r) => (refs = r))
+      .then((r) => (refs = withoutRemoteHeads(r)))
       .catch(() => {});
     await Promise.all([refsCall, reloadGraph()]);
   }
@@ -2141,13 +2159,22 @@
   // Middle-ellipsize a long branch leaf so the DISTINGUISHING SUFFIX stays visible
   // (e.g. "PROJ-1234-really-long…-retry-fix"). Returns null for short names (render
   // plain). The head span shrinks + ellipsizes; the tail span is pinned (see CSS).
+  //
+  // The tail starts at a WORD boundary (after a `-` `_` `.` `/`) so the pinned
+  // suffix reads as whole words — a fixed 14-char cut chopped mid-word
+  // ("…maintaining…nd-fixes-todos"). Falls back to the fixed cut when the name
+  // has no separator in range.
   function midParts(label: string): { head: string; tail: string } | null {
     if (label.length <= 18) return null;
-    const tailLen = Math.min(14, Math.floor(label.length / 2));
-    return {
-      head: label.slice(0, label.length - tailLen),
-      tail: label.slice(label.length - tailLen),
-    };
+    const maxTail = Math.min(16, Math.floor(label.length / 2));
+    let cut = label.length - Math.min(14, maxTail);
+    for (let i = label.length - maxTail; i <= label.length - 5; i++) {
+      if ('-_./'.includes(label[i - 1] ?? '')) {
+        cut = i;
+        break;
+      }
+    }
+    return { head: label.slice(0, cut), tail: label.slice(cut) };
   }
 
   // ── Cleanup base branch (drives the "merged → safe to delete" indicators) ────
@@ -2462,7 +2489,7 @@
           onclick={() => selectBranchRow(b)}
           ondblclick={() => checkoutRemote(b)}
           oncontextmenu={(e) => branchMenu(e, b)}
-          title="Click to highlight · double-click to checkout as a local tracking branch · drag onto a local branch to merge"
+          title="{b.name} — click to highlight · double-click to checkout as a local tracking branch · drag onto a local branch to merge"
         >
           <Icon name="dot" size={10} />
           {@render refName(leaf.label)}
@@ -2582,7 +2609,7 @@
                     tagMenu(e, t);
                   }
                 }}
-              >⋯</span>
+              ><Icon name="more" size={13} /></span>
             </div>
           {:else}
             <div class="dim ref-empty">No tags</div>
@@ -2759,7 +2786,7 @@
     {#if commitsError && commits.length === 0}
       <LoadState what="commits" error={commitsError} empty loading={commitsLoading} onretry={retryCommits} />
     {:else if commitsLoading}
-      <div style="padding: 10px"><Skeleton rows={12} height={28} /></div>
+      <div style="padding: 10px"><Skeleton rows={12} height={ROW_H} /></div>
     {:else if commits.length === 0}
       <div class="dim" style="padding: 18px; font-size: 12px">No commits found.</div>
     {:else}
@@ -2780,6 +2807,7 @@
           {@const cx = wipCol * LANE_W + LANE_W / 2}
           <button
             class="graph-row wip-row"
+            style:height="{ROW_H}px"
             class:graph-row-selected={wipSelected}
             onclick={selectWip}
             title="Uncommitted changes — click to stage & commit"
@@ -2791,26 +2819,26 @@
             <svg
               class="gutter"
               width={gutterWidth}
-              height={28}
+              height={ROW_H}
               style="flex-shrink: 0; width: {gutterWidth}px;"
             >
               <!-- dashed stub hanging toward the HEAD commit's lane -->
               <line
                 x1={cx}
-                y1={14 + NODE_R}
+                y1={ROW_H / 2 + NODE_R}
                 x2={cx}
-                y2={28}
+                y2={ROW_H}
                 stroke="var(--accent)"
                 stroke-width="1.5"
                 stroke-dasharray="2 2"
                 opacity="0.7"
               />
               {#if wipSelected}
-                <circle cx={cx} cy={14} r={NODE_R + 3} fill="none" stroke="var(--accent)" stroke-width="1.5" opacity="0.55" />
+                <circle cx={cx} cy={ROW_H / 2} r={NODE_R + 3} fill="none" stroke="var(--accent)" stroke-width="1.5" opacity="0.55" />
               {/if}
               <circle
                 cx={cx}
-                cy={14}
+                cy={ROW_H / 2}
                 r={NODE_R}
                 fill="var(--surface)"
                 stroke="var(--accent)"
@@ -2849,8 +2877,8 @@
         {#each visibleRows as row (row.commit.sha)}
           {@const svgW = gutterWidth}
           {@const cx = row.col * LANE_W + LANE_W / 2}
-          {@const cy = 14}
-          {@const totalH = 28}
+          {@const cy = ROW_H / 2}
+          {@const totalH = ROW_H}
           {@const isSelected = selectedSha === row.commit.sha}
           {@const isHead = isHeadCommit(row.commit)}
           {@const isStash = isStashNode(row.commit.sha)}
@@ -2859,6 +2887,7 @@
           {@const onSpine = highlightSpine !== null && highlightSpine.has(row.commit.sha)}
           <button
             class="graph-row"
+            style:height="{ROW_H}px"
             class:graph-row-selected={isSelected}
             class:graph-row-head={isHead}
             class:dimmed
@@ -2889,7 +2918,7 @@
                   onkeydown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') openRefMenu(e as unknown as MouseEvent, row.commit, chips);
                   }}
-                >▾ +{chips.length - 1}</span>
+                ><Icon name="chevronDown" size={9} />+{chips.length - 1}</span>
               {:else}
                 {#each chips as chip (chip.kind + chip.label)}
                   {@const label = chip.kind === 'stash'
@@ -3167,7 +3196,7 @@
                     title="File actions"
                     aria-label="File actions"
                     onclick={(e) => { e.stopPropagation(); fileToolsMenu(e, file.path); }}
-                  >⋯</button>
+                  ><Icon name="more" size={13} /></button>
                 </div>
 
                 {#if !isCollapsed}
@@ -3360,7 +3389,11 @@
     align-items: center;
     gap: 6px;
     width: 100%;
-    padding: 4px 10px 4px 11px;
+    /* Starts on the SAME indent as a loose branch row (22px): a folder is a
+       sibling of the loose branches, not of the LOCAL/REMOTE section header —
+       it used to sit 11px further out than the rows beside it. */
+    padding-block: 4px;
+    padding-inline: 22px 10px;
     border: none;
     background: transparent;
     color: var(--text);
@@ -3371,6 +3404,10 @@
   }
   .ref-folder:hover {
     background: var(--surface-2);
+  }
+  /* The count pill is surface-2 too — lift it so it doesn't vanish on hover. */
+  .ref-folder:hover .ref-count {
+    background: var(--surface-3);
   }
   /* The folder glyph picks up the accent so the grouping is obvious at a glance. */
   .ref-folder :global(svg:nth-of-type(2)) {
@@ -3386,7 +3423,9 @@
   /* Children of a folder: indented under a vertical tree guide so the nesting is
      visually unmistakable. */
   .folder-children {
-    margin-inline-start: 21px;
+    /* The guide drops from the centre of the folder's 11px chevron (22 + 5.5),
+       and nested rows' dots then line up under the folder icon. */
+    margin-inline-start: 27px;
     border-inline-start: 1.5px solid var(--border);
   }
   .ref-row {
@@ -3421,11 +3460,12 @@
   /* Tag actions: revealed on hover/focus so the row stays clean, but always
      present for pointers that have no right-click. */
   .ref-more {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
     margin-inline-start: auto;
     padding-inline: 4px;
     color: var(--text-dim);
-    font-size: 13px;
-    line-height: 1;
     opacity: 0;
     cursor: pointer;
     transition: opacity 100ms ease-out, color 100ms ease-out;
@@ -3439,7 +3479,7 @@
   }
   /* Folder children sit just inside the tree guide of `.folder-children`. */
   .ref-row.nested {
-    padding-inline-start: 14px;
+    padding-inline-start: 10px;
   }
   /* The checked-out branch: accent text + a leading accent rail and faint wash so
      the row itself is unmistakable, not just the check pip. */
@@ -3636,7 +3676,7 @@
     display: flex;
     align-items: center;
     width: 100%;
-    height: 28px;
+    height: 32px; /* overridden inline by ROW_H — keep them equal */
     padding-inline-end: 12px;
     border: none;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
@@ -3787,7 +3827,8 @@
     display: flex;
     flex-direction: column;
     justify-content: center;
-    gap: 1px;
+    gap: 2px;
+    line-height: 1.2;
   }
   .ci-top {
     display: flex;
@@ -3861,6 +3902,7 @@
   }
   .chip-ab {
     display: inline-flex;
+    flex-shrink: 0;
     gap: 2px;
     margin-inline-start: 2px;
     padding-inline-start: 3px;
@@ -3922,6 +3964,18 @@
     white-space: nowrap;
     min-width: 0;
   }
+  /* In the fixed-width column a chip SHRINKS to fit and ellipsizes its own
+     label at the end. Left rigid (flex-shrink:0, max-width 160px) a long chip
+     overflowed a 156px (or 76px with the detail open) cell and, being
+     end-aligned, got clipped at its START — "gin/CS3-15178-goo…" lost both
+     ends. The HEAD badge and the +N expander stay rigid. */
+  .branch-cell .ref-chip {
+    flex-shrink: 1;
+    min-width: 0;
+  }
+  .ref-chip > :global(svg) {
+    flex-shrink: 0;
+  }
   /* Stash decoration — dashed + muted so it reads as plumbing, not a branch. */
   .ref-chip.kind-stash {
     background: transparent;
@@ -3931,6 +3985,9 @@
 
   /* ── Multi-ref collapse: the "▾ +N" expander + its grouped popover ──────────── */
   .ref-expander {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
     flex-shrink: 0;
     font-size: var(--fs-xs);
     font-weight: 700;
@@ -4265,6 +4322,8 @@
     background: var(--surface-2);
   }
   .df-tools {
+    display: inline-flex;
+    align-items: center;
     flex-shrink: 0;
     padding: 0 9px;
     border: none;
@@ -4518,7 +4577,7 @@
     }
 
     /* Bigger touch targets + legible text on the commit rows. */
-    .mobile .graph-row { height: 46px; }
+    /* Row height (46px here) is ROW_H, applied inline — see "Row windowing". */
     .mobile .ci-subject { font-size: 14px; }
     .mobile .ci-meta { font-size: 12px; }
     .mobile .ci-sha { font-size: 12px; }

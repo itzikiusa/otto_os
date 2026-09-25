@@ -516,7 +516,7 @@
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     cursor: pointer;
     text-align: start;
   }

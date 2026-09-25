@@ -20,6 +20,7 @@
   import { events } from '../../../lib/events.svelte';
   import { sessionState } from '../../../lib/status';
   import StatusDot from '../../../lib/components/StatusDot.svelte';
+  import Icon from '../../../lib/components/Icon.svelte';
 
   interface Props {
     sessionId: string;
@@ -276,7 +277,7 @@
           onpaste={onPaste}
           aria-autocomplete="list"
         ></textarea>
-        <button class="send icon-btn" onclick={() => void send()} disabled={!canSend} title="Send (⏎)" aria-label="Send">➤</button>
+        <button class="send icon-btn" onclick={() => void send()} disabled={!canSend} title="Send (⏎)" aria-label="Send"><Icon name="send" size={14} /></button>
       </div>
       {#if attachments.length}
         <div class="thumbs" data-attachments={attachments.length}>
@@ -368,7 +369,6 @@
   .send {
     flex-shrink: 0;
     color: var(--accent-text);
-    font-size: 14px;
   }
   .send:disabled {
     opacity: 0.4;

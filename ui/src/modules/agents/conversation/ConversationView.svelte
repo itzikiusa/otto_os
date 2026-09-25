@@ -359,7 +359,7 @@
         title="Conversation actions"
         onclick={openHeadMenu}
         onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && openHeadMenu(e)}
-      >⋯</button>
+      ><Icon name="more" size={12} /></button>
     {:else if headTier >= 2}
       <!-- Narrow: the labelled checkbox becomes an icon toggle. -->
       <button

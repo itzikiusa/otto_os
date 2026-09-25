@@ -8,6 +8,7 @@
   import RunStageRail from './RunStageRail.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import type { OttoRun } from '../../lib/api/types';
   import { humanize, isTerminal, sourceColor, sourceLabel, statusTone } from './runStatus';
 
@@ -31,7 +32,9 @@
       const j = JSON.parse(run.pr_draft_json) as Record<string, unknown>;
       const title = (j.title ?? j.pr_title ?? '') as string;
       const description = (j.description ?? j.body ?? j.description_md ?? '') as string;
-      return { title, description };
+      const source = (j.source_branch ?? '') as string;
+      const target = (j.target_branch ?? '') as string;
+      return { title, description, source, target };
     } catch {
       return null;
     }
@@ -55,7 +58,7 @@
   }
 
   async function cancel(): Promise<void> {
-    if (!(await confirmer.ask('Cancel this run?', { title: 'Cancel run', confirmLabel: 'Cancel run' }))) return;
+    if (!(await confirmer.ask('Cancel this run? The agent stops and the run can’t be resumed — you would launch a new one.', { title: 'Cancel run', confirmLabel: 'Cancel run', cancelLabel: 'Keep running' }))) return;
     error = '';
     busy = true;
     try {
@@ -67,7 +70,25 @@
     }
   }
 
+  // Mirrors the daemon's open-PR gate (otto-core open_pr_block_reason) so the
+  // button says WHY it can't open instead of failing with the raw gate text.
+  const prBlock = $derived.by(() => {
+    if (run.approval_decision !== 'approved') return 'Approve the run first';
+    if (run.proof_status !== 'passed' && run.proof_status !== 'waived') return 'The proof pack must pass (or be waived) before a PR can be opened';
+    if (!run.repo_id) return 'This run has no repository to open a PR in';
+    return '';
+  });
+
+  /** The one outward-facing action: say where it goes and who sees it first. */
   async function openPr(): Promise<void> {
+    const into = prDraft?.target || run.base_branch || 'the default branch';
+    const from = prDraft?.source || run.branch || 'the run branch';
+    const where = run.repo_path ? ` in ${run.repo_path}` : '';
+    const ok = await confirmer.ask(
+      `Push ${from} and open “${prDraft?.title || run.title}” as a pull request into ${into}${where}? It is created on the remote, where everyone with access to the repository can see it.`,
+      { title: 'Open pull request', confirmLabel: 'Open PR', danger: false },
+    );
+    if (!ok) return;
     error = '';
     busy = true;
     try {
@@ -91,6 +112,9 @@
   </header>
 
   {#if error}<div class="err" role="alert">{error}</div>{/if}
+  {#if run.status === 'failed' && run.error}
+    <div class="err" role="status"><strong>Run failed:</strong> {run.error}</div>
+  {/if}
 
   <!-- where the run is on the pipeline right now -->
   <section class="block">
@@ -101,7 +125,7 @@
     <div class="goal">{run.goal || '(no goal text)'}</div>
     <div class="src-row">
       {#if run.source_url}
-        <a class="link" href={run.source_url} target="_blank" rel="noreferrer">{run.source_ref} ↗</a>
+        <a class="link" href={run.source_url} target="_blank" rel="noreferrer">{run.source_ref} <Icon name="external" size={11} /></a>
       {:else}
         <span class="muted">{run.source_ref}</span>
       {/if}
@@ -185,16 +209,17 @@
       {#if prDraft.description}<pre class="pr-desc">{prDraft.description}</pre>{/if}
       <div class="actions">
         {#if run.pr_url}
-          <a class="btn primary" href={run.pr_url} target="_blank" rel="noreferrer">View PR ↗</a>
+          <a class="btn primary" href={run.pr_url} target="_blank" rel="noreferrer">View PR <Icon name="external" size={12} /></a>
         {:else}
-          <button class="btn primary" disabled={busy} onclick={openPr}>Open PR</button>
+          <button class="btn primary" disabled={busy || !!prBlock} title={prBlock || 'Push the branch and open this draft as a real pull request'} onclick={openPr}>Open PR</button>
+          {#if prBlock}<span class="muted hint">{prBlock}.</span>{/if}
         {/if}
       </div>
     </section>
   {:else if run.pr_url}
     <section class="block pr">
       <h3 class="h">Pull request</h3>
-      <a class="btn primary" href={run.pr_url} target="_blank" rel="noreferrer">View PR ↗</a>
+      <a class="btn primary" href={run.pr_url} target="_blank" rel="noreferrer">View PR <Icon name="external" size={12} /></a>
     </section>
   {/if}
 
@@ -225,13 +250,13 @@
     color: var(--text);
   }
   .d-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.75rem; }
-  .d-title { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
-  .d-title strong { font-size: 1rem; }
+  .d-title { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; min-width: 0; }
+  .d-title strong { font-size: 1rem; min-width: 0; overflow-wrap: anywhere; }
   .block { display: flex; flex-direction: column; gap: 0.5rem; }
   .h { margin: 0; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); }
   .goal { font-size: 0.92rem; line-height: 1.45; }
   .src-row { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; flex-wrap: wrap; }
-  .link { color: var(--accent-text); }
+  .link { color: var(--accent-text); display: inline-flex; align-items: center; gap: 0.25rem; overflow-wrap: anywhere; }
   .muted { color: var(--text-dim); }
   .mono { font-family: var(--font-mono); font-size: 0.78rem; }
   .dot { color: var(--text-dim); }
@@ -239,7 +264,7 @@
   .findings { font-size: 0.82rem; color: var(--text-dim); }
   .fnum { color: var(--text); font-weight: 600; }
   .blocking {
-    margin-left: 0.35rem; font-size: 0.72rem; padding: 0.05rem 0.45rem; border-radius: 999px;
+    margin-inline-start: 0.35rem; font-size: 0.72rem; padding: 0.05rem 0.45rem; border-radius: 999px;
     background: color-mix(in srgb, var(--status-exited) 16%, transparent); color: var(--status-exited);
   }
   .timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.55rem; }
@@ -256,7 +281,8 @@
   .tl-when { color: var(--text-dim); font-size: 0.74rem; font-variant-numeric: tabular-nums; }
   .tl-msg { font-size: 0.82rem; color: var(--text-dim); line-height: 1.4; }
   .gate { border: 1px solid color-mix(in srgb, var(--status-warn) 40%, transparent); border-radius: var(--radius-m); padding: 0.65rem 0.75rem; background: color-mix(in srgb, var(--status-warn) 7%, transparent); }
-  .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  .actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+  .hint { font-size: 0.8rem; }
   .pr-title { font-size: 0.92rem; font-weight: 600; }
   .pr-desc {
     white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono);
@@ -269,8 +295,8 @@
     border: 1px solid var(--border); border-radius: var(--radius-s); padding: 0.45rem 0.55rem; font: inherit;
   }
   .err {
-    background: color-mix(in srgb, var(--status-exited) 12%, transparent);
-    color: var(--status-exited); padding: 0.5rem 0.75rem;
+    background: var(--danger-soft);
+    color: var(--danger); padding: 0.5rem 0.75rem; overflow-wrap: anywhere;
     border-radius: var(--radius-s); font-size: 0.85rem;
   }
   .badge {
@@ -286,7 +312,7 @@
     font-size: 0.7rem; padding: 0.05rem 0.5rem; border-radius: 999px;
     border: 1px solid transparent; text-transform: capitalize; white-space: nowrap;
   }
-  .pill.tiny { font-size: 0.66rem; padding: 0.02rem 0.4rem; }
+  .pill.tiny { font-size: var(--fs-xs); padding: 0.02rem 0.4rem; }
   .pill.ok { background: color-mix(in srgb, var(--status-working) 16%, transparent); color: var(--status-working); }
   .pill.bad { background: color-mix(in srgb, var(--status-exited) 16%, transparent); color: var(--status-exited); }
   .pill.warn { background: color-mix(in srgb, var(--status-warn) 18%, transparent); color: var(--status-warn); }

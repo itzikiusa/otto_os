@@ -73,14 +73,16 @@
   {#if loading && reports.length === 0}
     <Skeleton rows={3} />
   {:else if error && reports.length === 0}
-    <EmptyState icon="gauge" title="Insights unavailable" body={error} />
+    <EmptyState icon="gauge" title="Insights unavailable" body={error} actionLabel="Retry" actionIcon="refresh" onaction={() => poller?.now()} />
   {:else if reports.length === 0}
     <EmptyState icon="gauge" title="No reports yet" body="Turn on daily / weekly reports or run one now." actionLabel="Open Insights" onaction={() => router.go('insights')} />
   {:else}
     <ul class="rows">
       {#each shown as r (r.html_path)}
         <li>
-          <button class="card" onclick={() => router.go('insights')} title="Open in Insights">
+          <!-- Deep-link to THIS report (InsightsPage's `#/insights/r/<kind>/<start>/<end>`),
+               not just the Insights page, which opens on whatever was last viewed. -->
+          <button class="card" onclick={() => router.go(`insights/r/${r.kind}/${r.period_start}/${r.period_end}`)} title="Open this report in Insights">
             <div class="head">
               <span class="kind">{KIND_LABEL[r.kind] ?? r.kind}</span>
               <span class="per">{period(r)}</span>

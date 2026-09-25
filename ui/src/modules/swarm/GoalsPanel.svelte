@@ -77,7 +77,13 @@
     editorOpen = true;
   }
   async function del(g: SwarmGoal) {
-    if (await confirmer.ask(g.title, { title: 'Delete goal?' })) {
+    if (
+      await confirmer.ask(`Delete goal “${g.title}”? Its verification history goes with it.`, {
+        title: 'Delete goal',
+        confirmLabel: 'Delete',
+        danger: true,
+      })
+    ) {
       try {
         await swarm.deleteGoal(g.id);
       } catch (e) {
@@ -93,7 +99,7 @@
       <span class="running"><span class="spinner-xs"></span> Verifying…</span>
       <button class="btn small" onclick={stop}><Icon name="square" size={12} /> Stop</button>
     {:else}
-      <button class="btn small primary" onclick={runVerify} disabled={verifying || !goals.length}>
+      <button class="btn small primary" onclick={runVerify} disabled={verifying || !goals.length} title={goals.length ? 'Run every goal check for this task now' : 'Add a goal first'}>
         <Icon name="check" size={12} /> Verify now
       </button>
     {/if}
@@ -114,8 +120,8 @@
             {#if g.blocking}<span class="blocking" title="Blocks task completion until it passes">blocking</span>{/if}
             <span class="g-title">{g.title}</span>
             <span class="grow"></span>
-            <button class="icon-btn small" onclick={() => edit(g)} aria-label="Edit goal"><Icon name="edit" size={13} /></button>
-            <button class="icon-btn small" onclick={() => del(g)} aria-label="Delete goal"><Icon name="trash" size={13} /></button>
+            <button class="icon-btn small" onclick={() => edit(g)} aria-label="Edit goal" title="Edit goal"><Icon name="edit" size={13} /></button>
+            <button class="icon-btn small" onclick={() => del(g)} aria-label="Delete goal" title="Delete goal"><Icon name="trash" size={13} /></button>
           </div>
           {#if g.description}<div class="g-desc">{g.description}</div>{/if}
           <div class="g-meta">
@@ -191,6 +197,8 @@
   }
   .g-title {
     font-weight: 600;
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
   .kind {
     font-size: var(--fs-xs);
@@ -203,8 +211,8 @@
   }
   .blocking {
     font-size: var(--fs-xs);
-    color: var(--status-exited);
-    border: 1px solid color-mix(in srgb, var(--status-exited) 40%, transparent);
+    color: var(--danger);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
     border-radius: 999px;
     padding: 0 6px;
   }
@@ -246,8 +254,8 @@
     padding-inline-start: 8px;
   }
   .verdict.bad {
-    color: var(--status-exited);
-    border-inline-start-color: var(--status-exited);
+    color: var(--danger);
+    border-inline-start-color: var(--danger);
   }
 
   /* Status chips — colours per the goal lifecycle. `passed` is the high-contrast
@@ -274,10 +282,11 @@
     background: color-mix(in srgb, var(--warning) 26%, transparent);
     color: var(--warning);
   }
+  /* Text-safe semantic tone — the --status-* colours are for dots only. */
   .status.unmet,
   .status.error {
-    background: color-mix(in srgb, var(--status-exited) 22%, transparent);
-    color: var(--status-exited);
+    background: var(--danger-soft);
+    color: var(--danger);
   }
   .status.pulse {
     animation: gp-pulse 1.2s ease-in-out infinite;
@@ -285,6 +294,12 @@
   @keyframes gp-pulse {
     50% {
       opacity: 0.55;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .status.pulse,
+    .spinner-xs {
+      animation: none;
     }
   }
 </style>

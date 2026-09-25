@@ -12,6 +12,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { activity } from '../../lib/stores/activity.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { rel } from '../../lib/stores/now.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import type { TaskStatus, TrailKind, TrailSource } from '../../lib/api/types';
@@ -157,20 +158,10 @@
     return s === 'user' ? 'you' : s === 'otto' ? 'otto' : 'agent';
   }
 
-  /** Relative time: "now", "3m", "2h", else a short date. */
-  function relTime(iso: string): string {
-    try {
-      const then = new Date(iso).getTime();
-      const secs = Math.max(0, Math.round((Date.now() - then) / 1000));
-      if (secs < 10) return 'now';
-      if (secs < 60) return `${secs}s`;
-      const mins = Math.floor(secs / 60);
-      if (mins < 60) return `${mins}m`;
-      const hrs = Math.floor(mins / 60);
-      if (hrs < 24) return `${hrs}h`;
-      return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-    } catch {
-      return '';
+  function onRowKeydown(e: KeyboardEvent, id: string): void {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      toggle(id);
     }
   }
 
@@ -293,23 +284,35 @@
       <div class="filters">
         <div class="tabs">
           {#each SOURCE_TABS as t (t.id)}
-            <button class="tab" class:on={sourceFilter === t.id} onclick={() => (sourceFilter = t.id)}>
+            <button
+              class="tab"
+              class:on={sourceFilter === t.id}
+              aria-pressed={sourceFilter === t.id}
+              onclick={() => (sourceFilter = t.id)}
+            >
               {t.label}
             </button>
           {/each}
         </div>
-        <input class="search" placeholder="Filter…" bind:value={query} spellcheck="false" />
+        <input class="search" placeholder="Filter…" aria-label="Filter the trail" bind:value={query} spellcheck="false" />
       </div>
 
       <div class="note-add">
         <input
           class="note-input"
           placeholder="Add a note to this session…"
+          aria-label="Note"
           bind:value={note}
           onkeydown={onNoteKeydown}
           spellcheck="false"
         />
-        <button class="note-btn" title="Add note" disabled={note.trim() === '' || adding} onclick={addNote}>
+        <button
+          class="note-btn"
+          title={note.trim() === '' ? 'Type a note first' : 'Add note'}
+          aria-label="Add note"
+          disabled={note.trim() === '' || adding}
+          onclick={addNote}
+        >
           <Icon name="plus" size={13} />
         </button>
       </div>
@@ -322,14 +325,22 @@
         <ul class="trail">
           {#each filtered as e (e.id)}
             <li class="row src-{e.source} kind-{e.kind} lvl-{e.level}">
-              <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
-              <div class="row-main" class:clickable={e.detail != null} onclick={() => e.detail != null && toggle(e.id)}>
+              <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events, a11y_no_noninteractive_tabindex -->
+              <div
+                class="row-main"
+                class:clickable={e.detail != null}
+                role={e.detail != null ? 'button' : undefined}
+                tabindex={e.detail != null ? 0 : undefined}
+                aria-expanded={e.detail != null ? !!expanded[e.id] : undefined}
+                onclick={() => e.detail != null && toggle(e.id)}
+                onkeydown={(ev) => e.detail != null && onRowKeydown(ev, e.id)}
+              >
                 <span class="row-icon"><Icon name={KIND_ICON[e.kind] ?? 'dot'} size={12} /></span>
                 <div class="row-body">
                   <div class="row-summary">{e.summary}</div>
                   <div class="row-meta">
                     <span class="row-src">{sourceLabel(e.source)}</span>
-                    <span class="row-time mono">{relTime(e.ts)}</span>
+                    <span class="row-time mono" title={new Date(e.ts).toLocaleString()}>{rel(e.ts)}</span>
                     {#if e.detail != null}
                       <Icon name={expanded[e.id] ? 'chevronDown' : 'chevronRight'} size={10} />
                     {/if}
@@ -473,7 +484,7 @@
   }
   .badge {
     flex-shrink: 0;
-    font-size: 9px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -521,6 +532,10 @@
     list-style: none;
     margin: 2px 0 0;
     padding: 0;
+    /* A long plan scrolls on its own instead of squeezing the live trail
+       below it down to nothing. */
+    max-height: 240px;
+    overflow-y: auto;
     display: flex;
     flex-direction: column;
     gap: 3px;
@@ -671,6 +686,10 @@
   .row-main.clickable {
     cursor: pointer;
   }
+  .row-main.clickable:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
   .row-main:hover {
     background: var(--surface-2);
   }
@@ -705,11 +724,12 @@
     font-family: var(--font-mono);
     font-size: 11px;
   }
+  /* Text uses the text-safe semantic tokens (the --status-* ones are for dots). */
   .lvl-warn .row-summary {
-    color: var(--status-warn, #d29922);
+    color: var(--warning);
   }
   .lvl-error .row-summary {
-    color: var(--status-exited, #e5534b);
+    color: var(--danger);
   }
   .row-meta {
     display: flex;
@@ -718,7 +738,7 @@
     margin-top: 1px;
   }
   .row-src {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
@@ -727,7 +747,7 @@
     color: var(--accent-text);
   }
   .row-time {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .row-detail {

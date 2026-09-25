@@ -7,6 +7,7 @@
   //   • advisory — instruction files / skills: guidance the model MAY ignore.
   //   • enforced — hooks / settings the runtime imposes regardless.
   // See docs/contracts/api.md (POST /workspaces/{id}/context/preview).
+  import Icon from '../../lib/components/Icon.svelte';
   import { onDestroy } from 'svelte';
   import { contextApi } from '../../lib/api/context';
   import type {
@@ -150,7 +151,7 @@
               <span class="file-name mono" title={f.path}>{leaf(f.path)}</span>
               <span class="badge {f.enforcement}">{f.enforcement}</span>
               <span class="file-size dim">{fmtBytes(f.size)}</span>
-              <span class="chevron" class:open={openFile === f.path}>▸</span>
+              <span class="chevron" class:open={openFile === f.path}><Icon name="chevronRight" size={10} /></span>
             </button>
             {#if openFile === f.path}
               <pre class="file-body mono">{f.first_lines}{f.truncated ? '\n…' : ''}</pre>
@@ -223,7 +224,7 @@
     margin-inline-end: 8px;
   }
   .badge {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -273,7 +274,7 @@
   .chip .ver {
     margin-inline-start: 4px;
     color: var(--text-dim);
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
   }
 
   .files-head {
@@ -337,7 +338,7 @@
     flex-shrink: 0;
   }
   .chevron {
-    font-size: 9px;
+    display: inline-flex;
     color: var(--text-dim);
     transition: transform 120ms ease-out;
     flex-shrink: 0;

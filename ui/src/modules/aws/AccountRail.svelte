@@ -86,7 +86,7 @@
           }}
           aria-label={`Actions for ${a.name}`}
           title="Actions"
-        >⋯</button>
+        ><Icon name="more" size={14} /></button>
       </div>
       {#if open}
         <ul class="svcs">
@@ -161,6 +161,8 @@
     font-weight: 500;
   }
   .more {
+    display: inline-flex;
+    align-items: center;
     border: 0;
     background: transparent;
     color: var(--text-dim);
@@ -201,7 +203,7 @@
   }
   .deny {
     margin-left: auto;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);

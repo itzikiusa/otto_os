@@ -102,32 +102,47 @@
       ...agents.map((a) => ({ label: a.name, action: () => bulkAssign(a.id) })),
     ]);
   }
+  // Every board mutation reports a failure (a rejected promise from a menu
+  // action or button used to vanish, leaving the card where it was).
+  async function attempt(failed: string, fn: () => Promise<unknown>): Promise<boolean> {
+    try {
+      await fn();
+      return true;
+    } catch (e) {
+      toasts.error(failed, e instanceof Error ? e.message : String(e));
+      return false;
+    }
+  }
   async function bulkMove(status: TaskStatus) {
-    await swarm.bulkUpdateTasks(selectedTasks, { status });
-    clearSelection();
+    if (await attempt("Couldn't move the tasks", () => swarm.bulkUpdateTasks(selectedTasks, { status }))) clearSelection();
   }
   async function bulkAssign(agentId: string | null) {
-    await swarm.bulkUpdateTasks(selectedTasks, { assignee_agent_id: agentId });
-    clearSelection();
+    if (await attempt("Couldn't reassign the tasks", () => swarm.bulkUpdateTasks(selectedTasks, { assignee_agent_id: agentId })))
+      clearSelection();
   }
   async function bulkDelete() {
     const n = selectedTasks.length;
     if (!n) return;
-    if (await confirmer.ask(`Delete ${n} selected task${n === 1 ? '' : 's'}?`, { title: 'Delete tasks' })) {
-      await swarm.bulkDeleteTasks(selectedTasks);
-      clearSelection();
+    if (
+      await confirmer.ask(`Delete ${n} selected task${n === 1 ? '' : 's'}? This cannot be undone.`, {
+        title: 'Delete tasks',
+        confirmLabel: 'Delete',
+        danger: true,
+      })
+    ) {
+      if (await attempt('Delete failed', () => swarm.bulkDeleteTasks(selectedTasks))) clearSelection();
     }
   }
   async function clearBoard() {
     if (!pid || !tasks.length) return;
+    const board = pid;
     if (
       await confirmer.ask(
         `Delete ALL ${tasks.length} tasks on this board? In-flight agent runs are stopped and the project's feed is cleared too. This cannot be undone.`,
-        { title: 'Clear board' },
+        { title: 'Clear board', confirmLabel: 'Clear board', danger: true },
       )
     ) {
-      await swarm.clearProject(pid);
-      clearSelection();
+      if (await attempt("Couldn't clear the board", () => swarm.clearProject(board))) clearSelection();
     }
   }
 
@@ -135,9 +150,11 @@
   let newTitle = $state('');
   async function addTask() {
     if (!pid || !newTitle.trim()) return;
-    await swarm.createTask(pid, { title: newTitle.trim(), priority: 'medium' });
-    newTitle = '';
-    adding = false;
+    const project = pid;
+    if (await attempt("Couldn't add the task", () => swarm.createTask(project, { title: newTitle.trim(), priority: 'medium' }))) {
+      newTitle = '';
+      adding = false;
+    }
   }
 
   // -- Goal view + edit ------------------------------------------------------
@@ -208,11 +225,11 @@
   function cardMenu(e: MouseEvent, t: SwarmTask) {
     const moves = TASK_COLUMNS.filter((s) => s !== t.status).map((s) => ({
       label: `Move to ${COLUMN_LABEL[s]}`,
-      action: () => swarm.updateTask(t, { status: s }),
+      action: () => void attempt("Couldn't move the task", () => swarm.updateTask(t, { status: s })),
     }));
     const assigns = agents.map((a) => ({
       label: `Assign to ${a.name}`,
-      action: () => swarm.updateTask(t, { assignee_agent_id: a.id }),
+      action: () => void attempt("Couldn't reassign the task", () => swarm.updateTask(t, { assignee_agent_id: a.id })),
     }));
     ctxMenu.show(e, [
       { label: 'Run now', icon: 'play', action: () => runNow(t) },
@@ -227,7 +244,14 @@
         icon: 'trash',
         danger: true,
         action: async () => {
-          if (await confirmer.ask(t.title, { title: 'Delete task?' })) swarm.deleteTask(t);
+          if (
+            await confirmer.ask(`Delete task “${t.title}”? This cannot be undone.`, {
+              title: 'Delete task',
+              confirmLabel: 'Delete',
+              danger: true,
+            })
+          )
+            await attempt('Delete failed', () => swarm.deleteTask(t));
         },
       },
     ]);
@@ -331,7 +355,7 @@
         <Icon name="trash" size={13} /> Clear board
       </button>
     {/if}
-    <button class="btn small primary" onclick={() => (adding = !adding)} disabled={!pid}>
+    <button class="btn small primary" onclick={() => (adding = !adding)} disabled={!pid} title={pid ? undefined : 'Create a project first'}>
       <Icon name="plus" size={13} /> Add task
     </button>
   </div>
@@ -367,7 +391,7 @@
         bind:value={newTitle}
         onkeydown={(e) => e.key === 'Enter' && addTask()}
       />
-      <button class="btn small primary" onclick={addTask}>Add</button>
+      <button class="btn small primary" onclick={addTask} disabled={!newTitle.trim()}>Add</button>
       <button class="btn small ghost" onclick={() => (adding = false)}>Cancel</button>
     </div>
   {/if}
@@ -417,7 +441,7 @@
                     onchange={() => toggleSelect(t.id)}
                     aria-label="Select task"
                   />
-                  <span>{t.title}</span>
+                  <span class="card-title-text">{t.title}</span>
                 </div>
                 <div class="card-meta">
                   {#if agent}
@@ -439,13 +463,13 @@
                       <Icon name="check" size={10} /> {gs.passed}/{gs.total}
                     </button>
                   {:else}
-                    <button class="icon-btn small" onclick={(e) => { e.stopPropagation(); goalsTask = t; }} aria-label="goals" title="Goals">
+                    <button class="icon-btn small" onclick={(e) => { e.stopPropagation(); goalsTask = t; }} aria-label="Goals" title="Goals">
                       <Icon name="check" size={13} />
                     </button>
                   {/if}
                   <span class="chip {PRIORITY_CLASS[t.priority]}">{t.priority}</span>
-                  <button class="icon-btn small" onclick={(e) => cardMenu(e, t)} aria-label="task menu">
-                    <Icon name="dot" size={14} />
+                  <button class="icon-btn small" onclick={(e) => cardMenu(e, t)} aria-label="Task actions" title="Task actions">
+                    <Icon name="more" size={14} />
                   </button>
                 </div>
                 {#if t.delegated}<span class="tag">delegated</span>{/if}
@@ -641,6 +665,10 @@
     font-size: 12.5px;
     margin-bottom: 6px;
   }
+  /* A long unbroken title (a path, a URL) used to overflow the 240px column. */
+  .card-title-text {
+    overflow-wrap: anywhere;
+  }
   .card-meta {
     display: flex;
     align-items: center;
@@ -674,6 +702,12 @@
   @keyframes kb-pulse {
     50% {
       opacity: 0.5;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .vchip,
+    .spinner-xs {
+      animation: none;
     }
   }
   .gchip {

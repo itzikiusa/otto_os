@@ -12,11 +12,14 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
 
   const providerOpts = $derived(agentProviders());
 
   let cfg: SkillEvalConfig | null = $state(null);
   let loading = $state(true);
+  let loadError = $state('');
   let saving = $state(false);
 
   $effect(() => {
@@ -25,10 +28,11 @@
 
   async function load(): Promise<void> {
     loading = true;
+    loadError = '';
     try {
       cfg = await skillsEvalApi.getConfig();
     } catch (e) {
-      toasts.error('Could not load settings', e instanceof Error ? e.message : String(e));
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -58,7 +62,12 @@
     if (!cfg || saving) return;
     saving = true;
     try {
+      // Spread the loaded config first: PUT stores the body as-is and serde
+      // fills anything missing with its default, so sending only the fields
+      // on this page silently reset weights, promote_min_score,
+      // require_proof_pass and the default test/lint commands on every save.
       const body: SkillEvalConfig = {
+        ...$state.snapshot(cfg),
         validations: cfg.validations.map((v: SkillEvalValidationCfg) => ({
           name: v.name.trim(),
           criteria: v.criteria.trim(),
@@ -66,7 +75,7 @@
           model: v.model ?? '',
         })),
         improver: { provider: cfg.improver.provider, model: cfg.improver.model ?? '' },
-        iterations: Math.max(1, Math.floor(cfg.iterations)),
+        iterations: Math.max(1, Math.min(10, Math.floor(cfg.iterations))),
         validator_passes: Math.max(1, Math.min(3, Math.floor(cfg.validator_passes))),
       };
       cfg = await skillsEvalApi.putConfig(body);
@@ -88,8 +97,8 @@
   <SectionIntro>Each validation runs as its own agent (one per CLI selected); the improver edits the skill between iterations.</SectionIntro>
   <div class="eval-body">
 
-  {#if loading || !cfg}
-    <p class="muted">Loading…</p>
+  {#if !cfg}
+    <LoadState what="Skills Evaluator defaults" {loading} error={loadError} empty onretry={() => void load()} rows={3} />
   {:else}
     <section class="card row3">
       <div>
@@ -110,6 +119,7 @@
         <ModelPicker
           provider={cfg.improver.provider || defaultAgentProvider()}
           value={cfg.improver.model ?? ''}
+          hint="Saved, but not applied yet: runs started from Skills evaluator use the provider's default model for the improver."
           onchange={(m) => { if (cfg) cfg.improver.model = m; }}
         />
       </div>
@@ -162,12 +172,6 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
-  }
-  .muted {
-    margin: 0;
-    font-size: 12.5px;
-    color: var(--text-dim);
-    line-height: 1.5;
   }
   .row3 {
     display: grid;

@@ -665,13 +665,13 @@
   .btn.small { height: 24px; padding: 0 9px; font-size: 11.5px; }
 
   .accept-btn {
-    border-color: var(--status-working, #22c55e);
-    color: var(--status-working, #22c55e);
-    background: color-mix(in srgb, var(--status-working, #22c55e) 12%, transparent);
+    border-color: var(--success);
+    color: var(--success);
+    background: color-mix(in srgb, var(--success) 12%, transparent);
     font-weight: 700;
   }
   .accept-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--status-working, #22c55e) 22%, transparent);
+    background: color-mix(in srgb, var(--success) 22%, transparent);
   }
 
   /* Confirm bar */

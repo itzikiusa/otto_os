@@ -4,6 +4,7 @@
   import type { Snippet } from 'svelte';
   import { untrack } from 'svelte';
   import { ui } from '../stores/ui.svelte';
+  import Icon from './Icon.svelte';
 
   interface Props {
     title: string;
@@ -41,12 +42,18 @@
     return () => untrack(() => ui.popModal());
   });
 
-  // Move focus into the sheet on open (first body control, else the close
-  // button) and hand it back to whatever had it when the modal closes.
+  // Move focus into the sheet on open and hand it back to whatever had it
+  // when the modal closes. An explicit `data-autofocus` / `autofocus` control
+  // wins (the default button of a confirm, a prompt's field), else the first
+  // body control, else the close button.
   $effect(() => {
     const prev = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const els = untrack(focusables);
-    (els.find((el) => !el.closest('header')) ?? els[0])?.focus();
+    (
+      els.find((el) => el.hasAttribute('data-autofocus') || el.hasAttribute('autofocus')) ??
+      els.find((el) => !el.closest('header')) ??
+      els[0]
+    )?.focus();
     return () => prev?.focus();
   });
 
@@ -101,7 +108,9 @@
   >
     <header>
       <h2>{title}</h2>
-      <button class="icon-btn" onclick={onclose} aria-label="Close">✕</button>
+      <button class="icon-btn" onclick={onclose} aria-label="Close" title="Close (Esc)">
+        <Icon name="x" size={14} />
+      </button>
     </header>
     <div class="sheet-body">{@render children()}</div>
     {#if footer}
@@ -143,12 +152,17 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 12px;
     padding: 14px 16px 10px;
   }
   h2 {
     margin: 0;
+    min-width: 0;
     font-size: 14px;
     font-weight: 600;
+    /* A title carrying a path / branch / session name wraps instead of
+       pushing the close button out of the sheet. */
+    overflow-wrap: anywhere;
   }
   .sheet-body {
     padding: 4px 16px 16px;

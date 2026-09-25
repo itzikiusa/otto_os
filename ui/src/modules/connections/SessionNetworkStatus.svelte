@@ -10,6 +10,10 @@
   let open = $state(false);
   let busy = $state(false);
   let refresh = $state(0);
+  // Status enum → words ("disabled" means no profile: a direct connection).
+  const STATUS_LABEL: Record<SessionNetwork['status'], string> = {
+    connected: 'Connected', error: 'Error', stopped: 'Stopped', disabled: 'Direct',
+  };
   $effect(() => {
     const id = sessionId; void selectedProfileId; void refresh;
     let alive = true;
@@ -36,7 +40,7 @@
   }
 </script>
 <details class="network" bind:open data-testid="network-status">
-  <summary>Network: {network?.profile_name || (selectedProfileId ? 'selected profile' : 'none')} · {network?.status ?? 'loading'}{#if network?.restart_required} · Restart required{/if}</summary>
+  <summary>Network: {network?.profile_name || (selectedProfileId ? 'selected profile' : 'none')} · {network ? (STATUS_LABEL[network.status] ?? network.status) : 'Loading…'}{#if network?.restart_required} · Restart required{/if}</summary>
   <div class="contents">
     {#if network?.status === 'connected'}<p>SSH forwards ready. Service health is not checked.</p>{/if}
     {#if network?.error}<p class="error" role="alert">{network.error} Restart the session to rebuild its forwards.</p>{/if}
@@ -57,9 +61,9 @@
   </div>
 </details>
 <style>
-  .network { flex-shrink: 0; min-width: 0; border-block-end: 1px solid var(--border, #555); font-size: 11px; }
-  summary { cursor: pointer; padding: 5px 9px; overflow-wrap: anywhere; color: var(--text-dim, #bbb); }
+  .network { flex-shrink: 0; min-width: 0; border-block-end: 1px solid var(--border); font-size: 11px; }
+  summary { cursor: pointer; padding: 5px 9px; overflow-wrap: anywhere; color: var(--text-dim); }
   .contents { max-height: 40vh; overflow: auto; padding: 5px 9px; } .endpoint { display: grid; gap: 3px; margin-block: 8px; }
-  code { white-space: normal; overflow-wrap: anywhere; } p { margin: 6px 0; } .error { color: var(--status-exited, #f88); }
-  button { color: var(--text, white); background: var(--surface-2, #30343b); border: 1px solid var(--border, #555); padding: 5px; border-radius: 4px; }
+  code { white-space: normal; overflow-wrap: anywhere; } p { margin: 6px 0; } .error { color: var(--danger); }
+  button { color: var(--text); background: var(--surface-2); border: 1px solid var(--border); padding: 5px; border-radius: 4px; }
 </style>

@@ -20,6 +20,8 @@
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import { improvementBus } from '../../lib/events.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import DiffView from '../../lib/components/DiffView.svelte';
 
@@ -32,7 +34,35 @@
   let runs: ImprovementRun[] = $state([]);
   let pending: ImprovementEdit[] = $state([]);
   let loading = $state(false);
+  let loadError = $state('');
   let saving = $state(false);
+  // The editable fields as last loaded/saved, and the workspace they belong
+  // to. The 30 s poll and every improvement event re-load this page; they
+  // used to overwrite `cfg` too, snapping a half-edited form back with no
+  // word. Now the form is only refreshed while it has no unsaved edits.
+  let savedKey = $state('');
+  let cfgWs: string | null = null;
+  function formKey(c: SelfImprovementConfig, allow: string): string {
+    return JSON.stringify([
+      c.enabled,
+      c.live_evolve,
+      c.cadence_minutes,
+      c.lookback_hours,
+      c.autonomy,
+      [...c.providers].sort(),
+      allow.split(',').map((x) => x.trim()).filter(Boolean),
+    ]);
+  }
+  const dirty = $derived(cfg != null && formKey(cfg, allowlistText) !== savedKey);
+  // number inputs bind `null` when cleared; the daemon would answer with a raw
+  // deserialize error.
+  const formError = $derived.by(() => {
+    if (!cfg) return '';
+    const whole = (n: unknown) => typeof n === 'number' && Number.isInteger(n) && n >= 1;
+    if (!whole(cfg.cadence_minutes)) return '“Run every” must be a whole number of minutes (1 or more).';
+    if (!whole(cfg.lookback_hours)) return '“Look back” must be a whole number of hours (1 or more).';
+    return '';
+  });
   let running = $state(false);
   let busyEdit: string | null = $state(null);
 
@@ -109,15 +139,27 @@
     return () => clearTimeout(pollTimer);
   });
 
+  function adopt(id: string, fresh: SelfImprovementConfig): void {
+    cfg = fresh;
+    cfgWs = id;
+    allowlistText = fresh.skill_allowlist.join(', ');
+    savedKey = formKey(fresh, allowlistText);
+  }
+
   async function load(id: string): Promise<void> {
     loading = true;
     try {
-      cfg = await improveApi.getConfig(id);
-      allowlistText = cfg.skill_allowlist.join(', ');
+      const fresh = await improveApi.getConfig(id);
+      if (!cfg || cfgWs !== id || !dirty) adopt(id, fresh);
+      // Status fields always refresh (they aren't in the form).
+      else cfg = { ...cfg, last_run_at: fresh.last_run_at, next_run_at: fresh.next_run_at };
       runs = await improveApi.listRuns(id);
       pending = await improveApi.listEdits(id, 'pending');
+      loadError = '';
     } catch (e) {
-      toasts.error('Could not load self-improvement', e instanceof Error ? e.message : String(e));
+      // Inline (first load) or a slim stale bar (background refresh) — never
+      // a toast every 30 s while the daemon is unreachable.
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -128,7 +170,7 @@
   // ---------------------------------------------------------------------------
 
   async function save(): Promise<void> {
-    if (!wsId || !cfg) return;
+    if (!wsId || !cfg || formError) return;
     saving = true;
     try {
       const body = {
@@ -143,8 +185,7 @@
         providers: cfg.providers,
         live_evolve: cfg.live_evolve,
       };
-      cfg = await improveApi.putConfig(wsId, body);
-      allowlistText = cfg.skill_allowlist.join(', ');
+      adopt(wsId, await improveApi.putConfig(wsId, body));
       toasts.success('Self-improvement settings saved', cfg.enabled ? 'Enabled' : 'Disabled');
     } catch (e) {
       toasts.error('Save failed', e instanceof Error ? e.message : String(e));
@@ -280,7 +321,12 @@
     />
   {:else if loading && !cfg}
     <Skeleton rows={2} height={88} />
-  {:else if cfg}
+  {:else if !cfg}
+    <LoadState what="self-improvement settings" error={loadError || 'Nothing came back.'} empty onretry={() => wsId && void load(wsId)} />
+  {:else}
+    {#if loadError}
+      <LoadState what="self-improvement" error={loadError} onretry={() => wsId && void load(wsId)} />
+    {/if}
     <!-- Config form -->
     <div class="card form">
       <div class="field field-row">
@@ -327,9 +373,9 @@
           {/each}
         </div>
         <span class="hint">
-          Each selected agent CLI runs the analysis independently with its own default model, so you
-          get a separate set of suggestions per provider (labeled in the results). At least one is
-          required.
+          Each selected agent CLI runs the scheduled / Run-now analysis independently with its own
+          default model, so you get a separate set of suggestions per provider (labeled in the
+          results). Evolve now and Live evolve use only the first one. At least one is required.
         </span>
       </div>
 
@@ -350,7 +396,12 @@
       </div>
 
       <div class="actions">
-        <button class="btn primary" disabled={saving} onclick={save}>
+        <button
+          class="btn primary"
+          disabled={saving || !dirty || !!formError}
+          title={formError || (dirty ? 'Save these settings' : 'No changes to save')}
+          onclick={save}
+        >
           {saving ? 'Saving…' : 'Save'}
         </button>
         <button class="btn" disabled={running} onclick={runNow}>
@@ -369,6 +420,11 @@
           <span class="dim next-run">Next run: {fmtDate(cfg.next_run_at)}</span>
         {/if}
       </div>
+      {#if formError}
+        <p class="form-note error" role="alert">{formError}</p>
+      {:else if dirty}
+        <p class="form-note">Unsaved changes — Save to apply them.</p>
+      {/if}
 
       <!-- Evolve result badge — shown after an Evolve now completes. -->
       {#if evolveResult !== null}
@@ -461,6 +517,14 @@
 </div>
 
 <style>
+  .form-note {
+    margin: 6px 0 0;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
+  .form-note.error {
+    color: var(--danger);
+  }
   /* Section chrome: shared PageHeader bar + scrolling PageBody. */
   .settings-section {
     display: flex;

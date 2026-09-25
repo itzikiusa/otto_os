@@ -7,6 +7,9 @@
   import PageBody from '../../lib/components/PageBody.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { humanVerification } from './verification';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { loopStatus } from './loopStatus';
+  import { confirmer } from '../../lib/confirm.svelte';
   import type { GoalLoop } from '../../lib/api/types';
 
   let { id, onback }: { id: string; onback: () => void } = $props();
@@ -52,10 +55,25 @@
       toasts.error(`${label} failed`, e instanceof Error ? e.message : String(e));
     }
   }
+  // Irreversible: confirm first, and only leave the page once the delete landed
+  // (a failed delete keeps the user on the loop with the error toast).
   async function del(): Promise<void> {
-    await act(() => loops.remove(id), 'Delete');
+    const name = loop?.name ?? 'this goal loop';
+    if (!(await confirmer.ask(`Delete goal loop "${name}" and its iteration history?`, { title: 'Delete goal loop' }))) return;
+    try {
+      await loops.remove(id);
+    } catch (e) {
+      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      return;
+    }
     onback();
   }
+  // Stop is terminal (a stopped loop can't be resumed), unlike Pause.
+  async function stop(): Promise<void> {
+    if (!(await confirmer.ask('Stop this goal loop? A stopped loop can\'t be resumed — use Pause to continue later.', { title: 'Stop goal loop', confirmLabel: 'Stop' }))) return;
+    await act(() => loops.stop(id), 'Stop');
+  }
+  const unanswered = $derived(loop?.ledger?.questions.some((q) => !q.answer) ?? false);
 </script>
 
 <div class="detail-page">
@@ -66,16 +84,16 @@
     </button>
   {/snippet}
   {#snippet badge()}
-    {#if loop}<span class="status {loop.status}">{loop.status}</span>{/if}
+    {#if loop}<StatusBadge status={loopStatus(loop.status)} />{/if}
   {/snippet}
   {#snippet actions()}
     {#if loop}
       {#if loop.status === 'running'}
         <button class="btn" onclick={() => act(() => loops.pause(id), 'Pause')}>Pause</button>
-        <button class="btn danger" onclick={() => act(() => loops.stop(id), 'Stop')}>Stop</button>
+        <button class="btn danger" onclick={stop}>Stop</button>
       {:else if loop.status === 'paused' || loop.status === 'blocked' || loop.status === 'exhausted'}
-        <button class="btn primary" disabled={loop.ledger?.questions.some(q => !q.answer)} onclick={() => act(() => loops.resume(id), 'Resume')}>Resume</button>
-        <button class="btn danger" onclick={() => act(() => loops.stop(id), 'Stop')}>Stop</button>
+        <button class="btn primary" disabled={unanswered} title={unanswered ? 'Answer the open decision below first' : undefined} onclick={() => act(() => loops.resume(id), 'Resume')}>Resume</button>
+        <button class="btn danger" onclick={stop}>Stop</button>
         <button class="btn ghost" onclick={del}>Delete</button>
       {:else}
         <button class="btn ghost" onclick={del}>Delete</button>
@@ -87,7 +105,14 @@
 <div class="detail">
 
   {#if !loop}
-    <p class="muted">Loading…</p>
+    {#if loops.loadingDetail}
+      <p class="muted">Loading…</p>
+    {:else}
+      <!-- The store keeps the prior detail on a failed load, so no loop here
+           means the first load failed — say so instead of "Loading…" forever. -->
+      <p class="muted">Couldn't load this goal loop.</p>
+      <button class="btn small" onclick={() => void loops.loadDetail(id)}>Retry</button>
+    {/if}
   {:else}
     <div class="bar"><span class="bar-fill" style:width={`${loop.progress_pct}%`}></span></div>
 
@@ -191,33 +216,6 @@
     height: 100%;
     min-height: 0;
   }
-  .status {
-    font-size: 11px;
-    padding: 1px 8px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    color: var(--text-dim);
-    text-transform: capitalize;
-  }
-  .status.running {
-    background: color-mix(in srgb, var(--status-working) 18%, transparent);
-    color: var(--status-working);
-  }
-  .status.succeeded {
-    background: var(--success-soft);
-    color: var(--success);
-    font-weight: 600;
-  }
-  .status.failed,
-  .status.stopped {
-    background: color-mix(in srgb, var(--status-exited) 16%, transparent);
-    color: var(--status-exited);
-  }
-  .status.blocked,
-  .status.exhausted {
-    background: var(--status-warn-soft);
-    color: var(--status-warn);
-  }
   .bar {
     height: 6px;
     border-radius: 3px;
@@ -288,7 +286,7 @@
   }
   .crit-list {
     margin: 0;
-    padding-left: 18px;
+    padding-inline-start: 18px;
     font-size: 12.5px;
   }
   .crit-list li {

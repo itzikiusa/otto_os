@@ -19,11 +19,18 @@
     /** The statement to run uncapped (the tab's ran statement). */
     statement: string;
     connectionId: string;
+    /**
+     * The scope the on-screen result RAN with (the tab's `ran_node`; `null` = no
+     * database). The export re-runs the statement, so it must hit the same
+     * database the rows came from — not whatever the selector shows now.
+     * Omitted → the explorer's active database.
+     */
+    node?: string | null;
     /** Export permission on the connection — re-checked before each run. */
     canExport: boolean;
     onclose: () => void;
   }
-  let { statement, connectionId, canExport, onclose }: Props = $props();
+  let { statement, connectionId, node, canExport, onclose }: Props = $props();
 
   type ExportFmtOpt = { value: DbExportFormat; label: string };
   const EXPORT_FORMATS: ExportFmtOpt[] = [
@@ -114,7 +121,7 @@
         `/connections/${connectionId}/db/export-to-path`,
         {
           statement,
-          node: database.activeDb ?? undefined,
+          node: (node === undefined ? database.activeDb : node) ?? undefined,
           format: exportFormat,
           local_path: localPath,
           max_rows: maxRows,

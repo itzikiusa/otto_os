@@ -196,14 +196,14 @@
         <div class="crit">
           <div class="crit-row">
             <input class="in grow" bind:value={c.text} placeholder="Criterion description" />
-            <button class="btn ghost small" onclick={() => removeCriterion(i)} aria-label="Remove">✕</button>
+            <button class="icon-btn" onclick={() => removeCriterion(i)} aria-label="Remove criterion" title="Remove criterion"><Icon name="x" size={13} /></button>
           </div>
           <div class="crit-row">
             <select class="in kind" value={c.verify_kind} onchange={(e) => setKind(c, e.currentTarget.value as AcceptanceCriterion['verify_kind'])}>
               <option value="agent">Agent assessment</option>
               <option value="manual">Agent assessment (legacy)</option>
               <option value="human">Human verification</option>
-              <option value="command">command</option>
+              <option value="command">Shell command</option>
             </select>
             {#if c.verify_kind === 'command'}
               <input class="in grow mono" bind:value={c.verify_cmd} placeholder="shell command (exit 0 = met), e.g. cargo test" />
@@ -216,7 +216,7 @@
           {/if}
         </div>
       {/each}
-      <button class="btn small" onclick={addCriterion}>+ Add criterion</button>
+      <button class="btn small" onclick={addCriterion}><Icon name="plus" size={12} /> Add criterion</button>
     </section>
 
     <section class="block">
@@ -257,7 +257,7 @@
       <input id="gl-skills" class="in" bind:value={selectedSkills} />
       {#each ['planner', 'evaluator', 'digester'] as role}
         {@const key = role as 'planner' | 'evaluator' | 'digester'}
-        <label class="lbl" for={`gl-${role}`}>{role} provider</label>
+        <label class="lbl" for={`gl-${role}`}>{role[0].toUpperCase() + role.slice(1)} provider</label>
         <select id={`gl-${role}`} class="in" bind:value={draft.suggested_config[key].provider} onchange={() => { if (draft) draft.suggested_config[key].model = ''; }}>
           {#each providers as p (p)}<option value={p}>{p}</option>{/each}
         </select>
@@ -265,7 +265,12 @@
       {/each}
     </section>
     <div class="row end">
-      <button class="btn primary" onclick={launch} disabled={launching || !canLaunch()}>
+      <button
+        class="btn primary"
+        onclick={launch}
+        disabled={launching || !canLaunch()}
+        title={launching || canLaunch() ? undefined : 'Give the loop a name and at least one criterion, each with a description and how to verify it'}
+      >
         {launching ? 'Launching…' : 'Launch loop'}
       </button>
     </div>

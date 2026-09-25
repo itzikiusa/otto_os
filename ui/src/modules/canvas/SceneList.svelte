@@ -159,6 +159,8 @@
         {#if section !== ''}
           <button
             class="section-head"
+            aria-expanded={!collapsed[section]}
+            title={section}
             onclick={() => (collapsed = { ...collapsed, [section]: !collapsed[section] })}
           >
             <Icon name={collapsed[section] ? 'chevronRight' : 'chevronDown'} size={12} />
@@ -183,10 +185,10 @@
               }}
             >
               <div class="meta">
-                <span class="title">{s.title}</span>
+                <span class="title" title={s.title}>{s.title}</span>
                 <span class="when">{ago(s.updated_at)}</span>
               </div>
-              <div class="actions">
+              <div class="actions" class:shown={canvas.currentId === s.id}>
                 <button onclick={(e) => rename(e, s)} aria-label="Rename" title="Rename">
                   <Icon name="edit" size={13} />
                 </button>
@@ -275,6 +277,7 @@
   }
   .section-label {
     flex: 1 1 auto;
+    min-width: 0;
     text-align: start;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -325,8 +328,20 @@
     gap: 1px;
     opacity: 0;
   }
+  /* Hover-only row actions were unreachable by keyboard (tabbing onto a
+     hidden button) and invisible on touch; keep them shown on focus, on the
+     open scene, and wherever there is no hover. */
   .row:hover .actions {
     opacity: 1;
+  }
+  .actions:focus-within,
+  .actions.shown {
+    opacity: 1;
+  }
+  @media (hover: none) {
+    .actions {
+      opacity: 1;
+    }
   }
   .actions button {
     border: none;
@@ -342,6 +357,6 @@
     background: var(--surface);
   }
   .actions .del:hover {
-    color: var(--status-exited);
+    color: var(--danger);
   }
 </style>

@@ -2,6 +2,7 @@
   // Analysis tab — multi-provider per-lens config, summarizer select, live polling.
   import { untrack } from 'svelte';
   import { product } from '../../lib/stores/product.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import Terminal from '../../lib/components/Terminal.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -424,6 +425,7 @@
           class="run-btn"
           onclick={runAnalysis}
           disabled={running || !canRun}
+          title={!running && !canRun ? 'Enable at least one lens and pick a provider for it' : undefined}
         >
           {running ? 'Starting…' : 'Run analysis'}
         </button>
@@ -603,7 +605,7 @@
                 {@const key = agent.id + ':repos'}
                 <div class="collapsible">
                   <button class="coll-trigger" onclick={() => toggleCollapse(key)}>
-                    <span class="coll-arrow">{collapsed[key] ? '▶' : '▼'}</span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
                     Related Repos
                     <span class="coll-count">({findings.related_repos.length})</span>
                   </button>
@@ -622,7 +624,7 @@
                 {@const key = agent.id + ':func'}
                 <div class="collapsible">
                   <button class="coll-trigger" onclick={() => toggleCollapse(key)}>
-                    <span class="coll-arrow">{collapsed[key] ? '▶' : '▼'}</span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
                     Functionalities
                     <span class="coll-count">({findings.functionalities.length})</span>
                   </button>
@@ -641,7 +643,7 @@
                 {@const key = agent.id + ':int'}
                 <div class="collapsible">
                   <button class="coll-trigger" onclick={() => toggleCollapse(key)}>
-                    <span class="coll-arrow">{collapsed[key] ? '▶' : '▼'}</span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
                     Integration Points
                     <span class="coll-count">({findings.integration_points.length})</span>
                   </button>
@@ -660,7 +662,7 @@
                 {@const key = agent.id + ':risks'}
                 <div class="collapsible">
                   <button class="coll-trigger" onclick={() => toggleCollapse(key)}>
-                    <span class="coll-arrow">{collapsed[key] ? '▶' : '▼'}</span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
                     Risks
                     <span class="coll-count">({findings.risks.length})</span>
                   </button>
@@ -679,7 +681,7 @@
                 {@const key = agent.id + ':oq'}
                 <div class="collapsible">
                   <button class="coll-trigger" onclick={() => toggleCollapse(key)}>
-                    <span class="coll-arrow">{collapsed[key] ? '▶' : '▼'}</span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
                     Open Questions
                     <span class="coll-count">({findings.open_questions.length})</span>
                   </button>
@@ -703,7 +705,7 @@
                 {@const key = agent.id + ':sl'}
                 <div class="collapsible">
                   <button class="coll-trigger" onclick={() => toggleCollapse(key)}>
-                    <span class="coll-arrow">{collapsed[key] ? '▶' : '▼'}</span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
                     Suggested Learnings
                     <span class="coll-count">({findings.suggested_learnings.length})</span>
                   </button>
@@ -1192,7 +1194,8 @@
     color: var(--text);
   }
   .coll-arrow {
-    font-size: 9px;
+    display: inline-flex;
+    align-items: center;
     color: var(--text-dim);
   }
   .coll-count {

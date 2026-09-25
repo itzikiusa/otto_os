@@ -78,12 +78,12 @@
     </button>
   {/each}
 
-  {#if overflow.length > 0}
-    <button class="bn-btn" class:active={moreActive} onclick={() => (moreOpen = true)}>
-      <span class="bn-icon"><Icon name="command" size={20} /></span>
-      <span class="bn-label">More</span>
-    </button>
-  {/if}
+  <!-- Always present: besides the spilled modules it holds Commands (the
+       phone's only palette entry off the Agents page) and Settings. -->
+  <button class="bn-btn" class:active={moreActive} onclick={() => (moreOpen = true)}>
+    <span class="bn-icon"><Icon name="command" size={20} /></span>
+    <span class="bn-label">More</span>
+  </button>
 </nav>
 
 {#if moreOpen}
@@ -94,6 +94,16 @@
   <div class="more-sheet" role="dialog" aria-modal="true" aria-label="More modules">
     <div class="sheet-grip"></div>
     <div class="sheet-grid">
+      <button
+        class="sheet-item"
+        onclick={() => {
+          moreOpen = false;
+          ui.openPalette('commands');
+        }}
+      >
+        <Icon name="search" size={22} />
+        <span>Commands</span>
+      </button>
       {#each overflow as m (m.id)}
         <button class="sheet-item" class:active={current === m.id} onclick={() => go(m.id)}>
           <Icon name={m.icon} size={22} />

@@ -8,6 +8,7 @@
   // Desktop never renders this: callers gate it behind viewport.isMobile, so
   // there is no z-index or layout cost on the unchanged ≥1025px layout.
   import type { Snippet } from 'svelte';
+  import Icon from '../lib/components/Icon.svelte';
 
   interface Props {
     /** Bound: whether the drawer is shown. */
@@ -62,7 +63,9 @@
   >
     <!-- Always-visible close affordance: tapping the thin backdrop sliver left by
          a wide drawer is hard on a phone, so give an explicit ✕. -->
-    <button class="drawer-close" onclick={close} aria-label="Close {label}" title="Close">✕</button>
+    <button class="drawer-close" onclick={close} aria-label="Close {label}" title="Close">
+      <Icon name="x" size={14} />
+    </button>
     {@render children()}
   </div>
 {/if}

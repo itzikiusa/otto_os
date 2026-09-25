@@ -8,6 +8,7 @@
   import { assistant } from '../lib/stores/assistant.svelte';
   import { auth } from '../lib/stores/auth.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
+  import { ctxMenu } from '../lib/contextmenu.svelte';
   import { tick } from 'svelte';
   import {
     activeNavId,
@@ -56,6 +57,21 @@
   function isActive(id: string): boolean {
     return activeId === id;
   }
+
+  // The account avatar was a button that did nothing — and the collapsed
+  // rail had no way to sign out (only the expanded Navigator's footer did).
+  function accountMenu(e: MouseEvent): void {
+    const name = auth.me?.display_name ?? 'Account';
+    const sub = auth.isRoot ? 'root' : auth.me?.username;
+    ctxMenu.showAt(e.currentTarget as HTMLElement, [
+      { label: sub && sub !== name ? `${name} (${sub})` : name, icon: 'user', disabled: true },
+      { separator: true },
+      { label: 'Help', icon: 'info', action: () => router.go('walkthroughs') },
+      { label: 'Settings', icon: 'gear', action: () => router.go('settings/appearance') },
+      { separator: true },
+      { label: 'Sign out', icon: 'logout', action: () => auth.logout() },
+    ]);
+  }
 </script>
 
 <nav class="rail sidebar-material" aria-label="Modules">
@@ -84,7 +100,7 @@
         >
           <Icon name={m.icon} />
           {#if m.id === 'agents' && ws.workingCount > 0}
-            <span class="rail-badge">{ws.workingCount}</span>
+            <span class="rail-badge" title={`${ws.workingCount} working`}>{ws.workingCount}</span>
           {/if}
           {#if m.id === 'assistant' && assistant.needsYouCount > 0}
             <span class="rail-badge needs" title={`${assistant.needsYouCount} waiting on you`}>{assistant.needsYouCount}</span>
@@ -104,7 +120,13 @@
     >
       <Icon name="gear" />
     </button>
-    <button class="rail-btn user" title={auth.me?.display_name ?? 'Account'} aria-label="Account">
+    <button
+      class="rail-btn user"
+      onclick={accountMenu}
+      title={auth.me?.display_name ?? 'Account'}
+      aria-label="Account"
+      aria-haspopup="menu"
+    >
       <span class="avatar">{(auth.me?.display_name ?? '?').slice(0, 1).toUpperCase()}</span>
     </button>
   </div>
@@ -135,6 +157,9 @@
     width: 100%;
     overflow-y: auto;
     scrollbar-width: none;
+    /* A scroller clips: room for the first/last icon's focus ring and the
+       count badge that overhangs the icon's top edge. */
+    padding-block: 3px;
   }
   .rail-modules::-webkit-scrollbar {
     display: none;
@@ -195,19 +220,23 @@
     position: absolute;
     top: -2px;
     inset-inline-end: -3px;
-    min-width: 14px;
-    height: 14px;
+    min-width: 15px;
+    height: 15px;
     padding: 0 3px;
     border-radius: 999px;
-    background: var(--status-working);
-    color: #fff;
-    font-size: 9px;
+    /* The Navigator's count-chip language (tinted fill, semantic text), made
+       opaque over the sidebar so the icon under the badge doesn't show
+       through. White on the bright working-green was ~2:1. */
+    background: color-mix(in srgb, var(--success) 24%, var(--bg-sidebar));
+    color: var(--success);
+    font-size: var(--fs-xs);
     font-weight: 700;
+    line-height: 1;
     display: grid;
     place-items: center;
   }
   .rail-badge.needs {
-    background: var(--warning-soft);
+    background: color-mix(in srgb, var(--warning) 24%, var(--bg-sidebar));
     color: var(--warning);
   }
   .avatar {

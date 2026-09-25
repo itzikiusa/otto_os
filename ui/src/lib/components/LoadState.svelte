@@ -69,7 +69,7 @@
   {#if error}
     <div class="ls-stale" role="status" data-testid="load-stale">
       <Icon name="warning" size={12} />
-      <span class="ls-stale-text">Showing the last good load — refresh failed: {error}</span>
+      <span class="ls-stale-text" title={error}>Showing the last good load — refresh failed: {error}</span>
       {#if onretry}<button class="btn small ghost" onclick={onretry} disabled={loading}>Retry</button>{/if}
     </div>
   {/if}

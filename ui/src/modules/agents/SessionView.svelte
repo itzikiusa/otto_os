@@ -14,6 +14,7 @@
   import AttachProductStory from './AttachProductStory.svelte';
   import Handover from './Handover.svelte';
   import HandoverDeliveryPanel from './HandoverDeliveryPanel.svelte';
+  import ShareModal from './ShareModal.svelte';
   import { ws, isForeground } from '../../lib/stores/workspace.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { activity } from '../../lib/stores/activity.svelte';
@@ -168,10 +169,6 @@
   }
 
   let renaming = $state(false);
-  // Bumped after a successful restart so the embedded <Terminal> drops its
-  // exited overlay and reconnects to the freshly respawned/resumed PTY.
-  let restartNonce = $state(0);
-
   // Keyboard follows the active pane: when this pane becomes the target one
   // (new session, tab/tile switch, sidebar navigation) move focus into its
   // terminal so typing works without a click. `focused` alone won't do — it is
@@ -188,6 +185,7 @@
   let attachIssueOpen = $state(false);
   let attachProductOpen = $state(false);
   let handoverOpen = $state(false);
+  let shareOpen = $state(false);
 
   const attachedIssue = $derived(
     (session?.meta?.issue as AttachedIssue | undefined) ?? null,
@@ -393,7 +391,7 @@
       const dirs = collectDirs();
       await ws.updateSessionMeta(sessionId, { extra_dirs: dirs });
       if (alsoRestart) {
-        await ws.restartSession(sessionId);
+        await ws.restartSession(sessionId, { quiet: true });
         toasts.success('Directories saved', 'Session restarted with the new directories.');
       } else {
         toasts.success('Directories saved', 'Applies the next time this session restarts.');
@@ -417,6 +415,10 @@
   }
 
   async function commitRename(): Promise<void> {
+    // Enter/Escape unmount the input, and WebKit fires `blur` on the removed
+    // focused node — without this guard Escape COMMITTED the draft (and Enter
+    // sent the rename twice).
+    if (!renaming) return;
     renaming = false;
     const next = draftTitle.trim();
     if (!next || next === session?.title) return;
@@ -427,25 +429,10 @@
     }
   }
 
-  async function restart(): Promise<void> {
-    // Restart kills the live process and respawns it — a working agent loses
-    // its in-flight turn, so that one case asks first (idle/exited don't).
-    if (status === 'working') {
-      const name = session?.title?.trim() || 'this session';
-      const ok = await confirmer.ask(
-        `“${name}” is working right now. Restarting stops its current turn and starts the agent again, resuming its saved conversation where it can.`,
-        { title: 'Restart working session?', confirmLabel: 'Restart session', danger: true },
-      );
-      if (!ok) return;
-    }
-    try {
-      await ws.restartSession(sessionId);
-      // Nudge the embedded Terminal to drop its exited overlay and reconnect to
-      // the now-live PTY (the session id is unchanged, so this is the only signal).
-      restartNonce++;
-    } catch (e) {
-      toasts.error('Restart failed', e instanceof Error ? e.message : String(e));
-    }
+  // Asks first when the agent is working (it loses its in-flight turn); the
+  // store bumps the restart nonce the Terminal below reconnects on.
+  function restart(): Promise<void> {
+    return ws.requestRestart(sessionId);
   }
 
   const keepAlive = $derived(session?.meta?.keep_alive === true);
@@ -467,11 +454,14 @@
     }
   }
 
-  // Always asked — even under "Always delete" (Settings → Appearance), same as
-  // the tab ×: a remembered preference never skips an irreversible delete.
+  // Always asked, like the sidebar row's Delete: this is the explicit Delete
+  // command. The "Always delete" preference (Settings → Appearance) governs
+  // CLOSING a tab (⌘W / the tab ×), which it now does silently.
   async function del(): Promise<void> {
+    // Name it — in a tiled/split view the ⋯ that opened this is one of many.
+    const name = session?.title?.trim();
     const ok = await confirmer.ask(
-      'Delete this session and its entire history? This cannot be undone.',
+      `Delete ${name ? `“${name}”` : 'this session'} and its entire history? This cannot be undone.`,
       { title: 'Delete session', confirmLabel: 'Delete' },
     );
     if (!ok) return;
@@ -590,6 +580,9 @@
             { label: 'Rename…', icon: 'edit', action: startRename } as MenuItem,
             ...(isAgent ? [{ label: 'Additional directories…', icon: 'folder', action: openDirs } as MenuItem] : []),
             ...(isAgent ? [{ label: 'Hand over to…', icon: 'send', action: openHandover } as MenuItem] : []),
+            // Parity with the tab's right-click menu — a tiled/split pane has no
+            // tab to right-click, so Share was unreachable from here.
+            { label: 'Share…', icon: 'share', action: () => (shareOpen = true) } as MenuItem,
             { separator: true } as MenuItem,
             {
               label: attachedIssue ? 'Change Jira issue…' : 'Attach Jira issue…',
@@ -611,13 +604,20 @@
               : []),
             // In-progress agent only: respawn a stuck PTY (provider resume when
             // possible). Idle/exited/reconnectable sessions have their own paths.
-            ...(isAgent && (status === 'running' || status === 'working')
-              ? [{ label: 'Restart agent', icon: 'refresh', action: () => void restart() } as MenuItem]
+            // Same verb as the header ↻ button; skipped once tier 5 folded that
+            // button into this menu (it is already a row below — no duplicate).
+            ...(isAgent && tier < 5 && (status === 'running' || status === 'working')
+              ? [{ label: 'Restart session', icon: 'refresh', action: () => void restart() } as MenuItem]
               : []),
           ]),
       ...(folded.length > 0 ? [{ separator: true } as MenuItem, ...folded] : []),
       ...(showClose && tier >= 7
-        ? [{ separator: true } as MenuItem, { label: 'Close pane', icon: 'x', action: onclosepane } as MenuItem]
+        ? [
+            { separator: true } as MenuItem,
+            // Same words as the header ✕ it replaces: in a split that closes the
+            // SESSION (archive/delete per Settings), not merely the pane.
+            { label: closeTitle.split(' (')[0], icon: 'x', action: onclosepane } as MenuItem,
+          ]
         : []),
       ...(presets.length > 0 ? [{ separator: true } as MenuItem, ...presets] : []),
       ...(readOnly
@@ -677,7 +677,7 @@
         class="pane-title"
         role="button"
         tabindex="0"
-        title="Double-click to rename; right-click for options"
+        title="{session?.title ?? sessionId} — double-click to rename, right-click for options"
         ondblclick={startRename}
         oncontextmenu={(e) => openPaneMenu(e)}
       >{session?.title ?? sessionId}</span>
@@ -777,9 +777,9 @@
            controls never float over (and hide) terminal content. The embedded
            <Terminal> gets showToolbar={false} to drop its overlay counterpart. -->
       <div class="term-ctl" role="toolbar" tabindex="-1" aria-label="Terminal controls" onmousedown={(e) => e.stopPropagation()}>
-        <button class="icon-btn" onclick={() => ui.termZoomOut()} title="Terminal font smaller (Ctrl+−)" aria-label="Zoom out">−</button>
+        <button class="icon-btn" onclick={() => ui.termZoomOut()} disabled={ui.termFontSize <= 8} title="Terminal font smaller (⌘− in the terminal)" aria-label="Zoom out">−</button>
         <span class="term-ctl-size" title="Terminal font size">{ui.termFontSize}px</span>
-        <button class="icon-btn" onclick={() => ui.termZoomIn()} title="Terminal font larger (Ctrl+=)" aria-label="Zoom in">+</button>
+        <button class="icon-btn" onclick={() => ui.termZoomIn()} disabled={ui.termFontSize >= 28} title="Terminal font larger (⌘+ in the terminal)" aria-label="Zoom in">+</button>
         <button
           class="icon-btn term-ctl-copy"
           class:on={ui.termCopyOnSelect}
@@ -814,7 +814,7 @@
         onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && openPaneMenu(e)}
         title="More…"
         aria-label={tier >= 7 ? `More… — ${session?.title ?? sessionId}` : 'More…'}
-      >⋯</button>
+      ><Icon name="more" size={13} /></button>
     {/if}
     {#if showClose && tier < 7}
       <button class="icon-btn" onclick={onclosepane} title={closeTitle} aria-label={closeTitle}><Icon name="x" size={12} /></button>
@@ -836,7 +836,7 @@
     {/if}
     {#if effView !== 'chat'}
       <div class="pane-term">
-        <Terminal bind:this={termRef} {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} {restartNonce} onstatus={onTermStatus} showToolbar={false} autoFocus={kbFocused} preferDom={isAgent} claimOnAttach={!readOnly} />
+        <Terminal bind:this={termRef} {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} restartNonce={ws.restartNonces[sessionId] ?? 0} onstatus={onTermStatus} showToolbar={false} autoFocus={kbFocused} preferDom={isAgent} claimOnAttach={!readOnly} />
       </div>
     {/if}
   </div>
@@ -854,6 +854,10 @@
   <Handover {sessionId} onclose={() => (handoverOpen = false)} />
 {/if}
 
+{#if shareOpen}
+  <ShareModal {sessionId} onclose={() => (shareOpen = false)} />
+{/if}
+
 {#if dirsOpen}
   <Modal title="Additional directories" onclose={() => (dirsOpen = false)}>
     <div class="field">
@@ -867,8 +871,9 @@
                 type="button"
                 class="dir-remove"
                 title="Remove directory"
+                aria-label="Remove {dir}"
                 onclick={() => removeDir(dir)}
-              >✕</button>
+              ><Icon name="x" size={11} /></button>
             </li>
           {/each}
         </ul>
@@ -1178,6 +1183,8 @@
   }
   .dir-remove {
     flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
     background: none;
     border: none;
     cursor: pointer;

@@ -13,6 +13,7 @@ function form(overrides: Record<string, unknown> = {}) {
     tunHost: '', tunPort: '', tunUser: '', tunIdentity: '', secret: '', name: '',
     hasDatabaseField: new Set(['mysql','postgres','redis','mongodb','clickhouse']),
     tzKinds: new Set(['mysql','postgres','clickhouse']), tlsKinds: new Set(['mysql','postgres','redis','mongodb','clickhouse']),
+    kindLabels: { ssh: 'SSH', mysql: 'MySQL', postgres: 'PostgreSQL', redis: 'Redis', mongodb: 'MongoDB', clickhouse: 'ClickHouse', custom: 'Custom' },
     URL, toasts: { error: () => {}, success: () => {} }, ...overrides,
   };
   ctx.setKind = (kind: string) => { ctx.kind = kind; };

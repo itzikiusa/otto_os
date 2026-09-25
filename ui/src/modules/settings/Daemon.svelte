@@ -8,6 +8,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
 
   interface NetworkListener {
     enabled: boolean;
@@ -20,6 +22,10 @@
   }
 
   let loading = $state(true);
+  // A failed load shows inline with Retry — never the form with its defaults
+  // (listener off, sandbox off) dressed up as the real settings, one Save away
+  // from writing them back.
+  let loadError = $state('');
   let saving = $state(false);
   let enabled = $state(false);
   let port = $state(7700);
@@ -34,6 +40,10 @@
     sandboxEnabled !== savedSandbox.enabled || sandboxNetwork !== savedSandbox.network,
   );
   const dirty = $derived(listenerDirty || sandboxDirty);
+  // The inputs' min/max are advisory only; an out-of-range or empty port would
+  // be saved as-is (and an empty one silently falls back to the loopback port).
+  const portValid = $derived(Number.isInteger(port) && port >= 1024 && port <= 65535);
+  const portError = $derived(enabled && !portValid ? 'Enter a whole number from 1024 to 65535.' : '');
   // Latest full settings object (the PUT response). Saves send ONLY the keys
   // they change: PUT /settings upserts exactly the keys in the body, so
   // spreading this page-load snapshot reverted keys written since (auto-update
@@ -42,31 +52,35 @@
   let allSettings: Record<string, unknown> = $state({});
 
   $effect(() => {
-    void (async () => {
-      try {
-        allSettings = await api.get<Record<string, unknown>>('/settings');
-        const nl = allSettings['network_listener'] as NetworkListener | undefined;
-        if (nl) {
-          enabled = nl.enabled;
-          port = nl.port;
-        }
-        savedListener = { enabled, port };
-        const sb = allSettings['process_sandbox'] as ProcessSandbox | undefined;
-        if (sb) {
-          sandboxEnabled = sb.enabled;
-          sandboxNetwork = sb.network ?? 'full';
-        }
-        savedSandbox = { enabled: sandboxEnabled, network: sandboxNetwork };
-      } catch {
-        toasts.error('Could not load daemon settings');
-      } finally {
-        loading = false;
-      }
-    })();
+    void load();
   });
 
+  async function load(): Promise<void> {
+    loading = true;
+    loadError = '';
+    try {
+      allSettings = await api.get<Record<string, unknown>>('/settings');
+      const nl = allSettings['network_listener'] as NetworkListener | undefined;
+      if (nl) {
+        enabled = nl.enabled;
+        port = nl.port;
+      }
+      savedListener = { enabled, port };
+      const sb = allSettings['process_sandbox'] as ProcessSandbox | undefined;
+      if (sb) {
+        sandboxEnabled = sb.enabled;
+        sandboxNetwork = sb.network ?? 'full';
+      }
+      savedSandbox = { enabled: sandboxEnabled, network: sandboxNetwork };
+    } catch (e) {
+      loadError = loadErrorText(e);
+    } finally {
+      loading = false;
+    }
+  }
+
   async function save(): Promise<void> {
-    if (!dirty) return;
+    if (!dirty || portError) return;
     // Only the changed groups: an unchanged network_listener in the body would
     // still write a network-listener audit entry.
     const body: Record<string, unknown> = {};
@@ -81,11 +95,21 @@
       if (saveListener) {
         savedListener = { enabled, port };
         if (auth.meta) auth.meta.network_listener = enabled;
-        notes.push(enabled ? `Listening on 0.0.0.0:${port}` : 'Loopback only');
+        // The listener is bound once at daemon start — say so rather than
+        // claim a socket that isn't open yet.
+        notes.push(
+          enabled
+            ? `https://0.0.0.0:${port} after the daemon restarts`
+            : 'Loopback only after the daemon restarts',
+        );
       }
       if (saveSandbox) {
         savedSandbox = { enabled: sandboxEnabled, network: sandboxNetwork };
-        notes.push(sandboxEnabled ? `Agents confined (network: ${sandboxNetwork})` : 'Sandbox off');
+        notes.push(
+          sandboxEnabled
+            ? `New sessions confined (network: ${sandboxNetwork})`
+            : 'Sandbox off for new sessions',
+        );
       }
       toasts.success('Daemon settings saved', notes.join(' · '));
     } catch (e) {
@@ -99,11 +123,11 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('daemon')} subtitle={`ottod ${auth.meta?.version ?? ''} · API v${auth.meta?.api_version ?? 1}`}>
     {#snippet actions()}
-      {#if !loading}
+      {#if !loading && !loadError}
         <button
           class="btn small primary"
-          disabled={!dirty || saving}
-          title={dirty ? 'Save network and sandbox settings' : 'No changes to save'}
+          disabled={!dirty || saving || !!portError}
+          title={portError || (dirty ? 'Save network and sandbox settings' : 'No changes to save')}
           onclick={() => void save()}
         >
           {saving ? 'Saving…' : 'Save'}
@@ -115,6 +139,8 @@
 
   {#if loading}
     <Skeleton rows={3} height={40} />
+  {:else if loadError}
+    <LoadState what="daemon settings" error={loadError} empty onretry={() => void load()} />
   {:else}
     <div class="section-title">Network</div>
     <div class="card pad">
@@ -124,6 +150,10 @@
       </label>
       <p class="warn-note" class:visible={enabled}>
         Anyone on your network can reach the login page. Only enable on trusted networks.
+      </p>
+      <p class="hint-line">
+        Served over HTTPS with a self-signed certificate. Takes effect the next time the daemon
+        starts (quit and reopen Otto).
       </p>
       <div class="field" style="max-width: 160px">
         <label for="dm-port">Port</label>
@@ -135,7 +165,9 @@
           max="65535"
           bind:value={port}
           disabled={!enabled}
+          aria-invalid={!!portError}
         />
+        {#if portError}<span class="hint port-error">{portError}</span>{/if}
       </div>
     </div>
 
@@ -148,7 +180,10 @@
       <p class="hint-line">
         When on, spawned agent CLIs (claude / codex / agy / shell) can only write to
         the workspace, its git dir, the CLIs' own caches and temp — never the rest of
-        your disk. Reads are unaffected. macOS only; ignored on other systems.
+        your disk. Reads are unaffected. macOS only; ignored on other systems. Applies to
+        sessions started from now on — running ones keep the confinement they started with.
+        Not yet confined: custom providers, connection terminals, and background agent runs
+        (workflow steps, scheduled tasks, swarms).
       </p>
       <div class="field" style="max-width: 320px">
         <label for="dm-sandbox-net">Network</label>
@@ -174,9 +209,9 @@
     <div class="card pad">
       <div class="row">
         <span class="dim">Log file</span>
-        <span class="mono">~/Library/Logs/Otto/ottod.log</span>
+        <span class="mono">~/Library/Logs/Otto/ottod.log.YYYY-MM-DD</span>
       </div>
-      <p class="hint-line">Rotated daily by the daemon.</p>
+      <p class="hint-line">A new file each day; older files are kept.</p>
       <button class="btn" onclick={() => router.go('settings/logs')}>Open log viewer</button>
     </div>
   {/if}
@@ -210,5 +245,8 @@
     font-size: 11.5px;
     color: var(--text-dim);
     margin: 8px 0 0;
+  }
+  .port-error {
+    color: var(--danger);
   }
 </style>

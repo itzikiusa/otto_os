@@ -9,6 +9,7 @@
   import { api } from '../../lib/api/client';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { NotificationSettings } from '../../lib/api/types';
 
   // Load once on mount if the store hasn't fetched yet.
@@ -21,9 +22,15 @@
   }
 
   function onThreshold(e: Event & { currentTarget: HTMLInputElement }): void {
-    const n = Math.round(Number(e.currentTarget.value));
-    if (!Number.isFinite(n)) return;
-    save({ expiry_threshold_days: Math.min(30, Math.max(1, n)) });
+    const el = e.currentTarget;
+    const n = Math.round(Number(el.value));
+    const cur = notifications.settings.expiry_threshold_days;
+    // An empty/invalid entry, or one clamped back to the value already saved,
+    // changes no state — so put the saved number back in the box explicitly
+    // (otherwise it keeps showing e.g. "45" while 30 is in effect).
+    const next = el.value.trim() === '' || !Number.isFinite(n) ? cur : Math.min(30, Math.max(1, n));
+    el.value = String(next);
+    if (next !== cur) save({ expiry_threshold_days: next });
   }
 
   // ---------------------------------------------------------------------------
@@ -82,17 +89,22 @@
     if (auth.isRoot) void loadChannelFlags();
   });
 
+  // Set when the flags couldn't be read: the toggles would otherwise all show
+  // OFF (the defaults) even if some are on, so they're disabled until a retry.
+  let flagsError = $state('');
+
   async function loadChannelFlags(): Promise<void> {
     for (const f of CHANNEL_NOTIFY_FLAGS) {
       flagLoading[f.key] = true;
     }
+    flagsError = '';
     try {
       const all = await api.get<Record<string, unknown>>('/settings');
       for (const f of CHANNEL_NOTIFY_FLAGS) {
         flagValues[f.key] = all?.[f.key] === true;
       }
-    } catch {
-      // Not root or settings not reachable — keep defaults.
+    } catch (e) {
+      flagsError = loadErrorText(e);
     } finally {
       for (const f of CHANNEL_NOTIFY_FLAGS) {
         flagLoading[f.key] = false;
@@ -128,6 +140,7 @@
         value={notifications.settings.expiry_threshold_days}
         onchange={onThreshold}
       />
+      <span class="hint">1–30 days (default 3).</span>
     </div>
   </div>
 
@@ -170,6 +183,12 @@
       Each toggle below sends a one-line push notification to your configured
       Slack / Telegram integration. All are off by default.
     </div>
+    {#if flagsError}
+      <div class="flags-error" role="alert">
+        <span>Couldn't load these settings: {flagsError}</span>
+        <button class="btn small" onclick={() => void loadChannelFlags()}>Retry</button>
+      </div>
+    {/if}
     <div class="card pad">
       {#each CHANNEL_NOTIFY_FLAGS as flag (flag.key)}
         <label class="opt">
@@ -181,7 +200,7 @@
             <input
               type="checkbox"
               checked={flagValues[flag.key]}
-              disabled={flagLoading[flag.key]}
+              disabled={flagLoading[flag.key] || !!flagsError}
               onchange={(e) => void toggleFlag(flag.key, e.currentTarget.checked)}
             />
             <span class="toggle-track"></span>
@@ -213,6 +232,15 @@
     gap: 16px;
     padding: 8px 0;
     cursor: pointer;
+  }
+  .flags-error {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    max-width: 520px;
+    margin-bottom: 8px;
+    font-size: var(--fs-s);
+    color: var(--danger);
   }
   .opt + .opt {
     border-top: 1px solid var(--border);

@@ -87,12 +87,12 @@
     if (!resourceAccess.can('aws_account', account.id, `ec2_${action}`, 'aws_ec2', 'edit')) return;
     const label = i.name ? `${i.name} (${i.instance_id})` : i.instance_id;
     if (action === 'start') {
-      const ok = await confirmer.ask(`Start ${label}?`, { title: 'Start instance', confirmLabel: 'Start', danger: false });
+      const ok = await confirmer.ask(`Start ${label} in ${account.name} · ${region}?`, { title: 'Start instance', confirmLabel: 'Start', danger: false });
       if (!ok) return;
     } else {
       const typed = await confirmer.promptText(
-        `${action === 'stop' ? 'Stop' : 'Reboot'} ${label}${account.environment === 'prod' ? ' — this is PRODUCTION' : ''}? Type the instance id to confirm.`,
-        { title: `${action === 'stop' ? 'Stop' : 'Reboot'} instance`, confirmLabel: action === 'stop' ? 'Stop' : 'Reboot', placeholder: i.instance_id },
+        `${action === 'stop' ? 'Stop' : 'Reboot'} ${label} in ${account.name} · ${region}${account.environment === 'prod' ? ' — this is PRODUCTION' : ''}? Type the instance id to confirm.`,
+        { title: `${action === 'stop' ? 'Stop' : 'Reboot'} instance`, confirmLabel: action === 'stop' ? 'Stop' : 'Reboot', placeholder: i.instance_id, danger: true },
       );
       if (typed === null) return;
       if (typed !== i.instance_id) {
@@ -110,6 +110,14 @@
     } finally {
       busy = { ...busy, [i.instance_id]: false };
     }
+  }
+
+  /** Why a drawer power button is disabled (undefined when it isn't). */
+  function powerHint(allowed: boolean, i: Ec2Instance, needs: 'stopped' | 'running'): string | undefined {
+    if (!allowed) return 'You don’t have permission for this action on this account';
+    if (busy[i.instance_id]) return 'An action is already in flight';
+    if (i.state !== needs) return `Only available while the instance is ${needs} (it is ${i.state})`;
+    return undefined;
   }
 
   // Detail drawer. The drawer's `inst` is refreshed from the list after a
@@ -244,7 +252,7 @@
             <td class="mono hide-md">{i.public_ip ?? '—'}</td>
             <td class="dim hide-md" title={fmtDate(i.launch_time)}>{fmtAgo(i.launch_time)}</td>
             <td class="act">
-              <button class="icon-btn" onclick={(e) => menu(e, i)} aria-label={`Actions for ${i.instance_id}`} title="Actions" disabled={busy[i.instance_id]}>⋯</button>
+              <button class="icon-btn" onclick={(e) => menu(e, i)} aria-label={`Actions for ${i.instance_id}`} title="Actions" disabled={busy[i.instance_id]}><Icon name="more" size={14} /></button>
             </td>
           </tr>
         {/each}
@@ -274,9 +282,9 @@
           <span class="mono dim">{inst.az ?? ''}</span>
           {#if canEdit}
             <span class="spacer"></span>
-            <button class="ghost sm" onclick={() => void act(inst, 'start')} disabled={!canStart || inst.state !== 'stopped' || busy[inst.instance_id]}><Icon name="play" size={12} /> Start</button>
-            <button class="ghost sm" onclick={() => void act(inst, 'reboot')} disabled={!canReboot || inst.state !== 'running' || busy[inst.instance_id]}><Icon name="refresh" size={12} /> Reboot</button>
-            <button class="ghost sm danger" onclick={() => void act(inst, 'stop')} disabled={!canStop || inst.state !== 'running' || busy[inst.instance_id]}><Icon name="x" size={12} /> Stop</button>
+            <button class="ghost sm" onclick={() => void act(inst, 'start')} disabled={!canStart || inst.state !== 'stopped' || busy[inst.instance_id]} title={powerHint(canStart, inst, 'stopped')}><Icon name="play" size={12} /> Start</button>
+            <button class="ghost sm" onclick={() => void act(inst, 'reboot')} disabled={!canReboot || inst.state !== 'running' || busy[inst.instance_id]} title={powerHint(canReboot, inst, 'running')}><Icon name="refresh" size={12} /> Reboot</button>
+            <button class="ghost sm danger" onclick={() => void act(inst, 'stop')} disabled={!canStop || inst.state !== 'running' || busy[inst.instance_id]} title={powerHint(canStop, inst, 'running')}><Icon name="x" size={12} /> Stop</button>
           {/if}
         </div>
         <dl class="kv">

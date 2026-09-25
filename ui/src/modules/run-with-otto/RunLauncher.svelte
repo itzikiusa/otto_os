@@ -118,6 +118,7 @@
   }
 
   async function launch(): Promise<void> {
+    if (busy) return;
     error = '';
     const q = query.trim();
     if (!q) {
@@ -126,6 +127,14 @@
     }
     busy = true;
     try {
+      // ⌘↩ right after a paste lands while detection is still debouncing/in
+      // flight — launching now would send a Jira key or URL as FREE TEXT (the
+      // daemon only parses url/source_ref, never seed_text). Finish detecting.
+      if (detecting) {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        detectAbort?.abort();
+        await runDetect(q);
+      }
       const run = await runWithOtto.launch(wsId, {
         source_kind: detected?.source_kind,
         source_ref: detected?.source_ref,
@@ -205,6 +214,7 @@
         type="button"
         class="seg-btn"
         class:active={mode === 'single_agent'}
+        aria-pressed={mode === 'single_agent'}
         onclick={() => (mode = 'single_agent')}
         title="One headless agent makes the change on an isolated branch"
       >Single agent</button>
@@ -212,6 +222,7 @@
         type="button"
         class="seg-btn"
         class:active={mode === 'goal_loop'}
+        aria-pressed={mode === 'goal_loop'}
         onclick={() => (mode = 'goal_loop')}
         title="A full Plan → Execute → Evaluate loop iterates until the goal is met"
       >Goal loop</button>
@@ -232,7 +243,9 @@
 
     <label class="ctl">
       <span>Provider</span>
-      <select bind:value={provider} aria-label="Provider">
+      <!-- A model id belongs to one provider: switching clears it, else a
+           hidden stale model (e.g. claude's "opus") rides along to codex. -->
+      <select bind:value={provider} aria-label="Provider" onchange={() => (model = '')}>
         {#each providers as p (p)}
           <option value={p}>{p}</option>
         {/each}
@@ -242,7 +255,7 @@
     <!-- Catalog-backed model control; hides itself when the provider has no
          model-flag template. Blank = provider default. -->
     <div class="model-ctl">
-      <ModelPicker {provider} value={model} onchange={(m) => (model = m)} />
+      <ModelPicker {provider} value={model} onchange={(m) => (model = m)} hint="Pins the model for this run only. Empty uses the provider’s default." />
     </div>
 
     <label class="chk"><input type="checkbox" bind:checked={autoOpenPr} /> Auto-open PR</label>
@@ -332,7 +345,7 @@
     outline-offset: 1px;
   }
   .detect { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; min-height: 1.2rem; flex-wrap: wrap; }
-  .ref { color: var(--text); font-variant-numeric: tabular-nums; }
+  .ref { color: var(--text); font-variant-numeric: tabular-nums; min-width: 0; overflow-wrap: anywhere; }
   .link { color: var(--accent-text); font-size: var(--fs-s); }
   .muted { color: var(--text-dim); }
   .controls { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }

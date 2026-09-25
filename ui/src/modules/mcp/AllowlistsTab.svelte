@@ -203,7 +203,7 @@
     padding: 4px;
   }
   .icon.danger:hover {
-    color: var(--status-exited, #ff5f57);
+    color: var(--danger);
   }
   .muted {
     color: var(--text-dim);

@@ -150,8 +150,8 @@
             <span class="dot" style="background:{c.color || 'var(--accent)'}"></span>
             <span class="name" title={c.name}>{c.name}</span>
             <EnvBadge env={c.environment} />
-            <button class="icon-btn more" aria-label="Cluster actions" onclick={(e) => { e.stopPropagation(); menu(e, c); }}>
-              <Icon name="grip" size={13} />
+            <button class="icon-btn more" aria-label="Cluster actions" title="Cluster actions" onclick={(e) => { e.stopPropagation(); menu(e, c); }}>
+              <Icon name="more" size={14} />
             </button>
           </div>
           <div class="row2 mono" title={c.context_name}>
@@ -248,7 +248,8 @@
   .more {
     opacity: 0.5;
   }
-  .cluster:hover .more {
+  .cluster:hover .more,
+  .cluster:focus-within .more {
     opacity: 1;
   }
   .row2 {

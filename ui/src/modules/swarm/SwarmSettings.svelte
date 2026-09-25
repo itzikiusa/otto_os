@@ -23,6 +23,9 @@
   // -- Standing goals (edited as a local draft set, PUT on Save) --------------
   let draftGoals = $state<CreateGoalReq[]>([]);
   let goalsLoaded = $state(false);
+  // True once the saved set has landed in the draft. Save PUTs the WHOLE set,
+  // so saving before that would replace the swarm's goals with an empty list.
+  let goalsReady = $state(false);
   let savingGoals = $state(false);
   let goalEditorOpen = $state(false);
   let goalEditIndex = $state<number>(-1);
@@ -44,6 +47,7 @@
         blocking: g.blocking,
         order_idx: g.order_idx,
       }));
+      goalsReady = true;
     });
   });
 
@@ -148,7 +152,13 @@
     }
   }
   async function delTrigger(t: SwarmChannelTrigger) {
-    if (await confirmer.ask(`Delete this ${t.channel} trigger?`, { title: 'Delete trigger?' })) {
+    if (
+      await confirmer.ask(`Delete this ${t.channel} trigger? Matching messages stop launching swarm work.`, {
+        title: 'Delete trigger',
+        confirmLabel: 'Delete',
+        danger: true,
+      })
+    ) {
       try {
         await swarm.deleteTrigger(t.id);
       } catch (e) {
@@ -178,11 +188,13 @@
     <div class="bar">
       <button class="btn small" onclick={addGoal}><Icon name="plus" size={12} /> Add standing goal</button>
       <span class="grow"></span>
-      <button class="btn small primary" onclick={saveGoals} disabled={savingGoals}>
+      <button class="btn small primary" onclick={saveGoals} disabled={savingGoals || !goalsReady} title={goalsReady ? undefined : 'Loading the saved standing goals…'}>
         {savingGoals ? 'Saving…' : 'Save standing goals'}
       </button>
     </div>
-    {#if draftGoals.length === 0}
+    {#if !goalsReady}
+      <p class="hint">Loading standing goals…</p>
+    {:else if draftGoals.length === 0}
       <EmptyState icon="check" title="No standing goals" body="Add goals the whole swarm must hit — e.g. tests pass, no new clippy warnings." />
     {:else}
       <div class="list">
@@ -193,8 +205,8 @@
               {#if g.blocking}<span class="blocking">blocking</span>{/if}
               {#if g.metric}<span class="dim">· {g.metric}{g.comparator ? ` ${g.comparator}` : ''}{g.target_value != null ? ` ${g.target_value}` : ''}</span>{/if}
             </div>
-            <button class="icon-btn small" onclick={() => editGoal(i)} aria-label="Edit"><Icon name="edit" size={13} /></button>
-            <button class="icon-btn small" onclick={() => removeGoal(i)} aria-label="Remove"><Icon name="trash" size={13} /></button>
+            <button class="icon-btn small" onclick={() => editGoal(i)} aria-label="Edit standing goal" title="Edit standing goal"><Icon name="edit" size={13} /></button>
+            <button class="icon-btn small" onclick={() => removeGoal(i)} aria-label="Remove standing goal" title="Remove (takes effect on Save)"><Icon name="trash" size={13} /></button>
           </div>
         {/each}
       </div>
@@ -258,11 +270,11 @@
                 {#if t.auto_start}<span class="dim">· auto-start</span>{/if}
                 {#if t.reply}<span class="dim">· reply</span>{/if}
               </div>
-              <button class="toggle" class:on={t.enabled} onclick={() => toggleEnabled(t)} title={t.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}>
+              <button class="toggle" class:on={t.enabled} aria-pressed={t.enabled} onclick={() => toggleEnabled(t)} title={t.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}>
                 {t.enabled ? 'On' : 'Off'}
               </button>
-              <button class="icon-btn small" onclick={() => editTrigger(t)} aria-label="Edit"><Icon name="edit" size={13} /></button>
-              <button class="icon-btn small" onclick={() => delTrigger(t)} aria-label="Delete"><Icon name="trash" size={13} /></button>
+              <button class="icon-btn small" onclick={() => editTrigger(t)} aria-label="Edit trigger" title="Edit trigger"><Icon name="edit" size={13} /></button>
+              <button class="icon-btn small" onclick={() => delTrigger(t)} aria-label="Delete trigger" title="Delete trigger"><Icon name="trash" size={13} /></button>
             </div>
           {/each}
         </div>
@@ -348,8 +360,8 @@
   }
   .blocking {
     font-size: var(--fs-xs);
-    color: var(--status-exited);
-    border: 1px solid color-mix(in srgb, var(--status-exited) 40%, transparent);
+    color: var(--danger);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
     border-radius: 999px;
     padding: 0 6px;
   }

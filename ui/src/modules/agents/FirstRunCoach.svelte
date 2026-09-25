@@ -181,7 +181,7 @@
 
 <div class="coach-wrap">
   <div class="coach card">
-    <button class="coach-close" title="Dismiss" onclick={dismiss}><Icon name="x" size={13} /></button>
+    <button class="coach-close" title="Dismiss" aria-label="Dismiss the getting-started guide" onclick={dismiss}><Icon name="x" size={13} /></button>
 
     <div class="coach-head">
       <div class="coach-mark"><Icon name="zap" size={20} /></div>
@@ -420,7 +420,7 @@
     gap: 8px;
   }
   .opt-tag {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;

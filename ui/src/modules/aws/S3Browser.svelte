@@ -253,7 +253,7 @@
                 { label: 'Copy S3 URI', icon: 'copy', action: () => void copy(`s3://${b.name}/`, 'S3 URI') },
               ])}
             >
-              <td class="name"><Icon name="archive" size={13} /> {b.name}</td>
+              <td class="name" title={b.name}><Icon name="archive" size={13} /> {b.name}</td>
               <td class="mono hide-sm">{b.region ?? '—'}</td>
               <td class="dim hide-sm" title={fmtDate(b.creation_date)}>{fmtAgo(b.creation_date)}</td>
             </tr>
@@ -272,7 +272,7 @@
     onrefresh={() => void loadObjects()}
   >
     <nav class="crumbs" aria-label="Prefix">
-      <button class="crumb" onclick={() => goTo('', '')} title="All buckets"><Icon name="archive" size={12} /></button>
+      <button class="crumb" onclick={() => goTo('', '')} title="All buckets" aria-label="All buckets"><Icon name="archive" size={12} /></button>
       <span class="sep">/</span>
       <button class="crumb" class:cur={!prefix} onclick={() => goTo(bucket, '')}>{bucket}</button>
       {#each crumbs as c (c.prefix)}
@@ -312,7 +312,7 @@
                 <td class="dim mono hide-sm">{r.kind === 'file' ? (r.obj.storage_class ?? '') : ''}</td>
                 <td class="act">
                   {#if r.kind === 'file'}
-                    <button class="icon-btn" onclick={(e) => { e.stopPropagation(); void download(r.obj); }} disabled={!canRead} title="Download" aria-label={`Download ${r.name}`}><Icon name="arrowDown" size={13} /></button>
+                    <button class="icon-btn" onclick={(e) => { e.stopPropagation(); void download(r.obj); }} disabled={!canRead} title={canRead ? 'Download' : 'You don’t have read access to this bucket'} aria-label={`Download ${r.name}`}><Icon name="arrowDown" size={13} /></button>
                   {/if}
                 </td>
               </tr>
@@ -359,7 +359,7 @@
         <button class="ghost sm" onclick={() => preview && void download(preview.obj)}><Icon name="arrowDown" size={12} /> Download</button>
         <button class="ghost sm" onclick={() => preview && void copy(`s3://${bucket}/${preview.obj.key}`, 'S3 URI')}><Icon name="copy" size={12} /> URI</button>
         {#if !viewport.isMobile}
-          <button class="icon-btn" onclick={() => (preview = null)} aria-label="Close preview"><Icon name="x" size={13} /></button>
+          <button class="icon-btn" onclick={() => (preview = null)} aria-label="Close preview" title="Close preview"><Icon name="x" size={13} /></button>
         {/if}
       </div>
     </div>

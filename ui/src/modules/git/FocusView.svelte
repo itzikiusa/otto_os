@@ -269,7 +269,9 @@
     <!-- ── MY PULL REQUESTS ── -->
     <section class="fx-section">
       <header class="fx-head">
-        <span class="fx-title">MY PULL REQUESTS</span>
+        <!-- "All open" lists every open PR across the registered repos, not just
+             the user's — the heading says which one is showing. -->
+        <span class="fx-title">{prFilter === 'mine' && myHandles.size > 0 ? 'MY PULL REQUESTS' : 'OPEN PULL REQUESTS'}</span>
         <span class="fx-count">{visiblePrRows.length}</span>
         <span class="grow"></span>
         {#if myHandles.size > 0}
@@ -307,7 +309,7 @@
               <button
                 class="fx-pr-title"
                 onclick={() => openExternal(row.pr.url)}
-                title="Open !{row.pr.number} on the provider"
+                title="Open #{row.pr.number} on the provider"
               >
                 <span class="mono fx-pr-num">#{row.pr.number}</span>
                 {#if row.pr.draft}<span class="fx-draft">draft</span>{/if}
@@ -406,7 +408,7 @@
         >
           <Icon name="globe" size={12} /> Jira
         </button>
-        <button class="fx-quick-close" onclick={closeQuick} title="Close" aria-label="Close issue quick view">✕</button>
+        <button class="fx-quick-close" onclick={closeQuick} title="Close" aria-label="Close issue quick view"><Icon name="x" size={12} /></button>
       </header>
       {#if quickLoading}
         <div style="padding: 12px"><Skeleton rows={6} height={20} /></div>
@@ -561,7 +563,7 @@
     flex-shrink: 0;
   }
   .fx-draft {
-    font-size: 9px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     padding: 0 5px;
@@ -618,7 +620,7 @@
     flex-shrink: 1;
   }
   .fx-ci {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     padding: 1px 6px;
     border-radius: 999px;
@@ -682,7 +684,7 @@
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .fx-type {
-    font-size: 9px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.03em;
@@ -780,12 +782,13 @@
     flex-shrink: 0;
   }
   .fx-quick-close {
+    display: inline-flex;
+    align-items: center;
     border: none;
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    font-size: 12px;
-    padding: 2px 6px;
+    padding: 4px 6px;
     border-radius: 4px;
   }
   .fx-quick-close:hover {

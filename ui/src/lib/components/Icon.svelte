@@ -132,6 +132,8 @@
     undo: 'M5.2 3.8 2.5 6.5l2.7 2.7M2.5 6.5h7a3.5 3.5 0 0 1 0 7H7',
     // Raised hand — an approval or a question waiting on you.
     hand: 'M5.5 8V3.8a1 1 0 0 1 2 0V7.5m0-4.7a1 1 0 0 1 2 0v4.7m0-3.7a1 1 0 0 1 2 0V9a4.5 4.5 0 0 1-4.5 4.5H7a3.5 3.5 0 0 1-2.9-1.6L2.6 9.6a1 1 0 0 1 1.6-1.2L5.5 10',
+    // Door + outward arrow — Sign out.
+    logout: 'M6.5 13.5h-3a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1h3M10.5 5l3 3-3 3M13.5 8H6',
   } satisfies Record<string, string>;
 
   export type IconName = keyof typeof paths;

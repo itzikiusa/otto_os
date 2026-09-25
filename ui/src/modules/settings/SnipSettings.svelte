@@ -16,6 +16,9 @@
   let loading = $state(true);
   let recording = $state(false);
   let saveError = $state('');
+  // The shell couldn't report the chord (an older app build): '' would read
+  // as "disabled" and offer Reset/Disable against a value we never saw.
+  let unavailable = $state(false);
 
   $effect(() => {
     if (!isTauri) {
@@ -28,6 +31,7 @@
         accel = await invoke<string>('snip_get_shortcut');
       } catch {
         // Older shell without the command; leave the section read-only.
+        unavailable = true;
       } finally {
         loading = false;
       }
@@ -63,8 +67,19 @@
       e.shiftKey ? 'Shift' : null,
     ].filter(Boolean) as string[];
     if (!mods.length) return;
-    let key = e.key.length === 1 ? e.key.toUpperCase() : e.key;
-    if (key === ' ') key = 'Space';
+    // The PHYSICAL key: with ⇧ or ⌥ held, `e.key` is the shifted/option
+    // character ("@", "™"), which the shell can't parse as a chord.
+    const c = e.code;
+    let key = /^Key[A-Z]$/.test(c)
+      ? c.slice(3)
+      : /^Digit[0-9]$/.test(c)
+        ? c.slice(5)
+        : /^F\d{1,2}$/.test(c)
+          ? c
+          : e.key.length === 1
+            ? e.key.toUpperCase()
+            : e.key;
+    if (key === ' ' || c === 'Space') key = 'Space';
     recording = false;
     void save([...mods, key].join('+'));
   }
@@ -106,6 +121,8 @@
               onkeydown={onRecordKey}
               onblur={() => (recording = false)}
             />
+          {:else if unavailable}
+            <span class="row-desc">This version of the app can't change the shortcut — update Otto.</span>
           {:else}
             <code class="chord" data-accel={accel}>{loading ? '…' : pretty(accel)}</code>
             <button class="btn" onclick={() => (recording = true)}>Change</button>

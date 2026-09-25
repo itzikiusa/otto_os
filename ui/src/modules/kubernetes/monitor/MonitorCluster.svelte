@@ -272,7 +272,7 @@
           <option value={c}>{c === '' ? 'Restarts + churn' : c === 'k8s_event' ? 'Raw cluster events' : classLabel(c)}</option>
         {/each}
       </select>
-      <button class="btn ghost small" onclick={() => void loadEvents()} aria-label="Refresh events"><Icon name="refresh" size={13} /></button>
+      <button class="btn ghost small" onclick={() => void loadEvents()} aria-label="Refresh events" title="Refresh events"><Icon name="refresh" size={13} /></button>
     </div>
     {#if eventsLoading && !events.length}
       <Skeleton rows={6} height={28} />
@@ -310,7 +310,7 @@
         <span class="chip" title="Metrics-server probing is off in Settings">metrics-server off</span>
       {/if}
       <span class="spacer"></span>
-      <button class="btn ghost small" onclick={() => void loadWorkloads()} aria-label="Refresh workloads"><Icon name="refresh" size={13} /></button>
+      <button class="btn ghost small" onclick={() => void loadWorkloads()} aria-label="Refresh workloads" title="Refresh workloads"><Icon name="refresh" size={13} /></button>
     </div>
     {#if !enabled && !loading}
       <EmptyState icon="helm" title="Monitoring is off" body="Enable it in Settings: pick a preset, adjust ports, test the probes, save." actionLabel={canEdit ? 'Open settings' : undefined} onaction={canEdit ? () => goTab('settings') : undefined} />

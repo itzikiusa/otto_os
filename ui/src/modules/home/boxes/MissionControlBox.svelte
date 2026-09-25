@@ -81,7 +81,7 @@
   {#if loading && !summary}
     <Skeleton rows={4} />
   {:else if error && !summary}
-    <EmptyState icon="radar" title="Mission Control unavailable" body={error} />
+    <EmptyState icon="radar" title="Mission Control unavailable" body={error} actionLabel="Retry" actionIcon="refresh" onaction={() => poller?.now()} />
   {:else if summary}
     <div class="stats">
       <div class="stat"><span class="n" class:working={summary.active > 0}>{summary.active}</span><span class="l">active</span></div>

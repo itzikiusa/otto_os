@@ -384,8 +384,13 @@
   }
 
   async function deleteStory(s: ProductStory): Promise<void> {
+    // Name what else goes (patterns.md §7): the story's Otto-side work is
+    // deleted with it; children are re-parented to the top level, not deleted.
+    const kids = product.childrenOf(s.id).length;
     const ok = await confirmer.ask(
-      `Delete "${s.title}"? This removes it from Otto (the Jira/Confluence item is untouched).`,
+      `Delete "${s.title}"? This removes it from Otto (the Jira/Confluence item is untouched).\n\n` +
+        'Its versions, questions, notes, analyses, test cases, transcripts and attachments are deleted too.' +
+        (kids > 0 ? ` Its ${kids} child stor${kids === 1 ? 'y moves' : 'ies move'} to the top level.` : ''),
       { title: 'Delete story', confirmLabel: 'Delete', danger: true },
     );
     if (!ok) return;
@@ -494,7 +499,7 @@
       class="story-row"
       class:active={product.selectedId === s.id}
       onclick={() => selectStory(s)}
-      title={s.source_key}
+      title={s.source_kind === 'draft' ? s.title : `${s.source_key} · ${s.title}`}
     >
       <span class="story-icon"><Icon name={node?.isEpic ? 'folder' : s.tree_kind === 'doc' ? 'note' : sourceIcon(s.source_kind)} size={13} /></span>
       <span class="story-info">
@@ -529,7 +534,7 @@
       aria-label="Story menu"
       title="Move to epic, set folder, mark as epic…"
     >
-      <Icon name="grip" size={12} />
+      <Icon name="more" size={12} />
     </button>
     <button
       class="delete-btn"
@@ -970,7 +975,8 @@
     padding: 0;
   }
   .story-row-wrap:hover .delete-btn,
-  .story-row-wrap.active .delete-btn {
+  .story-row-wrap.active .delete-btn,
+  .delete-btn:focus-visible {
     color: var(--text-dim);
   }
   .delete-btn:hover {
@@ -993,7 +999,8 @@
     transition: color 100ms, background 100ms;
   }
   .story-row-wrap:hover .row-menu-btn,
-  .story-row-wrap.active .row-menu-btn {
+  .story-row-wrap.active .row-menu-btn,
+  .row-menu-btn:focus-visible {
     color: var(--text-dim);
   }
   .row-menu-btn:hover {

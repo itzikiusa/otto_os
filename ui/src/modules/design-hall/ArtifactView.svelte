@@ -552,7 +552,7 @@
     if (!artifact) return;
     const ok = await confirmer.ask(
       `Archive “${artifact.title}”? It leaves the lobby and search; every version is kept and links to it keep working.`,
-      { title: 'Archive design', confirmLabel: 'Archive' },
+      { title: 'Archive design', confirmLabel: 'Archive', danger: false },
     );
     if (!ok) return;
     try {
@@ -698,7 +698,13 @@
     {/snippet}
     {#snippet actions()}
       {#if artifact}
-        <button class="btn small" data-icon="columns" onclick={openCompare} disabled={versions.length < 2}>
+        <button
+          class="btn small"
+          data-icon="columns"
+          onclick={openCompare}
+          disabled={versions.length < 2}
+          title={versions.length < 2 ? 'Compare needs at least two versions — save once more first' : 'Compare two versions'}
+        >
           <Icon name="columns" size={12} /> Compare
         </button>
         <button class="icon-btn" data-icon="more" data-label="More actions" onclick={moreMenu} aria-label="More actions" title="More actions" aria-haspopup="menu" data-testid="design-more">

@@ -4,6 +4,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { copyAsJson, downloadJson, exportCsv } from '../../lib/components/exporters';
   import type {
     BrokerCluster,
@@ -75,19 +76,23 @@
   // Extra headers for produce: list of {key, value} pairs.
   let pHeaders = $state<{ key: string; value: string }[]>([]);
   let producing = $state(false);
+  /** Inline field error for the produce form (shown under Value, not a toast). */
+  let pValueErr = $state<string | null>(null);
 
   // ---- config editing ----
   let cfgName = $state('');
   let cfgValue = $state('');
   let cfgSaving = $state(false);
 
-  function loadDetail() {
-    detail = null;
+  /** `keep` refreshes in place (after a produce) instead of blanking the
+   *  header counts, the partitions table and the partition pickers. */
+  function loadDetail(keep = false) {
+    if (!keep) detail = null;
     detailErr = null;
     void api
       .get<TopicDetail>(`/brokers/clusters/${cluster.id}/topics/${encodeURIComponent(topic)}`)
       .then((d) => (detail = d))
-      .catch((e) => (detailErr = String(e)));
+      .catch((e) => (detailErr = loadErrorText(e)));
   }
 
   $effect(() => {
@@ -253,9 +258,10 @@
       );
       // Reset tail cursors: a manual peek replaces the view and reseeds offsets.
       tailOffsets = new Map();
-      if (result.messages.length === 0) toasts.info('No messages in the selected range');
+      // An empty range renders inline ("No messages in the selected range.");
+      // no toast for what is already on screen.
     } catch (e) {
-      toasts.error('Consume failed', String(e));
+      toasts.error("Couldn't read messages", e instanceof Error ? e.message : String(e));
     } finally {
       consuming = false;
     }
@@ -283,9 +289,10 @@
 
   async function produce() {
     if (!pTombstone && !pValue) {
-      toasts.error('Value is required (or enable Tombstone)');
+      pValueErr = 'Enter a value, or tick Tombstone to send a null value.';
       return;
     }
+    pValueErr = null;
     if (guarded) {
       const ok = await confirmer.ask(
         `Produce to "${topic}" on guarded cluster "${cluster.name}"?`,
@@ -314,9 +321,9 @@
       pKey = '';
       pTombstone = false;
       pHeaders = [];
-      loadDetail();
+      loadDetail(true);
     } catch (e) {
-      toasts.error('Produce failed', String(e));
+      toasts.error("Couldn't produce the message", e instanceof Error ? e.message : String(e));
     } finally {
       producing = false;
     }
@@ -344,7 +351,7 @@
       cfgName = '';
       cfgValue = '';
     } catch (e) {
-      toasts.error('Config update failed', String(e));
+      toasts.error("Couldn't update the config", e instanceof Error ? e.message : String(e));
     } finally {
       cfgSaving = false;
     }
@@ -353,9 +360,14 @@
   async function deleteTopic() {
     const typed = await confirmer.promptText(
       `Type the topic name to confirm deletion. This is irreversible.`,
-      { title: `Delete topic "${topic}"`, confirmLabel: 'Delete', placeholder: topic },
+      { title: `Delete topic "${topic}"`, confirmLabel: 'Delete', placeholder: topic, danger: true },
     );
-    if (typed !== topic) return;
+    if (typed === null) return;
+    if (typed !== topic) {
+      // A mistyped name must not look like a silent no-op.
+      toasts.warn('Topic not deleted', `The name you typed didn't match "${topic}".`);
+      return;
+    }
     try {
       await api.del(
         `/brokers/clusters/${cluster.id}/topics/${encodeURIComponent(topic)}?confirm=${guarded}`,
@@ -363,7 +375,7 @@
       toasts.success(`Deleted ${topic}`);
       ondeleted();
     } catch (e) {
-      toasts.error('Delete failed', String(e));
+      toasts.error("Couldn't delete the topic", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -409,7 +421,7 @@
   <header>
     <div class="title">
       <Icon name="box" size={15} />
-      <span class="name">{topic}</span>
+      <span class="name" title={topic}>{topic}</span>
       {#if detail}<span class="muted">· {detail.partitions.length}p · {detail.message_count.toLocaleString()} msgs</span>{/if}
     </div>
     <button class="btn small danger" onclick={deleteTopic}>Delete topic</button>
@@ -423,31 +435,37 @@
   </nav>
 
   {#if detailErr}
-    <p class="err">{detailErr}</p>
+    <div class="err" role="alert">
+      <Icon name="warning" size={13} />
+      <span class="err-text">Couldn't load topic details. <span class="muted">{detailErr}</span></span>
+      <button class="btn small" onclick={() => loadDetail(detail !== null)}>
+        <Icon name="refresh" size={12} /> Retry
+      </button>
+    </div>
   {/if}
 
   {#if tab === 'messages'}
     <div class="consume-bar">
-      <select bind:value={startMode}>
+      <select bind:value={startMode} aria-label="Start position" title="Start position">
         <option value="latest">Latest</option>
         <option value="beginning">From beginning</option>
         <option value="offset">From offset</option>
         <option value="timestamp">From time</option>
       </select>
       {#if startMode === 'offset'}
-        <input class="sm" type="number" bind:value={startOffset} placeholder="offset" />
+        <input class="sm" type="number" bind:value={startOffset} placeholder="offset" aria-label="Start offset" />
       {/if}
       {#if startMode === 'timestamp'}
-        <input class="sm" type="datetime-local" bind:value={startTs} />
+        <input class="sm" type="datetime-local" bind:value={startTs} aria-label="Start time" />
       {/if}
-      <select bind:value={partition}>
+      <select bind:value={partition} aria-label="Partition" title="Partition">
         <option value="">All partitions</option>
         {#each detail?.partitions ?? [] as p (p.id)}
           <option value={p.id}>P{p.id}</option>
         {/each}
       </select>
-      <input class="sm" type="number" bind:value={limit} min="1" max="5000" title="Max messages" />
-      <select bind:value={decode} title="Decode value as">
+      <input class="sm" type="number" bind:value={limit} min="1" max="5000" title="Max messages" aria-label="Max messages" />
+      <select bind:value={decode} title="Decode value as" aria-label="Decode value as">
         <option value="auto">Auto</option>
         <option value="json">JSON</option>
         <option value="utf8">UTF-8</option>
@@ -457,14 +475,14 @@
         <option value="base64">Base64</option>
       </select>
       <div class="filter-group">
-        <input class="grow" bind:value={keyFilter} placeholder="filter key…" title="Server-side key filter (case-insensitive substring)" />
+        <input class="grow" bind:value={keyFilter} placeholder="filter key…" aria-label="Filter by key" title="Server-side key filter (case-insensitive substring)" />
         {#if keyFilter.trim()}
           <label class="chk-small" title="Scan from beginning to find older matching messages">
             <input type="checkbox" bind:checked={keyFromBeginning} /> From start
           </label>
         {/if}
       </div>
-      <input class="grow" bind:value={valueFilter} placeholder="filter value…" />
+      <input class="grow" bind:value={valueFilter} placeholder="filter value…" aria-label="Filter by value" />
       <label class="auto" class:on={autoPoll} title="Append new messages every minute (incremental, capped at {TAIL_CAP})">
         <input type="checkbox" bind:checked={autoPoll} /> Live · 1m
       </label>
@@ -516,15 +534,17 @@
                     <span class="muted">—</span>
                   {/if}
                 </td>
-                <td class="key">{m.key?.text ?? '∅'}</td>
+                <td class="key" title={m.key?.text ?? undefined}>{m.key?.text ?? '∅'}</td>
                 <td class="muted nowrap">{fmtTs(m.timestamp_ms)}</td>
                 <td class="muted">{m.size_bytes}</td>
               </tr>
             {/each}
           </tbody>
         </table>
-        {#if result && result.messages.length === 0}
-          <p class="muted pad">No messages.</p>
+        {#if !result && !consuming}
+          <p class="muted pad">Pick a start position and press <strong>Peek</strong> to read messages.</p>
+        {:else if result && result.messages.length === 0}
+          <p class="muted pad">No messages in the selected range.</p>
         {/if}
         {#if result?.truncated}
           <p class="muted pad small">Showing first {result.messages.length} — increase the limit for more.</p>
@@ -582,7 +602,7 @@
             <h5>Headers</h5>
             <table class="headers">
               <tbody>
-                {#each selected.headers as h (h.key)}
+                {#each selected.headers as h, i (i)}
                   <tr><td class="mono">{h.key}</td><td>{h.value}</td></tr>
                 {/each}
               </tbody>
@@ -594,6 +614,9 @@
       </div>
     </div>
   {:else if tab === 'partitions'}
+    {#if !detail && !detailErr}
+      <p class="muted pad">Loading partitions…</p>
+    {/if}
     <table class="grid">
       <thead>
         <tr><th>Partition</th><th>Leader</th><th>Replicas</th><th>ISR</th><th>Low</th><th>High</th><th>Messages</th></tr>
@@ -614,10 +637,18 @@
     </table>
   {:else if tab === 'config'}
     <div class="cfg-set">
-      <input class="grow" bind:value={cfgName} placeholder="config name (e.g. retention.ms)" />
-      <input class="grow" bind:value={cfgValue} placeholder="value" />
-      <button class="btn small" onclick={setConfig} disabled={cfgSaving}>Set</button>
+      <input class="grow" bind:value={cfgName} placeholder="config name (e.g. retention.ms)" aria-label="Config name" />
+      <input class="grow" bind:value={cfgValue} placeholder="value" aria-label="Config value" />
+      <button
+        class="btn small"
+        onclick={setConfig}
+        disabled={cfgSaving || !cfgName.trim()}
+        title={cfgName.trim() ? `Set ${cfgName.trim()}` : 'Enter a config name first'}
+      >{cfgSaving ? 'Setting…' : 'Set'}</button>
     </div>
+    {#if !detail && !detailErr}
+      <p class="muted pad">Loading config…</p>
+    {/if}
     <table class="grid">
       <thead><tr><th>Name</th><th>Value</th><th>Source</th></tr></thead>
       <tbody>
@@ -653,19 +684,33 @@
       {#if !pTombstone}
         <label class="field grow">
           <span>Value{pValueBase64 ? ' — base64' : ''}</span>
-          <textarea bind:value={pValue} rows="6" placeholder={pValueBase64 ? 'base64-encoded bytes' : '{ "hello": "world" }'}></textarea>
+          <textarea
+            bind:value={pValue}
+            rows="6"
+            placeholder={pValueBase64 ? 'base64-encoded bytes' : '{ "hello": "world" }'}
+            aria-invalid={pValueErr ? 'true' : undefined}
+            oninput={() => (pValueErr = null)}
+          ></textarea>
+          {#if pValueErr}<span class="field-err">{pValueErr}</span>{/if}
         </label>
       {/if}
       <div class="headers-section">
         <div class="headers-title">
           <span class="dim-label">Headers</span>
-          <button class="btn tiny" onclick={addHeader}>+ Add</button>
+          <button class="btn tiny" onclick={addHeader}><Icon name="plus" size={11} /> Add</button>
         </div>
         {#each pHeaders as h, i (i)}
           <div class="header-row">
-            <input bind:value={h.key} placeholder="key" class="header-key" />
-            <input bind:value={h.value} placeholder="value" class="header-val" />
-            <button class="btn tiny danger-tiny" onclick={() => removeHeader(i)} title="Remove header">×</button>
+            <input bind:value={h.key} placeholder="key" class="header-key" aria-label="Header {i + 1} key" />
+            <input bind:value={h.value} placeholder="value" class="header-val" aria-label="Header {i + 1} value" />
+            <button
+              class="icon-btn danger-tiny"
+              onclick={() => removeHeader(i)}
+              aria-label="Remove header {i + 1}"
+              title="Remove header"
+            >
+              <Icon name="x" size={12} />
+            </button>
           </div>
         {/each}
       </div>
@@ -709,14 +754,31 @@
     padding: 10px 14px;
     border-bottom: 1px solid var(--border);
   }
+  header {
+    gap: 12px;
+  }
   header .title {
     display: flex;
     align-items: baseline;
     gap: 8px;
+    /* Long topic names truncate instead of shoving "Delete topic" off-screen. */
+    min-width: 0;
+  }
+  header .title > :global(svg),
+  header .title > .muted {
+    flex: none;
+    white-space: nowrap;
   }
   header .name {
     font-weight: 600;
     font-family: var(--font-mono);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  header > .btn {
+    flex: none;
   }
   .subtabs {
     display: flex;
@@ -1019,10 +1081,11 @@
     font-size: 12px;
   }
   .danger-tiny {
-    color: var(--status-exited, #ff5f57);
-    padding: 2px 7px;
-    font-size: 14px;
-    line-height: 1;
+    color: var(--danger);
+  }
+  .field .field-err {
+    font-size: var(--fs-xs);
+    color: var(--danger);
   }
   .muted-badge {
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
@@ -1065,12 +1128,20 @@
     padding: 14px;
   }
   .err {
-    color: var(--status-exited, #ff5f57);
-    padding: 10px 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
     font-size: 13px;
+    color: var(--text);
+    border-bottom: 1px solid var(--border);
   }
-  .btn.danger {
-    color: var(--status-exited, #ff5f57);
+  .err > :global(svg) {
+    color: var(--danger);
+  }
+  .err-text {
+    flex: 1;
+    min-width: 0;
   }
   .btn.tiny {
     padding: 2px 8px;

@@ -128,6 +128,9 @@ class VaultStore {
   searchQuery = $state('');
   searchHits = $state<VaultSearchHit[]>([]);
   searching = $state(false);
+  /** The query the current `searchHits` answer — lets the panel tell "no
+   *  results" apart from "typed but not run yet" (search runs on Enter). */
+  searchedQuery = $state('');
   tags = $state<VaultTagCount[]>([]);
 
   // Quick switcher.
@@ -264,6 +267,7 @@ class VaultStore {
     this.notePath = null;
     this.backlinks = [];
     this.searchHits = [];
+    this.searchedQuery = '';
     this.okfReport = null;
     this.roots = [];
     this.docsRun = null;
@@ -994,6 +998,7 @@ class VaultStore {
     const q = this.searchQuery.trim();
     if (!q) {
       this.searchHits = [];
+      this.searchedQuery = '';
       return;
     }
     // Newest query + same vault only: hits from vault A (or an older query)
@@ -1003,7 +1008,10 @@ class VaultStore {
     this.searching = true;
     try {
       const hits = await vaultSearch(this.wsId, id, { query: q, limit: 50 });
-      if (current()) this.searchHits = hits;
+      if (current()) {
+        this.searchHits = hits;
+        this.searchedQuery = q;
+      }
     } catch (e) {
       if (current()) toasts.error(`Search: ${msg(e)}`);
     } finally {

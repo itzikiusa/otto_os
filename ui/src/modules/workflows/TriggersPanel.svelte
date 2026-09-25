@@ -6,6 +6,7 @@
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import type { WorkflowTrigger, TriggerKind } from '../../lib/api/types';
   import { buildTriggerSpec, defaultTriggerForm, formFromTrigger, EVENT_KINDS } from './triggerForm';
   import { copyTextOrThrow } from '../../lib/clipboard';
@@ -76,6 +77,13 @@
     finally { previewing = false; }
   }
 
+  // A preview describes the form as it WAS: any later edit hides it, so a stale
+  // "Next fires" list never sits under a changed cadence/timezone.
+  $effect(() => {
+    JSON.stringify(form);
+    preview = null;
+  });
+
   let saving = $state(false);
 
   async function load(): Promise<void> {
@@ -108,7 +116,7 @@
       adding = false;
       toasts.success(editingId ? 'Trigger updated' : 'Trigger added');
     } catch (e) {
-      toasts.error('Could not add trigger', e instanceof Error ? e.message : String(e));
+      toasts.error(editingId ? 'Could not update trigger' : 'Could not add trigger', e instanceof Error ? e.message : String(e));
     } finally {
       saving = false;
     }
@@ -127,7 +135,15 @@
     }
   }
 
+  // Deleting is irreversible — a webhook trigger's token goes with it, so any
+  // external caller breaks — so it asks first, like deleting the workflow.
+  // (Pausing is the reversible option: the on/off toggle.)
   async function remove(t: WorkflowTrigger): Promise<void> {
+    const ok = await confirmer.ask(
+      `Delete this ${t.kind} trigger (${describeSpec(t)})?${t.kind === 'webhook' ? ' Its webhook URL stops working.' : ''} To pause it instead, switch it off.`,
+      { title: 'Delete trigger', confirmLabel: 'Delete trigger' },
+    );
+    if (!ok) return;
     try {
       await api.del(`/workflow-triggers/${t.id}`);
       if (!alive) return;
@@ -215,7 +231,7 @@
           <label class="fl"><span>Cron (5 fields)</span><input bind:value={form.cron} placeholder="0 9 * * 1-5" /></label>
         {:else}
           <label class="fl">
-            <span>At (local HH:MM)</span>
+            <span>At (HH:MM, in the timezone below)</span>
             <input type="text" placeholder="09:00" bind:value={form.atTime} />
           </label>
           {#if form.cadence === 'weekly'}
@@ -303,13 +319,14 @@
       </div>
       <button
         class="toggle"
-        title={t.enabled ? 'Disable' : 'Enable'}
+        aria-pressed={t.enabled}
+        title={t.enabled ? 'On — click to pause this trigger' : 'Off — click to enable this trigger'}
         onclick={() => toggle(t)}
       >
         {t.enabled ? 'on' : 'off'}
       </button>
-      <button class="btn ghost small" title="Edit trigger" onclick={() => edit(t)}><Icon name="edit" size={12} /></button>
-      <button class="row-del" title="Delete" onclick={() => remove(t)}>
+      <button class="btn ghost small" title="Edit trigger" aria-label="Edit trigger" onclick={() => edit(t)}><Icon name="edit" size={12} /></button>
+      <button class="row-del" title="Delete trigger…" aria-label="Delete trigger…" onclick={() => remove(t)}>
         <Icon name="trash" size={12} />
       </button>
     </div>
@@ -363,7 +380,7 @@
   .st-snip {
     margin: 0;
     padding: 8px 10px;
-    background: var(--bg, #0d0f13);
+    background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 6px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

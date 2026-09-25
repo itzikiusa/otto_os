@@ -2,6 +2,9 @@
   import { loops } from '../../lib/stores/loops.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type { GoalLoopIteration, LoopAgentState } from '../../lib/api/types';
+  import Icon from '../../lib/components/Icon.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { runStatus } from '../../lib/status';
 
   let {
     iter,
@@ -55,10 +58,10 @@
 </script>
 
 <div class="iter">
-  <button class="iter-head" onclick={() => (expanded = !expanded)}>
-    <span class="chev">{expanded ? '▾' : '▸'}</span>
+  <button class="iter-head" aria-expanded={expanded} onclick={() => (expanded = !expanded)}>
+    <span class="chev"><Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={12} /></span>
     <span class="idx">Iteration {iter.idx}</span>
-    <span class="istatus">{iter.status}</span>
+    <StatusBadge status={runStatus(iter.status)} variant="text" />
     {#if iter.evaluation}
       <span class="prog">{iter.evaluation.progress_pct}% · {iter.evaluation.verdict}</span>
     {/if}
@@ -138,17 +141,14 @@
     font-size: 12.5px;
   }
   .chev {
+    display: inline-flex;
     color: var(--text-dim);
   }
   .idx {
     font-weight: 600;
   }
-  .istatus {
-    color: var(--text-dim);
-    text-transform: capitalize;
-  }
   .prog {
-    margin-left: auto;
+    margin-inline-start: auto;
     color: var(--status-working);
     font-size: 11.5px;
   }

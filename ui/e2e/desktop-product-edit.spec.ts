@@ -225,7 +225,7 @@ test('product: manually edit Jira story title and description', async ({
   await expect(titleInput).toBeVisible({ timeout: 10_000 });
   await expect(titleInput).toHaveValue(INITIAL_TITLE);
   await titleInput.fill(NEW_TITLE);
-  await page.locator('.title-edit').getByRole('button', { name: 'Save', exact: true }).click();
+  await page.locator('.title-edit').getByRole('button', { name: /^Save to / }).click();
 
   // Optimistic update: the header reflects the new title without a reload.
   await expect(page.locator('h1.story-title')).toHaveText(NEW_TITLE, { timeout: 10_000 });
@@ -239,7 +239,7 @@ test('product: manually edit Jira story title and description', async ({
   await expect(descArea).toBeVisible({ timeout: 10_000 });
   await expect(descArea).toHaveValue(INITIAL_DESC);
   await descArea.fill(NEW_DESC);
-  await page.locator('.desc-editor').getByRole('button', { name: 'Save', exact: true }).click();
+  await page.locator('.desc-editor').getByRole('button', { name: /^Save to / }).click();
 
   // Optimistic update: the rendered body shows the new text; editor closes.
   await expect(descArea).toHaveCount(0, { timeout: 10_000 });

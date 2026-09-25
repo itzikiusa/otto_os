@@ -163,7 +163,7 @@
         {/if}
         <button class="jrec-copy" title="Copy this row as JSON" aria-label="Copy row JSON" onclick={() => copyText(prettyJson(obj))}><Icon name="file" size={10} /></button>
         {#if !mini}
-          <button class="jrec-copy jrec-more" title="Record actions" aria-label="Record actions" onclick={(e) => recordMenu(e, obj, idx, ri)}>⋯</button>
+          <button class="jrec-copy jrec-more" title="Record actions" aria-label="Record actions" onclick={(e) => recordMenu(e, obj, idx, ri)}><Icon name="more" size={14} /></button>
         {/if}
       </div>
       <!-- Collapsible tree, NOT a stringified blob: a closed branch renders

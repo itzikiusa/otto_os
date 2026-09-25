@@ -450,6 +450,7 @@
             class="btn primary"
             onclick={generate}
             disabled={generating || pollTimer !== null || selectedProviders.length === 0}
+            title={selectedProviders.length === 0 ? 'Pick at least one provider' : undefined}
           >
             {#if generating}
               Triggering…
@@ -524,8 +525,8 @@
           <div class="ph-actions">
             {#if saving}<span class="saving">Saving…</span>{:else if savedTick}<span class="saved-tick">Saved</span>{/if}
             {#if swarmLink}
-              <span class="chip pl-swarm-chip" title="This story is linked to a swarm project">
-                <Icon name="zap" size={10} /> {swarmLink.project_name}
+              <span class="chip pl-swarm-chip" title="Linked to swarm project “{swarmLink.project_name}”">
+                <Icon name="zap" size={10} /> <span class="pl-swarm-name">{swarmLink.project_name}</span>
               </span>
             {/if}
             <button class="btn small" onclick={refresh} disabled={generating}>Refresh</button>
@@ -721,7 +722,9 @@
   .saved-tick { font-size: var(--fs-xs); color: var(--success); font-weight: 600; }
 
   /* Linked swarm project: a neutral chip + the kind icon (no per-feature hue). */
-  .pl-swarm-chip { max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+  /* Ellipsis on the inner span: it never applies to an inline-flex's bare text node. */
+  .pl-swarm-chip { max-width: 200px; min-width: 0; }
+  .pl-swarm-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* Tasks */
   .tasks { display: flex; flex-direction: column; gap: 10px; }

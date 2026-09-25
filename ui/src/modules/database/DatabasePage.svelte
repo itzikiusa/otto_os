@@ -555,15 +555,18 @@
   }
   async function deleteCluster(cl: BrokerCluster): Promise<void> {
     if (
-      !(await confirmer.ask(`Delete cluster “${cl.name}”? Its Keychain secrets are removed too.`, {
-        title: 'Delete cluster',
-      }))
+      // Same verb + consequence as the Message Brokers page and ClusterViewer's
+      // "Remove" button, which lands here.
+      !(await confirmer.ask(
+        `Remove cluster “${cl.name}”? Its saved settings and Keychain secrets are removed from Otto; topics on the broker are not touched.`,
+        { title: 'Remove cluster', confirmLabel: 'Remove' },
+      ))
     )
       return;
     try {
       await brokers.remove(cl.id);
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Remove failed', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -788,6 +791,24 @@
       : null,
   );
 
+  // The open-connections strip scrolls sideways with its scrollbar hidden, so a
+  // tab opened (or focused) past the right edge would be selected but invisible —
+  // with nothing hinting the strip scrolls. Bring the active tab into view
+  // whenever the selection or the set of open tabs changes.
+  let connTabsEl = $state<HTMLElement | null>(null);
+  $effect(() => {
+    void database.selectedConnId;
+    void database.activePane;
+    void openConns.length;
+    void brokers.openClusters.length;
+    void database.sshTabs.length;
+    const strip = connTabsEl;
+    if (!strip) return;
+    requestAnimationFrame(() =>
+      strip.querySelector<HTMLElement>('.conn-tab.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }),
+    );
+  });
+
   // Close a Kafka cluster tab; follow the brokers store's neighbour reselection
   // (or drop back to the DB workbench when no clusters remain open).
   function closeKafkaTab(id: string): void {
@@ -832,11 +853,11 @@
 <PageHeader title="Connections">
   {#snippet actions()}
     {#if !viewport.isPhone}
-      <button class="btn ghost" disabled={!auth.isRoot} onclick={() => (connImportOpen = true)} title="Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster">
+      <button class="btn ghost" disabled={!auth.isRoot} onclick={() => (connImportOpen = true)} title={auth.isRoot ? 'Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster' : 'Only the owner can import connections'}>
         <Icon name="arrowDown" size={12} /> Import
       </button>
       {#if database.connections.length > 0 || brokers.clusters.length > 0}
-        <button class="btn primary" disabled={!auth.isRoot} onclick={newConnectionFromStrip} title="New connection (SSH, database or custom CLI)">
+        <button class="btn primary" disabled={!auth.isRoot} onclick={newConnectionFromStrip} title={auth.isRoot ? 'New connection (SSH, database or custom CLI)' : 'Only the owner can create connections'}>
           <Icon name="plus" size={12} /> New connection
         </button>
       {/if}
@@ -874,8 +895,8 @@
         </button>
         <div class="head-btns">
           <button class="icon-btn" onclick={() => createSection(null)} aria-label="New section" title="New section"><Icon name="folder" size={13} /></button>
-          <button class="icon-btn" disabled={!auth.isRoot} onclick={newConnection} aria-label="New connection" title="New connection"><Icon name="plus" size={13} /></button>
-          <button class="icon-btn" disabled={!auth.isRoot} onclick={() => (connImportOpen = true)} aria-label="Import connections" title="Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster"><Icon name="arrowDown" size={13} /></button>
+          <button class="icon-btn" disabled={!auth.isRoot} onclick={newConnection} aria-label="New connection" title={auth.isRoot ? 'New connection' : 'Only the owner can create connections'}><Icon name="plus" size={13} /></button>
+          <button class="icon-btn" disabled={!auth.isRoot} onclick={() => (connImportOpen = true)} aria-label="Import connections" title={auth.isRoot ? 'Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster' : 'Only the owner can import connections'}><Icon name="arrowDown" size={13} /></button>
         </div>
       </div>
       <div class="conn-list" class:acc-collapsed={!connOpen}>
@@ -940,7 +961,7 @@
             <div class="list-empty">Open a connection to browse its schema.</div>
             <div class="side-empty-actions">
               <button class="btn small" onclick={() => database.setSideTab('connections')}>Browse connections</button>
-              <button class="btn small ghost" disabled={!auth.isRoot} onclick={newConnection}>New connection</button>
+              <button class="btn small ghost" disabled={!auth.isRoot} onclick={newConnection} title={auth.isRoot ? undefined : 'Only the owner can create connections'}>New connection</button>
             </div>
           </div>
         {/if}
@@ -984,7 +1005,7 @@
       />
     {:else}
       <!-- Unified tab strip: DB connections, Kafka clusters, and SSH/custom terminals -->
-      <div class="conn-tabs" role="tablist" aria-label="Open connections">
+      <div class="conn-tabs" role="tablist" aria-label="Open connections" bind:this={connTabsEl}>
         {#each openConns as c (c.id)}
           {@const st = database.connStatus.get(c.id)}
           <div class="conn-tab" class:active={database.activePane === null && database.selectedConnId === c.id} class:prod={isProdConn(c)} class:guarded={isGuardedConn(c) && !isProdConn(c)} role="tab" tabindex="-1" aria-selected={database.activePane === null && database.selectedConnId === c.id} oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}>
@@ -1017,7 +1038,7 @@
               { label: 'Open in Message Brokers page', icon: 'split', action: () => openClusterStandalone(cl) },
               { separator: true },
               { label: 'Edit', icon: 'edit', action: () => editCluster(cl) },
-              { label: 'Delete', icon: 'trash', danger: true, action: () => void deleteCluster(cl) },
+              { label: 'Remove…', icon: 'trash', danger: true, action: () => void deleteCluster(cl) },
             ]); }}>
             <button class="conn-tab-main" onclick={() => openCluster(cl)} title={cl.name}>
               <span class="conn-tab-glyph kafka"><Icon name={engineGlyph('kafka')} size={12} /></span>
@@ -1296,7 +1317,7 @@
         { label: 'Open in Message Brokers page', icon: 'split', action: () => openClusterStandalone(cl) },
         { separator: true },
         { label: 'Edit', icon: 'edit', action: () => editCluster(cl) },
-        { label: 'Delete', icon: 'trash', danger: true, action: () => void deleteCluster(cl) },
+        { label: 'Remove…', icon: 'trash', danger: true, action: () => void deleteCluster(cl) },
       ]);
     }}
   >
@@ -1314,7 +1335,7 @@
       <button class="icon-btn" aria-label="Edit cluster" title="Edit" onclick={() => editCluster(cl)}>
         <Icon name="edit" size={11} />
       </button>
-      <button class="icon-btn" aria-label="Delete cluster" title="Delete" onclick={() => void deleteCluster(cl)}>
+      <button class="icon-btn" aria-label="Remove cluster" title="Remove cluster" onclick={() => void deleteCluster(cl)}>
         <Icon name="trash" size={11} />
       </button>
     </div>
@@ -1339,9 +1360,9 @@
       <!-- New section / connection live here on tablet/desktop (the phone keeps
            them in the accordion header), so the tab strip never overflows. -->
       <button class="icon-btn" onclick={() => createSection(null)} aria-label="New section" title="New section"><Icon name="folder" size={12} /></button>
-      <button class="icon-btn" disabled={!auth.isRoot} onclick={newConnection} aria-label="New connection" title="New connection (SSH, database or custom CLI)"><Icon name="plus" size={12} /></button>
+      <button class="icon-btn" disabled={!auth.isRoot} onclick={newConnection} aria-label="New connection" title={auth.isRoot ? 'New connection (SSH, database or custom CLI)' : 'Only the owner can create connections'}><Icon name="plus" size={12} /></button>
       <button class="icon-btn" onclick={newCluster} aria-label="New Kafka cluster" title="New Kafka cluster"><Icon name="split" size={12} /></button>
-      <button class="icon-btn" disabled={!auth.isRoot} onclick={() => (connImportOpen = true)} aria-label="Import connections" title="Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster"><Icon name="arrowDown" size={12} /></button>
+      <button class="icon-btn" disabled={!auth.isRoot} onclick={() => (connImportOpen = true)} aria-label="Import connections" title={auth.isRoot ? 'Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster' : 'Only the owner can import connections'}><Icon name="arrowDown" size={12} /></button>
     {/if}
   </div>
   <!-- Type-filter chips: one tree, narrowed by connection type. -->

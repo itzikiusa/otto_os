@@ -9,6 +9,7 @@
   import type { AgentSchedule, AgentSkill, CreateAgentReq, SwarmAgent } from './types';
   import { agentProvidersWith, defaultAgentProvider } from '../../lib/providers';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
 
   interface Props {
     agent?: SwarmAgent | null;
@@ -190,7 +191,7 @@
             class="link"
             aria-label="Remove skill {s.name}"
             title="Remove skill"
-            onclick={() => (skills = skills.filter((_, j) => j !== i))}>×</button>
+            onclick={() => (skills = skills.filter((_, j) => j !== i))}><Icon name="x" size={10} /></button>
         </span>
       {/each}
     </div>
@@ -211,7 +212,10 @@
           <input class="input small" type="number" min="1" bind:value={everyMin} /> min
         {/if}
         {#if cadence === 'daily' || cadence === 'weekly'}
-          <input class="input small" type="time" bind:value={at} />
+          <!-- The swarm scheduler matches `at` against UTC (swarm_scheduler.rs),
+               not the Mac's local clock — say so, or 09:00 fires at 09:00 UTC. -->
+          <input class="input small" type="time" bind:value={at} aria-label="Run time (UTC)" title="Time of day in UTC" />
+          <span class="dim" title="The swarm scheduler runs on UTC time">UTC</span>
         {/if}
         {#if cadence === 'weekly'}
           <select class="input small" bind:value={weekday}>
@@ -264,6 +268,8 @@
     color: var(--accent-text);
   }
   .link {
+    display: inline-grid;
+    place-items: center;
     border: none;
     background: transparent;
     color: inherit;

@@ -163,7 +163,7 @@
         {/if}
       {:else}
         <div class="activity">
-          <ApprovalsTab />
+          <ApprovalsTab ondecided={() => void loadPending()} />
           <AuditTab {servers} />
         </div>
       {/if}
@@ -220,8 +220,10 @@
     min-width: 16px;
     padding: 1px 5px;
     border-radius: 999px;
-    background: var(--danger-solid);
-    color: white;
+    /* A pending queue is "needs you" — the amber state, not an error (patterns §5). */
+    background: var(--warning-soft);
+    color: var(--warning);
+    font-weight: 600;
     font-size: var(--fs-xs);
     line-height: 14px;
     text-align: center;

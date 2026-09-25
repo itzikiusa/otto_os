@@ -83,6 +83,23 @@
     showRequest();
     requestAnimationFrame(() => document.querySelector<HTMLInputElement>('input[aria-label="Request URL"]')?.focus());
   }
+  /** Close a request tab. A SAVED request with unsaved edits asks first
+   *  (patterns §7 "Discard"); a scratch draft still closes silently — its
+   *  sends are in History. */
+  async function closeRequestTab(i: number): Promise<void> {
+    const t = apiClient.tabs[i];
+    if (t?.requestId && apiClient.isDirty(t)) {
+      const ok = await confirmer.ask(`“${apiClient.tabLabel(t)}” has unsaved changes. Close the tab and discard them? The saved request is kept.`, {
+        title: 'Discard changes?',
+        confirmLabel: 'Discard changes',
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    // The tab list may have shifted while the dialog was open.
+    const at = t?.tabId ? apiClient.tabs.findIndex((x) => x.tabId === t.tabId) : i;
+    if (at >= 0) apiClient.closeTab(at);
+  }
   function openEnvironments(envId: Id | null = null): void {
     view = { kind: 'environments', envId };
     phonePane = 'main';
@@ -244,7 +261,7 @@
         <Icon name="chevronDown" size={12} />
       </button>
       <button class="btn small" data-icon="download" data-overflow="0" onclick={() => (importOpen = true)}><Icon name="download" size={12} />Import…</button>
-      <button class="btn small" data-icon="branch" data-overflow="-1" onclick={() => (gitOpen = true)} disabled={ws.myRole === 'viewer'}><Icon name="branch" size={12} />Sync with Git…</button>
+      <button class="btn small" data-icon="branch" data-overflow="-1" onclick={() => (gitOpen = true)} disabled={ws.myRole === 'viewer'} title={ws.myRole === 'viewer' ? 'Viewers can’t sync API collections with Git' : undefined}><Icon name="branch" size={12} />Sync with Git…</button>
       {#if !onboarding}
         <button class="btn small primary" onclick={newRequest} title="New request (⌘T)" aria-label="New request"><Icon name="plus" size={12} />{#if !viewport.isPhone}New request{/if}</button>
       {/if}
@@ -318,7 +335,7 @@
                       <span class="req-tab-label">{apiClient.tabLabel(t)}</span>
                       {#if apiClient.isDirty(t)}<span class="req-tab-dirty" aria-label="Unsaved changes"></span>{/if}
                     </button>
-                    <button class="req-tab-close icon-btn" title="Close tab" aria-label="Close tab" onclick={() => apiClient.closeTab(i)}><Icon name="x" size={12} /></button>
+                    <button class="req-tab-close icon-btn" title="Close tab" aria-label="Close tab" onclick={() => void closeRequestTab(i)}><Icon name="x" size={12} /></button>
                   </div>
                 {/each}
                 {#if view.kind !== 'request'}
@@ -392,6 +409,8 @@
     color: var(--text-dim);
   }
   .env-v {
+    /* A flex item won't shrink below its text without this — the ellipsis never shows. */
+    min-width: 0;
     font-weight: 600;
     color: var(--text);
     overflow: hidden;

@@ -109,7 +109,7 @@ pub fn router<C: ContextCtx>() -> Router<C> {
                 .put(put_skill::<C>)
                 .delete(delete_skill::<C>),
         )
-        // Provider-global skills (~/.claude|.codex|.agy/skills) — read-only.
+        // Provider-global skills (~/.claude, $CODEX_HOME, ~/.gemini for agy) — read-only.
         .route("/library/provider-skills", get(list_provider_skills::<C>))
         .route(
             "/library/provider-skills/{provider}/{name}/file",

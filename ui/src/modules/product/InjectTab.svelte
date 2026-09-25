@@ -158,7 +158,7 @@
           {#each bundle.sections as sec, idx (idx)}
             <div class="section-block">
               <button class="sec-trigger" onclick={() => toggleSection(idx)}>
-                <span class="coll-arrow">{collapsed[idx] ? '▶' : '▼'}</span>
+                <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[idx] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
                 <span class="sec-heading">{sec.heading}</span>
               </button>
               {#if !collapsed[idx]}
@@ -316,7 +316,8 @@
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .coll-arrow {
-    font-size: 9px;
+    display: inline-flex;
+    align-items: center;
     color: var(--text-dim);
     flex-shrink: 0;
   }

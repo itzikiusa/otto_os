@@ -371,6 +371,13 @@
   }
 
   const canQuery = $derived(!!database.selectedConnId && ['db_query','db_data','db_schema'].some(op=>resourceAccess.can('connection',database.selectedConnId!,op,'database','edit',databaseAccessChild(database.activeDb))));
+  // Why Run is disabled — a disabled button must say why (the normal tooltip
+  // describes what Run WOULD do, which reads as a dead button here).
+  const noQueryReason = $derived(
+    database.selectedConnId
+      ? 'You have no query access to this connection (or this database) — ask its owner for access'
+      : 'Pick a connection first',
+  );
   $effect(()=>{if(database.selectedConnId)void resourceAccess.load('connection',database.selectedConnId,databaseAccessChild(database.activeDb));});
   function run(): void {
     if (!canQuery) return;
@@ -802,7 +809,9 @@
         class="btn small primary"
         onclick={run}
         disabled={!canQuery}
-        title={isMongoshScript
+        title={!canQuery
+          ? noQueryReason
+          : isMongoshScript
           ? 'Run the WHOLE script through mongosh — a script is indivisible, so Run never sends a single ;-delimited fragment (⌘↵)'
           : 'Run the selection, else the statement under the cursor (⌘↵)'}
       >
@@ -815,7 +824,7 @@
           class="btn small"
           onclick={runAll}
           disabled={!canQuery}
-          title="Run all {stmtCount} statements as one batch — one result set per statement (⇧⌘↵)"
+          title={!canQuery ? noQueryReason : `Run all ${stmtCount} statements as one batch — one result set per statement (⇧⌘↵)`}
         >
           <Icon name="play" size={12} />
           Run all
@@ -940,7 +949,7 @@
         {/each}
       </select>
     </label>
-    <label class="qe-timeout" title="Per-statement timeout (ms) — 0 or blank = no limit; MySQL only">
+    <label class="qe-timeout" title="Per-statement timeout (ms) — the engine stops the statement past it; 0 or blank = no limit">
       <span>Timeout</span>
       <input
         class="input qe-timeout-input"

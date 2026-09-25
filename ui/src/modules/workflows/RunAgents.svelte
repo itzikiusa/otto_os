@@ -12,6 +12,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { WorkflowRun, Review, Session } from '../../lib/api/types';
   import { api } from '../../lib/api/client';
+  import { runStatus } from '../../lib/status';
   import { reviewIds, reviewSessions, reviewAgentStatus } from './reviewAgents';
 
   interface Props {
@@ -172,9 +173,12 @@
     {#each groups as g (g.id)}
       <div class="grp">
         <div class="grp-h">
-          <span class="dot {g.status}"></span>
+          <!-- Step status in the shared run vocabulary (Succeeded / Failed /
+               Queued…), like the Steps list and timeline — not the raw
+               engine word ("success", "error", "pending"). -->
+          <span class="dot {runStatus(g.status).key}" aria-hidden="true"></span>
           <span class="grp-name" title={nodeName(g.id)}>{nodeName(g.id)}</span>
-          <span class="grp-status">{g.status}</span>
+          <span class="grp-status">{runStatus(g.status).label}</span>
           <span class="grow"></span>
           <span class="grp-count" title="{g.sessions.length} session(s)">{g.sessions.length}</span>
         </div>
@@ -351,19 +355,26 @@
     border-radius: 50%;
     flex-shrink: 0;
   }
-  .dot.success,
-  .dot.running,
+  .dot.succeeded,
   .s-dot.running,
   .s-dot.working {
-    background: var(--status-working, #28c840);
+    background: var(--status-working);
   }
-  .dot.error,
+  /* A running STEP is info-blue (lib/status.ts), never the succeeded green. */
+  .dot.running {
+    background: var(--info);
+  }
+  .dot.waiting {
+    background: var(--status-warn);
+  }
+  .dot.failed,
   .s-dot.exited,
   .s-dot.error,
   .s-dot.fallback {
     background: var(--status-exited);
   }
-  .dot.pending,
+  .dot.queued,
+  .dot.cancelled,
   .dot.skipped,
   .s-dot.idle,
   .s-dot.reconnectable {

@@ -289,8 +289,8 @@
     width: 20px;
     height: 20px;
     border-radius: 999px;
-    background: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
     font-size: 11px;
     font-weight: 700;
     display: grid;
@@ -353,9 +353,9 @@
     color: var(--text);
   }
   .mini.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    border-color: var(--accent-solid);
+    color: var(--accent-contrast);
   }
   .mini.primary:disabled {
     opacity: 0.5;
@@ -431,8 +431,8 @@
     width: 18px;
     height: 18px;
     border-radius: 999px;
-    background: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
     font-size: var(--fs-xs);
     font-weight: 700;
     display: grid;

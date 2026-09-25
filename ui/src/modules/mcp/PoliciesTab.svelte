@@ -106,6 +106,16 @@
       toasts.error('Expected a policies array or an exported {version, policies} document');
       return;
     }
+    // Replace wipes every existing rule — name the loss before doing it.
+    if (
+      importReplace &&
+      policies.length > 0 &&
+      !(await confirmer.ask(
+        `Replace all ${policies.length} existing rule${policies.length === 1 ? '' : 's'} with the ${list.length} imported? The current rules are deleted.`,
+        { title: 'Replace policy rules', danger: true, confirmLabel: 'Replace' },
+      ))
+    )
+      return;
     importing = true;
     try {
       const res = await mcpCpApi.cpImportPolicies({
@@ -243,12 +253,12 @@
         <div class="prow">
           <div class="pname">
             <span class="nm">{p.name}</span>
-            {#if p.reason}<span class="desc">{p.reason}</span>{/if}
+            {#if p.reason}<span class="desc" title={p.reason}>{p.reason}</span>{/if}
           </div>
           <span class="cell"><span class="scope">{p.workspace_id == null ? 'global' : 'workspace'}</span></span>
           <span class="cell num">{p.priority}</span>
           <span class="cell"><McpPill kind="decision" value={p.effect === 'allow' ? 'allowed' : p.effect === 'deny' ? 'denied' : p.effect === 'require_approval' ? 'pending_approval' : 'dry_run'} small /></span>
-          <span class="cell match mono">{matchSummary(p.match)}</span>
+          <span class="cell mono"><span class="match" title={matchSummary(p.match)}>{matchSummary(p.match)}</span></span>
           <span class="cell">{#if p.enabled}<Icon name="check" size={14} />{:else}<span class="off">off</span>{/if}</span>
           <span class="cell actions">
             <button class="btn xs" onclick={() => openEdit(p)}>Edit</button>
@@ -350,6 +360,10 @@
   .num {
     text-align: right;
   }
+  /* `.cell` is a flex box — text-align doesn't move its content. */
+  .cell.num {
+    justify-content: flex-end;
+  }
   .pname {
     display: flex;
     flex-direction: column;
@@ -378,6 +392,7 @@
     color: var(--text-dim);
   }
   .match {
+    min-width: 0;
     font-size: 11px;
     color: var(--text-dim);
     overflow: hidden;
@@ -420,7 +435,7 @@
     padding: 3px 8px;
   }
   .btn.danger {
-    color: var(--status-exited, #ff5f57);
+    color: var(--danger);
   }
   .muted {
     color: var(--text-dim);

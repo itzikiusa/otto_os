@@ -364,7 +364,7 @@
     <div class="filter">
       <Icon name="search" size={12} />
       <input bind:this={filterEl} class="filter-in" placeholder="Filter  ( / )" bind:value={k8s.filter} aria-label="Filter rows" data-testid="k8s-filter" />
-      {#if k8s.filter}<button class="icon-btn" onclick={() => (k8s.filter = '')} aria-label="Clear filter"><Icon name="x" size={11} /></button>{/if}
+      {#if k8s.filter}<button class="icon-btn" onclick={() => (k8s.filter = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={11} /></button>{/if}
     </div>
 
     <span class="meta dim" title={k8s.rowsLoadedAt ? new Date(k8s.rowsLoadedAt).toLocaleTimeString() : ''}>

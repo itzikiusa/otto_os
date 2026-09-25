@@ -3,6 +3,7 @@
   // GitHub issue/PR, a Slack thread, a finding, a failing test) into a reviewed,
   // evidence-backed PR draft. The page has three areas: the launcher (the one
   // button), the runs list, and the open run's detail panel.
+  import { untrack } from 'svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { runWithOtto } from '../../lib/stores/runWithOtto.svelte';
   import ProofStatusChip from '../../lib/components/ProofStatusChip.svelte';
@@ -19,9 +20,16 @@
 
   // Load the workspace's runs whenever the active workspace changes. This effect
   // reads ONLY ws.currentId (not the run list it loads), so it never self-loops.
+  // An open run from ANOTHER workspace is closed — its cached record would
+  // otherwise keep showing next to this workspace's list.
   $effect(() => {
     const id = ws.currentId;
-    if (id) void runWithOtto.loadList(id);
+    if (!id) return;
+    untrack(() => {
+      const open = runWithOtto.openRun;
+      if (open && open.workspace_id !== id) runWithOtto.closeDetail();
+    });
+    void runWithOtto.loadList(id);
   });
 
   const list = $derived(runWithOtto.list);
@@ -70,7 +78,7 @@
               >
                 <div class="run-top">
                   <span class="badge src-badge" style="--src: {sourceColor(r.source_kind)}">{sourceLabel(r.source_kind)}</span>
-                  <span class="run-title">{r.title || r.source_ref}</span>
+                  <span class="run-title" title={r.title || r.source_ref}>{r.title || r.source_ref}</span>
                   <span class="pill {statusTone(r.status)}">{humanize(r.status)}</span>
                 </div>
                 <div class="run-meta">
@@ -98,7 +106,10 @@
 
     {#if openRun}
       <section class="detail-col">
-        <RunDetail run={openRun} onClose={() => runWithOtto.closeDetail()} />
+        <!-- keyed: the reject draft / action error belong to ONE run -->
+        {#key openRun.id}
+          <RunDetail run={openRun} onClose={() => runWithOtto.closeDetail()} />
+        {/key}
       </section>
     {/if}
   </div>
@@ -115,7 +126,7 @@
   }
   .runs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
   .run {
-    width: 100%; text-align: left; cursor: pointer;
+    width: 100%; text-align: start; cursor: pointer;
     border: 1px solid var(--border); background: var(--surface); color: var(--text);
     border-radius: var(--radius-m); padding: 0.6rem 0.75rem;
     display: flex; flex-direction: column; gap: 0.35rem; font: inherit;
@@ -127,10 +138,10 @@
   .run-meta { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; font-size: 0.8rem; color: var(--text-dim); }
   .findings { font-variant-numeric: tabular-nums; }
   .blocking {
-    margin-left: 0.3rem; font-size: 0.7rem; padding: 0.02rem 0.4rem; border-radius: 999px;
+    margin-inline-start: 0.3rem; font-size: 0.7rem; padding: 0.02rem 0.4rem; border-radius: 999px;
     background: color-mix(in srgb, var(--status-exited) 16%, transparent); color: var(--status-exited);
   }
-  .when { margin-left: auto; font-variant-numeric: tabular-nums; }
+  .when { margin-inline-start: auto; font-variant-numeric: tabular-nums; }
   .badge {
     font-size: 0.7rem; padding: 0.05rem 0.45rem; border-radius: 999px;
     border: 1px solid var(--border); color: var(--text-dim); text-transform: capitalize;

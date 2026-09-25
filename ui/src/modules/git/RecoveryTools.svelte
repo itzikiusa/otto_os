@@ -104,7 +104,7 @@
     });
   }
   async function bisectAction(action: 'start' | 'good' | 'bad' | 'skip' | 'reset'): Promise<void> {
-    if (action === 'start' && !await confirmer.ask('Start bisect? Git will check out candidate commits for you to test, and End bisect returns to your current branch.', { title: 'Start bisect', confirmLabel: 'Start' })) return;
+    if (action === 'start' && !await confirmer.ask('Start bisect? Git will check out candidate commits for you to test, and End bisect returns to your current branch.', { title: 'Start bisect', confirmLabel: 'Start', danger: false })) return;
     await run(async () => {
       gitBridge.bisectTargets[id] = { good, bad };
       const state = await api.post<GitBisectState>(`/repos/${id}/bisect`, { op: action, good, bad, expected_head: bisect?.current_sha });
@@ -117,9 +117,13 @@
 <Modal title="Git recovery tools" width={820} {onclose}>
   <div class="tools">
     <nav aria-label="Recovery tools">
-      {#each [{ id: 'history', label: 'Recovery history' }, { id: 'rebase', label: 'Interactive rebase' }, { id: 'bisect', label: 'Bisect' }] as tab}
-        <button class="btn" class:primary={mode === tab.id} onclick={() => { mode = tab.id as RecoveryMode; }}>{tab.label}</button>
-      {/each}
+      <!-- Mode switch is a segmented control, not three buttons with the active
+           one painted as the primary action (which read as "click me"). -->
+      <div class="segmented" role="group" aria-label="Recovery tool">
+        {#each [{ id: 'history', label: 'Recovery history' }, { id: 'rebase', label: 'Interactive rebase' }, { id: 'bisect', label: 'Bisect' }] as tab}
+          <button class:active={mode === tab.id} aria-pressed={mode === tab.id} onclick={() => { mode = tab.id as RecoveryMode; }}>{tab.label}</button>
+        {/each}
+      </div>
       <button class="btn" disabled={busy} onclick={() => run(refresh)}>Refresh</button>
     </nav>
     {#if error}<p class="error" role="alert">{error}</p>{/if}
@@ -139,7 +143,7 @@
       <button class="btn" disabled={busy || !more} onclick={() => run(() => loadHistory())}>Load more</button>
     {:else if mode === 'rebase'}
       {#if op === 'rebase'}
-        <p>A rebase is in progress. At an Edit stop, use Changes to amend the current commit, then continue.</p>
+        <p>A rebase is in progress. At an Edit stop, amend the current commit from the graph's WIP row, then continue.</p>
         <div class="actions">
           <button class="btn primary" disabled={busy} onclick={() => rebaseAction('continue')}>Continue rebase</button>
           <button class="btn" disabled={busy} onclick={onresolve}>Open conflict resolver</button>
@@ -197,6 +201,7 @@
 <style>
   .tools { padding: 16px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
   nav, .actions { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
+  nav { align-items: center; justify-content: space-between; }
   p { margin: 4px 0; overflow-wrap: anywhere; }
   label { display: flex; flex-direction: column; gap: 5px; flex: 1; }
   input, select { padding: 7px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 5px; min-width: 0; }

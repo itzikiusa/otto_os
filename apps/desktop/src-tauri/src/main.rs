@@ -302,7 +302,7 @@ fn build_menu(app: &tauri::App) -> tauri::Result<()> {
                 true,
                 None::<&str>,
             )?,
-            &MenuItem::with_id(handle, "session-kill", "Kill Session", true, None::<&str>)?,
+            &MenuItem::with_id(handle, "session-kill", "End Session…", true, None::<&str>)?,
         ],
     )?;
 

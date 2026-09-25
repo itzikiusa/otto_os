@@ -17,6 +17,7 @@
   import { api } from '../../../lib/api/client';
   import { winKey } from '../../../lib/win';
   import Icon from '../../../lib/components/Icon.svelte';
+  import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import PageHeader from '../../../lib/components/PageHeader.svelte';
   import { recallSelection, rememberSelection } from '../../../lib/lastSelection';
@@ -211,7 +212,6 @@
       {
         label: 'Archive',
         icon: 'archive',
-        danger: true,
         disabled: !canEdit || !e.session_id || e.status === 'on_disk',
         action: () => void archive(e),
       },
@@ -370,7 +370,10 @@
 
     <div class="rows" data-testid="history-list">
       {#if history.error}
-        <p class="empty-line err">{history.error}</p>
+        <p class="empty-line err" role="alert">
+          {history.error}
+          <button class="btn small" onclick={() => void history.refresh()}>Retry</button>
+        </p>
       {:else if history.loading && history.entries.length === 0}
         <p class="empty-line dim">Loading…</p>
       {:else if shown === 0}
@@ -413,9 +416,9 @@
                   data-status={e.status}
                   data-session-id={e.session_id}
                 >
-                  <span class="glyph {e.provider}" title={e.provider}>{e.provider === 'codex' ? '◇' : 'C'}</span>
+                  <span class="glyph {e.provider}" title={e.provider}><ProviderIcon provider={e.provider} size={18} /></span>
                   <span class="row-body">
-                    <span class="row-title">{entryTitle(e)}</span>
+                    <span class="row-title" title={entryTitle(e)}>{entryTitle(e)}</span>
                     <span class="row-meta">
                       <span class="dot st-{e.status}" title={STATUS_LABEL[e.status]}></span>
                       <span class="mono">{relTime(e.last_active_at)}</span>
@@ -431,7 +434,7 @@
                     }}
                     title="Actions"
                     aria-label="Actions"
-                  >⋯</button>
+                  ><Icon name="more" size={13} /></button>
                 </div>
               {/each}
             {/if}
@@ -473,7 +476,7 @@
         <div class="dtitle-wrap">
           <div class="dtitle" title={entryTitle(sel)}>{entryTitle(sel)}</div>
           <div class="dmeta">
-            <span class="glyph {sel.provider}">{sel.provider === 'codex' ? '◇' : 'C'}</span>
+            <span class="glyph {sel.provider}"><ProviderIcon provider={sel.provider} size={14} /></span>
             <span>{sel.provider}</span>
             <span class="dot st-{sel.status}"></span>
             <span>{STATUS_LABEL[sel.status]}</span>
@@ -500,7 +503,7 @@
             <Icon name="copy" size={12} /> Copy path
           </button>
           {#if canEdit && sel.session_id && sel.status !== 'on_disk'}
-            <button class="act danger" onclick={() => sel && void archive(sel)} disabled={busy}>
+            <button class="act" onclick={() => sel && void archive(sel)} disabled={busy} title="Archive the session — restore it any time from the sidebar's Archived list">
               <Icon name="archive" size={12} /> Archive
             </button>
           {/if}
@@ -568,7 +571,7 @@
     font-weight: 400;
   }
   .err {
-    color: var(--status-exited, #e5534b);
+    color: var(--danger);
   }
   .empty-line {
     font-size: 12px;
@@ -718,25 +721,15 @@
     outline: 2px solid var(--accent);
     outline-offset: -2px;
   }
+  /* Provider mark — the shared ProviderIcon (the sidebar/pane header one), not
+     a private letter glyph. */
   .glyph {
     flex-shrink: 0;
     display: inline-grid;
     place-items: center;
     width: 18px;
     height: 18px;
-    border-radius: 5px;
-    font-size: var(--fs-xs);
-    font-weight: 700;
-    line-height: 1;
     margin-top: 1px;
-  }
-  .glyph.claude {
-    background: color-mix(in srgb, #d97757 22%, transparent);
-    color: #d97757;
-  }
-  .glyph.codex {
-    background: var(--surface-2);
-    color: var(--text);
   }
   .row-body {
     flex: 1;
@@ -760,7 +753,7 @@
     color: var(--text-dim);
   }
   .on-disk {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     border: 1px dashed var(--border);
@@ -794,6 +787,9 @@
   }
   .row-more {
     flex-shrink: 0;
+    display: inline-grid;
+    place-items: center;
+    padding: 0;
     width: 20px;
     height: 20px;
     border: none;
@@ -882,7 +878,6 @@
   .dmeta .glyph {
     width: 14px;
     height: 14px;
-    font-size: 8.5px;
     margin-top: 0;
   }
   .dactions {
@@ -919,10 +914,6 @@
     background: var(--accent);
     border-color: var(--accent);
     color: var(--accent-contrast, #fff);
-  }
-  .act.danger:hover:not(:disabled) {
-    color: var(--status-exited, #e5534b);
-    border-color: var(--status-exited, #e5534b);
   }
   .dconv {
     flex: 1;

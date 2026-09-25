@@ -317,7 +317,7 @@
   .ma-empty {
     margin: auto;
     text-align: center;
-    color: var(--text-dim, #aaa);
+    color: var(--text-dim);
     padding: 20px;
   }
   .embedded .ma-empty {

@@ -167,7 +167,7 @@
     const typed = await confirmer.promptText(
       `You are about to IMPORT rows into the ${label} connection "${conn.name}". ` +
         `This writes data. Type the connection name to confirm.`,
-      { title: '⚠ Confirm production write', confirmLabel: 'Run import', placeholder: conn.name },
+      { title: '⚠ Confirm production write', confirmLabel: 'Run import', placeholder: conn.name, danger: true },
     );
     return typed != null && typed.trim().toLowerCase() === conn.name.trim().toLowerCase();
   }

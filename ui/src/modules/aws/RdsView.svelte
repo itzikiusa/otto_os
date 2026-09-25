@@ -11,6 +11,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import JsonTree from '../database/JsonTree.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
@@ -186,7 +187,7 @@
             <td class="mono hide-md" title={endpointOf(i)}>{endpointOf(i) || '—'}</td>
             <td class="dim hide-md" title={fmtDate(i.created)}>{fmtAgo(i.created)}</td>
             <td class="act">
-              <button class="icon-btn" onclick={(e) => menu(e, i)} aria-label={`Actions for ${i.identifier}`} title="Actions">⋯</button>
+              <button class="icon-btn" onclick={(e) => menu(e, i)} aria-label={`Actions for ${i.identifier}`} title="Actions"><Icon name="more" size={14} /></button>
             </td>
           </tr>
         {/each}
@@ -370,7 +371,7 @@
   }
   .tag {
     margin-left: 6px;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     padding: 0 5px;
     border-radius: 999px;

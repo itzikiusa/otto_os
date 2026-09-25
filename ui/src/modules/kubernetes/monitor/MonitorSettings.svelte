@@ -343,7 +343,7 @@
                   <input class="input mono" placeholder="metric name" bind:value={m.metric} disabled={!canEdit} />
                   <input class="input mono" placeholder="or label" bind:value={m.label} disabled={!canEdit} />
                   <button class="input picker" onclick={(e) => unitMenu(e, m)} disabled={!canEdit}>{m.unit ?? 'number'}</button>
-                  {#if canEdit}<button class="icon-btn" onclick={() => removeMapping(p, j)} aria-label="Remove mapping"><Icon name="x" size={12} /></button>{/if}
+                  {#if canEdit}<button class="icon-btn" onclick={() => removeMapping(p, j)} aria-label="Remove mapping" title="Remove mapping"><Icon name="x" size={12} /></button>{/if}
                   {#if errors[`probe.${i}.map.${j}`]}<em class="err span">{errors[`probe.${i}.map.${j}`]}</em>{/if}
                 </div>
               {/each}
@@ -372,7 +372,7 @@
           {:else}
             <input class="input mono" placeholder={x.kind === 'workload' ? 'cronjob:*' : '*-confsrv-*'} bind:value={x.match} disabled={!canEdit} />
           {/if}
-          {#if canEdit}<button class="icon-btn" onclick={() => removeExclusion(i)} aria-label="Remove exclusion"><Icon name="x" size={12} /></button>{/if}
+          {#if canEdit}<button class="icon-btn" onclick={() => removeExclusion(i)} aria-label="Remove exclusion" title="Remove exclusion"><Icon name="x" size={12} /></button>{/if}
           {#if errors[`ex.${i}`]}<em class="err span">{errors[`ex.${i}`]}</em>{/if}
         </div>
       {/each}

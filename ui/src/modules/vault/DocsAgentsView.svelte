@@ -1596,7 +1596,7 @@
   .finding p {
     margin: 3px 0 0;
     color: var(--text-dim);
-    font-size: 10.75px;
+    font-size: var(--fs-xs);
     line-height: 1.4;
   }
   .finding p span {
@@ -1606,7 +1606,7 @@
   .severity {
     border-radius: 4px;
     padding: 1px 5px;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
   }

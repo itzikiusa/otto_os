@@ -161,7 +161,8 @@
           <h2 class="section-title">Rules</h2>
           <p class="help">
             Classified on this Mac with simple keyword rules — no extra model call. The model chip on a thread, or a message
-            starting with <span class="mono">@claude</span> / <span class="mono">@codex</span>, always overrides.
+            starting with <span class="mono">@claude</span> / <span class="mono">@codex</span>, always overrides. A thread
+            that has already started stays on its CLI unless the new message matches a rule strongly.
           </p>
           <div class="table-wrap">
             <table class="rules">

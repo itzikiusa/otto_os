@@ -53,7 +53,7 @@
 
   {#if annotations.length === 0}
     <p class="empty">
-      No marks yet. Enable "Mark element" (reader) or the picker (live) and click something.
+      No marks yet. Turn on "Mark element" above the page, then click something to mark it.
     </p>
   {:else}
     <ul class="list">
@@ -81,12 +81,12 @@
           </div>
           <div class="actions">
             {#if editingId !== a.id}
-              <button class="icon-btn" title="Edit note" onclick={() => startEdit(a)}>
+              <button class="icon-btn" title="Edit note" aria-label="Edit note" onclick={() => startEdit(a)}>
                 <Icon name="edit" size={12} />
               </button>
             {/if}
             <SendToSession annotationId={a.id} />
-            <button class="icon-btn" title="Delete mark" onclick={() => remove(a.id)}>
+            <button class="icon-btn" title="Delete mark" aria-label="Delete mark" onclick={() => remove(a.id)}>
               <Icon name="trash" size={12} />
             </button>
           </div>
@@ -100,7 +100,7 @@
   .notes-rail {
     width: 260px;
     flex-shrink: 0;
-    border-left: 1px solid var(--border);
+    border-inline-start: 1px solid var(--border);
     overflow-y: auto;
     padding: 0.6rem;
     display: flex;
@@ -227,8 +227,8 @@
     cursor: pointer;
   }
   .btn.primary {
-    background: var(--accent);
-    color: var(--accent-contrast, #fff);
-    border-color: var(--accent);
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
+    border-color: var(--accent-solid);
   }
 </style>

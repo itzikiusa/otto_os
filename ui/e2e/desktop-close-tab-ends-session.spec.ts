@@ -9,9 +9,10 @@ import { expectFullyInViewport } from './helpers';
 // skipped the dialog entirely when the client's cached `live` flag was stale —
 // so a session silently stayed alive behind a closed tab. Now every close
 // gesture (tab ×, sidebar ×) asks Archive / Delete (Cancel keeps the tab).
-// A remembered Archive applies without asking for ONE tab; a remembered
-// Delete still confirms (irreversible), and a bulk close that ends more than
-// one session always confirms once, naming the count.
+// A remembered Archive or Delete applies without asking for ONE tab (the
+// user opted out of the question — confirming anyway made "Always delete" a
+// lie), and a bulk close that ends more than one session always confirms
+// once, naming the count.
 // ─────────────────────────────────────────────────────────────────────────────
 
 let ctx: APIRequestContext;
@@ -131,7 +132,7 @@ test('archived list: multi-select deletes the checked sessions in one confirm', 
   expect(await exists(idByTitle.Maldini)).toBe(true);
 });
 
-test('"Always delete" pref: split-pane header × still confirms the delete', async ({ page }) => {
+test('"Always delete" pref: split-pane header × deletes without asking again', async ({ page }) => {
   // Remember "Delete" through the tab × dialog (the beforeEach init script
   // clears the pref on every load, so it must be set in-page).
   const tab = await openTab(page, 'Kaka');
@@ -145,16 +146,11 @@ test('"Always delete" pref: split-pane header × still confirms the delete', asy
   await openTab(page, 'Gattuso');
   // ⌘D splits the focused session into a second pane → header × shows.
   await page.keyboard.press('Meta+d');
-  const hdrClose = page.locator('button[aria-label="Close session (⌘W) — deletes the session (asks first)"]').first();
+  const hdrClose = page.locator('button[aria-label="Close session (⌘W) — deletes the session and its history"]').first();
   await expect(hdrClose).toBeVisible({ timeout: 10_000 });
   await hdrClose.click();
-  // The remembered Delete picks the action but never skips the confirm.
-  await expect(page.locator('.cf-msg')).toContainText('Always delete');
-  await page.getByRole('button', { name: 'Cancel' }).click();
-  expect(await exists(idByTitle.Gattuso)).toBe(true);
-  expect(await exists(idByTitle.Maldini)).toBe(true);
-  await hdrClose.click();
-  await page.getByRole('dialog').getByRole('button', { name: 'Delete session' }).click();
+  // The remembered Delete applies directly — no second dialog.
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   // Exactly one of the two panes' sessions is gone; the other survives.
   await expect
     .poll(async () => (await exists(idByTitle.Gattuso)) !== (await exists(idByTitle.Maldini)), { timeout: 15_000 })

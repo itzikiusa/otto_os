@@ -25,6 +25,10 @@
   let query = $state('');
   let loading = $state(true);
   let error = $state('');
+  /** A failed "Load more" — shown inline beside the button. It used to write
+   *  `error`, which swapped the WHOLE list for the error state and wiped the
+   *  rows already on screen (the opposite of what loadMore promises). */
+  let moreError = $state('');
   /** Headline for the error state — distinguishes "your token is bad" from
    *  "the provider is down" instead of labelling every failure "unreachable". */
   let errorTitle = $state('Provider unreachable');
@@ -38,6 +42,7 @@
     void retryRev;
     loading = true;
     error = '';
+    moreError = '';
     void api
       .get<PrListResp>(`/repos/${id}/prs?state=${st}&page=1&per_page=${PER_PAGE}`)
       .then((r) => {
@@ -59,11 +64,13 @@
       .finally(() => (loading = false));
   });
 
-  /** Append the next page. Failures toast nothing — the button simply stays,
-   *  so a flaky provider never wipes the rows already on screen. */
+  /** Append the next page. Failures toast nothing — the button simply stays
+   *  (with an inline note), so a flaky provider never wipes the rows already
+   *  on screen. */
   async function loadMore(): Promise<void> {
     if (loadingMore || !hasMore) return;
     loadingMore = true;
+    moreError = '';
     try {
       const next = page + 1;
       const r = await api.get<PrListResp>(
@@ -73,7 +80,7 @@
       hasMore = r.has_more;
       page = next;
     } catch (e) {
-      error = e instanceof Error ? e.message : 'failed to load more PRs';
+      moreError = e instanceof Error ? e.message : 'failed to load more PRs';
     } finally {
       loadingMore = false;
     }
@@ -101,6 +108,13 @@
     return new Date(iso).toLocaleDateString([], { month: 'short', day: 'numeric' });
   }
 
+  const STATE_LABEL: Record<PrState, string> = {
+    open: 'Open',
+    merged: 'Merged',
+    declined: 'Declined',
+    all: 'All',
+  };
+
   const stateColors: Record<string, string> = {
     open: 'ok',
     merged: 'accent',
@@ -112,8 +126,13 @@
   <div class="pr-toolbar">
     <div class="row">
       {#each states as s (s)}
-        <button class="chip filter-chip" class:active={stateFilter === s} onclick={() => (stateFilter = s)}>
-          {s}
+        <button
+          class="chip filter-chip"
+          class:active={stateFilter === s}
+          aria-pressed={stateFilter === s}
+          onclick={() => (stateFilter = s)}
+        >
+          {STATE_LABEL[s]}
         </button>
       {/each}
     </div>
@@ -143,7 +162,7 @@
   {:else if prs.length === 0}
     <EmptyState
       icon="pr"
-      title="No {stateFilter === 'all' ? '' : stateFilter} pull requests"
+      title={stateFilter === 'all' ? 'No pull requests' : `No ${stateFilter} pull requests`}
       body="Create one from your current branch, or change the filter."
       actionLabel="New Pull Request"
       onaction={() => (createOpen = true)}
@@ -164,9 +183,9 @@
                 <span class="ci-chip {ci.cls}" title="CI {pr.ci_status}">{ci.glyph}</span>
               {/if}
               <span class="dim">{pr.author}</span>
-              <span class="mono dim">{pr.source_branch} <span class="dir-arrow">→</span> {pr.target_branch}</span>
+              <span class="mono dim pr-branches" title="{pr.source_branch} → {pr.target_branch}">{pr.source_branch} <span class="dir-arrow">→</span> {pr.target_branch}</span>
               <span class="grow"></span>
-              <span class="dim">updated {fmtDate(pr.updated_at)}</span>
+              <span class="dim pr-updated">updated {fmtDate(pr.updated_at)}</span>
             </div>
           </div>
         </button>
@@ -178,8 +197,9 @@
     {#if hasMore}
       <div class="pr-more">
         <button class="btn small" disabled={loadingMore} onclick={loadMore}>
-          {loadingMore ? 'Loading…' : 'Load more'}
+          {loadingMore ? 'Loading…' : moreError ? 'Retry' : 'Load more'}
         </button>
+        {#if moreError}<span class="pr-more-err" role="status">Couldn't load more: {moreError}</span>{/if}
       </div>
     {/if}
   {/if}
@@ -234,8 +254,26 @@
   }
   .pr-more {
     display: flex;
+    align-items: center;
     justify-content: center;
+    gap: 10px;
     margin-top: 10px;
+  }
+  .pr-more-err {
+    color: var(--danger);
+    font-size: var(--fs-s);
+  }
+  /* A long source → target pair ellipsizes (full pair in the title) instead of
+     pushing "updated …" out of the card. */
+  .pr-branches {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pr-updated {
+    flex-shrink: 0;
+    white-space: nowrap;
   }
   .ci-chip {
     font-weight: 700;
@@ -304,5 +342,6 @@
     .pr-meta .grow { display: none; }
     /* Long branch names break instead of forcing horizontal overflow. */
     .pr-meta .mono { overflow-wrap: anywhere; min-width: 0; }
+    .pr-branches { white-space: normal; }
   }
 </style>

@@ -100,7 +100,7 @@
   {#if loading && !summary}
     <Skeleton rows={3} />
   {:else if error && !summary}
-    <EmptyState icon="chart" title="Usage unavailable" body={error} />
+    <EmptyState icon="chart" title="Usage unavailable" body={error} actionLabel="Retry" actionIcon="refresh" onaction={() => poller?.now()} />
   {:else if status && !status.available}
     <EmptyState icon="chart" title="Usage engine is off" body="Enable the embedded ClickHouse engine on the Usage page." actionLabel="Open Usage" onaction={() => router.go('usage')} />
   {:else if summary}

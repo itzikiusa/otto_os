@@ -8,6 +8,8 @@
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { rel } from '../../lib/stores/now.svelte';
+  import { formatCount } from '../../lib/metric-format';
+  import { toasts } from '../../lib/toast.svelte';
   import type { RecruitedAgent, RunStatus, SwarmRun } from './types';
 
   // `onhire` lets a completed recruit run open the Recruiter wizard pre-filled
@@ -34,6 +36,22 @@
     ),
   );
 
+  const filtering = $derived(!!(agentFilter || projectFilter || statusFilter));
+
+  // A failed stop must surface instead of rejecting silently (the row would
+  // just keep showing Running with no explanation).
+  async function stop(r: SwarmRun) {
+    try {
+      await swarm.stopRun(r.id);
+    } catch (e) {
+      toasts.error("Couldn't stop the run", e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function tokenTitle(r: SwarmRun): string {
+    return `${(r.tokens_input ?? 0).toLocaleString()} input · ${(r.tokens_output ?? 0).toLocaleString()} output tokens`;
+  }
+
   function active(r: SwarmRun): boolean {
     return r.status === 'queued' || r.status === 'running' || r.status === 'waiting';
   }
@@ -54,19 +72,29 @@
       {/each}
     </select>
     <div class="chips">
-      <button class="chip" class:accent={statusFilter === ''} onclick={() => (statusFilter = '')}>all</button>
+      <button class="chip" class:accent={statusFilter === ''} onclick={() => (statusFilter = '')}>All</button>
       {#each STATUSES as s (s)}
         <button class="chip" class:accent={statusFilter === s} onclick={() => (statusFilter = s)}>{runStatus(s).label}</button>
       {/each}
     </div>
     <span class="grow"></span>
-    <button class="icon-btn" onclick={() => swarm.detail && swarm.loadRuns({ swarm_id: swarm.detail.id })} aria-label="refresh">
+    <button class="icon-btn" onclick={() => swarm.detail && swarm.loadRuns({ swarm_id: swarm.detail.id })} aria-label="Refresh runs" title="Refresh runs">
       <Icon name="refresh" size={14} />
     </button>
   </div>
 
   {#if filtered.length === 0}
-    <EmptyState icon="clock" title="No runs" body="Runs appear here as agents work tasks." />
+    {#if filtering && swarm.runs.length > 0}
+      <EmptyState
+        icon="clock"
+        title="No runs match these filters"
+        body="Clear the assignee, project or status filter to see all {swarm.runs.length} runs."
+        actionLabel="Clear filters"
+        onaction={() => { agentFilter = ''; projectFilter = ''; statusFilter = ''; }}
+      />
+    {:else}
+      <EmptyState icon="clock" title="No runs" body="Runs appear here as agents work tasks." />
+    {/if}
   {:else}
     <div class="table">
       <div class="thead">
@@ -74,23 +102,23 @@
         <span class="c-kind">Work</span>
         <span class="c-status">Status</span>
         <span class="c-time">Started</span>
-        <span class="c-tok">Tokens</span>
+        <span class="c-tok" title="Input / output tokens">Tokens in/out</span>
         <span class="c-act"></span>
       </div>
       <VirtualList items={filtered} estimateHeight={37} class="vlist-runs">
         {#snippet row(r: SwarmRun)}
           {@const agent = swarm.agentById(r.agent_id)}
           <div class="trow" role="button" tabindex="0" onclick={() => (inspecting = r)} onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (inspecting = r)}>
-            <span class="c-agent">
+            <span class="c-agent" title={agent ? `${agent.name}${agent.title ? ` — ${agent.title}` : ''}` : r.agent_id}>
               <span class="agent-name">{agent?.name ?? r.agent_id.slice(0, 6)}</span>
               {#if agent?.title}<span class="agent-title dim">{agent.title}</span>{/if}
             </span>
-            <span class="c-kind dim">{r.kind}{r.summary ? ` · ${r.summary}` : ''}</span>
+            <span class="c-kind dim" title={r.summary ? `${r.kind} · ${r.summary}` : r.kind}>{r.kind}{r.summary ? ` · ${r.summary}` : ''}</span>
             <span class="c-status"><StatusBadge status={runStatus(r.status)} /></span>
             <span class="c-time dim">{rel(r.started_at ?? r.enqueued_at ?? '')}</span>
-            <span class="c-tok mono dim">
+            <span class="c-tok mono dim" title={r.tokens_input != null || r.tokens_output != null ? tokenTitle(r) : 'No usage recorded'}>
               {r.tokens_input != null || r.tokens_output != null
-                ? `${r.tokens_input ?? 0}/${r.tokens_output ?? 0}`
+                ? `${formatCount(r.tokens_input ?? 0)}/${formatCount(r.tokens_output ?? 0)}`
                 : '—'}
             </span>
             <span class="c-act">
@@ -104,7 +132,7 @@
                 <button class="btn small primary" title="Review & hire this proposed agent" onclick={(e) => { e.stopPropagation(); onhire?.(r.result as unknown as RecruitedAgent, r.id); }}>Hire</button>
               {/if}
               {#if active(r)}
-                <button class="btn small danger" onclick={(e) => { e.stopPropagation(); swarm.stopRun(r.id); }}>Stop</button>
+                <button class="btn small danger" onclick={(e) => { e.stopPropagation(); void stop(r); }}>Stop</button>
               {/if}
             </span>
           </div>
@@ -178,7 +206,19 @@
   .trow:hover {
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
+  /* Grid cells default to min-width:auto — without 0 a long agent name/title
+     pushes the row wider instead of truncating. */
+  .c-agent {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .agent-title {
+    margin-inline-start: 4px;
+  }
   .c-kind {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

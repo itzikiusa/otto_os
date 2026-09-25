@@ -126,7 +126,7 @@
         },
       })),
       { separator: true },
-      { label: 'Remove box', icon: 'trash', danger: true, action: () => home.removeBox(viewId, box.id) },
+      { label: 'Remove widget', icon: 'trash', danger: true, action: () => home.removeBox(viewId, box.id) },
     ]);
   }
 </script>

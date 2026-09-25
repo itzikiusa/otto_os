@@ -18,6 +18,7 @@
   import { vaultGraph, vaultSwitcher, type VaultGraphQuery } from '../../lib/api/vault';
   import type { VaultGraphPayload, VaultSwitchHit } from '../../lib/api/types';
   import { vault } from './vault.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import type { GraphWorkerIn, GraphWorkerOut } from './graph.worker';
 
@@ -1289,7 +1290,7 @@
     ></div>
     <button class="panel-head" onclick={() => (panelOpen = !panelOpen)} aria-expanded={panelOpen}>
       <span>Graph</span>
-      <span class="tri">{panelOpen ? '▾' : '▸'}</span>
+      <span class="tri"><Icon name={panelOpen ? 'chevronDown' : 'chevronRight'} size={12} /></span>
     </button>
     {#if panelOpen}
       <div class="panel-body">
@@ -1311,7 +1312,8 @@
                 title={a}
                 onclick={() => (anchorPaths = anchorPaths.filter((x) => x !== a))}
               >
-                {a.split('/').pop()?.replace(/\.md$/, '')} ×
+                <span class="pill-t">{a.split('/').pop()?.replace(/\.md$/, '')}</span>
+                <Icon name="x" size={10} />
               </button>
             {/each}
           </div>
@@ -1434,7 +1436,7 @@
           {#if expandedGroups.length}
             <div class="chips">
               {#each expandedGroups as g (g)}
-                <button class="pill" onclick={() => toggleGroup(g)}>{g} ×</button>
+                <button class="pill" title="Collapse {g}" onclick={() => toggleGroup(g)}><span class="pill-t">{g}</span> <Icon name="x" size={10} /></button>
               {/each}
             </div>
           {/if}
@@ -1623,6 +1625,7 @@
     cursor: pointer;
   }
   .tri {
+    display: inline-flex;
     color: var(--text-dim, #98989f);
   }
   .panel-body {
@@ -1680,7 +1683,7 @@
     justify-content: space-between;
     gap: 6px;
     margin-top: 6px;
-    font-size: 9px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.06em;
     text-transform: uppercase;
@@ -1703,7 +1706,7 @@
     border: none;
     background: none;
     color: var(--accent, #0a84ff);
-    font-size: 9px;
+    font-size: var(--fs-xs);
     letter-spacing: 0.06em;
     text-transform: uppercase;
     cursor: pointer;
@@ -1748,7 +1751,12 @@
     flex-wrap: wrap;
     gap: 3px;
   }
+  /* Label ellipsizes in its own span; the × icon stays whole (ellipsis on
+     the button itself would clip the icon, not the text). */
   .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     max-width: 100%;
     padding: 1px 6px;
     border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
@@ -1757,9 +1765,12 @@
     color: var(--text, #f2f2f5);
     font-size: var(--fs-xs);
     cursor: pointer;
+    white-space: nowrap;
+  }
+  .pill-t {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .pill:hover {
     border-color: var(--accent, #0a84ff);

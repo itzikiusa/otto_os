@@ -90,7 +90,7 @@
     <button class="btn" onclick={onclose}>Cancel</button>
     {#if repos.length > 0}
       <button class="btn" onclick={pull} disabled={busy || !repoId}><Icon name="download" size={13} />Pull</button>
-      <button class="btn primary" onclick={push} disabled={busy || !repoId || roots.length === 0}>{busy ? 'Working…' : 'Commit & push'}</button>
+      <button class="btn primary" onclick={push} disabled={busy || !repoId || roots.length === 0} title={roots.length === 0 ? 'No collections to push yet — save a request into a collection first' : undefined}>{busy ? 'Working…' : 'Commit & push'}</button>
     {/if}
   {/snippet}
 </Modal>

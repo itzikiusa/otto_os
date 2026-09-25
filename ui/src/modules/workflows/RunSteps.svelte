@@ -2,7 +2,7 @@
   // Reusable run detail: every step of a WorkflowRun with its status, duration,
   // logs, error, and rendered "work product" (agent reply / JSON).
   import {untrack, onDestroy} from 'svelte';
-  import {RunBodyCache, mergeCheckpointPage} from './runProgress';
+  import {RunBodyCache, mergeCheckpointPage, fmtStepMs} from './runProgress';
   import {api} from '../../lib/api/client';
   import Icon from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -65,10 +65,7 @@
     return Number.isFinite(t) ? Math.max(0, now - t) : null;
   }
 
-  function fmtMs(ms?: number | null): string {
-    if (ms == null) return '';
-    return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
-  }
+  const fmtMs = fmtStepMs;
 
   // Phase lines the step engine emits (turn oracle): muted, so the ▶/✓/⚠/↻
   // lines around them stay the ones that read as events.
@@ -434,7 +431,7 @@
               <span>Work product</span>
               <span class="ph-grow"></span>
               <button class="copy-btn" title="Copy to clipboard" onclick={() => copy(asText(ns.output), 'output')}>
-                <Icon name="file" size={11} /> Copy
+                <Icon name="copy" size={11} /> Copy
               </button>
             </div>
             {#if txt}
@@ -469,7 +466,7 @@
           <span>Work product</span>
           <span class="ph-grow"></span>
           <button class="copy-btn" title="Copy to clipboard" onclick={() => copy(asText(z.output), 'output')}>
-            <Icon name="file" size={11} /> Copy
+            <Icon name="copy" size={11} /> Copy
           </button>
         </div>
         {#if zt}

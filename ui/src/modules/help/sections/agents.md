@@ -64,7 +64,7 @@ Agents is where your coding agents run. Each session is a real terminal on this 
 - Status dots: running, working, idle, exited, suspended (resumable). A **Needs you** badge marks a session waiting for your input or a permission.
 - Sessions resume on open after a daemon restart. `claude`, `codex` and `agy` conversations resume when their conversation id was captured. A `shell` always comes back as a fresh shell, and an agent you started inside it is resumed with its own resume command.
 - Sessions you start here are never auto-suspended. Background sessions (workflows, reviews, swarms, channels…) are suspended after 5 idle minutes to free memory, and the pane header shows the countdown. **Pin (keep alive)** stops that.
-- **Restart session** respawns the process (resuming the conversation when possible). **Restart agent** appears while an agent is running, for a stuck process.
+- **Restart session** respawns the process (resuming the conversation when possible). It's in the pane header and, while an agent is running, in the sidebar row menu (for a stuck process). If the agent is mid-turn, Otto asks first.
 - Close a tab to only hide it (the session keeps running), **Archive** to stop it and keep its history, or **Delete** to remove it and its history (always confirmed). Closed tabs reopen with `⌘⇧T`.
 - Select many sessions in the sidebar to archive or delete them together. Archived sessions live in the Archived section, where you can restore them.
 

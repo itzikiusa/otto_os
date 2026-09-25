@@ -403,7 +403,7 @@
     if (!tab || !cred || filling) return;
     const ok = await confirmer.ask(
       `Fill the saved credentials for "${cred.username}" on ${cred.domain} into this page? Nothing is submitted automatically — review it before you sign in.`,
-      { title: 'Autofill Credentials', confirmLabel: 'Fill' },
+      { title: 'Autofill credentials', confirmLabel: 'Fill', danger: false },
     );
     if (!ok) return;
     filling = true;
@@ -681,6 +681,8 @@
           class="seg"
           class:active={browser.activeTab.mode === 'reader'}
           onclick={() => toggleMode('reader')}
+          aria-label="Reader mode"
+          aria-pressed={browser.activeTab.mode === 'reader'}
           title="Reader mode — fetched and rendered as clean markdown"
         >
           <Icon name="file" size={13} />
@@ -791,7 +793,15 @@
           <button class="btn ghost" onclick={() => browser.activeTab && void browser.setMode(browser.activeTab.id, 'reader')}>Switch to Reader</button>
         </div>
       {/if}
-      <ReaderView page={browser.page} loading={browser.loadingPage} error={browser.pageError} />
+      <ReaderView
+        page={browser.page}
+        loading={browser.loadingPage}
+        error={browser.pageError}
+        onretry={() => {
+          const url = browser.activeTab?.url;
+          if (url) void browser.loadPage(url);
+        }}
+      />
       {#if browser.page}
         <NotesRail annotations={browser.annotations} />
       {/if}
@@ -824,6 +834,7 @@
     inset-block-start: 8px;
     z-index: 2;
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
     padding: 6px 8px 6px 10px;
@@ -939,6 +950,9 @@
     margin-bottom: 6px;
   }
   .summary p {
+    /* A long summary scrolls in place instead of shoving the page off-screen. */
+    max-height: 30vh;
+    overflow-y: auto;
     margin: 0;
     color: var(--text);
     line-height: 1.5;

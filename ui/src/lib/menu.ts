@@ -49,10 +49,13 @@ export function handleMenu(id: string): void {
       ui.zoomReset();
       break;
     case 'session-restart':
-      if (ws.activeSessionId) void ws.restartSession(ws.activeSessionId);
+      if (ws.activeSessionId) void ws.requestRestart(ws.activeSessionId);
       break;
     case 'session-kill':
-      if (ws.activeSessionId) void ws.killSession(ws.activeSessionId);
+      // "End Session" — the same outcome as closing its tab, so it honours
+      // Settings → Appearance "Closing a session tab" (ask / archive /
+      // delete). It used to hard-DELETE the session with no confirm.
+      if (ws.activeSessionId) void ws.requestCloseTab(ws.activeSessionId);
       break;
     case 'walkthroughs':
       router.go('walkthroughs');

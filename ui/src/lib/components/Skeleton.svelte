@@ -30,6 +30,11 @@
     background-size: 220% 100%;
     animation: shimmer 1.4s ease-in-out infinite;
   }
+  @media (prefers-reduced-motion: reduce) {
+    .skeleton-row {
+      animation: none;
+    }
+  }
   @keyframes shimmer {
     0% {
       background-position: 120% 0;

@@ -3,6 +3,7 @@
   // user expand a run to read the report + per-task summaries + board messages,
   // and provides a "Run Discovery" button (with team picker) for repeat runs.
   import { product } from '../../lib/stores/product.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
@@ -81,7 +82,7 @@
     const attCount = 0; // attachment count not tracked here; overview has the panel
     const ok = await confirmer.ask(
       `Run Discovery in ${teamName}? This will START the swarm and send the story info${attCount > 0 ? ` + ${attCount} attachments` : ''} as discovery context.`,
-      { title: 'Run Discovery', confirmLabel: 'Run Discovery' },
+      { title: 'Run Discovery', confirmLabel: 'Run Discovery', danger: false },
     );
     if (!ok) return;
 
@@ -188,7 +189,7 @@
             onclick={() => toggleRun(summary.run.id)}
             onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggleRun(summary.run.id); }}
           >
-            <span class="coll-arrow">{isOpen ? '▼' : '▶'}</span>
+            <span class="coll-arrow" aria-hidden="true"><Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={11} /></span>
             <span class="status-badge {statusColor(summary.derived_status)}">
               {summary.derived_status}
             </span>
@@ -380,7 +381,8 @@
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .coll-arrow {
-    font-size: var(--fs-xs);
+    display: inline-flex;
+    align-items: center;
     color: var(--text-dim);
     flex-shrink: 0;
   }

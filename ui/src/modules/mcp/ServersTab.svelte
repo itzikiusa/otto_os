@@ -98,23 +98,27 @@
   }
 
   async function remove(s: McpServerDetail): Promise<void> {
-    const ok = await confirmer.ask(`Remove MCP server "${s.name}"? Its discovered tools and allowlist entries go too.`, {
-      title: 'Remove server',
-      confirmLabel: 'Remove',
+    const ok = await confirmer.ask(`Delete MCP server "${s.name}"? Its discovered tools and allowlist entries are deleted too.`, {
+      title: 'Delete server',
+      confirmLabel: 'Delete',
       danger: true,
     });
     if (!ok) return;
     setBusy(s.id, 'delete');
     try {
       await mcpCpApi.cpDelete(s.id);
-      toasts.success('Server removed', s.name);
+      toasts.success('Server deleted', s.name);
       await onReload();
     } catch (e) {
-      toasts.error('Remove failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(s.id, null);
     }
   }
+
+  /** Tooltip for a greyed-out row action — never a disabled button with no reason. */
+  const NO_CONFIGURE = 'You need configure access to this server';
+  const ROOT_ONLY = 'Only an Otto admin can add MCP servers';
 
   function toggleExpanded(id: string): void {
     expandedId = expandedId === id ? null : id;
@@ -129,7 +133,7 @@
     <button class="btn small" onclick={() => void onReload()} title="Refresh">
       <Icon name="refresh" size={13} /> Refresh
     </button>
-    <button class="btn primary small" data-testid="mcp-add-server" disabled={!auth.isRoot} onclick={() => (formOpen = true)}>
+    <button class="btn primary small" data-testid="mcp-add-server" disabled={!auth.isRoot} title={auth.isRoot ? undefined : ROOT_ONLY} onclick={() => (formOpen = true)}>
       <Icon name="plus" size={13} /> Add server
     </button>
   </div>
@@ -146,7 +150,7 @@
     <div class="empty">
       <Icon name="plug" size={26} />
       <p>No external servers yet. Otto's built-in server is on the Otto server tab; add an external MCP server here to govern it.</p>
-      <button class="btn primary" disabled={!auth.isRoot} onclick={() => (formOpen = true)}>Add a server</button>
+      <button class="btn primary" disabled={!auth.isRoot} title={auth.isRoot ? undefined : ROOT_ONLY} onclick={() => (formOpen = true)}>Add a server</button>
     </div>
   {:else}
     <div class="grid">
@@ -160,6 +164,7 @@
         <span class="actions-h">Actions</span>
       </div>
       {#each servers as s (s.id)}
+        {@const endpoint = s.transport === 'stdio' ? `${s.command} ${s.args.join(' ')}`.trim() : (s.url ?? '')}
         <div class="srow">
           <button
             class="name"
@@ -169,8 +174,8 @@
           >
             <span class="nm">{s.name}</span>
             {#if s.has_secret}<Icon name="key" size={11} />{/if}
-            {#if s.description}<span class="desc">{s.description}</span>{/if}
-            <span class="endpoint mono">{s.transport === 'stdio' ? `${s.command} ${s.args.join(' ')}`.trim() : (s.url ?? '')}</span>
+            {#if s.description}<span class="desc" title={s.description}>{s.description}</span>{/if}
+            <span class="endpoint mono" title={endpoint}>{endpoint}</span>
           </button>
           <span class="cell"><span class="transport">{s.transport}</span></span>
           <span class="cell">
@@ -187,26 +192,27 @@
               aria-checked={s.enabled}
               disabled={busy[s.id] === 'toggle' || !can(s.id,'configure')}
               onclick={() => void toggleEnabled(s)}
-              title={s.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}
+              aria-label={`Enable ${s.name}`}
+              title={!can(s.id, 'configure') ? NO_CONFIGURE : s.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}
             >
               <span class="knob"></span>
             </button>
           </span>
           <span class="cell actions">
             {#if auth.isRoot || can(s.id,'manage_access')}<button class="btn xs" onclick={() => accessId=s.id}>Access</button>{/if}
-            <button class="btn xs" disabled={!!busy[s.id] || !can(s.id,'configure')} onclick={() => void discover(s)}>
+            <button class="btn xs" disabled={!!busy[s.id] || !can(s.id,'configure')} title={can(s.id,'configure') ? undefined : NO_CONFIGURE} onclick={() => void discover(s)}>
               {busy[s.id] === 'discover' ? '…' : 'Discover'}
             </button>
-            <button class="btn xs" disabled={!!busy[s.id] || !can(s.id,'configure')} onclick={() => void health(s)}>
+            <button class="btn xs" disabled={!!busy[s.id] || !can(s.id,'configure')} title={can(s.id,'configure') ? undefined : NO_CONFIGURE} onclick={() => void health(s)}>
               {busy[s.id] === 'health' ? '…' : 'Health'}
             </button>
-            <button class="btn xs danger" disabled={!!busy[s.id] || !can(s.id,'configure')} onclick={() => void remove(s)}>
+            <button class="btn xs danger" disabled={!!busy[s.id] || !can(s.id,'configure')} title={can(s.id,'configure') ? undefined : NO_CONFIGURE} onclick={() => void remove(s)}>
               {busy[s.id] === 'delete' ? '…' : 'Delete'}
             </button>
           </span>
           {#if expandedId === s.id}
             <div class="row-body" data-testid="mcp-server-tools">
-              <ToolsTab {wsId} {servers} selectedServerId={s.id} onSelect={() => {}} embedded />
+              <ToolsTab {wsId} {servers} selectedServerId={s.id} onSelect={() => {}} embedded ondiscovered={() => void onReload()} />
             </div>
           {/if}
         </div>
@@ -358,7 +364,7 @@
     flex: none;
   }
   .switch.on {
-    background: var(--status-working, #28c840);
+    background: var(--success);
   }
   .switch .knob {
     position: absolute;
@@ -397,7 +403,7 @@
     padding: 3px 8px;
   }
   .btn.danger {
-    color: var(--status-exited, #ff5f57);
+    color: var(--danger);
   }
 
   @media (max-width: 760px) {

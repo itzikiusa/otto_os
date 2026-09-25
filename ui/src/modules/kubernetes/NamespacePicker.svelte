@@ -66,6 +66,10 @@
       maxH = Math.max(120, Math.min(wantH, above - 4));
       top = Math.max(pad, r.top - 4 - maxH);
     }
+    // The 120px floor can still overrun a short window — keep the whole popup
+    // on screen (and never above the top edge).
+    maxH = Math.min(maxH, vh - 2 * pad);
+    top = Math.max(pad, Math.min(top, vh - pad - maxH));
     pos = { top, left, width, maxH };
   }
 
@@ -178,7 +182,7 @@
       autocapitalize="off"
       autocorrect="off"
       spellcheck={false}
-      title={error ? `Namespaces couldn't be listed: ${error}` : shown}
+      title={disabled ? 'This kind is cluster-scoped — no namespace applies' : error ? `Namespaces couldn't be listed: ${error}` : shown}
       value={open ? query : shown}
       {disabled}
       onfocus={() => void show()}
@@ -212,7 +216,7 @@
           onpointerdown={(e) => { e.preventDefault(); choose(o.value); }}
           onkeydown={(e) => { if (e.key === 'Enter') choose(o.value); }}
         >
-          <span class="ns-opt-label" class:mono={o.value !== ''}>{o.label}</span>
+          <span class="ns-opt-label" class:mono={o.value !== ''} title={o.label}>{o.label}</span>
           {#if o.value === value}<Icon name="check" size={12} />{/if}
         </div>
       {/each}

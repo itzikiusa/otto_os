@@ -118,7 +118,9 @@
       case 'working':
         return 'working…';
       case 'waiting':
-        return 'queued…';
+        // `waiting` folds a queued run (no slot yet) and a run that is waiting
+        // on a person/approval — name which one instead of calling both queued.
+        return activeRun(a.id)?.status === 'waiting' ? 'waiting…' : 'queued…';
       case 'open':
         return 'session open';
       default:
@@ -260,9 +262,9 @@
 <div class="agent-graph">
   <div class="graph-col">
     <div class="controls">
-      <button class="icon-btn" onclick={() => zoomBy(1.15)} aria-label="zoom in"><Icon name="plus" size={14} /></button>
-      <button class="icon-btn" onclick={() => zoomBy(0.87)} aria-label="zoom out"><Icon name="minimize" size={14} /></button>
-      <button class="icon-btn" onclick={recenter} aria-label="fit to view"><Icon name="maximize" size={14} /></button>
+      <button class="icon-btn" onclick={() => zoomBy(1.15)} aria-label="Zoom in" title="Zoom in"><Icon name="plus" size={14} /></button>
+      <button class="icon-btn" onclick={() => zoomBy(0.87)} aria-label="Zoom out" title="Zoom out"><Icon name="minimize" size={14} /></button>
+      <button class="icon-btn" onclick={recenter} aria-label="Fit to view" title="Fit to view"><Icon name="maximize" size={14} /></button>
     </div>
 
     {#if agents.length === 0}
@@ -324,10 +326,11 @@
                   <div class="tooltip" onmouseenter={() => (hoverAgentId = a.id)}>
                     <div class="tip-head dim">Sessions ({sess.length})</div>
                     {#each sess as s (s.id)}
+                      {@const sst = ws.statusMap[s.id] ?? s.status}
                       <button class="tip-row" onclick={() => (swarm.selectedSessionId = s.id)}>
                         <Icon name="terminal" size={11} />
                         <span class="grow ellipsis">{s.title || s.provider}</span>
-                        <span class="node-state st-{(ws.statusMap[s.id] ?? s.status) === 'running' ? 'working' : 'idle'}"></span>
+                        <span class="node-state st-{sst === 'running' || sst === 'working' ? 'working' : 'idle'}"></span>
                       </button>
                     {/each}
                   </div>
@@ -372,7 +375,7 @@
           >
             <Icon name="zap" size={12} />
             <span class="task-main">
-              <span class="task-title ellipsis2">{t.title}</span>
+              <span class="task-title ellipsis2" title={t.title}>{t.title}</span>
               <span class="task-meta dim">
                 <span class="pchip prio-{t.priority}">{t.priority}</span>
                 <span>{t.status.replace('_', ' ')}</span>
@@ -555,6 +558,16 @@
     box-shadow: var(--shadow, 0 4px 16px rgba(0, 0, 0, 0.28));
     padding: 5px;
   }
+  /* Invisible bridge over the 6px gap: the tooltip lives inside `.node`, so
+     without it the pointer "leaves" the node while crossing the gap and the
+     session list vanishes before it can be clicked. */
+  .tooltip::before {
+    content: '';
+    position: absolute;
+    inset-inline: 0;
+    bottom: 100%;
+    height: 8px;
+  }
   .tip-head {
     font-size: var(--fs-xs);
     padding: 2px 6px 4px;
@@ -684,16 +697,12 @@
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text-dim);
-    cursor: grab;
-  }
-  .task-card:hover {
-    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   }
   .task-card.prio-urgent {
-    border-inline-start-color: var(--status-exited);
+    border-inline-start-color: var(--danger);
   }
   .task-card.prio-high {
-    border-inline-start-color: #e6883c;
+    border-inline-start-color: var(--warning);
   }
   .task-card.prio-medium {
     border-inline-start-color: var(--accent);
@@ -732,8 +741,8 @@
     color: var(--danger);
   }
   .pchip.prio-high {
-    background: color-mix(in srgb, #e6883c 22%, transparent);
-    color: #e6883c;
+    background: var(--warning-soft);
+    color: var(--warning);
   }
   .ellipsis {
     overflow: hidden;

@@ -92,6 +92,7 @@ adds the system-wide shortcut and opens the editor in its own window.
 | ⌘⇧S | Take a snip from inside Otto |
 | Space | While selecting: toggle window capture |
 | Esc | While selecting: cancel the capture |
+| V R O A L P H T B N | Pick a tool: Select, Box, Ellipse, Arrow, Line, Pen, Mark, Text, Blur, Step (the letter is in each tool's tooltip) |
 | ⌘Z | Undo |
 | ⇧⌘Z | Redo |
 | ⌘C | Copy the annotated image now (when no annotation is selected) |
@@ -131,8 +132,6 @@ shortcuts.
 - Images must be PNG and at most 25 MB.
 - Snipping uses the **Agents** permission: viewing needs Agents view, and
   capturing, annotating or deleting needs Agents edit.
-- The toolbar tooltips show single-letter hints (V, R, O…), but those letter
-  keys are not wired up yet — pick tools with the mouse.
 
 ## Related
 

@@ -10,6 +10,8 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { mcpCpExtraApi, type McpGatewayToolRow } from './cp-api';
   import ExposePanel from './ExposePanel.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { McpOttoServerStatus, McpOttoToolInfo, McpSessionAttach } from '../../lib/api/types';
 
   interface Props {
@@ -71,33 +73,38 @@
       status = await mcpCpApi.cpOttoServer();
     } catch (e) {
       status = null;
-      loadError = e instanceof Error ? e.message : String(e);
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
   }
 
-  async function patch(body: Parameters<typeof mcpCpApi.cpUpdateOttoServer>[0]): Promise<void> {
+  /** Resolves false when the save failed. The checkboxes here are one-way
+   *  (`checked={…}`), so a failed save must put the clicked box back itself —
+   *  otherwise it keeps showing a state the daemon never stored. */
+  async function patch(body: Parameters<typeof mcpCpApi.cpUpdateOttoServer>[0]): Promise<boolean> {
     saving = true;
     try {
       const next = await mcpCpApi.cpUpdateOttoServer(body);
       status = { ...next, token: null };
+      return true;
     } catch (e) {
       toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+      return false;
     } finally {
       saving = false;
     }
   }
 
-  async function toggleEnabled(): Promise<void> {
-    await patch({ enabled: !(status?.enabled ?? false) });
+  async function toggleEnabled(input: HTMLInputElement): Promise<void> {
+    if (!(await patch({ enabled: !(status?.enabled ?? false) }))) input.checked = status?.enabled ?? false;
   }
 
-  async function toggleTool(name: string): Promise<void> {
+  async function toggleTool(name: string, input: HTMLInputElement): Promise<void> {
     const next = new Set(enabledNames);
     if (next.has(name)) next.delete(name);
     else next.add(name);
-    await patch({ tools: [...next] });
+    if (!(await patch({ tools: [...next] }))) input.checked = enabledNames.has(name);
   }
 
   async function setCategory(categoryTools: McpOttoToolInfo[], enable: boolean): Promise<void> {
@@ -132,7 +139,7 @@
     const next = new Set(exemptNames);
     if (ask) next.delete(tool.name);
     else next.add(tool.name);
-    await patch({ approval_exempt_tools: [...next] });
+    if (!(await patch({ approval_exempt_tools: [...next] }))) input.checked = !exemptNames.has(tool.name);
   }
 
   async function setCategoryAsk(categoryTools: McpOttoToolInfo[], ask: boolean): Promise<void> {
@@ -158,7 +165,7 @@
     }
   }
 
-  async function updateAttach(enabled: boolean): Promise<void> {
+  async function updateAttach(enabled: boolean, input: HTMLInputElement): Promise<void> {
     const id = wsId;
     if (!id) return;
     attachBusy = true;
@@ -170,7 +177,9 @@
         'Applies to sessions started from now on.',
       );
     } catch (e) {
-      attachError = e instanceof Error ? e.message : String(e);
+      // Put the box back: the daemon still has the old value.
+      input.checked = attach?.attached ?? true;
+      toasts.error(enabled ? 'Could not attach to sessions' : 'Could not detach from sessions', e instanceof Error ? e.message : String(e));
     } finally {
       attachBusy = false;
     }
@@ -233,7 +242,7 @@
           data-testid="mcp-session-attach"
           checked={attach?.attached ?? true}
           disabled={!wsId || attachBusy || !isMcpAdmin}
-          onchange={(event) => void updateAttach(event.currentTarget.checked)}
+          onchange={(event) => void updateAttach(event.currentTarget.checked, event.currentTarget)}
         />
         <span class="switchcopy">
           <strong>Attach to sessions in {ws.current?.name ?? 'this workspace'}</strong>
@@ -253,7 +262,7 @@
         data-testid="mcp-outward-enabled"
         checked={status?.enabled ?? false}
         disabled={saving || !status || !isMcpAdmin}
-        onchange={() => void toggleEnabled()}
+        onchange={(event) => void toggleEnabled(event.currentTarget)}
       />
       <span class="switchcopy">
         <strong>Expose to external clients</strong>
@@ -267,11 +276,8 @@
     </p>
   </section>
 
-  {#if loading && !status}
-    <p class="muted pad">Loading…</p>
-  {/if}
-  {#if loadError}
-    <p class="warn">Could not load the external tool catalog: {loadError}</p>
+  {#if (loading || loadError) && !status}
+    <LoadState what="the external tool catalog" {loading} error={loadError} empty rows={3} onretry={() => void load()} />
   {/if}
 
   <div class="tools-head">
@@ -347,7 +353,7 @@
                 type="checkbox"
                 checked={tool.enabled}
                 disabled={saving || !status || !isMcpAdmin}
-                onchange={() => void toggleTool(tool.name)}
+                onchange={(event) => void toggleTool(tool.name, event.currentTarget)}
               />
               <span class="t-meta">
                 <span class="t-name mono">
@@ -428,7 +434,7 @@
       aria-expanded={exposeOpen}
       onclick={() => (exposeOpen = !exposeOpen)}
     >
-      <span class:open={exposeOpen}>▸</span>
+      <span class:open={exposeOpen}><Icon name="chevronRight" size={13} /></span>
       Connect an external client
     </button>
     {#if exposeOpen}<ExposePanel {groups} {isMcpAdmin} />{/if}
@@ -570,7 +576,7 @@
     cursor: pointer;
   }
   .noask {
-    color: #e0a000;
+    color: var(--warning);
   }
   .grp-ask {
     display: flex;
@@ -642,7 +648,7 @@
     border-radius: var(--radius-m, 8px) var(--radius-m, 8px) 0 0;
   }
   .disclose span {
-    display: inline-block;
+    display: inline-flex;
     transition: transform 120ms ease;
   }
   .disclose span.open {

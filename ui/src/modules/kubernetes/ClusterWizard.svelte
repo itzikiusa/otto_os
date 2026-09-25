@@ -196,7 +196,7 @@
         <p class="hint">Contexts found in <span class="mono">~/.kube/config</span> and <span class="mono">$KUBECONFIG</span>. Otto reads them in place and never modifies the file. Pick one or more.</p>
         <div class="ctx-tools">
           <input class="input" placeholder="Filter contexts…" bind:value={ctxFilter} aria-label="Filter contexts" />
-          <button class="btn ghost" onclick={() => void discover()} disabled={discovering} aria-label="Rescan"><Icon name="refresh" size={13} /></button>
+          <button class="btn ghost" onclick={() => void discover()} disabled={discovering} aria-label="Rescan" title="Rescan"><Icon name="refresh" size={13} /></button>
         </div>
         {#if discovering}
           <Skeleton rows={3} height={40} />

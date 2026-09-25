@@ -19,13 +19,25 @@
   let query = $state('');
   let attaching = $state(false);
 
-  $effect(() => {
-    const wsId = ws.currentId;
-    if (!wsId) { loading = false; return; }
+  // A failed load used to fall through to "No product stories in this
+  // workspace." — say it failed, with Retry.
+  let loadError = $state<string | null>(null);
+  function load(wsId: string): void {
+    loading = true;
+    loadError = null;
     void api
       .get<ProductStory[]>(`/workspaces/${wsId}/product/stories`)
       .then((s) => { stories = s; loading = false; })
-      .catch(() => { loading = false; });
+      .catch((e) => {
+        loadError = e instanceof Error ? e.message : String(e);
+        loading = false;
+      });
+  }
+
+  $effect(() => {
+    const wsId = ws.currentId;
+    if (!wsId) { loading = false; return; }
+    load(wsId);
   });
 
   const filtered = $derived(
@@ -69,6 +81,11 @@
 
   {#if loading}
     <p class="dim">Loading stories…</p>
+  {:else if loadError}
+    <p class="dim" role="alert">
+      Couldn’t load product stories: {loadError}
+      <button class="btn small" onclick={() => ws.currentId && load(ws.currentId)}>Retry</button>
+    </p>
   {:else if filtered.length === 0}
     <p class="dim">{stories.length === 0 ? 'No product stories in this workspace.' : 'No stories match your filter.'}</p>
   {:else}
@@ -164,7 +181,7 @@
   }
   .story-stage {
     flex-shrink: 0;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     height: 16px;

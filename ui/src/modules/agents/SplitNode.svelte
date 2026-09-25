@@ -31,6 +31,7 @@
   import DatabasePage from '../database/DatabasePage.svelte';
   import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import {
     layout,
     MIN_PANE_PX,
@@ -188,7 +189,7 @@
             aria-label="Close pane"
             onclick={() => ws.closePane(idx)}
             oncontextmenu={(e) => ctxMenu.show(e, presetItems())}
-          >✕</button>
+          ><Icon name="x" size={12} /></button>
         {/if}
         <DatabasePage />
       </div>
@@ -269,8 +270,10 @@
     background: var(--surface);
     color: var(--text-dim);
     cursor: pointer;
-    font-size: 11px;
-    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
   }
   .db-pane-close:hover {
     color: var(--text);

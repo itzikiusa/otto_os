@@ -20,6 +20,8 @@
     fmtCost,
     relTime,
   } from './lib';
+  import { now } from '../../lib/stores/now.svelte';
+  import { sentenceCase } from '../../lib/status';
 
   interface Props {
     wsId: string;
@@ -132,6 +134,17 @@
     router.go('agents');
   }
 
+  /** "3m ago" that keeps counting (shared clock); "—" when unknown. */
+  function ago(iso: string | null | undefined): string {
+    void now();
+    const r = relTime(iso);
+    return r === '—' ? r : `${r} ago`;
+  }
+  function localTime(iso: string | null | undefined): string | undefined {
+    const t = iso ? Date.parse(iso) : NaN;
+    return Number.isFinite(t) ? new Date(t).toLocaleString() : undefined;
+  }
+
   function isUrl(s: string | null): boolean {
     return !!s && /^https?:\/\//.test(s);
   }
@@ -161,7 +174,10 @@
   {#if loading && !detail}
     <div class="d-body dim">Loading…</div>
   {:else if err && !detail}
-    <div class="d-body err">{err}</div>
+    <div class="d-body err">
+      {err}
+      <button class="btn small" onclick={() => void load()}>Retry</button>
+    </div>
   {:else if detail}
     <div class="d-body">
       {#if err}<div class="err small">{err}</div>{/if}
@@ -181,10 +197,10 @@
       <div class="facts">
         <div><span class="flabel">Owner</span><span>{detail.owner ?? '—'} <span class="dim">({ACTOR_LABEL[detail.owner_kind]})</span></span></div>
         <div><span class="flabel">Cost so far</span><span class="mono">{fmtCost(detail.cost_so_far)}</span></div>
-        <div><span class="flabel">Repo</span><span class="mono ell">{detail.repo_id ?? '—'}</span></div>
-        <div><span class="flabel">Branch</span><span class="mono">{detail.branch ?? '—'}</span></div>
-        <div><span class="flabel">Created</span><span>{relTime(detail.created_at)} ago</span></div>
-        <div><span class="flabel">Updated</span><span>{relTime(detail.updated_at)} ago</span></div>
+        <div><span class="flabel">Repo</span><span class="mono ell" title={detail.repo_id ?? undefined}>{detail.repo_id ?? '—'}</span></div>
+        <div><span class="flabel">Branch</span><span class="mono" title={detail.branch ?? undefined}>{detail.branch ?? '—'}</span></div>
+        <div><span class="flabel">Created</span><span title={localTime(detail.created_at)}>{ago(detail.created_at)}</span></div>
+        <div><span class="flabel">Updated</span><span title={localTime(detail.updated_at)}>{ago(detail.updated_at)}</span></div>
       </div>
 
       <!-- goal / context / result + inline editor -->
@@ -220,7 +236,7 @@
             {#each detail.approvals as a (a.id)}
               <li class="ap" class:pending={a.status === 'pending'}>
                 <div class="ap-main">
-                  <span class="ap-status ap-{a.status}">{a.status}</span>
+                  <span class="ap-status ap-{a.status}">{sentenceCase(a.status)}</span>
                   <span class="small">{a.reason ?? 'approval requested'}</span>
                   <span class="dim small">· {a.requested_by}</span>
                 </div>
@@ -294,7 +310,7 @@
                 <span class="tl-dot actor-{ev.actor}"></span>
                 <span class="tl-type">{ev.event_type}</span>
                 <span class="tl-actor dim small">{ACTOR_LABEL[ev.actor]}</span>
-                <span class="tl-time dim small">{relTime(ev.ts)}</span>
+                <span class="tl-time dim small" title={localTime(ev.ts)}>{ago(ev.ts)}</span>
                 {#if payloadPreview(ev.payload)}<span class="tl-payload mono small dim">{payloadPreview(ev.payload)}</span>{/if}
               </li>
             {/each}

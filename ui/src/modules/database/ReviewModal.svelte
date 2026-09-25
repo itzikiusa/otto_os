@@ -39,7 +39,9 @@
   function onReviewKeydown(e: KeyboardEvent): void {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
-      onrun();
+      // Same gate as the Run button: a second ⌘↵ while the first statement is
+      // still in flight must not fire it again (an UPDATE/DELETE twice).
+      if (!running && sql.trim()) onrun();
     }
   }
 </script>

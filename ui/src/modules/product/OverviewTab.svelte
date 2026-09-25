@@ -309,7 +309,7 @@
     const attCount = 0; // attachments listed in the panel; count not tracked here
     const ok = await confirmer.ask(
       `Run Discovery in ${teamName}? This will START the swarm and send the story info${attCount > 0 ? ` + ${attCount} attachments` : ''} as discovery context.`,
-      { title: 'Run Discovery', confirmLabel: 'Run Discovery' },
+      { title: 'Run Discovery', confirmLabel: 'Run Discovery', danger: false },
     );
     if (!ok) return;
     runningDiscovery = true;
@@ -1056,7 +1056,7 @@
       aria-label="Edit field"
       onclick={() => beginEdit(editableFor(key)!, current)}
     >
-      ✎
+      <Icon name="edit" size={11} />
     </button>
   {/if}
 {/snippet}
@@ -1113,8 +1113,8 @@
       {/if}
     {/if}
     <div class="field-editor-actions">
-      <button class="btn small primary" onclick={() => saveField(ef)} disabled={fieldSaving}>
-        {fieldSaving ? 'Saving…' : 'Save'}
+      <button class="btn small primary" onclick={() => saveField(ef)} disabled={fieldSaving} title="Writes to the live Jira issue — everyone with access sees it">
+        {fieldSaving ? 'Saving…' : `Save to ${story?.source_key ?? 'Jira'}`}
       </button>
       <button class="btn small" onclick={cancelEdit} disabled={fieldSaving}>Cancel</button>
     </div>
@@ -1164,8 +1164,8 @@
               else if (e.key === 'Escape') { e.preventDefault(); cancelEditTitle(); }
             }}
           />
-          <button class="btn small primary" onclick={saveTitle} disabled={titleSaving}>
-            {titleSaving ? 'Saving…' : 'Save'}
+          <button class="btn small primary" onclick={saveTitle} disabled={titleSaving} title="Writes to the live Jira issue — everyone with access sees it">
+            {titleSaving ? 'Saving…' : `Save to ${story.source_key}`}
           </button>
           <button class="btn small" onclick={cancelEditTitle} disabled={titleSaving}>Cancel</button>
         </div>
@@ -1178,7 +1178,7 @@
               title="Edit title"
               aria-label="Edit title"
               onclick={beginEditTitle}
-            >✎</button>
+            ><Icon name="edit" size={13} /></button>
           {/if}
         </div>
       {/if}
@@ -1186,10 +1186,10 @@
       <!-- counts row -->
       <div class="counts-row">
         <span class="count-chip" title="Versions"><Icon name="archive" size={11} />{detail.counts.versions} version{detail.counts.versions !== 1 ? 's' : ''}</span>
-        <span class="count-chip" title="Analyses"><Icon name="gauge" size={11} />{detail.counts.analyses} anal.</span>
-        <span class="count-chip" title="Open questions"><Icon name="comment" size={11} />{detail.counts.open_questions} Q</span>
-        <span class="count-chip" title="Notes"><Icon name="note" size={11} />{detail.counts.notes} notes</span>
-        <span class="count-chip" title="Test cases"><Icon name="check" size={11} />{detail.counts.testcases} tests</span>
+        <span class="count-chip" title="Analyses"><Icon name="gauge" size={11} />{detail.counts.analyses} analys{detail.counts.analyses !== 1 ? 'es' : 'is'}</span>
+        <span class="count-chip" title="Open questions"><Icon name="comment" size={11} />{detail.counts.open_questions} open question{detail.counts.open_questions !== 1 ? 's' : ''}</span>
+        <span class="count-chip" title="Notes"><Icon name="note" size={11} />{detail.counts.notes} note{detail.counts.notes !== 1 ? 's' : ''}</span>
+        <span class="count-chip" title="Test cases"><Icon name="check" size={11} />{detail.counts.testcases} test{detail.counts.testcases !== 1 ? 's' : ''}</span>
       </div>
 
       <!-- tags row -->
@@ -1202,7 +1202,7 @@
               onclick={() => removeTag(tag)}
               aria-label="Remove tag {tag}"
               title="Remove tag"
-            >×</button>
+            ><Icon name="x" size={10} /></button>
           </span>
         {/each}
         <form
@@ -1372,7 +1372,7 @@
                         onclick={() => toggleTranscript(t.id)}
                         aria-expanded={expandedTranscripts[t.id] ?? false}
                       >
-                        <span class="coll-arrow">{expandedTranscripts[t.id] ? '▼' : '▶'}</span>
+                        <span class="coll-arrow" aria-hidden="true"><Icon name={expandedTranscripts[t.id] ? 'chevronDown' : 'chevronRight'} size={11} /></span>
                         <span class="transcript-title">{t.title || 'Untitled transcript'}</span>
                         <span class="transcript-date">{relDate(t.created_at)}</span>
                       </button>
@@ -1381,7 +1381,7 @@
                         onclick={() => doDeleteTranscript(t)}
                         title="Remove transcript"
                         aria-label="Remove transcript"
-                      >✕</button>
+                      ><Icon name="x" size={11} /></button>
                     </div>
                     {#if expandedTranscripts[t.id]}
                       <div class="transcript-body">{t.body}</div>
@@ -1445,7 +1445,7 @@
               <span class="desc-label">Description</span>
               {#if !editingDesc && !viewingVersion}
                 <button class="desc-edit-btn" onclick={beginEditDesc}>
-                  <span aria-hidden="true">✎</span> Edit
+                  <Icon name="edit" size={11} /> Edit
                 </button>
               {/if}
             </div>
@@ -1462,8 +1462,8 @@
                   onkeydown={(e) => { if (e.key === 'Escape') { e.preventDefault(); cancelEditDesc(); } }}
                 ></textarea>
                 <div class="desc-editor-actions">
-                  <button class="btn small primary" onclick={saveDesc} disabled={descSaving}>
-                    {descSaving ? 'Saving…' : 'Save'}
+                  <button class="btn small primary" onclick={saveDesc} disabled={descSaving} title="Overwrites the live Jira description — everyone with access sees it">
+                    {descSaving ? 'Saving…' : `Save to ${story.source_key}`}
                   </button>
                   <button class="btn small" onclick={cancelEditDesc} disabled={descSaving}>Cancel</button>
                 </div>
@@ -1490,7 +1490,7 @@
                   onclick={() => toggleSection('comments')}
                   aria-expanded={!collapsed.comments}
                 >
-                  <span class="coll-arrow">{collapsed.comments ? '▶' : '▼'}</span>
+                  <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed.comments ? 'chevronRight' : 'chevronDown'} size={11} /></span>
                   <span class="jira-section-label">Comments</span>
                   <span class="section-count">({issueFull.comments.length})</span>
                 </button>
@@ -1541,7 +1541,7 @@
                     onclick={() => toggleSection('history')}
                     aria-expanded={!collapsed.history}
                   >
-                    <span class="coll-arrow">{collapsed.history ? '▶' : '▼'}</span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed.history ? 'chevronRight' : 'chevronDown'} size={11} /></span>
                     <span class="jira-section-label">History</span>
                     <span class="section-count">({issueFull.history.length} entries)</span>
                   </button>
@@ -1577,7 +1577,7 @@
                     onclick={() => toggleSection('attachments')}
                     aria-expanded={!collapsed.attachments}
                   >
-                    <span class="coll-arrow">{collapsed.attachments ? '▶' : '▼'}</span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed.attachments ? 'chevronRight' : 'chevronDown'} size={11} /></span>
                     <span class="jira-section-label">Attachments</span>
                     <span class="section-count">({issueFull.attachments.length})</span>
                   </button>
@@ -1685,7 +1685,7 @@
                       aria-haspopup="menu"
                       data-testid="ov-transition-btn"
                     >
-                      {transitionWorking ? 'Working…' : transitionsLoading ? 'Loading…' : 'Transition ▾'}
+                      {#if transitionWorking}Working…{:else if transitionsLoading}Loading…{:else}Transition <Icon name="chevronDown" size={10} />{/if}
                     </button>
                   </div>
                 </div>
@@ -1716,7 +1716,7 @@
                       aria-haspopup="menu"
                       data-testid="ov-assignee-btn"
                     >
-                      {assigneeWorking ? 'Working…' : assignablesLoading ? 'Loading…' : 'Change ▾'}
+                      {#if assigneeWorking}Working…{:else if assignablesLoading}Loading…{:else}Change <Icon name="chevronDown" size={10} />{/if}
                     </button>
                   </div>
                 </div>
@@ -1729,7 +1729,7 @@
                   onclick={() => toggleSection('details')}
                   aria-expanded={!collapsed.details}
                 >
-                  <span class="coll-arrow">{collapsed.details ? '▶' : '▼'}</span>
+                  <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed.details ? 'chevronRight' : 'chevronDown'} size={11} /></span>
                   <span class="jira-section-label">Details</span>
                 </button>
                 {#if !collapsed.details}
@@ -1851,7 +1851,7 @@
                                 title="Set {ef.name}"
                                 aria-label="Set {ef.name}"
                                 onclick={() => beginEdit(ef, '')}
-                              >+</button>
+                              ><Icon name="plus" size={11} /></button>
                             </div>
                           {/if}
                         </span>
@@ -1869,7 +1869,7 @@
                     onclick={() => toggleSection('links')}
                     aria-expanded={!collapsed.links}
                   >
-                    <span class="coll-arrow">{collapsed.links ? '▶' : '▼'}</span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed.links ? 'chevronRight' : 'chevronDown'} size={11} /></span>
                     <span class="jira-section-label">Linked Issues</span>
                     <span class="section-count">({issueFull.links.length})</span>
                   </button>
@@ -1896,7 +1896,7 @@
                   onclick={() => toggleSection('development')}
                   aria-expanded={!collapsed.development}
                 >
-                  <span class="coll-arrow">{collapsed.development ? '▶' : '▼'}</span>
+                  <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed.development ? 'chevronRight' : 'chevronDown'} size={11} /></span>
                   <span class="jira-section-label">Development</span>
                   {#if devStatus}
                     <span class="section-count">
@@ -2111,6 +2111,8 @@
     border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
   }
   .tag-remove {
+    display: inline-flex;
+    align-items: center;
     background: none;
     border: none;
     padding: 0 1px;
@@ -2198,7 +2200,7 @@
     flex-shrink: 0;
   }
   .tag-chip-sm {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     padding: 1px 6px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 12%, transparent);
@@ -2255,6 +2257,8 @@
   }
   .title-edit-btn {
     flex-shrink: 0;
+    display: inline-grid;
+    place-items: center;
     margin-top: 2px;
     width: 24px;
     height: 24px;
@@ -2542,7 +2546,8 @@
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .coll-arrow {
-    font-size: 9px;
+    display: inline-flex;
+    align-items: center;
     flex-shrink: 0;
   }
   .section-count {
@@ -2624,6 +2629,9 @@
   /* ── Status / assignee pickers (menus are the global ctxMenu) ── */
   .change-btn {
     height: 24px;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
     padding: 0 9px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -2698,6 +2706,8 @@
   }
   .field-edit-btn {
     flex-shrink: 0;
+    display: inline-grid;
+    place-items: center;
     width: 20px;
     height: 20px;
     line-height: 1;

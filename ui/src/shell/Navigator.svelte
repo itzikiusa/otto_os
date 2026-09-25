@@ -236,19 +236,16 @@
     ws.navigateToSession(id);
   }
 
-  /** Respawn a stuck in-progress agent's PTY (the terminal reconnects itself). */
-  async function restartAgent(id: string): Promise<void> {
-    try {
-      await ws.restartSession(id);
-    } catch (e) {
-      toasts.error('Restart failed', e instanceof Error ? e.message : String(e));
-    }
+  /** Respawn a stuck in-progress agent's PTY (the terminal reconnects itself).
+   *  Asks first when it is working, same as the pane header. */
+  function restartAgent(id: string): Promise<void> {
+    return ws.requestRestart(id);
   }
 
   /** Delete = PTY killed, row + full history gone — confirm first (mirrors
    *  the workspace-delete confirm; one mis-click must not destroy a session's
-   *  history). Always asked — even under "Always delete" for closing tabs:
-   *  a remembered preference never skips an irreversible delete. */
+   *  history). An explicit Delete command always asks; "Always delete" in
+   *  Settings covers closing a tab, not this menu row. */
   async function deleteSession(id: string): Promise<void> {
     const ok = await confirmer.ask(
       'Delete this session and its entire history? This cannot be undone.',
@@ -493,10 +490,13 @@
         <input
           class="nav-search-input"
           placeholder="Search all sessions…"
+          aria-label="Search all sessions"
           bind:value={sessionQuery}
         />
         {#if sessionQuery}
-          <button class="search-clear" onclick={() => (sessionQuery = '')} aria-label="Clear search">×</button>
+          <button class="search-clear" onclick={() => (sessionQuery = '')} aria-label="Clear search" title="Clear search">
+            <Icon name="x" size={11} />
+          </button>
         {/if}
       </div>
 
@@ -640,11 +640,13 @@
     </button>
     <div class="nav-user">
       <span class="avatar">{(auth.me?.display_name ?? '?').slice(0, 1).toUpperCase()}</span>
-      <div class="grow">
-        <div class="user-name">{auth.me?.display_name}</div>
-        <div class="user-sub">{auth.isRoot ? 'root' : auth.me?.username}</div>
+      <div class="grow" title={auth.me?.display_name}>
+        <div class="user-name ellipsis">{auth.me?.display_name}</div>
+        <div class="user-sub ellipsis">{auth.isRoot ? 'root' : auth.me?.username}</div>
       </div>
-      <button class="icon-btn" onclick={() => auth.logout()} title="Sign out" aria-label="Sign out">⎋</button>
+      <button class="icon-btn" onclick={() => auth.logout()} title="Sign out" aria-label="Sign out">
+        <Icon name="logout" size={14} />
+      </button>
     </div>
   </div>
 </nav>
@@ -773,6 +775,8 @@
       class="icon-btn twisty"
       onclick={() => (agentsOpen = !agentsOpen)}
       aria-label="Toggle session list"
+      aria-expanded={agentsOpen}
+      title={agentsOpen ? 'Hide sessions' : 'Show sessions'}
     >
       <Icon name={agentsOpen ? 'chevronDown' : 'chevronRight'} size={12} />
     </button>
@@ -1032,7 +1036,7 @@
             // In-progress agent only: respawn a stuck PTY (provider resume when
             // possible). Idle/exited/reconnectable sessions have their own paths.
             ...(s.kind === 'agent' && (status === 'running' || status === 'working')
-              ? [{ label: 'Restart agent', icon: 'refresh', action: () => void restartAgent(s.id) }]
+              ? [{ label: 'Restart session', icon: 'refresh', action: () => void restartAgent(s.id) }]
               : []),
             { label: 'Archive', icon: 'archive', action: () => ws.archiveSession(s.id) },
             { label: 'Delete', icon: 'trash', danger: true as const, action: () => void deleteSession(s.id) },
@@ -1084,7 +1088,7 @@
       {#if ws.canEditSession(s)}
         <button
           class="row-action"
-          title="Close session (archive or delete)"
+          title={ws.closeTabTitle(s.id, 'session')}
           aria-label="Close session"
           onclick={() => void ws.requestCloseTab(s.id)}
         >
@@ -1219,6 +1223,16 @@
   }
   .nav-item:hover {
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+  }
+  /* Module / group labels ellipsize in a narrow (resized) sidebar instead of
+     running under the count chips and toggles beside them. */
+  .nav-item > .grow {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .nav-item > .count-chip {
+    flex-shrink: 0;
   }
   /* Selection = the theme accent as a TINT (never a solid fill: --text on a
      solid --accent is unreadable in several themes) + a short accent bar at the
@@ -1467,6 +1481,11 @@
   .nested-row:hover .row-action {
     opacity: 1;
   }
+  /* Hover-revealed, but a keyboard user tabbing onto one must see it (and
+     its focus ring) — it was an invisible focused button. */
+  .row-action:focus-visible {
+    opacity: 1;
+  }
   .row-action:hover {
     background: var(--surface-2);
     color: var(--text);
@@ -1520,13 +1539,17 @@
     outline: none;
   }
   .search-clear {
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
     border: none;
+    border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    font-size: 15px;
-    line-height: 1;
-    padding: 0 2px;
+    padding: 0;
+    flex-shrink: 0;
   }
   .search-clear:hover {
     color: var(--text);

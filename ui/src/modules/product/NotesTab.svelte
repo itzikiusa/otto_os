@@ -5,6 +5,7 @@
   import { renderMarkdown } from '../../lib/md';
   import { confirmer } from '../../lib/confirm.svelte';
   import Modal from '../../lib/components/Modal.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import type { ProductNote, NewNoteReq } from './types';
 
   // ── Load notes when story is selected / changes ────────────────────────────
@@ -109,14 +110,14 @@
     <!-- ── Toolbar ──────────────────────────────────────────────────────────── -->
     <div class="toolbar">
       <span class="grow"></span>
-      <button class="btn small primary" onclick={openAdd}>+ Add note</button>
+      <button class="btn small primary" onclick={openAdd}><Icon name="plus" size={12} /> Add note</button>
     </div>
 
     <!-- ── Notes list ───────────────────────────────────────────────────────── -->
     {#if product.loadingNotes}
       <div class="muted">Loading notes…</div>
     {:else if product.notes.length === 0}
-      <div class="muted">No notes yet. Click "+ Add note" to capture a thought.</div>
+      <div class="muted">No notes yet. Use Add note to capture a thought.</div>
     {:else}
       <div class="n-list">
         {#each product.notes as n (n.id)}

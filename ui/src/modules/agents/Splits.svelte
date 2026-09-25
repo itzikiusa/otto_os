@@ -244,9 +244,11 @@
     padding: 0 12px;
     font-size: 12px;
     border-radius: var(--radius-s);
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: #fff;
+    /* The primary-button pair: a lime accent (Pro Dark) needs DARK text, so a
+       hard-coded white was unreadable there. */
+    border: 1px solid var(--accent-solid);
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
     cursor: pointer;
     transition: opacity 120ms;
   }

@@ -62,7 +62,7 @@
       if (r.ok) toasts.success('Connected', `${r.message} · ${r.latency_ms}ms`);
       else toasts.error('Connection failed', r.message);
     } catch (e) {
-      toasts.error('Test failed', String(e));
+      toasts.error('Test failed', e instanceof Error ? e.message : String(e));
     } finally {
       testing = false;
     }
@@ -73,7 +73,7 @@
   <header class="cv-head">
     <div class="cv-title">
       <span class="dot" style="background: {cluster.color || 'var(--accent)'}"></span>
-      <span class="name ellipsis">{cluster.name}</span>
+      <span class="name ellipsis" title={cluster.name}>{cluster.name}</span>
       <EnvBadge env={cluster.environment} />
       {#if cluster.read_only}<span class="ro">read-only</span>{/if}
       {#if cluster.ssh}
@@ -85,7 +85,7 @@
           <Icon name="zap" size={10} /> {tunnelReady ? 'Tunnel' : 'Connecting…'}
         </span>
       {/if}
-      <span class="boot mono ellipsis">{cluster.bootstrap_servers}</span>
+      <span class="boot mono ellipsis" title={cluster.bootstrap_servers}>{cluster.bootstrap_servers}</span>
     </div>
     <div class="cv-actions">
       <button class="btn small" onclick={testConn} disabled={testing}>
@@ -223,28 +223,5 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .btn {
-    background: var(--surface-2, var(--surface));
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    font: inherit;
-    cursor: pointer;
-  }
-  .btn.small {
-    font-size: 12px;
-    padding: 3px 10px;
-  }
-  .btn:hover {
-    border-color: var(--accent);
-  }
-  .btn:disabled {
-    opacity: 0.6;
-    cursor: default;
-  }
-  .btn.danger:hover {
-    border-color: var(--danger);
-    color: var(--danger);
   }
 </style>

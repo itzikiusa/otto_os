@@ -21,6 +21,8 @@
   import { ws } from '../lib/stores/workspace.svelte';
   import { storeContext } from '../lib/ask';
   import { toasts } from '../lib/toast.svelte';
+  import { confirmer } from '../lib/confirm.svelte';
+  import { applyClose } from '../lib/orchestrate';
   import Icon, { type IconName } from '../lib/components/Icon.svelte';
 
   let mode: 'commands' | 'english' = $state('commands');
@@ -182,6 +184,13 @@
     void totalRows;
     if (selected >= totalRows) selected = Math.max(0, totalRows - 1);
   });
+  // A new query puts the selection back on the best match (row 0): without
+  // this, arrowing to row 3 and typing more made Enter run whatever landed on
+  // row 3 of the NEW list. Hits arriving later only append (see above).
+  $effect(() => {
+    void query;
+    untrack(() => (selected = 0));
+  });
 
   // Keep the keyboard selection visible in the scrolling list.
   let listEl: HTMLDivElement | null = $state(null);
@@ -284,12 +293,13 @@
     try {
       // The shared engine (lib/orchestrate.ts): close → addressed send →
       // deterministic plan (runs at once) → AI planner (confirm below).
-      // The palette runs deletes directly (the bar asks first).
+      // A permanent delete comes back as `confirm-close` and asks first — the
+      // same guard the floating bar has (⌘I lands here).
       const out = await runEnglish(englishText, {
         ...storeContext(ws.currentId),
         optimize,
         aiFallback,
-        confirmDestructive: false,
+        confirmDestructive: true,
       });
       await applyOutcome(out, before);
     } catch (e) {
@@ -307,8 +317,20 @@
     };
     switch (out.kind) {
       case 'empty':
-      case 'confirm-close': // only the bar asks for this; the palette deletes directly
         return;
+      case 'confirm-close': {
+        const n = out.ids.length;
+        const shown = out.titles.slice(0, 5).map((t) => `• ${t}`).join('\n');
+        const more = out.titles.length > 5 ? `\n…and ${out.titles.length - 5} more` : '';
+        const ok = await confirmer.ask(
+          `Permanently delete ${plural(n, 'session')} and ${n === 1 ? 'its' : 'their'} history?\n\n${shown}${more}`,
+          { title: n === 1 ? 'Delete session?' : 'Delete sessions?', confirmLabel: 'Delete' },
+        );
+        if (!ok || !ws.currentId) return;
+        const count = await applyClose(storeContext(ws.currentId), out.ids, true);
+        toasts.success('Sessions deleted', `${plural(count, 'session')} removed`);
+        return done();
+      }
       case 'closed':
         toasts.success(
           out.permanent ? 'Sessions deleted' : 'Sessions closed',
@@ -422,7 +444,7 @@
               onmouseenter={() => (selected = i)}
               onclick={() => run(item.cmd)}
             >
-              <span class="pal-item-title">{item.cmd.title}</span>
+              <span class="pal-item-title" title={item.cmd.title.length > 48 ? item.cmd.title : undefined}>{item.cmd.title}</span>
               {#if item.cmd.detail}<span class="pal-detail">{item.cmd.detail}</span>{/if}
               <span class="grow"></span>
               {#if item.cmd.group}<span class="pal-group">{item.cmd.group}</span>{/if}
@@ -444,8 +466,8 @@
               onmouseenter={() => (selected = filtered.length)}
               onclick={askOtto}
             >
-              <Icon name="zap" size={13} />
-              <span class="pal-item-title">Ask Otto: "{query}"</span>
+              <Icon name="sparkle" size={13} />
+              <span class="pal-item-title" title={query}>Ask Otto: "{query}"</span>
               <span class="grow"></span>
               <span class="pal-group">plain english</span>
             </button>
@@ -469,9 +491,9 @@
             >
               <div class="pal-hit-main">
                 <Icon name={hitIcon(hit.kind)} size={12} />
-                <span class="pal-hit-title">{hit.title}</span>
+                <span class="pal-hit-title" title={hit.title}>{hit.title}</span>
                 {#if hit.subtitle}
-                  <span class="pal-hit-sub">{hit.subtitle}</span>
+                  <span class="pal-hit-sub" title={hit.subtitle}>{hit.subtitle}</span>
                 {/if}
                 <span class="grow"></span>
                 <span class="pal-group pal-hit-kind">{hit.kind.replace('_', ' ')}</span>
@@ -619,6 +641,19 @@
   }
   .pal-item.selected {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
+  }
+  /* One line per row (30px): a long "Focus Session: …" title ellipsizes
+     instead of wrapping out of the row and shoving the group / shortcut. */
+  .pal-item-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pal-group,
+  .pal-item > kbd {
+    flex-shrink: 0;
+    white-space: nowrap;
   }
   .pal-group {
     font-size: var(--fs-xs);

@@ -11,6 +11,7 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
   import AgentEditSheet from './AgentEditSheet.svelte';
   import AgentDocuments from './AgentDocuments.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -110,6 +111,7 @@
   }
 
   async function toggleSchedule(s: PersonalAgentSchedule): Promise<void> {
+    error = '';
     try {
       await personalAgents.updateSchedule(agentId, s.id, { enabled: !s.enabled });
     } catch (e) {
@@ -119,6 +121,7 @@
 
   async function deleteSchedule(s: PersonalAgentSchedule): Promise<void> {
     if (!(await confirmer.ask('Delete this schedule?', { title: 'Delete schedule' }))) return;
+    error = '';
     try {
       await personalAgents.deleteSchedule(agentId, s.id);
     } catch (e) {
@@ -248,7 +251,11 @@
           <dt>Browser use</dt><dd>{agent.browser ? 'on' : 'off'}</dd>
           <dt>Enabled</dt><dd>{agent.enabled ? 'yes' : 'no — schedules are paused'}</dd>
           <dt>Workspace dir</dt><dd class="mono wrap">{agent.cwd || `(default) …/personal/${agent.id}/`}</dd>
-          <dt>Schedules</dt><dd>{schedules.length} — next run {personalAgents.nextRunAt(agent.id) ?? '—'}</dd>
+          <dt>Schedules</dt>
+          <dd>
+            {schedules.length} —
+            {#if agent.enabled}next run <RelTime iso={personalAgents.nextRunAt(agent.id)} fallback="not scheduled" />{:else}paused{/if}
+          </dd>
         </dl>
       </section>
     </div>
@@ -320,7 +327,8 @@
             <div class="rowmain">
               <strong>{cadenceLabel(s.schedule, s.timezone)}</strong>
               {#if !s.enabled}<span class="pill">paused</span>{/if}
-              <span class="meta">next <RelTime iso={s.next_run_at} /> · last <RelTime iso={s.last_run_at} fallback="never" /></span>
+              <!-- a paused schedule (or paused agent) never fires: no "next" promise -->
+              <span class="meta">{#if s.enabled && agent.enabled}next <RelTime iso={s.next_run_at} /> · {/if}last <RelTime iso={s.last_run_at} fallback="never" /></span>
               <p class="directive">{s.directive || '(no directive)'}</p>
             </div>
             <div class="rowactions">
@@ -344,7 +352,7 @@
             <span class="run-when"><RelTime iso={r.started_at} /></span>
             <span class="pill" title="which schedule fired">{scheduleName(r)}</span>
             {#if duration(r)}<span class="meta">{duration(r)}</span>{/if}
-            <span class="run-sum">{r.summary || r.error || '(no summary)'}</span>
+            <span class="run-sum" title={r.summary || r.error || undefined}>{r.summary || r.error || '(no summary)'}</span>
             {#if r.report_rel}
               <button class="btn small" onclick={() => viewReport(r)}>View report</button>
             {/if}
@@ -381,24 +389,14 @@
   {/if}
 
   {#if reportOpen}
-    <div
-      class="modal-bg"
-      onclick={(e) => { if (e.target === e.currentTarget) reportOpen = false; }}
-      onkeydown={(e) => { if (e.key === 'Escape') reportOpen = false; }}
-      role="presentation"
-    >
-      <div class="modal" role="dialog" aria-label="Report" aria-modal="true" tabindex="-1">
-        <header class="modal-head">
-          <strong>Report</strong>
-          <button class="btn small" onclick={() => (reportOpen = false)}>Close</button>
-        </header>
-        {#if reportLoading}
-          <div class="muted">Loading…</div>
-        {:else}
-          <pre class="report">{reportText}</pre>
-        {/if}
-      </div>
-    </div>
+    <!-- the shared sheet: Esc works from anywhere, focus is trapped + restored -->
+    <Modal title="Report" width={760} onclose={() => (reportOpen = false)}>
+      {#if reportLoading}
+        <div class="muted">Loading…</div>
+      {:else}
+        <pre class="report">{reportText}</pre>
+      {/if}
+    </Modal>
   {/if}
 </div>
 </PageBody>
@@ -422,8 +420,8 @@
   .tab.active { color: var(--text); border-bottom-color: var(--accent); }
   .tab:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: -2px; }
   .err {
-    background: color-mix(in srgb, var(--status-exited) 12%, transparent);
-    color: var(--status-exited); padding: 0.5rem 0.75rem;
+    background: var(--danger-soft);
+    color: var(--danger); padding: 0.5rem 0.75rem;
     border-radius: var(--radius-s); margin-bottom: 0.75rem; font-size: 0.85rem;
   }
   .muted, .hint { color: var(--text-dim); font-size: 0.88rem; }
@@ -472,8 +470,5 @@
   .chk { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; color: var(--text); }
   .actions { display: flex; gap: 0.5rem; }
   .chatwrap { height: min(64vh, 620px); border: 1px solid var(--border); border-radius: var(--radius-m); overflow: hidden; }
-  .modal-bg { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); display: flex; align-items: center; justify-content: center; z-index: 50; }
-  .modal { background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius-l); width: min(760px, 92vw); max-height: 82vh; overflow: auto; padding: 0.85rem 1rem; box-shadow: var(--shadow); }
-  .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
   .report { white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.45; color: var(--text); }
 </style>

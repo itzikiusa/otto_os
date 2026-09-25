@@ -6,6 +6,8 @@
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { runStatus } from '../../lib/status';
   import { toasts } from '../../lib/toast.svelte';
   import { openExternal, isExternalUrl } from '../../lib/external';
   import { swarm } from '../../lib/stores/swarm.svelte';
@@ -89,7 +91,9 @@
     <div class="hdr">
       <span class="agent">{agent?.name ?? run.agent_id.slice(0, 8)}</span>
       <span class="dim">· {run.kind}</span>
-      <span class="badge {run.status}">{run.status}</span>
+      <!-- Same shared vocabulary as the Runs list (done → Succeeded, error →
+           Failed, stopped → Cancelled) instead of the raw status word. -->
+      <StatusBadge status={runStatus(run.status)} />
       <span class="grow"></span>
       {#if run.session_id}
         <button class="btn small ghost" onclick={() => { swarm.selectedSessionId = run.session_id!; onclose(); }}>
@@ -158,7 +162,7 @@
           <span class="path mono">{cwd}</span>
           <span class="grow"></span>
           <button class="copy-btn" title="Copy path" onclick={() => copy(cwd!, 'path')}>
-            <Icon name="file" size={11} /> Copy
+            <Icon name="copy" size={11} /> Copy
           </button>
         </div>
       </section>
@@ -192,7 +196,7 @@
           <h3>Brief sent</h3>
           <span class="grow"></span>
           <button class="copy-btn" title="Copy brief" onclick={() => copy(brief!, 'brief')}>
-            <Icon name="file" size={11} /> Copy
+            <Icon name="copy" size={11} /> Copy
           </button>
         </div>
         <pre class="block scrolly">{brief}</pre>
@@ -228,7 +232,7 @@
           <h3>Raw result</h3>
           <span class="grow"></span>
           <button class="copy-btn" title="Copy JSON" onclick={() => copy(rawJson!, 'JSON')}>
-            <Icon name="file" size={11} /> Copy
+            <Icon name="copy" size={11} /> Copy
           </button>
         </div>
         <pre class="block json scrolly">{rawJson}</pre>
@@ -269,8 +273,8 @@
     font-size: 11px;
   }
   .err {
-    color: var(--status-exited);
-    background: color-mix(in srgb, var(--status-exited) 10%, transparent);
+    color: var(--danger);
+    background: var(--danger-soft);
     padding: 7px 9px;
     border-radius: var(--radius-s);
     font-size: 11.5px;
@@ -469,10 +473,10 @@
     background: var(--surface);
   }
   .finding.error {
-    border-color: color-mix(in srgb, var(--status-exited) 40%, var(--border));
+    border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
   }
   .finding.warn {
-    border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+    border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
   }
   .sev-chip {
     font-size: var(--fs-xs);
@@ -483,13 +487,15 @@
     color: var(--text-dim);
     flex: none;
   }
+  /* Severity uses the semantic tones (text-safe), not the --status-* dot
+     colours or the accent — a warning is not a selection. */
   .sev-chip.error {
-    background: color-mix(in srgb, var(--status-exited) 20%, transparent);
-    color: var(--status-exited);
+    background: var(--danger-soft);
+    color: var(--danger);
   }
   .sev-chip.warn {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent-text);
+    background: var(--warning-soft);
+    color: var(--warning);
   }
   .sev-chip.info {
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
@@ -498,26 +504,5 @@
     font-size: 12px;
     white-space: pre-wrap;
     word-break: break-word;
-  }
-  .badge {
-    font-size: var(--fs-xs);
-    padding: 1px 7px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
-    color: var(--text-dim);
-  }
-  .badge.running,
-  .badge.waiting {
-    background: color-mix(in srgb, var(--status-working) 22%, transparent);
-    color: var(--status-working);
-  }
-  .badge.done {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent-text);
-  }
-  .badge.error,
-  .badge.stopped {
-    background: color-mix(in srgb, var(--status-exited) 22%, transparent);
-    color: var(--status-exited);
   }
 </style>

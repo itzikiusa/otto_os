@@ -325,8 +325,8 @@
     padding: 9px 16px;
     border: none;
     border-radius: 999px;
-    background: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;

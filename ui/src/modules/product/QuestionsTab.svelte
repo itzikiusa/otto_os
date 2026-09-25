@@ -4,7 +4,9 @@
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { confirmOutward } from '../../lib/confirmOutward';
   import Modal from '../../lib/components/Modal.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import type { ProductQuestion, NewQuestionReq, UpdateQuestionReq } from './types';
 
   // ── Load questions when tab becomes active ─────────────────────────────────
@@ -208,9 +210,27 @@
     }
   }
 
+  // Where a post lands — named on the button and in the confirm (patterns.md §5:
+  // an outward action says where it goes, what is sent and who sees it).
+  const story = $derived(product.detail?.story ?? null);
+  const isJira = $derived(story?.source_kind === 'jira');
+  const postTarget = $derived(isJira ? (story?.source_key ?? 'Jira') : 'Confluence');
+
   async function postSelected(): Promise<void> {
     const ids = [...selectedIds];
     if (ids.length === 0) return;
+    const texts = product.questions.filter((q) => selectedIds.has(q.id)).map((q) => `• ${q.text}`);
+    const n = ids.length;
+    const ok = await confirmOutward({
+      verb: 'Post comment',
+      title: `Post ${n} question${n !== 1 ? 's' : ''} to ${postTarget}?`,
+      where: isJira
+        ? `Jira ${story?.source_key ?? ''} “${story?.title ?? ''}” — as one comment`
+        : `Confluence page “${story?.title ?? ''}” — as one comment`,
+      what: texts.join('\n'),
+      who: 'Everyone who can see it; Jira/Confluence notify its watchers.',
+    });
+    if (!ok) return;
     postingIds = true;
     try {
       await product.postQuestions({ ids });
@@ -288,12 +308,12 @@
           onclick={postSelected}
           disabled={postingIds}
         >
-          {postingIds ? 'Posting…' : `Post ${selectedIds.size} to Jira / Confluence`}
+          {postingIds ? 'Posting…' : `Post ${selectedIds.size} to ${postTarget}…`}
         </button>
       {/if}
 
       <!-- Add question -->
-      <button class="btn small" onclick={openAdd}>+ Add question</button>
+      <button class="btn small" onclick={openAdd}><Icon name="plus" size={12} /> Add question</button>
     </div>
 
     <!-- ── Loading state ────────────────────────────────────────────────────── -->
@@ -302,7 +322,7 @@
     {:else if filtered.length === 0}
       <div class="muted">
         {product.questions.length === 0
-          ? 'No questions yet. Click "+ Add question" to create one.'
+          ? 'No questions yet. Use Add question to create one.'
           : 'No questions match the current filters.'}
       </div>
     {:else}

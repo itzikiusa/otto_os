@@ -35,6 +35,7 @@
     saveError = '';
     try {
       await browserLive.updateSettings(patch);
+      toasts.success('Browser engine settings saved', 'Used the next time the live browser starts.');
     } catch (e) {
       saveError = e instanceof Error ? e.message : String(e);
     } finally {
@@ -131,6 +132,9 @@
                   name="build"
                   checked={st.settings.build === b.build}
                   disabled={!isAdmin || saving || (b.build === 'chrome-headless-shell' && st.settings.headed)}
+                  title={b.build === 'chrome-headless-shell' && st.settings.headed
+                    ? 'Turn off “Show the window on this Mac” first — the lighter engine has no window'
+                    : undefined}
                   onchange={() => void save({ build: b.build })}
                 />
                 <label for={`bs-build-${b.build}`} class="choice-text">
@@ -222,6 +226,12 @@
         </div>
       </section>
 
+      <!-- A running Chromium is reused (engine, window and download policy are
+           fixed at launch) until it has had no tabs for about a minute. -->
+      <p class="row-desc">
+        Engine, window and download changes apply the next time the live browser starts. One that is
+        already running keeps its settings until all its tabs have been closed for about a minute.
+      </p>
       {#if !isAdmin}
         <p class="row-desc">Only a Browser admin can change the engine settings.</p>
       {/if}

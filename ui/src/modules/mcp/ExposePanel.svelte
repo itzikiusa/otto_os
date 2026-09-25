@@ -3,6 +3,7 @@
   import { api, baseUrl } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
+  import { confirmer } from '../../lib/confirm.svelte';
   import TokensPanel from './TokensPanel.svelte';
   import type { McpOttoToolInfo } from '../../lib/api/types';
 
@@ -76,12 +77,24 @@
     }
   }
 
-  async function toggleNetwork(): Promise<void> {
+  async function toggleNetwork(input: HTMLInputElement): Promise<void> {
     if (!netEnabled && portConflict) {
       toasts.error(
         'Pick a different port',
         `The network port must differ from the daemon's loopback port (${loopbackPort}).`,
       );
+      return;
+    }
+    // Leaving loopback is the one switch here that weakens a security default
+    // (AGENTS.md) — say where it listens and who can reach it before doing it.
+    if (
+      !netEnabled &&
+      !(await confirmer.ask(
+        `The daemon will also listen on 0.0.0.0:${netPort} (TLS, self-signed), so any machine that can reach this Mac on that port can try to connect. Every call still needs a valid access token. Takes effect after a daemon restart.`,
+        { title: 'Allow network access?', confirmLabel: 'Allow network access' },
+      ))
+    ) {
+      input.checked = false;
       return;
     }
     netBusy = true;
@@ -96,6 +109,8 @@
         'Restart the daemon to apply the listener change.',
       );
     } catch (e) {
+      // One-way `checked` — put the box back to what the daemon still has.
+      input.checked = netEnabled;
       toasts.error('Update failed', e instanceof Error ? e.message : String(e));
     } finally {
       netBusy = false;
@@ -138,7 +153,7 @@
     aria-expanded={networkOpen}
     onclick={() => (networkOpen = !networkOpen)}
   >
-    <span class:open={networkOpen}>▸</span>
+    <span class:open={networkOpen}><Icon name="chevronRight" size={12} /></span>
     Network access (advanced)
   </button>
   {#if networkOpen}
@@ -151,7 +166,7 @@
             type="checkbox"
             checked={netEnabled}
             disabled={netBusy || !isMcpAdmin || (!netEnabled && portConflict)}
-            onchange={() => void toggleNetwork()}
+            onchange={(event) => void toggleNetwork(event.currentTarget)}
           />
           <div class="t-meta">
             <span class="t-name">
@@ -255,7 +270,7 @@
     text-align: start;
   }
   .subdisclose span {
-    display: inline-block;
+    display: inline-flex;
     transition: transform 120ms ease;
   }
   .subdisclose span.open {

@@ -2430,7 +2430,7 @@ pub struct BundledSkillContent {
     pub files: Vec<SkillFileEntry>,
 }
 
-/// One on-disk provider-global skill (`~/.claude|.codex|.agy/skills/<name>/`),
+/// One on-disk provider-global skill (`~/.claude|$CODEX_HOME|~/.gemini` + `/skills/<name>/`),
 /// surfaced read-only in the Skills Lab so it can be viewed and reviewed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderSkillInfo {

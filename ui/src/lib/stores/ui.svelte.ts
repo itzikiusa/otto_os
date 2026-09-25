@@ -478,8 +478,12 @@ class UiStore {
   setSessionIsolation(on: boolean): void {
     this.sessionIsolation = on;
     lsSet(LS.sessionIsolation, on ? '1' : '0');
-    // Re-apply the filter immediately against the already-loaded sessions.
-    void import('./workspace.svelte').then(({ ws }) => ws.refreshSessions());
+    // Re-apply the filter immediately — the current workspace's list AND the
+    // all-workspaces sidebar groups, which are loaded separately.
+    void import('./workspace.svelte').then(({ ws }) => {
+      void ws.refreshSessions();
+      void ws.refreshOtherSessions();
+    });
   }
 
   /** resolved light|dark after applying `auto` */

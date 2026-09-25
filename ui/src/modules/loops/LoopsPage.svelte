@@ -7,6 +7,8 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import LoopDetail from './LoopDetail.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { loopStatus } from './loopStatus';
 
   let selectedId = $state<string | null>(null);
   let creating = $state(false);
@@ -29,23 +31,6 @@
     loops.closeDetail();
     const id = ws.currentId;
     if (id) void loops.loadList(id);
-  }
-
-  function pillClass(status: string): string {
-    switch (status) {
-      case 'running':
-        return 'pill working';
-      case 'succeeded':
-        return 'pill ok';
-      case 'failed':
-      case 'stopped':
-        return 'pill bad';
-      case 'blocked':
-      case 'exhausted':
-        return 'pill warn';
-      default:
-        return 'pill';
-    }
   }
 </script>
 
@@ -93,13 +78,13 @@
           <li>
             <button class="card" onclick={() => open(l.id)}>
               <div class="card-top">
-                <span class="name">{l.name}</span>
-                <span class={pillClass(l.status)}>{l.status}</span>
+                <span class="name" title={l.name}>{l.name}</span>
+                <StatusBadge status={loopStatus(l.status)} />
               </div>
               <div class="bar"><span class="bar-fill" style:width={`${l.progress_pct}%`}></span></div>
               <div class="card-meta">
-                <span>iter {l.current_iteration}/{l.limits.max_iterations}</span>
-                <span>{l.progress_pct}%</span>
+                <span>Iteration {l.current_iteration}/{l.limits.max_iterations}</span>
+                <span>{l.progress_pct}% complete</span>
                 {#if l.status === 'running'}<span class="phase">{l.phase}</span>{/if}
               </div>
             </button>
@@ -128,7 +113,7 @@
   }
   .card {
     width: 100%;
-    text-align: left;
+    text-align: start;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
@@ -150,6 +135,10 @@
   .name {
     font-weight: 600;
     font-size: 13px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .card-meta {
     display: flex;
@@ -171,30 +160,5 @@
     display: block;
     height: 100%;
     background: var(--status-working);
-  }
-  .pill {
-    font-size: 11px;
-    padding: 1px 8px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    color: var(--text-dim);
-    text-transform: capitalize;
-  }
-  .pill.working {
-    background: color-mix(in srgb, var(--status-working) 18%, transparent);
-    color: var(--status-working);
-  }
-  .pill.ok {
-    background: var(--success-soft);
-    color: var(--success);
-    font-weight: 600;
-  }
-  .pill.bad {
-    background: color-mix(in srgb, var(--status-exited) 16%, transparent);
-    color: var(--status-exited);
-  }
-  .pill.warn {
-    background: var(--status-warn-soft);
-    color: var(--status-warn);
   }
 </style>

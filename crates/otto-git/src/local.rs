@@ -1252,23 +1252,27 @@ impl LocalGit {
             })
             .collect();
 
-        // Remote branches: name TAB sha; skip entries ending in "/HEAD"
+        // Remote branches: full refname TAB sha; skip the symbolic
+        // `refs/remotes/<remote>/HEAD`. Filter on the FULL name — `:short`
+        // abbreviates `origin/HEAD` to just "origin", which slipped past a
+        // "/HEAD" suffix check and showed up as a stray "origin" branch.
         let remote_out = self
             .run_read(&[
                 "for-each-ref",
-                "--format=%(refname:short)\t%(objectname)",
+                "--format=%(refname)\t%(objectname)",
                 "refs/remotes",
             ])
             .await?;
         let remote = remote_out
             .lines()
             .filter(|l| {
-                let name = l.split('\t').next().unwrap_or("").trim();
-                !l.trim().is_empty() && !name.ends_with("/HEAD")
+                let full = l.split('\t').next().unwrap_or("").trim();
+                !l.trim().is_empty() && !full.ends_with("/HEAD")
             })
             .map(|line| {
                 let mut cols = line.splitn(2, '\t');
-                let name = cols.next().unwrap_or("").trim().to_string();
+                let full = cols.next().unwrap_or("").trim();
+                let name = full.strip_prefix("refs/remotes/").unwrap_or(full).to_string();
                 let sha = cols.next().unwrap_or("").trim().to_string();
                 // Don't flag the base's own remote twin (origin/<base>) as safe.
                 let is_base_remote = base
@@ -4981,6 +4985,29 @@ mod tests {
     /// `origin/develop`, with a dirty overlapping file. The user's bug: this is
     /// exactly the shape where `pull --no-rebase` created an unasked-for merge
     /// commit during a plain switch.
+    /// A clone has the symbolic `refs/remotes/origin/HEAD`; `%(refname:short)`
+    /// abbreviates it to bare "origin", which used to slip past the "/HEAD"
+    /// filter and render as a stray "origin" leaf under REMOTE.
+    #[tokio::test]
+    async fn refs_skip_the_symbolic_remote_head() {
+        let (_tmp, dir) = diverged_fixture();
+        // Fails the test if the fixture lacks origin/HEAD (proves nothing then).
+        sh_git(&dir, &["symbolic-ref", "refs/remotes/origin/HEAD"]);
+        let names: Vec<String> = LocalGit::new(&dir)
+            .refs()
+            .await
+            .unwrap()
+            .remote
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        assert!(names.contains(&"origin/main".to_string()), "{names:?}");
+        assert!(
+            !names.iter().any(|n| n == "origin" || n.ends_with("/HEAD")),
+            "no HEAD pseudo-branch in {names:?}"
+        );
+    }
+
     fn diverged_fixture() -> (tempfile::TempDir, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
         let origin = tmp.path().join("origin.git");

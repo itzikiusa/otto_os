@@ -3,7 +3,7 @@
   // Groups usage_events by a chosen work-graph dimension (repo/branch/PR/…) and
   // shows cost + tokens per group. Supports CSV and JSON export via exporters.ts.
   import { api } from '../../lib/api/client';
-  import { toasts } from '../../lib/toast.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import { exportCsv, downloadJson, copyAsJson } from '../../lib/components/exporters';
   import type { AttributionRow, AttributionDim } from './types';
   import { DIM_LABELS } from './types';
@@ -26,6 +26,9 @@
   let selectedDim: AttributionDim = $state('origin');
   let rows: AttributionRow[] = $state([]);
   let loading = $state(false);
+  /** Last load failure — shown inline with Retry (an empty table would read
+   *  as "nothing attributed", which is not what happened). */
+  let error = $state('');
   let copiedRow: string | null = $state(null);
 
   // Request token: switching dimension/window while a query is in flight must
@@ -39,13 +42,13 @@
       const next = await api.get<AttributionRow[]>(
         `/usage/attribution?by=${selectedDim}&days=${days}`,
       );
-      if (mine === seq) rows = next;
+      if (mine === seq) {
+        rows = next;
+        error = '';
+      }
     } catch (e) {
       if (mine !== seq) return;
-      toasts.error(
-        'Could not load attribution',
-        e instanceof Error ? e.message : String(e),
-      );
+      error = e instanceof Error ? e.message : String(e);
       rows = [];
     } finally {
       if (mine === seq) loading = false;
@@ -109,7 +112,7 @@
 
 <div class="attribution-panel">
   <div class="attr-header">
-    <h3 class="attr-title">Cost Attribution</h3>
+    <h3 class="attr-title">Cost attribution</h3>
     <span class="attr-subtitle">Why did this cost so much?</span>
     <div class="attr-controls">
       <label class="dim-label" for="attr-dim-select">Group by</label>
@@ -131,6 +134,11 @@
 
   {#if loading}
     <div class="attr-loading">Loading attribution…</div>
+  {:else if error}
+    <div class="attr-error" role="alert">
+      <span>Couldn't load attribution: {error}</span>
+      <button class="btn small" onclick={() => void load()}>Retry</button>
+    </div>
   {:else if rows.length === 0}
     <div class="attr-empty">
       No attributed usage for this dimension in the selected window.
@@ -169,8 +177,9 @@
                   class="copy-btn"
                   onclick={() => copyRow(r)}
                   title="Copy row as JSON"
+                  aria-label="Copy row as JSON"
                 >
-                  {copiedRow === r.key ? '✓' : '⧉'}
+                  <Icon name={copiedRow === r.key ? 'check' : 'copy'} size={12} />
                 </button>
               </td>
             </tr>
@@ -317,7 +326,16 @@
   .col-cost, .col-pct, .col-tokens, .col-sessions { text-align: end; }
   .dim-pct { color: var(--text-dim); }
   .col-copy { width: 32px; text-align: center; }
+  .attr-error {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: var(--fs-s);
+    color: var(--danger);
+  }
   .copy-btn {
+    display: inline-grid;
+    place-items: center;
     background: none;
     border: none;
     cursor: pointer;

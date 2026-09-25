@@ -11,6 +11,7 @@
     fmtCost,
     relTime,
   } from './lib';
+  import { now } from '../../lib/stores/now.svelte';
 
   interface Props {
     items: WorkItem[];
@@ -39,8 +40,8 @@
         <span class="wi-title">{it.title}</span>
         <span class="wi-sub">
           <span class="wi-kindlabel">{KIND_LABEL[it.kind]}</span>
-          {#if it.repo_id}<span class="wi-dot">·</span><span class="mono">{shortRepo(it.repo_id)}</span>{/if}
-          {#if it.owner}<span class="wi-dot">·</span><span>{it.owner}</span>{/if}
+          {#if it.repo_id}<span class="wi-dot">·</span><span class="mono wi-clip" title={it.repo_id}>{shortRepo(it.repo_id)}</span>{/if}
+          {#if it.owner}<span class="wi-dot">·</span><span class="wi-clip" title={it.owner}>{it.owner}</span>{/if}
         </span>
       </span>
       <span class="wi-meta">
@@ -50,7 +51,9 @@
         <span class="chip-status" style="--c:{statusColor(it.status)}">{STATUS_LABEL[it.status]}</span>
         <span class="chip-risk" style="--c:{riskColor(it.risk_level)}" title="Risk / policy">{RISK_LABEL[it.risk_level]}</span>
         <span class="wi-cost mono" title="Cost so far">{fmtCost(it.cost_so_far)}</span>
-        <span class="wi-time dim" title={it.last_event_at ?? it.updated_at}>{relTime(it.last_event_at ?? it.updated_at)}</span>
+        <!-- now() re-renders on the shared clock so "3m" keeps counting; the
+             hover shows the local time, never a raw ISO string. -->
+        <span class="wi-time dim" title={new Date(it.last_event_at ?? it.updated_at).toLocaleString()}>{now() && relTime(it.last_event_at ?? it.updated_at)}</span>
       </span>
     </button>
   {/each}
@@ -67,7 +70,7 @@
     align-items: center;
     gap: 10px;
     width: 100%;
-    text-align: left;
+    text-align: start;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-m, 8px);
@@ -119,6 +122,17 @@
   .wi-dot {
     opacity: 0.5;
   }
+  /* text-overflow on the flex .wi-sub never draws an ellipsis (its text lives
+     in flex items), so the long parts clip themselves. */
+  .wi-sub > span {
+    flex: none;
+  }
+  .wi-sub > .wi-clip {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .wi-meta {
     flex: 0 0 auto;
     display: flex;
@@ -153,12 +167,12 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     min-width: 48px;
-    text-align: right;
+    text-align: end;
   }
   .wi-time {
     font-size: var(--fs-xs);
     min-width: 28px;
-    text-align: right;
+    text-align: end;
   }
   @media (max-width: 640px) {
     .wi-cost,

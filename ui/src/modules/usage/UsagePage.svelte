@@ -133,8 +133,12 @@
       workspaces: budgetCfg.workspaces.filter((b) => b.workspace_id && b.monthly_usd > 0),
       providers: budgetCfg.providers.filter((b) => b.provider && b.monthly_usd > 0),
     };
+    const before = usage.budgets;
     await usage.saveBudgets(cfg);
-    budgetsDirty = false;
+    // saveBudgets toasts + swallows a failure; only a landed save (fresh
+    // status object) may clear dirty — otherwise the seeding effect would
+    // overwrite the user's unsaved edits with the old server config.
+    if (usage.budgets !== before) budgetsDirty = false;
   }
 
   // Workspace name for a budget row's id (falls back to the id). The hidden
@@ -168,9 +172,12 @@
     if (n >= 1 << 10) return (n / (1 << 10)).toFixed(0) + ' KB';
     return n + ' B';
   }
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   function shortDay(iso: string): string {
-    // "2026-06-16" → "06-16"
-    return iso.length >= 10 ? iso.slice(5) : iso;
+    // "2026-06-16" → "Jun 16" (a bare "06-16" reads as either order).
+    const m = iso.match(/^\d{4}-(\d{2})-(\d{2})/);
+    if (!m) return iso;
+    return `${MONTHS[parseInt(m[1], 10) - 1] ?? m[1]} ${parseInt(m[2], 10)}`;
   }
   function fmtLastActive(iso: string): string {
     // "2026-06-16 14:32:05.123" → "Jun 16, 14:32" (date matters: window is up to
@@ -178,8 +185,7 @@
     // a timezone shift.
     const m = iso.match(/(\d{4})-(\d{2})-(\d{2})[ T](\d{2}:\d{2})/);
     if (!m) return iso;
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const mon = months[parseInt(m[2], 10) - 1] ?? m[2];
+    const mon = MONTHS[parseInt(m[2], 10) - 1] ?? m[2];
     return `${mon} ${parseInt(m[3], 10)}, ${m[4]}`;
   }
 
@@ -216,10 +222,12 @@
     const max = yTicks[yTicks.length - 1] || 1;
     return plotH - (cost / max) * plotH;
   }
+  // Bars sit at the CENTRE of equal bands: pinning the first/last bar to the
+  // plot edges put half of the first bar over the y-axis labels and half of
+  // the last one (and its date) past the right edge.
   function svgX(i: number, total: number): number {
-    if (total <= 1) return AXIS_L;
     const plotW = SVG_W - AXIS_L;
-    return AXIS_L + (i / (total - 1)) * plotW;
+    return AXIS_L + ((i + 0.5) / Math.max(1, total)) * plotW;
   }
 
   // X-axis: thin labels so they don't overlap (max ~8 visible).
@@ -376,7 +384,7 @@
           spent ${budgetAlert.spendUsd.toFixed(2)} of the ${budgetAlert.capUsd.toFixed(2)} cap.
         </span>
       {/if}
-      <button class="close-btn" onclick={dismissBudgetAlert} title="Dismiss">×</button>
+      <button class="close-btn" onclick={dismissBudgetAlert} title="Dismiss" aria-label="Dismiss budget alert"><Icon name="x" size={13} /></button>
     </div>
   {/if}
 
@@ -597,21 +605,10 @@
               <!-- Stacked area bars (one per day): a thin rect per token category -->
               {#each days as d, i (d.day)}
                 {@const x = svgX(i, n)}
-                {@const barW = n > 1 ? Math.max(2, (SVG_W - AXIS_L) / n * 0.7) : 20}
+                {@const barW = Math.max(2, Math.min(40, ((SVG_W - AXIS_L) / Math.max(1, n)) * 0.7))}
                 {@const barH = (d.cost_usd / (yTicks[yTicks.length - 1] || 1)) * (SVG_H - AXIS_B)}
                 {@const barY = SVG_H - AXIS_B - barH}
                 {@const segs = tokenSegs(d)}
-                <title>{d.day}: {breakdownTitle(d)} · {fmtCost(d.cost_usd)}</title>
-                <!-- invisible hit target for tooltip -->
-                <rect
-                  class="bar-hit"
-                  x={x - barW / 2}
-                  y={0}
-                  width={barW}
-                  height={SVG_H - AXIS_B}
-                >
-                  <title>{d.day} · {fmtCost(d.cost_usd)} · {breakdownTitle(d)}</title>
-                </rect>
                 <!-- stacked colour segments (bottom = input, then cache-write, cache-read, output) -->
                 {#each segs as s, si (s.label)}
                   {#if s.pct > 0}
@@ -627,6 +624,19 @@
                     />
                   {/if}
                 {/each}
+                <!-- Invisible hit target for the tooltip, drawn OVER the
+                     segments so hovering the bar itself shows this day. (A
+                     bare <title> used to sit directly in the <svg>, which made
+                     day 1's text the tooltip for every bar.) -->
+                <rect
+                  class="bar-hit"
+                  x={x - barW / 2}
+                  y={0}
+                  width={barW}
+                  height={SVG_H - AXIS_B}
+                >
+                  <title>{d.day} · {fmtCost(d.cost_usd)} · {breakdownTitle(d)}</title>
+                </rect>
 
                 <!-- x-axis label (thinned) -->
                 {#if showXLabel(i, n)}
@@ -786,7 +796,7 @@
             <div class="editor-section">
               <div class="editor-head">
                 <span>Per workspace</span>
-                <button class="link-btn" onclick={addWsBudget}>+ Add</button>
+                <button class="link-btn" onclick={addWsBudget}><Icon name="plus" size={11} /> Add</button>
               </div>
               {#each budgetCfg.workspaces as b, i (i)}
                 <div class="editor-line">
@@ -813,7 +823,7 @@
             <div class="editor-section">
               <div class="editor-head">
                 <span>Per provider</span>
-                <button class="link-btn" onclick={addProviderBudget}>+ Add</button>
+                <button class="link-btn" onclick={addProviderBudget}><Icon name="plus" size={11} /> Add</button>
               </div>
               {#each budgetCfg.providers as b, i (i)}
                 <div class="editor-line">
@@ -1556,6 +1566,9 @@
 
   /* --- Budgets --------------------------------------------------------- */
   .link-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
     background: none;
     border: none;
     color: var(--accent-text);
@@ -1634,10 +1647,11 @@
     flex: 1;
   }
   .budget-banner .close-btn {
+    display: inline-grid;
+    place-items: center;
     background: none;
     border: none;
     cursor: pointer;
-    font-size: 16px;
     line-height: 1;
     color: var(--text-dim);
     padding: 0 2px;
@@ -1810,7 +1824,7 @@
 
   /* "Estimated" cost tag — shown when the model is not in the rate table. */
   .est-tag {
-    font-size: 9px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;

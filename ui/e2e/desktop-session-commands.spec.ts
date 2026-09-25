@@ -79,8 +79,20 @@ test('⌘I: close a session by NAME, then close ALL of a provider', async ({ pag
   await expect.poll(() => isArchived(idByTitle.Buffon), { timeout: 15_000 }).toBe(true);
 });
 
-test('⌘I: "delete <name>" removes the session permanently (not just archive)', async ({ page }) => {
-  await runOttoCommand(page, 'please delete pirlo');
+test('⌘I: "delete <name>" asks first, then removes the session permanently (not just archive)', async ({ page }) => {
+  await page.keyboard.press('Meta+i');
+  const box = page.locator('.pal-english textarea');
+  await expect(box).toBeVisible({ timeout: 10_000 });
+  await box.fill('please delete pirlo');
+  await page.keyboard.press('Meta+Enter');
+  // A permanent delete confirms first (the floating bar's guard, now in ⌘I
+  // too) and names what goes; nothing is deleted until it's confirmed.
+  const dialog = page.getByRole('dialog', { name: 'Delete session?' });
+  await expect(dialog).toBeVisible({ timeout: 10_000 });
+  await expect(dialog).toContainText('Pirlo');
+  expect(await sessionExists(idByTitle.Pirlo)).toBe(true);
+  await dialog.getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect(box).toBeHidden({ timeout: 10_000 });
   // Gone entirely — a GET returns 404, unlike archive which keeps the row.
   await expect.poll(() => sessionExists(idByTitle.Pirlo), { timeout: 15_000 }).toBe(false);
   // The others are untouched.

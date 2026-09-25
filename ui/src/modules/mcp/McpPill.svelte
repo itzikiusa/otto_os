@@ -65,20 +65,21 @@
     color: var(--text-dim);
   }
   .pill.small {
-    font-size: 9px;
+    /* Table cells: tighter box, but never below the 11px readable floor. */
     padding: 0 5px;
+    letter-spacing: 0.02em;
   }
   .pill.ok {
-    background: color-mix(in srgb, var(--status-working, #28c840) 18%, transparent);
-    color: var(--status-working, #28c840);
+    background: var(--success-soft);
+    color: var(--success);
   }
   .pill.warn {
     background: color-mix(in srgb, var(--warning) 22%, transparent);
     color: var(--warning);
   }
   .pill.bad {
-    background: color-mix(in srgb, var(--status-exited, #ff5f57) 22%, transparent);
-    color: var(--status-exited, #ff5f57);
+    background: var(--danger-soft);
+    color: var(--danger);
   }
   .pill.info {
     background: var(--info-soft);

@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { GraphView, GraphNode } from '../../lib/api/types';
-  import { KIND_LABEL, WORK_KINDS, statusColor } from './lib';
+  import { KIND_LABEL, STATUS_LABEL, WORK_KINDS, statusColor } from './lib';
 
   interface Props {
     graph: GraphView;
@@ -88,7 +88,7 @@
             }
           }}
         >
-          <title>{p.node.title} — {p.node.status}</title>
+          <title>{p.node.title} — {STATUS_LABEL[p.node.status] ?? p.node.status}</title>
           <circle cx={p.x} cy={p.y} r={p.r} fill={statusColor(p.node.status)} />
           {#if p.node.needs_approval}
             <circle class="approve-ring" cx={p.x} cy={p.y} r={p.r + 4} />
@@ -139,7 +139,7 @@
   }
   .edge-label {
     fill: var(--text-dim);
-    font-size: 9px;
+    font-size: var(--fs-xs);
     opacity: 0.8;
   }
   .node {
@@ -153,8 +153,9 @@
   .node:hover circle {
     stroke: var(--text);
   }
+  /* Selection is the accent (foundations) — green read as "succeeded". */
   .node.selected > circle {
-    stroke: var(--success);
+    stroke: var(--accent);
     stroke-width: 3;
   }
   .approve-ring {

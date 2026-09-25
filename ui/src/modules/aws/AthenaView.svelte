@@ -330,7 +330,7 @@
         </label>
         <button class="icon-btn" onclick={() => void loadCatalog()} title="Reload catalog" aria-label="Reload catalog" disabled={catLoading}><Icon name="refresh" size={12} /></button>
         {#if viewport.isMobile}
-          <button class="icon-btn" onclick={() => (treeOpen = false)} aria-label="Hide catalog"><Icon name="x" size={12} /></button>
+          <button class="icon-btn" onclick={() => (treeOpen = false)} aria-label="Hide catalog" title="Hide catalog"><Icon name="x" size={12} /></button>
         {/if}
       </div>
       {#if catLoading && !catalog}
@@ -461,7 +461,7 @@
         {#if !qstate && !result}
           <EmptyState icon="db" title="No results yet" body="Run a query to see rows here." />
         {:else}
-          <ResultsGrid {result} error={resultError} statement={ranSql} connectionId={null} running={running} />
+          <ResultsGrid {result} error={resultError} statement={ranSql} connectionId={null} running={running} oncancel={() => void cancel()} />
         {/if}
       {:else if historyLoading && history.length === 0}
         <div class="pad"><Skeleton rows={6} /></div>

@@ -5,6 +5,7 @@
   import type { PullMode, PullModeResp, RepoStatusResp } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { runPull } from './pullFlow';
 
@@ -20,13 +21,6 @@
   let { repoId, status, onstatus, onrefresh }: Props = $props();
 
   let busy = $state('');
-  // Branch creation inline input state
-  let branchOpen = $state(false);
-  let branchName = $state('');
-
-  function focusOnMount(node: HTMLElement): void {
-    node.focus();
-  }
 
   async function doFetch(): Promise<void> {
     busy = 'fetch';
@@ -97,8 +91,16 @@
     }
   }
 
+  // Same sheet the graph's "Create branch here…" uses. (This used to be an
+  // absolutely-positioned inline popover, which the ≤1024px toolbar's
+  // horizontal scroller clipped — the input was unreachable on a tablet.)
   async function doCreateBranch(): Promise<void> {
-    const name = branchName.trim();
+    const raw = await confirmer.promptText(`New branch from ${status.branch}`, {
+      title: 'Create branch',
+      confirmLabel: 'Create',
+      placeholder: 'feature/my-branch',
+    });
+    const name = raw?.trim() ?? '';
     if (!name) return;
     busy = 'branch';
     try {
@@ -106,8 +108,6 @@
       onstatus(s);
       onrefresh?.();
       toasts.success('Branch created', name);
-      branchOpen = false;
-      branchName = '';
     } catch (e) {
       toasts.error('Branch failed', e instanceof Error ? e.message : String(e));
     } finally {
@@ -120,6 +120,8 @@
     try {
       const s = await api.post<RepoStatusResp>(`/repos/${repoId}/stash`, { op: 'save' });
       onstatus(s);
+      // Re-mount the graph: its STASHES section + stash node only reload then.
+      onrefresh?.();
       toasts.success('Stashed');
     } catch (e) {
       toasts.error('Stash failed', e instanceof Error ? e.message : String(e));
@@ -133,6 +135,7 @@
     try {
       const s = await api.post<RepoStatusResp>(`/repos/${repoId}/stash`, { op: 'pop' });
       onstatus(s);
+      onrefresh?.();
       // A conflicting pop is a 200 with unmerged paths (git keeps the stash
       // entry) — guide the user into the resolver instead of claiming success.
       const conflicts = s.changes.filter((c) => c.kind === 'conflicted').length;
@@ -154,9 +157,12 @@
 
 <div class="toolbar">
   <!-- Branch chip -->
-  <span class="branch-chip">
+  <span
+    class="branch-chip"
+    title="{status.branch}{status.upstream ? ` · tracks ${status.upstream}` : ''}{status.ahead > 0 ? ` · ${status.ahead} ahead` : ''}{status.behind > 0 ? ` · ${status.behind} behind` : ''}"
+  >
     <Icon name="branch" size={12} />
-    <span class="mono">{status.branch}</span>
+    <span class="mono branch-name">{status.branch}</span>
     {#if status.ahead > 0}<span class="ab up">↑{status.ahead}</span>{/if}
     {#if status.behind > 0}<span class="ab down">↓{status.behind}</span>{/if}
   </span>
@@ -186,7 +192,7 @@
       onclick={pullMenu}
       title="Pull with a different mode"
       aria-label="Pull options"
-    >▾</button>
+    ><Icon name="chevronDown" size={11} /></button>
   </span>
 
   <!-- Push -->
@@ -198,58 +204,26 @@
   <span class="divider"></span>
 
   <!-- Branch (create) -->
-  <div class="branch-wrap">
-    <button
-      class="tbtn"
-      class:active={branchOpen}
-      disabled={busy !== ''}
-      onclick={() => { branchOpen = !branchOpen; branchName = ''; }}
-      title="Create new branch"
-    >
-      <Icon name="plus" size={13} />
-      Branch
-    </button>
-    {#if branchOpen}
-      <form
-        class="branch-form"
-        onsubmit={(e) => { e.preventDefault(); void doCreateBranch(); }}
-      >
-        <input
-          class="input branch-input"
-          bind:value={branchName}
-          placeholder="new-branch-name"
-          spellcheck="false"
-          use:focusOnMount
-          onkeydown={(e) => { if (e.key === 'Escape') { branchOpen = false; branchName = ''; } }}
-        />
-        <button class="btn small primary" type="submit" disabled={busy === 'branch' || branchName.trim() === ''}>
-          {busy === 'branch' ? '…' : 'Create'}
-        </button>
-        <button
-          class="btn small ghost"
-          type="button"
-          aria-label="Cancel new branch"
-          title="Cancel"
-          onclick={() => { branchOpen = false; branchName = ''; }}
-        >
-          <Icon name="x" size={11} />
-        </button>
-      </form>
-      <!-- click-away -->
-      <div class="dd-away" role="presentation" onclick={() => { branchOpen = false; branchName = ''; }}></div>
-    {/if}
-  </div>
+  <button class="tbtn" disabled={busy !== ''} onclick={() => void doCreateBranch()} title="Create a new branch from {status.branch} and switch to it">
+    <Icon name="plus" size={13} />
+    {busy === 'branch' ? 'Creating…' : 'Branch'}
+  </button>
 
   <span class="divider"></span>
 
   <!-- Stash -->
-  <button class="tbtn" disabled={busy !== ''} onclick={doStash} title="Stash working changes">
+  <button
+    class="tbtn"
+    disabled={busy !== '' || status.changes.length === 0}
+    onclick={doStash}
+    title={status.changes.length === 0 ? 'Nothing to stash — the working tree is clean' : 'Stash working changes (including untracked files)'}
+  >
     <Icon name="stash" size={13} />
     {busy === 'stash' ? 'Stashing…' : 'Stash'}
   </button>
 
   <!-- Pop -->
-  <button class="tbtn" disabled={busy !== ''} onclick={doPop} title="Pop stash">
+  <button class="tbtn" disabled={busy !== ''} onclick={doPop} title="Pop the latest stash">
     <Icon name="arrowDown" size={13} />
     {busy === 'pop' ? 'Popping…' : 'Pop'}
   </button>
@@ -262,17 +236,31 @@
     gap: 2px;
     flex-wrap: nowrap;
   }
+  /* Shrinks (never below its icon + counts) so a long branch name ellipsizes
+     instead of shoving Fetch…Pop out of the row; the full name is the title. */
   .branch-chip {
     display: inline-flex;
     align-items: center;
     gap: 5px;
+    min-width: 0;
+    max-width: 260px;
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     color: var(--accent-text);
     border-radius: var(--radius-s);
     padding: 2px 8px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     font-weight: 500;
+    flex-shrink: 1;
+  }
+  .branch-chip > :global(svg),
+  .branch-chip .ab {
     flex-shrink: 0;
+  }
+  .branch-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .ab {
     font-size: var(--fs-xs);
@@ -307,78 +295,39 @@
     background: var(--surface-2);
     color: var(--text);
   }
-  .tbtn.active {
-    background: var(--surface-2);
-    color: var(--text);
-  }
   .tbtn:disabled {
     opacity: 0.45;
     cursor: default;
   }
-  /* Pull split button: one visual unit, the caret sharing its left edge. */
+  /* Pull split button: one visual unit — the halves share a square seam with a
+     hairline between them, and hovering either half outlines both. */
   .split {
     display: inline-flex;
     align-items: center;
   }
   .split .tbtn:first-child {
-    padding-inline-end: 6px;
+    padding-inline-end: 7px;
+    border-start-end-radius: 0;
+    border-end-end-radius: 0;
   }
   .split .caret {
-    padding: 0 6px;
-    font-size: var(--fs-xs);
-    line-height: 1;
+    padding: 0 5px;
+    border-start-start-radius: 0;
+    border-end-start-radius: 0;
+    border-inline-start-color: color-mix(in srgb, var(--border) 70%, transparent);
   }
-  .branch-wrap {
-    position: relative;
-  }
-  .branch-form {
-    position: absolute;
-    top: 32px;
-    inset-inline-start: 0;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    padding: 6px 8px;
-    box-shadow: var(--shadow);
-    z-index: 60;
-    min-width: 300px;
-  }
-  .branch-input {
-    flex: 1;
-    height: 26px;
-    font-size: 12px;
-  }
-  .dd-away {
-    position: fixed;
-    inset: 0;
-    z-index: 50;
+  .split:hover .tbtn:not(:disabled) {
+    border-color: var(--border);
   }
 
   /* ── Mobile + tablet (≤1024px): the toolbar already scrolls horizontally
-     inside RepoView's header, so just give the buttons comfortable touch heights
-     and keep the branch-create popover inside the viewport (its 300px min-width
-     would otherwise spill off a 375px screen). ── */
+     inside RepoView's header, so just give the buttons comfortable touch
+     heights. ── */
   @media (max-width: 1024px) {
     .tbtn {
       height: 36px;
       padding: 0 11px;
       font-size: 13px;
-    }
-    .branch-form {
-      min-width: 0;
-      width: min(300px, calc(100vw - 28px));
-      max-width: calc(100vw - 28px);
-    }
-    .branch-input {
-      height: 34px;
-      font-size: 14px;
-    }
-    /* Comfortable tap targets for the popover's Create / ✕ buttons. */
-    .branch-form .btn.small {
-      min-height: 34px;
     }
   }
 </style>

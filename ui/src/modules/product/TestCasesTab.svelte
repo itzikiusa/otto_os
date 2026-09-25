@@ -237,6 +237,20 @@
   const activeRun = $derived<ProductTestcaseRun | null>(activeRunDetail?.run ?? null);
   const activeCases = $derived<ProductTestcase[]>(activeRunDetail?.cases ?? []);
 
+  // What a Confluence publish actually sends (mirrors `publish_testcases`): only
+  // APPROVED cases, on a "Test Cases — <title>" page. A Jira story has no space
+  // to fall back to, so its space key is required, and the daemon also comments
+  // the page link on the issue — say all of that before the user hits Publish.
+  const approvedCount = $derived(activeCases.filter((c) => c.status === 'approved').length);
+  const storyIsJira = $derived(story?.source_kind === 'jira');
+  const publishBlocked = $derived(
+    approvedCount === 0
+      ? 'Approve at least one case — only approved cases are published'
+      : storyIsJira && !publishSpaceKey.trim()
+        ? 'Enter a space key — a Jira story has no Confluence space to publish into'
+        : '',
+  );
+
   // Cases in the locally-applied display order (reflects drag-and-drop before
   // the next store reload, which will bring the persisted order_idx back).
   const orderedCases = $derived.by(() => {
@@ -662,7 +676,7 @@
                 id="pf-space"
                 class="text-input"
                 type="text"
-                placeholder="e.g. TEAM (optional)"
+                placeholder={storyIsJira ? 'e.g. TEAM (required)' : 'e.g. TEAM (default: the source page’s space)'}
                 bind:value={publishSpaceKey}
                 disabled={publishingRun}
               />
@@ -678,11 +692,17 @@
                 disabled={publishingRun}
               />
             </div>
+            <p class="pf-summary" data-testid="tc-publish-summary">
+              Publishes {approvedCount} approved case{approvedCount !== 1 ? 's' : ''} as the page
+              “Test Cases — {story?.title ?? ''}”{storyIsJira ? `, and comments its link on ${story?.source_key ?? 'the issue'}` : ''}.
+              Everyone with access to the space can see it.
+            </p>
             <div class="pf-actions">
               <button
                 class="btn small primary"
                 onclick={publishTests}
-                disabled={publishingRun}
+                disabled={publishingRun || !!publishBlocked}
+                title={publishBlocked || undefined}
               >
                 {publishingRun ? 'Publishing…' : 'Publish'}
               </button>
@@ -1136,6 +1156,11 @@
     display: flex;
     align-items: center;
     gap: 8px;
+  }
+  .pf-summary {
+    margin: 0;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
   }
   .pf-actions {
     display: flex;

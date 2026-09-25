@@ -239,7 +239,7 @@
       <button
         class="icon-btn strip-btn"
         onclick={() => ui.openRight(t.id)}
-        title="{t.label} (⌘J)"
+        title={t.label}
         aria-label={t.label}
       >
         <Icon name={t.icon} size={15} />

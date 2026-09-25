@@ -68,6 +68,31 @@
   let fEnabled = $state(true);
   let fCwd = $state('');
 
+  /** Known IANA zones for the timezone field's suggestions (empty on engines
+   *  without `Intl.supportedValuesOf`, where the field is plain free text). */
+  const tzNames: string[] = (() => {
+    try {
+      return (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf?.('timeZone') ?? [];
+    } catch {
+      return [];
+    }
+  })();
+  /** Is `tz` a zone this engine knows? The daemon rejects unknown names on
+   *  save; say so while typing instead of after the round-trip. */
+  function tzValid(tz: string): boolean {
+    const t = tz.trim();
+    if (!t) return true; // empty → UTC
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: t });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  const tzOk = $derived(tzValid(fTimezone));
+  /** Standard 5-field cron (minute hour day-of-month month day-of-week). */
+  const cronFieldCount = $derived(fCronExpr.trim() ? fCronExpr.trim().split(/\s+/).length : 0);
+
   // Live registry (built-ins + custom); shell is valid for scheduled tasks.
   const PROVIDERS = $derived(allProviders());
 
@@ -240,6 +265,7 @@
   }
 
   async function toggle(t: ScheduledTask): Promise<void> {
+    error = '';
     try {
       await scheduledTasks.setEnabled(t.id, !t.enabled);
     } catch (e) {
@@ -249,6 +275,7 @@
 
   async function runNow(t: ScheduledTask): Promise<void> {
     busy = true;
+    error = '';
     try {
       await scheduledTasks.runNow(t.id);
       expandedId = t.id;
@@ -275,6 +302,7 @@
 
   async function remove(t: ScheduledTask): Promise<void> {
     if (!(await confirmer.ask(`Delete scheduled task "${t.name}"?`, { title: 'Delete scheduled task' }))) return;
+    error = '';
     try {
       await scheduledTasks.remove(t.id);
     } catch (e) {
@@ -436,12 +464,17 @@
         {:else if fCadence === 'cron'}
           <label class="fld">
             <span>Cron expression (5 fields)</span>
-            <input bind:value={fCronExpr} placeholder="0 9 * * 1" />
+            <input bind:value={fCronExpr} placeholder="0 9 * * 1" aria-invalid={cronFieldCount !== 5} />
+            <small class="fld-hint" class:bad={cronFieldCount !== 5}>
+              {cronFieldCount === 5
+                ? 'minute · hour · day of month · month · day of week (0 or 7 = Sun)'
+                : `Needs 5 fields (minute hour day month weekday) — has ${cronFieldCount}`}
+            </small>
           </label>
         {:else}
           <label class="fld">
-            <span>At (HH:MM)</span>
-            <input bind:value={fAt} placeholder="03:00" />
+            <span>At (24h, in the timezone)</span>
+            <input type="time" bind:value={fAt} />
           </label>
           {#if fCadence === 'weekly'}
             <label class="fld">
@@ -457,7 +490,11 @@
         {#if fCadence !== 'interval'}
           <label class="fld">
             <span>Timezone</span>
-            <input bind:value={fTimezone} placeholder="e.g. Europe/London" />
+            <input bind:value={fTimezone} placeholder="e.g. Europe/London" list="sched-tz-list" aria-invalid={!tzOk} />
+            {#if !tzOk}<small class="fld-hint bad">Unknown timezone — use an IANA name like Europe/London</small>{/if}
+            {#if tzNames.length}
+              <datalist id="sched-tz-list">{#each tzNames as z (z)}<option value={z}></option>{/each}</datalist>
+            {/if}
           </label>
         {/if}
       </div>
@@ -572,6 +609,8 @@
               <div class="task-info">
                 <strong class="name">{t.name}</strong>
                 <span class="meta">{cadenceLabel(t)} · → {destLabel(t)}</span>
+                <!-- When it fires next (ticks via RelTime; exact time on hover). -->
+                {#if t.enabled && t.next_run_at}<span class="meta">next <RelTime iso={t.next_run_at} /></span>{/if}
                 <!-- Shared run vocabulary (lib/status.ts): ok → Succeeded, error → Failed. -->
                 {#if t.last_status}<StatusBadge status={runStatus(t.last_status)} />{/if}
                 {#if !t.enabled}<span class="pill">Paused</span>{/if}
@@ -581,7 +620,7 @@
                 <button class="btn small ghost" onclick={() => toggleRuns(t)}>
                   {expandedId === t.id ? 'Hide runs' : 'Runs'}
                 </button>
-                <button class="btn small ghost" onclick={() => toggle(t)}>{t.enabled ? 'Pause' : 'Enable'}</button>
+                <button class="btn small ghost" onclick={() => toggle(t)}>{t.enabled ? 'Pause' : 'Resume'}</button>
                 <button class="btn small ghost" title="Create a multi-step workflow (+ schedule trigger) from this task" onclick={() => convertToWorkflow(t)} disabled={busy}>To workflow</button>
                 <button class="btn small ghost" onclick={() => startEdit(t)}>Edit</button>
                 <!-- Destructive: quiet icon at the end of the row, confirmed by confirmer.ask(). -->
@@ -685,6 +724,8 @@
   .fld input:focus-visible, .fld select:focus-visible, .fld textarea:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: 1px;
   }
+  .fld .fld-hint { color: var(--text-dim); font-size: var(--fs-xs); }
+  .fld .fld-hint.bad { color: var(--danger); }
   .chk { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; color: var(--text); }
   .toggles { display: flex; flex-direction: column; gap: 0.4rem; margin: 0.25rem 0; }
   .hint { font-size: 0.82rem; color: var(--text-dim); margin: 0 0 0.25rem; }

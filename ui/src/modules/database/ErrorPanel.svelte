@@ -11,7 +11,8 @@
      *  label; parsing is pattern-based so it works for all of them. */
     engine: string | null;
     statement: string;
-    onAskAi: () => void;
+    /** Omitted where there is no DB Assistant to open (e.g. the Athena view). */
+    onAskAi?: () => void;
   }
   let { error, engine, statement, onAskAi }: Props = $props();
 
@@ -52,9 +53,11 @@
     {#if parsed.code}<span class="err-code mono">{parsed.code}</span>{/if}
     <span class="err-engine mono">{label}</span>
     <span class="err-grow"></span>
-    <button class="err-ai" onclick={onAskAi} title="Open the DB Assistant to investigate and fix this error">
-      <Icon name="zap" size={12} /> Ask AI to fix
-    </button>
+    {#if onAskAi}
+      <button class="err-ai" onclick={onAskAi} title="Open the DB Assistant to investigate and fix this error">
+        <Icon name="zap" size={12} /> Ask AI to fix
+      </button>
+    {/if}
   </div>
   <pre class="err-msg mono">{error}</pre>
   {#if excerpt}

@@ -223,6 +223,13 @@
   {#snippet children()}
     {#if accountsLoading}
       <div class="loading">Loading accounts…</div>
+    {:else if accounts.length === 0 && formError}
+      <!-- A failed accounts load is an error with Retry, not "no accounts yet". -->
+      <div class="field-error">
+        {formError}
+        {#if formErrorDetail}<div class="pd-error-detail">{formErrorDetail}</div>{/if}
+      </div>
+      <button class="btn small" onclick={() => { formError = ''; formErrorDetail = ''; void loadAccounts(); }}>Retry</button>
     {:else if accounts.length === 0}
       <div class="no-accounts">No Jira or Confluence account yet. Add one in Settings → Integrations → Jira.</div>
     {:else}
@@ -485,10 +492,10 @@
   }
   .field-error {
     font-size: 12px;
-    color: var(--status-exited, #e53e3e);
+    color: var(--danger);
     margin-bottom: 8px;
     padding: 6px 10px;
-    background: color-mix(in srgb, var(--status-exited, #e53e3e) 10%, transparent);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
     border-radius: var(--radius-s);
   }
   .btn {
@@ -514,9 +521,9 @@
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
   }
   .btn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    border-color: var(--accent-solid);
+    color: var(--accent-contrast);
   }
   .btn.primary:hover:not(:disabled) {
     opacity: 0.88;

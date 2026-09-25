@@ -1130,7 +1130,7 @@
   .chip.partial {
     height: 15px;
     padding: 0 5px;
-    font-size: 9px;
+    font-size: var(--fs-xs);
     color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 35%, transparent);
     flex-shrink: 0;

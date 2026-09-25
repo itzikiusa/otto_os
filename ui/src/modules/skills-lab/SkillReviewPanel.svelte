@@ -10,6 +10,7 @@
   import { skillLabApi } from '../../lib/api/skillLab';
   import { skillReviewBus } from '../../lib/events.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import SkillReviewAgents from './SkillReviewAgents.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
@@ -30,6 +31,8 @@
   type SkillOpt = { name: string; source: string; label: string };
 
   let reviews = $state<SkillReview[]>([]);
+  // Inline list-load failure + Retry (instead of a toast over "No skill reviews yet").
+  let listError = $state<string | null>(null);
   let selected = $state<SkillReview | null>(null);
   let skillOpts = $state<SkillOpt[]>([]);
 
@@ -93,16 +96,19 @@
     if (!wsId) return;
     try {
       reviews = await skillReviewApi.list(wsId);
+      listError = null;
     } catch (e) {
-      toasts.error('Load reviews failed', e instanceof Error ? e.message : String(e));
+      listError = e instanceof Error ? e.message : String(e);
     }
   }
 
-  async function openReview(id: string): Promise<void> {
+  /** `quiet` for background refreshes (poll / bus): a transient failure there
+   *  must not raise a toast every 2.5 s — the next tick retries. */
+  async function openReview(id: string, quiet = false): Promise<void> {
     try {
       selected = await skillReviewApi.get(id);
     } catch (e) {
-      toasts.error('Open review failed', e instanceof Error ? e.message : String(e));
+      if (!quiet) toasts.error('Open review failed', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -161,6 +167,15 @@
   }
 
   async function deleteReview(rev: SkillReview): Promise<void> {
+    // Every other delete in Skills Lab / Evaluator confirms; this one used to
+    // fire on a single click of a bare ✕.
+    if (
+      !(await confirmer.ask(
+        `Delete the review of "${rev.skill_name}"? Its findings, agent transcripts and summary are removed. The skill itself is not touched.`,
+        { title: 'Delete review' },
+      ))
+    )
+      return;
     try {
       await skillReviewApi.remove(rev.id);
       if (selected?.id === rev.id) selected = null;
@@ -183,7 +198,7 @@
     if (skillReviewBus.workspaceId && skillReviewBus.workspaceId !== wsId) return;
     // A review advanced — refresh the list and, if it's the open one, the detail.
     void loadList();
-    if (selected && skillReviewBus.reviewId === selected.id) void openReview(selected.id);
+    if (selected && skillReviewBus.reviewId === selected.id) void openReview(selected.id, true);
   });
 
   // Fallback poll while the open review is running (covers dropped sockets).
@@ -192,7 +207,7 @@
     if (poll) { clearInterval(poll); poll = null; }
     if (activeReview && selected) {
       const id = selected.id;
-      poll = setInterval(() => { void openReview(id); }, 2500);
+      poll = setInterval(() => { void openReview(id, true); }, 2500);
     }
   });
   onDestroy(() => { if (poll) clearInterval(poll); });
@@ -201,9 +216,15 @@
   let loadedWs = '';
   $effect(() => {
     if (wsId && wsId !== loadedWs) {
+      // The open review belongs to the previous workspace.
+      if (loadedWs) selected = null;
       loadedWs = wsId;
       void loadSkills();
-      void loadList();
+      // Open on the newest review rather than a blank form — unless the form
+      // is already in use (a "Review this skill" hand-off pre-fills fSkill).
+      void loadList().then(() => {
+        if (!selected && !fSkill && reviews.length > 0) void openReview(reviews[0].id);
+      });
     }
   });
 
@@ -239,20 +260,25 @@
 <div class="lab-review" data-testid="skill-review">
   <aside class="lr-side">
     <button class="btn small primary block" onclick={newReview} data-testid="new-skill-review"><Icon name="plus" size={12} /> New review</button>
-    {#if reviews.length === 0}
+    {#if listError && reviews.length === 0}
+      <div class="lr-empty lr-list-err" role="alert">
+        Couldn't load reviews: {listError}
+        <button class="btn small" onclick={loadList}>Retry</button>
+      </div>
+    {:else if reviews.length === 0}
       <p class="lr-empty">No skill reviews yet.</p>
     {:else}
       <ul class="lr-list">
         {#each reviews as r (r.id)}
           <li>
             <button class="lr-item" class:active={selected?.id === r.id} onclick={() => openReview(r.id)}>
-              <span class="lr-item-name">{r.skill_name}</span>
+              <span class="lr-item-name" title={r.skill_name}>{r.skill_name}</span>
               <span class="lr-item-meta">
                 <span class="chip lr-src">{r.skill_source}</span>
                 <span class="rp-status-pill" data-status={r.status}><StatusBadge status={runStatus(r.status)} /></span>
               </span>
             </button>
-            <button class="btn small ghost lr-del" title="Delete" onclick={() => deleteReview(r)}>✕</button>
+            <button class="btn small ghost lr-del" title="Delete review" aria-label="Delete the review of {r.skill_name}" onclick={() => deleteReview(r)}><Icon name="trash" size={12} /></button>
           </li>
         {/each}
       </ul>
@@ -303,7 +329,7 @@
             data-testid="skill-review-instructions"
           ></textarea>
         </label>
-        <button class="btn primary" disabled={!fSkill || starting} onclick={start} data-testid="start-skill-review">
+        <button class="btn primary" disabled={!fSkill || starting} title={!fSkill ? 'Pick a skill to review' : undefined} onclick={start} data-testid="start-skill-review">
           {starting ? 'Starting…' : 'Start review'}
         </button>
       </div>
@@ -465,6 +491,7 @@
   .lr-side { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; padding: 10px 8px; background: var(--surface); border-inline-end: 1px solid var(--border); }
   .block { width: 100%; }
   .lr-empty { color: var(--text-dim); font-size: var(--fs-s); padding: 8px; }
+  .lr-list-err { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; color: var(--danger); overflow-wrap: anywhere; }
   .lr-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
   .lr-list li { display: flex; align-items: center; gap: 4px; }
   .lr-item {

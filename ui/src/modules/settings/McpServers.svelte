@@ -11,7 +11,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { mcpApi } from '../../lib/api/mcp';
-  import { api } from '../../lib/api/client';
+  import { mcpCpExtraApi } from '../mcp/cp-api';
   import type { McpServer, CreateMcpServerReq } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -19,39 +19,48 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
 
   // The first-party `otto` MCP server (Otto's read-only tools + the read-only DB
-  // connection tools). Global toggle backed by the `otto_mcp_enabled` setting;
-  // default ON (opt-out). Distinct from the per-workspace user servers below.
+  // connection tools), attached to agent sessions per WORKSPACE through the same
+  // session-attach endpoint the MCP page uses (`otto_mcp_enabled`, stored as a
+  // per-workspace map; unlisted ⇒ default ON). It used to read/write the raw
+  // setting as ONE global bool: a workspace switched off on the MCP page still
+  // showed "On" here, and flipping it overwrote every workspace's choice.
   let ottoEnabled = $state(true);
   let ottoLoaded = $state(false);
   let ottoSaving = $state(false);
+  let ottoError = $state('');
 
   $effect(() => {
-    void loadOttoSetting();
+    const id = ws.currentId;
+    if (id) void loadOttoSetting(id);
   });
 
-  async function loadOttoSetting(): Promise<void> {
+  async function loadOttoSetting(id: string): Promise<void> {
+    ottoLoaded = false;
+    ottoError = '';
     try {
-      const all = await api.get<Record<string, unknown>>('/settings');
-      // Scalar bool is the global toggle; anything but an explicit `false`
-      // (absent / object / other) resolves to the default ON.
-      ottoEnabled = all['otto_mcp_enabled'] !== false;
-    } catch {
-      ottoEnabled = true;
+      const r = await mcpCpExtraApi.sessionAttach(id);
+      if (ws.currentId === id) ottoEnabled = r.attached;
+    } catch (e) {
+      if (ws.currentId === id) ottoError = errMsg(e);
     } finally {
-      ottoLoaded = true;
+      if (ws.currentId === id) ottoLoaded = true;
     }
   }
 
-  async function toggleOtto(next: boolean): Promise<void> {
+  async function toggleOtto(input: HTMLInputElement): Promise<void> {
+    const id = ws.currentId;
+    if (!id) return;
+    const next = input.checked;
     ottoSaving = true;
     try {
-      await api.put('/settings', { otto_mcp_enabled: next });
-      ottoEnabled = next;
+      const r = await mcpCpExtraApi.setSessionAttach(id, { enabled: next });
+      ottoEnabled = r.attached;
       toasts.info(
-        next ? 'Connections MCP enabled' : 'Connections MCP disabled',
-        'Applies to agent sessions started from now on.',
+        r.attached ? 'Connections MCP enabled' : 'Connections MCP disabled',
+        'For this workspace — applies to agent sessions started from now on.',
       );
     } catch (e) {
+      input.checked = ottoEnabled; // the box flipped itself; put it back
       toasts.error('Could not update setting', errMsg(e));
     } finally {
       ottoSaving = false;
@@ -262,20 +271,30 @@
           Connections MCP <span class="badge">read-only</span>
         </div>
         <div class="sub">
-          Gives every agent session Otto's <code>otto</code> MCP server — including tools to
+          Gives every agent session in this workspace Otto's <code>otto</code> MCP server — including tools to
           discover your database connections and run <strong>read-only</strong> queries:
           <code>otto_list_connections</code>, <code>otto_db_schema</code>,
           <code>otto_db_children</code>, <code>otto_db_object</code>, <code>otto_db_query</code>.
           Writes/DDL are refused server-side; rows are capped, PII-masked and audited. Attached to
-          Claude via <code>.mcp.json</code> and to Codex via <code>-c</code> overrides. Default on.
+          Claude via <code>.mcp.json</code> and to Codex via <code>-c</code> overrides. Default on;
+          the same switch as “Attach to sessions” on the MCP page.
         </div>
+        {#if ottoError}
+          <div class="sub otto-error" role="alert">
+            Couldn't read this workspace's setting: {ottoError}
+            <button class="btn small" onclick={() => ws.currentId && void loadOttoSetting(ws.currentId)}>Retry</button>
+          </div>
+        {/if}
       </div>
-      <label class="switch" title="Toggle the otto MCP server for agent sessions">
+      <label
+        class="switch"
+        title={wsId ? 'Toggle the otto MCP server for agent sessions in this workspace' : 'Select a workspace first'}
+      >
         <input
           type="checkbox"
           checked={ottoEnabled}
-          disabled={!ottoLoaded || ottoSaving}
-          onchange={(e) => void toggleOtto((e.currentTarget as HTMLInputElement).checked)}
+          disabled={!wsId || !ottoLoaded || ottoSaving || !!ottoError}
+          onchange={(e) => void toggleOtto(e.currentTarget as HTMLInputElement)}
         />
         <span class="switch-label">{ottoEnabled ? 'On' : 'Off'}</span>
       </label>
@@ -434,6 +453,13 @@
     color: var(--text-dim);
     line-height: 1.5;
     max-width: 560px;
+  }
+  .otto-error {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+    color: var(--danger);
   }
   .section-intro {
     margin: 0 0 14px;

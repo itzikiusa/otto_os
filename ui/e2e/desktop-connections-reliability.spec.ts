@@ -15,8 +15,8 @@ test('editing retains advanced TLS configuration and duplication omits credentia
   await page.locator('.conn-row', { hasText: name }).click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Edit', exact: true }).click();
   await page.getByLabel('Name', { exact: true }).fill(`${name}-edited`);
-  await page.getByRole('button', { name: 'Save Changes', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Save Changes', exact: true })).toBeHidden();
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Save changes', exact: true })).toBeHidden();
   const list = await ctx.get(`${base}/api/v1/workspaces/${ws}/connections`);
   const saved = (await list.json()).find((c: { id: string }) => c.id === original.id);
   expect(saved.params.custom_option).toBe('preserved');

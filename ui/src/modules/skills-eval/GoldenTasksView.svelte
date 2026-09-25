@@ -16,6 +16,9 @@
 
   let tasks: GoldenTask[] = $state([]);
   let loading = $state(true);
+  // Inline load failure + Retry (a failed load used to fall through to the
+  // "No golden tasks" empty state, which reads as "you have none").
+  let loadError: string | null = $state(null);
   let runningId: string | null = $state(null);
 
   // Inline create/edit form. `editingId === null` while creating.
@@ -32,6 +35,9 @@
   // Reload whenever the active workspace changes.
   $effect(() => {
     const wsId = ws.currentId;
+    // An open edit form belongs to the previous workspace's task.
+    showForm = false;
+    editingId = null;
     if (wsId) {
       void load(wsId);
     } else {
@@ -42,10 +48,11 @@
 
   async function load(wsId: string): Promise<void> {
     loading = true;
+    loadError = null;
     try {
       tasks = await skillsEvalApi.listGolden(wsId);
     } catch (e) {
-      toasts.error('Could not load golden tasks', e instanceof Error ? e.message : String(e));
+      loadError = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
     }
@@ -269,6 +276,11 @@
       <EmptyState icon="zap" title="No workspace selected" body="Pick a workspace to manage its golden tasks." />
     {:else if loading && tasks.length === 0}
       <div class="gt-muted">Loading…</div>
+    {:else if loadError && tasks.length === 0}
+      <div class="gt-muted gt-err" role="alert">
+        Couldn't load golden tasks: {loadError}
+        <button class="btn small" onclick={() => ws.currentId && load(ws.currentId)}>Retry</button>
+      </div>
     {:else if tasks.length === 0}
       <EmptyState
         icon="radar"
@@ -288,7 +300,7 @@
           {#each g.items as t (t.id)}
             <article class="gt-card" data-testid="golden-card" class:disabled={!t.enabled}>
               <div class="gt-card-top">
-                <span class="gt-name">{t.name}</span>
+                <span class="gt-name" title={t.name}>{t.name}</span>
                 {#if t.origin === 'regression'}
                   <span class="gt-badge regression" data-testid="golden-regression-badge">regression</span>
                 {/if}
@@ -299,7 +311,8 @@
                     class="btn small gt-run"
                     data-testid="golden-run"
                     onclick={() => run(t)}
-                    disabled={runningId === t.id}
+                    disabled={runningId !== null}
+                    title={runningId !== null && runningId !== t.id ? 'Another golden task is starting…' : 'Score this task against the working tree'}
                   >
                     <Icon name="play" size={12} /> {runningId === t.id ? 'Running…' : 'Run'}
                   </button>
@@ -314,7 +327,7 @@
 
               <div class="gt-meta">
                 {#if t.skill}<span class="gt-pill"><Icon name="zap" size={11} /> {t.skill}</span>{/if}
-                {#if t.test_cmd}<code class="gt-code">{t.test_cmd}</code>{/if}
+                {#if t.test_cmd}<code class="gt-code" title={t.test_cmd}>{t.test_cmd}</code>{/if}
               </div>
 
               {#if t.prompt}<p class="gt-prompt">{truncate(t.prompt)}</p>{/if}
@@ -420,6 +433,14 @@
     color: var(--text-dim);
     font-size: 12px;
   }
+  .gt-err {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    color: var(--danger);
+    overflow-wrap: anywhere;
+  }
   .gt-group {
     display: flex;
     flex-direction: column;
@@ -462,6 +483,7 @@
     gap: 7px;
   }
   .gt-name {
+    min-width: 0;
     font-size: 13px;
     font-weight: 600;
     color: var(--text);
@@ -484,7 +506,7 @@
     background: color-mix(in srgb, var(--success) 16%, transparent);
   }
   .gt-badge {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.04em;
     text-transform: uppercase;

@@ -126,6 +126,7 @@
       <div class="loading">Loading accounts…</div>
     {:else if accountsError}
       <div class="field-error">Could not load accounts: {accountsError}</div>
+      <button class="btn small" onclick={() => void loadAccounts()}>Retry</button>
     {:else if accounts.length === 0}
       <div class="no-accounts">
         <Icon name="ticket" size={16} />
@@ -189,9 +190,10 @@
         <button
           class="manual-toggle"
           type="button"
+          aria-expanded={showManual}
           onclick={() => (showManual = !showManual)}
         >
-          {showManual ? '▾' : '▸'}
+          <Icon name={showManual ? 'chevronDown' : 'chevronRight'} size={11} />
           Enter {sourceKind === 'jira' ? 'issue key' : 'page ID'} manually
         </button>
       </div>
@@ -423,10 +425,10 @@
   }
   .field-error {
     font-size: 12px;
-    color: var(--status-exited, #e53e3e);
+    color: var(--danger);
     margin-bottom: 8px;
     padding: 6px 10px;
-    background: color-mix(in srgb, var(--status-exited, #e53e3e) 10%, transparent);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
     border-radius: var(--radius-s);
   }
   .btn {
@@ -452,9 +454,9 @@
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
   }
   .btn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    border-color: var(--accent-solid);
+    color: var(--accent-contrast);
   }
   .btn.primary:hover:not(:disabled) {
     opacity: 0.88;

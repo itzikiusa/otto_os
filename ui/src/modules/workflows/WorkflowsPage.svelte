@@ -28,7 +28,8 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { api } from '../../lib/api/client';
   import { workflowProgress, workflowNodeDetail, listWorkflowVersions, restoreWorkflowVersion } from '../../lib/api/workflows';
-  import { mergeRunProgress } from './runProgress';
+  import { mergeRunProgress, fmtStepMs } from './runProgress';
+  import RelTime from '../../lib/components/RelTime.svelte';
   import { workflowRunBus } from '../../lib/events.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import type {
@@ -279,6 +280,7 @@
     requestedRunId = runId;
     try {
       if (current?.id !== workflowId) {
+        if (!(await discardEditsOk()) || requestedRunId !== runId) return;
         let wf = workflows.find(w => w.id === workflowId);
         if (!wf) wf = await api.get<Workflow>(`/workflows/${workflowId}`);
         if (requestedRunId !== runId) return;
@@ -290,17 +292,6 @@
       if (result.changed) run = result.run;
       runsOpen = false;
     } catch (e) {toasts.error('Could not open run',e instanceof Error ? e.message : String(e));}
-  }
-
-  /** Compact "5m ago" for run rows. */
-  function ago(iso: string): string {
-    const ms = Date.now() - new Date(iso).getTime();
-    if (!Number.isFinite(ms) || ms < 0) return '';
-    const s = Math.floor(ms / 1000);
-    if (s < 60) return `${s}s ago`;
-    const m = Math.floor(s / 60);
-    if (m < 60) return `${m}m ago`;
-    return `${Math.floor(m / 60)}h ago`;
   }
 
   // Never open onto an empty "build a workflow" pane when the workspace has
@@ -406,6 +397,23 @@
     finalOutputAvailable = false;
     void loadRuns();
     dirty = false;
+  }
+
+  /** Opening another workflow (or restoring a version) replaces the canvas,
+   *  so unsaved node/edge edits would vanish silently — ask first. */
+  async function discardEditsOk(): Promise<boolean> {
+    if (!dirty || !current) return true;
+    return confirmer.ask(`“${current.name}” has unsaved changes. Discard them?`, {
+      title: 'Discard unsaved changes',
+      confirmLabel: 'Discard changes',
+    });
+  }
+  /** Sidebar row click: re-clicking the open workflow keeps its unsaved edits
+   *  (it used to reload the saved graph over them). */
+  async function openGuarded(wf: Workflow): Promise<void> {
+    if (current?.id === wf.id && dirty) return;
+    if (!(await discardEditsOk())) return;
+    open(wf);
   }
 
   async function generate(): Promise<void> {
@@ -660,7 +668,7 @@
       const done = await waitRunTerminal(r.id);
       if (destroyed) return;
       if (done.status === 'success') toasts.success('Run complete');
-      else if (done.status === 'canceled') toasts.info('Run stopped');
+      else if (done.status === 'canceled') toasts.info('Run cancelled');
       else toasts.error('Run finished with errors', done.error ?? '');
       void loadRuns();
     } catch (e) {
@@ -835,7 +843,7 @@
     if (!run) return;
     try {
       await api.post(`/workflow-runs/${run.id}/cancel`, {});
-      toasts.info('Stopping…', 'Finishes the current step, then halts.');
+      toasts.info('Cancelling run…', 'Finishes the current step, then halts.');
     } catch (e) {
       toasts.error('Stop failed', e instanceof Error ? e.message : String(e));
     }
@@ -1021,10 +1029,7 @@
     const n = graph.nodes.find((x) => x.id === id);
     return n?.name || n?.kind || id;
   }
-  function fmtMs(ms?: number | null): string {
-    if (ms == null) return '';
-    return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
-  }
+  const fmtMs = fmtStepMs;
 
   function onParam(field: string, value: unknown): void {
     if (!selectedNode) return;
@@ -1319,6 +1324,7 @@
 
   async function restoreVersion(v: WorkflowVersion): Promise<void> {
     if (!current) return;
+    if (!(await discardEditsOk())) return;
     try {
       const wf = await restoreWorkflowVersion(current.id, v.version);
       current = wf;
@@ -1384,7 +1390,7 @@
       {#if selectedId}
         <button class="btn small" data-label="Delete selected" data-icon="trash" title="Delete selected" aria-label="Delete selected" onclick={removeSelected}><Icon name="trash" size={12} /></button>
       {/if}
-      <button class="btn small" data-overflow="1" disabled={!dirty} onclick={save}>Save</button>
+      <button class="btn small" data-overflow="1" disabled={!dirty} title={dirty ? 'Save the canvas changes' : 'No unsaved changes'} onclick={save}>Save</button>
       <button class="btn small" data-overflow="1" data-icon="clock" onclick={(e) => { anchorPop(e, 200); runsOpen = !runsOpen; if (runsOpen) void loadRuns(); }}>
         <Icon name="clock" size={12} /> Runs
       </button>
@@ -1454,7 +1460,9 @@
 
       <button class="btn small" data-overflow="1" disabled={validating} onclick={async () => { if (await validateGraph()) toasts.success('Preflight passed'); }}>{validating ? 'Checking…' : 'Validate'}</button>
       {#if running}
-        <button class="btn small danger" data-keep onclick={stop}><Icon name="square" size={11} /> Stop</button>
+        <!-- Same word as the inspector's "Cancel run" and the run's final
+             "Cancelled" status (it used to say Stop here). -->
+        <button class="btn small danger" data-keep onclick={stop} title="Cancel this run (finishes the current step, then halts)"><Icon name="square" size={11} /> Cancel run</button>
       {/if}
       <button
         class="btn primary small"
@@ -1547,8 +1555,9 @@
             {/if}
             <span class="grow"></span>
             <code class="run-id" title={r.run_id}>{shortRunId(r.run_id)}</code>
-            <span class="run-prog">{r.nodes_done}/{r.nodes_total}</span>
-            <span class="run-when">{ago(r.started_at)}</span>
+            <span class="run-prog" title={`${r.nodes_done} of ${r.nodes_total} steps done`}>{r.nodes_done}/{r.nodes_total}</span>
+            <!-- Ticks with the shared clock (a one-shot "5m ago" froze at load). -->
+            <span class="run-when"><RelTime iso={r.started_at} fallback="" /></span>
           </button>
         {/each}
       </div>
@@ -1557,7 +1566,7 @@
     <div class="list">
       <div class="list-h">Workflows</div>
       {#each workflows as wf (wf.id)}
-        <div class="row" class:active={current?.id === wf.id} data-testid={`wf-row-${wf.id}`}>
+        <div class="wf-row" class:active={current?.id === wf.id} data-testid={`wf-row-${wf.id}`}>
           {#if renamingId === wf.id && !renameInBar}
             <!-- svelte-ignore a11y_autofocus -->
             <input
@@ -1573,14 +1582,14 @@
               onblur={() => commitRename(wf)}
             />
           {:else}
-            <button class="row-main" onclick={() => open(wf)}>
+            <button class="row-main" title={wf.name} onclick={() => void openGuarded(wf)}>
               <Icon name="split" size={13} />
               <span class="row-name">{wf.name}</span>
             </button>
-            <button class="row-edit" title="Rename" data-testid="wf-rename-btn" onclick={() => startRename(wf)}>
+            <button class="row-edit" title="Rename" aria-label="Rename workflow “{wf.name}”" data-testid="wf-rename-btn" onclick={() => startRename(wf)}>
               <Icon name="edit" size={12} />
             </button>
-            <button class="row-edit" title="Duplicate" data-testid="wf-duplicate-btn" onclick={() => duplicate(wf)}>
+            <button class="row-edit" title="Duplicate" aria-label="Duplicate workflow “{wf.name}”" data-testid="wf-duplicate-btn" onclick={() => duplicate(wf)}>
               <Icon name="copy" size={12} />
             </button>
             <button class="row-del" title="Delete workflow…" aria-label="Delete workflow “{wf.name}”…" data-testid="wf-delete-btn" onclick={() => del(wf)}><Icon name="trash" size={12} /></button>
@@ -1632,7 +1641,7 @@
             <button class="run-item" data-testid="run-item" class:active={run?.id === r.id} onclick={() => void openRunById(r.workflow_id, r.id)}>
               <span class="dot {dotKey(r.status)}" aria-hidden="true"></span>
               <span class="run-status">{runStatusLabel(r.status)}</span>
-              <span class="run-when">{new Date(r.started_at).toLocaleTimeString()}</span>
+              <span class="run-when"><RelTime iso={r.started_at} fallback="" /></span>
               <span class="grow"></span>
               <code class="run-id" title={r.id}>{shortRunId(r.id)}</code>
             </button>
@@ -1700,7 +1709,7 @@
       {#if run?.waiting_approval && run.approval_node_id}
         <div class="approval-banner">
           <Icon name="userCheck" size={14} />
-          <span>Run paused — waiting for approval at <strong>{run.approval_node_id}</strong></span>
+          <span>Run paused — waiting for approval at <strong title={run.approval_node_id}>{nodeName(run.approval_node_id)}</strong></span>
           <button class="btn primary small" disabled={approving} onclick={() => approveRun(true)}>
             Approve
           </button>
@@ -1713,7 +1722,7 @@
       {#if validationIssues.length}
         <div class="preflight" role="alert"><strong>Resolve these issues before running</strong>
           {#each validationIssues as issue}
-            <button class="btn ghost small" onclick={() => { selectedId = issue.node_id; selectedEdgeId = issue.edge_id; }}>{issue.node_id ?? issue.edge_id ?? 'Graph'}: {issue.message}</button>
+            <button class="btn ghost small" onclick={() => { selectedId = issue.node_id; selectedEdgeId = issue.edge_id; }}>{issue.node_id ? nodeName(issue.node_id) : issue.edge_id ? 'Connection' : 'Graph'}: {issue.message}</button>
           {/each}
         </div>
       {/if}
@@ -1865,6 +1874,7 @@
                 data-testid="run-detail-max"
                 onclick={() => (runDetailMax = !runDetailMax)}
                 aria-pressed={runDetailMax}
+                aria-label={runDetailMax ? 'Restore run-detail height' : 'Maximize run detail'}
                 title={runDetailMax ? 'Restore run-detail height' : 'Maximize run detail'}
               >
                 <Icon name={runDetailMax ? 'minimize' : 'maximize'} size={13} />
@@ -1919,7 +1929,7 @@
               {#if selectedRun}<StatusBadge status={runStatus(selectedRun.status)} variant="text" />{/if}
               {#if selectedRun?.duration_ms != null}<span class="dim">· {fmtMs(selectedRun.duration_ms)}</span>{/if}
               <span class="grow"></span>
-              <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, false)} title="Run this node and everything downstream">▶ From here</button>
+              <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, false)} title="Run this node and everything downstream"><Icon name="play" size={11} /> From here</button>
               <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, true)} title="Run only this node">Only this</button>
             </div>
             <!-- Shared Provider + Model editor for every agent-running node —
@@ -2343,7 +2353,7 @@
                       value={step.name ?? ''}
                       oninput={(e) => updateLoopStep(i, { name: e.currentTarget.value || undefined })}
                     />
-                    <button class="rv-del" type="button" title="Remove step" onclick={() => removeLoopStep(i)}>
+                    <button class="rv-del" type="button" title="Remove step" aria-label="Remove step" onclick={() => removeLoopStep(i)}>
                       <Icon name="trash" size={11} />
                     </button>
                   </div>
@@ -2484,7 +2494,7 @@
                       value={r.lens ?? ''}
                       oninput={(e) => updateReviewer(i, { lens: e.currentTarget.value })}
                     />
-                    <button class="rv-del" type="button" title="Remove reviewer" onclick={() => removeReviewer(i)}>
+                    <button class="rv-del" type="button" title="Remove reviewer" aria-label="Remove reviewer" onclick={() => removeReviewer(i)}>
                       <Icon name="trash" size={11} />
                     </button>
                   </div>
@@ -2837,7 +2847,7 @@
               <strong>Connection</strong>
               <span class="mono dim">{nodeName(selectedEdge.source)} → {nodeName(selectedEdge.target)}</span>
               <span class="grow"></span>
-              <button class="btn small danger" title="Delete connection" onclick={removeSelectedEdge}>
+              <button class="btn small danger" title="Delete connection" aria-label="Delete connection" onclick={removeSelectedEdge}>
                 <Icon name="trash" size={12} />
               </button>
             </div>
@@ -3129,12 +3139,15 @@
     letter-spacing: 0.04em;
     padding: 4px 6px;
   }
-  .row {
+  /* Was `.row` — the global app.css class (whose gap it relied on), so it's
+     prefixed now and restates that gap. */
+  .wf-row {
     display: flex;
     align-items: center;
+    gap: 8px;
     border-radius: var(--radius-s);
   }
-  .row.active {
+  .wf-row.active {
     background: color-mix(in srgb, var(--accent) 12%, transparent);
   }
   .row-main {
@@ -3165,9 +3178,20 @@
     padding: 6px;
     opacity: 0;
   }
-  .row:hover .row-del,
-  .row:hover .row-edit {
+  .wf-row:hover .row-del,
+  .wf-row:hover .row-edit,
+  .wf-row:focus-within .row-del,
+  .wf-row:focus-within .row-edit,
+  .wf-row.active .row-del,
+  .wf-row.active .row-edit {
     opacity: 1;
+  }
+  /* No hover on touch: the row actions would otherwise never show. */
+  @media (hover: none) {
+    .row-del,
+    .row-edit {
+      opacity: 1;
+    }
   }
   .row-del:hover {
     color: var(--status-exited);
@@ -3255,7 +3279,7 @@
   }
   .run-id {
     font-family: var(--font-mono);
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     flex-shrink: 0;
   }
@@ -3531,7 +3555,7 @@
   .is-snip {
     margin: 0;
     padding: 8px 10px;
-    background: var(--bg, #0d0f13);
+    background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 6px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -3739,8 +3763,10 @@
   .tl-step[data-status='error'] {
     border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
   }
+  /* Running is info-blue (lib/status.ts) — the accent border is `.active`
+     (selection), so a running step no longer looks selected. */
   .tl-step[data-status='running'] {
-    border-color: var(--accent);
+    border-color: color-mix(in srgb, var(--info) 60%, var(--border));
   }
   .tl-name {
     white-space: nowrap;
@@ -3819,7 +3845,7 @@
   }
   .tab-count {
     font-family: var(--font-mono);
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     letter-spacing: 0;
     color: var(--text-dim);
@@ -4045,7 +4071,7 @@
     flex: 1;
     min-width: 200px;
     font-size: 11.5px;
-    color: var(--text-dim, #9aa0aa);
+    color: var(--text-dim);
   }
   /* `.ri-text` is the JSON run-input box; the prompt box above it is
      `.ri-prompt` — same tokens, its own hook (a single `.ri-text` is what
@@ -4058,7 +4084,7 @@
     padding: 8px 10px;
     border: 1px solid var(--border);
     border-radius: 6px;
-    background: var(--bg, #0d0f13);
+    background: var(--bg);
     color: var(--text);
     font-size: 12px;
     line-height: 1.5;
@@ -4071,7 +4097,7 @@
     padding: 6px 10px;
     border: 1px solid var(--border);
     border-radius: 6px;
-    background: var(--bg, #0d0f13);
+    background: var(--bg);
     color: var(--text);
     font-size: 12px;
   }

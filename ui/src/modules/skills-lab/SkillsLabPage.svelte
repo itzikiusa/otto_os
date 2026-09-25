@@ -44,8 +44,11 @@
     reviewTarget = { name, source };
     go('review');
   }
-  function evaluateSkill(_name: string, _source: string): void {
-    // The evaluator's start form picks the skill itself; just navigate there.
+  // "Evaluate <skill>" opens the Evaluator's start form with that skill
+  // pre-selected (it used to land on the form with whatever came first).
+  let evalTarget = $state<{ name: string; source: string } | null>(null);
+  function evaluateSkill(name: string, source: string): void {
+    evalTarget = { name, source };
     go('evaluator');
   }
 
@@ -94,7 +97,7 @@
     {:else if tab === 'review'}
       <SkillReviewPanel {wsId} initialTarget={reviewTarget} onconsumed={() => (reviewTarget = null)} />
     {:else}
-      <SkillsEvalPage />
+      <SkillsEvalPage initialSkill={evalTarget} onconsumed={() => (evalTarget = null)} />
     {/if}
   </div>
 </div>

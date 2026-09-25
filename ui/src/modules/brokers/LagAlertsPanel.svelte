@@ -26,6 +26,14 @@
   let newGroup = $state('');
   let newThreshold = $state(1000);
   let creating = $state(false);
+  // Why "Add" is disabled, in words (a disabled button must say why).
+  const addBlock = $derived(
+    !newTopic.trim() || !newGroup.trim()
+      ? 'Enter a topic and a consumer group first'
+      : !(Number(newThreshold) > 0)
+        ? 'Threshold must be greater than 0'
+        : null,
+  );
 
   $effect(() => {
     void cluster.id;
@@ -44,11 +52,7 @@
   }
 
   async function createAlert() {
-    if (!newTopic.trim() || !newGroup.trim()) return;
-    if (newThreshold <= 0) {
-      toasts.error('Threshold must be > 0');
-      return;
-    }
+    if (addBlock) return;
     creating = true;
     try {
       const a = await api.post<LagAlert>(`/brokers/clusters/${cluster.id}/lag-alerts`, {
@@ -62,7 +66,7 @@
       newThreshold = 1000;
       toasts.success('Alert created');
     } catch (e) {
-      toasts.error('Create alert failed', String(e));
+      toasts.error("Couldn't create the alert", e instanceof Error ? e.message : String(e));
     } finally {
       creating = false;
     }
@@ -70,7 +74,7 @@
 
   async function deleteAlert(alert: LagAlert) {
     const ok = await confirmer.ask(
-      `Delete lag alert for "${alert.topic}" / "${alert.group_name}"?`,
+      `Delete the lag alert for "${alert.topic}" / "${alert.group_name}"? It stops being evaluated.`,
       { title: 'Delete alert' },
     );
     if (!ok) return;
@@ -79,7 +83,7 @@
       alerts = alerts.filter((a) => a.id !== alert.id);
       toasts.success('Alert deleted');
     } catch (e) {
-      toasts.error('Delete alert failed', String(e));
+      toasts.error("Couldn't delete the alert", e instanceof Error ? e.message : String(e));
     }
   }
 </script>
@@ -92,7 +96,7 @@
   </p>
 
   {#if loading}
-    <p class="muted pad">Loading…</p>
+    <p class="muted pad">Loading lag alerts…</p>
   {:else if loadError}
     <LoadState what="lag alerts" variant="compact" error={loadError} empty onretry={loadAlerts} />
   {:else}
@@ -138,8 +142,8 @@
 
     <h5 class="create-head">Add alert</h5>
     <div class="create-row">
-      <input type="text" bind:value={newTopic} placeholder="topic" class="field" />
-      <input type="text" bind:value={newGroup} placeholder="consumer group" class="field wide" />
+      <input type="text" bind:value={newTopic} placeholder="topic" class="field" aria-label="Topic" />
+      <input type="text" bind:value={newGroup} placeholder="consumer group" class="field wide" aria-label="Consumer group" />
       <label class="thresh-label">
         Threshold
         <input type="number" bind:value={newThreshold} min="1" class="narrow" />
@@ -147,7 +151,8 @@
       <button
         class="btn small primary"
         onclick={createAlert}
-        disabled={creating || !newTopic.trim() || !newGroup.trim()}
+        disabled={creating || addBlock !== null}
+        title={addBlock ?? 'Add lag alert'}
       >
         {creating ? 'Creating…' : 'Add'}
       </button>
@@ -199,13 +204,13 @@
     border-radius: 4px;
   }
   .badge.breach {
-    background: color-mix(in srgb, var(--status-exited, #ff5f57) 18%, transparent);
-    color: var(--status-exited, #ff5f57);
+    background: var(--danger-soft);
+    color: var(--danger);
     font-weight: 600;
   }
   .badge.ok {
-    background: color-mix(in srgb, var(--status-working, #28c840) 18%, transparent);
-    color: var(--status-working, #28c840);
+    background: var(--success-soft);
+    color: var(--success);
   }
   .badge.dim {
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
@@ -254,8 +259,5 @@
   }
   .pad {
     padding: 8px 0;
-  }
-  .btn.danger {
-    color: var(--status-exited, #ff5f57);
   }
 </style>

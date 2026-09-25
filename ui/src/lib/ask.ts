@@ -18,7 +18,7 @@ import {
 import { lsGet } from './storage';
 import { applyTileOrder } from './stores/splitLayout';
 import { layout } from './stores/splitLayout.svelte';
-import { isForeground, ws } from './stores/workspace.svelte';
+import { isForeground, visibleOnThisDevice, ws } from './stores/workspace.svelte';
 
 export interface AskReply {
   tone: TurnTone;
@@ -61,7 +61,11 @@ function orchestratorPrefs(): { optimize: boolean; aiFallback: boolean } {
  *  store (the ⌥Space panel) or a space pinned to another workspace. Positions
  *  ("session 2") count foreground agent sessions in list order. */
 export async function apiContext(workspaceId: string): Promise<OrchestrateCtx> {
-  const sessions = await api.get<Session[]>(`/workspaces/${workspaceId}/sessions`);
+  // Honour "Isolate sessions to this device": a session the user can't see
+  // here must not be reachable by name or position ("session 2").
+  const sessions = (await api.get<Session[]>(`/workspaces/${workspaceId}/sessions`)).filter(
+    visibleOnThisDevice,
+  );
   const nameable = sessions.filter((s) => !s.archived && s.kind === 'agent' && isForeground(s));
   return {
     workspaceId,

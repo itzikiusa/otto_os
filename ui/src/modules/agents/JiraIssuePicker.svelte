@@ -94,21 +94,31 @@
     debounceTimer = setTimeout(() => void search(q), 350);
   }
 
+  // Why the last search failed — shown in the results area with Retry (a toast
+  // plus "No issues found." read as a real empty result).
+  let searchError = $state<string | null>(null);
+  let searchSeq = 0;
+
   async function search(q: string): Promise<void> {
     if (!selectedAccountId) return;
+    const seq = ++searchSeq;
     searching = true;
+    searchError = null;
     try {
       const projectParam = selectedProjectKey
         ? `&project=${encodeURIComponent(selectedProjectKey)}`
         : '';
-      results = await api.get<IssueSummary[]>(
+      const found = await api.get<IssueSummary[]>(
         `/issue/search?account_id=${encodeURIComponent(selectedAccountId)}&q=${encodeURIComponent(q)}${projectParam}`,
       );
+      // A slower, older search must not overwrite the newer one's results.
+      if (seq === searchSeq) results = found;
     } catch (e) {
-      toasts.error('Search failed', e instanceof Error ? e.message : String(e));
+      if (seq !== searchSeq) return;
+      searchError = e instanceof Error ? e.message : String(e);
       results = [];
     } finally {
-      searching = false;
+      if (seq === searchSeq) searching = false;
     }
   }
 
@@ -189,6 +199,11 @@
   <div class="picker-results">
     {#if searching}
       <Skeleton rows={3} height={44} />
+    {:else if searchError && query.trim() !== ''}
+      <div class="no-results" role="alert">
+        <span class="err">Search failed: {searchError}</span>
+        <button class="btn small" onclick={() => void search(query.trim())}>Retry</button>
+      </div>
     {:else if results.length === 0 && query.trim() !== ''}
       <div class="no-results dim">No issues found.</div>
     {:else}
@@ -307,5 +322,10 @@
     padding: 16px;
     text-align: center;
     font-size: 12.5px;
+  }
+  .no-results .err {
+    display: block;
+    margin-bottom: 8px;
+    color: var(--danger);
   }
 </style>

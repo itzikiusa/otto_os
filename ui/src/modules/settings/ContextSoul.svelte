@@ -289,7 +289,7 @@
           spellcheck="false"
           placeholder="Free-form markdown appended to the OTTO context region…"
         ></textarea>
-        <span class="hint">Markdown, appended to the Otto-managed region of CLAUDE.md / AGENTS.md.</span>
+        <span class="hint">Markdown, added to the context Otto hands each new or restarted agent session (kept outside the repo — your CLAUDE.md / AGENTS.md aren't edited).</span>
       </div>
 
       <div class="field">

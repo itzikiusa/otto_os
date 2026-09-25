@@ -353,7 +353,10 @@
   let runFailReason: string | null = $state(null);
   let pollRunId: string | null = $state(null);
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
-  const POLL_MAX = 20;
+  // 3 s × 100 ≈ 5 min: the banner promises "a few minutes", and the old 20
+  // checks (one minute) dropped the banner silently while the agent was still
+  // writing — the report then never appeared until a manual reload.
+  const POLL_MAX = 100;
   let pollCount = $state(0);
 
   async function runNow(choice = runChoice): Promise<void> {
@@ -384,6 +387,9 @@
 
   function schedulePoll(): void {
     if (pollCount >= POLL_MAX || !pollRunId) {
+      if (pollRunId) {
+        toasts.info('Still generating the insights report', 'It will show up in the list once the agent finishes — reopen Insights to check.');
+      }
       pollRunId = null;
       void load();
       return;
@@ -532,7 +538,7 @@
             <div class="banner" role="status">
               <Icon name="refresh" size={14} />
               <span>Generating the report — an agent is reading your transcripts. This can take a few minutes; it appears in the list when it's done.</span>
-              <span class="dim">Checked {pollCount} of {POLL_MAX}</span>
+              <span class="dim">{Math.floor((pollCount * 3) / 60)}:{String((pollCount * 3) % 60).padStart(2, '0')} elapsed</span>
             </div>
           {/if}
         </div>

@@ -5,6 +5,7 @@
   import PropertiesEditor from './PropertiesEditor.svelte';
   import KnowledgeMetadata from './KnowledgeMetadata.svelte';
   import { slugifyHeading } from './mdRender';
+  import Icon from '../../lib/components/Icon.svelte';
 
   let open = $state({ backlinks: true, outgoing: true, outline: false, props: false, okf: false });
 
@@ -30,8 +31,8 @@
     <section><h3 class="hdr">Knowledge provenance</h3><KnowledgeMetadata frontmatter={vault.note.meta.frontmatter} /></section>
   {/if}
   <section>
-    <button class="hdr" onclick={() => (open.backlinks = !open.backlinks)}>
-      <span class="tri" class:open={open.backlinks}>▸</span>
+    <button class="hdr" aria-expanded={open.backlinks} onclick={() => (open.backlinks = !open.backlinks)}>
+      <span class="tri" class:open={open.backlinks}><Icon name="chevronRight" size={12} /></span>
       Backlinks
       <span class="badge">{vault.backlinks.length}</span>
     </button>
@@ -40,7 +41,7 @@
         <div class="none">No linked mentions</div>
       {:else}
         {#each vault.backlinks as bl (bl.path + bl.kind)}
-          <button class="item" onclick={() => void vault.open(bl.path)}>
+          <button class="item" title={bl.path} onclick={() => void vault.open(bl.path)}>
             <div class="t">{bl.title}</div>
             {#if bl.context}<div class="ctx">{bl.context}</div>{/if}
           </button>
@@ -50,8 +51,8 @@
   </section>
 
   <section>
-    <button class="hdr" onclick={() => (open.outgoing = !open.outgoing)}>
-      <span class="tri" class:open={open.outgoing}>▸</span>
+    <button class="hdr" aria-expanded={open.outgoing} onclick={() => (open.outgoing = !open.outgoing)}>
+      <span class="tri" class:open={open.outgoing}><Icon name="chevronRight" size={12} /></span>
       Outgoing links
       <span class="badge">{vault.note?.outgoing.length ?? 0}</span>
     </button>
@@ -60,6 +61,7 @@
         <button
           class="item"
           class:unresolved={!l.dst_path}
+          title={l.dst_path ?? `${l.raw_target} (unresolved)`}
           disabled={!l.dst_path || !/\.md$/i.test(l.dst_path)}
           onclick={() => l.dst_path && void vault.open(l.dst_path)}
         >
@@ -73,8 +75,8 @@
   </section>
 
   <section>
-    <button class="hdr" onclick={() => (open.outline = !open.outline)}>
-      <span class="tri" class:open={open.outline}>▸</span>
+    <button class="hdr" aria-expanded={open.outline} onclick={() => (open.outline = !open.outline)}>
+      <span class="tri" class:open={open.outline}><Icon name="chevronRight" size={12} /></span>
       Outline
       <span class="badge">{vault.note?.meta.headings.length ?? 0}</span>
     </button>
@@ -83,6 +85,7 @@
         <button
           class="item outline"
           style="padding-inline-start: {10 + (h.level - 1) * 12}px"
+          title={h.text}
           onclick={() => jumpToHeading(h.text)}
         >
           <div class="t">{h.text}</div>
@@ -92,8 +95,8 @@
   </section>
 
   <section>
-    <button class="hdr" onclick={() => (open.props = !open.props)}>
-      <span class="tri" class:open={open.props}>▸</span>
+    <button class="hdr" aria-expanded={open.props} onclick={() => (open.props = !open.props)}>
+      <span class="tri" class:open={open.props}><Icon name="chevronRight" size={12} /></span>
       Properties
       <span class="badge">{props.length}</span>
     </button>
@@ -120,8 +123,8 @@
 
   {#if vault.current?.okf}
     <section>
-      <button class="hdr" onclick={() => (open.okf = !open.okf)}>
-        <span class="tri" class:open={open.okf}>▸</span>
+      <button class="hdr" aria-expanded={open.okf} onclick={() => (open.okf = !open.okf)}>
+        <span class="tri" class:open={open.okf}><Icon name="chevronRight" size={12} /></span>
         OKF
         {#if vault.okfReport}
           <span class="badge" class:err={!vault.okfReport.conformant}>
@@ -190,8 +193,8 @@
     cursor: pointer;
   }
   .tri {
+    display: inline-flex;
     transition: transform 0.12s;
-    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .tri.open {
@@ -206,8 +209,8 @@
     padding: 1px 7px;
   }
   .badge.err {
-    background: rgba(214, 86, 72, 0.25);
-    color: var(--status-exited);
+    background: var(--danger-soft);
+    color: var(--danger);
   }
   .item {
     display: block;
@@ -278,7 +281,7 @@
     white-space: nowrap;
   }
   .props tr.okf .k {
-    color: var(--accent, #7a9cff);
+    color: var(--accent-text);
   }
   .okf-actions {
     display: flex;

@@ -11,6 +11,8 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { Session } from '../../lib/api/types';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
 
   interface ProviderDef {
     cmd: string;
@@ -45,6 +47,11 @@
   ];
 
   let loading = $state(true);
+  // A failed load shows inline with Retry. Rendering the form instead showed
+  // the defaults as if they were saved — and every save here writes whole
+  // objects (`providers`, `cli_auto_update`), so one click would have replaced
+  // the real custom providers / update schedule with those defaults.
+  let loadError = $state('');
   let saving = $state(false);
   let updating = $state(false);
   let custom: Record<string, ProviderDef> = $state({});
@@ -149,26 +156,30 @@
   }
 
   $effect(() => {
-    void (async () => {
-      try {
-        allSettings = await api.get<Record<string, unknown>>('/settings');
-        custom = (allSettings['providers'] as Record<string, ProviderDef> | undefined) ?? {};
-        defaultProvider = (allSettings['default_provider'] as string | undefined) ?? '';
-        disabled = new Set((allSettings['disabled_providers'] as string[] | undefined) ?? []);
-        autoUpdate = {
-          ...AUTO_UPDATE_DEFAULTS,
-          ...((allSettings['cli_auto_update'] as Partial<CliAutoUpdate> | undefined) ?? {}),
-        };
-        lastRun = (allSettings['cli_auto_update_last_run'] as string | undefined) ?? null;
-        skipPermissions = (allSettings['agent_skip_permissions'] as boolean | undefined) ?? true;
-        draftModel = (allSettings['pr_draft_model'] as string | undefined) ?? '';
-      } catch {
-        toasts.error('Could not load provider settings');
-      } finally {
-        loading = false;
-      }
-    })();
+    void loadSettings();
   });
+
+  async function loadSettings(): Promise<void> {
+    loading = true;
+    loadError = '';
+    try {
+      allSettings = await api.get<Record<string, unknown>>('/settings');
+      custom = (allSettings['providers'] as Record<string, ProviderDef> | undefined) ?? {};
+      defaultProvider = (allSettings['default_provider'] as string | undefined) ?? '';
+      disabled = new Set((allSettings['disabled_providers'] as string[] | undefined) ?? []);
+      autoUpdate = {
+        ...AUTO_UPDATE_DEFAULTS,
+        ...((allSettings['cli_auto_update'] as Partial<CliAutoUpdate> | undefined) ?? {}),
+      };
+      lastRun = (allSettings['cli_auto_update_last_run'] as string | undefined) ?? null;
+      skipPermissions = (allSettings['agent_skip_permissions'] as boolean | undefined) ?? true;
+      draftModel = (allSettings['pr_draft_model'] as string | undefined) ?? '';
+    } catch (e) {
+      loadError = loadErrorText(e);
+    } finally {
+      loading = false;
+    }
+  }
 
   function openNew(): void {
     editing = null;
@@ -369,6 +380,8 @@
 
   {#if loading}
     <Skeleton rows={4} />
+  {:else if loadError}
+    <LoadState what="provider settings" error={loadError} empty onretry={() => void loadSettings()} />
   {:else}
     <div class="section">
       <div class="label">Automatic updates</div>
@@ -462,6 +475,8 @@
         <code>--dangerously-bypass-approvals-and-sandbox</code>) so tool use never blocks.
         Turn off to use each CLI's own default permission mode (ask / auto) — tool use then
         prompts in the session terminal. Applies to new sessions; running ones are unchanged.
+        Background agent runs (workflow steps, scheduled tasks, swarms, self-improvement) still
+        skip prompts whatever this says — nobody is at their terminal to answer.
       </p>
     </div>
 

@@ -27,8 +27,8 @@
   let description = $state(src.description ?? '');
   let metric = $state((src.metric ?? '') as string);
   let comparator = $state<GoalComparator>((src.comparator as GoalComparator) ?? 'lte');
-  let targetValue = $state(src.target_value == null ? '' : String(src.target_value));
-  let blockValue = $state(src.block_value == null ? '' : String(src.block_value));
+  let targetValue = $state<string | number | null>(src.target_value == null ? '' : String(src.target_value));
+  let blockValue = $state<string | number | null>(src.block_value == null ? '' : String(src.block_value));
   let verifyCmd = $state((src.verify_cmd ?? '') as string);
   let maxRetries = $state(src.max_retries ?? 2);
   let blocking = $state(src.blocking ?? false);
@@ -47,9 +47,12 @@
     if (description.trim()) req.description = description.trim();
     if (metric.trim()) req.metric = metric.trim();
     if (comparator) req.comparator = comparator;
-    const tv = targetValue.trim();
+    // `bind:value` on a type="number" input writes a NUMBER (or null when
+    // blank), not the string this state started as — `.trim()` on it threw, so
+    // Save/Add silently did nothing once a target or block value was typed.
+    const tv = String(targetValue ?? '').trim();
     if (tv !== '' && Number.isFinite(Number(tv))) req.target_value = Number(tv);
-    const bv = blockValue.trim();
+    const bv = String(blockValue ?? '').trim();
     if (bv !== '' && Number.isFinite(Number(bv))) req.block_value = Number(bv);
     if (verifyCmd.trim()) req.verify_cmd = verifyCmd.trim();
     req.max_retries = Math.max(0, Math.floor(Number(maxRetries) || 0));

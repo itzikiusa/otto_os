@@ -64,9 +64,13 @@
 
   <div class="sb-group">
     {#if git.primaryStatus}
-      <button class="sb-item sb-btn" onclick={() => router.go('git')} title="Current branch">
+      <button
+        class="sb-item sb-btn sb-branch"
+        onclick={() => router.go('git')}
+        title={`Current branch: ${git.primaryStatus.branch} — open Git`}
+      >
         <Icon name="branch" size={11} />
-        {git.primaryStatus.branch}
+        <span class="sb-branch-name">{git.primaryStatus.branch}</span>
         {#if git.primaryStatus.ahead > 0}<span class="dim">↑{git.primaryStatus.ahead}</span>{/if}
         {#if git.primaryStatus.behind > 0}<span class="dim">↓{git.primaryStatus.behind}</span>{/if}
       </button>
@@ -106,13 +110,24 @@
     border: none;
     background: transparent;
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text);
     padding: 1px 4px;
     border-radius: 4px;
   }
   .sb-btn:hover {
     background: var(--surface-2);
+  }
+  /* A long branch name (feature/…/…) ellipsizes instead of running into the
+     docked "Ask Otto" chip centred in this bar; the tooltip has it whole. */
+  .sb-branch {
+    min-width: 0;
+  }
+  .sb-branch-name {
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .working-dot {
     width: 7px;

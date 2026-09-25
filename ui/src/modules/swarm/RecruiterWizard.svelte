@@ -10,6 +10,7 @@
   import type { AgentSkill, CreateAgentReq, RecruitedAgent } from './types';
   import { agentProvidersWith, defaultAgentProvider } from '../../lib/providers';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
 
   interface Props {
     onclose: () => void;
@@ -137,17 +138,23 @@
       skills,
       schedule: scheduleRaw ?? null,
     };
+    let hired = 0;
     try {
       for (let i = 0; i < n; i++) {
         // Suffix names when hiring multiple so they're distinguishable.
         const body = n > 1 ? { ...base, name: `${base.name} ${i + 1}` } : base;
         await swarm.createAgent(swarm.detail.id, body);
+        hired += 1;
       }
       toasts.success(n > 1 ? `Hired ${n}× ${name}` : `${name} hired`);
       if (proposalRunId) swarm.markRecruitHired(proposalRunId);
       onclose();
     } catch (e) {
-      toasts.error('Hire failed', e instanceof Error ? e.message : String(e));
+      // A mid-batch failure still hired the first copies — say how many, so a
+      // retry doesn't silently double them.
+      const msg = e instanceof Error ? e.message : String(e);
+      if (hired > 0) toasts.error(`Hired ${hired} of ${n} — the rest failed`, msg);
+      else toasts.error('Hire failed', msg);
     } finally {
       busy = false;
     }
@@ -217,13 +224,13 @@
               class="link"
               aria-label="Remove skill {s.name}"
               title="Remove skill"
-              onclick={() => (skills = skills.filter((_, j) => j !== i))}>×</button>
+              onclick={() => (skills = skills.filter((_, j) => j !== i))}><Icon name="x" size={10} /></button>
           </span>
         {/each}
         {#if skills.length === 0}<span class="dim small">no library skills proposed</span>{/if}
       </div>
     </div>
-    {#if scheduleRaw}<p class="dim small">Suggested schedule: {scheduleRaw.cadence}{scheduleRaw.at ? ` @ ${scheduleRaw.at}` : ''} — editable later in the agent editor.</p>{/if}
+    {#if scheduleRaw}<p class="dim small">Suggested schedule: {scheduleRaw.cadence}{scheduleRaw.at ? ` @ ${scheduleRaw.at} UTC` : ''} — editable later in the agent editor.</p>{/if}
   {/if}
 
   {#snippet footer()}
@@ -272,6 +279,8 @@
     color: var(--accent-text);
   }
   .link {
+    display: inline-grid;
+    place-items: center;
     border: none;
     background: transparent;
     color: inherit;
@@ -287,7 +296,7 @@
     gap: 2px;
     color: var(--text-dim);
     font-size: 12px;
-    margin-right: auto;
+    margin-inline-end: auto;
   }
   .count .num {
     width: 52px;

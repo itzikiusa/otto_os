@@ -242,10 +242,15 @@
        tools right-aligned (they collapse into ⋯ when the pane is narrow). -->
   <PageHeader title={vault.current?.name ?? 'Vault'} class="vault-header">
     {#snippet titleContent()}
-      <button class="vault-pick" onclick={(e) => vaultMenu(e)} title="Switch vault">
+      <button
+        class="vault-pick"
+        onclick={(e) => vaultMenu(e)}
+        title={vault.current ? `${vault.current.name} — switch vault` : 'Switch vault'}
+        aria-haspopup="menu"
+      >
         <Icon name="globe" size={14} />
-        <span>{vault.current?.name ?? 'No vault'}</span>
-        <span class="tri">▾</span>
+        <span class="vp-name">{vault.current?.name ?? 'No vault'}</span>
+        <span class="tri"><Icon name="chevronDown" size={12} /></span>
       </button>
     {/snippet}
     {#snippet badge()}
@@ -415,7 +420,7 @@
                   onclick={(e) => {
                     e.stopPropagation();
                     void vault.closeTab(i);
-                  }}>×</button
+                  }}><Icon name="x" size={11} /></button
                 >
               </div>
             {/each}
@@ -426,7 +431,7 @@
             <label>Graph scope <select aria-label="Graph scope" bind:value={vault.graphLocal} onchange={() => vault.persistView()}>
               <option value={false}>Whole vault</option><option value={true} disabled={!vault.notePath}>Around current note</option>
             </select></label>
-            {#if vault.graphLocal}<span>{vault.notePath}</span>{/if}
+            {#if vault.graphLocal}<span class="gs-path" title={vault.notePath ?? ''}>{vault.notePath}</span>{/if}
           </div>
           <GraphView local={vault.graphLocal} />
         {:else if vault.centerMode === 'trash' || vault.centerMode === 'history'}
@@ -535,6 +540,7 @@
 
 <style>
   .graph-scope { display: flex; align-items: center; gap: 12px; padding: 8px 12px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim); }
+  .gs-path { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .graph-scope select { background: var(--bg); color: var(--text); border: 1px solid var(--border); padding: 4px; border-radius: 4px; }
   .vault-page {
     display: flex;
@@ -558,14 +564,19 @@
     cursor: pointer;
     max-width: 260px;
   }
-  .vault-pick span {
+  /* The name is a flex item: without min-width:0 it never shrinks below
+     its full text, so a long vault name pushed past the 260px cap with no
+     ellipsis (the chevron was the part that got cut). */
+  .vp-name {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .tri {
+    display: inline-flex;
+    flex-shrink: 0;
     color: var(--text-dim);
-    font-size: var(--fs-xs);
   }
   .okf-chip {
     font-size: var(--fs-xs);
@@ -716,8 +727,7 @@
     border-radius: 4px;
     background: none;
     color: var(--text-dim);
-    font-size: 13px;
-    line-height: 1;
+    flex-shrink: 0;
     cursor: pointer;
     padding: 0;
   }

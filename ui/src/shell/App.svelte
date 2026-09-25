@@ -575,7 +575,7 @@
     if (!active) return registry.register('focused-session', []);
     const isAgent = active.kind === 'agent';
     const cmds = [
-      { id: 'focus.restart', title: 'Restart Focused Session', group: 'Session', keywords: 'reload reboot relaunch active current', run: () => void ws.restartSession(active.id) },
+      { id: 'focus.restart', title: 'Restart Focused Session', group: 'Session', keywords: 'reload reboot relaunch active current', run: () => void ws.requestRestart(active.id) },
       { id: 'focus.archive', title: 'Archive Focused Session', group: 'Session', keywords: 'close hide stash active current', run: () => void ws.archiveSession(active.id) },
       { id: 'focus.rename', title: 'Rename Focused Session', group: 'Session', keywords: 'title name active current', run: () => void renameActiveSession() },
       ...(isAgent
@@ -611,9 +611,11 @@
   });
 
   $effect(() => {
+    // Archived sessions are parked (restore them from the sidebar's Archived
+    // list); "Focus" on one opened a dead tab. Same rule as the ⌥Space bar.
     const unreg = registry.register(
       'sessions',
-      ws.sessions.map((s) => ({
+      ws.sessions.filter((s) => !s.archived).map((s) => ({
         id: `session.${s.id}`,
         title: `Focus Session: ${s.title}`,
         group: 'Sessions',
@@ -720,13 +722,16 @@
   {/if}
   {#if serviceHealth.visible}
     <div class="provider-banner" role="alert">
+      <Icon name="warning" size={14} />
       <span>
-        ⚠ A remote git provider (GitHub / Bitbucket / GitLab) is failing with a
+        A remote git provider (GitHub / Bitbucket / GitLab) is failing with a
         <strong>gateway error</strong> — it may be down or under maintenance. Your local work is
         unaffected; retries will resume automatically.
       </span>
       <span class="grow"></span>
-      <button class="pb-dismiss" onclick={() => serviceHealth.dismiss()} aria-label="Dismiss notice">✕</button>
+      <button class="pb-dismiss" onclick={() => serviceHealth.dismiss()} aria-label="Dismiss notice" title="Dismiss">
+        <Icon name="x" size={12} />
+      </button>
     </div>
   {/if}
   {#if moduleName === 'agents'}
@@ -1192,7 +1197,7 @@
     align-items: center;
     gap: 10px;
     padding: 7px 14px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     background: color-mix(in srgb, var(--warning) 18%, var(--surface));
     color: var(--text);
     border-bottom: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
@@ -1200,14 +1205,20 @@
   }
   .pb-dismiss {
     flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     border: none;
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    font-size: 13px;
+    font-size: var(--fs-s);
     padding: 2px 6px;
     border-radius: 4px;
     line-height: 1;
+  }
+  .provider-banner > :global(svg) {
+    color: var(--warning);
   }
   .pb-dismiss:hover {
     color: var(--text);
@@ -1216,8 +1227,8 @@
   /* Impersonation banner — blue tint to visually differentiate from the
      amber provider-health banner; Stop button is non-destructive styling. */
   .impersonation-banner {
-    background: color-mix(in srgb, #3b82f6 18%, var(--surface));
-    border-bottom-color: color-mix(in srgb, #3b82f6 45%, transparent);
+    background: color-mix(in srgb, var(--info) 18%, var(--surface));
+    border-bottom-color: color-mix(in srgb, var(--info) 45%, transparent);
   }
   .imp-real {
     font-size: 11.5px;

@@ -102,36 +102,46 @@
 
   // ---- Compare against the reference copy ----------------------------------
   let comparing = $state<VariantSource | null>(null);
+  // A copy that can't be read ends the "Loading both copies…" wait with a
+  // reason instead of leaving it up forever.
+  let compareError = $state<string | null>(null);
   $effect(() => {
     void group.name;
     comparing = null;
+    compareError = null;
   });
   const refBody = $derived(group.reference === 'library' ? libraryBody : bodyOf(group.reference));
   async function compare(s: VariantSource): Promise<void> {
     comparing = comparing === s ? null : s;
+    compareError = null;
     // The diff lives on Overview, above the rendered SKILL.md.
     if (comparing && tab !== 'overview') ontab('overview');
     if (comparing && s !== 'library' && s !== 'bundled' && bodyOf(s) == null) {
       try {
         const p = await skillLabApi.getProvider(s, group.name);
         onbody(s, p.body);
-      } catch {
-        /* the diff shows as unavailable */
+      } catch (e) {
+        compareError = `Couldn't read the ${sourceLabel(s)} copy: ${e instanceof Error ? e.message : String(e)}`;
       }
     }
     if (comparing && group.reference !== 'library' && bodyOf(group.reference) == null) {
       try {
         const p = await skillLabApi.getProvider(group.reference, group.name);
         onbody(group.reference, p.body);
-      } catch {
-        /* ditto */
+      } catch (e) {
+        compareError = `Couldn't read the ${sourceLabel(group.reference)} copy: ${e instanceof Error ? e.message : String(e)}`;
       }
     }
   }
   let bundledBody = $state<string | null>(null);
   $effect(() => {
     if (comparing === 'bundled' && bundledBody == null) {
-      void skillLabApi.getBundled(group.name).then((b) => (bundledBody = b.body)).catch(() => (bundledBody = ''));
+      // On failure don't fake an empty body (that renders as "everything was
+      // deleted"); say the bundled copy couldn't be read.
+      void skillLabApi
+        .getBundled(group.name)
+        .then((b) => (bundledBody = b.body))
+        .catch((e) => (compareError = `Couldn't read the bundled copy: ${e instanceof Error ? e.message : String(e)}`));
     }
   });
   $effect(() => {
@@ -291,7 +301,9 @@
           <span class="section-title">{comparing === 'bundled' ? 'Library → Bundled' : `${sourceLabel(group.reference)} → ${sourceLabel(comparing)}`}</span>
           <button class="icon-btn" onclick={() => (comparing = null)} aria-label="Close diff" title="Close diff"><Icon name="x" size={14} /></button>
         </div>
-        {#if compareBefore == null || compareAfter == null}
+        {#if compareError}
+          <p class="compare-err" role="alert">{compareError}</p>
+        {:else if compareBefore == null || compareAfter == null}
           <p class="dim" role="status">Loading both copies…</p>
         {:else}
           <DiffView before={compareBefore} after={compareAfter} mode="word" contextLines={3} />
@@ -569,6 +581,12 @@
   }
   .compare-head .section-title {
     margin: 0;
+  }
+  .compare-err {
+    margin: 0;
+    font-size: var(--fs-s);
+    color: var(--danger);
+    overflow-wrap: anywhere;
   }
   .overview {
     display: grid;

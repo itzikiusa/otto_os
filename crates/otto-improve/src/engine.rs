@@ -739,13 +739,21 @@ impl ImprovementEngine {
 
     // ---- helpers ----
 
+    /// Persist the run's schedule advance (`last_run_at` / `next_run_at`)
+    /// ONLY, merged onto the workspace's settings as they are NOW. A run can
+    /// take minutes; writing back its start-of-run config copy used to undo
+    /// any Settings → Self-improvement save made while it ran.
     async fn persist_config(
         &self,
         ws_id: &Id,
-        current_settings: &serde_json::Value,
+        _start_settings: &serde_json::Value,
         cfg: &otto_core::api::SelfImprovementConfig,
     ) -> Result<()> {
-        let merged = write_config(current_settings, cfg);
+        let ws = self.workspaces.get(ws_id).await?;
+        let mut fresh = effective_config(&ws.settings);
+        fresh.last_run_at = cfg.last_run_at;
+        fresh.next_run_at = cfg.next_run_at;
+        let merged = write_config(&ws.settings, &fresh);
         self.workspaces
             .update(ws_id, None, None, Some(&merged), None)
             .await?;
