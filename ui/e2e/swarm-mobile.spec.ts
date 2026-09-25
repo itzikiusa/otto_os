@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedSwarm } from './seed';
+import { expectFullyInViewport } from './helpers';
 
 // Durable mobile-layout coverage for the Agent Swarm page. Runs on every device
 // project (phones + tablets). Seeds — via the API — a swarm with a real org tree
@@ -293,7 +294,9 @@ test('phone: the swarm header keeps the title and overflows secondary actions in
   await expect(menu).toBeHidden();
 
   // The parallel cap lives in the view-switcher row (reachable by scrolling it).
-  await expect(page.locator('.switcher #cap')).toBeAttached();
+  const parallelCap = page.getByRole('spinbutton', { name: 'Max parallel' });
+  await parallelCap.scrollIntoViewIfNeeded();
+  await expectFullyInViewport(page, parallelCap);
   await expectFitsWidth(page);
 });
 
