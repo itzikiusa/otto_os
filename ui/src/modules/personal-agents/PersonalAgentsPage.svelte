@@ -96,8 +96,9 @@
     if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft' && e.key !== 'Home' && e.key !== 'End') return;
     e.preventDefault();
     const toRooms = e.key === 'End' || ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && sub !== 'rooms');
+    const tablist = e.currentTarget as HTMLElement;
     router.go(toRooms ? 'personal-agents/rooms' : 'personal-agents');
-    queueMicrotask(() => (e.currentTarget as HTMLElement | null)?.querySelector<HTMLButtonElement>('[aria-selected="true"]')?.focus());
+    tablist.querySelectorAll<HTMLButtonElement>('[role="tab"]')[toRooms ? 1 : 0]?.focus();
   }
 </script>
 

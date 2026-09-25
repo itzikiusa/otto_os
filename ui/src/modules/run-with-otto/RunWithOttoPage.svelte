@@ -5,6 +5,7 @@
   // button), the runs list, and the open run's detail panel.
   import { untrack } from 'svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { runWithOtto } from '../../lib/stores/runWithOtto.svelte';
   import ProofStatusChip from '../../lib/components/ProofStatusChip.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -86,7 +87,6 @@
 
   {#if ws.currentId}
     <RunLauncher wsId={ws.currentId} {onLaunched} />
-  {/if}
 
   <div class="body-wrap">
   <div class="body" class:has-detail={openRun}>
@@ -149,6 +149,17 @@
     {/if}
   </div>
   </div>
+  {:else}
+    <EmptyState
+      variant="page"
+      icon="folder"
+      title="Add a workspace to get started"
+      body="Runs belong to a workspace. Add your project folder, then choose the source you want Otto to work on."
+      actionLabel="Add workspace"
+      actionIcon="plus"
+      onaction={() => (ui.newWorkspaceOpen = true)}
+    />
+  {/if}
 </div>
 </PageBody>
 </div>

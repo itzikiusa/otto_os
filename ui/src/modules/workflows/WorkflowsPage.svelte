@@ -3043,6 +3043,16 @@
           {/if}
         </div>
       {/if}
+    {:else if !ws.currentId}
+      <EmptyState
+        variant="page"
+        icon="folder"
+        title="Add a workspace to get started"
+        body="Workflows belong to a workspace. Add your project folder to create and run an automation."
+        actionLabel="Add workspace"
+        actionIcon="plus"
+        onaction={() => (ui.newWorkspaceOpen = true)}
+      />
     {:else if workflows.length === 0 && (wfError || wfLoading)}
       <LoadState what="workflows" variant="page" loading={wfLoading} error={wfError} empty onretry={() => void load()} />
     {:else if workflows.length === 0}
