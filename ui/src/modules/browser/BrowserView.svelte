@@ -658,6 +658,7 @@
     {/if}
     <input
       type="text"
+      dir="ltr"
       placeholder="Enter URL"
       aria-label="Address"
       enterkeyhint="go"

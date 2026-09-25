@@ -326,6 +326,15 @@
     min-height: 0;
     min-width: 0;
   }
+  /* On phones the assistant replaces the board until closed. Keep the editor
+     mounted so closing the panel preserves its zoom and pending work. */
+  .phone .with-convo .editor-host {
+    display: none;
+  }
+  .convo-panel.overlay {
+    width: 100%;
+    border-inline-start: none;
+  }
   /* Ask-AI launcher — bottom-center so it clears Excalidraw's top toolbar. */
   .ai-bar {
     position: absolute;
