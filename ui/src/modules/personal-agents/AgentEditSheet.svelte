@@ -45,6 +45,9 @@
 
   let busy = $state(false);
   let error = $state('');
+  let errorEl = $state<HTMLDivElement | null>(null);
+  // Save is in the fixed footer: reveal errors even after scrolling a long form.
+  $effect(() => { if (error) errorEl?.scrollIntoView({ block: 'nearest' }); });
 
   // The sheet is mounted fresh per open (parent {#if}-gates it), so capturing
   // the agent's initial values into the form state is intentional.
@@ -152,7 +155,7 @@
 
 <Modal title={agent ? `Edit ${agent.name}` : 'New personal agent'} width={620} {onclose}>
   <div class="sheet">
-    {#if error}<div class="err" role="alert">{error}</div>{/if}
+    {#if error}<div class="err" role="alert" bind:this={errorEl}>{error}</div>{/if}
     {#if !agent && !ws.currentId}
       <button class="btn" onclick={() => (ui.newWorkspaceOpen = true)}>Add workspace</button>
     {/if}

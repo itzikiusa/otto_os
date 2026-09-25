@@ -23,9 +23,13 @@
   let selectedId = $state<string | null>(null);
   let showingList = $state(false);
   let newRoomName = $state('');
-  let draft = $state('');
+  // Drafts and send results belong to a room, even while a request is pending.
+  let drafts = $state<Record<string, string>>({});
+  let sending = $state<Record<string, boolean>>({});
+  let sendErrors = $state<Record<string, string>>({});
+  const draft = $derived(selectedId ? (drafts[selectedId] ?? '') : '');
+  const error = $derived(selectedId ? (sendErrors[selectedId] ?? '') : '');
   let busy = $state(false);
-  let error = $state('');
   let createError = $state('');
   let feedEl = $state<HTMLElement | null>(null);
   let createEl = $state<HTMLInputElement | null>(null);
@@ -139,18 +143,20 @@
   }
 
   async function send(): Promise<void> {
-    const text = draft.trim();
-    if (!text || !selectedId) return;
-    busy = true;
-    error = '';
+    const roomId = selectedId;
+    const submitted = draft;
+    const text = submitted.trim();
+    if (!text || !roomId || sending[roomId]) return;
+    sending[roomId] = true;
+    sendErrors[roomId] = '';
     try {
-      await personalAgents.postMessage(selectedId, text);
-      draft = '';
+      await personalAgents.postMessage(roomId, text);
+      // Keep anything typed after Send, including a draft in another room.
+      if (drafts[roomId] === submitted) drafts[roomId] = '';
     } catch (e) {
-      // Inline next to the composer: the draft is kept, so the fix is a resend.
-      error = `Couldn’t post the message. ${loadErrorText(e)}`;
+      sendErrors[roomId] = `Couldn’t post the message. ${loadErrorText(e)}`;
     } finally {
-      busy = false;
+      sending[roomId] = false;
     }
   }
 </script>
@@ -286,7 +292,8 @@
         {#if error}<div class="err" role="alert">{error}</div>{/if}
         <div class="composer">
           <textarea
-            bind:value={draft}
+            value={draft}
+            oninput={(e) => { if (selectedId) drafts[selectedId] = e.currentTarget.value; }}
             rows="2"
             aria-label="Message to the room"
             placeholder="Post into the room (visible to all member agents)…"
@@ -294,7 +301,7 @@
               if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void send();
             }}
           ></textarea>
-          <button class="btn primary" disabled={busy || !draft.trim()} onclick={send} title="Send (⌘↩)">Send</button>
+          <button class="btn primary" disabled={sending[selectedId ?? ''] || !draft.trim()} onclick={send} title="Send (⌘↩)">Send</button>
         </div>
       {/if}
     </LoadState>
