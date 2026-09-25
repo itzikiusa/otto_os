@@ -444,8 +444,11 @@ class SwarmStore {
     // used to silently leave the board EMPTY until the next full reload.
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        this.tasksByProject[pid] = await api.get<SwarmTask[]>(`/swarm/projects/${pid}/tasks`);
-        this.tasksByProject = { ...this.tasksByProject };
+        const tasks = await api.get<SwarmTask[]>(`/swarm/projects/${pid}/tasks`);
+        // Merge after the await: sibling project loads may replace the cache
+        // while this request is pending. An assignment target before await
+        // would retain the old map and silently lose this project’s tasks.
+        this.tasksByProject = { ...this.tasksByProject, [pid]: tasks };
         return;
       } catch {
         if (attempt === 0) await new Promise((r) => setTimeout(r, 800));

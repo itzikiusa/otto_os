@@ -79,6 +79,11 @@
   let selected = $state<Set<string>>(new Set());
   const selectedCount = $derived(selected.size);
   const selectedTasks = $derived(tasks.filter((t) => selected.has(t.id)));
+  // Bulk actions belong to the visible project, never to a previous board.
+  $effect(() => {
+    void pid;
+    selected = new Set();
+  });
 
   function toggleSelect(id: string) {
     const n = new Set(selected);
@@ -148,12 +153,21 @@
 
   let adding = $state(false);
   let newTitle = $state('');
+  let addingTask = $state(false);
   async function addTask() {
-    if (!pid || !newTitle.trim()) return;
+    if (!pid || !newTitle.trim() || addingTask) return;
     const project = pid;
-    if (await attempt("Couldn't add the task", () => swarm.createTask(project, { title: newTitle.trim(), priority: 'medium' }))) {
-      newTitle = '';
-      adding = false;
+    const submitted = newTitle;
+    addingTask = true;
+    try {
+      if (await attempt("Couldn't add the task", () => swarm.createTask(project, { title: submitted.trim(), priority: 'medium' }))) {
+        if (pid === project && newTitle === submitted) {
+          newTitle = '';
+          adding = false;
+        }
+      }
+    } finally {
+      addingTask = false;
     }
   }
 
@@ -414,7 +428,7 @@
           else if (e.key === 'Escape') adding = false;
         }}
       />
-      <button class="btn small primary" onclick={addTask} disabled={!newTitle.trim()} title={newTitle.trim() ? undefined : 'Type a task title first'}>Add task</button>
+      <button class="btn small primary" onclick={addTask} disabled={addingTask || !newTitle.trim()} title={newTitle.trim() ? undefined : 'Type a task title first'}>Add task</button>
       <button class="btn small ghost" onclick={() => (adding = false)}>Cancel</button>
     </div>
   {/if}
