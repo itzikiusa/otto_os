@@ -1197,7 +1197,7 @@
             <div class="rp-comment-head">
               <span class="severity-chip sev-{c.severity}">{c.severity}</span>
               {#if c.path !== null}
-                <span class="mono rp-loc">{c.path}{c.line !== null ? `:${c.line}` : ''}</span>
+                <span class="mono rp-loc" dir="ltr" title={c.path}>{c.path}{c.line !== null ? `:${c.line}` : ''}</span>
               {/if}
               <span class="grow"></span>
               {#if c.state === 'draft'}
@@ -1241,7 +1241,7 @@
                 </button>
               </div>
               {#if expanded}
-                <div class="rp-diff-snippet">
+                <div class="rp-diff-snippet" dir="ltr">
                   {#each snippetLines as dl}
                     {@const isTarget = (dl.new_line !== null && dl.new_line === c.line) || (dl.new_line === null && dl.old_line !== null && dl.old_line === c.line)}
                     <div
@@ -1303,7 +1303,7 @@
                         <div class="rp-comment-head">
                           <span class="severity-chip sev-{c.severity}">{c.severity}</span>
                           {#if c.path !== null}
-                            <span class="mono rp-loc">{c.path}{c.line !== null ? `:${c.line}` : ''}</span>
+                            <span class="mono rp-loc" dir="ltr" title={c.path}>{c.path}{c.line !== null ? `:${c.line}` : ''}</span>
                           {/if}
                           <span class="grow"></span>
                           {#if c.state === 'approved' && c.posted}

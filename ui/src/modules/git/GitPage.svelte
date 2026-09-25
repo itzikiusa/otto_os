@@ -48,6 +48,22 @@
   let busy = $state(false);
   let pickerOpen = $state(false);
 
+  /** ←/→ (Home/End) move between the view tabs, like any tablist. */
+  function onTabKey(e: KeyboardEvent): void {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+    const list = (e.currentTarget as HTMLElement).closest<HTMLElement>('[role="tablist"]');
+    if (!list) return;
+    const btns = [...list.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+    const i = btns.indexOf(document.activeElement as HTMLButtonElement);
+    if (i < 0) return;
+    e.preventDefault();
+    const rtl = getComputedStyle(list).direction === 'rtl';
+    const fwd = e.key === (rtl ? 'ArrowLeft' : 'ArrowRight');
+    const next = e.key === 'Home' ? 0 : e.key === 'End' ? btns.length - 1 : (i + (fwd ? 1 : -1) + btns.length) % btns.length;
+    btns[next].focus();
+    btns[next].click();
+  }
+
   // Clone destination dir — REMEMBERED across sessions so the user never has to
   // re-pick it (persisted to localStorage; defaults to the last-used location).
   const CLONE_DIR_KEY = 'otto_git_clone_dir';
@@ -64,6 +80,22 @@
   let remoteRepos: RemoteRepoSummary[] = $state([]);
   let remoteLoading = $state(false);
   let remoteError = $state('');
+  let remoteRevision = 0;
+  let remoteResultsAccount = '';
+  $effect(() => {
+    if (!addOpen) {
+      remoteRevision++;
+      if (searchTimer) clearTimeout(searchTimer);
+      remoteRepos = [];
+      remoteLoading = false;
+    } else if (untrack(() => addMode === 'browse')) {
+      untrack(() => void runRemoteSearch());
+    }
+    return () => {
+      remoteRevision++;
+      if (searchTimer) clearTimeout(searchTimer);
+    };
+  });
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
   const accountsWithNs = $derived(accounts.filter((a) => a.namespace));
@@ -140,34 +172,46 @@
   }
 
   function scheduleRemoteSearch(): void {
+    remoteRevision++;
+    remoteRepos = [];
+    remoteError = '';
+    remoteLoading = true;
     if (searchTimer) clearTimeout(searchTimer);
     searchTimer = setTimeout(() => void runRemoteSearch(), 350);
   }
 
   async function runRemoteSearch(): Promise<void> {
-    if (browseAccount === '') return;
+    if (searchTimer) clearTimeout(searchTimer);
+    const revision = ++remoteRevision;
+    const accountId = browseAccount;
+    remoteRepos = [];
+    if (accountId === '') { remoteLoading = false; return; }
     remoteLoading = true;
     remoteError = '';
     try {
       const q = browseQuery.trim() === '' ? '' : `?q=${encodeURIComponent(browseQuery.trim())}`;
-      remoteRepos = await api.get<RemoteRepoSummary[]>(`/git/accounts/${browseAccount}/remote-repos${q}`);
+      const next = await api.get<RemoteRepoSummary[]>(`/git/accounts/${accountId}/remote-repos${q}`);
+      if (revision !== remoteRevision) return;
+      remoteRepos = next;
+      remoteResultsAccount = accountId;
     } catch (e) {
+      if (revision !== remoteRevision) return;
       remoteError = e instanceof Error ? e.message : String(e);
       if (remoteError === '') remoteError = 'The account’s host did not answer.';
       remoteRepos = [];
     } finally {
-      remoteLoading = false;
+      if (revision === remoteRevision) remoteLoading = false;
     }
   }
 
   async function cloneRemote(repo: RemoteRepoSummary): Promise<void> {
-    if (!ws.currentId || busy) return;
+    if (!ws.currentId || busy || remoteLoading || remoteResultsAccount !== browseAccount) return;
     busy = true;
     try {
       const created = await api.post<Repo>(`/workspaces/${ws.currentId}/repos`, {
         clone_url: repo.clone_url,
         name: repo.name || null,
-        git_account_id: browseAccount || null,
+        git_account_id: remoteResultsAccount || null,
         clone_dir: cloneDir.trim() || null,
       });
       rememberCloneDir();
@@ -261,7 +305,9 @@
 
 {#if prRepo && isPr}
   <!-- PR detail is still routed (deep-linkable). -->
-  <PrDetail repoId={prRepo.id} number={Number(router.parts[3])} />
+  {#key `${prRepo.id}:${router.parts[3]}`}
+    <PrDetail repoId={prRepo.id} number={Number(router.parts[3])} />
+  {/key}
 {:else}
   <div class="gitpage">
     <!-- Unified toolbar: the open-repo tabs sit inline in the page header
@@ -413,13 +459,13 @@
 {#if addOpen}
   <Modal title="Add repository" onclose={() => (addOpen = false)}>
     <div class="segmented add-mode" role="tablist" aria-label="How to add the repository">
-      <button role="tab" aria-selected={addMode === 'register'} class:active={addMode === 'register'} onclick={() => (addMode = 'register')}>
+      <button role="tab" onkeydown={onTabKey} tabindex={addMode === 'register' ? 0 : -1} aria-selected={addMode === 'register'} class:active={addMode === 'register'} onclick={() => (addMode = 'register')}>
         Local folder
       </button>
-      <button role="tab" aria-selected={addMode === 'browse'} class:active={addMode === 'browse'} onclick={() => { addMode = 'browse'; if (remoteRepos.length === 0) void runRemoteSearch(); }}>
+      <button role="tab" onkeydown={onTabKey} tabindex={addMode === 'browse' ? 0 : -1} aria-selected={addMode === 'browse'} class:active={addMode === 'browse'} onclick={() => { addMode = 'browse'; if (remoteRepos.length === 0) void runRemoteSearch(); }}>
         Browse remote
       </button>
-      <button role="tab" aria-selected={addMode === 'clone'} class:active={addMode === 'clone'} onclick={() => (addMode = 'clone')}>Clone URL</button>
+      <button role="tab" onkeydown={onTabKey} tabindex={addMode === 'clone' ? 0 : -1} aria-selected={addMode === 'clone'} class:active={addMode === 'clone'} onclick={() => (addMode = 'clone')}>Clone URL</button>
     </div>
 
     {#if addMode === 'register'}

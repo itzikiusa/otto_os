@@ -2,9 +2,10 @@
   // PR detail: meta, editable markdown description, diff with inline comment
   // threads, general comments, approve/merge/decline, "open as session".
   // Three tabs: Summary | Files | Review (AI agents).
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { api } from '../../lib/api/client';
   import type { DiffResp, PrComment, PrCommit, PrDetail } from '../../lib/api/types';
+  import { guardUnsaved } from '../../lib/leaveGuard';
   import { router } from '../../lib/router.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -29,6 +30,8 @@
     number: number;
   }
   let { repoId, number }: Props = $props();
+  let disposed = false;
+  onDestroy(() => { disposed = true; });
 
   type Tab = 'summary' | 'files' | 'commits' | 'review';
   const TABS: Tab[] = ['summary', 'files', 'commits', 'review'];
@@ -62,6 +65,11 @@
   let mergeOpen = $state(false);
   let showRequestChanges = $state(false);
   let requestChangesBody = $state('');
+  $effect(() => guardUnsaved(
+    () => (editMode && !!pr && (editTitle !== pr.title || editDesc !== pr.description_md))
+      || newComment.trim() !== '' || requestChangesBody.trim() !== '',
+    { what: `pull request #${number}` },
+  ));
   // Provider to spawn the "open as session" review agent on (registry-sourced,
   // defaults to the configured default agent — never a hardcoded 'claude').
   let reviewProvider = $state(defaultAgentProvider());
@@ -112,13 +120,13 @@
     loading = true;
     try {
       const next = await api.get<PrDetail>(`/repos/${rid}/prs/${num}`);
-      if (rid !== repoId || num !== number) return; // switched PRs mid-flight
+      if (disposed || rid !== repoId || num !== number) return; // switched PRs mid-flight
       pr = next;
       prError = null;
     } catch (e) {
-      if (rid === repoId && num === number) prError = loadErrorText(e);
+      if (!disposed && rid === repoId && num === number) prError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (!disposed) loading = false;
     }
   }
 
@@ -126,13 +134,13 @@
     diffLoading = true;
     try {
       const next = await api.get<DiffResp>(`/repos/${rid}/prs/${num}/diff`);
-      if (rid !== repoId || num !== number) return;
+      if (disposed || rid !== repoId || num !== number) return;
       diff = next;
       diffError = null;
     } catch (e) {
-      if (rid === repoId && num === number) diffError = loadErrorText(e);
+      if (!disposed && rid === repoId && num === number) diffError = loadErrorText(e);
     } finally {
-      diffLoading = false;
+      if (!disposed) diffLoading = false;
     }
   }
 
@@ -140,13 +148,13 @@
     commitsLoading = true;
     try {
       const next = await api.get<PrCommit[]>(`/repos/${rid}/prs/${num}/commits`);
-      if (rid !== repoId || num !== number) return;
+      if (disposed || rid !== repoId || num !== number) return;
       commits = next;
       commitsError = null;
     } catch (e) {
-      if (rid === repoId && num === number) commitsError = loadErrorText(e);
+      if (!disposed && rid === repoId && num === number) commitsError = loadErrorText(e);
     } finally {
-      commitsLoading = false;
+      if (!disposed) commitsLoading = false;
     }
   }
 
@@ -196,16 +204,18 @@
   }
 
   async function saveEdit(): Promise<void> {
+    if (busy !== '') return;
     busy = 'edit';
     try {
       await api.patch(`/repos/${repoId}/prs/${number}`, { title: editTitle, description: editDesc });
+      if (disposed) return;
       editMode = false;
       await load(repoId, number);
       toasts.success('Pull request updated');
     } catch (e) {
       toasts.error('Update failed', e instanceof Error ? e.message : String(e));
     } finally {
-      busy = '';
+      if (!disposed) busy = '';
     }
   }
 
@@ -348,7 +358,7 @@
 
     <div class="prd-title-block">
       {#if editMode}
-        <input class="input prd-title-input" bind:value={editTitle} />
+        <input class="input prd-title-input" aria-label="Pull request title" bind:value={editTitle} disabled={busy === 'edit'} />
       {:else}
         <h2 class="prd-title">
           <span class="dim">#{pr.number}</span>
@@ -420,10 +430,10 @@
     {#if activeTab === 'summary'}
       <section class="prd-desc card">
         {#if editMode}
-          <textarea class="input" rows="8" bind:value={editDesc} aria-label="Pull request description"></textarea>
+          <textarea class="input" rows="8" bind:value={editDesc} aria-label="Pull request description" disabled={busy === 'edit'}></textarea>
           <div class="row prd-compose-foot">
             <span class="hint dim">Updates the pull request on {providerName}; everyone on it sees the change.</span>
-            <button class="btn small" onclick={() => (editMode = false)}>Cancel</button>
+            <button class="btn small" disabled={busy === 'edit'} onclick={() => (editMode = false)}>Cancel</button>
             <button class="btn small primary" disabled={busy === 'edit' || editTitle.trim() === ''} onclick={saveEdit}>
               {busy === 'edit' ? 'Saving…' : 'Save to ' + providerName}
             </button>

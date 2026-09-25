@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { dialogFocus } from '../../lib/dialogFocus';
   import { branchTracking } from './refTracking';
   // Two-pane: LEFT = refs tree (local/remote/tags), MIDDLE = commit graph, RIGHT = commit detail/diff.
   import { untrack } from 'svelte';
@@ -2172,7 +2173,9 @@
     e.stopPropagation(); // don't also select the commit (the row is a button)
     e.preventDefault();
     const { branches, tags } = splitChips(chips);
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const trigger = e.currentTarget as HTMLElement;
+    trigger.focus(); // WebKit pointer clicks do not focus buttons automatically.
+    const r = trigger.getBoundingClientRect();
     refMenu = { commit, branches, tags, x: r.left, y: r.bottom + 4 };
   }
 
@@ -2193,6 +2196,12 @@
       refPopX = Math.max(pad, Math.min(m.x, window.innerWidth - refPopEl.offsetWidth - pad));
       refPopY = Math.max(pad, Math.min(m.y, window.innerHeight - refPopEl.offsetHeight - pad));
     });
+  });
+
+  $effect(() => {
+    if (!refMenu) return;
+    untrack(() => ui.pushModal());
+    return () => untrack(() => ui.popModal());
   });
 
   function closeRefMenu(): void {
@@ -2328,6 +2337,9 @@
   // chips check out a local tracking branch (mirrors checkoutRemote); tags
   // check out detached; worktree branches open the linked tree as a git tab.
   function refRowCheckout(chip: RefChip): void {
+    // Re-resolve against the current refs; the list may have loaded/refreshed
+    // since this popover opened. Preserve tag identity for detached checkout.
+    if (chip.kind !== 'tag') chip = classifyRef(chip.label);
     closeRefMenu();
     if (chip.kind === 'remote') {
       void checkout(chip.label.replace(/^[^/]+\//, ''), true);
@@ -2357,8 +2369,8 @@
       if (t) tagMenu(e, t);
       return;
     }
-    const list = chip.kind === 'remote' ? r.remote : r.local;
-    const b = list.find((x) => x.name === chip.label);
+    const b = r.local.find((x) => x.name === chip.label)
+      ?? r.remote.find((x) => x.name === chip.label);
     if (b) branchMenu(e, b);
   }
 
@@ -2411,7 +2423,6 @@
 
 <!-- Escape closes the open multi-ref popover (top-level: svelte:window can't sit
      inside a block). No-op when nothing is open. -->
-<svelte:window onkeydown={(e) => e.key === 'Escape' && refMenu && closeRefMenu()} />
 
 <!-- One commit-row ref chip — shared by the inline (single ref) and collapsed
      (primary ref) renderings so they never drift apart. -->
@@ -2734,20 +2745,18 @@
         </button>
         {#if stashesOpen}
           {#each stashes as s (s.ref)}
-            <div
+            <div class="ref-action-row">
+            <button
               class="ref-row stash-row"
-              role="button"
-              tabindex="0"
               title={`${s.ref} · ${s.message}`}
               onclick={() => selectStash(s)}
               oncontextmenu={(e) => stashMenu(e, s)}
-              onkeydown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') selectStash(s);
-              }}
             >
               <Icon name="stash" size={10} />
               <span class="ref-name stash-msg">{stashShortMsg(s)}</span>
               {#if s.branch}<span class="stash-branch mono dim">{s.branch}</span>{/if}
+            </button>
+            <button class="icon-btn ref-action" title="Actions for stash {s.ref}" aria-label="Actions for stash {s.ref}" onclick={(e) => stashMenu(e, s)}><Icon name="more" size={13} /></button>
             </div>
           {:else}
             <div class="dim ref-empty">No stashes</div>
@@ -2768,6 +2777,7 @@
         {#if worktreesOpen}
           {#each worktrees as w (w.path)}
             {@const isHere = currentRepoPath !== '' && normPath(w.path) === currentRepoPath}
+            <div class="ref-action-row">
             <button
               type="button"
               class="ref-row stash-row is-worktree"
@@ -2808,6 +2818,8 @@
               {/if}
               {#if openWtBusy === w.path}<span class="dim">…</span>{/if}
             </button>
+            <button class="icon-btn ref-action" title="Actions for worktree {w.path}" aria-label="Actions for worktree {w.path}" onclick={(e) => wtMenu(e, w)}><Icon name="more" size={13} /></button>
+            </div>
           {:else}
             <div class="dim ref-empty">No worktrees</div>
           {/each}
@@ -2831,22 +2843,20 @@
           </button>
           {#if submodulesOpen}
             {#each submodules as sub (sub.path)}
-              <div
+              <button
                 class="ref-row stash-row"
-                role="button"
-                tabindex="0"
                 title={`${sub.path} @ ${sub.sha.slice(0, 10)}${sub.url ? ` · ${sub.url}` : ''}${sub.state !== 'ok' ? ` · ${sub.state}` : ''}`}
                 oncontextmenu={(e) => subMenu(e, sub)}
-                onkeydown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') subMenu(e, sub);
-                }}
+                aria-label="Actions for submodule {sub.path}"
+                onclick={(e) => subMenu(e, sub)}
               >
                 <Icon name="shapes" size={10} />
                 <span class="ref-name stash-msg">{sub.path}</span>
                 {#if sub.state !== 'ok'}
                   <span class="wt-flag mono" class:sub-warn={sub.state !== 'uninitialized'}>{sub.state}</span>
                 {/if}
-              </div>
+                <Icon name="more" size={13} />
+              </button>
             {/each}
           {/if}
         </div>
@@ -3000,7 +3010,7 @@
           {@const chips = chipsFor(row.commit)}
           {@const dimmed = highlightSpine !== null && !highlightSpine.has(row.commit.sha)}
           {@const onSpine = highlightSpine !== null && highlightSpine.has(row.commit.sha)}
-          <button
+          <div
             class="graph-row"
             style:height="{ROW_H}px"
             class:graph-row-selected={isSelected}
@@ -3010,36 +3020,31 @@
             class:stash-row-commit={isStash}
             class:row-pulse={pulseSha === row.commit.sha}
             data-sha={row.commit.sha}
-            onclick={() => selectCommit(row.commit)}
-            oncontextmenu={(e) => commitMenu(e, row.commit)}
             title={isHead ? `${row.commit.subject} — you are here (HEAD)` : row.commit.subject}
-            aria-pressed={isSelected}
           >
             <!-- BRANCH / TAG column: refs for this row, right-aligned so labels
                  line up vertically and butt against the graph node (GitKraken). -->
             <div class="branch-cell">
               {#if shouldCollapseRow(chips)}
-                <!-- 2+ refs: keep the primary one, tuck the rest behind ▾ +N. The
-                     expander is a role=button SPAN (the row itself is a <button>,
-                     so a nested real <button> would be invalid). -->
+                <!-- Keep collapsed refs on a separate keyboard-accessible control. -->
                 {@const primary = primaryChip(chips)}
-                {@render chipView(primary, primary.label, row.color)}
-                <span
+                <button class="ref-select" tabindex="-1" title={primary.label} aria-label={`Select ${primary.label}`} onclick={() => selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>{@render chipView(primary, primary.label, row.color)}</button>
+                <button
                   class="ref-expander"
-                  role="button"
-                  tabindex="-1"
+                  tabindex="0"
+                  aria-label={`Show ${chips.length} refs for ${row.commit.subject}`}
+                  aria-haspopup="dialog"
+                  disabled={refsLoading || !refs}
+                  aria-expanded={refMenu?.commit.sha === row.commit.sha}
                   title="{chips.length} refs on this commit — click to list"
                   onclick={(e) => openRefMenu(e, row.commit, chips)}
-                  onkeydown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') openRefMenu(e as unknown as MouseEvent, row.commit, chips);
-                  }}
-                ><Icon name="chevronDown" size={9} />+{chips.length - 1}</span>
+                ><Icon name="chevronDown" size={9} />+{chips.length - 1}</button>
               {:else}
                 {#each chips as chip (chip.kind + chip.label)}
                   {@const label = chip.kind === 'stash'
                     ? (stashMsgBySha.get(row.commit.sha) ?? 'stash')
                     : chip.label}
-                  {@render chipView(chip, label, row.color)}
+                  <button class="ref-select" tabindex="-1" title={label} aria-label={`Select ${label}`} onclick={() => selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>{@render chipView(chip, label, row.color)}</button>
                 {/each}
               {/if}
               <!-- HEAD marker ("you are here") — rightmost so it stays visible as
@@ -3049,6 +3054,7 @@
               {/if}
             </div>
 
+            <button class="graph-select" title={row.commit.subject} aria-label={row.commit.subject} aria-pressed={isSelected} onclick={() => selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>
             <!-- SVG gutter -->
             <svg
               class="gutter"
@@ -3144,7 +3150,8 @@
                 <span class="dim ci-date">{fmtDate(row.commit.date)}</span>
               </div>
             </div>
-          </button>
+            </button>
+          </div>
         {/each}
         <div class="row-spacer" style="height: {padBottom}px" aria-hidden="true"></div>
         <!-- History footer: more pages stream in on scroll, so this is a status
@@ -3362,10 +3369,11 @@
      full-screen backdrop closes it on any outside click; Escape also closes. -->
 {#if refMenu}
   <button type="button" class="ref-pop-backdrop" aria-label="Close" onclick={closeRefMenu}></button>
-  <div class="ref-popover" bind:this={refPopEl} style="left: {refPopX}px; top: {refPopY}px;">
+  <div class="ref-popover" role="dialog" aria-modal="true" aria-label="Commit references" use:dialogFocus={closeRefMenu} bind:this={refPopEl} style="left: {refPopX}px; top: {refPopY}px;">
     {#if refMenu.branches.length > 0}
       <div class="ref-pop-group">Branches</div>
       {#each refMenu.branches as chip (chip.kind + chip.label)}
+        <div class="ref-action-row">
         <button
           type="button"
           class="ref-pop-row kind-{chip.kind}"
@@ -3396,11 +3404,14 @@
             <span class="ref-pop-tag">worktree</span>
           {/if}
         </button>
+        <button class="icon-btn ref-action" title="Actions for {chip.label}" aria-label="Actions for {chip.label}" onclick={(e) => refRowMenu(e, chip)}><Icon name="more" size={13} /></button>
+        </div>
       {/each}
     {/if}
     {#if refMenu.tags.length > 0}
       <div class="ref-pop-group">Tags</div>
       {#each refMenu.tags as chip (chip.kind + chip.label)}
+        <div class="ref-action-row">
         <button
           type="button"
           class="ref-pop-row kind-tag"
@@ -3412,6 +3423,8 @@
           <Icon name="tag" size={10} />
           <span class="ref-pop-label">{chip.label}</span>
         </button>
+        <button class="icon-btn ref-action" title="Actions for {chip.label}" aria-label="Actions for {chip.label}" onclick={(e) => refRowMenu(e, chip)}><Icon name="more" size={13} /></button>
+        </div>
       {/each}
     {/if}
   </div>
@@ -3569,7 +3582,7 @@
     align-self: center;
   }
   @media (max-width: 1024px) {
-    .ref-action { min-width: 36px; min-height: 36px; }
+    .ref-action, .ref-expander { min-width: 36px; min-height: 36px; }
   }
   .ref-row {
     display: flex;
@@ -3816,7 +3829,25 @@
     overflow: hidden;
     white-space: nowrap;
   }
+  .graph-select, .ref-select {
+    display: flex;
+    align-items: center;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    color: inherit;
+    text-align: inherit;
+    min-width: 0;
+    cursor: pointer;
+  }
+  .graph-select { flex: 1; height: 100%; }
+  .ref-select { flex-shrink: 0; }
+  .graph-row:has(.graph-select:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
   .graph-row {
+    position: relative;
     display: flex;
     align-items: center;
     width: 100%;
