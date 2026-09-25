@@ -696,6 +696,7 @@
   }
   .rate-row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 4px;
     margin-top: 8px;
@@ -803,7 +804,7 @@
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
   .rd-load-err {
     display: flex;
@@ -856,6 +857,7 @@
     gap: 8px;
     flex-wrap: wrap;
   }
+  .iter-head :global(.chip) { max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
   .iter-num {
     font-size: var(--fs-m);
     font-weight: 600;
@@ -884,6 +886,16 @@
     display: flex;
     align-items: center;
     gap: 8px;
+  }
+  .impl-top,
+  .improve-top,
+  .skill-actions {
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  .skill-actions .lbl {
+    flex-basis: 100%;
+    overflow-wrap: anywhere;
   }
   .skill-actions {
     border-top: 1px solid var(--border);
