@@ -440,6 +440,7 @@
 <style>
   /* Section chrome: shared PageHeader bar + scrolling PageBody. */
   .settings-section {
+    container-type: inline-size;
     display: flex;
     flex-direction: column;
     height: 100%;
@@ -638,7 +639,7 @@
   details .hint {
     margin-top: 6px;
   }
-  @media (max-width: 640px) {
+  @container (max-width: 640px) {
     .layout {
       grid-template-columns: 1fr;
     }
