@@ -262,7 +262,7 @@
 
   // Load every workspace's members the first time the by-user view is opened.
   $effect(() => {
-    if (membershipAxis === 'user' && Object.keys(allMembers).length === 0) {
+    if (membershipAxis === 'user' && ws.workspaces.length > 0 && Object.keys(allMembers).length === 0) {
       void loadAllMembers();
     }
   });
