@@ -1,7 +1,26 @@
 // Keyboard ownership for custom modal surfaces (drawers and the palette).
 // Inner controls handle their own keys first; only the top dialog traps Tab.
+// Safari does not focus pointer-clicked buttons. Remember the activating
+// control through the click's render flush so sheets can return to it, without
+// changing normal pointer focus behavior throughout the app.
+let activatingControl: HTMLElement | null = null;
+if (typeof document !== 'undefined') {
+  document.addEventListener('click', (event) => {
+    const control = event.target instanceof Element
+      ? event.target.closest<HTMLElement>('button, a[href], input, select, textarea, [tabindex]')
+      : null;
+    activatingControl = control;
+    setTimeout(() => { if (activatingControl === control) activatingControl = null; }, 0);
+  }, true);
+}
+
+export function dialogReturnTarget(): HTMLElement | null {
+  return activatingControl?.isConnected ? activatingControl
+    : document.activeElement instanceof HTMLElement ? document.activeElement : null;
+}
+
 export function dialogFocus(node: HTMLElement, onEscape: () => void) {
-  const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const previous = dialogReturnTarget();
   const controls = () => Array.from(node.querySelectorAll<HTMLElement>(
     'a[href], button, input, select, textarea, [tabindex]',
   )).filter((el) => el.tabIndex >= 0 && !el.matches(':disabled') && el.getClientRects().length > 0);

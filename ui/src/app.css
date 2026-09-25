@@ -422,6 +422,9 @@ textarea.input {
 
 .md-body {
   user-select: text;
+  /* Paths and identifiers in prose must wrap; fenced code keeps its own
+     horizontal scroller through white-space: pre. */
+  overflow-wrap: break-word;
   font-size: var(--fs-m);
   line-height: 1.6;
 }

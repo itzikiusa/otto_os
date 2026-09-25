@@ -2,6 +2,8 @@ import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
+test.use({ serviceWorkers: 'block' });
+
 let workspaceId = '';
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
