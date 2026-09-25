@@ -179,6 +179,11 @@ pub struct ServerCtx {
     /// Lazily-started page-fetch engine (Lightpanda sidecar autodetect, else
     /// plain-fetch) — see `crate::routes::browser::BrowserEngineHandle`.
     pub browser: std::sync::Arc<crate::routes::browser::BrowserEngineHandle>,
+    // -- Agent UI control --------------------------------------------------
+    /// The Otto documents registered over `/ws/events` (hello / presence) and
+    /// the in-flight `otto.ui_*` commands routed to them. In-memory by design:
+    /// a daemon restart drops every window registration and pending command.
+    pub ui_bridge: Arc<crate::ui_bridge::UiBridge>,
 }
 
 impl ServerCtx {

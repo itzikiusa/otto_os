@@ -145,6 +145,17 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/notifications" || p.starts_with("/notifications/") {
         return Exempt;
     }
+    // Agent UI control: the static command catalog, and an Otto window
+    // reporting the result / progress of a command sent to IT. Self-owned —
+    // the handler requires a human credential, the command's target user and
+    // the target window's connection id; the action itself already ran under
+    // the module's own feature gate (the window calls the real endpoints).
+    if p == "/ui/commands/catalog"
+        || p == "/ui/commands/{id}/result"
+        || p == "/ui/commands/{id}/progress"
+    {
+        return Exempt;
+    }
     // Per-user email sender (Gmail App Password → Keychain; mobile plan Task
     // 7.1). Self-owned — any authed user configures/reads their OWN sender, like
     // `/auth/tokens`; no feature grant needed. The app password lives in the
@@ -560,6 +571,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // {scene_id}` (remove).
     if p.starts_with("/sessions/") && p.contains("/canvas-refs") {
         return Require(Canvas, if get { View } else { Edit });
+    }
+    if p == "/sessions/{id}/ui-control" {
+        // Agent UI control grant / revoke: a session-control write (the
+        // handler adds human-credential + owner / owner-or-admin checks).
+        return Require(Agents, Edit);
     }
     if p == "/sessions/{id}/wait" {
         // A delegating lead blocking on a worker's status: reading, not driving.
@@ -1841,6 +1857,17 @@ mod tests {
         // listed kind's own route, so the discovery route itself is exempt.
         assert_eq!(pol(Method::GET, "/api/v1/refs/directory"), Exempt);
         assert_eq!(pol(Method::GET, "/api/v1/refs/resolve"), Exempt);
+        // Agent UI control: catalog + a window's own result / progress reports.
+        assert_eq!(pol(Method::GET, "/api/v1/ui/commands/catalog"), Exempt);
+        assert_eq!(pol(Method::POST, "/api/v1/ui/commands/{id}/result"), Exempt);
+        assert_eq!(pol(Method::POST, "/api/v1/ui/commands/{id}/progress"), Exempt);
+        // …but nothing else under /ui/ is.
+        assert_eq!(pol(Method::POST, "/api/v1/ui/commands/{id}"), Deny);
+        // The grant is a session-control write.
+        assert_eq!(
+            pol(Method::POST, "/api/v1/sessions/{id}/ui-control"),
+            Require(Agents, Edit)
+        );
         // Per-user email sender (Gmail App Password → Keychain): self-owned.
         assert_eq!(pol(Method::GET, "/api/v1/email-sender"), Exempt);
         assert_eq!(pol(Method::PUT, "/api/v1/email-sender"), Exempt);

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { ws } from '../../lib/stores/workspace.svelte';
   import { loops } from '../../lib/stores/loops.svelte';
+  import { loopsPagePort } from '../../lib/uiCommands/loops';
   import GoalDefineForm from './GoalDefineForm.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -42,6 +43,8 @@
     const id = ws.currentId;
     if (id) void loops.loadList(id);
   }
+  // Agent UI control (lib/uiCommands/loops.ts) opens a loop's detail here.
+  $effect(() => loopsPagePort.bind({ open, selectedId: () => selectedId }));
 </script>
 
 <div class="loops">

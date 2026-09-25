@@ -23,6 +23,7 @@
   import SwarmSettings from './SwarmSettings.svelte';
   import SkillPicker from './SkillPicker.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
+  import { swarmPagePort } from '../../lib/uiCommands/swarm';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -203,6 +204,9 @@
       openErrorId = id;
     }
   }
+
+  // Agent UI control (lib/uiCommands/swarm.ts) opens a swarm / switches the view.
+  $effect(() => swarmPagePort.bind({ openSwarm, setView: (v) => (view = v) }));
 
   // A deep-link (e.g. Product → Swarm) opened a project and asked for the
   // Kanban board — honor it once, then clear the flag.

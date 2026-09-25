@@ -42,6 +42,24 @@ export function hostPrimaryKey(): string | null {
   }
 }
 
+/**
+ * The id of the window hosting this pane (lib/win.ts `windowId` over there):
+ * `embedSrc` drops `?win=` from the iframe URL, so read it from the same-origin
+ * parent — its injected Tauri label, else its `?win=`, else `main`. The agent
+ * UI-control `hello` frame reports it so the daemon can pair a side pane with
+ * its window. Null outside the side pane (or if the parent can't be read).
+ */
+export function hostWindowId(): string | null {
+  if (!isEmbedded) return null;
+  try {
+    const p = window.parent as Window & { __OTTO_WIN__?: string };
+    const fromTauri = typeof p.__OTTO_WIN__ === 'string' ? p.__OTTO_WIN__ : '';
+    return fromTauri || new URLSearchParams(p.location.search).get('win') || 'main';
+  } catch {
+    return null;
+  }
+}
+
 export interface GuestHooks {
   /** A native menu item the host forwarded because this pane has focus. */
   runMenu: (id: string) => void;

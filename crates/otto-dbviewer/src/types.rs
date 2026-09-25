@@ -717,6 +717,17 @@ pub struct QueryRequest {
     /// always send it alongside `offset`.
     #[serde(default)]
     pub cursor: Option<Value>,
+    /// Run this statement read-only, whatever the connection's write-guard:
+    /// the service classifies it first ([`crate::service::ensure_read_only_request`]
+    /// refuses a write/DDL with a [`crate::service::READ_ONLY_PREFIX`]-tagged 403,
+    /// before the driver is touched) and then executes it in the engine's native
+    /// read-only mode — the same two barriers as the MCP path, but WITHOUT its
+    /// forced PII mask or 200-row cap, so a human watching the grid sees the full
+    /// result. Set by the UI when an agent drives the Database Explorer; a refusal
+    /// is the UI's cue to ask the human before re-running without it (where the
+    /// guarded-connection typed confirm still applies). Wins over `confirm_write`.
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 impl QueryRequest {

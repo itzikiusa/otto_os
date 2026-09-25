@@ -293,6 +293,10 @@ async fn get_session<S: SessionsCtx>(
     Ok(Json(with_live(&ctx, session)))
 }
 
+/// `session.meta` keys a PATCH may never change (an unchanged round-trip is
+/// accepted and dropped): the agent-UI-control grant and the device stamp.
+pub const SERVER_OWNED_META: &[&str] = &["ui_control", "client_id"];
+
 /// #20 PATCH /sessions/{id} — owner-or-admin
 async fn patch_session<S: SessionsCtx>(
     State(ctx): State<S>,
@@ -313,13 +317,29 @@ async fn patch_session<S: SessionsCtx>(
                 "resource session bindings cannot be edited".into(),
             )));
         }
+        // Agent UI control: the grant is server-owned (only `POST
+        // /sessions/{id}/ui-control`, human credentials, writes it) and the
+        // device stamp decides WHICH window an agent may drive — the agent
+        // holds this session's token and could otherwise grant itself
+        // control or point itself at another device.
+        if SERVER_OWNED_META
+            .iter()
+            .any(|key| meta.get(*key).is_some() && meta.get(*key) != session.meta.get(*key))
+        {
+            return Err(ApiErr(Error::Forbidden(
+                "ui_control / client_id are server-owned; use POST /sessions/{id}/ui-control".into(),
+            )));
+        }
     }
     // The manager replaces nested objects via two writes. Do not pass even
     // unchanged binding objects through that path, which could detach them
     // transiently while a concurrent input request authorizes the session.
     if let Some(object) = req.meta.as_mut().and_then(serde_json::Value::as_object_mut) {
-        for key in ["k8s", "aws", "connection_id", "source", "resource_node"] {
-            object.remove(key);
+        for key in ["k8s", "aws", "connection_id", "source", "resource_node"]
+            .iter()
+            .chain(SERVER_OWNED_META)
+        {
+            object.remove(*key);
         }
     }
     let session = match req.title {

@@ -55,6 +55,7 @@ pub mod snips;
 pub mod swarm_ingest;
 pub mod swarm_webhook;
 pub mod transcript;
+pub mod ui_commands;
 pub mod usage;
 pub mod users;
 pub mod workflow_progress;
@@ -308,6 +309,24 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route(
             "/mcp/otto-tools/invoke",
             post(crate::mcp_outward::otto_tools_invoke),
+        )
+        // --- Agent UI control (docs/contracts/ui-commands.json): the catalog,
+        //     the Otto window's result / progress reports (human credentials
+        //     only), and the per-session grant. --------------------------------
+        .route("/ui/commands/catalog", get(ui_commands::catalog))
+        .route(
+            "/ui/commands/{id}/result",
+            post(ui_commands::post_result).layer(axum::extract::DefaultBodyLimit::max(
+                ui_commands::MAX_RESULT_BYTES,
+            )),
+        )
+        .route(
+            "/ui/commands/{id}/progress",
+            post(ui_commands::post_progress),
+        )
+        .route(
+            "/sessions/{id}/ui-control",
+            post(ui_commands::set_ui_control),
         )
         .route(
             "/mcp/otto-server",

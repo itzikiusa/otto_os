@@ -307,6 +307,23 @@ class ApiClientStore {
   automationRuns: ApiAutomationRun[] = $state([]);
   currentRun: ApiAutomationRun | null = $state(null);
 
+  /** Bumped to ask ApiPage to show the request editor (it may be showing the
+   *  environments or an automation) — used by agent UI control
+   *  (lib/uiCommands/api.ts) so an agent-edited request is on screen. */
+  requestViewTick = $state(0);
+  showRequestView(): void {
+    this.requestViewTick++;
+  }
+
+  /** Load the current workspace's API client unless this document already
+   *  holds it (its tabs restored). An agent command can land before ApiPage's
+   *  own load effect has run, and editing a not-yet-restored blank tab would be
+   *  overwritten by the restore. */
+  async ensureLoaded(): Promise<void> {
+    const wid = this.wsId();
+    if (wid && this.tabsWid !== wid) await this.loadAll();
+  }
+
   /** Open request tabs; the active one is edited via `draft`. */
   tabs: ApiDraft[] = $state([blankDraft()]);
   activeTab = $state(0);

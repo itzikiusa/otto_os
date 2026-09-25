@@ -83,6 +83,11 @@
   import { startWindowDrag } from '../lib/windowDrag';
   import { isPopout, isEmbedded, popoutTitle, openPopout, currentRoute } from '../lib/desktop';
   import SidePane from './SidePane.svelte';
+  import AgentDrivingBar from '../lib/components/AgentDrivingBar.svelte';
+  import { uiControl } from '../lib/stores/uiControl.svelte';
+  // Agent UI control: every module's `ui_*` handlers, registered before the
+  // events socket introduces this document (`hello.capabilities`).
+  import '../lib/uiCommands/index';
   import SplitDivider from './SplitDivider.svelte';
   import { sidePane } from '../lib/stores/sidePane.svelte';
   import { startGuest, postToHost } from '../lib/embedGuest';
@@ -978,6 +983,11 @@
   {/if}
   {#if moduleName === 'agents'}
     <TabBar />
+  {/if}
+  {#if !uiControl.barOwner}
+    <!-- Pages without a PageHeader (Agents, Browser…): the agent-driving
+         strip sits above the page instead of under its toolbar. -->
+    <AgentDrivingBar />
   {/if}
   <div class="content">
     {#if moduleName === 'agents'}

@@ -19,6 +19,7 @@
     ValueFormat,
   } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { brokersTopicPort } from '../../lib/uiCommands/brokers';
   import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
 
   // ── Send-to-agent dialog (B2a) ─────────────────────────────────────────────
@@ -78,6 +79,39 @@
   let producing = $state(false);
   /** Inline field error for the produce form (shown under Value, not a toast). */
   let pValueErr = $state<string | null>(null);
+
+  // Agent UI control (lib/uiCommands/brokers.ts): the agent's peek runs in
+  // THIS form (the user sees the options and the grid), and a produce is
+  // prefilled here while the user confirms it.
+  $effect(() =>
+    brokersTopicPort.bind({
+      clusterId: cluster.id,
+      topic,
+      async peek(o) {
+        tab = 'messages';
+        startMode = o.start ?? 'latest';
+        partition = o.partition ?? '';
+        limit = o.limit ?? 50;
+        keyFilter = o.key_filter ?? '';
+        valueFilter = o.value_filter ?? '';
+        result = null;
+        await consume();
+        return result;
+      },
+      showProduce(o) {
+        tab = 'produce';
+        pKey = o.key ?? '';
+        pValue = o.value;
+        pPartition = o.partition ?? '';
+        pTombstone = false;
+      },
+      produced() {
+        pValue = '';
+        pKey = '';
+        loadDetail(true);
+      },
+    }),
+  );
 
   // ---- config editing ----
   let cfgName = $state('');

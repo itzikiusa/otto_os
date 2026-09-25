@@ -40,8 +40,6 @@
   let { embedded = false, targetSessionId = null }: Props = $props();
 
   let urlInput = $state('');
-  let summarizing = $state(false);
-  let summary = $state('');
   let vaultSaving = $state(false);
   let urlFocused = $state(false);
 
@@ -522,7 +520,7 @@
     urlInput = url;
     try {
       await browser.navigate(url);
-      summary = '';
+      browser.summary = '';
     } catch (e) {
       toasts.error('Failed to load page', e instanceof Error ? e.message : undefined);
     }
@@ -570,14 +568,10 @@
   async function doSummarize(): Promise<void> {
     const url = browser.activeTab?.url;
     if (!url) return;
-    summarizing = true;
     try {
-      const resp = await browser.summarize(url);
-      summary = resp.summary;
+      await browser.runSummarize(url);
     } catch (e) {
       toasts.error('Summarize failed', e instanceof Error ? e.message : undefined);
-    } finally {
-      summarizing = false;
     }
   }
 
@@ -590,7 +584,7 @@
       // else a slice of the already-fetched page markdown. Either way this
       // keeps the daemon on the caller-supplied-summary path (no second page
       // fetch); omitting it would make vault-save re-fetch the URL server-side.
-      const derived = summary || browser.page?.markdown?.slice(0, 4000) || '';
+      const derived = browser.summary || browser.page?.markdown?.slice(0, 4000) || '';
       const resp = await browser.vaultSave(url, vaultId, derived);
       toasts.success('Saved to vault', resp.note_path);
     } catch (e) {
@@ -746,9 +740,9 @@
       <button
         class="icon-btn tool"
         onclick={doSummarize}
-        disabled={summarizing}
+        disabled={browser.summarizing}
         aria-label="Summarize this page"
-        title={summarizing ? 'Summarizing…' : 'Summarize this page'}
+        title={browser.summarizing ? 'Summarizing…' : 'Summarize this page'}
       >
         <Icon name="sparkle" size={14} />
       </button>
@@ -764,18 +758,18 @@
     {/if}
   </div>
 
-  {#if summarizing && !summary}
+  {#if browser.summarizing && !browser.summary}
     <div class="summary" role="status">
       <div class="summary-head"><span>Summary · drafted by Otto</span></div>
       <p class="dim-line">Summarizing this page…</p>
     </div>
-  {:else if summary}
+  {:else if browser.summary}
     <div class="summary">
       <div class="summary-head">
         <span>Summary · drafted by Otto</span>
-        <button class="icon-btn" onclick={() => (summary = '')} aria-label="Close summary" title="Close summary"><Icon name="x" size={12} /></button>
+        <button class="icon-btn" onclick={() => (browser.summary = '')} aria-label="Close summary" title="Close summary"><Icon name="x" size={12} /></button>
       </div>
-      <p>{summary}</p>
+      <p>{browser.summary}</p>
     </div>
   {/if}
 

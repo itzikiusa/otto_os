@@ -190,6 +190,15 @@ pub async fn create_token(
             "an impersonated session cannot mint API tokens".into(),
         )));
     }
+    // An agent session's own credential (or an MCP one) must not mint a
+    // personal token: that token would carry no session binding and pass
+    // every human-only check (UI-control results/grants, goal-loop
+    // decisions) — an agent could launder itself into "the user".
+    if !crate::ui_bridge::is_human(&auth.0) {
+        return Err(ApiError(Error::Forbidden(
+            "an agent session or MCP credential cannot mint API tokens".into(),
+        )));
+    }
     let label = req
         .label
         .as_deref()

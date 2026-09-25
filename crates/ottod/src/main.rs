@@ -560,6 +560,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         browser_tabs: otto_state::BrowserTabsRepo::new(pool.clone()),
         browser_annotations: otto_state::BrowserAnnotationsRepo::new(pool.clone()),
         browser_credentials: otto_state::BrowserCredentialsRepo::new(pool.clone()),
+        ui_bridge: Default::default(),
         // Config is captured now; the Lightpanda sidecar itself is only
         // located/started on the first `/browser/page` request (see
         // `BrowserEngineHandle`) so daemon boot never waits on it.
@@ -932,6 +933,8 @@ async fn run(cfg: Config) -> Result<(), String> {
     // every ~6h). Event-bus listener: session-progress notices.
     CredentialMonitor::new(ctx.clone()).spawn();
     spawn_session_event_listener(ctx.clone());
+    // Agent UI control: a removed session's in-flight UI commands end.
+    otto_server::ui_bridge::spawn_session_watch(ctx.clone());
     tracing::info!("credential monitor + session-event notices started");
 
     // --- Conversation view (docs/design/conversation-view.md) ---

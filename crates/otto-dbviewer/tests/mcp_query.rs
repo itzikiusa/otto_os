@@ -14,6 +14,7 @@ use chrono::Utc;
 use otto_core::domain::{ConnectionKind, Environment};
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id, Result};
+use otto_dbviewer::service::{MCP_READ_ONLY_PREFIX, READ_ONLY_PREFIX};
 use otto_dbviewer::types::QueryRequest;
 use otto_dbviewer::DbViewerService;
 use otto_state::{ConnectionsRepo, DbExplorerRepo, NewConnection, SqlitePool};
@@ -194,4 +195,128 @@ async fn non_queryable_kind_is_invalid() {
         .await
         .expect_err("ssh is not a queryable database");
     assert!(matches!(err, Error::Invalid(_)), "got {err:?}");
+}
+
+// --- `QueryRequest.read_only` over the normal `run` path (agent-driven UI) ----
+
+fn ro(stmt: &str) -> QueryRequest {
+    QueryRequest {
+        statement: stmt.into(),
+        read_only: true,
+        ..Default::default()
+    }
+}
+
+/// Bounded run: a dead-port connect either errors or is still retrying after 3s;
+/// both mean the statement got PAST the gate. `None` = still connecting.
+async fn run_bounded(
+    svc: &DbViewerService,
+    conn: &Id,
+    user: &Id,
+    q: &QueryRequest,
+) -> Option<Result<otto_dbviewer::types::QueryResult>> {
+    tokio::time::timeout(std::time::Duration::from_secs(3), svc.run(conn, user, q))
+        .await
+        .ok()
+}
+
+#[tokio::test]
+async fn read_only_run_refuses_a_write_on_an_unguarded_connection() {
+    let pool = mem_pool().await;
+    let user = seed_user(&pool).await;
+    let ws = seed_ws(&pool).await;
+    // Dev + read_only=false: the write-guard would let every one of these through.
+    let conn = seed_conn(&pool, Some(ws), &user, ConnectionKind::Mysql).await;
+    let svc = service(&pool);
+    for stmt in [
+        "DROP TABLE t",
+        "DELETE FROM t",
+        "UPDATE t SET a = 1",
+        "INSERT INTO t VALUES (1)",
+        "SELECT 1; DROP TABLE t",
+    ] {
+        match svc.run(&conn, &user, &ro(stmt)).await {
+            Err(Error::Forbidden(m)) => assert!(
+                m.starts_with(READ_ONLY_PREFIX) && !m.starts_with(MCP_READ_ONLY_PREFIX),
+                "{stmt:?}: wrong marker: {m}"
+            ),
+            other => panic!("{stmt:?}: expected a read_only Forbidden, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn read_only_wins_over_confirm_write() {
+    let pool = mem_pool().await;
+    let user = seed_user(&pool).await;
+    let ws = seed_ws(&pool).await;
+    let conn = seed_conn(&pool, Some(ws), &user, ConnectionKind::Mysql).await;
+    let svc = service(&pool);
+    let q = QueryRequest {
+        confirm_write: true,
+        ..ro("DELETE FROM t")
+    };
+    let err = svc
+        .run(&conn, &user, &q)
+        .await
+        .expect_err("read_only must refuse");
+    assert!(
+        matches!(err, Error::Forbidden(ref m) if m.starts_with(READ_ONLY_PREFIX)),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_same_write_without_read_only_is_not_refused() {
+    // The control: the flag is what refuses — a plain run of the same write on
+    // the same unguarded connection passes every gate and fails only at connect.
+    let pool = mem_pool().await;
+    let user = seed_user(&pool).await;
+    let ws = seed_ws(&pool).await;
+    let conn = seed_conn(&pool, Some(ws), &user, ConnectionKind::Mysql).await;
+    let svc = service(&pool);
+    if let Some(Err(e)) = run_bounded(&svc, &conn, &user, &req("DELETE FROM t")).await {
+        assert!(
+            !matches!(e, Error::Forbidden(_)),
+            "plain run refused: {e:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn read_only_read_passes_the_gate_and_reaches_execution() {
+    let pool = mem_pool().await;
+    let user = seed_user(&pool).await;
+    let ws = seed_ws(&pool).await;
+    let conn = seed_conn(&pool, Some(ws), &user, ConnectionKind::Mysql).await;
+    let svc = service(&pool);
+    if let Some(Err(e)) = run_bounded(&svc, &conn, &user, &ro("SELECT 1")).await {
+        assert!(
+            !matches!(e, Error::Forbidden(_)),
+            "a read_only SELECT must not be refused; got {e:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn read_only_on_a_non_queryable_kind_is_invalid() {
+    let pool = mem_pool().await;
+    let user = seed_user(&pool).await;
+    let ws = seed_ws(&pool).await;
+    let conn = seed_conn(&pool, Some(ws), &user, ConnectionKind::Ssh).await;
+    let svc = service(&pool);
+    let err = svc
+        .run(&conn, &user, &ro("SELECT 1"))
+        .await
+        .expect_err("ssh is not a queryable database");
+    assert!(matches!(err, Error::Invalid(_)), "got {err:?}");
+}
+
+#[test]
+fn read_only_defaults_off_and_deserializes() {
+    let off: QueryRequest = serde_json::from_str(r#"{"statement":"SELECT 1"}"#).unwrap();
+    assert!(!off.read_only, "an old client that omits it runs normally");
+    let on: QueryRequest =
+        serde_json::from_str(r#"{"statement":"SELECT 1","read_only":true}"#).unwrap();
+    assert!(on.read_only);
 }

@@ -44,6 +44,8 @@
   import { sidePane } from '../stores/sidePane.svelte';
   import { embedChrome } from '../stores/embedChrome.svelte';
   import PaneControls from './PaneControls.svelte';
+  import AgentDrivingBar from './AgentDrivingBar.svelte';
+  import { uiControl } from '../stores/uiControl.svelte';
   import { ctxMenu, type MenuItem } from '../contextmenu.svelte';
 
   interface Props {
@@ -97,6 +99,10 @@
   // controls (Swap / Open in main pane / Close — lib/stores/embedChrome).
   $effect(() => (rootEl ? embedChrome.claim(rootEl) : undefined));
   const hostsPane = $derived(isEmbedded && !!rootEl && embedChrome.owner === rootEl);
+  // Agent UI control: the page's top header hosts the "‹agent› is driving…"
+  // strip under its row (lib/components/AgentDrivingBar.svelte).
+  $effect(() => (rootEl ? uiControl.claimBar(rootEl) : undefined));
+  const hostsBar = $derived(!!rootEl && uiControl.barOwner === rootEl);
   // A pop-out window's traffic lights live in its own title strip (shell).
   // In a side-by-side split they sit over whichever pane leads: the main
   // pane's header when the side pane trails, the side pane's when it leads.
@@ -334,6 +340,7 @@
   {#if tabs && tabsBelow}
     <div class="ph-tabs-below">{@render tabs()}</div>
   {/if}
+  {#if hostsBar}<AgentDrivingBar />{/if}
 </header>
 
 <style>

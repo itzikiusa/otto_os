@@ -742,6 +742,8 @@
       <div
         class="qe-tab"
         class:active={i === database.activeTab}
+        class:agent={!!t.agent}
+        data-db-tab-id={t.id}
         role="tab"
         tabindex="0"
         aria-selected={i === database.activeTab}
@@ -757,6 +759,12 @@
       >
         {#if t.pinned}
           <span class="qe-tab-pin" title="Pinned"><Icon name="pin" size={10} /></span>
+        {/if}
+        {#if t.agent}
+          <!-- Opened by an agent session over UI control: always attributed. -->
+          <span class="qe-tab-agent" title="Opened by {t.agent.label}" aria-label="Opened by {t.agent.label}">
+            <Icon name="sparkle" size={10} />
+          </span>
         {/if}
         {#if renaming === i}
           <!-- svelte-ignore a11y_autofocus -->
@@ -1255,6 +1263,15 @@
     color: var(--accent-text);
     flex: 0 0 auto;
     margin-inline-end: -2px;
+  }
+  .qe-tab-agent {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 3px;
+    border-radius: 4px;
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    flex: 0 0 auto;
   }
   .qe-tab-dot {
     width: 6px;

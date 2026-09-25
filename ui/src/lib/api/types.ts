@@ -1556,6 +1556,20 @@ export type OttoEvent =
       type: 'aws_install_updated';
       tool: string;
       state: string;
+    }
+  | {
+      /** Agent UI control: an agent session called an `otto.ui_*` tool but the
+       *  user hasn't allowed UI control for it (`session.meta.ui_control`). Owner
+       *  scope. The session's pane shows an inline "Allow for this session /
+       *  Deny" prompt (stores/uiControl.svelte.ts); the tool returns
+       *  `pending_grant` and the agent retries once the user allows it. */
+      type: 'ui_control_requested';
+      session_id: Id;
+      session_title: string;
+      /** The paneKey of the module the command drives (`connections`, `shell`…). */
+      module: string;
+      /** The catalog command name, e.g. `db_run_query` (tool `otto.ui_db_run_query`). */
+      command: string;
     };
 
 // ---------------------------------------------------------------------------
@@ -5497,6 +5511,13 @@ export interface RunQueryReq {
   explain?: boolean;
   /** Engine-specific positional/named params (unused by the Explorer UI). */
   params?: unknown;
+  /** Run read-only whatever the connection's write-guard: a write/DDL is
+   *  refused (403, `Problem.message` prefixed `read_only: `) before the driver
+   *  is touched, and the rest runs in the engine's native read-only mode —
+   *  without the MCP path's forced mask / 200-row cap. Set on agent-driven
+   *  runs; a refusal is the cue to ask the human, then re-run without it.
+   *  Wins over `confirm_write`. */
+  read_only?: boolean;
 }
 
 /** Result of running a statement: tabular rows + stats.
@@ -10281,4 +10302,133 @@ export interface AssistantHermesImportResp {
   queued: number;
   duplicates: number;
   files: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Agent UI control — `otto.ui_*` tools driving this window (docs/contracts/
+// ui-commands.json is the catalog; ws.md §2 the per-connection frames; api.md
+// the result / progress / grant routes). Runtime: ui/src/lib/uiCommands.ts.
+// ---------------------------------------------------------------------------
+
+/** How much a UI command can change: `read` and `navigate` run once the session
+ *  is granted; `local_write` confirms every time (with an "allow for this
+ *  session" memory); `outward` always confirms and is never remembered. */
+export type UiCommandRisk = 'read' | 'navigate' | 'local_write' | 'outward';
+
+/** One `docs/contracts/ui-commands.json` entry (also `GET /ui/commands/catalog`). */
+export interface UiCommandSpec {
+  /** snake_case, unique; the tool is `otto.ui_<name>` (stdio `otto_ui_<name>`). */
+  name: string;
+  /** The paneKey (lib/sidePane.ts) of the document that runs it; `shell` = any document. */
+  module: string;
+  /** Hash route opened when no document shows `module` (`''` for shell commands). */
+  route: string;
+  risk: UiCommandRisk;
+  /** Default deadline the daemon gives the UI (1000..=120000). */
+  timeout_ms: number;
+  /** Daemon-side fallback when no Otto window can run it (`read` only). */
+  headless?: 'presence' | 'db_list_connections' | 'db_mcp_query';
+  description: string;
+  input_schema: Record<string, unknown>;
+}
+
+export interface UiCommandsCatalog {
+  version: number;
+  commands: UiCommandSpec[];
+}
+
+/** The agent a UI command comes from (attribution in the driven document). */
+export interface UiAgentRef {
+  session_id: Id;
+  title: string;
+  provider: string;
+}
+
+/** Which half of a window a document is: the main pane or the side-by-side pane (an iframe). */
+export type UiPane = 'main' | 'side';
+
+/** Client → server on `/ws/events`, once per socket open (and again when the
+ *  registered command set changes): who this document is and what it can run. */
+export interface UiHelloFrame {
+  type: 'hello';
+  /** Per-device id (`clientId()`, the value stamped as `session.meta.client_id`). */
+  client_id: string;
+  /** This window's id (`lib/win.ts`; the side pane reports its host's here too). */
+  window_id: string;
+  pane: UiPane;
+  /** Side pane only: the window that hosts the iframe. */
+  host_window_id?: string;
+  /** Current route without `#/`. */
+  route: string;
+  /** paneKey(route). */
+  module: string;
+  focused: boolean;
+  visible: boolean;
+  /** Registered UI command names (the catalog `name`s this document implements). */
+  capabilities: string[];
+}
+
+/** Client → server, debounced 250 ms, on a route / focus / visibility change. */
+export interface UiPresenceFrame {
+  type: 'presence';
+  route: string;
+  module: string;
+  focused: boolean;
+  visible: boolean;
+}
+
+/** Server → this connection: the ephemeral id sent back as `X-Otto-Ui-Conn`. */
+export interface UiHelloAckFrame {
+  type: 'hello_ack';
+  conn_id: string;
+}
+
+/** Server → this connection: run one UI command. */
+export interface UiCommandFrame {
+  type: 'ui_command';
+  id: string;
+  session_id: Id;
+  agent: UiAgentRef;
+  /** Catalog name (`db_run_query`). */
+  command: string;
+  args: Record<string, unknown>;
+  /** How long the daemon waits for the result (ms). */
+  deadline_ms: number;
+}
+
+/** Server → this connection: stop a command (deadline, Stop, grant revoked). */
+export interface UiCommandCancelFrame {
+  type: 'ui_command_cancel';
+  id: string;
+  reason: string;
+}
+
+export type UiServerFrame = UiHelloAckFrame | UiCommandFrame | UiCommandCancelFrame;
+export type UiClientFrame = UiHelloFrame | UiPresenceFrame;
+
+/** Error codes a UI handler reports back (`POST /ui/commands/{id}/result`). */
+export type UiCommandErrorCode = 'cancelled_by_user' | 'invalid_args' | 'not_found' | 'forbidden' | 'failed';
+
+/** Body for `POST /ui/commands/{id}/result` (header `X-Otto-Ui-Conn: <conn_id>`). */
+export type UiCommandResultReq =
+  | { ok: true; result: unknown }
+  | { ok: false; error: { code: UiCommandErrorCode; message: string } };
+
+/** Body for `POST /ui/commands/{id}/progress`. `awaiting_human` extends the
+ *  daemon's deadline (≤ 120 s) while a confirm is open. */
+export interface UiCommandProgressReq {
+  note: string;
+  awaiting_human: boolean;
+}
+
+/** Body for `POST /sessions/{id}/ui-control` (owner or admin, human credential). */
+export interface UiControlReq {
+  enabled: boolean;
+}
+
+/** `session.meta.ui_control` — server-owned (PATCH /sessions strips it). */
+export interface UiControlGrant {
+  enabled: boolean;
+  granted_at?: string;
+  granted_by?: Id;
 }

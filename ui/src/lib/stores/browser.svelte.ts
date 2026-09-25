@@ -80,6 +80,7 @@ class BrowserStore {
       this.pageError = '';
       this.annotations = [];
       this.loadingPage = false;
+      this.summary = '';
     }
     this.loadingTabs = true;
     try {
@@ -104,6 +105,7 @@ class BrowserStore {
       ? this.tabs.map((t) => (t.id === tab.id ? tab : t))
       : [...this.tabs, tab];
     this.activeId = tab.id;
+    this.summary = '';
     await this.loadPage(url);
     return tab;
   }
@@ -115,9 +117,12 @@ class BrowserStore {
     this.activeId = null;
     this.page = null;
     this.annotations = [];
+    this.summary = '';
   }
 
   select(id: string): void {
+    // The summary panel belongs to the page it summarized.
+    if (id !== this.activeId) this.summary = '';
     this.activeId = id;
     const tab = this.activeTab;
     // A live tab that's actually rendered natively skips the reader fetch —
@@ -248,6 +253,26 @@ class BrowserStore {
 
   async summarize(url: string) {
     return browserApi.summarize(this.wsId, url);
+  }
+
+  /** The summary panel's text (drafted by Otto) and whether one is running.
+   *  Store state — not BrowserView's — so an agent-driven summarize (agent UI
+   *  control, lib/uiCommands/browser.ts) shows in the same panel as a click. */
+  summary = $state('');
+  summarizing = $state(false);
+
+  /** Summarize `url` into the summary panel. Returns the text; throws on
+   *  failure (the caller reports it). A result for a page the user has since
+   *  left is still returned but not shown. */
+  async runSummarize(url: string): Promise<string> {
+    this.summarizing = true;
+    try {
+      const resp = await this.summarize(url);
+      if (this.activeTab?.url === url) this.summary = resp.summary;
+      return resp.summary;
+    } finally {
+      this.summarizing = false;
+    }
   }
 
   /** Create a DOM annotation (a "mark") against the active page's URL. Pushes

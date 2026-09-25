@@ -22,6 +22,7 @@ import type {
   DbCapabilities,
   DbCompletionItem,
   DbDashboard,
+  DbExportFormat,
   DbEngine,
   DbHistoryEntry,
   DbQueryPlan,
@@ -75,6 +76,16 @@ function errMsg(e: unknown): string {
  */
 function isWriteBlocked(e: unknown): boolean {
   return e instanceof ApiError && e.message.startsWith('write_blocked:');
+}
+
+/**
+ * The refusal of a `read_only` run (`QueryRequest.read_only`, what an agent's
+ * UI-control run always sends): the statement classifies as a write/DDL. Tagged
+ * `read_only: ` by otto-dbviewer — distinct from `write_blocked:` (a guarded
+ * connection) and `mcp_read_only:` (no human in that loop).
+ */
+export function isReadOnlyRefusal(e: unknown): boolean {
+  return e instanceof ApiError && e.message.startsWith('read_only:');
 }
 
 /** Persisted default row cap applied when a statement has no explicit LIMIT. */
@@ -503,6 +514,32 @@ export interface QueryTab {
    * × / ⌥⌘W until unpinned. Pinned tabs sit first in the strip. Persisted.
    */
   pinned: boolean;
+  /**
+   * Set when an agent session opened this tab over UI control
+   * (`otto.ui_db_new_tab` / `ui_db_run_query`, lib/uiCommands/database.ts): the
+   * strip shows an attributed chip so the person always sees whose tab it is.
+   * Persisted with the tab; absent = a tab the person opened.
+   */
+  agent?: QueryTabAgent | null;
+}
+
+/** Who drove a query tab (see {@link QueryTab.agent}). */
+export interface QueryTabAgent {
+  session_id: string;
+  /** Short attribution shown in the chip ("Claude · fix-orders"). */
+  label: string;
+}
+
+/**
+ * What a {@link DatabaseStore.runQuery} call ended as — filled in by the store
+ * when the caller passes `opts.outcome`. `runQuery` itself returns `null` for
+ * every non-result ending (Stop, a declined write, an engine error, a lost wait),
+ * which is right for the buttons but not for an agent command that has to report
+ * WHICH one happened.
+ */
+export interface RunOutcome {
+  status?: 'ok' | 'cancelled' | 'aborted' | 'failed' | 'detached' | 'invalid';
+  error?: string;
 }
 
 /** Normalize a persisted vars blob — legacy `Record<string,string>` (bare value)
@@ -544,6 +581,7 @@ function blankTab(statement = ''): QueryTab {
     pending: null,
     viewMode: null,
     pinned: false,
+    agent: null,
   };
 }
 
@@ -1243,6 +1281,69 @@ class DatabaseStore {
     this.persistTabs();
   }
 
+  // ── Agent UI control (lib/uiCommands/database.ts) ─────────────────────────
+  // An agent session drives the Explorer through the SAME methods the buttons
+  // call; these helpers only address a tab by its id across open connections
+  // and stamp the agent's attribution on the tabs it opens.
+
+  /** Find a query tab by id on ANY open connection — the active one, or a
+   *  parked (snapshotted) background one. */
+  locateTab(tabId: number): { connId: Id; index: number; tab: QueryTab } | null {
+    const sel = this.selectedConnId;
+    if (sel) {
+      const i = this.tabs.findIndex((t) => t.id === tabId);
+      if (i >= 0) return { connId: sel, index: i, tab: this.tabs[i] };
+    }
+    for (const [connId, snap] of this.snapshots) {
+      if (connId === sel) continue; // the live singletons above are newer
+      const i = snap.tabs.findIndex((t) => t.id === tabId);
+      if (i >= 0) return { connId, index: i, tab: snap.tabs[i] };
+    }
+    return null;
+  }
+
+  /** Bring a tab on screen: focus its connection (the DB pane, not a Kafka/SSH
+   *  one), make it the active tab and show the Query view. Null when no open
+   *  connection has it (closed, or ids reset by a reload). */
+  async focusTab(tabId: number): Promise<QueryTab | null> {
+    const at = this.locateTab(tabId);
+    if (!at) return null;
+    if (this.activePane !== null || this.selectedConnId !== at.connId) {
+      await this.openConnection(at.connId);
+    }
+    const i = this.tabs.findIndex((t) => t.id === tabId);
+    if (i < 0) return null;
+    if (i !== this.activeTab) this.switchTab(i);
+    if (this.mainTab !== 'query') this.setMainTab('query');
+    return this.tabs[i] ?? null;
+  }
+
+  /** Open a new tab on the SELECTED connection, attributed to an agent. */
+  newAgentTab(statement: string, agent: QueryTabAgent): QueryTab {
+    this.newTab(statement);
+    const t = this.tab;
+    t.agent = { ...agent };
+    this.persistTabs();
+    return t;
+  }
+
+  /**
+   * A pending "Export all rows…" the agent asked for (`otto.ui_db_export`):
+   * DatabasePage mounts the ExportDialog prefilled from it while set, and the
+   * HUMAN picks the folder/file and confirms. `done` reports what happened —
+   * `{exported:false}` when they dismissed it. Raw (not deep-proxied): it
+   * carries a callback.
+   */
+  exportRequest: {
+    connId: Id;
+    statement: string;
+    node: string | null;
+    format?: DbExportFormat;
+    maxRows?: number;
+    agentLabel?: string;
+    done: (r: { exported: boolean; path?: string; rows?: number; bytes?: number }) => void;
+  } | null = $state.raw(null);
+
   // ── Result view mode ──────────────────────────────────────────────────────
   /**
    * Set the active tab's explicit result view (`null` = back to automatic). An
@@ -1363,6 +1464,8 @@ class DatabaseStore {
             // unpinned, so older payloads read back unchanged).
             viewMode: t.viewMode ?? undefined,
             pinned: t.pinned || undefined,
+            // An agent-opened tab keeps its attribution chip across a reload.
+            agent: t.agent ?? undefined,
           })),
           activeTab: this.activeTab,
           activeDb: this.activeDb,
@@ -1393,6 +1496,7 @@ class DatabaseStore {
           mask?: boolean;
           viewMode?: unknown;
           pinned?: unknown;
+          agent?: { session_id?: unknown; label?: unknown } | null;
         }[];
         activeTab?: number;
         activeDb?: string | null;
@@ -1413,6 +1517,10 @@ class DatabaseStore {
         // Unknown view names (a newer build's mode) fall back to automatic.
         viewMode: isViewMode(t.viewMode) ? t.viewMode : null,
         pinned: t.pinned === true,
+        agent:
+          t.agent && typeof t.agent.session_id === 'string' && typeof t.agent.label === 'string'
+            ? { session_id: t.agent.session_id, label: t.agent.label }
+            : null,
       }));
       if (!tabs.length) return null;
       // Pinned tabs are never dropped and always lead the strip.
@@ -2412,17 +2520,47 @@ class DatabaseStore {
   async runQuery(
     statement?: string,
     node?: string | null,
-    opts?: { transient?: boolean; keepOffset?: boolean; cursor?: unknown },
+    opts?: {
+      transient?: boolean;
+      keepOffset?: boolean;
+      cursor?: unknown;
+      /**
+       * Run READ-ONLY (`QueryRequest.read_only`): the server refuses a write/DDL
+       * before touching the driver. What an agent's UI-control run always sends —
+       * the human's token must never quietly upgrade the agent to writes.
+       */
+      readOnly?: boolean;
+      /**
+       * Asked when a `readOnly` run was refused as a write on an UNGUARDED
+       * connection (the attributed "‹agent› wants to write" confirm). True
+       * re-runs it normally. A guarded (prod / read-only) connection skips this
+       * and goes straight to the typed confirm, attributed with `agentLabel`.
+       */
+      confirmWrite?: () => Promise<boolean>;
+      /** Who asked, for the typed guarded-write confirm ("Claude · fix-orders"). */
+      agentLabel?: string;
+      /** Filled with how the run ended (see {@link RunOutcome}). */
+      outcome?: RunOutcome;
+      /** Called right before a confirm waits on the person (an agent command
+       *  extends its deadline to the human-wait cap). */
+      awaitingHuman?: (note: string) => void;
+      /** Row cap for THIS run instead of the persisted default (`rowLimit`) —
+       *  an agent's `row_limit` must not rewrite the person's preference. */
+      maxRows?: number;
+    },
   ): Promise<QueryResult | null> {
     const id = this.selectedConnId;
     const t = this.tab;
+    const outcome = opts?.outcome;
     if (!id) {
       toasts.error('No connection selected');
+      if (outcome) Object.assign(outcome, { status: 'invalid', error: 'no connection selected' });
       return null;
     }
     const sql = (statement ?? t.statement).trim();
     if (!sql) {
       toasts.error('Statement is empty');
+      if (outcome) Object.assign(outcome, { status: 'invalid', error: 'statement is empty' });
       return null;
     }
     // A transient run (the selected / current statement, variable-substituted)
@@ -2456,10 +2594,13 @@ class DatabaseStore {
       const tabTimeoutMs = this.tab?.timeout_ms ?? null;
 
       const tabMask = this.tab?.mask ?? false;
+      // Dropped (below) once the human approves the write the read-only run
+      // refused — the re-run is then an ordinary run under their own confirm.
+      let readOnly = opts?.readOnly === true;
       const post = (confirmWrite: boolean): Promise<QueryResult> => {
         const body: RunQueryReq = {
           statement: sql,
-          max_rows: explicit ?? this.rowLimit,
+          max_rows: explicit ?? opts?.maxRows ?? this.rowLimit,
           node: scopeNode,
           confirm_write: confirmWrite,
           // Per-run id so the cancel endpoint can issue engine-native
@@ -2477,6 +2618,7 @@ class DatabaseStore {
           // Server-side PII/prod masking: redacts cell values before they leave
           // the server. Only sent when the toggle is explicitly on.
           ...(tabMask ? { mask: true } : {}),
+          ...(readOnly ? { read_only: true } : {}),
         };
         return api.post<QueryResult>(`${this.connBase(id)}/query`, body, controller.signal);
       };
@@ -2485,14 +2627,34 @@ class DatabaseStore {
       try {
         result = await post(false);
       } catch (e) {
-        // Production / read-only guardrail: the server refused a write/DDL on a
-        // guarded connection. Ask for a typed confirmation and, if granted,
-        // retry with the explicit confirm flag.
-        if (isWriteBlocked(e)) {
-          const ok = await this.confirmGuardedWrite(e);
+        if (readOnly && isReadOnlyRefusal(e)) {
+          // An agent's read-only run hit a write/DDL: the human decides. A
+          // guarded connection always takes the typed confirm (and re-runs with
+          // the explicit confirm flag); an unguarded one takes the caller's
+          // attributed confirm, then re-runs as an ordinary run.
+          const guarded = this.isGuarded;
+          opts?.awaitingHuman?.(guarded ? 'Waiting for the typed write confirm' : 'Waiting for you to allow the write');
+          const ok = guarded
+            ? await this.confirmGuardedWrite(e, opts?.agentLabel)
+            : await (opts?.confirmWrite?.() ?? Promise.resolve(false));
           if (!ok || accessEpoch!==this.accessEpoch || controller.signal.aborted) {
             toasts.info('Write cancelled');
             this.clearPending(t);
+            if (outcome) Object.assign(outcome, { status: 'cancelled', error: 'the user declined the write' });
+            return null;
+          }
+          readOnly = false;
+          result = await post(guarded);
+        } else if (isWriteBlocked(e)) {
+          // Production / read-only guardrail: the server refused a write/DDL on a
+          // guarded connection. Ask for a typed confirmation and, if granted,
+          // retry with the explicit confirm flag.
+          opts?.awaitingHuman?.('Waiting for the typed write confirm');
+          const ok = await this.confirmGuardedWrite(e, opts?.agentLabel);
+          if (!ok || accessEpoch!==this.accessEpoch || controller.signal.aborted) {
+            toasts.info('Write cancelled');
+            this.clearPending(t);
+            if (outcome) Object.assign(outcome, { status: 'cancelled', error: 'the user declined the write' });
             return null;
           }
           result = await post(true);
@@ -2500,12 +2662,16 @@ class DatabaseStore {
           throw e;
         }
       }
-      if(accessEpoch!==this.accessEpoch || controller.signal.aborted || t.pending?.queryId!==queryId)return null;
+      if(accessEpoch!==this.accessEpoch || controller.signal.aborted || t.pending?.queryId!==queryId){
+        if (outcome) Object.assign(outcome, { status: 'aborted', error: 'the run was stopped or superseded' });
+        return null;
+      }
       t.result = result;
       t.ran_statement = sql;
       t.ran_node = scopeNode;
       this.clearPending(t);
       void this.loadHistory(id);
+      if (outcome) outcome.status = 'ok';
       return result;
     } catch (e) {
       // A user-initiated abort isn't an error — leave the prior result intact.
@@ -2513,10 +2679,12 @@ class DatabaseStore {
       // server's cancel outcome — this only drops our wait, so it must not
       // claim the query stopped.
       if (isAbortError(e) || controller.signal.aborted) {
+        if (outcome) Object.assign(outcome, { status: 'aborted', error: 'the query was stopped' });
         return null;
       }
       // The server answered → the query itself finished with an error.
       if (e instanceof ApiError) {
+        if (outcome) Object.assign(outcome, { status: 'failed', error: errMsg(e) });
         this.clearPending(t);
         t.error = errMsg(e);
         // The tab's inline ErrorPanel already says this when it's on screen —
@@ -2527,6 +2695,7 @@ class DatabaseStore {
       // The HTTP wait was lost (page teardown / network blip) but the server
       // keeps executing the query detached — re-attach by query_id instead of
       // declaring failure.
+      if (outcome) Object.assign(outcome, { status: 'detached', error: errMsg(e) });
       void this.reattach(t);
       return null;
     } finally {
@@ -2547,12 +2716,18 @@ class DatabaseStore {
    * back as `cursor`, so the server pages by `_id > cursor` instead of `skip`;
    * "Prev" stays offset-based. No-op when the current result wasn't auto-paginated.
    */
-  runPage(delta: number): void {
+  runPage(
+    delta: number,
+    extra?: Pick<
+      NonNullable<Parameters<DatabaseStore['runQuery']>[2]>,
+      'readOnly' | 'confirmWrite' | 'agentLabel' | 'outcome' | 'awaitingHuman'
+    >,
+  ): Promise<QueryResult | null> {
     const t = this.tab;
     const pageSize = t?.result?.auto_limited ?? 0;
-    if (!t || pageSize <= 0) return;
+    if (!t || pageSize <= 0) return Promise.resolve(null);
     const next = Math.max(0, t.offset + delta * pageSize);
-    if (next === t.offset) return;
+    if (next === t.offset) return Promise.resolve(null);
     // The cursor belongs to the page the user is LEAVING — read it before the
     // re-run replaces `t.result`.
     const cursor = delta > 0 ? (t.result?.next_cursor ?? undefined) : undefined;
@@ -2561,10 +2736,15 @@ class DatabaseStore {
     // buffer / active DB may have been edited since the run. `ran_node` is
     // passed as-is: a `null` (ran unscoped) must stay unscoped, not fall back
     // to a database selected since. `transient` keeps the buffer untouched.
-    void this.runQuery(t.ran_statement ?? undefined, t.ran_node, {
+    return this.runQuery(t.ran_statement ?? undefined, t.ran_node, {
+      ...extra,
       keepOffset: true,
       transient: true,
       cursor,
+      // Keep the page size the pages are counted in: the result being paged
+      // may have run with a different cap (an agent's `row_limit`, or a Limit
+      // changed since) than the persisted default.
+      maxRows: pageSize,
     });
   }
 
@@ -2574,21 +2754,25 @@ class DatabaseStore {
    * production is a deliberate, explicit act. Returns true only on an exact,
    * case-insensitive match.
    */
-  private async confirmGuardedWrite(blocked?: unknown): Promise<boolean> {
+  private async confirmGuardedWrite(blocked?: unknown, agentLabel?: string): Promise<boolean> {
     const conn = this.selectedConn;
     if (!conn) return false;
     const label = conn.environment === 'prod' ? 'PRODUCTION' : 'read-only';
+    // An agent-driven write names who is asking — the typed confirm is the
+    // person's decision about SOMEONE ELSE's statement.
+    const who = agentLabel ? `${agentLabel} wants to run this. ` : '';
     // Redis `KEYS` is gated too — not a write, but it blocks the whole server
     // while it walks every key; say that instead of "can modify data".
     const blockingKeys = blocked instanceof ApiError && blocked.message.includes('KEYS blocks');
     const typed = await confirmer.promptText(
-      blockingKeys
+      who +
+      (blockingKeys
         ? `KEYS blocks the Redis server while it scans every key on the ${label} ` +
             `connection "${conn.name}" — prefer SCAN with MATCH/COUNT. Type the ` +
             `connection name to run it anyway.`
         : `You are about to run a WRITE / schema change on the ${label} connection ` +
             `"${conn.name}". This can modify or destroy data. Type the connection ` +
-            `name to confirm.`,
+            `name to confirm.`),
       {
         title: blockingKeys ? '⚠ Confirm blocking command' : '⚠ Confirm production write',
         confirmLabel: blockingKeys ? 'Run KEYS' : 'Run write',
@@ -2637,7 +2821,7 @@ class DatabaseStore {
    * `EXPLAIN`; Mongo sends the `explain` flag (server `explain` command). The
    * plan replaces the tab's result.
    */
-  async runExplain(): Promise<QueryResult | null> {
+  async runExplain(opts?: { readOnly?: boolean }): Promise<QueryResult | null> {
     const id = this.selectedConnId;
     const t = this.tab;
     if (!id) {
@@ -2657,6 +2841,8 @@ class DatabaseStore {
       const body: Record<string, unknown> = isSql
         ? { statement: `EXPLAIN ${stmt}`, max_rows: this.rowLimit, node: this.activeDb || null }
         : { statement: stmt, max_rows: this.rowLimit, node: this.activeDb || null, explain: true };
+      // An agent's Explain can't smuggle a write through `EXPLAIN ANALYZE …`.
+      if (opts?.readOnly) body.read_only = true;
       const result = await api.post<QueryResult>(`${this.connBase(id)}/query`, body);
       if(accessEpoch!==this.accessEpoch)return null;
       t.result = result;
@@ -2679,7 +2865,7 @@ class DatabaseStore {
    * Explain always shows something. The statement is EXPLAIN-wrapped server-side
    * (never executed raw), so this is read-only even on a guarded connection.
    */
-  async explainPlan(): Promise<void> {
+  async explainPlan(opts?: { readOnly?: boolean }): Promise<void> {
     const accessEpoch=this.accessEpoch;
     const id = this.selectedConnId;
     const stmt = this.tab.statement.trim();
@@ -2704,7 +2890,7 @@ class DatabaseStore {
       // back to the always-available raw EXPLAIN → grid path.
       if(accessEpoch!==this.accessEpoch)return;
       this.closePlan();
-      await this.runExplain();
+      await this.runExplain(opts);
     }
   }
 

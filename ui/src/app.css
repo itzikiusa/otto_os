@@ -513,6 +513,32 @@ html[data-scheme='dark'] .hljs-type {
   color: #56c8d8;
 }
 
+/* Agent UI control: the element an agent just acted on (lib/uiCommands.ts
+   `ctx.highlight`) — a focus-style ring that fades out after ~2.4 s. An
+   outline, never a border, so layout never shifts under the agent's hand. */
+[data-agent-target] {
+  outline: 2px solid var(--accent) !important;
+  outline-offset: 2px;
+  border-radius: var(--radius-s);
+  animation: agent-target-fade 2.4s ease-out forwards;
+}
+@keyframes agent-target-fade {
+  0%,
+  70% {
+    outline-color: var(--accent);
+  }
+  100% {
+    outline-color: transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* No fade: the ring simply shows, then goes when the attribute is removed
+     (the app-wide block below would otherwise jump straight to the end). */
+  [data-agent-target] {
+    animation: none !important;
+  }
+}
+
 /* Reduced motion, app-wide (foundations §8): with the OS setting on, every
    animation and transition collapses to an instant change. Live-state
    pulses/shimmers stop instead of looping; nothing that conveys state relies
