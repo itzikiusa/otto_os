@@ -174,7 +174,7 @@
     {:else}
       <div class="film-frame" class:loading={status === 'loading'}>
         <!-- preload="metadata": only the moov atom + first frame are fetched
-             until the viewer presses play. Narrated, so it never autoplays.
+             until the viewer presses play. The soundtrack never autoplays.
              The captions <track> is conditional (see CAPTIONS above). -->
         <!-- svelte-ignore a11y_media_has_caption -->
         <video
@@ -197,7 +197,7 @@
           {/if}
         </video>
         {#if status === 'loading'}
-          <div class="film-loading" aria-hidden="true">Loading the tour…</div>
+          <div class="film-loading" role="status">Loading the tour…</div>
         {/if}
       </div>
     {/if}
@@ -460,5 +460,12 @@
   }
   .dim {
     color: var(--text-dim);
+  }
+  @media (max-width: 640px) {
+    .chapter-play,
+    .chapter-guide,
+    .cc {
+      min-height: 36px;
+    }
   }
 </style>

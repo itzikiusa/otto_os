@@ -55,7 +55,7 @@
   });
 
   function open(id: string, replace = false): void {
-    const path = id === DEFAULT_GUIDE_ID && !param ? 'walkthroughs' : `walkthroughs/${id}`;
+    const path = `walkthroughs/${id}`;
     if (replace) router.replace(path);
     else router.go(path);
   }
@@ -132,6 +132,9 @@
   function onRailKey(e: KeyboardEvent): void {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     const inSearch = e.target === searchEl;
+    // The phone rail also contains the film. Keep its native controls and
+    // chapter buttons out of the guide list's keyboard navigation.
+    if (!inSearch && !(e.target instanceof HTMLElement && e.target.closest('[data-guide]'))) return;
     const moves: Record<string, number | 'first' | 'last'> = { ArrowDown: 1, ArrowUp: -1 };
     if (!inSearch) Object.assign(moves, { Home: 'first', End: 'last' });
     if (inSearch && e.key === 'Enter') {
@@ -194,7 +197,7 @@
   <PageHeader title="Help" subtitle={pageSubtitle}>
     {#snippet leading()}
       {#if viewport.isPhone && !isDefault}
-        <button class="icon-btn" onclick={() => router.go('walkthroughs')} aria-label="Back to all guides" title="Back to all guides">
+        <button class="icon-btn help-back" onclick={() => router.go('walkthroughs')} aria-label="Back to all guides" title="Back to all guides">
           <Icon name="chevronLeft" size={16} />
         </button>
       {/if}
@@ -306,7 +309,7 @@
                   title="There's no guide called “{param}”"
                   body="It may have been renamed. Pick one from the list, or start at the beginning."
                   actionLabel="Open Getting started"
-                  onaction={() => router.go('walkthroughs')}
+                  onaction={() => open(DEFAULT_GUIDE_ID)}
                 />
               {/if}
             </div>
@@ -318,6 +321,9 @@
 </div>
 
 <style>
+  :global([dir='rtl']) .help-back :global(svg) {
+    transform: scaleX(-1);
+  }
   .help-page {
     height: 100%;
     min-height: 0;
@@ -348,6 +354,7 @@
     overflow-y: auto;
   }
   .rail-search {
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     gap: 6px;
@@ -528,7 +535,6 @@
   .guide-body :global(ul),
   .guide-body :global(ol) {
     padding-inline-start: 22px;
-    padding-left: revert;
   }
   .guide-body :global(a) {
     color: var(--accent-text);
