@@ -2,6 +2,7 @@
   // The shared surface: a live feed of agent + user board posts, with a composer.
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { rel } from '../../lib/stores/now.svelte';
   import { sentenceCase } from '../../lib/status';
@@ -77,15 +78,16 @@
   let posting = $state(false);
   async function post() {
     if (!draft.trim() || posting) return;
+    const submitted = draft;
     posting = true;
     try {
       await swarm.postBoard({
-        body: draft.trim(),
+        body: submitted.trim(),
         kind: draftKind,
         project_id: swarm.selectedProjectId ?? undefined,
         to_agent_id: draftTo || undefined,
       });
-      draft = '';
+      if (draft === submitted) draft = '';
     } catch (e) {
       // Keep the draft so nothing typed is lost; say why it didn't post.
       toasts.error("Couldn't post to the board", e instanceof Error ? e.message : String(e));
@@ -115,6 +117,11 @@
   </div>
 
   <div class="feed">
+    <LoadState what="board posts" loading={swarm.boardLoading} error={swarm.boardError}
+      empty={swarm.board.length === 0} onretry={() => void swarm.loadBoard()}>
+      {#snippet emptyView()}
+        <EmptyState icon="comment" title="Quiet board" body="Agents post ideas, reviews and decisions here as they work." />
+      {/snippet}
     {#if filtered.length === 0}
       {#if kindFilter}
         <EmptyState icon="comment" title="No {sentenceCase(kindFilter).toLowerCase()} posts" body="Nothing of this kind on the board yet — pick All to see every post." />
@@ -137,6 +144,7 @@
         <div class="msg-body">{m.body}</div>
       </div>
     {/each}
+    </LoadState>
   </div>
 
   <div class="composer">
@@ -167,6 +175,7 @@
     flex-direction: column;
     height: 100%;
     min-height: 0;
+    container-type: inline-size;
   }
   .b-filters {
     display: flex;
@@ -202,6 +211,7 @@
   }
   .feed {
     flex: 1;
+    min-height: 0;
     overflow-y: auto;
     padding: 12px;
     display: flex;
@@ -235,9 +245,16 @@
     word-break: break-word;
   }
   .composer {
+    flex: none;
     display: flex;
     gap: 8px;
     padding: 8px 12px;
     border-block-start: 1px solid var(--border);
+  }
+  @container (max-width: 640px) {
+    .composer { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
+    .composer select { min-width: 0; width: 100%; }
+    .composer input { grid-column: 1 / -1; grid-row: 1; width: 100%; min-width: 0; }
+    .composer button { min-width: 48px; }
   }
 </style>

@@ -37,6 +37,9 @@ class SwarmStore {
   tasksByProject: Record<string, SwarmTask[]> = $state({});
   runs: SwarmRun[] = $state([]);
   board: SwarmMessage[] = $state([]);
+  boardLoading = $state(false);
+  boardError: string | null = $state(null);
+  private boardRequest = 0;
   presets: SwarmPreset[] = $state([]);
   graph: SwarmGraph | null = $state(null);
   selectedProjectId: string | null = $state(null);
@@ -189,6 +192,7 @@ class SwarmStore {
       this.tasksByProject = {};
       this.runs = [];
       this.board = [];
+      this.boardError = null;
       this.graph = null;
       this.selectedProjectId = null;
       this.selectedSessionId = null;
@@ -545,16 +549,23 @@ class SwarmStore {
   // -- Board ----------------------------------------------------------------
 
   async loadBoard(projectId?: string, taskId?: string): Promise<void> {
-    if (!this.detail) return;
+    const swarmId = this.detail?.id;
+    if (!swarmId) return;
+    const request = ++this.boardRequest;
+    const isCurrent = () => this.detail?.id === swarmId && this.boardRequest === request;
+    this.boardLoading = true;
+    this.boardError = null;
     const q = new URLSearchParams();
     if (projectId) q.set('project_id', projectId);
     if (taskId) q.set('task_id', taskId);
     try {
-      this.board = await api.get<SwarmMessage[]>(
-        `/swarm/swarms/${this.detail.id}/board?${q.toString()}`,
-      );
-    } catch {
-      this.board = [];
+      const posts = await api.get<SwarmMessage[]>(`/swarm/swarms/${swarmId}/board?${q.toString()}`);
+      if (isCurrent()) this.board = posts;
+    } catch (e) {
+      // Preserve the last successful feed; an unavailable board is not empty.
+      if (isCurrent()) this.boardError = loadErrorText(e);
+    } finally {
+      if (isCurrent()) this.boardLoading = false;
     }
   }
 

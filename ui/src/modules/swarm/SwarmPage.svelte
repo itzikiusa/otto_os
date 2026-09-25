@@ -252,8 +252,9 @@
   function onTabKey(e: KeyboardEvent): void {
     const i = VIEWS.findIndex((v) => v.id === view);
     let next = -1;
-    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (i + 1) % VIEWS.length;
-    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = (i - 1 + VIEWS.length) % VIEWS.length;
+    const rtl = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl';
+    if (e.key === (rtl ? 'ArrowLeft' : 'ArrowRight') || e.key === 'ArrowDown') next = (i + 1) % VIEWS.length;
+    else if (e.key === (rtl ? 'ArrowRight' : 'ArrowLeft') || e.key === 'ArrowUp') next = (i - 1 + VIEWS.length) % VIEWS.length;
     else if (e.key === 'Home') next = 0;
     else if (e.key === 'End') next = VIEWS.length - 1;
     if (next < 0) return;
@@ -1077,6 +1078,9 @@
     width: 52px;
   }
   .switcher {
+    /* The available pane can be narrow on tablets or beside a wide swarm rail. */
+    overflow-x: auto;
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     gap: 12px;
