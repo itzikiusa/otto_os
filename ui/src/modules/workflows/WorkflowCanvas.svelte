@@ -283,9 +283,12 @@
 
     {#each graph.nodes as n (n.id)}
       {@const st = statusOf(n.id)}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div
+      <button
+        type="button"
         class="node"
+        aria-label={`Edit ${n.name || spec(n.kind)?.label || n.kind}`}
+        aria-pressed={selectedId === n.id}
+        onclick={() => { onselect?.(n.id); onedgeselect?.(null); }}
         class:invalid={invalidNodes.includes(n.id)}
         class:selected={selectedId === n.id}
         class:loop={n.kind === 'loop'}
@@ -332,7 +335,7 @@
             onpointerdown={(e) => startConnect(e, n)}
           ></span>
         {/if}
-      </div>
+      </button>
     {/each}
   </div>
 
@@ -421,7 +424,15 @@
   .edge-hit:hover {
     stroke: var(--status-exited);
   }
+  .node:focus-visible {
+    outline: 2px solid var(--accent-solid);
+    outline-offset: 2px;
+  }
   .node {
+    padding: 0;
+    color: var(--text);
+    font: inherit;
+    text-align: start;
     position: absolute;
     display: flex;
     flex-direction: column;
