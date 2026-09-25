@@ -389,7 +389,7 @@
     {/if}
 
     <div class="rows" data-testid="history-list">
-      {#if history.error && history.entries.length > 0}
+      {#if history.error}
         <p class="empty-line err" role="alert">
           <span>Refresh failed: {history.error}</span>
           <button class="btn small" onclick={() => void history.refresh()}>Retry</button>
@@ -397,7 +397,7 @@
       {/if}
       {#if history.loading && history.entries.length === 0}
         <p class="empty-line dim">Loading conversations…</p>
-      {:else if shown === 0}
+      {:else if shown === 0 && !history.error}
         <!-- The miss is explained (with its fix) by the right pane; this line
              only shows at the narrow list-only layout, where that pane is hidden. -->
         <p class="empty-line dim narrow-only">

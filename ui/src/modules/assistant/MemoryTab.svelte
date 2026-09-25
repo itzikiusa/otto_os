@@ -41,13 +41,15 @@
   let justSaved = $state(false);
   let profileError = $state('');
   async function saveProfile(): Promise<void> {
-    if (!dirty || draft === null) return;
+    if (!dirty || draft === null || saving) return;
+    const submitted = draft;
     saving = true;
     profileError = '';
     try {
-      await assistant.saveProfile(draft);
-      draft = null;
-      justSaved = true;
+      await assistant.saveProfile(submitted);
+      // A save response acknowledges only the submitted text; keep newer edits.
+      if (draft === submitted) draft = null;
+      justSaved = draft === null;
     } catch (e) {
       profileError =
         e instanceof ApiError && e.status === 409

@@ -102,8 +102,9 @@
     else if (e.key === 'End') next = TABS.length - 1;
     if (next < 0) return;
     e.preventDefault();
+    const tablist = e.currentTarget as HTMLElement;
     go(TABS[next].id);
-    queueMicrotask(() => (e.currentTarget as HTMLElement | null)?.querySelector<HTMLButtonElement>('[aria-selected="true"]')?.focus());
+    tablist.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();
   }
 
   // ⌘K verbs.

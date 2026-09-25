@@ -173,12 +173,12 @@
   // Open on the routed report, else the last-viewed one, else the newest.
   $effect(() => {
     if (loading || reports.length === 0) return;
-    if (routeKey && reports.some((r) => keyOf(r) === routeKey)) {
+    if (routeKey && filtered.some((r) => keyOf(r) === routeKey)) {
       if (selectedKey !== routeKey) selectedKey = routeKey;
       return;
     }
-    if (selectedKey && reports.some((r) => keyOf(r) === selectedKey)) return;
-    selectedKey = initialSelection('insights', reports, keyOf);
+    if (selectedKey && filtered.some((r) => keyOf(r) === selectedKey)) return;
+    selectedKey = initialSelection('insights', filtered, keyOf);
   });
   $effect(() => {
     if (selectedKey && !detailOnly) rememberSelection('insights', selectedKey);
@@ -572,7 +572,7 @@
             <aside class="list-pane" class:hide-phone={viewport.isPhone && phoneDetail} aria-label="Reports">
               <div class="filters" role="group" aria-label="Filter by period">
                 {#each visibleKinds as k (k.id)}
-                  <button class="filter-chip" class:active={filter === k.id} aria-pressed={filter === k.id} onclick={() => (filter = k.id)}>
+                  <button class="filter-chip" class:active={filter === k.id} aria-pressed={filter === k.id} onclick={() => { filter = k.id; if (routeKey) router.replace('insights'); }}>
                     {k.label} <span class="count">{counts[k.id] ?? 0}</span>
                   </button>
                 {/each}
