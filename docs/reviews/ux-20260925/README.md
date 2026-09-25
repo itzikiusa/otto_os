@@ -21,6 +21,25 @@ The audit uses ten fresh reviewers per round, five mandatory rounds. Because onl
 
 Per-page ratings and exact coverage limits are in each report. A group mean does not establish that every page meets the target. All documented feasible residuals are assigned to the next fresh review.
 
+## Round 2 (in progress)
+
+Nine fresh reviewers have started; six scopes have finished their repairs and verification. The remaining reviewers are queued, not counted as completed.
+
+| Scope | Current verified range / 10 | Evidence |
+|---|---:|---|
+| Git, graph, PRs, Focus | 9.4–9.5 by dimension | [Review](r2-git.md) |
+| Database, API, connections, brokers | 9.3–9.5 by family | [Review](r2-data.md) |
+| Product, Vault, Canvas, Design, Browser | 9.0–9.5 by dimension | [Review](r2-content.md) |
+| Automation and agent coordination | 9.0–9.3 by family | [Review](r2-automation.md) |
+| Shared accessibility | 9.5–9.6 by dimension | [Review](r2-access.md) |
+| Settings, MCP, Plugins, Skills Lab | 9.16–9.44 by family | [Review](r2-settings.md) |
+| Shell, Home, sessions and panels | Review underway | Pending |
+| AWS and Kubernetes | Review underway | Pending |
+| Assistant, History, Usage, Insights | Review underway | Pending |
+| Help and walkthrough player | Queued | Pending |
+
+Rounds 3, 4 and 5 are still required. Ratings above describe tested browser behavior, not a guarantee of every application path. Current UI unit gate: 454 passed. A broader session test run found one clipboard-fallback failure among 28 cases; the shell reviewer is investigating it. The subsequent full UI check passed with zero errors and zero warnings. Production-build LSP and nested-focus checks passed in both Chromium and WebKit (6 tests).
+
 ## Integration and broad evidence
 
 - Integrated `fix/git-tabs-use-free-width` through `997b9b5a`, including the delete preference repair, without editing its worktree.
