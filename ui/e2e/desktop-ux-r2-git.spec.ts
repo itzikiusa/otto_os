@@ -315,6 +315,10 @@ test('local review history recovers from an error and expands a long finding on 
   await page.getByRole('button', { name: 'Past reviews (1)' }).click();
   await page.locator('.lrp-history-run-header').click();
   await expect(page.locator('.lrp-history-comment')).toContainText('useful evidence');
+  const location = page.locator('.lrp-history-comment .lrp-loc');
+  await expect(location).toContainText('reviewed-file.ts:1');
+  expect(await location.evaluate(el => el.scrollWidth <= el.clientWidth + 1), 'the complete finding path is readable without hover').toBe(true);
+  await expect(location).toHaveCSS('direction', 'ltr');
   await page.locator('.lrp-history-comment').scrollIntoViewIfNeeded();
   await expectNoHorizontalOverflow(page);
   await page.screenshot({ path: testInfo.outputPath('local-review.png'), fullPage: true });
