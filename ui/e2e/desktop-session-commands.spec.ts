@@ -66,6 +66,16 @@ test.afterEach(async () => {
 });
 
 test('⌘I: close a session by NAME, then close ALL of a provider', async ({ page }) => {
+  // A workspace-less ("No workspace") shell: the store holds it for the
+  // sidebar group in every workspace, but it is not this workspace's session.
+  const scratchTitle = `Scratch bystander ${Date.now().toString(36)}`;
+  const sr = await ctx.post(`${base}/api/v1/workspaces/scratch/sessions`, {
+    data: { kind: 'agent', provider: 'shell', title: scratchTitle, cwd: '/tmp', meta: { origin: 'e2e' } },
+  });
+  expect(sr.ok(), await sr.text()).toBeTruthy();
+  const scratchId = (await sr.json()).id as string;
+  await expect(page.locator('.navigator .nested-item', { hasText: scratchTitle })).toBeVisible({ timeout: 20_000 });
+
   // "close zlatan" → only that session is archived.
   await runOttoCommand(page, 'please close zlatan');
   await expect.poll(() => isArchived(idByTitle.Zlatan), { timeout: 15_000 }).toBe(true);
@@ -77,6 +87,9 @@ test('⌘I: close a session by NAME, then close ALL of a provider', async ({ pag
   await runOttoCommand(page, 'please close all shell sessions');
   await expect.poll(() => isArchived(idByTitle.Pirlo), { timeout: 15_000 }).toBe(true);
   await expect.poll(() => isArchived(idByTitle.Buffon), { timeout: 15_000 }).toBe(true);
+  // …but only THIS workspace's: the scratch shell is left running.
+  expect(await isArchived(scratchId)).toBe(false);
+  await ctx.delete(`${base}/api/v1/sessions/${scratchId}`);
 });
 
 test('⌘I: "delete <name>" asks first, then removes the session permanently (not just archive)', async ({ page }) => {

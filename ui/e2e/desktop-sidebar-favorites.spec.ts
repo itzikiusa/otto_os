@@ -157,10 +157,16 @@ test('favorite from the row menu → first section, only there; reorder persists
   await page.locator('.navigator').getByRole('button', { name: 'Collapse sidebar' }).click();
   const rail = page.locator('.rail');
   await expect(rail).toBeVisible();
-  const railLabels = await rail
+  // By module id, not accessible name: the Rail speaks its badges ("Agents,
+  // 1 waiting on you"), and other workers' sessions set them on a shared daemon.
+  const railIds = await rail
     .locator('.rail-modules > *')
-    .evaluateAll((els) => els.slice(0, 5).map((e) => (e.matches('[data-testid="rail-sep"]') ? '|' : e.getAttribute('aria-label'))));
-  expect(railLabels).toEqual(['Agents', 'Connections', 'Git', 'Workflows', '|']);
+    .evaluateAll((els) => els.slice(0, 5).map((e) => (e.matches('[data-testid="rail-sep"]') ? '|' : e.getAttribute('data-testid')!.replace(/^rail-/, ''))));
+  expect(railIds).toEqual([...ORDERED, '|']);
+  // …each still named for its module (a spoken badge only ever follows it).
+  for (const [id, label] of [['agents', 'Agents'], ['connections', 'Connections'], ['git', 'Git'], ['workflows', 'Workflows']] as const) {
+    await expect(rail.getByTestId(`rail-${id}`)).toHaveAccessibleName(new RegExp(`^${label}(,|$)`));
+  }
   await expect(page.getByTestId('rail-sep')).toHaveCount(DEFAULT_SECTIONS.length);
   await rail.getByRole('button', { name: 'Expand sidebar' }).click();
   await expect(page.locator('.navigator')).toBeVisible();

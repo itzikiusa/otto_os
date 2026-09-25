@@ -266,7 +266,9 @@ test('⌘K reaches Vault, Workflows and Mission Control (derived from the regist
     await expect(item).toBeVisible();
     await expect(item.locator('.opt-detail')).toHaveText(section);
     await item.click();
-    await expect.poll(() => page.evaluate(() => window.location.hash)).toBe(`#/${route}`);
+    // The module, or the item a list/detail module opens on (Mission Control
+    // lands on its first work item when the daemon has any: `#/mission-control/<id>`).
+    await expect.poll(() => page.evaluate(() => window.location.hash)).toMatch(new RegExp(`^#/${route}(?:/[^/]+)?$`));
     await expect(row(page, label)).toHaveClass(/active/);
   }
   // Tools no longer masquerade as session commands.

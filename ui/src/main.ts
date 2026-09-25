@@ -123,9 +123,19 @@ const app = mount(App, {
 // service worker to its host: a new worker taking control reloads the host,
 // and the pane with it — a second reload from inside the pane would drop it
 // back to its boot state mid-use.
+// FIRST install is not an update: nothing stale was serving this page, yet
+// sw.js's `clients.claim()` still fires `controllerchange` — reloading then
+// rebooted every fresh visit mid-boot (aborting its in-flight /auth/me and
+// doubling time-to-shell). Only a worker REPLACING one that already
+// controlled this page reloads.
 if ('serviceWorker' in navigator && !isEmbedded) {
+  let hadController = navigator.serviceWorker.controller !== null;
   let reloadingForSw = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController) {
+      hadController = true; // the first claim; a later update still reloads
+      return;
+    }
     if (reloadingForSw) return;
     reloadingForSw = true;
     window.location.reload();

@@ -3,10 +3,10 @@ import { createServer, type Server } from 'node:http';
 import { createHash } from 'node:crypto';
 import { apiCtx, seedWorkspace } from './seed';
 
-// On a fresh browser profile the app's service worker claims the page and
-// main.ts reloads once on `controllerchange` — which destroys the SSE test's
-// `page.evaluate` context mid-stream. Nothing here exercises the service
-// worker, so keep it out of this file's pages.
+// The app's service worker claims a fresh page mid-test (main.ts no longer
+// reloads on that FIRST claim, only on an update, but a reload here would
+// destroy the SSE test's `page.evaluate` context mid-stream). Nothing here
+// exercises the service worker, so keep it out of this file's pages.
 test.use({ serviceWorkers: 'block' });
 
 let ctx: APIRequestContext, base = '', token = '', api = '', workspace = '', upstream = '';

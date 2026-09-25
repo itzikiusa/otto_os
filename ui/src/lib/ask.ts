@@ -17,6 +17,7 @@ import {
 } from './orchestrate';
 import { lsGet } from './storage';
 import { applyTileOrder } from './stores/splitLayout';
+import { workspaceCommandScope } from './stores/sessionScope';
 import { layout } from './stores/splitLayout.svelte';
 import { isForeground, visibleOnThisDevice, ws } from './stores/workspace.svelte';
 
@@ -97,7 +98,10 @@ export function storeContext(workspaceId: string): OrchestrateCtx {
   return {
     workspaceId,
     focusedSessionId: ws.activeSessionId,
-    sessions: ws.sessions,
+    // This workspace's sessions, as `apiContext` sees them — not every scratch
+    // ("No workspace") session the store also holds for the sidebar group, or
+    // "close all shell sessions" here would archive those too.
+    sessions: workspaceCommandScope(ws.sessions, ws.currentId, ws.openTabs),
     nameable: ws.plainAgentSessions,
     order: paneOrder(),
     archive: (id) => ws.archiveSession(id),

@@ -14,9 +14,12 @@ test('connection export covers all workspaces and includes passwords only by opt
   test.setTimeout(120_000);
   const { ctx, base } = await apiCtx();
   try {
+    // Unique per run: workspaces persist on the shared daemon, so a retry
+    // would otherwise list two "Export B" checkboxes.
+    const run = Date.now().toString(36);
     const a = await seedWorkspace(ctx, base), b = await seedWorkspace(ctx, base);
-    await ctx.patch(`${base}/api/v1/workspaces/${a}`, { data: { name: 'Export A' } });
-    await ctx.patch(`${base}/api/v1/workspaces/${b}`, { data: { name: 'Export B' } });
+    await ctx.patch(`${base}/api/v1/workspaces/${a}`, { data: { name: `Export A ${run}` } });
+    await ctx.patch(`${base}/api/v1/workspaces/${b}`, { data: { name: `Export B ${run}` } });
     for (const [ws, kind, name, params] of [
       [a, 'mysql', 'Export MySQL', { host: 'mysql.invalid', port: 3306, user: 'fixture', db: 'saved' }],
       [b, 'mongodb', 'Export Mongo', { conn_string: 'mongodb://fixture@mongo.invalid:27017/saved' }],
@@ -28,6 +31,10 @@ test('connection export covers all workspaces and includes passwords only by opt
     }
     await page.goto('/#/settings/backup');
     const card = page.getByRole('region', { name: 'Connection export', exact: true });
+    // The card loads its formats (and workspaces) before it renders a control.
+    // On a busy shared e2e daemon that first load has taken over 10 s (a full
+    // run caught the card still on "Loading export formats…"), so allow more.
+    await expect(card.getByLabel('Include saved passwords and credentials')).toBeVisible({ timeout: 30_000 });
     await expect(card.getByLabel('Include saved passwords and credentials')).not.toBeChecked();
     await card.getByRole('button', { name: 'Prepare export', exact: true }).click();
     let text = await download(page, card.getByRole('button', { name: /^Download / }).first());
@@ -45,7 +52,7 @@ test('connection export covers all workspaces and includes passwords only by opt
     const credentials = await download(page, card.getByRole('button', { name: /Download .*\.json/ }));
     expect(credentials).toContain('fixture-export-password-7821');
     await card.getByLabel('Connections to export').selectOption('workspaces');
-    await card.getByRole('group', { name: 'Export workspaces' }).getByLabel('Export B', { exact: true }).check();
+    await card.getByRole('group', { name: 'Export workspaces' }).getByLabel(`Export B ${run}`, { exact: true }).check();
     await card.getByLabel('Export format', { exact: true }).selectOption('nosqlbooster');
     await card.getByRole('button', { name: 'Prepare export with passwords', exact: true }).click();
     const uris = await download(page, card.getByRole('button', { name: /^Download / }).first());

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import PathField from '../../lib/components/PathField.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -132,12 +133,17 @@
   // Live registry (built-ins + custom); shell is valid for scheduled tasks.
   const PROVIDERS = $derived(allProviders());
 
+  // Keyed on the workspace ONLY: the loaders read store state synchronously
+  // (`loadPresets` checks `presets.length`), which would otherwise subscribe
+  // this effect — the presets landing then re-ran it and fired a second list
+  // load that silently replaced a failed load's "Couldn't load" + Retry.
   $effect(() => {
     const id = ws.currentId;
-    if (id) {
+    if (!id) return;
+    untrack(() => {
       void scheduledTasks.loadList(id);
       void scheduledTasks.loadPresets();
-    }
+    });
   });
 
   const list = $derived(scheduledTasks.list);

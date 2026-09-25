@@ -23,6 +23,7 @@ import { lsGet, lsSet } from '../storage';
 import { layout, type Axis } from './splitLayout.svelte';
 import { MAX_PANES, LS_PANES } from './splitLayout';
 import { isEmbedded } from '../desktop';
+import { SCRATCH_WORKSPACE_ID } from './sessionScope';
 
 // Layout state is per-WINDOW (multi-window): winKey() namespaces these by the
 // window's label so two windows never clobber each other's workspace/tabs/view.
@@ -34,12 +35,9 @@ const LS_TABS = 'otto_tabs_'; // + workspace id
 // current one. Default ON — a session shouldn't vanish on a workspace switch.
 const LS_ALL_WS = 'otto_nav_all_ws';
 
-/** Id of the daemon's hidden, system-owned **scratch** workspace — the home of
- *  workspace-less sessions. Mirrors `SCRATCH_WORKSPACE_ID` in
- *  `crates/otto-core/src/domain.rs`. Never in `workspaces` (hidden from
- *  `GET /workspaces`); read via `GET /workspaces/scratch`. Also the tabs/panes
- *  persistence key when no workspace is selected. */
-export const SCRATCH_WORKSPACE_ID = 'scratch';
+// The scratch ("No workspace") id lives in the rune-free `sessionScope.ts` so
+// the pure scope rules there are unit-testable; re-exported for callers.
+export { SCRATCH_WORKSPACE_ID };
 
 /** Background-spawned session sources that never surface in the sidebar's flat
  *  session lists (they live in their own panels/views). MUST stay byte-identical

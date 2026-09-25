@@ -16,7 +16,9 @@ import { openPage } from './helpers';
 let ctx: APIRequestContext;
 let base = '';
 let wsA = '';
-const TITLE = 'e2e scratch';
+// Unique per run: scratch sessions are global on the shared daemon, and a
+// failed attempt's session (or its archived row) must not match the retry's.
+const TITLE = `e2e scratch ${Date.now().toString(36)}`;
 
 test.beforeAll(async () => {
   const a = await apiCtx();
