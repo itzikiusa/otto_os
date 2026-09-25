@@ -22,6 +22,7 @@ const _shareTokens: Map<string, string> = new Map();
 
 import { winKey } from './win';
 import { lsGet, lsSet } from './storage';
+import { isEmbedded } from './desktop';
 
 // Per-window last-route persistence (multi-window restore). Desktop-app only:
 // a fresh Tauri window loads with an empty hash, so restoring the saved route
@@ -29,7 +30,9 @@ import { lsGet, lsSet } from './storage';
 // behavior is untouched (deep links / reloads already carry a hash; a fresh
 // web load should keep landing on the default view).
 const LS_LAST_ROUTE = 'otto_last_route';
-const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+// The side-by-side pane (an iframe of the main window) never reads or writes
+// the window's last route: its own route lives in the host's side-pane state.
+const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window && !isEmbedded;
 
 function restoreLastRoute(): void {
   if (!IS_TAURI) return;
@@ -75,6 +78,19 @@ function safeDecode(seg: string): string {
   }
 }
 
+/**
+ * A split-view partner that owns some routes: the side-by-side pane (see
+ * stores/sidePane.svelte.ts) owns its module in the main window, and the main
+ * pane owns its module inside the side pane. A navigation to a route the
+ * delegate `claims` is handed to it (`deliver`) instead of replacing this
+ * pane's page, so one module is never open in both panes. Routes are passed
+ * without the leading `#/`.
+ */
+export interface RouteDelegate {
+  claims(route: string): boolean;
+  deliver(route: string): void;
+}
+
 class Router {
   /** path segments after '#/', e.g. ['git', '01H...', 'pr', '7'] */
   parts: string[] = $state([]);
@@ -84,6 +100,7 @@ class Router {
   private index = $state(-1);
   /** set while doing an internal back/forward so onHashChange doesn't push. */
   private navigating = false;
+  private delegate: RouteDelegate | null = null;
 
   canBack = $derived(this.index > 0);
   canForward = $derived(this.index < this.stack.length - 1);
@@ -126,7 +143,34 @@ class Router {
     return window.location.hash || '#/';
   }
 
+  /** Install (or clear) the split-view partner — see {@link RouteDelegate}. */
+  setDelegate(d: RouteDelegate | null): void {
+    this.delegate = d;
+  }
+
+  private claimed(hash: string): boolean {
+    return !!this.delegate && this.delegate.claims(hash.replace(/^#\/?/, ''));
+  }
+
+  /** Hand `hash` to the delegate when it claims it; true = handled there. */
+  private divert(hash: string): boolean {
+    if (!this.claimed(hash)) return false;
+    this.delegate!.deliver(hash.replace(/^#\/?/, ''));
+    return true;
+  }
+
   private onHashChange(): void {
+    // A link (`<a href="#/…">`) or a direct hash write bypasses go(): divert a
+    // claimed route after the fact and put this pane's hash back, leaving the
+    // page, the stack and the persisted route untouched.
+    if (!this.navigating) {
+      const prev = this.stack[this.index];
+      const h = this.currentHash();
+      if (prev !== undefined && h !== prev && this.divert(h)) {
+        history.replaceState(null, '', prev);
+        return;
+      }
+    }
     this.parse();
     persistLastRoute(this.currentHash());
     if (this.navigating) {
@@ -152,27 +196,35 @@ class Router {
   go(path: string): void {
     const hash = this.toHash(path);
     if (hash === this.currentHash()) return;
+    if (this.divert(hash)) return;
     window.location.hash = hash;
   }
 
   replace(path: string): void {
     const hash = this.toHash(path);
+    if (hash !== this.currentHash() && this.divert(hash)) return;
     history.replaceState(null, '', hash);
     this.parse();
     persistLastRoute(this.currentHash());
     if (this.index >= 0) this.stack[this.index] = this.currentHash();
   }
 
+  /** Back/forward step over entries the split-view partner now owns (a
+   *  module that moved into the other pane) rather than opening it twice. */
   back(): void {
-    if (this.index <= 0) return;
-    this.index -= 1;
-    this.moveTo(this.stack[this.index]);
+    let i = this.index - 1;
+    while (i >= 0 && this.claimed(this.stack[i])) i -= 1;
+    if (i < 0) return;
+    this.index = i;
+    this.moveTo(this.stack[i]);
   }
 
   forward(): void {
-    if (this.index >= this.stack.length - 1) return;
-    this.index += 1;
-    this.moveTo(this.stack[this.index]);
+    let i = this.index + 1;
+    while (i < this.stack.length && this.claimed(this.stack[i])) i += 1;
+    if (i >= this.stack.length) return;
+    this.index = i;
+    this.moveTo(this.stack[i]);
   }
 
   /** Internal back/forward. Setting the hash to its CURRENT value fires no

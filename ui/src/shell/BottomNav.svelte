@@ -17,9 +17,9 @@
   import { plugins } from '../lib/stores/plugins.svelte';
   import {
     availableModules,
-    groupModules,
     activeNavId,
     resolveOrder,
+    sidebarSections,
     visibleOrder,
   } from '../lib/sidebar';
 
@@ -31,9 +31,10 @@
       .filter((p) => auth.canPlugin(p.slug, 'view'))
       .map((p) => ({ id: `plugin/${p.slug}`, icon: p.icon, label: p.name })),
   );
-  // Flattened section by section, so the bar's order matches the sidebar's.
+  // Flattened section by section, so the bar's order matches the sidebar's —
+  // Favorites first, so a user's favorites become the phone's primary tabs.
   const modules = $derived(
-    groupModules(
+    sidebarSections(
       visibleOrder(
         resolveOrder(
           availableModules((f) => auth.can(f, 'view'), pluginEntries),
@@ -41,6 +42,8 @@
         ),
         ui.sidebarHidden,
       ),
+      ui.sidebarFavorites,
+      ui.sidebarGroupOrder,
     ).flatMap((s) => s.modules),
   );
   // The entry the current route highlights (plugin slug, '' → Agents, …).

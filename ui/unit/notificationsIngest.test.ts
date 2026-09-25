@@ -10,6 +10,7 @@ function store() {
     '../toast.svelte': { toasts: { warn() {}, info() {} } },
     '../external': { openExternal: async () => {} },
     './workspace.svelte': { ws: { sessions: [] } },
+    '../desktop': { isEmbedded: false },
   });
   return notifications;
 }

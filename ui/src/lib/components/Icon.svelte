@@ -40,6 +40,8 @@
     sigma: 'M12 3.5H4.5L8.6 8l-4.1 4.5H12',
     // two side-by-side panes — Compare
     columns: 'M2.5 3h4.5v10H2.5V3Zm6.5 0h4.5v10H9V3Z',
+    // two opposed arrows — swap the side-by-side panes
+    swap: 'M2.5 5.5h10M10 3l2.5 2.5L10 8M13.5 10.5h-10M6 8l-2.5 2.5L6 13',
     // stored procedure — a runnable block (rounded card + play glyph)
     procedure: 'M3.5 3h9a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm2.3 2.7 3.4 2.3-3.4 2.3V5.7Z',
     // stored function — curly braces { } denoting a callable routine
@@ -113,6 +115,9 @@
     download: 'M8 2.5v7.5M4.8 7 8 10.2 11.2 7M3 13h10',
     share: 'M11.5 2.5a2 2 0 1 1 0 4 2 2 0 0 1 0-4ZM4.5 6a2 2 0 1 1 0 4 2 2 0 0 1 0-4Zm7 4a2 2 0 1 1 0 4 2 2 0 0 1 0-4Zm-7-1.5 7-3M4.5 8l7 3',
     pin: 'M9 2.5 13.5 7l-2 .5-3.5-3.5L9 2.5ZM6 4l6 6M4 8l4 4-3.5 1.5L3 12l1.5-3.5ZM8 12l-6 2',
+    // five-point star — Favorites (sidebar section + add/remove toggles; a
+    // "favorited" state fills it via CSS `fill: currentColor` on the path)
+    star: 'M8 2.4 9.5 6.24l4.1.24-3.17 2.61 1.04 3.98L8 10.85l-3.47 2.22 1.04-3.98L2.4 6.48l4.1-.24L8 2.4Z',
     radar: 'M8 2.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11Zm0 2.6a2.9 2.9 0 1 0 2.9 2.9M8 8l3.4-2.1M8 8h.01',
     image: 'M2.5 3.5h11a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1Zm2.2 2.7a1 1 0 1 1 0 .01M3.5 11.5l3.2-3.4 2 2 2-2.3 3.3 3.7',
     layers: 'M8 2.5 14 5.5 8 8.5 2 5.5 8 2.5Zm-6 5.5 6 3 6-3M2 10.8l6 3 6-3',

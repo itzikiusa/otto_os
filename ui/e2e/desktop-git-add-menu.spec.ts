@@ -23,6 +23,9 @@ import { expectFullyInViewport, openPage } from './helpers';
 // ─────────────────────────────────────────────────────────────────────────────
 
 const REPO_COUNT = 30; // enough rows to exceed the 800px viewport height
+// One worker for the file: the repos are seeded in beforeAll, and a second
+// worker would re-run it and register every repo twice.
+test.describe.configure({ mode: 'serial' });
 
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();

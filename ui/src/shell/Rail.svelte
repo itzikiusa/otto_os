@@ -9,20 +9,22 @@
   import { auth } from '../lib/stores/auth.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
   import { ctxMenu } from '../lib/contextmenu.svelte';
+  import { sidePane, splitMenuItems, navClick, SPLIT_HINT } from '../lib/stores/sidePane.svelte';
   import { tick } from 'svelte';
   import {
     activeNavId,
     availableModules,
-    groupModules,
     resolveOrder,
+    sidebarSections,
     visibleOrder,
   } from '../lib/sidebar';
 
   // The collapsed rail mirrors the same resolved module list as the Navigator
   // (shared registry → RBAC filter + plugins → user's saved order, minus hidden
   // ones), section by section with a thin separator between sections (no
-  // headers or folding — the Navigator owns those). It's read-only here:
-  // reordering / show-hide happens in the expanded Navigator (and Settings →
+  // headers or folding — the Navigator owns those): Favorites first, then the
+  // rest in the user's section order. It's read-only here: reordering /
+  // show-hide / favoriting happens in the expanded Navigator (and Settings →
   // Appearance). See ui.svelte.ts for persistence.
   const pluginEntries = $derived(
     plugins.list
@@ -30,7 +32,7 @@
       .map((p) => ({ id: `plugin/${p.slug}`, icon: p.icon, label: p.name })),
   );
   const sections = $derived(
-    groupModules(
+    sidebarSections(
       visibleOrder(
         resolveOrder(
           availableModules((f) => auth.can(f, 'view'), pluginEntries),
@@ -38,6 +40,8 @@
         ),
         ui.sidebarHidden,
       ),
+      ui.sidebarFavorites,
+      ui.sidebarGroupOrder,
     ),
   );
 
@@ -91,12 +95,19 @@
         <div class="rail-sep" role="separator" aria-label={sec.group.label} data-testid="rail-sep"></div>
       {/if}
       {#each sec.modules as m (m.id)}
+        {@const inSide = sidePane.showing && sidePane.key === m.id}
         <button
           class="rail-btn"
           class:active={isActive(m.id)}
-          onclick={() => router.go(m.id)}
-          title={`${m.label} · ${sec.group.label}`}
-          aria-label={m.label}
+          class:side={inSide}
+          onclick={(e) => navClick(e, m.id, m.label)}
+          oncontextmenu={(e) => {
+            const items = splitMenuItems(m.id, m.label);
+            if (items.length) ctxMenu.show(e, items);
+          }}
+          title={`${m.label} · ${sec.group.label}${inSide ? ' · in the side pane' : sidePane.supported ? ` — ${SPLIT_HINT}` : ''}`}
+          aria-label={inSide ? `${m.label} (in the side pane)` : m.label}
+          data-testid={`rail-${m.id}`}
         >
           <Icon name={m.icon} />
           {#if m.id === 'agents' && ws.workingCount > 0}
@@ -203,6 +214,12 @@
   .rail-btn.active {
     background: var(--accent-soft);
     color: var(--accent-text);
+  }
+  /* The module shown in the side-by-side pane: open, but not the page — a
+     hairline ring instead of the selection tint. */
+  .rail-btn.side {
+    color: var(--text);
+    box-shadow: inset 0 0 0 1px var(--border-strong);
   }
   .rail-modules .rail-btn.active::before {
     content: '';

@@ -6,8 +6,14 @@ import { ws } from './stores/workspace.svelte';
 import { router } from './router.svelte';
 import { startSnip } from './snip';
 import { selectAllInFocus } from './selectall';
+import { sidePane } from './stores/sidePane.svelte';
+import { isEmbedded } from './desktop';
 
 export function handleMenu(id: string): void {
+  // The window's menu while its side-by-side pane has focus: ⌘A / ⌘W / the
+  // session items act on that pane (or ⌘W closes it) — not on the main pane
+  // behind it. The pane runs the forwarded id through this same function.
+  if (sidePane.handleMenu(id)) return;
   switch (id) {
     case 'snip':
       // File → Take Snip, and the global shortcut (the Rust handler emits the
@@ -69,7 +75,9 @@ export function handleMenu(id: string): void {
  *  listener would receive targeted events for every window and re-broadcast
  *  the action (multi-window). */
 export async function attachMenuBridge(): Promise<() => void> {
-  if (!('__TAURI_INTERNALS__' in window)) return () => {};
+  // Once per window: the side-by-side pane gets menu items forwarded by its
+  // host instead (a second listener would run every item twice).
+  if (isEmbedded || !('__TAURI_INTERNALS__' in window)) return () => {};
   try {
     const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow');
     return await getCurrentWebviewWindow().listen<string>('otto://menu', (e) =>

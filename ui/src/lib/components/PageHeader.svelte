@@ -40,7 +40,10 @@
   import { ui, isTauri } from '../stores/ui.svelte';
   import { viewport } from '../stores/viewport.svelte';
   import { startWindowDrag } from '../windowDrag';
-  import { isPopout } from '../desktop';
+  import { isPopout, isEmbedded } from '../desktop';
+  import { sidePane } from '../stores/sidePane.svelte';
+  import { embedChrome } from '../stores/embedChrome.svelte';
+  import PaneControls from './PaneControls.svelte';
   import { ctxMenu, type MenuItem } from '../contextmenu.svelte';
 
   interface Props {
@@ -90,8 +93,21 @@
   /** The controls currently collapsed into the "⋯" menu (DOM order). */
   let collapsed: HTMLElement[] = $state([]);
 
+  // Inside the side-by-side pane the page's top row also carries the pane's
+  // controls (Swap / Open in main pane / Close — lib/stores/embedChrome).
+  $effect(() => (rootEl ? embedChrome.claim(rootEl) : undefined));
+  const hostsPane = $derived(isEmbedded && !!rootEl && embedChrome.owner === rootEl);
   // A pop-out window's traffic lights live in its own title strip (shell).
-  const padTraffic = $derived(isTauri && viewport.isDesktop && !ui.railExpanded && !isPopout);
+  // In a side-by-side split they sit over whichever pane leads: the main
+  // pane's header when the side pane trails, the side pane's when it leads.
+  const padTraffic = $derived(
+    (isTauri &&
+      viewport.isDesktop &&
+      !ui.railExpanded &&
+      !isPopout &&
+      !(sidePane.showing && sidePane.placement === 'leading')) ||
+      (hostsPane && embedChrome.padTraffic),
+  );
   // A phone row has no room for title + tabs + actions: tabs drop to the
   // second row there regardless of the requested placement.
   const tabsBelow = $derived(!!tabs && (tabsPlacement === 'below' || viewport.isPhone));
@@ -141,8 +157,14 @@
       const row = wrapEl.parentElement;
       const lead = row?.querySelector<HTMLElement>(':scope > .ph-leading');
       const inlineTabs = row?.querySelector<HTMLElement>(':scope > .ph-tabs-inline');
+      const pane = row?.querySelector<HTMLElement>(':scope > .pane-controls');
       const room = row
-        ? row.clientWidth - 48 - titleMin - (lead ? lead.offsetWidth + 12 : 0) - (inlineTabs ? inlineTabs.offsetWidth + 12 : 0)
+        ? row.clientWidth -
+          48 -
+          titleMin -
+          (lead ? lead.offsetWidth + 12 : 0) -
+          (inlineTabs ? inlineTabs.offsetWidth + 12 : 0) -
+          (pane ? pane.offsetWidth + 12 : 0)
         : Infinity;
       wrapEl.style.minWidth = `${Math.max(0, Math.min(Math.ceil(keepW) + RING * 2, room))}px`;
       let need = visible.reduce((s, k) => s + (widthOf.get(k) ?? 0), 0) + GAP * Math.max(0, visible.length - 1);
@@ -289,6 +311,7 @@
         </button>
       {/if}
     </div>
+    {#if hostsPane}<PaneControls />{/if}
   </div>
   {#if tabs && tabsBelow}
     <div class="ph-tabs-below">{@render tabs()}</div>

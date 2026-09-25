@@ -10,6 +10,7 @@ import {
   type AutoVerticalEngine,
   type AutoVerticalPrefs,
 } from '../db-view-prefs';
+import { insertFavorite } from '../sidebar';
 
 export type ThemeName = 'native' | 'pro-dark' | 'warm';
 export type SchemePref = 'auto' | 'light' | 'dark';
@@ -88,6 +89,8 @@ const LS = {
   sidebarOrder: 'otto_sidebar_order',
   sidebarHidden: 'otto_sidebar_hidden',
   sidebarCollapsedGroups: 'otto_sidebar_groups_collapsed',
+  sidebarFavorites: 'otto_sidebar_favorites',
+  sidebarGroupOrder: 'otto_sidebar_group_order',
   gitSideWidth: 'otto_git_side_width',
   gitGraphListWidth: 'otto_git_graph_list_width',
   gitGraphSideWidth: 'otto_git_graph_side_width',
@@ -137,6 +140,14 @@ function lsGetJson<T>(key: string, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+/** A persisted string list (ids): anything that isn't an array of strings —
+ *  a hand-edited or corrupt value — reads as empty rather than breaking the
+ *  sidebar. */
+function lsGetStrings(key: string): string[] {
+  const v = lsGetJson<unknown>(key, []);
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
 }
 
 /** Stable per-DEVICE id. Persisted once in localStorage and reused thereafter;
@@ -400,7 +411,16 @@ class UiStore {
   sidebarOrder: string[] = $state(lsGetJson<string[]>(LS.sidebarOrder, []));
   sidebarHidden: string[] = $state(lsGetJson<string[]>(LS.sidebarHidden, []));
   sidebarEditMode = $state(false);
-  /** Navigator sections (SidebarGroupId) the user has folded shut. Per device;
+  /** Favorites (per device): module ids pinned into the Navigator's first
+   *  section, in the user's order. A favorite shows ONLY there (it leaves its
+   *  own section). Ids the user can't currently see (RBAC, an uninstalled
+   *  plugin) are kept but skipped at render — see sidebar.ts sidebarSections. */
+  sidebarFavorites: string[] = $state(lsGetStrings(LS.sidebarFavorites));
+  /** The user's section order (SidebarGroupId list; Favorites is always
+   *  first and never listed). Empty = the shipped order; unknown ids are
+   *  ignored and new sections append (sidebar.ts resolveGroupOrder). */
+  sidebarGroupOrder: string[] = $state(lsGetStrings(LS.sidebarGroupOrder));
+  /** Navigator sections (SidebarSectionId) the user has folded shut. Per device;
    *  the section holding the current page is re-opened on navigation. */
   sidebarCollapsedGroups: string[] = $state(
     ((v) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []))(
@@ -461,14 +481,54 @@ class UiStore {
     lsSet(LS.sidebarHidden, JSON.stringify(this.sidebarHidden));
   }
 
-  /** Restore the shipped default order with everything visible and unfolded. */
+  isSidebarFavorite(id: string): boolean {
+    return this.sidebarFavorites.includes(id);
+  }
+
+  /** Replace the full favorites list (the saved ids, incl. ones not rendered). */
+  setSidebarFavorites(ids: string[]): void {
+    this.sidebarFavorites = ids;
+    lsSet(LS.sidebarFavorites, JSON.stringify(ids));
+  }
+
+  /** Favorite `id` — at the end, or before `beforeId` (a drop onto a
+   *  favorite). Favoriting is an explicit "I want this at hand", so a hidden
+   *  module is shown again rather than becoming an invisible favorite. */
+  addSidebarFavorite(id: string, beforeId?: string | null): void {
+    this.setSidebarFavorites(insertFavorite(this.sidebarFavorites, id, beforeId));
+    if (this.sidebarHidden.includes(id)) this.toggleSidebarHidden(id);
+  }
+
+  /** Unfavorite `id`: it returns to its own section, in its saved slot. */
+  removeSidebarFavorite(id: string): void {
+    if (!this.sidebarFavorites.includes(id)) return;
+    this.setSidebarFavorites(this.sidebarFavorites.filter((x) => x !== id));
+  }
+
+  toggleSidebarFavorite(id: string): void {
+    if (this.sidebarFavorites.includes(id)) this.removeSidebarFavorite(id);
+    else this.addSidebarFavorite(id);
+  }
+
+  /** Replace the section order (the full resolved SidebarGroupId list). */
+  setSidebarGroupOrder(ids: string[]): void {
+    this.sidebarGroupOrder = ids;
+    lsSet(LS.sidebarGroupOrder, JSON.stringify(ids));
+  }
+
+  /** Restore the shipped default: module and section order, everything
+   *  visible and unfolded, no favorites. */
   resetSidebar(): void {
     this.sidebarOrder = [];
     this.sidebarHidden = [];
     this.sidebarCollapsedGroups = [];
+    this.sidebarFavorites = [];
+    this.sidebarGroupOrder = [];
     lsSet(LS.sidebarOrder, '[]');
     lsSet(LS.sidebarHidden, '[]');
     lsSet(LS.sidebarCollapsedGroups, '[]');
+    lsSet(LS.sidebarFavorites, '[]');
+    lsSet(LS.sidebarGroupOrder, '[]');
   }
 
   toggleSidebarEdit(): void {
@@ -793,6 +853,44 @@ class UiStore {
     el.setAttribute('data-ambient', this.ambient);
     if (this.reduceTransparency) el.setAttribute('data-transparency', 'reduced');
     else el.removeAttribute('data-transparency');
+  }
+
+  /**
+   * Re-read the appearance + terminal preferences another document of THIS
+   * window wrote — the side-by-side pane is a second document (an iframe) on
+   * the same origin, so a theme picked in a Settings pane on one side reaches
+   * the other through the `storage` event (lib/stores/sidePane.svelte.ts).
+   * Returns true when `key` was one of them (and was applied).
+   */
+  reloadAppearance(key: string | null): boolean {
+    const keys: string[] = [
+      LS.theme,
+      LS.scheme,
+      LS.direction,
+      LS.accent,
+      LS.ambient,
+      LS.ambientPhoto,
+      LS.reduceTransparency,
+      LS.termFont,
+      LS.termFontFamily,
+    ];
+    if (key !== null && !keys.includes(key)) return false;
+    this.theme = (lsGet(LS.theme) as ThemeName) ?? 'native';
+    this.scheme = (lsGet(LS.scheme) as SchemePref) ?? 'auto';
+    this.direction = (lsGet(LS.direction) as Direction) ?? 'ltr';
+    this.accent = lsGet(LS.accent) ?? '';
+    const amb = lsGet(LS.ambient);
+    this.ambient = isAmbientMode(amb) ? amb : 'subtle';
+    const photo = lsGetJson<unknown>(LS.ambientPhoto, null) as { light?: unknown; dark?: unknown } | null;
+    this.ambientPhoto =
+      photo && typeof photo.light === 'string' && typeof photo.dark === 'string'
+        ? { light: photo.light, dark: photo.dark }
+        : null;
+    this.reduceTransparency = lsGet(LS.reduceTransparency) === '1';
+    this.termFontSize = Number(lsGet(LS.termFont) ?? '13') || 13;
+    this.termFontFamily = (lsGet(LS.termFontFamily) as TermFontKey) ?? 'system';
+    this.applyTheme();
+    return true;
   }
 }
 

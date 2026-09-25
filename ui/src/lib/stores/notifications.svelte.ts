@@ -10,6 +10,7 @@ import type { Notice, NoticeAction, NoticeSeverity, NotificationSettings } from 
 import { toasts } from '../toast.svelte';
 import { openExternal } from '../external';
 import { ws } from './workspace.svelte';
+import { isEmbedded } from '../desktop';
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
@@ -252,7 +253,9 @@ class NotificationStore {
   // ── Native OS notification (Tauri only) ───────────────────────────────────
 
   private async fireNative(notice: Notice): Promise<void> {
-    if (!isTauri) return;
+    // The side-by-side pane (an iframe) sees the same notices as its window:
+    // one native banner per notice, from the main document only.
+    if (!isTauri || isEmbedded) return;
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       // Returns true | false | null (null = "prompt", not yet decided).

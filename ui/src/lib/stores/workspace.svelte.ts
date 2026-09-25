@@ -21,7 +21,8 @@ import { ui, clientId } from './ui.svelte';
 import { winKey } from '../win';
 import { lsGet, lsSet } from '../storage';
 import { layout, type Axis } from './splitLayout.svelte';
-import { MAX_PANES } from './splitLayout';
+import { MAX_PANES, LS_PANES } from './splitLayout';
+import { isEmbedded } from '../desktop';
 
 // Layout state is per-WINDOW (multi-window): winKey() namespaces these by the
 // window's label so two windows never clobber each other's workspace/tabs/view.
@@ -631,6 +632,22 @@ class WorkspaceStore {
   private persistTabs(): void {
     if (!this.tabsHydrated) return;
     lsSet(winKey(LS_TABS + this.tabsKey), JSON.stringify(this.openTabs));
+  }
+
+  /** Is `key` (a `storage` event key) this workspace's persisted tabs or
+   *  split layout? */
+  ownsLayoutKey(key: string | null): boolean {
+    return key === winKey(LS_TABS + this.tabsKey) || key === winKey(LS_PANES + this.tabsKey);
+  }
+
+  /** Re-read the open tabs + split layout that ANOTHER document of this
+   *  window persisted — the side-by-side pane (an iframe) shares the window's
+   *  keys, so whichever pane shows Agents is the owner and the other adopts
+   *  its tabs when they change (lib/stores/sidePane.svelte.ts). A no-op until
+   *  the current workspace's layout has been restored once. */
+  adoptPersistedLayout(): void {
+    if (!this.tabsHydrated || !this.layoutReady) return;
+    this.restoreLayout(this.tabsKey);
   }
 
   /** Persist the split layout per workspace, so an arrangement of up to
@@ -1298,6 +1315,9 @@ class WorkspaceStore {
         break;
       }
       case 'notice': {
+        // The side-by-side pane gets the same event stream: the main window
+        // toasts it once.
+        if (isEmbedded) break;
         const level = ev.level === 'error' ? 'error' : ev.level === 'warn' ? 'warn' : 'info';
         toasts.push(level, ev.title, ev.body);
         break;

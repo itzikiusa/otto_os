@@ -8,6 +8,9 @@
 //   #/bar            — the assistant bar panel (`otto-bar`)
 //   #/tray           — the menu-bar popover (`otto-tray`)
 //   ?popout=1#/<r>   — a pop-out window of route <r> (`popout-<N>`)
+//   ?embed=1#/<r>    — the side-by-side pane (an iframe in the main window)
+
+import { isEmbedSearch } from './sidePane';
 
 export const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
@@ -19,6 +22,15 @@ export const isPopout: boolean =
   typeof window !== 'undefined' &&
   (new URLSearchParams(window.location.search).get('popout') === '1' ||
     typeof (window as { __OTTO_POPOUT__?: PopoutInit }).__OTTO_POPOUT__ === 'object');
+
+/** True inside the side-by-side pane: the main window's content column split
+ *  in two, the second pane being this app in a same-origin `<iframe>` at
+ *  `?embed=1#/<route>` (lib/sidePane.ts). The shell renders chrome-less (no
+ *  sidebar, status bar or floating bar) and skips everything that must run
+ *  once per WINDOW (native menu bridge, native notifications, route restore,
+ *  palette commands…). Never true for a top-level document. */
+export const isEmbedded: boolean =
+  typeof window !== 'undefined' && window.parent !== window && isEmbedSearch(window.location.search);
 
 /** Title the shell gave this pop-out (falls back to the document title). */
 export function popoutTitle(): string {

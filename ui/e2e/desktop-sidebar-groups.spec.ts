@@ -47,7 +47,13 @@ async function boot(
   await page.addInitScript((r) => {
     if (sessionStorage.getItem('sg-reset')) return;
     sessionStorage.setItem('sg-reset', '1');
-    for (const k of ['otto_sidebar_order', 'otto_sidebar_hidden', 'otto_sidebar_groups_collapsed']) {
+    for (const k of [
+      'otto_sidebar_order',
+      'otto_sidebar_hidden',
+      'otto_sidebar_groups_collapsed',
+      'otto_sidebar_favorites',
+      'otto_sidebar_group_order',
+    ]) {
       localStorage.removeItem(k);
     }
     localStorage.setItem('otto_rail_expanded', r);

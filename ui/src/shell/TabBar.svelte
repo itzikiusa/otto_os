@@ -9,6 +9,10 @@
   import { ui, isTauri } from '../lib/stores/ui.svelte';
   import { startWindowDrag } from '../lib/windowDrag';
   import { router } from '../lib/router.svelte';
+  import { sidePane } from '../lib/stores/sidePane.svelte';
+  import { embedChrome } from '../lib/stores/embedChrome.svelte';
+  import { isEmbedded } from '../lib/desktop';
+  import PaneControls from '../lib/components/PaneControls.svelte';
   import { ctxMenu } from '../lib/contextmenu.svelte';
   import { popoutItems } from '../lib/popoutMenu';
   import ShareModal from '../modules/agents/ShareModal.svelte';
@@ -158,12 +162,20 @@
     dragId = null;
     dragOverId = null;
   }
+
+  // In the side-by-side pane the tab row carries the pane's controls, like a
+  // PageHeader does on every other page (lib/stores/embedChrome).
+  let barEl: HTMLDivElement | undefined = $state();
+  $effect(() => (barEl ? embedChrome.claim(barEl) : undefined));
+  const hostsPane = $derived(isEmbedded && !!barEl && embedChrome.owner === barEl);
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
+  bind:this={barEl}
   class="tabbar chrome-material"
-  class:tauri-pad={isTauri && !ui.railExpanded}
+  class:tauri-pad={(isTauri && !ui.railExpanded && !(sidePane.showing && sidePane.placement === 'leading')) ||
+    (hostsPane && embedChrome.padTraffic)}
   data-tauri-drag-region
   onmousedown={startWindowDrag}
 >
@@ -337,6 +349,7 @@
   >
     <Icon name="plus" size={13} />
   </button>
+  {#if hostsPane}<PaneControls />{/if}
 </div>
 
 <style>

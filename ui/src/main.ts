@@ -12,6 +12,7 @@ import '@fontsource/cousine/hebrew.css';
 import App from './App.svelte';
 import { mockEnabled, setupMock } from './lib/api/mock';
 import { setToken, getToken, baseUrl } from './lib/api/client';
+import { isEmbedded } from './lib/desktop';
 
 if (mockEnabled()) {
   setupMock();
@@ -118,7 +119,11 @@ const app = mount(App, {
 // When a NEW service worker takes control (after a deploy), reload once so the
 // fresh app shell is shown immediately — otherwise a cached SW can keep serving
 // a stale build until the user manually clears site data.
-if ('serviceWorker' in navigator) {
+// The side-by-side pane (an iframe of this window, `?embed=1`) leaves the
+// service worker to its host: a new worker taking control reloads the host,
+// and the pane with it — a second reload from inside the pane would drop it
+// back to its boot state mid-use.
+if ('serviceWorker' in navigator && !isEmbedded) {
   let reloadingForSw = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (reloadingForSw) return;
