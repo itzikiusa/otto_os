@@ -198,6 +198,7 @@ for (const variant of variants) test(`Loaded data workbenches ${variant.name}`, 
   await page.getByRole('menuitem',{name:'Browse files (SFTP)',exact:true}).click();
   await expect(page.locator('.sftp .nav',{hasText:'monthly-reports'})).toBeVisible();
   await expectFullyInViewport(page,page.getByLabel('Filter files in this directory'));
+  for (const selector of ['.name .ellipsis','.size','.mtime','.perms']) await expect(page.locator('.sftp-row').filter({has:page.locator('.nav')}).first().locator(selector).first()).toHaveCSS('direction','ltr');
   await shot('sftp');
 });
 
