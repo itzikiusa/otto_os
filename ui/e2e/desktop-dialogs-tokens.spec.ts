@@ -90,7 +90,7 @@ test('delete scheduled task: in-app confirm, Cancel keeps it, Delete removes it'
   await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete…' }).click();
   const dlg = page.getByRole('dialog', { name: 'Delete scheduled task' });
   await expect(dlg).toBeVisible();
-  await expect(dlg).toContainText('Delete scheduled task "E2E confirm target"?');
+  await expect(dlg).toContainText('Delete “E2E confirm target”?');
   await dlg.getByRole('button', { name: 'Cancel' }).click();
   await expect(dlg).toBeHidden();
   await expect(row).toBeVisible();

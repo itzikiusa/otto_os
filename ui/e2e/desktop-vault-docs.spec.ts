@@ -276,8 +276,9 @@ test('ui: OKF panel validates and reports', async ({ page }) => {
   // OKF chip visible on an OKF vault; validate from the right panel.
   await expect(page.locator('.okf-chip')).toBeVisible();
   await page.locator('.right .hdr', { hasText: 'OKF' }).click();
-  await page.locator('.okf-actions .mini', { hasText: 'Validate' }).click();
-  await expect(page.locator('.right')).toContainText('✓ OKF conformant (');
+  await page.locator('.okf-actions').getByRole('button', { name: 'Validate', exact: true }).click();
+  // The conformance tick is an icon now, not a ✓ glyph in the text.
+  await expect(page.locator('.right .none.ok')).toContainText('OKF conformant (');
   // Broken-link warning surfaces as W2.
   await expect(page.locator('.finding.warn .t', { hasText: 'W2' }).first()).toBeVisible();
 });

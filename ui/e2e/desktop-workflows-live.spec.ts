@@ -240,11 +240,11 @@ test('human-approval pause is announced promptly; approve resumes to success', a
   await gotoWorkflows(page);
   const runId = await startRun(wfId);
 
-  // The pause must surface as a ⏸ badge on the Running sidebar row promptly —
-  // driven by the pause EVENT, not by waiting for a poll to happen by.
+  // The pause must surface as an approval badge on the Running sidebar row
+  // promptly — driven by the pause EVENT, not by waiting for a poll to happen by.
   const running = page.getByTestId('running-workflows');
   await expect(running).toBeVisible({ timeout: 15_000 });
-  await expect(running.getByTitle('waiting for approval')).toBeVisible({ timeout: 5_000 });
+  await expect(running.getByRole('img', { name: 'Waiting for your approval' })).toBeVisible({ timeout: 5_000 });
 
   // Open the run: the approval banner is up; approve it.
   await running.getByText('E2E Approve').click();

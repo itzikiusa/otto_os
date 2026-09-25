@@ -1,4 +1,7 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
+// Save lives in the PageHeader as a plain "Save" (its title only describes it)
+// and stays disabled until the draft differs from what was loaded/saved.
+const saveButton = (page: Page) => page.getByRole('button', { name: 'Save', exact: true });
 const config = (goal: string, version = 0) => ({ skills: null, soul: null, extra_context_md: '', include_memory: true, include_repo_map: false, goal_md: goal, memory_md: '', decisions_md: '', references: [], artifacts: [], context_version: version });
 
 test('workspace context previews all shared fields, sends version and preserves draft on conflict', async ({ page }) => {
@@ -24,7 +27,7 @@ test('workspace context previews all shared fields, sends version and preserves 
   await page.getByLabel('Shared instructions').fill('Keep changes local');
   await page.getByLabel('Workspace memory', { exact: true }).fill('Use the office bastion');
   await page.getByLabel('References', { exact: true }).fill('docs/contracts/api.md\nhttps://example.test/design');
-  await page.getByRole('button', { name: 'Save workspace context' }).click();
+  await saveButton(page).click();
   await expect.poll(() => saved?.context_version).toBe(3);
   expect(saved?.references).toEqual(['docs/contracts/api.md', 'https://example.test/design']);
   expect(saved?.memory_md).toBe('Use the office bastion');
@@ -32,7 +35,7 @@ test('workspace context previews all shared fields, sends version and preserves 
   await expect.poll(() => preview?.memory_md).toBe('Use the office bastion');
   rejectSave = true;
   await page.getByLabel('Goal', { exact: true }).fill('Unsaved goal');
-  await page.getByRole('button', { name: 'Save workspace context' }).click();
+  await saveButton(page).click();
   await expect(page.getByRole('alert')).toContainText('changed');
   await expect(page.getByLabel('Goal', { exact: true })).toHaveValue('Unsaved goal');
   await page.getByRole('button', { name: 'Reload saved context' }).click();
@@ -67,7 +70,10 @@ test('late load and save responses cannot overwrite a different workspace draft'
   await expect(page.getByLabel('Goal', { exact: true })).toHaveValue('Goal two');
   await page.getByRole('button', { name: 'Workspace one', exact: true }).click();
   await expect(page.getByLabel('Goal', { exact: true })).toHaveValue('Goal one');
-  await page.getByRole('button', { name: 'Save workspace context' }).click();
+  // A clean draft has nothing to save — edit first so Save is live.
+  await expect(saveButton(page)).toBeDisabled();
+  await page.getByLabel('Goal', { exact: true }).fill('Goal one edited');
+  await saveButton(page).click();
   await expect.poll(() => saveStarted).toBe(true);
   await page.getByRole('button', { name: 'Workspace two', exact: true }).click();
   await expect(page.getByLabel('Goal', { exact: true })).toHaveValue('Goal two');
@@ -76,7 +82,7 @@ test('late load and save responses cannot overwrite a different workspace draft'
   releaseSave(); await savedResponse;
   await page.evaluate(() => new Promise(requestAnimationFrame));
   await expect(page.getByLabel('Goal', { exact: true })).toHaveValue('Workspace two draft');
-  await expect(page.getByRole('button', { name: 'Save workspace context' })).toBeEnabled();
+  await expect(saveButton(page)).toBeEnabled();
 });
 
 test('a delayed preview cannot be relabeled as a different provider or newer draft', async ({ page }) => {
@@ -95,7 +101,7 @@ test('a delayed preview cannot be relabeled as a different provider or newer dra
   await page.goto('/e2e/fixtures/workspace-context.html');
   await page.getByRole('button', { name: 'Preview context', exact: true }).click();
   await expect.poll(() => started).toBe(true);
-  await page.getByRole('combobox', { name: 'Provider', exact: true }).selectOption('codex');
+  await page.getByRole('combobox', { name: 'Preview for', exact: true }).selectOption('codex');
   await page.getByLabel('Goal', { exact: true }).fill('New draft');
   const response = page.waitForResponse((r) => r.url().endsWith('/context/preview'));
   release(); await response;
