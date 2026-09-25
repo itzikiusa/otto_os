@@ -13,23 +13,11 @@ const CHAPTERS = layout();
 const XFADE = 12; // frames of overlap between shots inside a chapter
 const clamp = { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' } as const;
 
-/** Music gain over the film: ducked ~20 dB under the voice, open in the gaps. */
-const VO_SPANS = CHAPTERS.filter((c) => c.hasVo).map((c) => [c.voFrom, c.voFrom + c.voFrames] as const);
-const OPEN = 0.72;
-const DUCK = 0.13;
+/** Instrumental edition: a continuous score with gentle opening/closing fades. */
 function musicGain(f: number): number {
-  let g = OPEN;
-  for (const [a, b] of VO_SPANS) {
-    const r = 10; // ramp frames
-    if (f >= a - r && f <= b + r * 2) {
-      const k = f < a ? (f - (a - r)) / r : f > b ? 1 - (f - b) / (r * 2) : 1;
-      g = Math.min(g, OPEN - (OPEN - DUCK) * Math.max(0, Math.min(1, k)));
-    }
-  }
-  const end = T.totalFrames;
   const fadeIn = interpolate(f, [0, 20], [0, 1], clamp);
-  const fadeOut = interpolate(f, [end - 60, end - 1], [1, 0], clamp);
-  return g * fadeIn * fadeOut;
+  const fadeOut = interpolate(f, [T.totalFrames - 60, T.totalFrames - 1], [1, 0], clamp);
+  return 0.85 * fadeIn * fadeOut;
 }
 
 export const Tour: React.FC = () => (
@@ -42,11 +30,6 @@ export const Tour: React.FC = () => (
     ))}
     {/* ── sound ── */}
     <Audio src={staticFile('audio/music.wav')} volume={musicGain} />
-    {CHAPTERS.filter((c) => c.hasVo).map((c) => (
-      <Sequence key={`vo-${c.id}`} from={c.voFrom} name={`vo:${c.id}`}>
-        <Audio src={staticFile(`audio/vo-${c.id}.wav`)} volume={1} />
-      </Sequence>
-    ))}
     {CHAPTERS.slice(1).map((c) => (
       <Sequence key={`wh-${c.id}`} from={Math.max(0, c.from - 8)} durationInFrames={24} name="sfx:whoosh">
         <Audio src={staticFile('audio/sfx-whoosh.wav')} volume={0.32} />

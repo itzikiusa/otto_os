@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 
 const tour = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repo = resolve(tour, '../../..');
-const FF = process.env.FFMPEG ?? '/opt/homebrew/bin/ffmpeg';
+const FF = process.env.FFMPEG ?? 'ffmpeg';
 const argv = process.argv.slice(2);
 const opt = (f) => {
   const i = argv.indexOf(`--${f}`);
@@ -42,7 +42,7 @@ if (stills) {
 }
 
 const raw = join(out, 'otto-tour.raw.mp4');
-const final = join(out, 'otto-tour.mp4');
+const final = join(out, 'otto-tour-instrumental-20260925.mp4');
 let last = -1;
 await renderMedia({
   serveUrl,
@@ -90,7 +90,7 @@ const vtt = join(out, 'otto-tour.vtt');
 const walk = join(repo, 'ui/src/lib/walkthroughs');
 copyFileSync(vtt, join(walk, 'otto-tour.vtt'));
 const film = {
-  file: 'otto-tour.mp4',
+  file: 'otto-tour-instrumental-20260925.mp4',
   poster: 'otto-tour-poster.jpg',
   captions: 'otto-tour.vtt',
   duration: Math.round(timing.totalSeconds * 100) / 100,

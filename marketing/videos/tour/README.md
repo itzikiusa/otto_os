@@ -1,12 +1,11 @@
 # Otto product tour film
 
-One narrated film (~3 min, 1920×1080, 30 fps, H.264 + AAC) that walks through
+One music-led film (~3 min, 1920×1080, 30 fps, H.264 + AAC) that walks through
 every main area of the app, chaptered by sidebar section. The Help →
 Walkthroughs page plays it from `ui/src/lib/walkthroughs/film.json`.
 
 Everything here is self-contained: its own `package.json`, footage captured from
-the **current** UI, narration from macOS `say`, and a soundtrack synthesized
-from code. Nothing is downloaded or licensed.
+the **current** UI, an original instrumental soundtrack synthesized from code, and instructional captions. Nothing is downloaded or licensed.
 
 ```
 script/chapters.json     narration text + chapter → sidebar section map (edit this first)
@@ -74,7 +73,11 @@ node scripts/capture.mjs --attach --only db-builder,git
 node scripts/contact.mjs public/capture   # 4-up contact sheets in .cache/cs/ for review
 ```
 
-## 2. Narration and captions
+## 2. Timing and captions
+
+The existing timeline and captions are retained in the instrumental edition.
+The optional script below regenerates sentence timing; its voice files are not
+included in the final composition.
 
 ```bash
 node scripts/voice.mjs            # VOICE=Samantha RATE=182 by default
@@ -99,13 +102,13 @@ line re-times the whole film automatically.
 node scripts/soundtrack.mjs       # sized to timing.json
 ```
 
-This produces an original ambient pad (Dmaj9 – Bm9 – Gmaj7 – A6sus at 96 BPM)
+This produces an original ambient pad (Dmaj9 – Bm9 – Gmaj7 – A6sus at 112 BPM)
 plus a soft plucked pulse, with a riser on the intro and a swell and ring-out
 on the outro. It is normalized to −20 LUFS. It also writes the UI accents
 (`sfx-click|whoosh|tick|riser|impact.wav`).
 
-The composition ducks the music about 20 dB under the voice (`src/Tour.tsx`)
-and opens it up in the gaps.
+The instrumental composition keeps the score present throughout, with gentle
+opening and closing fades. Captions are enabled by default in the app.
 
 ## 4. Render
 
@@ -117,7 +120,7 @@ npx remotion studio src/index.ts                # interactive preview
 
 The render produces:
 
-- `out/otto-tour.mp4`, with a two-pass loudnorm to −16 LUFS integrated and
+- `out/otto-tour-instrumental-20260925.mp4`, with a two-pass loudnorm to −16 LUFS integrated and
   −1.5 dBTP, and the video stream copied
 - `out/otto-tour-poster.jpg`
 - `ui/src/lib/walkthroughs/film.json`, the manifest the app reads (chapters
@@ -132,7 +135,7 @@ The mp4 and poster are **not** committed; `out/`, `public/capture/` and
 `walkthroughs` GitHub release, and only after the owner approves:
 
 ```bash
-gh release upload walkthroughs out/otto-tour.mp4 out/otto-tour-poster.jpg out/otto-tour.vtt --clobber
+gh release upload walkthroughs out/otto-tour-instrumental-20260925.mp4 out/otto-tour-poster.jpg out/otto-tour.vtt --clobber
 ```
 
 ## Editing the film
@@ -145,3 +148,10 @@ gh release upload walkthroughs out/otto-tour.mp4 out/otto-tour-poster.jpg out/ot
   - a `montage` shot is a quick beat of several stills
   - a `custom` shot is used for the desktop-app and phone beats
 - **After a UI change.** Re-run the capture, then render.
+
+## Instrumental update without re-rendering footage
+
+`node scripts/instrumental.mjs /path/to/otto-tour.mp4` replaces only the audio
+stream of an existing tour with the current original score. It retains the
+video bytes, duration and chapter/caption timing. Run `soundtrack.mjs` first.
+The output has a new filename, so the previous narrated asset remains available.
