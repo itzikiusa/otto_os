@@ -3,6 +3,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { missionControlBus } from '../../lib/events.svelte';
@@ -33,6 +35,12 @@
   let backfilling = $state(false);
 
   let view = $state<'list' | 'graph'>('list');
+  function onViewKey(e: KeyboardEvent): void {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+    e.preventDefault();
+    view = e.key === 'Home' ? 'list' : e.key === 'End' ? 'graph' : view === 'list' ? 'graph' : 'list';
+    (e.currentTarget as HTMLElement).querySelectorAll<HTMLButtonElement>('[role="tab"]')[view === 'list' ? 0 : 1]?.focus();
+  }
   let selectedId = $state<string | null>(null);
   /** The user closed the detail pane: don't auto-open it again this visit. */
   let userClosed = false;
@@ -62,6 +70,11 @@
     if (id === lastWs) return;
     lastWs = id;
     untrack(() => {
+      ++reqSeq;
+      summary = null;
+      graph = { nodes: [], edges: [] };
+      loading = false;
+      err = '';
       items = [];
       if (selectedId) select(null);
       userClosed = false;
@@ -242,29 +255,34 @@
   subtitle="Every agentic activity as one traceable unit — sessions, swarms, loops, workflows, reviews, stories, PRs & triggers."
 >
   {#snippet actions()}
-    <button class="btn small" disabled={backfilling || loading} onclick={runBackfill} title="Re-derive the graph from every source">
+    <button class="btn small" disabled={!ws.currentId || backfilling || loading} onclick={runBackfill} title="Re-derive the graph from every source">
       <Icon name="refresh" size={13} /> {backfilling ? 'Refreshing…' : 'Refresh'}
     </button>
   {/snippet}
 </PageHeader>
 <PageBody>
+{#if !ws.currentId}
+  <EmptyState variant="page" icon="radar" title="Add a workspace to get started"
+    body="Mission Control brings together the work in your workspace. Add a project folder to get started."
+    actionLabel="Add workspace" actionIcon="plus" onaction={() => (ui.newWorkspaceOpen = true)} />
+{:else}
 <div class="mission-control" class:detail-open={selectedId}>
   <!-- summary tiles -->
   <div class="tiles" aria-label="Summary">
     <div class="tile">
-      <span class="t-val">{summary?.total ?? 0}</span>
+      <span class="t-val">{summary?.total ?? '—'}</span>
       <span class="t-lbl">Work items</span>
     </div>
     <div class="tile">
-      <span class="t-val accent">{summary?.active ?? 0}</span>
+      <span class="t-val accent">{summary?.active ?? '—'}</span>
       <span class="t-lbl">Active</span>
     </div>
     <div class="tile" class:warn={(summary?.needs_approval ?? 0) > 0}>
-      <span class="t-val" class:warn-text={(summary?.needs_approval ?? 0) > 0}>{summary?.needs_approval ?? 0}</span>
+      <span class="t-val" class:warn-text={(summary?.needs_approval ?? 0) > 0}>{summary?.needs_approval ?? '—'}</span>
       <span class="t-lbl">Needs approval</span>
     </div>
     <div class="tile">
-      <span class="t-val">{fmtCost(summary?.total_cost ?? 0)}</span>
+      <span class="t-val">{summary ? fmtCost(summary.total_cost) : '—'}</span>
       <span class="t-lbl">Total cost</span>
     </div>
   </div>
@@ -287,11 +305,11 @@
       <input class="input search" type="search" placeholder="Search titles…" bind:value={q} oninput={onQInput} aria-label="Search work items" />
       {#if hasFilters}<button class="btn ghost small" onclick={clearFilters}>Clear filters</button>{/if}
     </div>
-    <div class="segmented view-toggle" role="tablist" aria-label="View">
-      <button role="tab" aria-selected={view === 'list'} class:active={view === 'list'} onclick={() => (view = 'list')}>
+    <div class="segmented view-toggle" role="tablist" aria-label="View" tabindex="-1" onkeydown={onViewKey}>
+      <button role="tab" tabindex={view === 'list' ? 0 : -1} aria-selected={view === 'list'} class:active={view === 'list'} onclick={() => (view = 'list')}>
         <Icon name="format" size={12} /> List
       </button>
-      <button role="tab" aria-selected={view === 'graph'} class:active={view === 'graph'} onclick={() => (view = 'graph')}>
+      <button role="tab" tabindex={view === 'graph' ? 0 : -1} aria-selected={view === 'graph'} class:active={view === 'graph'} onclick={() => (view = 'graph')}>
         <Icon name="share" size={12} /> Graph
       </button>
     </div>
@@ -309,7 +327,9 @@
   <!-- body -->
   <div class="mc-body">
     <div class="mc-main">
-      {#if items.length === 0 && !loading && err}
+      {#if items.length === 0 && loading}
+        <div aria-label="Loading work items" role="status"><Skeleton rows={6} height={40} /></div>
+      {:else if items.length === 0 && err}
         <!-- A failed load is not "no work items yet": say so, with Retry. -->
         <div class="card">
           <EmptyState
@@ -369,6 +389,7 @@
     {/if}
   </div>
 </div>
+{/if}
 </PageBody>
 </div>
 

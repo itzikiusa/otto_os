@@ -9,6 +9,7 @@
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { PersonalAgent } from '../../lib/api/types';
   import { agentTemplates, templateById } from './templates';
@@ -107,6 +108,10 @@
       error = 'Name is required.';
       return;
     }
+    if (!agent && !ws.currentId) {
+      error = 'Add or select a workspace before saving. Your changes are kept in this form.';
+      return;
+    }
     const body = {
       name: fName.trim(),
       avatar: fAvatar.trim(),
@@ -148,6 +153,9 @@
 <Modal title={agent ? `Edit ${agent.name}` : 'New personal agent'} width={620} {onclose}>
   <div class="sheet">
     {#if error}<div class="err" role="alert">{error}</div>{/if}
+    {#if !agent && !ws.currentId}
+      <button class="btn" onclick={() => (ui.newWorkspaceOpen = true)}>Add workspace</button>
+    {/if}
 
     {#if !agent}
       <label class="fld">

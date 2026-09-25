@@ -9,6 +9,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { router } from '../../lib/router.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -121,14 +122,18 @@
     {#snippet actions()}
       <!-- One primary per view: Rooms has its own create (the list's name
            field / the empty state's "Create a room"). -->
-      {#if sub !== 'rooms' && agents.length > 0}
+      {#if ws.currentId && sub !== 'rooms' && agents.length > 0}
         <button class="btn primary" data-icon="plus" onclick={() => (creating = true)}><Icon name="plus" size={12} /> New agent</button>
       {/if}
     {/snippet}
   </PageHeader>
   <PageBody fill={sub === 'rooms'}>
   <div class="pa">
-    {#if sub === 'rooms'}
+    {#if !ws.currentId}
+      <EmptyState variant="page" icon="user" title="Add a workspace to get started"
+        body="Personal agents and rooms belong to a workspace. Add your project folder to create them."
+        actionLabel="Add workspace" actionIcon="plus" onaction={() => (ui.newWorkspaceOpen = true)} />
+    {:else if sub === 'rooms'}
       <RoomsView />
     {:else}
       <LoadState

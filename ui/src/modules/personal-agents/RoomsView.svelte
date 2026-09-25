@@ -3,9 +3,11 @@
   // Room list + create on the left; the selected room's membership editor,
   // live message feed (WS agent_room_message + `after` paging) and the user
   // post box on the right.
+  import { tick, untrack } from 'svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -19,6 +21,7 @@
   import type { AgentRoomMessage, AgentRoomWithMembers } from '../../lib/api/types';
 
   let selectedId = $state<string | null>(null);
+  let showingList = $state(false);
   let newRoomName = $state('');
   let draft = $state('');
   let busy = $state(false);
@@ -26,6 +29,7 @@
   let createError = $state('');
   let feedEl = $state<HTMLElement | null>(null);
   let createEl = $state<HTMLInputElement | null>(null);
+  let roomListEl = $state<HTMLElement | null>(null);
   let roomsLoading = $state(true);
   const roomsError = $derived(loadErrorOf(personalAgents, 'roomsError'));
 
@@ -46,12 +50,13 @@
   });
   // First room auto-selects; a deleted selection falls back.
   $effect(() => {
-    if (rooms.length > 0 && !rooms.some((r) => r.room.id === selectedId)) {
+    if (!showingList && rooms.length > 0 && !rooms.some((r) => r.room.id === selectedId)) {
       selectedId = rooms[0].room.id;
     }
   });
   $effect(() => {
-    if (selectedId) void personalAgents.loadMessages(selectedId);
+    const id = selectedId;
+    if (id) untrack(() => void personalAgents.loadMessages(id));
   });
   // Keep the feed pinned to the latest message.
   $effect(() => {
@@ -65,6 +70,15 @@
   }
 
 
+  async function backToRooms(): Promise<void> {
+    const previous = selectedId;
+    showingList = true;
+    selectedId = null;
+    await tick();
+    Array.from(roomListEl?.querySelectorAll<HTMLButtonElement>('.room') ?? [])
+      .find(button => button.dataset.roomId === previous)?.focus();
+  }
+
   async function createRoom(): Promise<void> {
     const name = newRoomName.trim();
     if (!name || !ws.currentId) return;
@@ -72,6 +86,7 @@
     createError = '';
     try {
       selectedId = await personalAgents.createRoom(ws.currentId, name);
+      showingList = false;
       newRoomName = '';
     } catch (e) {
       createError = `Couldn’t create the room. ${loadErrorText(e)}`;
@@ -141,7 +156,8 @@
 </script>
 
 <div class="rooms">
-  <aside class="list" aria-label="Rooms">
+  {#if !viewport.isPhone || !selectedId}
+  <aside class="list" aria-label="Rooms" bind:this={roomListEl}>
     <div class="create">
       <input
         bind:this={createEl}
@@ -158,9 +174,10 @@
         <li>
           <button
             class="room"
+            data-room-id={r.room.id}
             class:active={r.room.id === selectedId}
             aria-current={r.room.id === selectedId ? 'true' : undefined}
-            onclick={() => (selectedId = r.room.id)}
+            onclick={() => { showingList = false; selectedId = r.room.id; }}
             oncontextmenu={(e) => roomMenu(e, r)}
           >
             <span class="room-name" title={r.room.name}>{r.room.name}</span>
@@ -170,7 +187,9 @@
       {/each}
     </ul>
   </aside>
+  {/if}
 
+  {#if !viewport.isPhone || selectedId || rooms.length === 0}
   <section class="detail">
     <LoadState
       what="rooms"
@@ -191,6 +210,10 @@
       {/snippet}
       {#if selected}
         <header class="detail-head">
+          {#if viewport.isPhone}
+            <button class="icon-btn" aria-label="Back to rooms" title="Back to rooms"
+              onclick={backToRooms}><Icon name="chevronLeft" size={16} /></button>
+          {/if}
           <strong class="detail-title" title={selected.room.name}>{selected.room.name}</strong>
           <button
             class="icon-btn"
@@ -232,6 +255,12 @@
         </div>
 
         <div class="feed" bind:this={feedEl} role="log" aria-label="Room messages" aria-live="polite">
+          <LoadState what="room messages" loading={personalAgents.messagesLoading[selectedId ?? '']}
+            error={personalAgents.messagesError[selectedId ?? '']} empty={messages.length === 0}
+            onretry={() => selectedId && void personalAgents.loadMessages(selectedId)}>
+            {#snippet emptyView()}
+              <div class="meta pad">No messages yet. Member agents post here while they run, and anything you send is visible to all of them.</div>
+            {/snippet}
           {#each messages as m (m.id)}
             {@const agentMsg = m.author_kind !== 'user'}
             {@const a = agentMsg ? personalAgents.agent(m.author_id) : undefined}
@@ -250,9 +279,8 @@
                 <p class="msg-text">{m.text}</p>
               </div>
             </div>
-          {:else}
-            <div class="meta pad">No messages yet. Member agents post here while they run, and anything you send is visible to all of them.</div>
           {/each}
+          </LoadState>
         </div>
 
         {#if error}<div class="err" role="alert">{error}</div>{/if}
@@ -271,6 +299,7 @@
       {/if}
     </LoadState>
   </section>
+  {/if}
 </div>
 
 <style>
@@ -291,7 +320,7 @@
   .room.active { background: var(--accent-soft); border-color: transparent; font-weight: 600; }
   .room.active .meta { font-weight: 400; }
   .room-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .detail { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+  .detail { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
   .detail-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--text); min-width: 0; }
   .detail-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-l); }
   .members { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
@@ -311,7 +340,7 @@
     border-radius: 999px; padding: 2px 8px; font: inherit; font-size: var(--fs-s);
   }
   .feed {
-    flex: 1; min-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
+    flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
     border: 1px solid var(--border); border-radius: var(--radius-m); background: var(--surface); padding: 10px;
   }
   .msg { display: flex; gap: 8px; align-items: flex-start; }
@@ -341,6 +370,8 @@
   }
   @media (max-width: 640px) {
     .rooms { flex-direction: column; }
-    .list { width: 100%; }
+    .list { width: 100%; flex: 1; }
+    .detail-head :global(.icon-btn:first-child) { flex: none; }
+    :global([dir="rtl"]) .detail-head :global(.icon-btn:first-child svg) { transform: scaleX(-1); }
   }
 </style>

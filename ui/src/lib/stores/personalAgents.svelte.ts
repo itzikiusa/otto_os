@@ -32,6 +32,9 @@ class PersonalAgentsStore {
   rooms: AgentRoomWithMembers[] = $state([]);
   /** room_id → its messages, oldest first (appended via `after` paging). */
   messagesByRoom: Record<string, AgentRoomMessage[]> = $state({});
+  messagesLoading: Record<string, boolean> = $state({});
+  messagesError: Record<string, string> = $state({});
+  private messageRequests = new Map<string, number>();
   private wsId = '';
   /** Workspace each list was last loaded for (a late reply for another is dropped). */
   private agentsWs = '';
@@ -191,22 +194,24 @@ class PersonalAgentsStore {
   async loadMessages(roomId: string): Promise<void> {
     const PAGE = 200;
     const MAX_PAGES = 25;
+    const request = (this.messageRequests.get(roomId) ?? 0) + 1;
+    this.messageRequests.set(roomId, request);
+    this.messagesLoading[roomId] = true;
+    this.messagesError[roomId] = '';
     let have = this.messagesByRoom[roomId] ?? [];
-    for (let i = 0; i < MAX_PAGES; i++) {
-      const after = have.length > 0 ? have[have.length - 1].id : undefined;
-      let page: AgentRoomMessage[];
-      try {
-        page = await personalAgentsApi.messages(roomId, after, PAGE);
-      } catch {
-        break;
-      }
-      if (page.length > 0) {
+    try {
+      for (let i = 0; i < MAX_PAGES; i++) {
+        const after = have.length > 0 ? have[have.length - 1].id : undefined;
+        const page = await personalAgentsApi.messages(roomId, after, PAGE);
+        if (this.messageRequests.get(roomId) !== request) return;
         have = [...have, ...page];
         this.messagesByRoom = { ...this.messagesByRoom, [roomId]: have };
-      } else if (!(roomId in this.messagesByRoom)) {
-        this.messagesByRoom = { ...this.messagesByRoom, [roomId]: [] };
+        if (page.length < PAGE) break;
       }
-      if (page.length < PAGE) break;
+    } catch (e) {
+      if (this.messageRequests.get(roomId) === request) this.messagesError[roomId] = loadErrorText(e);
+    } finally {
+      if (this.messageRequests.get(roomId) === request) this.messagesLoading[roomId] = false;
     }
   }
 

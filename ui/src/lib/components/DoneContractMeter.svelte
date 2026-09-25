@@ -10,6 +10,8 @@
   }
   let { contract }: Props = $props();
 
+  // `satisfied` includes optional successes; the required checklist must not.
+  const requiredSatisfied = $derived(contract.items.filter(item => item.required && item.satisfied).length);
   const score = $derived(Math.max(0, Math.min(100, Math.round(contract.score))));
 
   type Tone = 'ok' | 'warn' | 'bad';
@@ -46,7 +48,7 @@
   <div class="contract">
     <div class="contract-head">
       <span class="title">Done contract</span>
-      <span class="dim">{contract.satisfied}/{contract.required} required met</span>
+      <span class="dim">{requiredSatisfied}/{contract.required} required met</span>
     </div>
     {#if contract.items.length === 0}
       <p class="dim empty">No contract items.</p>
