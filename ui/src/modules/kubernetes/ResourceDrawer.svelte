@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { viewport } from '../../lib/stores/viewport.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { actionOperation } from './permissions';
   // Detail drawer for the selected row: Overview (normalized fields + action
@@ -181,15 +183,56 @@
     return out;
   });
 
+  let drawerEl = $state<HTMLElement | null>(null);
+
+  // On phones details replace the screen. Register the overlay, keep keyboard
+  // focus inside it, and return focus to the triggering row when it closes.
+  $effect(() => {
+    if (!viewport.isPhone) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    untrack(() => ui.pushModal());
+    queueMicrotask(() => drawerEl?.querySelector<HTMLElement>('.dr-close')?.focus());
+    return () => {
+      untrack(() => ui.popModal());
+      previous?.focus();
+    };
+  });
+
+  function sheetKey(e: KeyboardEvent): void {
+    if (!viewport.isPhone || e.defaultPrevented) return;
+    // A confirmation or picker above the details owns its keyboard events.
+    if (Array.from(document.querySelectorAll('[aria-modal="true"]')).some(el => el !== drawerEl)) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      onclose();
+    } else if (e.key === 'Tab') {
+      const controls = Array.from(drawerEl?.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]',
+      ) ?? []).filter(el => el.tabIndex >= 0 && el.offsetParent !== null);
+      const i = controls.indexOf(document.activeElement as HTMLElement);
+      if (i < 0 || (e.shiftKey ? i === 0 : i === controls.length - 1)) {
+        e.preventDefault();
+        controls[e.shiftKey ? controls.length - 1 : 0]?.focus();
+      }
+    }
+  }
+
   function tabKey(e: KeyboardEvent, i: number): void {
-    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+    if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
     e.preventDefault();
-    const j = (i + (e.key === 'ArrowRight' ? 1 : -1) + TABS.length) % TABS.length;
+    const button = e.currentTarget as HTMLButtonElement;
+    const rtl = getComputedStyle(button).direction === 'rtl';
+    const step = (e.key === 'ArrowRight' ? 1 : -1) * (rtl ? -1 : 1);
+    const j = e.key === 'Home' ? 0 : e.key === 'End' ? TABS.length - 1 : (i + step + TABS.length) % TABS.length;
     ontab(TABS[j].id);
+    button.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[j]?.focus();
   }
 </script>
 
-<aside class="drawer" aria-label="{def.singular} details" data-testid="k8s-drawer">
+<svelte:window onkeydown={sheetKey} />
+
+<aside bind:this={drawerEl} class="drawer" role={viewport.isPhone ? 'dialog' : undefined} aria-modal={viewport.isPhone ? 'true' : undefined} aria-label="{def.singular} details" data-testid="k8s-drawer">
   <header class="dr-head">
     <div class="dr-title">
       <span class="dr-kind">{def.singular}</span>
@@ -197,7 +240,7 @@
       {#if ns}<span class="dr-ns mono">{ns}</span>{/if}
       {#if row}<span class="status-pill {healthClass(row.health, row.status)}"><span class="hdot"></span>{row.status}</span>{/if}
     </div>
-    <button class="icon-btn" onclick={onclose} aria-label="Close details" title="Close (Esc)"><Icon name="x" size={14} /></button>
+    <button class="icon-btn dr-close" onclick={onclose} aria-label="Close details" title="Close (Esc)"><Icon name="x" size={14} /></button>
   </header>
 
   <div class="dr-tabs" role="tablist" aria-label="Detail tabs">

@@ -52,10 +52,14 @@
   }
 
   function tabKey(e: KeyboardEvent, i: number): void {
-    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+    if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
     e.preventDefault();
-    const j = (i + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+    const button = e.currentTarget as HTMLButtonElement;
+    const rtl = getComputedStyle(button).direction === 'rtl';
+    const step = (e.key === 'ArrowRight' ? 1 : -1) * (rtl ? -1 : 1);
+    const j = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : (i + step + tabs.length) % tabs.length;
     ontab(tabs[j].id);
+    button.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[j]?.focus();
   }
 </script>
 

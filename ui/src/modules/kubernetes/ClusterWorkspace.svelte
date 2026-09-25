@@ -255,6 +255,8 @@
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (keyContext.terminalFocused || ui.modalCount > 0 || ctxMenu.open || k8s.k9sSessionId) return;
       if (e.key === 'Escape') {
+        // The open namespace combobox owns Escape and preserves its focus.
+        if ((e.target as HTMLElement | null)?.closest('[role="combobox"][aria-expanded="true"]')) return;
         if (isTyping(e.target)) {
           (e.target as HTMLElement).blur();
           return;
@@ -328,6 +330,8 @@
           break;
         }
         case 'Enter':
+          // Native controls own Enter; the workspace shortcut is for the table.
+          if ((e.target as HTMLElement | null)?.closest('button, a[href], summary, [role="button"], [role="tab"]')) return;
           if (row) {
             e.preventDefault();
             openRow(row);
@@ -701,7 +705,7 @@
   .drawer-host.sheet {
     position: fixed;
     inset: 0;
-    z-index: 40;
+    z-index: var(--z-modal);
     width: auto;
     border-left: none;
   }
