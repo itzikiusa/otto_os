@@ -1,8 +1,8 @@
 # UX and design audit — 25 September 2026
 
-Status: in progress. Scores are reviewer judgments supported by the linked evidence, not an automated quality guarantee. The target is at least 9.5 for each reviewed surface; known defects and untested main flows lower the score. No whole-app completion claim is made here.
+Status: four review rounds complete; final integration and delivery verification in progress. Scores are reviewer judgments supported by the linked evidence, not an automated quality guarantee. The target is at least 9.5 for each reviewed surface; known defects and untested main flows lower the score. No whole-app completion claim is made here.
 
-The audit uses ten fresh reviewers per round, five mandatory rounds. Because only three reviewers can run concurrently, independent scopes are queued in batches; a later-round scope starts only after its preceding review and repairs finish. Each new reviewer verifies prior repairs and examines deeper loaded, error, keyboard, long-content, theme and device states. Browser tests use isolated daemon state and intercepted external services; production user data is not modified.
+The audit uses ten fresh reviewers per round, four rounds (the user made round4 final on26 September). Because only three reviewers can run concurrently, independent scopes are queued in batches; a later-round scope starts only after its preceding review and repairs finish. Each new reviewer verifies prior repairs and examines deeper loaded, error, keyboard, long-content, theme and device states. Browser tests use isolated daemon state and intercepted external services; production user data is not modified.
 
 ## Round 1
 
@@ -42,7 +42,7 @@ Ratings above describe tested browser behavior, not a guarantee of every applica
 
 ## Round 3
 
-All ten fresh reviewers completed their repairs and scoped checks. The combined gate passed: full UI check with zero errors/warnings, 454 unit tests, and production build. This round found further terminal sizing, mutation ownership, startup draft, media-control and monitoring layout defects. Rounds four and five remain mandatory.
+All ten fresh reviewers completed their repairs and scoped checks. The combined gate passed: full UI check with zero errors/warnings, 454 unit tests, and production build. This round found further terminal sizing, mutation ownership, startup draft, media-control and monitoring layout defects. At that checkpoint further rounds were planned; the user subsequently made round4 final.
 
 | Completed scope | Verified dimensions / 10 | Evidence |
 |---|---:|---|
@@ -59,24 +59,32 @@ All ten fresh reviewers completed their repairs and scoped checks. The combined 
 
 Content verification passed 73 scoped checks plus four diagnostic reload repetitions. One intermittent Product reload rejection did not reproduce with tracing and remains an explicit next-round investigation. This is not a clean-runtime claim. Mid-round UI checking passed with zero errors or warnings. The complete Rust rerun after Git normalization passed 3,563 tests with zero failures (66 ignored); the later Insights calendar extension separately passed12 focused tests. Full clippy passed with both Rust changes. Final gates will verify the final integrated revision. [Parent cross-checks](r3-parent.md) document a newly reproduced Canvas queue identity regression, its repair and both-engine validation, plus workflow response compatibility.
 
-## Round 4 (in progress)
+## Round 4 (final)
 
-Five fresh reviewers have started. Settings and automation completed their scoped reviews; content, shell and shared access are active. Data, Git, cloud, Insights and Help follow. The parent independently verified new automation and settings regressions; a mid-round full UI check passed with zero errors/warnings. The round is not complete.
+All ten fresh reviewers completed their repairs and scoped verification: forty fresh reviews across four rounds. No fifth round will run, per the latest user instruction. Final integration, CI and installation are tracked separately below.
 
-| Completed scope | Verified dimensions / 10 | Evidence |
+| Scope | Verified dimensions / 10 | Evidence |
 |---|---:|---|
-| Settings, MCP, Plugins, Skills Lab | 9.3–9.5; loaded Review reaches9.5 across inspected dimensions | [Review](r4-settings.md) |
-| Automation and agent coordination | 9.1–9.5 on steady layouts; desktop/tablet transition was7.0–8.0 and is assigned to shell integration | [Review](r4-automation.md) |
+| Settings, MCP, Plugins, Skills Lab |9.3–9.5; loaded Review9.5|[Review](r4-settings.md)|
+| Automation and agent coordination |9.1–9.5 steady layouts; original breakpoint defect repaired and rechecked|[Review](r4-automation.md)|
+| Shared accessibility, identity and onboarding |9.5–9.6 inspected dimensions|[Review](r4-access.md)|
+| Shell, Home, terminal and panels |9.3–9.6; mobile terminal accessibility9.3|[Review](r4-shell.md)|
+| Product, Vault, Canvas, Design, Reader, Snip |9.3–9.5; final tablet scene-width deduction repaired|[Review](r4-content.md)|
+| Database, API, Kafka, connections and network profiles |9.5–9.6 on inspected flows|[Review](r4-data.md)|
+| Git, graph, PRs and review |9.4–9.6; exact long-tab header9.5–9.6|[Review](r4-git.md)|
+| AWS and Kubernetes |9.4–9.5; main repaired resource flows9.5|[Review](r4-cloud.md)|
+| Assistant, History, Usage, Insights |9.5–9.6 on inspected flows; family means9.52–9.58|[Review](r4-insights.md)|
+| Help, walkthrough, guides, hotkeys and coach |9.5–9.6 on inspected variants|[Review](r4-help.md)|
 
-The shell reviewer has already passed the unchanged transition regression in both engines after preserving the mounted page; broader panel/terminal checks remain underway. The content reviewer reproduced Product failed-save recovery and D2 WebKit worker initialization failures. Their repairs and production verification remain in progress. [Parent cross-checks](r4-parent.md) record independent draft and identity checks.
+These ranges do not establish9.5 on every page or dimension. The reports distinguish actual design tradeoffs, unverified workflows and environment limits. Confirmed failures are repaired and rechecked before closure. [Parent cross-checks](r4-parent.md) include independent identity/save checks, production D2 under the desktop CSP, retained Swarm state, tablet Canvas and Product reload diagnosis.
 
 ## Integration and broad evidence
 
 - Integrated `fix/git-tabs-use-free-width` through `997b9b5a`, including the delete preference repair, without editing its worktree.
 - Twelve focused Git header/menu/delete-preference checks passed after integration.
 - Expanded the shared page inventory from 21 to 33 routes, corrected obsolete Help/Plugins aliases, and passed 165 iPhone WebKit page/theme/RTL checks.
-- UI type/style gate passed mid-round with zero errors/warnings; 454 unit tests and the production UI build passed. Later modifications require another final gate.
+- Final UI type/style gate passed with zero errors/warnings; 454 unit tests, six deployment mock tests, production UI build and the full165-check phone inventory passed. The full Rust workspace suite passed3,565 tests, zero failures,66 ignored. Final-source Clippy, the final Insights prompt test and delivery outcomes are tracked on the combined PR.
 - [First-run phone repair](onboarding.md).
 - [Instrumental walkthrough and playback evidence](media.md).
 
-Screenshots and precise local test output paths are linked in the scope reports. Selected durable light/dark/phone screenshots will accompany the final PR. Merge, Actions, and installation verification are pending until the review and final gates finish.
+Screenshots and precise local test output paths are linked in the scope reports. [Selected durable light/dark/phone evidence](evidence/README.md) accompanies the final PR. Actions, merge and installation verification follow the final integration gates.
