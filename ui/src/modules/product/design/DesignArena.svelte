@@ -89,6 +89,7 @@
   // ── Story context ──────────────────────────────────────────────────────────
   const story = $derived(product.detail?.story ?? null);
   const storyId = $derived(product.selectedId);
+  const contentContext = product.contentContext;
   /** An epic's arena shows every child's artifacts too (design §3.2). */
   const children = $derived<ProductStory[]>(storyId ? product.childrenOf(storyId) : []);
   const isEpic = $derived(!!story && (story.tree_kind === 'epic' || children.length > 0));
@@ -345,11 +346,11 @@
     sourceLoading = true;
     localInvalid = null;
     try {
-      const text = await product.attachmentText(a.id);
+      const text = await product.attachmentText(a.id, true);
       if (token === loadToken) {
         source = text;
         // Optimistic-concurrency base: the row we just loaded.
-        product.setContentBase(a.id, a.updated_at);
+        if (!product.hasUnsavedContent(a.id)) product.setContentBase(a.id, a.updated_at);
       }
     } catch (e) {
       if (token === loadToken) sourceError = loadErrorText(e);
@@ -395,12 +396,14 @@
         return;
       }
     }
+    if (contentContext !== product.contentContext || aid !== att?.id) return;
     if (incoming === source) return; // the echo of our own save
     if (product.hasUnsavedContent(aid)) {
       const ok = await confirmer.ask(
         'This artifact was just changed on the server (by the agent or another editor) while you have unsaved edits here. Replace your edits with the new version?',
         { title: 'Newer version available', confirmLabel: 'Replace mine', danger: false },
       );
+      if (contentContext !== product.contentContext || aid !== att?.id) return;
       if (!ok) {
         product.markConflict(aid);
         return;
@@ -440,11 +443,11 @@
         ],
       },
     );
-    if (value !== 'mine' && value !== 'theirs') return;
+    if (contentContext !== product.contentContext || (value !== 'mine' && value !== 'theirs')) return;
     const takeTheirs = value === 'theirs';
     try {
       const fresh = (await product.listAttachmentsOf(a.story_id)).find((x) => x.id === a.id);
-      if (!fresh) return;
+      if (!fresh || contentContext !== product.contentContext) return;
       if (takeTheirs) {
         product.discardPendingContent(a.id);
         product.setContentBase(a.id, fresh.updated_at);
@@ -473,9 +476,9 @@
       }
     }
     localInvalid = null;
-    void product.saveAttachmentContent(a.id, next).catch((e) => {
+    void product.saveAttachmentContent(a.id, next, contentContext).catch((e) => {
       if (e instanceof ApiError && e.status === 409) {
-        void resolveConflict(a, next);
+        if (product.saveState[a.id] === 'conflict') void resolveConflict(a, next);
         return;
       }
       toasts.error('Save failed', e instanceof Error ? e.message : String(e));

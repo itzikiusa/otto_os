@@ -218,7 +218,7 @@
   // is expanded at a time so the open panel gets the full remaining height to
   // scroll in; the other shows just its tappable header. This is a no-op on
   // desktop/tablet where the CSS for these classes is never applied.
-  let mobileSection = $state<'list' | 'content'>('list');
+  let mobileSection = $state<'list' | 'content'>(product.selectedId ? 'content' : 'list');
 
   async function createDraft(): Promise<void> {
     draftCreating = true;
