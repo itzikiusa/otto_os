@@ -63,11 +63,13 @@ class AuthStore {
   }
 
   /** Re-fetch /meta without touching the boot phase (e.g. after provider changes). */
-  async refreshMeta(): Promise<void> {
+  async refreshMeta(): Promise<boolean> {
     try {
       this.meta = await api.get<MetaResp>('/meta');
+      return true;
     } catch {
       // non-fatal: keep the stale meta
+      return false;
     }
   }
 

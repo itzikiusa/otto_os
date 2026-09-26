@@ -36,6 +36,19 @@
   const hasAgentCli = $derived(agentTools.some((t) => t.found));
   // The provider names whose CLI is actually present.
   const foundProviders = $derived(agentTools.filter((t) => t.found).map((t) => t.name));
+  let checkingProviders = $state(false);
+  let providerCheckFailed = $state(false);
+
+  async function recheckProviders(): Promise<void> {
+    if (checkingProviders) return;
+    checkingProviders = true;
+    providerCheckFailed = false;
+    try {
+      providerCheckFailed = !(await auth.refreshMeta());
+    } finally {
+      checkingProviders = false;
+    }
+  }
 
   // --- Step 2: workspace -----------------------------------------------------
   const hasWorkspace = $derived(ws.workspaces.length > 0 && ws.current !== null);
@@ -230,9 +243,12 @@
                 <span class="mono">npm i -g @openai/codex</span>
               </li>
             </ul>
-            <button class="btn small" onclick={() => auth.refreshMeta()}>
-              <Icon name="refresh" size={11} /> Re-check
+            <button class="btn small" disabled={checkingProviders} onclick={recheckProviders}>
+              <Icon name="refresh" size={11} /> {checkingProviders ? 'Checking…' : 'Re-check'}
             </button>
+            {#if providerCheckFailed}
+              <p role="status">Could not check agent CLIs. Try again.</p>
+            {/if}
           </div>
         {/if}
       </div>
@@ -329,7 +345,6 @@
     start={wsPath}
     onpick={(p) => {
       wsPath = p;
-      wsNameTouched = false;
       pickerOpen = false;
     }}
     onclose={() => (pickerOpen = false)}
