@@ -6,7 +6,7 @@
   // bounding-rect scale). Every committed mutation schedules a debounced
   // flatten → POST /snips/{id}/annotated, which puts the latest state on the
   // clipboard — the user can paste into a session at any moment (R4).
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { router } from '../../lib/router.svelte';
   import { snipApi } from '../../lib/snip';
   import { ApiError } from '../../lib/api/client';
@@ -348,6 +348,19 @@
     setTimeout(() => textareaEl?.focus(), 0);
   }
 
+  function fitTextInImage(a: Anno): Anno {
+    const ctx = canvasEl?.getContext('2d');
+    if (!img || !ctx) return a;
+    ctx.save();
+    ctx.font = `600 ${a.font}px ui-sans-serif, system-ui, sans-serif`;
+    const lines = (a.text ?? '').split('\n');
+    const width = Math.max(...lines.map(line => ctx.measureText(line).width));
+    ctx.restore();
+    const x = Math.max(4, Math.min(a.x1, img.width - width - 4));
+    const y = Math.max(4, Math.min(a.y1, img.height - a.font * 1.25 * lines.length - 4));
+    return moveAnno(a, x - a.x1, y - a.y1);
+  }
+
   function commitText(): void {
     if (!textDraft) return;
     const { x, y, value, editId } = textDraft;
@@ -362,11 +375,11 @@
     }
     snapshot();
     if (editId !== null) {
-      commit(annos.map((a) => (a.id === editId ? { ...a, text } : a)));
+      commit(annos.map((a) => (a.id === editId ? fitTextInImage({ ...a, text }) : a)));
     } else {
       commit([
         ...annos,
-        {
+        fitTextInImage({
           id: nextId++,
           tool: 'text',
           x1: x,
@@ -377,7 +390,7 @@
           color,
           stroke: STROKES[strokeIx],
           font: FONTS[fontIx],
-        },
+        }),
       ]);
     }
   }
@@ -400,14 +413,43 @@
     if (!wrap) return '';
     const sx = r.width / canvasEl.width;
     const sy = r.height / canvasEl.height;
-    // The image coordinate remains unchanged; only the editing control moves
-    // inward so text can be entered near the image's right/bottom edges.
+    // Keep the input reachable at image edges. Committing measures the text
+    // separately and fits the annotation itself within the image.
     const width = Math.min(260, wrap.width - 16);
     const left = Math.max(8, Math.min(r.left - wrap.left + textDraft.x * sx, wrap.width - width - 8));
     const top = Math.max(8, Math.min(r.top - wrap.top + textDraft.y * sy, wrap.height - 84));
     const fs = Math.max(11, FONTS[fontIx] * sy);
     return `left:${left}px;top:${top}px;width:${width}px;max-width:${wrap.width - left - 8}px;max-height:${wrap.height - top - 8}px;font-size:${fs}px;color:${color};`;
   });
+
+  // Keyboard placement starts at the image center. The same selection, undo,
+  // move and copy paths serve both pointer and keyboard changes.
+  async function focusCanvas(): Promise<void> {
+    await tick();
+    canvasEl?.focus();
+  }
+  function placeWithKeyboard(): void {
+    if (!img) return;
+    const current = annos.find(a => a.id === selected);
+    if (current?.tool === 'text') {
+      openTextDraft(current.x1, current.y1, current.text ?? '', current.id);
+      return;
+    }
+    if (tool === 'select') {
+      selected = annos[0]?.id ?? null;
+      return;
+    }
+    const x = Math.round(img.width / 2), y = Math.round(img.height / 2);
+    if (tool === 'text') { openTextDraft(x, y, '', null); return; }
+    const w = Math.min(120, img.width / 4), h = Math.min(80, img.height / 4);
+    const a: Anno = {
+      id: nextId++, tool, x1: x - w / 2, y1: y - h / 2, x2: x + w / 2, y2: y + h / 2,
+      color, stroke: STROKES[strokeIx], font: FONTS[fontIx],
+      ...(tool === 'badge' ? { n: nextBadge++ } : {}),
+      ...(tool === 'pen' || tool === 'highlight' ? { points: [{ x: x - w / 2, y }, { x: x + w / 2, y }] } : {}),
+    };
+    snapshot(); commit([...annos, a]); selected = a.id;
+  }
 
   // ── Keyboard ───────────────────────────────────────────────────────────────
 
@@ -418,11 +460,22 @@
     if (textDraft) {
       if (e.key === 'Escape') {
         textDraft = null;
+        void focusCanvas();
         e.stopPropagation();
       } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
         commitText();
+        void focusCanvas();
         e.stopPropagation();
       }
+      return;
+    }
+    if (e.target === canvasEl && e.key === 'Enter') {
+      e.preventDefault(); placeWithKeyboard(); return;
+    }
+    if (e.target === canvasEl && (e.key === '[' || e.key === ']')) {
+      e.preventDefault();
+      const index = annos.findIndex(a => a.id === selected);
+      selected = annos[(index + (e.key === ']' ? 1 : -1) + annos.length) % annos.length]?.id ?? null;
       return;
     }
     const mod = e.metaKey || e.ctrlKey;
@@ -626,14 +679,21 @@
         <button class="btn" data-act="close" onclick={() => void close()}>Close</button>
       </div>
     {:else}
+      <!-- svelte-ignore a11y_no_interactive_element_to_noninteractive_role (this canvas is a keyboard-operated drawing application; onKeydown handles placement, selection, movement and deletion) -->
       <canvas
         class="snip-canvas"
         bind:this={canvasEl}
+        tabindex="0"
+        role="application"
+        aria-label="Snip annotation canvas"
+        aria-describedby="snip-keyboard-help"
         onpointerdown={onPointerDown}
         onpointermove={onPointerMove}
         onpointerup={onPointerUp}
         ondblclick={onDblClick}
       ></canvas>
+      <p id="snip-keyboard-help" class="snip-keyboard-help">Choose a tool, then press Enter on the image to add it. Use [ and ] to select annotations, arrow keys to move, and Delete to remove. Enter edits selected text.</p>
+      <span class="sr-only" role="status">{selected === null ? `${annos.length} annotations` : `Selected ${annos.find(a => a.id === selected)?.tool ?? 'annotation'} ${annos.findIndex(a => a.id === selected) + 1} of ${annos.length}`}</span>
       {#if textDraft}
         <!-- svelte-ignore a11y_autofocus -->
         <textarea
@@ -652,6 +712,20 @@
 </div>
 
 <style>
+  .snip-keyboard-help {
+    position: absolute;
+    inset-inline: 12px;
+    inset-block-end: 8px;
+    margin: 0;
+    padding: 6px 10px;
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
+    pointer-events: none;
+    display: none;
+  }
+  .snip-canvas:focus-visible ~ .snip-keyboard-help { display: block; }
   .snip-editor {
     position: fixed;
     inset: 0;

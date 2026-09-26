@@ -54,6 +54,18 @@ for(const [theme,scheme,width,rtl] of [['native','light',1440,false],['native','
   await expectFullyInViewport(page,page.locator('.snip-textentry'),'Text editor at image edge');
   await page.screenshot({path:`/tmp/otto-ux-r3-content-snip-${theme}-${scheme}-entry.png`});
   await page.locator('.snip-textentry').fill('Readable annotation');await page.keyboard.press('Control+Enter');await expect(page.locator('.snip-editor')).toHaveAttribute('data-count','1');
+  // The input may move inward, but the exported annotation must also be legible.
+  const ink = await drawing.evaluate((canvas: HTMLCanvasElement) => {
+    const pixels = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height).data;
+    let left = canvas.width, right = 0, top = canvas.height, bottom = 0;
+    for (let i = 0; i < pixels.length; i += 4) if (pixels[i] > 150 && pixels[i + 1] < 130 && pixels[i + 2] < 130 && pixels[i + 3] > 100) {
+      const x = (i / 4) % canvas.width, y = Math.floor(i / 4 / canvas.width);
+      left = Math.min(left, x); right = Math.max(right, x); top = Math.min(top, y); bottom = Math.max(bottom, y);
+    }
+    return { width: right - left, height: bottom - top };
+  });
+  expect(ink.width, 'Committed edge text must remain readable in the image').toBeGreaterThan(100);
+  expect(ink.height).toBeGreaterThan(10);
   await expect(page.locator('.snip-copied')).toHaveText('Copied');await page.screenshot({path:`/tmp/otto-ux-r3-content-snip-${theme}-${scheme}.png`});
  });
 }
