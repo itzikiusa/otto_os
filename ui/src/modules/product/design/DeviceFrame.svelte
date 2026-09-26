@@ -128,6 +128,11 @@
     flex-direction: column;
     background: #fff;
   }
+  /* The bezel is decoration, so keep the preview below its camera island. */
+  .iphone .device-screen {
+    box-sizing: border-box;
+    padding-block-start: 46px;
+  }
   .device-screen > :global(*) {
     flex: 1;
     min-height: 0;
