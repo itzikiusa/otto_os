@@ -100,7 +100,7 @@
       ];
       const allNames = [...remotes.map((r) => r.name), ...locals.map((l) => l.name)];
       const hit = preferred.find((p) => allNames.includes(p));
-      selectedBase = hit ?? remotes[0]?.name ?? locals[0]?.name ?? '';
+      selectedBase = allBranches.find((b) => b.name === hit)?.value ?? allBranches[0]?.value ?? '';
     } catch (e) {
       refsError = loadErrorText(e);
     } finally {
@@ -294,10 +294,14 @@
   // ---------------------------------------------------------------------------
 
   const allBranches = $derived.by(() => {
-    if (!refs) return [] as string[];
+    if (!refs) return [];
+    const locals = new Set(refs.local.map((b) => b.name));
+    const remotes = new Set(refs.remote.map((b) => b.name));
+    // A local branch named origin/foo is distinct from the remote origin/foo.
+    // Keep both choices and pass Git an unambiguous revision in that case.
     return [
-      ...refs.remote.map((r) => r.name),
-      ...refs.local.map((l) => l.name),
+      ...refs.remote.map((b) => ({ name: b.name, value: locals.has(b.name) ? `refs/remotes/${b.name}` : b.name, label: locals.has(b.name) ? `${b.name} (remote)` : b.name })),
+      ...refs.local.map((b) => ({ name: b.name, value: remotes.has(b.name) ? `refs/heads/${b.name}` : b.name, label: remotes.has(b.name) ? `${b.name} (local)` : b.name })),
     ];
   });
 </script>
@@ -312,8 +316,8 @@
       <LoadState what="branches" error={refsError} empty variant="compact" onretry={() => void loadRefs(repoId)} />
     {:else}
       <select id="lrp-base" class="lrp-select" bind:value={selectedBase} disabled={starting}>
-        {#each allBranches as b (b)}
-          <option value={b}>{b}</option>
+        {#each allBranches as b (b.value)}
+          <option value={b.value}>{b.label}</option>
         {/each}
         {#if allBranches.length === 0}
           <option value="">No branches found</option>
@@ -345,13 +349,15 @@
   {:else if historyError && !review}
     <LoadState what="past local reviews" error={historyError} empty onretry={() => void loadExisting(repoId)} />
   {:else if !review}
+    {#if pastRuns.length > 0}
+      <p class="lrp-idle-note"><strong>No active review.</strong> Review your current changes, or inspect an earlier run below.</p>
+    {:else}
     <EmptyState
       icon="zap"
       title="No active review"
-      body={pastRuns.length > 0
-        ? "Click 'Review changes' to review your current changes. Earlier runs are kept under 'Past reviews' below."
-        : "Select a base branch and click 'Review changes' to run AI agents on your current uncommitted work."}
+      body="Select a base branch and click 'Review changes' to run AI agents on your current uncommitted work."
     />
+    {/if}
   {:else if review.status === 'running'}
     <div class="lrp-running-header">
       <div class="spinner"></div>
@@ -501,6 +507,8 @@
 </div>
 
 <style>
+  .lrp-idle-note { margin: 4px 0; color: var(--text-dim); font-size: var(--fs-s); line-height: 1.5; }
+  .lrp-idle-note strong { color: var(--text); font-weight: 500; }
   .lrp {
     padding: 12px 0 32px;
     display: flex;
