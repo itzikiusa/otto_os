@@ -76,8 +76,28 @@
     });
   });
 
+  interface QueueDraft {
+    body: string;
+    delay: number;
+    group: string;
+    dedup: string;
+    attributes: { k: string; v: string }[];
+    destination: string;
+  }
+  const drafts = new Map<string, QueueDraft>();
+  function keepDraft(): void {
+    if (selectedUrl) drafts.set(selectedUrl, { body: sendBody, delay: sendDelay, group: sendGroup, dedup: sendDedup, attributes: sendAttrs.map(a => ({ ...a })), destination: redriveDest });
+  }
   function select(q: SqsQueue): void {
+    keepDraft();
     selectedUrl = q.url;
+    const draft = drafts.get(q.url);
+    sendBody = draft?.body ?? '';
+    sendDelay = draft?.delay ?? 0;
+    sendGroup = draft?.group ?? '';
+    sendDedup = draft?.dedup ?? '';
+    sendAttrs = draft?.attributes.map(a => ({ ...a })) ?? [];
+    redriveDest = draft?.destination ?? '';
     peekVersion++;
     peeking = false;
     openMsg = null;
@@ -146,21 +166,22 @@
   const validDelay = $derived(Number.isInteger(sendDelay) && sendDelay >= 0 && sendDelay <= 900);
 
   async function send(): Promise<void> {
-    if (!selected || !sendBody.trim() || !validDelay) return;
+    if (!selected || !sendBody.trim() || !validDelay || sending) return;
+    const queue = selected;
     sending = true;
     try {
       const message_attributes: Record<string, { DataType: string; StringValue: string }> = {};
       for (const a of sendAttrs) if (a.k.trim()) message_attributes[a.k.trim()] = { DataType: 'String', StringValue: a.v };
       const r = await awsApi.sqsSend(account.id, {
-        url: selected.url,
+        url: queue.url,
         body: sendBody,
         delay_seconds: sendDelay || undefined,
-        group_id: selected.fifo ? sendGroup || undefined : undefined,
-        dedup_id: selected.fifo ? sendDedup || undefined : undefined,
+        group_id: queue.fifo ? sendGroup || undefined : undefined,
+        dedup_id: queue.fifo ? sendDedup || undefined : undefined,
         message_attributes: Object.keys(message_attributes).length ? message_attributes : undefined,
       });
       toasts.success('Message sent', r.message_id);
-      void aws.loadSqsAttrs(account.id, selected.url);
+      void aws.loadSqsAttrs(account.id, queue.url);
     } catch (e) {
       toasts.error('Send failed', e instanceof Error ? e.message : String(e));
     } finally {
@@ -299,7 +320,7 @@
       {:else}
         <div class="dhead">
           {#if viewport.isMobile}
-            <button class="back" onclick={() => (selectedUrl = null)} aria-label="Back to queues" title="Back to queues"><Icon name="chevronLeft" size={14} /></button>
+            <button class="back" onclick={() => { keepDraft(); selectedUrl = null; }} aria-label="Back to queues" title="Back to queues"><Icon name="chevronLeft" size={14} /></button>
           {/if}
           <strong class="qname" title={selected.url}>{selected.name}</strong>
           {#if selected.fifo}<span class="tag">FIFO</span>{/if}
