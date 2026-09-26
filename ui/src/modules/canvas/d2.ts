@@ -11,7 +11,11 @@
 // below into one readable line. Dark themes start at 200 ("Dark Mauve").
 
 type D2CompileOptions = { sketch?: boolean; themeID?: number };
-type D2Api = {
+export type D2Api = {
+  dispose?: () => void;
+  readonly disposed?: boolean;
+  ready?: Promise<unknown>;
+  worker?: { terminate: () => void };
   compile: (
     src: string,
     opts?: D2CompileOptions,
@@ -27,10 +31,20 @@ let _loading: Promise<D2Api> | null = null;
  *  stay cached — clear the memo so the next render retries instead of leaving
  *  D2 broken for the whole session. */
 async function load(): Promise<D2Api> {
+  if (_d2?.disposed) { _d2 = null; _loading = null; }
   if (_d2) return _d2;
   _loading ??= import('@terrastruct/d2')
-    .then((m) => {
-      const api = new m.D2() as unknown as D2Api;
+    .then(async (m) => {
+      let api = new m.D2() as unknown as D2Api;
+      try {
+        await api.ready;
+      } catch (error) {
+        api.worker?.terminate();
+        if (!(error instanceof Error) || !/maximum call stack size exceeded|out of stack space/i.test(error.message)) throw error;
+        const assets = (m as unknown as { ottoD2Assets: () => Promise<{ source: string; wasm: ArrayBuffer }> }).ottoD2Assets;
+        const [{ createD2Frame }, runtime] = await Promise.all([import('./d2-frame'), assets()]);
+        api = await createD2Frame(runtime.source, runtime.wasm);
+      }
       _d2 = api;
       return api;
     })
@@ -52,6 +66,12 @@ function enqueue<T>(job: () => Promise<T>): Promise<T> {
   const next = _queue.then(job, job);
   _queue = next.catch(() => undefined);
   return next;
+}
+
+function invalidateTransport(api: D2Api, error: unknown): void {
+  if (!(error instanceof Error) || error.name !== 'D2TransportError') return;
+  api.dispose?.();
+  if (_d2 === api) { _d2 = null; _loading = null; }
 }
 
 /** A compile error's `.message` is a JSON array of `{errmsg}` — flatten it into
@@ -79,13 +99,18 @@ export async function renderD2(
   const text = src.trim();
   if (!text) return { error: 'Empty diagram' };
   try {
-    const api = await load();
     const svg = await enqueue(async () => {
-      const compiled = await api.compile(text, {
-        sketch: opts.sketch ?? false,
-        themeID: opts.dark ? 200 : 0,
-      });
-      return api.render(compiled.diagram, compiled.renderOptions);
+      const api = await load();
+      try {
+        const compiled = await api.compile(text, {
+          sketch: opts.sketch ?? false,
+          themeID: opts.dark ? 200 : 0,
+        });
+        return await api.render(compiled.diagram, compiled.renderOptions);
+      } catch (error) {
+        invalidateTransport(api, error);
+        throw error;
+      }
     });
     // Belt-and-braces: never hand a non-SVG payload to innerHTML.
     if (typeof svg !== 'string' || !svg.includes('<svg')) {
@@ -103,10 +128,22 @@ export async function parseD2(src: string): Promise<boolean> {
   const text = src.trim();
   if (!text) return false;
   try {
-    const api = await load();
-    await enqueue(() => api.compile(text, {}));
+    await enqueue(async () => {
+      const api = await load();
+      try { await api.compile(text, {}); }
+      catch (error) { invalidateTransport(api, error); throw error; }
+    });
     return true;
   } catch {
     return false;
   }
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', event => {
+    // The browser suspends and resumes bfcache pages, including queued renders.
+    // Terminating their worker here would leave that queue waiting forever.
+    if (event.persisted) return;
+    _d2?.dispose?.(); _d2?.worker?.terminate(); _d2 = null; _loading = null;
+  });
 }
