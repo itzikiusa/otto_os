@@ -309,6 +309,9 @@
 
   onMount(() => {
     liveId = canvas.currentId;
+    const observer = new ResizeObserver(() => { if (!userAdjusted && svgHtml) fit(); });
+    if (surface) observer.observe(surface);
+    return () => observer.disconnect();
   });
   onDestroy(() => {
     flushPendingCode();
@@ -383,7 +386,7 @@
       </div>
 
       <div class="mode-bar">
-        <span class="mode-chip"><Icon name="branch" size={12} /> Mermaid</span>
+        <span class="mode-chip"><Icon name="branch" size={12} /> Mermaid{#if readonly} · Preview{/if}</span>
         {#if !readonly}
           <button
             class="code-toggle"
@@ -422,6 +425,7 @@
 
 <style>
   .board {
+    container-type: inline-size;
     position: relative;
     width: 100%;
     height: 100%;
@@ -443,6 +447,14 @@
     min-height: 0;
     border-inline-end: 1px solid var(--border);
     background: var(--surface);
+  }
+  @container (max-width: 700px) {
+    .lanes { flex-direction: column; }
+    .code-pane {
+      flex-basis: 40%;
+      border-inline-end: 0;
+      border-block-end: 1px solid var(--border);
+    }
   }
   .code-head {
     display: flex;

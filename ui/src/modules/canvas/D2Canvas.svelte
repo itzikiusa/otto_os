@@ -311,6 +311,11 @@
 
   onMount(() => {
     liveId = canvas.currentId;
+    // Opening Code or resizing a split pane changes the preview's viewport.
+    // Keep the automatic fit until the user deliberately pans or zooms.
+    const observer = new ResizeObserver(() => { if (!userAdjusted && svgHtml) fit(); });
+    if (surface) observer.observe(surface);
+    return () => observer.disconnect();
   });
   onDestroy(() => {
     flushPendingCode();
@@ -385,7 +390,7 @@
       </div>
 
       <div class="mode-bar">
-        <span class="mode-chip"><Icon name="layers" size={12} /> D2</span>
+        <span class="mode-chip"><Icon name="layers" size={12} /> D2{#if readonly} · Preview{/if}</span>
         {#if !readonly}
           <button
             class="sketch-toggle"
@@ -432,6 +437,7 @@
 
 <style>
   .board {
+    container-type: inline-size;
     position: relative;
     width: 100%;
     height: 100%;
@@ -603,7 +609,7 @@
   .zoombar {
     position: absolute;
     bottom: 16px;
-    right: 16px;
+    inset-inline-end: 16px;
     z-index: 5;
     display: inline-flex;
     align-items: center;
@@ -641,5 +647,14 @@
     height: 18px;
     background: var(--border);
     margin: 0 2px;
+  }
+  @container (max-width: 700px) {
+    .lanes { flex-direction: column; }
+    .code-pane {
+      flex-basis: 40%;
+      border-inline-end: 0;
+      border-block-end: 1px solid var(--border);
+    }
+    .zoombar { inset-inline-end: 8px; bottom: 12px; }
   }
 </style>

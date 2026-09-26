@@ -40,6 +40,7 @@
   >(undefined);
   // The Assistant panel (the agent shell + Ask-AI input) — opens on demand.
   let showConvo = $state(false);
+  let showTabletScenes = $state(true);
   let workspaceEmpty: HTMLDivElement | undefined = $state();
 
   // Canvas is global — list the user's scenes across all workspaces. A failure
@@ -157,6 +158,13 @@
       <button class="icon-btn" onclick={() => void backToList()} aria-label="Back to scenes" title="Back to scenes">
         <Icon name="chevronLeft" size={16} />
       </button>
+    {:else if viewport.isTablet && canvas.currentId && !noScenes && !listFailed}
+      <button class="icon-btn" onclick={() => (showTabletScenes = !showTabletScenes)}
+        aria-label={showTabletScenes ? 'Hide scenes' : 'Show scenes'}
+        title={showTabletScenes ? 'Hide scenes' : 'Show scenes'} aria-expanded={showTabletScenes}
+        aria-controls="canvas-scene-list">
+        <Icon name="sidebar" size={16} />
+      </button>
     {/if}
   {/snippet}
   {#snippet actions()}
@@ -198,10 +206,11 @@
 {:else}
   <!-- Phone: push navigation — the scene list IS the first screen (full
        width); opening a scene replaces it and the header gets a Back button. -->
-  <div class="canvas-page" class:phone={readonly}>
+  <div class="canvas-page" class:phone={readonly} class:tablet={viewport.isTablet}>
     <aside
+      id="canvas-scene-list"
       class="scenes"
-      class:hidden={(readonly && canvas.currentId) || noScenes || listFailed}
+      class:hidden={(readonly && canvas.currentId) || (viewport.isTablet && canvas.currentId && !showTabletScenes) || noScenes || listFailed}
       class:full={readonly && !canvas.currentId}
     >
       <SceneList />
@@ -318,6 +327,16 @@
     width: auto;
     border-inline-end: none;
   }
+  /* A second fixed rail left only 374px for the editor on an 834px tablet.
+     Stack a bounded, collapsible list without remounting the editor or draft. */
+  .tablet { flex-direction: column; }
+  .tablet .scenes {
+    width: auto;
+    flex: 0 1 auto;
+    max-height: 160px;
+    border-inline-end: none;
+    border-block-end: 1px solid var(--border);
+  }
   .scenes.hidden,
   .main.hidden {
     display: none;
@@ -336,6 +355,7 @@
     min-width: 0;
   }
   .editor-host {
+    container: canvas-editor / inline-size;
     flex: 1 1 auto;
     position: relative;
     min-width: 0;
@@ -368,6 +388,9 @@
     display: flex;
     align-items: center;
     gap: 8px;
+  }
+  @container canvas-editor (max-width: 700px) {
+    .ai-bar { bottom: 66px; }
   }
   /* A floating launcher, not a second primary: a raised neutral pill with an
      accent glyph (the header's New scene is the page's one primary). */
