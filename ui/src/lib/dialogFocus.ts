@@ -26,11 +26,31 @@ export function dialogReturnTarget(): HTMLElement | null {
   return target;
 }
 
-export function dialogFocus(node: HTMLElement, onEscape: () => void) {
+/** Capture a return scope as well as the trigger: asynchronous updates may
+ * remove or disable that trigger while a child sheet is open. */
+export function dialogFocusReturn(): () => void {
   const previous = dialogReturnTarget();
+  const scope = previous?.closest<HTMLElement>('[role="dialog"][aria-modal="true"]');
+  const usable = (el: HTMLElement) => el.isConnected && !el.closest('[inert]') &&
+    !el.matches(':disabled') && el.getClientRects().length > 0;
+  return () => queueMicrotask(() => {
+    if (previous && usable(previous)) {
+      previous.focus();
+      if (document.activeElement === previous) return;
+    }
+    const container = scope?.isConnected ? scope : document.querySelector<HTMLElement>('main');
+    const fallback = Array.from(container?.querySelectorAll<HTMLElement>(
+      'a[href], button, input, select, textarea, [tabindex]',
+    ) ?? []).find((el) => el.tabIndex >= 0 && usable(el));
+    fallback?.focus();
+  });
+}
+
+export function dialogFocus(node: HTMLElement, onEscape: () => void) {
+  const restoreFocus = dialogFocusReturn();
   const controls = () => Array.from(node.querySelectorAll<HTMLElement>(
     'a[href], button, input, select, textarea, [tabindex]',
-  )).filter((el) => el.tabIndex >= 0 && !el.matches(':disabled') && el.getClientRects().length > 0);
+  )).filter((el) => el.tabIndex >= 0 && !el.matches(':disabled') && !el.closest('[inert]') && el.getClientRects().length > 0);
   const topmost = () => {
     const dialogs = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]'))
       .filter((el) => el.getClientRects().length > 0);
@@ -60,7 +80,7 @@ export function dialogFocus(node: HTMLElement, onEscape: () => void) {
       cancelAnimationFrame(frame);
       window.removeEventListener('keydown', onKey);
       queueMicrotask(() => {
-        if (previous?.isConnected && (document.activeElement === document.body || node.contains(document.activeElement))) previous.focus();
+        if (document.activeElement === document.body || node.contains(document.activeElement)) restoreFocus();
       });
     },
   };

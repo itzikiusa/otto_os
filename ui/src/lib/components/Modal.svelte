@@ -5,7 +5,7 @@
   import { untrack } from 'svelte';
   import { ui } from '../stores/ui.svelte';
   import Icon from './Icon.svelte';
-  import { dialogReturnTarget } from '../dialogFocus';
+  import { dialogFocusReturn } from '../dialogFocus';
 
   interface Props {
     title: string;
@@ -25,8 +25,14 @@
       else node.removeAttribute('tabindex');
     };
     const resize = new ResizeObserver(update);
-    const content = new MutationObserver(update);
-    resize.observe(node);
+    const observeChildren = () => {
+      resize.disconnect();
+      resize.observe(node);
+      for (const child of node.children) resize.observe(child);
+      update();
+    };
+    const content = new MutationObserver(observeChildren);
+    observeChildren();
     content.observe(node, { childList: true, subtree: true, characterData: true });
     update();
     return { destroy() { resize.disconnect(); content.disconnect(); } };
@@ -39,7 +45,7 @@
     // offsetParent filters display:none/collapsed elements (a fixed-position
     // sheet still gives its children an offsetParent).
     return Array.from(sheetEl.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
-      (el) => el.tabIndex >= 0 && (el.offsetParent !== null || el === document.activeElement),
+      (el) => el.tabIndex >= 0 && !el.closest('[inert]') && (el.offsetParent !== null || el === document.activeElement),
     );
   }
 
@@ -62,14 +68,14 @@
   // wins (the default button of a confirm, a prompt's field), else the first
   // body control, else the close button.
   $effect(() => {
-    const prev = dialogReturnTarget();
+    const restoreFocus = dialogFocusReturn();
     const els = untrack(focusables);
     (
       els.find((el) => el.hasAttribute('data-autofocus') || el.hasAttribute('autofocus')) ??
       els.find((el) => !el.closest('header') && !el.classList.contains('sheet-body')) ??
       els[0]
     )?.focus();
-    return () => prev?.focus();
+    return restoreFocus;
   });
 
   function onKeydown(e: KeyboardEvent) {
