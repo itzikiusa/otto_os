@@ -7,6 +7,7 @@
 </script>
 
 <script lang="ts">
+  import { onTabKey } from './tabKeys';
   // Compare two versions — of this artifact, or this artifact against a
   // reference from the library. Side by side renders both with the same stage
   // the editor uses; Changes is a text diff of the sources (JSON pretty-printed
@@ -121,8 +122,8 @@
   <div class="cmp" data-testid="design-compare-modal">
     <div class="modes">
       <div class="segmented" role="tablist" aria-label="Compare mode">
-        <button role="tab" aria-selected={mode === 'side'} class:active={mode === 'side'} onclick={() => (mode = 'side')}>Side by side</button>
-        <button role="tab" aria-selected={mode === 'changes'} class:active={mode === 'changes'} onclick={() => (mode = 'changes')}
+        <button role="tab" aria-selected={mode === 'side'} tabindex={mode === 'side' ? 0 : -1} onkeydown={onTabKey} class:active={mode === 'side'} onclick={() => (mode = 'side')}>Side by side</button>
+        <button role="tab" aria-selected={mode === 'changes'} tabindex={mode === 'changes' ? 0 : -1} onkeydown={onTabKey} class:active={mode === 'changes'} onclick={() => (mode = 'changes')}
           disabled={!textBoth} title={textBoth ? undefined : 'Changes compare text sources; images and models compare side by side'}>Changes</button>
       </div>
     </div>

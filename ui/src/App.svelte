@@ -22,7 +22,7 @@
   // it answers instead of parking on a manual Retry button.
   $effect(() => {
     if (auth.phase !== 'offline') return;
-    const timer = setInterval(() => void auth.boot(), 2000);
+    const timer = setInterval(() => void auth.boot(true), 2000);
     return () => clearInterval(timer);
   });
 </script>
@@ -47,15 +47,15 @@
 {:else if auth.phase === 'loading'}
   <div class="boot">
     <div class="boot-mark">Otto</div>
-    <div class="boot-sub">connecting to daemon…</div>
+    <div class="boot-sub" role="status">Connecting to the Otto daemon…</div>
   </div>
 {:else if auth.phase === 'offline'}
   <div class="boot">
     <div class="boot-mark">Otto</div>
-    <div class="boot-sub">
+    <div class="boot-sub" role="status">
       Starting the Otto daemon — first launch can take a few seconds…
     </div>
-    <button class="btn primary" onclick={() => auth.boot()}>Retry now</button>
+    <button class="btn primary" onclick={() => auth.boot(true)}>Retry now</button>
   </div>
 {:else if auth.phase === 'onboarding'}
   <Onboarding />

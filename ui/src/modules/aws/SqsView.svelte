@@ -19,7 +19,7 @@
   import JsonTree from '../database/JsonTree.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
   import MetricsPanel from './MetricsPanel.svelte';
-  import { prettyJson, awsErrorText } from './util';
+  import { prettyJson, awsErrorText, serviceTabKey } from './util';
   import type { AwsAccount, SqsMessage, SqsQueue } from '../../lib/api/types';
 
   interface Props {
@@ -44,6 +44,10 @@
   const attrs = $derived(selectedUrl ? (aws.sqsAttrs[selectedUrl] ?? null) : null);
   type Tab = 'messages' | 'send' | 'attributes' | 'metrics' | 'redrive';
   let tab = $state<Tab>('messages');
+  $effect(() => {
+    if (!resourceAccess.get('aws_account', account.id)) return;
+    if ((tab === 'messages' && !canReceive) || (tab === 'send' && !canSend) || (tab === 'redrive' && !canRedrive)) tab = 'attributes';
+  });
 
   const shown = $derived.by(() => {
     const q = filter.trim().toLowerCase();
@@ -72,8 +76,31 @@
     });
   });
 
+  interface QueueDraft {
+    body: string;
+    delay: number;
+    group: string;
+    dedup: string;
+    attributes: { k: string; v: string }[];
+    destination: string;
+  }
+  const drafts = new Map<string, QueueDraft>();
+  function keepDraft(): void {
+    if (selectedUrl) drafts.set(selectedUrl, { body: sendBody, delay: sendDelay, group: sendGroup, dedup: sendDedup, attributes: sendAttrs.map(a => ({ ...a })), destination: redriveDest });
+  }
   function select(q: SqsQueue): void {
+    keepDraft();
     selectedUrl = q.url;
+    const draft = drafts.get(q.url);
+    sendBody = draft?.body ?? '';
+    sendDelay = draft?.delay ?? 0;
+    sendGroup = draft?.group ?? '';
+    sendDedup = draft?.dedup ?? '';
+    sendAttrs = draft?.attributes.map(a => ({ ...a })) ?? [];
+    redriveDest = draft?.destination ?? '';
+    peekVersion++;
+    peeking = false;
+    openMsg = null;
     messages = [];
     void aws.loadSqsAttrs(account.id, q.url);
   }
@@ -82,19 +109,23 @@
   let messages = $state<SqsMessage[]>([]);
   let peekN = $state(10);
   let peeking = $state(false);
+  let peekVersion = 0;
   let openMsg = $state<string | null>(null);
 
   async function peek(): Promise<void> {
     if (!selectedUrl) return;
     peeking = true;
+    const version = ++peekVersion;
     try {
       const r = await awsApi.sqsPeek(account.id, { url: selectedUrl, max: peekN, visibility_timeout: 0 });
+      if (version !== peekVersion) return;
       messages = r.messages;
       if (r.messages.length === 0) toasts.info('No messages visible right now');
     } catch (e) {
+      if (version !== peekVersion) return;
       toasts.error('Peek failed', e instanceof Error ? e.message : String(e));
     } finally {
-      peeking = false;
+      if (version === peekVersion) peeking = false;
     }
   }
 
@@ -132,23 +163,25 @@
   let sendDedup = $state('');
   let sendAttrs = $state<{ k: string; v: string }[]>([]);
   let sending = $state(false);
+  const validDelay = $derived(Number.isInteger(sendDelay) && sendDelay >= 0 && sendDelay <= 900);
 
   async function send(): Promise<void> {
-    if (!selected || !sendBody.trim()) return;
+    if (!selected || !sendBody.trim() || !validDelay || sending) return;
+    const queue = selected;
     sending = true;
     try {
       const message_attributes: Record<string, { DataType: string; StringValue: string }> = {};
       for (const a of sendAttrs) if (a.k.trim()) message_attributes[a.k.trim()] = { DataType: 'String', StringValue: a.v };
       const r = await awsApi.sqsSend(account.id, {
-        url: selected.url,
+        url: queue.url,
         body: sendBody,
         delay_seconds: sendDelay || undefined,
-        group_id: selected.fifo ? sendGroup || undefined : undefined,
-        dedup_id: selected.fifo ? sendDedup || undefined : undefined,
+        group_id: queue.fifo ? sendGroup || undefined : undefined,
+        dedup_id: queue.fifo ? sendDedup || undefined : undefined,
         message_attributes: Object.keys(message_attributes).length ? message_attributes : undefined,
       });
       toasts.success('Message sent', r.message_id);
-      void aws.loadSqsAttrs(account.id, selected.url);
+      void aws.loadSqsAttrs(account.id, queue.url);
     } catch (e) {
       toasts.error('Send failed', e instanceof Error ? e.message : String(e));
     } finally {
@@ -287,16 +320,16 @@
       {:else}
         <div class="dhead">
           {#if viewport.isMobile}
-            <button class="back" onclick={() => (selectedUrl = null)} aria-label="Back to queues" title="Back to queues"><Icon name="chevronLeft" size={14} /></button>
+            <button class="back" onclick={() => { keepDraft(); selectedUrl = null; }} aria-label="Back to queues" title="Back to queues"><Icon name="chevronLeft" size={14} /></button>
           {/if}
           <strong class="qname" title={selected.url}>{selected.name}</strong>
           {#if selected.fifo}<span class="tag">FIFO</span>{/if}
           {#if attrs}<span class="dim counts mono">{attrs.approx_messages} avail · {attrs.approx_not_visible} in-flight · {attrs.approx_delayed} delayed</span>{/if}
           <button class="icon-btn more" onclick={(e) => selected && queueMenu(e, selected)} aria-label="Queue actions" title="Actions"><Icon name="more" size={14} /></button>
         </div>
-        <div class="tabs" role="tablist">
+        <div class="tabs" role="tablist" aria-label="Queue details">
           {#each [['messages', 'Messages'], ['send', 'Send'], ['attributes', 'Attributes'], ['metrics', 'Metrics'], ['redrive', 'Redrive']] as const as [id, label] (id)}
-            <button role="tab" aria-selected={tab === id} class:on={tab === id} onclick={() => (tab = id)} disabled={((id === 'send' && !canSend) || (id === 'redrive' && !canRedrive) || (id === 'messages' && !canReceive))} title={((id === 'send' && !canSend) || (id === 'redrive' && !canRedrive) || (id === 'messages' && !canReceive)) ? 'Needs Edit on SQS' : ''}>{label}</button>
+            <button role="tab" tabindex={tab === id ? 0 : -1} onkeydown={serviceTabKey} aria-selected={tab === id} class:on={tab === id} onclick={() => (tab = id)} disabled={((id === 'send' && !canSend) || (id === 'redrive' && !canRedrive) || (id === 'messages' && !canReceive))} title={((id === 'send' && !canSend) || (id === 'redrive' && !canRedrive) || (id === 'messages' && !canReceive)) ? 'Needs Edit on SQS' : ''}>{label}</button>
           {/each}
         </div>
 
@@ -328,15 +361,15 @@
                       {/if}
                     </div>
                     {#if !open}
-                      <pre class="msg-preview">{m.body.slice(0, 200)}{m.body.length > 200 ? '…' : ''}</pre>
+                      <pre dir="ltr" class="msg-preview">{m.body.slice(0, 200)}{m.body.length > 200 ? '…' : ''}</pre>
                     {:else}
                       {#if parsed !== undefined}
-                        <div class="msg-body mono"><JsonTree value={parsed} /></div>
+                        <div dir="ltr" class="msg-body mono"><JsonTree value={parsed} /></div>
                       {:else}
-                        <pre class="msg-body">{m.body}</pre>
+                        <pre dir="ltr" class="msg-body">{m.body}</pre>
                       {/if}
                       {#if Object.keys(m.message_attributes ?? {}).length}
-                        <div class="msg-body mono"><JsonTree value={m.message_attributes} label="message_attributes" /></div>
+                        <div dir="ltr" class="msg-body mono"><JsonTree value={m.message_attributes} label="message_attributes" /></div>
                       {/if}
                     {/if}
                   </li>
@@ -345,9 +378,9 @@
             {/if}
           {:else if tab === 'send'}
             <div class="form">
-              <label class="field"><span>Body</span><textarea bind:value={sendBody} rows={8} placeholder={'{"event": "…"}'} spellcheck="false"></textarea></label>
+              <label class="field"><span>Body</span><textarea dir="ltr" bind:value={sendBody} rows={8} placeholder={'{"event": "…"}'} spellcheck="false"></textarea></label>
               <div class="row3">
-                <label class="field"><span>Delay (s)</span><input type="number" min="0" max="900" bind:value={sendDelay} /></label>
+                <label class="field"><span>Delay (s)</span><input type="number" min="0" max="900" bind:value={sendDelay} aria-invalid={!validDelay} />{#if !validDelay}<span class="err">Enter a whole number from 0 to 900.</span>{/if}</label>
                 {#if selected.fifo}
                   <label class="field"><span>Message group ID</span><input bind:value={sendGroup} required /></label>
                   <label class="field"><span>Dedup ID <em>(optional)</em></span><input bind:value={sendDedup} /></label>
@@ -357,8 +390,8 @@
                 <span>Message attributes (String)</span>
                 {#each sendAttrs as a, i (i)}
                   <div class="kv">
-                    <input placeholder="name" bind:value={a.k} />
-                    <input placeholder="value" bind:value={a.v} />
+                    <input aria-label="Attribute {i + 1} name" placeholder="name" bind:value={a.k} />
+                    <input aria-label="Attribute {i + 1} value" placeholder="value" bind:value={a.v} />
                     <button class="icon-btn" onclick={() => (sendAttrs = sendAttrs.filter((_, j) => j !== i))} aria-label="Remove attribute" title="Remove attribute"><Icon name="x" size={12} /></button>
                   </div>
                 {/each}
@@ -366,7 +399,7 @@
               </div>
               <div class="bar">
                 <button class="btn small" onclick={() => (sendBody = prettyJson(sendBody))}>Pretty JSON</button>
-                <button class="btn primary small" onclick={() => void send()} disabled={!canSend || sending || !sendBody.trim() || (selected.fifo && !sendGroup.trim())}>{sending ? 'Sending…' : 'Send message'}</button>
+                <button class="btn primary small" onclick={() => void send()} disabled={!canSend || sending || !validDelay || !sendBody.trim() || (selected.fifo && !sendGroup.trim())}>{sending ? 'Sending…' : 'Send message'}</button>
               </div>
             </div>
           {:else if tab === 'attributes'}
@@ -666,6 +699,10 @@
     font-size: var(--fs-m);
     padding: 6px 8px;
   }
+  .field input,
+  .field textarea {
+    min-width: 0;
+  }
   .field textarea {
     font-family: var(--font-mono);
     resize: vertical;
@@ -677,7 +714,7 @@
   }
   .kv {
     display: grid;
-    grid-template-columns: 1fr 1fr auto;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
     gap: 6px;
   }
   .self {

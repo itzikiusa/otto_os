@@ -182,7 +182,8 @@
   const kbFocused = $derived(focused || ws.activeSessionId === sessionId);
   let termRef = $state<Terminal | null>(null);
   $effect(() => {
-    if (kbFocused && !readOnly && !viewport.isPhone) termRef?.focus();
+    // Breakpoint changes should not steal focus from a draft in another pane.
+    if (kbFocused && !readOnly && !untrack(() => viewport.isPhone)) termRef?.focus();
   });
   let draftTitle = $state('');
   let attachIssueOpen = $state(false);
@@ -542,22 +543,9 @@
     }
   }
 
-  // Always asked, like the sidebar row's Delete: this is the explicit Delete
-  // command. The "Always delete" preference (Settings → Appearance) governs
-  // CLOSING a tab (⌘W / the tab ×), which it now does silently.
-  async function del(): Promise<void> {
-    // Name it — in a tiled/split view the ⋯ that opened this is one of many.
-    const name = session?.title?.trim();
-    const ok = await confirmer.ask(
-      `Delete ${name ? `“${name}”` : 'this session'} and its entire history? This cannot be undone.`,
-      { title: 'Delete session', confirmLabel: 'Delete' },
-    );
-    if (!ok) return;
-    try {
-      await ws.killSession(sessionId);
-    } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
-    }
+  // Asks first unless the user chose "Always delete" (ws.requestDeleteSession).
+  function del(): Promise<void> {
+    return ws.requestDeleteSession(sessionId);
   }
 
   async function detachIssue(): Promise<void> {
@@ -881,13 +869,15 @@
            <Terminal> gets showToolbar={false} to drop its overlay counterpart. -->
       <div class="term-ctl" role="toolbar" tabindex="-1" aria-label="Terminal controls" onmousedown={(e) => e.stopPropagation()}>
         <button class="icon-btn" onclick={() => ui.termZoomOut()} disabled={ui.termFontSize <= 8} title="Terminal font smaller (⌘− in the terminal)" aria-label="Zoom out"><Icon name="minus" size={13} /></button>
-        <span
-          class="term-ctl-size"
+        <button
+          class="icon-btn term-ctl-size"
+          onclick={() => ui.termZoomReset()}
+          aria-label="Reset terminal zoom"
           class:shrunk={fontShrunk}
           title={fontShrunk
             ? `Terminal font size ${ui.termFontSize}px — drawn at ${drawnFont}px so this narrow pane keeps 80 columns`
-            : 'Terminal font size'}
-        >{fontShrunk ? `${drawnFont}px` : `${ui.termFontSize}px`}</span>
+            : 'Reset terminal zoom (⌘0)'}
+        >{fontShrunk ? `${drawnFont}px` : `${ui.termFontSize}px`}</button>
         <button class="icon-btn" onclick={() => ui.termZoomIn()} disabled={ui.termFontSize >= 28} title="Terminal font larger (⌘+ in the terminal)" aria-label="Zoom in"><Icon name="plus" size={13} /></button>
         <button
           class="icon-btn term-ctl-copy"
@@ -1366,7 +1356,7 @@
     color: var(--text);
     text-decoration: underline dotted;
     text-underline-offset: 2px;
-    cursor: help;
+    cursor: pointer;
   }
   .term-ctl-size {
     font-size: var(--fs-xs);

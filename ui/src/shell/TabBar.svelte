@@ -172,19 +172,9 @@
     }
   }
 
-  // Always asked, like the pane menu's and the sidebar's Delete.
-  async function deleteTab(id: string): Promise<void> {
-    const name = title(id).trim();
-    const ok = await confirmer.ask(
-      `Delete ${name ? `“${name}”` : 'this session'} and its entire history? This cannot be undone.`,
-      { title: 'Delete session', confirmLabel: 'Delete' },
-    );
-    if (!ok) return;
-    try {
-      await ws.killSession(id);
-    } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
-    }
+  // Asks first unless the user chose "Always delete" (ws.requestDeleteSession).
+  function deleteTab(id: string): Promise<void> {
+    return ws.requestDeleteSession(id);
   }
 
   // ── Drag-to-reorder tabs ─────────────────────────────────────────────────

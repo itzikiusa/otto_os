@@ -91,7 +91,7 @@ a:hover {
 }
 
 :focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline: 2px solid var(--accent-text);
   outline-offset: 1px;
   border-radius: var(--radius-s);
 }
@@ -230,7 +230,7 @@ textarea.input {
 }
 .input:focus {
   outline: none;
-  border-color: var(--accent);
+  border-color: var(--accent-text);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 .input::placeholder {
@@ -422,6 +422,9 @@ textarea.input {
 
 .md-body {
   user-select: text;
+  /* Paths and identifiers in prose must wrap; fenced code keeps its own
+     horizontal scroller through white-space: pre. */
+  overflow-wrap: break-word;
   font-size: var(--fs-m);
   line-height: 1.6;
 }
@@ -438,6 +441,8 @@ textarea.input {
   margin: 6px 0;
 }
 .md-body code {
+  direction: ltr;
+  unicode-bidi: isolate;
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -445,6 +450,9 @@ textarea.input {
   font-size: var(--fs-s);
 }
 .md-body pre {
+  direction: ltr;
+  unicode-bidi: isolate;
+  text-align: start;
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-m);
@@ -459,12 +467,12 @@ textarea.input {
 .md-body ul,
 .md-body ol {
   margin: 6px 0;
-  padding-left: 22px;
+  padding-inline: 22px 0;
 }
 .md-body blockquote {
   margin: 8px 0;
   padding: 4px 12px;
-  border-left: 3px solid var(--accent);
+  border-inline-start: 3px solid var(--accent);
   color: var(--text-dim);
 }
 

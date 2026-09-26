@@ -72,6 +72,7 @@
         class="provider"
         value={canvas.provider}
         onchange={(e) => setProvider(e.currentTarget.value)}
+        aria-label="Canvas agent"
         title="Which agent draws this canvas"
       >
         {#each providers as p (p)}
@@ -103,6 +104,7 @@
     <textarea
       bind:value={draft}
       onkeydown={onKey}
+      aria-label="Ask the canvas assistant"
       placeholder="Ask for a diagram or a change…"
       rows="2"
       disabled={busy}
@@ -170,7 +172,7 @@
     min-height: 0;
     display: flex;
     position: relative;
-    background: #1e1e1e;
+    background: var(--surface);
   }
   .shell > :global(*) {
     flex: 1 1 auto;
@@ -186,7 +188,7 @@
     margin: 0 0 6px;
     font-size: var(--fs-m);
     font-weight: 600;
-    color: #eee;
+    color: var(--text);
   }
   .empty .hint {
     margin: 0;

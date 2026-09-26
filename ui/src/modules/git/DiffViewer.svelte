@@ -824,7 +824,7 @@
             <span class="dfile-chevron">
               <Icon name={collapsed[file.path] ? 'chevronRight' : 'chevronDown'} size={11} />
             </span>
-            <span class="dfile-path mono">
+            <span class="dfile-path mono" dir="ltr">
               {#if file.old_path}{file.old_path}<span class="rename-arrow"> → </span>{/if}{file.path}
             </span>
             <span class="grow"></span>
@@ -864,7 +864,7 @@
             {/if}
 
             {#each file.hunks as hunk, hi (hi)}
-              <div class="hunk-header mono">
+              <div class="hunk-header mono" dir="ltr">
                 <span>{hunk.header}</span>
                 {#if wip && repoId}
                   <span class="grow"></span>
@@ -898,7 +898,7 @@
                     class="vlist-hunk"
                   >
                     {#snippet row(line: DiffLine, _i: number)}
-                      <div class="vrow dline {line.origin}">
+                      <div dir="ltr" class="vrow dline {line.origin}">
                         <span class="gut old">{line.old_line ?? ''}</span>
                         <span class="gut new">{line.new_line ?? ''}</span>
                         <span class="sign">{line.origin === 'add' ? '+' : line.origin === 'del' ? '−' : ''}</span>
@@ -917,7 +917,7 @@
                 {:else}
                   {@const hunkCapped = !prMode && !isHunkExpanded(file.path, hi) && hunk.lines.length > HUNK_LINE_CAP}
                   {@const visibleLines = hunkCapped ? hunk.lines.slice(0, HUNK_LINE_CAP) : hunk.lines}
-                  <table class="dtable">
+                  <table class="dtable" dir="ltr">
                     <tbody>
                       {#each visibleLines as line, li (li)}
                         <tr class="dline {line.origin}" class:selected={isSelected(file.path, hi, li)}>
@@ -996,7 +996,7 @@
                     class="vlist-hunk"
                   >
                     {#snippet row(sr: SplitRow, _i: number)}
-                      <div class="vrow split-vrow">
+                      <div dir="ltr" class="vrow split-vrow">
                         <span class="gut old">{sr.left?.old_line ?? ''}</span>
                         <span class="code mono half {sr.left ? (sr.left.origin === 'del' ? 'del' : '') : 'void'}">{@html sr.left ? highlightLine(sr.left.content, lang) : ''}</span>
                         <span class="gut new">{sr.right?.new_line ?? ''}</span>
@@ -1015,7 +1015,7 @@
                 {:else}
                   {@const hunkSplitCapped = !prMode && !isHunkExpanded(file.path, hi) && hunk.lines.length > HUNK_LINE_CAP}
                   {@const splitLines = hunkSplitCapped ? hunk.lines.slice(0, HUNK_LINE_CAP) : hunk.lines}
-                  <table class="dtable split">
+                  <table class="dtable split" dir="ltr">
                     <tbody>
                       {#each splitRows(file.path, hi, splitLines) as srow, ri (ri)}
                         {@const leftComments = srow.left ? inlineCommentsForLine(fc.anchored, srow.left) : []}

@@ -17,7 +17,6 @@
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { canvasDocBus } from '../../lib/events.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
-  import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import { renderD2 } from './d2';
   import { svgToPngDownload } from './export';
@@ -34,6 +33,7 @@
   // The scene THIS editor is mounted for — saves target THIS id, never
   // canvas.currentId (which on a scene switch already points at the next scene).
   const sceneId = canvas.currentId;
+  const saveContext = canvas.saveContext;
 
   let surface = $state<HTMLDivElement | null>(null);
   let content = $state<HTMLDivElement | null>(null);
@@ -65,14 +65,12 @@
   // toggle, which rides along in the doc) to THIS scene (guarded: if the scene
   // switched, drop the stale save).
   async function saveD2(value: string): Promise<void> {
-    if (canvas.currentId !== sceneId || !sceneId) return;
-    const doc = { type: 'otto-canvas', version: 1, format: 'd2' as CanvasFormat, source: value, sketch };
+    if (canvas.saveContext !== saveContext || canvas.currentId !== sceneId || !sceneId) return;
+    const doc: CanvasDoc = { type: 'otto-canvas', version: 1, format: 'd2' as CanvasFormat, source: value, sketch };
     canvas.source = value; // drives the live preview re-render
     canvas.rawDoc = doc;
     try {
-      await api.put(`/canvas/scenes/${sceneId}`, { doc });
-      // Re-check after the await: don't mark a now-switched scene as saved/clean.
-      if (canvas.currentId === sceneId) canvas.markSaved(doc);
+      await canvas.persistDoc(sceneId, doc, saveContext);
     } catch (e) {
       if (canvas.currentId === sceneId)
         toasts.error('Save failed', e instanceof Error ? e.message : String(e));
@@ -82,10 +80,11 @@
   /** The code-pane text a pending debounce has not saved yet. */
   let pendingCode: string | null = null;
   function onCode(value: string): void {
+    if (canvas.saveContext !== saveContext) return;
     if (codeTimer) clearTimeout(codeTimer);
     pendingCode = value;
     // Unsaved typing wins over live agent pushes (ingestDoc skips while dirty).
-    if (canvas.currentId === sceneId) canvas.dirty = true;
+    if (sceneId) canvas.stageDoc(sceneId, { type: 'otto-canvas', version: 1, format: 'd2', source: value, sketch }, saveContext);
     codeTimer = setTimeout(() => {
       codeTimer = null;
       pendingCode = null;
@@ -99,9 +98,9 @@
     if (codeTimer) clearTimeout(codeTimer);
     codeTimer = null;
     if (pendingCode === null || !sceneId) return;
-    const doc = { type: 'otto-canvas', version: 1, format: 'd2' as CanvasFormat, source: pendingCode, sketch };
+    const doc: CanvasDoc = { type: 'otto-canvas', version: 1, format: 'd2' as CanvasFormat, source: pendingCode, sketch };
     pendingCode = null;
-    void api.put(`/canvas/scenes/${sceneId}`, { doc }).catch((e: unknown) =>
+    void canvas.persistDoc(sceneId, doc, saveContext).catch((e: unknown) =>
       toasts.error('Save failed', e instanceof Error ? e.message : String(e)),
     );
   }
@@ -261,6 +260,7 @@
     // The result belongs to THIS scene even if the user switches away while
     // the agent works (the server commits it there).
     const sceneId = canvas.currentId;
+  const saveContext = canvas.saveContext;
     canvas.pushConvo('user', p, sceneId);
     try {
       const res = await canvas.assist(p, 'flow');
@@ -311,6 +311,11 @@
 
   onMount(() => {
     liveId = canvas.currentId;
+    // Opening Code or resizing a split pane changes the preview's viewport.
+    // Keep the automatic fit until the user deliberately pans or zooms.
+    const observer = new ResizeObserver(() => { if (!userAdjusted && svgHtml) fit(); });
+    if (surface) observer.observe(surface);
+    return () => observer.disconnect();
   });
   onDestroy(() => {
     flushPendingCode();
@@ -385,7 +390,7 @@
       </div>
 
       <div class="mode-bar">
-        <span class="mode-chip"><Icon name="layers" size={12} /> D2</span>
+        <span class="mode-chip"><Icon name="layers" size={12} /> D2{#if readonly} · Preview{/if}</span>
         {#if !readonly}
           <button
             class="sketch-toggle"
@@ -432,6 +437,7 @@
 
 <style>
   .board {
+    container-type: inline-size;
     position: relative;
     width: 100%;
     height: 100%;
@@ -603,7 +609,7 @@
   .zoombar {
     position: absolute;
     bottom: 16px;
-    right: 16px;
+    inset-inline-end: 16px;
     z-index: 5;
     display: inline-flex;
     align-items: center;
@@ -641,5 +647,14 @@
     height: 18px;
     background: var(--border);
     margin: 0 2px;
+  }
+  @container (max-width: 700px) {
+    .lanes { flex-direction: column; }
+    .code-pane {
+      flex-basis: 40%;
+      border-inline-end: 0;
+      border-block-end: 1px solid var(--border);
+    }
+    .zoombar { inset-inline-end: 8px; bottom: 12px; }
   }
 </style>

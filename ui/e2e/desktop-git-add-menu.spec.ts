@@ -106,4 +106,13 @@ test('+ stays fully visible when many repo tabs are open', async ({ page }) => {
   });
   expect(within).toBe(true);
   await expectFullyInViewport(page, page.locator('.git-tab-new'), 'open-repo + button');
+  // …and the strip USES the header's free width (the Git header has no
+  // actions of its own): it used to stop at 50% of the row, ellipsizing
+  // repo names beside an empty half-row. Its trailing edge must reach
+  // close to the row's end.
+  const gap = await page.locator('.git-tab-new').evaluate((btn) => {
+    const row = btn.closest('.ph-row') as HTMLElement;
+    return row.getBoundingClientRect().right - btn.getBoundingClientRect().right;
+  });
+  expect(gap).toBeLessThan(80);
 });

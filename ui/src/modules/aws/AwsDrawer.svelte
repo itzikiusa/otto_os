@@ -7,6 +7,7 @@
   // with ui.pushModal() so the native browser webview hides under it.
   import type { Snippet } from 'svelte';
   import { untrack } from 'svelte';
+  import { dialogFocus } from '../../lib/dialogFocus';
   import Icon from '../../lib/components/Icon.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
@@ -34,14 +35,14 @@
   // Phone: a full-screen sheet is a modal overlay — register it (untracked:
   // pushModal reads the counter it bumps) and move focus into it.
   $effect(() => {
-    if (!viewport.isPhone) return;
+    if (!viewport.isPhone || !drawerEl) return;
     untrack(() => ui.pushModal());
-    queueMicrotask(() => drawerEl?.querySelector<HTMLElement>('.dr-close')?.focus());
-    return () => untrack(() => ui.popModal());
+    const focus = dialogFocus(drawerEl, onclose);
+    return () => { focus.destroy(); untrack(() => ui.popModal()); };
   });
 
   function onKey(e: KeyboardEvent): void {
-    if (e.key !== 'Escape' || e.defaultPrevented) return;
+    if (viewport.isPhone || e.key !== 'Escape' || e.defaultPrevented) return;
     const t = e.target as HTMLElement | null;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
     // A dialog stacked over the drawer (confirm, picker) owns its own Esc.
@@ -52,10 +53,14 @@
   }
 
   function tabKey(e: KeyboardEvent, i: number): void {
-    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+    if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
     e.preventDefault();
-    const j = (i + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+    const button = e.currentTarget as HTMLButtonElement;
+    const rtl = getComputedStyle(button).direction === 'rtl';
+    const step = (e.key === 'ArrowRight' ? 1 : -1) * (rtl ? -1 : 1);
+    const j = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : (i + step + tabs.length) % tabs.length;
     ontab(tabs[j].id);
+    button.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[j]?.focus();
   }
 </script>
 

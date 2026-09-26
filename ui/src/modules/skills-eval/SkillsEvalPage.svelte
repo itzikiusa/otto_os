@@ -60,6 +60,7 @@
   let mode: Mode = $state('form');
   let selectedId: string | null = $state(null);
   let starting = $state(false);
+  let listHidden = $state(false);
   // The view is part of the route (`#/skills-eval/evaluator[/golden|/matrix]`)
   // so back/forward and deep links land on it.
   const TABS: { id: Tab; label: string; icon: 'zap' | 'target' | 'grid' }[] = [
@@ -263,6 +264,8 @@
 </script>
 
 <div class="se-wrap">
+  <div class="se-toolbar">
+  {#if tab === 'runs'}<button class="btn small ghost list-toggle" aria-label={listHidden ? 'Show evaluations list' : 'Hide evaluations list'} title={listHidden ? 'Show evaluations list' : 'Hide evaluations list'} aria-expanded={!listHidden} aria-controls="evaluations-list" onclick={() => (listHidden = !listHidden)}><Icon name="sidebar" size={14} /></button>{/if}
   <div class="se-tabs" role="tablist" aria-label="Evaluator view" data-testid="eval-tabs" tabindex="-1" bind:this={tabsEl} onkeydown={onTabKey}>
     {#each TABS as t (t.id)}
       <button class="se-tab" role="tab" aria-selected={tab === t.id} tabindex={tab === t.id ? 0 : -1} class:active={tab === t.id} onclick={() => setTab(t.id)} data-testid="tab-{t.id}">
@@ -270,14 +273,15 @@
       </button>
     {/each}
   </div>
+  </div>
   <div class="se-content">
     {#if tab === 'golden'}
       <GoldenTasksView onopenrun={openRun} />
     {:else if tab === 'matrix'}
       <MatrixView onopenrun={openRunById} />
     {:else}
-<div class="se-page">
-  <aside class="se-side" style={viewport.isPhone ? undefined : `width:${sideW}px`}>
+<div class="se-page" class:list-hidden={listHidden}>
+  <aside class="se-side" id="evaluations-list" style={viewport.isPhone ? undefined : `width:${sideW}px`}>
     <div class="se-side-head">
       <span class="se-side-title">Evaluations</span>
       <button
@@ -396,6 +400,9 @@
 </div>
 
 <style>
+  .se-toolbar { display: flex; align-items: center; border-bottom: 1px solid var(--border); }
+  .list-toggle { margin-inline-start: 8px; flex-shrink: 0; }
+  .se-page.list-hidden .se-side, .se-page.list-hidden .side-resizer { display: none; }
   .se-wrap {
     display: flex;
     flex-direction: column;
@@ -407,7 +414,6 @@
     display: flex;
     gap: 2px;
     padding: 0 16px;
-    border-bottom: 1px solid var(--border);
     flex-shrink: 0;
   }
   .se-tab {

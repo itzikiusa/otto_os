@@ -5942,12 +5942,14 @@ export type InsightRunPeriod = 'day' | 'week' | 'month';
 
 export interface RunInsightsReq {
   period: InsightRunPeriod;
-  /** How many periods back (0 = the most recent complete period). */
+  /** How many calendar periods back (0 = current, 1 = previous complete period). */
   offset?: number;
 }
 
 export interface RunInsightsResp {
   started: boolean;
+  /** Requested daemon-local collector period, e.g. daily:20260924_20260924. */
+  report_key?: string | null;
   /** Session id of the spawned insights run (when started === true). */
   run_id?: string | null;
   /** Human-readable explanation when started === false (e.g. skill not installed). */

@@ -59,14 +59,16 @@
   function onTabKey(e: KeyboardEvent): void {
     const at = TABS.findIndex((t) => t.id === tab);
     let next = -1;
-    if (e.key === 'ArrowRight') next = (at + 1) % TABS.length;
-    else if (e.key === 'ArrowLeft') next = (at - 1 + TABS.length) % TABS.length;
+    const direction = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl' ? -1 : 1;
+    if (e.key === 'ArrowRight') next = (at + direction + TABS.length) % TABS.length;
+    else if (e.key === 'ArrowLeft') next = (at - direction + TABS.length) % TABS.length;
     else if (e.key === 'Home') next = 0;
     else if (e.key === 'End') next = TABS.length - 1;
     if (next < 0) return;
     e.preventDefault();
+    const tablist = e.currentTarget as HTMLElement;
     goTab(TABS[next].id);
-    queueMicrotask(() => (e.currentTarget as HTMLElement | null)?.querySelector<HTMLButtonElement>('[aria-selected="true"]')?.focus());
+    tablist.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();
   }
   let editing = $state(false);
   let busy = $state(false);

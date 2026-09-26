@@ -19,7 +19,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import ResultsGrid from '../database/ResultsGrid.svelte';
-  import { athenaCostUsd, fmtAgo, fmtBytes, fmtMs, awsErrorText } from './util';
+  import { athenaCostUsd, fmtAgo, fmtBytes, fmtMs, awsErrorText, serviceTabKey } from './util';
   import type {
     AthenaExecution,
     AthenaQueryState,
@@ -450,9 +450,9 @@
         <span class="dim">{canRun ? 'Write a query and press ⌘↵.' : 'You can browse the catalog and history; running queries needs Edit on Athena.'}</span>
       {/if}
       <span class="spacer"></span>
-      <div class="tabs" role="tablist">
-        <button role="tab" aria-selected={tab === 'results'} class:on={tab === 'results'} onclick={() => (tab = 'results')}>Results</button>
-        <button role="tab" aria-selected={tab === 'history'} class:on={tab === 'history'} onclick={() => { tab = 'history'; void loadHistory(); }}>History</button>
+      <div class="tabs" role="tablist" aria-label="Query output">
+        <button role="tab" tabindex={tab === 'results' ? 0 : -1} onkeydown={serviceTabKey} aria-selected={tab === 'results'} class:on={tab === 'results'} onclick={() => (tab = 'results')}>Results</button>
+        <button role="tab" tabindex={tab === 'history' ? 0 : -1} onkeydown={serviceTabKey} aria-selected={tab === 'history'} class:on={tab === 'history'} onclick={() => { tab = 'history'; void loadHistory(); }}>History</button>
       </div>
     </div>
 

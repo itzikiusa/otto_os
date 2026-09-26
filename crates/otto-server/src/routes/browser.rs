@@ -2330,10 +2330,31 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json(&body).as_array().map(|a| a.len()), Some(0));
 
-        // The download is refused while this build ships no sha256 pin (or
-        // the platform is unsupported) — never silently unverified.
-        let (status, _) = post_json(&app, "/browser/live/install", serde_json::json!({})).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // Supported builds now ship checksum pins. Seed an installed fixture
+        // so the route's idempotent path is exercised without downloading or
+        // launching Chrome. Archive verification has isolated installer tests.
+        if let Some(platform) = otto_browser::live::install::current_platform() {
+            use otto_browser::live::install::{
+                build_dir, managed_exe, pin_for, INSTALLED_MARKER,
+            };
+            let pin = pin_for(otto_browser::live::ChromeBuild::Chrome, platform).unwrap();
+            let exe = managed_exe(tmp.path(), pin);
+            std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+            std::fs::write(&exe, b"test fixture; never executed").unwrap();
+            std::fs::write(build_dir(tmp.path(), pin).join(INSTALLED_MARKER), pin.sha256)
+                .unwrap();
+            let (status, body) =
+                post_json(&app, "/browser/live/install", serde_json::json!({})).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json(&body)["state"], "installed");
+            assert_eq!(json(&body)["build"], "chrome");
+            assert_eq!(json(&body)["version"], pin.version);
+        } else {
+            let (status, body) =
+                post_json(&app, "/browser/live/install", serde_json::json!({})).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(json(&body)["code"], "unsupported_platform");
+        }
     }
 
     #[tokio::test]

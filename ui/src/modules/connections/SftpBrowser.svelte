@@ -249,7 +249,7 @@
       <div class="transfers" aria-label="File transfers">
         {#each view.transfers as transfer (transfer.id)}
           <div class="transfer">
-            <span class="ellipsis" title={transfer.remote_path}>{transfer.direction === 'upload' ? 'Upload' : 'Download'} {transfer.remote_path}</span>
+            <span class="ellipsis" dir="ltr" title={transfer.remote_path}>{transfer.direction === 'upload' ? 'Upload' : 'Download'} {transfer.remote_path}</span>
             <span>{TRANSFER_STATUS[transfer.status] ?? transfer.status} · {humanSize(transfer.bytes)}{transfer.total_bytes !== null ? ` / ${humanSize(transfer.total_bytes)}` : ''} · {transfer.elapsed_secs}s</span>
             {#if transfer.status === 'running'}
               <progress max={transfer.total_bytes ?? undefined} value={transfer.total_bytes ? transfer.bytes : undefined} aria-label="Transferred bytes"></progress>
@@ -262,7 +262,7 @@
     {/if}
 
     <!-- Breadcrumb -->
-    <div class="crumbs mono">
+    <div class="crumbs mono" dir="ltr">
       {#each crumbs as c, i (c.path)}
         {#if i > 0}<span class="sep">/</span>{/if}
         <button class="crumb" onclick={() => sftp.navigate(conn.id, c.path)}>{c.label}</button>
@@ -280,7 +280,7 @@
       {:else if shownEntries.length === 0}
         <div class="dim pad">No files match “{query.trim()}”.</div>
       {:else}
-        <div class="head row">
+        <div class="head sftp-row">
           <span class="cell name">Name</span>
           <span class="cell size">Size</span>
           <span class="cell mtime">Modified</span>
@@ -288,21 +288,18 @@
           <span class="cell actions"></span>
         </div>
         {#each shownEntries as e (e.name)}
-          <div class="row">
+          <div class="sftp-row">
             <button
               class="cell name nav"
-              ondblclick={() => onRowActivate(e)}
-              onkeydown={(ev) => {
-                if (ev.key === 'Enter') onRowActivate(e);
-              }}
+              onclick={() => onRowActivate(e)}
             >
               <Icon name={iconFor(e)} size={13} />
-              <span class="ellipsis" title={e.name}>{e.name}</span>
-              {#if e.symlink_target}<span class="link-to dim ellipsis" title={e.symlink_target}>→ {e.symlink_target}</span>{/if}
+              <span class="ellipsis" dir="ltr" title={e.name}>{e.name}</span>
+              {#if e.symlink_target}<span class="link-to dim ellipsis" dir="ltr" title={e.symlink_target}>→ {e.symlink_target}</span>{/if}
             </button>
-            <span class="cell size mono">{e.kind === 'dir' ? '' : humanSize(e.size)}</span>
-            <span class="cell mtime dim">{e.mtime ?? ''}</span>
-            <span class="cell perms mono dim">{e.perms}</span>
+            <span class="cell size mono" dir="ltr">{e.kind === 'dir' ? '' : humanSize(e.size)}</span>
+            <span class="cell mtime dim" dir="ltr">{e.mtime ?? ''}</span>
+            <span class="cell perms mono dim" dir="ltr">{e.perms}</span>
             <span class="cell actions">
               {#if isTextLike(e)}
                 <button
@@ -377,7 +374,7 @@
     {#if viewing.truncated}
       <div class="trunc">Showing the first 1 MiB — file is larger.</div>
     {/if}
-    <pre class="viewer mono">{viewing.text}</pre>
+    <pre class="viewer mono" dir="ltr">{viewing.text}</pre>
   </Modal>
 {/if}
 
@@ -394,6 +391,7 @@
   }
   .toolbar {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 6px;
   }
@@ -402,6 +400,8 @@
   }
   .sftp-search {
     width: 180px;
+    min-width: 0;
+    max-width: 100%;
     background: var(--surface-2, var(--surface));
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -450,7 +450,7 @@
     background: var(--surface-2);
     max-height: 52vh;
   }
-  .row {
+  .sftp-row {
     display: grid;
     grid-template-columns: 1fr 84px 130px 110px auto;
     align-items: center;
@@ -458,10 +458,10 @@
     padding: 4px 8px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
   }
-  .row:last-child {
+  .sftp-row:last-child {
     border-bottom: none;
   }
-  .row.head {
+  .sftp-row.head {
     position: sticky;
     top: 0;
     background: var(--surface);
@@ -537,5 +537,17 @@
     font-size: var(--fs-s);
     color: var(--text-dim);
     padding: 0 2px 8px;
+  }
+  @media (max-width: 640px) {
+    .transfer > .ellipsis { flex-basis: 100%; max-width: none; white-space: normal; overflow-wrap: anywhere; }
+    .toolbar .grow { display: none; }
+    .sftp-search { flex: 1 0 100%; width: 100%; }
+    .sftp-row { grid-template-columns: minmax(0, 1fr) auto; }
+    .sftp-row.head { display: none; }
+    .cell.name { grid-column: 1 / -1; min-height: 36px; }
+    .cell.mtime { grid-column: 1; grid-row: 3; white-space: normal; }
+    .cell.perms { grid-column: 1; grid-row: 4; }
+    .cell.actions { grid-column: 2; grid-row: 2 / 5; }
+    .cell.actions :global(.icon-btn) { width: 36px; height: 36px; }
   }
 </style>

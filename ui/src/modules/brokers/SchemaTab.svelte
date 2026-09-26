@@ -17,6 +17,23 @@
   // Toggle to show version history / compat panel for the selected subject.
   let showVersions = $state(false);
 
+  function onViewKeydown(event: KeyboardEvent) {
+    const tabs = Array.from(event.currentTarget instanceof HTMLElement ? event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]') : []);
+    const current = tabs.indexOf(event.target as HTMLButtonElement);
+    if (current < 0) return;
+    let next: number;
+    if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = tabs.length - 1;
+    else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      const rtl = getComputedStyle(event.currentTarget as HTMLElement).direction === 'rtl';
+      const step = (event.key === 'ArrowRight' ? 1 : -1) * (rtl ? -1 : 1);
+      next = (current + step + tabs.length) % tabs.length;
+    } else return;
+    event.preventDefault();
+    showVersions = next === 1;
+    tabs[next]?.focus();
+  }
+
   function prettySchema(s: SchemaSubject): string {
     try {
       return JSON.stringify(JSON.parse(s.schema), null, 2);
@@ -48,6 +65,7 @@
   });
 </script>
 
+<div class="schema-host">
 <div class="schema">
   {#if loading}
     <p class="muted pad">Loading subjects…</p>
@@ -81,22 +99,24 @@
       {#if selected}
         <div class="view-head">
           <span class="sn-big">{selected.subject}</span>
-          <div class="view-tabs" role="tablist" aria-label="Subject views">
-            <button class:on={!showVersions} role="tab" aria-selected={!showVersions} onclick={() => (showVersions = false)}>Schema</button>
-            <button class:on={showVersions} role="tab" aria-selected={showVersions} onclick={() => (showVersions = true)}>Versions &amp; Compat</button>
+          <div class="view-tabs" role="tablist" aria-label="Subject views" tabindex="-1" onkeydown={onViewKeydown}>
+            <button class:on={!showVersions} role="tab" aria-selected={!showVersions} tabindex={showVersions ? -1 : 0} onclick={() => (showVersions = false)}>Schema</button>
+            <button class:on={showVersions} role="tab" aria-selected={showVersions} tabindex={showVersions ? 0 : -1} onclick={() => (showVersions = true)}>Versions &amp; Compat</button>
           </div>
         </div>
         {#if showVersions}
           <SchemaVersionsPanel cluster={cluster} subject={selected.subject} />
         {:else}
-          <pre class="payload">{prettySchema(selected)}</pre>
+          <pre class="payload" dir="ltr">{prettySchema(selected)}</pre>
         {/if}
       {/if}
     </div>
   {/if}
 </div>
 
+</div>
 <style>
+  .schema-host { container-type: inline-size; height: 100%; min-height: 0; min-width: 0; }
   .schema {
     display: flex;
     height: 100%;
@@ -104,6 +124,8 @@
   }
   .list {
     width: 300px;
+    max-width: 40%;
+    flex-shrink: 0;
     border-inline-end: 1px solid var(--border);
     overflow: auto;
   }
@@ -132,6 +154,7 @@
     word-break: break-all;
   }
   .view {
+    min-width: 0;
     flex: 1;
     overflow: hidden;
     display: flex;
@@ -195,16 +218,15 @@
     padding: 12px;
   }
 
-  /* Phone (≤640px): the 300px fixed subject list + viewer can't sit side-by-side
-     on a ~375–430px viewport. Stack them and cap the list height so the schema
-     viewer stays reachable. */
-  @media (max-width: 640px) {
+  /* Stack by available pane width, including tablets and embedded panels. */
+  @container (max-width: 760px) {
     .schema {
       flex-direction: column;
     }
     .list {
       width: 100%;
-      max-height: 35vh;
+      max-width: none;
+      max-height: 25vh;
       border-inline-end: none;
       border-bottom: 1px solid var(--border);
     }

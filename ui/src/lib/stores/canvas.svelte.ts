@@ -8,7 +8,7 @@
 // which updates `scene` + schedules a save + records an undo snapshot WITHOUT
 // bumping `rev` (so the editor is not yanked mid-drag).
 
-import { api } from '../api/client';
+import { api, getToken } from '../api/client';
 import { ws } from './workspace.svelte';
 import { defaultAgentProvider } from '../providers';
 import { loadErrorText } from '../loadError';
@@ -71,9 +71,77 @@ class CanvasStore {
   /** The scene id that `loadError` belongs to — what Retry re-opens. */
   loadErrorId = $state<string | null>(null);
 
+  #openSequence = 0;
+  // File-backed editors retain unsaved snapshots across scene/workspace changes.
+  // A per-scene queue keeps delayed older PUTs from overwriting newer edits.
+  #drafts = new Map<string, CanvasDoc>();
+  docSaveErrors = $state<Record<string, string>>({});
+  #writes = new Map<string, Promise<void>>();
+  #authToken = getToken();
+  #saveContext = 0;
+
+  /** Editors capture this on mount; their cleanup must not save as a new login. */
+  get saveContext(): number { return this.#saveContext; }
+
+  resetAuthContext(): void {
+    const token = getToken();
+    if (token === this.#authToken) return;
+    this.#authToken = token;
+    this.#saveContext++;
+    this.closeScene();
+    this.#drafts.clear();
+    this.docSaveErrors = {};
+    this.scenes = [];
+    this.rawDoc = null;
+    this.source = null;
+    this.convo = [];
+    this.sessionId = null;
+    this.pendingOpenId = null;
+    this.loadError = null;
+    this.loadErrorId = null;
+    this.listError = null;
+    this.listLoading = false;
+    // Keep in-flight queues ordered, but invalidate all their old completions.
+    if (token) void this.loadScenes().catch(() => {});
+  }
+
+  stageDoc(id: string, doc: CanvasDoc, context = this.#saveContext): void {
+    if (context !== this.#saveContext) return;
+    this.#drafts.set(id, doc);
+    if (this.currentId === id) this.dirty = true;
+  }
+
+  async persistDoc(id: string, doc: CanvasDoc, context = this.#saveContext): Promise<void> {
+    if (context !== this.#saveContext) return;
+    this.stageDoc(id, doc, context);
+    const previous = this.#writes.get(id);
+    const write = (async () => {
+      await previous?.catch(() => {});
+      if (context !== this.#saveContext) return;
+      await api.put(`/canvas/scenes/${id}`, { doc });
+      if (context !== this.#saveContext) return;
+      if (this.#drafts.get(id) !== doc) return;
+      this.#drafts.delete(id);
+      delete this.docSaveErrors[id];
+      if (this.currentId === id) this.markSaved(doc);
+    })();
+    this.#writes.set(id, write);
+    try { await write; }
+    catch (e) {
+      if (context !== this.#saveContext) return;
+      this.docSaveErrors[id] = loadErrorText(e); throw e;
+    }
+    finally { if (this.#writes.get(id) === write) this.#writes.delete(id); }
+  }
+
   #history: string[] = [];
   #future: string[] = [];
   #saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  async retryDoc(id: string): Promise<void> {
+    const doc = this.#drafts.get(id);
+    if (doc) await this.persistDoc(id, doc);
+  }
 
   get canUndo(): boolean {
     return this.#history.length > 0;
@@ -86,15 +154,18 @@ class CanvasStore {
   // Canvas is a GLOBAL tool: list the user's scenes across all workspaces (no
   // active-workspace requirement). Creating a scene still uses the current ws.
   async loadScenes(): Promise<void> {
+    const context = this.#saveContext;
     this.listLoading = true;
     this.listError = null;
     try {
-      this.scenes = await api.get<CanvasSceneSummary[]>(`/canvas/scenes`);
+      const scenes = await api.get<CanvasSceneSummary[]>(`/canvas/scenes`);
+      if (context === this.#saveContext) this.scenes = scenes;
     } catch (e) {
+      if (context !== this.#saveContext) return;
       this.listError = loadErrorText(e);
       throw e;
     } finally {
-      this.listLoading = false;
+      if (context === this.#saveContext) this.listLoading = false;
     }
   }
 
@@ -111,10 +182,12 @@ class CanvasStore {
   }
 
   async open(id: string): Promise<void> {
+    const sequence = ++this.#openSequence;
     this.loadError = null;
     this.loadErrorId = null;
     try {
       const row = await api.get<CanvasScene>(`/canvas/scenes/${id}`);
+      if (sequence !== this.#openSequence) return;
       this.currentId = row.id;
       this.scene = parseScene(row.doc_json, row.title);
       let doc: CanvasDoc | null = null;
@@ -123,6 +196,7 @@ class CanvasStore {
       } catch {
         doc = null;
       }
+      doc = this.#drafts.get(id) ?? doc;
       this.rawDoc = doc;
       this.source = typeof doc?.source === 'string' ? doc.source : null;
       this.format =
@@ -132,10 +206,11 @@ class CanvasStore {
       this.sessionId = row.session_id;
       this.#history = [];
       this.#future = [];
-      this.dirty = false;
+      this.dirty = this.#drafts.has(id);
       this.savedAt = Date.parse(row.updated_at) || null;
       this.rev += 1;
     } catch (e) {
+      if (sequence !== this.#openSequence) return;
       this.loadError = loadErrorText(e);
       this.loadErrorId = id;
       throw e;
@@ -143,6 +218,7 @@ class CanvasStore {
   }
 
   closeScene(): void {
+    ++this.#openSequence;
     if (this.#saveTimer) clearTimeout(this.#saveTimer);
     this.currentId = null;
     this.scene = null;
@@ -152,7 +228,12 @@ class CanvasStore {
   }
 
   async del(id: string): Promise<void> {
+    const context = this.#saveContext;
+    await this.#writes.get(id)?.catch(() => {});
+    if (context !== this.#saveContext) return;
     await api.del(`/canvas/scenes/${id}`);
+    this.#drafts.delete(id);
+    delete this.docSaveErrors[id];
     if (this.currentId === id) this.closeScene();
     await this.loadScenes().catch(() => {});
   }
@@ -319,6 +400,10 @@ class CanvasStore {
   }
 
   async saveNow(): Promise<void> {
+    if (this.currentId && this.#drafts.has(this.currentId)) {
+      await this.retryDoc(this.currentId);
+      return;
+    }
     if (!this.currentId || !this.scene || this.saving) return;
     this.saving = true;
     try {
@@ -346,3 +431,7 @@ class CanvasStore {
 }
 
 export const canvas = new CanvasStore();
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('otto:auth-changed', () => canvas.resetAuthContext());
+}

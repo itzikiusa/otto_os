@@ -88,23 +88,25 @@
   /** workspace id → its full member list. Loaded for the by-user view. */
   let allMembers: Record<string, MemberEntry[]> = $state({});
   let allMembersLoading = $state(false);
+  let allMembersError = $state('');
   /** Workspace ids currently mid-save (disables that row's buttons). */
   let savingWs: string[] = $state([]);
 
   /** Load every workspace's member list (by-user view needs them all). */
   async function loadAllMembers(): Promise<void> {
     allMembersLoading = true;
+    allMembersError = '';
     try {
       const pairs = await Promise.all(
-        ws.workspaces.map(async (w) => {
-          try {
-            return [w.id, await api.get<MemberEntry[]>(`/workspaces/${w.id}/members`)] as const;
-          } catch {
-            return [w.id, [] as MemberEntry[]] as const;
-          }
-        }),
+        ws.workspaces.map(async (w) =>
+          [w.id, await api.get<MemberEntry[]>(`/workspaces/${w.id}/members`)] as const,
+        ),
       );
       allMembers = Object.fromEntries(pairs);
+    } catch (e) {
+      // Membership updates replace the full list. Never substitute an empty
+      // list for an unreadable workspace, or the next edit removes its users.
+      allMembersError = loadErrorText(e);
     } finally {
       allMembersLoading = false;
     }
@@ -119,8 +121,9 @@
     wsId: string,
     userId: string,
     role: WorkspaceRole | 'none',
-  ): Promise<void> {
-    if (roleIn(wsId, userId) === role) return;
+  ): Promise<boolean> {
+    if (allMembersLoading || allMembersError || !allMembers[wsId] || savingWs.includes(wsId)) return false;
+    if (roleIn(wsId, userId) === role) return true;
     const current = allMembers[wsId] ?? [];
     const next = current.filter((m) => m.user_id !== userId);
     if (role !== 'none') next.push({ user_id: userId, username: '', display_name: '', role });
@@ -133,8 +136,10 @@
       // Keep the by-workspace view honest when it's showing the same workspace.
       if (matrixWs === wsId) members = saved;
       flashSaved('roles');
+      return true;
     } catch (e) {
       toasts.error('Couldn’t change the workspace role', e instanceof Error ? e.message : String(e));
+      return false;
     } finally {
       savingWs = savingWs.filter((id) => id !== wsId);
     }
@@ -143,10 +148,15 @@
   /** Give the selected user the same role in EVERY workspace (or remove them). */
   async function setRoleEverywhere(role: WorkspaceRole | 'none'): Promise<void> {
     const userId = memberUserId;
-    if (!userId) return;
+    if (!userId || savingWs.length || allMembersLoading || allMembersError) return;
     const targets = ws.workspaces.filter((w) => roleIn(w.id, userId) !== role);
     if (targets.length === 0) return;
-    await Promise.all(targets.map((w) => setRoleIn(w.id, userId, role)));
+    const results = await Promise.all(targets.map((w) => setRoleIn(w.id, userId, role)));
+    const updated = results.filter(Boolean).length;
+    if (updated !== targets.length) {
+      toasts.error('Some workspace roles were not updated', `${updated} of ${targets.length} workspaces updated. Retry to apply the remaining changes.`);
+      return;
+    }
     toasts.success(
       role === 'none' ? 'Removed from all workspaces' : `Set to ${role} in all workspaces`,
       `${targets.length} workspace${targets.length === 1 ? '' : 's'} updated`,
@@ -252,7 +262,7 @@
 
   // Load every workspace's members the first time the by-user view is opened.
   $effect(() => {
-    if (membershipAxis === 'user' && Object.keys(allMembers).length === 0) {
+    if (membershipAxis === 'user' && ws.workspaces.length > 0 && Object.keys(allMembers).length === 0) {
       void loadAllMembers();
     }
   });
@@ -559,6 +569,8 @@
       {/if}
     {:else if allMembersLoading}
       <Skeleton rows={4} height={32} />
+    {:else if allMembersError}
+      <LoadState what="workspace memberships" error={allMembersError} empty onretry={() => void loadAllMembers()} />
     {:else}
       <div class="urow controls">
         <span class="dim">

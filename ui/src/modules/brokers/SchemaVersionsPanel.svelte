@@ -139,6 +139,8 @@
       <p class="muted small">Paste a candidate schema to check it against the latest registered version.</p>
       <textarea
         class="compat-input"
+        aria-label="Candidate schema"
+        dir="ltr"
         bind:value={compatSchema}
         placeholder={'{"type":"record","name":"...","fields":[...]}'}
         rows="5"

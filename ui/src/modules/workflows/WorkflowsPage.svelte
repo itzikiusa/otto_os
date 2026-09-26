@@ -59,6 +59,7 @@
   let graph = $state<WorkflowGraph>({ nodes: [], edges: [] });
   let selectedId = $state<string | null>(null);
   let dirty = $state(false);
+  let savingGraph = $state(false);
 
   let prompt = $state('');
   let generating = $state(false);
@@ -367,7 +368,7 @@
     if (viewport.isPhone) {
       items.push(
         { label: 'Add node…', icon: 'plus', action: () => { popRight = 8; paletteOpen = true; } },
-        { label: 'Save', icon: 'check', disabled: !dirty, title: dirty ? undefined : 'No unsaved changes', action: () => void save() },
+        { label: 'Save', icon: 'check', disabled: !dirty || savingGraph, title: dirty ? undefined : 'No unsaved changes', action: () => void save() },
         { label: 'Runs', icon: 'clock', action: () => { popRight = 8; runsOpen = true; void loadRuns(); } },
         { separator: true },
       );
@@ -471,7 +472,7 @@
   /** Opening another workflow (or restoring a version) replaces the canvas,
    *  so unsaved node/edge edits would vanish silently — ask first. */
   async function discardEditsOk(): Promise<boolean> {
-    if (!dirty || !current) return true;
+    if ((!dirty && !instructionsDirty) || !current) return true;
     return confirmer.ask(`“${current.name}” has unsaved changes. Discard them?`, {
       title: 'Discard unsaved changes',
       confirmLabel: 'Discard changes',
@@ -480,7 +481,7 @@
   /** Sidebar row click: re-clicking the open workflow keeps its unsaved edits
    *  (it used to reload the saved graph over them). */
   async function openGuarded(wf: Workflow): Promise<void> {
-    if (current?.id === wf.id && dirty) return;
+    if (current?.id === wf.id && (dirty || instructionsDirty)) return;
     if (!(await discardEditsOk())) return;
     open(wf);
   }
@@ -521,16 +522,27 @@
     }
   }
 
+  /** A save updates its own row; a late response must never reopen an old editor. */
+  function applySavedWorkflow(wf: Workflow): void {
+    if (current?.id === wf.id && (wf.version ?? 0) >= (current.version ?? 0)) current = wf;
+    workflows = workflows.map((w) => (w.id === wf.id && (wf.version ?? 0) >= (w.version ?? 0) ? wf : w));
+  }
+
   async function save(): Promise<void> {
-    if (!current) return;
+    if (!current || savingGraph) return;
+    const workflowId = current.id;
+    const submitted = JSON.stringify($state.snapshot(graph));
+    savingGraph = true;
     try {
-      const wf = await api.patch<Workflow>(`/workflows/${current.id}`, { graph });
-      current = wf;
-      workflows = workflows.map((w) => (w.id === wf.id ? wf : w));
-      dirty = false;
+      const wf = await api.patch<Workflow>(`/workflows/${workflowId}`, { graph: JSON.parse(submitted) });
+      applySavedWorkflow(wf);
+      // Editing stays available during Save; only the submitted graph is saved.
+      if (current?.id === workflowId && JSON.stringify($state.snapshot(graph)) === submitted) dirty = false;
       toasts.success('Saved');
     } catch (e) {
       toasts.error('Couldn’t save the workflow', e instanceof Error ? e.message : String(e));
+    } finally {
+      savingGraph = false;
     }
   }
 
@@ -543,8 +555,7 @@
     savingInstructions = true;
     try {
       const wf = await api.patch<Workflow>(`/workflows/${current.id}`, { instructions: wfInstructions });
-      current = wf;
-      workflows = workflows.map((w) => (w.id === wf.id ? wf : w));
+      applySavedWorkflow(wf);
       toasts.success('Instructions saved');
     } catch (e) {
       toasts.error('Couldn’t save the instructions', e instanceof Error ? e.message : String(e));
@@ -561,8 +572,7 @@
       const wf = await api.patch<Workflow>(`/workflows/${current.id}`, {
         on_restart: resume ? 'resume' : 'fail',
       });
-      current = wf;
-      workflows = workflows.map((w) => (w.id === wf.id ? wf : w));
+      applySavedWorkflow(wf);
     } catch (e) {
       toasts.error('Couldn’t save the restart policy', e instanceof Error ? e.message : String(e));
     }
@@ -1638,7 +1648,7 @@
         <button class="btn small" data-overflow="1" data-icon="plus" aria-expanded={paletteOpen} onclick={(e) => { anchorPop(e, 230); paletteOpen = !paletteOpen; }}>
           <Icon name="plus" size={12} /> Node
         </button>
-        <button class="btn small" data-overflow="2" data-icon="check" disabled={!dirty} title={dirty ? 'Save the canvas changes' : 'No unsaved changes'} onclick={save}>Save</button>
+        <button class="btn small" data-overflow="2" data-icon="check" disabled={!dirty || savingGraph} title={dirty ? 'Save the canvas changes' : 'No unsaved changes'} onclick={save}>Save</button>
         <button class="btn small" data-overflow="1" data-icon="clock" aria-expanded={runsOpen} onclick={(e) => { anchorPop(e, 200); runsOpen = !runsOpen; if (runsOpen) void loadRuns(); }}>
           <Icon name="clock" size={12} /> Runs
         </button>
@@ -1929,6 +1939,7 @@
           <textarea
             class="ri-text mono"
             rows="8"
+            aria-label="Workflow instructions"
             bind:value={wfInstructions}
             placeholder="Standing rules every step follows by the letter (markdown)"
           ></textarea>
@@ -3043,6 +3054,16 @@
           {/if}
         </div>
       {/if}
+    {:else if !ws.currentId}
+      <EmptyState
+        variant="page"
+        icon="folder"
+        title="Add a workspace to get started"
+        body="Workflows belong to a workspace. Add your project folder to create and run an automation."
+        actionLabel="Add workspace"
+        actionIcon="plus"
+        onaction={() => (ui.newWorkspaceOpen = true)}
+      />
     {:else if workflows.length === 0 && (wfError || wfLoading)}
       <LoadState what="workflows" variant="page" loading={wfLoading} error={wfError} empty onretry={() => void load()} />
     {:else if workflows.length === 0}

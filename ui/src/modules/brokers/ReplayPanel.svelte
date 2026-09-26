@@ -34,15 +34,23 @@
   let result = $state<ReplayResp | null>(null);
 
   // Why Replay is disabled, in words (a disabled button must say why).
-  const blockReason = $derived(
-    !sourceTopic.trim() || !targetTopic.trim()
-      ? 'Enter a source and a target topic first'
-      : sourceTopic.trim() === targetTopic.trim()
-        ? 'Source and target must be different topics'
-        : selectorType === 'offset_range' && Number(toOffset) < Number(fromOffset)
-          ? '"To offset" must be at or after "From offset"'
-          : null,
-  );
+  function validInteger(value: number, min: number, max = Number.MAX_SAFE_INTEGER): boolean {
+    return Number.isSafeInteger(value) && value >= min && value <= max;
+  }
+  const blockReason = $derived.by(() => {
+    if (!sourceTopic.trim() || !targetTopic.trim()) return 'Enter a source and a target topic first';
+    if (sourceTopic.trim() === targetTopic.trim()) return 'Source and target must be different topics';
+    if (selectorType === 'latest' && !validInteger(count, 1, 5000)) return 'Count must be a whole number from 1 to 5000';
+    if (selectorType === 'timestamp') {
+      if (!timestampMs || !Number.isFinite(new Date(timestampMs).getTime())) return 'Choose a valid start time';
+      if (!validInteger(tsLimit, 1, 5000)) return 'Limit must be a whole number from 1 to 5000';
+    }
+    if (selectorType === 'offset_range') {
+      if (![partition, fromOffset, toOffset].every((n) => validInteger(n, 0))) return 'Partition and offsets must be non-negative whole numbers';
+      if (toOffset < fromOffset) return '"To offset" must be at or after "From offset"';
+    }
+    return null;
+  });
 
   function buildSelector(): ReplaySelector {
     if (selectorType === 'offset_range') {
@@ -51,7 +59,7 @@
     if (selectorType === 'timestamp') {
       return {
         type: 'timestamp',
-        timestamp_ms: new Date(timestampMs).getTime() || Date.now(),
+        timestamp_ms: new Date(timestampMs).getTime(),
         limit: tsLimit,
       };
     }
@@ -59,8 +67,8 @@
   }
 
   async function runReplay() {
-    if (!sourceTopic.trim() || !targetTopic.trim()) {
-      toasts.error('Replay', 'Source and target topic are required');
+    if (running || blockReason) {
+      if (blockReason) toasts.error('Replay', blockReason);
       return;
     }
     const ok = await confirmer.ask(

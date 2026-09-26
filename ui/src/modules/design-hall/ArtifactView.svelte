@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onTabKey } from './tabKeys';
   // One design, open (canvas/studio archetype):
   //
   //   PageHeader: Design Hall › Project › Title · status ▾ · vN      Compare  ⋯  [Save]
@@ -18,7 +19,7 @@
   // posts the decisions it makes (restore, keep/replace vs an agent version) as
   // design signals; approve/status/edit-after-draft signals are recorded by the
   // daemon itself.
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -87,6 +88,15 @@
 
   let selected = $state<string[]>([]);
   let compare = $state<{ left: CompareSide; right: CompareSide } | null>(null);
+  let detailsOpen = $state(false);
+  let detailsButton: HTMLButtonElement | undefined = $state();
+  let designButton: HTMLButtonElement | undefined = $state();
+  async function setDetails(open: boolean): Promise<void> {
+    detailsOpen = open;
+    await tick();
+    const target = open ? designButton : detailsButton;
+    if (target?.getClientRects().length) target.focus();
+  }
   let rightTab = $state<'otto' | 'links' | 'references'>('links');
   let showSource = $state(false);
   let device = $state<DeviceKind>('none');
@@ -246,6 +256,7 @@
       compare = null;
       // `#/design/a/<id>/otto` (the lobby's Generate hand-off) opens on Otto.
       rightTab = router.parts[3] === 'otto' ? 'otto' : 'links';
+      detailsOpen = router.parts[3] === 'otto';
       phase = 'loading';
       void load(target);
       void loadVersions();
@@ -313,7 +324,7 @@
     const body = { content: source, base_version: baseVersionId ?? '', ...(message ? { message } : {}) };
     try {
       const res = named ? await api.commitVersion(id, { ...body, message: message ?? '' }) : await api.putContent(id, body);
-      applySaved(res);
+      applySaved(res, body.content);
       if (!res.created) toasts.info('No changes to save', 'The content matches the current version.');
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) await resolveConflict(named ? message : undefined);
@@ -378,7 +389,7 @@
       try {
         const body = { content: source ?? '', base_version: latest.id, ...(namedMessage ? { message: namedMessage } : {}) };
         const res = namedMessage ? await api.commitVersion(id, { ...body, message: namedMessage }) : await api.putContent(id, body);
-        applySaved(res);
+        applySaved(res, body.content);
         if (byAgent) {
           api.captureSignal({ artifact_id: id, kind: 'variant_rejected', version_id: latest.id, payload: { source: 'conflict', rejected_version_id: latest.id, rejected_seq: latest.seq, kept_version_id: res.version.id, reason: 'kept my edits' } });
         }
@@ -635,8 +646,8 @@
       { id: 'design.save', title: 'Save design', group: 'Design Hall', shortcut: '⌘S', keywords: 'version commit', run: () => void save() },
       { id: 'design.named', title: 'Save named version…', group: 'Design Hall', keywords: 'commit message', run: () => void saveNamed() },
       { id: 'design.compare', title: 'Compare versions', group: 'Design Hall', keywords: 'diff history restore', run: openCompare },
-      { id: 'design.references', title: 'Find references', group: 'Design Hall', keywords: 'inspiration library search', run: () => (rightTab = 'references') },
-      { id: 'design.otto', title: 'Ask Otto about this design', group: 'Design Hall', keywords: 'agent assist variants accessibility refine', run: () => (rightTab = 'otto') },
+      { id: 'design.references', title: 'Find references', group: 'Design Hall', keywords: 'inspiration library search', run: () => { rightTab = 'references'; void setDetails(true); } },
+      { id: 'design.otto', title: 'Ask Otto about this design', group: 'Design Hall', keywords: 'agent assist variants accessibility refine', run: () => { rightTab = 'otto'; void setDetails(true); } },
     ]);
   });
 
@@ -781,7 +792,7 @@
           />
         {/key}
       {:else}
-      <div class="studio" class:wide-right={rightTab === 'otto'}>
+      <div class="studio" class:wide-right={rightTab === 'otto'} class:details-open={detailsOpen}>
         <section class="center" aria-label="Design">
           <div class="toolbar">
             {#if kind === 'html'}
@@ -798,6 +809,7 @@
             {/if}
             <span class="fmt">{formatLabel(artifact.format)} · {studioInfo(artifact.studio).name}</span>
             <span class="grow"></span>
+            <button class="btn small ghost compact-details" aria-label="Show design details" bind:this={detailsButton} onclick={() => void setDetails(true)}><Icon name="info" size={12} /> Details</button>
             {@render notices()}
           </div>
           <div class="stage-host">
@@ -815,14 +827,15 @@
           </div>
         </section>
         <aside class="right" aria-label="Design details">
+          <button class="btn small ghost compact-details back-design" bind:this={designButton} onclick={() => void setDetails(false)}>Back to design</button>
           <div class="tabs segmented" role="tablist" aria-label="Details panel">
-            <button role="tab" aria-selected={rightTab === 'otto'} class:active={rightTab === 'otto'} onclick={() => (rightTab = 'otto')} data-testid="design-tab-otto">
+            <button role="tab" aria-selected={rightTab === 'otto'} tabindex={rightTab === 'otto' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'otto'} onclick={() => (rightTab = 'otto')} data-testid="design-tab-otto">
               Otto
             </button>
-            <button role="tab" aria-selected={rightTab === 'links'} class:active={rightTab === 'links'} onclick={() => (rightTab = 'links')} data-testid="design-tab-links">
+            <button role="tab" aria-selected={rightTab === 'links'} tabindex={rightTab === 'links' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'links'} onclick={() => (rightTab = 'links')} data-testid="design-tab-links">
               Links <span class="count">{split.uses.length + split.usedIn.length}</span>
             </button>
-            <button role="tab" aria-selected={rightTab === 'references'} class:active={rightTab === 'references'} onclick={() => (rightTab = 'references')} data-testid="design-tab-references">
+            <button role="tab" aria-selected={rightTab === 'references'} tabindex={rightTab === 'references' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'references'} onclick={() => (rightTab = 'references')} data-testid="design-tab-references">
               References
             </button>
           </div>
@@ -1024,19 +1037,18 @@
     font-size: var(--fs-s);
     white-space: pre-wrap;
   }
+  .compact-details { display: none; }
   @container (max-width: 900px) {
     .studio,
     .studio.wide-right {
       grid-template-columns: minmax(0, 1fr);
-      /* Stacked: the stage keeps a usable height and the details panel gets
-         a real one too (it was squeezed to ~170px, clipping Links/Otto); the
-         studio scrolls between them. */
-      grid-template-rows: minmax(320px, 1fr) minmax(420px, auto);
-      overflow-y: auto;
+      grid-template-rows: minmax(0, 1fr);
+      overflow: hidden;
     }
-    .right {
-      border-inline-start: 0;
-      border-block-start: 1px solid var(--border);
-    }
+    .compact-details { display: inline-flex; }
+    .back-design { align-self: flex-start; margin: 10px 14px 0; }
+    .studio:not(.details-open) .right,
+    .studio.details-open .center { display: none; }
+    .right { border-inline-start: 0; }
   }
 </style>

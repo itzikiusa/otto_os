@@ -14,6 +14,7 @@
   //              rendered through the sanitized GFM renderer
   //   Edit     — the multi-file editor (SkillEditor)
   //   Evals / Usage — SkillActivity
+  import { untrack } from 'svelte';
   import type { SkillFileEntry } from '../../lib/api/types';
   import { skillLabApi } from '../../lib/api/skillLab';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -86,40 +87,40 @@
   let files = $state<SkillFileEntry[]>([]);
   let loading = $state(true);
   let loadError = $state<string | null>(null);
-  let loadedKey = $state('');
+  let loadGeneration = 0;
 
   async function load(name: string, src: VariantSource): Promise<void> {
-    const key = `${src}:${name}`;
+    const generation = ++loadGeneration;
     loading = true;
     loadError = null;
     try {
       if (src === 'library') {
         const [fs, f] = await Promise.all([skillLabApi.listFiles(name), skillLabApi.getFile(name, 'SKILL.md')]);
-        if (`${variant.source}:${group.name}` !== key) return;
+        if (generation !== loadGeneration) return;
         files = fs;
         body = f.content;
       } else if (src === 'bundled') {
         const b = await skillLabApi.getBundled(name);
-        if (`${variant.source}:${group.name}` !== key) return;
+        if (generation !== loadGeneration) return;
         files = b.files;
         body = b.body;
       } else {
         const p = await skillLabApi.getProvider(src, name);
-        if (`${variant.source}:${group.name}` !== key) return;
+        if (generation !== loadGeneration) return;
         files = p.files;
         body = p.body;
         onbody(src, p.body);
       }
-      loadedKey = key;
     } catch (e) {
-      loadError = e instanceof Error ? e.message : String(e);
+      if (generation === loadGeneration) loadError = e instanceof Error ? e.message : String(e);
     } finally {
-      loading = false;
+      if (generation === loadGeneration) loading = false;
     }
   }
+  const selectionKey = $derived(`${variant.source}:${group.name}`);
   $effect(() => {
-    const key = `${variant.source}:${group.name}`;
-    if (key !== loadedKey) void load(group.name, variant.source);
+    void selectionKey;
+    untrack(() => void load(group.name, variant.source));
   });
 
   const fm = $derived(parseFrontmatter(body));

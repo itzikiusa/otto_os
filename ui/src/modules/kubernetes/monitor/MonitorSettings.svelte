@@ -437,6 +437,7 @@
   }
   .row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
   }
@@ -556,6 +557,8 @@
     color: var(--text-dim);
   }
   .mono {
+    direction: ltr;
+    text-align: start;
     font-family: var(--font-mono);
   }
   .error {

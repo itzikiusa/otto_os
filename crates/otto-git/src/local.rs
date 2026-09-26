@@ -1212,7 +1212,7 @@ impl LocalGit {
         let local_out = self
             .run_read(&[
                 "for-each-ref",
-                "--format=%(refname:short)\t%(upstream:short)\t%(HEAD)\t%(objectname)\t%(upstream:track,nobracket)",
+                "--format=%(refname:lstrip=2)\t%(upstream:short)\t%(HEAD)\t%(objectname)\t%(upstream:track,nobracket)",
                 "refs/heads",
             ])
             .await?;
@@ -1359,7 +1359,7 @@ impl LocalGit {
                 .collect::<std::collections::HashSet<String>>()
         };
         let local = self
-            .run_read(&["branch", "--merged", base, "--format=%(refname:short)"])
+            .run_read(&["branch", "--merged", base, "--format=%(refname:lstrip=2)"])
             .await
             .map(parse)
             .unwrap_or_default();
@@ -1369,7 +1369,7 @@ impl LocalGit {
                 "-r",
                 "--merged",
                 base,
-                "--format=%(refname:short)",
+                "--format=%(refname:lstrip=2)",
             ])
             .await
             .map(parse)
@@ -4977,6 +4977,22 @@ mod tests {
                 .unwrap_or_else(|| panic!("tag {name} present"));
             assert_eq!(t.sha, root, "tag {name} resolves to the tagged COMMIT");
         }
+    }
+
+    #[tokio::test]
+    async fn refs_keep_local_names_when_remote_names_collide() {
+        let (_tmp, dir) = fixture_n_commits(2);
+        sh_git(&dir, &["branch", "origin/collision"]);
+        sh_git(&dir, &["update-ref", "refs/remotes/origin/collision", "HEAD~1"]);
+        let git = LocalGit::new(&dir);
+        let refs = git.refs().await.unwrap();
+        let local = refs.local.iter().find(|b| b.name == "origin/collision")
+            .expect("local branch keeps its usable checkout name");
+        let remote = refs.remote.iter().find(|b| b.name == "origin/collision").unwrap();
+        assert!(!local.remote);
+        assert!(remote.remote);
+        assert_ne!(local.sha, remote.sha);
+        assert!(local.merged_into_base, "normalized names must still match cleanup membership");
     }
 
     // ── R0: a branch switch never pulls ─────────────────────────────────────

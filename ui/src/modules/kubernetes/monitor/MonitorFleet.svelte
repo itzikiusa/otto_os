@@ -7,6 +7,7 @@
   // persisted per device, and every row is a drill-down (cluster → namespace
   // → workload → pod → events).
   import { untrack } from 'svelte';
+  import { radioKey } from '../../../lib/radioKey';
   import { router } from '../../../lib/router.svelte';
   import { k8s } from '../../../lib/stores/k8s.svelte';
   import { k8sApi } from '../../../lib/api/k8s';
@@ -440,7 +441,7 @@
   {#snippet actions()}
     <div class="seg" role="radiogroup" aria-label="Window" data-keep>
       {#each WINDOWS as w (w)}
-        <button class="seg-btn" class:on={window === w} role="radio" aria-checked={window === w} onclick={() => (window = w)}>{w}</button>
+        <button class="seg-btn" class:on={window === w} role="radio" onkeydown={radioKey} aria-checked={window === w} tabindex={window === w ? 0 : -1} onclick={() => (window = w)}>{w}</button>
       {/each}
     </div>
     <button class="icon-btn" onclick={refresh} title="Refresh" aria-label="Refresh fleet"><Icon name="refresh" size={14} /></button>
@@ -513,7 +514,7 @@
       <span class="dim small">Series per</span>
       <div class="seg" role="radiogroup" aria-label="Series by">
         {#each BYS as b (b)}
-          <button class="seg-btn" class:on={by === b} role="radio" aria-checked={by === b} onclick={() => (by = b)}>{b}</button>
+          <button class="seg-btn" class:on={by === b} role="radio" onkeydown={radioKey} aria-checked={by === b} tabindex={by === b ? 0 : -1} onclick={() => (by = b)}>{b}</button>
         {/each}
       </div>
       <span class="dim small">(restarts are always per class)</span>
@@ -536,8 +537,8 @@
     <div class="toolbar">
       <input class="input" placeholder="Quick filter…" bind:value={quick} aria-label="Quick filter" />
       <div class="seg" role="radiogroup" aria-label="Group by">
-        <button class="seg-btn" class:on={group === 'workload'} role="radio" aria-checked={group === 'workload'} onclick={() => (group = 'workload')}>Workloads</button>
-        <button class="seg-btn" class:on={group === 'pod'} role="radio" aria-checked={group === 'pod'} onclick={() => (group = 'pod')}>Pods</button>
+        <button class="seg-btn" class:on={group === 'workload'} role="radio" onkeydown={radioKey} aria-checked={group === 'workload'} tabindex={group === 'workload' ? 0 : -1} onclick={() => (group = 'workload')}>Workloads</button>
+        <button class="seg-btn" class:on={group === 'pod'} role="radio" onkeydown={radioKey} aria-checked={group === 'pod'} tabindex={group === 'pod' ? 0 : -1} onclick={() => (group = 'pod')}>Pods</button>
       </div>
       <span class="spacer"></span>
       <span class="dim small" data-testid="k8s-fleet-table-count">{total.toLocaleString()} {group === 'pod' ? 'pods' : 'workloads'}</span>
@@ -576,19 +577,19 @@
               <tr class="wl-row" onclick={() => drillRow(r)} title={group === 'workload' ? "Show this workload's pods" : "Show this pod's events"} data-testid="k8s-fleet-row">
                 <td><span class="dot" style="background: {r.cluster.color ?? 'var(--accent)'}"></span> {r.cluster.name} <EnvBadge env={r.cluster.environment} /></td>
                 <td class="dim">{r.namespace}</td>
-                <td><b>{r.workload}</b></td>
-                {#if group === 'pod'}<td class="mono small">{r.pod}</td>{:else}<td class="num mono">{r.pods}</td>{/if}
-                <td class="num mono" class:bad={restartsTotal(r) > 0}>
+                <td>{#if group === 'workload'}<button class="drill-btn" aria-label={`Show pods for ${r.workload}`} onclick={(e) => { e.stopPropagation(); drillRow(r); }}>{r.workload}</button>{:else}<b>{r.workload}</b>{/if}</td>
+                {#if group === 'pod'}<td class="mono small"><button class="drill-btn" aria-label={`Show events for ${r.pod}`} onclick={(e) => { e.stopPropagation(); drillRow(r); }}>{r.pod}</button></td>{:else}<td dir="ltr" class="num mono">{r.pods}</td>{/if}
+                <td dir="ltr" class="num mono" class:bad={restartsTotal(r) > 0}>
                   {restartsTotal(r)}
                   {#if restartsTotal(r) > 0}<span class="dim small"> ({[r.restarts.oom && `oom ${r.restarts.oom}`, r.restarts.crash && `crash ${r.restarts.crash}`, r.restarts.probe && `probe ${r.restarts.probe}`, r.restarts.unknown && `? ${r.restarts.unknown}`].filter(Boolean).join(' · ')})</span>{/if}
                 </td>
-                <td class="num mono" class:bad={r.restarts.oom > 0}>{r.restarts.oom}</td>
-                <td class="num mono">{r.churn}</td>
-                <td class="num mono">{r.mem_last ? formatBytes(r.mem_last) : '—'}</td>
-                <td class="num mono">{r.mem_max ? formatBytes(r.mem_max) : '—'}</td>
-                <td class="num mono">{r.rps ? fmtRate(r.rps) : '—'}</td>
-                <td class="num mono" class:bad={r.err_pct >= 5} class:warn={r.err_pct >= 1 && r.err_pct < 5}>{r.rps ? fmtPct(r.err_pct) : '—'}</td>
-                <td class="num mono">{r.latency_kind ? `${fmtMs(r.latency_ms)} ${r.latency_kind}` : '—'}</td>
+                <td dir="ltr" class="num mono" class:bad={r.restarts.oom > 0}>{r.restarts.oom}</td>
+                <td dir="ltr" class="num mono">{r.churn}</td>
+                <td dir="ltr" class="num mono">{r.mem_last ? formatBytes(r.mem_last) : '—'}</td>
+                <td dir="ltr" class="num mono">{r.mem_max ? formatBytes(r.mem_max) : '—'}</td>
+                <td dir="ltr" class="num mono">{r.rps ? fmtRate(r.rps) : '—'}</td>
+                <td dir="ltr" class="num mono" class:bad={r.err_pct >= 5} class:warn={r.err_pct >= 1 && r.err_pct < 5}>{r.rps ? fmtPct(r.err_pct) : '—'}</td>
+                <td dir="ltr" class="num mono">{r.latency_kind ? `${fmtMs(r.latency_ms)} ${r.latency_kind}` : '—'}</td>
               </tr>
             {/each}
           </tbody>
@@ -685,11 +686,11 @@
             <tbody>
               {#each reqRows as r (`${r.method} ${r.path}`)}
                 <tr>
-                  <td class="mono">{r.path}</td>
-                  <td class="mono small dim">{r.method || '—'}</td>
-                  <td class="num mono">{fmtRate(r.rps)}</td>
-                  <td class="num mono" class:bad={r.err_pct >= 5} class:warn={r.err_pct >= 1 && r.err_pct < 5}>{fmtPct(r.err_pct)}</td>
-                  <td class="num mono">{r.avg_ms ? fmtMs(r.avg_ms) : '—'}</td>
+                  <td class="mono" dir="ltr">{r.path}</td>
+                  <td class="mono small dim" dir="ltr">{r.method || '—'}</td>
+                  <td dir="ltr" class="num mono">{fmtRate(r.rps)}</td>
+                  <td dir="ltr" class="num mono" class:bad={r.err_pct >= 5} class:warn={r.err_pct >= 1 && r.err_pct < 5}>{fmtPct(r.err_pct)}</td>
+                  <td dir="ltr" class="num mono">{r.avg_ms ? fmtMs(r.avg_ms) : '—'}</td>
                 </tr>
               {/each}
             </tbody>
@@ -874,7 +875,7 @@
     font-size: var(--fs-s);
   }
   .wl th {
-    text-align: left;
+    text-align: start;
     font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -902,6 +903,15 @@
     border-bottom: 1px solid var(--border);
     vertical-align: top;
   }
+  .drill-btn {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
   .wl-row {
     cursor: pointer;
   }
@@ -909,7 +919,7 @@
     background: color-mix(in srgb, var(--accent) 4%, transparent);
   }
   .num {
-    text-align: right;
+    text-align: end;
     white-space: nowrap;
   }
   .nowrap {

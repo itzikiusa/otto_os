@@ -174,6 +174,21 @@
         : Infinity;
       wrapEl.style.minWidth = `${Math.max(0, Math.min(Math.ceil(keepW) + RING * 2, room))}px`;
       let need = visible.reduce((s, k) => s + (widthOf.get(k) ?? 0), 0) + GAP * Math.max(0, visible.length - 1);
+      // The inline tabs' cap: never less than half the row (a header with
+      // many actions keeps today's split), but when the actions leave room
+      // the tabs take it — a fixed 50% left the Git repo tabs squeezed to
+      // "bo_co…" next to an empty half-row (the page's toolbar lives on the
+      // row below, so its header has no actions at all).
+      if (row && rootEl) {
+        const reserved =
+          48 +
+          titleMin +
+          (lead ? lead.offsetWidth + 12 : 0) +
+          (pane ? pane.offsetWidth + 12 : 0) +
+          (visible.length ? need + RING * 2 + 12 : 0);
+        const tabsCap = Math.max(row.clientWidth * 0.5, row.clientWidth - reserved);
+        rootEl.style.setProperty('--ph-tabs-max', `${Math.floor(tabsCap)}px`);
+      }
       // The title block's cap: 45% of the row by default, but a header with
       // only one or two actions lets a long title use the room they leave
       // instead of ellipsizing next to an empty stretch of toolbar.
@@ -470,10 +485,11 @@
     display: flex;
     align-items: center;
     /* Tabs keep their width (the subtitle yields first, then the actions
-       scroll); only an absurdly wide tab set is capped and scrolls. On a
-       phone the tabs move to the row below instead. */
+       scroll); only a tab set wider than the room the title and actions
+       leave (--ph-tabs-max, measured in JS; never below half the row) is
+       capped and scrolls. On a phone the tabs move to the row below. */
     flex: 0 0 auto;
-    max-width: 50%;
+    max-width: var(--ph-tabs-max, 50%);
     min-width: 0;
     overflow-x: auto;
     scrollbar-width: none;

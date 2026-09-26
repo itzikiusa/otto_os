@@ -341,6 +341,7 @@
 
 <style>
   .report {
+    container-type: inline-size;
     display: flex;
     flex-direction: column;
     height: 100%;
@@ -417,7 +418,7 @@
   /* KPI tiles (dataviz stat-tile contract: label · value · delta · trend). */
   .kpis {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
     gap: 8px;
   }
   .kpi {
@@ -718,6 +719,12 @@
     overflow: hidden;
     clip: rect(0 0 0 0);
     white-space: nowrap;
+  }
+
+  @container (max-width: 640px) {
+    .kpis {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
   }
 
   @media (max-width: 640px) {

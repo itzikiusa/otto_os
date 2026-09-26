@@ -2,6 +2,7 @@
   // DB Explorer page (mirrors ApiPage): left sidebar = connection picker +
   // SchemaTree + a Saved/History switch; main = a tab strip (Query / Builder /
   // Structure / Dashboards) over the active view.
+  import { tick } from 'svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
@@ -532,6 +533,16 @@
     editingConn = null;
     connFormOpen = true;
   }
+  async function showSchemaSidebar(e: MouseEvent): Promise<void> {
+    const page = (e.currentTarget as HTMLElement).closest('.db-page');
+    database.toggleSidebar();
+    await tick();
+    const selected = [...(page?.querySelectorAll<HTMLElement>('[data-node-id]') ?? [])]
+      .find((node) => node.dataset.nodeId === database.selectedObjectPath);
+    (selected?.querySelector<HTMLButtonElement>('.node-label') ?? selected
+      ?? page?.querySelector<HTMLInputElement>('[aria-label="Find an object"]'))?.focus();
+  }
+
   // Point the user at the connection list from anywhere: make sure the sidebar
   // rail is actually visible (it may be collapsed) and land on the picker tab.
   function showConnections(): void {
@@ -707,11 +718,29 @@
   ];
   const visibleTabs = $derived(mainTabs.filter((t) => t.show()));
   /** ←/→ (and Home/End) between the workbench views, focus following. */
+  function onSidebarKey(e: KeyboardEvent): void {
+    const bar = e.currentTarget as HTMLElement;
+    const tabs = [...bar.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+    const i = tabs.indexOf(e.target as HTMLButtonElement);
+    if (i < 0) return;
+    let j = i;
+    const forward = getComputedStyle(bar).direction === 'rtl' ? 'ArrowLeft' : 'ArrowRight';
+    if (e.key === forward) j = (i + 1) % tabs.length;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') j = (i - 1 + tabs.length) % tabs.length;
+    else if (e.key === 'Home') j = 0;
+    else if (e.key === 'End') j = tabs.length - 1;
+    else return;
+    e.preventDefault();
+    tabs[j].click();
+    tabs[j].focus();
+  }
+
   function onViewKey(e: KeyboardEvent): void {
     const i = visibleTabs.findIndex((t) => t.id === database.mainTab);
     let j = i;
-    if (e.key === 'ArrowRight') j = (i + 1) % visibleTabs.length;
-    else if (e.key === 'ArrowLeft') j = (i - 1 + visibleTabs.length) % visibleTabs.length;
+    const forward = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl' ? 'ArrowLeft' : 'ArrowRight';
+    if (e.key === forward) j = (i + 1) % visibleTabs.length;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') j = (i - 1 + visibleTabs.length) % visibleTabs.length;
     else if (e.key === 'Home') j = 0;
     else if (e.key === 'End') j = visibleTabs.length - 1;
     else return;
@@ -911,7 +940,7 @@
     <div class="side-rail">
       <button
         class="rail-btn"
-        onclick={() => database.toggleSidebar()}
+        onclick={showSchemaSidebar}
         title="Show schema (⌘B)"
         aria-label="Show schema sidebar"
       >
@@ -957,10 +986,10 @@
             </div>
           {/if}
         </div>
-        <div class="side-switch" class:acc-collapsed={!schemaOpen} role="tablist">
-          <button class="ss" class:active={database.sideTab === 'schema' || database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'schema'} onclick={() => database.setSideTab('schema')}>Schema</button>
-          <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} onclick={() => database.setSideTab('saved')}>Saved</button>
-          <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} onclick={() => database.setSideTab('history')}>History</button>
+        <div class="side-switch" class:acc-collapsed={!schemaOpen} role="tablist" aria-label="Sidebar view" tabindex="-1" onkeydown={onSidebarKey}>
+          <button class="ss" class:active={database.sideTab === 'schema' || database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'schema' || database.sideTab === 'connections'} tabindex={database.sideTab === 'schema' || database.sideTab === 'connections' ? 0 : -1} onclick={() => database.setSideTab('schema')}>Schema</button>
+          <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} tabindex={database.sideTab === 'saved' ? 0 : -1} onclick={() => database.setSideTab('saved')}>Saved</button>
+          <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} tabindex={database.sideTab === 'history' ? 0 : -1} onclick={() => database.setSideTab('history')}>History</button>
         </div>
         <div class="side-body" class:acc-collapsed={!schemaOpen}>
           {@render schemaSideBody()}
@@ -972,11 +1001,11 @@
       <div class="side-switch">
         <!-- The tabs get their own tablist: the strip also carries plain
              buttons (Refresh, Hide sidebar), which a tablist may not own. -->
-        <div class="ss-tabs" role="tablist" aria-label="Sidebar view">
-          <button class="ss" class:active={database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'connections'} onclick={() => database.setSideTab('connections')}>Connections</button>
-          <button class="ss" class:active={database.sideTab === 'schema'} role="tab" aria-selected={database.sideTab === 'schema'} onclick={() => database.setSideTab('schema')}>Schema</button>
-          <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} onclick={() => database.setSideTab('saved')}>Saved</button>
-          <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} onclick={() => database.setSideTab('history')}>History</button>
+        <div class="ss-tabs" role="tablist" aria-label="Sidebar view" tabindex="-1" onkeydown={onSidebarKey}>
+          <button class="ss" class:active={database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'connections'} tabindex={database.sideTab === 'connections' ? 0 : -1} onclick={() => database.setSideTab('connections')}>Connections</button>
+          <button class="ss" class:active={database.sideTab === 'schema'} role="tab" aria-selected={database.sideTab === 'schema'} tabindex={database.sideTab === 'schema' ? 0 : -1} onclick={() => database.setSideTab('schema')}>Schema</button>
+          <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} tabindex={database.sideTab === 'saved' ? 0 : -1} onclick={() => database.setSideTab('saved')}>Saved</button>
+          <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} tabindex={database.sideTab === 'history' ? 0 : -1} onclick={() => database.setSideTab('history')}>History</button>
         </div>
         <span class="grow"></span>
         {#if database.sideTab === 'schema' && database.selectedConnId}
@@ -1516,7 +1545,10 @@
         <button class="icon-btn" onclick={() => (savedSearch = '')} aria-label="Clear search"><Icon name="x" size={12} /></button>
       {/if}
     </div>
-    {#if database.savedQueries.length === 0}
+    <LoadState what="saved queries" variant="compact" loading={database.savedQueriesLoading} error={database.savedQueriesError} empty={database.savedQueries.length === 0} onretry={() => database.loadSavedQueries()} />
+    {#if database.savedQueries.length === 0 && (database.savedQueriesLoading || database.savedQueriesError)}
+      <!-- Loading and failed loads are rendered above, never as an empty list. -->
+    {:else if database.savedQueries.length === 0}
       <div class="list-empty">No saved queries. Save one from the Query tab.</div>
     {:else if filteredSaved.length === 0}
       <div class="list-empty">No saved queries match “{savedSearch}”.</div>
@@ -1570,7 +1602,10 @@
         <button class="icon-btn" onclick={() => (historySearch = '')} aria-label="Clear search"><Icon name="x" size={12} /></button>
       {/if}
     </div>
-    {#if database.history.length === 0}
+    <LoadState what="query history" variant="compact" loading={database.historyLoading} error={database.historyError} empty={database.history.length === 0} onretry={() => database.loadHistory()} />
+    {#if database.history.length === 0 && (database.historyLoading || database.historyError)}
+      <!-- Loading and failed loads are rendered above, never as an empty list. -->
+    {:else if database.history.length === 0}
       <div class="list-empty">No query history yet.</div>
     {:else if filteredHistory.length === 0}
       <div class="list-empty">No history matches “{historySearch}”.</div>

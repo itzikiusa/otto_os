@@ -113,6 +113,7 @@
   import { now } from '../lib/stores/now.svelte';
 
   const moduleName = $derived(router.module === '' ? 'agents' : router.module);
+  const compactShell = $derived(!viewport.isDesktop && !isPopout && !isEmbedded);
 
   // Native sidebar vibrancy (desktop shell): the window has an NSVisualEffect
   // view behind the page, so the document goes transparent and ONLY chrome
@@ -296,9 +297,14 @@
     return () => window.removeEventListener('keydown', onHelpKey);
   });
 
+  // Reload scoped data when impersonation changes the effective identity.
+  // Keep this separate from the once-per-window event/native subscriptions.
+  $effect(() => {
+    if (auth.me?.id) void untrack(() => ws.load());
+  });
+
   // ---- boot ----
   $effect(() => {
-    void ws.load();
     events.start();
     let unlistenMenu: (() => void) | null = null;
     let unlistenClose: (() => void) | null = null;
@@ -938,10 +944,8 @@
   <!-- Its "Delete…" asks first — the shell's own dialog host isn't mounted here. -->
   <ConfirmDialog />
 {:else}
-<!-- Center column: banners + (agents) TabBar + the module
-     router. Extracted to a snippet so the desktop 3-pane and the mobile
-     single-pane shells render byte-for-byte identical content — only the
-     surrounding chrome differs by viewport. -->
+<!-- One content mount across desktop/tablet/phone. Changing the surrounding
+     chrome must preserve each page's unsaved draft, selection and focus. -->
 {#snippet centerContent()}
   {#if auth.isImpersonating}
     <div class="provider-banner impersonation-banner" role="alert">
@@ -971,9 +975,8 @@
     <div class="provider-banner" role="alert">
       <Icon name="warning" size={14} />
       <span>
-        A remote git provider (GitHub / Bitbucket / GitLab) is failing with a
-        <strong>gateway error</strong> — it may be down or under maintenance. Your local work is
-        unaffected; retries will resume automatically.
+        A request to your Git provider failed with a <strong>gateway error</strong>.
+        Local work remains available.
       </span>
       <span class="grow"></span>
       <button class="pb-dismiss" onclick={() => serviceHealth.dismiss()} aria-label="Dismiss notice" title="Dismiss">
@@ -1072,10 +1075,8 @@
   </div>
 {/snippet}
 
-{#if viewport.isDesktop || isPopout || isEmbedded}
-<!-- DESKTOP (≥1025px): the original, unchanged 3-pane shell. A pop-out window
-     (`?popout=1`, desktop shell `open_popout`) renders the same shell at any
-     width minus the sidebar + status bar, under a slim unified title strip. -->
+<!-- A stable shell hosts desktop and compact chrome. Pop-out windows keep
+     the desktop presentation at any width, minus sidebar and status bar. -->
 <!-- App zoom: Tauri uses the native WKWebView page-zoom (applyNativeZoom). In a
      BROWSER we used to apply CSS `zoom:${ui.zoom}` here, but CSS zoom (a) stretches
      the WebGL terminal canvas (oversized + clipped fit) and (b) breaks click
@@ -1083,82 +1084,8 @@
      browser we DON'T CSS-zoom — users scale crisply with the browser's own zoom
      (⌘+/−), which re-rasterizes everything (terminal included) and keeps
      coordinates correct. ui.zoom still drives native zoom inside Tauri. -->
-<div class="shell" class:vibrant class:embedded={isEmbedded}>
-  {#if isPopout && isTauri && !isEmbedded}
-    <!-- Pop-out title strip: the overlaid traffic lights sit in it and it
-         drags the window (double-click zooms), like a unified title bar. -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="popout-titlebar sidebar-material" data-tauri-drag-region onmousedown={startWindowDrag}>
-      <span class="popout-title">{popoutTitle()}</span>
-    </div>
-  {/if}
-  <div class="shell-main">
-    {#if !isPopout && !isEmbedded}
-    <div class="sidebar" class:tauri-top={isTauri}>
-      <!-- Draggable titlebar strip over the overlaid traffic-lights inset, so the
-           window can be moved by dragging the top-left (the native title bar is
-           hidden by `titleBarStyle: Overlay`). The empty 26px inset has no
-           interactive content, so this never steals clicks. -->
-      {#if isTauri}
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="titlebar-drag" data-tauri-drag-region onmousedown={startWindowDrag}></div>
-      {/if}
-      {#if ui.railExpanded}
-        <Navigator />
-      {:else}
-        <Rail />
-      {/if}
-    </div>
-    {/if}
-
-    <!-- Side by side: the content column holds the main pane and, when one
-         is open, a divider + the side pane (another document, SidePane.svelte).
-         Swap flips their places with CSS order only, so neither reloads. -->
-    <div
-      class="split"
-      class:swapped={sidePane.showing && sidePane.placement === 'leading'}
-      bind:clientWidth={splitWidth}
-      style:--side-share={sideShare}
-    >
-      <div class="primary-pane">
-        <div class="primary-row">
-          <div class="center">
-            {@render centerContent()}
-            {#if !isPopout && !isEmbedded && viewport.isDesktop}
-              <!-- The floating "Type or speak… ⌘K" bar (layout.md §7): bottom-
-                   centre over the content column, docking into the status bar
-                   while you scroll or type elsewhere. -->
-              <FloatingBar host="app" />
-            {/if}
-          </div>
-
-          <!-- Right panel (Activity/Git/Files/…) for the focused session. Shown in
-               every Agents layout — tabbed, split, AND tiled — so per-session activity
-               stays visible in multi-session views (it tracks `ws.activeSession`, the
-               focused pane/tile), not just when a single session is on screen. It
-               belongs to the Agents pane, so a side-by-side split keeps it there. -->
-          {#if showRightPanel}
-            <RightPanel />
-          {/if}
-        </div>
-      </div>
-      {#if sidePane.showing && sideMeta}
-        <SplitDivider label={`${mainMeta.label} and ${sideMeta.label}`} />
-        <SidePane label={sideMeta.label} />
-      {/if}
-    </div>
-  </div>
-
-  {#if !isPopout && !isEmbedded}
-    <StatusBar />
-  {/if}
-</div>
-{:else}
-<!-- MOBILE (phone ≤640px / tablet 641–1024px): single-pane content with the
-     Navigator and RightPanel moved off-canvas into drawers, a compact top bar,
-     and (phone only) a bottom nav. Tablet keeps a persistent narrow Navigator
-     column instead of the left drawer. -->
-<div class="shell mobile" class:tablet={viewport.isTablet}>
+<div class="shell" class:vibrant class:embedded={isEmbedded} class:mobile={compactShell} class:tablet={compactShell && viewport.isTablet}>
+  {#if compactShell}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <header
     class="mtopbar"
@@ -1215,47 +1142,91 @@
     />
   {/if}
 
-  <div class="mbody">
-    {#if viewport.isTablet}
-      <!-- Persistent narrow Navigator on tablet. -->
-      <div class="msidebar" class:tauri-top={isTauri}>
+  {/if}
+  {#if isPopout && isTauri && !isEmbedded}
+    <!-- Pop-out title strip: the overlaid traffic lights sit in it and it
+         drags the window (double-click zooms), like a unified title bar. -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="popout-titlebar sidebar-material" data-tauri-drag-region onmousedown={startWindowDrag}>
+      <span class="popout-title">{popoutTitle()}</span>
+    </div>
+  {/if}
+  <div class="shell-main" class:mbody={compactShell}>
+    {#if !isPopout && !isEmbedded && !viewport.isPhone}
+    <div class="sidebar" class:msidebar={compactShell} class:tauri-top={isTauri && !compactShell}>
+      <!-- Draggable titlebar strip over the overlaid traffic-lights inset, so the
+           window can be moved by dragging the top-left (the native title bar is
+           hidden by `titleBarStyle: Overlay`). The empty 26px inset has no
+           interactive content, so this never steals clicks. -->
+      {#if isTauri && !compactShell}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="titlebar-drag" data-tauri-drag-region onmousedown={startWindowDrag}></div>
+      {/if}
+      {#if compactShell || ui.railExpanded}
         <Navigator />
-      </div>
+      {:else}
+        <Rail />
+      {/if}
+    </div>
     {/if}
-    <div class="center mcenter">
-      {@render centerContent()}
+
+    <!-- Side by side: the content column holds the main pane and, when one
+         is open, a divider + the side pane (another document, SidePane.svelte).
+         Swap flips their places with CSS order only, so neither reloads. -->
+    <div
+      class="split"
+      class:swapped={sidePane.showing && sidePane.placement === 'leading'}
+      bind:clientWidth={splitWidth}
+      style:--side-share={sideShare}
+    >
+      <div class="primary-pane">
+        <div class="primary-row">
+          <div class="center" class:mcenter={compactShell}>
+            {@render centerContent()}
+            {#if !isPopout && !isEmbedded && viewport.isDesktop}
+              <!-- The floating "Type or speak… ⌘K" bar (layout.md §7): bottom-
+                   centre over the content column, docking into the status bar
+                   while you scroll or type elsewhere. -->
+              <FloatingBar host="app" />
+            {/if}
+          </div>
+
+          <!-- Right panel (Activity/Git/Files/…) for the focused session. Shown in
+               every Agents layout — tabbed, split, AND tiled — so per-session activity
+               stays visible in multi-session views (it tracks `ws.activeSession`, the
+               focused pane/tile), not just when a single session is on screen. It
+               belongs to the Agents pane, so a side-by-side split keeps it there. -->
+          {#if showRightPanel}
+            <Drawer bind:open={ui.rightOpen} inline={!compactShell} side="right" label="Activity" width="min(92vw, 360px)">
+              <RightPanel forceOpen={compactShell} />
+            </Drawer>
+          {/if}
+        </div>
+      </div>
+      {#if sidePane.showing && sideMeta}
+        <SplitDivider label={`${mainMeta.label} and ${sideMeta.label}`} />
+        <SidePane label={sideMeta.label} />
+      {/if}
     </div>
   </div>
 
-  {#if viewport.isPhone}
+  {#if compactShell && viewport.isPhone}
     <BottomNav />
   {/if}
-
-  <!-- The phone already spends a top bar + bottom nav on chrome; the status
-       bar only earns its row there when the event stream needs attention. -->
-  {#if !viewport.isPhone || events.state !== 'connected'}
+  {#if !isPopout && !isEmbedded && (!viewport.isPhone || events.state !== 'connected')}
     <StatusBar />
   {/if}
 </div>
-
 <!-- Phone: Navigator lives in a LEFT drawer with its own open-state
      (ui.navDrawerOpen — not persisted, closed on load, closed on navigation;
      never the desktop sidebar's railExpanded preference). On tablet the
      Navigator is persistent, so no left drawer. -->
-{#if viewport.isPhone}
+{#if compactShell && viewport.isPhone}
   <Drawer bind:open={ui.navDrawerOpen} side="left" label="Navigator" width="min(86vw, 280px)">
     <Navigator />
   </Drawer>
 {/if}
 
-<!-- RightPanel as a RIGHT drawer on phone + tablet (ui.rightOpen). Only
-     meaningful in the Agents layout with a focused session. -->
-{#if showRightPanel}
-  <Drawer bind:open={ui.rightOpen} side="right" label="Activity" width="min(92vw, 360px)">
-    <RightPanel forceOpen />
-  </Drawer>
-{/if}
-{/if}
 
 <Palette />
 
@@ -1396,7 +1367,7 @@
     display: flex;
   }
   /* A widened right panel never pushes the Agents pane out of its half. */
-  .split:has(:global(.side-pane)) .primary-row > :global(.rpanel) {
+  .split:has(:global(.side-pane)) .primary-row :global(.rpanel) {
     max-width: 60%;
   }
   /* Swap: the side pane moves to the leading edge — CSS order only, so
@@ -1423,8 +1394,7 @@
   }
 
   /* ---------- mobile shell (phone ≤640 / tablet 641–1024) ---------- */
-  /* Only mounted when viewport.isDesktop is false, so none of this affects the
-     ≥1025px desktop layout above. */
+  /* Compact chrome changes around the same mounted content tree. */
   .mtopbar {
     display: flex;
     align-items: center;

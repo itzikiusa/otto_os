@@ -70,6 +70,7 @@
     typeLabel,
     type ArtifactKind,
   } from './format';
+  import { viewport } from '../../../lib/stores/viewport.svelte';
   import { DESIGN_TEMPLATES, blankSource, type DesignTemplate } from './templates';
   import {
     canvasToPng,
@@ -88,6 +89,7 @@
   // ── Story context ──────────────────────────────────────────────────────────
   const story = $derived(product.detail?.story ?? null);
   const storyId = $derived(product.selectedId);
+  const contentContext = product.contentContext;
   /** An epic's arena shows every child's artifacts too (design §3.2). */
   const children = $derived<ProductStory[]>(storyId ? product.childrenOf(storyId) : []);
   const isEpic = $derived(!!story && (story.tree_kind === 'epic' || children.length > 0));
@@ -295,6 +297,7 @@
       // the previously-selected one is gone.
       if (!selectedId || !rows.some((r) => r.att.id === selectedId)) {
         selectedId = rows[0]?.att.id ?? null;
+        if (selectedId && !viewport.isPhone) mobilePane = 'canvas';
       }
     } catch (e) {
       // A load failure is shown inline in the assets pane (with Retry), not toasted.
@@ -343,11 +346,11 @@
     sourceLoading = true;
     localInvalid = null;
     try {
-      const text = await product.attachmentText(a.id);
+      const text = await product.attachmentText(a.id, true);
       if (token === loadToken) {
         source = text;
         // Optimistic-concurrency base: the row we just loaded.
-        product.setContentBase(a.id, a.updated_at);
+        if (!product.hasUnsavedContent(a.id)) product.setContentBase(a.id, a.updated_at);
       }
     } catch (e) {
       if (token === loadToken) sourceError = loadErrorText(e);
@@ -393,12 +396,14 @@
         return;
       }
     }
+    if (contentContext !== product.contentContext || aid !== att?.id) return;
     if (incoming === source) return; // the echo of our own save
     if (product.hasUnsavedContent(aid)) {
       const ok = await confirmer.ask(
         'This artifact was just changed on the server (by the agent or another editor) while you have unsaved edits here. Replace your edits with the new version?',
         { title: 'Newer version available', confirmLabel: 'Replace mine', danger: false },
       );
+      if (contentContext !== product.contentContext || aid !== att?.id) return;
       if (!ok) {
         product.markConflict(aid);
         return;
@@ -438,11 +443,11 @@
         ],
       },
     );
-    if (value !== 'mine' && value !== 'theirs') return;
+    if (contentContext !== product.contentContext || (value !== 'mine' && value !== 'theirs')) return;
     const takeTheirs = value === 'theirs';
     try {
       const fresh = (await product.listAttachmentsOf(a.story_id)).find((x) => x.id === a.id);
-      if (!fresh) return;
+      if (!fresh || contentContext !== product.contentContext) return;
       if (takeTheirs) {
         product.discardPendingContent(a.id);
         product.setContentBase(a.id, fresh.updated_at);
@@ -471,9 +476,9 @@
       }
     }
     localInvalid = null;
-    void product.saveAttachmentContent(a.id, next).catch((e) => {
+    void product.saveAttachmentContent(a.id, next, contentContext).catch((e) => {
       if (e instanceof ApiError && e.status === 409) {
-        void resolveConflict(a, next);
+        if (product.saveState[a.id] === 'conflict') void resolveConflict(a, next);
         return;
       }
       toasts.error('Save failed', e instanceof Error ? e.message : String(e));
@@ -677,6 +682,21 @@
     ctxMenu.show(e, items);
   }
 
+  function onPaneTabKey(event: KeyboardEvent): void {
+    const button = event.currentTarget as HTMLButtonElement;
+    const group = button.parentElement!;
+    const tabs = Array.from(group.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+    const index = tabs.indexOf(button);
+    const direction = getComputedStyle(group).direction === 'rtl' ? -1 : 1;
+    const next = event.key === 'ArrowRight' ? (index + direction + tabs.length) % tabs.length
+      : event.key === 'ArrowLeft' ? (index - direction + tabs.length) % tabs.length
+      : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : -1;
+    if (next < 0) return;
+    event.preventDefault();
+    tabs[next].focus();
+    tabs[next].click();
+  }
+
   // ── Row actions ────────────────────────────────────────────────────────────
   function selectArtifact(id: string): void {
     selectedId = id;
@@ -783,6 +803,7 @@
   }
 </script>
 
+<div class="arena-container">
 <!-- `.mockups-tab` is kept as an alias class: the product-mockups E2E + deep links target it. -->
 <div
   class="design-arena mockups-tab"
@@ -790,11 +811,11 @@
   class:m-canvas={mobilePane === 'canvas'}
   class:m-inspector={mobilePane === 'inspector'}
 >
-  <!-- ≤640px segmented pane switch (Database Explorer idiom) -->
+  <!-- Narrow available pane: preserve a useful stage with explicit pane navigation. -->
   <div class="arena-seg" role="tablist" aria-label="Design panes">
-    <button class="seg" class:active={mobilePane === 'assets'} role="tab" aria-selected={mobilePane === 'assets'} onclick={() => (mobilePane = 'assets')}>Assets</button>
-    <button class="seg" class:active={mobilePane === 'canvas'} role="tab" aria-selected={mobilePane === 'canvas'} onclick={() => (mobilePane = 'canvas')}>Canvas</button>
-    <button class="seg" class:active={mobilePane === 'inspector'} role="tab" aria-selected={mobilePane === 'inspector'} onclick={() => (mobilePane = 'inspector')}>Inspector</button>
+    <button class="seg" class:active={mobilePane === 'assets'} role="tab" aria-selected={mobilePane === 'assets'} tabindex={mobilePane === 'assets' ? 0 : -1} onkeydown={onPaneTabKey} onclick={() => (mobilePane = 'assets')}>Assets</button>
+    <button class="seg" class:active={mobilePane === 'canvas'} role="tab" aria-selected={mobilePane === 'canvas'} tabindex={mobilePane === 'canvas' ? 0 : -1} onkeydown={onPaneTabKey} onclick={() => (mobilePane = 'canvas')}>Canvas</button>
+    <button class="seg" class:active={mobilePane === 'inspector'} role="tab" aria-selected={mobilePane === 'inspector'} tabindex={mobilePane === 'inspector' ? 0 : -1} onkeydown={onPaneTabKey} onclick={() => (mobilePane = 'inspector')}>Inspector</button>
   </div>
 
   <!-- ── ASSETS / HIERARCHY ─────────────────────────────────────────────── -->
@@ -1093,8 +1114,10 @@
     {/if}
   </aside>
 </div>
+</div>
 
 <style>
+  .arena-container { container-type: inline-size; display: flex; flex: 1; min-height: 0; min-width: 0; }
   .design-arena {
     flex: 1;
     min-height: 0;
@@ -1623,7 +1646,7 @@
   }
 
   /* ── Phone: segmented single pane ─────────────────────────────────────── */
-  @media (max-width: 640px) {
+  @container (max-width: 960px) {
     .design-arena {
       flex-direction: column;
     }

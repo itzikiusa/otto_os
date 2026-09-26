@@ -30,6 +30,8 @@
   // Run Discovery controls
   let targetSwarmId = $state('');
   let running = $state(false);
+  let listSequence = 0;
+  let detailSequence = 0;
 
   // ── Swarms ────────────────────────────────────────────────────────────────
   $effect(() => {
@@ -41,22 +43,30 @@
   $effect(() => {
     // Re-run whenever the selected story changes.
     product.selectedId;
+    ++detailSequence;
+    expandedId = null;
+    expandedDetail = null;
     void loadRuns();
   });
 
   async function loadRuns(): Promise<void> {
+    const sequence = ++listSequence;
+    const storyId = product.selectedId;
     loading = true;
     loadError = null;
     try {
-      runs = await product.listDiscoveryRuns();
+      const result = await product.listDiscoveryRuns();
+      if (sequence === listSequence && storyId === product.selectedId) runs = result;
     } catch (e) {
-      loadError = loadErrorText(e);
+      if (sequence === listSequence && storyId === product.selectedId) loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (sequence === listSequence && storyId === product.selectedId) loading = false;
     }
   }
 
   async function toggleRun(id: string): Promise<void> {
+    const sequence = ++detailSequence;
+    const storyId = product.selectedId;
     if (expandedId === id) {
       expandedId = null;
       expandedDetail = null;
@@ -67,11 +77,12 @@
     expandError = null;
     expandLoading = true;
     try {
-      expandedDetail = await product.getDiscoveryRun(id);
+      const result = await product.getDiscoveryRun(id);
+      if (sequence === detailSequence && storyId === product.selectedId) expandedDetail = result;
     } catch (e) {
-      expandError = loadErrorText(e);
+      if (sequence === detailSequence && storyId === product.selectedId) expandError = loadErrorText(e);
     } finally {
-      expandLoading = false;
+      if (sequence === detailSequence && storyId === product.selectedId) expandLoading = false;
     }
   }
 

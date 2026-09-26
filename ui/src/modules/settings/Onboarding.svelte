@@ -1,18 +1,30 @@
 <script lang="ts">
   // First-run wizard: welcome → root password → first workspace → tools → done.
-  import { api } from '../../lib/api/client';
+  import { tick } from 'svelte';
+  import { api, setToken, ApiError } from '../../lib/api/client';
   import type { LoginResp, Workspace } from '../../lib/api/types';
   import { auth } from '../../lib/stores/auth.svelte';
   import Icon from '../../lib/components/Icon.svelte';
 
   let step = $state(0);
+  let card = $state<HTMLElement | null>(null);
+  $effect(() => {
+    const currentStep = step;
+    void tick().then(() => {
+      if (step === currentStep) card?.querySelector<HTMLElement>('h1')?.focus();
+    });
+  });
   let password = $state('');
   let password2 = $state('');
   let displayName = $state('');
   let wsName = $state('');
   let wsPath = $state('');
+  let skipWorkspace = $state(false);
   let busy = $state(false);
   let error = $state('');
+  // Root creation is irreversible; retain its result if optional workspace
+  // setup fails so Retry cannot attempt to create the account again.
+  let rootLogin = $state<LoginResp | null>(null);
 
   const strength = $derived.by(() => {
     let score = 0;
@@ -46,15 +58,29 @@
     busy = true;
     error = '';
     try {
-      const resp = await api.post<LoginResp>('/onboarding/root', {
-        password,
-        display_name: displayName.trim() === '' ? null : displayName.trim(),
-      });
-      await auth.acceptLogin(resp);
-      if (wsName.trim() !== '' && wsPath.trim() !== '') {
+      if (!rootLogin) {
+        try {
+          rootLogin = await api.post<LoginResp>('/onboarding/root', {
+            password,
+            display_name: displayName.trim() === '' ? null : displayName.trim(),
+          });
+        } catch (e) {
+          // The account may exist even if its response was lost. Authenticate
+          // with the just-entered credentials; never replace an existing root.
+          if (e instanceof ApiError && e.status !== 409 && e.status < 500) throw e;
+          try {
+            rootLogin = await api.post<LoginResp>('/auth/login', { username: 'root', password });
+          } catch {
+            throw e;
+          }
+        }
+      }
+      setToken(rootLogin.token);
+      if (!skipWorkspace && wsName.trim() !== '' && wsPath.trim() !== '') {
         await api.post<Workspace>('/workspaces', { name: wsName.trim(), root_path: wsPath.trim() });
       }
       if (auth.meta) auth.meta.needs_onboarding = false;
+      await auth.acceptLogin(rootLogin);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       busy = false;
@@ -65,8 +91,8 @@
 </script>
 
 <div class="ob-wrap">
-  <div class="ob-card card">
-    <div class="ob-progress">
+  <div class="ob-card card" bind:this={card}>
+    <div class="ob-progress" role="img" aria-label={`Setup step ${step + 1} of 5`}>
       {#each Array(5) as _, i (i)}
         <span class="ob-dot" class:done={i <= step}></span>
       {/each}
@@ -75,7 +101,7 @@
     {#if step === 0}
       <div class="ob-body">
         <div class="ob-mark">Otto</div>
-        <h1>Welcome to Otto</h1>
+        <h1 tabindex="-1">Welcome to Otto</h1>
         <p>
           Your agentic development environment: terminal sessions for Claude and Codex,
           managed connections, and full git + pull-request review — backed by a local daemon
@@ -85,7 +111,7 @@
       </div>
     {:else if step === 1}
       <div class="ob-body">
-        <h1>Set the root password</h1>
+        <h1 tabindex="-1">Set the root password</h1>
         <p>The root account manages users, workspaces, and daemon settings.</p>
 
         <div class="field">
@@ -94,7 +120,7 @@
         </div>
         <div class="field">
           <label for="ob-pass">Password</label>
-          <input id="ob-pass" class="input" type="password" bind:value={password} autocomplete="new-password" />
+          <input id="ob-pass" aria-describedby="ob-strength" class="input" type="password" bind:value={password} autocomplete="new-password" />
           <div class="strength">
             <div class="strength-bar">
               <div
@@ -102,17 +128,15 @@
                 style="width: {Math.min(100, strength * 20)}%"
               ></div>
             </div>
-            <span class="hint">
+            <span id="ob-strength" class="hint">
               {password.length < 10 ? `min 10 chars (${password.length}/10)` : strengthLabel}
             </span>
           </div>
         </div>
         <div class="field">
           <label for="ob-pass2">Confirm password</label>
-          <input id="ob-pass2" class="input" type="password" bind:value={password2} autocomplete="new-password" />
-          {#if password2.length > 0 && password !== password2}
-            <span class="hint err">Passwords don't match</span>
-          {/if}
+          <input id="ob-pass2" aria-describedby="ob-mismatch" aria-invalid={password2.length > 0 && password !== password2} class="input" type="password" bind:value={password2} autocomplete="new-password" />
+          <span id="ob-mismatch" class="hint err" role="status">{password2.length > 0 && password !== password2 ? "Passwords don't match" : ''}</span>
         </div>
 
         <div class="ob-actions">
@@ -122,7 +146,7 @@
       </div>
     {:else if step === 2}
       <div class="ob-body">
-        <h1>Create your first workspace</h1>
+        <h1 tabindex="-1">Create your first workspace</h1>
         <p>A workspace maps to a project directory. Sessions and repos live inside it.</p>
 
         <div class="field">
@@ -131,16 +155,16 @@
         </div>
         <div class="field">
           <label for="ob-wspath">Directory</label>
-          <input id="ob-wspath" class="input mono" bind:value={wsPath} placeholder="/Users/you/code/my-project" spellcheck="false" />
+          <input id="ob-wspath" dir="ltr" class="input mono" bind:value={wsPath} placeholder="/Users/you/code/my-project" spellcheck="false" />
         </div>
 
         <div class="ob-actions">
-          <button class="btn" onclick={() => (step = 1)}>Back</button>
-          <button class="btn ghost" onclick={() => (step = 3)}>Skip</button>
+          <button class="btn" disabled={!!rootLogin} title={rootLogin ? 'The root account is already created' : undefined} onclick={() => (step = 1)}>Back</button>
+          <button class="btn ghost" onclick={() => { skipWorkspace = true; step = 3; }}>Skip</button>
           <button
             class="btn primary"
             disabled={wsName.trim() === '' || wsPath.trim() === ''}
-            onclick={() => (step = 3)}
+            onclick={() => { skipWorkspace = false; step = 3; }}
           >
             Continue
           </button>
@@ -148,7 +172,7 @@
       </div>
     {:else if step === 3}
       <div class="ob-body">
-        <h1>Usage tracking</h1>
+        <h1 tabindex="-1">Usage tracking</h1>
         <p>
           Otto can track token usage, cost, and system metrics in an embedded
           <strong>ClickHouse</strong> engine — a full <em>Usage</em> dashboard, kept locally for
@@ -182,7 +206,7 @@
       </div>
     {:else}
       <div class="ob-body">
-        <h1>Tool check</h1>
+        <h1 tabindex="-1">Tool check</h1>
         <p>Otto spawns these CLIs on your behalf. Missing tools can be installed later.</p>
 
         <div class="tools">
@@ -211,10 +235,10 @@
           {/if}
         </p>
 
-        {#if error}<div class="hint err">{error}</div>{/if}
+        {#if error}<div class="hint err" role="alert">{error}</div>{/if}
 
         <div class="ob-actions">
-          <button class="btn" onclick={() => (step = 3)}>Back</button>
+          <button class="btn" disabled={busy} onclick={() => (step = 3)}>Back</button>
           <button class="btn primary big" disabled={busy} onclick={finish}>
             {busy ? 'Setting up…' : 'Finish Setup'}
           </button>
@@ -228,7 +252,9 @@
   .ob-wrap {
     height: 100%;
     display: grid;
-    place-items: center;
+    place-items: safe center;
+    overflow-y: auto;
+    padding-block: 16px;
     background: var(--bg);
   }
   .ob-card {
@@ -251,7 +277,7 @@
     transition: background 150ms ease-out;
   }
   .ob-dot.done {
-    background: var(--accent);
+    background: var(--accent-text);
     border-color: transparent;
   }
   .ob-mark {
@@ -316,7 +342,7 @@
     background: var(--status-working);
   }
   .hint.err {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .hint-line {
     font-size: 11.5px;
@@ -338,9 +364,19 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    height: 30px;
-    padding: 0 10px;
+    min-height: 30px;
+    padding: 4px 10px;
     border-radius: var(--radius-s);
+  }
+  .tool-row > .dim {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    text-align: end;
+  }
+  .tool-row > .mono {
+    flex-shrink: 0;
+    direction: ltr;
+    unicode-bidi: isolate;
   }
   .tool-row:nth-child(odd) {
     background: var(--surface-2);
@@ -350,6 +386,7 @@
     place-items: center;
     width: 18px;
     height: 18px;
+    flex-shrink: 0;
     border-radius: 50%;
     background: color-mix(in srgb, var(--status-exited) 18%, transparent);
     color: var(--status-exited);

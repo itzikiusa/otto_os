@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onTabKey } from './tabKeys';
   // Design Hall lobby (Grid view): the prompt hero, all seven studios, the
   // Continue strip, projects, the Linked-to-Product epic tree, and a rail with
   // what Otto captured for learning + agent activity. Dashboard-style: every
@@ -261,10 +262,10 @@
 <PageHeader title="Design Hall" class="dh-header">
   {#snippet tabs()}
     <div class="segmented" role="tablist" aria-label="Lobby view">
-      <button role="tab" aria-selected={view === 'grid'} class:active={view === 'grid'} onclick={() => goView('grid')}>
+      <button role="tab" aria-selected={view === 'grid'} tabindex={view === 'grid' ? 0 : -1} onkeydown={onTabKey} class:active={view === 'grid'} onclick={() => goView('grid')}>
         <Icon name="grid" size={12} /> Grid
       </button>
-      <button role="tab" aria-selected={view === 'spatial'} class:active={view === 'spatial'} onclick={() => goView('spatial')}
+      <button role="tab" aria-selected={view === 'spatial'} tabindex={view === 'spatial' ? 0 : -1} onkeydown={onTabKey} class:active={view === 'spatial'} onclick={() => goView('spatial')}
         data-testid="design-spatial-tab">
         <Icon name="gallery" size={12} /> Spatial <span class="beta">Beta</span>
       </button>

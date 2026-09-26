@@ -6,9 +6,10 @@
   // bounding-rect scale). Every committed mutation schedules a debounced
   // flatten → POST /snips/{id}/annotated, which puts the latest state on the
   // clipboard — the user can paste into a session at any moment (R4).
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { router } from '../../lib/router.svelte';
   import { snipApi } from '../../lib/snip';
+  import { ApiError } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
@@ -30,10 +31,14 @@
     blobToB64,
   } from './annotations';
 
-  const snipId = $derived(router.parts[1] ?? '');
+  // The shell keys this editor by id; cleanup saves belong to that mounted image.
+  const snipId = router.parts[1] ?? '';
 
   let img: HTMLImageElement | null = $state(null);
   let missing = $state(false);
+  let loadError = $state('');
+  let imageUrl: string | null = null;
+  let destroyed = false;
   let loading = $state(true);
   let canvasEl: HTMLCanvasElement | undefined = $state();
   let wrapEl: HTMLDivElement | undefined = $state();
@@ -77,28 +82,40 @@
     !!(window as unknown as { __OTTO_WIN__?: string }).__OTTO_WIN__ &&
     (window as unknown as { __OTTO_WIN__?: string }).__OTTO_WIN__ !== 'main';
 
-  onMount(() => {
-    let url: string | null = null;
-    (async () => {
-      try {
-        url = await snipApi.imageUrl(snipId);
-        const el = new Image();
-        el.onload = () => {
-          img = el;
-          loading = false;
-          queueMicrotask(redraw);
-        };
-        el.onerror = () => {
-          missing = true;
-          loading = false;
-        };
-        el.src = url;
-      } catch {
-        missing = true;
+  async function loadImage(): Promise<void> {
+    loading = true;
+    missing = false;
+    loadError = '';
+    try {
+      const url = await snipApi.imageUrl(snipId);
+      if (destroyed) { URL.revokeObjectURL(url); return; }
+      if (imageUrl) URL.revokeObjectURL(imageUrl);
+      imageUrl = url;
+      const el = new Image();
+      el.onload = () => {
+        if (destroyed) return;
+        img = el;
         loading = false;
-      }
-    })();
+        queueMicrotask(redraw);
+      };
+      el.onerror = () => {
+        if (destroyed) return;
+        loadError = 'The image could not be decoded. Retry loading the snip.';
+        loading = false;
+      };
+      el.src = url;
+    } catch (e) {
+      if (destroyed) return;
+      missing = e instanceof ApiError && e.status === 404;
+      loadError = missing ? '' : e instanceof Error ? e.message : 'Could not load the image. Try again.';
+      loading = false;
+    }
+  }
+
+  onMount(() => {
+    void loadImage();
     return () => {
+      destroyed = true;
       if (copyTimer) {
         // Closed inside the 800 ms debounce: still copy/save the last
         // annotation instead of silently dropping it. (The loaded image stays
@@ -107,7 +124,7 @@
         copyTimer = null;
         void copyNow();
       }
-      if (url) URL.revokeObjectURL(url);
+      if (imageUrl) URL.revokeObjectURL(imageUrl);
     };
   });
 
@@ -331,6 +348,19 @@
     setTimeout(() => textareaEl?.focus(), 0);
   }
 
+  function fitTextInImage(a: Anno): Anno {
+    const ctx = canvasEl?.getContext('2d');
+    if (!img || !ctx) return a;
+    ctx.save();
+    ctx.font = `600 ${a.font}px ui-sans-serif, system-ui, sans-serif`;
+    const lines = (a.text ?? '').split('\n');
+    const width = Math.max(...lines.map(line => ctx.measureText(line).width));
+    ctx.restore();
+    const x = Math.max(4, Math.min(a.x1, img.width - width - 4));
+    const y = Math.max(4, Math.min(a.y1, img.height - a.font * 1.25 * lines.length - 4));
+    return moveAnno(a, x - a.x1, y - a.y1);
+  }
+
   function commitText(): void {
     if (!textDraft) return;
     const { x, y, value, editId } = textDraft;
@@ -345,11 +375,11 @@
     }
     snapshot();
     if (editId !== null) {
-      commit(annos.map((a) => (a.id === editId ? { ...a, text } : a)));
+      commit(annos.map((a) => (a.id === editId ? fitTextInImage({ ...a, text }) : a)));
     } else {
       commit([
         ...annos,
-        {
+        fitTextInImage({
           id: nextId++,
           tool: 'text',
           x1: x,
@@ -360,7 +390,7 @@
           color,
           stroke: STROKES[strokeIx],
           font: FONTS[fontIx],
-        },
+        }),
       ]);
     }
   }
@@ -383,11 +413,43 @@
     if (!wrap) return '';
     const sx = r.width / canvasEl.width;
     const sy = r.height / canvasEl.height;
-    const left = r.left - wrap.left + textDraft.x * sx;
-    const top = r.top - wrap.top + textDraft.y * sy;
-    const fs = FONTS[fontIx] * sy;
-    return `left:${left}px;top:${top}px;font-size:${fs}px;color:${color};`;
+    // Keep the input reachable at image edges. Committing measures the text
+    // separately and fits the annotation itself within the image.
+    const width = Math.min(260, wrap.width - 16);
+    const left = Math.max(8, Math.min(r.left - wrap.left + textDraft.x * sx, wrap.width - width - 8));
+    const top = Math.max(8, Math.min(r.top - wrap.top + textDraft.y * sy, wrap.height - 84));
+    const fs = Math.max(11, FONTS[fontIx] * sy);
+    return `left:${left}px;top:${top}px;width:${width}px;max-width:${wrap.width - left - 8}px;max-height:${wrap.height - top - 8}px;font-size:${fs}px;color:${color};`;
   });
+
+  // Keyboard placement starts at the image center. The same selection, undo,
+  // move and copy paths serve both pointer and keyboard changes.
+  async function focusCanvas(): Promise<void> {
+    await tick();
+    canvasEl?.focus();
+  }
+  function placeWithKeyboard(): void {
+    if (!img) return;
+    const current = annos.find(a => a.id === selected);
+    if (current?.tool === 'text') {
+      openTextDraft(current.x1, current.y1, current.text ?? '', current.id);
+      return;
+    }
+    if (tool === 'select') {
+      selected = annos[0]?.id ?? null;
+      return;
+    }
+    const x = Math.round(img.width / 2), y = Math.round(img.height / 2);
+    if (tool === 'text') { openTextDraft(x, y, '', null); return; }
+    const w = Math.min(120, img.width / 4), h = Math.min(80, img.height / 4);
+    const a: Anno = {
+      id: nextId++, tool, x1: x - w / 2, y1: y - h / 2, x2: x + w / 2, y2: y + h / 2,
+      color, stroke: STROKES[strokeIx], font: FONTS[fontIx],
+      ...(tool === 'badge' ? { n: nextBadge++ } : {}),
+      ...(tool === 'pen' || tool === 'highlight' ? { points: [{ x: x - w / 2, y }, { x: x + w / 2, y }] } : {}),
+    };
+    snapshot(); commit([...annos, a]); selected = a.id;
+  }
 
   // ── Keyboard ───────────────────────────────────────────────────────────────
 
@@ -398,11 +460,22 @@
     if (textDraft) {
       if (e.key === 'Escape') {
         textDraft = null;
+        void focusCanvas();
         e.stopPropagation();
       } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
         commitText();
+        void focusCanvas();
         e.stopPropagation();
       }
+      return;
+    }
+    if (e.target === canvasEl && e.key === 'Enter') {
+      e.preventDefault(); placeWithKeyboard(); return;
+    }
+    if (e.target === canvasEl && (e.key === '[' || e.key === ']')) {
+      e.preventDefault();
+      const index = annos.findIndex(a => a.id === selected);
+      selected = annos[(index + (e.key === ']' ? 1 : -1) + annos.length) % annos.length]?.id ?? null;
       return;
     }
     const mod = e.metaKey || e.ctrlKey;
@@ -584,14 +657,20 @@
       >{#if copyState === 'copied' || copyState === 'idle'}<Icon name="check" size={12} />{:else if copyState === 'failed'}<Icon name="warning" size={12} />{/if}{copyLabel}</span
     >
     <div class="group actions">
-      <button class="btn small ghost" data-act="close" title="Close the editor (the clipboard keeps the latest copy)" onclick={() => void close()}>Close</button>
-      <button class="btn small primary" data-act="copy" title="Copy now (⌘C)" onclick={() => void copyNow()}><Icon name="copy" size={12} /> Copy</button>
+      <button class="btn small ghost snip-action" data-act="close" title="Close the editor (the clipboard keeps the latest copy)" onclick={() => void close()}>Close</button>
+      <button class="btn small primary snip-action" data-act="copy" title="Copy now (⌘C)" onclick={() => void copyNow()}><Icon name="copy" size={12} /> Copy</button>
     </div>
   </header>
 
   <div class="snip-body" bind:this={wrapEl}>
     {#if loading}
       <div class="snip-empty" role="status">Loading the snip…</div>
+    {:else if loadError}
+      <div class="snip-empty" role="alert">
+        <p class="snip-missing-title">Could not load the snip</p>
+        <p>{loadError}</p>
+        <button class="btn" onclick={() => void loadImage()}>Retry</button>
+      </div>
     {:else if missing}
       <div class="snip-empty snip-missing" role="alert">
         <Icon name="image" size={26} />
@@ -600,18 +679,26 @@
         <button class="btn" data-act="close" onclick={() => void close()}>Close</button>
       </div>
     {:else}
+      <!-- svelte-ignore a11y_no_interactive_element_to_noninteractive_role (this canvas is a keyboard-operated drawing application; onKeydown handles placement, selection, movement and deletion) -->
       <canvas
         class="snip-canvas"
         bind:this={canvasEl}
+        tabindex="0"
+        role="application"
+        aria-label="Snip annotation canvas"
+        aria-describedby="snip-keyboard-help"
         onpointerdown={onPointerDown}
         onpointermove={onPointerMove}
         onpointerup={onPointerUp}
         ondblclick={onDblClick}
       ></canvas>
+      <p id="snip-keyboard-help" class="snip-keyboard-help">Choose a tool, then press Enter on the image to add it. Use [ and ] to select annotations, arrow keys to move, and Delete to remove. Enter edits selected text.</p>
+      <span class="sr-only" role="status">{selected === null ? `${annos.length} annotations` : `Selected ${annos.find(a => a.id === selected)?.tool ?? 'annotation'} ${annos.findIndex(a => a.id === selected) + 1} of ${annos.length}`}</span>
       {#if textDraft}
         <!-- svelte-ignore a11y_autofocus -->
         <textarea
           class="snip-textentry"
+          aria-label="Annotation text"
           style={textOverlayStyle}
           bind:this={textareaEl}
           bind:value={textDraft.value}
@@ -625,6 +712,20 @@
 </div>
 
 <style>
+  .snip-keyboard-help {
+    position: absolute;
+    inset-inline: 12px;
+    inset-block-end: 8px;
+    margin: 0;
+    padding: 6px 10px;
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
+    pointer-events: none;
+    display: none;
+  }
+  .snip-canvas:focus-visible ~ .snip-keyboard-help { display: block; }
   .snip-editor {
     position: fixed;
     inset: 0;
@@ -744,7 +845,8 @@
   }
   .snip-textentry {
     position: absolute;
-    min-width: 160px;
+    min-width: 0;
+    box-sizing: border-box;
     min-height: 1.4em;
     background: color-mix(in srgb, var(--bg) 70%, transparent);
     border: 1px dashed var(--accent);
@@ -771,6 +873,14 @@
   .snip-missing-title {
     color: var(--text);
     font-weight: 600;
+  }
+  @media (max-width: 640px) {
+    .tools { display: grid; grid-template-columns: repeat(5, minmax(36px, 1fr)); width: 100%; }
+    .tools .tb { justify-content: center; }
+    .snip-action { min-height: 36px; }
+    .tb, .tb.size, .swatch { min-width: 36px; min-height: 36px; }
+    .snip-bar { gap: 6px; padding: 8px; }
+    .colors { flex-wrap: wrap; }
   }
   /* Narrow windows: tools go icon-only (the tooltip keeps name + key) so
      the bar stays one row as long as possible. */

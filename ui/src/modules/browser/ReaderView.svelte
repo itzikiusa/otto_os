@@ -53,17 +53,53 @@
   let pending: { selector: string; excerpt: string; text: string } | null = $state(null);
   let noteText = $state('');
   let saving = $state(false);
+  let markButton: HTMLButtonElement | undefined = $state();
+  let pendingTarget: HTMLElement | null = null;
 
   function toggleMark(): void {
+    markButton?.focus();
     markMode = !markMode;
     pending = null;
   }
 
-  async function onArticleClick(e: MouseEvent): Promise<void> {
-    if (!markMode || !articleEl) return;
-    const target = e.target as Element | null;
-    if (!target || target === articleEl) return;
-    e.preventDefault();
+  // A composer belongs to one fetched page, never the next URL or refresh.
+  $effect(() => {
+    void page;
+    markMode = false;
+    pending = null;
+    pendingTarget = null;
+    noteText = '';
+  });
+
+  // While marking, the rendered blocks form a roving keyboard selection.
+  // Restore their original semantics as soon as marking ends.
+  $effect(() => {
+    const root = articleEl;
+    if (!markMode || !root) return;
+    void html;
+    const nested = Array.from(root.querySelectorAll<HTMLElement>('a, button, input, select, textarea, [tabindex]'));
+    const nestedTabs = nested.map(el => el.getAttribute('tabindex'));
+    nested.forEach(el => { el.tabIndex = -1; });
+    const blocks = Array.from(root.children).filter((el): el is HTMLElement => el instanceof HTMLElement);
+    const previous = blocks.map((el) => [el.getAttribute('tabindex'), el.getAttribute('role')]);
+    blocks.forEach((el, i) => { el.tabIndex = i === 0 ? 0 : -1; el.setAttribute('role', 'button'); });
+    return () => {
+      nested.forEach((el, i) => {
+        const value = nestedTabs[i];
+        if (value === null) el.removeAttribute('tabindex'); else el.setAttribute('tabindex', value);
+      });
+      blocks.forEach((el, i) => {
+        for (const [j, attr] of ['tabindex', 'role'].entries()) {
+          const value = previous[i][j];
+          if (value === null) el.removeAttribute(attr); else el.setAttribute(attr, value);
+        }
+      });
+    };
+  });
+
+  async function markElement(target: Element): Promise<void> {
+    if (!articleEl) return;
+    pendingTarget = target.closest<HTMLElement>('[role="button"]');
     const selector = buildSelector(target, articleEl);
     const excerpt = target.outerHTML.slice(0, 2000);
     const text = (target.textContent || '').trim().slice(0, 500);
@@ -73,14 +109,44 @@
     document.querySelector<HTMLTextAreaElement>('.mark-composer textarea')?.focus();
   }
 
+  function onArticleClick(e: MouseEvent): void {
+    if (!markMode || !articleEl) return;
+    const target = e.target as Element | null;
+    if (!target || target === articleEl) return;
+    e.preventDefault();
+    void markElement(target);
+  }
+
+  function onArticleKey(e: KeyboardEvent): void {
+    if (!markMode || !articleEl) return;
+    const blocks = Array.from(articleEl.children) as HTMLElement[];
+    const i = blocks.findIndex(el => el === e.target || el.contains(e.target as Node));
+    if (i < 0) return;
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      void markElement(blocks[i]);
+      return;
+    }
+    const next = e.key === 'ArrowDown' ? (i + 1) % blocks.length
+      : e.key === 'ArrowUp' ? (i + blocks.length - 1) % blocks.length
+      : e.key === 'Home' ? 0 : e.key === 'End' ? blocks.length - 1 : -1;
+    if (next < 0) return;
+    e.preventDefault();
+    blocks.forEach((el, j) => { el.tabIndex = j === next ? 0 : -1; });
+    blocks[next].focus();
+  }
+
   function cancelMark(): void {
     pending = null;
     noteText = '';
+    pendingTarget?.focus();
   }
 
   async function saveMark(): Promise<void> {
     if (!pending || !page || saving) return;
     saving = true;
+    const selection = pending;
+    const sourcePage = page;
     try {
       await browser.createAnnotation({
         url: page.url,
@@ -89,9 +155,12 @@
         text: pending.text,
         comment: noteText.trim(),
       });
+      if (page !== sourcePage || pending !== selection) return;
       pending = null;
       noteText = '';
       markMode = false;
+      await tick();
+      markButton?.focus();
     } catch (e) {
       toasts.error('Failed to save mark', e instanceof Error ? e.message : undefined);
     } finally {
@@ -149,10 +218,11 @@
     {/if}
 
     <div class="toolbar">
-      {#if markMode}<span class="mark-hint" role="status">Click a passage to mark it · Esc to stop</span>{/if}
+      {#if markMode}<span class="mark-hint" role="status">Choose a passage · ↑↓ to move · Enter to mark · Esc to stop</span>{/if}
       <button
         class="btn small"
         class:mark-on={markMode}
+        bind:this={markButton}
         onclick={toggleMark}
         aria-pressed={markMode}
         title={markMode ? 'Stop marking' : 'Mark a passage to hand to an agent'}
@@ -166,10 +236,11 @@
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <article
-      class="page"
+      class="page md-body"
       class:mark-armed={markMode}
       bind:this={articleEl}
       onclick={onArticleClick}
+      onkeydown={onArticleKey}
     >
       <h1 class="page-title">{page.title || page.url}</h1>
       <!-- eslint-disable-next-line svelte/no-at-html-tags -->
@@ -201,7 +272,7 @@
   {/if}
 </div>
 
-<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && markMode && !pending) { markMode = false; } }} />
+<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && markMode && !pending) { markMode = false; markButton?.focus(); } }} />
 
 <style>
   .reader {
@@ -247,7 +318,8 @@
   .page.mark-armed {
     cursor: crosshair;
   }
-  .page.mark-armed :global(*:hover) {
+  .page.mark-armed :global(*:hover),
+  .page.mark-armed :global([role="button"]:focus-visible) {
     outline: 1px dashed var(--accent);
     outline-offset: 2px;
   }

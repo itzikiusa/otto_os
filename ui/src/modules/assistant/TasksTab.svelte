@@ -57,6 +57,13 @@
 {/snippet}
 
 <div class="tasks" data-testid="assistant-tasks">
+  {#if assistant.needsState === 'error'}
+    <div class="error" role="alert">
+      <Icon name="warning" size={14} />
+      <div class="error-t"><strong>Couldn’t load requests waiting on you.</strong><span class="dim">Retry to check whether Otto needs a decision.</span></div>
+      <button class="btn small" onclick={() => void assistant.loadNeedsYou()}>Retry requests</button>
+    </div>
+  {/if}
   {#if tasks.state === 'loading' && !tasks.data.length && !needs.length}
     <div aria-busy="true" aria-label="Loading tasks"><Skeleton rows={4} height={52} /></div>
   {:else if tasks.state === 'unsupported'}

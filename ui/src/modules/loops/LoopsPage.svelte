@@ -1,5 +1,6 @@
 <script lang="ts">
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { loops } from '../../lib/stores/loops.svelte';
   import { loopsPagePort } from '../../lib/uiCommands/loops';
   import GoalDefineForm from './GoalDefineForm.svelte';
@@ -60,13 +61,18 @@
       {#snippet actions()}
         <!-- One primary per page: while the list is empty the empty state owns
              the "New goal loop" CTA. -->
-        {#if list.length > 0}
+        {#if ws.currentId && list.length > 0}
           <button class="btn small primary" onclick={() => (creating = true)}><Icon name="plus" size={12} /> New goal loop</button>
         {/if}
       {/snippet}
     </PageHeader>
     <PageBody>
 
+    {#if !ws.currentId}
+      <EmptyState variant="page" icon="refresh" title="Add a workspace to get started"
+        body="Goal loops belong to a workspace. Add your project folder, then define your goal and budget."
+        actionLabel="Add workspace" actionIcon="plus" onaction={() => (ui.newWorkspaceOpen = true)} />
+    {:else}
     <LoadState
       what="goal loops"
       variant="page"
@@ -107,6 +113,7 @@
         {/each}
       </ul>
     </LoadState>
+    {/if}
     </PageBody>
   {/if}
 </div>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick, untrack } from 'svelte';
   import PathField from '../../lib/components/PathField.svelte';
   // Agent Swarm section: swarm list + the open swarm (org tree, run graph,
   // kanban, runs, board) with an inline session panel (reuses SessionView).
@@ -37,23 +38,32 @@
   /** Swarm lifecycle → the shared badge tone (patterns.md §1). */
   const SWARM_TONE: Record<string, Tone> = { active: 'success', paused: 'neutral', aborted: 'danger' };
 
-  // --- Phone chrome (≤640px) ----------------------------------------------
-  // On a phone the Swarms rail + the swarm header would eat most of the screen
-  // before the chosen view even starts. Both become collapsible sections so the
-  // view gets the room; desktop/tablet keep the original always-open chrome.
-  // `railOpen` defaults closed once a swarm is open (you've made your pick);
-  // (The swarm's secondary actions live in the shared PageHeader, which
-  // collapses whatever doesn't fit into its "⋯" menu — no header toggle.)
+  // On phone and tablet, the swarm picker becomes a compact band above the
+  // detail. Keep the view mounted when the picker opens or closes.
   let railOpen = $state(true);
-  // Auto-collapse the rail when a swarm opens on a phone (one-time per open).
-  let lastOpenedId = $state<string | null>(null);
-  $effect(() => {
+  let railEl = $state<HTMLElement | null>(null);
+  let railToggle = $state<HTMLButtonElement | null>(null);
+  let lastOpenedId: string | null = null;
+  let wasCompact = false;
+  async function collapseRail(): Promise<void> {
+    const restoreFocus = railEl?.querySelector('.rail-list')?.contains(document.activeElement);
+    railOpen = false;
+    await tick();
+    if (restoreFocus) railToggle?.focus();
+  }
+  $effect.pre(() => {
+    const compact = viewport.isMobile;
     const id = swarm.detail?.id ?? null;
-    if (viewport.isPhone && id && id !== lastOpenedId) {
-      railOpen = false;
+    if (compact && id && (id !== lastOpenedId || !wasCompact)) {
+      untrack(() => void collapseRail());
     }
     lastOpenedId = id;
+    wasCompact = compact;
   });
+  async function pickSwarm(id: string): Promise<void> {
+    await openSwarm(id);
+    if (viewport.isMobile && swarm.detail?.id === id) await collapseRail();
+  }
 
   let showNew = $state(false);
   let showRecruit = $state(false);
@@ -252,8 +262,9 @@
   function onTabKey(e: KeyboardEvent): void {
     const i = VIEWS.findIndex((v) => v.id === view);
     let next = -1;
-    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (i + 1) % VIEWS.length;
-    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = (i - 1 + VIEWS.length) % VIEWS.length;
+    const rtl = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl';
+    if (e.key === (rtl ? 'ArrowLeft' : 'ArrowRight') || e.key === 'ArrowDown') next = (i + 1) % VIEWS.length;
+    else if (e.key === (rtl ? 'ArrowRight' : 'ArrowLeft') || e.key === 'ArrowUp') next = (i - 1 + VIEWS.length) % VIEWS.length;
     else if (e.key === 'Home') next = 0;
     else if (e.key === 'End') next = VIEWS.length - 1;
     if (next < 0) return;
@@ -524,7 +535,7 @@
   const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 </script>
 
-<div class="swarm-page" class:phone={viewport.isPhone}>
+<div class="swarm-page" class:phone={viewport.isPhone} class:compact={viewport.isMobile}>
   <PageHeader
     class="swarm-head"
     title={detail?.name ?? 'Swarm'}
@@ -568,22 +579,23 @@
   </PageHeader>
 
   <div class="swarm-split">
-  <!-- Swarms rail — a plain sidebar on desktop/tablet; a collapsible accordion
-       section on a phone (tap the header to toggle the list). -->
+  <!-- Swarms rail — a plain sidebar on desktop; a collapsible accordion
+       section on phone and tablet (tap the header to toggle the list). -->
   {#if showRail}
-  <aside class="rail" class:collapsed={viewport.isPhone && !railOpen} style={viewport.isPhone ? '' : `width:${railW}px`}>
+  <aside class="rail" bind:this={railEl} class:collapsed={viewport.isMobile && !railOpen} style={viewport.isMobile ? '' : `width:${railW}px`}>
     <div class="rail-head">
       <button
         class="rail-toggle"
+        bind:this={railToggle}
         onclick={() => (railOpen = !railOpen)}
         aria-expanded={railOpen}
         aria-label="Toggle swarms list"
       >
-        {#if viewport.isPhone}
+        {#if viewport.isMobile}
           <Icon name={railOpen ? 'chevronDown' : 'chevronRight'} size={13} />
         {/if}
         <span class="section-title">Swarms</span>
-        {#if viewport.isPhone && !railOpen && detail}
+        {#if viewport.isMobile && !railOpen && detail}
           <span class="rail-current ellipsis">· {detail.name}</span>
         {/if}
       </button>
@@ -604,7 +616,7 @@
             class:active={detail?.id === s.id}
             aria-current={detail?.id === s.id ? 'true' : undefined}
             title="{s.name} · {sentenceCase(s.status)}"
-            onclick={() => { void openSwarm(s.id); if (viewport.isPhone) railOpen = false; }}
+            onclick={() => void pickSwarm(s.id)}
           >
             <span class="grow ellipsis">{s.name}</span>
             <span class="dot {s.status}" role="img" aria-label={sentenceCase(s.status)}></span>
@@ -616,7 +628,7 @@
 
   {/if}
 
-  {#if !viewport.isPhone && showRail}
+  {#if !viewport.isMobile && showRail}
     <!-- A focusable separator is a widget in ARIA (←/→ resize, Enter resets);
          Svelte's lint doesn't know that — same exemption as agents/SplitNode. -->
     <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
@@ -711,7 +723,7 @@
             </button>
           {/each}
         </div>
-        <span class="grow"></span>
+        <span class="grow switcher-spacer"></span>
         <!-- Budget meters + parallel cap: swarm-level status/settings that sit
              with the views rather than crowding the page header's actions. -->
         <div class="budget-bars">
@@ -1077,6 +1089,9 @@
     width: 52px;
   }
   .switcher {
+    /* The available pane can be narrow on tablets or beside a wide swarm rail. */
+    overflow-x: auto;
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     gap: 12px;
@@ -1162,41 +1177,56 @@
     max-width: 160px;
   }
 
-  @media (max-width: 640px) {
-    .swarm-page.phone .swarm-split {
+  @media (max-width: 1024px) {
+    /* Tablet detail has room for the views and budget controls on two calm
+       rows. Focus never needs to reveal a partially clipped number field. */
+    .swarm-page.compact:not(.phone) .switcher {
+      flex-wrap: wrap;
+      justify-content: space-between;
+    }
+    .swarm-page.compact:not(.phone) .seg-tabs {
+      flex-basis: 100%;
+    }
+    .swarm-page.compact:not(.phone) .switcher-spacer {
+      display: none;
+    }
+    .swarm-page.compact .swarm-split {
       flex-direction: column;
     }
     /* Rail = collapsible accordion. Header is a tappable toggle; the list
        scrolls within a capped height when open, and is hidden when collapsed. */
-    .swarm-page.phone .rail {
+    .swarm-page.compact .rail {
       width: 100%;
       flex: none;
       border-inline-end: none;
       border-block-end: 1px solid var(--border);
       min-height: 0;
     }
-    .swarm-page.phone .rail-head {
+    .swarm-page.compact .rail-head {
       padding: 10px 14px;
     }
-    .swarm-page.phone .rail-toggle {
+    .swarm-page.compact .rail-toggle {
       flex: 1;
       padding: 4px 0;
     }
-    .swarm-page.phone .rail-toggle .section-title {
+    .swarm-page.compact .rail-toggle .section-title {
       font-size: var(--fs-s);
     }
-    .swarm-page.phone .rail-list {
+    .swarm-page.compact .rail-list {
       max-height: 38vh;
       overflow-y: auto;
     }
-    .swarm-page.phone .rail.collapsed .rail-list {
+    .swarm-page.compact .rail.collapsed .rail-list {
       display: none;
     }
-    .swarm-page.phone .swarm-item {
+    .swarm-page.compact .swarm-item {
       font-size: var(--fs-l);
       padding: 11px 12px;
     }
 
+  }
+
+  @media (max-width: 640px) {
     .swarm-page.phone .cap {
       flex: none;
     }

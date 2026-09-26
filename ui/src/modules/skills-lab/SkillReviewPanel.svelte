@@ -57,6 +57,7 @@
   }
   let fInstructions = $state('');
   let starting = $state(false);
+  let listHidden = $state(false);
 
   // Apply-fixes form.
   let fixProvider = $state(defaultAgentProvider());
@@ -116,11 +117,25 @@
 
   /** `quiet` for background refreshes (poll / bus): a transient failure there
    *  must not raise a toast every 2.5 s — the next tick retries. */
+  let detailGeneration = 0;
+  let selectionPending: number | null = null;
+  let refreshPending: number | null = null;
   async function openReview(id: string, quiet = false): Promise<void> {
+    // A poll for the still-visible old review must not supersede a deliberate
+    // selection. Coalesce background reads so a slow response can finish.
+    if (quiet && (selected?.id !== id || selectionPending === detailGeneration || refreshPending === detailGeneration)) return;
+    const generation = quiet ? detailGeneration : ++detailGeneration;
+    if (quiet) refreshPending = generation;
+    else selectionPending = generation;
+    const workspace = wsId;
     try {
-      selected = await skillReviewApi.get(id);
+      const review = await skillReviewApi.get(id);
+      if (generation === detailGeneration && workspace === wsId) selected = review;
     } catch (e) {
-      if (!quiet) toasts.error("Couldn't open the review", e instanceof Error ? e.message : String(e));
+      if (generation === detailGeneration && workspace === wsId && !quiet) toasts.error("Couldn't open the review", e instanceof Error ? e.message : String(e));
+    } finally {
+      if (quiet && refreshPending === generation) refreshPending = null;
+      if (!quiet && selectionPending === generation) selectionPending = null;
     }
   }
 
@@ -205,6 +220,7 @@
   }
 
   function newReview(): void {
+    detailGeneration++;
     selected = null;
     fSkill = '';
   }
@@ -230,13 +246,14 @@
       poll = setInterval(() => { void openReview(id, true); }, 2500);
     }
   });
-  onDestroy(() => { if (poll) clearInterval(poll); });
+  onDestroy(() => { detailGeneration++; if (poll) clearInterval(poll); });
 
   // Load on workspace change.
   let loadedWs = '';
   $effect(() => {
     if (wsId && wsId !== loadedWs) {
       // The open review belongs to the previous workspace.
+      detailGeneration++;
       if (loadedWs) selected = null;
       loadedWs = wsId;
       void loadSkills();
@@ -252,6 +269,7 @@
   let consumedTarget = '';
   $effect(() => {
     if (initialTarget && `${initialTarget.source}:${initialTarget.name}` !== consumedTarget) {
+      detailGeneration++;
       consumedTarget = `${initialTarget.source}:${initialTarget.name}`;
       selected = null;
       // Ensure the option exists even before the skill list loads.
@@ -290,8 +308,10 @@
   }
 </script>
 
-<div class="lab-review" data-testid="skill-review">
-  <aside class="lr-side">
+<div class="review-wrap">
+  <div class="review-toolbar"><button class="btn small ghost" aria-label={listHidden ? 'Show reviews list' : 'Hide reviews list'} title={listHidden ? 'Show reviews list' : 'Hide reviews list'} aria-expanded={!listHidden} aria-controls="reviews-list" onclick={() => (listHidden = !listHidden)}><Icon name="sidebar" size={14} /></button></div>
+<div class="lab-review" class:list-hidden={listHidden} data-testid="skill-review">
+  <aside class="lr-side" id="reviews-list">
     <!-- Same list head as the Evaluator's runs. Not .primary: the form's
          "Start review" is the view's primary. -->
     <div class="lr-side-head">
@@ -533,10 +553,15 @@
     {/if}
   </main>
 </div>
+</div>
 
 <style>
+  .review-wrap { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+  .review-toolbar { display: flex; align-items: center; min-height: 32px; padding-inline: 8px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .lab-review.list-hidden { grid-template-columns: minmax(0, 1fr); }
+  .list-hidden .lr-side { display: none; }
   /* Same shell as Skills: a surface list pane with a hairline, content beside it. */
-  .lab-review { display: grid; grid-template-columns: 280px 1fr; height: 100%; min-height: 0; }
+  .lab-review { display: grid; grid-template-columns: 280px minmax(0, 1fr); flex: 1; min-height: 0; }
   .lr-side { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; padding: 0 8px 12px; background: var(--surface); border-inline-end: 1px solid var(--border); }
   .lr-side-head { display: flex; align-items: center; gap: 8px; padding: 12px 4px 8px; }
   .lr-side-title { flex: 1; font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim); }
@@ -557,7 +582,7 @@
   .lr-item-meta { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--text-dim); min-width: 0; }
   .lr-item-meta > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .lr-src { font-size: var(--fs-xs); }
-  .lr-main { overflow-y: auto; min-height: 0; padding: 16px 20px; }
+  .lr-main { min-width: 0; overflow-y: auto; min-height: 0; padding: 16px 20px; }
   .lr-form { padding: 16px; max-width: 620px; display: flex; flex-direction: column; gap: 12px; }
   .lr-form h3 { margin: 0; font-size: var(--fs-l); font-weight: 600; }
   .lr-actions { display: flex; align-items: center; gap: 8px; padding-top: 4px; }
@@ -612,9 +637,9 @@
   .lr-plan { margin: 4px 0 8px 18px; font-size: var(--fs-s); line-height: 1.5; }
 
   .rp-status-pill { display: inline-flex; align-items: center; }
-  .rp-finding { display: flex; align-items: baseline; gap: 6px; font-size: var(--fs-xs); line-height: 1.4; }
-  .rp-finding-body { flex: 1; min-width: 0; }
-  .rp-loc { font-size: var(--fs-xs); color: var(--text-dim); white-space: nowrap; }
+  .rp-finding { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; gap: 6px; font-size: var(--fs-xs); line-height: 1.4; }
+  .rp-finding-body { grid-column: 1 / -1; min-width: 0; overflow-wrap: anywhere; }
+  .rp-loc { font-size: var(--fs-xs); color: var(--text-dim); overflow-wrap: anywhere; }
   .severity-chip { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: var(--fs-xs); font-weight: 500; text-transform: capitalize; }
   .sev-critical { background: var(--danger-soft); color: var(--danger); }
   .sev-high { background: var(--danger-soft); color: var(--danger); }

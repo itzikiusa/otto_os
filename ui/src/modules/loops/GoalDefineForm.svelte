@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ui } from '../../lib/stores/ui.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { loops } from '../../lib/stores/loops.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -91,7 +92,7 @@
   }
 
   function canLaunch(): boolean {
-    if (!draft || !name.trim()) return false;
+    if (!ws.currentId || !draft || !name.trim()) return false;
     const cs = draft.definition.acceptance_criteria;
     return cs.length > 0 && cs.every((c) => c.text.trim() !== '' && c.verify.trim() !== '');
   }
@@ -165,6 +166,12 @@
 </PageHeader>
 <PageBody width="readable">
 <div class="form">
+  {#if !ws.currentId}
+    <section class="block" role="status">
+      <p>Add a workspace to define and launch this goal. Your draft stays here.</p>
+      <button class="btn" onclick={() => (ui.newWorkspaceOpen = true)}>Add workspace</button>
+    </section>
+  {/if}
 
   <section class="block">
     <label class="lbl" for="gl-seed">Goal <span class="hint">(what “done” looks like)</span></label>
@@ -189,13 +196,13 @@
     <select id="gl-define-provider" class="input in" bind:value={defProvider} onchange={() => (defModel = '')}>{#each providers as p (p)}<option value={p}>{p}</option>{/each}</select>
     <ModelPicker provider={defProvider} value={defModel} onchange={(m) => (defModel = m)} />
     <div class="frow">
-      <button class="btn" class:primary={!draft} onclick={define} disabled={defining || !seed.trim() || (mode === 'build' && !repoPath.trim())}
-        title={!seed.trim() ? 'Describe the goal first' : mode === 'build' && !repoPath.trim() ? 'Choose the repository first' : 'Draft criteria and a budget from your goal'}>
+      <button class="btn" class:primary={!draft} onclick={define} disabled={!ws.currentId || defining || !seed.trim() || (mode === 'build' && !repoPath.trim())}
+        title={!ws.currentId ? 'Add a workspace first' : !seed.trim() ? 'Describe the goal first' : mode === 'build' && !repoPath.trim() ? 'Choose the repository first' : 'Draft criteria and a budget from your goal'}>
         {defining ? 'Defining…' : draft ? 'Re-define' : 'Define with AI'}
       </button>
       {#if draft}
         <input class="input in grow" bind:value={feedback} placeholder="Refine: what to change about the draft" />
-        <button class="btn" onclick={define} disabled={defining || !feedback.trim()}>Refine</button>
+        <button class="btn" onclick={define} disabled={!ws.currentId || defining || !feedback.trim()}>Refine</button>
       {/if}
     </div>
   </section>

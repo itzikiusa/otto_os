@@ -98,24 +98,37 @@
   );
   let resizing = $state(false);
   let bodyEl = $state<HTMLDivElement | null>(null);
+  let bodyWidth = $state(0);
+  // A useful table needs 280px beside the 168px kind rail and 320px detail.
+  const detailSheet = $derived(viewport.isPhone || (bodyWidth > 0 && bodyWidth < 780));
+  const maxDrawerW = $derived(Math.max(320, bodyWidth - 168 - 280 - 6));
+  const visibleDrawerW = $derived(Math.min(drawerW, maxDrawerW));
+  function saveDrawerWidth(): void {
+    try { localStorage.setItem(DRAWER_KEY, String(Math.round(drawerW))); } catch { /* ignore */ }
+  }
+  function resizeKey(e: KeyboardEvent): void {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+    e.preventDefault();
+    const rtl = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl';
+    const delta = (e.key === 'ArrowRight' ? 24 : -24) * (rtl ? 1 : -1);
+    drawerW = e.key === 'Home' ? 320 : e.key === 'End' ? maxDrawerW
+      : Math.max(320, Math.min(maxDrawerW, visibleDrawerW + delta));
+    saveDrawerWidth();
+  }
 
   function startResize(e: PointerEvent): void {
     e.preventDefault();
     resizing = true;
     const startX = e.clientX;
-    const startW = drawerW;
-    const maxW = Math.max(360, (bodyEl?.clientWidth ?? 1200) - 420);
+    const startW = visibleDrawerW;
+    const rtl = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl';
     const onMove = (ev: PointerEvent): void => {
-      // Drawer sits on the right: dragging left widens it.
-      drawerW = Math.max(320, Math.min(maxW, startW - (ev.clientX - startX)));
+      // Pointer motion follows the physical side occupied by the drawer.
+      drawerW = Math.max(320, Math.min(maxDrawerW, startW + (ev.clientX - startX) * (rtl ? 1 : -1)));
     };
     const onUp = (): void => {
       resizing = false;
-      try {
-        localStorage.setItem(DRAWER_KEY, String(Math.round(drawerW)));
-      } catch {
-        /* ignore */
-      }
+      saveDrawerWidth();
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
     };
@@ -255,6 +268,8 @@
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (keyContext.terminalFocused || ui.modalCount > 0 || ctxMenu.open || k8s.k9sSessionId) return;
       if (e.key === 'Escape') {
+        // The open namespace combobox owns Escape and preserves its focus.
+        if ((e.target as HTMLElement | null)?.closest('[role="combobox"][aria-expanded="true"]')) return;
         if (isTyping(e.target)) {
           (e.target as HTMLElement).blur();
           return;
@@ -328,6 +343,8 @@
           break;
         }
         case 'Enter':
+          // Native controls own Enter; the workspace shortcut is for the table.
+          if ((e.target as HTMLElement | null)?.closest('button, a[href], summary, [role="button"], [role="tab"]')) return;
           if (row) {
             e.preventDefault();
             openRow(row);
@@ -399,7 +416,7 @@
       </div>
     </div>
   {:else}
-    <div class="body" bind:this={bodyEl} class:resizing>
+    <div class="body" bind:this={bodyEl} bind:clientWidth={bodyWidth} class:resizing>
       {#if viewport.isPhone}
         <!-- Phone: the header can't hold a text field (it never collapses into ⋯),
              so the row filter sits beside the kind picker instead. -->
@@ -438,13 +455,13 @@
       </div>
 
       {#if drawerOpen && sel}
-        {#if !viewport.isPhone}
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div class="splitter" role="separator" aria-orientation="vertical" aria-label="Drag to resize details" onpointerdown={startResize}><span class="grip"></span></div>
+        {#if !detailSheet}
+          <input class="splitter" type="range" min="320" max={Math.round(maxDrawerW)} value={Math.round(visibleDrawerW)} aria-orientation="vertical" aria-label="Resize details" aria-valuetext={`${Math.round(visibleDrawerW)} pixels`} title="Drag or use arrow keys to resize details" oninput={(e) => { drawerW = Number(e.currentTarget.value); saveDrawerWidth(); }} onkeydown={resizeKey} onpointerdown={startResize} />
         {/if}
-        <div class="drawer-host" class:sheet={viewport.isPhone} style={viewport.isPhone ? '' : `width:${drawerW}px`}>
+        <div class="drawer-host" class:sheet={detailSheet} style={detailSheet ? '' : `width:${visibleDrawerW}px`}>
           {#key `${cluster.id}/${kind}/${sel.ns}/${sel.name}`}
             <ResourceDrawer
+              modal={detailSheet}
               clusterId={cluster.id}
               {kind}
               ns={sel.ns}
@@ -672,6 +689,13 @@
     }
   }
   .splitter {
+    appearance: none;
+    border: 0;
+    border-radius: 0;
+    padding: 0;
+    margin: 0;
+    height: 100%;
+    min-width: 0;
     width: 6px;
     flex-shrink: 0;
     cursor: col-resize;
@@ -684,7 +708,8 @@
   .resizing .splitter {
     background: color-mix(in srgb, var(--accent) 45%, var(--border));
   }
-  .grip {
+  .splitter::-webkit-slider-thumb {
+    appearance: none;
     width: 2px;
     height: 28px;
     border-radius: 2px;
@@ -701,7 +726,7 @@
   .drawer-host.sheet {
     position: fixed;
     inset: 0;
-    z-index: 40;
+    z-index: var(--z-modal);
     width: auto;
     border-left: none;
   }

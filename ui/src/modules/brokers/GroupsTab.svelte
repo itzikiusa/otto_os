@@ -27,6 +27,8 @@
   let selected = $state<string | null>(null);
   let detail = $state<GroupDetail | null>(null);
   let detailLoading = $state(false);
+  let detailRequest = 0;
+  let listRequest = 0;
   // Sort offsets table by lag descending; toggle to sort by topic+partition.
   let sortByLag = $state(true);
   // Offset reset state.
@@ -61,9 +63,9 @@
     e.preventDefault();
     const startX = e.clientX;
     const startW = listW;
+    const direction = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl' ? -1 : 1;
     const onMove = (ev: PointerEvent): void => {
-      // The list is pinned to the LEFT edge, so dragging RIGHT widens it.
-      listW = Math.max(220, Math.min(520, startW + (ev.clientX - startX)));
+      listW = Math.max(220, Math.min(520, startW + direction * (ev.clientX - startX)));
     };
     const onUp = (): void => {
       persistListW();
@@ -73,6 +75,16 @@
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
   }
+  function resizeListKey(e: KeyboardEvent): void {
+    const forward = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl' ? 'ArrowLeft' : 'ArrowRight';
+    if (e.key === 'Home') listW = 220;
+    else if (e.key === 'End') listW = 520;
+    else if (e.key === 'Enter') listW = LIST_W_DEFAULT;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') listW = Math.max(220, Math.min(520, listW + (e.key === forward ? 1 : -1) * (e.shiftKey ? 40 : 10)));
+    else return;
+    e.preventDefault();
+    persistListW();
+  }
   function resetListW(): void {
     listW = LIST_W_DEFAULT;
     persistListW();
@@ -80,8 +92,11 @@
 
   $effect(() => {
     void cluster.id;
+    detailRequest++;
     selected = null;
     detail = null;
+    detailLoading = false;
+    dryRunResult = null;
     detailError = null;
     // Another cluster's groups are not "stale data" for this one.
     groups = [];
@@ -90,11 +105,15 @@
   });
 
   function loadGroups(): void {
+    const request = ++listRequest;
+    const clusterId = cluster.id;
+    const current = () => request === listRequest && cluster.id === clusterId;
     loading = true;
     accessDenied = false;
     api
       .get<GroupSummary[]>(`/brokers/clusters/${cluster.id}/groups`)
       .then((g) => {
+        if (!current()) return;
         groups = g;
         accessDenied = false;
         loadError = null;
@@ -102,6 +121,7 @@
         if (!selected && g.length > 0) open(g[0].group_id);
       })
       .catch((e) => {
+        if (!current()) return;
         if (e instanceof ApiError && e.status === 403 && /consumer-group access/i.test(e.message)) {
           // Broker ACLs deny group access — show the banner, don't toast/retry.
           accessDenied = true;
@@ -111,10 +131,15 @@
           loadError = loadErrorText(e);
         }
       })
-      .finally(() => (loading = false));
+      .finally(() => { if (current()) loading = false; });
   }
 
   function open(id: string) {
+    const request = ++detailRequest;
+    const clusterId = cluster.id;
+    const current = () => request === detailRequest && cluster.id === clusterId && selected === id;
+    dryRunResult = null;
+    dryRunLoading = false;
     selected = id;
     detail = null;
     detailError = null;
@@ -122,9 +147,9 @@
     resetTopic = '';
     api
       .get<GroupDetail>(`/brokers/clusters/${cluster.id}/groups/${encodeURIComponent(id)}`)
-      .then((d) => (detail = d))
-      .catch((e) => (detailError = loadErrorText(e)))
-      .finally(() => (detailLoading = false));
+      .then((d) => { if (current()) detail = d; })
+      .catch((e) => { if (current()) detailError = loadErrorText(e); })
+      .finally(() => { if (current()) detailLoading = false; });
   }
 
   function stateClass(s: string): string {
@@ -163,6 +188,13 @@
     [...new Set(detail?.offsets.map((o) => o.topic) ?? [])].sort(),
   );
 
+  const resetError = $derived(
+    resetMode === 'timestamp' && (!resetTs || !Number.isFinite(new Date(resetTs).getTime()))
+      ? 'Choose a valid target time'
+      : resetMode === 'offset' && (!Number.isSafeInteger(resetOffset) || resetOffset < 0)
+        ? 'Offset must be a non-negative whole number' : null,
+  );
+
   function buildResetBody(confirm: boolean): Record<string, unknown> {
     let body: Record<string, unknown>;
     if (resetMode === 'offset') {
@@ -170,7 +202,7 @@
     } else if (resetMode === 'timestamp') {
       body = {
         mode: 'timestamp',
-        timestamp_ms: new Date(resetTs).getTime() || Date.now(),
+        timestamp_ms: new Date(resetTs).getTime(),
         confirm,
       };
     } else {
@@ -181,36 +213,47 @@
   }
 
   async function previewReset() {
-    if (!selected) return;
+    if (!selected || resetError) return;
+    const groupId = selected;
+    const clusterId = cluster.id;
+    const request = detailRequest;
+    const body = buildResetBody(false);
+    const current = () => request === detailRequest && groupId === selected && clusterId === cluster.id && JSON.stringify(body) === JSON.stringify(buildResetBody(false));
     dryRunLoading = true;
     dryRunResult = null;
     try {
-      dryRunResult = await api.post<DryRunResp>(
-        `/brokers/clusters/${cluster.id}/groups/${encodeURIComponent(selected)}/reset?dry_run=true`,
-        buildResetBody(false),
+      const preview = await api.post<DryRunResp>(
+        `/brokers/clusters/${clusterId}/groups/${encodeURIComponent(groupId)}/reset?dry_run=true`,
+        body,
       );
+      if (current()) dryRunResult = preview;
     } catch (e) {
-      toasts.error("Couldn't preview the reset", e instanceof Error ? e.message : String(e));
+      if (current()) toasts.error("Couldn't preview the reset", e instanceof Error ? e.message : String(e));
     } finally {
-      dryRunLoading = false;
+      if (request === detailRequest) dryRunLoading = false;
     }
   }
 
   async function applyReset() {
-    if (!selected) return;
+    if (!selected || resetError) return;
     // Clear preview and proceed to confirmation.
     dryRunResult = null;
     await resetOffsets();
   }
 
   async function resetOffsets() {
-    if (!selected) return;
+    if (!selected || resetError) return;
+    const groupId = selected;
+    const clusterId = cluster.id;
+    const request = detailRequest;
+    const body = buildResetBody(guarded);
+    const current = () => cluster.id === clusterId && selected === groupId && detailRequest === request;
     const typed = await confirmer.promptText(
       `Type the group name to confirm offset reset.`,
-      { title: `Reset offsets for "${selected}"`, confirmLabel: 'Reset', placeholder: selected, danger: true },
+      { title: `Reset offsets for "${groupId}"`, confirmLabel: 'Reset', placeholder: groupId, danger: true },
     );
-    if (typed === null) return;
-    if (typed !== selected) {
+    if (typed === null || !current()) return;
+    if (typed !== groupId) {
       // A mistyped name must not look like a silent no-op.
       toasts.warn('Offsets not reset', `The name you typed didn't match "${selected}".`);
       return;
@@ -219,11 +262,11 @@
     resetting = true;
     try {
       const updated = await api.post<GroupDetail>(
-        `/brokers/clusters/${cluster.id}/groups/${encodeURIComponent(selected)}/reset`,
-        buildResetBody(guarded),
+        `/brokers/clusters/${clusterId}/groups/${encodeURIComponent(groupId)}/reset`,
+        body,
       );
-      detail = updated;
-      toasts.success(`Offsets reset for "${selected}"`);
+      if (current()) detail = updated;
+      toasts.success(`Offsets reset for "${groupId}"`);
     } catch (e) {
       toasts.error("Couldn't reset offsets", e instanceof Error ? e.message : String(e));
     } finally {
@@ -232,6 +275,7 @@
   }
 </script>
 
+<div class="groups-container">
 <div class="groups">
   <div class="list" style="--groups-list-w:{listW}px">
     {#if loadError}
@@ -266,11 +310,18 @@
     {/if}
   </div>
 
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- A focusable ARIA separator is the APG window-splitter control. Svelte
+       classifies separator as static even with its required value/keyboard API. -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
   <div
     class="side-resizer"
     role="separator"
     aria-orientation="vertical"
+    tabindex="0"
+    aria-valuemin="220"
+    aria-valuemax="520"
+    aria-valuenow={Math.round(listW)}
+    onkeydown={resizeListKey}
     aria-label="Drag to resize the group list (double-click to reset)"
     title="Drag to resize · double-click to reset"
     ondblclick={resetListW}
@@ -398,7 +449,7 @@
         <button
           class="btn small"
           onclick={previewReset}
-          disabled={dryRunLoading || resetting}
+          disabled={dryRunLoading || resetting || !!resetError}
           title="Preview what this reset would do without committing"
         >
           {dryRunLoading ? 'Previewing…' : 'Preview'}
@@ -406,12 +457,14 @@
         <button
           class="btn small danger"
           onclick={applyReset}
-          disabled={resetting || dryRunLoading}
+          disabled={resetting || dryRunLoading || !!resetError}
           title={guarded ? 'Cluster is guarded — requires confirmation' : 'Reset committed offsets'}
         >
           {resetting ? 'Resetting…' : 'Reset'}
         </button>
       </div>
+
+      {#if resetError}<p class="muted small" role="status">{resetError}</p>{/if}
 
       <!-- Dry-run preview table -->
       {#if dryRunResult}
@@ -456,8 +509,14 @@
     {/if}
   </div>
 </div>
+</div>
 
 <style>
+  .groups-container {
+    container-type: inline-size;
+    height: 100%;
+    min-width: 0;
+  }
   .groups {
     display: flex;
     height: 100%;
@@ -465,8 +524,9 @@
   }
   .list {
     /* Default width; drag-resizable via the .side-resizer (persisted). The
-       phone media query below overrides back to a full-width band. */
+       narrow-container query below overrides back to a full-width band. */
     width: var(--groups-list-w, 300px);
+    max-width: 45%;
     border-inline-end: 1px solid var(--border);
     overflow: auto;
     flex: none;
@@ -725,15 +785,14 @@
     margin: 0;
   }
 
-  /* Phone (≤640px): the 300px fixed group list + detail can't sit side-by-side
-     on a ~375–430px viewport. Stack them, cap the list height so the detail
-     stays reachable, and let the reset bar wrap. */
-  @media (max-width: 640px) {
+  /* Follow the actual content width, including resizable app/cluster panes. */
+  @container (max-width: 760px) {
     .groups {
       flex-direction: column;
     }
     .list {
       width: 100%;
+      max-width: none;
       max-height: 35vh;
       border-inline-end: none;
       border-bottom: 1px solid var(--border);

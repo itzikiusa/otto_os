@@ -14,7 +14,6 @@
   import { onMount, onDestroy, tick } from 'svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { canvasDocBus } from '../../lib/events.svelte';
-  import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import { renderMermaid } from './mermaid';
   import { svgToPngDownload } from './export';
@@ -32,6 +31,7 @@
   // The scene THIS editor is mounted for — saves target THIS id, never
   // canvas.currentId (which on a scene switch already points at the next scene).
   const sceneId = canvas.currentId;
+  const saveContext = canvas.saveContext;
 
   let surface = $state<HTMLDivElement | null>(null);
   let content = $state<HTMLDivElement | null>(null);
@@ -57,14 +57,12 @@
   // The agent + the user share ONE file. Save the edited Mermaid SOURCE to THIS
   // scene (guarded: if the scene switched, drop the stale save).
   async function saveMermaid(value: string): Promise<void> {
-    if (canvas.currentId !== sceneId || !sceneId) return;
-    const doc = { type: 'otto-canvas', version: 1, format: 'mermaid' as CanvasFormat, source: value };
+    if (canvas.saveContext !== saveContext || canvas.currentId !== sceneId || !sceneId) return;
+    const doc: CanvasDoc = { type: 'otto-canvas', version: 1, format: 'mermaid' as CanvasFormat, source: value };
     canvas.source = value; // drives the live preview re-render
     canvas.rawDoc = doc;
     try {
-      await api.put(`/canvas/scenes/${sceneId}`, { doc });
-      // Re-check after the await: don't mark a now-switched scene as saved/clean.
-      if (canvas.currentId === sceneId) canvas.markSaved(doc);
+      await canvas.persistDoc(sceneId, doc, saveContext);
     } catch (e) {
       if (canvas.currentId === sceneId)
         toasts.error('Save failed', e instanceof Error ? e.message : String(e));
@@ -74,10 +72,11 @@
   /** The code-pane text a pending debounce has not saved yet. */
   let pendingCode: string | null = null;
   function onCode(value: string): void {
+    if (canvas.saveContext !== saveContext) return;
     if (codeTimer) clearTimeout(codeTimer);
     pendingCode = value;
     // Unsaved typing wins over live agent pushes (ingestDoc skips while dirty).
-    if (canvas.currentId === sceneId) canvas.dirty = true;
+    if (sceneId) canvas.stageDoc(sceneId, { type: 'otto-canvas', version: 1, format: 'mermaid', source: value }, saveContext);
     codeTimer = setTimeout(() => {
       codeTimer = null;
       pendingCode = null;
@@ -91,9 +90,9 @@
     if (codeTimer) clearTimeout(codeTimer);
     codeTimer = null;
     if (pendingCode === null || !sceneId) return;
-    const doc = { type: 'otto-canvas', version: 1, format: 'mermaid' as CanvasFormat, source: pendingCode };
+    const doc: CanvasDoc = { type: 'otto-canvas', version: 1, format: 'mermaid' as CanvasFormat, source: pendingCode };
     pendingCode = null;
-    void api.put(`/canvas/scenes/${sceneId}`, { doc }).catch((e: unknown) =>
+    void canvas.persistDoc(sceneId, doc, saveContext).catch((e: unknown) =>
       toasts.error('Save failed', e instanceof Error ? e.message : String(e)),
     );
   }
@@ -264,6 +263,7 @@
     // The result belongs to THIS scene even if the user switches away while
     // the agent works (the server commits it there).
     const sceneId = canvas.currentId;
+  const saveContext = canvas.saveContext;
     canvas.pushConvo('user', p, sceneId);
     try {
       const res = await canvas.assist(p, 'flow');
@@ -309,6 +309,9 @@
 
   onMount(() => {
     liveId = canvas.currentId;
+    const observer = new ResizeObserver(() => { if (!userAdjusted && svgHtml) fit(); });
+    if (surface) observer.observe(surface);
+    return () => observer.disconnect();
   });
   onDestroy(() => {
     flushPendingCode();
@@ -383,7 +386,7 @@
       </div>
 
       <div class="mode-bar">
-        <span class="mode-chip"><Icon name="branch" size={12} /> Mermaid</span>
+        <span class="mode-chip"><Icon name="branch" size={12} /> Mermaid{#if readonly} · Preview{/if}</span>
         {#if !readonly}
           <button
             class="code-toggle"
@@ -422,6 +425,7 @@
 
 <style>
   .board {
+    container-type: inline-size;
     position: relative;
     width: 100%;
     height: 100%;
@@ -443,6 +447,14 @@
     min-height: 0;
     border-inline-end: 1px solid var(--border);
     background: var(--surface);
+  }
+  @container (max-width: 700px) {
+    .lanes { flex-direction: column; }
+    .code-pane {
+      flex-basis: 40%;
+      border-inline-end: 0;
+      border-block-end: 1px solid var(--border);
+    }
   }
   .code-head {
     display: flex;

@@ -625,7 +625,7 @@
 </script>
 
 <div class="code-editor-outer" data-lang={language ?? ''}>
-  <div class="code-editor-wrap" bind:this={container}></div>
+  <div class="code-editor-wrap" dir="ltr" bind:this={container}></div>
   {#if sel}
     <button class="send-to-agent-btn" onclick={sendToAgent} type="button">
       Send to agent ↗

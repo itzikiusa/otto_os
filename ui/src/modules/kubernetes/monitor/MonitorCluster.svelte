@@ -1,13 +1,15 @@
 <script lang="ts">
+  import { radioKey } from '../../../lib/radioKey';
   // Per-cluster Monitor view. Tabs live in the URL
   // (`#/kubernetes/monitor/<id>/<workloads|events|insights|settings>`):
   // Workloads = sortable table with sparklines + an expandable Trends row;
   // Events = classified restart / churn timeline; Insights = the watchdog
   // agent's latest report; Settings = the probe configuration. Re-fetches on
   // WS `k8s_monitor_cycle` for this cluster.
-  import { untrack } from 'svelte';
+  import { untrack, onDestroy } from 'svelte';
   import { router } from '../../../lib/router.svelte';
   import { k8s } from '../../../lib/stores/k8s.svelte';
+  import { viewport } from '../../../lib/stores/viewport.svelte';
   import { auth } from '../../../lib/stores/auth.svelte';
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
   import { k8sApi } from '../../../lib/api/k8s';
@@ -62,6 +64,9 @@
   let expanded = $state<string | null>(null);
   let series = $state<{ mem: K8sMonitorSeries | null; rps: K8sMonitorSeries | null; err: K8sMonitorSeries | null }>({ mem: null, rps: null, err: null });
   let seriesLoading = $state(false);
+  let seriesError = $state('');
+  let seriesRequest = 0;
+  let eventsRequest = 0;
   let abort: AbortController | null = null;
 
   function goTab(id: string): void {
@@ -112,6 +117,14 @@
     }
     if (t === 'workloads') untrack(() => void loadWorkloads());
     if (t === 'events') untrack(() => void loadEvents());
+    untrack(() => {
+      // A different cluster, namespace, window or section owns fresh detail.
+      seriesRequest++;
+      expanded = null;
+      seriesLoading = false;
+      seriesError = '';
+      if (t !== 'events') eventsRequest++;
+    });
   });
 
   $effect(() => {
@@ -156,10 +169,17 @@
     const key = `${r.namespace}/${r.workload}`;
     if (expanded === key) {
       expanded = null;
+      seriesRequest++;
       return;
     }
     expanded = key;
+    await loadTrends(r);
+  }
+
+  async function loadTrends(r: K8sMonitorWorkloadRow): Promise<void> {
+    const request = ++seriesRequest;
     seriesLoading = true;
+    seriesError = '';
     series = { mem: null, rps: null, err: null };
     try {
       const memMetric = status?.metrics_server === 'ok' ? 'mem_working_set_bytes' : 'mem_sys_bytes';
@@ -167,11 +187,11 @@
         k8sApi.monitorSeries(cluster.id, { metric: memMetric, workload: r.workload, window }),
         k8sApi.monitorSeries(cluster.id, { metric: 'http_requests_total', workload: r.workload, window }),
       ]);
-      series = { mem, rps, err: null };
-    } catch {
-      /* charts are best-effort */
+      if (request === seriesRequest) series = { mem, rps, err: null };
+    } catch (e) {
+      if (request === seriesRequest) seriesError = e instanceof Error ? e.message : String(e);
     } finally {
-      seriesLoading = false;
+      if (request === seriesRequest) seriesLoading = false;
     }
   }
 
@@ -183,20 +203,30 @@
   const CLASS_OPTIONS = ['', 'oom', 'crash', 'probe', 'unknown', 'planned', 'completed', 'version', 'k8s_event'];
 
   async function loadEvents(quiet = false): Promise<void> {
+    const request = ++eventsRequest;
     if (!quiet) eventsLoading = true;
     try {
-      events = await k8sApi.monitorEvents(cluster.id, { window, class: classFilter || undefined, limit: 300 });
+      const next = await k8sApi.monitorEvents(cluster.id, { window, class: classFilter || undefined, limit: 300 });
+      if (request !== eventsRequest) return;
+      events = next;
       eventsError = '';
     } catch (e) {
+      if (request !== eventsRequest) return;
       eventsError = e instanceof Error ? e.message : String(e);
     } finally {
-      eventsLoading = false;
+      if (request === eventsRequest) eventsLoading = false;
     }
   }
   $effect(() => {
     const c = classFilter;
     void c;
     if (activeTab === 'events') untrack(() => void loadEvents());
+  });
+
+  onDestroy(() => {
+    abort?.abort();
+    eventsRequest++;
+    seriesRequest++;
   });
 
   function fmtTs(ts: string): string {
@@ -241,12 +271,8 @@
     </button>
   {/snippet}
   {#snippet actions()}
-    {#if activeTab === 'workloads' || activeTab === 'events'}
-      <div class="seg" role="radiogroup" aria-label="Window" data-keep>
-        {#each WINDOWS as w (w)}
-          <button class="seg-btn" class:on={window === w} role="radio" aria-checked={window === w} onclick={() => (window = w)}>{w}</button>
-        {/each}
-      </div>
+    {#if !viewport.isPhone && (activeTab === 'workloads' || activeTab === 'events')}
+      {@render windowPicker()}
     {/if}
     <button class="btn small ghost" onclick={() => router.go(`kubernetes/${encodeURIComponent(cluster.id)}`)} title="Open the console for this cluster"><Icon name="helm" size={12} /> Console</button>
   {/snippet}
@@ -260,6 +286,7 @@
 </PageHeader>
 <PageBody>
 <div class="mon">
+  {#if viewport.isPhone && (activeTab === 'workloads' || activeTab === 'events')}<div class="window-bar">{@render windowPicker()}</div>{/if}
 
   {#if activeTab === 'settings'}
     <MonitorSettings {cluster} {canEdit} onsaved={(c, s) => { enabled = c.enabled; status = s; }} />
@@ -325,20 +352,20 @@
         <table class="wl" data-testid="k8s-monitor-workloads">
           <thead>
             <tr>
-              <th class="sortable" onclick={() => sortBy('workload')}>Workload</th>
-              <th class="num sortable" onclick={() => sortBy('pods')}>Pods</th>
+              <th aria-sort={sortKey === 'workload' ? (sortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="th-btn" onclick={() => sortBy('workload')}>Workload</button></th>
+              <th class="num" aria-sort={sortKey === 'pods' ? (sortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="th-btn" onclick={() => sortBy('pods')}>Pods</button></th>
               <th class="num" title="Per pod: average · hungriest pod; % = worst pod vs its own limit. Click a row for every pod.">
                 <button class="th-btn" class:on={sortKey === 'mem_max'} onclick={() => sortBy('mem_max')}>Memory / pod</button>
                 <span class="dim"> · </span>
                 <button class="th-btn" class:on={sortKey === 'mem_pct'} onclick={() => sortBy('mem_pct')} title="Sort by % of limit (worst pod)">%</button>
               </th>
               <th class="spark">Trend</th>
-              <th class="num sortable" onclick={() => sortBy('restarts_total')}>Restarts</th>
-              <th class="num sortable" onclick={() => sortBy('churn_planned')}>Churn</th>
-              <th class="num sortable" onclick={() => sortBy('rps')}>Req/s</th>
+              <th class="num" aria-sort={sortKey === 'restarts_total' ? (sortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="th-btn" onclick={() => sortBy('restarts_total')}>Restarts</button></th>
+              <th class="num" aria-sort={sortKey === 'churn_planned' ? (sortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="th-btn" onclick={() => sortBy('churn_planned')}>Churn</button></th>
+              <th class="num" aria-sort={sortKey === 'rps' ? (sortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="th-btn" onclick={() => sortBy('rps')}>Req/s</button></th>
               <th class="spark">Trend</th>
-              <th class="num sortable" onclick={() => sortBy('err_pct')}>5xx</th>
-              <th class="num sortable" onclick={() => sortBy('latency_ms')}>Latency</th>
+              <th class="num" aria-sort={sortKey === 'err_pct' ? (sortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="th-btn" onclick={() => sortBy('err_pct')}>5xx</button></th>
+              <th class="num" aria-sort={sortKey === 'latency_ms' ? (sortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="th-btn" onclick={() => sortBy('latency_ms')}>Latency</button></th>
               <th>Versions</th>
             </tr>
           </thead>
@@ -348,7 +375,7 @@
               {@const total = restartsTotal(r)}
               <tr class="wl-row" class:open={expanded === key} onclick={() => void toggle(r)}>
                 <td>
-                  <div class="wlname"><b>{r.workload}</b><span class="dim small"> {r.kind}{namespaces.length > 1 ? ` · ${r.namespace}` : ''}</span></div>
+                  <div class="wlname"><button class="workload-toggle" aria-expanded={expanded === key} onclick={(e) => { e.stopPropagation(); void toggle(r); }}>{r.workload}</button><span class="dim small"> {r.kind}{namespaces.length > 1 ? ` · ${r.namespace}` : ''}</span></div>
                   {#if r.crashloop}<span class="chip bad">CrashLoopBackOff ×{r.crashloop}</span>{/if}
                 </td>
                 <td class="num mono">{r.ready}<span class="dim">/{r.pods}</span></td>
@@ -406,6 +433,8 @@
                     </table>
                     {#if seriesLoading}
                       <Skeleton rows={2} height={60} />
+                    {:else if seriesError}
+                      <div class="trend-error" role="alert"><strong>Couldn't load trends</strong><p>{seriesError}</p><button class="btn small" onclick={() => void loadTrends(r)}>Retry trends</button></div>
                     {:else}
                       <div class="charts">
                         <div class="chart">
@@ -433,6 +462,14 @@
 </PageBody>
 </div>
 
+{#snippet windowPicker()}
+      <div class="seg" role="radiogroup" aria-label="Window">
+        {#each WINDOWS as w (w)}
+          <button class="seg-btn" class:on={window === w} role="radio" onkeydown={radioKey} aria-checked={window === w} tabindex={window === w ? 0 : -1} onclick={() => (window = w)}>{w}</button>
+        {/each}
+      </div>
+{/snippet}
+
 <style>
   .mon-page {
     display: flex;
@@ -441,10 +478,12 @@
     min-height: 0;
   }
   .mon {
+    container-type: inline-size;
     display: flex;
     flex-direction: column;
     gap: 12px;
   }
+  .window-bar { display: flex; justify-content: flex-end; }
   .cluster-pick {
     display: inline-flex;
     align-items: center;
@@ -524,7 +563,7 @@
     font-size: var(--fs-s);
   }
   .wl th {
-    text-align: left;
+    text-align: start;
     font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -532,12 +571,6 @@
     padding: 8px 10px;
     border-bottom: 1px solid var(--border);
     white-space: nowrap;
-  }
-  .wl th.sortable {
-    cursor: pointer;
-  }
-  .wl th.sortable:hover {
-    color: var(--text);
   }
   .th-btn {
     background: none;
@@ -568,7 +601,7 @@
     background: var(--surface-2);
   }
   .num {
-    text-align: right;
+    text-align: end;
     white-space: nowrap;
   }
   .spark {
@@ -587,7 +620,21 @@
   .rc {
     font-weight: 600;
   }
+  .workload-toggle {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .trend-error { padding: 8px; }
+  .trend-error p { margin: 4px 0 8px; color: var(--text-dim); }
   .wlname {
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
     white-space: nowrap;
   }
   .detail td {
@@ -600,7 +647,7 @@
     margin-bottom: 12px;
   }
   .pods th {
-    text-align: left;
+    text-align: start;
     font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -669,9 +716,8 @@
   }
   .twl,
   .tmsg {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
   .dim {
     color: var(--text-dim);
@@ -682,11 +728,13 @@
   .mono {
     font-family: var(--font-mono);
   }
-  @media (max-width: 760px) {
+  @container (max-width: 640px) {
     .timeline li {
-      grid-template-columns: 10px 1fr;
+      grid-template-columns: 10px minmax(0, 1fr);
     }
     .tts,
+    .tclass,
+    .twl,
     .tmsg {
       grid-column: 2;
     }

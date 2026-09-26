@@ -53,7 +53,7 @@
   {#if loading && !metrics}
     <Skeleton rows={3} height={40} />
   {:else if error}
-    <div class="err">{error}</div>
+    <div class="err" role="alert">Couldn’t load metrics: {error} <button class="btn small" onclick={() => void load()}>Retry</button></div>
   {:else if !available}
     <div class="dim">metrics-server isn't installed in this cluster, so <span class="mono">kubectl top</span> has nothing to report.</div>
   {:else if !metrics}

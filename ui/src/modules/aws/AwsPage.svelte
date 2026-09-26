@@ -162,8 +162,8 @@
       </label>
     {/if}
     {#if aws.installed && canAdmin && aws.accounts.length > 0}
-      <button class="btn primary" onclick={openCreate} data-testid="aws-add-account">
-        <Icon name="plus" size={13} /> Add account
+      <button class="btn primary" onclick={openCreate} data-testid="aws-add-account" aria-label="Add account" title="Add account">
+        <Icon name="plus" size={13} />{#if !viewport.isPhone} Add account{/if}
       </button>
     {/if}
   {/snippet}

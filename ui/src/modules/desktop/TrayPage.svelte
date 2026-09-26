@@ -78,12 +78,9 @@
   }
 
   async function sessionsOf(wsId: string): Promise<Session[]> {
-    try {
-      // Honour "Isolate sessions to this device", like the sidebar does.
-      return (await api.get<Session[]>(`/workspaces/${wsId}/sessions`)).filter(visibleOnThisDevice);
-    } catch {
-      return [];
-    }
+    // Honour device isolation, but propagate failures: an unavailable list
+    // must never be presented as proof that no agents need attention.
+    return (await api.get<Session[]>(`/workspaces/${wsId}/sessions`)).filter(visibleOnThisDevice);
   }
 
   async function refresh(): Promise<void> {
@@ -95,8 +92,8 @@
       names.set(SCRATCH_WORKSPACE_ID, 'No workspace');
       const [lists, approvals, notices] = await Promise.all([
         Promise.all([...names.keys()].map((id) => sessionsOf(id))),
-        api.get<McpApproval[]>('/mcp/approvals?status=pending').catch(() => [] as McpApproval[]),
-        api.get<Notice[]>('/notifications').catch(() => [] as Notice[]),
+        api.get<McpApproval[]>('/mcp/approvals?status=pending'),
+        api.get<Notice[]>('/notifications'),
       ]);
 
       running = lists
@@ -206,6 +203,13 @@
   </button>
 
   <div class="body">
+    {#if loadError}
+      <div class="state" role="alert">
+        <p>Couldn't refresh your work: {loadError}</p>
+        {#if loaded}<p>Showing the last loaded activity.</p>{/if}
+        <button class="btn small" onclick={() => void refresh()}>Retry</button>
+      </div>
+    {/if}
     {#if auth.phase === 'loading' || (auth.phase === 'ready' && !loaded && !loadError)}
       <p class="state">Loading…</p>
     {:else if auth.phase === 'offline'}
@@ -218,12 +222,7 @@
         <p>Sign in to Otto to see your work here.</p>
         <button class="btn small primary" onclick={() => open()}>Open Otto</button>
       </div>
-    {:else if loadError && !loaded}
-      <div class="state">
-        <p>Couldn't load your work: {loadError}</p>
-        <button class="btn small" onclick={() => void refresh()}>Retry</button>
-      </div>
-    {:else}
+    {:else if loaded}
       <section aria-labelledby="tray-needs">
         <h2 id="tray-needs">Needs you{needs.length ? ` · ${needs.length}` : ''}</h2>
         {#each needs as row (row.id)}

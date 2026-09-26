@@ -57,6 +57,20 @@
   let selected = $state<KafkaMessage | null>(null);
   let rawView = $state(false);
 
+  // Keep the full row as a pointer target without changing table semantics.
+  // The offset button supplies the same action for keyboard/assistive input.
+  function inspectRow(event: PointerEvent) {
+    if (event.button !== 0 || !(event.target instanceof Element) || event.target.closest('button')) return;
+    // Finishing a text drag should leave the selection available to copy.
+    if (window.getSelection()?.isCollapsed === false) return;
+    const row = event.target.closest<HTMLTableRowElement>('tr[data-message-key]');
+    const message = result?.messages.find((m) => `${m.partition}-${m.offset}` === row?.dataset.messageKey);
+    if (message) {
+      selected = message;
+      rawView = false;
+    }
+  }
+
   // ---- incremental live-tail state ----
   // Tracks the max offset seen per partition so each poll only fetches new messages.
   let tailOffsets = $state<Map<number, number>>(new Map());
@@ -79,6 +93,7 @@
   let producing = $state(false);
   /** Inline field error for the produce form (shown under Value, not a toast). */
   let pValueErr = $state<string | null>(null);
+  let produceError = $state<string | null>(null);
 
   // Agent UI control (lib/uiCommands/brokers.ts): the agent's peek runs in
   // THIS form (the user sees the options and the grid), and a produce is
@@ -162,12 +177,19 @@
     return new Date(ms).toLocaleString();
   }
 
+  const consumeError = $derived(
+    !Number.isSafeInteger(limit) || limit < 1 || limit > 5000 ? 'Choose a whole message limit from 1 to 5000.'
+      : startMode === 'offset' && (!Number.isSafeInteger(startOffset) || startOffset < 0) ? 'Enter a nonnegative whole offset.'
+      : startMode === 'timestamp' && (!startTs || !Number.isFinite(new Date(startTs).getTime())) ? 'Choose a valid start time.'
+      : '',
+  );
+
   /** Build a start position appropriate for a fresh (non-tail) peek. */
   function buildStart(): StartPosition {
     if (startMode === 'beginning') return { type: 'beginning' };
     if (startMode === 'offset') return { type: 'offset', offset: Number(startOffset) };
     if (startMode === 'timestamp')
-      return { type: 'timestamp', timestamp_ms: new Date(startTs).getTime() || Date.now() };
+      return { type: 'timestamp', timestamp_ms: new Date(startTs).getTime() };
     return { type: 'latest' };
   }
 
@@ -211,6 +233,7 @@
     try {
       const parts = partition !== '' ? [Number(partition)] : [...tailOffsets.keys()];
       const newMsgs: KafkaMessage[] = [];
+      let allMasked = result?.masked === true;
       let mergedPartitions: PartitionRange[] = result?.partitions ?? [];
 
       for (const p of parts) {
@@ -221,6 +244,7 @@
           start: { type: 'offset', offset: cursor + 1 },
           limit: 50,
           decode,
+          ...(maskPayloads ? { mask: true } : {}),
           // No filters on tail increments — they were applied on the seed.
         };
         try {
@@ -229,6 +253,8 @@
             req,
           );
           newMsgs.push(...r.messages);
+          // A mixed buffer must never claim every payload was masked.
+          if (r.messages.length > 0) allMasked = allMasked && r.masked === true;
           // Merge watermark ranges: keep the freshest high for each partition.
           mergedPartitions = mergePartitionRanges(mergedPartitions, r.partitions);
         } catch {
@@ -243,6 +269,7 @@
           messages: combined,
           partitions: mergedPartitions,
           truncated: result?.truncated ?? false,
+          masked: allMasked,
         };
         toasts.info(`+${newMsgs.length} new message${newMsgs.length === 1 ? '' : 's'}`);
       }
@@ -271,6 +298,7 @@
   }
 
   async function consume() {
+    if (consuming || consumeError) return;
     const req: ConsumeReq = {
       partition: partition === '' ? null : Number(partition),
       start: buildStart(),
@@ -322,6 +350,8 @@
   }
 
   async function produce() {
+    if (producing) return;
+    produceError = null;
     if (!pTombstone && !pValue) {
       pValueErr = 'Enter a value, or tick Tombstone to send a null value.';
       return;
@@ -357,7 +387,7 @@
       pHeaders = [];
       loadDetail(true);
     } catch (e) {
-      toasts.error("Couldn't produce the message", e instanceof Error ? e.message : String(e));
+      produceError = e instanceof Error ? e.message : String(e);
     } finally {
       producing = false;
     }
@@ -518,7 +548,7 @@
       </div>
       <input class="grow" bind:value={valueFilter} placeholder="filter value…" aria-label="Filter by value" />
       <label class="auto" class:on={autoPoll} title="Append new messages every minute (incremental, capped at {TAIL_CAP})">
-        <input type="checkbox" bind:checked={autoPoll} /> Live · 1m
+        <input type="checkbox" bind:checked={autoPoll} disabled={!!consumeError && !autoPoll} /> Live · 1m
       </label>
       <label
         class="auto"
@@ -528,7 +558,7 @@
         <input type="checkbox" bind:checked={maskPayloads} />
         <Icon name="lock" size={12} /> Mask
       </label>
-      <button class="btn primary small" onclick={consume} disabled={consuming}>
+      <button class="btn primary small" onclick={consume} disabled={consuming || !!consumeError}>
         {consuming ? 'Reading…' : 'Peek'}
       </button>
       {#if result && result.messages.length > 0}
@@ -541,24 +571,20 @@
       {/if}
     </div>
 
+    {#if consumeError}<p class="field-err" role="status">{consumeError}</p>{/if}
+
     <div class="msg-layout">
       <div class="msg-list">
         <table>
           <thead>
             <tr><th>P</th><th>Offset</th><th>Pos</th><th>Key</th><th>Time</th><th>Size</th></tr>
           </thead>
-          <tbody>
+          <tbody onpointerup={inspectRow}>
             {#each result?.messages ?? [] as m (m.partition + '-' + m.offset)}
               {@const pct = result ? offsetPct(m, result.partitions) : null}
-              <tr
-                class:sel={selected === m}
-                onclick={() => {
-                  selected = m;
-                  rawView = false;
-                }}
-              >
+              <tr class:sel={selected === m} data-message-key={`${m.partition}-${m.offset}`}>
                 <td>{m.partition}</td>
-                <td class="mono">{m.offset}</td>
+                <td class="mono"><button class="message-open" aria-label={`Inspect partition ${m.partition} offset ${m.offset}`} title={`Inspect partition ${m.partition} offset ${m.offset}`} aria-pressed={selected === m} onclick={() => { selected = m; rawView = false; }}>{m.offset}</button></td>
                 <td class="pos-cell">
                   {#if pct !== null}
                     <div class="pos-bar-wrap" title="offset {m.offset} — {pct.toFixed(1)}% through partition">
@@ -748,6 +774,7 @@
           </div>
         {/each}
       </div>
+      {#if produceError}<p class="field-err" role="alert">{produceError}</p>{/if}
       <button class="btn primary" onclick={produce} disabled={producing}>
         {producing ? 'Producing…' : pTombstone ? 'Produce tombstone' : 'Produce message'}
       </button>
@@ -938,9 +965,18 @@
     padding: 5px 10px;
     border-top: 1px solid var(--border);
   }
-  .msg-list tbody tr {
+  .message-open {
+    border: none;
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--accent-text);
+    font: inherit;
+    padding: 2px 4px;
     cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
+  .msg-list tbody tr { cursor: pointer; }
   .msg-list tbody tr:hover {
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
@@ -1184,6 +1220,7 @@
      neither collapses to a sliver on short screens. The consume-bar already
      wraps; widen its controls so they don't jut off the edge. */
   @media (max-width: 640px) {
+    .message-open { min-width: 36px; min-height: 36px; }
     /* Let the detail grow past the viewport so the produce form / message rows
        scroll into view (the brokers tab-body scrolls on phones) instead of being
        compressed behind the sticky header + bottom nav. */

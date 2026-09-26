@@ -5,6 +5,7 @@
   import { untrack } from 'svelte';
   import { ui } from '../stores/ui.svelte';
   import Icon from './Icon.svelte';
+  import { dialogFocusReturn } from '../dialogFocus';
 
   interface Props {
     title: string;
@@ -16,6 +17,26 @@
   let { title, width = 460, onclose, children, footer }: Props = $props();
 
   let sheetEl = $state<HTMLElement | null>(null);
+  // Text-only confirmations need a keyboard stop for their scrolling body.
+  // Keep ordinary short sheets out of the Tab order.
+  function scrollableBody(node: HTMLElement) {
+    const update = () => {
+      if (node.scrollHeight > node.clientHeight + 1) node.tabIndex = 0;
+      else node.removeAttribute('tabindex');
+    };
+    const resize = new ResizeObserver(update);
+    const observeChildren = () => {
+      resize.disconnect();
+      resize.observe(node);
+      for (const child of node.children) resize.observe(child);
+      update();
+    };
+    const content = new MutationObserver(observeChildren);
+    observeChildren();
+    content.observe(node, { childList: true, subtree: true, characterData: true });
+    update();
+    return { destroy() { resize.disconnect(); content.disconnect(); } };
+  }
   const FOCUSABLE =
     'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
@@ -24,7 +45,7 @@
     // offsetParent filters display:none/collapsed elements (a fixed-position
     // sheet still gives its children an offsetParent).
     return Array.from(sheetEl.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
-      (el) => el.tabIndex >= 0 && (el.offsetParent !== null || el === document.activeElement),
+      (el) => el.tabIndex >= 0 && !el.closest('[inert]') && (el.offsetParent !== null || el === document.activeElement),
     );
   }
 
@@ -47,14 +68,14 @@
   // wins (the default button of a confirm, a prompt's field), else the first
   // body control, else the close button.
   $effect(() => {
-    const prev = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const restoreFocus = dialogFocusReturn();
     const els = untrack(focusables);
     (
       els.find((el) => el.hasAttribute('data-autofocus') || el.hasAttribute('autofocus')) ??
-      els.find((el) => !el.closest('header')) ??
+      els.find((el) => !el.closest('header') && !el.classList.contains('sheet-body')) ??
       els[0]
     )?.focus();
-    return () => prev?.focus();
+    return restoreFocus;
   });
 
   function onKeydown(e: KeyboardEvent) {
@@ -112,7 +133,7 @@
         <Icon name="x" size={14} />
       </button>
     </header>
-    <div class="sheet-body">{@render children()}</div>
+    <div class="sheet-body" use:scrollableBody>{@render children()}</div>
     {#if footer}
       <footer>{@render footer()}</footer>
     {/if}
@@ -172,6 +193,8 @@
   }
   footer {
     display: flex;
+    flex-wrap: wrap;
+    flex-shrink: 0;
     justify-content: flex-end;
     gap: 8px;
     padding: 12px 16px;

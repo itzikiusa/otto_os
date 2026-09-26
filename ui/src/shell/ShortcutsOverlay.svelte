@@ -75,6 +75,7 @@
     min-width: 0;
   }
   .sc-keys {
+    direction: ltr;
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;

@@ -20,6 +20,7 @@
       <!-- svelte-ignore a11y_autofocus -->
       <input
         class="input cf-input"
+        aria-label={confirmer.message || confirmer.title}
         bind:value={confirmer.inputValue}
         placeholder={confirmer.placeholder}
         autofocus

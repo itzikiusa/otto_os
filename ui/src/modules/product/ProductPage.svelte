@@ -218,7 +218,7 @@
   // is expanded at a time so the open panel gets the full remaining height to
   // scroll in; the other shows just its tappable header. This is a no-op on
   // desktop/tablet where the CSS for these classes is never applied.
-  let mobileSection = $state<'list' | 'content'>('list');
+  let mobileSection = $state<'list' | 'content'>(product.selectedId ? 'content' : 'list');
 
   async function createDraft(): Promise<void> {
     draftCreating = true;
@@ -909,12 +909,10 @@
     display: flex;
     min-height: 0;
   }
-  /* Nothing to list → no empty list pane beside the empty state (the phone
-     accordion keeps its two sections). */
-  @media (min-width: 641px) {
-    .product-page.no-stories .product-side {
-      display: none;
-    }
+  /* With no stories, onboarding owns the entire page, including on phones. */
+  .product-page.no-stories .product-side,
+  .product-page.no-stories .m-acc-head {
+    display: none;
   }
   /* Learnings has no list pane (and no phone accordion): the view fills it. */
   .product-page.learn-view .product-side,
@@ -1445,6 +1443,7 @@
       height: auto;
       overflow-y: auto;
     }
+    .no-stories .product-main,
     .m-content-open .product-main {
       flex: 1 1 auto;
       height: auto;

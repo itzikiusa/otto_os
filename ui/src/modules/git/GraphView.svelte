@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { dialogFocus } from '../../lib/dialogFocus';
   import { branchTracking } from './refTracking';
   // Two-pane: LEFT = refs tree (local/remote/tags), MIDDLE = commit graph, RIGHT = commit detail/diff.
   import { untrack } from 'svelte';
@@ -408,6 +409,8 @@
   let selectedCommit = $state<CommitInfo | null>(null);
   let diffResp = $state<DiffResp | null>(null);
   let diffLoading = $state(false);
+  let diffError = $state<string | null>(null);
+  let diffRequest = 0;
   // Track which files are collapsed (path → true = collapsed)
   let fileCollapsed = $state<Record<string, boolean>>({});
 
@@ -425,6 +428,8 @@
       return;
     }
     wipSelected = true;
+    diffRequest++;
+    diffError = null;
     selectedSha = null;
     selectedCommit = null;
     diffResp = null;
@@ -700,15 +705,10 @@
    *  FOREIGN worktree (checking those out errors hard — the refs tree routes
    *  them to their worktree instead). */
   function commitBranchNames(c: CommitInfo): string[] {
-    const { localNames } = refKnowledge;
     const names: string[] = [];
-    for (const r of c.refs) {
-      const arrow = r.match(/^HEAD\s*->\s*(.+)$/);
-      const raw = (arrow ? arrow[1] : r).trim();
-      if (!raw || raw === 'HEAD' || isTagRef(raw)) continue;
-      if (raw === 'refs/stash' || /^stash@\{/.test(raw)) continue;
-      // A remote decoration (origin/x) maps to its short local name.
-      const name = localNames.has(raw) ? raw : raw.replace(/^[^/]+\//, '');
+    for (const chip of chipsFor(c)) {
+      if (!['head', 'local', 'remote'].includes(chip.kind)) continue;
+      const name = chip.kind === 'remote' ? chip.label.replace(/^[^/]+\//, '') : chip.label;
       if (!name || names.includes(name) || worktreeBranches.has(name)) continue;
       names.push(name);
     }
@@ -1462,17 +1462,24 @@
     wipSelected = false;
     selectedSha = commit.sha;
     selectedCommit = commit;
-    diffResp = null;
-    diffLoading = true;
-    fileCollapsed = {};
     // On a phone, collapse the commit list so the diff section gets the room.
     if (isMobile) secCommitsOpen = false;
+    await loadCommitDiff(commit);
+  }
+
+  async function loadCommitDiff(commit: CommitInfo): Promise<void> {
+    const request = ++diffRequest;
+    diffResp = null;
+    diffError = null;
+    diffLoading = true;
+    fileCollapsed = {};
     try {
       const resp = await api.get<DiffResp>(
-        `/repos/${repoId}/diff?target=${encodeURIComponent('commit:' + commit.sha)}`
+        `/repos/${repoId}/diff?target=${encodeURIComponent('commit:' + commit.sha)}`,
       );
+      // A different commit, WIP, or closing the detail invalidates this load.
+      if (request !== diffRequest) return;
       diffResp = resp;
-      // Auto-collapse files with >400 changed lines
       const next: Record<string, boolean> = {};
       for (const f of resp.files) {
         const { add, del } = changedLinesCount(f);
@@ -1480,14 +1487,16 @@
       }
       fileCollapsed = next;
     } catch (e) {
-      toasts.error('Failed to load diff', e instanceof Error ? e.message : String(e));
-      diffResp = { files: [] };
+      if (request !== diffRequest) return;
+      diffError = (e instanceof Error ? e.message : String(e)) || 'The diff could not be loaded.';
     } finally {
-      diffLoading = false;
+      if (request === diffRequest) diffLoading = false;
     }
   }
 
   function clearSelection(): void {
+    diffRequest++;
+    diffError = null;
     wipSelected = false;
     selectedSha = null;
     selectedCommit = null;
@@ -1620,13 +1629,10 @@
      *  wins, then a plain local branch, then a remote-tracking one. Tags, stashes
      *  and a detached HEAD are NOT branches and never name a lane. */
     function branchOf(commit: CommitInfo): string | null {
-      let remote: string | null = null;
-      for (const ref of commit.refs) {
-        const chip = classifyRef(ref);
-        if (chip.kind === 'head' || chip.kind === 'local') return chip.label;
-        if (chip.kind === 'remote' && remote === null) remote = chip.label;
-      }
-      return remote;
+      const chips = chipsFor(commit);
+      return (chips.find((chip) => chip.kind === 'head')
+        ?? chips.find((chip) => chip.kind === 'local')
+        ?? chips.find((chip) => chip.kind === 'remote'))?.label ?? null;
     }
 
     const rows: LaneRow[] = [];
@@ -2047,6 +2053,30 @@
     };
   });
 
+  // Decorations from `git log %D` can contain the same text for a local
+  // origin/foo and the remote origin/foo. The refs endpoint already gives us
+  // unambiguous type and tip SHA; index it once instead of guessing per row.
+  const haveTypedRefs = $derived.by(() => {
+    const r: RefsResp | null = refs;
+    return r !== null && [...r.local, ...r.remote].every((b) => !!b.sha);
+  });
+  const branchChipsBySha = $derived.by(() => {
+    const bySha = new Map<string, RefChip[]>();
+    for (const b of [...(refs?.local ?? []), ...(refs?.remote ?? [])]) {
+      if (!b.sha) continue;
+      const chip: RefChip = {
+        kind: b.remote ? 'remote' : b.is_current ? 'head' : 'local',
+        label: b.name,
+        current: b.is_current,
+        worktree: !b.remote && worktreeBranches.has(b.name),
+      };
+      const list = bySha.get(b.sha) ?? [];
+      list.push(chip);
+      bySha.set(b.sha, list);
+    }
+    return bySha;
+  });
+
   function classifyRef(ref: string): RefChip {
     // Stash ref (`refs/stash` for the top stash, or a `stash@{N}` selector) —
     // its own kind, never bucketed as a remote branch.
@@ -2088,7 +2118,11 @@
     const order: Record<ChipKind, number> = {
       tag: 0, stash: 0, remote: 1, local: 2, detached: 3, head: 3,
     };
-    const all = c.refs.filter((r) => !/\/HEAD$/.test(r)).map(classifyRef);
+    const decorations = c.refs.filter((r) => !/\/HEAD$/.test(r)).map(classifyRef);
+    const all = haveTypedRefs
+      ? [...(branchChipsBySha.get(c.sha) ?? []), ...decorations.filter((chip) =>
+          chip.kind === 'tag' || chip.kind === 'stash' || chip.kind === 'detached')]
+      : decorations;
     // Collapse a local/head branch and its same-named remote twin (origin/<name>)
     // into ONE chip flagged `onRemote`: keeps the branch NAME, adds a small remote
     // glyph to show it's pushed, and frees a whole chip in the narrow column.
@@ -2159,7 +2193,9 @@
     e.stopPropagation(); // don't also select the commit (the row is a button)
     e.preventDefault();
     const { branches, tags } = splitChips(chips);
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const trigger = e.currentTarget as HTMLElement;
+    trigger.focus(); // WebKit pointer clicks do not focus buttons automatically.
+    const r = trigger.getBoundingClientRect();
     refMenu = { commit, branches, tags, x: r.left, y: r.bottom + 4 };
   }
 
@@ -2180,6 +2216,12 @@
       refPopX = Math.max(pad, Math.min(m.x, window.innerWidth - refPopEl.offsetWidth - pad));
       refPopY = Math.max(pad, Math.min(m.y, window.innerHeight - refPopEl.offsetHeight - pad));
     });
+  });
+
+  $effect(() => {
+    if (!refMenu) return;
+    untrack(() => ui.pushModal());
+    return () => untrack(() => ui.popModal());
   });
 
   function closeRefMenu(): void {
@@ -2315,6 +2357,7 @@
   // chips check out a local tracking branch (mirrors checkoutRemote); tags
   // check out detached; worktree branches open the linked tree as a git tab.
   function refRowCheckout(chip: RefChip): void {
+    // Keep the explicit local/remote identity; their display names may match.
     closeRefMenu();
     if (chip.kind === 'remote') {
       void checkout(chip.label.replace(/^[^/]+\//, ''), true);
@@ -2344,8 +2387,7 @@
       if (t) tagMenu(e, t);
       return;
     }
-    const list = chip.kind === 'remote' ? r.remote : r.local;
-    const b = list.find((x) => x.name === chip.label);
+    const b = (chip.kind === 'remote' ? r.remote : r.local).find((x) => x.name === chip.label);
     if (b) branchMenu(e, b);
   }
 
@@ -2398,7 +2440,6 @@
 
 <!-- Escape closes the open multi-ref popover (top-level: svelte:window can't sit
      inside a block). No-op when nothing is open. -->
-<svelte:window onkeydown={(e) => e.key === 'Escape' && refMenu && closeRefMenu()} />
 
 <!-- One commit-row ref chip — shared by the inline (single ref) and collapsed
      (primary ref) renderings so they never drift apart. -->
@@ -2494,6 +2535,7 @@
         {@const b = leaf.b}
         {@const tracking = branchTracking(b, status)}
         {@const wtElsewhere = worktreeByBranch.get(b.name)}
+        <div class="ref-action-row">
         <button
           class="ref-row"
           class:nested
@@ -2548,10 +2590,20 @@
           {/if}
           {#if checkoutBusy === b.name || (wtElsewhere && openWtBusy === wtElsewhere.path)}<span class="dim" title="Working…">…</span>{/if}
         </button>
+        <button
+          class="icon-btn ref-action"
+          aria-label="Actions for branch {b.name}"
+          title="Actions for branch {b.name}"
+          aria-haspopup="menu"
+          disabled={checkoutBusy !== '' || openWtBusy !== ''}
+          onclick={(e) => branchMenu(e, b)}
+        ><Icon name="more" size={13} /></button>
+        </div>
       {/snippet}
 
       {#snippet remoteRow(leaf: BranchLeaf, nested: boolean)}
         {@const b = leaf.b}
+        <div class="ref-action-row">
         <button
           class="ref-row remote"
           class:nested
@@ -2570,6 +2622,15 @@
           {#if showMerged(b)}{@render mergedMark()}{/if}
           {#if checkoutBusy === b.name.replace(/^[^/]+\//, '')}<span class="dim">…</span>{/if}
         </button>
+        <button
+          class="icon-btn ref-action"
+          aria-label="Actions for branch {b.name}"
+          title="Actions for branch {b.name}"
+          aria-haspopup="menu"
+          disabled={checkoutBusy !== '' || openWtBusy !== ''}
+          onclick={(e) => branchMenu(e, b)}
+        ><Icon name="more" size={13} /></button>
+        </div>
       {/snippet}
 
       <!-- A collapsible branch FOLDER header (feature/, release/, …). -->
@@ -2701,20 +2762,18 @@
         </button>
         {#if stashesOpen}
           {#each stashes as s (s.ref)}
-            <div
+            <div class="ref-action-row">
+            <button
               class="ref-row stash-row"
-              role="button"
-              tabindex="0"
               title={`${s.ref} · ${s.message}`}
               onclick={() => selectStash(s)}
               oncontextmenu={(e) => stashMenu(e, s)}
-              onkeydown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') selectStash(s);
-              }}
             >
               <Icon name="stash" size={10} />
               <span class="ref-name stash-msg">{stashShortMsg(s)}</span>
               {#if s.branch}<span class="stash-branch mono dim">{s.branch}</span>{/if}
+            </button>
+            <button class="icon-btn ref-action" title="Actions for stash {s.ref}" aria-label="Actions for stash {s.ref}" onclick={(e) => stashMenu(e, s)}><Icon name="more" size={13} /></button>
             </div>
           {:else}
             <div class="dim ref-empty">No stashes</div>
@@ -2735,6 +2794,7 @@
         {#if worktreesOpen}
           {#each worktrees as w (w.path)}
             {@const isHere = currentRepoPath !== '' && normPath(w.path) === currentRepoPath}
+            <div class="ref-action-row">
             <button
               type="button"
               class="ref-row stash-row is-worktree"
@@ -2775,6 +2835,8 @@
               {/if}
               {#if openWtBusy === w.path}<span class="dim">…</span>{/if}
             </button>
+            <button class="icon-btn ref-action" title="Actions for worktree {w.path}" aria-label="Actions for worktree {w.path}" onclick={(e) => wtMenu(e, w)}><Icon name="more" size={13} /></button>
+            </div>
           {:else}
             <div class="dim ref-empty">No worktrees</div>
           {/each}
@@ -2798,22 +2860,20 @@
           </button>
           {#if submodulesOpen}
             {#each submodules as sub (sub.path)}
-              <div
+              <button
                 class="ref-row stash-row"
-                role="button"
-                tabindex="0"
                 title={`${sub.path} @ ${sub.sha.slice(0, 10)}${sub.url ? ` · ${sub.url}` : ''}${sub.state !== 'ok' ? ` · ${sub.state}` : ''}`}
                 oncontextmenu={(e) => subMenu(e, sub)}
-                onkeydown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') subMenu(e, sub);
-                }}
+                aria-label="Actions for submodule {sub.path}"
+                onclick={(e) => subMenu(e, sub)}
               >
                 <Icon name="shapes" size={10} />
                 <span class="ref-name stash-msg">{sub.path}</span>
                 {#if sub.state !== 'ok'}
                   <span class="wt-flag mono" class:sub-warn={sub.state !== 'uninitialized'}>{sub.state}</span>
                 {/if}
-              </div>
+                <Icon name="more" size={13} />
+              </button>
             {/each}
           {/if}
         </div>
@@ -2967,7 +3027,7 @@
           {@const chips = chipsFor(row.commit)}
           {@const dimmed = highlightSpine !== null && !highlightSpine.has(row.commit.sha)}
           {@const onSpine = highlightSpine !== null && highlightSpine.has(row.commit.sha)}
-          <button
+          <div
             class="graph-row"
             style:height="{ROW_H}px"
             class:graph-row-selected={isSelected}
@@ -2977,36 +3037,31 @@
             class:stash-row-commit={isStash}
             class:row-pulse={pulseSha === row.commit.sha}
             data-sha={row.commit.sha}
-            onclick={() => selectCommit(row.commit)}
-            oncontextmenu={(e) => commitMenu(e, row.commit)}
             title={isHead ? `${row.commit.subject} — you are here (HEAD)` : row.commit.subject}
-            aria-pressed={isSelected}
           >
             <!-- BRANCH / TAG column: refs for this row, right-aligned so labels
                  line up vertically and butt against the graph node (GitKraken). -->
             <div class="branch-cell">
               {#if shouldCollapseRow(chips)}
-                <!-- 2+ refs: keep the primary one, tuck the rest behind ▾ +N. The
-                     expander is a role=button SPAN (the row itself is a <button>,
-                     so a nested real <button> would be invalid). -->
+                <!-- Keep collapsed refs on a separate keyboard-accessible control. -->
                 {@const primary = primaryChip(chips)}
-                {@render chipView(primary, primary.label, row.color)}
-                <span
+                <button class="ref-select" tabindex="-1" title={primary.label} aria-label={`Select ${primary.label}`} onclick={() => selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>{@render chipView(primary, primary.label, row.color)}</button>
+                <button
                   class="ref-expander"
-                  role="button"
-                  tabindex="-1"
+                  tabindex="0"
+                  aria-label={`Show ${chips.length} refs for ${row.commit.subject}`}
+                  aria-haspopup="dialog"
+                  disabled={refsLoading || !refs}
+                  aria-expanded={refMenu?.commit.sha === row.commit.sha}
                   title="{chips.length} refs on this commit — click to list"
                   onclick={(e) => openRefMenu(e, row.commit, chips)}
-                  onkeydown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') openRefMenu(e as unknown as MouseEvent, row.commit, chips);
-                  }}
-                ><Icon name="chevronDown" size={9} />+{chips.length - 1}</span>
+                ><Icon name="chevronDown" size={9} />+{chips.length - 1}</button>
               {:else}
                 {#each chips as chip (chip.kind + chip.label)}
                   {@const label = chip.kind === 'stash'
                     ? (stashMsgBySha.get(row.commit.sha) ?? 'stash')
                     : chip.label}
-                  {@render chipView(chip, label, row.color)}
+                  <button class="ref-select" tabindex="-1" title={label} aria-label={`Select ${label}`} onclick={() => selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>{@render chipView(chip, label, row.color)}</button>
                 {/each}
               {/if}
               <!-- HEAD marker ("you are here") — rightmost so it stays visible as
@@ -3016,6 +3071,7 @@
               {/if}
             </div>
 
+            <button class="graph-select" title={row.commit.subject} aria-label={row.commit.subject} aria-pressed={isSelected} onclick={() => selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>
             <!-- SVG gutter -->
             <svg
               class="gutter"
@@ -3111,7 +3167,8 @@
                 <span class="dim ci-date">{fmtDate(row.commit.date)}</span>
               </div>
             </div>
-          </button>
+            </button>
+          </div>
         {/each}
         <div class="row-spacer" style="height: {padBottom}px" aria-hidden="true"></div>
         <!-- History footer: more pages stream in on scroll, so this is a status
@@ -3251,6 +3308,8 @@
           <div class="detail-diff-loading">
             <Skeleton rows={8} height={20} />
           </div>
+        {:else if diffError}
+          <LoadState what="this commit’s changes" error={diffError} empty onretry={() => selectedCommit && void loadCommitDiff(selectedCommit)} />
         {:else if diffResp !== null}
           {#if diffResp.files.length === 0}
             <div class="dim" style="padding: 18px; font-size: var(--fs-s); text-align: center">No file changes.</div>
@@ -3275,7 +3334,7 @@
                     title={file.path}
                   >
                     <span class="df-chevron dim" aria-hidden="true"><Icon name={isCollapsed ? 'chevronRight' : 'chevronDown'} size={12} /></span>
-                    <span class="mono df-path">
+                    <span class="mono df-path" dir="ltr">
                       {#if file.old_path}<span class="df-rename-from">{file.old_path}</span><span class="df-rename-arrow"> → </span>{/if}{file.path}
                     </span>
                     <span class="grow"></span>
@@ -3294,7 +3353,7 @@
                   {#if file.is_binary}
                     <div class="df-binary dim">Binary file — no text diff.</div>
                   {:else}
-                    <div class="df-hunks">
+                    <div class="df-hunks" dir="ltr">
                       {#each file.hunks as hunk, hi (hi)}
                         <div class="hunk-header mono">{hunk.header}</div>
                         <table class="dl-table">
@@ -3327,10 +3386,11 @@
      full-screen backdrop closes it on any outside click; Escape also closes. -->
 {#if refMenu}
   <button type="button" class="ref-pop-backdrop" aria-label="Close" onclick={closeRefMenu}></button>
-  <div class="ref-popover" bind:this={refPopEl} style="left: {refPopX}px; top: {refPopY}px;">
+  <div class="ref-popover" role="dialog" aria-modal="true" aria-label="Commit references" use:dialogFocus={closeRefMenu} bind:this={refPopEl} style="left: {refPopX}px; top: {refPopY}px;">
     {#if refMenu.branches.length > 0}
       <div class="ref-pop-group">Branches</div>
       {#each refMenu.branches as chip (chip.kind + chip.label)}
+        <div class="ref-action-row">
         <button
           type="button"
           class="ref-pop-row kind-{chip.kind}"
@@ -3361,11 +3421,14 @@
             <span class="ref-pop-tag">worktree</span>
           {/if}
         </button>
+        <button class="icon-btn ref-action" title="Actions for {chip.label}" aria-label="Actions for {chip.label}" onclick={(e) => refRowMenu(e, chip)}><Icon name="more" size={13} /></button>
+        </div>
       {/each}
     {/if}
     {#if refMenu.tags.length > 0}
       <div class="ref-pop-group">Tags</div>
       {#each refMenu.tags as chip (chip.kind + chip.label)}
+        <div class="ref-action-row">
         <button
           type="button"
           class="ref-pop-row kind-tag"
@@ -3377,6 +3440,8 @@
           <Icon name="tag" size={10} />
           <span class="ref-pop-label">{chip.label}</span>
         </button>
+        <button class="icon-btn ref-action" title="Actions for {chip.label}" aria-label="Actions for {chip.label}" onclick={(e) => refRowMenu(e, chip)}><Icon name="more" size={13} /></button>
+        </div>
       {/each}
     {/if}
   </div>
@@ -3518,6 +3583,23 @@
        and nested rows' dots then line up under the folder icon. */
     margin-inline-start: 27px;
     border-inline-start: 1.5px solid var(--border);
+  }
+  .ref-action-row {
+    display: flex;
+    align-items: stretch;
+    min-width: 0;
+  }
+  .ref-action-row .ref-row {
+    flex: 1;
+    min-width: 0;
+    width: 0;
+  }
+  .ref-action {
+    flex-shrink: 0;
+    align-self: center;
+  }
+  @media (max-width: 1024px) {
+    .ref-action, .ref-expander { min-width: 36px; min-height: 36px; }
   }
   .ref-row {
     display: flex;
@@ -3764,7 +3846,25 @@
     overflow: hidden;
     white-space: nowrap;
   }
+  .graph-select, .ref-select {
+    display: flex;
+    align-items: center;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    color: inherit;
+    text-align: inherit;
+    min-width: 0;
+    cursor: pointer;
+  }
+  .graph-select { flex: 1; height: 100%; }
+  .ref-select { flex-shrink: 1; overflow: hidden; }
+  .graph-row:has(.graph-select:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
   .graph-row {
+    position: relative;
     display: flex;
     align-items: center;
     width: 100%;

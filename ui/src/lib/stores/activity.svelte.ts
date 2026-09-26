@@ -36,6 +36,9 @@ class ActivityStore {
   summaryBySession: Record<string, SessionActivitySummary> = $state({});
   /** session id -> artifacts the transcript folder registered (Outputs panel) */
   artifactsBySession: Record<string, Artifact[]> = $state({});
+  /** Artifact fetch states stay scoped to the session while panels switch. */
+  artifactsLoadingBySession: Record<string, boolean> = $state({});
+  artifactsErrorBySession: Record<string, string> = $state({});
   /** Latest History-index walk progress; null until a walk reports in. Reset to
    *  `{…, done:false}` when a rescan is requested so the button can show it. */
   historyIndex: HistoryIndexProgress | null = $state(null);
@@ -97,14 +100,19 @@ class ActivityStore {
 
   /** Fetch a session's artifact list once (`artifact_added` keeps it fresh). */
   async loadArtifacts(sessionId: string, force = false): Promise<void> {
-    if (!force && this.artifactsLoaded.has(sessionId)) return;
+    if (this.artifactsLoadingBySession[sessionId] || (!force && this.artifactsLoaded.has(sessionId))) return;
     this.artifactsLoaded.add(sessionId);
+    this.artifactsLoadingBySession[sessionId] = true;
+    delete this.artifactsErrorBySession[sessionId];
     try {
       this.artifactsBySession[sessionId] = await api.get<Artifact[]>(
         `/sessions/${sessionId}/artifacts`,
       );
-    } catch {
+    } catch (e) {
       this.artifactsLoaded.delete(sessionId);
+      this.artifactsErrorBySession[sessionId] = loadErrorText(e);
+    } finally {
+      this.artifactsLoadingBySession[sessionId] = false;
     }
   }
 
@@ -201,6 +209,8 @@ class ActivityStore {
     delete this.tasksBySession[sessionId];
     delete this.summaryBySession[sessionId];
     delete this.artifactsBySession[sessionId];
+    delete this.artifactsLoadingBySession[sessionId];
+    delete this.artifactsErrorBySession[sessionId];
     this.loaded.delete(sessionId);
     this.artifactsLoaded.delete(sessionId);
   }

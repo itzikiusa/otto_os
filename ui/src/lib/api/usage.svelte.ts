@@ -236,10 +236,11 @@ class UsageStore {
   /** Load status + (when available) summary + metrics for the current window. */
   async loadAll(): Promise<void> {
     this.loading = true;
+    let mine: number | null = null;
     try {
       await this.loadStatus();
       if (this.status?.available) {
-        const mine = ++this.summarySeq;
+        mine = ++this.summarySeq;
         const [summary, metrics] = await Promise.all([
           api.get<UsageSummary>(`/usage/summary?${this.summaryQuery()}`),
           api.get<MetricPoint[]>('/usage/metrics?minutes=180'),
@@ -255,7 +256,7 @@ class UsageStore {
         this.metrics = [];
       }
     } catch (e) {
-      this.summaryError = loadErrorText(e);
+      if (mine === this.summarySeq) this.summaryError = loadErrorText(e);
     }
     try {
       // Budgets are config (not engine) data — load them whether or not the
@@ -268,25 +269,36 @@ class UsageStore {
   }
 
   /** Load the budget config + live spend status (root-only). */
+  private budgetsSeq = 0;
+
   async loadBudgets(): Promise<void> {
+    const mine = ++this.budgetsSeq;
     try {
-      this.budgets = await api.get<UsageBudgetStatus>('/usage/budgets');
+      const next = await api.get<UsageBudgetStatus>('/usage/budgets');
+      if (mine !== this.budgetsSeq || this.savingBudgets) return;
+      this.budgets = next;
       this.budgetsError = null;
     } catch (e) {
+      if (mine !== this.budgetsSeq || this.savingBudgets) return;
       // Non-fatal: the dashboard still renders; the Budgets panel shows why.
       this.budgetsError = loadErrorText(e);
     }
   }
 
   /** Persist the budget config and refresh the status. */
-  async saveBudgets(cfg: UsageBudgetConfig): Promise<void> {
+  async saveBudgets(cfg: UsageBudgetConfig): Promise<boolean> {
     this.savingBudgets = true;
+    ++this.budgetsSeq;
     try {
       this.budgets = await api.put<UsageBudgetStatus>('/usage/budgets', cfg);
       toasts.success('Budgets saved');
+      return true;
     } catch (e) {
       toasts.error('Could not save budgets', errMsg(e));
+      return false;
     } finally {
+      // Ignore refreshes begun before or during this mutation.
+      ++this.budgetsSeq;
       this.savingBudgets = false;
     }
   }

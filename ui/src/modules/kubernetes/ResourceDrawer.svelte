@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { dialogFocus } from '../../lib/dialogFocus';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { actionOperation } from './permissions';
   // Detail drawer for the selected row: Overview (normalized fields + action
@@ -25,6 +27,7 @@
   import WorkloadPods from './WorkloadPods.svelte';
 
   interface Props {
+    modal?: boolean;
     clusterId: string;
     kind: K8sResourceKind;
     ns: string;
@@ -42,7 +45,7 @@
     /** Workloads: jump to one of this object's pods (its own drawer). */
     onopenpod?: (ns: string, pod: string, tab?: K8sDrawerTab) => void;
   }
-  let { clusterId, kind, ns, name, row, tab, canEdit, autoExec = false, ontab, onclose, onaction, onopenpod }: Props = $props();
+  let { modal = false, clusterId, kind, ns, name, row, tab, canEdit, autoExec = false, ontab, onclose, onaction, onopenpod }: Props = $props();
 
   $effect(() => {
     void resourceAccess.load('k8s_cluster', clusterId);
@@ -181,15 +184,33 @@
     return out;
   });
 
+  let drawerEl = $state<HTMLElement | null>(null);
+
+  // Compact detail sheets share the same nested-dialog ownership and focus
+  // restoration as other app sheets, including Safari pointer activation.
+  $effect(() => {
+    if (!modal || !drawerEl) return;
+    untrack(() => ui.pushModal());
+    const focus = dialogFocus(drawerEl, onclose);
+    return () => {
+      focus.destroy();
+      untrack(() => ui.popModal());
+    };
+  });
+
   function tabKey(e: KeyboardEvent, i: number): void {
-    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+    if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
     e.preventDefault();
-    const j = (i + (e.key === 'ArrowRight' ? 1 : -1) + TABS.length) % TABS.length;
+    const button = e.currentTarget as HTMLButtonElement;
+    const rtl = getComputedStyle(button).direction === 'rtl';
+    const step = (e.key === 'ArrowRight' ? 1 : -1) * (rtl ? -1 : 1);
+    const j = e.key === 'Home' ? 0 : e.key === 'End' ? TABS.length - 1 : (i + step + TABS.length) % TABS.length;
     ontab(TABS[j].id);
+    button.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[j]?.focus();
   }
 </script>
 
-<aside class="drawer" aria-label="{def.singular} details" data-testid="k8s-drawer">
+<aside bind:this={drawerEl} class="drawer" role={modal ? 'dialog' : undefined} aria-modal={modal ? 'true' : undefined} aria-label="{def.singular} details" data-testid="k8s-drawer">
   <header class="dr-head">
     <div class="dr-title">
       <span class="dr-kind">{def.singular}</span>
@@ -197,7 +218,7 @@
       {#if ns}<span class="dr-ns mono">{ns}</span>{/if}
       {#if row}<span class="status-pill {healthClass(row.health, row.status)}"><span class="hdot"></span>{row.status}</span>{/if}
     </div>
-    <button class="icon-btn" onclick={onclose} aria-label="Close details" title="Close (Esc)"><Icon name="x" size={14} /></button>
+    <button class="icon-btn dr-close" onclick={onclose} aria-label="Close details" title="Close (Esc)"><Icon name="x" size={14} /></button>
   </header>
 
   <div class="dr-tabs" role="tablist" aria-label="Detail tabs">

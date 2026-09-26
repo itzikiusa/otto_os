@@ -53,6 +53,7 @@
   }
 
   let videoEl: HTMLVideoElement | null = $state(null);
+  let filmEl: HTMLElement | undefined = $state();
   let src = $state<string | null>(null);
   let status = $state<'loading' | 'ready' | 'failed'>('loading');
   let currentTime = $state(0);
@@ -118,6 +119,20 @@
     if (t) t.mode = captionsOn ? 'showing' : 'hidden';
   }
 
+  // Native video controls (including fullscreen) also change this track.
+  // Keep the external CC button truthful without resetting a saved preference
+  // while a replacement video is still loading after Retry.
+  $effect(() => {
+    const video = videoEl;
+    const tracks = video?.textTracks;
+    if (!video || !tracks) return;
+    const syncCaptions = () => {
+      if (video.readyState >= 1 && tracks[0]) captionsOn = tracks[0].mode === 'showing';
+    };
+    tracks.addEventListener('change', syncCaptions);
+    return () => tracks.removeEventListener('change', syncCaptions);
+  });
+
   function toggleCaptions(): void {
     captionsOn = !captionsOn;
     applyCaptions();
@@ -130,6 +145,7 @@
     if (videoEl && pendingSeek !== null) {
       videoEl.currentTime = pendingSeek;
       pendingSeek = null;
+      revealPlayer();
       void videoEl.play().catch(() => {});
     }
   }
@@ -137,6 +153,7 @@
   /** Seek to `seconds` and play (queued until the metadata is in). Used by the
    *  chapter list, the markers and the guides' "Watch this part". */
   export function playAt(seconds: number): void {
+    revealPlayer();
     currentTime = seconds;
     if (status === 'failed') {
       pendingSeek = seconds;
@@ -150,9 +167,15 @@
       pendingSeek = seconds;
     }
   }
+
+  function revealPlayer(): void {
+    // Only explicit playback requests reveal the film; timeupdate must leave
+    // readers where they scrolled. Instant also respects reduced motion.
+    filmEl?.querySelector('.film-frame')?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+  }
 </script>
 
-<section class="film" aria-label="Tour film" data-testid="tour-film">
+<section class="film" bind:this={filmEl} aria-label="Tour film" data-testid="tour-film">
   {#if !film}
     <div class="film-missing" role="status" data-testid="tour-film-missing">
       <span class="film-missing-icon" aria-hidden="true"><Icon name="play" size={14} /></span>
@@ -174,7 +197,7 @@
     {:else}
       <div class="film-frame" class:loading={status === 'loading'}>
         <!-- preload="metadata": only the moov atom + first frame are fetched
-             until the viewer presses play. Narrated, so it never autoplays.
+             until the viewer presses play. The soundtrack never autoplays.
              The captions <track> is conditional (see CAPTIONS above). -->
         <!-- svelte-ignore a11y_media_has_caption -->
         <video
@@ -197,7 +220,7 @@
           {/if}
         </video>
         {#if status === 'loading'}
-          <div class="film-loading" aria-hidden="true">Loading the tour…</div>
+          <div class="film-loading" role="status">Loading the tour…</div>
         {/if}
       </div>
     {/if}
@@ -436,11 +459,10 @@
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
     font-size: var(--fs-xs);
+    white-space: nowrap;
   }
   .chapter-title {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
   .chapter.active .chapter-title {
     color: var(--accent-text);
@@ -460,5 +482,14 @@
   }
   .dim {
     color: var(--text-dim);
+  }
+  @media (max-width: 640px) {
+    .fallback-actions button,
+    .fallback-actions a,
+    .chapter-play,
+    .chapter-guide,
+    .cc {
+      min-height: 36px;
+    }
   }
 </style>

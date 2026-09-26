@@ -103,9 +103,23 @@
       }
     }),
   );
+  async function chooseGroup(group?: AccessGroup) {
+    if (group?.id === selected?.id && group) return;
+    const dirty = selected ? groupDirty : !!(name.trim() || description.trim());
+    if (dirty && !(await confirmer.ask('Switching groups discards your unsaved changes.', { title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing' }))) return;
+    if (group) await selectGroup(group);
+    else newGroup();
+  }
+  async function chooseRole(role?: AccessRole) {
+    if (role?.id === roleId) return;
+    const dirty = savedRole ? roleDirty : !!(roleName.trim() || roleDescription.trim() || operations.length);
+    if (dirty && !(await confirmer.ask('Switching presets discards your unsaved changes.', { title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing' }))) return;
+    editRole(role);
+  }
   async function selectGroup(group: AccessGroup) {
     const generation = ++membershipGeneration;
     selected = group;
+    error = '';
     name = group.name;
     description = group.description ?? '';
     members = [];
@@ -257,7 +271,7 @@
         <div class="list-pane">
           <div class="list-head">
             <span class="list-label">{groups.length ? 'All groups' : 'No groups yet'}</span>
-            <button class="icon-btn" aria-label="New group" title="New group" disabled={busy} onclick={newGroup}><Icon name="plus" size={14} /></button>
+            <button class="icon-btn" aria-label="New group" title="New group" disabled={busy} onclick={() => chooseGroup()}><Icon name="plus" size={14} /></button>
           </div>
           <nav class="list" aria-label="Access groups">
             {#if !selected}
@@ -271,7 +285,7 @@
                 aria-label={group.name}
                 title={group.description ?? group.name}
                 disabled={busy}
-                onclick={() => selectGroup(group)}
+                onclick={() => chooseGroup(group)}
               >
                 <span class="row-name">{group.name}</span>
                 {#if group.description}<span class="row-meta">{group.description}</span>{/if}
@@ -346,7 +360,7 @@
         <div class="list-pane">
           <div class="list-head">
             <span class="list-label">{roles.length ? 'All presets' : 'No presets yet'}</span>
-            <button class="icon-btn" aria-label="New preset" title="New preset" disabled={busy} onclick={() => editRole()}><Icon name="plus" size={14} /></button>
+            <button class="icon-btn" aria-label="New preset" title="New preset" disabled={busy} onclick={() => chooseRole()}><Icon name="plus" size={14} /></button>
           </div>
           <nav class="list" aria-label="Role presets">
             {#if !roleId}
@@ -359,7 +373,7 @@
                 aria-current={roleId === role.id ? 'true' : undefined}
                 aria-label={role.name}
                 disabled={busy}
-                onclick={() => editRole(role)}
+                onclick={() => chooseRole(role)}
               >
                 <span class="row-name">{role.name}</span>
                 <span class="row-meta">{resourceLabels[role.kind]}</span>
@@ -426,6 +440,7 @@
 <style>
   /* Section chrome: shared PageHeader bar + scrolling PageBody. */
   .settings-section {
+    container-type: inline-size;
     display: flex;
     flex-direction: column;
     height: 100%;
@@ -624,7 +639,7 @@
   details .hint {
     margin-top: 6px;
   }
-  @media (max-width: 640px) {
+  @container (max-width: 640px) {
     .layout {
       grid-template-columns: 1fr;
     }

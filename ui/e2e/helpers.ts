@@ -14,10 +14,10 @@ export const PAGES = [
   'connections',
   'database',
   'git',
-  'help',
+  'walkthroughs',
   'insights',
   'kubernetes',
-  'plugins',
+  'settings/plugins',
   'product',
   'settings',
   'skills-eval',
@@ -25,6 +25,18 @@ export const PAGES = [
   'usage',
   'vault',
   'workflows',
+  'history',
+  'run-with-otto',
+  'loops',
+  'proof',
+  'canvas',
+  'design',
+  'design/brand',
+  'design/learned',
+  'browser',
+  'mcp',
+  'scheduled-tasks',
+  'personal-agents',
 ] as const;
 
 export type PageId = (typeof PAGES)[number];
@@ -45,6 +57,9 @@ export async function openPage(page: Page, id: string): Promise<void> {
  */
 export async function openApiEditor(page: Page): Promise<void> {
   await openPage(page, 'api');
+  // The editor is temporarily visible during the first workspace fetch. Wait
+  // for that fetch before deciding whether the empty-workspace CTA is needed.
+  await expect(page.getByText('Loading saved requests…', { exact: true })).toHaveCount(0);
   const url = page.getByLabel('Request URL', { exact: true });
   const onboarding = page.getByText('Create your first request', { exact: true });
   await expect(url.or(onboarding).first()).toBeVisible({ timeout: 15_000 });

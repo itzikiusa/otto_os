@@ -9,6 +9,11 @@
 // Keeps a browser-style navigation stack so back/forward (buttons + ⌘⇧←/→)
 // can return to previously-viewed pages.
 
+import { SvelteMap } from 'svelte/reactivity';
+import { winKey } from './win';
+import { lsGet, lsSet } from './storage';
+import { isEmbedded } from './desktop';
+
 // ---------------------------------------------------------------------------
 // Share-token in-memory store (Task 3.1)
 // ---------------------------------------------------------------------------
@@ -18,11 +23,8 @@
 // never persists in browser history, logs, or the address bar.
 // The token is intentionally NOT stored in localStorage (would clobber a real
 // owner login under the 'otto_token' key and survive the session).
-const _shareTokens: Map<string, string> = new Map();
-
-import { winKey } from './win';
-import { lsGet, lsSet } from './storage';
-import { isEmbedded } from './desktop';
+// Replacing a token for the same session must refresh the guest's role too.
+const _shareTokens = new SvelteMap<string, string>();
 
 // Per-window last-route persistence (multi-window restore). Desktop-app only:
 // a fresh Tauri window loads with an empty hash, so restoring the saved route

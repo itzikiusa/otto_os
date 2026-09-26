@@ -13,6 +13,7 @@
   import ApiPanel from '../modules/api/ApiPanel.svelte';
   import { ui, type RightTab } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
+  import { getToken } from '../lib/api/client';
   import { toasts } from '../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../lib/contextmenu.svelte';
   import { onDestroy, untrack } from 'svelte';
@@ -142,12 +143,15 @@
   let notes = $state('');
   let notesLoadedFor: string | null = $state(null);
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
-  let saveState: 'idle' | 'saving' | 'saved' = $state('idle');
+  let saveState: 'idle' | 'saving' | 'saved' | 'error' = $state('idle');
+  let notesError = $state('');
+  let notesRevision = 0;
+  let notesQueue: Promise<void> = Promise.resolve();
 
   /** Text typed but not yet saved, bound to the workspace it was typed in:
    *  the debounce used to save whatever workspace was current WHEN IT FIRED,
    *  so switching within 600 ms wrote B's text back to B and lost A's edit. */
-  let pendingNotes: { wsId: string; text: string } | null = null;
+  let pendingNotes: { wsId: string; text: string; token: string | null } | null = null;
 
   $effect(() => {
     // (re)load notes when workspace changes
@@ -156,6 +160,8 @@
       untrack(() => void flushNotes());
       notesLoadedFor = w.id;
       notes = typeof w.settings?.notes === 'string' ? (w.settings.notes as string) : '';
+      notesRevision++;
+      notesError = '';
       saveState = 'idle';
     }
   });
@@ -165,22 +171,38 @@
     saveTimer = null;
     const p = pendingNotes;
     pendingNotes = null;
-    if (!p) return;
+    if (!p || p.token !== getToken()) return;
+    const revision = notesRevision;
+    saveState = 'saving';
+    notesError = '';
+    // Serialize writes so an older, slow save cannot overwrite newer text.
+    const saving = notesQueue.then(() => {
+      if (p.token === getToken()) return ws.saveNotes(p.text, p.wsId);
+    });
+    notesQueue = saving.catch(() => {});
     try {
-      await ws.saveNotes(p.text, p.wsId);
-      if (p.wsId !== notesLoadedFor) return;
+      await saving;
+      if (p.token !== getToken() || p.wsId !== notesLoadedFor || revision !== notesRevision) return;
       saveState = 'saved';
-      setTimeout(() => (saveState = 'idle'), 1500);
     } catch (e) {
-      if (p.wsId === notesLoadedFor) saveState = 'idle';
-      toasts.error('Notes not saved', e instanceof Error ? e.message : String(e));
+      if (p.token !== getToken()) return;
+      if (p.wsId !== notesLoadedFor) {
+        toasts.error('Notes not saved', e instanceof Error ? e.message : String(e));
+        return;
+      }
+      if (revision !== notesRevision) return;
+      pendingNotes = p;
+      notesError = e instanceof Error ? e.message : String(e);
+      saveState = 'error';
     }
   }
 
   function onNotesInput(): void {
     if (!notesLoadedFor) return;
     if (saveTimer) clearTimeout(saveTimer);
-    pendingNotes = { wsId: notesLoadedFor, text: notes };
+    pendingNotes = { wsId: notesLoadedFor, text: notes, token: getToken() };
+    notesRevision++;
+    notesError = '';
     saveState = 'saving';
     saveTimer = setTimeout(() => void flushNotes(), 600);
   }
@@ -333,13 +355,18 @@
         <div class="notes-wrap">
           <textarea
             class="notes"
+            aria-label="Workspace notes"
             bind:value={notes}
             oninput={onNotesInput}
             placeholder="Workspace notes (markdown)…"
             spellcheck="false"
           ></textarea>
-          <div class="notes-foot">
-            {#if saveState === 'saving'}<span class="dim">Saving…</span>
+          <div class="notes-foot" aria-live="polite">
+            {#if saveState === 'error'}
+              <div class="notes-error" role="alert"><span>Notes not saved. {notesError}</span>
+                <button class="btn small" onclick={() => void flushNotes()}>Retry</button>
+              </div>
+            {:else if saveState === 'saving'}<span class="dim">Saving…</span>
             {:else if saveState === 'saved'}<span class="dim">Saved</span>
             {:else}<span class="dim">Saved to this workspace as you type</span>{/if}
           </div>
@@ -536,6 +563,15 @@
     color: var(--text);
     outline: none;
   }
+  .notes-error {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--danger);
+    overflow-wrap: anywhere;
+  }
+  .notes-error span { flex: 1; min-width: 0; }
+  .notes:focus-visible { outline: 2px solid var(--accent-text); outline-offset: -2px; }
   .notes-foot {
     padding: 4px 12px 8px;
     font-size: var(--fs-xs);

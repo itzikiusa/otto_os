@@ -524,12 +524,14 @@
   // ── Save query ──────────────────────────────────────────────────────────
   let saving = $state(false);
   let saveName = $state('');
+  let savePending = $state(false);
   /** True when this tab was opened from a saved query that still exists — then
    *  the primary Save UPDATES it in place ("Save as new" forks a fresh one). */
   const savedLinked = $derived(
     !!tab?.savedQueryId && database.savedQueries.some((q) => q.id === tab.savedQueryId),
   );
   async function openSave(): Promise<void> {
+    if (savePending) return;
     saveName = tab.name && tab.name !== 'Query' ? tab.name : '';
     saving = true;
     await tick();
@@ -537,23 +539,23 @@
   /** Primary save: update the linked saved query in place, else create a new one
    *  (a name is required only for the create case). */
   async function confirmSave(): Promise<void> {
-    if (!savedLinked && !saveName.trim()) return;
-    const saved = await database.saveActiveTab(saveName);
-    if (saved) {
-      saving = false;
-      saveName = '';
-    }
+    if (savePending || (!savedLinked && !saveName.trim())) return;
+    savePending = true;
+    try {
+      const saved = await database.saveActiveTab(saveName);
+      if (saved) { saving = false; saveName = ''; }
+    } finally { savePending = false; }
   }
   /** Always create a fresh saved query from the current statement (a name is
    *  required). Lets the user fork a saved query without overwriting it. */
   async function confirmSaveAsNew(): Promise<void> {
     const name = saveName.trim();
-    if (!name) return;
-    const saved = await database.saveQuery(name, tab.statement);
-    if (saved) {
-      saving = false;
-      saveName = '';
-    }
+    if (savePending || !name) return;
+    savePending = true;
+    try {
+      const saved = await database.saveQuery(name, tab.statement);
+      if (saved) { saving = false; saveName = ''; }
+    } finally { savePending = false; }
   }
 
   const canEdit = $derived(ws.myRole !== 'viewer');
@@ -745,12 +747,25 @@
         class:agent={!!t.agent}
         data-db-tab-id={t.id}
         role="tab"
-        tabindex="0"
+        tabindex={i === database.activeTab ? 0 : -1}
         aria-selected={i === database.activeTab}
         onclick={() => database.switchTab(i)}
         ondblclick={() => startRename(i, t)}
         oncontextmenu={(e) => tabMenu(e, i, t)}
         onkeydown={(e) => {
+          if (e.target !== e.currentTarget) return;
+          let next = i;
+          const forward = getComputedStyle(e.currentTarget).direction === 'rtl' ? 'ArrowLeft' : 'ArrowRight';
+          if (e.key === forward) next = (i + 1) % database.tabs.length;
+          else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') next = (i - 1 + database.tabs.length) % database.tabs.length;
+          else if (e.key === 'Home') next = 0;
+          else if (e.key === 'End') next = database.tabs.length - 1;
+          if (next !== i) {
+            e.preventDefault();
+            database.switchTab(next);
+            const bar = e.currentTarget.parentElement;
+            queueMicrotask(() => bar?.querySelectorAll<HTMLElement>('[role="tab"]')[next]?.focus());
+          }
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
             database.switchTab(i);
@@ -1084,11 +1099,11 @@
           else if (e.key === 'Escape') saving = false;
         }}
       />
-      <button class="btn small primary" onclick={confirmSave} disabled={!savedLinked && !saveName.trim()}>
-        {savedLinked ? 'Update' : 'Save'}
+      <button class="btn small primary" onclick={confirmSave} disabled={savePending || (!savedLinked && !saveName.trim())}>
+        {savePending ? 'Saving…' : savedLinked ? 'Update' : 'Save'}
       </button>
       {#if savedLinked}
-        <button class="btn small" onclick={confirmSaveAsNew} disabled={!saveName.trim()} title="Create a new saved query instead of updating">
+        <button class="btn small" onclick={confirmSaveAsNew} disabled={savePending || !saveName.trim()} title="Create a new saved query instead of updating">
           Save as new
         </button>
       {/if}

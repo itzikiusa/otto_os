@@ -2,6 +2,7 @@
   // One PR comment + its replies (recursive). Optional reply affordance.
   import CommentThread from './CommentThread.svelte';
   import type { PrComment } from '../../lib/api/types';
+  import { guardUnsaved } from '../../lib/leaveGuard';
   import { renderMarkdown } from '../../lib/md';
 
   interface Props {
@@ -17,6 +18,8 @@
   let replying = $state(false);
   let replyText = $state('');
   let busy = $state(false);
+  let replyError = $state<string | null>(null);
+  $effect(() => guardUnsaved(() => replying && replyText.trim() !== '', { what: 'comment reply' }));
   let resolveBusy = $state(false);
 
   // Thread status lives on the head comment; replies inherit the container.
@@ -45,12 +48,15 @@
   }
 
   async function submitReply(): Promise<void> {
-    if (!onreply || replyText.trim() === '') return;
+    if (busy || !onreply || replyText.trim() === '') return;
     busy = true;
+    replyError = null;
     try {
       await onreply(comment.id, replyText.trim());
       replying = false;
       replyText = '';
+    } catch (e) {
+      replyError = e instanceof Error ? e.message : String(e);
     } finally {
       busy = false;
     }
@@ -86,9 +92,10 @@
   {#if onreply || canResolve}
     <div class="cmt-actions">
       {#if replying}
-        <textarea class="input" rows="2" bind:value={replyText} placeholder="Reply…"></textarea>
+        <textarea class="input" rows="2" bind:value={replyText} disabled={busy} aria-label="Reply" placeholder="Reply…"></textarea>
+        {#if replyError}<p class="reply-error" role="alert">Couldn’t post reply. {replyError} Try Reply again.</p>{/if}
         <div class="row" style="justify-content: flex-end">
-          <button class="btn small" onclick={() => (replying = false)}>Cancel</button>
+          <button class="btn small" disabled={busy} onclick={() => (replying = false)}>Cancel</button>
           <button class="btn small primary" disabled={busy || replyText.trim() === ''} onclick={submitReply}>
             {busy ? 'Posting…' : 'Reply'}
           </button>
@@ -116,6 +123,7 @@
 </div>
 
 <style>
+  .reply-error { margin: 0; color: var(--danger); font-size: var(--fs-s); }
   .cmt {
     padding: 8px 0 2px;
   }

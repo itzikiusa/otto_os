@@ -1,6 +1,6 @@
 // Workspaces + sessions + tab/split state for the shell and Agent Mode.
 
-import { api } from '../api/client';
+import { api, getToken } from '../api/client';
 import { listActiveWorkflowRuns } from '../api/workflows';
 import { fetchWorkspace } from '../api/workspaces';
 import { router } from '../router.svelte';
@@ -112,6 +112,8 @@ class WorkspaceStore {
   injections: Record<Id, { text: string; n: number }> = $state({});
   sessionsLoading = $state(false);
   private selectionGeneration = 0;
+  private loadGeneration = 0;
+  private loadedToken: string | null | undefined;
   private sessionsGeneration = 0;
   private sessionsInFlight: Promise<void> | null = null;
 
@@ -284,6 +286,8 @@ class WorkspaceStore {
    *  must not blank the rest. */
   async refreshOtherSessions(): Promise<void> {
     if (!this.allWorkspaces) return;
+    const token = getToken();
+    const selection = this.selectionGeneration;
     const others = this.workspaces.filter((w) => w.id !== this.currentId);
     const lists = await Promise.all(
       others.map(async (w) => {
@@ -294,6 +298,7 @@ class WorkspaceStore {
         }
       }),
     );
+    if (token !== getToken() || selection !== this.selectionGeneration || !this.allWorkspaces) return;
     const flat = lists.flat().filter((s) => !s.archived && visibleOnThisDevice(s));
     this.otherWsSessions = flat;
     // Seed statuses without clobbering fresher event-fed values.
@@ -431,17 +436,35 @@ class WorkspaceStore {
   }
 
   async load(): Promise<void> {
-    this.workspaces = await api.get<WorkspaceWithRole[]>('/workspaces');
+    const generation = ++this.loadGeneration;
+    const token = getToken();
+    if (this.loadedToken !== token) {
+      this.loadedToken = token;
+      ++this.selectionGeneration;
+      this.workspaces = [];
+      this.currentId = null;
+      this.scratch = null;
+      this.sessions = [];
+      this.otherWsSessions = [];
+      this.activeWorkflowRuns = [];
+    }
+    const selection = this.selectionGeneration;
+    const current = () => generation === this.loadGeneration && token === getToken() && selection === this.selectionGeneration;
+    const workspaces = await api.get<WorkspaceWithRole[]>('/workspaces');
+    if (!current()) return;
+    this.workspaces = workspaces;
     // The hidden scratch workspace — best-effort: a daemon without it leaves
     // `scratch` null and the sheet falls back to `~`.
+    let scratch: Workspace | null = null;
     try {
-      this.scratch = await api.get<Workspace>(`/workspaces/${SCRATCH_WORKSPACE_ID}`);
+      scratch = await api.get<Workspace>(`/workspaces/${SCRATCH_WORKSPACE_ID}`);
     } catch {
-      this.scratch = null;
+      // Optional workspace unavailable.
     }
+    if (!current()) return;
+    this.scratch = scratch;
     const saved = lsGet(winKey(LS_CURRENT));
-    const found = this.workspaces.find((w) => w.id === saved);
-    const target = found ?? this.workspaces[0] ?? null;
+    const target = workspaces.find((w) => w.id === saved) ?? workspaces[0] ?? null;
     if (target) await this.select(target.id);
     else await this.selectNone();
   }
@@ -1104,6 +1127,28 @@ class WorkspaceStore {
   }
 
   /** Delete: remove the session entirely (PTY killed, row + history gone). */
+  /** User-facing Delete of ONE session (tab menu, pane ⋯, sidebar row).
+   *  Asks first — unless the user chose "Always delete" in Settings →
+   *  Appearance: they opted out of the question, so an explicit Delete is
+   *  honoured just like closing its tab (asking anyway is what made the
+   *  setting feel broken). Bulk deletes keep their own one-time confirm.
+   *  Failures surface as a toast. */
+  async requestDeleteSession(id: Id): Promise<void> {
+    if (ui.closeTabPref !== 'delete') {
+      const name = this.sessions.find((s) => s.id === id)?.title?.trim();
+      const ok = await confirmer.ask(
+        `Delete ${name ? `“${name}”` : 'this session'} and its entire history? This cannot be undone.`,
+        { title: 'Delete session', confirmLabel: 'Delete' },
+      );
+      if (!ok) return;
+    }
+    try {
+      await this.killSession(id);
+    } catch (e) {
+      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
   async killSession(id: Id): Promise<void> {
     await api.del(`/sessions/${id}`);
     this.closeTab(id);
@@ -1369,9 +1414,12 @@ class WorkspaceStore {
    *  could revert keys changed since (e.g. api_client.allow_local). */
   async saveNotes(notes: string, wsId: Id | null = this.currentId): Promise<void> {
     if (!wsId) return;
+    const token = getToken();
     const fresh = await fetchWorkspace(wsId);
+    if (token !== getToken()) return;
     const settings = { ...fresh.settings, notes };
     const updated = await api.patch<Workspace>(`/workspaces/${wsId}`, { settings });
+    if (token !== getToken()) return;
     this.workspaces = this.workspaces.map((w) =>
       w.id === updated.id ? { ...w, ...updated } : w,
     );

@@ -64,7 +64,7 @@
   $effect(() => {
     const want = router.parts[1];
     if (!want || history.entries.length === 0) return;
-    const hit = history.entries.find((e) => e.session_id === want);
+    const hit = history.visible.find((e) => e.session_id === want);
     if (hit && history.selectedKey !== entryKey(hit)) history.select(hit);
   });
 
@@ -90,12 +90,14 @@
   $effect(() => {
     const w = wsId;
     const groups = history.groups;
-    if (!w || history.loading || history.selectedKey) return;
+    if (!w || history.loading) return;
+    const visible = groups.flatMap((g) => g.entries);
+    if (history.selectedKey && visible.some((e) => entryKey(e) === history.selectedKey)) return;
     untrack(() => {
+      if (history.selectedKey) clearSelection();
       const want = router.parts[1];
-      if (want && history.entries.some((e) => e.session_id === want)) return;
+      if (want && visible.some((e) => e.session_id === want)) return;
       if (typeof window !== 'undefined' && window.matchMedia?.('(max-width: 768px)').matches) return;
-      const visible = groups.flatMap((g) => g.entries);
       if (visible.length === 0) return;
       const last = recallSelection('history');
       pick(visible.find((e) => entryKey(e) === last) ?? visible[0]);
@@ -389,7 +391,7 @@
     {/if}
 
     <div class="rows" data-testid="history-list">
-      {#if history.error && history.entries.length > 0}
+      {#if history.error}
         <p class="empty-line err" role="alert">
           <span>Refresh failed: {history.error}</span>
           <button class="btn small" onclick={() => void history.refresh()}>Retry</button>
@@ -397,7 +399,7 @@
       {/if}
       {#if history.loading && history.entries.length === 0}
         <p class="empty-line dim">Loading conversations…</p>
-      {:else if shown === 0}
+      {:else if shown === 0 && !history.error}
         <!-- The miss is explained (with its fix) by the right pane; this line
              only shows at the narrow list-only layout, where that pane is hidden. -->
         <p class="empty-line dim narrow-only">
@@ -950,9 +952,7 @@
     margin: 0;
     font-size: var(--fs-l);
     font-weight: 600;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
   .dmeta {
     display: flex;

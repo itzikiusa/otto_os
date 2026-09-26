@@ -35,6 +35,7 @@
   } from '../../lib/api/proof';
   import { downloadText } from '../../lib/components/exporters';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -188,6 +189,7 @@
   // pack; the second revokes every URL on unmount. `untrack` keeps the effect's
   // only dependency `detail` — reads/writes of `mediaUrls` must not re-trigger it.
   let mediaUrls = $state<Record<string, string>>({});
+  let mediaErrors = $state<Record<string, string>>({});
 
   $effect(() => {
     const wanted = (detail?.artifacts ?? [])
@@ -216,10 +218,11 @@
 
   async function fetchMedia(id: string): Promise<void> {
     if (id in mediaUrls) return;
+    delete mediaErrors[id];
     try {
       mediaUrls[id] = await artifactBlobUrl(id);
-    } catch {
-      /* media blob unavailable — leave the loading placeholder */
+    } catch (e) {
+      mediaErrors[id] = loadErrorText(e);
     }
   }
 
@@ -711,7 +714,17 @@
   <!-- Right: detail. -->
   <section class="main">
     {#if !detail}
-      {#if proof.detailError && !openingId}
+      {#if !ws.currentId}
+        <EmptyState
+          variant="page"
+          icon="folder"
+          title="Add a workspace to get started"
+          body="Proof packs belong to a workspace. Add your project folder to collect and review evidence."
+          actionLabel="Add workspace"
+          actionIcon="plus"
+          onaction={() => (ui.newWorkspaceOpen = true)}
+        />
+      {:else if proof.detailError && !openingId}
         <LoadState what="the proof pack" error={proof.detailError} empty variant="page" onretry={retryOpen} />
       {:else if listError && !showRail}
         <LoadState what="proof packs" error={listError} empty variant="page" loading={proof.loading} onretry={retryList} />
@@ -813,6 +826,12 @@
                       {:else}
                         <img class="art-media" src={mediaUrls[a.id]} alt={a.title} />
                       {/if}
+                    {:else if mediaErrors[a.id]}
+                      <div role="alert">
+                        <p>Couldn’t load the media</p>
+                        <p class="dim">{mediaErrors[a.id]}</p>
+                        <button class="btn small" aria-label="Retry media" onclick={() => void fetchMedia(a.id)}>Retry</button>
+                      </div>
                     {:else}
                       <p class="dim media-loading">Loading media…</p>
                     {/if}

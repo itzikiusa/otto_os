@@ -628,7 +628,23 @@ class ProductStore {
   saveState: Record<string, SaveState> = $state({});
   /** Last successful save time per attachment (drives "saved 2s ago"). */
   savedAt: Record<string, number> = $state({});
-  private pendingContent = new Map<string, { data: string | Uint8Array; timer: ReturnType<typeof setTimeout> }>();
+  private pendingContent = new Map<string, {
+    data: string | Uint8Array; timer: ReturnType<typeof setTimeout>; context: number;
+    resolve?: (value: ProductAttachment | null) => void; reject?: (reason: unknown) => void;
+  }>();
+  private contentDrafts = new Map<string, { data: string | Uint8Array; context: number }>();
+  contentContext = 0;
+
+  resetContentContext(): void {
+    this.contentContext++;
+    for (const pending of this.pendingContent.values()) {
+      clearTimeout(pending.timer); pending.resolve?.(null);
+    }
+    this.pendingContent.clear(); this.contentDrafts.clear(); this.contentBase.clear();
+    this.saveState = {}; this.savedAt = {};
+    this.selectedId = null; this.detail = null;
+    this.revokeBlobCache();
+  }
   private inflight = new Map<string, Promise<ProductAttachment | null>>();
   /** Optimistic-concurrency base per artifact: the `updated_at` we last loaded or
    *  saved, sent as `base_updated_at` so a stale editor gets a 409, not a clobber. */
@@ -646,15 +662,19 @@ class ProductStore {
   /** Schedule a debounced `PUT …/content`. Resolves with the row once THIS
    *  payload (or a later one that superseded it) is persisted; `null` when a
    *  later edit superseded it before it was sent. */
-  saveAttachmentContent(aid: string, data: string | Uint8Array): Promise<ProductAttachment | null> {
+  saveAttachmentContent(aid: string, data: string | Uint8Array, context = this.contentContext): Promise<ProductAttachment | null> {
+    if (context !== this.contentContext) return Promise.resolve(null);
     const prev = this.pendingContent.get(aid);
-    if (prev) clearTimeout(prev.timer);
+    if (prev) { clearTimeout(prev.timer); prev.resolve?.(null); }
     this.saveState = { ...this.saveState, [aid]: 'dirty' };
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        void this.flushAttachmentContent(aid).then(resolve);
+        // flush settles the submitted caller even when invoked by navigation.
+        void this.flushAttachmentContent(aid).catch(() => {});
       }, CONTENT_SAVE_DEBOUNCE_MS);
-      this.pendingContent.set(aid, { data, timer });
+      const pending = { data, timer, context, resolve, reject };
+      this.pendingContent.set(aid, pending);
+      this.contentDrafts.set(aid, pending);
     });
   }
 
@@ -664,9 +684,9 @@ class ProductStore {
     if (!pending) return this.inflight.get(aid) ?? null;
     clearTimeout(pending.timer);
     this.pendingContent.delete(aid);
-    // Serialize writes per artifact so two flushes can't race on the wire.
     const prior = this.inflight.get(aid) ?? Promise.resolve(null);
     const run = prior.then(async () => {
+      if (pending.context !== this.contentContext) return null;
       this.saveState = { ...this.saveState, [aid]: 'saving' };
       try {
         const body: SaveAttachmentContentReq = {
@@ -674,31 +694,37 @@ class ProductStore {
           base_updated_at: this.contentBase.get(aid) ?? null,
         };
         const att = await api.put<ProductAttachment>(
-          `/product/attachments/${encodeURIComponent(aid)}/content`,
-          body,
+          `/product/attachments/${encodeURIComponent(aid)}/content`, body,
         );
+        if (pending.context !== this.contentContext) return null;
         this.contentBase.set(aid, att.updated_at);
-        // A newer edit landed while we were saving → stay dirty (its own flush
-        // will flip us to saved); otherwise we're clean.
-        const stillDirty = this.pendingContent.has(aid);
+        const stillDirty = this.contentDrafts.get(aid) !== pending;
+        if (!stillDirty) this.contentDrafts.delete(aid);
         this.saveState = { ...this.saveState, [aid]: stillDirty ? 'dirty' : 'saved' };
         this.savedAt = { ...this.savedAt, [aid]: Date.now() };
         return att;
       } catch (e) {
-        // 409 = the row moved on since our base (another editor / the agent):
-        // surface the conflict UI instead of a generic error. Keep the payload
-        // so "keep mine" can re-send it against the fresh base.
-        const conflict = e instanceof ApiError && e.status === 409;
-        if (conflict) this.pendingContent.set(aid, { data: pending.data, timer: setTimeout(() => {}, 0) });
-        this.saveState = { ...this.saveState, [aid]: conflict ? 'conflict' : 'error' };
+        if (pending.context !== this.contentContext) return null;
+        // An older failure must never replace a newer queued draft. Retain
+        // each latest snapshot across switches; Retry explicitly resubmits it.
+        if (this.contentDrafts.get(aid) === pending) {
+          const conflict = e instanceof ApiError && e.status === 409;
+          this.saveState = { ...this.saveState, [aid]: conflict ? 'conflict' : 'error' };
+        }
         throw e;
       }
     });
-    this.inflight.set(aid, run.catch(() => null));
+    const settled = run.catch(() => null);
+    this.inflight.set(aid, settled);
     try {
-      return await run;
+      const result = await run;
+      pending.resolve?.(result);
+      return result;
+    } catch (e) {
+      pending.reject?.(e);
+      throw e;
     } finally {
-      if (this.inflight.get(aid) === run) this.inflight.delete(aid);
+      if (this.inflight.get(aid) === settled) this.inflight.delete(aid);
     }
   }
 
@@ -715,16 +741,19 @@ class ProductStore {
   async overwriteAttachmentContent(aid: string, data: string | Uint8Array, serverUpdatedAt: string): Promise<ProductAttachment | null> {
     this.contentBase.set(aid, serverUpdatedAt);
     const prev = this.pendingContent.get(aid);
-    if (prev) clearTimeout(prev.timer);
-    this.pendingContent.set(aid, { data, timer: setTimeout(() => {}, 0) });
+    if (prev) { clearTimeout(prev.timer); prev.resolve?.(null); }
+    const pending = { data, timer: setTimeout(() => {}, 0), context: this.contentContext };
+    this.pendingContent.set(aid, pending);
+    this.contentDrafts.set(aid, pending);
     return this.flushAttachmentContent(aid);
   }
 
   /** Drop a pending (unsent) edit — used when the user accepts a live replace. */
   discardPendingContent(aid: string): void {
     const pending = this.pendingContent.get(aid);
-    if (pending) clearTimeout(pending.timer);
+    if (pending) { clearTimeout(pending.timer); pending.resolve?.(null); }
     this.pendingContent.delete(aid);
+    this.contentDrafts.delete(aid);
     this.saveState = { ...this.saveState, [aid]: 'saved' };
   }
 
@@ -733,7 +762,9 @@ class ProductStore {
   }
 
   /** Fetch an attachment's bytes as text (the arena's initial load). */
-  async attachmentText(aid: string): Promise<string> {
+  async attachmentText(aid: string, restoreDraft = false): Promise<string> {
+    const draft = this.contentDrafts.get(aid);
+    if (restoreDraft && draft?.context === this.contentContext) return typeof draft.data === 'string' ? draft.data : new TextDecoder().decode(draft.data);
     return authedText(`/product/attachments/${encodeURIComponent(aid)}`);
   }
 
@@ -771,7 +802,9 @@ class ProductStore {
    *  URL and drop editor bases (pending timers are flushed by the arena first). */
   teardown(): void {
     this.revokeBlobCache();
-    this.contentBase.clear();
+    for (const aid of this.contentBase.keys()) {
+      if (!this.hasUnsavedContent(aid)) this.contentBase.delete(aid);
+    }
   }
 
   // ── Blender bridge (design §4.4; optional, detected) ───────────────────────
@@ -1079,3 +1112,7 @@ class ProductStore {
 }
 
 export const product = new ProductStore();
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('otto:auth-changed', () => product.resetContentContext());
+}

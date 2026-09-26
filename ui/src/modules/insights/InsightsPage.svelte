@@ -53,6 +53,19 @@
   // ---------------------------------------------------------------------------
 
   const tab = $derived(router.parts[1] === 'health' ? 'health' : 'reports');
+  function onTabKey(e: KeyboardEvent): void {
+    const tabs = (e.currentTarget as HTMLElement).querySelectorAll<HTMLButtonElement>('[role="tab"]');
+    const at = tab === 'reports' ? 0 : 1;
+    let next = -1;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') next = 1 - at;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = 1;
+    if (next < 0) return;
+    e.preventDefault();
+    router.go(next === 0 ? 'insights' : 'insights/health');
+    tabs[next]?.focus();
+  }
+
   /** `daily:20260923_20260923` when the route names one report. */
   const routeKey = $derived.by(() => {
     const [, r, kind, start, end] = router.parts;
@@ -98,11 +111,13 @@
   let fullMd: Record<string, string> = $state({});
 
   let loaded = false;
+  let disposed = false;
   $effect(() => {
     if (loaded) return;
     loaded = true;
     void load();
     return () => {
+      disposed = true;
       if (pollTimer) clearTimeout(pollTimer);
     };
   });
@@ -120,12 +135,15 @@
     }
   }
 
+  let indexRequest = 0;
   async function loadIndex(): Promise<void> {
+    const request = ++indexRequest;
     const html = reports.find((r) => r.html_path)?.html_path;
     const path = html ? indexPathFrom(html) : null;
     if (!path) return;
     try {
-      index = parseIndex(JSON.parse(await insightsApi.readText(path)));
+      const next = parseIndex(JSON.parse(await insightsApi.readText(path)));
+      if (!disposed && request === indexRequest) index = next;
     } catch {
       /* no index yet / unreadable — KPIs fall back to the summaries alone */
     }
@@ -169,16 +187,17 @@
   let selectedKey: string | null = $state(null);
   /** Phone: list/detail is push navigation — the detail replaces the list. */
   let phoneDetail = $state(false);
+  $effect(() => { phoneDetail = routeKey !== null; });
 
   // Open on the routed report, else the last-viewed one, else the newest.
   $effect(() => {
     if (loading || reports.length === 0) return;
-    if (routeKey && reports.some((r) => keyOf(r) === routeKey)) {
+    if (routeKey) {
       if (selectedKey !== routeKey) selectedKey = routeKey;
       return;
     }
-    if (selectedKey && reports.some((r) => keyOf(r) === selectedKey)) return;
-    selectedKey = initialSelection('insights', reports, keyOf);
+    if (selectedKey && filtered.some((r) => keyOf(r) === selectedKey)) return;
+    selectedKey = initialSelection('insights', filtered, keyOf);
   });
   $effect(() => {
     if (selectedKey && !detailOnly) rememberSelection('insights', selectedKey);
@@ -200,14 +219,16 @@
     if (fullMd[k] != null) return;
     const path = siblingPath(r.html_path, 'summary');
     if (!path) return;
+    let current = true;
     void insightsApi
       .readText(path)
       .then((text) => {
-        if (text.trim()) fullMd = { ...fullMd, [k]: text };
+        if (current && text.trim()) fullMd = { ...fullMd, [k]: text };
       })
       .catch(() => {
-        fullMd = { ...fullMd, [k]: r.summary };
+        if (current) fullMd = { ...fullMd, [k]: r.summary };
       });
+    return () => { current = false; };
   });
 
   // ---------------------------------------------------------------------------
@@ -341,6 +362,21 @@
   // Run now — with run_id polling
   // ---------------------------------------------------------------------------
 
+  // Compatibility for older daemons without report_key. New daemons resolve
+  // this in their own local timezone, matching the skill collector.
+  function localReportKey(period: InsightRunPeriod, offset: number): string {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    if (period === 'day') start.setDate(start.getDate() - offset);
+    else if (period === 'week') start.setDate(start.getDate() - (start.getDay() + 6) % 7 - offset * 7);
+    else { start.setDate(1); start.setMonth(start.getMonth() - offset); }
+    const end = new Date(start);
+    if (period === 'week') end.setDate(end.getDate() + 6);
+    else if (period === 'month') { end.setMonth(end.getMonth() + 1); end.setDate(0); }
+    const ymd = (d: Date) => `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+    return `${period === 'day' ? 'daily' : period === 'week' ? 'weekly' : 'monthly'}:${ymd(start)}_${ymd(end)}`;
+  }
+
   const RUN_OPTIONS: { value: string; label: string }[] = [
     { value: 'day:1', label: 'Yesterday' },
     { value: 'day:2', label: '2 days ago' },
@@ -354,6 +390,8 @@
   /** Reason the last run did not start (e.g. skill not installed). */
   let runFailReason: string | null = $state(null);
   let pollRunId: string | null = $state(null);
+  let pollReportKey: string | null = null;
+  let reportBeforeRun: string | undefined;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   // 3 s × 100 ≈ 5 min: the banner promises "a few minutes", and the old 20
   // checks (one minute) dropped the banner silently while the agent was still
@@ -362,19 +400,26 @@
   let pollCount = $state(0);
 
   async function runNow(choice = runChoice): Promise<void> {
-    if (running || pollRunId) return;
+    if (loading || loadError || running || pollRunId) return;
     const [p, o] = choice.split(':');
     running = true;
     runFailReason = null;
     pollCount = 0;
+    const period = p as InsightRunPeriod;
+    const offset = Number(o) || 1;
+    const before = new Map(reports.map((r) => [keyOf(r), JSON.stringify(r)]));
+    const fallbackKey = localReportKey(period, offset);
     try {
-      const resp = await insightsApi.run({ period: p as InsightRunPeriod, offset: Number(o) || 1 });
+      const resp = await insightsApi.run({ period, offset });
+      if (disposed) return;
       if (!resp.started) {
         runFailReason = resp.reason ?? 'Check that the insights skill is installed.';
         return;
       }
       if (resp.run_id) {
         pollRunId = resp.run_id;
+        pollReportKey = resp.report_key ?? fallbackKey;
+        reportBeforeRun = before.get(pollReportKey);
         schedulePoll();
       } else {
         setTimeout(() => void load(), 2500);
@@ -388,6 +433,7 @@
   }
 
   function schedulePoll(): void {
+    if (disposed) return;
     if (pollCount >= POLL_MAX || !pollRunId) {
       if (pollRunId) {
         toasts.info('Still generating the insights report', 'It will show up in the list once the agent finishes — reopen Insights to check.');
@@ -398,17 +444,21 @@
     }
     pollTimer = setTimeout(async () => {
       pollCount += 1;
-      const prev = reports.length;
       try {
-        reports = await insightsApi.listReports();
+        const next = await insightsApi.listReports();
+        if (disposed) return;
+        reports = next;
       } catch {
         /* keep polling; the next tick retries */
       }
-      if (reports.length > prev) {
+      const ready = reports.find((r) => keyOf(r) === pollReportKey && reportBeforeRun !== JSON.stringify(r));
+      if (ready) {
         pollRunId = null;
-        selectedKey = keyOf(reports[0]);
+        fullMd = {};
+        filter = 'all';
+        select(ready);
         void loadIndex();
-        toasts.success('Insights report ready', periodShort(reports[0]));
+        toasts.success('Insights report ready', periodShort(ready));
       } else {
         schedulePoll();
       }
@@ -481,16 +531,16 @@
   >
     {#snippet leading()}
       {#if viewport.isPhone && tab === 'reports' && phoneDetail && selected}
-        <button class="icon-btn" onclick={() => (phoneDetail = false)} aria-label="Back to reports" title="Back to reports">
+        <button class="icon-btn" onclick={() => { phoneDetail = false; if (routeKey) router.replace('insights'); }} aria-label="Back to reports" title="Back to reports">
           <Icon name="chevronLeft" size={16} />
         </button>
       {/if}
     {/snippet}
     {#snippet tabs()}
       {#if !detailOnly}
-        <div class="segmented" role="tablist" aria-label="Insights view">
-          <button role="tab" aria-selected={tab === 'reports'} class:active={tab === 'reports'} onclick={() => router.go('insights')}>Reports</button>
-          <button role="tab" aria-selected={tab === 'health'} class:active={tab === 'health'} onclick={() => router.go('insights/health')}>Health</button>
+        <div class="segmented" role="tablist" tabindex="-1" aria-label="Insights view" onkeydown={onTabKey}>
+          <button role="tab" tabindex={tab === 'reports' ? 0 : -1} aria-selected={tab === 'reports'} class:active={tab === 'reports'} onclick={() => router.go('insights')}>Reports</button>
+          <button role="tab" tabindex={tab === 'health' ? 0 : -1} aria-selected={tab === 'health'} class:active={tab === 'health'} onclick={() => router.go('insights/health')}>Health</button>
         </div>
       {/if}
     {/snippet}
@@ -505,10 +555,10 @@
           <Icon name="gear" size={14} />
         </button>
         {#if reports.length > 0 || loading}
-          <select class="input run-period" bind:value={runChoice} disabled={running || !!pollRunId} aria-label="Period to report on" title="Period to report on">
+          <select class="input run-period" bind:value={runChoice} disabled={loading || !!loadError || running || !!pollRunId} aria-label="Period to report on" title="Period to report on">
             {#each RUN_OPTIONS as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
           </select>
-          <button class="btn small primary" disabled={running || !!pollRunId} onclick={() => runNow()}>
+          <button class="btn small primary" disabled={loading || !!loadError || running || !!pollRunId} onclick={() => runNow()}>
             <Icon name="play" size={12} />
             {running ? 'Starting…' : pollRunId ? 'Running…' : 'Run now'}
           </button>
@@ -572,7 +622,7 @@
             <aside class="list-pane" class:hide-phone={viewport.isPhone && phoneDetail} aria-label="Reports">
               <div class="filters" role="group" aria-label="Filter by period">
                 {#each visibleKinds as k (k.id)}
-                  <button class="filter-chip" class:active={filter === k.id} aria-pressed={filter === k.id} onclick={() => (filter = k.id)}>
+                  <button class="filter-chip" class:active={filter === k.id} aria-pressed={filter === k.id} onclick={() => { filter = k.id; if (routeKey) router.replace('insights'); }}>
                     {k.label} <span class="count">{counts[k.id] ?? 0}</span>
                   </button>
                 {/each}

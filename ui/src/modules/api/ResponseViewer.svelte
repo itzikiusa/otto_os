@@ -583,6 +583,7 @@
   }
   .rtabs {
     display: flex;
+    flex-wrap: wrap;
     align-items: flex-end;
     gap: 2px;
     border-bottom: 1px solid var(--border);

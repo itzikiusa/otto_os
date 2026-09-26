@@ -73,6 +73,7 @@
   }
 
   async function mint(): Promise<void> {
+    if (minting) return;
     minting = true;
     try {
       const resp = await api.post<CreateApiTokenResp>('/auth/tokens', {

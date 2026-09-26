@@ -166,6 +166,19 @@
     if (saved) toasts.success(editing ? 'Account updated' : 'Account added', saved.name);
     onclose();
   }
+  function sourceKey(e: KeyboardEvent): void {
+    if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
+    e.preventDefault();
+    const button = e.currentTarget as HTMLButtonElement;
+    const tabs = Array.from(button.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]') ?? []);
+    const rtl = getComputedStyle(button).direction === 'rtl';
+    const step = (e.key === 'ArrowRight' ? 1 : -1) * (rtl ? -1 : 1);
+    const i = tabs.indexOf(button);
+    const j = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : (i + step + tabs.length) % tabs.length;
+    tabs[j]?.click();
+    tabs[j]?.focus();
+  }
+
 </script>
 
 <Modal title={editing ? `Edit ${init?.name ?? 'account'}` : 'Add AWS account'} width={620} {onclose}>
@@ -178,10 +191,10 @@
 
     {#if step === 1}
       <div class="modes" role="tablist" aria-label="Credential source">
-        <button role="tab" aria-selected={mode === 'profile'} class:on={mode === 'profile'} onclick={() => (mode = 'profile')}>
+        <button role="tab" aria-selected={mode === 'profile'} tabindex={mode === 'profile' ? 0 : -1} onkeydown={sourceKey} class:on={mode === 'profile'} onclick={() => (mode = 'profile')}>
           Use an existing AWS profile
         </button>
-        <button role="tab" aria-selected={mode === 'access_keys'} class:on={mode === 'access_keys'} onclick={() => (mode = 'access_keys')}>
+        <button role="tab" aria-selected={mode === 'access_keys'} tabindex={mode === 'access_keys' ? 0 : -1} onkeydown={sourceKey} class:on={mode === 'access_keys'} onclick={() => (mode = 'access_keys')}>
           Enter access keys
         </button>
       </div>

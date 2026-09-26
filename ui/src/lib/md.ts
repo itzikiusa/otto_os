@@ -13,7 +13,13 @@ import { sanitizeHtml } from './sanitize';
  *  the escaped tiny renderer. */
 export function renderMarkdownGfm(md: string): string {
   try {
-    return sanitizeHtml(marked.parse(md ?? '', { async: false, gfm: true, breaks: false }) as string);
+    const html = sanitizeHtml(marked.parse(md ?? '', { async: false, gfm: true, breaks: false }) as string);
+    // WebKit does not make overflow containers keyboard-focusable by default.
+    // Add trusted attributes after sanitizing, so wide code/tables can be
+    // reached with Tab and scrolled with arrow keys without a pointer.
+    const document = new DOMParser().parseFromString(html, 'text/html');
+    for (const block of document.querySelectorAll('pre, table')) block.setAttribute('tabindex', '0');
+    return document.body.innerHTML;
   } catch {
     return renderMarkdown(md);
   }
@@ -67,7 +73,7 @@ export function renderMarkdown(md: string): string {
         out.push('</code></pre>');
         inCode = false;
       } else {
-        out.push('<pre><code>');
+        out.push('<pre tabindex="0"><code>');
         inCode = true;
       }
       continue;

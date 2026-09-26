@@ -86,7 +86,6 @@
     open = false;
     query = '';
     if (v !== value) onchange(v);
-    inputEl?.blur();
   }
 
   function onKey(e: KeyboardEvent): void {
@@ -113,7 +112,6 @@
       e.stopPropagation();
       open = false;
       query = '';
-      inputEl?.blur();
     }
   }
 
@@ -189,6 +187,7 @@
       title={disabled ? 'This kind is cluster-scoped — no namespace applies' : error ? `Namespaces couldn't be listed: ${error}` : shown}
       value={open ? query : shown}
       {disabled}
+      onblur={() => { open = false; query = ''; }}
       onfocus={() => void show()}
       onclick={() => void show()}
       oninput={(e) => { query = (e.currentTarget as HTMLInputElement).value; onInput(); }}

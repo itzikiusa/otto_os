@@ -36,6 +36,19 @@
   const hasAgentCli = $derived(agentTools.some((t) => t.found));
   // The provider names whose CLI is actually present.
   const foundProviders = $derived(agentTools.filter((t) => t.found).map((t) => t.name));
+  let checkingProviders = $state(false);
+  let providerCheckFailed = $state(false);
+
+  async function recheckProviders(): Promise<void> {
+    if (checkingProviders) return;
+    checkingProviders = true;
+    providerCheckFailed = false;
+    try {
+      providerCheckFailed = !(await auth.refreshMeta());
+    } finally {
+      checkingProviders = false;
+    }
+  }
 
   // --- Step 2: workspace -----------------------------------------------------
   const hasWorkspace = $derived(ws.workspaces.length > 0 && ws.current !== null);
@@ -72,6 +85,8 @@
   const RECOMMENDED = ['grill', 'correctness-review', 'security-review', 'insights'];
   let bundled: BundledSkill[] = $state([]);
   let skillsLoaded = $state(false);
+  let skillsLoading = $state(false);
+  let skillsError = $state(false);
   let skillBusy: Set<string> = $state(new Set());
   const recommendedSkills = $derived(
     RECOMMENDED.map((n) => bundled.find((b) => b.name === n)).filter(
@@ -80,18 +95,22 @@
   );
 
   $effect(() => {
-    if (skillsLoaded || !auth.isRoot) return;
+    if (skillsLoaded || skillsLoading || !auth.isRoot) return;
     void loadSkills();
   });
 
   async function loadSkills(): Promise<void> {
+    if (skillsLoading) return;
+    skillsLoading = true;
+    skillsError = false;
     try {
       bundled = await contextApi.listBundled();
     } catch {
-      // Non-fatal: the skills step just stays empty.
-      bundled = [];
+      // Optional setup must stay recoverable without blocking the first agent.
+      skillsError = true;
     } finally {
       skillsLoaded = true;
+      skillsLoading = false;
     }
   }
 
@@ -224,9 +243,12 @@
                 <span class="mono">npm i -g @openai/codex</span>
               </li>
             </ul>
-            <button class="btn small" onclick={() => auth.refreshMeta()}>
-              <Icon name="refresh" size={11} /> Re-check
+            <button class="btn small" disabled={checkingProviders} onclick={recheckProviders}>
+              <Icon name="refresh" size={11} /> {checkingProviders ? 'Checking…' : 'Re-check'}
             </button>
+            {#if providerCheckFailed}
+              <p role="status">Could not check agent CLIs. Try again.</p>
+            {/if}
           </div>
         {/if}
       </div>
@@ -247,9 +269,9 @@
         {:else}
           <div class="step-hint">A workspace maps to a project directory. Sessions run inside it.</div>
           <div class="ws-form">
-            <input class="input" bind:value={wsName} oninput={() => (wsNameTouched = true)} placeholder="my-project" />
+            <input class="input" aria-label="Workspace name" bind:value={wsName} oninput={() => (wsNameTouched = true)} placeholder="my-project" />
             <div class="path-row">
-              <input class="input mono" bind:value={wsPath} spellcheck="false" placeholder="~/code/my-project" />
+              <input class="input mono" aria-label="Workspace folder" dir="ltr" bind:value={wsPath} spellcheck="false" placeholder="~/code/my-project" />
               <button class="btn" type="button" onclick={() => (pickerOpen = true)}>Browse…</button>
             </div>
             <button class="btn small primary" disabled={!canCreateWs} onclick={createWorkspace}>
@@ -261,7 +283,7 @@
     </div>
 
     <!-- Step 3: recommended skills (optional) -->
-    {#if auth.isRoot && recommendedSkills.length > 0}
+    {#if auth.isRoot && (!skillsLoaded || skillsError || recommendedSkills.length > 0)}
       <div class="step optional">
         <span class="step-mark"><span class="num">3</span></span>
         <div class="step-body">
@@ -272,6 +294,14 @@
             Drop-in expertise your agents can use — code review and usage insights. Install now or
             later from <button class="link" onclick={() => router.go('settings/skills')}>Settings → Skills</button>.
           </div>
+          {#if skillsLoading}
+            <p class="step-hint" role="status">Loading recommended skills…</p>
+          {:else if skillsError}
+            <div class="step-hint" role="status">
+              <p>Could not load recommended skills.</p>
+              <button class="btn small" onclick={loadSkills}>Retry skills</button>
+            </div>
+          {/if}
           <div class="skill-rows">
             {#each recommendedSkills as s (s.name)}
               {@const installed = s.state === 'up_to_date' || s.state === 'ahead'}
@@ -315,7 +345,6 @@
     start={wsPath}
     onpick={(p) => {
       wsPath = p;
-      wsNameTouched = false;
       pickerOpen = false;
     }}
     onclose={() => (pickerOpen = false)}
@@ -326,7 +355,8 @@
   .coach-wrap {
     height: 100%;
     display: grid;
-    place-items: center;
+    grid-template-columns: minmax(0, 1fr);
+    place-items: safe center;
     overflow: auto;
     padding: 24px;
   }
@@ -334,6 +364,8 @@
     position: relative;
     width: 480px;
     max-width: 100%;
+    min-width: 0;
+    overflow-wrap: anywhere;
     padding: 22px 24px 24px;
   }
   .coach-close {
@@ -368,6 +400,9 @@
     color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
+  .coach-head > div:last-child {
+    min-width: 0;
+  }
   .coach-head h2 {
     margin: 0 0 2px;
     font-size: var(--fs-l);
@@ -384,9 +419,6 @@
     gap: 11px;
     padding: 12px 0;
     border-top: 1px solid var(--border);
-  }
-  .step.optional {
-    opacity: 0.95;
   }
   .step-mark {
     flex-shrink: 0;
@@ -413,6 +445,7 @@
     min-width: 0;
   }
   .step-title {
+    flex-wrap: wrap;
     font-size: var(--fs-m);
     font-weight: 600;
     display: flex;
@@ -451,6 +484,10 @@
     margin-top: 6px;
   }
   .chip {
+    height: auto;
+    min-height: 20px;
+    max-width: 100%;
+    white-space: normal;
     display: inline-flex;
     align-items: center;
     gap: 4px;
@@ -534,5 +571,18 @@
   }
   .link:hover {
     text-decoration: underline;
+  }
+  @media (max-width: 640px) {
+    .coach button {
+      min-height: 36px;
+    }
+    .coach-close {
+      min-width: 36px;
+      top: 6px;
+      inset-inline-end: 6px;
+    }
+    .coach-head {
+      padding-inline-end: 20px;
+    }
   }
 </style>

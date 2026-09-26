@@ -2,8 +2,8 @@
 // scratch (no samples, no network). Writes to public/audio/:
 //   music.wav     ambient pad + soft pulse, sized to the film (reads
 //                 src/generated/timing.json), with an intro rise and an outro
-//                 swell/ring-out. Ducking under the narration happens in the
-//                 composition (see src/Tour.tsx), not here.
+//                 swell/ring-out. The instrumental edition keeps
+//                 the score present throughout; captions carry the instructions.
 //   sfx-*.wav     small UI accents: click, whoosh, tick, riser, impact.
 //
 //   node scripts/soundtrack.mjs [--duration <sec>]
@@ -103,7 +103,7 @@ function music() {
   const n = Math.round(DURATION * SR);
   const L = new Float32Array(n);
   const R = new Float32Array(n);
-  const BPM = 96;
+  const BPM = 112;
   const beat = 60 / BPM;
   const bar = beat * 4;
   // Dmaj9 – Bm9 – Gmaj7(#11) – A6sus : warm, optimistic, unresolved loop.
@@ -136,7 +136,7 @@ function music() {
       const f = midi(note + 12 * (k < 2 ? 0 : 0));
       const amp = (k === 0 ? 0.09 : 0.055) / Math.sqrt(notes.length);
       const det = [0.9965, 1, 1.0037];
-      const ph = det.map(() => Math.random() * Math.PI * 2);
+      const ph = det.map(() => (rnd() + 1) * Math.PI);
       for (let i = i0; i < i1; i++) {
         const t = i / SR;
         const local = (t - t0) / (t1 - t0);
@@ -183,7 +183,7 @@ function music() {
     const f = midi(note);
     const i0 = Math.round(t * SR);
     const len = Math.round(0.42 * SR);
-    const amp = (s % 2 ? 0.028 : 0.04) * energy(t);
+    const amp = (s % 2 ? 0.035 : 0.05) * energy(t);
     const pan = s % 4 < 2 ? 0.35 : -0.35;
     for (let j = 0; j < len && i0 + j < n; j++) {
       const tt = j / SR;
@@ -336,12 +336,11 @@ function effects() {
 effects();
 music();
 
-// Normalize the bed to −20 LUFS so the composition's duck/open gains
-// (src/Tour.tsx) land it ~20 dB under the −16 LUFS narration.
+// Normalize the instrumental score; the final film is mastered to −16 LUFS.
 {
   const { execFileSync } = await import('node:child_process');
   const { renameSync } = await import('node:fs');
-  const FF = process.env.FFMPEG ?? '/opt/homebrew/bin/ffmpeg';
+  const FF = process.env.FFMPEG ?? 'ffmpeg';
   const src = join(outDir, 'music.wav');
   const tmp = join(outDir, 'music.norm.wav');
   execFileSync(FF, ['-y', '-v', 'error', '-i', src, '-af', 'loudnorm=I=-20:TP=-3:LRA=11', '-ar', '48000', '-ac', '2', tmp]);

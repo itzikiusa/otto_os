@@ -38,3 +38,22 @@ export function accentFill(hex: string): { solid: string; contrast: string } | n
     ? { solid: hex, contrast: DARK_TEXT }
     : { solid: `color-mix(in srgb, ${hex} 84%, black)`, contrast: '#ffffff' };
 }
+
+/** Preserve as much custom hue as possible while keeping small accent labels
+ * readable on the theme's solid surfaces and accent-tinted selections. */
+export function accentText(hex: string, text: string, surfaces: string[]): string | null {
+  const accent = parseHex(hex);
+  const foreground = parseHex(text);
+  const backgrounds = surfaces.map(parseHex).filter((v): v is [number, number, number] => v !== null);
+  if (!accent || !foreground || backgrounds.length === 0) return null;
+  const mix = (a: number[], b: number[], weight: number): [number, number, number] =>
+    a.map((v, i) => v * weight + b[i] * (1 - weight)) as [number, number, number];
+  const candidates = [...backgrounds, ...backgrounds.map((bg) => mix(accent, bg, 0.14))];
+  for (let percent = 62; percent >= 0; percent--) {
+    const color = mix(accent, foreground, percent / 100);
+    if (candidates.every((bg) => ratio(luminance(color), luminance(bg)) >= 4.6)) {
+      return `color-mix(in srgb, ${hex} ${percent}%, ${text})`;
+    }
+  }
+  return text;
+}

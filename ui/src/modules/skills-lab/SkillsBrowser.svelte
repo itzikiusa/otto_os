@@ -37,6 +37,7 @@
   } from './skillGroups';
 
   interface Props {
+    listCollapsed?: boolean;
     onreview?: (name: string, source: string) => void;
     onevaluate?: (name: string, source: string) => void;
     /** Tells the page whether the library is empty (it then drops its header
@@ -49,7 +50,7 @@
     /** Open one existing review in the Review tab. */
     onopenreview?: (id: string) => void;
   }
-  let { onreview, onevaluate, onempty, onphonedetail, onopenrun, onopenreview }: Props = $props();
+  let { listCollapsed = false, onreview, onevaluate, onempty, onphonedetail, onopenrun, onopenreview }: Props = $props();
 
   // ---- Data -----------------------------------------------------------------
   let library = $state<LibrarySkill[]>([]);
@@ -330,7 +331,7 @@
     </EmptyState>
   {:else}
     <div class="split">
-      <aside class="list-pane" class:hide-phone={viewport.isPhone && phoneDetail} aria-label="Skills">
+      <aside id="skills-list-pane" class="list-pane" class:collapsed={listCollapsed && !viewport.isPhone} class:hide-phone={viewport.isPhone && phoneDetail} aria-label="Skills">
         <div class="list-tools">
           <label class="search">
             <Icon name="search" size={14} />
@@ -476,6 +477,7 @@
     border-inline-end: 1px solid var(--border);
     background: var(--surface);
   }
+  .list-pane.collapsed { display: none; }
   .detail-pane {
     flex: 1;
     min-width: 0;

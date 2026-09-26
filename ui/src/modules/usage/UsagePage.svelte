@@ -4,6 +4,7 @@
   // CPU/RAM metrics, and the embedded-ClickHouse install/retention controls.
   // All data comes from the daemon's /usage/* endpoints (otto-usage engine).
   import { onMount } from 'svelte';
+  import { guardUnsaved } from '../../lib/leaveGuard';
   import Icon from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -51,6 +52,20 @@
   });
   let budgetsOpen = $state(false);
   let budgetsDirty = $state(false);
+  let budgetValidated = $state(false);
+  $effect(() => guardUnsaved(() => budgetsDirty, { what: 'your budgets' }));
+  const budgetWindowInvalid = $derived(!Number.isInteger(budgetCfg.window_days) || budgetCfg.window_days < 1 || budgetCfg.window_days > 3650);
+  const budgetValidation = $derived.by(() => {
+    if (budgetWindowInvalid)
+      return 'Choose a whole number of days from 1 to 3650.';
+    if ([...budgetCfg.workspaces, ...budgetCfg.providers].some((b) => b.monthly_usd != null && (!Number.isFinite(b.monthly_usd) || b.monthly_usd < 0)))
+      return 'Caps must be zero or a positive amount in US dollars.';
+    const providers = budgetCfg.providers.filter((b) => b.provider && b.monthly_usd > 0).map((b) => b.provider);
+    if (new Set(providers).size !== providers.length) return 'Use one cap per provider. Remove the duplicate row or choose another provider.';
+    const workspaces = budgetCfg.workspaces.filter((b) => b.workspace_id && b.monthly_usd > 0).map((b) => b.workspace_id);
+    if (new Set(workspaces).size !== workspaces.length) return 'Use one cap per workspace. Remove the duplicate row or choose another workspace.';
+    return '';
+  });
 
   // Live budget-exceeded banner — driven by the BudgetExceeded WS event via
   // budgetBus. The banner is dismissible; a "recovered" direction auto-clears
@@ -167,6 +182,8 @@
     budgetCfg.providers = budgetCfg.providers.filter((_, j) => j !== i);
   }
   async function saveBudgets(): Promise<void> {
+    if (usage.savingBudgets || budgetValidation) return;
+    const submitted = JSON.stringify(budgetCfg);
     // Drop blank rows before saving (no key or no cap = nothing to enforce).
     const cfg: UsageBudgetConfig = {
       ...budgetCfg,
@@ -174,12 +191,9 @@
       workspaces: budgetCfg.workspaces.filter((b) => b.workspace_id && b.monthly_usd > 0),
       providers: budgetCfg.providers.filter((b) => b.provider && b.monthly_usd > 0),
     };
-    const before = usage.budgets;
-    await usage.saveBudgets(cfg);
-    // saveBudgets toasts + swallows a failure; only a landed save (fresh
-    // status object) may clear dirty — otherwise the seeding effect would
-    // overwrite the user's unsaved edits with the old server config.
-    if (usage.budgets !== before) budgetsDirty = false;
+    const saved = await usage.saveBudgets(cfg);
+    // The response acknowledges the submitted draft, never newer local edits.
+    if (saved && JSON.stringify(budgetCfg) === submitted) budgetsDirty = false;
   }
 
   // Workspace name for a budget row's id (falls back to the id). The hidden
@@ -924,8 +938,13 @@
                   class="input num-in"
                   type="number"
                   min="1"
+                  max="3650"
+                  step="1"
+                  aria-invalid={budgetValidated && budgetWindowInvalid}
+                  aria-describedby={budgetValidated && budgetValidation ? 'budget-validation' : undefined}
+                  onblur={() => (budgetValidated = true)}
                   bind:value={budgetCfg.window_days}
-                  onchange={() => (budgetsDirty = true)}
+                  oninput={() => (budgetsDirty = true)}
                 />
                 <span class="dim">days</span>
               </div>
@@ -952,7 +971,10 @@
                       placeholder="0"
                       aria-label="Cap in US dollars"
                       bind:value={b.monthly_usd}
-                      onchange={() => (budgetsDirty = true)}
+                      aria-invalid={budgetValidated && b.monthly_usd != null && (!Number.isFinite(b.monthly_usd) || b.monthly_usd < 0)}
+                      aria-describedby={budgetValidated && budgetValidation ? 'budget-validation' : undefined}
+                      onblur={() => (budgetValidated = true)}
+                      oninput={() => (budgetsDirty = true)}
                     />
                     <button class="icon-btn rm-btn" onclick={() => removeWsBudget(i)} title="Remove this cap" aria-label="Remove this workspace cap">
                       <Icon name="trash" size={14} />
@@ -985,7 +1007,10 @@
                       placeholder="0"
                       aria-label="Cap in US dollars"
                       bind:value={b.monthly_usd}
-                      onchange={() => (budgetsDirty = true)}
+                      aria-invalid={budgetValidated && b.monthly_usd != null && (!Number.isFinite(b.monthly_usd) || b.monthly_usd < 0)}
+                      aria-describedby={budgetValidated && budgetValidation ? 'budget-validation' : undefined}
+                      onblur={() => (budgetValidated = true)}
+                      oninput={() => (budgetsDirty = true)}
                     />
                     <button class="icon-btn rm-btn" onclick={() => removeProviderBudget(i)} title="Remove this cap" aria-label="Remove this provider cap">
                       <Icon name="trash" size={14} />
@@ -996,12 +1021,13 @@
                 {/each}
               </div>
 
+              {#if budgetValidated && budgetValidation}<p id="budget-validation" role="alert">{budgetValidation}</p>{/if}
               <div class="editor-actions">
                 <span class="dim small">Rows without a scope or a cap above $0 are dropped on save.</span>
                 <button
                   class="btn primary"
-                  disabled={usage.savingBudgets || !budgetsDirty}
-                  title={budgetsDirty ? undefined : 'No changes to save'}
+                  disabled={usage.savingBudgets || !budgetsDirty || !!budgetValidation}
+                  title={budgetValidation || (budgetsDirty ? undefined : 'No changes to save')}
                   onclick={saveBudgets}
                 >
                   {usage.savingBudgets ? 'Saving…' : 'Save budgets'}
@@ -1708,6 +1734,7 @@
     color: var(--danger);
     flex-shrink: 0;
   }
+  #budget-validation { color: var(--danger); }
   .budget-editor {
     margin-top: 12px;
     padding-top: 12px;

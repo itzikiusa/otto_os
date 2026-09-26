@@ -4,6 +4,8 @@
   // repo, grouped by forge) and MY WORK (Jira issues assigned to me, rebuilt
   // into project → epic → story → subtask hierarchy). Rows deep-link both ways:
   // into the Otto repo tab and out to the provider.
+  import { untrack } from 'svelte';
+  import { dialogFocus } from '../../lib/dialogFocus';
   import { api } from '../../lib/api/client';
   import type {
     GitAccount,
@@ -14,6 +16,7 @@
     PrSummary,
     Repo,
   } from '../../lib/api/types';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { router } from '../../lib/router.svelte';
   import { openExternal } from '../../lib/external';
@@ -87,34 +90,42 @@
 
   // ── MY WORK (Jira) ──────────────────────────────────────────────────────────
   let issueAccounts = $state<IssueAccount[]>([]);
+  let accountsError = $state<string | null>(null);
   let issueAccountId = $state<string>('');
   let work = $state<MyWorkIssue[]>([]);
   let workLoading = $state(true);
   let workError = $state<string | null>(null);
 
   async function loadAccounts(): Promise<void> {
+    accountsError = null;
+    workLoading = true;
     try {
       issueAccounts = await api.get<IssueAccount[]>('/issue/accounts');
       if (!issueAccountId && issueAccounts[0]) issueAccountId = issueAccounts[0].id;
-    } catch {
-      issueAccounts = [];
+    } catch (e) {
+      accountsError = (e instanceof Error ? e.message : String(e)) || 'The account service did not answer.';
     } finally {
       if (issueAccounts.length === 0) workLoading = false;
     }
   }
 
+  let workRevision = 0;
+
   async function loadWork(accountId: string): Promise<void> {
+    const revision = ++workRevision;
     workLoading = true;
     workError = null;
     try {
-      work = await api.get<MyWorkIssue[]>(
+      const next = await api.get<MyWorkIssue[]>(
         `/issue/my-work?account_id=${encodeURIComponent(accountId)}`,
       );
+      if (revision === workRevision && accountId === issueAccountId) work = next;
     } catch (e) {
+      if (revision !== workRevision || accountId !== issueAccountId) return;
       work = [];
       workError = e instanceof Error ? e.message : String(e);
     } finally {
-      workLoading = false;
+      if (revision === workRevision && accountId === issueAccountId) workLoading = false;
     }
   }
 
@@ -124,7 +135,10 @@
   });
   $effect(() => {
     const id = issueAccountId;
+    untrack(closeQuick);
+    work = [];
     if (id) void loadWork(id);
+    return () => { workRevision++; };
   });
 
   // Hierarchy: project → (parent group | top-level issue) → children.
@@ -192,23 +206,51 @@
   let quickKey = $state<string | null>(null);
   let quickIssue = $state<IssueDetail | null>(null);
   let quickLoading = $state(false);
+  let quickError = $state<string | null>(null);
+
+  let quickRevision = 0;
+  let narrow = $state(false);
+  $effect(() => {
+    const media = window.matchMedia('(max-width: 1024px)');
+    const sync = () => { narrow = media.matches; };
+    sync();
+    media.addEventListener('change', sync);
+    return () => media.removeEventListener('change', sync);
+  });
+  $effect(() => {
+    if (!narrow || quickKey === null) return;
+    untrack(() => ui.pushModal());
+    return () => untrack(() => ui.popModal());
+  });
+  function quickFocus(node: HTMLElement) {
+    if (narrow) return dialogFocus(node, closeQuick);
+  }
 
   async function openQuick(key: string): Promise<void> {
+    const revision = ++quickRevision;
+    const accountId = issueAccountId;
+    quickError = null;
     quickKey = key;
     quickIssue = null;
     quickLoading = true;
     try {
-      quickIssue = await api.get<IssueDetail>(
-        `/issue/${encodeURIComponent(issueAccountId)}/${encodeURIComponent(key)}`,
+      const next = await api.get<IssueDetail>(
+        `/issue/${encodeURIComponent(accountId)}/${encodeURIComponent(key)}`,
       );
-    } catch {
-      quickIssue = null;
+      if (revision === quickRevision && accountId === issueAccountId) quickIssue = next;
+    } catch (e) {
+      if (revision === quickRevision) {
+        quickIssue = null;
+        quickError = e instanceof Error ? e.message : String(e);
+      }
     } finally {
-      quickLoading = false;
+      if (revision === quickRevision) quickLoading = false;
     }
   }
 
   function closeQuick(): void {
+    quickRevision++;
+    quickLoading = false;
     quickKey = null;
     quickIssue = null;
   }
@@ -248,7 +290,7 @@
     <button
       class="fx-issue-main"
       class:quick-open={quickKey === node.issue.key}
-      onclick={() => openQuick(node.issue.key)}
+      onclick={(e) => { e.currentTarget.focus(); void openQuick(node.issue.key); }}
       title="Quick view {node.issue.key}"
     >
       <span class="fx-type t-{node.issue.issue_type.toLowerCase().replace(/[^a-z]+/g, '-')}">{node.issue.issue_type}</span>
@@ -274,7 +316,7 @@
 {/snippet}
 
 <div class="focus" class:quick={quickKey !== null}>
-  <div class="focus-main">
+  <div class="focus-main" inert={narrow && quickKey !== null}>
     <!-- ── MY PULL REQUESTS ── -->
     <section class="fx-section">
       <header class="fx-head">
@@ -368,7 +410,13 @@
         {/if}
       </header>
 
-      {#if issueAccounts.length === 0 && !workLoading}
+      {#if accountsError}
+        <div class="fx-empty fx-empty-row" role="alert">
+          <Icon name="warning" size={14} />
+          <span class="grow">Couldn’t load Jira accounts. <span class="dim">{accountsError}</span></span>
+          <button class="btn small" onclick={() => void loadAccounts()}>Retry</button>
+        </div>
+      {:else if issueAccounts.length === 0 && !workLoading}
         <div class="fx-empty dim fx-empty-row">
           <span>Connect a Jira account to see the issues assigned to you here.</span>
           <button class="btn small" onclick={() => router.go('settings/jira')}><Icon name="ticket" size={12} /> Add Jira account…</button>
@@ -410,7 +458,8 @@
 
   <!-- ── Issue quick-view side panel ── -->
   {#if quickKey !== null}
-    <aside class="fx-quick">
+    {#key narrow}
+    <aside class="fx-quick" role={narrow ? 'dialog' : 'complementary'} aria-modal={narrow ? 'true' : undefined} aria-label={`Issue ${quickKey}`} use:quickFocus>
       <header class="fx-quick-head">
         <span class="mono fx-key">{quickKey}</span>
         <span class="grow"></span>
@@ -443,11 +492,12 @@
       {:else}
         <div class="fx-empty fx-empty-row" role="alert">
           <Icon name="warning" size={14} />
-          <span class="grow">Couldn’t load {quickKey}.</span>
+          <span class="grow">Couldn’t load {quickKey}. {#if quickError}<span class="dim">{quickError}</span>{/if}</span>
           <button class="btn small" onclick={() => quickKey && void openQuick(quickKey)}>Retry</button>
         </div>
       {/if}
     </aside>
+    {/key}
   {/if}
 </div>
 
