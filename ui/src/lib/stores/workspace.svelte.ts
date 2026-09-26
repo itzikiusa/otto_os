@@ -1414,9 +1414,12 @@ class WorkspaceStore {
    *  could revert keys changed since (e.g. api_client.allow_local). */
   async saveNotes(notes: string, wsId: Id | null = this.currentId): Promise<void> {
     if (!wsId) return;
+    const token = getToken();
     const fresh = await fetchWorkspace(wsId);
+    if (token !== getToken()) return;
     const settings = { ...fresh.settings, notes };
     const updated = await api.patch<Workspace>(`/workspaces/${wsId}`, { settings });
+    if (token !== getToken()) return;
     this.workspaces = this.workspaces.map((w) =>
       w.id === updated.id ? { ...w, ...updated } : w,
     );
