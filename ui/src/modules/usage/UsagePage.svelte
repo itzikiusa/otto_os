@@ -60,6 +60,10 @@
       return 'Choose a whole number of days from 1 to 3650.';
     if ([...budgetCfg.workspaces, ...budgetCfg.providers].some((b) => b.monthly_usd != null && (!Number.isFinite(b.monthly_usd) || b.monthly_usd < 0)))
       return 'Caps must be zero or a positive amount in US dollars.';
+    const providers = budgetCfg.providers.filter((b) => b.provider && b.monthly_usd > 0).map((b) => b.provider);
+    if (new Set(providers).size !== providers.length) return 'Use one cap per provider. Remove the duplicate row or choose another provider.';
+    const workspaces = budgetCfg.workspaces.filter((b) => b.workspace_id && b.monthly_usd > 0).map((b) => b.workspace_id);
+    if (new Set(workspaces).size !== workspaces.length) return 'Use one cap per workspace. Remove the duplicate row or choose another workspace.';
     return '';
   });
 

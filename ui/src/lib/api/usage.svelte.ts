@@ -269,11 +269,17 @@ class UsageStore {
   }
 
   /** Load the budget config + live spend status (root-only). */
+  private budgetsSeq = 0;
+
   async loadBudgets(): Promise<void> {
+    const mine = ++this.budgetsSeq;
     try {
-      this.budgets = await api.get<UsageBudgetStatus>('/usage/budgets');
+      const next = await api.get<UsageBudgetStatus>('/usage/budgets');
+      if (mine !== this.budgetsSeq || this.savingBudgets) return;
+      this.budgets = next;
       this.budgetsError = null;
     } catch (e) {
+      if (mine !== this.budgetsSeq || this.savingBudgets) return;
       // Non-fatal: the dashboard still renders; the Budgets panel shows why.
       this.budgetsError = loadErrorText(e);
     }
@@ -282,6 +288,7 @@ class UsageStore {
   /** Persist the budget config and refresh the status. */
   async saveBudgets(cfg: UsageBudgetConfig): Promise<boolean> {
     this.savingBudgets = true;
+    ++this.budgetsSeq;
     try {
       this.budgets = await api.put<UsageBudgetStatus>('/usage/budgets', cfg);
       toasts.success('Budgets saved');
@@ -290,6 +297,8 @@ class UsageStore {
       toasts.error('Could not save budgets', errMsg(e));
       return false;
     } finally {
+      // Ignore refreshes begun before or during this mutation.
+      ++this.budgetsSeq;
       this.savingBudgets = false;
     }
   }
