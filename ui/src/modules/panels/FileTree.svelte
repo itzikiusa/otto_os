@@ -351,7 +351,7 @@
               class:is-dir={node.entry.is_dir}
               class:is-open={node.open}
               class:is-file={!node.entry.is_dir}
-              style="padding-left: {8 + node.depth * 14}px"
+              style="padding-inline-start: {8 + node.depth * 14}px"
               onclick={() => node.entry.is_dir ? toggleDir(node) : openFile(node.entry)}
               title={node.entry.path}
             >
@@ -493,7 +493,10 @@
     min-height: 60px;
   }
   .tree-pane.has-viewer {
-    flex: 0 0 45%;
+    /* Sparse folders give their unused room to the document; large trees
+       retain a bounded, independently scrollable navigation area. */
+    flex: 0 1 auto;
+    max-height: 45%;
     border-bottom: 1px solid var(--border);
   }
 
