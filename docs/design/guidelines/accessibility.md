@@ -24,7 +24,8 @@ in audits.
   - Status indicator colours (`--status-*`) are for dots and bars, not text.
   - A custom accent is handled by `accentFill()` for fills. Your own
     accent-tinted text must use `--accent-text`, which is mixed toward
-    `--text` so that it passes.
+    `--text`; custom hues are measured against the active theme surfaces before
+    choosing that mix.
 - **Check** anything you tint, overlay or put on a translucent material, in
   light and in dark. `ui/e2e/desktop-dialogs-tokens.spec.ts` has a `contrastOf`
   helper that composites real computed styles. Copy it for new assertions.
@@ -33,8 +34,9 @@ in audits.
 
 ## 2. Focus
 
-- There is a global `:focus-visible` ring in `app.css`: 2 px, `--accent` at
-  70%, 1 px offset. Inputs use an accent border plus a 3 px ring instead.
+- There is a global `:focus-visible` ring in `app.css`: 2 px, opaque `--accent-text`,
+  1 px offset. Inputs use a contrast-checked `--accent-text` border plus a
+  soft 3 px accent halo instead.
 - **Never remove an outline without a replacement.**
   `outline: none` / `outline: 0` is allowed only if the same rule set also
   styles `:focus-visible`: a ring, a border or a background. The audit found 25

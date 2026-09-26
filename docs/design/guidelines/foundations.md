@@ -71,8 +71,8 @@ Rules:
 
 | Token | Use for | Never for |
 |---|---|---|
-| `--accent` | Indicators: the 3 px active-nav bar, focus ring (`color-mix` 70%), active icon tint, input focus border, progress fills | Text, or a fill under text |
-| `--accent-text` | Links, accent-coloured labels, `.chip.accent`, breadcrumb hover | Fills |
+| `--accent` | Indicators: the 3 px active-nav bar, active icon tint, progress fills | Text, or a fill under text |
+| `--accent-text` | Links, accent-coloured labels, `.chip.accent`, breadcrumb hover, focus outlines/input borders | Large fills |
 | `--accent-solid` + `--accent-contrast` | A filled primary button and its label (`.btn.primary`) | Anything that isn't the one primary action |
 | `--accent-soft` | Selected rows, the active nav item, "on" toggles (14% tint) | Large backgrounds, whole cards |
 

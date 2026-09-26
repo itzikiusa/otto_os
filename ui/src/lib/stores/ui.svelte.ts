@@ -1,7 +1,7 @@
 // Shell UI state: rail, right panel, palette, theme, zoom. Persisted bits go
 // to localStorage.
 
-import { accentFill } from '../accent';
+import { accentFill, accentText } from '../accent';
 import { ambientImage, isAmbientMode, type AmbientMode } from '../ambient';
 import {
   autoVerticalFor,
@@ -834,12 +834,16 @@ class UiStore {
     // layout mirrors automatically when this flips to 'rtl'.
     el.dir = this.direction;
     const fill = this.accent ? accentFill(this.accent) : null;
+    const colors = getComputedStyle(el);
+    const accentLabel = this.accent ? accentText(this.accent, colors.getPropertyValue('--text').trim(),
+      ['--bg', '--bg-sidebar', '--surface', '--surface-2', '--surface-3'].map((name) => colors.getPropertyValue(name).trim())) : null;
     if (this.accent) el.style.setProperty('--accent', this.accent);
     else el.style.removeProperty('--accent');
     // A custom accent carries its own contrast-checked button fill/text pair.
     for (const [prop, v] of [
       ['--accent-solid', fill?.solid],
       ['--accent-contrast', fill?.contrast],
+      ['--accent-text', accentLabel],
     ] as const) {
       if (v) el.style.setProperty(prop, v);
       else el.style.removeProperty(prop);

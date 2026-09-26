@@ -91,7 +91,7 @@ a:hover {
 }
 
 :focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline: 2px solid var(--accent-text);
   outline-offset: 1px;
   border-radius: var(--radius-s);
 }
@@ -230,7 +230,7 @@ textarea.input {
 }
 .input:focus {
   outline: none;
-  border-color: var(--accent);
+  border-color: var(--accent-text);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 .input::placeholder {
