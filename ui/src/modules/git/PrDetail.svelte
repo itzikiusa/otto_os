@@ -431,7 +431,9 @@
     </div>
 
     <!-- Summary tab -->
-    {#if activeTab === 'summary'}
+    <!-- Keep reply editors mounted while inspecting another subtab. Their
+         draft and leave guard belong to this PR, not the visible subtab. -->
+    <div hidden={activeTab !== 'summary'}>
       <section class="prd-desc card">
         {#if editMode}
           <textarea class="input" rows="8" bind:value={editDesc} aria-label="Pull request description" disabled={busy === 'edit'}></textarea>
@@ -573,11 +575,11 @@
           </div>
         </div>
       </section>
-    {/if}
+    </div>
 
-    <!-- Files tab -->
-    {#if activeTab === 'files'}
-      <section class="prd-diff">
+    <!-- Once loaded, preserve inline reply/comment drafts across subtabs. -->
+    {#if activeTab === 'files' || diff}
+      <section class="prd-diff" hidden={activeTab !== 'files'}>
         {#if diffError || !diff}
           <LoadState
             what="the diff"
