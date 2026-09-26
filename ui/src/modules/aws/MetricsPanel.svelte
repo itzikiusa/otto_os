@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { radioKey } from '../../lib/radioKey';
   import { awsErrorText } from './util';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // CloudWatch metrics for ONE resource (an SQS queue, EC2 instance or RDS
@@ -118,6 +119,8 @@
       {#each RANGES as r (r.id)}
         <button
           role="radio"
+          onkeydown={radioKey}
+          tabindex={range === r.id ? 0 : -1}
           aria-checked={range === r.id}
           class:on={range === r.id}
           onclick={() => (range = r.id)}

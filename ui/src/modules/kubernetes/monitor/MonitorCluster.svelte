@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { radioKey } from '../../../lib/radioKey';
   // Per-cluster Monitor view. Tabs live in the URL
   // (`#/kubernetes/monitor/<id>/<workloads|events|insights|settings>`):
   // Workloads = sortable table with sparklines + an expandable Trends row;
@@ -464,7 +465,7 @@
 {#snippet windowPicker()}
       <div class="seg" role="radiogroup" aria-label="Window">
         {#each WINDOWS as w (w)}
-          <button class="seg-btn" class:on={window === w} role="radio" aria-checked={window === w} onclick={() => (window = w)}>{w}</button>
+          <button class="seg-btn" class:on={window === w} role="radio" onkeydown={radioKey} aria-checked={window === w} tabindex={window === w ? 0 : -1} onclick={() => (window = w)}>{w}</button>
         {/each}
       </div>
 {/snippet}

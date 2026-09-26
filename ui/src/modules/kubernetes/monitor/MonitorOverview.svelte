@@ -4,6 +4,7 @@
   // collector status line with the exact metrics-server RBAC message when it
   // is denied). Refreshes on WS `k8s_monitor_cycle` and on a window change.
   import { untrack } from 'svelte';
+  import { radioKey } from '../../../lib/radioKey';
   import { router } from '../../../lib/router.svelte';
   import { k8s } from '../../../lib/stores/k8s.svelte';
   import { toasts } from '../../../lib/toast.svelte';
@@ -93,7 +94,7 @@
   {#snippet actions()}
     <div class="seg" role="radiogroup" aria-label="Window" data-keep>
       {#each WINDOWS as w (w)}
-        <button class="seg-btn" class:on={window === w} role="radio" aria-checked={window === w} onclick={() => (window = w)}>{w}</button>
+        <button class="seg-btn" class:on={window === w} role="radio" onkeydown={radioKey} aria-checked={window === w} tabindex={window === w ? 0 : -1} onclick={() => (window = w)}>{w}</button>
       {/each}
     </div>
     <button class="btn small" onclick={() => router.go('kubernetes/monitor/fleet')} title="One dashboard over every cluster — restarts, memory, req/s, latency — read from ClickHouse only" data-testid="k8s-monitor-fleet-link"><Icon name="chart" size={12} /> Fleet dashboard</button>
@@ -115,7 +116,7 @@
         {@const h = healthLabel(r.health)}
         {@const total = restartTotal(r)}
         {@const rbac = rbacMessage(r.status?.metrics_server)}
-        <div class="card cluster" class:off={!r.enabled} role="button" tabindex="0" onclick={() => open(r)} onkeydown={(e) => { if (e.key === 'Enter') open(r); }} data-testid="k8s-monitor-card" data-health={r.health}>
+        <div class="card cluster" class:off={!r.enabled} role="button" tabindex="0" onclick={() => open(r)} onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); open(r); } }} data-testid="k8s-monitor-card" data-health={r.health}>
           <div class="row1">
             <span class="dot" style="background: {r.cluster.color ?? 'var(--accent)'}"></span>
             <span class="name">{r.cluster.name}</span>
@@ -143,12 +144,12 @@
               </div>
               <div class="stat">
                 <span class="k">Restarts <span class="dim">({r.window})</span></span>
-                <span class="v mono">{total}<span class="dim"> unplanned</span></span>
+                <span class="v mono">{total}<span class="dim">{' '}unplanned</span></span>
                 <span class="note">{r.churn} planned replacement{r.churn === 1 ? '' : 's'}</span>
               </div>
               <div class="stat">
                 <span class="k">Memory</span>
-                <span class="v mono">{formatBytes(r.mem.used)}{#if r.mem.limit > 0}<span class="dim"> / {formatBytes(r.mem.limit)}</span>{/if}</span>
+                <span class="v mono">{formatBytes(r.mem.used)}{#if r.mem.limit > 0}<span class="dim">{' / '}{formatBytes(r.mem.limit)}</span>{/if}</span>
                 {#if r.mem.limit > 0}
                   <div class="bar" title="{fmtPct(r.mem.pct)} of limits"><div class="fill" class:warn={r.mem.pct >= 85} style="width: {Math.min(100, r.mem.pct)}%"></div></div>
                 {/if}
@@ -319,8 +320,13 @@
     color: var(--text-dim);
   }
   .v {
+    direction: ltr;
+    text-align: start;
     font-size: var(--fs-l);
     font-weight: 600;
+  }
+  :global([dir='rtl']) .v {
+    text-align: end;
   }
   .note {
     font-size: var(--fs-xs);
@@ -373,9 +379,7 @@
   }
   .status {
     font-size: var(--fs-xs);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
   .rbac {
     display: flex;
