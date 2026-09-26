@@ -2,6 +2,9 @@ import { test, expect } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { expectFullyInViewport, expectNoHorizontalOverflow, openPage } from './helpers';
 
+// Route fixtures must observe the actual requests in WebKit as well as Chromium.
+test.use({ serviceWorkers: 'block' });
+
 let workspaceId = '';
 const sceneTitle = `Content audit flow ${Date.now()}`;
 test.beforeAll(async () => {

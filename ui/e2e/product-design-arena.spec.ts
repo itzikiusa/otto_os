@@ -88,8 +88,8 @@ test.beforeEach(async ({ page }) => {
   }, workspaceId);
 });
 
-async function openArena(page: Page): Promise<void> {
-  await page.goto('/#/product');
+async function openArena(page: Page, navigate = true): Promise<void> {
+  if (navigate) await page.goto('/#/product');
   await expect(page.locator('.product-page')).toBeVisible({ timeout: 30_000 });
   await page.waitForLoadState('networkidle').catch(() => {});
   const row = page.locator('.story-row', { hasText: STORY_TITLE }).first();
@@ -142,6 +142,13 @@ test('arena: a scene3d opens with the Hierarchy pane and an object count', async
 
 test('arena: code-view edit autosaves via PUT …/content and survives a reload', async ({ page }) => {
   test.setTimeout(90_000);
+  const errors: string[] = [];
+  page.on('pageerror', error => {
+    // WebKit's inspector probes sandboxed previews; retain every other error,
+    // including an unexplained Load failed rejection across the reload.
+    if (error.name === 'SecurityError' && /sandbox|web-inspector/.test(error.stack ?? error.message)) return;
+    errors.push(error.stack ?? error.message);
+  });
   await openArena(page);
   await page.locator('.mockup-row', { hasText: 'flow.mmd' }).click();
   await expect(page.locator('.mockup-stage iframe.mockup-frame')).toBeVisible({ timeout: 20_000 });
@@ -162,7 +169,10 @@ test('arena: code-view edit autosaves via PUT …/content and survives a reload'
 
   // Reload → the server has the new bytes and the viewer shows them.
   await page.reload();
-  await openArena(page);
+  // Reopen the arena in this reloaded document. A second immediate goto
+  // aborts its startup requests and WebKit reports those CORS cancellations
+  // as pageerror events even when the application catches the fetch failure.
+  await openArena(page, false);
   await page.locator('.mockup-row', { hasText: 'flow.mmd' }).click();
   await page.locator('.stage-toolbar .tb-btn', { hasText: 'Source' }).click();
   await expect(page.locator('.code-view')).toHaveValue(new RegExp(EDIT_MARK), { timeout: 15_000 });
@@ -170,6 +180,7 @@ test('arena: code-view edit autosaves via PUT …/content and survives a reload'
   const body = await (await ctx.get(`${base}/api/v1/product/attachments/${mermaidId}`)).text();
   await ctx.dispose();
   expect(body).toContain(EDIT_MARK);
+  expect(errors, 'Autosave and reload must not leak an unhandled rejection').toEqual([]);
 });
 
 test('arena: New ▾ → template creates an HTML screen in a device frame (sandboxed iframe)', async ({ page }) => {

@@ -39,6 +39,9 @@ test('Canvas queued writes never inherit a later login or reveal its old draft',
 });
 
 test('Canvas logout invalidates a mounted editor debounce without flushing as the next user', async ({ page }) => {
+  // Phones intentionally expose the read-only Canvas preview. Use the supported
+  // tablet editor in the mobile WebKit project for this edit/debounce case.
+  if ((page.viewportSize()?.width ?? 1280) <= 640) await page.setViewportSize({ width: 834, height: 1112 });
   const { ctx, base } = await apiCtx();
   const workspace = await seedWorkspace(ctx, base);
   const response = await ctx.post(`${base}/api/v1/workspaces/${workspace}/canvas/scenes`, {
