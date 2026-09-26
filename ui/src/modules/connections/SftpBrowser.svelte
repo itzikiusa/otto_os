@@ -249,7 +249,7 @@
       <div class="transfers" aria-label="File transfers">
         {#each view.transfers as transfer (transfer.id)}
           <div class="transfer">
-            <span class="ellipsis" title={transfer.remote_path}>{transfer.direction === 'upload' ? 'Upload' : 'Download'} {transfer.remote_path}</span>
+            <span class="ellipsis" dir="ltr" title={transfer.remote_path}>{transfer.direction === 'upload' ? 'Upload' : 'Download'} {transfer.remote_path}</span>
             <span>{TRANSFER_STATUS[transfer.status] ?? transfer.status} · {humanSize(transfer.bytes)}{transfer.total_bytes !== null ? ` / ${humanSize(transfer.total_bytes)}` : ''} · {transfer.elapsed_secs}s</span>
             {#if transfer.status === 'running'}
               <progress max={transfer.total_bytes ?? undefined} value={transfer.total_bytes ? transfer.bytes : undefined} aria-label="Transferred bytes"></progress>
@@ -539,6 +539,7 @@
     padding: 0 2px 8px;
   }
   @media (max-width: 640px) {
+    .transfer > .ellipsis { flex-basis: 100%; max-width: none; white-space: normal; overflow-wrap: anywhere; }
     .toolbar .grow { display: none; }
     .sftp-search { flex: 1 0 100%; width: 100%; }
     .sftp-row { grid-template-columns: minmax(0, 1fr) auto; }
