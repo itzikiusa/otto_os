@@ -96,3 +96,7 @@ Final UI guards passed after the last CSS change; scoped whitespace checks passe
 ## Parent integration check
 
 The parent inspected the final Warm-dark RTL tablet Feed screenshot and reran all six new standalone automation cases on the current integrated tree: **6passed23.0s**, exit0, `/tmp/otto-ux-r4-parent-automation.log`. The desktop-to-tablet case remains tracked with the shell integration and is not skipped in source.
+
+## Parent final-round closure
+
+The desktop↔tablet transition row above records the defect at reviewer handoff. The shared App repair now retains mounted pages across that breakpoint; the original unchanged Swarm transition regression passed in both engines in the parent14-case handoff run (`/tmp/otto-ux-r4-parent-handoffs.log`,exit0). Selection, draft and focused control survive1440→834 RTL→1440. This closes the reported7.0–8.0 transition defect; the steady-state9.1–9.5 ratings and other explicit coverage limits remain. Round4 is final per the user; no fifth review is scheduled.
