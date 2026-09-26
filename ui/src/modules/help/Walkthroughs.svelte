@@ -370,6 +370,12 @@
     border-color: var(--accent);
     box-shadow: 0 0 0 2px var(--accent-soft);
   }
+  .phone .rail-search {
+    height: 38px;
+  }
+  .phone .rail-search input {
+    height: 36px;
+  }
   .rail-search input {
     flex: 1;
     min-width: 0;

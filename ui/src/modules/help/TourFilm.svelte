@@ -484,6 +484,8 @@
     color: var(--text-dim);
   }
   @media (max-width: 640px) {
+    .fallback-actions button,
+    .fallback-actions a,
     .chapter-play,
     .chapter-guide,
     .cc {
