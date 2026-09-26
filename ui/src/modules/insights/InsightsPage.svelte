@@ -400,7 +400,7 @@
   let pollCount = $state(0);
 
   async function runNow(choice = runChoice): Promise<void> {
-    if (running || pollRunId) return;
+    if (loading || loadError || running || pollRunId) return;
     const [p, o] = choice.split(':');
     running = true;
     runFailReason = null;
@@ -555,10 +555,10 @@
           <Icon name="gear" size={14} />
         </button>
         {#if reports.length > 0 || loading}
-          <select class="input run-period" bind:value={runChoice} disabled={running || !!pollRunId} aria-label="Period to report on" title="Period to report on">
+          <select class="input run-period" bind:value={runChoice} disabled={loading || !!loadError || running || !!pollRunId} aria-label="Period to report on" title="Period to report on">
             {#each RUN_OPTIONS as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
           </select>
-          <button class="btn small primary" disabled={running || !!pollRunId} onclick={() => runNow()}>
+          <button class="btn small primary" disabled={loading || !!loadError || running || !!pollRunId} onclick={() => runNow()}>
             <Icon name="play" size={12} />
             {running ? 'Starting…' : pollRunId ? 'Running…' : 'Run now'}
           </button>
