@@ -78,6 +78,7 @@
   async function onFiles(list: FileList | null): Promise<void> {
     if (!list) return;
     error = '';
+    const failures: string[] = [];
     for (const f of Array.from(list)) {
       uploading += 1;
       try {
@@ -85,7 +86,8 @@
         const att = await assistantApi.attach(thread.id, { name: f.name, content_base64, mime: f.type || undefined });
         files = [...files, att];
       } catch (e) {
-        error = `Couldn’t attach ${f.name}. ${describeError(e)}`;
+        failures.push(`Couldn’t attach ${f.name}. ${describeError(e)}`);
+        error = failures.join("\n");
       } finally {
         uploading -= 1;
       }
@@ -252,6 +254,7 @@
   .err {
     margin: 6px 0 0;
     color: var(--danger);
+    white-space: pre-line;
   }
   .files {
     list-style: none;
