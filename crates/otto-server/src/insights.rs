@@ -406,21 +406,62 @@ const INSIGHTS_SKILL: &str = "insights";
 /// Timeout for one insights run (the skill collects, classifies, renders HTML).
 const RUN_TIMEOUT: Duration = Duration::from_secs(900);
 
+/// Manual requests explicitly regenerate; catch-up keeps per-period idempotency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunMode {
+    Manual,
+    Scheduled,
+}
+
 /// Build the headless prompt that drives the `insights` skill for one period.
-pub fn build_run_prompt(kind: Kind, offset: i64) -> String {
+pub fn build_run_prompt(kind: Kind, offset: i64, as_of: NaiveDate, collector: &Path, mode: RunMode) -> String {
     format!(
         "Run the `insights` skill to generate the usage report for the {period} \
          period at --offset {offset} (the previous {period} when offset is 1). \
-         Invoke its collector with `--period {period} --offset {offset}`, follow \
+         Use the pinned collector at {collector} for every collection step (including \
+         facet extraction and re-collection) with `--period {period} --offset {offset} \
+         --as-of {as_of}{force}`. Keep this calendar reference even if the date changes. Follow \
          the skill's full method (collect, classify facet-less sessions, compare \
          to the prior comparable period, render the self-contained HTML report), \
          and store all three artifacts (report HTML, summary markdown, metrics \
          JSON) plus update index.json. The report is for the period that ended; \
          do not ask the user any questions — run it end-to-end and stop when the \
-         report is written. If the period was already generated, note that and stop.",
+         report is written. {existing}",
         period = kind.period(),
         offset = offset,
+        as_of = as_of,
+        force = if mode == RunMode::Manual { " --force" } else { "" },
+        existing = if mode == RunMode::Manual {
+            "The user explicitly requested generation: replace this period's report even if it already exists. Retain --force for every collection step."
+        } else {
+            "If the period was already generated, note that and stop."
+        },
+        collector = serde_json::to_string(&collector.to_string_lossy()).unwrap_or_default(),
     )
+}
+
+/// A daemon-owned, content-addressed collector keeps the calendar contract even
+/// when the installed skill is older. Never edits the user's skill directory.
+fn materialize_collector(dir: &Path) -> std::io::Result<PathBuf> {
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+    let source = otto_skills::bundled_file(INSIGHTS_SKILL, "scripts/collect_insights.py")
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "bundled insights collector missing"))?;
+    let collectors = dir.join("collectors");
+    std::fs::create_dir_all(&collectors)?;
+    let path = collectors.join(format!("{:x}.py", Sha256::digest(source.as_bytes())));
+    let mut pending = tempfile::NamedTempFile::new_in(&collectors)?;
+    pending.write_all(source.as_bytes())?;
+    match pending.persist_noclobber(&path) {
+        Ok(_) => {}
+        Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if std::fs::read_to_string(&path)? != source {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "pinned insights collector changed"));
+            }
+        }
+        Err(e) => return Err(e.error),
+    }
+    Ok(path)
 }
 
 /// Spawn a real, openable agent session that runs the `insights` skill for
@@ -435,6 +476,8 @@ pub async fn run_insights(
     ctx: &ServerCtx,
     kind: Kind,
     offset: i64,
+    as_of: NaiveDate,
+    mode: RunMode,
 ) -> otto_core::Result<Option<otto_core::Id>> {
     // The insights skill is manual-install. If absent, skip (don't spawn a
     // session that would just say "no such skill").
@@ -474,7 +517,9 @@ pub async fn run_insights(
     };
     otto_sessions::trust::ensure_trusted(&provider, &cwd);
 
-    let prompt = build_run_prompt(kind, offset);
+    let collector = materialize_collector(&insights_dir(ctx))
+        .map_err(|e| otto_core::Error::Internal(format!("prepare insights collector: {e}")))?;
+    let prompt = build_run_prompt(kind, offset, as_of, &collector, mode);
     let mut meta = serde_json::json!({ "source": "insights" });
     if !cfg.model.trim().is_empty() {
         meta["model"] = serde_json::json!(cfg.model.trim());
@@ -649,10 +694,11 @@ async fn post_run(
         )))
     })?;
     let offset = req.offset.max(0);
-    let (start, end) = requested_period(kind, offset, chrono::Local::now().date_naive())
+    let as_of = chrono::Local::now().date_naive();
+    let (start, end) = requested_period(kind, offset, as_of)
         .ok_or_else(|| ApiError(otto_core::Error::Invalid("report offset is out of range".into())))?;
 
-    match run_insights(&ctx, kind, offset).await {
+    match run_insights(&ctx, kind, offset, as_of, RunMode::Manual).await {
         Ok(Some(id)) => Ok(Json(RunResp {
             started: true,
             run_id: Some(id.to_string()),
@@ -784,7 +830,7 @@ impl InsightsScheduler {
             let word = kind.word();
             info!(kind = word, "insights: scheduled catch-up run is due");
             tokio::spawn(async move {
-                let session_id = match run_insights(&ctx, kind, 1).await {
+                let session_id = match run_insights(&ctx, kind, 1, now.date_naive(), RunMode::Scheduled).await {
                     Ok(Some(id)) => Some(id),
                     Ok(None) => {
                         // Skill not installed / no host — already logged inside.
@@ -805,7 +851,6 @@ impl InsightsScheduler {
                 // After the grace window, check whether the period's report landed.
                 // If so, emit `InsightReady` so the channel notifier + UI can react
                 // without polling. Best-effort: a missed send is not an error.
-                let (start, end) = due_period(kind, chrono::Utc::now());
                 if period_done(&insights_dir(&ctx), kind, start, end) {
                     let period_label = format!("{} {}", word, start.format("%Y-%m-%d"));
                     let _ = ctx.events.send(Event::InsightReady {
@@ -829,6 +874,43 @@ mod tests {
 
     fn at(y: i32, m: u32, d: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(y, m, d, 12, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn pinned_collector_preserves_legacy_skill_and_concurrent_materialization() {
+        let root = tempfile::tempdir().unwrap();
+        let installed = root.path().join("library/skills/insights");
+        std::fs::create_dir_all(installed.join("scripts")).unwrap();
+        std::fs::write(installed.join("SKILL.md"), "version: 2\nCustom narrative").unwrap();
+        std::fs::write(installed.join("scripts/collect_insights.py"), "# legacy custom collector").unwrap();
+        let dir = root.path().join("insights");
+        let paths = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4).map(|_| scope.spawn(|| materialize_collector(&dir).unwrap())).collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+        });
+        assert!(paths.iter().all(|p| p == &paths[0]));
+        assert!(std::fs::read_to_string(&paths[0]).unwrap().contains("--as-of"));
+        assert_eq!(std::fs::read_to_string(installed.join("scripts/collect_insights.py")).unwrap(), "# legacy custom collector");
+        assert_eq!(std::fs::read_to_string(installed.join("SKILL.md")).unwrap(), "version: 2\nCustom narrative");
+        let prompt = build_run_prompt(Kind::Month, 1, NaiveDate::from_ymd_opt(2026, 9, 30).unwrap(), &paths[0], RunMode::Scheduled);
+        assert!(prompt.contains("--period month --offset 1 --as-of 2026-09-30"));
+        assert!(prompt.contains(paths[0].to_str().unwrap()));
+        std::fs::write(&paths[0], "modified").unwrap();
+        assert!(materialize_collector(&dir).is_err());
+        assert_eq!(std::fs::read_to_string(&paths[0]).unwrap(), "modified");
+    }
+
+    #[test]
+    fn manual_regeneration_overrides_existing_report_while_scheduler_keeps_idempotency() {
+        let date = NaiveDate::from_ymd_opt(2026, 9, 30).unwrap();
+        let path = Path::new("/tmp/synthetic/collector.py");
+        let manual = build_run_prompt(Kind::Day, 1, date, path, RunMode::Manual);
+        let scheduled = build_run_prompt(Kind::Day, 1, date, path, RunMode::Scheduled);
+        assert!(manual.contains("--as-of 2026-09-30 --force"));
+        assert!(manual.contains("replace this period's report even if it already exists"));
+        assert!(!manual.contains("note that and stop"));
+        assert!(!scheduled.contains("--force"));
+        assert!(scheduled.contains("If the period was already generated, note that and stop"));
     }
 
     #[test]

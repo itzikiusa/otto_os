@@ -139,7 +139,9 @@ def parse_date(iso_str):
 
 def resolve_window(args):
     """Return (kind, start_dt, end_dt, label). Inclusive end (23:59:59.999999)."""
-    now = datetime.now()
+    # A daemon run keeps its accepted calendar even if collection starts later.
+    as_of = getattr(args, "as_of", None)
+    now = datetime.fromisoformat(as_of) if as_of else datetime.now()
 
     def day_floor(d):
         return d.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1386,6 +1388,8 @@ def main():
                     help="named period; week is Mon-Sun, month is calendar month")
     ap.add_argument("--offset", type=int, default=0,
                     help="periods back: 1 = the PREVIOUS day/week/month")
+    ap.add_argument("--as-of", type=lambda value: datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d"),
+                    help="freeze the reference calendar date YYYY-MM-DD for named periods")
     ap.add_argument("--start", help="explicit start date YYYY-MM-DD (inclusive)")
     ap.add_argument("--end", help="explicit end date YYYY-MM-DD (inclusive)")
     ap.add_argument("--no-history", action="store_true",

@@ -2329,7 +2329,7 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 | PUT /insights/config | root | InsightsConfig | config |
 | GET /insights/reports | root | — | generated report list |
 | GET /insights/report | root | — | one report's HTML |
-| POST /insights/run | root | `{ period, offset? }` | `{ started, run_id?, report_key?, reason? }` — `run_id` when started; `report_key` identifies the requested daemon-local collector calendar period (`daily:YYYYMMDD_YYYYMMDD`, or `weekly`/`monthly`); offset 0 is current, 1 is the previous complete period. `reason` when not started (e.g. skill not installed) |
+| POST /insights/run | root | `{ period, offset? }` | `{ started, run_id?, report_key?, reason? }` — `run_id` when started; `report_key` identifies the requested daemon-local collector calendar period (`daily:YYYYMMDD_YYYYMMDD`, or `weekly`/`monthly`); offset 0 is current, 1 is the previous complete period. The calendar reference is frozen at acceptance and passed to a daemon-owned, content-addressed bundled collector under `insights/collectors/`, so a delayed start across midnight keeps this key. Installed skill instructions/customizations remain untouched. This manual endpoint explicitly regenerates an existing period (`--force`); scheduled catch-up remains idempotent. `reason` when not started (e.g. skill not installed) |
 
 ## LSP (language server bridge)
 

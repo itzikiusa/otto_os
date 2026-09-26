@@ -1,7 +1,7 @@
 ---
 description: Generate an action-first coding-agent usage report across ALL providers Otto uses (Claude, Codex, agy/Gemini) for a chosen period (day/week/month or explicit range), compare it to the previous comparable period for trends, and emit a self-contained HTML report where every finding — even the good ones — carries Evidence/threshold → Action → Expected effect. Use when the user wants a usage/productivity insights report, a weekly/daily/monthly review, or trend tracking of how they work with AI agents.
 category: insights
-version: 2
+version: 3
 ---
 
 # Insights
@@ -45,7 +45,10 @@ Decide the window from the user's request and call the collector accordingly:
 | "last N days" (legacy) | pass `N` positionally |
 
 Week = **Monday–Sunday** (ISO). Month = calendar month. `--offset 1` always means the
-**previous** day/week/month.
+**previous** day/week/month. When a daemon run supplies `--as-of YYYY-MM-DD` and
+a pinned collector path, use that path and retain the flag for every collection,
+including facet extraction and re-collection. This freezes the requested calendar
+across midnight while preserving the daily/weekly/monthly report kind.
 
 **Idempotency (catch-up safe).** This skill is safe to invoke for a *specific past period*
 repeatedly. After Step 1, check `history.already_generated`: if it's `true` (the period's
