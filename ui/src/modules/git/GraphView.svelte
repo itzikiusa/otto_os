@@ -3858,7 +3858,7 @@
     cursor: pointer;
   }
   .graph-select { flex: 1; height: 100%; }
-  .ref-select { flex-shrink: 0; }
+  .ref-select { flex-shrink: 1; overflow: hidden; }
   .graph-row:has(.graph-select:focus-visible) {
     outline: 2px solid var(--accent);
     outline-offset: -2px;
