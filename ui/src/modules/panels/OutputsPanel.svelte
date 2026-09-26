@@ -57,6 +57,7 @@
   let error = $state<string | null>(null);
   let createdUrls: string[] = [];
   let previewRequest = 0;
+  let previewIdentity = '';
   let dismissed = $state(false);
 
   function revokeCreated(): void {
@@ -105,6 +106,7 @@
 
   async function select(a: Artifact): Promise<void> {
     const request = ++previewRequest;
+    previewIdentity = JSON.stringify(a);
     selectedId = a.id;
     dismissed = false;
     preview = null;
@@ -159,10 +161,10 @@
     }
   }
 
-  // Drop the selection when the session (or the list) changes underneath us.
+  // Drop the selection when the session changes underneath us.
   $effect(() => {
     void sid;
-    void artifacts;
+    previewIdentity = '';
     previewRequest++;
     loading = false;
     selectedId = null;
@@ -177,6 +179,20 @@
   $effect(() => {
     const first = list[0];
     if (first && !selected && !dismissed) untrack(() => void select(first));
+  });
+
+  // A producing turn may replace the same path/id while the preview is open.
+  // Keep the selection, but load the current revision's bytes and invalidate
+  // any older fetch. Unrelated list updates do not disturb the preview.
+  $effect(() => {
+    const current = selected;
+    if (current && JSON.stringify(current) !== previewIdentity) untrack(() => void select(current));
+    else if (!current) untrack(() => {
+      previewRequest++;
+      preview = null;
+      loading = false;
+      revokeCreated();
+    });
   });
 
   function closePreview(): void {
