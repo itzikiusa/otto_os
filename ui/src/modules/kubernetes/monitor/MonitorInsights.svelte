@@ -4,7 +4,7 @@
   // from Markdown through the shared allowlist sanitizer, plus run history
   // and a "Run now". Offers to create the agent from the template when the
   // workspace has none.
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { marked } from 'marked';
   import { router } from '../../../lib/router.svelte';
   import { ws } from '../../../lib/stores/workspace.svelte';
@@ -20,7 +20,6 @@
   import { K8S_WATCHDOG_MARK } from '../../personal-agents/templates';
   import { fmtAgo, verdictOf } from './monitor-util';
 
-  let agents = $state<PersonalAgent[]>([]);
   let agent = $state<PersonalAgent | null>(null);
   let runs = $state<PersonalAgentRun[]>([]);
   let selected = $state<PersonalAgentRun | null>(null);
@@ -30,6 +29,10 @@
   let error = $state('');
   let creating = $state(false);
   let running = $state(false);
+  let reportError = $state('');
+  let loadVersion = 0;
+  let reportVersion = 0;
+  let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
   const html = $derived.by(() => {
     if (!report) return '';
@@ -42,7 +45,13 @@
   const verdict = $derived(verdictOf(report));
 
   async function load(): Promise<void> {
+    const version = ++loadVersion;
     const wsId = ws.currentId;
+    agent = null;
+    runs = [];
+    running = false;
+    error = '';
+    void openRun(null);
     if (!wsId) {
       loading = false;
       return;
@@ -50,52 +59,68 @@
     loading = true;
     try {
       const all = await personalAgentsApi.list(wsId);
-      agents = all.filter((a) => a.soul_md.includes(K8S_WATCHDOG_MARK));
-      agent = agents[0] ?? null;
+      if (version !== loadVersion) return;
+      agent = all.find((a) => a.soul_md.includes(K8S_WATCHDOG_MARK)) ?? null;
       if (agent) {
-        runs = (await personalAgentsApi.runs(agent.id)).slice(0, 12);
-        const latest = runs.find((r) => r.report_path) ?? runs[0] ?? null;
-        await openRun(latest);
+        const nextRuns = await personalAgentsApi.runs(agent.id);
+        if (version !== loadVersion) return;
+        runs = nextRuns.slice(0, 12);
+        await openRun(runs.find((r) => r.report_path) ?? runs[0] ?? null);
       }
-      error = '';
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      if (version === loadVersion) error = e instanceof Error ? e.message : String(e);
     } finally {
-      loading = false;
+      if (version === loadVersion) loading = false;
     }
   }
 
   async function openRun(run: PersonalAgentRun | null): Promise<void> {
+    const version = ++reportVersion;
     selected = run;
     report = '';
+    reportError = '';
+    reportLoading = false;
     if (!run?.report_path) return;
     reportLoading = true;
     try {
-      report = await authedText(personalAgentsApi.reportPath(run.id));
+      const next = await authedText(personalAgentsApi.reportPath(run.id));
+      if (version === reportVersion) report = next;
     } catch (e) {
-      report = `_Could not load the report: ${e instanceof Error ? e.message : String(e)}_`;
+      if (version === reportVersion) reportError = e instanceof Error ? e.message : String(e);
     } finally {
-      reportLoading = false;
+      if (version === reportVersion) reportLoading = false;
     }
   }
 
   $effect(() => {
     const id = ws.currentId;
     void id;
-    untrack(() => void load());
+    untrack(() => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      void load();
+    });
+    return () => { loadVersion++; reportVersion++; };
+  });
+
+  onDestroy(() => {
+    loadVersion++;
+    reportVersion++;
+    if (refreshTimer) clearTimeout(refreshTimer);
   });
 
   async function runNow(): Promise<void> {
-    if (!agent) return;
+    if (!agent || running) return;
+    const version = loadVersion;
     running = true;
     try {
       await personalAgentsApi.run(agent.id);
+      if (version !== loadVersion) return;
       toasts.success('Watchdog started', 'The report appears here when the run finishes.');
-      setTimeout(() => void load(), 4000);
+      refreshTimer = setTimeout(() => void load(), 4000);
     } catch (e) {
-      toasts.error('Run failed', e instanceof Error ? e.message : String(e));
+      if (version === loadVersion) toasts.error('Run failed', e instanceof Error ? e.message : String(e));
     } finally {
-      running = false;
+      if (version === loadVersion) running = false;
     }
   }
 
@@ -145,7 +170,7 @@
           <div class="dim small">No runs yet.</div>
         {/if}
         {#each runs as r (r.id)}
-          <button class="run" class:on={selected?.id === r.id} onclick={() => void openRun(r)}>
+          <button class="run" class:on={selected?.id === r.id} aria-pressed={selected?.id === r.id} title={r.summary || r.error || r.status} onclick={() => void openRun(r)}>
             <span class="st {r.status}"></span>
             <span class="when">{fmtAgo(r.started_at)}</span>
             <span class="sum dim">{r.summary || r.error || r.status}</span>
@@ -155,6 +180,8 @@
       <article class="report card">
         {#if reportLoading}
           <Skeleton rows={6} height={16} />
+        {:else if reportError}
+          <div class="error" role="alert">Couldn't load the report: {reportError} <button class="btn small" onclick={() => void openRun(selected)}>Retry</button></div>
         {:else if html}
           <div class="md">{@html html}</div>
         {:else if selected}
@@ -176,6 +203,8 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
+    min-width: 0;
+    container-type: inline-size;
   }
   .head {
     display: flex;
@@ -185,6 +214,8 @@
     padding: 10px 14px;
   }
   .who {
+    min-width: 0;
+    overflow-wrap: anywhere;
     display: flex;
     align-items: center;
     gap: 10px;
@@ -197,6 +228,7 @@
     font-size: var(--fs-m);
   }
   .row {
+    flex-wrap: wrap;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -211,16 +243,16 @@
     color: var(--text-dim);
   }
   .verdict.ok {
-    color: var(--status-working);
-    border-color: color-mix(in srgb, var(--status-working) 40%, transparent);
+    color: var(--success);
+    border-color: color-mix(in srgb, var(--success) 40%, transparent);
   }
   .verdict.warn {
-    color: orange;
-    border-color: color-mix(in srgb, orange 40%, transparent);
+    color: var(--warning);
+    border-color: color-mix(in srgb, var(--warning) 40%, transparent);
   }
   .verdict.bad {
-    color: var(--status-exited);
-    border-color: color-mix(in srgb, var(--status-exited) 40%, transparent);
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 40%, transparent);
   }
   .body {
     display: grid;
@@ -241,7 +273,7 @@
     grid-template-columns: auto auto 1fr;
     gap: 6px;
     align-items: center;
-    text-align: left;
+    text-align: start;
     background: none;
     border: 1px solid transparent;
     border-radius: 6px;
@@ -305,6 +337,8 @@
     border-radius: 3px;
   }
   .md :global(pre) {
+    direction: ltr;
+    text-align: start;
     background: var(--surface-2);
     padding: 8px 10px;
     border-radius: 6px;
@@ -326,8 +360,15 @@
     font-size: var(--fs-xs);
   }
   .error {
-    color: var(--status-exited);
+    color: var(--danger);
     font-size: var(--fs-s);
+  }
+  @container (max-width: 620px) {
+    .head { flex-direction: column; align-items: stretch; }
+    .who { width: 100%; }
+    .body { grid-template-columns: minmax(0, 1fr); }
+    .runs { max-height: 180px; }
+    .report { max-height: none; }
   }
   @media (max-width: 760px) {
     .body {
