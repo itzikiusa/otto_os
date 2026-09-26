@@ -96,16 +96,17 @@
   // Effective terminal font size. On phone we apply a comfortable readability
   // floor (PHONE_MIN_FONT): a 13px monospace grid is legible on a desktop
   // monitor but cramped on a high-DPI handset held at arm's length, which is a
-  // big part of why the mobile terminal felt unusable. The user's zoom still
-  // wins when they zoom LARGER — we only raise the floor, never cap. Desktop
+  // big part of why the mobile terminal felt unusable. Apply the user's zoom
+  // offset above that floor so the first Zoom in changes the rendered size. Desktop
   // keeps the shared 11px readable-content floor, including dense split panes.
   const PHONE_MIN_FONT = 15;
   const effFontSize = $derived(
-    viewport.isPhone ? Math.max(ui.termFontSize, PHONE_MIN_FONT) : Math.max(ui.termFontSize, 11),
+    viewport.isPhone ? Math.max(PHONE_MIN_FONT, PHONE_MIN_FONT + ui.termFontSize - 13) : Math.max(ui.termFontSize, 11),
   );
 
   let container: HTMLDivElement;
   let horizontalOverflow = $state(false);
+  let fittedFontSize = $state(13);
   function scrollFocus(node: HTMLElement, overflowing: boolean) {
     const update = (value: boolean) => {
       if (value) node.tabIndex = 0;
@@ -701,8 +702,12 @@
       return false;
     }
     const cur = term.options.fontSize ?? effFontSize;
+    // Fit the default 13px grid, then apply the user's zoom offset. Fitting
+    // the requested size itself used to undo every Zoom in on narrow panes.
+    const automatic = Math.max(11, Math.min(13, Math.floor(cur * dims.cols / MIN_FIT_COLS)));
     const target = viewport.isPhone ? effFontSize
-      : Math.max(11, Math.min(effFontSize, Math.floor(cur * dims.cols / MIN_FIT_COLS)));
+      : Math.max(11, automatic + ui.termFontSize - 13);
+    fittedFontSize = target;
     onfontfit?.(target);
     if (target !== cur) {
       term.options.fontSize = target;
@@ -1535,7 +1540,8 @@
           title="Zoom out (⌘−)"
           aria-label="Zoom out"
         >−</button>
-        <span class="tb-size" title="Terminal font size">{ui.termFontSize}px</span>
+        <button class="tb-btn tb-size" onclick={() => ui.termZoomReset()}
+          title="Reset terminal zoom (⌘0)" aria-label="Reset terminal zoom">{fittedFontSize}px</button>
         <button
           class="tb-btn"
           onclick={() => ui.termZoomIn()}
