@@ -864,7 +864,7 @@
     }
     .left {
       width: 100% !important;
-      max-height: 40%;
+      max-height: min(25%, 180px);
       border-inline-end: none;
       border-bottom: 1px solid var(--border);
     }
