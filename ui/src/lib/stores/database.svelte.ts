@@ -1451,14 +1451,16 @@ class DatabaseStore {
     this.persistTabsTimer = null;
     this.persistTabsNow();
   }
-  private persistTabsNow(): void {
-    if (typeof localStorage === 'undefined' || !this.selectedConnId) return;
-    const key = this.tabsKey(this.selectedConnId);
+  private persistTabsNow(connId: Id | null = this.selectedConnId): void {
+    if (typeof localStorage === 'undefined' || !connId) return;
+    const state = connId === this.selectedConnId ? this : this.snapshots.get(connId);
+    if (!state) return;
+    const key = this.tabsKey(connId);
     try {
       localStorage.setItem(
         key,
         JSON.stringify({
-          tabs: this.tabs.map((t) => ({
+          tabs: state.tabs.map((t) => ({
             name: t.name,
             statement: t.statement,
             vars: t.vars,
@@ -1474,8 +1476,8 @@ class DatabaseStore {
             // An agent-opened tab keeps its attribution chip across a reload.
             agent: t.agent ?? undefined,
           })),
-          activeTab: this.activeTab,
-          activeDb: this.activeDb,
+          activeTab: state.activeTab,
+          activeDb: state.activeDb,
         }),
       );
     } catch {
@@ -3413,11 +3415,13 @@ class DatabaseStore {
       });
       if (accessEpoch !== this.accessEpoch || base !== this.wsBase()) return saved;
       this.savedQueries = [saved, ...this.savedQueries.filter((q) => q.id !== saved.id)];
-      // The save belongs to the initiating tab, even if focus changed in flight.
-      if (tab && this.tabs.includes(tab)) {
+      // The initiating tab may be parked in another connection's snapshot.
+      // Update and persist its owner without changing the visible connection.
+      const owner = tab ? this.locateTab(tab.id) : null;
+      if (owner?.tab === tab) {
         tab.savedQueryId = saved.id;
         tab.name = saved.name;
-        this.persistTabs();
+        this.persistTabsNow(owner.connId);
       }
       toasts.success('Query saved', saved.name);
       return saved;
