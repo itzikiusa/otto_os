@@ -2,7 +2,7 @@
   // AI review panel: start review agents, refresh via WS reviewBus (no poll),
   // approve/decline individual draft comments. Supports live per-agent progress
   // cards, a configure-agents modal, and a merge-readiness panel.
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { api, ApiError } from '../../lib/api/client';
   import type {
     Review,
@@ -79,6 +79,10 @@
   let loadError = $state<string | null>(null);
   let starting = $state(false);
   let cancelling = $state(false);
+  // Reads started before a new run/cancel/retry must not restore old progress.
+  let reviewGeneration = 0;
+  let disposed = false;
+  onDestroy(() => { disposed = true; reviewGeneration++; });
   // Fallback poll (visibility-gated) used only while the review is running and
   // no WS event has arrived yet — keeps the panel alive if the WS drops.
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -101,6 +105,8 @@
   // A child <ReviewAgents> retried one agent: adopt the refreshed review and
   // resume polling so we keep tracking the re-run.
   function onAgentRetried(r: Review): void {
+    if (disposed) return;
+    reviewGeneration++;
     review = r;
     history = history.length > 0 ? [r, ...history.slice(1)] : [r];
     pollCount = 0;
@@ -247,8 +253,10 @@
 
   /** Re-fetch the review when the WS bus fires. */
   async function refreshFromBus(evReviewId: string, evStatus: string): Promise<void> {
+    const generation = reviewGeneration;
     try {
       const r = await api.get<Review>(`/repos/${repoId}/prs/${prNumber}/review`);
+      if (disposed || generation !== reviewGeneration) return;
       review = r;
       if (history.length > 0) {
         history = [r, ...history.slice(1)];
@@ -327,6 +335,7 @@
   }
 
   async function load(rid: string, num: number): Promise<void> {
+    const generation = ++reviewGeneration;
     loading = true;
     loadError = null;
     diffData = null;
@@ -334,6 +343,7 @@
     findings = [];
     try {
       const runs = await api.get<Review[]>(`/repos/${rid}/prs/${num}/reviews`);
+      if (disposed || generation !== reviewGeneration) return;
       history = runs;
       review = runs.length > 0 ? runs[0] : null;
       if (review?.status === 'running') {
@@ -346,6 +356,7 @@
         void loadFindingsAndReadiness(review.id);
       }
     } catch (e) {
+      if (disposed || generation !== reviewGeneration) return;
       if (e instanceof ApiError && e.status === 404) {
         review = null;
         history = [];
@@ -353,7 +364,7 @@
         loadError = loadErrorText(e);
       }
     } finally {
-      loading = false;
+      if (!disposed && generation === reviewGeneration) loading = false;
     }
   }
 
@@ -371,7 +382,7 @@
 
   function schedulePoll(delay?: number): void {
     if (pollTimer !== null) clearTimeout(pollTimer);
-    if (pollPaused) return;
+    if (disposed || cancelling || pollPaused) return;
     pollTimer = setTimeout(() => void poll(), delay ?? pollDelay(pollCount));
   }
 
@@ -386,9 +397,11 @@
   }
 
   async function poll(): Promise<void> {
+    const generation = reviewGeneration;
     pollCount++;
     try {
       const r = await api.get<Review>(`/repos/${repoId}/prs/${prNumber}/review`);
+      if (disposed || generation !== reviewGeneration) return;
       // Update the latest run in-place within history
       review = r;
       if (history.length > 0) {
@@ -411,11 +424,12 @@
       }
     } catch {
       // silently retry
-      schedulePoll();
+      if (!disposed && generation === reviewGeneration) schedulePoll();
     }
   }
 
   async function startReview(): Promise<void> {
+    const generation = ++reviewGeneration;
     if (pollTimer !== null) clearTimeout(pollTimer);
     starting = true;
     pollCount = 0;
@@ -431,6 +445,7 @@
       const trimmedContext = reviewContext.trim();
       if (trimmedContext) body.context = trimmedContext;
       const newRun = await api.post<Review>(`/repos/${repoId}/prs/${prNumber}/review`, body);
+      if (disposed || generation !== reviewGeneration) return;
       // Prepend new run; keep old runs in history
       review = newRun;
       history = [newRun, ...history];
@@ -439,24 +454,31 @@
     } catch (e) {
       toasts.error('Could not start review', e instanceof Error ? e.message : String(e));
     } finally {
-      starting = false;
+      if (!disposed) starting = false;
     }
   }
 
   /** Cancel the in-flight review: tears down the agent sessions server-side and
    *  marks the run cancelled. The WS reviewBus then refreshes this panel. */
   async function cancelReview(): Promise<void> {
-    if (!review || review.status !== 'running') return;
+    if (cancelling || !review || review.status !== 'running') return;
+    reviewGeneration++;
+    if (pollTimer !== null) clearTimeout(pollTimer);
     cancelling = true;
     try {
       const updated = await api.post<Review>(`/reviews/${review.id}/cancel`, {});
+      if (disposed) return;
+      reviewGeneration++;
       review = updated;
       history = history.map((r) => (r.id === updated.id ? updated : r));
       toasts.info('Review cancelled');
     } catch (e) {
       toasts.error('Could not cancel review', e instanceof Error ? e.message : String(e));
     } finally {
-      cancelling = false;
+      if (!disposed) {
+        cancelling = false;
+        if (review?.status === 'running') schedulePoll();
+      }
     }
   }
 
