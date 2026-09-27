@@ -3,7 +3,6 @@
     "src/app.css": 1
   },
   "body-style": {
-    "src/modules/api/ApiPage.svelte": 8,
     "src/modules/git/DiffViewer.svelte": 4,
     "src/modules/git/GraphView.svelte": 8,
     "src/modules/vault/GraphView.svelte": 4,
