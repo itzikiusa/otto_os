@@ -83,12 +83,16 @@ async fn seed_ws(pool: &SqlitePool) -> (String, String) {
 }
 
 /// A mock MCP server: a read tool and a `delete_thing` (dangerous-by-name) tool.
+// Replies echo the request id: a pooled session numbers its requests (SE-14).
+// `$MOCK_SPAWNS` (optional) gets one line per server start.
 const MOCK_SERVER: &str = r#"
+[ -n "$MOCK_SPAWNS" ] && echo x >> "$MOCK_SPAWNS"
 while IFS= read -r line; do
+  id=$(printf '%s' "$line" | grep -o '"id":[0-9]*' | head -n 1 | cut -d: -f2)
   case "$line" in
     *'"initialize"'*) printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"mock","version":"1"}}}\n' ;;
-    *'"tools/list"'*) printf '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"list_items","description":"list items","inputSchema":{"type":"object"},"annotations":{"readOnlyHint":true}},{"name":"delete_thing","description":"delete a thing","inputSchema":{"type":"object"}}]}}\n' ;;
-    *'"tools/call"'*) printf '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"done"}],"isError":false}}\n' ;;
+    *'"tools/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"list_items","description":"list items","inputSchema":{"type":"object"},"annotations":{"readOnlyHint":true}},{"name":"delete_thing","description":"delete a thing","inputSchema":{"type":"object"}}]}}\n' "$id" ;;
+    *'"tools/call"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"done"}],"isError":false}}\n' "$id" ;;
     *'"notifications/initialized"'*) : ;;
   esac
 done
@@ -628,4 +632,36 @@ async fn delegated_configure_cannot_attach_or_repoint_native_mcp_credentials() {
     }
     let response=app.oneshot(axum::http::Request::builder().method("POST").uri(format!("/workspaces/{ws}/mcp/servers")).header("content-type","application/json").body(axum::body::Body::from(serde_json::json!({"name":"alias","transport":"stdio","command":"hidden-command"}).to_string())).unwrap()).await.unwrap();
     assert_eq!(response.status().as_u16(), 403);
+}
+
+// SE-14: governed calls reuse one pooled client (one server process) per
+// server; a config edit retires it.
+#[tokio::test]
+async fn governed_calls_reuse_one_pooled_client() {
+    let pool = pool().await;
+    let (ws, user) = seed_ws(&pool).await;
+    let svc = McpService::new(pool.clone(), Arc::new(MemSecrets::default()));
+    let server = register_mock(&svc, &pool, &ws, &user).await;
+    let dir = tempfile::tempdir().unwrap();
+    let spawns = dir.path().join("spawns");
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("MOCK_SPAWNS".to_string(), spawns.display().to_string());
+    svc.registry()
+        .update(&server.id, None, None, None, None, Some(&env), None, None, None, None, None)
+        .await
+        .unwrap();
+    svc.discover(&server.id).await.unwrap();
+    for _ in 0..4 {
+        let out = svc
+            .invoke(&server.id, "list_items", &serde_json::json!({}), &ctx(&ws, false))
+            .await
+            .unwrap();
+        assert!(matches!(out, InvokeOutcome::Executed { is_error: false, .. }));
+    }
+    assert_eq!(svc.pooled_clients(), 1);
+    let starts = std::fs::read_to_string(&spawns).unwrap().lines().count();
+    assert_eq!(starts, 1, "discover + 4 invokes share one server process");
+
+    svc.evict_client(&server.id);
+    assert_eq!(svc.pooled_clients(), 0);
 }

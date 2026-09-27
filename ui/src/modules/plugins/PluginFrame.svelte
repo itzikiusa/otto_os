@@ -48,7 +48,11 @@
     probe = 'loading';
     frameLoaded = false;
     try {
-      const r = await fetch(url, { cache: 'no-store' });
+      // HEAD (V8): the probe only needs the status; a GET downloaded the whole
+      // entry once here and again when the iframe loaded it. Axum answers HEAD
+      // on GET routes; anything that refuses it (405) falls back to a GET.
+      let r = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+      if (r.status === 405 || r.status === 501) r = await fetch(url, { cache: 'no-store' });
       if (seq !== probeSeq) return;
       if (r.ok) {
         probeError = null;

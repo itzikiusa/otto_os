@@ -131,7 +131,7 @@
     notD2 = false;
     const dark = ui.resolvedScheme === 'dark';
     if (text === lastRendered && sketch === lastRenderedSketch && dark === lastRenderedDark) return; // nothing changed
-    const out = await renderD2(`cv-${sceneId ?? 'x'}-${token}`, text, { sketch, dark });
+    const out = await renderD2(`cv-${sceneId ?? 'x'}-${token}`, text, { sketch, dark, isStale: () => token !== renderToken });
     if (token !== renderToken) return; // superseded
     if (out.error || !out.svg) {
       renderError = out.error || 'Could not render the diagram';

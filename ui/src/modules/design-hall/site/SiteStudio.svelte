@@ -59,7 +59,10 @@
   });
 
   // ── Document + undo ────────────────────────────────────────────────────────
-  let doc = $state<SiteDoc | null>(null);
+  // Raw (SD-17): documents are immutable, path-copied values (engine/ops.ts).
+  // A deep proxy re-wrapped the whole site per keystroke and made every
+  // section a new object, so the canvas re-rendered all of them.
+  let doc = $state.raw<SiteDoc | null>(null);
   let issues = $state<SiteIssue[]>([]);
   let undoStack: SiteDoc[] = [];
   let redoStack: SiteDoc[] = [];
@@ -74,6 +77,9 @@
     const s = source;
     untrack(() => {
       if (s !== null && s === emitted) return;
+      // An outside change (live update, discard, version switch) wins over a
+      // typing burst the parent has not been handed yet.
+      cancelEmit();
       const r = ops.parseSite(s);
       doc = r.doc;
       issues = r.issues;
@@ -88,10 +94,48 @@
     canRedo = redoStack.length > 0;
   }
   function emit(next: SiteDoc): void {
+    cancelEmit();
     const text = ops.serializeSite(next);
     emitted = text;
     onchange?.(text);
   }
+  // Typing (coalesced edits) serializes the whole site and hands it up at most
+  // once per EMIT_MS (trailing) instead of per keystroke (SD-17). Structural
+  // edits, undo and redo emit at once. A pending emit is flushed before
+  // anything that could read the parent's copy — a pointer press anywhere
+  // (Save button, version menu) or a ⌘/Ctrl shortcut (⌘S) — and on unmount.
+  const EMIT_MS = 250;
+  let emitTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingEmit: SiteDoc | null = null;
+  function emitSoon(next: SiteDoc): void {
+    pendingEmit = next;
+    emitTimer ??= setTimeout(flushEmit, EMIT_MS);
+  }
+  function flushEmit(): void {
+    const next = pendingEmit;
+    cancelEmit();
+    if (next) emit(next);
+  }
+  function cancelEmit(): void {
+    if (emitTimer) clearTimeout(emitTimer);
+    emitTimer = null;
+    pendingEmit = null;
+  }
+  $effect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (pendingEmit && (e.metaKey || e.ctrlKey)) flushEmit();
+    };
+    const onPointer = () => {
+      if (pendingEmit) flushEmit();
+    };
+    window.addEventListener('keydown', onKey, true);
+    window.addEventListener('pointerdown', onPointer, true);
+    return () => {
+      window.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('pointerdown', onPointer, true);
+    };
+  });
+  onDestroy(flushEmit);
   /** Apply an edit. Rapid edits of the same field (typing) coalesce into one undo step. */
   function commit(next: SiteDoc, coalesce?: string): void {
     if (readonly || !doc) return;
@@ -105,7 +149,8 @@
     redoStack = [];
     doc = next;
     syncUndo();
-    emit(next);
+    if (coalesce) emitSoon(next);
+    else emit(next);
   }
   function undo(): void {
     const prev = undoStack.pop();

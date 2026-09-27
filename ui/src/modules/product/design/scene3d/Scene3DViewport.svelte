@@ -200,7 +200,14 @@
         if (orbit) orbit.enabled = !dragging;
         if (!dragging) commitGizmo(); // final, rounded write at drag end
       });
-      gizmo.addEventListener('objectChange', () => commitGizmo());
+      // SD-18: during a drag three.js already moves the node; committing per
+      // pointer move serialized, re-parsed, validated and reconciled the whole
+      // scene 60×/s. Mid-drag only the light marker follows; the doc is written
+      // once, at drag end (`dragging-changed` above).
+      gizmo.addEventListener('objectChange', () => {
+        if (dragging) followLightMarker();
+        else commitGizmo();
+      });
       gizmoHelper = gizmo.getHelper();
       scene.add(gizmoHelper);
 
@@ -617,6 +624,16 @@
       helpers.add(selectionBox);
     }
     invalidate();
+  }
+
+  /** Keep a dragged light's marker on the light (no doc write). */
+  function followLightMarker(): void {
+    if (!gizmo?.object || !selectedId) return;
+    const marker = lightMarkers.get(selectedId);
+    if (marker) {
+      marker.position.copy(gizmo.object.position);
+      invalidate();
+    }
   }
 
   /** Gizmo moved the selected node → write the transform back through ops. */

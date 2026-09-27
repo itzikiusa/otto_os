@@ -7,12 +7,48 @@
 import { api } from '../../lib/api/client';
 import * as design from '../../lib/api/design';
 import type { DesignArtifact, DesignProject, DesignSearchHit } from '../../lib/api/types';
+import type { DesignBusEvent } from '../../lib/events.svelte';
 import { ws } from '../../lib/stores/workspace.svelte';
 import { auth } from '../../lib/stores/auth.svelte';
 import type { StoryRef } from './model';
 
 function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/** More distinct artifacts than this in one burst → one full reload instead. */
+const PATCH_MAX = 10;
+
+/** Everything a library card / lookup reads from an artifact. */
+function sameArtifactCard(a: DesignArtifact, b: DesignArtifact): boolean {
+  return (
+    a.updated_at === b.updated_at &&
+    a.head_version_id === b.head_version_id &&
+    a.approved_version_id === b.approved_version_id &&
+    a.thumb_blob === b.thumb_blob &&
+    a.title === b.title &&
+    a.status === b.status &&
+    a.project_id === b.project_id
+  );
+}
+
+function sameHits(a: DesignSearchHit[], b: DesignSearchHit[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i], y = b[i];
+    if (
+      x.artifact.id !== y.artifact.id ||
+      !sameArtifactCard(x.artifact, y.artifact) ||
+      x.reference_count !== y.reference_count ||
+      x.story_ids.join() !== y.story_ids.join()
+    )
+      return false;
+  }
+  return true;
+}
+
+function sameProjects(a: DesignProject[], b: DesignProject[]): boolean {
+  return a.length === b.length && JSON.stringify(a) === JSON.stringify(b);
 }
 
 class DesignLibrary {
@@ -62,8 +98,10 @@ class DesignLibrary {
         design.listProjects(),
       ]);
       if (my !== this.seq) return;
-      this.hits = hits;
-      this.projects = projects;
+      // Keep the arrays when nothing a card shows changed, so the id maps,
+      // grids and thumbnails see no change at all (SD-16).
+      if (!sameHits(this.hits, hits)) this.hits = hits;
+      if (!sameProjects(this.projects, projects)) this.projects = projects;
       this.error = null;
       this.loaded = true;
       void this.resolveStories(my);
@@ -75,8 +113,77 @@ class DesignLibrary {
     }
   }
 
+  /**
+   * Live events → the cheapest refresh (SD-16). A content / meta / approval /
+   * archive change of an artifact the library already shows re-reads THAT
+   * artifact (one small GET, no content) and patches its card; anything that
+   * can change the set, the story links or reference counts (created,
+   * deleted, link events, unknown artifacts, big bursts) falls back to the
+   * debounced full reload of up to 500 hits.
+   */
+  applyEvents(evs: readonly DesignBusEvent[]): void {
+    let full = false;
+    for (const ev of evs) {
+      if (ev.type === 'design_learning_update') continue;
+      if (
+        ev.type === 'design_artifact_updated' &&
+        ev.change !== 'created' &&
+        ev.change !== 'deleted' &&
+        this.#hitById.has(ev.artifact_id)
+      ) {
+        this.#patchIds.add(ev.artifact_id);
+      } else {
+        full = true;
+      }
+    }
+    if (full || this.#patchIds.size > PATCH_MAX) {
+      this.#patchIds.clear();
+      this.refreshSoon();
+    } else if (this.#patchIds.size) {
+      this.#patchSoon();
+    }
+  }
+
+  #patchIds = new Set<string>();
+  #patchTimer: ReturnType<typeof setTimeout> | null = null;
+  #patchSoon(): void {
+    if (this.#patchTimer || this.timer) return; // a full reload is already due
+    this.#patchTimer = setTimeout(() => {
+      this.#patchTimer = null;
+      void this.#patch();
+    }, 350);
+  }
+
+  async #patch(): Promise<void> {
+    const ids = [...this.#patchIds];
+    this.#patchIds.clear();
+    const seq = this.seq;
+    const fresh = await Promise.all(
+      ids.map((id) => design.getArtifact(id).then((d) => d.artifact, () => null)),
+    );
+    if (seq !== this.seq) return; // a full load landed meanwhile
+    const byId = new Map(fresh.filter((a): a is DesignArtifact => !!a).map((a) => [a.id, a]));
+    if (byId.size < ids.length) {
+      this.refreshSoon(); // gone or unreadable → let the full list decide
+      return;
+    }
+    let changed = false;
+    const next = this.hits.map((h) => {
+      const a = byId.get(h.artifact.id);
+      if (!a || sameArtifactCard(h.artifact, a)) return h;
+      changed = true;
+      return { ...h, artifact: a };
+    });
+    if (changed) this.hits = next;
+  }
+
   /** Coalesce bursts of live events into one reload. */
   refreshSoon(delay = 350): void {
+    if (this.#patchTimer) {
+      clearTimeout(this.#patchTimer);
+      this.#patchTimer = null;
+      this.#patchIds.clear();
+    }
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => {
       this.timer = null;

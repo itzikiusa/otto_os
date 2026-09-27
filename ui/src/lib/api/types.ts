@@ -2899,6 +2899,8 @@ export interface DiffResp {
   truncated?: boolean | null;
   total_added?: number | null;
   total_deleted?: number | null;
+  /** git skipped rename detection (past `-l1000`): some renames show as delete + add. */
+  renames_incomplete?: boolean | null;
 }
 
 export interface StagePathsReq {

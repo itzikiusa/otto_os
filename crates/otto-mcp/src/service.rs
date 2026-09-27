@@ -7,9 +7,9 @@
 //! approval gate (hash-bound, single-use, approver≠requester, expiry) → dry-run
 //! (pure simulation) → execute → **guaranteed** audit (fail-closed) → stats.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::Instant;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use otto_core::redact::{redact_json, redact_text};
@@ -50,15 +50,52 @@ pub enum InvokeOutcome {
     Executed { content: Value, is_error: bool },
 }
 
+/// Pooled outbound clients (SE-14): one per server, reused while its effective
+/// config (transport + plaintext config + keychain secrets) hashes the same.
+/// An entry idle past [`CLIENT_IDLE_TTL`] is dropped — which kills a parked
+/// stdio child — on the next checkout or health sweep.
+const CLIENT_IDLE_TTL: Duration = Duration::from_secs(5 * 60);
+const CLIENT_POOL_CAP: usize = 32;
+
+struct PooledClient {
+    config_hash: String,
+    client: Arc<McpClient>,
+    last_used: Instant,
+}
+
 #[derive(Clone)]
 pub struct McpService {
     pool: SqlitePool,
     secrets: Arc<dyn SecretStore>,
+    clients: Arc<Mutex<HashMap<String, PooledClient>>>,
 }
 
 impl McpService {
     pub fn new(pool: SqlitePool, secrets: Arc<dyn SecretStore>) -> Self {
-        Self { pool, secrets }
+        Self {
+            pool,
+            secrets,
+            clients: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Number of pooled clients (diagnostics / tests).
+    pub fn pooled_clients(&self) -> usize {
+        self.clients.lock().map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// Drop a server's pooled client now (config edit, disable, delete).
+    pub fn evict_client(&self, server_id: &str) {
+        if let Ok(mut m) = self.clients.lock() {
+            m.remove(server_id);
+        }
+    }
+
+    /// Drop pooled clients idle past the TTL (their stdio children die with them).
+    pub fn reap_idle_clients(&self) {
+        if let Ok(mut m) = self.clients.lock() {
+            m.retain(|_, c| c.last_used.elapsed() < CLIENT_IDLE_TTL);
+        }
     }
 
     /// Current identity and resource policy are checked again at execution, so
@@ -185,10 +222,53 @@ impl McpService {
         (env, headers)
     }
 
+    /// The pooled outbound client for a server (SE-14): reused while the
+    /// server's effective config is unchanged, so governed calls stop paying a
+    /// spawn + `initialize` each (1–3 s for an `npx` server). A config or
+    /// secret change hashes differently and replaces the entry.
+    async fn client_for(&self, server: &McpServerDetail) -> Arc<McpClient> {
+        let (secret_env, secret_headers) = self.resolve_secrets(server).await;
+        let hash = client_config_hash(server, &secret_env, &secret_headers);
+        if let Ok(mut m) = self.clients.lock() {
+            m.retain(|_, c| c.last_used.elapsed() < CLIENT_IDLE_TTL);
+            if let Some(entry) = m.get_mut(&server.id) {
+                if entry.config_hash == hash {
+                    entry.last_used = Instant::now();
+                    return entry.client.clone();
+                }
+            }
+        }
+        let client = Arc::new(Self::build_client(server, secret_env, secret_headers));
+        if let Ok(mut m) = self.clients.lock() {
+            if m.len() >= CLIENT_POOL_CAP && !m.contains_key(&server.id) {
+                // Evict the least recently used entry.
+                if let Some(oldest) = m
+                    .iter()
+                    .min_by_key(|(_, c)| c.last_used)
+                    .map(|(k, _)| k.clone())
+                {
+                    m.remove(&oldest);
+                }
+            }
+            m.insert(
+                server.id.clone(),
+                PooledClient {
+                    config_hash: hash,
+                    client: client.clone(),
+                    last_used: Instant::now(),
+                },
+            );
+        }
+        client
+    }
+
     /// Build an outbound client for a server, overlaying keychain secrets onto the
     /// plaintext config.
-    async fn client_for(&self, server: &McpServerDetail) -> McpClient {
-        let (secret_env, secret_headers) = self.resolve_secrets(server).await;
+    fn build_client(
+        server: &McpServerDetail,
+        secret_env: BTreeMap<String, String>,
+        secret_headers: BTreeMap<String, String>,
+    ) -> McpClient {
         match server.transport.as_str() {
             "http" => {
                 let mut headers = server.headers.clone();
@@ -262,7 +342,10 @@ impl McpService {
                 .await?;
             return self.registry().get(&server.id).await;
         }
-        let client = self.client_for(&server).await;
+        // Health is a one-shot probe that the server can START; it never
+        // touches (or parks) the pooled session.
+        let (secret_env, secret_headers) = self.resolve_secrets(&server).await;
+        let client = Self::build_client(&server, secret_env, secret_headers);
         let start = Instant::now();
         let res = client.health().await;
         let latency = start.elapsed().as_millis() as i64;
@@ -284,6 +367,7 @@ impl McpService {
 
     /// Best-effort health sweep across all managed servers (background tick).
     pub async fn health_sweep(&self) {
+        self.reap_idle_clients();
         let servers = match self.registry().list_all_managed().await {
             Ok(s) => s,
             Err(_) => return,
@@ -852,6 +936,45 @@ fn cap_rows(v: Value, max_seen: &mut usize) -> Value {
         ),
         other => other,
     }
+}
+
+/// Hash of everything that shapes an outbound client: transport, command,
+/// args, plaintext env/url/headers and the resolved secrets. Secrets are
+/// hashed (never stored) so a rotated key replaces the pooled client.
+fn client_config_hash(
+    server: &McpServerDetail,
+    secret_env: &BTreeMap<String, String>,
+    secret_headers: &BTreeMap<String, String>,
+) -> String {
+    let mut h = Sha256::new();
+    let mut put = |tag: &str, v: &str| {
+        h.update(tag.as_bytes());
+        h.update((v.len() as u64).to_le_bytes());
+        h.update(v.as_bytes());
+    };
+    put("transport", &server.transport);
+    put("command", &server.command);
+    for a in &server.args {
+        put("arg", a);
+    }
+    put("url", server.url.as_deref().unwrap_or(""));
+    for (k, v) in &server.env {
+        put("env.k", k);
+        put("env.v", v);
+    }
+    for (k, v) in &server.headers {
+        put("hdr.k", k);
+        put("hdr.v", v);
+    }
+    for (k, v) in secret_env {
+        put("senv.k", k);
+        put("senv.v", v);
+    }
+    for (k, v) in secret_headers {
+        put("shdr.k", k);
+        put("shdr.v", v);
+    }
+    hex::encode(h.finalize())
 }
 
 #[cfg(test)]

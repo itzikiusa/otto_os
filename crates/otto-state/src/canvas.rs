@@ -47,9 +47,9 @@ pub struct CanvasSceneSummary {
     pub thumbnail: Option<String>,
     /// Folder path used to group scenes in the UI. `None` = root/ungrouped.
     pub section: Option<String>,
-    /// The scene's source format (`mermaid` | `excalidraw` | `d2`), pulled out of
-    /// `doc_json` via `json_extract` so list views can show a format chip without
-    /// fetching the full document. `None` for docs that predate/omit `format`
+    /// The scene's source format (`mermaid` | `excalidraw` | `d2`) — the
+    /// trigger-maintained `format` column (migration 0143) mirrors `doc_json`'s
+    /// `format`, so list views show a format chip without parsing documents. `None` for docs that predate/omit `format`
     /// (treated as `mermaid` by convention on the UI side).
     pub format: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -182,7 +182,7 @@ impl CanvasRepo {
     pub async fn list_for_workspace(&self, ws: &Id) -> Result<Vec<CanvasSceneSummary>> {
         let rows = sqlx::query(
             "SELECT id, workspace_id, story_id, title, thumbnail, section,
-                    json_extract(doc_json, '$.format') AS format, created_at, updated_at
+                    format, created_at, updated_at
              FROM canvas_scenes WHERE workspace_id = ? ORDER BY updated_at DESC",
         )
         .bind(ws)
@@ -196,7 +196,7 @@ impl CanvasRepo {
     pub async fn list_for_story(&self, story_id: &Id) -> Result<Vec<CanvasSceneSummary>> {
         let rows = sqlx::query(
             "SELECT id, workspace_id, story_id, title, thumbnail, section,
-                    json_extract(doc_json, '$.format') AS format, created_at, updated_at
+                    format, created_at, updated_at
              FROM canvas_scenes WHERE story_id = ? ORDER BY updated_at DESC",
         )
         .bind(story_id)
@@ -211,7 +211,7 @@ impl CanvasRepo {
     pub async fn list_for_user(&self, user_id: &Id) -> Result<Vec<CanvasSceneSummary>> {
         let rows = sqlx::query(
             "SELECT id, workspace_id, story_id, title, thumbnail, section,
-                    json_extract(doc_json, '$.format') AS format, created_at, updated_at
+                    format, created_at, updated_at
              FROM canvas_scenes WHERE created_by = ? ORDER BY updated_at DESC",
         )
         .bind(user_id)
@@ -285,7 +285,44 @@ impl CanvasRepo {
     /// With `expect_updated_at` set, the write applies only when the row is
     /// unchanged since that stamp; a concurrent edit yields `Error::Conflict`
     /// instead of a silent last-write-wins clobber.
+    /// The owning workspace of a scene, without loading its document (SD-22:
+    /// access checks on PUT/DELETE used to `SELECT *` the whole doc).
+    pub async fn workspace_of(&self, id: &Id) -> Result<Option<Id>> {
+        sqlx::query_scalar("SELECT workspace_id FROM canvas_scenes WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("canvas scene workspace"))
+    }
+
+    /// One scene's list row (no `doc_json`).
+    pub async fn summary(&self, id: &Id) -> Result<CanvasSceneSummary> {
+        let row = sqlx::query(
+            "SELECT id, workspace_id, story_id, title, thumbnail, section,
+                    format, created_at, updated_at
+             FROM canvas_scenes WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("get canvas scene summary"))?
+        .ok_or_else(|| Error::NotFound(format!("canvas scene {id}")))?;
+        row_to_summary(&row)
+    }
+
     pub async fn update(&self, id: &Id, patch: SceneUpdate) -> Result<CanvasScene> {
+        self.apply_update(id, patch).await?;
+        self.get_required(id).await
+    }
+
+    /// [`Self::update`] answering with the list row instead of echoing the
+    /// whole document back (SD-22: the save round-trip moved the doc 3×).
+    pub async fn update_summary(&self, id: &Id, patch: SceneUpdate) -> Result<CanvasSceneSummary> {
+        self.apply_update(id, patch).await?;
+        self.summary(id).await
+    }
+
+    async fn apply_update(&self, id: &Id, patch: SceneUpdate) -> Result<()> {
         let now = fmt(Utc::now());
         let result = sqlx::query(
             "UPDATE canvas_scenes
@@ -313,14 +350,14 @@ impl CanvasRepo {
         .map_err(dberr("update canvas scene"))?;
         if result.rows_affected() == 0 {
             // Distinguish "gone" from "changed under us".
-            return match self.get(id).await? {
+            return match self.workspace_of(id).await? {
                 Some(_) => Err(Error::Conflict(format!(
                     "canvas scene {id} changed since the edit began"
                 ))),
                 None => Err(Error::NotFound(format!("canvas scene {id}"))),
             };
         }
-        self.get_required(id).await
+        Ok(())
     }
 
     pub async fn delete(&self, id: &Id) -> Result<()> {
@@ -652,5 +689,58 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(count, 0, "deleting a scene must cascade its refs");
+    }
+
+    // SD-22: the list's `format` is a trigger-maintained column; PUT/DELETE
+    // access checks and the summary answer never load the document.
+    #[tokio::test]
+    async fn format_column_follows_the_document_and_summary_skips_it() {
+        let pool = mem_pool().await;
+        let repo = CanvasRepo::new(pool.clone());
+        let scene = repo
+            .create(NewScene {
+                workspace_id: "w1".into(),
+                story_id: None,
+                title: "D".into(),
+                doc_json: r#"{"type":"otto-canvas","format":"d2","source":"a -> b"}"#.into(),
+                provider: "claude".into(),
+                section: None,
+                created_by: "u1".into(),
+            })
+            .await
+            .unwrap();
+        let list = repo.list_for_workspace(&"w1".into()).await.unwrap();
+        assert_eq!(list[0].format.as_deref(), Some("d2"), "insert trigger");
+
+        let row = repo
+            .update_summary(
+                &scene.id,
+                SceneUpdate {
+                    doc_json: Some(r#"{"type":"otto-canvas","format":"excalidraw","source":"{}"}"#.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(row.format.as_deref(), Some("excalidraw"), "update trigger");
+        assert_eq!(row.id, scene.id);
+
+        // A title-only update keeps the format; malformed JSON clears it
+        // instead of failing the write.
+        repo.update(&scene.id, SceneUpdate { title: Some("T".into()), ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(repo.summary(&scene.id).await.unwrap().format.as_deref(), Some("excalidraw"));
+        repo.update(&scene.id, SceneUpdate { doc_json: Some("not json".into()), ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(repo.summary(&scene.id).await.unwrap().format, None);
+
+        assert_eq!(repo.workspace_of(&scene.id).await.unwrap().as_deref(), Some("w1"));
+        assert_eq!(repo.workspace_of(&"missing".into()).await.unwrap(), None);
+        assert!(matches!(
+            repo.update_summary(&"missing".into(), SceneUpdate::default()).await,
+            Err(Error::NotFound(_))
+        ));
     }
 }

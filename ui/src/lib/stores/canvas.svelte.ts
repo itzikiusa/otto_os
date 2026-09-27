@@ -118,7 +118,7 @@ class CanvasStore {
     const write = (async () => {
       await previous?.catch(() => {});
       if (context !== this.#saveContext) return;
-      await api.put(`/canvas/scenes/${id}`, { doc });
+      await api.put(`/canvas/scenes/${id}?summary=true`, { doc }); // list row back, not the doc (SD-22)
       if (context !== this.#saveContext) return;
       if (this.#drafts.get(id) !== doc) return;
       this.#drafts.delete(id);
@@ -293,7 +293,7 @@ class CanvasStore {
     id: string,
     patch: { title?: string; section?: string | null; provider?: string; story_id?: string },
   ): Promise<void> {
-    await api.put(`/canvas/scenes/${id}`, patch);
+    await api.put(`/canvas/scenes/${id}?summary=true`, patch);
     if (this.currentId === id) {
       if (patch.title != null && this.scene) this.scene = { ...this.scene, title: patch.title };
       if (patch.provider != null) this.provider = patch.provider;
@@ -321,7 +321,7 @@ class CanvasStore {
     };
     this.rawDoc = doc;
     try {
-      await api.put(`/canvas/scenes/${id}`, { doc });
+      await api.put(`/canvas/scenes/${id}?summary=true`, { doc }); // list row back, not the doc (SD-22)
       this.savedAt = Date.now();
       this.dirty = false;
     } catch {
@@ -407,7 +407,7 @@ class CanvasStore {
     if (!this.currentId || !this.scene || this.saving) return;
     this.saving = true;
     try {
-      await api.put<CanvasScene>(`/canvas/scenes/${this.currentId}`, {
+      await api.put(`/canvas/scenes/${this.currentId}?summary=true`, {
         title: this.scene.title,
         doc: this.scene,
       });

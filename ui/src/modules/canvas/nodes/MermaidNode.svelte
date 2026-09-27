@@ -41,7 +41,7 @@
   async function doRender(s: string): Promise<void> {
     const mine = ++seq;
     rendering = true;
-    const res = await renderMermaid(`${renderId}-${mine}`, s);
+    const res = await renderMermaid(`${renderId}-${mine}`, s, { isStale: () => mine !== seq });
     if (mine !== seq) return; // a newer render superseded this one
     rendering = false;
     if (res.error) {

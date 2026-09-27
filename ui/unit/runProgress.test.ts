@@ -6,7 +6,7 @@ import ts from 'typescript';
 const file=new URL('../src/modules/workflows/runProgress.ts',import.meta.url);
 function helpers():Record<string,any> {
   if (!existsSync(file)) return {mergeRunProgress:(current:any,next:any)=>{if(current.id===next.id && next.rev>=current.rev) {current.rev=next.rev; current.nodes=next.nodes;}},RunBodyCache:class {items=new Map(); put(run:string,node:string,version:string,body:any){this.items.set(`${run}:${node}`,{version,body});} get(run:string,node:string,_version:string){return this.items.get(`${run}:${node}`)?.body;} }};
-  const context={exports:{} as Record<string,any>,require:()=>({})};
+  const context={exports:{} as Record<string,any>,require:()=>({}),AbortController};
   runInNewContext(ts.transpileModule(readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,context); return context.exports;
 }
 test('checkpoint-only progress merges freshness without clearing loaded pages',()=>{
@@ -44,4 +44,30 @@ test('unchanged nodes (same detail_version + status) keep their object and field
   assert.equal(current.nodes[0],a); assert.equal(current.nodes[0].sessions,sessions,'unchanged node not rewritten');
   assert.deepEqual(current.nodes[0].logs,['loaded body']);
   assert.equal(current.nodes[1],b); assert.equal(current.nodes[1].status,'done'); assert.deepEqual(current.nodes[1].sessions,['s2']);
+});
+test('shared node bodies: one request per (run,node) across the step list and the inspector',async()=>{
+  const {SharedNodeBodies}=helpers(); const shared=new SharedNodeBodies(2);
+  let calls=0; const signals:AbortSignal[]=[];
+  let release!:()=>void; const gate=new Promise<void>(r=>{release=r;});
+  const load=async(signal:AbortSignal)=>{calls++;signals.push(signal);await gate;return {detail_version:'v1',body:{output:'x'}};};
+  const a=shared.fetch('r','n',load); const b=shared.fetch('r','n',load);
+  release(); const [ra,rb]=await Promise.all([a,b]);
+  assert.equal(calls,1,'concurrent readers share one request');
+  assert.equal(ra,rb);
+  assert.deepEqual(shared.peek('r','n','v1'),{output:'x'});
+  assert.equal(shared.peek('r','n','v2'),null,'another version is a miss');
+  // Bounded: the oldest (run,node) falls out past the cap.
+  await shared.fetch('r','m',async()=>({detail_version:'1',body:1}));
+  await shared.fetch('r','o',async()=>({detail_version:'1',body:2}));
+  assert.equal(shared.peek('r','n','v1'),null);
+});
+test('a shared read is aborted only when every consumer that joined it aborted',async()=>{
+  const {SharedNodeBodies}=helpers(); const shared=new SharedNodeBodies();
+  let seen!:AbortSignal; let release!:()=>void; const gate=new Promise<void>(r=>{release=r;});
+  const load=async(signal:AbortSignal)=>{seen=signal;await gate;return {detail_version:'v',body:0};};
+  const c1=new AbortController(), c2=new AbortController();
+  const p1=shared.fetch('r','n',load,c1.signal); const p2=shared.fetch('r','n',load,c2.signal);
+  c1.abort(); assert.equal(seen.aborted,false,'one consumer left; the request stays');
+  c2.abort(); assert.equal(seen.aborted,true,'the last consumer left; the request is aborted');
+  release(); await Promise.all([p1,p2]);
 });

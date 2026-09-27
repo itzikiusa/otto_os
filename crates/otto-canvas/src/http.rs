@@ -1,6 +1,6 @@
 //! Canvas Studio router + handlers.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -118,6 +118,31 @@ async fn ws_from_scene<S: CanvasCtx>(
     Ok(scene)
 }
 
+/// Role-check against a scene's workspace WITHOUT loading its document (PUT /
+/// DELETE only need the owner; SD-22).
+async fn check_scene_role<S: CanvasCtx>(
+    ctx: &S,
+    user: &otto_core::domain::User,
+    id: &Id,
+    role: WorkspaceRole,
+) -> ApiResult<()> {
+    let ws = ctx
+        .canvas_repo()
+        .workspace_of(id)
+        .await?
+        .ok_or_else(|| Error::NotFound(format!("canvas scene {id}")))?;
+    ctx.roles().check(user, &ws, role).await?;
+    Ok(())
+}
+
+#[derive(Deserialize, Default)]
+struct UpdateSceneQ {
+    /// `?summary=true`: answer with the `CanvasSceneSummary` list row instead
+    /// of echoing the full scene (the Canvas editor ignores the echo).
+    #[serde(default)]
+    summary: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Handlers — collection (workspace-scoped)
 // ---------------------------------------------------------------------------
@@ -183,24 +208,24 @@ async fn update_scene<S: CanvasCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(SceneIdPath { id }): Path<SceneIdPath>,
+    Query(q): Query<UpdateSceneQ>,
     Json(req): Json<UpdateSceneReq>,
 ) -> ApiResult<Response> {
-    ws_from_scene(&ctx, &user, &id, WorkspaceRole::Editor).await?;
-    let updated = ctx
-        .canvas_repo()
-        .update(
-            &id,
-            SceneUpdate {
-                title: req.title,
-                doc_json: req.doc.map(|v| v.to_string()),
-                thumbnail: req.thumbnail,
-                provider: req.provider,
-                section: req.section,
-                story_id: req.story_id,
-                ..Default::default()
-            },
-        )
-        .await?;
+    check_scene_role(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let patch = SceneUpdate {
+        title: req.title,
+        doc_json: req.doc.map(|v| v.to_string()),
+        thumbnail: req.thumbnail,
+        provider: req.provider,
+        section: req.section,
+        story_id: req.story_id,
+        ..Default::default()
+    };
+    if q.summary {
+        let row = ctx.canvas_repo().update_summary(&id, patch).await?;
+        return Ok(Json(row).into_response());
+    }
+    let updated = ctx.canvas_repo().update(&id, patch).await?;
     Ok(Json(updated).into_response())
 }
 
@@ -209,7 +234,7 @@ async fn delete_scene<S: CanvasCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(SceneIdPath { id }): Path<SceneIdPath>,
 ) -> ApiResult<Response> {
-    ws_from_scene(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    check_scene_role(&ctx, &user, &id, WorkspaceRole::Editor).await?;
     ctx.canvas_repo().delete(&id).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }

@@ -1525,6 +1525,10 @@ pub struct DiffResp {
     pub total_added: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_deleted: Option<u64>,
+    /// `true` when git skipped rename detection (more files than the
+    /// `-l1000` limit): some renames are reported as a delete + an add.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renames_incomplete: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

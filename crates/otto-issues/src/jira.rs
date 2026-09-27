@@ -875,6 +875,21 @@ impl JiraClient {
     ///
     /// Each comment's ADF body is converted to Markdown via [`adf_to_markdown`].
     pub async fn list_comments(&self, key: &str) -> Result<Vec<IssueComment>> {
+        self.walk_comments(key, None).await
+    }
+
+    /// Comments created at or after `since` (the story watcher's cursor
+    /// timestamp; RFC3339-ish, compared lexicographically like the cursor),
+    /// oldest first. SE-13: walks NEWEST-first (`orderBy=-created`) and stops
+    /// at the first page that reaches an older comment, so a quiet issue with
+    /// 2,000 comments costs one request per tick instead of 20 — and only the
+    /// new bodies are converted. If the server ignores the ordering (a page
+    /// comes back ascending) the walk falls back to reading every page.
+    pub async fn list_comments_since(&self, key: &str, since: &str) -> Result<Vec<IssueComment>> {
+        self.walk_comments(key, Some(since)).await
+    }
+
+    async fn walk_comments(&self, key: &str, since: Option<&str>) -> Result<Vec<IssueComment>> {
         let url = format!(
             "{}/rest/api/3/issue/{}/comment",
             self.base_url,
@@ -887,6 +902,7 @@ impl JiraClient {
         // never seen. Capped at 20 pages of 100 (2000 comments).
         const PAGE: u64 = 100;
         const MAX_PAGES: u64 = 20;
+        let order = if since.is_some() { "-created" } else { "created" };
         let mut all: Vec<serde_json::Value> = Vec::new();
         let mut start_at: u64 = 0;
         for _ in 0..MAX_PAGES {
@@ -898,7 +914,7 @@ impl JiraClient {
                 .header("Authorization", &self.auth_header)
                 .header("Accept", "application/json")
                 .query(&[
-                    ("orderBy", "created"),
+                    ("orderBy", order),
                     ("startAt", start_s.as_str()),
                     ("maxResults", max_s.as_str()),
                 ])
@@ -924,12 +940,27 @@ impl JiraClient {
                 .cloned()
                 .unwrap_or_default();
             let got = page.len() as u64;
-            all.extend(page);
             let total = body.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
             start_at += got;
-            if got == 0 || start_at >= total {
+            let reached_cursor = match since {
+                Some(ts) => {
+                    let (kept, reached) = newest_first_page_since(page, ts);
+                    all.extend(kept);
+                    reached
+                }
+                None => {
+                    all.extend(page);
+                    false
+                }
+            };
+            if reached_cursor || got == 0 || start_at >= total {
                 break;
             }
+        }
+        if since.is_some() {
+            // Newest-first on the wire (or ascending on a server that ignored
+            // `-created`); callers get oldest-first either way.
+            all.sort_by(|a, b| comment_created(a).cmp(comment_created(b)));
         }
 
         let comments = all.as_slice();
@@ -947,11 +978,7 @@ impl JiraClient {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let created = c
-                .get("created")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let created = comment_created(c).to_string();
             // The body is ADF; convert to markdown. Fall back to empty string if absent.
             let body_md = match c.get("body") {
                 Some(adf) if !adf.is_null() => adf_to_markdown(adf),
@@ -2549,6 +2576,35 @@ pub(crate) fn dedupe_dev_status(status: &mut DevStatus) {
         .retain(|p| seen.insert((p.repo.clone(), p.id.clone())));
 }
 
+/// A comment's `created` timestamp ("" when absent).
+fn comment_created(c: &serde_json::Value) -> &str {
+    c.get("created").and_then(|v| v.as_str()).unwrap_or("")
+}
+
+/// SE-13: filter one page of a `-created` walk to comments at or after `since`
+/// and report whether the cursor was reached (an older comment is on the
+/// page, so every later page is older still). A page that is NOT descending
+/// means the server ignored `-created`; it never ends the walk early, so a
+/// new comment on a later page is never missed.
+fn newest_first_page_since(
+    page: Vec<serde_json::Value>,
+    since: &str,
+) -> (Vec<serde_json::Value>, bool) {
+    let descending = page
+        .windows(2)
+        .all(|w| comment_created(&w[0]) >= comment_created(&w[1]));
+    let mut reached = false;
+    let mut kept = Vec::with_capacity(page.len());
+    for c in page {
+        if comment_created(&c) >= since {
+            kept.push(c);
+        } else {
+            reached = true;
+        }
+    }
+    (kept, reached && descending)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3262,5 +3318,50 @@ mod tests {
         assert!(out.commits.is_empty());
         assert!(out.branches.is_empty());
         assert!(out.pull_requests.is_empty());
+    }
+
+    // ── SE-13: newest-first comment walk ─────────────────────────────────
+    fn c(id: &str, created: &str) -> serde_json::Value {
+        serde_json::json!({ "id": id, "created": created })
+    }
+
+    #[test]
+    fn newest_first_page_stops_at_the_cursor_and_keeps_ties() {
+        let page = vec![
+            c("5", "2026-01-05T00:00:00.000+0000"),
+            c("4", "2026-01-04T00:00:00.000+0000"),
+            c("3", "2026-01-03T00:00:00.000+0000"),
+            c("2", "2026-01-02T00:00:00.000+0000"),
+        ];
+        let (kept, reached) = newest_first_page_since(page, "2026-01-04T00:00:00.000+0000");
+        let ids: Vec<&str> = kept.iter().map(|v| v["id"].as_str().unwrap()).collect();
+        // The tie (id 4) is kept — the caller drops already-seen ids.
+        assert_eq!(ids, ["5", "4"]);
+        assert!(reached, "an older comment on a descending page ends the walk");
+    }
+
+    #[test]
+    fn newest_first_page_without_older_comments_keeps_walking() {
+        let page = vec![
+            c("9", "2026-02-09T00:00:00.000+0000"),
+            c("8", "2026-02-08T00:00:00.000+0000"),
+        ];
+        let (kept, reached) = newest_first_page_since(page, "2026-01-01T00:00:00.000+0000");
+        assert_eq!(kept.len(), 2);
+        assert!(!reached);
+    }
+
+    #[test]
+    fn an_ascending_page_never_ends_the_walk_early() {
+        // A server that ignored `orderBy=-created`: old comments first, the new
+        // one last. Stopping here would lose later pages; filtering still works.
+        let page = vec![
+            c("1", "2026-01-01T00:00:00.000+0000"),
+            c("2", "2026-03-01T00:00:00.000+0000"),
+        ];
+        let (kept, reached) = newest_first_page_since(page, "2026-02-01T00:00:00.000+0000");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0]["id"], "2");
+        assert!(!reached);
     }
 }

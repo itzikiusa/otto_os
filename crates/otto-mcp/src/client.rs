@@ -2,14 +2,24 @@
 //!
 //! Two transports:
 //! - **stdio**: spawn `command args` with `env` (incl. keychain-resolved secrets),
-//!   speak newline-delimited JSON-RPC 2.0 over the child's stdin/stdout. One
-//!   short-lived child per operation (discovery / health / invoke) keeps the
-//!   client stateless and robust; results are cached in `mcp_tools`.
-//! - **http** (Streamable HTTP): one operation = `POST initialize` (capture
-//!   `Mcp-Session-Id`) → `POST <op>` (carry the session id). The reqwest client is
-//!   built with the **SSRF-validated IP pinned** (`.resolve`) so a DNS rebind can't
-//!   redirect the connect — and the configured auth header — to loopback/metadata
-//!   (design §14 F9). `otto_netguard::redirect_policy()` guards redirect hops.
+//!   speak newline-delimited JSON-RPC 2.0 over the child's stdin/stdout.
+//! - **http** (Streamable HTTP): `POST initialize` (capture `Mcp-Session-Id`) →
+//!   `POST <op>` (carry the session id). The reqwest client is built with the
+//!   **SSRF-validated IP pinned** (`.resolve`) so a DNS rebind can't redirect the
+//!   connect — and the configured auth header — to loopback/metadata (design §14
+//!   F9). `otto_netguard::redirect_policy()` guards redirect hops.
+//!
+//! **Sessions (SE-14).** `list_tools` / `call_tool` keep ONE initialized session
+//! per client (the stdio child stays up; the HTTP client + pinned IP + session id
+//! are reused), so a pooled client (see `McpService`) pays spawn + `initialize`
+//! once instead of per call (1–3 s for an `npx` server). A failed or timed-out op
+//! drops the session (the child is killed); the next op starts a fresh one. A
+//! reused session is retried once, fresh, ONLY when the request provably never
+//! reached the server (write failed / stream already closed before we wrote) —
+//! a tool call is never replayed after the server may have run it. A busy
+//! session is never waited on: a concurrent op runs on a one-shot session, so
+//! parallel calls keep their old parallelism. `health` is always one-shot (it
+//! probes that the server can START). Children are `kill_on_drop`.
 //!
 //! Hard caps mirror the inward server: 20 s per op, 1 MiB body. Redaction/row-cap
 //! of results happens in the service layer.
@@ -19,7 +29,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const OP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -45,19 +55,58 @@ pub enum Transport {
     },
 }
 
+/// A spawned stdio server's handles (boxed: far bigger than the HTTP arm).
+struct StdioIo {
+    child: Child,
+    stdin: ChildStdin,
+    reader: BufReader<ChildStdout>,
+}
+
+/// An initialized, reusable session.
+enum Live {
+    Stdio {
+        io: Box<StdioIo>,
+        next_id: i64,
+    },
+    Http {
+        client: reqwest::Client,
+        session_id: Option<String>,
+        next_id: i64,
+    },
+}
+
+/// Why an op on a live session failed — decides whether a fresh retry is safe.
+enum OpError {
+    /// The request never reached the server (write failed, or the stream was
+    /// already closed before anything was written): safe to retry fresh.
+    NotDelivered(String),
+    /// The server may have seen the request: never replay it.
+    Failed(String),
+}
+
 pub struct McpClient {
     transport: Transport,
+    live: tokio::sync::Mutex<Option<Live>>,
 }
 
 impl McpClient {
     pub fn new(transport: Transport) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            live: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// True while an initialized session is parked on this client (tests /
+    /// pool diagnostics).
+    pub fn has_live_session(&self) -> bool {
+        self.live.try_lock().map(|g| g.is_some()).unwrap_or(true)
     }
 
     /// `tools/list` → the advertised tool objects.
     pub async fn list_tools(&self) -> Result<Vec<Value>, String> {
         let result = self
-            .op(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}), 2)
+            .op(json!({"jsonrpc":"2.0","method":"tools/list"}))
             .await?;
         let tools = result
             .get("tools")
@@ -70,10 +119,10 @@ impl McpClient {
     /// `tools/call` for a named tool.
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<CallResult, String> {
         let req = json!({
-            "jsonrpc":"2.0","id":3,"method":"tools/call",
+            "jsonrpc":"2.0","method":"tools/call",
             "params": {"name": name, "arguments": args}
         });
-        let result = self.op(req, 3).await?;
+        let result = self.op(req).await?;
         let bytes = serde_json::to_vec(&result).map(|v| v.len()).unwrap_or(0);
         let is_error = result
             .get("isError")
@@ -86,158 +135,265 @@ impl McpClient {
         })
     }
 
-    /// Health probe = an `initialize` round-trip (no extra op).
+    /// Health probe = an `initialize` round-trip on a ONE-SHOT session (it must
+    /// prove the server can start, not that a parked session is still up).
     pub async fn health(&self) -> Result<(), String> {
-        match &self.transport {
-            Transport::Stdio { .. } => self.stdio_op(None).await.map(|_| ()),
-            Transport::Http { .. } => self.http_op(None).await.map(|_| ()),
+        self.open().await.map(drop)
+    }
+
+    /// Run one post-initialize op, returning its `result`. Uses (and keeps) the
+    /// parked session; a busy session makes this op a one-shot instead of
+    /// queueing behind it.
+    async fn op(&self, request: Value) -> Result<Value, String> {
+        let Ok(mut guard) = self.live.try_lock() else {
+            return self.one_shot(request).await;
+        };
+        let reused = guard.is_some();
+        if guard.is_none() {
+            *guard = Some(self.open().await?);
         }
-    }
-
-    /// Run one post-initialize op (request with `id`), returning its `result`.
-    async fn op(&self, request: Value, id: i64) -> Result<Value, String> {
-        match &self.transport {
-            Transport::Stdio { .. } => self.stdio_op(Some((request, id))).await,
-            Transport::Http { .. } => self.http_op(Some((request, id))).await,
-        }
-    }
-
-    // ---- stdio ------------------------------------------------------------
-
-    async fn stdio_op(&self, op: Option<(Value, i64)>) -> Result<Value, String> {
-        let Transport::Stdio { command, args, env } = &self.transport else {
-            return Err("not a stdio transport".into());
+        let res = {
+            let live = guard.as_mut().expect("session just opened");
+            tokio::time::timeout(OP_TIMEOUT, run_on(live, &self.transport, request.clone())).await
         };
-        let fut = async {
-            let mut child = Command::new(command)
-                .args(args)
-                .envs(env)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .map_err(|e| format!("spawn '{command}': {e}"))?;
-
-            let mut stdin = child.stdin.take().ok_or("no child stdin")?;
-            let stdout = child.stdout.take().ok_or("no child stdout")?;
-            let mut reader = BufReader::new(stdout);
-
-            // 1. initialize, wait for its response.
-            let init = json!({
-                "jsonrpc":"2.0","id":1,"method":"initialize",
-                "params":{"protocolVersion":PROTOCOL_VERSION,"capabilities":{},
-                          "clientInfo":{"name":"otto-control-plane","version":"0.1.0"}}
-            });
-            write_line(&mut stdin, &init).await?;
-            let _ = read_until_id(&mut reader, 1).await?;
-
-            // 2. initialized notification.
-            write_line(
-                &mut stdin,
-                &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
-            )
-            .await?;
-
-            // 3. the op (if any), wait for its response.
-            let result = match op {
-                Some((req, id)) => {
-                    write_line(&mut stdin, &req).await?;
-                    read_until_id(&mut reader, id).await?
-                }
-                None => json!({}), // health: initialize was enough
-            };
-
-            // Close stdin so the child exits; reap it.
-            drop(stdin);
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            Ok::<Value, String>(result)
-        };
-        tokio::time::timeout(OP_TIMEOUT, fut)
-            .await
-            .map_err(|_| format!("stdio op timed out after {}s", OP_TIMEOUT.as_secs()))?
-    }
-
-    // ---- http (Streamable HTTP) ------------------------------------------
-
-    async fn http_op(&self, op: Option<(Value, i64)>) -> Result<Value, String> {
-        let Transport::Http { url, headers } = &self.transport else {
-            return Err("not an http transport".into());
-        };
-        // SSRF: validate, then PIN the vetted IP so the actual connect can't be
-        // DNS-rebound to an internal/metadata address (which would also exfiltrate
-        // the auth header). Reject non-public resolutions.
-        otto_netguard::check_url(url).await?;
-        let parsed = reqwest::Url::parse(url).map_err(|e| format!("bad url: {e}"))?;
-        let host = parsed.host_str().ok_or("url has no host")?.to_string();
-        let port = parsed.port_or_known_default().ok_or("url has no port")?;
-        let addrs = tokio::net::lookup_host((host.as_str(), port))
-            .await
-            .map_err(|e| format!("dns: {e}"))?;
-        let addr = addrs
-            .into_iter()
-            .find(|a| !otto_netguard::is_blocked_ip(a.ip()))
-            .ok_or("host resolves only to blocked addresses")?;
-
-        let mut builder = reqwest::Client::builder()
-            .timeout(OP_TIMEOUT)
-            .redirect(otto_netguard::redirect_policy())
-            .resolve(&host, addr);
-        let _ = &mut builder;
-        let client = builder.build().map_err(|e| format!("http client: {e}"))?;
-
-        let send = |body: Value, session: Option<String>| {
-            let mut rb = client
-                .post(url)
-                .header("Content-Type", "application/json")
-                .header("Accept", "application/json, text/event-stream");
-            for (k, v) in headers {
-                rb = rb.header(k.as_str(), v.as_str());
-            }
-            if let Some(s) = session {
-                rb = rb.header("Mcp-Session-Id", s);
-            }
-            rb.json(&body).send()
-        };
-
-        // 1. initialize.
-        let init = json!({
-            "jsonrpc":"2.0","id":1,"method":"initialize",
-            "params":{"protocolVersion":PROTOCOL_VERSION,"capabilities":{},
-                      "clientInfo":{"name":"otto-control-plane","version":"0.1.0"}}
-        });
-        let resp = send(init, None)
-            .await
-            .map_err(|e| format!("initialize: {e}"))?;
-        let session_id = resp
-            .headers()
-            .get("mcp-session-id")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
-        let _ = parse_http_message(resp).await?; // ensure initialize succeeded
-
-        let result = match op {
-            None => json!({}),
-            Some((mut req, _id)) => {
-                // notifications/initialized first (best-effort).
-                let _ = send(
-                    json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
-                    session_id.clone(),
-                )
-                .await;
-                req["id"] = json!(2);
-                let resp = send(req, session_id)
+        match res {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(OpError::NotDelivered(e))) if reused => {
+                // The parked session died while idle (child exited, HTTP session
+                // expired). Nothing reached the server: one fresh attempt.
+                *guard = None;
+                let mut fresh = self.open().await?;
+                let out = tokio::time::timeout(OP_TIMEOUT, run_on(&mut fresh, &self.transport, request))
                     .await
-                    .map_err(|e| format!("op: {e}"))?;
-                let msg = parse_http_message(resp).await?;
-                msg.get("result").cloned().ok_or_else(|| {
+                    .map_err(|_| timeout_msg())
+                    .and_then(|r| r.map_err(|e| match e {
+                        OpError::NotDelivered(m) | OpError::Failed(m) => m,
+                    }));
+                if out.is_ok() {
+                    *guard = Some(fresh);
+                }
+                out.map_err(|m| format!("{m} (after stale session: {e})"))
+            }
+            Ok(Err(OpError::NotDelivered(e) | OpError::Failed(e))) => {
+                *guard = None; // drop (and kill) the broken session
+                Err(e)
+            }
+            Err(_) => {
+                *guard = None;
+                Err(timeout_msg())
+            }
+        }
+    }
+
+    /// A throwaway session for one op (the parked one is busy).
+    async fn one_shot(&self, request: Value) -> Result<Value, String> {
+        let mut live = self.open().await?;
+        tokio::time::timeout(OP_TIMEOUT, run_on(&mut live, &self.transport, request))
+            .await
+            .map_err(|_| timeout_msg())?
+            .map_err(|e| match e {
+                OpError::NotDelivered(m) | OpError::Failed(m) => m,
+            })
+    }
+
+    /// Spawn / connect and complete the `initialize` handshake.
+    async fn open(&self) -> Result<Live, String> {
+        match &self.transport {
+            Transport::Stdio { command, args, env } => {
+                tokio::time::timeout(OP_TIMEOUT, open_stdio(command, args, env))
+                    .await
+                    .map_err(|_| timeout_msg())?
+            }
+            Transport::Http { url, headers } => {
+                tokio::time::timeout(OP_TIMEOUT, open_http(url, headers))
+                    .await
+                    .map_err(|_| timeout_msg())?
+            }
+        }
+    }
+}
+
+fn timeout_msg() -> String {
+    format!("op timed out after {}s", OP_TIMEOUT.as_secs())
+}
+
+fn init_request() -> Value {
+    json!({
+        "jsonrpc":"2.0","id":1,"method":"initialize",
+        "params":{"protocolVersion":PROTOCOL_VERSION,"capabilities":{},
+                  "clientInfo":{"name":"otto-control-plane","version":"0.1.0"}}
+    })
+}
+
+async fn open_stdio(
+    command: &str,
+    args: &[String],
+    env: &BTreeMap<String, String>,
+) -> Result<Live, String> {
+    let mut child = Command::new(command)
+        .args(args)
+        .envs(env)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("spawn '{command}': {e}"))?;
+    let mut stdin = child.stdin.take().ok_or("no child stdin")?;
+    let stdout = child.stdout.take().ok_or("no child stdout")?;
+    let mut reader = BufReader::new(stdout);
+    write_line(&mut stdin, &init_request()).await?;
+    let _ = read_until_id(&mut reader, 1).await?;
+    write_line(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    )
+    .await?;
+    Ok(Live::Stdio {
+        io: Box::new(StdioIo {
+            child,
+            stdin,
+            reader,
+        }),
+        next_id: 2,
+    })
+}
+
+/// SSRF-validate the URL, pin the vetted IP, build the client and initialize.
+async fn open_http(url: &str, headers: &BTreeMap<String, String>) -> Result<Live, String> {
+    otto_netguard::check_url(url).await?;
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("bad url: {e}"))?;
+    let host = parsed.host_str().ok_or("url has no host")?.to_string();
+    let port = parsed.port_or_known_default().ok_or("url has no port")?;
+    let addrs = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .map_err(|e| format!("dns: {e}"))?;
+    let addr = addrs
+        .into_iter()
+        .find(|a| !otto_netguard::is_blocked_ip(a.ip()))
+        .ok_or("host resolves only to blocked addresses")?;
+    let client = reqwest::Client::builder()
+        .timeout(OP_TIMEOUT)
+        .redirect(otto_netguard::redirect_policy())
+        .resolve(&host, addr)
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let resp = http_send(&client, url, headers, init_request(), None)
+        .await
+        .map_err(|e| format!("initialize: {e}"))?;
+    let session_id = resp
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let _ = parse_http_message(resp).await?; // ensure initialize succeeded
+    // notifications/initialized (best-effort).
+    let _ = http_send(
+        &client,
+        url,
+        headers,
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        session_id.clone(),
+    )
+    .await;
+    Ok(Live::Http {
+        client,
+        session_id,
+        next_id: 2,
+    })
+}
+
+fn http_send(
+    client: &reqwest::Client,
+    url: &str,
+    headers: &BTreeMap<String, String>,
+    body: Value,
+    session: Option<String>,
+) -> impl std::future::Future<Output = reqwest::Result<reqwest::Response>> {
+    let mut rb = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream");
+    for (k, v) in headers {
+        rb = rb.header(k.as_str(), v.as_str());
+    }
+    if let Some(s) = session {
+        rb = rb.header("Mcp-Session-Id", s);
+    }
+    rb.json(&body).send()
+}
+
+/// The request envelope with `id` right after `jsonrpc` (before `params`), so
+/// the id is the first one on the wire whatever the map ordering.
+fn with_id(request: &Value, id: i64) -> Value {
+    let mut m = serde_json::Map::new();
+    m.insert("jsonrpc".into(), json!("2.0"));
+    m.insert("id".into(), json!(id));
+    if let Some(method) = request.get("method") {
+        m.insert("method".into(), method.clone());
+    }
+    if let Some(params) = request.get("params") {
+        m.insert("params".into(), params.clone());
+    }
+    Value::Object(m)
+}
+
+/// One request on a live session, with a fresh JSON-RPC id.
+async fn run_on(live: &mut Live, transport: &Transport, request: Value) -> Result<Value, OpError> {
+    match live {
+        Live::Stdio { io, next_id } => {
+            let StdioIo {
+                child,
+                stdin,
+                reader,
+            } = io.as_mut();
+            // A child that already exited while parked never saw this request.
+            if let Ok(Some(_)) = child.try_wait() {
+                return Err(OpError::NotDelivered("server process exited".into()));
+            }
+            let id = *next_id;
+            *next_id += 1;
+            let request = with_id(&request, id);
+            write_line(stdin, &request)
+                .await
+                .map_err(OpError::NotDelivered)?;
+            read_until_id(reader, id).await.map_err(OpError::Failed)
+        }
+        Live::Http {
+            client,
+            session_id,
+            next_id,
+        } => {
+            let Transport::Http { url, headers } = transport else {
+                return Err(OpError::Failed("not an http transport".into()));
+            };
+            let id = *next_id;
+            *next_id += 1;
+            let request = with_id(&request, id);
+            let resp = http_send(client, url, headers, request, session_id.clone())
+                .await
+                .map_err(|e| {
+                    // A connect failure never reached the server.
+                    if e.is_connect() {
+                        OpError::NotDelivered(format!("op: {e}"))
+                    } else {
+                        OpError::Failed(format!("op: {e}"))
+                    }
+                })?;
+            // Streamable HTTP: 404 on a request carrying a session id means the
+            // server dropped the session and did NOT process the request.
+            if resp.status() == reqwest::StatusCode::NOT_FOUND && session_id.is_some() {
+                return Err(OpError::NotDelivered("mcp session expired".into()));
+            }
+            let msg = parse_http_message(resp).await.map_err(OpError::Failed)?;
+            msg.get("result").cloned().ok_or_else(|| {
+                OpError::Failed(
                     msg.get("error")
                         .map(|e| format!("server error: {e}"))
-                        .unwrap_or_else(|| "no result in response".into())
-                })?
-            }
-        };
-        Ok(result)
+                        .unwrap_or_else(|| "no result in response".into()),
+                )
+            })
+        }
     }
 }
 
@@ -332,15 +488,18 @@ mod tests {
 
     // Drives the stdio client against a tiny shell MCP server so the framing +
     // initialize→list/call sequence is exercised end to end (no external deps).
+    // Replies echo the request id (a pooled session numbers its requests).
+    // `$SPAWNS` (optional) gets one line per server start; `$EXIT_AFTER_CALL`
+    // makes the server exit after answering one tools/call.
     fn echo_server_script() -> String {
-        // A minimal MCP stdio server in awk-free pure sh: respond to initialize,
-        // tools/list, tools/call by id. Reads line-by-line.
         r#"
+[ -n "$SPAWNS" ] && echo x >> "$SPAWNS"
 while IFS= read -r line; do
+  id=$(printf '%s' "$line" | grep -o '"id":[0-9]*' | head -n 1 | cut -d: -f2)
   case "$line" in
     *'"initialize"'*) printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"mock","version":"1"}}}\n' ;;
-    *'"tools/list"'*) printf '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"echo","inputSchema":{"type":"object"}}]}}\n' ;;
-    *'"tools/call"'*) printf '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"ok"}],"isError":false}}\n' ;;
+    *'"tools/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo","description":"echo","inputSchema":{"type":"object"}}]}}\n' "$id" ;;
+    *'"tools/call"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"ok"}],"isError":false}}\n' "$id"; [ -n "$EXIT_AFTER_CALL" ] && exit 0 ;;
     *'"notifications/initialized"'*) : ;;
   esac
 done
@@ -348,14 +507,31 @@ done
         .to_string()
     }
 
-    fn stdio_client() -> McpClient {
+    fn stdio_client_with(extra: &[(&str, String)]) -> McpClient {
         let mut env = BTreeMap::new();
         env.insert("LC_ALL".into(), "C".into());
+        env.insert(
+            "PATH".into(),
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),
+        );
+        for (k, v) in extra {
+            env.insert((*k).to_string(), v.clone());
+        }
         McpClient::new(Transport::Stdio {
             command: "sh".into(),
             args: vec!["-c".into(), echo_server_script()],
             env,
         })
+    }
+
+    fn stdio_client() -> McpClient {
+        stdio_client_with(&[])
+    }
+
+    fn spawns(path: &std::path::Path) -> usize {
+        std::fs::read_to_string(path)
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
     }
 
     #[tokio::test]
@@ -378,5 +554,46 @@ done
             .unwrap();
         assert!(!r.is_error);
         assert_eq!(r.content["content"][0]["text"], json!("ok"));
+    }
+
+    // SE-14: one spawn + initialize serves every op on a client.
+    #[tokio::test]
+    async fn stdio_session_is_reused_across_ops() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("spawns");
+        let c = stdio_client_with(&[("SPAWNS", log.display().to_string())]);
+        c.list_tools().await.unwrap();
+        for _ in 0..5 {
+            let r = c.call_tool("echo", &json!({})).await.unwrap();
+            assert_eq!(r.content["content"][0]["text"], json!("ok"));
+        }
+        assert_eq!(spawns(&log), 1, "six ops, one server process");
+        assert!(c.has_live_session());
+    }
+
+    // A parked child that died while idle is replaced transparently: the
+    // request never reached it, so the fresh retry is safe.
+    #[tokio::test]
+    async fn a_dead_parked_session_is_replaced_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("spawns");
+        let c = stdio_client_with(&[
+            ("SPAWNS", log.display().to_string()),
+            ("EXIT_AFTER_CALL", "1".into()),
+        ]);
+        c.call_tool("echo", &json!({})).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await; // let it exit
+        let r = c.call_tool("echo", &json!({})).await.unwrap();
+        assert!(!r.is_error);
+        assert_eq!(spawns(&log), 2);
+    }
+
+    // Concurrent ops never queue behind the parked session.
+    #[tokio::test]
+    async fn concurrent_ops_do_not_serialize() {
+        let c = stdio_client();
+        let args = json!({});
+        let (a, b) = tokio::join!(c.call_tool("echo", &args), c.call_tool("echo", &args));
+        assert!(a.is_ok() && b.is_ok());
     }
 }

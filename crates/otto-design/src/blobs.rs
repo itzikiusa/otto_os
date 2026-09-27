@@ -49,7 +49,14 @@ impl BlobStore {
     /// Store `bytes`, returning their sha256. Idempotent: an existing blob with
     /// the same name is left untouched (its content is identical by definition).
     pub async fn put(&self, bytes: &[u8]) -> Result<String> {
-        let sha = sha256_hex(bytes);
+        self.put_hashed(bytes, sha256_hex(bytes)).await
+    }
+
+    /// [`Self::put`] with the sha256 the caller already computed (off the
+    /// runtime, D10) — hashing a 4 MB blob twice per save was pure waste.
+    /// `sha` MUST be `sha256_hex(bytes)`.
+    pub(crate) async fn put_hashed(&self, bytes: &[u8], sha: String) -> Result<String> {
+        debug_assert_eq!(sha, sha256_hex(bytes));
         let dest = self.path(&sha)?;
         if tokio::fs::try_exists(&dest).await.unwrap_or(false) {
             return Ok(sha);

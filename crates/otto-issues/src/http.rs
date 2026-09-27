@@ -22,7 +22,7 @@ use otto_state::{IssuesRepo, NewIssueAccount};
 
 use crate::confluence::ConfluenceClient;
 use crate::confluence::{
-    markdown_to_storage, storage_to_markdown, ConfluencePageSummary, ConfluenceSpace, PageComment,
+    markdown_to_storage, ConfluencePageSummary, ConfluenceSpace, PageComment,
 };
 use crate::jira::{
     CommentRef, DevStatus, EditableField, IssueFull, JiraClient, JiraTransition, JiraUser,
@@ -443,18 +443,19 @@ fn resolve_body(
     }
 }
 
-impl From<crate::confluence::ConfluencePage> for ConfluencePageResp {
-    fn from(p: crate::confluence::ConfluencePage) -> Self {
-        Self {
-            body_md: storage_to_markdown(&p.body_storage),
-            id: p.id,
-            title: p.title,
-            space_key: p.space_key,
-            url: p.url,
-            version: p.version,
-        }
+/// The page response with its body converted off the runtime when big (SE-18).
+async fn page_resp(p: crate::confluence::ConfluencePage) -> ConfluencePageResp {
+    let body_md = crate::confluence::storage_to_markdown_async(p.body_storage).await;
+    ConfluencePageResp {
+        body_md,
+        id: p.id,
+        title: p.title,
+        space_key: p.space_key,
+        url: p.url,
+        version: p.version,
     }
 }
+
 
 /// `GET /issue/confluence/pages/{page_id}?account_id=`
 async fn get_page_cf<S: IssuesCtx>(
@@ -464,7 +465,7 @@ async fn get_page_cf<S: IssuesCtx>(
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult<Json<ConfluencePageResp>> {
     let client = confluence_client_for(&s, &params, &user).await?;
-    Ok(Json(client.get_page(&page_id).await?.into()))
+    Ok(Json(page_resp(client.get_page(&page_id).await?).await))
 }
 
 /// `POST /issue/confluence/pages?account_id=`
@@ -494,7 +495,7 @@ async fn create_page_cf<S: IssuesCtx>(
             req.parent_id.as_deref().filter(|p| !p.trim().is_empty()),
         )
         .await?;
-    Ok(Json(page.into()))
+    Ok(Json(page_resp(page).await))
 }
 
 /// `PUT /issue/confluence/pages/{page_id}?account_id=`
@@ -538,7 +539,7 @@ async fn update_page_cf<S: IssuesCtx>(
     let page = client
         .update_page(&page_id, title, &storage, current.version)
         .await?;
-    Ok(Json(page.into()))
+    Ok(Json(page_resp(page).await))
 }
 
 /// `GET /issue/confluence/pages/{page_id}/comments?account_id=`

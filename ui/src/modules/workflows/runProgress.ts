@@ -56,6 +56,65 @@ export class RunBodyCache {
   }
 }
 
+/**
+ * One node-body fetch path shared by the step list (RunSteps) and the node
+ * inspector (WorkflowsPage). Both used to fetch the same `…/nodes/{id}` body
+ * independently — twice per `detail_version` for a node that was expanded AND
+ * selected. Concurrent reads of the same (run, node) share one request; the
+ * newest body per (run, node) is kept (bounded) so the second consumer gets it
+ * without a request. A shared request is aborted only when EVERY consumer
+ * that joined it has aborted (the inspector aborts superseded reads).
+ */
+export class SharedNodeBodies {
+  private done = new Map<string, {version: string; body: unknown}>();
+  private inflight = new Map<string, {promise: Promise<{detail_version: string; body: unknown}>; ctl: AbortController; refs: number}>();
+  private cap: number;
+  constructor(cap = 48) {this.cap = cap;}
+  private key(run: string, node: string): string {return `${run}\u0000${node}`;}
+  /** The cached body for exactly this version, else null. */
+  peek<T = unknown>(run: string, node: string, version: string): T | null {
+    const hit = this.done.get(this.key(run, node));
+    return hit && hit.version === version ? (hit.body as T) : null;
+  }
+  fetch<T extends {detail_version: string; body: unknown}>(
+    run: string, node: string, load: (signal: AbortSignal) => Promise<T>, signal?: AbortSignal,
+  ): Promise<T> {
+    const key = this.key(run, node);
+    let entry = this.inflight.get(key);
+    if (!entry) {
+      const ctl = new AbortController();
+      const promise = load(ctl.signal).then((result) => {
+        this.done.delete(key);
+        this.done.set(key, {version: result.detail_version, body: result.body});
+        while (this.done.size > this.cap) this.done.delete(this.done.keys().next().value as string);
+        return result;
+      });
+      const settle = () => { if (this.inflight.get(key)?.promise === promise) this.inflight.delete(key); };
+      promise.then(settle, settle);
+      entry = {promise, ctl, refs: 0};
+      this.inflight.set(key, entry);
+    }
+    const e = entry;
+    e.refs++;
+    if (signal) {
+      const leave = () => {
+        e.refs--;
+        if (e.refs <= 0) {
+          e.ctl.abort();
+          if (this.inflight.get(key) === e) this.inflight.delete(key);
+        }
+      };
+      if (signal.aborted) leave();
+      else signal.addEventListener('abort', leave, {once: true});
+    }
+    return e.promise as Promise<T>;
+  }
+  clear(): void {this.done.clear();}
+}
+
+/** The app-wide instance (module scope: survives the inspector re-mounting). */
+export const sharedNodeBodies = new SharedNodeBodies();
+
 /** Page membership remains useful while later checkpoint revisions arrive.
  * Preserve a row already fetched at a newer revision, independent of run.rev. */
 export function mergeCheckpointPage<T extends {node_id:string}>(

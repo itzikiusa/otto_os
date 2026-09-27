@@ -744,3 +744,75 @@ async fn quiet_rescan_writes_no_scan_state() {
     e.scan(id).await.unwrap();
     assert_eq!(e.store.get_vault(id).await.unwrap().scan_state, "idle");
 }
+
+/// SD-15 (listing half): history for one note in a vault with 50k revisions
+/// reads the index, not 50k `meta.json` files — and the index is a cache that
+/// learns revisions it doesn't know (older history, other writers) once.
+#[tokio::test(flavor = "multi_thread")]
+async fn revision_listing_at_50k_revisions_reads_only_the_path_index() {
+    use crate::recovery::INDEX_META_READS;
+    let (e, dir, id) = fixture().await;
+    let hist = dir.path().join(".otto-history");
+    std::fs::create_dir_all(&hist).unwrap();
+    const N: usize = 50_000;
+    for i in 0..N {
+        // Time-sortable ids like `new_id()`; every 1000th revision is `a.md`.
+        let rid = format!("r{i:08}");
+        let path = if i % 1000 == 0 { "a.md" } else { "other.md" };
+        let rdir = hist.join(&rid);
+        std::fs::create_dir(&rdir).unwrap();
+        let rev = VaultRevision {
+            id: rid.clone(),
+            path: path.into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            before_hash: None,
+            after_hash: "x".into(),
+            reason: "note write".into(),
+            committed: true,
+        };
+        std::fs::write(rdir.join("meta.json"), serde_json::to_vec(&rev).unwrap()).unwrap();
+    }
+
+    // First listing learns every revision once (pre-index history) and
+    // persists the index.
+    let first = e.revisions("ws", id, Some("a.md")).await.unwrap();
+    assert_eq!(first.len(), N / 1000);
+    assert_eq!(first[0].id, format!("r{:08}", N - 1000), "newest first");
+    assert!(hist.join(".path-index.jsonl").is_file());
+
+    // Warm: no meta read beyond the 50 hits themselves, well under 50 ms.
+    let reads = INDEX_META_READS.load(Relaxed);
+    let t = std::time::Instant::now();
+    let warm = e.revisions("ws", id, Some("a.md")).await.unwrap();
+    let warm_ms = t.elapsed().as_millis();
+    assert_eq!(warm.len(), N / 1000);
+    assert_eq!(INDEX_META_READS.load(Relaxed), reads, "index hit: no meta scan");
+    // 50 ms is the release budget; unoptimized test builds get headroom (the
+    // meta-read counter above is the load-bearing regression check).
+    let budget = if cfg!(debug_assertions) { 250 } else { 50 };
+    assert!(warm_ms < budget, "warm 50k-revision listing took {warm_ms} ms");
+
+    // A revision the index has never seen (another writer) is learned once.
+    let rid = format!("r{:08}", N);
+    std::fs::create_dir(hist.join(&rid)).unwrap();
+    let rev = VaultRevision {
+        id: rid.clone(),
+        path: "a.md".into(),
+        created_at: "2026-01-02T00:00:00Z".into(),
+        before_hash: None,
+        after_hash: "y".into(),
+        reason: "note write".into(),
+        committed: true,
+    };
+    std::fs::write(hist.join(&rid).join("meta.json"), serde_json::to_vec(&rev).unwrap()).unwrap();
+    let next = e.revisions("ws", id, Some("a.md")).await.unwrap();
+    assert_eq!(next[0].id, rid);
+    assert_eq!(INDEX_META_READS.load(Relaxed), reads + 1);
+
+    // Paging by cursor still works on the index.
+    let older = e
+        .revisions_page("ws", id, Some("a.md"), Some(&next[1].id))
+        .await
+        .unwrap();
+    assert_eq!(older.len(), N / 1000 - 1);
+}

@@ -3193,8 +3193,11 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                 new_doc["sketch"] = sketch.clone();
             }
 
+            // `?summary=true`: the list row comes back, not the whole scene —
+            // an echo of a big Excalidraw doc tripped the 1 MiB body cap and
+            // reported a failure for a write that had succeeded (SD-22).
             ctx.put_json(
-                &format!("/canvas/scenes/{}", seg(&scene_id)),
+                &format!("/canvas/scenes/{}?summary=true", seg(&scene_id)),
                 &json!({ "doc": new_doc }),
             )
             .await?;

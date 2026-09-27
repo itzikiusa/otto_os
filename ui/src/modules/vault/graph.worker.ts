@@ -11,8 +11,12 @@
 // Deterministic (mulberry32, fixed seed) so a given payload always settles
 // into the same shape. Plain TS — no DOM APIs.
 
+import { applySeed, WARM_ALPHA, WARM_SHARE } from './graphSeed';
+
 export type GraphWorkerIn =
-  | { t: 'init'; n: number; edges: Uint32Array<ArrayBuffer>; groups?: Uint16Array<ArrayBuffer> }
+  // `carry`: previous positions [x0,y0,…] (NaN = new node) so a real change
+  // keeps the layout and starts warm instead of re-exploding (SD-03).
+  | { t: 'init'; n: number; edges: Uint32Array<ArrayBuffer>; groups?: Uint16Array<ArrayBuffer>; carry?: Float32Array<ArrayBuffer> }
   | { t: 'params'; center: number; repel: number; link: number; dist: number }
   | { t: 'pin'; i: number; x: number; y: number }
   | { t: 'drag'; i: number; x: number; y: number }
@@ -390,7 +394,7 @@ function seed(groups?: Uint16Array): void {
   vy.fill(0);
 }
 
-function initSim(m: { n: number; edges: Uint32Array<ArrayBuffer>; groups?: Uint16Array }): void {
+function initSim(m: { n: number; edges: Uint32Array<ArrayBuffer>; groups?: Uint16Array; carry?: Float32Array }): void {
   n = m.n;
   // Defensive compaction: drop any out-of-range pair so a bad index can't
   // poison the position arrays with NaN (contract says this never happens).
@@ -421,8 +425,13 @@ function initSim(m: { n: number; edges: Uint32Array<ArrayBuffer>; groups?: Uint1
 
   rnd = mulberry32(0x1234abcd); // re-seed → identical payload = identical layout
   seed(m.groups);
+  let start = 1;
+  if (m.carry) {
+    const known = applySeed(px, py, m.carry, edges, rnd);
+    if (known >= n * WARM_SHARE) start = WARM_ALPHA; // settle the change, don't re-layout
+  }
 
-  alpha = 1;
+  alpha = start;
   stopped = false;
   edgeCursor = 0;
   lastPost = 0;
