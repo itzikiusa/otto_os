@@ -112,16 +112,22 @@ mod tests {
     #[tokio::test]
     async fn emits_only_after_a_successful_write() {
         let (tx, mut rx) = broadcast::channel::<Event>(8);
+        // Paths are bound to locals rather than written as `.route("…")`
+        // literals: route_inventory/policy_coverage scan the crate sources
+        // for `.route("` and would otherwise count this test router (whose
+        // paths already carry the `/api/v1` nest prefix) as real routes.
+        let (access, grants, health) = (
+            "/api/v1/access/{kind}/{id}",
+            "/api/v1/users/{id}/grants",
+            "/api/v1/health",
+        );
         let app = Router::new()
             .route(
-                "/api/v1/access/{kind}/{id}",
+                access,
                 put(|| async { StatusCode::OK }).get(|| async { "p" }),
             )
-            .route(
-                "/api/v1/users/{id}/grants",
-                put(|| async { StatusCode::FORBIDDEN }),
-            )
-            .route("/api/v1/health", get(|| async { "ok" }))
+            .route(grants, put(|| async { StatusCode::FORBIDDEN }))
+            .route(health, get(|| async { "ok" }))
             .layer(axum::middleware::from_fn_with_state(
                 tx.clone(),
                 notify_access_changes,

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx, seedWorkspace } from './seed';
 import { openPage } from './helpers';
+import { heapAfterGC } from './perf';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PERF GATE — clicking a branch whose tip commit carries ~100k changed lines
@@ -139,6 +140,19 @@ async function longTasks(page: Page): Promise<number[]> {
   return page.evaluate(() => (window as unknown as { __lt: number[] }).__lt ?? []);
 }
 
+/** Count "ResizeObserver loop …" reports from now on (console + page
+ *  errors): a measurer that re-lays out inside its own RO callback spams it
+ *  and pays an extra layout pass per frame. */
+function watchResizeLoops(page: Page): () => number {
+  let n = 0;
+  const hit = (t: string): void => {
+    if (/ResizeObserver loop/i.test(t)) n++;
+  };
+  page.on('console', (m) => hit(m.text()));
+  page.on('pageerror', (e) => hit(e.message));
+  return () => n;
+}
+
 function apiPath(r: Request): string {
   const u = new URL(r.url());
   return u.pathname + u.search;
@@ -151,6 +165,7 @@ test('single click on a 100k-line branch paints the file list fast and mounts no
     if (r.method() === 'GET' && /\/repos\/[^/]+\/diff\?/.test(r.url())) diffReqs.push(apiPath(r));
   });
   await watchLongTasks(page);
+  const resizeLoops = watchResizeLoops(page);
 
   const t0 = Date.now();
   await branchRow(page, 'huge').click();
@@ -168,7 +183,11 @@ test('single click on a 100k-line branch paints the file list fast and mounts no
       `long tasks ${lts.length} (max ${Math.round(maxLt)} ms) · diff requests ${JSON.stringify(diffReqs)}`,
   );
 
-  expect(fileListMs, 'file list painted within 1 s of the click').toBeLessThan(1000);
+  // GIT-5 target: the list paints ≤ 300 ms after the click even though the
+  // pane itself waits out the 200 ms double-click window — its summary is
+  // prefetched at the click (`prefetchCommitSummary`), so the list renders
+  // from cache when the window closes (was 380–390 ms: window + round-trip).
+  expect(fileListMs, 'file list painted within 300 ms of the click').toBeLessThanOrEqual(300);
   expect(rows, 'diff rows in the DOM after the click').toBeLessThan(2000);
   expect(blocks, 'file headers are paged, not all 400 mounted').toBeLessThanOrEqual(200);
   expect(maxLt, 'no main-thread task over 200 ms').toBeLessThan(200);
@@ -183,6 +202,7 @@ test('single click on a 100k-line branch paints the file list fast and mounts no
   await expect(page.locator('.detail-diff tr').first()).toBeVisible({ timeout: 10_000 });
   expect(diffReqs.slice(before).some((u) => /[?&]path=/.test(u))).toBe(true);
   expect(await page.locator('.detail-diff tr').count()).toBeLessThanOrEqual(HUGE_LINES + 10);
+  expect(resizeLoops(), 'no "ResizeObserver loop" errors').toBe(0);
 });
 
 test('double-click (checkout) never requests the diff and does not re-read history', async ({ page }) => {
@@ -198,7 +218,12 @@ test('double-click (checkout) never requests the diff and does not re-read histo
 
   console.log(`[perf] huge dblclick requests: ${JSON.stringify(seen)}`);
   expect(seen.some((s) => s.startsWith('POST') && s.includes('/checkout'))).toBe(true);
-  expect(seen.filter((s) => s.includes('/diff?')), 'no diff request for a checkout gesture').toEqual([]);
+  // The lead click may warm the file-list SUMMARY (one small numstat read,
+  // aborted by the double-click) — but a checkout gesture never asks for a
+  // patch: no full diff, no per-file diff.
+  const diffs = seen.filter((s) => s.includes('/diff?'));
+  expect(diffs.filter((s) => !/summary=true/.test(s)), 'no patch request for a checkout gesture').toEqual([]);
+  expect(diffs.length, 'at most the one prefetched summary').toBeLessThanOrEqual(1);
   expect(seen.filter((s) => s.includes('/log?')), 'a checkout does not re-read the log').toEqual([]);
   // The pane offers the diff on demand instead.
   await expect(page.getByRole('button', { name: 'Show this commit’s changes' })).toBeVisible();
@@ -246,4 +271,30 @@ test('repeated refreshes do not grow the history request', async ({ page }) => {
   expect(limits.length).toBeGreaterThanOrEqual(3);
   // One page of history was loaded; every refresh re-reads exactly that much.
   expect(Math.max(...limits)).toBeLessThanOrEqual(10_000);
+});
+
+test('context menus opened on the Git page do not pin it after leaving (heap probe)', async ({ page }) => {
+  test.setTimeout(120_000);
+  // Baseline: Home, after the Git page has been visited once (its module
+  // caches — diff summaries, graph snapshots — are legitimately retained).
+  await openRepo(page);
+  await openPage(page, 'home');
+  const baseline = await heapAfterGC(page);
+
+  await openRepo(page);
+  const row = page.locator('.graph-row[data-sha] .graph-select').first();
+  const menu = page.locator('.ctx-menu');
+  for (let i = 0; i < 50; i++) {
+    await row.click({ button: 'right' });
+    await expect(menu).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(menu).toBeHidden();
+  }
+  await openPage(page, 'home');
+  const after = await heapAfterGC(page);
+  const mb = (b: number) => Math.round(b / (1 << 20));
+  console.log(`[perf] ctxMenu heap probe: baseline ${mb(baseline)} MB → after 50 menus + leave ${mb(after)} MB`);
+  // R2-02: the menu store used to keep the last trigger element and every
+  // item closure alive, which pinned the whole Git page (≈159 MB).
+  expect(after, 'heap after leaving Git ≤ baseline + 20 MB').toBeLessThanOrEqual(baseline + 20 * (1 << 20));
 });

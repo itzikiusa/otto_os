@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use crate::types::CiStatus;
 
 use super::client::Http;
-use super::{map_state, ts, varr, vstr, vstr_opt, vu64, RemoteRef, RemoteRepoSummary};
+use super::{map_state, ts, varr, vbool, vstr, vstr_opt, vu64, RemoteRef, RemoteRepoSummary};
 
 /// Percent-encode characters that must be escaped in GitLab query/path values.
 fn percent_encode_query(s: &str) -> String {
@@ -445,8 +445,13 @@ impl super::GitProvider for Gitlab {
             crate::parse::fill_counts(&mut file);
             files.push(file);
         }
+        // GitLab has no patch-free stat API for an MR (`/diffs` pages still
+        // carry every patch), but `/changes` is already bounded server-side:
+        // past its file/line limits it sets `overflow` and omits the rest —
+        // say so instead of passing the cut list off as the whole MR.
         let mut resp = DiffResp {
             files,
+            truncated: (vbool(&v, &["overflow"]) == Some(true)).then_some(true),
             ..Default::default()
         };
         crate::parse::fill_totals(&mut resp);

@@ -30,7 +30,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import CreatePr from './CreatePr.svelte';
   import WipPanel from './WipPanel.svelte';
-  import GraphCommitDiff from './graph-commit-diff.svelte';
+  import GraphCommitDiff, { prefetchCommitSummary } from './graph-commit-diff.svelte';
   import { graphCache, type GraphSnapshot } from './graph-cache';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { runPull } from './pullFlow';
@@ -279,11 +279,14 @@
    *  falsely report the commit as unreachable). */
   let inflight: Promise<boolean> | null = null;
 
-  /** Append the next page of history. Returns false when nothing more arrived. */
-  function loadMore(): Promise<boolean> {
+  /** Append the next page of history. Returns false when nothing more arrived.
+   *  `until` (a sha) makes it ONE daemon walk that stops right after that
+   *  commit — how a jump to an old ref reaches it, instead of a chain of
+   *  10k-commit `--skip` pages that each re-walk everything before them. */
+  function loadMore(until?: string): Promise<boolean> {
     if (inflight) return inflight;
     if (!hasMore) return Promise.resolve(false);
-    const p = loadPage();
+    const p = loadPage(until);
     inflight = p;
     loadingMore = true;
     // Release the slot by PROMISE IDENTITY, never by generation: a reload that
@@ -371,11 +374,13 @@
     pendingPages = [];
   }
 
-  async function loadPage(): Promise<boolean> {
+  async function loadPage(until?: string): Promise<boolean> {
     const gen = loadGen;
     try {
+      // Only a sha is a valid target (the daemon 400s anything else).
+      const to = until && /^[0-9a-f]{4,64}$/i.test(until) ? `&until=${until}` : '';
       const page = await api.get<CommitInfo[]>(
-        `/repos/${repoId}/log?all=true&limit=${PAGE}&skip=${skipCursor}`,
+        `/repos/${repoId}/log?all=true&limit=${PAGE}&skip=${skipCursor}${to}`,
       );
       if (gen !== loadGen) return false; // repo changed under us — drop it
       commitsError = null;
@@ -463,8 +468,10 @@
     if (seenShas.has(sha)) return true;
     batching++;
     try {
+      // Usually one round trip: the `until` walk ends AT the commit. The
+      // loop only repeats when it joined a scroll page already in flight.
       while (hasMore) {
-        if (!(await loadMore())) break;
+        if (!(await loadMore(sha))) break;
         if (seenShas.has(sha)) break;
       }
     } finally {
@@ -1736,15 +1743,27 @@
     scheduleDiff(commit.sha, opts.deferDiff ? DIFF_DEFER_MS : 0);
   }
 
+  /** Abort for a summary prefetched during the double-click window; dropped
+   *  (NOT aborted) once the pane mounts and joins it. */
+  let prefetchStop: (() => void) | null = null;
   function scheduleDiff(sha: string, delay: number): void {
     cancelDiff();
     if (delay <= 0) {
       startDiff(sha);
       return;
     }
+    // The pane waits out the double-click window, but its file list need
+    // not: warm the (small, numstat-only) summary now so the list paints as
+    // soon as the window closes instead of a round-trip after it. A
+    // double-click (checkout) aborts it in `holdDiff` — only the summary is
+    // ever asked for, never a patch.
+    prefetchStop = prefetchCommitSummary(repoId, sha);
     diffTimer = setTimeout(() => {
       diffTimer = null;
-      if (selectedSha === sha) startDiff(sha);
+      if (selectedSha === sha) {
+        prefetchStop = null;
+        startDiff(sha);
+      }
     }, delay);
   }
   let diffStartedAt = 0;
@@ -1757,6 +1776,8 @@
   function cancelDiff(): void {
     if (diffTimer) clearTimeout(diffTimer);
     diffTimer = null;
+    prefetchStop?.();
+    prefetchStop = null;
     diffSha = null;
     diffHeld = false;
   }

@@ -244,6 +244,13 @@ pub(crate) fn pr_flights() -> &'static SingleFlight<Arc<DiffResp>> {
     F.get_or_init(SingleFlight::new)
 }
 
+/// Coalesces the provider's NARROW PR reads (stat-API summary, one file's
+/// patch); `None` = the provider has no such API.
+pub(crate) fn pr_narrow_flights() -> &'static SingleFlight<Option<Arc<DiffResp>>> {
+    static F: OnceLock<SingleFlight<Option<Arc<DiffResp>>>> = OnceLock::new();
+    F.get_or_init(SingleFlight::new)
+}
+
 /// `otto_core::Error` isn't `Clone`; every waiter of a shared failure gets
 /// its own copy with the same variant (→ the same HTTP status).
 fn clone_error(e: &Error) -> Error {

@@ -20,6 +20,7 @@
   import DiffViewer from './DiffViewer.svelte';
   import { repoDiffFileLoader } from './diff-load';
   import Icon from '../../lib/components/Icon.svelte';
+  import { ListWindow } from './list-window.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -346,8 +347,6 @@
   // an un-ignored `node_modules/` or `dist/` lists tens of thousands of files
   // (20k rows ≈ 200k DOM nodes ≈ 1.5 s to mount); its count stays visible.
   const AUTO_COLLAPSE_FILES = 200;
-  /** Rows mounted per section before "Show more" (a huge flat folder). */
-  const ROW_PAGE = 500;
   let folds = $state.raw<Map<string, boolean>>(new Map());
   function isCollapsed(key: string, node: TFolder): boolean {
     return folds.get(key) ?? node.files.length > AUTO_COLLAPSE_FILES;
@@ -378,11 +377,28 @@
   }
   const unstagedRows = $derived(visibleRows(unstagedTree, 'unstaged'));
   const stagedRows = $derived(visibleRows(stagedTree, 'staged'));
-  let rowLimit = $state({ unstaged: ROW_PAGE, staged: ROW_PAGE });
+  // Each section is WINDOWED against the shared `.wp-scroll` scroller: only
+  // the rows in view (+ overscan) mount, between spacers sized to the rest,
+  // so a 20k-file expanded folder costs the same as a 50-file one. Lists up
+  // to 300 rows render whole (find-in-page still sees them).
+  const unstagedWin = new ListWindow('.wp-file, .wp-folder');
+  const stagedWin = new ListWindow('.wp-file, .wp-folder');
+  const winOf = (section: 'unstaged' | 'staged') => (section === 'unstaged' ? unstagedWin : stagedWin);
 
   // Section collapse (GitKraken keeps both open; folding is still handy).
   let unstagedOpen = $state(true);
   let stagedOpen = $state(true);
+
+  // The staged list sits BELOW the unstaged one: when the unstaged rows (or a
+  // section fold) change, its offset in the scroller moves without a scroll.
+  $effect(() => {
+    void unstagedRows.length;
+    void stagedRows.length;
+    void unstagedOpen;
+    void stagedOpen;
+    unstagedWin.refresh();
+    stagedWin.refresh();
+  });
 
   // Repo signing defaults. Best-effort: a daemon without the route (or a repo
   // with no config) just leaves the toggle off.
@@ -555,20 +571,22 @@
 {/snippet}
 
 {#snippet sectionRows(rows: Row[], section: 'unstaged' | 'staged', empty: string)}
-  {#each rows.slice(0, rowLimit[section]) as r (r.key)}
-    {#if r.node.type === 'folder'}
-      {@render folderRow(r.node, r.depth, section)}
-    {:else}
-      {@render fileRow(r.node, r.depth, section)}
-    {/if}
-  {:else}
+  {@const lw = winOf(section)}
+  {@const win = lw.range(rows.length)}
+  {#if rows.length === 0}
     <div class="dim wp-empty">{empty}</div>
-  {/each}
-  {#if rows.length > rowLimit[section]}
-    <button class="wp-more" onclick={() => (rowLimit[section] += ROW_PAGE)}>
-      Show {Math.min(ROW_PAGE, rows.length - rowLimit[section])} more ({rows.length - rowLimit[section]} hidden)
-    </button>
   {/if}
+  <div class="wp-rows" {@attach lw.attach}>
+    {#if win.top > 0}<div class="wp-spacer" style="height:{win.top}px" aria-hidden="true"></div>{/if}
+    {#each rows.slice(win.start, win.end) as r (r.key)}
+      {#if r.node.type === 'folder'}
+        {@render folderRow(r.node, r.depth, section)}
+      {:else}
+        {@render fileRow(r.node, r.depth, section)}
+      {/if}
+    {/each}
+    {#if win.bottom > 0}<div class="wp-spacer" style="height:{win.bottom}px" aria-hidden="true"></div>{/if}
+  </div>
 {/snippet}
 
 <div class="wip-panel">
@@ -946,18 +964,6 @@
   .wp-empty {
     padding: 6px 12px;
     font-size: var(--fs-xs);
-  }
-  .wp-more {
-    display: block;
-    margin: 4px 8px;
-    padding: 3px 8px;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    color: var(--accent-text);
-    border-radius: var(--radius-s);
-  }
-  .wp-more:hover {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .wp-file {
     display: flex;

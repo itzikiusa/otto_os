@@ -1255,6 +1255,8 @@ struct LogQuery {
     /// Server-side search (`--grep` / `--author`): literal, case-insensitive.
     grep: Option<String>,
     author: Option<String>,
+    /// Page TO this commit sha in one spawn (see `LogOpts::until`).
+    until: Option<String>,
 }
 
 async fn repo_log<S: GitCtx>(
@@ -1283,6 +1285,7 @@ async fn repo_log<S: GitCtx>(
         follow: q.follow.unwrap_or(false),
         grep: blank(&q.grep),
         author: blank(&q.author),
+        until: blank(&q.until),
     };
     Ok(Json(git.log_with(&opts).await?))
 }
@@ -2335,9 +2338,66 @@ async fn pr_diff<S: GitCtx>(
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .get(&key);
-    let (diff, cache) = match cached {
-        Some(d) => (d, "hit"),
-        None => {
+    // Summary-first: unless the whole diff is memoized already, a summary or
+    // one-file request goes to the provider's NARROW API (Bitbucket's
+    // `diffstat` / `diff?path=`), memoized under its own key — the whole PR
+    // diff is only downloaded by a caller that actually wants all of it, or
+    // for a provider with no such API.
+    let narrow_key = match (&cached, q.path.as_deref().filter(|p| !p.is_empty())) {
+        (Some(_), _) => None,
+        (None, Some(p)) => Some(format!(
+            "{key}\0file\0{p}\0{}",
+            q.old_path.as_deref().unwrap_or("")
+        )),
+        (None, None) if q.summary == Some(true) => Some(format!("{key}\0summary")),
+        (None, None) => None,
+    };
+    let narrow = match narrow_key {
+        None => None,
+        Some(nk) => {
+            let hit = pr_diffs().lock().unwrap_or_else(|p| p.into_inner()).get(&nk);
+            match hit {
+                Some(d) => Some((d, "hit")),
+                None => {
+                    let (provider, remote) = (provider.clone(), remote.clone());
+                    let (path, old_path) = (q.path.clone(), q.old_path.clone());
+                    crate::diff_cache::pr_narrow_flights()
+                        .run(&nk, || {
+                            let nk = nk.clone();
+                            async move {
+                                let got = match path.as_deref().filter(|p| !p.is_empty()) {
+                                    Some(p) => {
+                                        provider
+                                            .get_pr_file_diff(&remote, number, p, old_path.as_deref())
+                                            .await?
+                                    }
+                                    None => provider.get_pr_diff_summary(&remote, number).await?,
+                                };
+                                Ok(got.map(|mut d| {
+                                    for f in &mut d.files {
+                                        crate::parse::fill_counts(f);
+                                    }
+                                    crate::parse::fill_totals(&mut d);
+                                    let d = Arc::new(d);
+                                    pr_diffs().lock().unwrap_or_else(|p| p.into_inner()).put(
+                                        nk,
+                                        d.clone(),
+                                        approx_size(&d),
+                                    );
+                                    d
+                                }))
+                            }
+                        })
+                        .await?
+                        .map(|d| (d, "miss"))
+                }
+            }
+        }
+    };
+    let (diff, cache) = match (narrow, cached) {
+        (Some(n), _) => n,
+        (None, Some(d)) => (d, "hit"),
+        (None, None) => {
             let d = pr_flights()
                 .run(&key, || {
                     let key = key.clone();

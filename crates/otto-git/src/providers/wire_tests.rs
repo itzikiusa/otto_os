@@ -323,6 +323,28 @@ mod gitlab {
         })
     }
 
+    /// `/changes` past GitLab's own limits sets `overflow` and drops files:
+    /// the diff must say it is partial.
+    #[tokio::test]
+    async fn mr_changes_overflow_marks_the_diff_truncated() {
+        let server = MockServer::start().await;
+        let gl = Gitlab::new("tok".into(), Some(server.uri()));
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/api/v4/projects/.+/merge_requests/5/changes$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "overflow": true,
+                "changes": [{
+                    "old_path": "a.rs", "new_path": "a.rs",
+                    "diff": "@@ -1 +1 @@\n-x\n+y\n",
+                }],
+            })))
+            .mount(&server)
+            .await;
+        let d = gl.get_pr_diff(&rr(), 5).await.unwrap();
+        assert_eq!(d.truncated, Some(true));
+        assert_eq!((d.files[0].added, d.files[0].deleted), (Some(1), Some(1)));
+    }
+
     #[tokio::test]
     async fn list_prs_two_pages_sets_has_more() {
         let server = MockServer::start().await;
@@ -467,6 +489,96 @@ mod bitbucket {
         let p2 = bb.list_prs(&rr(), PrState::Open, 2, 50).await.unwrap();
         assert!(!p2.has_more, "no `next` ⇒ last page");
         assert_eq!(p2.items[0].number, 2);
+    }
+
+    /// Summary-first: the file list comes from `diffstat` (paged by `next`),
+    /// never the unified diff — every status maps, a rename keeps its origin,
+    /// counts are Bitbucket's `lines_added/removed`.
+    #[tokio::test]
+    async fn pr_diff_summary_reads_diffstat_pages_not_the_diff() {
+        let server = MockServer::start().await;
+        let bb = Bitbucket::with_base("user".into(), "tok".into(), server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repositories/acme/app/pullrequests/7/diffstat"))
+            .and(query_param("pagelen", "500"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "values": [
+                    {"status": "modified", "lines_added": 3, "lines_removed": 1,
+                     "old": {"path": "src/a.rs"}, "new": {"path": "src/a.rs"}},
+                    {"status": "renamed", "lines_added": 0, "lines_removed": 0,
+                     "old": {"path": "old/b.ts"}, "new": {"path": "new/b.ts"}},
+                ],
+                "next": format!("{}/repositories/acme/app/pullrequests/7/diffstat?page=2", server.uri()),
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repositories/acme/app/pullrequests/7/diffstat"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "values": [
+                    {"status": "added", "lines_added": 5, "lines_removed": 0,
+                     "old": null, "new": {"path": "c.md"}},
+                    {"status": "removed", "lines_added": 0, "lines_removed": 9,
+                     "old": {"path": "gone.py"}, "new": null},
+                ],
+            })))
+            .mount(&server)
+            .await;
+        // The whole diff must NOT be downloaded for a summary.
+        Mock::given(method("GET"))
+            .and(path("/repositories/acme/app/pullrequests/7/diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let d = bb.get_pr_diff_summary(&rr(), 7).await.unwrap().expect("supported");
+        use otto_core::api::FileChangeStatus as S;
+        let rows: Vec<_> = d
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.old_path.as_deref(), f.status, f.added, f.deleted))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("src/a.rs", None, Some(S::Modified), Some(3), Some(1)),
+                ("new/b.ts", Some("old/b.ts"), Some(S::Renamed), Some(0), Some(0)),
+                ("c.md", None, Some(S::Added), Some(5), Some(0)),
+                ("gone.py", None, Some(S::Deleted), Some(0), Some(9)),
+            ]
+        );
+        assert!(d.files.iter().all(|f| f.hunks.is_empty() && f.hunks_omitted == Some(true)));
+        assert_eq!((d.total_added, d.total_deleted), (Some(8), Some(10)));
+        assert_eq!(d.truncated, None);
+    }
+
+    /// Opening one file asks Bitbucket for that file only (`?path=`, repeated
+    /// for a rename's origin, URL-encoded).
+    #[tokio::test]
+    async fn pr_file_diff_sends_the_path_filter() {
+        let server = MockServer::start().await;
+        let bb = Bitbucket::with_base("user".into(), "tok".into(), server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repositories/acme/app/pullrequests/7/diff"))
+            .and(query_param("path", "new dir/b&c.ts"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "diff --git a/old/b.ts b/new dir/b&c.ts\nsimilarity index 90%\nrename from old/b.ts\nrename to new dir/b&c.ts\n--- a/old/b.ts\n+++ b/new dir/b&c.ts\n@@ -1 +1 @@\n-x\n+y\n",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let d = bb
+            .get_pr_file_diff(&rr(), 7, "new dir/b&c.ts", Some("old/b.ts"))
+            .await
+            .unwrap()
+            .expect("supported");
+        assert_eq!(d.files.len(), 1);
+        assert_eq!(d.files[0].hunks.len(), 1);
+        let reqs = server.received_requests().await.unwrap();
+        let q = reqs[0].url.query().unwrap_or("").to_string();
+        assert!(q.contains("path=old%2Fb.ts"), "rename origin sent too: {q}");
     }
 
     #[tokio::test]

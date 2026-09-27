@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 use otto_core::api::{
-    CreatePrReq, DiffResp, MergeStrategy, NewPrCommentReq, PrComment, PrCommit, PrDetail,
+    CreatePrReq, DiffResp, FileChangeStatus, FileDiff, MergeStrategy, NewPrCommentReq, PrComment, PrCommit, PrDetail,
     PrReviewer, PrState, PrSummary, UpdatePrReq,
 };
 use otto_core::{Error, Result};
@@ -249,6 +249,44 @@ impl Bitbucket {
     }
 }
 
+/// One Bitbucket `diffstat` row as a summary [`FileDiff`] (no hunks). Statuses
+/// are `added | removed | modified | renamed | merge conflict | …`; `old`/`new`
+/// are `{path}` or null (an add has no `old`, a removal no `new`).
+pub(crate) fn file_from_diffstat(v: &Value) -> FileDiff {
+    let side = |k: &str| {
+        v.get(k)
+            .and_then(|s| s.get("path"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let (old, new) = (side("old"), side("new"));
+    let status = match vstr(v, &["status"]).as_str() {
+        "added" => FileChangeStatus::Added,
+        "removed" => FileChangeStatus::Deleted,
+        "renamed" => FileChangeStatus::Renamed,
+        _ => FileChangeStatus::Modified,
+    };
+    let path = new.clone().or_else(|| old.clone()).unwrap_or_default();
+    let old_path = match status {
+        FileChangeStatus::Renamed => old.filter(|o| *o != path),
+        _ => None,
+    };
+    let count = |k: &str| v.get(k).and_then(Value::as_u64).map(|n| n as u32);
+    FileDiff {
+        fingerprint: String::new(),
+        language: crate::parse::lang_from_ext(&path),
+        path,
+        old_path,
+        is_binary: false,
+        hunks: Vec::new(),
+        too_large: None,
+        hunks_omitted: Some(true),
+        added: count("lines_added"),
+        deleted: count("lines_removed"),
+        status: Some(status),
+    }
+}
+
 fn summary_from(v: &Value) -> PrSummary {
     PrSummary {
         number: vu64(v, &["id"]),
@@ -464,6 +502,63 @@ impl super::GitProvider for Bitbucket {
             )
             .await?;
         Ok(crate::parse::parse_diff(&text))
+    }
+
+    /// `GET …/pullrequests/{n}/diffstat`: status + `lines_added/removed` per
+    /// file, paged by the `next` cursor — no patch text at all.
+    async fn get_pr_diff_summary(&self, r: &RemoteRef, number: u64) -> Result<Option<DiffResp>> {
+        /// 40 × 500 rows = 20k files; a cursor still open past that is
+        /// reported as `truncated` rather than silently passing as whole.
+        const MAX_PAGES: usize = 40;
+        let mut page = self
+            .send_json(
+                reqwest::Method::GET,
+                &Self::pr_path(r, &format!("/{number}/diffstat?pagelen=500")),
+                None,
+            )
+            .await?;
+        let mut files = Vec::new();
+        let mut fetched = 1usize;
+        let truncated = loop {
+            files.extend(varr(&page, &["values"]).iter().map(file_from_diffstat));
+            let Some(next) = page.get("next").and_then(Value::as_str).map(str::to_string) else {
+                break false;
+            };
+            if fetched >= MAX_PAGES {
+                break true;
+            }
+            page = self.send_json(reqwest::Method::GET, &next, None).await?;
+            fetched += 1;
+        };
+        let mut resp = DiffResp {
+            files,
+            truncated: truncated.then_some(true),
+            ..Default::default()
+        };
+        crate::parse::fill_totals(&mut resp);
+        Ok(Some(resp))
+    }
+
+    /// `GET …/pullrequests/{n}/diff?path=<p>[&path=<old>]` — Bitbucket's
+    /// repeatable path filter, so opening one file downloads one file.
+    async fn get_pr_file_diff(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        path: &str,
+        old_path: Option<&str>,
+    ) -> Result<Option<DiffResp>> {
+        let mut q = format!("path={}", urlencoding::encode(path));
+        if let Some(old) = old_path.filter(|o| !o.is_empty() && *o != path) {
+            q.push_str(&format!("&path={}", urlencoding::encode(old)));
+        }
+        let text = self
+            .send_text(
+                reqwest::Method::GET,
+                &Self::pr_path(r, &format!("/{number}/diff?{q}")),
+            )
+            .await?;
+        Ok(Some(crate::parse::parse_diff(&text)))
     }
 
     async fn create_pr(&self, r: &RemoteRef, req: &CreatePrReq) -> Result<PrSummary> {

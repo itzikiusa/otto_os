@@ -187,6 +187,15 @@ for (const mode of ['summary', 'legacy'] as const) {
   test(`PR diff (${mode}, ${FILES} files × ${LINES} lines): bounded DOM, no long tasks, bounded Expand all`, async ({ page }) => {
     test.setTimeout(120_000);
     const perFile: string[] = [];
+    // G4: the variable-height measurer must not re-lay out inside its own
+    // ResizeObserver callback ("ResizeObserver loop completed with
+    // undelivered notifications" was logged hundreds of times a second).
+    let resizeLoops = 0;
+    const loopHit = (t: string): void => {
+      if (/ResizeObserver loop/i.test(t)) resizeLoops++;
+    };
+    page.on('console', (m) => loopHit(m.text()));
+    page.on('pageerror', (e) => loopHit(e.message));
     await prRoutes(page, mode, perFile);
     await page.goto(`/#/git/${repoId}/pr/1`);
     await expect(page.getByRole('tab', { name: 'Files', exact: true })).toBeVisible({ timeout: 15_000 });
@@ -230,10 +239,15 @@ for (const mode of ['summary', 'legacy'] as const) {
     expect(await maxLongTask(page)).toBeLessThan(200);
     await page.getByRole('button', { name: 'Unified' }).click();
 
-    // Jump to a file near the end from the navigator: its comment renders.
+    // The navigator is windowed too (GIT2-12): 1k files never mount 1k nav rows.
+    expect(await page.locator('.diff-nav .nav-file').count(), 'nav rows mounted').toBeLessThan(120);
+    // Jump to a file near the end from the navigator (filter to reach it — its
+    // row is outside the nav window): its comment renders.
+    await page.locator('.nav-search').fill(`file_${FILES - 3}.ts`);
     await page.locator('.nav-file', { hasText: `file_${FILES - 3}.ts` }).click();
     await expect(page.getByText('Deep comment far down the diff')).toBeVisible({ timeout: 15_000 });
     expect(await domRows(page)).toBeLessThan(ROW_BUDGET);
+    expect(resizeLoops, 'no "ResizeObserver loop" errors').toBe(0);
   });
 }
 
