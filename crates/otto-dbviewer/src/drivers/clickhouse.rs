@@ -1934,7 +1934,10 @@ impl Driver for ClickhouseDriver {
         let snap = self.completion_snapshot(cfg, &scope_db).await;
         let sql_ctx = crate::complete::sql::analyze(&ctx.prefix, &ctx.suffix);
         let items = crate::complete::sql::assemble(&sql_ctx, &snap, KEYWORDS, FUNCTIONS);
-        Ok(CompletionResponse { items, ..Default::default() })
+        Ok(CompletionResponse {
+            items,
+            ..Default::default()
+        })
     }
 
     async fn invalidate_completion_cache(&self, cfg: &ResolvedConfig) {

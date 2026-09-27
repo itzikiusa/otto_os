@@ -37,9 +37,11 @@ fn access_for(user: &User) -> NoticeAccess {
 /// Tell the caller's other windows (the menu-bar tray's glyph) that their
 /// notice list changed — reads/dismissals have no `notification` event.
 fn changed(ctx: &ServerCtx, user: &User) {
-    let _ = ctx.events.send(otto_core::event::Event::NotificationsChanged {
-        user_id: user.id.clone(),
-    });
+    let _ = ctx
+        .events
+        .send(otto_core::event::Event::NotificationsChanged {
+            user_id: user.id.clone(),
+        });
 }
 
 /// `GET /api/v1/notifications`

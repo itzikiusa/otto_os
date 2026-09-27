@@ -585,7 +585,8 @@ mod tests {
         )
         .as_bytes();
         for step in [1usize, 3, 7, 64, 1000] {
-            let dir = std::env::temp_dir().join(format!("otto-reply-tail-{}-{step}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("otto-reply-tail-{}-{step}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             let path = dir.join("s.jsonl");
             std::fs::write(&path, b"").unwrap();
@@ -607,8 +608,16 @@ mod tests {
                 // read_to_string would have failed outright — compare on the
                 // valid prefix's lossy view, like the tail sees it).
                 let whole = String::from_utf8_lossy(&jsonl[..end]).into_owned();
-                assert_eq!(tail.reply(), completed_turn_text(&whole), "step {step} at {end}");
-                assert_eq!(tail.api_error(), transcript_api_error(&whole), "step {step} at {end}");
+                assert_eq!(
+                    tail.reply(),
+                    completed_turn_text(&whole),
+                    "step {step} at {end}"
+                );
+                assert_eq!(
+                    tail.api_error(),
+                    transcript_api_error(&whole),
+                    "step {step} at {end}"
+                );
             }
             assert_eq!(tail.reply().as_deref(), Some("final λ"));
             assert_eq!(tail.api_error().as_deref(), Some("model not found"));
@@ -620,7 +629,9 @@ mod tests {
             assert_eq!(tail.api_error(), None);
             let _ = std::fs::remove_dir_all(&dir);
         }
-        assert!(ReplyTail::default().poll(std::path::Path::new("/nonexistent/otto.jsonl")).is_err());
+        assert!(ReplyTail::default()
+            .poll(std::path::Path::new("/nonexistent/otto.jsonl"))
+            .is_err());
     }
 
     #[test]

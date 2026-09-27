@@ -405,7 +405,10 @@ impl Driver for RedisDriver {
             })
             .collect();
 
-        Ok(CompletionResponse { items, ..Default::default() })
+        Ok(CompletionResponse {
+            items,
+            ..Default::default()
+        })
     }
 }
 

@@ -779,15 +779,40 @@ mod tests {
     #[test]
     fn type_name_matches_the_wire_tag() {
         let events = vec![
-            Event::SessionRemoved { session_id: "s".into(), workspace_id: "w".into() },
-            Event::Notice { level: "info".into(), title: "t".into(), body: "b".into() },
+            Event::SessionRemoved {
+                session_id: "s".into(),
+                workspace_id: "w".into(),
+            },
+            Event::Notice {
+                level: "info".into(),
+                title: "t".into(),
+                body: "b".into(),
+            },
             Event::UsageMetricsTick { ts: "now".into() },
-            Event::K8sClusterUpdated { cluster_id: "c".into(), deleted: false },
-            Event::AwsInstallUpdated { tool: "aws".into(), state: "done".into() },
-            Event::CanvasRefsChanged { workspace_id: "w".into(), session_id: "s".into() },
-            Event::McpApprovalChanged { approval_id: None, workspace_id: None, status: "expired".into() },
-            Event::ResourceAccessChanged { kind: Some("connection".into()), resource_id: Some("r".into()) },
-            Event::NotificationsChanged { user_id: "u".into() },
+            Event::K8sClusterUpdated {
+                cluster_id: "c".into(),
+                deleted: false,
+            },
+            Event::AwsInstallUpdated {
+                tool: "aws".into(),
+                state: "done".into(),
+            },
+            Event::CanvasRefsChanged {
+                workspace_id: "w".into(),
+                session_id: "s".into(),
+            },
+            Event::McpApprovalChanged {
+                approval_id: None,
+                workspace_id: None,
+                status: "expired".into(),
+            },
+            Event::ResourceAccessChanged {
+                kind: Some("connection".into()),
+                resource_id: Some("r".into()),
+            },
+            Event::NotificationsChanged {
+                user_id: "u".into(),
+            },
         ];
         for e in events {
             let v = serde_json::to_value(&e).unwrap();
@@ -799,7 +824,10 @@ mod tests {
             status: "expired".into(),
         })
         .unwrap();
-        assert_eq!(v, serde_json::json!({"type": "mcp_approval_changed", "status": "expired"}));
+        assert_eq!(
+            v,
+            serde_json::json!({"type": "mcp_approval_changed", "status": "expired"})
+        );
     }
 
     /// The wire shape the workflows UI merges in place: `rev` + the changed

@@ -183,8 +183,8 @@ impl LocalGit {
         Self::guard_ref(rev)?;
         Self::guard_path(path)?;
         // Bounded: a read past BLAME_STDOUT_CAP is killed and reported.
-        let cmd = GitCmd::read(&["blame", "--porcelain", rev, "--", path])
-            .max_stdout(BLAME_STDOUT_CAP);
+        let cmd =
+            GitCmd::read(&["blame", "--porcelain", rev, "--", path]).max_stdout(BLAME_STDOUT_CAP);
         let (ok, stdout, stderr, code) = self.exec(&cmd, None).await?;
         let stdout = String::from_utf8_lossy(&stdout);
         if !ok {

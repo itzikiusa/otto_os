@@ -315,7 +315,11 @@ async fn serve_lsp(
     let mut attached = match pool.attach(key.clone(), &cmd, &args) {
         Ok(a) => a,
         Err(e) => {
-            tracing::error!(lang = key.lang.as_str(), cmd, "failed to spawn language server: {e}");
+            tracing::error!(
+                lang = key.lang.as_str(),
+                cmd,
+                "failed to spawn language server: {e}"
+            );
             let err = serde_json::json!({
                 "type": "error",
                 "code": "spawn_failed",

@@ -186,7 +186,11 @@ impl VaultEngine {
             let paths = Self::revision_paths(&root, &names)?;
             Ok(names
                 .into_iter()
-                .filter(|name| before.as_deref().is_none_or(|cursor| name.as_str() < cursor))
+                .filter(|name| {
+                    before
+                        .as_deref()
+                        .is_none_or(|cursor| name.as_str() < cursor)
+                })
                 .filter(|name| match (&path, paths.get(name)) {
                     (None, Some(_)) => true,
                     (Some(want), Some(have)) => want == have,

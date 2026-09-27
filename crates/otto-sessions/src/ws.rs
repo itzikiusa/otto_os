@@ -85,21 +85,30 @@ struct TokenQuery {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientFrame {
-    Input { data: String },
-    Resize { cols: u16, rows: u16 },
+    Input {
+        data: String,
+    },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
     // Request a history-inclusive snapshot: up to `lines` rows of scrollback
     // history (rows that scrolled off above the visible screen) followed by a
     // coherent current-screen frame. Honors the requested `lines`. The client
     // treats every snapshot as a full rebuild (reset + repaint), so this must
     // always carry the complete retained history.
-    Scrollback { lines: usize },
+    Scrollback {
+        lines: usize,
+    },
     // Server-side search: grep the ring-buffer scrollback for `query` (plain
     // substring, case-insensitive). The server replies with a JSON
     // `{"type":"search_result","query":"…","matches":[…]}` frame containing
     // up to `MAX_SEARCH_RESULTS` matching line objects. This keeps results
     // across WS reconnects (the ring survives), unlike the xterm SearchAddon
     // which only searches the emulator's current viewport.
-    Search { query: String },
+    Search {
+        query: String,
+    },
     // Claim size authority without typing — sent when the terminal gains
     // FOCUS, so clicking into a pane reclaims the PTY size from a stale
     // viewer (e.g. a phone tab that typed once and stayed attached).

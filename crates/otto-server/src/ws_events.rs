@@ -130,9 +130,9 @@ async fn handle_events(socket: WebSocket, ctx: ServerCtx, user: User, ui_capable
     let (mut sink, mut stream) = socket.split();
     let mut ping = tokio::time::interval(Duration::from_secs(30));
     ping.tick().await; // consume the immediate first tick
-    // Optional per-connection topic filter (`subscribe` frame): a socket that
-    // only needs a few event types (the menu-bar tray) never pays for the
-    // rest — they are dropped before the authorization check and serializing.
+                       // Optional per-connection topic filter (`subscribe` frame): a socket that
+                       // only needs a few event types (the menu-bar tray) never pays for the
+                       // rest — they are dropped before the authorization check and serializing.
     let mut topics: Option<std::collections::HashSet<String>> = None;
 
     // Role-check results cached per workspace for this connection's lifetime.
@@ -239,7 +239,9 @@ fn parse_subscribe(text: &str) -> Option<Option<std::collections::HashSet<String
     let f: Subscribe = serde_json::from_str(text).ok()?;
     if f.kind != "subscribe"
         || f.topics.len() > MAX_TOPICS
-        || f.topics.iter().any(|t| t.is_empty() || t.len() > MAX_TOPIC_LEN)
+        || f.topics
+            .iter()
+            .any(|t| t.is_empty() || t.len() > MAX_TOPIC_LEN)
     {
         return None;
     }
@@ -598,13 +600,17 @@ mod tests {
 
     #[test]
     fn subscribe_frame_parses_caps_and_clears() {
-        let set = parse_subscribe(r#"{"type":"subscribe","topics":["session_status","notification"]}"#)
-            .expect("valid frame")
-            .expect("a filter");
+        let set =
+            parse_subscribe(r#"{"type":"subscribe","topics":["session_status","notification"]}"#)
+                .expect("valid frame")
+                .expect("a filter");
         assert!(set.contains("session_status") && set.contains("notification"));
         assert_eq!(set.len(), 2);
         // An empty list clears the filter (all events again).
-        assert_eq!(parse_subscribe(r#"{"type":"subscribe","topics":[]}"#), Some(None));
+        assert_eq!(
+            parse_subscribe(r#"{"type":"subscribe","topics":[]}"#),
+            Some(None)
+        );
         // Not a subscribe frame / malformed / over the caps → ignored.
         assert_eq!(parse_subscribe(r#"{"type":"hello","topics":["x"]}"#), None);
         assert_eq!(parse_subscribe("not json"), None);
@@ -618,11 +624,15 @@ mod tests {
 
     #[test]
     fn subscribe_ack_carries_sorted_topics_and_boot_id() {
-        let set: std::collections::HashSet<String> =
-            ["notification", "mcp_approval_changed"].map(String::from).into();
+        let set: std::collections::HashSet<String> = ["notification", "mcp_approval_changed"]
+            .map(String::from)
+            .into();
         let v: serde_json::Value = serde_json::from_str(&subscribe_ack(Some(&set))).unwrap();
         assert_eq!(v["type"], "subscribe_ack");
-        assert_eq!(v["topics"], serde_json::json!(["mcp_approval_changed", "notification"]));
+        assert_eq!(
+            v["topics"],
+            serde_json::json!(["mcp_approval_changed", "notification"])
+        );
         assert_eq!(v["boot_id"], crate::transport::boot_id());
         let v: serde_json::Value = serde_json::from_str(&subscribe_ack(None)).unwrap();
         assert!(v["topics"].is_null());
@@ -643,10 +653,15 @@ mod tests {
             status: "expired".into(),
         };
         assert!(matches!(scope_of(&global), Scope::Everyone));
-        let access = Event::ResourceAccessChanged { kind: None, resource_id: None };
+        let access = Event::ResourceAccessChanged {
+            kind: None,
+            resource_id: None,
+        };
         assert!(matches!(scope_of(&access), Scope::Everyone));
         let uid: Id = "u1".into();
-        let notes = Event::NotificationsChanged { user_id: uid.clone() };
+        let notes = Event::NotificationsChanged {
+            user_id: uid.clone(),
+        };
         assert!(matches!(scope_of(&notes), Scope::Owner(u) if u == &uid));
     }
 

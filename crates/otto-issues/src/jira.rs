@@ -902,7 +902,11 @@ impl JiraClient {
         // never seen. Capped at 20 pages of 100 (2000 comments).
         const PAGE: u64 = 100;
         const MAX_PAGES: u64 = 20;
-        let order = if since.is_some() { "-created" } else { "created" };
+        let order = if since.is_some() {
+            "-created"
+        } else {
+            "created"
+        };
         let mut all: Vec<serde_json::Value> = Vec::new();
         let mut start_at: u64 = 0;
         for _ in 0..MAX_PAGES {
@@ -3337,7 +3341,10 @@ mod tests {
         let ids: Vec<&str> = kept.iter().map(|v| v["id"].as_str().unwrap()).collect();
         // The tie (id 4) is kept — the caller drops already-seen ids.
         assert_eq!(ids, ["5", "4"]);
-        assert!(reached, "an older comment on a descending page ends the walk");
+        assert!(
+            reached,
+            "an older comment on a descending page ends the walk"
+        );
     }
 
     #[test]

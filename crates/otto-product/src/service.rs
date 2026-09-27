@@ -8,8 +8,7 @@ use otto_core::domain::{IssueAccount, User};
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id, Result};
 use otto_issues::{
-    markdown_to_storage, CommentRef, ConfluenceClient, IssueComment,
-    JiraClient, PageComment,
+    markdown_to_storage, CommentRef, ConfluenceClient, IssueComment, JiraClient, PageComment,
 };
 use otto_state::{
     IssuesRepo, NewEvent, NewStory, NewVersion, ProductQuestion, ProductRepo, QuestionPatch,
@@ -178,7 +177,8 @@ impl ProductService {
             "confluence" => {
                 let client = ConfluenceClient::new(&account.base_url, &account.email, &token);
                 let page = client.get_page(source_key).await?;
-                let body_md = otto_issues::storage_to_markdown_async(page.body_storage.clone()).await;
+                let body_md =
+                    otto_issues::storage_to_markdown_async(page.body_storage.clone()).await;
                 let raw_json = serde_json::to_string(&serde_json::json!({
                     "id": page.id,
                     "title": page.title,

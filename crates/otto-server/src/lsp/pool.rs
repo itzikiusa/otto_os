@@ -107,8 +107,13 @@ pub fn process_spawner() -> Spawner {
 /// Membership changes — unbounded so `Drop` can send, and polled FIRST by the
 /// actor so an `Attach` is always seen before that socket's first message.
 enum Ctl {
-    Attach { client: u64, tx: mpsc::Sender<String> },
-    Detach { client: u64 },
+    Attach {
+        client: u64,
+        tx: mpsc::Sender<String>,
+    },
+    Detach {
+        client: u64,
+    },
 }
 
 struct Data {
@@ -471,7 +476,9 @@ impl Mux {
             .collect();
         for pid in stale {
             self.pending.remove(&pid);
-            self.to_server(&json!({"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {"id": pid}}));
+            self.to_server(
+                &json!({"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {"id": pid}}),
+            );
         }
         if let Init::Pending { waiters, .. } = &mut self.init {
             waiters.retain(|(c, _)| *c != client);
@@ -672,7 +679,9 @@ impl Mux {
                             let reply = match (&ok, &err) {
                                 (Some(r), _) => json!({"jsonrpc": "2.0", "id": wid, "result": r}),
                                 (None, Some(e)) => json!({"jsonrpc": "2.0", "id": wid, "error": e}),
-                                (None, None) => json!({"jsonrpc": "2.0", "id": wid, "result": null}),
+                                (None, None) => {
+                                    json!({"jsonrpc": "2.0", "id": wid, "result": null})
+                                }
                             };
                             self.send_client(c, reply.to_string());
                         }
@@ -728,18 +737,22 @@ mod tests {
                     let reply = match method {
                         "initialize" => {
                             inits.fetch_add(1, Ordering::SeqCst);
-                            Some(json!({"jsonrpc":"2.0","id":msg["id"],"result":{"capabilities":{"hoverProvider":true}}}))
+                            Some(
+                                json!({"jsonrpc":"2.0","id":msg["id"],"result":{"capabilities":{"hoverProvider":true}}}),
+                            )
                         }
-                        "textDocument/hover" => Some(
-                            json!({"jsonrpc":"2.0","id":msg["id"],"result":{"contents":"hi"}}),
-                        ),
+                        "textDocument/hover" => {
+                            Some(json!({"jsonrpc":"2.0","id":msg["id"],"result":{"contents":"hi"}}))
+                        }
                         "textDocument/didOpen" | "textDocument/didClose" => {
                             let uri = msg["params"]["textDocument"]["uri"].as_str().unwrap();
                             doc_log.lock().unwrap().push(format!("{method} {uri}"));
-                            (method == "textDocument/didOpen").then(|| json!({
-                                "jsonrpc":"2.0","method":"textDocument/publishDiagnostics",
-                                "params":{"uri":uri,"diagnostics":[]}
-                            }))
+                            (method == "textDocument/didOpen").then(|| {
+                                json!({
+                                    "jsonrpc":"2.0","method":"textDocument/publishDiagnostics",
+                                    "params":{"uri":uri,"diagnostics":[]}
+                                })
+                            })
                         }
                         _ => None,
                     };
@@ -788,7 +801,8 @@ mod tests {
     }
 
     async fn init(a: &mut Attached, id: i64) {
-        let req = json!({"jsonrpc":"2.0","id":id,"method":"initialize","params":{"rootUri":"file:///r"}});
+        let req =
+            json!({"jsonrpc":"2.0","id":id,"method":"initialize","params":{"rootUri":"file:///r"}});
         assert!(a.send(req.to_string()).await);
         let resp = recv(a).await;
         assert_eq!(resp["id"], json!(id));
@@ -814,7 +828,11 @@ mod tests {
         let (pool, fake) = fake_pool(IDLE_TIMEOUT);
         let mut a = pool.attach(key("/r"), "tsls", &[]).unwrap();
         let mut b = pool.attach(key("/r"), "tsls", &[]).unwrap();
-        assert_eq!(fake.spawns.load(Ordering::SeqCst), 1, "one child for two sockets");
+        assert_eq!(
+            fake.spawns.load(Ordering::SeqCst),
+            1,
+            "one child for two sockets"
+        );
         assert_eq!(pool.live_servers(), 1);
 
         // Both editors initialize with the SAME id; the server sees one.

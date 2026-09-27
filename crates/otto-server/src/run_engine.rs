@@ -674,10 +674,10 @@ where
         let wake_at = (now + safety).min(deadline);
         loop {
             match tokio::time::timeout_at(wake_at, rx.recv()).await {
-                Err(_) => break,                              // safety / deadline tick
-                Ok(Ok(ev)) if is_wake(&ev) => break,          // our event
-                Ok(Ok(_)) => continue,                        // someone else's
-                Ok(Err(RecvError::Lagged(_))) => break,       // may have missed ours
+                Err(_) => break,                        // safety / deadline tick
+                Ok(Ok(ev)) if is_wake(&ev) => break,    // our event
+                Ok(Ok(_)) => continue,                  // someone else's
+                Ok(Err(RecvError::Lagged(_))) => break, // may have missed ours
                 Ok(Err(RecvError::Closed)) => {
                     tokio::time::sleep_until(wake_at).await;
                     break;

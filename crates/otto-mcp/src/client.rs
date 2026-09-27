@@ -163,12 +163,15 @@ impl McpClient {
                 // expired). Nothing reached the server: one fresh attempt.
                 *guard = None;
                 let mut fresh = self.open().await?;
-                let out = tokio::time::timeout(OP_TIMEOUT, run_on(&mut fresh, &self.transport, request))
-                    .await
-                    .map_err(|_| timeout_msg())
-                    .and_then(|r| r.map_err(|e| match e {
-                        OpError::NotDelivered(m) | OpError::Failed(m) => m,
-                    }));
+                let out =
+                    tokio::time::timeout(OP_TIMEOUT, run_on(&mut fresh, &self.transport, request))
+                        .await
+                        .map_err(|_| timeout_msg())
+                        .and_then(|r| {
+                            r.map_err(|e| match e {
+                                OpError::NotDelivered(m) | OpError::Failed(m) => m,
+                            })
+                        });
                 if out.is_ok() {
                     *guard = Some(fresh);
                 }
@@ -287,7 +290,7 @@ async fn open_http(url: &str, headers: &BTreeMap<String, String>) -> Result<Live
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     let _ = parse_http_message(resp).await?; // ensure initialize succeeded
-    // notifications/initialized (best-effort).
+                                             // notifications/initialized (best-effort).
     let _ = http_send(
         &client,
         url,

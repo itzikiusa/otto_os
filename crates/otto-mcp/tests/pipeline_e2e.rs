@@ -647,16 +647,39 @@ async fn governed_calls_reuse_one_pooled_client() {
     let mut env = std::collections::BTreeMap::new();
     env.insert("MOCK_SPAWNS".to_string(), spawns.display().to_string());
     svc.registry()
-        .update(&server.id, None, None, None, None, Some(&env), None, None, None, None, None)
+        .update(
+            &server.id,
+            None,
+            None,
+            None,
+            None,
+            Some(&env),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     svc.discover(&server.id).await.unwrap();
     for _ in 0..4 {
         let out = svc
-            .invoke(&server.id, "list_items", &serde_json::json!({}), &ctx(&ws, false))
+            .invoke(
+                &server.id,
+                "list_items",
+                &serde_json::json!({}),
+                &ctx(&ws, false),
+            )
             .await
             .unwrap();
-        assert!(matches!(out, InvokeOutcome::Executed { is_error: false, .. }));
+        assert!(matches!(
+            out,
+            InvokeOutcome::Executed {
+                is_error: false,
+                ..
+            }
+        ));
     }
     assert_eq!(svc.pooled_clients(), 1);
     let starts = std::fs::read_to_string(&spawns).unwrap().lines().count();

@@ -716,7 +716,9 @@ mod tests {
             .update_summary(
                 &scene.id,
                 SceneUpdate {
-                    doc_json: Some(r#"{"type":"otto-canvas","format":"excalidraw","source":"{}"}"#.into()),
+                    doc_json: Some(
+                        r#"{"type":"otto-canvas","format":"excalidraw","source":"{}"}"#.into(),
+                    ),
                     ..Default::default()
                 },
             )
@@ -727,19 +729,38 @@ mod tests {
 
         // A title-only update keeps the format; malformed JSON clears it
         // instead of failing the write.
-        repo.update(&scene.id, SceneUpdate { title: Some("T".into()), ..Default::default() })
-            .await
-            .unwrap();
-        assert_eq!(repo.summary(&scene.id).await.unwrap().format.as_deref(), Some("excalidraw"));
-        repo.update(&scene.id, SceneUpdate { doc_json: Some("not json".into()), ..Default::default() })
-            .await
-            .unwrap();
+        repo.update(
+            &scene.id,
+            SceneUpdate {
+                title: Some("T".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            repo.summary(&scene.id).await.unwrap().format.as_deref(),
+            Some("excalidraw")
+        );
+        repo.update(
+            &scene.id,
+            SceneUpdate {
+                doc_json: Some("not json".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(repo.summary(&scene.id).await.unwrap().format, None);
 
-        assert_eq!(repo.workspace_of(&scene.id).await.unwrap().as_deref(), Some("w1"));
+        assert_eq!(
+            repo.workspace_of(&scene.id).await.unwrap().as_deref(),
+            Some("w1")
+        );
         assert_eq!(repo.workspace_of(&"missing".into()).await.unwrap(), None);
         assert!(matches!(
-            repo.update_summary(&"missing".into(), SceneUpdate::default()).await,
+            repo.update_summary(&"missing".into(), SceneUpdate::default())
+                .await,
             Err(Error::NotFound(_))
         ));
     }

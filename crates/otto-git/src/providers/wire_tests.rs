@@ -330,7 +330,9 @@ mod gitlab {
         let server = MockServer::start().await;
         let gl = Gitlab::new("tok".into(), Some(server.uri()));
         Mock::given(method("GET"))
-            .and(path_regex(r"^/api/v4/projects/.+/merge_requests/5/changes$"))
+            .and(path_regex(
+                r"^/api/v4/projects/.+/merge_requests/5/changes$",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "overflow": true,
                 "changes": [{
@@ -533,23 +535,44 @@ mod bitbucket {
             .mount(&server)
             .await;
 
-        let d = bb.get_pr_diff_summary(&rr(), 7).await.unwrap().expect("supported");
+        let d = bb
+            .get_pr_diff_summary(&rr(), 7)
+            .await
+            .unwrap()
+            .expect("supported");
         use otto_core::api::FileChangeStatus as S;
         let rows: Vec<_> = d
             .files
             .iter()
-            .map(|f| (f.path.as_str(), f.old_path.as_deref(), f.status, f.added, f.deleted))
+            .map(|f| {
+                (
+                    f.path.as_str(),
+                    f.old_path.as_deref(),
+                    f.status,
+                    f.added,
+                    f.deleted,
+                )
+            })
             .collect();
         assert_eq!(
             rows,
             vec![
                 ("src/a.rs", None, Some(S::Modified), Some(3), Some(1)),
-                ("new/b.ts", Some("old/b.ts"), Some(S::Renamed), Some(0), Some(0)),
+                (
+                    "new/b.ts",
+                    Some("old/b.ts"),
+                    Some(S::Renamed),
+                    Some(0),
+                    Some(0)
+                ),
                 ("c.md", None, Some(S::Added), Some(5), Some(0)),
                 ("gone.py", None, Some(S::Deleted), Some(0), Some(9)),
             ]
         );
-        assert!(d.files.iter().all(|f| f.hunks.is_empty() && f.hunks_omitted == Some(true)));
+        assert!(d
+            .files
+            .iter()
+            .all(|f| f.hunks.is_empty() && f.hunks_omitted == Some(true)));
         assert_eq!((d.total_added, d.total_deleted), (Some(8), Some(10)));
         assert_eq!(d.truncated, None);
     }

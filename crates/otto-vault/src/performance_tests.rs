@@ -786,11 +786,18 @@ async fn revision_listing_at_50k_revisions_reads_only_the_path_index() {
     let warm = e.revisions("ws", id, Some("a.md")).await.unwrap();
     let warm_ms = t.elapsed().as_millis();
     assert_eq!(warm.len(), N / 1000);
-    assert_eq!(INDEX_META_READS.load(Relaxed), reads, "index hit: no meta scan");
+    assert_eq!(
+        INDEX_META_READS.load(Relaxed),
+        reads,
+        "index hit: no meta scan"
+    );
     // 50 ms is the release budget; unoptimized test builds get headroom (the
     // meta-read counter above is the load-bearing regression check).
     let budget = if cfg!(debug_assertions) { 250 } else { 50 };
-    assert!(warm_ms < budget, "warm 50k-revision listing took {warm_ms} ms");
+    assert!(
+        warm_ms < budget,
+        "warm 50k-revision listing took {warm_ms} ms"
+    );
 
     // A revision the index has never seen (another writer) is learned once.
     let rid = format!("r{:08}", N);
@@ -804,7 +811,11 @@ async fn revision_listing_at_50k_revisions_reads_only_the_path_index() {
         reason: "note write".into(),
         committed: true,
     };
-    std::fs::write(hist.join(&rid).join("meta.json"), serde_json::to_vec(&rev).unwrap()).unwrap();
+    std::fs::write(
+        hist.join(&rid).join("meta.json"),
+        serde_json::to_vec(&rev).unwrap(),
+    )
+    .unwrap();
     let next = e.revisions("ws", id, Some("a.md")).await.unwrap();
     assert_eq!(next[0].id, rid);
     assert_eq!(INDEX_META_READS.load(Relaxed), reads + 1);

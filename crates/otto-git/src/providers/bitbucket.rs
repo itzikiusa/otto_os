@@ -7,8 +7,8 @@
 
 use async_trait::async_trait;
 use otto_core::api::{
-    CreatePrReq, DiffResp, FileChangeStatus, FileDiff, MergeStrategy, NewPrCommentReq, PrComment, PrCommit, PrDetail,
-    PrReviewer, PrState, PrSummary, UpdatePrReq,
+    CreatePrReq, DiffResp, FileChangeStatus, FileDiff, MergeStrategy, NewPrCommentReq, PrComment,
+    PrCommit, PrDetail, PrReviewer, PrState, PrSummary, UpdatePrReq,
 };
 use otto_core::{Error, Result};
 use serde_json::{json, Value};

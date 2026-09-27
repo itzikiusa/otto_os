@@ -430,7 +430,11 @@ async fn proof_counts_from_the_summary_equal_the_full_parse() {
         let s = git.diff_with(&target, &summary()).await.unwrap();
         let full = git.diff_with(&target, &DiffOpts::default()).await.unwrap();
         assert_eq!(counts(&s), counts(&full), "{target:?}");
-        assert_eq!(s.files.len(), counts(&s).0, "the summary never repeats a path");
+        assert_eq!(
+            s.files.len(),
+            counts(&s).0,
+            "the summary never repeats a path"
+        );
         assert!(!s.files.is_empty());
     }
 }
@@ -466,13 +470,21 @@ async fn renames_incomplete_is_set_past_the_rename_limit() {
     let (_tmp, dir) = init();
     let n = 1_001;
     for i in 0..n {
-        write(&dir, &format!("old/{i}.txt"), format!("old body {i}\n").as_bytes());
+        write(
+            &dir,
+            &format!("old/{i}.txt"),
+            format!("old body {i}\n").as_bytes(),
+        );
     }
     sh_git(&dir, &["add", "-A"]);
     sh_git(&dir, &["commit", "-q", "-m", "base"]);
     std::fs::remove_dir_all(dir.join("old")).unwrap();
     for i in 0..n {
-        write(&dir, &format!("new/{i}.txt"), format!("new text {i}\n").as_bytes());
+        write(
+            &dir,
+            &format!("new/{i}.txt"),
+            format!("new text {i}\n").as_bytes(),
+        );
     }
     sh_git(&dir, &["add", "-A"]);
     sh_git(&dir, &["commit", "-q", "-m", "moved"]);

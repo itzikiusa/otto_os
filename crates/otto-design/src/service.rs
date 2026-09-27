@@ -622,13 +622,16 @@ impl DesignService {
         })?;
         // Validate + hash once, off the runtime for big payloads (D10).
         let validate = opts.validate;
-        let (bytes, sha) = cpu(bytes.len() >= OFF_RUNTIME_BYTES, move || -> Result<(Vec<u8>, String)> {
-            if validate {
-                format::validate(spec, &bytes)?;
-            }
-            let sha = blobs::sha256_hex(&bytes);
-            Ok((bytes, sha))
-        })
+        let (bytes, sha) = cpu(
+            bytes.len() >= OFF_RUNTIME_BYTES,
+            move || -> Result<(Vec<u8>, String)> {
+                if validate {
+                    format::validate(spec, &bytes)?;
+                }
+                let sha = blobs::sha256_hex(&bytes);
+                Ok((bytes, sha))
+            },
+        )
         .await??;
         if !one_of(VERSION_KINDS, &opts.kind) {
             return Err(Error::Invalid(format!(
@@ -1958,7 +1961,11 @@ mod tests {
         let f = crate::store::ArtifactFilter::default();
         assert_eq!(s.store().search("zebracorn", &f).await.unwrap().len(), 1);
         let (_, head) = s.head_content(&created.artifact).await.unwrap();
-        assert_eq!(head, body.as_bytes(), "the blob was stored under its own sha");
+        assert_eq!(
+            head,
+            body.as_bytes(),
+            "the blob was stored under its own sha"
+        );
 
         // Remove the blob store: a meta update that re-read the head would
         // index an empty body and lose "zebracorn".
@@ -1973,7 +1980,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(s.store().search("quokka", &f).await.unwrap().len(), 1, "title re-indexed");
+        assert_eq!(
+            s.store().search("quokka", &f).await.unwrap().len(),
+            1,
+            "title re-indexed"
+        );
         assert_eq!(
             s.store().search("zebracorn", &f).await.unwrap().len(),
             1,

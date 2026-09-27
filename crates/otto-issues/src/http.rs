@@ -21,9 +21,7 @@ use otto_core::{new_id, Error, Id};
 use otto_state::{IssuesRepo, NewIssueAccount};
 
 use crate::confluence::ConfluenceClient;
-use crate::confluence::{
-    markdown_to_storage, ConfluencePageSummary, ConfluenceSpace, PageComment,
-};
+use crate::confluence::{markdown_to_storage, ConfluencePageSummary, ConfluenceSpace, PageComment};
 use crate::jira::{
     CommentRef, DevStatus, EditableField, IssueFull, JiraClient, JiraTransition, JiraUser,
 };
@@ -455,7 +453,6 @@ async fn page_resp(p: crate::confluence::ConfluencePage) -> ConfluencePageResp {
         version: p.version,
     }
 }
-
 
 /// `GET /issue/confluence/pages/{page_id}?account_id=`
 async fn get_page_cf<S: IssuesCtx>(

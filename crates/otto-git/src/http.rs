@@ -2355,7 +2355,10 @@ async fn pr_diff<S: GitCtx>(
     let narrow = match narrow_key {
         None => None,
         Some(nk) => {
-            let hit = pr_diffs().lock().unwrap_or_else(|p| p.into_inner()).get(&nk);
+            let hit = pr_diffs()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(&nk);
             match hit {
                 Some(d) => Some((d, "hit")),
                 None => {
@@ -2368,7 +2371,12 @@ async fn pr_diff<S: GitCtx>(
                                 let got = match path.as_deref().filter(|p| !p.is_empty()) {
                                     Some(p) => {
                                         provider
-                                            .get_pr_file_diff(&remote, number, p, old_path.as_deref())
+                                            .get_pr_file_diff(
+                                                &remote,
+                                                number,
+                                                p,
+                                                old_path.as_deref(),
+                                            )
                                             .await?
                                     }
                                     None => provider.get_pr_diff_summary(&remote, number).await?,

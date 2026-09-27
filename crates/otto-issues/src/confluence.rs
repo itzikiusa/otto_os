@@ -529,7 +529,11 @@ impl ConfluenceClient {
     /// order, so the page walk is unchanged, but only the NEW comments' storage
     /// bodies are converted to Markdown (the old ones were converted, then
     /// filtered out by the caller, every tick).
-    pub async fn list_comments_since(&self, page_id: &str, since: &str) -> Result<Vec<PageComment>> {
+    pub async fn list_comments_since(
+        &self,
+        page_id: &str,
+        since: &str,
+    ) -> Result<Vec<PageComment>> {
         self.walk_comments(page_id, Some(since)).await
     }
 
