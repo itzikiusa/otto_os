@@ -931,6 +931,10 @@ pub struct SftpListResp {
     /// request omitted `path`).
     pub path: String,
     pub entries: Vec<SftpEntry>,
+    /// `true` when the directory held more than the daemon's cap (20k
+    /// entries); `entries` is then the first 20k of the listing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 /// `POST /api/v1/connections/{id}/sftp/download` — pull a remote file to local.

@@ -660,7 +660,7 @@ existing directory, the remote file's basename is used.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /connections/{id}/sftp/list?path= | ws viewer | — | SftpListResp `{path, entries: SftpEntry[]}` — empty/absent `path` ⇒ remote `pwd` then list |
+| GET /connections/{id}/sftp/list?path= | ws viewer | — | SftpListResp `{path, entries: SftpEntry[], truncated?}` — empty/absent `path` ⇒ remote `pwd` then list; at most 20,000 entries, `truncated: true` (omitted when false) when the directory held more |
 | GET /connections/{id}/sftp/read?path= | ws viewer | — | SftpReadResp `{text, truncated}` — downloads to a temp file, returns up to 1 MiB of UTF-8 text |
 | POST /connections/{id}/sftp/download | ws editor | SftpDownloadReq `{remote_path, local_path}` | SftpDownloadResp `{local_path, bytes}` |
 | POST /connections/{id}/sftp/upload | ws editor | SftpUploadReq `{local_path, remote_path}` | 200 |

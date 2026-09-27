@@ -2447,6 +2447,9 @@ export interface SftpListResp {
   /** Absolute remote path that was listed (resolved from pwd when omitted). */
   path: string;
   entries: SftpEntry[];
+  /** True when the directory held more than the daemon's 20k-entry cap;
+   *  `entries` is then the first 20k. Omitted when false. */
+  truncated?: boolean;
 }
 
 /** `POST /api/v1/connections/{id}/sftp/download`. */

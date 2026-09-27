@@ -2,6 +2,7 @@
   import { api } from '../../lib/api/client';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { TableWindow } from '../../lib/tableWindow.svelte';
   import type { BrokerCluster, SchemaSubject } from '../../lib/api/types';
   import SchemaVersionsPanel from './SchemaVersionsPanel.svelte';
 
@@ -17,6 +18,16 @@
   let selected = $state.raw<SchemaSubject | null>(null);
   // Toggle to show version history / compat panel for the selected subject.
   let showVersions = $state(false);
+
+  // Window the subject list (SC-03): thousands of subjects mount only the
+  // visible slice between two spacers.
+  const tw = new TableWindow();
+  const win = $derived(tw.range(subjects.length));
+  let listEl = $state<HTMLDivElement>();
+  $effect(() => {
+    void win;
+    tw.measure(listEl, '.srow');
+  });
 
   function onViewKeydown(event: KeyboardEvent) {
     const tabs = Array.from(event.currentTarget instanceof HTMLElement ? event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]') : []);
@@ -52,6 +63,7 @@
       .get<SchemaSubject[]>(`/brokers/clusters/${cluster.id}/schema-registry/subjects`)
       .then((s) => {
         subjects = s;
+        tw.reset(listEl);
         if (s.length > 0) selected = s[0];
       })
       .catch((e) => {
@@ -83,8 +95,15 @@
       {/if}
     </div>
   {:else}
-    <div class="list">
-      {#each subjects as s (s.subject)}
+    <div
+      class="list"
+      class:windowed={tw.active(subjects.length)}
+      bind:this={listEl}
+      bind:clientHeight={tw.viewH}
+      onscroll={tw.onscroll}
+    >
+      {#if win.top}<div class="tw-spacer" aria-hidden="true" style="height:{win.top}px"></div>{/if}
+      {#each subjects.slice(win.start, win.end) as s (s.subject)}
         <button
           class="srow"
           class:sel={selected?.subject === s.subject}
@@ -94,6 +113,7 @@
           <span class="muted small">v{s.version} · {s.schema_type} · #{s.id}</span>
         </button>
       {/each}
+      {#if win.bottom}<div class="tw-spacer" aria-hidden="true" style="height:{win.bottom}px"></div>{/if}
       {#if subjects.length === 0}<p class="muted pad">No subjects registered.</p>{/if}
     </div>
     <div class="view">
@@ -153,6 +173,14 @@
     font-family: var(--font-mono);
     font-size: var(--fs-m);
     word-break: break-all;
+  }
+  /* Windowed rows must be uniform: one-line names (full name in the title
+     and the detail header). */
+  .list.windowed .sn {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    word-break: normal;
   }
   .view {
     min-width: 0;

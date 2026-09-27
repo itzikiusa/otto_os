@@ -236,6 +236,36 @@ impl K8sMonitorRepo {
         Ok(())
     }
 
+    /// [`Self::upsert_status`] that leaves the stored `snapshot_json` alone —
+    /// the collector's path when the pod snapshot is unchanged since its last
+    /// write (a 5k-pod snapshot is MBs of JSON serialized and rewritten every
+    /// cycle otherwise). A missing row falls back to the full upsert.
+    pub async fn upsert_status_keep_snapshot(&self, row: &K8sMonitorStatusRow) -> Result<()> {
+        let done = sqlx::query(
+            "UPDATE k8s_monitor_status SET
+                last_cycle_at = ?, last_ok_at = ?, last_error = ?, transport_used = ?,
+                metrics_server = ?, pods_seen = ?, pods_scraped = ?, pods_failed = ?, cycle_ms = ?
+             WHERE cluster_id = ?",
+        )
+        .bind(&row.last_cycle_at)
+        .bind(&row.last_ok_at)
+        .bind(&row.last_error)
+        .bind(&row.transport_used)
+        .bind(&row.metrics_server)
+        .bind(row.pods_seen)
+        .bind(row.pods_scraped)
+        .bind(row.pods_failed)
+        .bind(row.cycle_ms)
+        .bind(&row.cluster_id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("update k8s monitor status"))?;
+        if done.rows_affected() == 0 {
+            return self.upsert_status(row).await;
+        }
+        Ok(())
+    }
+
     /// Drop both rows (cluster removed / monitoring reset).
     pub async fn delete(&self, cluster_id: &str) -> Result<()> {
         sqlx::query("DELETE FROM k8s_monitor_configs WHERE cluster_id = ?")
@@ -298,6 +328,33 @@ mod tests {
         assert_eq!(got.snapshot["ns/p"]["phase"], "Running");
         repo.delete("c1").await.unwrap();
         assert!(repo.get_status("c1").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn keep_snapshot_updates_status_but_not_the_snapshot() {
+        let repo = K8sMonitorRepo::new(pool_with_cluster().await);
+        let mut st = K8sMonitorStatusRow::empty("c1");
+        st.snapshot = serde_json::json!({"ns/p": {"phase": "Running"}});
+        // No row yet: the keep-snapshot path still inserts the snapshot.
+        repo.upsert_status_keep_snapshot(&st).await.unwrap();
+        assert_eq!(
+            repo.get_status("c1").await.unwrap().unwrap().snapshot["ns/p"]["phase"],
+            "Running"
+        );
+        st.cycle_ms = 42;
+        st.snapshot = serde_json::json!({});
+        repo.upsert_status_keep_snapshot(&st).await.unwrap();
+        let got = repo.get_status("c1").await.unwrap().unwrap();
+        assert_eq!(got.cycle_ms, 42);
+        assert_eq!(
+            got.snapshot["ns/p"]["phase"], "Running",
+            "snapshot left alone"
+        );
+        repo.upsert_status(&st).await.unwrap();
+        assert_eq!(
+            repo.get_status("c1").await.unwrap().unwrap().snapshot,
+            serde_json::json!({})
+        );
     }
 
     #[tokio::test]

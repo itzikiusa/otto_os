@@ -26,7 +26,7 @@
   import type { K8sContainer, K8sResourceDetail, K8sResourceKind, K8sRow } from '../../lib/api/types';
   import type { ActionDef } from './actions';
   import { actionsFor } from './actions';
-  import { formatAge, formatBytes, formatMillicores, healthClass, kindDef, podContainers } from './k8s-util';
+  import { clipLongScalars, formatAge, formatBytes, formatMillicores, healthClass, kindDef, podContainers } from './k8s-util';
   import LogsView from './LogsView.svelte';
   import ExecView from './ExecView.svelte';
   import MetricsView from './MetricsView.svelte';
@@ -170,14 +170,22 @@
     };
   });
 
-  const yaml = $derived.by(() => {
-    if (!detail) return '';
+  function manifestText(manifest: unknown): string {
     try {
-      return toYaml(detail.manifest, { lineWidth: 0 });
+      return toYaml(manifest, { lineWidth: 0 });
     } catch {
-      return JSON.stringify(detail.manifest, null, 2);
+      return JSON.stringify(manifest, null, 2);
     }
-  });
+  }
+  // The view shows scalars clipped at 64 KiB (SC-19: a 1 MB one-line value
+  // is one enormous highlighted line) and soft-wraps; Copy re-serializes the
+  // full manifest on demand.
+  const clippedManifest = $derived(detail ? clipLongScalars(detail.manifest) : { value: null, clipped: 0 });
+  const yaml = $derived(detail ? manifestText(clippedManifest.value) : '');
+  function copyManifest(): void {
+    if (!detail) return;
+    void copyText(clippedManifest.clipped ? manifestText(detail.manifest) : yaml);
+  }
 
   const actions = $derived(row ? actionsFor(kind, row).filter(a => a.id.startsWith('argocd_') ? resourceAccess.can('k8s_cluster', clusterId, actionOperation(a.id), 'kubernetes', 'edit') : canOperation(actionOperation(a.id))) : []);
 
@@ -314,12 +322,12 @@
       {:else if detailError}<div class="err pad">{detailError} <button class="btn small" onclick={retry}>Retry</button></div>
       {:else}
         <div class="code-tools">
-          <span class="dim">{kind === 'secrets' ? 'Secret values are redacted by the daemon.' : 'managedFields stripped.'}</span>
-          <button class="btn small" onclick={() => void copyText(yaml)}><Icon name="copy" size={12} /> Copy</button>
+          <span class="dim">{kind === 'secrets' ? 'Secret values are redacted by the daemon.' : 'managedFields stripped.'}{clippedManifest.clipped ? ` ${clippedManifest.clipped} long value${clippedManifest.clipped === 1 ? '' : 's'} shortened — Copy has the full manifest.` : ''}</span>
+          <button class="btn small" onclick={copyManifest}><Icon name="copy" size={12} /> Copy</button>
         </div>
         <div class="code">
           {#key `${clusterId}/${kind}/${ns}/${name}`}
-            <CodeEditor path="manifest.yaml" root="" content={yaml} readOnly minimal />
+            <CodeEditor path="manifest.yaml" root="" content={yaml} readOnly minimal wrap />
           {/key}
         </div>
       {/if}
