@@ -10,6 +10,8 @@
   import type { GraphNode, SwarmRun } from './types';
 
   let inspecting = $state<SwarmRun | null>(null);
+  // `/graph` is fetched only while a graph view is mounted (store gate).
+  $effect(() => swarm.watchGraph());
   const live = $derived(inspecting ? (swarm.runs.find((r) => r.id === inspecting!.id) ?? inspecting) : null);
 
   // Hide finished work by default so the graph foregrounds what's active /

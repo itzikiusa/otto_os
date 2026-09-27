@@ -39,6 +39,10 @@ class GitBridge {
 
   fileTool = $state<FileToolRequest | null>(null);
   focus = $state<FocusRequest | null>(null);
+  /** "History moved — re-read refs + log" for the graph of `repoId` (toolbar
+   *  pull/push/stash, a finished merge, recovery). Replaces remounting the
+   *  whole graph, which re-fetched everything and lost selection + scroll. */
+  graphRefresh = $state<{ repoId: string; nonce: number } | null>(null);
   private nonce = 0;
 
   openFileTool(req: FileToolRequest): void {
@@ -46,6 +50,10 @@ class GitBridge {
   }
   closeFileTool(): void {
     this.fileTool = null;
+  }
+  refreshGraph(repoId: string): void {
+    this.nonce += 1;
+    this.graphRefresh = { repoId, nonce: this.nonce };
   }
   /** Ask the graph of `repoId` to select `sha` (no-op if not loaded there). */
   focusCommit(repoId: string, sha: string): void {

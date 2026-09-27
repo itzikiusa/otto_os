@@ -10,10 +10,11 @@
   }
   let { cluster }: Props = $props();
 
-  let subjects = $state<SchemaSubject[]>([]);
+  // Raw: a registry can hold thousands of subjects, each carrying its schema.
+  let subjects = $state.raw<SchemaSubject[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
-  let selected = $state<SchemaSubject | null>(null);
+  let selected = $state.raw<SchemaSubject | null>(null);
   // Toggle to show version history / compat panel for the selected subject.
   let showVersions = $state(false);
 

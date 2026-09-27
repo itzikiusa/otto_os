@@ -1714,7 +1714,10 @@ mod tests {
             secrets.clone(),
         ));
         let usage = otto_usage::UsageEngine::start(
-            otto_usage::UsageConfig::default(),
+            otto_usage::UsageConfig {
+                enabled: false, // This fixture does not exercise metrics or start ClickHouse.
+                ..Default::default()
+            },
             PathBuf::from("/tmp/otto-test-usage-browser"),
         )
         .await;

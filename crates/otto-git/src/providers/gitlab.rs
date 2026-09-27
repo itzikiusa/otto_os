@@ -9,8 +9,8 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use otto_core::api::{
-    CreatePrReq, DiffResp, FileDiff, MergeStrategy, NewPrCommentReq, PrComment, PrCommit, PrDetail,
-    PrReviewer, PrState, PrSummary, UpdatePrReq,
+    CreatePrReq, DiffResp, FileChangeStatus, FileDiff, MergeStrategy, NewPrCommentReq, PrComment,
+    PrCommit, PrDetail, PrReviewer, PrState, PrSummary, UpdatePrReq,
 };
 use otto_core::Result;
 use serde_json::{json, Value};
@@ -189,6 +189,7 @@ fn summary_from(v: &Value) -> PrSummary {
         target_branch: vstr(v, &["target_branch"]),
         updated_at: ts(&vstr(v, &["updated_at"])),
         reviewer_warnings: Vec::new(),
+        head_sha: super::vstr_opt(v, &["sha"]),
         draft: Some(draft),
         ci_status: None,
         labels: v
@@ -418,19 +419,38 @@ impl super::GitProvider for Gitlab {
             } else {
                 crate::parse::parse_hunks(&diff_text)
             };
-            files.push(FileDiff {
+            let flag = |k: &str| ch.get(k).and_then(Value::as_bool).unwrap_or(false);
+            let status = if flag("new_file") {
+                FileChangeStatus::Added
+            } else if flag("deleted_file") {
+                FileChangeStatus::Deleted
+            } else if renamed {
+                FileChangeStatus::Renamed
+            } else {
+                FileChangeStatus::Modified
+            };
+            let mut file = FileDiff {
                 fingerprint: String::new(),
                 path: new_path,
                 old_path: if renamed { Some(old_path) } else { None },
                 is_binary: is_binary && !diff_text.is_empty(),
                 hunks,
                 too_large: None,
+                hunks_omitted: None,
                 added: None,
                 deleted: None,
+                status: Some(status),
                 language: None,
-            });
+            };
+            crate::parse::fill_counts(&mut file);
+            files.push(file);
         }
-        Ok(DiffResp { files })
+        let mut resp = DiffResp {
+            files,
+            ..Default::default()
+        };
+        crate::parse::fill_totals(&mut resp);
+        Ok(resp)
     }
 
     async fn create_pr(&self, r: &RemoteRef, req: &CreatePrReq) -> Result<PrSummary> {

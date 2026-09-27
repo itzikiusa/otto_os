@@ -971,22 +971,24 @@ pub async fn get_discovery_run(
         .unwrap_or_default();
 
     // Per-task latest run summary (the live "findings so far").
+    // ONE lite list for the project (it used to re-read up to 500 full run
+    // rows, result blobs included, once PER task — backlog B6).
+    let runs = ctx
+        .swarm_repo
+        .list_runs_lite(&RunFilter {
+            swarm_id: Some(run.swarm_id.clone()),
+            project_id: Some(run.project_id.clone()),
+            ..Default::default()
+        })
+        .await
+        .unwrap_or_default();
     let mut task_summaries: Vec<(Id, Option<String>)> = Vec::with_capacity(tasks.len());
     for t in &tasks {
-        let runs = ctx
-            .swarm_repo
-            .list_runs(&RunFilter {
-                swarm_id: Some(run.swarm_id.clone()),
-                project_id: Some(run.project_id.clone()),
-                ..Default::default()
-            })
-            .await
-            .unwrap_or_default();
         // `list_runs` is ordered newest-first; first run for this task wins.
         let summary = runs
-            .into_iter()
+            .iter()
             .find(|r| r.task_id.as_ref() == Some(&t.id))
-            .and_then(|r| r.summary);
+            .and_then(|r| r.summary.clone());
         task_summaries.push((t.id.clone(), summary));
     }
 

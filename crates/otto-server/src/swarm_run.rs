@@ -792,11 +792,9 @@ async fn run_attempt(
     // the old result while the agent kept working on the new brief). For a
     // reused session only a turn completed past `transcript_offset` — i.e.
     // after this brief — counts; the out-file is per-run either way.
-    let watch_ok: fn(&str) -> bool = if reused {
-        never_transcript
-    } else {
-        transcript_ok
-    };
+    // `None`: the reused watch never reads the transcript at all (it used to
+    // read + discard it every second); the tail check below covers it.
+    let watch_ok: Option<fn(&str) -> bool> = if reused { None } else { Some(transcript_ok) };
     let watch = watch_for_result(
         &ctx.manager,
         &sid,
@@ -815,6 +813,14 @@ async fn run_attempt(
     );
     tokio::pin!(watch);
     let mut tick = tokio::time::interval(CANCEL_POLL);
+    // The reused session's turn, read incrementally from the brief's offset
+    // (only new bytes per tick) and off the runtime.
+    let mut since: Option<crate::turn_oracle::ClaudeTail> = match provider_session_id.as_deref() {
+        Some(psid) if reused && provider == "claude" => {
+            Some(turn_since(cwd, psid, transcript_offset))
+        }
+        _ => None,
+    };
     loop {
         tokio::select! {
             res = &mut watch => return res,
@@ -826,11 +832,14 @@ async fn run_attempt(
                 if cancel.load(Ordering::Relaxed) {
                     return RunOutcome::failed(Some(sid.clone()), FailReason::Stopped);
                 }
-                if reused && provider == "claude" {
-                    if let Some(turn) = provider_session_id
-                        .as_deref()
-                        .and_then(|psid| turn_since(cwd, psid, transcript_offset))
-                    {
+                if let Some(mut t) = since.take() {
+                    let (t, turn) = crate::offload::blocking(move || {
+                        let turn = t.poll().and_then(|s| s.last_turn_text);
+                        (t, turn)
+                    })
+                    .await;
+                    since = Some(t);
+                    if let Some(turn) = turn {
                         if transcript_ok(&turn) {
                             return RunOutcome::ok(turn, sid.clone());
                         }
@@ -845,23 +854,15 @@ async fn run_attempt(
 /// session, the transcript tail).
 const CANCEL_POLL: Duration = Duration::from_secs(2);
 
-/// Transcript acceptance for a REUSED session's watch: never from the whole
-/// file (see [`turn_since`]).
-fn never_transcript(_: &str) -> bool {
-    false
-}
-
-/// The last completed claude turn written AFTER byte `offset` of the session's
-/// transcript — i.e. a turn that answered the brief injected at `offset`, never
-/// the previous turn's reply. Reads only the tail.
-fn turn_since(cwd: &str, psid: &str, offset: u64) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let path = otto_orchestrator::claude_pty::session_jsonl_path(cwd, psid);
-    let mut f = std::fs::File::open(path).ok()?;
-    f.seek(SeekFrom::Start(offset)).ok()?;
-    let mut tail = String::new();
-    f.read_to_string(&mut tail).ok()?;
-    otto_orchestrator::claude_pty::completed_turn_text(&tail)
+/// Reader of the last completed claude turn written AFTER byte `offset` of the
+/// session's transcript — i.e. a turn that answered the brief injected at
+/// `offset`, never the previous turn's reply (`completed_turn_text` of the
+/// tail). Reads only the tail, and each poll only what was appended since.
+fn turn_since(cwd: &str, psid: &str, offset: u64) -> crate::turn_oracle::ClaudeTail {
+    crate::turn_oracle::ClaudeTail::from_offset(
+        otto_orchestrator::claude_pty::session_jsonl_path(cwd, psid),
+        offset,
+    )
 }
 
 async fn mark_run_error(ctx: &ServerCtx, run: &SwarmRun, msg: &str) {

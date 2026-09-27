@@ -92,6 +92,16 @@ impl<'a> ClaudeFolder<'a> {
         self.st.f.snapshot(self.count)
     }
 
+    /// `snapshot().turns_since(since)` without cloning the untouched turns
+    /// (token totals only feed `stats`, never a turn).
+    pub fn turns_since(&self, since: usize) -> Vec<Turn> {
+        self.st.f.turns_since(since)
+    }
+
+    pub fn artifacts(&self) -> &[Artifact] {
+        self.st.f.artifacts()
+    }
+
     pub fn into_folded(self) -> Folded {
         self.st.f.finish(self.count)
     }

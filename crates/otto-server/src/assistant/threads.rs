@@ -368,6 +368,9 @@ async fn drive_turn(
     // Wait for the turn to end, indexing finished blocks as they land.
     let started = Instant::now();
     let mut last_index = Instant::now();
+    // The turn's fold, kept across ticks: each index reads only what the
+    // agent appended since the previous one (dropped with the turn).
+    let mut index = ReplyIndex::default();
     loop {
         tokio::time::sleep(POLL).await;
         let Some(h) = ctx.manager.live_handle(&session.id) else {
@@ -381,12 +384,12 @@ async fn drive_turn(
         }
         if last_index.elapsed() >= INDEX_EVERY {
             last_index = Instant::now();
-            let _ = index_replies(ctx, owner, &thread.id, &session).await;
+            let _ = index_replies(ctx, owner, &thread.id, &session, &mut index).await;
         }
     }
     // The transcript record lands when a block completes: retry briefly.
     for _ in 0..3 {
-        if index_replies(ctx, owner, &thread.id, &session).await > 0 {
+        if index_replies(ctx, owner, &thread.id, &session, &mut index).await > 0 {
             break;
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -666,19 +669,24 @@ pub async fn index_replies(
     owner: &str,
     thread_id: &str,
     session: &Session,
+    index: &mut ReplyIndex,
 ) -> usize {
     let Ok(resolved) = crate::routes::transcript::resolve_transcript(ctx, session).await else {
         return 0;
     };
     let (provider, path) = (resolved.provider, resolved.path.clone());
-    let folded = tokio::task::spawn_blocking(move || {
-        otto_transcript::fold_file(provider, &path, otto_transcript::FoldOpts::default())
+    let mut ix = std::mem::take(index);
+    let (ix, replies) = crate::offload::blocking(move || {
+        let replies = ix.replies(provider, &path);
+        (ix, replies)
     })
     .await;
-    let Ok(Ok(folded)) = folded else {
+    *index = ix;
+    // `None`: the transcript did not move since the last index (or could not
+    // be read) — nothing to upsert, no DB round-trips.
+    let Some(replies) = replies else {
         return 0;
     };
-    let replies = reply_texts(&folded.turns);
     let mut changed = 0;
     for (turn_id, model, text) in replies {
         let row = repo(ctx)
@@ -700,6 +708,76 @@ pub async fn index_replies(
         }
     }
     changed
+}
+
+/// Incremental fold of an assistant session's transcript for
+/// [`index_replies`]. The resumed session's transcript grows for the thread's
+/// whole life; it used to be read + folded from byte 0 every 15 s of a turn.
+/// Now the file is folded once per turn and every later index only pushes the
+/// records appended since (a replaced file / Codex era flip refolds), and an
+/// unchanged file (same length + mtime) is skipped outright.
+#[derive(Default)]
+pub struct ReplyIndex {
+    live: Option<(
+        otto_transcript::Provider,
+        std::path::PathBuf,
+        otto_transcript::Folder<'static>,
+        otto_transcript::Tailer,
+    )>,
+    stamp: Option<(u64, Option<std::time::SystemTime>)>,
+}
+
+impl ReplyIndex {
+    /// `reply_texts` of the transcript's current fold, or `None` when it has
+    /// not changed since the previous call. Blocking IO — call off the runtime.
+    fn replies(
+        &mut self,
+        provider: otto_transcript::Provider,
+        path: &std::path::Path,
+    ) -> Option<Vec<(String, Option<String>, String)>> {
+        let meta = std::fs::metadata(path).ok()?;
+        let stamp = (meta.len(), meta.modified().ok());
+        let same_file = matches!(&self.live, Some((p, f, _, _)) if *p == provider && f == path);
+        if same_file && self.stamp == Some(stamp) {
+            return None;
+        }
+        let fresh = match self.live.as_mut().filter(|_| same_file) {
+            Some((_, _, folder, tailer)) => match tailer.poll() {
+                Ok(d) if !d.restarted => !d.records.iter().any(|r| folder.push(r)),
+                _ => false,
+            },
+            None => false,
+        };
+        if !fresh {
+            self.live = Some(Self::refold(provider, path)?);
+        }
+        self.stamp = Some(stamp);
+        let (_, _, folder, _) = self.live.as_ref()?;
+        Some(reply_texts(&folder.snapshot().turns))
+    }
+
+    /// Fold the whole file; the tailer resumes exactly where the read stopped
+    /// (a line still being written is carried as its partial line).
+    fn refold(
+        provider: otto_transcript::Provider,
+        path: &std::path::Path,
+    ) -> Option<(
+        otto_transcript::Provider,
+        std::path::PathBuf,
+        otto_transcript::Folder<'static>,
+        otto_transcript::Tailer,
+    )> {
+        let bytes = std::fs::read(path).ok()?;
+        let mut folder =
+            otto_transcript::Folder::new(provider, otto_transcript::FoldOpts::default());
+        folder.seed(&otto_transcript::parse_records(&bytes));
+        let mut tailer = otto_transcript::Tailer::at(path, bytes.len() as u64);
+        tailer.partial_line = match bytes.iter().rposition(|b| *b == b'\n') {
+            Some(nl) => bytes[nl + 1..].to_vec(),
+            None => bytes,
+        };
+        Some((provider, path.to_path_buf(), folder, tailer))
+    }
 }
 
 /// Pure: `(turn id, model, text)` of the last 30 assistant turns that carry
@@ -747,6 +825,47 @@ fn cap_bytes(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SI-02: the incremental index answers exactly what a whole-file fold
+    /// did, skips an unchanged file, and survives a replaced (shorter) file.
+    #[test]
+    fn reply_index_matches_a_whole_file_fold() {
+        use otto_transcript::Provider;
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../otto-transcript/fixtures/claude/01-basic-tools.jsonl");
+        let bytes = std::fs::read(&src).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let want = |p: &std::path::Path| {
+            reply_texts(
+                &otto_transcript::fold_file(Provider::Claude, p, Default::default())
+                    .unwrap()
+                    .turns,
+            )
+        };
+        let mut ix = ReplyIndex::default();
+        let mut at = bytes.len() / 4;
+        std::fs::write(&path, &bytes[..at]).unwrap();
+        assert_eq!(ix.replies(Provider::Claude, &path), Some(want(&path)));
+        assert_eq!(
+            ix.replies(Provider::Claude, &path),
+            None,
+            "unchanged → skipped"
+        );
+        while at < bytes.len() {
+            let end = (at + 7919).min(bytes.len());
+            let mut all = std::fs::read(&path).unwrap();
+            all.extend_from_slice(&bytes[at..end]);
+            std::fs::write(&path, &all).unwrap();
+            at = end;
+            // (`fs::write` rewrites in place: same inode, longer file.)
+            assert_eq!(ix.replies(Provider::Claude, &path), Some(want(&path)));
+        }
+        assert!(!want(&path).is_empty());
+        // Replaced by a shorter file → refolded from scratch.
+        std::fs::write(&path, &bytes[..bytes.len() / 2]).unwrap();
+        assert_eq!(ix.replies(Provider::Claude, &path), Some(want(&path)));
+    }
 
     fn thread() -> AssistantThread {
         AssistantThread {

@@ -53,7 +53,6 @@ pub async fn tail(
     mut on_event: impl FnMut(TranscriptEvent),
     cancel: Arc<AtomicBool>,
 ) {
-    let mut offset: u64 = 0;
     let poll = Duration::from_millis(300);
     // Everything before this byte offset predates the tailer.
     let history_end: u64 = match since {
@@ -62,6 +61,19 @@ pub async fn tail(
             .map(|m| m.len())
             .unwrap_or(0),
         None => 0,
+    };
+    // A (re)attach to a long-lived session used to read the WHOLE history into
+    // memory and JSON-parse every line just to drop it by timestamp. Start at
+    // the first line that can still be at/after `since` instead (found by a
+    // bounded backwards scan, off the runtime).
+    let mut offset: u64 = match since {
+        Some(since) if history_end > 0 => {
+            let p = path.clone();
+            tokio::task::spawn_blocking(move || history_start(&p, history_end, since))
+                .await
+                .unwrap_or(0)
+        }
+        _ => 0,
     };
 
     loop {
@@ -114,6 +126,77 @@ fn complete_lines(buf: &[u8], start: u64) -> (u64, Vec<(u64, &str)>) {
         }
     }
     ((last_nl + 1) as u64, out)
+}
+
+/// A line whose timestamp is this far before `since` proves that everything
+/// before it predates `since` too (transcript timestamps only move forward;
+/// the margin absorbs clock jitter between writers).
+const HISTORY_MARGIN_SECS: i64 = 120;
+const HISTORY_CHUNK: u64 = 256 * 1024;
+
+/// Byte offset of a line start at or before the first history line (in
+/// `[0, end)`) that could be at/after `since`: walk back from `end` one chunk
+/// at a time until a chunk holds a line stamped more than
+/// [`HISTORY_MARGIN_SECS`] before `since`, and start at that chunk's first
+/// complete line. Lines from there on still go through [`line_at_or_after`],
+/// so the emitted set is exactly the whole-file one; 0 (the whole file) when no
+/// such line exists. Blocking IO.
+fn history_start(path: &std::path::Path, end: u64, since: DateTime<Utc>) -> u64 {
+    use std::io::{Read, Seek, SeekFrom};
+    let cutoff = since - chrono::Duration::seconds(HISTORY_MARGIN_SECS);
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return 0;
+    };
+    let mut hi = end;
+    while hi > 0 {
+        let lo = hi.saturating_sub(HISTORY_CHUNK);
+        let mut buf = Vec::with_capacity((hi - lo) as usize);
+        if f.seek(SeekFrom::Start(lo)).is_err()
+            || (&mut f).take(hi - lo).read_to_end(&mut buf).is_err()
+        {
+            return 0;
+        }
+        // The first piece may be the tail of a line that started earlier.
+        let first = if lo == 0 {
+            0
+        } else {
+            match buf.iter().position(|&b| b == b'\n') {
+                Some(nl) => nl + 1,
+                None => {
+                    hi = lo;
+                    continue;
+                }
+            }
+        };
+        let older = buf[first..]
+            .split(|&b| b == b'\n')
+            .filter_map(|raw| std::str::from_utf8(raw).ok())
+            .filter_map(line_timestamp)
+            .any(|ts| ts < cutoff);
+        if older {
+            return lo + first as u64;
+        }
+        if lo == 0 {
+            break;
+        }
+        // Next: the chunk ending where this one's first complete line starts
+        // (so the straddling line is read whole) — always strictly earlier.
+        hi = (lo + first as u64).min(hi - 1).max(lo);
+    }
+    0
+}
+
+/// The JSONL `line`'s top-level `timestamp`, if any.
+fn line_timestamp(line: &str) -> Option<DateTime<Utc>> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let v = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    let t = v.get("timestamp")?.as_str()?;
+    DateTime::parse_from_rfc3339(t)
+        .ok()
+        .map(|ts| ts.with_timezone(&Utc))
 }
 
 /// True when the JSONL `line`'s `timestamp` is at or after `since` (or there
@@ -508,6 +591,51 @@ mod tests {
         assert_eq!(lines, vec![(100, "{\"a\":1}"), (109, "{\"b\":2}")]);
         // No newline at all → nothing consumed.
         assert_eq!(complete_lines(b"{\"half", 0), (0, Vec::new()));
+    }
+
+    #[test]
+    fn history_start_skips_only_lines_that_cannot_be_at_or_after_since() {
+        let dir = std::env::temp_dir().join(format!(
+            "otto-history-start-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("t.jsonl");
+        let since: DateTime<Utc> = "2026-09-12T10:00:00Z".parse().unwrap();
+        // 4 000 old lines (~1 MB) an hour before `since`, then a few recent.
+        let mut body = String::new();
+        let pad = "x".repeat(200);
+        for i in 0..4000 {
+            body.push_str(&format!(
+                "{{\"type\":\"assistant\",\"timestamp\":\"2026-09-12T09:00:{:02}Z\",\"pad\":\"{pad}\"}}\n",
+                i % 60
+            ));
+        }
+        let recent_at = body.len() as u64;
+        body.push_str("{\"type\":\"assistant\",\"timestamp\":\"2026-09-12T09:59:30Z\"}\n");
+        body.push_str("{\"type\":\"assistant\",\"timestamp\":\"2026-09-12T10:00:05Z\"}\n");
+        std::fs::write(&p, &body).unwrap();
+        let end = body.len() as u64;
+        let start = history_start(&p, end, since);
+        // Well past the start of the file, at a line boundary, and before
+        // every line that could still count.
+        assert!(start > 0 && start <= recent_at, "start {start}");
+        assert!(start == 0 || body.as_bytes()[start as usize - 1] == b'\n');
+        // Everything skipped is older than `since`.
+        for line in body[..start as usize].lines() {
+            assert!(!line_at_or_after(line, Some(since)));
+        }
+        // No timestamps at all → the whole file (the old behavior).
+        std::fs::write(&p, "{\"a\":1}\n".repeat(50_000)).unwrap();
+        assert_eq!(history_start(&p, 50_000 * 8, since), 0);
+        // One huge line with no newline inside a chunk terminates too.
+        let huge = format!("{{\"pad\":\"{}\"}}\n", "y".repeat(600_000));
+        std::fs::write(&p, &huge).unwrap();
+        assert_eq!(history_start(&p, huge.len() as u64, since), 0);
+        // Missing file → 0.
+        assert_eq!(history_start(&dir.join("none"), 10, since), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

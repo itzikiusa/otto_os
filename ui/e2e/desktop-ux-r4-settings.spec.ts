@@ -13,7 +13,12 @@ async function fixtures(page: Page) {
  const { ctx, base } = await apiCtx(); const ws = await seedWorkspace(ctx, base); await ctx.dispose();
  await page.route('**/api/v1/library/provider-skills', r => r.fulfill({ json: [] }));
  const run = evaluation(ws); const reviews = [review('alpha', ws), review('beta', ws)];
- await page.route('**/api/v1/workspaces/*/skill-evaluations', r => r.fulfill({ json: [run] }));
+ // The list reads `?summary=1` pages (no iterations); the legacy full list stays for other callers.
+ await page.route('**/api/v1/workspaces/*/skill-evaluations*', r => {
+  if (!new URL(r.request().url()).searchParams.has('summary')) return r.fulfill({ json: [run] });
+  const { iterations, config, promoted_at, promoted_by, ...head } = run as Record<string, unknown>;
+  return r.fulfill({ json: { items: [{ ...head, iteration_count: Array.isArray(iterations) ? iterations.length : 0 }], next_cursor: null } });
+ });
  await page.route('**/api/v1/skill-evaluations/synthetic-evaluation', r => r.fulfill({ json: run }));
  await page.route('**/api/v1/workspaces/*/skill-reviews', r => r.fulfill({ json: reviews }));
  await page.route('**/api/v1/skill-reviews/*', r => r.fulfill({ json: reviews.find(x => r.request().url().endsWith(x.id)) }));

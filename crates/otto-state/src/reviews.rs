@@ -209,6 +209,17 @@ impl ReviewsRepo {
         Ok(res.rows_affected())
     }
 
+    /// Just a review's status — for pollers waiting on completion, which used
+    /// to load the whole row (agents JSON) plus every comment each tick.
+    pub async fn review_status(&self, id: &Id) -> Result<ReviewStatus> {
+        let status: String = sqlx::query_scalar("SELECT status FROM pr_reviews WHERE id = ?")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("review status"))?;
+        ReviewStatus::parse(&status).ok_or_else(|| Error::Internal("bad review status".into()))
+    }
+
     /// Fetch a review by id, loading its comments.
     pub async fn get_review(&self, id: &Id) -> Result<Review> {
         let row = sqlx::query("SELECT * FROM pr_reviews WHERE id = ?")

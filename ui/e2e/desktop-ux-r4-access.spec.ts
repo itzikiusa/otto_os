@@ -173,7 +173,9 @@ test('late cross-workspace sessions cannot repopulate another effective identity
   await page.route('**/api/v1/auth/capabilities',r=>r.fulfill({json:{capabilities:{agents:'view'}}}));
   await page.route('**/api/v1/admin/impersonate/fixture-guest',r=>{changed=true;return r.fulfill({json:{token:'fixture-new'}});});
   await page.route('**/api/v1/workspaces',r=>r.fulfill({json:changed?[workspace('new')]:[workspace('old'),workspace('other')]}));
-  await page.route('**/api/v1/workspaces/*/sessions',r=>r.request().url().includes('/other/')?old.hold(r):r.fulfill({json:[]}));
+  await page.route('**/api/v1/workspaces/*/sessions',r=>r.fulfill({json:[]}));
+  // Other workspaces' sessions arrive in ONE cross-workspace call (`GET /sessions`).
+  await page.route(url=>url.pathname==='/api/v1/sessions',old.hold);
   await page.goto('/#/agents');const pending=await old.promise;
   await page.evaluate(async()=>{const p='/src/lib/stores/auth.svelte.ts';await (await import(p)).auth.impersonate('fixture-guest');});
   await expect.poll(()=>page.evaluate(async()=>{const p='/src/lib/stores/workspace.svelte.ts';return (await import(p)).ws.currentId;})).toBe('new');

@@ -1137,6 +1137,18 @@ impl MongoDriver {
     /// when the user hasn't selected a database yet. Best-effort: an unreachable
     /// server yields `None` (completion degrades to empty, never errors).
     async fn completion_first_db(&self, cfg: &ResolvedConfig) -> Option<String> {
+        // Memoized per connection (a failure briefly, too): this used to run a
+        // live `listDatabases` on EVERY completion request while no db was chosen.
+        let cache_key = cfg.cache_key();
+        if let Some(hit) = self.completions.get_first_db(&cache_key) {
+            return hit;
+        }
+        let db = self.list_first_user_db(cfg).await;
+        self.completions.put_first_db(&cache_key, db.clone());
+        db
+    }
+
+    async fn list_first_user_db(&self, cfg: &ResolvedConfig) -> Option<String> {
         let client = self.connect(cfg).await.ok()?;
         let mut names = client.list_database_names().await.ok()?;
         // User databases first, system ones (admin/local/config) last — same order
@@ -1193,43 +1205,35 @@ impl MongoDriver {
 
     /// The (cached) list of collection names for a database, backing collection
     /// completion. Cached as a snapshot's `objects` until refresh; an unavailable
-    /// connection yields an empty list (not cached).
+    /// connection yields an empty list (negatively cached for a few seconds).
     async fn completion_collections(&self, cfg: &ResolvedConfig, db: &str) -> Vec<String> {
         if db.is_empty() {
             return Vec::new();
         }
-        let cache_key = cfg.cache_key();
-        if let Some(s) = self.completions.get_snapshot(&cache_key, db) {
-            return s.objects.iter().map(|o| o.name.clone()).collect();
-        }
-        let Ok(client) = self.connect(cfg).await else {
-            return Vec::new();
-        };
-        let mongo_db = client.database(db);
-        let Ok(mut names) = mongo_db.list_collection_names().await else {
-            return Vec::new();
-        };
-        names.sort();
-        let databases = client.list_database_names().await.unwrap_or_default();
-        let objects = names
-            .iter()
-            .map(|n| crate::complete::ObjectSnap {
-                name: n.clone(),
-                kind: crate::complete::ObjKind::Collection,
-                fields: Vec::new(),
-                fields_ready: false,
+        let snap = self
+            .completions
+            .snapshot_or_build(&cfg.cache_key(), db, || async {
+                let client = self.connect(cfg).await.ok()?;
+                let mut names = client.database(db).list_collection_names().await.ok()?;
+                names.sort();
+                let databases = client.list_database_names().await.unwrap_or_default();
+                let objects = names
+                    .into_iter()
+                    .map(|name| crate::complete::ObjectSnap {
+                        name,
+                        kind: crate::complete::ObjKind::Collection,
+                        fields: Vec::new(),
+                        fields_ready: false,
+                    })
+                    .collect();
+                Some(crate::complete::SchemaSnapshot {
+                    databases,
+                    objects,
+                    ..Default::default()
+                })
             })
-            .collect();
-        self.completions.put_snapshot(
-            &cache_key,
-            db,
-            crate::complete::SchemaSnapshot {
-                databases,
-                objects,
-                ..Default::default()
-            },
-        );
-        names
+            .await;
+        snap.objects.iter().map(|o| o.name.clone()).collect()
     }
 
     /// A collection's (cached) field paths for field completion — its index key

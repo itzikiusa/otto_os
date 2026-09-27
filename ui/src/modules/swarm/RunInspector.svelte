@@ -21,7 +21,32 @@
   let { run, onclose }: Props = $props();
 
   const agent = $derived(swarm.agentById(run.agent_id));
-  const result = $derived((run.result ?? null) as TurnResult | null);
+  // The runs list is `lite` (no per-run result blob); a live event's run does
+  // carry it. Otherwise fetch this one run in full, again when its status
+  // changes (a finished turn writes the result).
+  let fetched = $state.raw<SwarmRun | null>(null);
+  let resultError = $state<string | null>(null);
+  $effect(() => {
+    const id = run.id;
+    const status = run.status;
+    const has = run.result != null;
+    void status;
+    if (has) return;
+    const ctl = new AbortController();
+    resultError = null;
+    swarm
+      .getRun(id, ctl.signal)
+      .then((r) => {
+        if (!ctl.signal.aborted) fetched = r;
+      })
+      .catch((e: unknown) => {
+        if (!ctl.signal.aborted) resultError = e instanceof Error ? e.message : String(e);
+      });
+    return () => ctl.abort();
+  });
+  const result = $derived(
+    (run.result ?? (fetched?.id === run.id ? fetched.result : null) ?? null) as TurnResult | null,
+  );
   const brief = $derived(typeof result?.brief === 'string' ? result.brief : null);
   const cwd = $derived(typeof result?.cwd === 'string' ? result.cwd : null);
   const artifacts = $derived<TurnArtifact[]>(
@@ -82,7 +107,7 @@
     }
   }
 
-  const rawJson = $derived(run.result ? JSON.stringify(run.result, null, 2) : null);
+  const rawJson = $derived(result ? JSON.stringify(result, null, 2) : null);
 </script>
 
 <Modal title="Run detail" width={640} {onclose}>
@@ -237,11 +262,20 @@
         </div>
         <pre class="block json scrolly">{rawJson}</pre>
       </section>
+    {:else if resultError}
+      <section>
+        <p class="result-err" role="status">Couldn’t load this run’s result: {resultError}</p>
+      </section>
     {/if}
   </div>
 </Modal>
 
 <style>
+  .result-err {
+    margin: 0;
+    color: var(--danger);
+    font-size: var(--fs-s);
+  }
   .insp {
     display: flex;
     flex-direction: column;

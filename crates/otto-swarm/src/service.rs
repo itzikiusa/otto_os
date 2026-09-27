@@ -328,6 +328,11 @@ impl SwarmService {
         self.repo.list_runs(f).await
     }
 
+    /// `list_runs` without `result_json` (kept for recruit runs).
+    pub async fn list_runs_lite(&self, f: &RunFilter) -> Result<Vec<SwarmRun>> {
+        self.repo.list_runs_lite(f).await
+    }
+
     pub async fn get_run(&self, id: &Id) -> Result<SwarmRun> {
         self.repo.get_run(id).await
     }
@@ -402,15 +407,13 @@ impl SwarmService {
                 });
             }
         }
-        // Attach the most recent session per task from runs.
-        let runs = self.repo.runs_for_swarm(swarm_id, 500).await?;
+        // Attach the most recent session per task from runs — a narrow
+        // `task_id → session_id` projection, one map lookup per node.
+        let sessions = self.repo.latest_task_sessions(swarm_id).await?;
         for n in nodes.iter_mut() {
             if let Some(tid) = n.id.strip_prefix("task:") {
-                if let Some(run) = runs
-                    .iter()
-                    .find(|r| r.task_id.as_deref() == Some(tid) && r.session_id.is_some())
-                {
-                    n.session_id = run.session_id.clone();
+                if let Some(sid) = sessions.get(tid) {
+                    n.session_id = Some(sid.clone());
                 }
             }
         }

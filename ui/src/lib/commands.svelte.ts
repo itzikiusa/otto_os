@@ -19,7 +19,11 @@ export interface Command {
 }
 
 class CommandRegistry {
-  private sources: Record<string, Command[]> = $state({});
+  // Raw: command sets are replaced wholesale (never mutated), so deep-proxying
+  // every Command (closures included) bought nothing.
+  private sources: Record<string, Command[]> = $state.raw({});
+  /** Memoized flat list — recomputed only when a set is (un)registered. */
+  private flat = $derived(Object.values(this.sources).flat());
 
   /**
    * Register a command set under an owner key. Returns an unregister fn.
@@ -36,7 +40,7 @@ class CommandRegistry {
   }
 
   get all(): Command[] {
-    return Object.values(this.sources).flat();
+    return this.flat;
   }
 }
 

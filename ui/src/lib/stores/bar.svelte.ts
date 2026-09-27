@@ -28,6 +28,9 @@ class BarStore {
   mounted = $state(false);
   /** Bumped by ⌘K; the mounted bar toggles focus on change. */
   focusTick = $state(0);
+  /** px the toast stack rises to clear the in-app bar (Toasts.svelte scopes
+   *  it as `--toast-lift` on its own element — never on <html>). */
+  toastLift = $state(0);
 
   constructor() {
     if (typeof window === 'undefined') return;
@@ -46,6 +49,13 @@ class BarStore {
       });
       this.state = next;
     });
+  }
+
+  /** Write-only on purpose: the bar sets it from an effect, and reading it
+   *  there would subscribe that effect to its own output. An equal value is
+   *  already a no-op for a $state number. */
+  setToastLift(px: number): void {
+    this.toastLift = px;
   }
 
   get active(): BarSpace {

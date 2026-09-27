@@ -20,6 +20,7 @@
 //! a lost wake-up.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -28,8 +29,11 @@ use std::time::{Duration, Instant};
 use otto_core::domain::Session;
 use otto_core::event::Event;
 use otto_core::Id;
-use otto_transcript::{read_records, Folder, Provider, Tailer};
+use otto_transcript::{
+    parse_records, Artifact, Folded, Folder, Provider, SubagentMeta, SubagentScanner, Tailer,
+};
 
+use crate::offload::blocking;
 use crate::state::ServerCtx;
 
 pub const POLL: Duration = Duration::from_millis(700);
@@ -45,9 +49,36 @@ pub const EVENT_CAP: usize = 64 * 1024;
 /// `transcript_live` drafts are capped to this many bytes (tail kept).
 pub const LIVE_CAP: usize = 16 * 1024;
 
+/// The tail's fold state. Owned by a std `Mutex` that is only ever locked
+/// inside `spawn_blocking` (the poll step and [`live_page`]), so neither a
+/// fold nor a snapshot ever runs on a runtime worker.
+struct TailState {
+    folder: Folder<'static>,
+    tailer: Tailer,
+    subagents: SubagentScanner,
+    /// Full snapshot for `GET …/transcript`, built on demand and dropped
+    /// whenever the fold moves.
+    snap: Option<Arc<Folded>>,
+}
+
+/// What a running tail shares with the read route: the file it folds and its
+/// state (`None` until the initial fold lands).
+struct Live {
+    provider: Provider,
+    path: PathBuf,
+    state: Mutex<Option<TailState>>,
+}
+
+impl Live {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<TailState>> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
 struct Entry {
     last_touch: Instant,
     stop: Arc<AtomicBool>,
+    live: Arc<Live>,
 }
 
 fn registry() -> &'static Mutex<HashMap<Id, Entry>> {
@@ -88,11 +119,17 @@ pub fn touch(ctx: &ServerCtx, session: &Session, provider: Provider, path: &Path
         return;
     }
     let stop = Arc::new(AtomicBool::new(false));
+    let live = Arc::new(Live {
+        provider,
+        path: path.to_path_buf(),
+        state: Mutex::new(None),
+    });
     reg.insert(
         session.id.clone(),
         Entry {
             last_touch: Instant::now(),
             stop,
+            live: live.clone(),
         },
     );
     drop(reg);
@@ -101,10 +138,9 @@ pub fn touch(ctx: &ServerCtx, session: &Session, provider: Provider, path: &Path
     };
     let ctx = ctx.clone();
     let session = session.clone();
-    let path = path.to_path_buf();
     tokio::spawn(async move {
         let _slot = slot; // freed on every exit path, panics included
-        run(ctx, session, provider, path).await;
+        run(ctx, session, live).await;
     });
 }
 
@@ -128,44 +164,171 @@ fn should_continue(sid: &Id) -> bool {
     keep
 }
 
-/// Refold the whole file from record 0 (initial start, replaced file, Codex
-/// era flip). Blocking IO — run via `spawn_blocking`.
-fn refold(
-    ctx: &ServerCtx,
+/// The live tail's current fold of `path`, for `GET …/transcript` — served
+/// from memory instead of re-reading and re-folding the whole JSONL (which,
+/// on a 65 MB transcript, cost ~150 ms per refetch and raced the writer into
+/// "transcript busy"). `None` when no tail runs for this exact file yet (the
+/// caller falls back to the disk fold). The snapshot is at most one poll
+/// behind the file, and everything after it arrives as `transcript_appended`
+/// — the same contract a disk fold taken mid-poll has.
+pub async fn live_page(
+    session_id: &Id,
     provider: Provider,
     path: &Path,
-    opts_subagents: bool,
-) -> std::io::Result<Folder<'static>> {
-    let records = read_records(path)?;
-    let mut folder = Folder::new(
-        provider,
-        crate::routes::transcript::fold_opts(ctx, provider, path),
-    );
-    if opts_subagents {
-        folder.set_subagents(otto_transcript::read_subagents(path));
-    }
-    folder.seed(&records);
-    Ok(folder)
+) -> Option<(Arc<Folded>, Vec<SubagentMeta>)> {
+    let live = {
+        let reg = lock();
+        let e = reg.get(session_id)?;
+        (e.live.provider == provider && e.live.path == path).then(|| e.live.clone())?
+    };
+    blocking(move || {
+        let mut guard = live.lock();
+        let st = guard.as_mut()?;
+        if live.provider == Provider::Claude && st.subagents.refresh(&live.path) {
+            st.folder.set_subagents(st.subagents.tree().to_vec());
+            st.snap = None;
+        }
+        let snap = st
+            .snap
+            .get_or_insert_with(|| Arc::new(st.folder.snapshot()))
+            .clone();
+        Some((snap, st.subagents.tree().to_vec()))
+    })
+    .await
 }
 
-async fn run(ctx: ServerCtx, session: Session, provider: Provider, path: PathBuf) {
+/// Refold the whole file from record 0 (initial start, replaced file, Codex
+/// era flip). The tailer resumes exactly where this read stopped — the bytes
+/// of a line still being written are carried as its partial line — so a
+/// record appended between the read and the resume is never skipped.
+/// Blocking IO — call off the runtime.
+fn refold(ctx: &ServerCtx, provider: Provider, path: &Path) -> std::io::Result<TailState> {
+    refold_with(
+        provider,
+        path,
+        crate::routes::transcript::fold_opts(ctx, provider, path),
+    )
+}
+
+/// [`refold`] with explicit fold options (the server's knobs, or defaults in
+/// tests).
+fn refold_with(
+    provider: Provider,
+    path: &Path,
+    opts: otto_transcript::FoldOpts<'static>,
+) -> std::io::Result<TailState> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?.read_to_end(&mut bytes)?;
+    let records = parse_records(&bytes);
+    let mut folder = Folder::new(provider, opts);
+    let mut subagents = SubagentScanner::new();
+    if provider == Provider::Claude {
+        subagents.refresh(path);
+        folder.set_subagents(subagents.tree().to_vec());
+    }
+    folder.seed(&records);
+    let mut tailer = Tailer::at(path, bytes.len() as u64);
+    tailer.partial_line = match bytes.iter().rposition(|b| *b == b'\n') {
+        Some(nl) => bytes[nl + 1..].to_vec(),
+        None => bytes,
+    };
+    Ok(TailState {
+        folder,
+        tailer,
+        subagents,
+        snap: None,
+    })
+}
+
+/// One poll's worth of transcript work, produced off the runtime.
+struct Step {
+    turns: Vec<serde_json::Value>,
+    cursor: String,
+    oversize: bool,
+    new_artifacts: Vec<Artifact>,
+}
+
+/// Poll the file and fold what appeared. `None` = nothing new (or a read
+/// error, logged). Runs under the state lock inside `spawn_blocking`.
+fn step(
+    opts: &dyn Fn() -> otto_transcript::FoldOpts<'static>,
+    sid: &Id,
+    live: &Live,
+    st: &mut TailState,
+    known_artifacts: &mut HashSet<String>,
+) -> Option<Step> {
+    let delta = match st.tailer.poll() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::debug!(session = %sid, "transcript tail: poll failed: {e}");
+            return None;
+        }
+    };
+    if delta.records.is_empty() && !delta.restarted {
+        return None;
+    }
+    let prev_count = if delta.restarted {
+        0
+    } else {
+        st.folder.record_count()
+    };
+    let needs_refold = delta.restarted || delta.records.iter().any(|r| st.folder.push(r));
+    if needs_refold {
+        *st = match refold_with(live.provider, &live.path, opts()) {
+            Ok(fresh) => fresh,
+            Err(e) => {
+                tracing::debug!(session = %sid, "transcript tail: refold failed: {e}");
+                return None;
+            }
+        };
+    } else if live.provider == Provider::Claude && st.subagents.refresh(&live.path) {
+        // Sidecars for freshly spawned subagents appear between polls; the
+        // scanner only re-reads the ones that are new or changed.
+        st.folder.set_subagents(st.subagents.tree().to_vec());
+    }
+    st.snap = None;
+    let turns: Vec<serde_json::Value> = st
+        .folder
+        .turns_since(prev_count)
+        .iter()
+        .filter_map(|t| serde_json::to_value(t).ok())
+        .collect();
+    let cursor = st.folder.record_count().saturating_sub(1).to_string();
+    // Size the frame ONCE; over the cap the client re-fetches (served from
+    // this tail's memory by `live_page`).
+    let size = serde_json::to_vec(&turns)
+        .map(|v| v.len())
+        .unwrap_or(usize::MAX);
+    let new_artifacts = st
+        .folder
+        .artifacts()
+        .iter()
+        .filter(|a| known_artifacts.insert(a.id.clone()))
+        .cloned()
+        .collect();
+    Some(Step {
+        turns,
+        cursor,
+        oversize: size > EVENT_CAP,
+        new_artifacts,
+    })
+}
+
+async fn run(ctx: ServerCtx, session: Session, live: Arc<Live>) {
     let sid = session.id.clone();
     let wid = session.workspace_id.clone();
-    let claude = provider == Provider::Claude;
-    let (cx, p) = (ctx.clone(), path.clone());
-    let mut folder =
-        match tokio::task::spawn_blocking(move || refold(&cx, provider, &p, claude)).await {
-            Ok(Ok(f)) => f,
-            Ok(Err(e)) => {
-                tracing::debug!(session = %sid, "transcript tail: initial fold failed: {e}");
-                return;
-            }
-            Err(_) => return,
-        };
-    let mut folded = folder.snapshot();
-    let mut known_artifacts: HashSet<String> =
-        folded.artifacts.iter().map(|a| a.id.clone()).collect();
-    let mut tailer = Tailer::at(&path, Tailer::current_len(&path));
+    let (cx, lv) = (ctx.clone(), live.clone());
+    let known: Option<HashSet<String>> = blocking(move || {
+        let st = refold(&cx, lv.provider, &lv.path).ok()?;
+        let known = st.folder.artifacts().iter().map(|a| a.id.clone()).collect();
+        *lv.lock() = Some(st);
+        Some(known)
+    })
+    .await;
+    let Some(mut known_artifacts) = known else {
+        tracing::debug!(session = %sid, "transcript tail: initial fold failed");
+        return;
+    };
     let mut exited_since: Option<Instant> = None;
     let mut last_live: Option<ScreenParts> = None;
     let mut last_branch_at = Instant::now() - BRANCH_EVERY;
@@ -196,7 +359,8 @@ async fn run(ctx: ServerCtx, session: Session, provider: Provider, path: PathBuf
         if let Some(h) = ctx.manager.live_handle(&sid) {
             if last_branch_at.elapsed() >= BRANCH_EVERY {
                 last_branch_at = Instant::now();
-                branch = git_branch(&cwd);
+                let cwd = cwd.clone();
+                branch = blocking(move || git_branch(&cwd)).await;
             }
             let parts = screen_parts(&h.screen_rows());
             if last_live.as_ref() != Some(&parts) {
@@ -211,74 +375,36 @@ async fn run(ctx: ServerCtx, session: Session, provider: Provider, path: PathBuf
                 last_live = Some(parts);
             }
         }
-        let delta = match tailer.poll() {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::debug!(session = %sid, "transcript tail: poll failed: {e}");
-                continue;
-            }
-        };
-        if delta.records.is_empty() && !delta.restarted {
+        // Read + fold + diff + serialize: all of it off the runtime, under
+        // the state lock the read route shares.
+        let (cx, lv, id) = (ctx.clone(), live.clone(), sid.clone());
+        let mut known = std::mem::take(&mut known_artifacts);
+        let (out, known) = blocking(move || {
+            let mut guard = lv.lock();
+            let out = guard.as_mut().and_then(|st| {
+                let opts = || crate::routes::transcript::fold_opts(&cx, lv.provider, &lv.path);
+                step(&opts, &id, &lv, st, &mut known)
+            });
+            (out, known)
+        })
+        .await;
+        known_artifacts = known;
+        let Some(out) = out else {
             continue;
-        }
-        let prev_count = if delta.restarted {
-            0
-        } else {
-            folder.record_count()
         };
-        let mut needs_refold = delta.restarted;
-        if !needs_refold {
-            for r in &delta.records {
-                if folder.push(r) {
-                    needs_refold = true;
-                    break;
-                }
-            }
-        }
-        if needs_refold {
-            let (cx, p) = (ctx.clone(), path.clone());
-            folder = match tokio::task::spawn_blocking(move || refold(&cx, provider, &p, claude))
-                .await
-            {
-                Ok(Ok(f)) => f,
-                Ok(Err(e)) => {
-                    tracing::debug!(session = %sid, "transcript tail: refold failed: {e}");
-                    continue;
-                }
-                Err(_) => continue,
-            };
-            // The tailer is now ahead of / behind the refolded file; realign.
-            tailer = Tailer::at(&path, Tailer::current_len(&path));
-        } else if claude {
-            // Sidecars for freshly spawned subagents appear between polls.
-            folder.set_subagents(otto_transcript::read_subagents(&path));
-        }
-        folded = folder.snapshot();
-        let turns: Vec<serde_json::Value> = folded
-            .turns_since(prev_count)
-            .iter()
-            .filter_map(|t| serde_json::to_value(t).ok())
-            .collect();
-        let cursor = folded.record_count.saturating_sub(1).to_string();
-        // Size the frame ONCE; over the cap the client re-fetches.
-        let size = serde_json::to_vec(&turns)
-            .map(|v| v.len())
-            .unwrap_or(usize::MAX);
         let _ = ctx.events.send(Event::TranscriptAppended {
             workspace_id: wid.clone(),
             session_id: sid.clone(),
-            cursor,
-            turns: if size > EVENT_CAP { Vec::new() } else { turns },
+            cursor: out.cursor,
+            turns: if out.oversize { Vec::new() } else { out.turns },
         });
-        for a in &folded.artifacts {
-            if known_artifacts.insert(a.id.clone()) {
-                let _ = ctx.events.send(Event::ArtifactAdded {
-                    workspace_id: wid.clone(),
-                    session_id: sid.clone(),
-                    artifact: serde_json::to_value(a).unwrap_or(serde_json::Value::Null),
-                });
-                crate::routes::transcript::register_work_artifact(&ctx, &session, a).await;
-            }
+        for a in &out.new_artifacts {
+            let _ = ctx.events.send(Event::ArtifactAdded {
+                workspace_id: wid.clone(),
+                session_id: sid.clone(),
+                artifact: serde_json::to_value(a).unwrap_or(serde_json::Value::Null),
+            });
+            crate::routes::transcript::register_work_artifact(&ctx, &session, a).await;
         }
     }
 }
@@ -568,6 +694,99 @@ mod tests {
         assert!(d.ends_with("line 1999 xxxxxxxxxxxxxxxxxxxx"));
     }
 
+    fn copy_dir(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                copy_dir(&p, &to.join(e.file_name()));
+            } else {
+                std::fs::copy(&p, to.join(e.file_name())).unwrap();
+            }
+        }
+    }
+
+    /// The tail folds a file that grows in odd-sized appends (lines split
+    /// anywhere, the initial fold landing mid-line) and must end exactly where
+    /// a one-shot fold of the finished file does — every record once, the
+    /// partial line carried, the delta cursor contiguous, sub-agent sidecars
+    /// attached — without re-reading the file.
+    #[test]
+    fn stepping_a_growing_file_matches_a_whole_file_fold() {
+        use std::io::Write;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../otto-transcript/fixtures");
+        for (provider, sub) in [(Provider::Claude, "claude"), (Provider::Codex, "codex-new")] {
+            let mut files: Vec<PathBuf> = std::fs::read_dir(root.join(sub))
+                .unwrap()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+                .collect();
+            files.sort();
+            for src in files {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join(src.file_name().unwrap());
+                let side = src.with_extension("");
+                if side.is_dir() {
+                    copy_dir(&side, &path.with_extension(""));
+                }
+                let bytes = std::fs::read(&src).unwrap();
+                let head = bytes.len() / 3;
+                std::fs::write(&path, &bytes[..head]).unwrap();
+                let live = Live {
+                    provider,
+                    path: path.clone(),
+                    state: Mutex::new(None),
+                };
+                let mut st = refold_with(provider, &path, Default::default()).unwrap();
+                let mut known: HashSet<String> =
+                    st.folder.artifacts().iter().map(|a| a.id.clone()).collect();
+                let opts = || otto_transcript::FoldOpts::default();
+                let mut f = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap();
+                let mut at = head;
+                for n in [1usize, 97, 4096, 13, 20_000, 7].iter().cycle() {
+                    if at >= bytes.len() {
+                        break;
+                    }
+                    let end = (at + n).min(bytes.len());
+                    f.write_all(&bytes[at..end]).unwrap();
+                    f.flush().unwrap();
+                    at = end;
+                    let before = st.folder.record_count();
+                    if let Some(out) = step(&opts, &"t".into(), &live, &mut st, &mut known) {
+                        assert_eq!(
+                            out.cursor,
+                            st.folder.record_count().saturating_sub(1).to_string()
+                        );
+                        assert!(st.folder.record_count() > before || out.turns.is_empty());
+                    }
+                }
+                let want = otto_transcript::fold_file(provider, &path, {
+                    let mut o = otto_transcript::FoldOpts::default();
+                    if provider == Provider::Claude {
+                        o.subagents = otto_transcript::read_subagents(&path);
+                    }
+                    o
+                })
+                .unwrap();
+                let got = st.folder.snapshot();
+                assert_eq!(got.record_count, want.record_count, "{}", src.display());
+                assert_eq!(
+                    serde_json::to_value(got.turns_since(0)).unwrap(),
+                    serde_json::to_value(want.turns_since(0)).unwrap(),
+                    "{}",
+                    src.display()
+                );
+                let ids = |f: &Folded| f.artifacts.iter().map(|a| a.id.clone()).collect::<Vec<_>>();
+                assert_eq!(ids(&got), ids(&want));
+                assert_eq!(known.len(), want.artifacts.len());
+            }
+        }
+    }
+
     #[test]
     fn slot_guard_frees_the_registry_entry_on_drop() {
         let id: Id = "tail-test-slot".into();
@@ -576,6 +795,11 @@ mod tests {
             Entry {
                 last_touch: Instant::now(),
                 stop: Arc::new(AtomicBool::new(false)),
+                live: Arc::new(Live {
+                    provider: Provider::Claude,
+                    path: PathBuf::from("/nonexistent.jsonl"),
+                    state: Mutex::new(None),
+                }),
             },
         );
         assert!(should_continue(&id));

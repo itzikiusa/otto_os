@@ -331,6 +331,31 @@ pub struct DbViewerService {
     active_keys: Arc<std::sync::Mutex<HashMap<Id, (Engine, String)>>>,
     lifecycles: Arc<std::sync::Mutex<HashMap<Id, ConnectionLifecycle>>>,
     close_phase_timeout: Duration,
+    /// Secrets recently read for COMPLETION, by `secret_ref`, with the read time.
+    /// Completion fires once per word typed and each request used to pay a
+    /// synchronous Keychain read; within [`COMPLETION_SECRET_TTL`] it reuses
+    /// this copy. Only completion inserts entries, but EVERY fresh read of a
+    /// cached ref refreshes it, so after a credential change the next ordinary
+    /// operation (which always reads fresh) brings completion up to date — it
+    /// can never keep resolving an older cache key than the other operations
+    /// and flip-flop the tracked pool. Plain `std::sync::Mutex`: map ops only.
+    completion_secrets: Arc<std::sync::Mutex<CompletionSecrets>>,
+}
+
+/// `secret_ref` → (secret, read time); see [`DbViewerService::completion_secrets`].
+type CompletionSecrets = HashMap<String, (Option<String>, Instant)>;
+
+/// How long completion may reuse a secret it read (see
+/// [`DbViewerService::completion_secrets`]).
+const COMPLETION_SECRET_TTL: Duration = Duration::from_secs(30);
+
+/// Which secret read a [`DbViewerService::resolve_with`] uses.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SecretRead {
+    /// Always read the store (every ordinary operation).
+    Fresh,
+    /// Reuse a completion read younger than [`COMPLETION_SECRET_TTL`].
+    CompletionCached,
 }
 
 /// Removes an in-flight query from the registry when a `run` ends — on success,
@@ -416,7 +441,52 @@ impl DbViewerService {
             in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
             finished: Arc::new(std::sync::Mutex::new(FinishedStore::default())),
             active_keys: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            completion_secrets: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Read a secret OFF the async runtime: a Keychain read is a synchronous
+    /// XPC round-trip to `securityd` (ms, or much longer behind an ACL prompt)
+    /// that would otherwise stall a tokio worker and every task queued on it.
+    async fn read_secret(&self, key: &str, mode: SecretRead) -> Result<Option<String>> {
+        if mode == SecretRead::CompletionCached {
+            let mut cache = self
+                .completion_secrets
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            // Purge on the hit path too: plaintext must not outlive its TTL
+            // just because typing stopped before the next miss.
+            cache.retain(|_, (_, at)| at.elapsed() < COMPLETION_SECRET_TTL);
+            if let Some((value, _)) = cache.get(key) {
+                return Ok(value.clone());
+            }
+        }
+        let store = self.secrets.clone();
+        let owned = key.to_string();
+        let value = tokio::task::spawn_blocking(move || store.get(&owned))
+            .await
+            .map_err(|e| Error::Internal(format!("secret read task failed: {e}")))??;
+        let mut cache = self
+            .completion_secrets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Drop expired copies so plaintext never lingers past its use.
+        cache.retain(|_, (_, at)| at.elapsed() < COMPLETION_SECRET_TTL);
+        if mode == SecretRead::CompletionCached || cache.contains_key(key) {
+            cache.insert(key.to_string(), (value.clone(), Instant::now()));
+        }
+        Ok(value)
+    }
+
+    /// Drop completion's cached copy of a secret. Called when a connection's
+    /// credential is edited or the connection deleted, so completion can't keep
+    /// connecting with the old password for up to [`COMPLETION_SECRET_TTL`]
+    /// (and then negatively cache the resulting failure).
+    pub fn forget_secret(&self, secret_ref: &str) {
+        self.completion_secrets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(secret_ref);
     }
 
     /// Fetch a stored connection profile (for workspace/role resolution).
@@ -579,7 +649,7 @@ impl DbViewerService {
         };
         let profile = self.connections.get(&profile_id).await?;
         let secret = match &profile.secret_ref {
-            Some(key) => self.secrets.get(key)?,
+            Some(key) => self.read_secret(key, SecretRead::Fresh).await?,
             None => None,
         };
         let cfg = config::parse(&profile, secret)?.config;
@@ -666,6 +736,21 @@ impl DbViewerService {
         child: Option<&str>,
         operation: &str,
     ) -> Result<Resolved> {
+        self.resolve_with(conn_id, user_id, child, operation, SecretRead::Fresh)
+            .await
+    }
+
+    /// [`Self::resolve`] with a choice of secret read. Authorization (the
+    /// credential profile / access policy lookups) runs on every call either way
+    /// — only the Keychain read may be reused.
+    async fn resolve_with(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        child: Option<&str>,
+        operation: &str,
+        secret_read: SecretRead,
+    ) -> Result<Resolved> {
         let lifecycle = {
             let mut states = self.lifecycles.lock().unwrap_or_else(|e| e.into_inner());
             let state = states.entry(conn_id.clone()).or_default();
@@ -700,7 +785,7 @@ impl DbViewerService {
             profile
         };
         let secret = match &conn.secret_ref {
-            Some(r) => self.secrets.get(r)?,
+            Some(r) => self.read_secret(r, secret_read).await?,
             None => None,
         };
         let parsed = config::parse(&conn, secret)?;
@@ -1027,7 +1112,7 @@ impl DbViewerService {
         let secret = match secret {
             Some(value) => Some(value),
             None => match conn.secret_ref {
-                Some(key) => self.secrets.get(&key)?,
+                Some(key) => self.read_secret(&key, SecretRead::Fresh).await?,
                 None => None,
             },
         };
@@ -2419,8 +2504,15 @@ impl DbViewerService {
         ctx: &CompletionContext,
     ) -> Result<CompletionResponse> {
         let child = crate::access::child(ctx.database.as_deref().or(ctx.node.as_deref()));
+        // One request per word typed: reuse a recent Keychain read.
         let r = self
-            .resolve(conn_id, user_id, child.as_deref(), "db_browse")
+            .resolve_with(
+                conn_id,
+                user_id,
+                child.as_deref(),
+                "db_browse",
+                SecretRead::CompletionCached,
+            )
             .await?;
         if self.is_enforced(conn_id).await? {
             let schema = child.ok_or_else(|| {
@@ -2444,7 +2536,18 @@ impl DbViewerService {
             }
             return Ok(CompletionResponse { items });
         }
-        r.with_lifecycle(r.driver.completion(&r.config, ctx)).await
+        // Detached from the request: the editor aborts a superseded completion
+        // fetch on the next keystroke, which drops this handler future. The
+        // first request for a connection also pays the schema-snapshot build
+        // (seconds on a remote DB); run in the request's future it was
+        // cancelled part-way on every keystroke and nothing was ever cached,
+        // so completion stayed empty until the user paused for the whole build.
+        // A spawned task finishes (and caches) the build even when nobody waits
+        // for the answer; later requests wait on its single-flight gate.
+        let ctx = ctx.clone();
+        tokio::spawn(async move { r.with_lifecycle(r.driver.completion(&r.config, &ctx)).await })
+            .await
+            .map_err(|e| Error::Internal(format!("completion task failed: {e}")))?
     }
 
     /// Drop the cached completion snapshot for a connection so the next

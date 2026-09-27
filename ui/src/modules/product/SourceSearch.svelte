@@ -40,6 +40,12 @@
   // Whether more Jira results are likely available (last page returned a full 25).
   let jiraHasMore = $state(false);
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  // Only the newest search may land: a slow earlier query (or a multi-second
+  // "load more") must never overwrite / append to a newer one. The superseded
+  // request is aborted too, so it stops holding a webview connection.
+  let searchSeq = 0;
+  let searchCtl: AbortController | null = null;
+  $effect(() => () => searchCtl?.abort());
 
   // --- load projects / spaces when accountId or sourceKind changes ---
   $effect(() => {
@@ -48,11 +54,10 @@
     if (!aid) return;
     resetSearch();
     if (kind === 'jira') {
-      void loadProjects(aid).then(() => {
-        // Fire an empty-query search immediately so the picker shows recent issues
-        // even before the user types anything.
-        void search('', 0, false);
-      });
+      // The empty-query "recent issues" search is fired by the filter effect
+      // below (it re-runs on account/kind too) — firing it here as well made
+      // two identical Jira searches on every open (backlog B6 / SE-11).
+      void loadProjects(aid);
     } else {
       void loadSpaces(aid);
     }
@@ -139,6 +144,11 @@
     projectOverride?: string,
   ): Promise<void> {
     if (!accountId) return;
+    searchCtl?.abort();
+    const ctl = new AbortController();
+    searchCtl = ctl;
+    const seq = ++searchSeq;
+    const current = () => seq === searchSeq;
     if (append) {
       loadingMore = true;
     } else {
@@ -150,7 +160,9 @@
         const projectParam = proj ? `&project=${encodeURIComponent(proj)}` : '';
         const page = await api.get<IssueSummary[]>(
           `/issue/search?account_id=${encodeURIComponent(accountId)}&q=${encodeURIComponent(q)}${projectParam}&start_at=${startAt}`,
+          ctl.signal,
         );
+        if (!current()) return;
         if (append) {
           jiraResults = [...jiraResults, ...page];
         } else {
@@ -163,19 +175,26 @@
         const spaceParam = selectedSpaceKey
           ? `&space=${encodeURIComponent(selectedSpaceKey)}`
           : '';
-        confluenceResults = await api.get<ConfluencePageSummary[]>(
+        const pages = await api.get<ConfluencePageSummary[]>(
           `/issue/confluence/search?account_id=${encodeURIComponent(accountId)}&q=${encodeURIComponent(q)}${spaceParam}`,
+          ctl.signal,
         );
+        if (!current()) return;
+        confluenceResults = pages;
       }
     } catch (e) {
+      if (!current() || ctl.signal.aborted) return;
       toasts.error('Search failed', e instanceof Error ? e.message : String(e));
       if (!append) {
         jiraResults = [];
         confluenceResults = [];
       }
     } finally {
-      searching = false;
-      loadingMore = false;
+      if (current()) {
+        searching = false;
+        loadingMore = false;
+        searchCtl = null;
+      }
     }
   }
 

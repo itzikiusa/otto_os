@@ -111,6 +111,11 @@ pub trait DbTester: Send + Sync {
         id: &'a Id,
         user_id: &'a Id,
     ) -> otto_core::auth::BoxFuture<'a, Result<TestConnectionResp>>;
+
+    /// A connection's credential was replaced or the connection deleted: drop
+    /// any copy of `secret_ref` the DB Explorer cached (completion reuses a
+    /// Keychain read briefly) so it can't keep connecting with the old secret.
+    fn forget_secret(&self, _secret_ref: &str) {}
 }
 
 /// Spawns a connection session. Implemented at integration time on top of
@@ -357,13 +362,33 @@ impl ConnectionsService {
         self.get(&conn.id).await
     }
 
+    /// Ids of the connections under an `Enforced` access policy — ONE query
+    /// for a whole list instead of `is_enforced` per row (SI-05).
+    async fn enforced_ids(&self) -> Result<std::collections::HashSet<Id>> {
+        otto_state::resource_access::ResourceAccessRepo::new(self.repo.pool())
+            .enforced_ids(otto_core::access::ResourceKind::Connection)
+            .await
+    }
+
+    /// A row from `list_visible`, finished the way [`Self::get`] would finish
+    /// it — without re-reading it or taking the global credentials lock unless
+    /// the legacy Mongo inline-password migration actually has work to do.
+    async fn finish_listed(&self, conn: Connection) -> Result<Connection> {
+        if needs_credential_migration(&conn) {
+            self.get(&conn.id).await
+        } else {
+            Ok(conn)
+        }
+    }
+
     /// Connections visible to a workspace (its own + global).
     pub async fn list(&self, ws: &Id) -> Result<Vec<Connection>> {
         // An identity-free legacy adapter must never reveal governed profiles.
+        let enforced = self.enforced_ids().await?;
         let mut visible = Vec::new();
         for conn in self.repo.list_visible(ws).await? {
-            if !self.is_enforced(&conn.id).await? {
-                visible.push(self.get(&conn.id).await?);
+            if !enforced.contains(&conn.id) {
+                visible.push(self.finish_listed(conn).await?);
             }
         }
         Ok(visible)
@@ -371,6 +396,11 @@ impl ConnectionsService {
 
     /// Like `list` but filtered to connections created by `user_id`.
     /// Used when `connections.owner_private = true`.
+    ///
+    /// Non-enforced rows pass every resource check by definition, so they are
+    /// returned straight from the list query; only enforced rows pay for the
+    /// per-row discover/configure evaluation (it used to cost 4 sequential
+    /// queries plus the global credentials lock per row, SI-05).
     pub async fn list_for(&self, ws: &Id, user_id: &Id) -> Result<Vec<Connection>> {
         let private = otto_state::SettingsRepo::new(self.repo.pool())
             .get("connections.owner_private")
@@ -380,13 +410,18 @@ impl ConnectionsService {
         let user = otto_state::UsersRepo::new(self.repo.pool())
             .get(user_id)
             .await?;
+        let enforced = self.enforced_ids().await?;
         let mut visible = Vec::new();
         for conn in self.repo.list_visible(ws).await? {
-            if !self.is_enforced(&conn.id).await?
-                && private
-                && !user.is_root
-                && conn.created_by != *user_id
-            {
+            if !enforced.contains(&conn.id) {
+                if private && !user.is_root && conn.created_by != *user_id {
+                    continue;
+                }
+                match self.finish_listed(conn).await {
+                    Ok(conn) => visible.push(conn),
+                    Err(Error::NotFound(_)) => {} // deleted mid-list
+                    Err(error) => return Err(error),
+                }
                 continue;
             }
             match self.visible_connection(conn, user_id).await {
@@ -783,4 +818,21 @@ fn probe_spec(kind: ConnectionKind, mut spec: CommandSpec) -> (CommandSpec, Opti
         }
         ConnectionKind::Custom => (spec, None),
     }
+}
+
+/// True when [`ConnectionsService::get`] would rewrite this row: a Mongo profile
+/// whose `conn_string` still carries an inline password (or one that cannot be
+/// parsed — `get` then surfaces the same error it always did).
+fn needs_credential_migration(conn: &Connection) -> bool {
+    conn.kind == ConnectionKind::Mongodb
+        && conn
+            .params
+            .get("conn_string")
+            .and_then(|v| v.as_str())
+            .is_some_and(|uri| {
+                !matches!(
+                    otto_core::connection_credentials::extract_password(uri),
+                    Ok(None)
+                )
+            })
 }

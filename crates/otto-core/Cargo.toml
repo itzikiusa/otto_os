@@ -11,8 +11,6 @@ chrono.workspace = true
 thiserror.workspace = true
 ulid.workspace = true
 sha2.workspace = true
-
-[dev-dependencies]
-# Async test runtime for the `session_owner_or_admin` helper tests only; not a
-# production dependency of otto-core.
+# `secrets::get_async` runs keychain misses on the blocking pool.
 tokio = { workspace = true }
+

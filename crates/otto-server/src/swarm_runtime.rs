@@ -208,7 +208,14 @@ async fn tick(ctx: &ServerCtx, swarm_id: &Id) -> otto_core::Result<()> {
         None
     };
 
-    for task in repo.ready_tasks(swarm_id).await? {
+    let ready = repo.ready_tasks(swarm_id).await?;
+    if ready.is_empty() {
+        return Ok(());
+    }
+    // The roster once per tick — `pick_agent`/`has_reports` used to re-list
+    // every agent per ready task (backlog B6 / SE-10).
+    let agents = repo.list_agents(&swarm.id).await.unwrap_or_default();
+    for task in ready {
         if budget <= 0 {
             break;
         }
@@ -219,7 +226,7 @@ async fn tick(ctx: &ServerCtx, swarm_id: &Id) -> otto_core::Result<()> {
                 break;
             }
         }
-        let Some(agent) = pick_agent(ctx, &swarm, &task).await else {
+        let Some(agent) = pick_agent_from(ctx, &agents, &task).await else {
             continue;
         };
         if repo.agent_has_active_run(&agent.id).await.unwrap_or(false) {
@@ -250,7 +257,7 @@ async fn tick(ctx: &ServerCtx, swarm_id: &Id) -> otto_core::Result<()> {
         let _ = repo.bump_task_attempt(&task.id).await;
         emit_task(ctx, &task.id).await;
 
-        let is_leader = has_reports(ctx, &swarm.id, &agent.id).await;
+        let is_leader = has_reports_in(&agents, &agent.id);
         let kind = if is_leader && !task.delegated {
             "planning"
         } else {
@@ -441,39 +448,53 @@ async fn best_fit_agent_id(ctx: &ServerCtx, swarm_id: &str, hay: &str) -> Option
 /// Pick the agent to run a task: the explicit assignee, else best-fit by title/
 /// specialization keyword overlap, else any active agent.
 async fn pick_agent(ctx: &ServerCtx, swarm: &Swarm, task: &SwarmTask) -> Option<SwarmAgent> {
-    let repo = &ctx.swarm_repo;
+    let agents = ctx.swarm_repo.list_agents(&swarm.id).await.ok()?;
+    pick_agent_from(ctx, &agents, task).await
+}
+
+/// [`pick_agent`] over an already-loaded roster (the coordinator tick loads
+/// it once). An assignee outside the roster is still looked up by id.
+async fn pick_agent_from(
+    ctx: &ServerCtx,
+    agents: &[SwarmAgent],
+    task: &SwarmTask,
+) -> Option<SwarmAgent> {
     if let Some(aid) = &task.assignee_agent_id {
-        if let Ok(a) = repo.get_agent(aid).await {
+        let a = match agents.iter().find(|a| &a.id == aid) {
+            Some(a) => Some(a.clone()),
+            None => ctx.swarm_repo.get_agent(aid).await.ok(),
+        };
+        if let Some(a) = a {
             if a.status == "active" {
                 return Some(a);
             }
         }
     }
-    let agents = repo.list_agents(&swarm.id).await.ok()?;
-    let active: Vec<SwarmAgent> = agents
-        .into_iter()
-        .filter(|a| a.status == "active")
-        .collect();
+    let active: Vec<&SwarmAgent> = agents.iter().filter(|a| a.status == "active").collect();
     if active.is_empty() {
         return None;
     }
     let hay = format!("{} {}", task.title, task.description).to_lowercase();
     active
         .iter()
-        .cloned()
+        .copied()
         .max_by_key(|a| agent_fit_score(a, &hay))
-        .or_else(|| active.into_iter().next())
+        .or_else(|| active.first().copied())
+        .cloned()
 }
 
 async fn has_reports(ctx: &ServerCtx, swarm_id: &str, agent_id: &str) -> bool {
     ctx.swarm_repo
         .list_agents(&swarm_id.to_string())
         .await
-        .map(|all| {
-            all.iter()
-                .any(|a| a.reports_to.as_deref() == Some(agent_id))
-        })
+        .map(|all| has_reports_in(&all, agent_id))
         .unwrap_or(false)
+}
+
+fn has_reports_in(agents: &[SwarmAgent], agent_id: &str) -> bool {
+    agents
+        .iter()
+        .any(|a| a.reports_to.as_deref() == Some(agent_id))
 }
 
 async fn resolve_agent_by_title(ctx: &ServerCtx, swarm_id: &str, title: &str) -> Option<Id> {

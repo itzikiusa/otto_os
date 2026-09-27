@@ -269,6 +269,8 @@ impl MemoryService {
             story_id: q.story_id.clone(),
             include_inactive: q.include_inactive,
             limit: (limit * 4) as i64,
+            kinds: q.kinds.clone(),
+            viewer: q.viewer.clone(),
         };
         // FTS5 for a real query; the LIKE path otherwise (an empty query must
         // still return the filtered set — recall_brief relies on this).
@@ -283,19 +285,12 @@ impl MemoryService {
         } else {
             self.repo.search_keyword(ws, &text, &kf).await?
         };
-        let kw_ids: Vec<String> = kw.iter().map(|(m, _)| m.id.clone()).collect();
-
-        let fused: Vec<(String, f32)> = kw_ids
-            .iter()
-            .enumerate()
-            .map(|(i, id)| (id.clone(), 1.0 / (1.0 + i as f32)))
-            .collect();
-
+        // The search already returned full rows — rank them directly (this used
+        // to re-`get` every hit: up to k*4 point queries per search, ~480 per
+        // `recall_brief`).
         let mut hits: Vec<MemoryHit> = Vec::new();
-        for (id, base) in fused.into_iter() {
-            let Ok(m) = self.repo.get(ws, &id).await else {
-                continue;
-            };
+        for (i, (m, _)) in kw.into_iter().enumerate() {
+            let base = 1.0 / (1.0 + i as f32);
             if !q.include_inactive && !m.active {
                 continue;
             }

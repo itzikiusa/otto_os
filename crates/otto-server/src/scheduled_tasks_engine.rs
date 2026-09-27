@@ -540,7 +540,7 @@ async fn run_one_agent_session(
         RUN_NO_PROGRESS,
         WAITING_IDLE,
         STUCK_IDLE,
-        |t| !t.trim().is_empty(),
+        Some(|t| !t.trim().is_empty()),
         |_st| async {},
     )
     .await

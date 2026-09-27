@@ -49,6 +49,8 @@
   // left nothing to act on).
   let loadError: string | null = $state(null);
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
+  /** JSON of the last run the poll applied (skip identical ticks). */
+  let lastPolled = '';
   let pollCount = $state(0);
 
   // Expansion / busy state (keyed by stable ids).
@@ -98,6 +100,7 @@
     try {
       const r = await skillsEvalApi.get(id);
       run = r;
+      lastPolled = '';
       onupdate?.(r);
       if (isActive(r)) schedulePoll();
     } catch (e) {
@@ -123,12 +126,23 @@
     pollTimer = setTimeout(() => void poll(), delay);
   }
 
+  // The poll result is compared before it lands: an unchanged run (most
+  // ticks while an agent works) must not replace — and re-render — the
+  // whole report. A hidden window skips the fetch and checks back later.
   async function poll(): Promise<void> {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      schedulePoll(5000);
+      return;
+    }
     pollCount++;
     try {
       const r = await skillsEvalApi.get(evalId);
-      run = r;
-      onupdate?.(r);
+      const sig = JSON.stringify(r);
+      if (sig !== lastPolled) {
+        lastPolled = sig;
+        run = r;
+        onupdate?.(r);
+      }
       if (isActive(r)) schedulePoll(pollCount > 600 ? 5000 : 2000);
     } catch {
       schedulePoll();
@@ -200,6 +214,7 @@
     try {
       const r = await skillsEvalApi.cancel(run.id);
       run = r;
+      lastPolled = '';
       onupdate?.(r);
       toasts.info('Evaluation stopped');
     } catch (e) {
@@ -238,6 +253,7 @@
     try {
       const r = await skillsEvalApi.retryValidation(run.id, it.id, index);
       run = r;
+      lastPolled = '';
       onupdate?.(r);
       if (isActive(r)) schedulePoll();
       toasts.info('Re-running validation…');
@@ -360,6 +376,7 @@
     try {
       const r = await skillsEvalApi.rate(run.id, it.id, { rating: n, note: '' });
       run = r;
+      lastPolled = '';
       onupdate?.(r);
     } catch (e) {
       toasts.error("Couldn't save your rating", e instanceof Error ? e.message : String(e));

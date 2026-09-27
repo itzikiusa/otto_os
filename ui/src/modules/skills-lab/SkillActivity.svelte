@@ -8,7 +8,7 @@
   //           loads it (by category), and Otto's own activity on it in this
   //           workspace (reviews, evaluations, golden tasks). Otto doesn't
   //           record when an agent invokes a skill mid-session, and says so.
-  import type { GoldenTask, SkillEval, SkillReview } from '../../lib/api/types';
+  import type { GoldenTask, SkillEvalSummary, SkillReview } from '../../lib/api/types';
   import { skillsEvalApi } from '../../lib/api/skillsEval';
   import { skillReviewApi } from '../../lib/api/skillReview';
   import { rel } from '../../lib/stores/now.svelte';
@@ -35,28 +35,51 @@
   }
   let { group, view, wsId, onevaluate, onreview, onopenrun, onopenreview, onview }: Props = $props();
 
-  let evals = $state<SkillEval[] | null>(null);
+  // This skill's runs only, as summary rows (was: every run of the workspace
+  // with every iteration, filtered here).
+  let evals = $state.raw<SkillEvalSummary[] | null>(null);
+  let evalsError = $state<string | null>(null);
+  let evalsFor = '';
+  let evalsSeq = 0;
+  async function loadEvals(ws: string, skill: string): Promise<void> {
+    const my = ++evalsSeq;
+    evals = null;
+    evalsError = null;
+    try {
+      const page = await skillsEvalApi.listSummaries(ws, { skill, limit: 500 });
+      if (my === evalsSeq) evals = page.items;
+    } catch (e) {
+      if (my !== evalsSeq) return;
+      evals = [];
+      evalsError = e instanceof Error ? e.message : String(e);
+    }
+  }
+  $effect(() => {
+    const key = `${wsId}\u0000${group.name}`;
+    if (!wsId || evalsFor === key) return;
+    evalsFor = key;
+    void loadEvals(wsId, group.name);
+  });
   let reviews = $state<SkillReview[] | null>(null);
   let golden = $state<GoldenTask[] | null>(null);
-  let error = $state<string | null>(null);
   let loadedFor = '';
 
+  let wsError = $state<string | null>(null);
   async function load(ws: string): Promise<void> {
-    error = null;
-    evals = reviews = golden = null;
-    const [e, r, g] = await Promise.allSettled([
-      skillsEvalApi.list(ws),
+    wsError = null;
+    reviews = golden = null;
+    const [r, g] = await Promise.allSettled([
       skillReviewApi.list(ws),
       skillsEvalApi.listGolden(ws),
     ]);
-    evals = e.status === 'fulfilled' ? e.value : [];
     reviews = r.status === 'fulfilled' ? r.value : [];
     golden = g.status === 'fulfilled' ? g.value : [];
     // Any failed source is an error, not a zero: "Not evaluated yet" over a
     // failed load would be a lie.
-    const failed = [e, r, g].find((x) => x.status === 'rejected') as PromiseRejectedResult | undefined;
-    if (failed) error = failed.reason instanceof Error ? failed.reason.message : String(failed.reason);
+    const failed = [r, g].find((x) => x.status === 'rejected') as PromiseRejectedResult | undefined;
+    if (failed) wsError = failed.reason instanceof Error ? failed.reason.message : String(failed.reason);
   }
+  const error = $derived(evalsError ?? wsError);
   $effect(() => {
     if (!wsId || loadedFor === wsId) return;
     loadedFor = wsId;
@@ -67,7 +90,7 @@
   const myReviews = $derived((reviews ?? []).filter((x) => x.skill_name === group.name));
   const myGolden = $derived((golden ?? []).filter((x) => x.skill === group.name));
 
-  function scoreOf(e: SkillEval): number | null {
+  function scoreOf(e: SkillEvalSummary): number | null {
     const s = e.composite_score ?? e.best_score;
     return s == null || !Number.isFinite(s) ? null : s;
   }
@@ -132,7 +155,7 @@
   <div class="inline-error" role="alert">
     <Icon name="warning" size={14} />
     <div><strong>Couldn't load activity for this skill.</strong> <span class="dim">{error}</span></div>
-    <button class="btn small" onclick={() => load(wsId)}>Retry</button>
+    <button class="btn small" onclick={() => { void load(wsId); void loadEvals(wsId, group.name); }}>Retry</button>
   </div>
 {:else if !wsId}
   <EmptyState title="No workspace selected" body="Evaluations and reviews belong to a workspace. Pick one in the sidebar to see this skill's activity." icon="folder" />

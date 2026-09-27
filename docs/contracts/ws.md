@@ -49,7 +49,32 @@ below). Clients need no change: keep sending, and treat a dropped socket or a
 {"type":"scrollback","lines":2000}
 {"type":"search","query":"foo"}                     // server-side ring-buffer search (see below)
 {"type":"claim"}                                    // claim size authority (sent on terminal focus)
+{"type":"pause"}                                    // flow control: stop sending me output (see below)
+{"type":"resume"}                                   // flow control: send again (+ one snapshot if anything was held back)
 ```
+
+**Flow control (`pause` / `resume`).** A browser WebSocket drains the socket
+eagerly, so the daemon never feels TCP backpressure from a slow *renderer*
+(xterm parses ~5.5–8 MB/s in WebKit; `cat`/`yes` produce far more). Clients
+count bytes handed to their emulator until it has parsed them and send
+`pause` above a high watermark (Otto: 2 MB) and `resume` below a low one
+(256 KB). Per viewer, read-only safe (viewers may send both), never affects the
+PTY or other viewers:
+
+- While paused the server stops reading this viewer's output stream; the
+  bounded broadcast ring drops what it can't hold (the sender never blocks).
+- On `resume`, if any output was held back, the server discards it and sends
+  ONE unsolicited `scrollback` snapshot (the same lagging-viewer resync) before
+  live bytes continue; if nothing was produced it just continues (no rebuild).
+- A paused stream auto-resumes **2 s** after the last `pause` (same snapshot
+  rule), so a lost `resume` can never freeze a pane. A client still draining
+  above its low watermark re-sends `pause` about once a second to stay paused.
+- A new connection always starts unpaused.
+
+A snapshot can therefore arrive while the client still has older output queued
+in its emulator; it must apply the reset IN ORDER after that backlog (Otto
+prefixes the snapshot with RIS `ESC c` in that case) rather than resetting
+synchronously and letting stale bytes parse on top of the rebuild.
 
 **Size authority.** Multiple viewers share one PTY; the connection that most
 recently sent `input` or `claim` (editor+ only) owns the session's size, and
@@ -113,7 +138,8 @@ while the viewport is scrolled up (a rebuild yanks it to the bottom).
 {"type":"error","code":"input_failed","message":"..."} // input not delivered: no live process, or the process is not reading
                                                     // its terminal (queue full / not drained in 15 s — already-queued bytes
                                                     // are still delivered in order). Sent once per failing stretch.
-{"type":"search_result","query":"foo","matches":[{"line":42,"text":"foo bar baz"},...]}  // up to 200 matches
+{"type":"search_result","query":"foo","matches":[{"line":42,"text":"foo bar baz"},...]}  // up to 200 matches; always valid JSON
+                                                    // (text is ANSI-stripped but may contain tabs/C0 bytes, JSON-escaped)
 ```
 
 #### Server-side search (`{"type":"search"}`)
@@ -292,6 +318,24 @@ Server → that ONE connection:
 The one broadcast event of the feature is `ui_control_requested` (owner-scoped,
 below); a grant change arrives as the session-family `session_meta_updated`
 (`meta.ui_control = {enabled, granted_at, granted_by}`).
+
+### Lag resync frame (per connection)
+
+The bus is bounded (1024 events). A socket that falls that far behind (a
+suspended webview, a burst of large transcript frames) has events dropped for
+it. Instead of leaving the client silently stale until its next reconnect, the
+server sends that ONE connection:
+
+```json
+{"type":"resync","skipped":37}
+```
+
+- `skipped` — how many events were dropped for this socket (informational).
+- Like the UI-control frames it is never an `Event` variant and never enters the
+  broadcast; live events continue right after it.
+- The client must refetch its event-fed state exactly as after a reconnect
+  (Otto: `resyncAfterReconnect`, trailing-debounced 500 ms so a burst of lag
+  frames costs one refetch). Older clients ignore the unknown `type`.
 
 ### Full event catalog
 
@@ -984,7 +1028,8 @@ their own routes.
   on the working copy — already validated for the format (an invalid,
   half-written file is never broadcast); the turn's commit follows as
   `content`. Variant turns never emit `live`. `content` is the
-  UTF-8 source for text/JSON formats ≤ 4 MB; an explicit `null` (never omitted)
+  UTF-8 source for text/JSON formats ≤ 64 KB (was 4 MB — every open design
+  window parses every event); an explicit `null` (never omitted)
   for binaries, oversized payloads and metadata changes → clients re-fetch
   `GET /design/artifacts/{id}/content`.
 - `design_link_updated` — `artifact_id` is always the CONSUMER (link source).

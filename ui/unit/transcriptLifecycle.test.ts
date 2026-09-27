@@ -9,7 +9,7 @@ function setup(get?: (url: string, signal?: AbortSignal) => Promise<any>) {
   const gets: string[] = [], posts: string[] = [], storage = new Map<string, string>();
   const browserStorage = {getItem: (k: string) => storage.get(k) ?? null, setItem: (k: string, v: string) => storage.set(k, v), removeItem: (k: string) => storage.delete(k)};
   const document = {hidden: false};
-  const globals = {$state: (v: unknown) => v, document, AbortController, URLSearchParams, setTimeout, clearTimeout, localStorage: browserStorage, sessionStorage: browserStorage};
+  const globals = {$state: Object.assign((v: unknown) => v, {raw: (v: unknown) => v}), document, AbortController, URLSearchParams, setTimeout, clearTimeout, localStorage: browserStorage, sessionStorage: browserStorage};
   const load = (file: URL): Record<string, any> => {
     const context = {...globals, exports: {} as Record<string, any>, require: (p: string): any => {
       if (p.endsWith('/client')) return {api: {get: async (url: string, signal?: AbortSignal) => {gets.push(url); return get ? get(url, signal) : page();}, post: async (url: string) => {posts.push(url);}}};

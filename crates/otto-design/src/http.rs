@@ -1036,18 +1036,21 @@ async fn search<S: DesignCtx>(
     let ws = visible(&ctx, &svc, &user, q.workspace_id.as_ref()).await?;
     let text = q.q.clone().unwrap_or_default();
     let f = filter_from(q, ws, 50)?;
-    let mut hits = Vec::new();
-    for (artifact, snippet, score) in svc.store().search(&text, &f).await? {
-        let reference_count = svc.store().reference_count(&artifact.id).await?;
-        let story_ids = svc.store().story_ids_for(&artifact.id).await?;
-        hits.push(SearchHit {
+    let found = svc.store().search(&text, &f).await?;
+    // One grouped refcount query for the page; story ids already ride on the
+    // artifact row (`story_ids_joined`) — no per-hit round-trips.
+    let ids: Vec<&str> = found.iter().map(|(a, _, _)| a.id.as_str()).collect();
+    let counts = svc.store().reference_counts(&ids).await?;
+    let hits: Vec<SearchHit> = found
+        .into_iter()
+        .map(|(artifact, snippet, score)| SearchHit {
+            reference_count: counts.get(&artifact.id).copied().unwrap_or(0),
+            story_ids: artifact.story_ids.clone(),
             artifact,
             snippet,
             score,
-            reference_count,
-            story_ids,
-        });
-    }
+        })
+        .collect();
     Ok(Json(hits).into_response())
 }
 

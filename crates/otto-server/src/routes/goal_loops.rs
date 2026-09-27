@@ -2,7 +2,7 @@
 //! start/pause/resume/stop lifecycle. The controller engine lives in
 //! [`crate::goal_loop`].
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
@@ -13,10 +13,12 @@ use otto_core::api::{
 };
 use otto_core::auth::AuthUser;
 use otto_core::domain::{
-    GoalLoop, GoalLoopConfig, GoalLoopDetail, GoalLoopLimits, GoalLoopStatus, WorkspaceRole,
+    GoalLoop, GoalLoopConfig, GoalLoopDetail, GoalLoopIteration, GoalLoopLimits, GoalLoopStatus,
+    WorkspaceRole,
 };
 use otto_core::{Error, Id};
 use otto_state::NewGoalLoop;
+use serde::Deserialize;
 
 use crate::auth::CurrentAuthContext;
 use crate::error::{ApiError, ApiResult};
@@ -45,6 +47,7 @@ pub fn routes() -> Router<ServerCtx> {
             "/goal-loops/{id}/iterations/{idx}/agents/{agent}/retry",
             post(retry),
         )
+        .route("/goal-loops/{id}/iterations/{idx}", get(iteration))
 }
 
 async fn check(ctx: &ServerCtx, user: &AuthUser, ws: &Id, role: WorkspaceRole) -> ApiResult<()> {
@@ -248,18 +251,44 @@ async fn create(
     Ok(Json(loop_))
 }
 
+#[derive(Deserialize, Default)]
+struct DetailQuery {
+    /// `summary=true`: blank `plan`/`context_in`/`context_out` on every
+    /// iteration but the newest (read those via `…/iterations/{idx}`).
+    #[serde(default)]
+    summary: bool,
+}
+
 async fn detail(
     State(ctx): State<ServerCtx>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
+    Query(q): Query<DetailQuery>,
 ) -> ApiResult<Json<GoalLoopDetail>> {
     let loop_ = loop_for(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
-    let detail = ctx
+    let repo = &ctx.goal_loops_repo;
+    let detail = if q.summary {
+        repo.get_detail_summary(&loop_.id).await
+    } else {
+        repo.get_detail(&loop_.id).await
+    }
+    .map_err(ApiError)?;
+    Ok(Json(detail))
+}
+
+/// One iteration in full (the summary detail omits older bodies).
+async fn iteration(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path((id, idx)): Path<(Id, u32)>,
+) -> ApiResult<Json<GoalLoopIteration>> {
+    let loop_ = loop_for(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
+    let it = ctx
         .goal_loops_repo
-        .get_detail(&loop_.id)
+        .get_iteration(&loop_.id, idx)
         .await
         .map_err(ApiError)?;
-    Ok(Json(detail))
+    Ok(Json(it))
 }
 
 async fn patch(

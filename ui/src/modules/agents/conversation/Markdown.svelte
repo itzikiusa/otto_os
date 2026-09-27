@@ -1,10 +1,29 @@
-<script lang="ts">
+<script lang="ts" module>
   // Sanitized markdown for prose + tool text. Goes through the vault renderer
   // (marked + allowlist sanitizer) — NOT lib/md.ts, which is unsanitized.
   // Transcript prose has no vault to resolve wikilinks/embeds against, so the
   // resolver returns null (they render as plain text).
   import { renderNote } from '../../vault/mdRender';
+  import { ensureHljs } from '../../../lib/hl';
+  import { createMdCache } from './mdCache';
 
+  const ctx = { resolve: () => null, assetUrl: () => null };
+  // Shared across every mounted block: a re-derived block with an unchanged
+  // string is a Map lookup, not marked + hljs + DOMParser (mdCache.ts).
+  const cache = createMdCache((md) => renderNote(md, ctx), {
+    // Room for the whole mounted window (≤300 turns, a few prose blocks each).
+    maxEntries: 1000,
+    maxChars: 4_000_000,
+    maxEntryChars: 512 * 1024,
+  });
+  // hljs loads lazily; until it lands, fenced code renders escaped. Such
+  // output is not cached, and the block re-renders once when hljs arrives
+  // (this used to ride on the next live delta re-rendering everything).
+  let hlLoaded = false;
+  const FENCE = /```|~~~/;
+</script>
+
+<script lang="ts">
   interface Props {
     md: string;
     /** Compact variant for tool-result text / notes. */
@@ -12,8 +31,18 @@
   }
   let { md, small = false }: Props = $props();
 
-  const ctx = { resolve: () => null, assetUrl: () => null };
-  const html = $derived(renderNote(md, ctx));
+  let hlReady = $state(hlLoaded);
+  if (!hlLoaded) {
+    void ensureHljs().then(() => {
+      hlLoaded = true;
+      hlReady = true;
+    });
+  }
+  const html = $derived.by(() => {
+    const fenced = FENCE.test(md);
+    // Read hlReady only when it matters, so fence-free blocks never re-render.
+    return cache.get(md, !fenced || hlReady);
+  });
 </script>
 
 <div class="md" class:small dir="auto">{@html html}</div>

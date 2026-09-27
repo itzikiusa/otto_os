@@ -100,6 +100,18 @@ pub fn api_router<S: AwsCtx>() -> Router<S> {
             "/aws/accounts/{id}/s3/buckets/{bucket}/download",
             get(s3_download::<S>),
         )
+        .route(
+            "/aws/accounts/{id}/s3/buckets/{bucket}/download-to",
+            post(s3_download_to::<S>),
+        )
+        .route(
+            "/aws/accounts/{id}/s3/download-jobs/{job}",
+            get(s3_download_job::<S>),
+        )
+        .route(
+            "/aws/accounts/{id}/s3/download-jobs/{job}/cancel",
+            post(s3_download_cancel::<S>),
+        )
         // --- SQS ---
         .route("/aws/accounts/{id}/sqs/queues", get(sqs_queues::<S>))
         .route(
@@ -535,6 +547,45 @@ async fn s3_download<S: AwsCtx>(
         HeaderValue::from_static("nosniff"),
     );
     Ok(resp)
+}
+
+/// POST /aws/accounts/{id}/s3/buckets/{bucket}/download-to — AwsS3:View.
+/// Large objects: the daemon writes `aws s3 cp` output straight to a file in
+/// `local_dir` (never overwriting); poll the returned job for progress.
+async fn s3_download_to<S: AwsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path((id, bucket)): Path<(Id, String)>,
+    Json(req): Json<crate::s3_download::DownloadToReq>,
+) -> ApiResult<Json<crate::s3_download::DownloadJob>> {
+    crate::access::check(&ctx.pool(), &user, &id, "s3_read", Some(&bucket)).await?;
+    let svc = AwsService::from_ctx(&ctx);
+    let a = svc.get_row(&id).await?;
+    Ok(Json(
+        crate::s3_download::start(&svc, &a, &bucket, &req).await?,
+    ))
+}
+
+/// GET /aws/accounts/{id}/s3/download-jobs/{job} — AwsS3:View.
+async fn s3_download_job<S: AwsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path((id, job)): Path<(Id, String)>,
+) -> ApiResult<Json<crate::s3_download::DownloadJob>> {
+    let j = crate::s3_download::status(&id, &job)?;
+    crate::access::check(&ctx.pool(), &user, &id, "s3_read", Some(&j.bucket)).await?;
+    Ok(Json(j))
+}
+
+/// POST /aws/accounts/{id}/s3/download-jobs/{job}/cancel — AwsS3:View.
+async fn s3_download_cancel<S: AwsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path((id, job)): Path<(Id, String)>,
+) -> ApiResult<Json<crate::s3_download::DownloadJob>> {
+    let j = crate::s3_download::status(&id, &job)?;
+    crate::access::check(&ctx.pool(), &user, &id, "s3_read", Some(&j.bucket)).await?;
+    Ok(Json(crate::s3_download::cancel(&id, &job).await?))
 }
 
 // ---------------------------------------------------------------------------

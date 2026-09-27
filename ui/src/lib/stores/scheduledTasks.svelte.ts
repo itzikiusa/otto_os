@@ -84,11 +84,20 @@ class ScheduledTasksStore {
     if (this.wsId) await this.loadList(this.wsId);
   }
 
-  /** Live WS tick: refresh the affected task's runs + the list status. */
+  private listReload: ReturnType<typeof setTimeout> | null = null;
+
+  /** Live WS tick: refresh the affected task's runs — only when they were
+   *  loaded (the task was expanded; expanding reloads them anyway) — and the
+   *  list status, coalesced (each run fires start + finish events; backlog
+   *  B6 / SE-23). */
   applyEvent(ev: Extract<OttoEvent, { type: 'scheduled_task_run_updated' }>): void {
     if (this.wsId && ev.workspace_id !== this.wsId) return;
-    void this.loadRuns(ev.task_id);
-    if (this.wsId) void this.loadList(this.wsId);
+    if (ev.task_id in this.runsByTask) void this.loadRuns(ev.task_id);
+    if (!this.wsId || this.listReload) return;
+    this.listReload = setTimeout(() => {
+      this.listReload = null;
+      if (this.wsId) void this.loadList(this.wsId);
+    }, 300);
   }
 }
 

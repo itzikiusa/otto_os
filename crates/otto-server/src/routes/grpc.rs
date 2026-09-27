@@ -379,8 +379,6 @@ pub async fn invoke(
 
     let call_ms = call_started.elapsed().as_millis() as i64;
     let duration_ms = started.elapsed().as_millis() as i64;
-    use base64::engine::general_purpose::STANDARD as B64;
-    use base64::Engine;
 
     match outcome {
         Ok((meta_headers, json_body)) => {
@@ -406,7 +404,9 @@ pub async fn invoke(
                 status: 200,
                 status_text: "OK".into(),
                 headers: Value::Array(meta_headers),
-                body_base64: B64.encode(json_body.as_bytes()),
+                // `body` is the exact UTF-8 payload — no base64 copy needed.
+                body_base64: String::new(),
+                body_id: None,
                 body: json_body,
                 truncated: false,
                 too_large: false,
@@ -436,7 +436,8 @@ pub async fn invoke(
                 headers: Value::Array(vec![
                     json!({"key":"grpc-status","value": (code as i32).to_string()}),
                 ]),
-                body_base64: B64.encode(body.as_bytes()),
+                body_base64: String::new(),
+                body_id: None,
                 size_bytes: body.len() as i64,
                 body,
                 truncated: false,

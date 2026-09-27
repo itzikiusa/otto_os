@@ -3,8 +3,8 @@
 //! fixture text, exercised end-to-end from `local.rs`.
 
 use otto_core::api::{
-    BranchInfo, CommitInfo, ConflictSegment, DiffLine, DiffResp, FileChange, FileDiff, Hunk,
-    LineOrigin, RepoStatusResp, StashInfo, SubmoduleInfo, WorktreeInfo,
+    BranchInfo, CommitInfo, ConflictSegment, DiffLine, DiffResp, FileChange, FileChangeStatus,
+    FileDiff, Hunk, LineOrigin, RepoStatusResp, StashInfo, SubmoduleInfo, WorktreeInfo,
 };
 use otto_core::{Error, Result};
 
@@ -576,41 +576,351 @@ pub fn parse_diff(text: &str) -> DiffResp {
     parse_diff_bytes(text.as_bytes())
 }
 
+/// Size limits applied while a diff is parsed (the HTTP routes pass these;
+/// internal consumers parse uncapped). "Bytes" are rendered text: each kept
+/// line's content plus its newline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiffCaps {
+    /// One file above either limit → `too_large`, `hunks: []` (counts kept).
+    pub file_lines: usize,
+    pub file_bytes: usize,
+    /// Whole-response budget: the first file that doesn't fit, and every file
+    /// after it, comes back `hunks_omitted` and the response `truncated`.
+    pub total_lines: usize,
+    pub total_bytes: usize,
+}
+
+impl DiffCaps {
+    /// The default per-file cap (200 KB / 5,000 lines) and response budget
+    /// (20,000 lines / 4 MB) every non-summary `/diff` response is held to.
+    pub const DEFAULT: Self = Self {
+        file_lines: 5_000,
+        file_bytes: 200 * 1024,
+        total_lines: 20_000,
+        total_bytes: 4 * 1024 * 1024,
+    };
+    /// `?full=true` on a single-file request: the per-file cap is lifted to a
+    /// hard ceiling (50,000 lines / 5 MB) that still ends in `too_large`.
+    pub const FULL_FILE: Self = Self {
+        file_lines: 50_000,
+        file_bytes: 5 * 1024 * 1024,
+        total_lines: 50_000,
+        total_bytes: 5 * 1024 * 1024,
+    };
+}
+
 /// [`parse_diff`] over git's RAW output. Each file's `fingerprint` hashes the
 /// exact BYTES git printed — the same bytes `patch::run_hunk_op` re-reads,
 /// hashes and patches — while the rendered text is decoded lossily line by
 /// line (`\n` is never part of a multi-byte sequence, so lines map 1:1). A
 /// non-UTF-8 line therefore displays with U+FFFD but is never STAGED that way.
 pub fn parse_diff_bytes(bytes: &[u8]) -> DiffResp {
-    let mut files: Vec<FileDiff> = Vec::new();
-    let mut cur: Option<FileState> = None;
+    parse_diff_bytes_capped(bytes, None)
+}
 
+/// [`parse_diff_bytes`] held to `caps`: a file over the per-file cap stops
+/// storing lines as soon as it crosses it, and once the response budget is
+/// spent later files store none at all — so a 100k-line patch never becomes
+/// 100k `DiffLine`s. Counts, status and fingerprints are always complete.
+pub fn parse_diff_bytes_capped(bytes: &[u8], caps: Option<&DiffCaps>) -> DiffResp {
     use sha2::{Digest, Sha256};
-    let mut raw: Vec<u8> = Vec::new();
+    let mut resp = DiffResp::default();
+    let mut budget = Budget::new(caps);
+    let mut cur: Option<(FileState, Sha256)> = None;
     for raw_line in bytes.split_inclusive(|b| *b == b'\n') {
         let text = String::from_utf8_lossy(raw_line);
         let line = text.trim_end_matches('\n').trim_end_matches('\r');
         if line.starts_with("diff --git ") {
-            if let Some(f) = cur.take() {
-                let mut file = f.finish();
-                file.fingerprint = hex::encode(Sha256::digest(raw.as_slice()));
-                files.push(file);
+            if let Some((f, h)) = cur.take() {
+                budget.push(&mut resp, f, h.finalize().as_slice());
             }
-            raw.clear();
-            raw.extend_from_slice(raw_line);
-            cur = Some(FileState::new(line));
+            let mut h = Sha256::new();
+            h.update(raw_line);
+            cur = Some((FileState::new(line).capped(caps, budget.exhausted), h));
             continue;
         }
-        let Some(state) = cur.as_mut() else { continue };
-        raw.extend_from_slice(raw_line);
+        let Some((state, h)) = cur.as_mut() else {
+            continue;
+        };
+        h.update(raw_line);
         state.feed(line);
     }
-    if let Some(f) = cur.take() {
-        let mut file = f.finish();
-        file.fingerprint = hex::encode(Sha256::digest(raw.as_slice()));
-        files.push(file);
+    if let Some((f, h)) = cur.take() {
+        budget.push(&mut resp, f, h.finalize().as_slice());
     }
-    DiffResp { files }
+    fill_totals(&mut resp);
+    resp
+}
+
+/// The whole-response budget while files are appended in git's order.
+struct Budget {
+    caps: Option<DiffCaps>,
+    lines: usize,
+    bytes: usize,
+    exhausted: bool,
+}
+
+impl Budget {
+    fn new(caps: Option<&DiffCaps>) -> Self {
+        Self {
+            caps: caps.copied(),
+            lines: 0,
+            bytes: 0,
+            exhausted: false,
+        }
+    }
+
+    fn push(&mut self, resp: &mut DiffResp, f: FileState, digest: &[u8]) {
+        let (lines, bytes) = (f.kept_lines, f.kept_bytes);
+        let mut file = f.finish();
+        file.fingerprint = hex::encode(digest);
+        self.admit(&mut file, lines, bytes);
+        if self.exhausted {
+            resp.truncated = Some(true);
+        }
+        resp.files.push(file);
+    }
+
+    /// Charge one parsed file against the budget.
+    fn admit(&mut self, file: &mut FileDiff, lines: usize, bytes: usize) {
+        if file.too_large == Some(true) || file.hunks_omitted == Some(true) {
+            return;
+        }
+        match self.judge(lines, bytes, !file.hunks.is_empty()) {
+            Verdict::Keep => {}
+            Verdict::TooLarge => mark_too_large(file),
+            Verdict::Omitted => {
+                file.hunks = Vec::new();
+                file.hunks_omitted = Some(true);
+            }
+        }
+    }
+
+    /// Per-file cap first (a property of the file), then the response
+    /// budget: the first file that doesn't fit spends it for everything after.
+    fn judge(&mut self, lines: usize, bytes: usize, has_hunks: bool) -> Verdict {
+        let Some(caps) = self.caps else {
+            return Verdict::Keep;
+        };
+        if lines > caps.file_lines || bytes > caps.file_bytes {
+            return Verdict::TooLarge;
+        }
+        if !has_hunks {
+            return Verdict::Keep;
+        }
+        if self.exhausted
+            || self.lines + lines > caps.total_lines
+            || self.bytes + bytes > caps.total_bytes
+        {
+            self.exhausted = true;
+            return Verdict::Omitted;
+        }
+        self.lines += lines;
+        self.bytes += bytes;
+        Verdict::Keep
+    }
+}
+
+enum Verdict {
+    Keep,
+    TooLarge,
+    Omitted,
+}
+
+fn mark_too_large(file: &mut FileDiff) {
+    file.hunks = Vec::new();
+    file.too_large = Some(true);
+    file.hunks_omitted = Some(true);
+}
+
+/// Rendered size of a parsed file: (lines, bytes) — the unit [`DiffCaps`]
+/// counts in.
+fn rendered_size(file: &FileDiff) -> (usize, usize) {
+    file.hunks
+        .iter()
+        .flat_map(|h| h.lines.iter())
+        .fold((0, 0), |(n, b), l| (n + 1, b + l.content.len() + 1))
+}
+
+/// A capped (or summary) COPY of an already-parsed diff, limited to the files
+/// `keep` selects — built without cloning the hunks of any file the caps
+/// leave out, so serving one file of a cached 30 MB PR diff clones one file.
+pub fn capped_view(
+    src: &DiffResp,
+    keep: impl Fn(&FileDiff) -> bool,
+    caps: Option<&DiffCaps>,
+    summary: bool,
+) -> DiffResp {
+    let mut budget = Budget::new(caps);
+    let mut out = DiffResp::default();
+    for f in src.files.iter().filter(|f| keep(f)) {
+        let mut file = FileDiff {
+            fingerprint: f.fingerprint.clone(),
+            path: f.path.clone(),
+            old_path: f.old_path.clone(),
+            is_binary: f.is_binary,
+            hunks: Vec::new(),
+            too_large: f.too_large,
+            hunks_omitted: f.hunks_omitted,
+            added: f.added,
+            deleted: f.deleted,
+            status: f.status,
+            language: f.language.clone(),
+        };
+        if file.added.is_none() && !f.is_binary {
+            let mut counted = f.clone();
+            fill_counts(&mut counted);
+            (file.added, file.deleted) = (counted.added, counted.deleted);
+        }
+        if summary {
+            file.hunks_omitted = Some(true);
+        } else if f.too_large != Some(true) && f.hunks_omitted != Some(true) {
+            let (lines, bytes) = rendered_size(f);
+            match budget.judge(lines, bytes, !f.hunks.is_empty()) {
+                Verdict::Keep => file.hunks = f.hunks.clone(),
+                Verdict::TooLarge => mark_too_large(&mut file),
+                Verdict::Omitted => file.hunks_omitted = Some(true),
+            }
+        }
+        out.files.push(file);
+    }
+    // The source itself may be incomplete (a provider file list cut at its
+    // page limit) — that survives any view of it.
+    if budget.exhausted || src.truncated == Some(true) {
+        out.truncated = Some(true);
+    }
+    fill_totals(&mut out);
+    out
+}
+
+/// `added`/`deleted` from the hunks when a source didn't provide them (GitLab
+/// `changes`, GitHub's per-file patches). Binary files stay `None`.
+pub fn fill_counts(file: &mut FileDiff) {
+    if file.is_binary || (file.added.is_some() && file.deleted.is_some()) {
+        return;
+    }
+    let (mut a, mut d) = (0u32, 0u32);
+    for l in file.hunks.iter().flat_map(|h| h.lines.iter()) {
+        match l.origin {
+            LineOrigin::Add => a += 1,
+            LineOrigin::Del => d += 1,
+            LineOrigin::Context => {}
+        }
+    }
+    file.added = Some(a);
+    file.deleted = Some(d);
+}
+
+/// `total_added` / `total_deleted` over the files (binary counts 0).
+pub fn fill_totals(resp: &mut DiffResp) {
+    let (a, d) = resp.files.iter().fold((0u64, 0u64), |(a, d), f| {
+        (
+            a + u64::from(f.added.unwrap_or(0)),
+            d + u64::from(f.deleted.unwrap_or(0)),
+        )
+    });
+    resp.total_added = Some(a);
+    resp.total_deleted = Some(d);
+}
+
+/// Parse `git diff|show --raw --numstat -z` — the SUMMARY of a diff, never the
+/// patch. git prints every `--raw` record first (`:<modes> <oids> <S>[score]
+/// NUL path NUL`, or `… NUL old NUL new NUL` for R/C), then every numstat
+/// record (`<a> TAB <d> TAB path NUL`, or `<a> TAB <d> TAB NUL old NUL new NUL`
+/// for a rename; `-` counts for binary). Both lists are in the same order;
+/// pairing falls back to the path if the lengths ever disagree. With `-z`
+/// names are raw bytes — never C-quoted — so spaces, tabs, quotes and
+/// non-ASCII survive as-is.
+pub fn parse_raw_numstat(out: &[u8]) -> DiffResp {
+    struct Raw {
+        status: FileChangeStatus,
+        old_path: Option<String>,
+        path: String,
+    }
+    let text = String::from_utf8_lossy(out);
+    let mut tok = text.split('\0');
+    let mut raws: Vec<Raw> = Vec::new();
+    let mut stats: Vec<(Option<u32>, Option<u32>, String)> = Vec::new();
+    while let Some(t) = tok.next() {
+        if t.is_empty() {
+            continue;
+        }
+        if let Some(meta) = t.strip_prefix(':') {
+            // `<old mode> <new mode> <old oid> <new oid> <status>[score]`
+            let letter = meta
+                .rsplit(' ')
+                .next()
+                .and_then(|s| s.chars().next())
+                .unwrap_or('M');
+            let status = match letter {
+                'A' => FileChangeStatus::Added,
+                'D' => FileChangeStatus::Deleted,
+                'R' => FileChangeStatus::Renamed,
+                'C' => FileChangeStatus::Copied,
+                'T' => FileChangeStatus::Typechange,
+                _ => FileChangeStatus::Modified,
+            };
+            let first = tok.next().unwrap_or("").to_string();
+            let (old_path, path) = if matches!(letter, 'R' | 'C') {
+                (Some(first), tok.next().unwrap_or("").to_string())
+            } else {
+                (None, first)
+            };
+            raws.push(Raw {
+                status,
+                old_path,
+                path,
+            });
+            continue;
+        }
+        let mut cols = t.splitn(3, '\t');
+        let (a, d) = (cols.next().unwrap_or(""), cols.next().unwrap_or(""));
+        let rest = cols.next().unwrap_or("");
+        let path = if rest.is_empty() {
+            // Rename: the names follow as their own records (old, new).
+            let _old = tok.next();
+            tok.next().unwrap_or("").to_string()
+        } else {
+            rest.to_string()
+        };
+        stats.push((a.parse().ok(), d.parse().ok(), path));
+    }
+    let by_path: Option<std::collections::HashMap<&str, usize>> =
+        (raws.len() != stats.len()).then(|| {
+            stats
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.2.as_str(), i))
+                .collect()
+        });
+    let mut resp = DiffResp::default();
+    for (i, r) in raws.iter().enumerate() {
+        let idx = match &by_path {
+            None => Some(i),
+            Some(m) => m.get(r.path.as_str()).copied(),
+        };
+        let (added, deleted) = idx
+            .and_then(|i| stats.get(i))
+            .map(|s| (s.0, s.1))
+            .unwrap_or((Some(0), Some(0)));
+        // numstat prints `-\t-` for a binary file — the only null counts.
+        let is_binary = added.is_none() && deleted.is_none();
+        resp.files.push(FileDiff {
+            fingerprint: String::new(),
+            language: lang_from_ext(&r.path),
+            path: r.path.clone(),
+            old_path: r.old_path.clone(),
+            is_binary,
+            hunks: Vec::new(),
+            too_large: None,
+            hunks_omitted: Some(true),
+            added,
+            deleted,
+            status: Some(r.status),
+        });
+    }
+    fill_totals(&mut resp);
+    resp
 }
 
 /// Parse a bare hunk body (lines starting at `@@`) without `diff --git`
@@ -631,12 +941,25 @@ struct FileState {
     rename_from: Option<String>,
     rename_to: Option<String>,
     is_binary: bool,
+    status: FileChangeStatus,
     hunks: Vec<Hunk>,
     old_line: u32,
     new_line: u32,
     in_hunk: bool,
     added_lines: u32,
     deleted_lines: u32,
+    /// `@@` headers seen, stored or not.
+    hunks_seen: u32,
+    /// Lines/bytes actually stored in `hunks` (what [`DiffCaps`] charges).
+    kept_lines: usize,
+    kept_bytes: usize,
+    /// Per-file cap `(lines, bytes)`; `None` = uncapped.
+    file_cap: Option<(usize, usize)>,
+    /// False once the file went `too_large` or the response budget was
+    /// already spent when it started: lines are counted, not stored.
+    store: bool,
+    too_large: bool,
+    budget_omitted: bool,
 }
 
 impl FileState {
@@ -650,22 +973,46 @@ impl FileState {
             rename_from: None,
             rename_to: None,
             is_binary: false,
+            status: FileChangeStatus::Modified,
             hunks: Vec::new(),
             old_line: 0,
             new_line: 0,
             in_hunk: false,
             added_lines: 0,
             deleted_lines: 0,
+            hunks_seen: 0,
+            kept_lines: 0,
+            kept_bytes: 0,
+            file_cap: None,
+            store: true,
+            too_large: false,
+            budget_omitted: false,
         }
+    }
+
+    /// Arm the per-file cap; `exhausted` = the response budget is already
+    /// spent, so nothing of this file is stored.
+    fn capped(mut self, caps: Option<&DiffCaps>, exhausted: bool) -> Self {
+        if let Some(c) = caps {
+            self.file_cap = Some((c.file_lines, c.file_bytes));
+            if exhausted {
+                self.store = false;
+                self.budget_omitted = true;
+            }
+        }
+        self
     }
 
     fn feed(&mut self, line: &str) {
         if let Some(rest) = line.strip_prefix("@@") {
             if let Some((old_start, new_start)) = parse_hunk_header(rest) {
-                self.hunks.push(Hunk {
-                    header: line.to_string(),
-                    lines: Vec::new(),
-                });
+                self.hunks_seen += 1;
+                if self.store {
+                    self.hunks.push(Hunk {
+                        header: line.to_string(),
+                        lines: Vec::new(),
+                    });
+                }
                 self.old_line = old_start;
                 self.new_line = new_start;
                 self.in_hunk = true;
@@ -693,10 +1040,20 @@ impl FileState {
         // header territory
         if line.starts_with("Binary files ") || line.starts_with("GIT binary patch") {
             self.is_binary = true;
+        } else if line.starts_with("new file mode ") {
+            self.status = FileChangeStatus::Added;
+        } else if line.starts_with("deleted file mode ") {
+            self.status = FileChangeStatus::Deleted;
         } else if let Some(v) = line.strip_prefix("rename from ") {
-            self.rename_from = Some(v.to_string());
+            self.status = FileChangeStatus::Renamed;
+            self.rename_from = Some(unquote_c(v));
         } else if let Some(v) = line.strip_prefix("rename to ") {
-            self.rename_to = Some(v.to_string());
+            self.rename_to = Some(unquote_c(v));
+        } else if let Some(v) = line.strip_prefix("copy from ") {
+            self.status = FileChangeStatus::Copied;
+            self.rename_from = Some(unquote_c(v));
+        } else if let Some(v) = line.strip_prefix("copy to ") {
+            self.rename_to = Some(unquote_c(v));
         } else if let Some(v) = line.strip_prefix("--- ") {
             self.minus_path = strip_ab_prefix(v);
         } else if let Some(v) = line.strip_prefix("+++ ") {
@@ -725,6 +1082,9 @@ impl FileState {
                 p
             }
         };
+        if !self.store {
+            return;
+        }
         if let Some(h) = self.hunks.last_mut() {
             h.lines.push(DiffLine {
                 origin,
@@ -732,6 +1092,17 @@ impl FileState {
                 old_line,
                 new_line,
             });
+            self.kept_lines += 1;
+            self.kept_bytes += content.len() + 1;
+        }
+        if let Some((max_lines, max_bytes)) = self.file_cap {
+            if self.kept_lines > max_lines || self.kept_bytes > max_bytes {
+                // Over the per-file cap: drop what was kept and only count
+                // from here on — the file comes back `too_large`.
+                self.too_large = true;
+                self.store = false;
+                self.hunks = Vec::new();
+            }
         }
     }
 
@@ -761,21 +1132,30 @@ impl FileState {
                 _ => None,
             });
         let language = lang_from_ext(&path);
+        let omitted = self.too_large || (self.budget_omitted && self.hunks_seen > 0);
+        // A binary file has no line counts (numstat's `-`), not zero.
+        let (added, deleted) = if self.is_binary {
+            (None, None)
+        } else {
+            (Some(self.added_lines), Some(self.deleted_lines))
+        };
         FileDiff {
             fingerprint: String::new(),
             path,
             old_path,
             is_binary: self.is_binary,
-            hunks: self.hunks,
-            too_large: None,
-            added: Some(self.added_lines),
-            deleted: Some(self.deleted_lines),
+            hunks: if omitted { Vec::new() } else { self.hunks },
+            too_large: self.too_large.then_some(true),
+            hunks_omitted: omitted.then_some(true),
+            added,
+            deleted,
+            status: Some(self.status),
             language,
         }
     }
 }
 
-fn lang_from_ext(path: &str) -> Option<String> {
+pub(crate) fn lang_from_ext(path: &str) -> Option<String> {
     let ext = std::path::Path::new(path).extension()?.to_str()?;
     let lang = match ext {
         "rs" => "rust",
@@ -814,30 +1194,82 @@ fn lang_from_ext(path: &str) -> Option<String> {
 /// "--- a/path" → Some("path"); "--- /dev/null" → None. Quoted paths get the
 /// surrounding quotes stripped (escapes left as-is, best effort).
 fn strip_ab_prefix(v: &str) -> Option<String> {
-    let v = v.trim_end();
-    let v = v.trim_matches('"');
+    let v = unquote_c(v.trim_end());
     if v == "/dev/null" {
         return None;
     }
     let v = v
         .strip_prefix("a/")
         .or_else(|| v.strip_prefix("b/"))
-        .unwrap_or(v);
+        .unwrap_or(&v);
     Some(v.to_string())
+}
+
+/// Undo git's C-style name quoting. Even with `core.quotePath=false` a name
+/// holding a tab, newline, `"` or `\` is printed as `"…"` with escapes in
+/// patch headers (`diff --git`, `---`/`+++`, `rename from`) — while `-z`
+/// listings (the summary, `status`) print it raw. Unquoted, a per-file diff
+/// names the file exactly as the summary did. Unquoted input is returned as-is.
+fn unquote_c(v: &str) -> String {
+    let Some(inner) = v
+        .strip_prefix('"')
+        .and_then(|r| r.strip_suffix('"'))
+        .filter(|_| v.len() >= 2)
+    else {
+        return v.to_string();
+    };
+    let b = inner.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'\\' || i + 1 == b.len() {
+            out.push(b[i]);
+            i += 1;
+            continue;
+        }
+        let c = b[i + 1];
+        i += 2;
+        out.push(match c {
+            b't' => b'\t',
+            b'n' => b'\n',
+            b'r' => b'\r',
+            b'a' => 0x07,
+            b'b' => 0x08,
+            b'f' => 0x0c,
+            b'v' => 0x0b,
+            b'0'..=b'3'
+                if i + 1 < b.len()
+                    && (b'0'..=b'7').contains(&b[i])
+                    && (b'0'..=b'7').contains(&b[i + 1]) =>
+            {
+                let n = (c - b'0') * 64 + (b[i] - b'0') * 8 + (b[i + 1] - b'0');
+                i += 2;
+                n
+            }
+            other => other, // `\"`, `\\` and anything unknown
+        });
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// "diff --git a/old b/new" → (Some(old), Some(new)). Best effort: paths with
 /// the literal substring " b/" are ambiguous; the ---/+++ lines win anyway.
+/// Either side may be C-quoted (`"a/x\ty" "b/x\ty"`).
 fn parse_diff_git_paths(line: &str) -> (Option<String>, Option<String>) {
     let rest = match line.strip_prefix("diff --git ") {
         Some(r) => r,
         None => return (None, None),
     };
-    if let Some(idx) = rest.rfind(" b/") {
-        let old = rest[..idx].trim().trim_matches('"');
-        let new = rest[idx + 3..].trim().trim_matches('"');
-        let old = old.strip_prefix("a/").unwrap_or(old);
-        return (Some(old.to_string()), Some(new.to_string()));
+    let split = rest
+        .rfind(" \"b/")
+        .map(|i| (i, i + 1))
+        .or_else(|| rest.rfind(" b/").map(|i| (i, i + 1)));
+    if let Some((end_old, start_new)) = split {
+        let old = unquote_c(rest[..end_old].trim());
+        let new = unquote_c(rest[start_new..].trim());
+        let old = old.strip_prefix("a/").unwrap_or(&old).to_string();
+        let new = new.strip_prefix("b/").unwrap_or(&new).to_string();
+        return (Some(old), Some(new));
     }
     (None, None)
 }
@@ -1412,5 +1844,174 @@ submodule.other.url=https://example.com/other.git
             Some("https://github.com/acme/libfoo.git")
         );
         assert_eq!(subs[0].branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn raw_numstat_pairs_records_with_nul_safe_names() {
+        // Exactly what `git show --raw --numstat -z -M` printed for a commit
+        // with a binary edit, a delete, a type change, a rename with a space
+        // in both names, an add and a non-ASCII name.
+        let out = b":100644 100644 bdc955b 8835708 M\0bin.dat\0\
+:100644 000000 2fa992c 0000000 D\0keep.txt\0\
+:120000 100644 1de5659 3bcf9fd T\0link\0\
+:100644 100644 f9d9a01 5c2dbfa R085\0sp ace.txt\0moved sp.txt\0\
+:000000 100644 0000000 3e75765 A\0new.txt\0\
+:100644 100644 587be6b b77b4eb M\0\xc3\xbcn\xc3\xaf.txt\0\
+-\t-\tbin.dat\0\
+0\t1\tkeep.txt\0\
+1\t1\tlink\0\
+1\t1\t\0sp ace.txt\0moved sp.txt\0\
+1\t0\tnew.txt\0\
+1\t0\t\xc3\xbcn\xc3\xaf.txt\0";
+        let d = parse_raw_numstat(out);
+        let got: Vec<_> = d
+            .files
+            .iter()
+            .map(|f| {
+                (
+                    f.path.as_str(),
+                    f.old_path.as_deref(),
+                    f.status.unwrap(),
+                    f.added,
+                    f.deleted,
+                )
+            })
+            .collect();
+        use FileChangeStatus::*;
+        assert_eq!(
+            got,
+            vec![
+                ("bin.dat", None, Modified, None, None),
+                ("keep.txt", None, Deleted, Some(0), Some(1)),
+                ("link", None, Typechange, Some(1), Some(1)),
+                (
+                    "moved sp.txt",
+                    Some("sp ace.txt"),
+                    Renamed,
+                    Some(1),
+                    Some(1)
+                ),
+                ("new.txt", None, Added, Some(1), Some(0)),
+                ("\u{fc}n\u{ef}.txt", None, Modified, Some(1), Some(0)),
+            ]
+        );
+        assert!(d.files[0].is_binary);
+        assert!(d.files.iter().all(|f| f.hunks_omitted == Some(true)));
+        assert_eq!((d.total_added, d.total_deleted), (Some(4), Some(3)));
+        assert!(parse_raw_numstat(b"").files.is_empty());
+    }
+
+    #[test]
+    fn quoted_header_names_are_unquoted() {
+        assert_eq!(
+            unquote_c(r#""a\tb \"q\" \\ \303\274""#),
+            "a\tb \"q\" \\ \u{fc}"
+        );
+        assert_eq!(unquote_c("plain name"), "plain name");
+        let text = "\
+diff --git \"a/old\\tname.txt\" \"b/new\\tname.txt\"
+similarity index 90%
+rename from \"old\\tname.txt\"
+rename to \"new\\tname.txt\"
+--- \"a/old\\tname.txt\"
++++ \"b/new\\tname.txt\"
+@@ -1 +1,2 @@
+ x
++y
+diff --git \"a/q\\\"uote\" \"b/q\\\"uote\"
+new file mode 100644
+--- /dev/null
++++ \"b/q\\\"uote\"
+@@ -0,0 +1 @@
++z
+";
+        let d = parse_diff(text);
+        assert_eq!(d.files[0].path, "new\tname.txt");
+        assert_eq!(d.files[0].old_path.as_deref(), Some("old\tname.txt"));
+        assert_eq!(d.files[0].status, Some(FileChangeStatus::Renamed));
+        assert_eq!(d.files[1].path, "q\"uote");
+        assert_eq!(d.files[1].old_path, None);
+        assert_eq!(d.files[1].status, Some(FileChangeStatus::Added));
+    }
+
+    #[test]
+    fn full_parse_status_counts_and_binary_nulls() {
+        let text = "\
+diff --git a/img.png b/img.png
+index 333..444 100644
+Binary files a/img.png and b/img.png differ
+diff --git a/dead.rs b/dead.rs
+deleted file mode 100644
+--- a/dead.rs
++++ /dev/null
+@@ -1,1 +0,0 @@
+-bye
+diff --git a/src.rs b/copy.rs
+similarity index 100%
+copy from src.rs
+copy to copy.rs
+";
+        let d = parse_diff(text);
+        assert_eq!((d.files[0].added, d.files[0].deleted), (None, None));
+        assert_eq!(d.files[1].status, Some(FileChangeStatus::Deleted));
+        assert_eq!(d.files[2].status, Some(FileChangeStatus::Copied));
+        assert_eq!(d.files[2].old_path.as_deref(), Some("src.rs"));
+        assert_eq!(d.files[2].path, "copy.rs");
+        assert_eq!((d.total_added, d.total_deleted), (Some(0), Some(1)));
+    }
+
+    #[test]
+    fn per_file_cap_counts_on_and_budget_marks_the_rest() {
+        let mut text = String::new();
+        let file = |name: &str, n: usize, text: &mut String| {
+            text.push_str(&format!(
+                "diff --git a/{name} b/{name}\nnew file mode 100644\n--- /dev/null\n+++ b/{name}\n@@ -0,0 +1,{n} @@\n"
+            ));
+            for i in 0..n {
+                text.push_str(&format!("+{i}\n"));
+            }
+        };
+        file("a", 12, &mut text);
+        file("b", 30, &mut text);
+        file("c", 8, &mut text);
+        file("d", 1, &mut text);
+        let caps = DiffCaps {
+            file_lines: 20,
+            file_bytes: 1 << 20,
+            total_lines: 25,
+            total_bytes: 1 << 20,
+        };
+        let d = parse_diff_bytes_capped(text.as_bytes(), Some(&caps));
+        let full = parse_diff(&text);
+        // a fits; b is over the per-file cap (not charged); c (12+8=20) fits;
+        // d fits too (21 ≤ 25).
+        assert_eq!(d.files[0].hunks[0].lines.len(), 12);
+        assert_eq!(d.files[1].too_large, Some(true));
+        assert_eq!(d.files[1].added, Some(30));
+        assert_eq!(d.files[2].hunks[0].lines.len(), 8);
+        assert_eq!(d.files[3].hunks[0].lines.len(), 1);
+        assert_eq!(d.truncated, None);
+        for (c, f) in d.files.iter().zip(&full.files) {
+            assert_eq!(c.fingerprint, f.fingerprint);
+        }
+        // A tighter budget: c no longer fits, and d after it is omitted too.
+        let tight = DiffCaps {
+            total_lines: 15,
+            ..caps
+        };
+        let d = parse_diff_bytes_capped(text.as_bytes(), Some(&tight));
+        assert_eq!(d.files[0].hunks_omitted, None);
+        assert_eq!(d.files[2].hunks_omitted, Some(true));
+        assert_eq!(d.files[3].hunks_omitted, Some(true));
+        assert!(d.files[3].hunks.is_empty());
+        assert_eq!(d.truncated, Some(true));
+        assert_eq!(d.total_added, Some(51));
+        // Summary of a parsed diff: no hunks anywhere, counts kept.
+        let s = capped_view(&full, |_| true, None, true);
+        assert!(s
+            .files
+            .iter()
+            .all(|f| f.hunks.is_empty() && f.hunks_omitted == Some(true)));
+        assert_eq!(s.total_added, Some(51));
     }
 }

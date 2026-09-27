@@ -18,7 +18,7 @@ use otto_core::domain::{SessionKind, SessionStatus};
 use otto_core::event::Event;
 use otto_core::Id;
 use otto_state::{SessionsRepo, WorkspacesRepo};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, Notify};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
@@ -31,16 +31,20 @@ const IDLE_DEBOUNCE: Duration = Duration::from_secs(30);
 /// Handle; dropping it stops the evolver (mirrors ChannelHandle/SchedulerHandle).
 pub struct LiveEvolverHandle {
     cancel: Arc<AtomicBool>,
+    /// Wakes the event loop on shutdown (it otherwise parks on the bus with no
+    /// timer — the old 1 s poll existed only to notice `cancel`).
+    wake: Arc<Notify>,
     _task: JoinHandle<()>,
 }
 impl LiveEvolverHandle {
     pub fn shutdown(&self) {
         self.cancel.store(true, Ordering::Relaxed);
+        self.wake.notify_one();
     }
 }
 impl Drop for LiveEvolverHandle {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.shutdown();
     }
 }
 
@@ -75,14 +79,21 @@ impl LiveEvolver {
 
     pub fn start(self, events: broadcast::Receiver<Event>) -> LiveEvolverHandle {
         let cancel = Arc::new(AtomicBool::new(false));
-        let task = tokio::spawn(self.run(events, Arc::clone(&cancel)));
+        let wake = Arc::new(Notify::new());
+        let task = tokio::spawn(self.run(events, Arc::clone(&cancel), Arc::clone(&wake)));
         LiveEvolverHandle {
             cancel,
+            wake,
             _task: task,
         }
     }
 
-    async fn run(self, mut events: broadcast::Receiver<Event>, cancel: Arc<AtomicBool>) {
+    async fn run(
+        self,
+        mut events: broadcast::Receiver<Event>,
+        cancel: Arc<AtomicBool>,
+        wake: Arc<Notify>,
+    ) {
         let episodes: Episodes = Arc::new(Mutex::new(HashMap::new()));
         loop {
             if cancel.load(Ordering::Relaxed) {
@@ -90,7 +101,7 @@ impl LiveEvolver {
             }
             let received = tokio::select! {
                 event = events.recv() => event,
-                _ = tokio::time::sleep(Duration::from_secs(1)) => continue,
+                _ = wake.notified() => continue, // re-checks `cancel` above
             };
             let evt = match received {
                 Ok(e) => e,

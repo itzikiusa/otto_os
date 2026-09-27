@@ -5,6 +5,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { pollWhileVisible } from '../../lib/poll';
   import TopicDetail from './TopicDetail.svelte';
   import { brokersTopicsPort } from '../../lib/uiCommands/brokers';
   import type {
@@ -181,7 +182,7 @@
 
   // Periodically re-fetch the visible topics' stats so the msg/s rate refreshes
   // (the backend needs two samples to compute it). One batch call per tick.
-  async function refreshRates() {
+  async function refreshRates(signal?: AbortSignal) {
     if (loading || selected) return;
     const names = visible.map((t) => t.name).filter((n) => {
       const v = stats[n];
@@ -192,17 +193,23 @@
       const result = await api.post<Record<string, TopicStats>>(
         `/brokers/clusters/${cluster.id}/topics/stats`,
         { names },
+        signal,
       );
-      stats = { ...stats, ...result };
+      if (!signal?.aborted) stats = { ...stats, ...result };
     } catch {
       // Transient — keep the last values; the next tick retries.
     }
   }
 
+  // Chained (a slow tunnel never stacks ticks), paused while hidden, aborted
+  // on leave.
   $effect(() => {
     void cluster.id;
-    const h = setInterval(() => void refreshRates(), 5000);
-    return () => clearInterval(h);
+    const poller = pollWhileVisible((signal) => refreshRates(signal), {
+      ms: 5000,
+      immediate: false,
+    });
+    return () => poller.stop();
   });
 
   // True when any visible topic's stats failed — show the retry button.

@@ -149,7 +149,14 @@ async fn handle_events(socket: WebSocket, ctx: ServerCtx, user: User, ui_capable
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    tracing::warn!("events ws lagged, skipped {skipped} events");
+                    // The bounded bus dropped events this socket hadn't read
+                    // yet. Logging alone left the client silently stale until
+                    // its next reconnect; tell it to refetch instead (it reuses
+                    // its reconnect resync). See docs/contracts/ws.md.
+                    tracing::warn!("events ws lagged, skipped {skipped} events — sent resync");
+                    if sink.send(Message::Text(resync_frame(skipped).into())).await.is_err() {
+                        break;
+                    }
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
@@ -188,6 +195,12 @@ async fn handle_events(socket: WebSocket, ctx: ServerCtx, user: User, ui_capable
     if let Some(conn) = &ui_conn {
         ctx.ui_bridge.unregister(conn);
     }
+}
+
+/// Per-connection `resync` frame sent when the broadcast receiver lagged and
+/// `skipped` events were dropped for this socket.
+fn resync_frame(skipped: u64) -> String {
+    serde_json::json!({ "type": "resync", "skipped": skipped }).to_string()
 }
 
 /// How a single event is scoped on the wire.
@@ -502,6 +515,12 @@ mod tests {
     use otto_core::{Error, Result};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    #[test]
+    fn resync_frame_shape() {
+        let v: serde_json::Value = serde_json::from_str(&resync_frame(42)).unwrap();
+        assert_eq!(v, serde_json::json!({"type": "resync", "skipped": 42}));
+    }
 
     fn user(id: &str, is_root: bool) -> User {
         User {

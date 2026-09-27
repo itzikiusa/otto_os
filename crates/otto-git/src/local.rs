@@ -46,13 +46,18 @@ pub enum DiffTarget {
     Staged,
     /// A single commit (`git show <sha>`).
     Commit(String),
-    /// A commit range (`git diff a..b`).
+    /// Two commits' trees (`git diff a..b` — for `git diff` two dots mean
+    /// "a vs b", NOT the `log` meaning; kept as-is for existing callers).
     Range(String, String),
+    /// Branch-vs-base (`git diff a...b`): `b` against the merge-base of `a`
+    /// and `b` — what the branch itself changed, ignoring the base's own
+    /// newer commits.
+    MergeBase(String, String),
 }
 
 impl DiffTarget {
     /// Parse the `?target=` query value: `worktree | staged | commit:<sha> |
-    /// range:<a>..<b>`.
+    /// range:<a>..<b> | range:<a>...<b>`.
     pub fn parse(s: &str) -> Result<Self> {
         match s {
             "worktree" => Ok(Self::Worktree),
@@ -70,7 +75,12 @@ impl DiffTarget {
                     return Ok(Self::Commit(sha.to_string()));
                 }
                 if let Some(range) = s.strip_prefix("range:") {
-                    if let Some((a, b)) = range.split_once("..") {
+                    // Three dots first: `a...b` also contains `..`.
+                    let (split, three) = match range.split_once("...") {
+                        Some(ab) => (Some(ab), true),
+                        None => (range.split_once(".."), false),
+                    };
+                    if let Some((a, b)) = split {
                         if !a.is_empty() && !b.is_empty() {
                             LocalGit::guard_ref(a)?;
                             LocalGit::guard_ref(b)?;
@@ -79,7 +89,12 @@ impl DiffTarget {
                             if a.chars().chain(b.chars()).any(char::is_whitespace) {
                                 return Err(Error::Invalid(format!("bad range: {range}")));
                             }
-                            return Ok(Self::Range(a.to_string(), b.to_string()));
+                            let (a, b) = (a.to_string(), b.to_string());
+                            return Ok(if three {
+                                Self::MergeBase(a, b)
+                            } else {
+                                Self::Range(a, b)
+                            });
                         }
                     }
                     return Err(Error::Invalid(format!("bad range: {range}")));
@@ -213,6 +228,8 @@ pub(crate) struct GitCmd {
     args: Vec<String>,
     envs: Vec<(String, String)>,
     class: SpawnClass,
+    /// Bytes piped to git's stdin ([`GitCmd::paths_stdin`]).
+    stdin: Option<Vec<u8>>,
 }
 
 impl GitCmd {
@@ -237,6 +254,7 @@ impl GitCmd {
             args: args.iter().map(|s| s.to_string()).collect(),
             envs: Vec::new(),
             class,
+            stdin: None,
         }
     }
 
@@ -264,6 +282,32 @@ impl GitCmd {
         self
     }
 
+    /// [`Self::paths`] for an UNBOUNDED path list ("Stage all", a folder's
+    /// checkbox): the names go NUL-separated over stdin
+    /// (`--pathspec-from-file=- --pathspec-file-nul`) instead of argv, which
+    /// dies with E2BIG around 15k paths (ARG_MAX is 1 MB on macOS). Same
+    /// literal-name semantics. Only for subcommands that take the flag
+    /// (`add`, `restore`, `reset`, `rm`, `checkout`…) — NOT `clean`.
+    pub(crate) fn paths_stdin<I, S>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut buf = Vec::new();
+        for p in paths {
+            buf.extend_from_slice(p.as_ref().as_bytes());
+            buf.push(0);
+        }
+        self.args.push("--pathspec-from-file=-".to_string());
+        self.args.push("--pathspec-file-nul".to_string());
+        if !self.envs.iter().any(|(k, _)| k == "GIT_LITERAL_PATHSPECS") {
+            self.envs
+                .push(("GIT_LITERAL_PATHSPECS".to_string(), "1".to_string()));
+        }
+        self.stdin = Some(buf);
+        self
+    }
+
     /// [`Self::paths`] when `path` is `Some`, unchanged otherwise.
     pub(crate) fn maybe_path(self, path: Option<&str>) -> Self {
         match path {
@@ -272,14 +316,179 @@ impl GitCmd {
         }
     }
 
+    /// [`Self::paths`] when `paths` is non-empty, unchanged otherwise.
+    pub(crate) fn maybe_paths(self, paths: &[&str]) -> Self {
+        if paths.is_empty() {
+            self
+        } else {
+            self.paths(paths.iter().copied())
+        }
+    }
+
     fn argv(&self) -> Vec<&str> {
         self.args.iter().map(String::as_str).collect()
     }
 }
 
+/// Per-spawn argv budget for a path list that can't go over stdin (`git
+/// clean`): well under macOS's 1 MB ARG_MAX, which also holds the env.
+pub(crate) const CLEAN_ARGV_BYTES: usize = 256 * 1024;
+
+/// `paths` split into consecutive batches of at most `max_bytes` of argv
+/// (each name + its NUL); a single longer name still gets its own batch.
+pub(crate) fn argv_batches(paths: &[String], max_bytes: usize) -> Vec<&[String]> {
+    let mut out = Vec::new();
+    let (mut start, mut bytes) = (0, 0);
+    for (i, p) in paths.iter().enumerate() {
+        let n = p.len() + 1;
+        if i > start && bytes + n > max_bytes {
+            out.push(&paths[start..i]);
+            start = i;
+            bytes = 0;
+        }
+        bytes += n;
+    }
+    if start < paths.len() {
+        out.push(&paths[start..]);
+    }
+    out
+}
+
 /// Split `-z` output into its non-empty NUL-terminated records.
 pub(crate) fn nul_records(out: &str) -> impl Iterator<Item = &str> {
     out.split('\0').filter(|r| !r.is_empty())
+}
+
+/// Rename detection on every parsed diff: `-M` with git's default limit
+/// PINNED (`-l1000`). A user's `diff.renameLimit=0` (unlimited) otherwise
+/// turned one 1,600-move commit into ~2.8 s of O(adds×deletes) similarity
+/// scoring; above the limit git skips inexact detection (moves show as
+/// delete + add) at ~0.2 s. Worst case at the limit ≈ 1 s, paid once per
+/// immutable diff (the route caches it).
+pub(crate) const RENAMES: [&str; 2] = ["-M", "-l1000"];
+
+/// Knobs of one `/diff` request beyond its target.
+#[derive(Debug, Clone, Default)]
+pub struct DiffOpts {
+    /// Limit to one file (`-- <path>`).
+    pub path: Option<String>,
+    /// A rename's origin, passed alongside `path` so `-M` still pairs the two
+    /// sides (a lone new path would come back as an add).
+    pub old_path: Option<String>,
+    /// File list + counts only (`--raw --numstat`); no patch is produced.
+    pub summary: bool,
+    /// Per-file cap + response budget; `None` = uncapped (internal callers).
+    pub caps: Option<crate::parse::DiffCaps>,
+}
+
+impl DiffOpts {
+    /// The literal pathspecs this request is scoped to (validated).
+    fn pathspecs(&self) -> Result<Vec<&str>> {
+        let mut v = Vec::new();
+        for p in [self.path.as_deref(), self.old_path.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter(|p| !p.is_empty())
+        {
+            LocalGit::guard_path(p)?;
+            if !v.contains(&p) {
+                v.push(p);
+            }
+        }
+        Ok(v)
+    }
+}
+
+impl DiffTarget {
+    /// `a..b` / `a...b` for the range targets.
+    pub(crate) fn range_arg(&self) -> Option<String> {
+        match self {
+            Self::Range(a, b) => Some(format!("{a}..{b}")),
+            Self::MergeBase(a, b) => Some(format!("{a}...{b}")),
+            _ => None,
+        }
+    }
+}
+
+/// A full-length (SHA-1 or SHA-256) hex object id.
+pub(crate) fn is_full_oid(s: &str) -> bool {
+    (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Run CPU-bound work (a big parse / serialize) on the blocking pool when the
+/// input is large enough to hold a runtime worker for milliseconds; inline
+/// otherwise.
+pub(crate) async fn off_runtime<T, F>(size: usize, f: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    if size < 64 * 1024 {
+        return Ok(f());
+    }
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| Error::Internal(format!("diff worker: {e}")))
+}
+
+/// Summary rows for untracked files (what `Working` renders as fully-added
+/// `--no-index` diffs), counted from disk instead of spawning git per file:
+/// git's own binary test (a NUL in the first 8,000 bytes) and line count (a
+/// final line without `\n` still counts).
+fn untracked_summary(root: &Path, files: &[String]) -> Vec<otto_core::api::FileDiff> {
+    use std::io::Read;
+    files
+        .iter()
+        .map(|f| {
+            let full = root.join(f);
+            let (is_binary, lines) = match std::fs::symlink_metadata(&full) {
+                // A symlink's "content" is its target: one line.
+                Ok(m) if m.file_type().is_symlink() => (false, Some(1)),
+                Ok(m) if m.is_file() => match std::fs::File::open(&full) {
+                    Ok(mut fh) => {
+                        let mut buf = vec![0u8; 64 * 1024];
+                        let (mut n, mut last, mut first) = (0u32, b'\n', true);
+                        let mut binary = false;
+                        loop {
+                            let k = match fh.read(&mut buf) {
+                                Ok(0) | Err(_) => break,
+                                Ok(k) => k,
+                            };
+                            if first {
+                                binary = buf[..k.min(8000)].contains(&0);
+                                first = false;
+                                if binary {
+                                    break;
+                                }
+                            }
+                            n += buf[..k].iter().filter(|b| **b == b'\n').count() as u32;
+                            last = buf[k - 1];
+                        }
+                        if binary {
+                            (true, None)
+                        } else {
+                            (false, Some(n + u32::from(last != b'\n')))
+                        }
+                    }
+                    Err(_) => (false, Some(0)),
+                },
+                _ => (false, Some(0)),
+            };
+            otto_core::api::FileDiff {
+                fingerprint: String::new(),
+                language: crate::parse::lang_from_ext(f),
+                path: f.clone(),
+                old_path: None,
+                is_binary,
+                hunks: Vec::new(),
+                too_large: None,
+                hunks_omitted: Some(true),
+                added: lines,
+                deleted: lines.map(|_| 0),
+                status: Some(otto_core::api::FileChangeStatus::Added),
+            }
+        })
+        .collect()
 }
 
 /// A handle on one local repository; every method spawns `git -C <path> …`.
@@ -518,6 +727,7 @@ impl LocalGit {
         for (k, v) in &c.envs {
             cmd.env(k, v);
         }
+        let stdin = stdin.or(c.stdin.as_deref());
         let out = self.spawn_output(cmd, c.class, verb_of(&argv), stdin).await?;
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         Ok((out.status.success(), out.stdout, stderr, out.status.code()))
@@ -1208,20 +1418,38 @@ impl LocalGit {
     /// branch itself is never flagged (it always "contains" itself). `base_branch`
     /// in the response echoes the resolved base so the UI can exclude/label it.
     pub async fn refs_with_base(&self, base_override: Option<&str>) -> Result<RefsResp> {
-        // Local branches: name TAB upstream TAB HEAD-marker TAB sha TAB tracking
-        let local_out = self
-            .run_read(&[
+        // The three listings are independent reads — one round of spawns, not
+        // three in a row (this runs on every 30 s auto-fetch).
+        let (local_out, remote_out, tags_out, base) = tokio::join!(
+            // Local branches: name TAB upstream TAB HEAD-marker TAB sha TAB tracking
+            self.run_read(&[
                 "for-each-ref",
                 "--format=%(refname:lstrip=2)\t%(upstream:short)\t%(HEAD)\t%(objectname)\t%(upstream:track,nobracket)",
                 "refs/heads",
-            ])
-            .await?;
-
-        // Resolve the base and gather the "merged into base" sets up front so each
-        // branch row is a cheap set lookup. A missing base (empty repo) leaves the
-        // sets empty → nothing flagged.
-        let base = self.resolve_cleanup_base(base_override).await;
-        let (merged_local, merged_remote) = self.merged_sets(base.as_deref()).await;
+            ]),
+            // Remote branches: full refname TAB sha.
+            self.run_read(&[
+                "for-each-ref",
+                "--format=%(refname)\t%(objectname)",
+                "refs/remotes",
+            ]),
+            // Tags: sorted newest-first, ALL of them (an old tag is precisely
+            // the one a user reaches for). `%(*objectname)` is the dereferenced
+            // commit and is non-empty only for ANNOTATED tags.
+            self.run_read(&[
+                "for-each-ref",
+                "--sort=-creatordate",
+                "--format=%(refname:short)\t%(objectname)\t%(*objectname)",
+                "refs/tags",
+            ]),
+            // Resolve the base up front so each branch row is a cheap set
+            // lookup. A missing base (empty repo) leaves the sets empty.
+            self.resolve_cleanup_base(base_override),
+        );
+        let (local_out, remote_out, tags_out) = (local_out?, remote_out?, tags_out?);
+        let (merged_local, merged_remote) = self
+            .merged_sets_cached(base.as_deref(), &local_out, &remote_out)
+            .await;
 
         let local = local_out
             .lines()
@@ -1252,17 +1480,10 @@ impl LocalGit {
             })
             .collect();
 
-        // Remote branches: full refname TAB sha; skip the symbolic
-        // `refs/remotes/<remote>/HEAD`. Filter on the FULL name — `:short`
-        // abbreviates `origin/HEAD` to just "origin", which slipped past a
-        // "/HEAD" suffix check and showed up as a stray "origin" branch.
-        let remote_out = self
-            .run_read(&[
-                "for-each-ref",
-                "--format=%(refname)\t%(objectname)",
-                "refs/remotes",
-            ])
-            .await?;
+        // Remote branches: skip the symbolic `refs/remotes/<remote>/HEAD`.
+        // Filter on the FULL name — `:short` abbreviates `origin/HEAD` to just
+        // "origin", which slipped past a "/HEAD" suffix check and showed up as
+        // a stray "origin" branch.
         let remote = remote_out
             .lines()
             .filter(|l| {
@@ -1292,18 +1513,8 @@ impl LocalGit {
             })
             .collect();
 
-        // Tags: sorted newest-first, ALL of them (an old tag is precisely the one
-        // a user reaches for). `%(*objectname)` is the dereferenced commit and is
-        // non-empty only for ANNOTATED tags, so fall back to `%(objectname)` for
-        // lightweight ones — either way `sha` names a commit, never a tag object.
-        let tags_out = self
-            .run_read(&[
-                "for-each-ref",
-                "--sort=-creatordate",
-                "--format=%(refname:short)\t%(objectname)\t%(*objectname)",
-                "refs/tags",
-            ])
-            .await?;
+        // Fall back to `%(objectname)` for lightweight tags — either way `sha`
+        // names a commit, never a tag object.
         let tags = tags_out
             .lines()
             .filter(|l| !l.trim().is_empty())
@@ -1338,6 +1549,60 @@ impl LocalGit {
         self.default_branch().await
     }
 
+    /// [`Self::merged_sets`] memoized per repo on the ref state: the base's
+    /// commit id plus every branch tip (the `for-each-ref` listings already in
+    /// hand). `branch --merged` walks history once per branch tip — O(branches
+    /// × merge-base) — and the Git page asks every 30 s; while nothing moved
+    /// the answer is the same, so only a fetch/commit/checkout that changes a
+    /// tip (or the base) pays for it again.
+    async fn merged_sets_cached(
+        &self,
+        base: Option<&str>,
+        local_out: &str,
+        remote_out: &str,
+    ) -> (
+        std::collections::HashSet<String>,
+        std::collections::HashSet<String>,
+    ) {
+        type Sets = (
+            std::collections::HashSet<String>,
+            std::collections::HashSet<String>,
+        );
+        static MEMO: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PathBuf, (u64, Sets)>>> =
+            std::sync::OnceLock::new();
+        let Some(b) = base else {
+            return (Default::default(), Default::default());
+        };
+        let Ok(base_oid) = self.resolve_commit(b).await else {
+            return self.merged_sets(base).await.0;
+        };
+        let state = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (b, &base_oid, local_out, remote_out).hash(&mut h);
+            h.finish()
+        };
+        let memo = MEMO.get_or_init(Default::default);
+        if let Some((k, sets)) = memo
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&self.repo_path)
+        {
+            if *k == state {
+                return sets.clone();
+            }
+        }
+        let (sets, complete) = self.merged_sets(base).await;
+        // A failed `branch --merged` (timeout, lock) is never memoized: its
+        // empty set would stick until a ref moved.
+        if complete {
+            memo.lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(self.repo_path.clone(), (state, sets.clone()));
+        }
+        sets
+    }
+
     /// The `(local, remote)` sets of branch short-names whose tip is contained in
     /// `base` — one bulk `git branch --merged` each. Empty when `base` is `None`
     /// or the git call fails (best-effort: cleanup hints must never break `refs`).
@@ -1345,11 +1610,14 @@ impl LocalGit {
         &self,
         base: Option<&str>,
     ) -> (
-        std::collections::HashSet<String>,
-        std::collections::HashSet<String>,
+        (
+            std::collections::HashSet<String>,
+            std::collections::HashSet<String>,
+        ),
+        bool,
     ) {
         let Some(base) = base else {
-            return (Default::default(), Default::default());
+            return (Default::default(), true);
         };
         let parse = |out: String| {
             out.lines()
@@ -1358,23 +1626,26 @@ impl LocalGit {
                 .map(str::to_string)
                 .collect::<std::collections::HashSet<String>>()
         };
-        let local = self
-            .run_read(&["branch", "--merged", base, "--format=%(refname:lstrip=2)"])
-            .await
-            .map(parse)
-            .unwrap_or_default();
-        let remote = self
-            .run_read(&[
-                "branch",
-                "-r",
-                "--merged",
-                base,
-                "--format=%(refname:lstrip=2)",
-            ])
-            .await
-            .map(parse)
-            .unwrap_or_default();
-        (local, remote)
+        let local_args = ["branch", "--merged", base, "--format=%(refname:lstrip=2)"];
+        let remote_args = [
+            "branch",
+            "-r",
+            "--merged",
+            base,
+            "--format=%(refname:lstrip=2)",
+        ];
+        let (local, remote) = tokio::join!(
+            self.run_read(&local_args),
+            self.run_read(&remote_args)
+        );
+        let complete = local.is_ok() && remote.is_ok();
+        (
+            (
+                local.map(parse).unwrap_or_default(),
+                remote.map(parse).unwrap_or_default(),
+            ),
+            complete,
+        )
     }
 
     /// Compute a diff for `target`. When `pathspec` is `Some(path)`, every git
@@ -1383,11 +1654,36 @@ impl LocalGit {
     /// working tree (which, for the `Working` target, also runs a `--no-index`
     /// diff per untracked file — seconds of work on a large changeset). `None`
     /// returns the full diff (the "All changes" view, commit/range views).
+    ///
+    /// Uncapped: internal consumers (proof packs, reviews, goal loops) read
+    /// every line. The HTTP route goes through [`Self::diff_with`] with caps.
     pub async fn diff(&self, target: DiffTarget, pathspec: Option<&str>) -> Result<DiffResp> {
-        let path = pathspec.filter(|p| !p.is_empty());
-        if let Some(p) = path {
-            Self::guard_path(p)?;
+        let opts = DiffOpts {
+            path: pathspec.map(str::to_string),
+            ..DiffOpts::default()
+        };
+        self.diff_with(&target, &opts).await
+    }
+
+    /// [`Self::diff`] with the `/diff` route's knobs: `old_path` (a rename's
+    /// origin, so a per-file request still pairs the two sides), `summary`
+    /// (file list + counts from `--raw --numstat`, never the patch) and `caps`
+    /// (per-file cap + response budget, applied WHILE parsing).
+    pub async fn diff_with(&self, target: &DiffTarget, opts: &DiffOpts) -> Result<DiffResp> {
+        let paths = opts.pathspecs()?;
+        if opts.summary {
+            return self.diff_summary(target, &paths).await;
         }
+        let out = self.diff_patch_bytes(target, &paths).await?;
+        let caps = opts.caps;
+        off_runtime(out.len(), move || {
+            crate::parse::parse_diff_bytes_capped(&out, caps.as_ref())
+        })
+        .await
+    }
+
+    /// git's raw unified diff for `target`, scoped to `paths` (empty = all).
+    async fn diff_patch_bytes(&self, target: &DiffTarget, paths: &[&str]) -> Result<Vec<u8>> {
         // Every call is a [`GitCmd::diff`] — fixed output format, raw UTF-8
         // names (`core.quotePath=false`: the default octal-escaping broke
         // feeding `ls-files` names back into `--no-index`) — scoped with a
@@ -1397,26 +1693,27 @@ impl LocalGit {
         let diff = |sub: &str, extra: &[&str]| -> GitCmd {
             GitCmd::diff(sub)
                 .args(extra.iter().copied())
-                .maybe_path(path)
+                .maybe_paths(paths)
         };
-        let out: Vec<u8> = match &target {
-            DiffTarget::Worktree => self.exec_bytes(&diff("diff", &["-U3", "-M"])).await?,
+        let [m, l] = RENAMES;
+        let out: Vec<u8> = match target {
+            DiffTarget::Worktree => self.exec_bytes(&diff("diff", &["-U3", m, l])).await?,
             DiffTarget::Working => {
                 // Staged + unstaged tracked changes vs HEAD (a staged-new file
                 // shows as fully added). Falls back to cached+worktree when HEAD
                 // is unborn (no commits yet).
                 let (head_ok, head_out, _, _) = self
-                    .exec(&diff("diff", &["-U3", "-M", "HEAD"]), None)
+                    .exec(&diff("diff", &["-U3", m, l, "HEAD"]), None)
                     .await?;
                 let mut out = if head_ok {
                     head_out
                 } else {
                     let mut s = self
-                        .exec_bytes(&diff("diff", &["-U3", "-M", "--cached"]))
+                        .exec_bytes(&diff("diff", &["-U3", m, l, "--cached"]))
                         .await
                         .unwrap_or_default();
                     s.extend(
-                        self.exec_bytes(&diff("diff", &["-U3", "-M"]))
+                        self.exec_bytes(&diff("diff", &["-U3", m, l]))
                             .await
                             .unwrap_or_default(),
                     );
@@ -1424,18 +1721,13 @@ impl LocalGit {
                 };
                 // Untracked files: render each as a fully-added diff. Scope the
                 // `ls-files` to the pathspec so a single-file request only checks
-                // that one path (and runs at most one `--no-index` diff). `-z`:
-                // names arrive raw, never C-quoted.
-                let ls = GitCmd::read(&["ls-files", "-z", "--others", "--exclude-standard"])
-                    .maybe_path(path);
-                let (_, untracked, _, _) = self.exec(&ls, None).await?;
-                let untracked = String::from_utf8_lossy(&untracked).into_owned();
-                for f in nul_records(&untracked) {
+                // that one path (and runs at most one `--no-index` diff).
+                for f in self.untracked(paths).await? {
                     let (_, stdout, _, _) = self
                         .exec(
                             &GitCmd::diff("diff")
                                 .args(["-U3", "--no-index"])
-                                .paths(["/dev/null", f]),
+                                .paths(["/dev/null", f.as_str()]),
                             None,
                         )
                         .await?;
@@ -1444,7 +1736,7 @@ impl LocalGit {
                 out
             }
             DiffTarget::Staged => {
-                self.exec_bytes(&diff("diff", &["-U3", "-M", "--cached"]))
+                self.exec_bytes(&diff("diff", &["-U3", m, l, "--cached"]))
                     .await?
             }
             DiffTarget::Commit(sha) => {
@@ -1460,7 +1752,8 @@ impl LocalGit {
                         "-m",
                         "--first-parent",
                         "-U3",
-                        "-M",
+                        m,
+                        l,
                         "--format=",
                         "--end-of-options",
                         sha,
@@ -1468,13 +1761,96 @@ impl LocalGit {
                 ))
                 .await?
             }
-            DiffTarget::Range(a, b) => {
-                let range = format!("{a}..{b}");
-                self.exec_bytes(&diff("diff", &["-U3", "-M", "--end-of-options", &range]))
+            DiffTarget::Range(..) | DiffTarget::MergeBase(..) => {
+                let range = target.range_arg().unwrap_or_default();
+                self.exec_bytes(&diff("diff", &["-U3", m, l, "--end-of-options", &range]))
                     .await?
             }
         };
-        Ok(crate::parse::parse_diff_bytes(&out))
+        Ok(out)
+    }
+
+    /// The file list of a diff — status, rename origin, binary flag and line
+    /// counts from ONE `--raw --numstat -z` pass (plus `ls-files` for the
+    /// untracked side of `Working`). git still computes the changes but never
+    /// renders or ships a patch: ~40–100 KB for a 100k-line branch instead of
+    /// 15–30 MB. Every file comes back `hunks: []`, `hunks_omitted: true`.
+    async fn diff_summary(&self, target: &DiffTarget, paths: &[&str]) -> Result<DiffResp> {
+        let [m, l] = RENAMES;
+        let stat = |sub: &str, extra: &[&str]| -> GitCmd {
+            GitCmd::diff(sub)
+                .args(["--raw", "--numstat", "-z", m, l])
+                .args(extra.iter().copied())
+                .maybe_paths(paths)
+        };
+        let mut untracked = Vec::new();
+        let out: Vec<u8> = match target {
+            DiffTarget::Worktree => self.exec_bytes(&stat("diff", &[])).await?,
+            DiffTarget::Staged => self.exec_bytes(&stat("diff", &["--cached"])).await?,
+            DiffTarget::Working => {
+                let (head_ok, head_out, _, _) = self.exec(&stat("diff", &["HEAD"]), None).await?;
+                untracked = self.untracked(paths).await?;
+                if head_ok {
+                    head_out
+                } else {
+                    let mut s = self
+                        .exec_bytes(&stat("diff", &["--cached"]))
+                        .await
+                        .unwrap_or_default();
+                    s.extend(self.exec_bytes(&stat("diff", &[])).await.unwrap_or_default());
+                    s
+                }
+            }
+            DiffTarget::Commit(sha) => {
+                self.exec_bytes(&stat(
+                    "show",
+                    &["-m", "--first-parent", "--format=", "--end-of-options", sha],
+                ))
+                .await?
+            }
+            DiffTarget::Range(..) | DiffTarget::MergeBase(..) => {
+                let range = target.range_arg().unwrap_or_default();
+                self.exec_bytes(&stat("diff", &["--end-of-options", &range]))
+                    .await?
+            }
+        };
+        let mut resp = crate::parse::parse_raw_numstat(&out);
+        if !untracked.is_empty() {
+            let root = self.repo_path.clone();
+            let extra = off_runtime(usize::MAX, move || untracked_summary(&root, &untracked)).await?;
+            resp.files.extend(extra);
+            crate::parse::fill_totals(&mut resp);
+        }
+        Ok(resp)
+    }
+
+    /// Untracked (not ignored) files, optionally limited to `paths`. `-z`:
+    /// names arrive raw, never C-quoted.
+    async fn untracked(&self, paths: &[&str]) -> Result<Vec<String>> {
+        let ls = GitCmd::read(&["ls-files", "-z", "--others", "--exclude-standard"])
+            .maybe_paths(paths);
+        let (_, out, _, _) = self.exec(&ls, None).await?;
+        let out = String::from_utf8_lossy(&out);
+        Ok(nul_records(&out).map(str::to_string).collect())
+    }
+
+    /// Resolve a caller's rev to its full commit id — the cache key of an
+    /// immutable diff. A full-length hex id is taken as-is (git reads it as an
+    /// object name, never a ref); anything else costs one `rev-parse`.
+    pub async fn resolve_commit(&self, rev: &str) -> Result<String> {
+        Self::guard_ref(rev)?;
+        if is_full_oid(rev) {
+            return Ok(rev.to_ascii_lowercase());
+        }
+        let spec = format!("{rev}^{{commit}}");
+        let out = self
+            .run_read(&["rev-parse", "--verify", "--end-of-options", &spec])
+            .await?;
+        let oid = out.trim();
+        if !is_full_oid(oid) {
+            return Err(Error::Invalid(format!("not a commit: {rev}")));
+        }
+        Ok(oid.to_string())
     }
 
     /// Run `git diff <base>` — diffs the working tree (staged + unstaged)
@@ -1669,7 +2045,7 @@ impl LocalGit {
             return Err(Error::Invalid("no paths to stage".into()));
         }
         Self::guard_paths(paths)?;
-        self.exec_locked(&GitCmd::write(&["add"]).paths(paths))
+        self.exec_locked(&GitCmd::write(&["add"]).paths_stdin(paths))
             .await
     }
 
@@ -1679,8 +2055,11 @@ impl LocalGit {
         }
         Self::guard_paths(paths)?;
         let mut expanded = paths.to_vec();
+        // A set, and the cheap kind test first: `paths.contains` per change
+        // was O(paths × changes) — 400M compares for "Unstage all" at 20k.
+        let want: std::collections::HashSet<&str> = paths.iter().map(String::as_str).collect();
         for change in self.status().await?.changes {
-            if paths.contains(&change.path) && change.kind == "renamed" {
+            if change.kind == "renamed" && want.contains(change.path.as_str()) {
                 if let Some(original) = change.orig_path {
                     expanded.push(original);
                 }
@@ -1696,7 +2075,7 @@ impl LocalGit {
         } else {
             GitCmd::write(&["reset", "-q"])
         };
-        self.exec_locked(&cmd.paths(&expanded)).await
+        self.exec_locked(&cmd.paths_stdin(&expanded)).await
     }
 
     /// True once HEAD resolves to a commit (false on an unborn branch).
@@ -1756,7 +2135,7 @@ impl LocalGit {
         if !restore.is_empty() {
             self.exec_locked(
                 &GitCmd::write(&["restore", "--staged", "--worktree", "--source=HEAD"])
-                    .paths(&restore),
+                    .paths_stdin(&restore),
             )
             .await?;
         }
@@ -1764,10 +2143,13 @@ impl LocalGit {
             // Unstage first (a staged-new file → untracked), then `clean` removes
             // the untracked files/dirs. `reset` is a no-op for already-untracked.
             let _ = self
-                .exec_locked(&GitCmd::write(&["reset", "-q"]).paths(&remove))
+                .exec_locked(&GitCmd::write(&["reset", "-q"]).paths_stdin(&remove))
                 .await;
-            self.exec_locked(&GitCmd::write(&["clean", "-fdq"]).paths(&remove))
-                .await?;
+            // `clean` has no `--pathspec-from-file`: bounded argv batches.
+            for batch in argv_batches(&remove, CLEAN_ARGV_BYTES) {
+                self.exec_locked(&GitCmd::write(&["clean", "-fdq"]).paths(batch))
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -5672,6 +6054,45 @@ mod tests {
         git.stage(&["app/[id]/page.tsx".into()]).await.unwrap();
         let staged = git.run(&["diff", "--cached", "--name-only"]).await.unwrap();
         assert_eq!(staged.trim(), "app/[id]/page.tsx");
+    }
+
+    /// SH-08: "Stage all" / "Unstage all" / "Discard all" over a list whose
+    /// argv would exceed ARG_MAX (1 MB on macOS; ~1.3 MB here) — the names go
+    /// over stdin (`clean` in bounded argv batches) instead of dying E2BIG.
+    #[tokio::test]
+    async fn stage_unstage_discard_a_path_list_past_arg_max() {
+        let (_tmp, dir) = fixture_on_branch("main");
+        let pad = "x".repeat(90);
+        let paths: Vec<String> = (0..14_000)
+            .map(|i| format!("gen/{:02}/{pad}_{i:05}.txt", i % 50))
+            .collect();
+        for p in &paths {
+            write(&dir, p, "g\n");
+        }
+        assert!(paths.iter().map(|p| p.len() + 1).sum::<usize>() > 1 << 20);
+        let git = LocalGit::new(&dir);
+
+        git.stage(&paths).await.unwrap();
+        let staged = git.run(&["diff", "--cached", "--name-only", "-z"]).await.unwrap();
+        assert_eq!(nul_records(&staged).count(), paths.len());
+
+        git.unstage(&paths).await.unwrap();
+        let staged = git.run(&["diff", "--cached", "--name-only", "-z"]).await.unwrap();
+        assert_eq!(nul_records(&staged).count(), 0);
+
+        git.discard(&paths).await.unwrap();
+        assert!(paths.iter().all(|p| !dir.join(p).exists()), "every untracked file cleaned");
+    }
+
+    #[test]
+    fn argv_batches_split_by_bytes_and_keep_order() {
+        let paths: Vec<String> = ["aaaa", "bb", "cccccc", "d"].iter().map(|s| s.to_string()).collect();
+        let b = argv_batches(&paths, 8);
+        assert_eq!(b, vec![&paths[0..2], &paths[2..3], &paths[3..4]]);
+        // A single name over the budget still gets a batch of its own.
+        let b = argv_batches(&paths, 2);
+        assert_eq!(b.len(), 4);
+        assert!(argv_batches(&[], 8).is_empty());
     }
 
     /// G-3: status is read with `-z`, so a non-ASCII or `"`-carrying name is

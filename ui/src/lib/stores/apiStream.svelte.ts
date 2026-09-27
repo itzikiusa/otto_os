@@ -34,13 +34,23 @@ interface DaemonMsg {
 
 class ApiStreamStore {
   status: StreamStatus = $state('idle');
-  items: StreamItem[] = $state([]);
+  /** The console's messages, oldest first — a snapshot of the ring, replaced
+   *  (never mutated) at most once per animation frame. */
+  items: StreamItem[] = $state.raw([]);
   error = $state('');
   dropped = $state(0);
   workspaceId = $state('');
   mode: 'sse' | 'websocket' = $state('sse');
 
   private ws: WebSocket | null = null;
+  // Plain ring (not reactive): live entries are ring[head..]. A 1,000/s stream
+  // used to copy + re-sum the whole 1,000-entry array and flush reactivity per
+  // message; now a message is O(1) and the view updates once per frame.
+  private ring: StreamItem[] = [];
+  private head = 0;
+  private bytes = 0;
+  private pendingDrops = 0;
+  private flushQueued = false;
   /** The last `connect` call — replayed once with `confirm_new_host` when the
    *  daemon refuses to send a stored secret to an unbound host and the person
    *  confirms. */
@@ -53,8 +63,7 @@ class ApiStreamStore {
   /** Open a streaming connection of the given kind. */
   connect(workspaceId: string, kind: 'sse' | 'websocket', request: ExecuteApiReq): void {
     this.disconnect();
-    this.items = [];
-    this.dropped = 0;
+    this.reset();
     this.workspaceId = workspaceId;
     this.error = '';
     this.mode = kind;
@@ -138,6 +147,14 @@ class ApiStreamStore {
   }
 
   clear(): void {
+    this.reset();
+  }
+
+  private reset(): void {
+    this.ring = [];
+    this.head = 0;
+    this.bytes = 0;
+    this.pendingDrops = 0;
     this.items = [];
     this.dropped = 0;
   }
@@ -160,12 +177,41 @@ class ApiStreamStore {
   }
 
   private push(item: Omit<StreamItem, 't'>): void {
-    const next = [...this.items, { t: Date.now(), ...item, data: item.data.slice(0, 64 * 1024) }];
-    let bytes = next.reduce((n, entry) => n + entry.data.length, 0);
-    while (next.length > 1000 || bytes > 4 * 1024 * 1024) {
-      bytes -= next.shift()!.data.length; this.dropped++;
+    const entry: StreamItem = { t: Date.now(), ...item, data: item.data.slice(0, 64 * 1024) };
+    this.ring.push(entry);
+    this.bytes += entry.data.length;
+    while (this.ring.length - this.head > 1 && (this.ring.length - this.head > 1000 || this.bytes > 4 * 1024 * 1024)) {
+      this.bytes -= this.ring[this.head].data.length;
+      this.head++;
+      this.pendingDrops++;
     }
-    this.items = next;
+    // Compact once the dead prefix dominates (amortised O(1) per message).
+    if (this.head > 1024 && this.head * 2 > this.ring.length) {
+      this.ring = this.ring.slice(this.head);
+      this.head = 0;
+    }
+    this.scheduleFlush();
+  }
+
+  private scheduleFlush(): void {
+    if (typeof requestAnimationFrame !== 'function') {
+      this.flush();
+      return;
+    }
+    if (this.flushQueued) return;
+    this.flushQueued = true;
+    requestAnimationFrame(() => {
+      this.flushQueued = false;
+      this.flush();
+    });
+  }
+
+  private flush(): void {
+    this.items = this.ring.slice(this.head);
+    if (this.pendingDrops) {
+      this.dropped += this.pendingDrops;
+      this.pendingDrops = 0;
+    }
   }
 
   private handle(msg: DaemonMsg): void {

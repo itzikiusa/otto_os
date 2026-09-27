@@ -41,6 +41,10 @@ const MAX_SCAN_WITH_FILTER: usize = 50_000;
 /// threads — a few hundred partitions over a slow/tunnelled link complete in a
 /// couple of round-trip batches instead of one-by-one (minutes).
 pub const WATERMARK_WORKERS: usize = 16;
+/// Raw key+value byte budget for one viewer peek (the response is ~1.3–2×
+/// this once decoded/escaped). Hitting it ends the peek early with
+/// `truncated = true`. Replay reads are unbounded (they must copy everything).
+pub const MAX_CONSUME_BYTES: usize = 16 * 1024 * 1024;
 
 fn kerr(e: KafkaError) -> Error {
     Error::Upstream(format!("kafka: {e}"))
@@ -107,6 +111,59 @@ pub struct KafkaClient {
     consumer: BaseConsumer<QuietContext>,
     producer: FutureProducer,
     base_config: ClientConfig,
+    /// Idle pooled peek consumer (manual assignment, never commits). A peek
+    /// takes it (or builds a fresh one when another peek holds it) and puts it
+    /// back unassigned — one client per cluster instead of a new
+    /// bootstrap/TLS/SASL handshake on every peek or live-tail tick.
+    peek_pool: std::sync::Mutex<Option<BaseConsumer<QuietContext>>>,
+}
+
+/// A leased peek consumer; unassigns and returns it to the pool on drop.
+struct PeekLease<'a> {
+    pool: &'a std::sync::Mutex<Option<BaseConsumer<QuietContext>>>,
+    consumer: Option<BaseConsumer<QuietContext>>,
+}
+
+impl PeekLease<'_> {
+    fn consumer(&self) -> &BaseConsumer<QuietContext> {
+        self.consumer
+            .as_ref()
+            .expect("lease holds a consumer until drop")
+    }
+}
+
+impl Drop for PeekLease<'_> {
+    fn drop(&mut self) {
+        let Some(c) = self.consumer.take() else {
+            return;
+        };
+        // Only a cleanly unassigned consumer goes back; otherwise drop it.
+        if c.unassign().is_ok() {
+            let mut slot = self.pool.lock().unwrap_or_else(|p| p.into_inner());
+            if slot.is_none() {
+                *slot = Some(c);
+            }
+        }
+    }
+}
+
+/// Split a "Latest N" peek over partitions (`(partition, available)`), water-
+/// filling so partitions with fewer messages than their share hand the rest to
+/// the others. The takes sum to `min(n, Σ available)`.
+fn latest_split(parts: &[(i32, i64)], n: i64) -> HashMap<i32, i64> {
+    let mut order: Vec<(i32, i64)> = parts.to_vec();
+    order.sort_by_key(|&(_, avail)| avail);
+    let mut remaining = n.max(0);
+    let mut out = HashMap::with_capacity(order.len());
+    let len = order.len() as i64;
+    for (i, (p, avail)) in order.into_iter().enumerate() {
+        let left = len - i as i64;
+        let share = (remaining + left - 1) / left; // ceil
+        let take = avail.min(share).max(0);
+        remaining -= take;
+        out.insert(p, take);
+    }
+    out
 }
 
 fn build_config(spec: &KafkaConnSpec) -> ClientConfig {
@@ -180,6 +237,36 @@ impl KafkaClient {
             consumer,
             producer,
             base_config: base,
+            peek_pool: std::sync::Mutex::new(None),
+        })
+    }
+
+    /// Lease the pooled peek consumer, or build a fresh one if it's in use.
+    fn peek_lease(&self) -> Result<PeekLease<'_>> {
+        let pooled = self
+            .peek_pool
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+        let consumer = match pooled {
+            Some(c) => c,
+            None => {
+                let mut cfg = self.base_config.clone();
+                cfg.set("group.id", format!("otto-peek-{}", peek_suffix("pool")));
+                cfg.set("enable.auto.commit", "false");
+                cfg.set("enable.partition.eof", "true");
+                // Bound librdkafka's prefetch: a peek returns ≤ MAX_CONSUME_BYTES,
+                // but the defaults queue up to 64 MB per partition.
+                cfg.set("queued.max.messages.kbytes", "8192");
+                cfg.set("queued.min.messages", "1000");
+                cfg.set("fetch.max.bytes", "8388608");
+                cfg.set("max.partition.fetch.bytes", "1048576");
+                cfg.create_with_context(QuietContext).map_err(kerr)?
+            }
+        };
+        Ok(PeekLease {
+            pool: &self.peek_pool,
+            consumer: Some(consumer),
         })
     }
 
@@ -302,13 +389,97 @@ impl KafkaClient {
         Ok(out)
     }
 
+    /// `(low, high)` watermarks for many partitions in TWO batched ListOffsets
+    /// passes (`offsets_for_times` with the special timestamps `-2` earliest /
+    /// `-1` latest — the same queries `fetch_watermarks` sends, but grouped per
+    /// leader broker by librdkafka). A 12k-partition cluster costs ~2 × brokers
+    /// requests instead of ~24k serial round-trips. Partitions the batch could
+    /// not resolve (leaderless, per-partition error, or the whole batch failing)
+    /// fall back to the per-partition fan-out. Missing entries = unreachable.
+    pub fn batch_watermarks(&self, parts: &[(&str, i32)]) -> HashMap<(String, i32), (i64, i64)> {
+        let mut out: HashMap<(String, i32), (i64, i64)> = HashMap::with_capacity(parts.len());
+        if parts.is_empty() {
+            return out;
+        }
+        let query = |which: Offset| -> HashMap<(String, i32), i64> {
+            let mut tpl = TopicPartitionList::with_capacity(parts.len());
+            for &(t, p) in parts {
+                if tpl.add_partition_offset(t, p, which).is_err() {
+                    return HashMap::new();
+                }
+            }
+            match self.consumer.offsets_for_times(tpl, WATERMARK_TIMEOUT) {
+                Ok(res) => res
+                    .elements()
+                    .iter()
+                    .filter(|e| e.error().is_ok())
+                    .filter_map(|e| match e.offset() {
+                        Offset::Offset(o) if o >= 0 => {
+                            Some(((e.topic().to_string(), e.partition()), o))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                Err(_) => HashMap::new(),
+            }
+        };
+        // Both passes in parallel (each is already batched per leader).
+        let (lows, highs) = std::thread::scope(|s| {
+            let lo = s.spawn(|| query(Offset::Beginning));
+            let hi = query(Offset::End);
+            (lo.join().unwrap_or_default(), hi)
+        });
+        let mut missing: Vec<(&str, i32)> = Vec::new();
+        for &(t, p) in parts {
+            let k = (t.to_string(), p);
+            match (lows.get(&k), highs.get(&k)) {
+                (Some(&lo), Some(&hi)) => {
+                    out.insert(k, (lo, hi));
+                }
+                _ => missing.push((t, p)),
+            }
+        }
+        if !missing.is_empty() {
+            for (k, v) in self.fanout_watermarks(&missing) {
+                out.insert(k, v);
+            }
+        }
+        out
+    }
+
+    /// Per-partition `fetch_watermarks` fanned across `WATERMARK_WORKERS`
+    /// threads — the fallback for partitions the batched pass didn't resolve.
+    fn fanout_watermarks(&self, parts: &[(&str, i32)]) -> Vec<((String, i32), (i64, i64))> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let results = std::sync::Mutex::new(Vec::with_capacity(parts.len()));
+        let next = AtomicUsize::new(0);
+        let workers = WATERMARK_WORKERS.min(parts.len()).max(1);
+        std::thread::scope(|s| {
+            for _ in 0..workers {
+                s.spawn(|| loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(&(topic, partition)) = parts.get(i) else {
+                        break;
+                    };
+                    if let Ok(w) =
+                        self.consumer
+                            .fetch_watermarks(topic, partition, WATERMARK_TIMEOUT)
+                    {
+                        results
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .push(((topic.to_string(), partition), w));
+                    }
+                });
+            }
+        });
+        results.into_inner().unwrap_or_else(|p| p.into_inner())
+    }
+
     /// Total message count across all non-internal partitions (drives the
-    /// throughput sampler). One metadata pass, then the per-partition watermark
-    /// queries are fanned across worker threads (sharing the thread-safe
-    /// consumer) so a large or slow/tunnelled cluster completes in a couple of
-    /// parallel batches rather than hundreds of sequential round-trips.
+    /// throughput sampler). One metadata pass, then ONE batched watermark pass
+    /// (see [`Self::batch_watermarks`]).
     pub fn total_messages(&self) -> Result<i64> {
-        use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
         let md = self
             .consumer
             .fetch_metadata(None, META_TIMEOUT)
@@ -322,26 +493,36 @@ impl KafkaClient {
         if targets.is_empty() {
             return Ok(0);
         }
-        let total = AtomicI64::new(0);
-        let next = AtomicUsize::new(0);
-        let workers = WATERMARK_WORKERS.min(targets.len());
-        std::thread::scope(|s| {
-            for _ in 0..workers {
-                s.spawn(|| loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(&(topic, partition)) = targets.get(i) else {
-                        break;
-                    };
-                    if let Ok((low, high)) =
-                        self.consumer
-                            .fetch_watermarks(topic, partition, WATERMARK_TIMEOUT)
-                    {
-                        total.fetch_add((high - low).max(0), Ordering::Relaxed);
-                    }
-                });
-            }
-        });
-        Ok(total.load(Ordering::Relaxed))
+        Ok(self
+            .batch_watermarks(&targets)
+            .values()
+            .map(|&(low, high)| (high - low).max(0))
+            .sum())
+    }
+
+    /// Message counts for many topics: one metadata pass plus one batched
+    /// watermark pass for all their partitions (the Topics tab's 50-row page).
+    /// A topic missing from metadata, or with no resolvable partition, maps to
+    /// `-1` ("count unavailable").
+    pub fn topics_message_counts(&self, topics: &[String]) -> Result<HashMap<String, i64>> {
+        let md = self
+            .consumer
+            .fetch_metadata(None, META_TIMEOUT)
+            .map_err(kerr)?;
+        let wanted: HashSet<&str> = topics.iter().map(String::as_str).collect();
+        let targets: Vec<(&str, i32)> = md
+            .topics()
+            .iter()
+            .filter(|t| wanted.contains(t.name()))
+            .flat_map(|t| t.partitions().iter().map(move |p| (t.name(), p.id())))
+            .collect();
+        let wm = self.batch_watermarks(&targets);
+        let mut out: HashMap<String, i64> = topics.iter().map(|t| (t.clone(), -1)).collect();
+        for ((t, _), (low, high)) in wm {
+            let e = out.entry(t).or_insert(-1);
+            *e = (*e).max(0) + (high - low).max(0);
+        }
+        Ok(out)
     }
 
     /// Cheap message count for a single topic (sum of `high-low` watermarks
@@ -356,16 +537,12 @@ impl KafkaClient {
             .iter()
             .find(|t| t.name() == topic)
             .ok_or_else(|| Error::NotFound(format!("topic {topic}")))?;
-        let mut total = 0i64;
-        for p in mt.partitions() {
-            if let Ok((low, high)) =
-                self.consumer
-                    .fetch_watermarks(topic, p.id(), WATERMARK_TIMEOUT)
-            {
-                total += (high - low).max(0);
-            }
-        }
-        Ok(total)
+        let targets: Vec<(&str, i32)> = mt.partitions().iter().map(|p| (topic, p.id())).collect();
+        Ok(self
+            .batch_watermarks(&targets)
+            .values()
+            .map(|&(low, high)| (high - low).max(0))
+            .sum())
     }
 
     /// Partitions + watermarks for a topic (the async `topic_configs` is fetched
@@ -383,12 +560,14 @@ impl KafkaClient {
         if mt.partitions().is_empty() {
             return Err(Error::NotFound(format!("topic {topic}")));
         }
+        let targets: Vec<(&str, i32)> = mt.partitions().iter().map(|p| (topic, p.id())).collect();
+        let wm = self.batch_watermarks(&targets);
         let mut partitions = Vec::new();
         let mut total = 0i64;
         for p in mt.partitions() {
-            let (low, high) = self
-                .consumer
-                .fetch_watermarks(topic, p.id(), WATERMARK_TIMEOUT)
+            let (low, high) = wm
+                .get(&(topic.to_string(), p.id()))
+                .copied()
                 .unwrap_or((0, 0));
             let count = (high - low).max(0);
             total += count;
@@ -406,9 +585,23 @@ impl KafkaClient {
         Ok((partitions, total))
     }
 
-    /// Peek raw messages. Creates a throwaway assigned consumer for clean offset
-    /// control; never commits.
+    /// Peek raw messages with the pooled, manually-assigned consumer; never
+    /// commits. Unbounded bytes (replay produces everything it reads).
     pub fn consume_raw(&self, topic: &str, req: &ConsumeReq) -> Result<RawConsume> {
+        self.consume_raw_from(topic, req, None, None)
+    }
+
+    /// [`Self::consume_raw`] with viewer options: `starts` consumes ONLY those
+    /// partitions, each from its own offset (the live tail's single request),
+    /// and `byte_budget` ends the peek early (`truncated`) once the raw
+    /// key+value bytes reach it.
+    pub fn consume_raw_from(
+        &self,
+        topic: &str,
+        req: &ConsumeReq,
+        starts: Option<&HashMap<i32, i64>>,
+        byte_budget: Option<usize>,
+    ) -> Result<RawConsume> {
         let md = self
             .consumer
             .fetch_metadata(Some(topic), META_TIMEOUT)
@@ -419,29 +612,38 @@ impl KafkaClient {
             .find(|t| t.name() == topic)
             .ok_or_else(|| Error::NotFound(format!("topic {topic}")))?;
         let all: Vec<i32> = mt.partitions().iter().map(|p| p.id()).collect();
-        let parts: Vec<i32> = match req.partition {
-            Some(p) if all.contains(&p) => vec![p],
-            Some(p) => return Err(Error::Invalid(format!("partition {p} not in topic"))),
-            None => all,
+        let parts: Vec<i32> = match (starts, req.partition) {
+            (Some(st), _) => {
+                let mut v: Vec<i32> = all.iter().copied().filter(|p| st.contains_key(p)).collect();
+                v.sort_unstable();
+                v
+            }
+            (None, Some(p)) if all.contains(&p) => vec![p],
+            (None, Some(p)) => return Err(Error::Invalid(format!("partition {p} not in topic"))),
+            (None, None) => all,
         };
+        if parts.is_empty() {
+            return Ok(RawConsume {
+                messages: Vec::new(),
+                partitions: Vec::new(),
+                truncated: false,
+            });
+        }
         let limit = req.limit.clamp(1, 5000);
 
-        // Fresh consumer for an isolated assignment.
-        let mut cfg = self.base_config.clone();
-        cfg.set("group.id", format!("otto-peek-{}", peek_suffix(topic)));
-        cfg.set("enable.auto.commit", "false");
-        cfg.set("enable.partition.eof", "true");
-        let consumer: BaseConsumer<QuietContext> =
-            cfg.create_with_context(QuietContext).map_err(kerr)?;
+        // Pooled peek consumer (one bootstrap/TLS/SASL handshake per cluster,
+        // not per peek); returned to the pool on every exit path by the guard.
+        let lease = self.peek_lease()?;
+        let consumer = lease.consumer();
 
-        // Watermarks per partition.
+        // Watermarks per partition — one batched pass on the metadata consumer.
+        let targets: Vec<(&str, i32)> = parts.iter().map(|&p| (topic, p)).collect();
+        let wm = self.batch_watermarks(&targets);
         let mut ranges = Vec::new();
         let mut high_of: HashMap<i32, i64> = HashMap::new();
         let mut low_of: HashMap<i32, i64> = HashMap::new();
         for &p in &parts {
-            let (low, high) = consumer
-                .fetch_watermarks(topic, p, WATERMARK_TIMEOUT)
-                .unwrap_or((0, 0));
+            let (low, high) = wm.get(&(topic.to_string(), p)).copied().unwrap_or((0, 0));
             ranges.push(PartitionRange {
                 partition: p,
                 low,
@@ -487,17 +689,38 @@ impl KafkaClient {
             req.start
         };
 
+        // "Latest N" across partitions: split N over the partitions (water-fill,
+        // so short partitions hand their unused share to busy ones). Starting
+        // every partition at `high - N` assigned up to N × partitions messages
+        // (prefetching ~64 MB+ to return 50) and returned whichever arrived
+        // first, not the latest.
+        let latest_take = latest_split(
+            &parts
+                .iter()
+                .map(|&p| (p, (high_of[&p] - low_of[&p]).max(0)))
+                .collect::<Vec<_>>(),
+            limit as i64,
+        );
+
         // Build the assignment with per-partition start offsets.
         let mut tpl = TopicPartitionList::new();
         let mut expected = 0i64;
         for &p in &parts {
             let low = low_of[&p];
             let high = high_of[&p];
-            let start = match effective_start {
-                StartPosition::Beginning => low,
-                StartPosition::Latest => (high - limit as i64).max(low),
-                StartPosition::Offset { offset } => offset.clamp(low, high),
-                StartPosition::Timestamp { .. } => ts_starts.get(&p).copied().unwrap_or(low),
+            let explicit = starts
+                .and_then(|st| st.get(&p))
+                .map(|&o| o.clamp(low, high));
+            let start = match (explicit, effective_start) {
+                (Some(o), _) => o,
+                (None, StartPosition::Beginning) => low,
+                (None, StartPosition::Latest) => {
+                    (high - latest_take.get(&p).copied().unwrap_or(0)).max(low)
+                }
+                (None, StartPosition::Offset { offset }) => offset.clamp(low, high),
+                (None, StartPosition::Timestamp { .. }) => {
+                    ts_starts.get(&p).copied().unwrap_or(low)
+                }
             };
             expected += (high - start).max(0);
             tpl.add_partition_offset(topic, p, Offset::Offset(start))
@@ -530,6 +753,18 @@ impl KafkaClient {
         let deadline = Instant::now() + Duration::from_millis(req.max_wait_ms.unwrap_or(5000));
         let mut done: HashSet<i32> = HashSet::new();
         let mut scanned = 0usize;
+        // Response byte budget: stop (and flag `truncated`) once the raw
+        // key+value bytes reach it — 5000 × MB-sized payloads is GBs of JSON.
+        let mut bytes = 0usize;
+        let mut over_budget = false;
+        let start_of: HashMap<i32, i64> = tpl
+            .elements()
+            .iter()
+            .filter_map(|e| match e.offset() {
+                Offset::Offset(o) => Some((e.partition(), o)),
+                _ => None,
+            })
+            .collect();
         while messages.len() < want
             && scanned < raw_cap
             && Instant::now() < deadline
@@ -539,6 +774,11 @@ impl KafkaClient {
                 Some(Ok(m)) => {
                     let part = m.partition();
                     let offset = m.offset();
+                    // Defensive with a pooled consumer: ignore anything that
+                    // isn't from this assignment (stale prefetch).
+                    if m.topic() != topic || start_of.get(&part).is_none_or(|&s| offset < s) {
+                        continue;
+                    }
                     scanned += 1;
 
                     // Server-side key filter: evaluate against raw bytes before
@@ -570,6 +810,7 @@ impl KafkaClient {
                     let key = m.key().map(|k| k.to_vec());
                     let value = m.payload().map(|v| v.to_vec());
                     let size = m.key_len() + m.payload_len();
+                    bytes += size;
                     messages.push(RawMessage {
                         partition: part,
                         offset,
@@ -581,6 +822,10 @@ impl KafkaClient {
                     });
                     if offset + 1 >= high_of.get(&part).copied().unwrap_or(i64::MAX) {
                         done.insert(part);
+                    }
+                    if byte_budget.is_some_and(|b| bytes >= b) {
+                        over_budget = true;
+                        break;
                     }
                 }
                 Some(Err(KafkaError::PartitionEOF(p))) => {
@@ -594,7 +839,8 @@ impl KafkaClient {
                 }
             }
         }
-        let truncated = (messages.len() as i64) < expected && messages.len() >= want;
+        let truncated =
+            over_budget || ((messages.len() as i64) < expected && messages.len() >= want);
         messages.sort_by(|a, b| a.partition.cmp(&b.partition).then(a.offset.cmp(&b.offset)));
         Ok(RawConsume {
             messages,
@@ -671,6 +917,16 @@ impl KafkaClient {
             .committed_offsets(tpl, GROUP_TIMEOUT)
             .map_err(kerr)?;
 
+        // High watermarks for every committed partition in one batched pass
+        // (was one serial ListOffsets pair per partition — ~60 s for a
+        // 600-partition group over a tunnel).
+        let committed_elems = committed.elements();
+        let committed_parts: Vec<(&str, i32)> = committed_elems
+            .iter()
+            .filter(|e| matches!(e.offset(), Offset::Offset(o) if o >= 0))
+            .map(|e| (e.topic(), e.partition()))
+            .collect();
+        let wm = self.batch_watermarks(&committed_parts);
         let mut offsets = Vec::new();
         let mut total_lag = 0i64;
         for e in committed.elements() {
@@ -678,10 +934,9 @@ impl KafkaClient {
                 Offset::Offset(o) if o >= 0 => o,
                 _ => continue,
             };
-            let high = self
-                .consumer
-                .fetch_watermarks(e.topic(), e.partition(), WATERMARK_TIMEOUT)
-                .map(|(_, h)| h)
+            let high = wm
+                .get(&(e.topic().to_string(), e.partition()))
+                .map(|&(_, h)| h)
                 .unwrap_or(current);
             let lag = (high - current).max(0);
             total_lag += lag;
@@ -832,6 +1087,39 @@ impl KafkaClient {
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
+    }
+
+    /// `cleanup.policy` for many topics in ONE DescribeConfigs request (was one
+    /// admin round-trip per topic, serially). Topics the broker refused
+    /// (e.g. no DESCRIBE_CONFIGS) are simply absent; a whole-request failure is
+    /// an empty map — the policy column is best-effort.
+    pub async fn topics_cleanup_policy(
+        &self,
+        topics: &[String],
+    ) -> HashMap<String, Option<String>> {
+        if topics.is_empty() {
+            return HashMap::new();
+        }
+        let opts = AdminOptions::new().request_timeout(Some(Duration::from_secs(15)));
+        let specs: Vec<ResourceSpecifier<'_>> = topics
+            .iter()
+            .map(|t| ResourceSpecifier::Topic(t.as_str()))
+            .collect();
+        let Ok(res) = self.admin.describe_configs(specs.iter(), &opts).await else {
+            return HashMap::new();
+        };
+        let mut out = HashMap::with_capacity(topics.len());
+        for cr in res.into_iter().flatten() {
+            if let rdkafka::admin::OwnedResourceSpecifier::Topic(name) = &cr.specifier {
+                let policy = cr
+                    .entries
+                    .iter()
+                    .find(|e| e.name == "cleanup.policy")
+                    .and_then(|e| e.value.clone());
+                out.insert(name.clone(), policy);
+            }
+        }
+        out
     }
 
     /// Safe topic config update: merge the requested keys over the existing
@@ -1007,6 +1295,29 @@ impl<'a> ByteReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn latest_split_water_fills() {
+        // Even split when every partition has plenty.
+        let m = latest_split(&[(0, 100), (1, 100), (2, 100)], 30);
+        assert_eq!((m[&0], m[&1], m[&2]), (10, 10, 10));
+        // A short partition hands its unused share to the busy ones.
+        let m = latest_split(&[(0, 2), (1, 100), (2, 100)], 30);
+        assert_eq!(m[&0], 2);
+        assert_eq!(m[&1] + m[&2], 28);
+        // Never more than available; the total never exceeds N.
+        let m = latest_split(&[(0, 3), (1, 0)], 50);
+        assert_eq!((m[&0], m[&1]), (3, 0));
+        let m = latest_split(
+            &[(0, 1000); 1]
+                .iter()
+                .copied()
+                .chain((1..100).map(|p| (p, 1000)))
+                .collect::<Vec<_>>(),
+            50,
+        );
+        assert_eq!(m.values().sum::<i64>(), 50);
+    }
 
     #[test]
     fn internal_topic_detection() {

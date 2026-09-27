@@ -250,9 +250,14 @@ pub async fn run_session_turn_with(
     // at the exact instant our prompt is seen as the latest user turn (below), so a
     // stray reply to an empty submit is already counted and can't be mistaken for
     // THIS turn's result.
-    let mut baseline = transcript_path(provider, &cwd_canon, psid.as_deref(), provider_home.as_deref())
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .map(|c| otto_orchestrator::claude_pty::completed_turn_count(&c))
+    let tpath = transcript_path(provider, &cwd_canon, psid.as_deref(), provider_home.as_deref());
+    // Every transcript read below is incremental (only the bytes appended since
+    // the previous poll) and off the runtime: a resumed session's transcript
+    // can be tens of MB, and it used to be read + parsed whole every second.
+    let mut tail = tpath.clone().map(crate::turn_oracle::ClaudeTail::new);
+    let mut baseline = crate::turn_oracle::poll_claude_tail(&mut tail)
+        .await
+        .map(|s| s.completed_turns)
         .unwrap_or(0);
 
     if can_confirm {
@@ -261,17 +266,16 @@ pub async fn run_session_turn_with(
         let mut attempts: u32 = 1;
         let mut entered = false;
         loop {
-            if let Some(path) = transcript_path(provider, &cwd_canon, psid.as_deref(), provider_home.as_deref()) {
-                if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                    if let Some(err) = otto_orchestrator::claude_pty::transcript_api_error(&content)
-                    {
-                        return Err(ApiError(Error::Upstream(format!("agent error: {err}"))));
-                    }
-                    if prompt_entered(&content, &needle) {
-                        baseline = otto_orchestrator::claude_pty::completed_turn_count(&content);
-                        entered = true;
-                        break;
-                    }
+            // `transcript_api_error` / `last_user_text` / `completed_turn_count`
+            // of the whole file, from the incremental scan.
+            if let Some(scan) = crate::turn_oracle::poll_claude_tail(&mut tail).await {
+                if let Some(err) = scan.api_error {
+                    return Err(ApiError(Error::Upstream(format!("agent error: {err}"))));
+                }
+                if user_text_has(scan.last_user_text.as_deref(), &needle) {
+                    baseline = scan.completed_turns;
+                    entered = true;
+                    break;
                 }
             }
             match ctx.manager.live_handle(&sid) {
@@ -313,6 +317,8 @@ pub async fn run_session_turn_with(
     //     `end_turn` while sub-agents are still working is not completion (see
     //     `turn_oracle`). Every other caller keeps the legacy channels below.
     if opts.oracle {
+        // The oracle keeps reading through the same incremental reader (it is
+        // already past everything up to the prompt).
         let text = oracle_watch(
             ctx,
             &sid,
@@ -323,6 +329,7 @@ pub async fn run_session_turn_with(
             &mut opts,
             baseline,
             deadline,
+            tail,
         )
         .await?;
         return Ok((text, sid));
@@ -350,32 +357,31 @@ pub async fn run_session_turn_with(
                 }
             }
         }
-        if let Some(path) = transcript_path(provider, &cwd_canon, psid.as_deref(), provider_home.as_deref()) {
-            if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                if let Some(err) = otto_orchestrator::claude_pty::transcript_api_error(&content) {
-                    return Err(ApiError(Error::Upstream(format!("agent error: {err}"))));
+        // `transcript_api_error` / `completed_turn_count` / `completed_turn_text`
+        // of the whole file, from the incremental scan (O(new bytes) per poll).
+        if let Some(scan) = crate::turn_oracle::poll_claude_tail(&mut tail).await {
+            if let Some(err) = scan.api_error {
+                return Err(ApiError(Error::Upstream(format!("agent error: {err}"))));
+            }
+            if scan.completed_turns > baseline {
+                let text = scan.last_turn_text.unwrap_or_default();
+                // Guard against a DEGENERATE turn: the agent sometimes just
+                // parrots the CLI's injected skill/agentic-loop reminder ("Now
+                // write a response to the user. Keep going… Remember to use
+                // skills…") and ends its turn without doing any work. That is
+                // never a real reply — nudge it to actually act (bounded), rather
+                // than accept the echo as the step's output and silently no-op.
+                if is_injected_reminder_echo(&text) && reminder_nudges < MAX_REMINDER_NUDGES {
+                    reminder_nudges += 1;
+                    // Advance the baseline past this echo so we wait for the
+                    // NEXT (hopefully real) turn instead of re-tripping on it.
+                    baseline = scan.completed_turns;
+                    let _ = submit_once(&ctx.manager, &sid, REMINDER_NUDGE).await;
+                    tokio::time::sleep(POLL).await;
+                    continue;
                 }
-                if otto_orchestrator::claude_pty::completed_turn_count(&content) > baseline {
-                    let text = otto_orchestrator::claude_pty::completed_turn_text(&content)
-                        .unwrap_or_default();
-                    // Guard against a DEGENERATE turn: the agent sometimes just
-                    // parrots the CLI's injected skill/agentic-loop reminder ("Now
-                    // write a response to the user. Keep going… Remember to use
-                    // skills…") and ends its turn without doing any work. That is
-                    // never a real reply — nudge it to actually act (bounded), rather
-                    // than accept the echo as the step's output and silently no-op.
-                    if is_injected_reminder_echo(&text) && reminder_nudges < MAX_REMINDER_NUDGES {
-                        reminder_nudges += 1;
-                        // Advance the baseline past this echo so we wait for the
-                        // NEXT (hopefully real) turn instead of re-tripping on it.
-                        baseline = otto_orchestrator::claude_pty::completed_turn_count(&content);
-                        let _ = submit_once(&ctx.manager, &sid, REMINDER_NUDGE).await;
-                        tokio::time::sleep(POLL).await;
-                        continue;
-                    }
-                    if opts.done_file_validator.is_none() {
-                        return Ok((text, sid));
-                    }
+                if opts.done_file_validator.is_none() {
+                    return Ok((text, sid));
                 }
             }
         }
@@ -474,6 +480,7 @@ async fn oracle_watch(
     opts: &mut TurnOpts,
     baseline: usize,
     deadline: Instant,
+    claude_tail: Option<crate::turn_oracle::ClaudeTail>,
 ) -> ApiResult<String> {
     use crate::turn_oracle as oracle;
 
@@ -511,13 +518,20 @@ async fn oracle_watch(
     let mut codex_baselined = false;
     if provider == "codex" {
         if let Some(p) = &artifact {
-            oopts.baseline_ordinal = tokio::fs::read_to_string(p)
-                .await
-                .map(|c| oracle::codex_last_ordinal(&c))
-                .unwrap_or(0);
+            oopts.baseline_ordinal = codex_baseline_ordinal(p.clone()).await;
             codex_baselined = true;
         }
     }
+    // Every transcript/rollout read below is incremental (only the bytes
+    // appended since the previous poll) and runs off the runtime together with
+    // the directory stats, in ONE blocking hop per tick: a 68 MB transcript
+    // used to be read (9 ms) + parsed (63 ms) whole on a worker every second.
+    let mut claude_tail = match (&tpath, claude_tail) {
+        (Some(p), Some(t)) if t.path() == p.as_path() => Some(t),
+        (Some(p), _) => Some(oracle::ClaudeTail::new(p)),
+        (None, _) => None,
+    };
+    let mut codex_tail: Option<oracle::CodexTail> = None;
 
     let mut reminder_nudges: u32 = 0;
     let mut last_phase: Option<(u8, usize, usize)> = None;
@@ -554,34 +568,41 @@ async fn oracle_watch(
             if artifact.is_some() && !codex_baselined && started.elapsed() <= Duration::from_secs(6)
             {
                 if let Some(p) = &artifact {
-                    oopts.baseline_ordinal = tokio::fs::read_to_string(p)
-                        .await
-                        .map(|c| oracle::codex_last_ordinal(&c))
-                        .unwrap_or(0);
+                    oopts.baseline_ordinal = codex_baseline_ordinal(p.clone()).await;
                 }
             }
             codex_baselined = true;
         }
         if tasks_dir.is_none() && Instant::now() >= tasks_lookup_at {
-            tasks_dir = psid.and_then(|p| claude_tasks_dir(cwd_canon, p));
+            if let Some(p) = psid {
+                let (cwd, p) = (cwd_canon.to_string(), p.to_string());
+                tasks_dir = crate::offload::blocking(move || claude_tasks_dir(&cwd, &p)).await;
+            }
             tasks_lookup_at = Instant::now() + Duration::from_secs(5);
         }
 
-        let claude_scan = match &tpath {
-            Some(p) => tokio::fs::read_to_string(p)
-                .await
-                .ok()
-                .map(|c| oracle::scan_claude(&c)),
-            None => None,
-        };
-        let codex_scan = match (provider, &artifact) {
-            ("codex", Some(p)) => tokio::fs::read_to_string(p)
-                .await
-                .ok()
-                .map(|c| oracle::scan_codex(&c, oopts.baseline_ordinal)),
+        // (Re)arm the rollout reader for the current artifact + baseline.
+        codex_tail = match (provider, &artifact) {
+            ("codex", Some(p)) => match codex_tail.take() {
+                Some(t) if t.path() == p.as_path() && t.after_ordinal() == oopts.baseline_ordinal => {
+                    Some(t)
+                }
+                _ => Some(oracle::CodexTail::new(p, oopts.baseline_ordinal)),
+            },
             _ => None,
         };
-        oopts.subagent_moved_at = subagent_dir.as_deref().and_then(newest_subagent_write);
+        let (ct, xt, sub_dir) = (claude_tail.take(), codex_tail.take(), subagent_dir.clone());
+        let (ct, xt, claude_scan, codex_scan, subagent_moved_at) =
+            crate::offload::blocking(move || {
+                let (mut ct, mut xt) = (ct, xt);
+                let claude_scan = ct.as_mut().and_then(|t| t.poll());
+                let codex_scan = xt.as_mut().and_then(|t| t.poll());
+                let moved = sub_dir.as_deref().and_then(newest_subagent_write);
+                (ct, xt, claude_scan, codex_scan, moved)
+            })
+            .await;
+        (claude_tail, codex_tail) = (ct, xt);
+        oopts.subagent_moved_at = subagent_moved_at;
 
         let mut v = oracle::verdict(
             provider,
@@ -690,9 +711,16 @@ async fn oracle_watch(
                         // Progress = the transcript/rollout OR any child file
                         // moving; a sweep whose sub-agents are writing while the
                         // parent waits is progress, not a stall.
-                        let stamp = tpath.as_deref().or(artifact.as_deref()).and_then(|m| {
-                            oracle::progress_stamp(m, subagent_dir.as_deref(), tasks_dir.as_deref())
-                        });
+                        let stamp = match tpath.clone().or_else(|| artifact.clone()) {
+                            Some(m) => {
+                                let (sub, tasks) = (subagent_dir.clone(), tasks_dir.clone());
+                                crate::offload::blocking(move || {
+                                    oracle::progress_stamp(&m, sub.as_deref(), tasks.as_deref())
+                                })
+                                .await
+                            }
+                            None => None,
+                        };
                         match stamp {
                             Some(m) => {
                                 if progress_mtime != Some(m) {
@@ -740,6 +768,18 @@ async fn oracle_watch(
         }
         tokio::time::sleep(POLL).await;
     }
+}
+
+/// The codex rollout's highest ordinal right after the submit — the baseline a
+/// resumed rollout's prior `task_complete` sits under. One whole-file read,
+/// off the runtime.
+async fn codex_baseline_ordinal(p: std::path::PathBuf) -> u64 {
+    crate::offload::blocking(move || {
+        std::fs::read_to_string(&p)
+            .map(|c| crate::turn_oracle::codex_last_ordinal(&c))
+            .unwrap_or(0)
+    })
+    .await
 }
 
 /// Newest `subagents/*.jsonl` mtime. A grandchild still writing resets the
@@ -808,9 +848,19 @@ fn confirm_needle(prompt: &str) -> String {
 
 /// Whether claude's latest USER turn in `transcript` contains our prompt slice —
 /// i.e. the prompt was actually entered, not lost to a startup/promo banner.
+#[cfg(test)]
 fn prompt_entered(transcript: &str, needle: &str) -> bool {
-    match otto_orchestrator::claude_pty::last_user_text(transcript) {
-        Some(t) => normalize_ws(&t).contains(needle),
+    user_text_has(
+        otto_orchestrator::claude_pty::last_user_text(transcript).as_deref(),
+        needle,
+    )
+}
+
+/// [`prompt_entered`] given the transcript's `last_user_text` (the live loop
+/// takes it from the incremental scan instead of re-reading the file).
+fn user_text_has(last_user_text: Option<&str>, needle: &str) -> bool {
+    match last_user_text {
+        Some(t) => normalize_ws(t).contains(needle),
         None => false,
     }
 }

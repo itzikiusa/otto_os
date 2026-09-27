@@ -6,6 +6,7 @@
   // taking pointer events (sidePane.dragging) so it can't swallow the moves.
   import { sidePane } from '../lib/stores/sidePane.svelte';
   import { leadingFromPointer, nudgeLeading, SPLIT_MAX, SPLIT_MIN } from '../lib/sidePane';
+  import { rafCoalesce, showDragOverlay } from '../lib/dragCursor';
 
   interface Props {
     /** Accessible name of the two panes, e.g. "Agents and Connections". */
@@ -25,25 +26,27 @@
     el?.setPointerCapture(e.pointerId);
     sidePane.dragging = true;
     const rtl = isRtl();
-    const move = (ev: PointerEvent): void => {
+    // Overlay cursor (not body.style — an inherited write restyles the whole
+    // app) and one split write per frame (lib/dragCursor.ts).
+    const hideOverlay = showDragOverlay('col-resize');
+    const moves = rafCoalesce((ev: PointerEvent): void => {
       const r = split.getBoundingClientRect();
       sidePane.setLeading(leadingFromPointer(ev.clientX, r.left, r.right, rtl), false);
-    };
+    });
+    const move = (ev: PointerEvent): void => moves.push(ev);
     const up = (ev: PointerEvent): void => {
+      moves.flush();
       el?.releasePointerCapture(ev.pointerId);
       el?.removeEventListener('pointermove', move);
       el?.removeEventListener('pointerup', up);
       el?.removeEventListener('pointercancel', up);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
+      hideOverlay();
       sidePane.dragging = false;
       sidePane.setLeading(sidePane.leading, true);
     };
     el?.addEventListener('pointermove', move);
     el?.addEventListener('pointerup', up);
     el?.addEventListener('pointercancel', up);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
   }
 
   function onKeyDown(e: KeyboardEvent): void {

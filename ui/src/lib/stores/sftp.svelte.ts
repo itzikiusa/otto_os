@@ -23,22 +23,24 @@ function defaultLocalDir(): string {
   return '~/Downloads';
 }
 
-/** Per-connection browse state. */
-interface SftpState {
+/** Per-connection browse state. A class (not a plain object) so the
+ *  `states` record doesn't deep-proxy it: `entries` is `$state.raw` — a
+ *  50k-entry directory is replaced wholesale on every listing, never mutated. */
+class SftpState {
   /** Current remote directory (absolute). */
-  cwd: string;
-  entries: SftpEntry[];
-  loading: boolean;
-  error: string;
+  cwd = $state('');
+  entries = $state.raw<SftpEntry[]>([]);
+  loading = $state(false);
+  error = $state('');
   /** True once an initial list has resolved (so the UI can distinguish
    *  "never loaded" from "loaded but empty"). */
-  loaded: boolean;
-  attempted: boolean;
-  transfers: SftpTransfer[];
+  loaded = $state(false);
+  attempted = $state(false);
+  transfers = $state.raw<SftpTransfer[]>([]);
 }
 
 function blankState(): SftpState {
-  return { cwd: '', entries: [], loading: false, error: '', loaded: false, attempted: false, transfers: [] };
+  return new SftpState();
 }
 
 class SftpStore {

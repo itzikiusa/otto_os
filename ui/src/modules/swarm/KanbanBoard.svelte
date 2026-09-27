@@ -57,11 +57,32 @@
     verifying: 'Verifying',
   };
 
+  // One pass per task change into a column map (was three full filters per
+  // column per render — backlog B6 / SE-10).
+  const columns = $derived.by(() => {
+    const m = new Map<TaskStatus, SwarmTask[]>();
+    for (const t of tasks) {
+      // `verifying` is a transient status with no column of its own — fold
+      // those cards into "In review" (with a verifying badge) so they never
+      // disappear.
+      const col: TaskStatus = t.status === 'verifying' ? 'in_review' : (t.status as TaskStatus);
+      const list = m.get(col);
+      if (list) list.push(t);
+      else m.set(col, [t]);
+    }
+    return m;
+  });
+  const NO_TASKS: SwarmTask[] = [];
   function byStatus(s: TaskStatus): SwarmTask[] {
-    // `verifying` is a transient status with no column of its own — fold those
-    // cards into "In review" (with a verifying badge) so they never disappear.
-    if (s === 'in_review') return tasks.filter((t) => t.status === 'in_review' || t.status === 'verifying');
-    return tasks.filter((t) => t.status === s);
+    return columns.get(s) ?? NO_TASKS;
+  }
+  // Finished columns only grow: render the first DONE_CAP cards until asked.
+  const DONE_CAP = 50;
+  let showAllFinished = $state(false);
+  function visibleIn(s: TaskStatus): SwarmTask[] {
+    const list = byStatus(s);
+    if (showAllFinished || (s !== 'done' && s !== 'cancelled') || list.length <= DONE_CAP) return list;
+    return list.slice(0, DONE_CAP);
   }
 
   // -- Per-task goals --------------------------------------------------------
@@ -449,6 +470,7 @@
     {/if}
     <div class="columns">
       {#each TASK_COLUMNS as col (col)}
+        {@const colTasks = byStatus(col)}
         <div
           class="column"
           role="group"
@@ -459,10 +481,10 @@
         >
           <div class="col-head">
             <span>{COLUMN_LABEL[col]}</span>
-            <span class="count" aria-label="{byStatus(col).length} tasks">{byStatus(col).length}</span>
+            <span class="count" aria-label="{colTasks.length} tasks">{colTasks.length}</span>
           </div>
           <div class="col-body">
-            {#each byStatus(col) as t (t.id)}
+            {#each visibleIn(col) as t (t.id)}
               {@const agent = swarm.agentById(t.assignee_agent_id)}
               {@const gs = goalSummary(t.id)}
               <div
@@ -522,6 +544,11 @@
                 {#if t.delegated}<span class="tag" title="Handed to this agent by another agent">Delegated</span>{/if}
               </div>
             {/each}
+            {#if !showAllFinished && (col === 'done' || col === 'cancelled') && colTasks.length > DONE_CAP}
+              <button class="btn small ghost" onclick={() => (showAllFinished = true)}>
+                Show all {colTasks.length}
+              </button>
+            {/if}
           </div>
         </div>
       {/each}

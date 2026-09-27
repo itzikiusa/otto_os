@@ -19,6 +19,7 @@ pub mod metrics;
 pub mod paths;
 pub mod rds;
 pub mod s3;
+pub mod s3_download;
 pub mod sqs;
 
 use std::sync::Arc;

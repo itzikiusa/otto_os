@@ -244,6 +244,7 @@ pub async fn search(
             story_id: None,
             include_inactive: false,
             limit: CAP as i64,
+            ..Default::default()
         };
         if let Ok(hits) = repo.search_keyword(ws_id.as_str(), &q, &filter).await {
             for (mem, _score) in hits.into_iter().take(CAP) {

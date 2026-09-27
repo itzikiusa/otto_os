@@ -31,3 +31,17 @@ test('checkpoint pages preserve a row already fetched at a newer revision',()=>{
   const merged=mergeCheckpointPage({checkpoint_rev:2,items:[{node_id:'first',detail_version:'old'},{node_id:'second',detail_version:'v2'}]},[{node_id:'first',detail_version:'new'}],versions);
   assert.equal(merged.items[0].detail_version,'new');assert.equal(merged.items[1].detail_version,'v2');assert.equal(merged.known.length,2);
 });
+test('unchanged nodes (same detail_version + status) keep their object and fields',()=>{
+  const {mergeRunProgress}=helpers();
+  const sessions=['s1'];
+  const a={node_id:'a',status:'running',detail_version:'v1',sessions,logs:['loaded body']};
+  const b={node_id:'b',status:'running',detail_version:'v1',sessions:[]};
+  const current={id:'r',rev:1,nodes:[a,b]};
+  mergeRunProgress(current,{id:'r',rev:2,nodes:[
+    {node_id:'a',status:'running',detail_version:'v1',sessions:['s1'],logs:[]},
+    {node_id:'b',status:'done',detail_version:'v2',sessions:['s2'],logs:[]},
+  ]});
+  assert.equal(current.nodes[0],a); assert.equal(current.nodes[0].sessions,sessions,'unchanged node not rewritten');
+  assert.deepEqual(current.nodes[0].logs,['loaded body']);
+  assert.equal(current.nodes[1],b); assert.equal(current.nodes[1].status,'done'); assert.deepEqual(current.nodes[1].sessions,['s2']);
+});

@@ -39,8 +39,14 @@
 
   // Per-line picks. Undecided until the user touches ANY control — from then on
   // the resolution is exactly the checked lines (possibly none = delete block).
-  let oursSel = $state<boolean[]>([]);
-  let theirsSel = $state<boolean[]>([]);
+  // Raw arrays, replaced wholesale on every pick (never mutated in place).
+  let oursSel = $state.raw<boolean[]>([]);
+  let theirsSel = $state.raw<boolean[]>([]);
+  /** Pick rows mounted per side before "Show more": a lockfile / generated-
+   *  file conflict is 5–30k lines a side, and every line is a button. The
+   *  whole-side checkboxes and Edit still act on ALL lines. */
+  const LINE_PAGE = 300;
+  let shown = $state(LINE_PAGE);
   let touched = $state(false);
   let editing = $state(false);
   // (Re)seed the pick arrays whenever the conflict content itself changes —
@@ -50,7 +56,9 @@
     theirsSel = theirs.map(() => false);
     touched = false;
     editing = false;
+    shown = LINE_PAGE;
   });
+  const hiddenLines = $derived(Math.max(ours.length, theirs.length) - shown);
   // Edit-mode buffer (joined text the user can hand-edit).
   let editText = $state('');
   // Whether the diff3 merge base is currently expanded.
@@ -223,7 +231,7 @@
           {#if ours.length === 0}
             <div class="empty-side dim mono">(empty — taking A deletes the block)</div>
           {:else}
-            {#each ours as line, i (i)}
+            {#each ours.slice(0, shown) as line, i (i)}
               <button class="pick-line ours" class:picked={oursSel[i]} onclick={() => toggleLine('ours', i)}>
                 <span class="pick-box">{#if oursSel[i]}<Icon name="check" size={10} />{/if}</span>
                 <span class="mono pick-code">{line}</span>
@@ -246,7 +254,7 @@
           {#if theirs.length === 0}
             <div class="empty-side dim mono">(empty — taking B deletes the block)</div>
           {:else}
-            {#each theirs as line, i (i)}
+            {#each theirs.slice(0, shown) as line, i (i)}
               <button class="pick-line theirs" class:picked={theirsSel[i]} onclick={() => toggleLine('theirs', i)}>
                 <span class="pick-box">{#if theirsSel[i]}<Icon name="check" size={10} />{/if}</span>
                 <span class="mono pick-code">{line}</span>
@@ -261,7 +269,7 @@
           {#if ours.length === 0}
             <div class="empty-side dim mono">(empty — taking A deletes the block)</div>
           {:else}
-            {#each ours as line, i (i)}
+            {#each ours.slice(0, shown) as line, i (i)}
               <button class="pick-line ours" class:picked={oursSel[i]} onclick={() => toggleLine('ours', i)}>
                 <span class="pick-box">{#if oursSel[i]}<Icon name="check" size={10} />{/if}</span>
                 <span class="mono pick-code">{line}</span>
@@ -273,7 +281,7 @@
           {#if theirs.length === 0}
             <div class="empty-side dim mono">(empty — taking B deletes the block)</div>
           {:else}
-            {#each theirs as line, i (i)}
+            {#each theirs.slice(0, shown) as line, i (i)}
               <button class="pick-line theirs" class:picked={theirsSel[i]} onclick={() => toggleLine('theirs', i)}>
                 <span class="pick-box">{#if theirsSel[i]}<Icon name="check" size={10} />{/if}</span>
                 <span class="mono pick-code">{line}</span>
@@ -283,10 +291,28 @@
         </div>
       </div>
     {/if}
+    {#if hiddenLines > 0}
+      <button class="more-lines" onclick={() => (shown += LINE_PAGE * 10)}>
+        Show {Math.min(hiddenLines, LINE_PAGE * 10)} more line{hiddenLines === 1 ? '' : 's'} ({hiddenLines} hidden) — or take a whole side / Edit
+      </button>
+    {/if}
   {/if}
 </div>
 
 <style>
+  .more-lines {
+    display: block;
+    width: 100%;
+    padding: 5px 10px;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    color: var(--accent-text);
+    text-align: start;
+    border-top: 1px solid var(--border);
+  }
+  .more-lines:hover {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
   .hunk {
     border: 1px solid var(--border);
     border-radius: var(--radius-m);

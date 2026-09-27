@@ -81,6 +81,64 @@ mod github {
         }
     }
 
+    /// Past GitHub's `.diff` limits (406) the PR diff degrades to the
+    /// per-file listing instead of failing: counts + status for every file,
+    /// hunks where GitHub sent a patch, `too_large` where it didn't.
+    #[tokio::test]
+    async fn pr_diff_too_large_falls_back_to_the_files_listing() {
+        use otto_core::api::FileChangeStatus;
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/9"))
+            .respond_with(ResponseTemplate::new(406).set_body_json(json!({
+                "message": "Sorry, the diff exceeded the maximum number of files (300).",
+                "errors": [{"resource": "PullRequest", "field": "diff", "code": "too_large"}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/9/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"filename": "src/a.rs", "status": "modified", "additions": 1, "deletions": 1,
+                 "patch": "@@ -1,2 +1,2 @@\n keep\n-old\n+new"},
+                {"filename": "moved.rs", "previous_filename": "was.rs", "status": "renamed",
+                 "additions": 0, "deletions": 0},
+                {"filename": "huge.lock", "status": "modified", "additions": 90000, "deletions": 3},
+                {"filename": "img.png", "status": "modified", "additions": 0, "deletions": 0}
+            ])))
+            .mount(&server)
+            .await;
+        let d = gh.get_pr_diff(&rr(), 9).await.unwrap();
+        assert_eq!(d.files.len(), 4);
+        let a = &d.files[0];
+        assert_eq!((a.added, a.deleted), (Some(1), Some(1)));
+        assert_eq!(a.hunks[0].lines.len(), 3);
+        assert_eq!(a.language.as_deref(), Some("rust"));
+        let m = &d.files[1];
+        assert_eq!(m.status, Some(FileChangeStatus::Renamed));
+        assert_eq!(m.old_path.as_deref(), Some("was.rs"));
+        assert_eq!(m.too_large, None);
+        let h = &d.files[2];
+        assert_eq!(h.too_large, Some(true));
+        assert_eq!(h.hunks_omitted, Some(true));
+        assert_eq!(h.added, Some(90000));
+        assert!(d.files[3].is_binary);
+        assert_eq!(d.total_added, Some(90001));
+    }
+
+    #[tokio::test]
+    async fn pr_diff_other_errors_still_fail() {
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/9"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({"message": "Not Found"})))
+            .mount(&server)
+            .await;
+        assert!(gh.get_pr_diff(&rr(), 9).await.is_err());
+    }
+
     #[tokio::test]
     async fn list_prs_two_pages_sets_has_more() {
         let server = MockServer::start().await;

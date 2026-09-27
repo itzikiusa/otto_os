@@ -5,6 +5,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { pollWhileVisible } from '../../lib/poll';
   import { copyAsJson, downloadJson, exportCsv } from '../../lib/components/exporters';
   import type {
     BrokerCluster,
@@ -53,9 +54,64 @@
   /** When true, message key/value/headers are redacted server-side before returning. */
   let maskPayloads = $state(false);
   let consuming = $state(false);
-  let result = $state<ConsumeResp | null>(null);
-  let selected = $state<KafkaMessage | null>(null);
+  // Raw (not deep-proxied): a peek is up to 5000 messages / 16 MiB of payload,
+  // replaced wholesale on every peek or tail tick.
+  let result = $state.raw<ConsumeResp | null>(null);
+  let selected = $state.raw<KafkaMessage | null>(null);
   let rawView = $state(false);
+  const selKey = $derived(selected ? `${selected.partition}-${selected.offset}` : '');
+  /** The request behind `result` (exports re-read it in full when previews were cut). */
+  let lastReq: ConsumeReq | null = null;
+  /** Full-value fetch for a selected message whose list preview was truncated. */
+  let fullLoading = $state(false);
+  let fullErr = $state<string | null>(null);
+  let fullCtl: AbortController | null = null;
+  const consumeUrl = () => `/brokers/clusters/${cluster.id}/topics/${encodeURIComponent(topic)}/consume`;
+
+  /** Open a message; fetch its full value when the list only holds a preview. */
+  function selectMessage(m: KafkaMessage) {
+    selected = m;
+    rawView = false;
+    fullErr = null;
+    fullCtl?.abort();
+    fullCtl = null;
+    fullLoading = false;
+    if (!m.value?.truncated) return;
+    const ctl = new AbortController();
+    fullCtl = ctl;
+    fullLoading = true;
+    void fetchFull(m, ctl.signal)
+      .then((full) => {
+        if (ctl.signal.aborted || selected !== m) return;
+        if (full) selected = full;
+        else fullErr = 'The message is no longer available (retention or compaction).';
+      })
+      .catch((e) => {
+        if (!ctl.signal.aborted) fullErr = loadErrorText(e);
+      })
+      .finally(() => {
+        if (fullCtl === ctl) {
+          fullLoading = false;
+          fullCtl = null;
+        }
+      });
+  }
+
+  /** One message at (partition, offset), decoded in full with the peek's options. */
+  async function fetchFull(m: KafkaMessage, signal?: AbortSignal): Promise<KafkaMessage | null> {
+    const r = await api.post<ConsumeResp>(
+      consumeUrl(),
+      {
+        partition: m.partition,
+        start: { type: 'offset', offset: m.offset },
+        limit: 1,
+        decode: lastReq?.decode ?? decode,
+        ...(result?.masked ? { mask: true } : {}),
+      } satisfies ConsumeReq,
+      signal,
+    );
+    return r.messages.find((x) => x.partition === m.partition && x.offset === m.offset) ?? null;
+  }
 
   // Keep the full row as a pointer target without changing table semantics.
   // The offset button supplies the same action for keyboard/assistive input.
@@ -65,10 +121,7 @@
     if (window.getSelection()?.isCollapsed === false) return;
     const row = event.target.closest<HTMLTableRowElement>('tr[data-message-key]');
     const message = result?.messages.find((m) => `${m.partition}-${m.offset}` === row?.dataset.messageKey);
-    if (message) {
-      selected = message;
-      rawView = false;
-    }
+    if (message && message !== selected) selectMessage(message);
   }
 
   // ---- incremental live-tail state ----
@@ -80,6 +133,8 @@
   // accumulated so far; toggling off clears them.
   let autoPoll = $state(false);
   const POLL_MS = 60_000;
+  /** Messages the last tail tick appended (inline badge — no per-tick toast). */
+  let tailAdded = $state(0);
 
   // ---- produce state ----
   let pKey = $state('');
@@ -110,7 +165,8 @@
         keyFilter = o.key_filter ?? '';
         valueFilter = o.value_filter ?? '';
         result = null;
-        await consume();
+        // The agent reads the values it asked for — full, not list previews.
+        await consume(false);
         return result;
       },
       showProduce(o) {
@@ -149,6 +205,8 @@
     void topic;
     result = null;
     selected = null;
+    fullCtl?.abort();
+    lastReq = null;
     tab = 'messages';
     autoPoll = false;
     tailOffsets = new Map();
@@ -164,12 +222,13 @@
   // to a single all-partition call when no cursor is set yet).
   $effect(() => {
     if (!autoPoll) return;
-    // Seed on enable.
+    // Seed on enable, then chained ticks (paused while hidden, stopped on leave).
     untrack(() => void consumeWithTail(false));
-    const timer = setInterval(() => {
-      if (!consuming) untrack(() => void consumeWithTail(true));
-    }, POLL_MS);
-    return () => clearInterval(timer);
+    const poller = pollWhileVisible(
+      () => (consuming ? undefined : untrack(() => consumeWithTail(true))),
+      { ms: POLL_MS, immediate: false },
+    );
+    return () => poller.stop();
   });
 
   function fmtTs(ms: number | null): string {
@@ -226,52 +285,42 @@
       return;
     }
 
-    // Incremental pass: one request per partition with a known cursor.
-    // We ask for a small window (limit=50 per partition) starting just past
-    // the last seen offset. Responses are merged into the existing result.
+    // Incremental pass: ONE request for every partition with a known cursor,
+    // each resuming just past its last seen offset (was one sequential request
+    // per partition — 100 partitions × a peek each per tick).
     consuming = true;
     try {
       const parts = partition !== '' ? [Number(partition)] : [...tailOffsets.keys()];
-      const newMsgs: KafkaMessage[] = [];
-      let allMasked = result?.masked === true;
-      let mergedPartitions: PartitionRange[] = result?.partitions ?? [];
-
-      for (const p of parts) {
+      const starts = parts.flatMap((p) => {
         const cursor = tailOffsets.get(p);
-        if (cursor === undefined) continue;
-        const req: ConsumeReq = {
-          partition: p,
-          start: { type: 'offset', offset: cursor + 1 },
-          limit: 50,
-          decode,
-          ...(maskPayloads ? { mask: true } : {}),
-          // No filters on tail increments — they were applied on the seed.
-        };
-        try {
-          const r = await api.post<ConsumeResp>(
-            `/brokers/clusters/${cluster.id}/topics/${encodeURIComponent(topic)}/consume`,
-            req,
-          );
-          newMsgs.push(...r.messages);
-          // A mixed buffer must never claim every payload was masked.
-          if (r.messages.length > 0) allMasked = allMasked && r.masked === true;
-          // Merge watermark ranges: keep the freshest high for each partition.
-          mergedPartitions = mergePartitionRanges(mergedPartitions, r.partitions);
-        } catch {
-          // A single partition failing shouldn't abort the whole tail.
-        }
+        return cursor === undefined ? [] : [{ partition: p, offset: cursor + 1 }];
+      });
+      if (starts.length === 0) return;
+      const req: ConsumeReq = {
+        start_offsets: starts,
+        limit: Math.min(5000, 50 * starts.length),
+        decode,
+        preview: true,
+        ...(maskPayloads ? { mask: true } : {}),
+        // No filters on tail increments — they were applied on the seed.
+      };
+      let r: ConsumeResp;
+      try {
+        r = await api.post<ConsumeResp>(consumeUrl(), req);
+      } catch {
+        return; // a failed tick leaves the buffer as is; the next tick retries
       }
-
-      if (newMsgs.length > 0) {
-        updateTailOffsets(newMsgs);
-        const combined = capRing([...(result?.messages ?? []), ...newMsgs]);
+      tailAdded = r.messages.length;
+      if (r.messages.length > 0) {
+        updateTailOffsets(r.messages);
+        const prev = result;
         result = {
-          messages: combined,
-          partitions: mergedPartitions,
-          truncated: result?.truncated ?? false,
-          masked: allMasked,
+          messages: capRing([...(prev?.messages ?? []), ...r.messages]),
+          partitions: mergePartitionRanges(prev?.partitions ?? [], r.partitions),
+          truncated: prev?.truncated ?? false,
+          // A mixed buffer must never claim every payload was masked.
+          masked: (prev?.masked ?? r.masked) === true && r.masked === true,
         };
-        toasts.info(`+${newMsgs.length} new message${newMsgs.length === 1 ? '' : 's'}`);
       }
     } finally {
       consuming = false;
@@ -297,7 +346,7 @@
     return [...map.values()].sort((a, b) => a.partition - b.partition);
   }
 
-  async function consume() {
+  async function consume(preview = true) {
     if (consuming || consumeError) return;
     const req: ConsumeReq = {
       partition: partition === '' ? null : Number(partition),
@@ -310,14 +359,16 @@
       // Server-side PII masking: redacts key/value/headers before they leave
       // the server. Only sent when the toggle is explicitly on.
       ...(maskPayloads ? { mask: true } : {}),
+      // The list renders one-line snippets; big values are fetched on open.
+      ...(preview ? { preview: true } : {}),
     };
     consuming = true;
     selected = null;
+    fullCtl?.abort();
+    tailAdded = 0;
     try {
-      result = await api.post<ConsumeResp>(
-        `/brokers/clusters/${cluster.id}/topics/${encodeURIComponent(topic)}/consume`,
-        req,
-      );
+      result = await api.post<ConsumeResp>(consumeUrl(), req);
+      lastReq = req;
       // Reset tail cursors: a manual peek replaces the view and reseeds offsets.
       tailOffsets = new Map();
       // An empty range renders inline ("No messages in the selected range.");
@@ -445,9 +496,25 @@
 
   // ---- export helpers -------------------------------------------------------
 
-  function exportMessages(fmt: 'json' | 'csv') {
-    if (!result) return;
-    const rows = result.messages.map((m) => ({
+  let exporting = $state(false);
+  async function exportMessages(fmt: 'json' | 'csv') {
+    if (!result || exporting) return;
+    let messages = result.messages;
+    // The list holds 2 KiB previews for big values — export the real ones by
+    // re-reading the same peek in full (bounded server-side at 16 MiB).
+    if (lastReq && messages.some((m) => m.value?.truncated)) {
+      exporting = true;
+      try {
+        const full: ConsumeReq = { ...lastReq, preview: false };
+        messages = (await api.post<ConsumeResp>(consumeUrl(), full)).messages;
+      } catch (e) {
+        toasts.error("Couldn't export the messages", e instanceof Error ? e.message : String(e));
+        return;
+      } finally {
+        exporting = false;
+      }
+    }
+    const rows = messages.map((m) => ({
       partition: m.partition,
       offset: m.offset,
       timestamp_ms: m.timestamp_ms,
@@ -464,7 +531,7 @@
   }
 
   async function copySelectedAsJson() {
-    if (!selected) return;
+    if (!selected || selected.value?.truncated) return;
     try {
       await copyAsJson({
         partition: selected.partition,
@@ -558,14 +625,14 @@
         <input type="checkbox" bind:checked={maskPayloads} />
         <Icon name="lock" size={12} /> Mask
       </label>
-      <button class="btn primary small" onclick={consume} disabled={consuming || !!consumeError}>
+      <button class="btn primary small" onclick={() => consume()} disabled={consuming || !!consumeError}>
         {consuming ? 'Reading…' : 'Peek'}
       </button>
       {#if result && result.messages.length > 0}
-        <button class="btn small" onclick={() => exportMessages('json')} title="Export all as JSON">
+        <button class="btn small" onclick={() => exportMessages('json')} disabled={exporting} title="Export all as JSON">
           <Icon name="download" size={12} /> JSON
         </button>
-        <button class="btn small" onclick={() => exportMessages('csv')} title="Export all as CSV">
+        <button class="btn small" onclick={() => exportMessages('csv')} disabled={exporting} title="Export all as CSV">
           <Icon name="download" size={12} /> CSV
         </button>
       {/if}
@@ -582,9 +649,9 @@
           <tbody onpointerup={inspectRow}>
             {#each result?.messages ?? [] as m (m.partition + '-' + m.offset)}
               {@const pct = result ? offsetPct(m, result.partitions) : null}
-              <tr class:sel={selected === m} data-message-key={`${m.partition}-${m.offset}`}>
+              <tr class:sel={selKey === `${m.partition}-${m.offset}`} data-message-key={`${m.partition}-${m.offset}`}>
                 <td>{m.partition}</td>
-                <td class="mono"><button class="message-open" aria-label={`Inspect partition ${m.partition} offset ${m.offset}`} title={`Inspect partition ${m.partition} offset ${m.offset}`} aria-pressed={selected === m} onclick={() => { selected = m; rawView = false; }}>{m.offset}</button></td>
+                <td class="mono"><button class="message-open" aria-label={`Inspect partition ${m.partition} offset ${m.offset}`} title={`Inspect partition ${m.partition} offset ${m.offset}`} aria-pressed={selKey === `${m.partition}-${m.offset}`} onclick={() => selectMessage(m)}>{m.offset}</button></td>
                 <td class="pos-cell">
                   {#if pct !== null}
                     <div class="pos-bar-wrap" title="offset {m.offset} — {pct.toFixed(1)}% through partition">
@@ -613,7 +680,9 @@
           <p class="masked-badge pad small">PII masked — sensitive values were redacted server-side.</p>
         {/if}
         {#if autoPoll && tailOffsets.size > 0}
-          <p class="muted pad small tail-note">Live tail active — appending new messages (cap {TAIL_CAP}).</p>
+          <p class="muted pad small tail-note" role="status">
+            Live tail active — appending new messages (cap {TAIL_CAP}){tailAdded > 0 ? ` · +${tailAdded} new` : ''}.
+          </p>
         {/if}
       </div>
 
@@ -641,11 +710,11 @@
                 {rawView ? 'Decoded' : 'Raw'}
               </button>
             {/if}
-            <button class="btn small" onclick={copySelectedAsJson} title="Copy message as JSON">
+            <button class="btn small" onclick={copySelectedAsJson} disabled={!!selected.value?.truncated} title="Copy message as JSON">
               <Icon name="copy" size={12} /> Copy
             </button>
             {#if ws.current}
-              <button class="btn small" onclick={() => (sendToAgentOpen = true)} title="Send message to a running agent (redacted preview)">
+              <button class="btn small" onclick={() => (sendToAgentOpen = true)} disabled={!!selected.value?.truncated} title="Send message to a running agent (redacted preview)">
                 <Icon name="send" size={12} /> To agent
               </button>
             {/if}
@@ -655,6 +724,12 @@
             <pre class="payload key">{selected.key.text || '∅'}</pre>
           {/if}
           <h5>Value</h5>
+          {#if selected.value?.truncated}
+            <p class="muted small" role="status">
+              {#if fullLoading}Loading the full value… (showing the first 2 KiB){:else if fullErr}{fullErr} Showing the first 2 KiB.
+                <button class="btn small" onclick={() => selected && selectMessage(selected)}>Retry</button>{:else}Showing the first 2 KiB.{/if}
+            </p>
+          {/if}
           <pre class="payload">{rawView
               ? (selected.value?.raw_base64 ?? '')
               : (selected.value?.text ?? '∅')}</pre>

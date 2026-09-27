@@ -17,11 +17,9 @@
     const projectIds = new Set((swarm.detail?.projects ?? []).map((p) => p.id));
     return [...projectIds].flatMap((id) => swarm.tasksByProject[id] ?? []);
   });
-  const isLiveRun = (r: SwarmRun) =>
-    r.status === 'running' || r.status === 'waiting' || r.status === 'queued';
-  const liveTaskIds = $derived(
-    new Set(swarm.runs.filter((r) => r.task_id && isLiveRun(r)).map((r) => r.task_id as string)),
-  );
+  // One pass over the runs, shared by every helper below (was a filter per
+  // agent per helper per render).
+  const liveTaskIds = $derived(swarm.runStats.liveTaskIds);
 
   // ── Tidy top-down TREE: root (coordinator) at the top, reports branching down
   //    level by level. x = tidy leaf packing (parents centered over children),
@@ -89,15 +87,7 @@
   }
 
   function activeRun(agentId: string): SwarmRun | null {
-    const rs = swarm.runs.filter(
-      (r) =>
-        r.agent_id === agentId &&
-        isLiveRun(r),
-    );
-    if (rs.length === 0) return null;
-    return [...rs].sort(
-      (a, b) => new Date(b.enqueued_at).getTime() - new Date(a.enqueued_at).getTime(),
-    )[0];
+    return swarm.agentRunStats(agentId).active;
   }
 
   type Activity = 'working' | 'waiting' | 'open' | 'idle';
@@ -139,8 +129,7 @@
     return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
   }
 
-  const completedCount = (agentId: string) =>
-    swarm.runs.filter((r) => r.agent_id === agentId && r.status === 'done').length;
+  const completedCount = (agentId: string) => swarm.agentRunStats(agentId).done;
 
   function toAddress(agentId: string): number {
     return allTasks.filter(

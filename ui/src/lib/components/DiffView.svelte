@@ -176,18 +176,19 @@
         k++;
       }
       const pairCount = mode === 'word' ? Math.min(dels.length, adds.length) : 0;
+      // One word diff per replaced pair, shared by both sides (it used to run
+      // twice — once for the left segments, once for the right).
+      const pairs = Array.from({ length: pairCount }, (_, p) => diffWords(dels[p], adds[p]));
       for (let p = 0; p < dels.length; p++) {
         if (p < pairCount) {
-          const { left } = diffWords(dels[p], adds[p]);
-          out.push({ kind: 'del', segs: left, aNo: aNo++ });
+          out.push({ kind: 'del', segs: pairs[p].left, aNo: aNo++ });
         } else {
           out.push({ kind: 'del', segs: [{ t: 'del', s: dels[p] }], aNo: aNo++ });
         }
       }
       for (let p = 0; p < adds.length; p++) {
         if (p < pairCount) {
-          const { right } = diffWords(dels[p], adds[p]);
-          out.push({ kind: 'add', segs: right, bNo: bNo++ });
+          out.push({ kind: 'add', segs: pairs[p].right, bNo: bNo++ });
         } else {
           out.push({ kind: 'add', segs: [{ t: 'add', s: adds[p] }], bNo: bNo++ });
         }

@@ -3,6 +3,7 @@
   // story, render it as a task tree with 3-state checkboxes the PO can toggle,
   // and persist toggles in place. Modeled on RewriteTab's load/poll pattern.
   import { product } from '../../lib/stores/product.svelte';
+  import { pollWhileVisible, type Poller } from '../../lib/poll';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
@@ -97,14 +98,16 @@
   const renderedRaw = $derived(body ? renderMarkdown(body) : '');
 
   // ── Polling for a freshly generated plan ─────────────────────────────────────
-  let pollTimer = $state<ReturnType<typeof setInterval> | null>(null);
+  // Shared poll helper (lib/poll.ts): paused while hidden, never stacked,
+  // aborted on stop. `pollTimer !== null` still means "polling" to the UI.
+  let pollTimer = $state.raw<Poller | null>(null);
   const POLL_INTERVAL_MS = 3000;
   const POLL_MAX_MS = 120_000;
   let pollStartedAt = 0;
 
   function clearPoll(): void {
     if (pollTimer !== null) {
-      clearInterval(pollTimer);
+      pollTimer.stop();
       pollTimer = null;
     }
   }
@@ -156,8 +159,8 @@
   function startPolling(): void {
     clearPoll();
     pollStartedAt = Date.now();
-    void pollForPlan();
-    pollTimer = setInterval(() => { void pollForPlan(); }, POLL_INTERVAL_MS);
+    // Immediate first poll, then every POLL_INTERVAL_MS after each settles.
+    pollTimer = pollWhileVisible(() => pollForPlan(), { ms: POLL_INTERVAL_MS, jitter: 0 });
   }
 
   // ── Initial load + reset on story change ─────────────────────────────────────

@@ -97,17 +97,26 @@ export const RESULT_LIMIT = 14;
 
 const DAY_MS = 1000 * 60 * 60 * 24;
 
+// The ranking re-reads frecency on every query change; parse only when the
+// stored string changed (another window or recordUsage wrote it).
+let frecencyMemo: { raw: string; map: FrecencyMap } | null = null;
+
 export function loadFrecency(): FrecencyMap {
   try {
-    const raw = JSON.parse(localStorage.getItem(FRECENCY_KEY) ?? '{}') as unknown;
-    return raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as FrecencyMap) : {};
+    const raw = localStorage.getItem(FRECENCY_KEY) ?? '{}';
+    if (frecencyMemo?.raw === raw) return frecencyMemo.map;
+    const parsed = JSON.parse(raw) as unknown;
+    const map = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as FrecencyMap) : {};
+    frecencyMemo = { raw, map };
+    return map;
   } catch {
     return {};
   }
 }
 
 export function recordUsage(id: string, now = Date.now()): void {
-  const m = loadFrecency();
+  // Copy: the memoized map is shared with every caller of loadFrecency().
+  const m = { ...loadFrecency() };
   const prev = m[id] ?? { count: 0, lastUsed: 0 };
   m[id] = { count: prev.count + 1, lastUsed: now };
   try {

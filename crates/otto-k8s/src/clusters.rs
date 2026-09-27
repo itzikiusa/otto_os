@@ -158,9 +158,33 @@ pub fn kubectl_program(data_dir: &Path) -> String {
 }
 
 /// Build the kubectl handle for a cluster (base flags + AWS env for `eks`).
+///
+/// `eks` clusters use the cached-token kubeconfig overlay when one is fresh
+/// (see [`crate::eks_token`]) — no `aws eks get-token` process and no
+/// Keychain read per call; otherwise the AWS env is injected and, when the
+/// plugin can be run once here, a new overlay is minted for the next calls.
 pub async fn kubectl_for<S: K8sCtx>(ctx: &S, cluster: &K8sCluster) -> Result<Kubectl> {
+    let program = kubectl_program(ctx.data_dir());
+    if let Some(path) = crate::eks_token::cached(cluster) {
+        return Ok(Kubectl::new(
+            program,
+            &with_kubeconfig(cluster, &path),
+            vec![],
+        ));
+    }
     let env = aws_env_for(ctx, cluster).await?;
-    Ok(Kubectl::new(kubectl_program(ctx.data_dir()), cluster, env))
+    if let Some(path) = crate::eks_token::overlay_for(&program, cluster, &env, ctx.data_dir()).await
+    {
+        return Ok(Kubectl::new(program, &with_kubeconfig(cluster, &path), env));
+    }
+    Ok(Kubectl::new(program, cluster, env))
+}
+
+/// `cluster` pointed at another kubeconfig file (same context name).
+fn with_kubeconfig(cluster: &K8sCluster, path: &Path) -> K8sCluster {
+    let mut c = cluster.clone();
+    c.kubeconfig_path = Some(path.to_string_lossy().into_owned());
+    c
 }
 
 /// AWS credential environment for an `eks`-source cluster (contract §1 "Auth
@@ -593,6 +617,8 @@ impl<S: K8sCtx> Clusters<S> {
                 }
             }
         }
+        // The cached EKS token file is a credential — never leave it behind.
+        crate::eks_token::forget(id.as_str(), self.ctx.data_dir());
         self.broadcast(id, true);
         Ok(())
     }

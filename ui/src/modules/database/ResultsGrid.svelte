@@ -198,7 +198,9 @@
 
   // The rows we render/filter/sort over. Re-seeded whenever the upstream result
   // changes (edits run against the DB and refresh via re-query, not in place).
-  let liveRows = $state<unknown[][]>([]);
+  // `$state.raw`: only ever REASSIGNED. A deep proxy made every filter / sort /
+  // search pass over 100k rows walk proxies (the first search key 0.7–0.9 s).
+  let liveRows = $state.raw<unknown[][]>([]);
   // Column-name signature of the shown result. GridView takes it as its
   // `resetToken` (widths + scroll reset only when it changes).
   const colKey = $derived((result?.columns ?? []).map((c) => c.name).join(''));
@@ -468,37 +470,52 @@
     return v === null || v === undefined || isComplex(v);
   }
 
+  // ONE collator for every comparison: `localeCompare(…, { sensitivity })`
+  // built a fresh collator per call in JSC — ~1.5 s to sort 100k strings.
+  const SORT_COLLATOR = new Intl.Collator(undefined, { sensitivity: 'base' });
+
   // Final displayed rows: filter first, then sort (stable). Both in-memory.
+  // Each value's sort key (empty? / number / string) is computed ONCE per sort
+  // instead of per comparison (~1.7M comparisons at 100k rows).
   const viewRows = $derived.by<{ row: unknown[]; idx: number }[]>(() => {
     const base = filteredRows;
     if (!sorting || sortCol === null || sortDir === null) return base;
     const col = sortCol;
     const factor = sortDir === 'asc' ? 1 : -1;
-    // Decorate with position for a stable sort, then strip.
-    return base
-      .map((entry, pos) => ({ entry, pos }))
-      .sort((a, b) => {
-        const av = a.entry.row[col];
-        const bv = b.entry.row[col];
-        const aEmpty = isEmptyVal(av);
-        const bEmpty = isEmptyVal(bv);
-        // Empty values pinned to the bottom in BOTH directions.
-        if (aEmpty || bEmpty) {
-          if (aEmpty && bEmpty) return a.pos - b.pos;
-          return aEmpty ? 1 : -1;
-        }
-        const an = numericVal(av);
-        const bn = numericVal(bv);
-        let cmp: number;
-        if (an !== null && bn !== null) {
-          cmp = an - bn;
-        } else {
-          cmp = String(av).localeCompare(String(bv), undefined, { sensitivity: 'base' });
-        }
-        if (cmp !== 0) return cmp * factor;
-        return a.pos - b.pos; // stable tiebreak
-      })
-      .map((d) => d.entry);
+    const n = base.length;
+    const empty = new Uint8Array(n);
+    const nums = new Float64Array(n);
+    const isNum = new Uint8Array(n);
+    const strs: string[] = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const v = base[i].row[col];
+      if (isEmptyVal(v)) {
+        empty[i] = 1;
+        strs[i] = '';
+        continue;
+      }
+      const num = numericVal(v);
+      if (num !== null) {
+        isNum[i] = 1;
+        nums[i] = num;
+      }
+      strs[i] = String(v);
+    }
+    const order = new Array<number>(n);
+    for (let i = 0; i < n; i++) order[i] = i;
+    order.sort((a, b) => {
+      // Empty values pinned to the bottom in BOTH directions.
+      if (empty[a] || empty[b]) {
+        if (empty[a] && empty[b]) return a - b;
+        return empty[a] ? 1 : -1;
+      }
+      const cmp = isNum[a] && isNum[b] ? nums[a] - nums[b] : SORT_COLLATOR.compare(strs[a], strs[b]);
+      if (cmp !== 0) return cmp * factor;
+      return a - b; // stable tiebreak
+    });
+    const out = new Array<{ row: unknown[]; idx: number }>(n);
+    for (let i = 0; i < n; i++) out[i] = base[order[i]];
+    return out;
   });
 
   // Filtered/sorted rows as plain objects (for the JSON / vertical views),
@@ -1336,7 +1353,13 @@
           <span class="dot">·</span>
           <span>{result.rows_affected.toLocaleString()} affected</span>
         {/if}
-        {#if result.truncated}
+        {#if result.truncated && result.truncated_reason === 'bytes'}
+          <span
+            class="trunc-badge"
+            title="The response reached the 32 MB size budget — more rows exist. Use Export all rows… to get every row as a file, or select fewer or narrower columns."
+            >first {result.stats.row_count.toLocaleString()} rows (32 MB budget)</span
+          >
+        {:else if result.truncated}
           <span
             class="trunc-badge"
             title="Row cap reached — more rows exist. Raise the Limit or add an explicit LIMIT to fetch more."

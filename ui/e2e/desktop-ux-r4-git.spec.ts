@@ -73,7 +73,7 @@ async function prFixtures(page: Page, inline = false) {
       await route.fulfill({ json: { ...pr(number), title: `PR ${number}: ${'Long pull request description '.repeat(4)}`, source_branch: `feature/${'long-branch-'.repeat(9)}`, description_md: '## Change\n\n' + 'Readable summary of the change. '.repeat(50), approved_by: [], reviewers: [], mergeable: true, comments: [{ id: 'comment-1', author: 'reviewer', body: 'Discussion text '.repeat(30), path: inline ? longPath : null, line: inline ? 1 : null, created_at: '2026-09-25T08:00:00Z', replies: [], resolved: false }] } });
     } else await route.fallback();
   });
-  await page.route('**/api/v1/repos/*/prs/*/diff', r => r.fulfill({ json: diff(longPath) }));
+  await page.route('**/api/v1/repos/*/prs/*/diff*', r => r.fulfill({ json: diff(longPath) }));
   await page.route('**/api/v1/repos/*/prs/*/commits', r => r.fulfill({ json: [{ sha: secondSha, message: 'Long commit summary '.repeat(10), author: 'Audit author', date: '2026-09-25T08:00:00Z' }] }));
   await page.route('**/api/v1/repos/*/prs/*/reviews', r => r.fulfill({ json: [{ id: 'review-1', repo_id: repoId, pr_number: 1, status: 'done', error: null, comments: [{ id: 'finding-1', review_id: 'review-1', path: longPath, line: 1, severity: 'bug', body: 'Preserve the current account when accepting this response. '.repeat(8), state: 'draft', posted: false, created_at: '2026-09-25T08:00:00Z' }], agents: [], created_at: '2026-09-25T08:00:00Z', verdict: 'request_changes', blocker_count: 1 }] }));
   await page.route('**/api/v1/reviews/review-1/findings*', r => r.fulfill({ json: [] }));

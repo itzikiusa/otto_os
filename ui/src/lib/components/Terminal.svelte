@@ -13,6 +13,7 @@
   import '@xterm/xterm/css/xterm.css';
   import { wsUrl, WS_BEARER_SUBPROTOCOL } from '../api/client';
   import type { SessionStatus, TermSearchMatch, WsSearchResultFrame } from '../api/types';
+  import { TermFlow, hasCursorOrErase, withInOrderReset } from './termFlow';
   import { textToBase64, base64ToBytes, bytesToBase64 } from '../b64';
   import { terminalTheme } from '../termtheme';
   import { ui } from '../stores/ui.svelte';
@@ -88,8 +89,15 @@
      *  Preview/monitor embeds (review agents, share viewers, …) must NOT set
      *  this. Default false. */
     claimOnAttach?: boolean;
+    /** Local xterm scrollback depth (lines). Each line costs ~12 B/cell, so
+     *  10k lines × 200 cols ≈ 24 MB of JS heap per terminal — fine for the one
+     *  primary pane, 150–360 MB across a 15-tile grid (SA-05). Hosts that
+     *  mount many terminals at once (tiles) pass a smaller depth; the daemon
+     *  keeps 4000 rows, so maximizing/reconnecting still restores depth.
+     *  Also the `lines` requested in every `scrollback` snapshot. */
+    scrollback?: number;
   }
-  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, onstatus, onfontfit, onsearchresult, showToolbar = true, autoFocus = false, claimOnAttach = false }: Props = $props();
+  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, onstatus, onfontfit, onsearchresult, showToolbar = true, autoFocus = false, claimOnAttach = false, scrollback = 10_000 }: Props = $props();
 
   const effScheme = $derived(forceDark ? 'dark' : ui.resolvedScheme);
 
@@ -282,6 +290,20 @@
     if (sock && sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify(obj));
   }
 
+  // ── Flow control (SA-02, docs/contracts/ws.md §1 "Flow control") ─────────
+  // A browser WebSocket drains eagerly into the JS task queue, so the daemon
+  // never feels backpressure from a slow RENDERER: xterm parses 5.5–8 MB/s in
+  // WebKit while `cat`/`yes` produce far more. Unbounded, a flood kept the
+  // whole app saturated for seconds and the screen kept scrolling ~9 s after
+  // ^C. xterm's documented watermark pattern: count bytes handed to
+  // term.write() until its callback fires; above HIGH ask the server to
+  // `pause` this stream, below LOW `resume` it. The server then replaces
+  // whatever it held back with ONE snapshot (the lagging-viewer resync), so a
+  // flood costs a ~1 MB rebuild instead of 20–50 MB of parsing and ^C lands
+  // on screen as soon as the ≤2 MB backlog drains.
+  // Thresholds + keep-alive live in termFlow.ts (HIGH 2 MB / LOW 256 KB).
+  const flow = new TermFlow((frame) => sendJson(frame));
+
   // ── sendSeqToTerm (Task 5.2) ─────────────────────────────────────────────
   // Shared send path for TermKeysBar — identical to what term.onData uses.
   // readOnly is enforced here so viewer shares can't type via the accessory bar.
@@ -398,6 +420,9 @@
     connectedSid = sessionId;
     compactPending = false;
     snapshotEpoch = null;
+    // A fresh server stream starts unpaused. `flow.pending` stays: it is the
+    // local xterm backlog, which the next frame re-checks against HIGH.
+    flow.resetStream();
     // When a shareToken is supplied (guest share view) use the otto-bearer
     // subprotocol so the token travels in Sec-WebSocket-Protocol instead of
     // the URL query string (keeps it out of access logs). The stored owner
@@ -424,7 +449,7 @@
       // server's spawn-time 80×24), then verify again as layout settles.
       safeFit();
       sendResize(true);
-      const want = term?.options.scrollback ?? 10_000;
+      const want = term?.options.scrollback ?? scrollback;
       sendJson({ type: 'scrollback', lines: want });
       verifyFitSoon();
     };
@@ -435,8 +460,8 @@
         // write() only updates the buffer + marks dirty cells; the renderer then
         // paints *those* cells. Agent TUIs rewrite status/prompt rows in place —
         // if a cell is no longer dirty, the previous frame stays (cursor ghosts,
-        // stacked "-- INSERT --" lines). Always finish with a full viewport
-        // REDRAW for agent panes; shells keep partial paint for throughput.
+        // stacked "-- INSERT --" lines). Agent panes get a throttled full
+        // viewport REDRAW; shells only after cursor/erase frames (paintPtyBytes).
         paintPtyBytes(bytes);
         return;
       }
@@ -462,10 +487,21 @@
             // to a dead process painted at a stale width. Deterministic
             // rebuild keeps the buffer identical to what a fresh attach sees.
             if (msg.data) {
-              term?.reset();
-              // Snapshot is a full-screen paint already; still force a clean
-              // redraw so nothing from the previous process lingers.
-              paintPtyBytes(base64ToBytes(msg.data), /* alwaysRedraw */ true);
+              const snap = base64ToBytes(msg.data);
+              if (flow.pending === 0) {
+                term?.reset();
+                // Snapshot is a full-screen paint already; still force a clean
+                // redraw so nothing from the previous process lingers.
+                paintPtyBytes(snap, /* alwaysRedraw */ true);
+              } else {
+                // Output is still queued inside xterm (a flow-control resume
+                // or lag resync mid-flood). term.reset() is synchronous but
+                // the queue is not cleared, so those stale bytes would parse
+                // AFTER the reset, above the rebuilt history. Reset in-order
+                // instead: RIS (ESC c) makes xterm call the same reset() when
+                // the parser reaches it, i.e. after the backlog.
+                paintPtyBytes(withInOrderReset(snap), /* alwaysRedraw */ true);
+              }
             }
             break;
           }
@@ -628,7 +664,7 @@
     // routinely leaves the viewport a row or two shy of the bottom.
     if (buf.baseY - buf.viewportY > 3 || term.hasSelection()) return;
     compactPending = true;
-    sendJson({ type: 'scrollback', lines: term.options.scrollback ?? 10_000 });
+    sendJson({ type: 'scrollback', lines: term.options.scrollback ?? scrollback });
   }
 
   function sendResize(force = false): void {
@@ -744,9 +780,18 @@
   // views. At the 11px readability floor, overflow stays inside the terminal.
   const MIN_FIT_COLS = 80;
 
-  /** Cap below which a shell frame is treated as interactive (not a stream dump).
+  /** Cap below which a shell frame MAY be interactive (not a stream dump).
    *  Only used when we are NOT in full-redraw mode (plain shells on WebGL). */
   const TUI_FRAME_BYTES = 4096;
+
+  /** Agent-pane (DOM renderer) ghost clean-up cadence. xterm already repaints
+   *  the dirty rows of every frame; the forced FULL repaint only mops up rows
+   *  a TUI rewrote without dirtying them. It used to run on every frame — a
+   *  4 ms DOM render of all rows per spinner tick, ×15 in the tiled view
+   *  (SA-03). Throttled (not debounced, so a continuous stream still gets
+   *  cleaned) to at most ~5/s, a ghost lives ≤ this long. */
+  const DOM_CLEANUP_MS = 200;
+  let domCleanupTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
    * Apply PTY bytes, then REDRAW — not just "draw the dirty cells".
@@ -757,26 +802,43 @@
    * previous content should be gone, partial paint leaves ghosts. So after the
    * buffer has absorbed the frame we force every visible row to repaint.
    *
-   * - Agent panes (`preferDom`): always full redraw after every frame.
-   * - Shell panes: full redraw only on small/interactive frames (↑ history etc.).
-   * - `alwaysRedraw`: snapshots / forced paths ignore the size heuristic.
+   * - Agent panes (`preferDom`): throttled full redraw (≤ DOM_CLEANUP_MS late).
+   * - Shell panes: next-frame full redraw only on small frames that move the
+   *   cursor or erase (↑ history etc.).
+   * - `alwaysRedraw`: snapshots / forced paths — next-frame full redraw.
+   *
+   * Every write is also counted for flow control (`flow`, termFlow.ts).
    */
   function paintPtyBytes(bytes: Uint8Array, alwaysRedraw = false): void {
     if (!term) return;
-    const full =
-      alwaysRedraw ||
-      preferDom ||
-      bytes.byteLength < TUI_FRAME_BYTES;
-    term.write(bytes, full ? scheduleFullRedraw : undefined);
+    const n = bytes.byteLength;
+    const redraw: (() => void) | null = alwaysRedraw
+      ? scheduleFullRedraw
+      : preferDom
+        ? scheduleDomCleanup
+        : n < TUI_FRAME_BYTES && hasCursorOrErase(bytes)
+          ? scheduleFullRedraw
+          : null;
+    flow.add(n, sock?.readyState === WebSocket.OPEN);
+    try {
+      term.write(bytes, () => {
+        flow.done(n);
+        redraw?.();
+      });
+    } catch {
+      // xterm throws (and drops the data) past its 50 MB discard watermark;
+      // the callback never fires, so un-count it or the gate would stay shut.
+      flow.done(n);
+    }
   }
 
-  /** Force the emulator to repaint every visible row (a true redraw). */
+  /** Force the emulator to repaint every visible row (a true redraw). Does
+   *  NOT drop the WebGL glyph atlas: re-rasterizing every glyph cost ~3 ms per
+   *  small shell frame (SA-03). The font/size/theme paths that actually
+   *  invalidate glyphs call clearWebglAtlas() themselves before this. */
   function forceViewportRefresh(): void {
     if (!term) return;
     try {
-      // Invalidate WebGL glyph cache first when present so tiles from the prior
-      // frame can't be composited over the new buffer state.
-      clearWebglAtlas();
       term.refresh(0, Math.max(0, term.rows - 1));
     } catch {
       /* disposed mid-frame */
@@ -791,6 +853,16 @@
       tuiRefreshRaf = null;
       forceViewportRefresh();
     });
+  }
+
+  /** Throttled agent-pane clean-up repaint: the first frame arms it, frames
+   *  inside the window ride along, the window's end repaints once. */
+  function scheduleDomCleanup(): void {
+    if (domCleanupTimer !== null) return;
+    domCleanupTimer = setTimeout(() => {
+      domCleanupTimer = null;
+      scheduleFullRedraw();
+    }, DOM_CLEANUP_MS);
   }
 
   /** Drop cached WebGL glyph tiles after metrics/theme change so the next
@@ -809,8 +881,39 @@
     queueMicrotask(() => findInput?.focus());
   }
 
+  // Local find is a whole-buffer SearchAddon pass (13–19 ms over 10k lines
+  // incl. up to 1000 decorations, SA-12) — debounce it like the server search,
+  // and skip the highlight-all decorations for a 1-character query (matches
+  // nearly everything; Enter still highlights).
+  const LOCAL_FIND_DEBOUNCE_MS = 100;
+  let localFindTimer: ReturnType<typeof setTimeout> | null = null;
+  function cancelLocalFind(): void {
+    if (localFindTimer !== null) {
+      clearTimeout(localFindTimer);
+      localFindTimer = null;
+    }
+  }
+  function scheduleLocalFind(): void {
+    cancelLocalFind();
+    if (!findQuery) {
+      search?.clearDecorations();
+      return;
+    }
+    localFindTimer = setTimeout(() => {
+      localFindTimer = null;
+      const q = findQuery;
+      if (!search || !q) return;
+      if (q.length >= 2) search.findNext(q, { decorations: searchDecorations });
+      else {
+        search.clearDecorations();
+        search.findNext(q);
+      }
+    }, LOCAL_FIND_DEBOUNCE_MS);
+  }
+
   function closeFind(): void {
     findOpen = false;
+    cancelLocalFind();
     search?.clearDecorations();
     // Clear server-side results so they don't linger on next open.
     serverMatches = [];
@@ -830,6 +933,8 @@
 
   function findNext(back = false): void {
     if (findQuery === '') return;
+    // An explicit step supersedes the pending incremental search.
+    cancelLocalFind();
     // Local xterm search (visible buffer + decorations).
     if (search) {
       if (back) search.findPrevious(findQuery, { decorations: searchDecorations });
@@ -916,7 +1021,7 @@
       // and cell clears miss by a sub-pixel and leave residue between rows.
       lineHeight: 1.0,
       letterSpacing: 0,
-      scrollback: 10_000,
+      scrollback: untrack(() => scrollback),
       theme: untrack(() => terminalTheme(ui.theme, untrack(() => effScheme))),
       macOptionIsMeta: true,
       // ⌥-drag forces a LOCAL selection even while the running app has mouse
@@ -1300,6 +1405,14 @@
         cancelAnimationFrame(tuiRefreshRaf);
         tuiRefreshRaf = null;
       }
+      if (domCleanupTimer !== null) {
+        clearTimeout(domCleanupTimer);
+        domCleanupTimer = null;
+      }
+      if (localFindTimer !== null) {
+        clearTimeout(localFindTimer);
+        localFindTimer = null;
+      }
       closedByUs = true;
       termDidInit = false;
       unregisterSelectAll();
@@ -1411,6 +1524,12 @@
     }
   });
 
+  // react to a host changing the scrollback depth (tile ↔ primary pane)
+  $effect(() => {
+    const lines = scrollback;
+    if (term && term.options.scrollback !== lines) term.options.scrollback = lines;
+  });
+
   // react to terminal font-family choice (live, no rebuild needed)
   $effect(() => {
     const family = ui.termFontStack;
@@ -1474,9 +1593,8 @@
           bind:value={findQuery}
           placeholder="Find in terminal"
           oninput={() => {
-            // Local search: xterm SearchAddon (immediate, visible buffer only).
-            if (search && findQuery) search.findNext(findQuery, { decorations: searchDecorations });
-            else search?.clearDecorations();
+            // Local search: xterm SearchAddon (debounced, visible buffer only).
+            scheduleLocalFind();
             // Server search: ring-buffer grep (debounced, full scrollback history).
             scheduleServerSearch(findQuery);
           }}

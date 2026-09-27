@@ -15,6 +15,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import GitTabs from './GitTabs.svelte';
   import RepoView from './RepoView.svelte';
+  import { graphCache } from './graph-cache';
   import FocusView from './FocusView.svelte';
   import PrDetail from './PrDetail.svelte';
   import Modal from '../../lib/components/Modal.svelte';
@@ -295,6 +296,7 @@
     try {
       await api.del(`/repos/${r.id}`);
       git.closeRepoTab(r.id);
+      graphCache.drop(r.id);
       await git.loadAllRepos(true);
       toasts.info('Repository removed', r.name);
     } catch (e) {

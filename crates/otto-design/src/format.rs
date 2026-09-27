@@ -9,7 +9,9 @@ use otto_core::{Error, Result};
 /// Raw content cap per version (matches the product-attachment cap).
 pub const MAX_CONTENT_BYTES: usize = 25 * 1024 * 1024;
 /// Above this a `design_artifact_updated` event carries `content: null`.
-pub const MAX_EVENT_CONTENT: usize = 4 * 1024 * 1024;
+/// Small on purpose: every design window parses each event and the UI keeps a
+/// short event log — a big payload fans out to all clients (they re-fetch).
+pub const MAX_EVENT_CONTENT: usize = 64 * 1024;
 
 /// How a format's bytes are encoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

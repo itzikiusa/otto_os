@@ -96,6 +96,87 @@ pub fn nodes_projection(nodes: &[NodeRunState]) -> Result<String> {
         .collect::<Result<Vec<_>>>()?;
     serde_json::to_string(&values).map_err(json_error)
 }
+/// Per-node projection memo for [`progress_write`]: run id → per node index
+/// `(hash, len)` of the node's serialized JSON → its serialized projection.
+/// A live step's log line used to re-project (`to_value` + SHA-256) EVERY node
+/// of the run; now only nodes whose JSON changed are re-projected. Bounded to
+/// the most recently written runs.
+type ProjectionMemo = (
+    HashMap<String, Vec<(u64, usize, Arc<str>)>>,
+    std::collections::VecDeque<String>,
+);
+const PROJECTION_MEMO_RUNS: usize = 32;
+
+fn projection_memo() -> &'static Mutex<ProjectionMemo> {
+    static MEMO: OnceLock<Mutex<ProjectionMemo>> = OnceLock::new();
+    MEMO.get_or_init(Default::default)
+}
+
+fn fingerprint(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+/// `(serde_json::to_string(nodes), nodes_projection(nodes))` — byte-identical
+/// — for the run `id`, reusing the memoized projection of every node whose
+/// serialized JSON did not change since the run's previous write. Blocking CPU
+/// work (serialize + hash): call off the async runtime.
+pub fn progress_write(id: &str, nodes: &[NodeRunState]) -> Result<(String, String)> {
+    let parts = nodes
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| Error::Internal(e.to_string()))?;
+    let prev = {
+        let mut memo = projection_memo().lock().unwrap_or_else(|e| e.into_inner());
+        memo.0.remove(id).unwrap_or_default()
+    };
+    let mut next = Vec::with_capacity(parts.len());
+    for (i, part) in parts.iter().enumerate() {
+        let key = (fingerprint(part), part.len());
+        let projected = match prev.get(i) {
+            Some((h, l, p)) if (*h, *l) == key => p.clone(),
+            _ => {
+                // Exactly `nodes_projection`'s per-node step.
+                let value = serde_json::to_value(&nodes[i]).map_err(json_error)?;
+                Arc::from(serde_json::to_string(&project(&value, false)?).map_err(json_error)?)
+            }
+        };
+        next.push((key.0, key.1, projected));
+    }
+    let nodes_json = join_array(parts.iter().map(String::as_str));
+    let projection = join_array(next.iter().map(|(_, _, p)| &**p));
+    let mut memo = projection_memo().lock().unwrap_or_else(|e| e.into_inner());
+    let (runs, order) = &mut *memo;
+    order.retain(|r| r != id);
+    order.push_back(id.to_string());
+    runs.insert(id.to_string(), next);
+    while order.len() > PROJECTION_MEMO_RUNS {
+        if let Some(old) = order.pop_front() {
+            runs.remove(&old);
+        }
+    }
+    Ok((nodes_json, projection))
+}
+
+/// `[a,b,…]` from already-serialized elements — exactly what serde_json's
+/// compact serializer writes for a sequence.
+fn join_array<'a>(parts: impl Iterator<Item = &'a str> + Clone) -> String {
+    let cap = parts.clone().map(|p| p.len() + 1).sum::<usize>() + 2;
+    let mut out = String::with_capacity(cap);
+    out.push('[');
+    for (i, p) in parts.enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(p);
+    }
+    out.push(']');
+    out
+}
+
 pub fn checkpoint_projection(checkpoint: &WorkflowCheckpoint) -> Result<String> {
     serde_json::to_string(&project(
         &serde_json::to_value(checkpoint).map_err(json_error)?,
@@ -345,11 +426,24 @@ pub async fn detail(pool: &SqlitePool, id: &str, node: &str, checkpoint: bool) -
             .fetch_one(&mut *tx)
             .await
             .map_err(dberr("node detail"))?;
-        let nodes: Vec<Value> = serde_json::from_str(&raw).map_err(json_error)?;
-        nodes
+        // Split into raw per-node slices and build a `Value` only for the
+        // match: a run's nodes_json can be tens of MB, and this is fetched
+        // once per viewed log line.
+        #[derive(serde::Deserialize)]
+        struct NodeKey<'a> {
+            #[serde(borrow, default)]
+            node_id: Option<std::borrow::Cow<'a, str>>,
+        }
+        let nodes: Vec<&serde_json::value::RawValue> =
+            serde_json::from_str(&raw).map_err(json_error)?;
+        let hit = nodes
             .into_iter()
-            .find(|value| value["node_id"].as_str() == Some(node))
-            .ok_or_else(|| Error::NotFound("workflow node not found".into()))?
+            .find(|r| {
+                serde_json::from_str::<NodeKey>(r.get())
+                    .is_ok_and(|k| k.node_id.as_deref() == Some(node))
+            })
+            .ok_or_else(|| Error::NotFound("workflow node not found".into()))?;
+        serde_json::from_str::<Value>(hit.get()).map_err(json_error)?
     };
     Ok(json!({"rev":rev,"detail_version":version(&body)?,"body":body}))
 }
@@ -578,6 +672,55 @@ mod tests {
             detail(&pool, &id, "missing", true).await,
             Err(Error::NotFound(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod progress_write_tests {
+    use super::*;
+    use otto_core::workflows::NodeStatus;
+
+    fn node(id: &str, status: &str, logs: usize) -> NodeRunState {
+        serde_json::from_value(json!({
+            "node_id": id,
+            "status": status,
+            "output": {"f": 0.1 + 0.2, "n": -3, "big": u64::MAX, "s": "x\u{2028}é"},
+            "logs": (0..logs).map(|i| format!("⏳ line {i}")).collect::<Vec<_>>(),
+            "sessions": ["s1"],
+        }))
+        .unwrap()
+    }
+
+    /// `progress_write` is byte-for-byte `(to_string(nodes), nodes_projection)`
+    /// on every write, while a node's log grows — the memo only ever returns
+    /// the projection of an unchanged node.
+    #[test]
+    fn progress_write_matches_the_whole_run_projection() {
+        let run = "progress-write-test-run";
+        let mut nodes: Vec<NodeRunState> = (0..40)
+            .map(|i| {
+                node(
+                    &format!("n{i}"),
+                    if i < 10 { "success" } else { "pending" },
+                    3,
+                )
+            })
+            .collect();
+        for tick in 0..30 {
+            nodes[10].logs.push(format!("⏳ tick {tick}"));
+            if tick == 12 {
+                nodes[10].status = NodeStatus::Success;
+                nodes[11].status = NodeStatus::Running;
+            }
+            let (nodes_json, projection) = progress_write(run, &nodes).unwrap();
+            assert_eq!(nodes_json, serde_json::to_string(&nodes).unwrap());
+            assert_eq!(projection, nodes_projection(&nodes).unwrap(), "tick {tick}");
+        }
+        // Shrinking / reordering the run never reuses a stale entry.
+        nodes.truncate(5);
+        nodes.swap(0, 4);
+        let (_, projection) = progress_write(run, &nodes).unwrap();
+        assert_eq!(projection, nodes_projection(&nodes).unwrap());
     }
 }
 

@@ -66,7 +66,36 @@
     running: 'running', passed: 'passed', failed: 'failed', cancelled: 'canceled', interrupted: 'interrupted',
   };
 
-  const req = (id: Id) => apiClient.requests.find((r) => r.id === id);
+  // Id → request, built once per list change (a per-step `.find` re-scanned
+  // every saved request for every step on every render).
+  const reqById = $derived(new Map(apiClient.requests.map((r) => [r.id, r])));
+  const req = (id: Id) => reqById.get(id);
+  const reqLabel = (r: { name: string; method: string; url: string }) => `${r.name} · ${r.method} ${r.url}`;
+
+  // One shared, filterable picker instead of a <select> per step holding every
+  // saved request as an <option> (20 steps × 3k requests = 60k nodes, all
+  // re-diffed on every requests change). The menu searches name/method/url and
+  // renders at most 50 matches at a time.
+  function pickRequest(e: MouseEvent, i: number): void {
+    if (!canEdit) return;
+    const current = steps[i]?.request_id;
+    ctxMenu.show(
+      e,
+      apiClient.requests.map((q) => ({
+        label: reqLabel(q),
+        checked: q.id === current,
+        action: () => { if (steps[i] && steps[i].request_id !== q.id) patchStep(i, { request_id: q.id }); },
+      })),
+      { filter: true, filterPlaceholder: 'Search saved requests', maxVisible: 50 },
+    );
+  }
+
+  // Run report: render the first STEP_PAGE step results, more on demand (a
+  // data-driven run can report 1,000 steps, each re-diffed on every poll).
+  const STEP_PAGE = 100;
+  let reportLimit = $state(STEP_PAGE);
+  // The (large) snapshot JSON is only built while its disclosure is open.
+  let snapshotOpen = $state(false);
 
   function addStep(): void {
     const rid = apiClient.requests[0]?.id;
@@ -230,13 +259,11 @@
           <div class="step-top">
             <span class="step-idx" aria-hidden="true">{i + 1}</span>
             <MethodTag method={r?.method ?? ''} fixed />
-            <select class="input grow" aria-label="Request for step {i + 1}" value={step.request_id} disabled={!canEdit}
-              onchange={(e) => patchStep(i, { request_id: (e.currentTarget as HTMLSelectElement).value })}>
-              {#each apiClient.requests as q (q.id)}
-                <option value={q.id}>{q.name} · {q.method} {q.url}</option>
-              {/each}
-              {#if !r}<option value={step.request_id}>Deleted request</option>{/if}
-            </select>
+            <button type="button" class="input grow req-pick" aria-label="Request for step {i + 1}" aria-haspopup="menu" disabled={!canEdit}
+              title={r ? reqLabel(r) : 'Deleted request'} onclick={(e) => pickRequest(e, i)}>
+              <span class="req-pick-label">{r ? reqLabel(r) : 'Deleted request'}</span>
+              <Icon name="chevronDown" size={12} />
+            </button>
             {#if canEdit}
               <button class="icon-btn" title="Move up" aria-label="Move step {i + 1} up" disabled={i === 0} onclick={() => moveStep(i, -1)}><Icon name="arrowUp" size={14} /></button>
               <button class="icon-btn" title="Move down" aria-label="Move step {i + 1} down" disabled={i === steps.length - 1} onclick={() => moveStep(i, 1)}><Icon name="arrowDown" size={14} /></button>
@@ -317,7 +344,7 @@
           </p>
           {#if runDetails.error}<p class="err" role="status">{runDetails.error}</p>{/if}
         {/if}
-        {#each showRun.steps as r, ri (ri)}
+        {#each showRun.steps.length > reportLimit ? showRun.steps.slice(0, reportLimit) : showRun.steps as r, ri (ri)}
           <div class="r-step" class:ok={r.ok} class:fail={!r.ok}>
             <div class="r-top">
               <Icon name={r.ok ? 'check' : 'x'} size={12} />
@@ -334,8 +361,13 @@
             {/each}
           </div>
         {/each}
+        {#if showRun.steps.length > reportLimit}
+          <button class="btn ghost small" onclick={() => (reportLimit += STEP_PAGE)}>
+            Show {Math.min(STEP_PAGE, showRun.steps.length - reportLimit)} more of {showRun.steps.length - reportLimit} remaining steps
+          </button>
+        {/if}
         {#if runDetails && runDetails.automation_id === automationId}
-          <details class="disclosure"><summary>Request versions used by this run</summary><pre class="snap mono">{JSON.stringify(runDetails.snapshot, null, 2)}</pre></details>
+          <details class="disclosure" bind:open={snapshotOpen}><summary>Request versions used by this run</summary>{#if snapshotOpen}<pre class="snap mono">{JSON.stringify(runDetails.snapshot, null, 2)}</pre>{/if}</details>
         {/if}
       </section>
     {/if}
@@ -465,6 +497,30 @@
     display: flex;
     align-items: center;
     gap: 8px;
+  }
+  .req-pick {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    text-align: start;
+  }
+  .req-pick:disabled {
+    cursor: default;
+  }
+  .req-pick-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .req-pick:focus-visible {
+    outline: none;
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .step-idx {
     display: grid;

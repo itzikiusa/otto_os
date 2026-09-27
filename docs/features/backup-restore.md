@@ -117,6 +117,44 @@ those settings. Its format-1 manifest does not contain workflows, tasks,
 connections, or workspace records. **Restore settings** merges settings and
 reloads the relevant provider configuration; it is separate from data restore.
 
+## Data retention
+
+Four audit/event tables are append-only and used to grow for the life of an
+install (one real `otto.db` reached 514 MB). The daemon prunes them **hourly**
+(first pass at startup):
+
+| Table | Kept |
+|---|---|
+| `work_events` (Mission Control item history) | every row younger than **30 days**, AND each item's newest **500** events regardless of age — a row is deleted only when it is both older than the window and outside its item's newest 500 |
+| `mcp_tool_calls` (first-party MCP tool ledger) | **90 days** |
+| `mcp_call_log` (MCP control-plane call log) | **90 days** |
+| `audit_log` (security audit trail) | **90 days** |
+
+Rows younger than their window are never touched. The policy lives in the
+`data_retention` setting (a partial object merges over the defaults) and is
+re-read every pass; set it with `POST /settings/import`:
+
+```json
+{"data_retention": {"enabled": true, "work_events_days": 30, "work_events_keep_per_item": 500,
+                    "mcp_audit_days": 90, "audit_log_days": 90}}
+```
+
+`enabled: false` turns the job off. Floors a setting can't go below: 7 days
+(30 for `audit_log`) and 50 events per item. Deletes run in 5 000-row batches
+so the SQLite writer is never held for long; freed pages are reused, so the
+file stops growing but only shrinks after a manual `VACUUM`.
+
+Separately, `mcp_tool_calls.args_json` is shaped at insert: any string value
+over 1 024 characters is stored as its first 200 characters plus
+`…[N chars truncated]` (the JSON stays valid). The ledger records that a tool
+was called and with what arguments' shape — not whole note or file bodies.
+Migration `0142` also removes duplicate `artifact_added` work events left by an
+older reconcile bug (keeping the earliest per item, actor and payload).
+
+Implementation: `crates/otto-state/src/retention.rs` (policy + prune),
+`crates/otto-state/src/mcp_audit.rs` (`cap_args_json`), the hourly task in
+`crates/ottod/src/main.rs`.
+
 Implementation: `crates/otto-server/src/state_archive.rs`,
 `state_archive/{schema,files}.rs`, and the backup/Git/connection export routes.
 The authoritative HTTP shapes are in [API contracts](../contracts/api.md).

@@ -764,6 +764,7 @@ impl Driver for MysqlDriver {
         let mut sink = ExportSink::new(w, format);
 
         let mut header_written = false;
+        let mut decoders: Vec<CellDecoder> = Vec::new();
         let mut n: usize = 0;
         while let Some(row) = rows.try_next().await.map_err(types::upstream)? {
             if let Some(cap) = max_rows {
@@ -772,6 +773,7 @@ impl Driver for MysqlDriver {
                 }
             }
             if !header_written {
+                decoders = column_decoders(&row);
                 let columns: Vec<Column> = row
                     .columns()
                     .iter()
@@ -781,8 +783,10 @@ impl Driver for MysqlDriver {
                     .map_err(|e| otto_core::Error::Internal(format!("write export header: {e}")))?;
                 header_written = true;
             }
-            let cells: Vec<Value> = (0..row.columns().len())
-                .map(|i| mysql_value_to_json(&row, i))
+            let cells: Vec<Value> = decoders
+                .iter()
+                .enumerate()
+                .map(|(i, dec)| mysql_cell(&row, i, *dec))
                 .collect();
             sink.write_row(&cells)
                 .map_err(|e| otto_core::Error::Internal(format!("write export row: {e}")))?;
@@ -1351,20 +1355,19 @@ impl MysqlDriver {
 impl MysqlDriver {
     /// Get (or lazily build) the cached completion snapshot for `(connection, db)`.
     /// Built once and reused until refresh; a connection failure yields an empty
-    /// snapshot that is NOT cached (so it retries next keystroke).
+    /// snapshot cached for `COMPLETION_NEGATIVE_TTL` (retried after that, or on refresh).
     async fn completion_snapshot(
         &self,
         cfg: &ResolvedConfig,
         db: &str,
     ) -> std::sync::Arc<crate::complete::SchemaSnapshot> {
-        let cache_key = cfg.cache_key();
-        if let Some(s) = self.completions.get_snapshot(&cache_key, db) {
-            return s;
-        }
-        match self.build_completion_snapshot(cfg, db).await {
-            Some(snap) => self.completions.put_snapshot(&cache_key, db, snap),
-            None => std::sync::Arc::new(crate::complete::SchemaSnapshot::default()),
-        }
+        // Single-flight + negatively cached: a failed build is remembered
+        // briefly instead of re-introspecting on every completion request.
+        self.completions
+            .snapshot_or_build(&cfg.cache_key(), db, || {
+                self.build_completion_snapshot(cfg, db)
+            })
+            .await
     }
 
     /// Introspect `information_schema` into a [`SchemaSnapshot`]: databases, the
@@ -1748,7 +1751,19 @@ async fn run_read(
     if types::sql_leaves_session_state(statement) {
         conn.close_on_drop();
     }
-    exec_read_conn(&mut conn, statement, max_rows).await
+    let out = exec_read_conn(
+        &mut conn,
+        statement,
+        max_rows,
+        &mut types::ByteBudget::default(),
+    )
+    .await?;
+    if out.unread {
+        // Rows left on the wire: discard the session instead of letting its
+        // next use drain them.
+        conn.close_on_drop();
+    }
+    Ok(out.result)
 }
 
 async fn run_write(
@@ -1792,11 +1807,22 @@ async fn run_batch(
         conn.close_on_drop();
     }
     let mut results: Vec<QueryResult> = Vec::with_capacity(spans.len());
+    // One budget for the whole response, shared by every statement's rows.
+    let mut budget = types::ByteBudget::default();
     for span in spans {
         let stmt = span.text.as_str();
         let started = Instant::now();
         let outcome = if is_read_statement(stmt) {
-            exec_read_conn(&mut conn, stmt, max_rows).await
+            exec_read_conn(&mut conn, stmt, max_rows, &mut budget)
+                .await
+                .map(|out| {
+                    // A LATER statement would drain the unread rows anyway (same
+                    // session); the last one's are skipped by closing it.
+                    if out.unread {
+                        conn.close_on_drop();
+                    }
+                    out.result
+                })
         } else {
             exec_write_conn(&mut conn, stmt).await
         };
@@ -1821,51 +1847,150 @@ async fn run_batch(
     Ok(types::fold_batch_results(results))
 }
 
+/// Rows per decode task handed to the blocking pool.
+const DECODE_CHUNK: usize = 1024;
+/// A tail of at most this many cells is decoded inline (a spawn costs more).
+const INLINE_DECODE_CELLS: usize = 16 * 1024;
+
+/// A shaped read plus whether rows were left UNREAD on the wire.
+struct ReadOut {
+    result: QueryResult,
+    /// The read stopped at the row cap / byte budget before the server finished
+    /// sending: the session must be discarded (`close_on_drop`), or sqlx drains
+    /// every remaining row on the connection's next use.
+    unread: bool,
+}
+
 /// Run a row-returning statement on an already-prepared connection (`USE` +
 /// conn-id capture done by the caller) and shape the rows into a `QueryResult`,
-/// capping at `max_rows` and flagging `truncated` when the driver fetched more.
+/// capping at `max_rows` rows and at the response `budget`.
+///
+/// - Stops pulling at `max_rows + 1` (or the budget) instead of draining the
+///   rest: a non-LIMIT-able read (UNION, a batch statement, SHOW…) past the cap
+///   used to fetch and discard the WHOLE server result (~1.5 µs/row — a 50M-row
+///   UNION took over a minute to show 1,000 rows). The caller closes the session
+///   when `unread`.
+/// - Each column's decoder is chosen ONCE from its type ([`CellDecoder`]), not by
+///   trying up to 11 typed `try_get`s per cell (2.1–2.5 s → ~0.2 s CPU per
+///   100k×30 rows) — which also stops text that merely LOOKS like JSON being
+///   returned as JSON values (SH-02).
+/// - Decoding runs in chunks on the blocking pool while the next rows stream in.
 async fn exec_read_conn(
     conn: &mut sqlx::MySqlConnection,
     statement: &str,
     max_rows: usize,
-) -> Result<QueryResult> {
+    budget: &mut types::ByteBudget,
+) -> Result<ReadOut> {
     use futures_util::TryStreamExt as _;
 
-    // Stream rows instead of `fetch_all`: the auto-LIMIT injector bails on
-    // SHOW/DESC/EXPLAIN and anything with FORMAT/UNION/etc., and a batch never
-    // gets a LIMIT at all — with `fetch_all` those buffered the ENTIRE result
-    // in daemon RAM before the cap applied. Here at most `max_rows` decoded
-    // rows are retained; anything past the cap is drained row-by-row (keeping
-    // the protocol/connection clean for the next statement) and dropped.
     let mut stream = sqlx::query(statement).fetch(&mut *conn);
     let mut columns: Vec<Column> = Vec::new();
-    let mut out_rows: Vec<Vec<Value>> = Vec::new();
+    let mut decoders: std::sync::Arc<[CellDecoder]> = std::sync::Arc::from(Vec::new());
+    let mut chunk: Vec<MySqlRow> = Vec::new();
+    let mut decoding: Vec<tokio::task::JoinHandle<Vec<Vec<Value>>>> = Vec::new();
+    let mut kept = 0usize;
     let mut truncated = false;
+    let mut truncated_reason = None;
+    let mut unread = false;
     while let Some(row) = stream.try_next().await.map_err(types::upstream)? {
         if columns.is_empty() {
             for col in row.columns() {
                 columns.push(Column::typed(col.name(), col.type_info().name()));
             }
+            decoders = column_decoders(&row).into();
         }
-        if out_rows.len() >= max_rows {
+        if kept >= max_rows {
+            // Row max_rows+1 exists: the result is capped. Stop here.
             truncated = true;
-            continue; // drain without retaining
+            unread = true;
+            break;
         }
-        let mut cells = Vec::with_capacity(columns.len());
-        for i in 0..columns.len() {
-            // Cap oversized cells (LONGTEXT/blob/JSON) like ClickHouse does —
-            // an uncapped multi-MB cell freezes the grid and bloats the WS frame.
-            cells.push(types::cap_cell(mysql_value_to_json(&row, i)));
+        // Budget on the raw wire size, per row, BEFORE decoding. Always keep
+        // at least one row so a single huge row still shows.
+        if !budget.charge(raw_row_json_len(&row, &decoders)) && kept > 0 {
+            truncated = true;
+            truncated_reason = Some(types::TruncatedReason::Bytes);
+            unread = true;
+            break;
         }
-        out_rows.push(cells);
+        kept += 1;
+        chunk.push(row);
+        if chunk.len() >= DECODE_CHUNK {
+            let rows = std::mem::take(&mut chunk);
+            let dec = decoders.clone();
+            decoding.push(tokio::task::spawn_blocking(move || {
+                decode_rows(&rows, &dec)
+            }));
+        }
+    }
+    drop(stream);
+
+    let mut out_rows: Vec<Vec<Value>> = Vec::with_capacity(kept);
+    for task in decoding {
+        out_rows.extend(
+            task.await
+                .map_err(|e| otto_core::Error::Internal(format!("decode task failed: {e}")))?,
+        );
+    }
+    if !chunk.is_empty() {
+        if chunk.len() * decoders.len() <= INLINE_DECODE_CELLS {
+            out_rows.extend(decode_rows(&chunk, &decoders));
+        } else {
+            let dec = decoders.clone();
+            out_rows.extend(
+                tokio::task::spawn_blocking(move || decode_rows(&chunk, &dec))
+                    .await
+                    .map_err(|e| otto_core::Error::Internal(format!("decode task failed: {e}")))?,
+            );
+        }
     }
 
-    Ok(QueryResult {
-        columns,
-        rows: out_rows,
-        truncated,
-        ..QueryResult::empty()
+    Ok(ReadOut {
+        result: QueryResult {
+            columns,
+            rows: out_rows,
+            truncated,
+            truncated_reason,
+            ..QueryResult::empty()
+        },
+        unread,
     })
+}
+
+/// Decode fetched rows with their per-column decoders (capping oversized cells
+/// like ClickHouse does — an uncapped multi-MB cell freezes the grid).
+fn decode_rows(rows: &[MySqlRow], decoders: &[CellDecoder]) -> Vec<Vec<Value>> {
+    rows.iter()
+        .map(|row| {
+            decoders
+                .iter()
+                .enumerate()
+                .map(|(i, dec)| types::cap_cell(mysql_cell(row, i, *dec)))
+                .collect()
+        })
+        .collect()
+}
+
+/// Estimated JSON size of a row, from its raw wire bytes (no decoding): text
+/// is ~1:1, binary grows by base64's 4/3, fixed-width binary-protocol values
+/// (ints, floats, dates) are counted at a typical rendered width.
+fn raw_row_json_len(row: &MySqlRow, decoders: &[CellDecoder]) -> usize {
+    let mut n = 2;
+    for (i, dec) in decoders.iter().enumerate() {
+        let raw = row
+            .try_get_raw(i)
+            .ok()
+            .filter(|v| !sqlx::ValueRef::is_null(v))
+            .and_then(|v| <&[u8] as sqlx::Decode<sqlx::MySql>>::decode(v).ok())
+            .map(|b| b.len().min(types::MAX_CELL_CHARS));
+        n += 3 + match (raw, dec) {
+            (None, _) => 4,
+            (Some(len), CellDecoder::Bytes) => len.div_ceil(3) * 4,
+            (Some(len), CellDecoder::Text | CellDecoder::Json | CellDecoder::Fallback) => len,
+            (Some(len), _) => len.max(24),
+        };
+    }
+    n
 }
 
 /// Run a write/DDL statement on an already-prepared connection and return the
@@ -1881,8 +2006,123 @@ async fn exec_write_conn(conn: &mut sqlx::MySqlConnection, statement: &str) -> R
     Ok(result)
 }
 
+/// How one MySQL result column's cells decode, chosen ONCE per column from its
+/// type name (sqlx `MySqlTypeInfo::name()`), so each cell pays exactly one
+/// typed `try_get` — every failed `try_get` allocates a formatted mismatch
+/// error, and text columns used to fail 10 of them per cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CellDecoder {
+    /// Signed integers (incl. `BOOLEAN` = TINYINT(1)).
+    Int,
+    /// `… UNSIGNED` integers.
+    UInt,
+    Float,
+    /// DECIMAL/NUMERIC → exact string.
+    Decimal,
+    /// The native `JSON` type — the ONLY column whose text is parsed as JSON.
+    Json,
+    DateTime,
+    Timestamp,
+    Date,
+    Time,
+    /// CHAR/VARCHAR/TEXT/ENUM (non-binary collation) → the string AS IS.
+    Text,
+    /// BINARY/VARBINARY/BLOB → base64.
+    Bytes,
+    /// Anything else (YEAR, BIT, SET, GEOMETRY, NULL, future types): the typed
+    /// cascade, then raw text / base64.
+    Fallback,
+}
+
+/// The decoder for a column type name (see [`CellDecoder`]).
+fn cell_decoder(type_name: &str) -> CellDecoder {
+    use CellDecoder::*;
+    match type_name {
+        "BOOLEAN" | "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "BIGINT" => Int,
+        "TINYINT UNSIGNED" | "SMALLINT UNSIGNED" | "MEDIUMINT UNSIGNED" | "INT UNSIGNED"
+        | "BIGINT UNSIGNED" => UInt,
+        "FLOAT" | "DOUBLE" => Float,
+        "DECIMAL" => Decimal,
+        "JSON" => Json,
+        "DATETIME" => DateTime,
+        "TIMESTAMP" => Timestamp,
+        "DATE" => Date,
+        "TIME" => Time,
+        "CHAR" | "VARCHAR" | "TINYTEXT" | "TEXT" | "MEDIUMTEXT" | "LONGTEXT" | "ENUM" => Text,
+        "BINARY" | "VARBINARY" | "TINYBLOB" | "BLOB" | "MEDIUMBLOB" | "LONGBLOB" => Bytes,
+        _ => Fallback,
+    }
+}
+
+/// One decoder per column of `row` (every row of a result shares the columns).
+fn column_decoders(row: &MySqlRow) -> Vec<CellDecoder> {
+    row.columns()
+        .iter()
+        .map(|c| cell_decoder(c.type_info().name()))
+        .collect()
+}
+
+/// Decode one cell with its column's decoder. A decoder that unexpectedly
+/// rejects the value falls back to the typed cascade — never to Null.
+fn mysql_cell(row: &MySqlRow, idx: usize, dec: CellDecoder) -> Value {
+    use sqlx::types::chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+    let hit = match dec {
+        CellDecoder::Int => row.try_get::<Option<i64>, _>(idx).map(int_to_json).ok(),
+        CellDecoder::UInt => row
+            .try_get::<Option<u64>, _>(idx)
+            .map(|v| v.map(types::u64_to_json).unwrap_or(Value::Null))
+            .ok(),
+        CellDecoder::Float => row.try_get::<Option<f64>, _>(idx).map(float_to_json).ok(),
+        CellDecoder::Decimal => row
+            .try_get::<Option<sqlx::types::BigDecimal>, _>(idx)
+            .map(|v| {
+                v.map(|n| Value::String(n.to_string()))
+                    .unwrap_or(Value::Null)
+            })
+            .ok(),
+        CellDecoder::Json => row
+            .try_get::<Option<Value>, _>(idx)
+            .map(|v| v.unwrap_or(Value::Null))
+            .ok(),
+        CellDecoder::DateTime => row
+            .try_get::<Option<NaiveDateTime>, _>(idx)
+            .map(temporal_to_json)
+            .ok(),
+        CellDecoder::Timestamp => row
+            .try_get::<Option<DateTime<Utc>>, _>(idx)
+            .map(|v| temporal_to_json(v.map(|d| d.naive_utc())))
+            .ok(),
+        CellDecoder::Date => row
+            .try_get::<Option<NaiveDate>, _>(idx)
+            .map(temporal_to_json)
+            .ok(),
+        CellDecoder::Time => row
+            .try_get::<Option<NaiveTime>, _>(idx)
+            .map(temporal_to_json)
+            .ok(),
+        CellDecoder::Text => row
+            .try_get::<Option<String>, _>(idx)
+            .map(string_to_json)
+            .ok(),
+        CellDecoder::Bytes => row
+            .try_get::<Option<Vec<u8>>, _>(idx)
+            .map(|v| {
+                v.map(|b| Value::String(B64.encode(b)))
+                    .unwrap_or(Value::Null)
+            })
+            .ok(),
+        CellDecoder::Fallback => None,
+    };
+    hit.unwrap_or_else(|| mysql_value_to_json(row, idx))
+}
+
 /// Decode a single cell of a MySQL row to a `serde_json::Value`, trying a
 /// sequence of native types and finally falling back to base64 bytes or Null.
+/// The per-cell fallback for [`CellDecoder::Fallback`] columns; ordinary
+/// columns go through [`mysql_cell`]. Never parses text as JSON: sqlx's JSON
+/// type accepts EVERY string/blob column, so a VARCHAR holding `null`, `123`,
+/// `true` or a 30-digit id came back as JSON null/number/bool (SH-02) — only a
+/// native `JSON` column ([`CellDecoder::Json`]) is parsed.
 fn mysql_value_to_json(row: &MySqlRow, idx: usize) -> Value {
     // Integers (covers TINYINT..BIGINT, signed). Try i64 first.
     if let Ok(v) = row.try_get::<Option<i64>, _>(idx) {
@@ -1900,9 +2140,12 @@ fn mysql_value_to_json(row: &MySqlRow, idx: usize) -> Value {
     if let Ok(v) = row.try_get::<Option<bool>, _>(idx) {
         return v.map(Value::Bool).unwrap_or(Value::Null);
     }
-    // JSON columns decode straight to a Value.
-    if let Ok(Some(val)) = row.try_get::<Option<Value>, _>(idx) {
-        return val;
+    // JSON columns decode straight to a Value — gated on the native type:
+    // sqlx's JSON `compatible()` also accepts every text/blob column.
+    if row.columns()[idx].type_info().name() == "JSON" {
+        if let Ok(Some(val)) = row.try_get::<Option<Value>, _>(idx) {
+            return val;
+        }
     }
     // NUMERIC / DECIMAL → exact string (never lossy f64). sqlx's f64 branch
     // explicitly EXCLUDES Decimal columns (`real_compatible` matches only
@@ -2287,6 +2530,8 @@ async fn governed_read(
     let max_rows = req.max_rows.unwrap_or(DEFAULT_MAX_ROWS);
     let single = spans.len() == 1;
     let mut results = Vec::new();
+    let mut budget = types::ByteBudget::default();
+    let mut unread = false;
     for span in spans {
         let started = Instant::now();
         let limited = types::inject_row_limit(&span.text, max_rows.saturating_add(1), req.offset);
@@ -2304,7 +2549,22 @@ async fn governed_read(
                 );
             }
         }
-        let mut result = exec_read_conn(&mut tx, &sql, max_rows).await?;
+        let out = match exec_read_conn(&mut tx, &sql, max_rows, &mut budget).await {
+            Ok(out) => out,
+            // A batch keeps its completed results and flags the failing
+            // statement (same contract as `run_batch`); a single statement's
+            // failure is the request's error.
+            Err(e) if !single => {
+                results.push(types::errored_batch_entry(
+                    types::statement_preview(&span.text),
+                    e.to_string(),
+                ));
+                break;
+            }
+            Err(e) => return Err(e),
+        };
+        unread |= out.unread;
+        let mut result = out.result;
         result.stats.duration_ms = started.elapsed().as_millis() as u64;
         result.stats.row_count = result.rows.len();
         if single {
@@ -2314,13 +2574,79 @@ async fn governed_read(
         }
         results.push(result);
     }
-    tx.rollback().await.map_err(types::upstream)?;
+    if unread {
+        // A ROLLBACK would first drain the unread rows. Drop the transaction
+        // (its rollback is queued) and discard the session: the server rolls
+        // the read-only transaction back when the connection closes.
+        drop(tx);
+        conn.close_on_drop();
+    } else {
+        tx.rollback().await.map_err(types::upstream)?;
+    }
     Ok(types::fold_batch_results(results))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SH-01/SH-02: the decoder is picked from the column type, and ONLY the
+    /// native JSON type is parsed as JSON — text that looks like JSON (`null`,
+    /// `123`, `true`, a 30-digit id) must come back as the string it is.
+    #[test]
+    fn cell_decoder_is_chosen_by_column_type() {
+        use CellDecoder::*;
+        for (name, want) in [
+            ("BOOLEAN", Int),
+            ("TINYINT", Int),
+            ("SMALLINT", Int),
+            ("MEDIUMINT", Int),
+            ("INT", Int),
+            ("BIGINT", Int),
+            ("TINYINT UNSIGNED", UInt),
+            ("INT UNSIGNED", UInt),
+            ("BIGINT UNSIGNED", UInt),
+            ("FLOAT", Float),
+            ("DOUBLE", Float),
+            ("DECIMAL", Decimal),
+            ("JSON", Json),
+            ("DATETIME", DateTime),
+            ("TIMESTAMP", Timestamp),
+            ("DATE", Date),
+            ("TIME", Time),
+            ("CHAR", Text),
+            ("VARCHAR", Text),
+            ("TINYTEXT", Text),
+            ("TEXT", Text),
+            ("MEDIUMTEXT", Text),
+            ("LONGTEXT", Text),
+            ("ENUM", Text),
+            ("BINARY", Bytes),
+            ("VARBINARY", Bytes),
+            ("BLOB", Bytes),
+            ("LONGBLOB", Bytes),
+            ("YEAR", Fallback),
+            ("BIT", Fallback),
+            ("SET", Fallback),
+            ("GEOMETRY", Fallback),
+            ("NULL", Fallback),
+            ("SOMETHING NEW", Fallback),
+        ] {
+            assert_eq!(cell_decoder(name), want, "{name}");
+        }
+        // No text/binary type may reach the JSON parser.
+        for name in [
+            "CHAR",
+            "VARCHAR",
+            "TEXT",
+            "LONGTEXT",
+            "ENUM",
+            "BLOB",
+            "VARBINARY",
+        ] {
+            assert_ne!(cell_decoder(name), Json, "{name} must not decode as JSON");
+        }
+    }
 
     #[test]
     fn capabilities_are_honest() {

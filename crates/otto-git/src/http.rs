@@ -322,6 +322,18 @@ pub(crate) async fn provider_ctx<S: GitCtx>(
     user: &AuthUser,
     repo: &Repo,
 ) -> Result<(Arc<dyn GitProvider>, RemoteRef)> {
+    let (provider, remote, _) = provider_ctx_with_account(s, user, repo).await?;
+    Ok((provider, remote))
+}
+
+/// [`provider_ctx`] plus the id of the git account whose credential the
+/// provider carries — for memo keys that must not serve one credential's
+/// fetch to another.
+async fn provider_ctx_with_account<S: GitCtx>(
+    s: &S,
+    user: &AuthUser,
+    repo: &Repo,
+) -> Result<(Arc<dyn GitProvider>, RemoteRef, Id)> {
     // The remote is read ONCE at registration, and `LocalGit::remote_url` folds
     // any failure into `None` — so a repo registered before its `origin` existed
     // (or during a bulk import where the `git` spawn failed) is permanently
@@ -363,7 +375,7 @@ pub(crate) async fn provider_ctx<S: GitCtx>(
     // it to api.github.com.
     crate::providers::check_remote_reachable(kind, remote)?;
     let token = account_token(s, &account).await?;
-    Ok((make_provider(&account, token), remote_ref))
+    Ok((make_provider(&account, token), remote_ref, account.id))
 }
 
 /// Bind an unbound repo to the caller's account for `kind` and persist it.
@@ -1282,6 +1294,118 @@ struct DiffQuery {
     /// this when a file is selected so it computes only that file's diff instead
     /// of the whole working tree.
     path: Option<String>,
+    /// A rename's origin, sent with `path` so both pathspecs reach git and
+    /// `-M` still pairs the two sides.
+    old_path: Option<String>,
+    /// File list + counts only (`--raw --numstat`, never the patch).
+    summary: Option<bool>,
+    /// With `path`: lift the per-file cap to the hard ceiling.
+    full: Option<bool>,
+}
+
+impl DiffQuery {
+    fn opts(&self) -> crate::local::DiffOpts {
+        use crate::parse::DiffCaps;
+        let blank = |s: &Option<String>| s.clone().filter(|v| !v.is_empty());
+        let (path, old_path) = (blank(&self.path), blank(&self.old_path));
+        let summary = self.summary.unwrap_or(false);
+        let caps = if summary {
+            None
+        } else if self.full.unwrap_or(false) && path.is_some() {
+            Some(DiffCaps::FULL_FILE)
+        } else {
+            Some(DiffCaps::DEFAULT)
+        };
+        crate::local::DiffOpts {
+            path,
+            old_path,
+            summary,
+            caps,
+        }
+    }
+}
+
+/// `application/json` response from already-serialized bytes, tagged with
+/// whether the diff memo answered it (`x-otto-diff-cache: hit|miss|off`).
+fn json_body(body: axum::body::Bytes, cache: &'static str) -> Response {
+    use axum::http::header::{HeaderName, HeaderValue, CONTENT_TYPE};
+    (
+        [
+            (CONTENT_TYPE, HeaderValue::from_static("application/json")),
+            (
+                HeaderName::from_static("x-otto-diff-cache"),
+                HeaderValue::from_static(cache),
+            ),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+/// Serialize a diff off the async workers once it is big enough to matter.
+async fn diff_json(resp: DiffResp) -> Result<axum::body::Bytes> {
+    let lines: usize = resp
+        .files
+        .iter()
+        .flat_map(|f| f.hunks.iter())
+        .map(|h| h.lines.len())
+        .sum();
+    crate::local::off_runtime(lines * 64 + resp.files.len() * 128, move || {
+        serde_json::to_vec(&resp)
+    })
+    .await?
+    .map(axum::body::Bytes::from)
+    .map_err(|e| Error::Internal(format!("diff json: {e}")))
+}
+
+/// The content-addressed form of an immutable `target` plus its memo key, or
+/// `None` for the worktree/index (always recomputed). Refs are resolved to
+/// full commit ids first (one `rev-parse` each; a full hex id costs nothing),
+/// so a branch that moves never serves a stale entry. A rev that doesn't
+/// resolve falls through to the uncached path and its usual git error.
+async fn immutable_diff_key(
+    git: &LocalGit,
+    target: &DiffTarget,
+    opts: &crate::local::DiffOpts,
+) -> Option<(DiffTarget, String)> {
+    let (kind, resolved) = match target {
+        DiffTarget::Commit(rev) => (
+            "commit",
+            DiffTarget::Commit(git.resolve_commit(rev).await.ok()?),
+        ),
+        DiffTarget::Range(a, b) => (
+            "range2",
+            DiffTarget::Range(
+                git.resolve_commit(a).await.ok()?,
+                git.resolve_commit(b).await.ok()?,
+            ),
+        ),
+        DiffTarget::MergeBase(a, b) => (
+            "range3",
+            DiffTarget::MergeBase(
+                git.resolve_commit(a).await.ok()?,
+                git.resolve_commit(b).await.ok()?,
+            ),
+        ),
+        DiffTarget::Worktree | DiffTarget::Working | DiffTarget::Staged => return None,
+    };
+    let oids = match &resolved {
+        DiffTarget::Commit(c) => c.clone(),
+        DiffTarget::Range(a, b) | DiffTarget::MergeBase(a, b) => format!("{a}:{b}"),
+        _ => return None,
+    };
+    let mode = match (opts.summary, opts.caps) {
+        (true, _) => "summary".to_string(),
+        (false, Some(c)) => format!("capped:{}:{}", c.file_lines, c.total_lines),
+        (false, None) => "full".to_string(),
+    };
+    let key = format!(
+        "{}\0{kind}\0{oids}\0{}\0{}\0{mode}",
+        git.path().display(),
+        opts.path.as_deref().unwrap_or(""),
+        opts.old_path.as_deref().unwrap_or(""),
+    );
+    Some((resolved, key))
 }
 
 async fn repo_diff<S: GitCtx>(
@@ -1289,13 +1413,35 @@ async fn repo_diff<S: GitCtx>(
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<DiffQuery>,
-) -> ApiResult<Json<DiffResp>> {
+) -> ApiResult<Response> {
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
     let target = match q.target.as_deref() {
         None => DiffTarget::Worktree,
         Some(t) => DiffTarget::parse(t)?,
     };
-    Ok(Json(git.diff(target, q.path.as_deref()).await?))
+    let opts = q.opts();
+    if let Some((resolved, key)) = immutable_diff_key(&git, &target, &opts).await {
+        if let Some(body) = crate::diff_cache::get_body(&key) {
+            return Ok(json_body(body, "hit"));
+        }
+        // One computation per key however many identical requests race; it is
+        // dropped (git killed) only when every one of them has gone away.
+        let repo_path = git.path().to_path_buf();
+        let body = crate::diff_cache::diff_flights()
+            .run(&key, || {
+                let key = key.clone();
+                async move {
+                    let git = LocalGit::new(repo_path);
+                    let body = diff_json(git.diff_with(&resolved, &opts).await?).await?;
+                    crate::diff_cache::put_body(key, body.clone());
+                    Ok(body)
+                }
+            })
+            .await?;
+        return Ok(json_body(body, "miss"));
+    }
+    let resp = git.diff_with(&target, &opts).await?;
+    Ok(json_body(diff_json(resp).await?, "off"))
 }
 
 async fn repo_stage<S: GitCtx>(
@@ -2154,14 +2300,94 @@ async fn pr_update<S: GitCtx>(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+struct PrDiffQuery {
+    /// File list + counts only.
+    summary: Option<bool>,
+    /// One file (its current path; a deleted file's old path).
+    path: Option<String>,
+    /// A rename's origin, matched alongside `path`.
+    old_path: Option<String>,
+    /// With `path`: lift the per-file cap to the hard ceiling.
+    full: Option<bool>,
+    /// Opaque revision token (the UI passes `PrSummary.head_sha`): part of the
+    /// memo key, so a push is a new key rather than a stale hit.
+    rev: Option<String>,
+}
+
 async fn pr_diff<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Path((id, number)): Path<(Id, u64)>,
-) -> ApiResult<Json<DiffResp>> {
+    Query(q): Query<PrDiffQuery>,
+) -> ApiResult<Response> {
+    use crate::diff_cache::{approx_size, pr_diffs, pr_flights};
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
-    let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
-    Ok(Json(provider.get_pr_diff(&remote, number).await?))
+    // Access is decided per request (role + the caller's provider credential)
+    // BEFORE the shared memo is consulted.
+    let (provider, remote, account) = provider_ctx_with_account(&s, &user, &repo).await?;
+    let rev = q.rev.as_deref().unwrap_or("");
+    let key = format!(
+        "{}\0{}/{}\0{number}\0{account}\0{rev}",
+        repo.id, remote.owner, remote.repo
+    );
+    let cached = pr_diffs()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&key);
+    let (diff, cache) = match cached {
+        Some(d) => (d, "hit"),
+        None => {
+            let d = pr_flights()
+                .run(&key, || {
+                    let key = key.clone();
+                    async move {
+                        let mut d = provider.get_pr_diff(&remote, number).await?;
+                        for f in &mut d.files {
+                            crate::parse::fill_counts(f);
+                        }
+                        crate::parse::fill_totals(&mut d);
+                        let d = Arc::new(d);
+                        pr_diffs().lock().unwrap_or_else(|p| p.into_inner()).put(
+                            key,
+                            d.clone(),
+                            approx_size(&d),
+                        );
+                        Ok(d)
+                    }
+                })
+                .await?;
+            (d, "miss")
+        }
+    };
+    let opts = DiffQuery {
+        target: None,
+        path: q.path,
+        old_path: q.old_path,
+        summary: q.summary,
+        full: q.full,
+    }
+    .opts();
+    let size = if opts.path.is_some() || opts.summary {
+        0
+    } else {
+        approx_size(&diff)
+    };
+    let body = crate::local::off_runtime(size, move || {
+        let keep = |f: &otto_core::api::FileDiff| match (&opts.path, &opts.old_path) {
+            (None, _) => true,
+            (Some(p), old) => {
+                f.path == *p
+                    || f.old_path.as_deref() == Some(p.as_str())
+                    || (old.is_some() && f.old_path.as_deref() == old.as_deref())
+            }
+        };
+        let view = crate::parse::capped_view(&diff, keep, opts.caps.as_ref(), opts.summary);
+        serde_json::to_vec(&view)
+    })
+    .await?
+    .map_err(|e| Error::Internal(format!("diff json: {e}")))?;
+    Ok(json_body(body.into(), cache))
 }
 
 async fn pr_comment<S: GitCtx>(
@@ -3036,6 +3262,107 @@ mod tests {
             LocalGit::new(&dir).stash_list().await.unwrap().is_empty(),
             "a clean pop leaves no stash entry"
         );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// `/diff` end to end through the handler: summary, the cache (hit on
+    /// the second identical call, keyed by the RESOLVED commit so a branch
+    /// name and its sha share an entry), the worktree never memoized, and a
+    /// per-file rename request.
+    #[tokio::test]
+    async fn diff_route_summary_per_file_and_memo() {
+        let (_pool, ctx, user, ws) = fixture().await;
+        let dir = init_git_repo().await;
+        let sh = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .expect("spawn git");
+            assert!(out.status.success(), "git {args:?} failed");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        sh(&["config", "user.email", "otto@test.local"]);
+        sh(&["config", "user.name", "Otto Test"]);
+        sh(&["config", "commit.gpgsign", "false"]);
+        let body: String = (0..30).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.join("old.txt"), &body).unwrap();
+        sh(&["add", "-A"]);
+        sh(&["commit", "-q", "-m", "init"]);
+        std::fs::remove_file(dir.join("old.txt")).unwrap();
+        std::fs::write(dir.join("new.txt"), format!("{body}tail\n")).unwrap();
+        std::fs::write(dir.join("other.txt"), "x\n").unwrap();
+        sh(&["add", "-A"]);
+        sh(&["commit", "-q", "-m", "move"]);
+        let head = sh(&["rev-parse", "HEAD"]);
+        let repo = ctx
+            .store
+            .create_repo(NewRepo {
+                workspace_id: ws.clone(),
+                name: "diffs".into(),
+                path: dir.to_string_lossy().into_owned(),
+                remote_url: None,
+                provider: None,
+                git_account_id: None,
+            })
+            .await
+            .unwrap();
+        let call = |q: DiffQuery| {
+            let (ctx, user, id) = (ctx.clone(), user.clone(), repo.id.clone());
+            async move {
+                let resp = repo_diff(
+                    State(ctx),
+                    Extension(auth(&user, false)),
+                    Path(id),
+                    Query(q),
+                )
+                .await
+                .unwrap();
+                let cache = resp.headers()["x-otto-diff-cache"]
+                    .to_str()
+                    .unwrap()
+                    .to_string();
+                let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let d: DiffResp = serde_json::from_slice(&bytes).unwrap();
+                (cache, d)
+            }
+        };
+        let q = |target: &str, summary: bool, path: Option<&str>, old: Option<&str>| DiffQuery {
+            target: Some(target.to_string()),
+            path: path.map(str::to_string),
+            old_path: old.map(str::to_string),
+            summary: Some(summary),
+            full: None,
+        };
+
+        let (c1, s1) = call(q("commit:HEAD", true, None, None)).await;
+        assert_eq!(c1, "miss");
+        assert_eq!(s1.files.len(), 2);
+        assert!(s1
+            .files
+            .iter()
+            .all(|f| f.hunks.is_empty() && f.hunks_omitted == Some(true)));
+        let ren = s1.files.iter().find(|f| f.path == "new.txt").unwrap();
+        assert_eq!(ren.old_path.as_deref(), Some("old.txt"));
+        assert_eq!(ren.status, Some(otto_core::api::FileChangeStatus::Renamed));
+        assert_eq!(s1.total_added, Some(2));
+        // Same commit by its full id → the same memo entry.
+        let (c2, s2) = call(q(&format!("commit:{head}"), true, None, None)).await;
+        assert_eq!(c2, "hit");
+        assert_eq!(s2.files.len(), s1.files.len());
+
+        // Per-file with old_path: the rename pairs, hunks present.
+        let (_, one) = call(q("commit:HEAD", false, Some("new.txt"), Some("old.txt"))).await;
+        assert_eq!(one.files.len(), 1);
+        assert_eq!(one.files[0].old_path.as_deref(), Some("old.txt"));
+        assert_eq!(one.files[0].hunks.len(), 1);
+        assert_eq!(one.files[0].hunks_omitted, None);
+
+        // The worktree is never memoized.
+        let (c3, _) = call(q("worktree", true, None, None)).await;
+        assert_eq!(c3, "off");
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 

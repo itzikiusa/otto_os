@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { pollWhileVisible } from '../../lib/poll';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -15,6 +16,11 @@
   type LogMode = 'all' | 'tail';
 
   const ALL_FILES = '__all__';
+  /** Ring cap on what the page holds and renders. "All log files" was ~80k
+   *  lines re-split, re-escaped and re-rendered through `{@html}` on every
+   *  Live tick; the newest 5k lines are what anyone reads here (Copy copies
+   *  what is shown — the files themselves are in the log folder). */
+  const MAX_LINES = 5000;
 
   let loading = $state(true);
   let refreshing = $state(false);
@@ -23,9 +29,20 @@
   let mode: LogMode = $state('all');
   let tailLines = $state(2000);
   let selected = $state('');
+  // The input binds to `filterInput`; the (whole-buffer) filter pass runs on
+  // `filter`, debounced so typing doesn't re-scan per keystroke.
+  let filterInput = $state('');
   let filter = $state('');
   let content = $state('');
   let nextOffset = $state(0);
+  // The file Live follows with `mode=since`: the selected file, or for "All
+  // log files" the newest one (the only one still being written).
+  let liveFile = '';
+  // Bumped by every full read, so an in-flight Live append that started
+  // before a file/mode switch is discarded instead of landing on the new view.
+  let readGen = 0;
+  // True when older lines were dropped — by the ring cap or the daemon's byte cap.
+  let clipped = $state(false);
   let payload: DaemonLogs | null = $state(null);
   let logEl: HTMLDivElement | null = $state(null);
   let loadError = $state('');
@@ -50,8 +67,48 @@
     const lines = filter.trim()
       ? `${nf.format(shownCount)} of ${nf.format(lineCount)} lines match`
       : `${nf.format(lineCount)} lines`;
-    return `${lines} · ${fileCount} file${fileCount === 1 ? '' : 's'} in the log folder`;
+    const clip = clipped ? ` (newest ${nf.format(mode === 'tail' ? Math.min(tailLines, MAX_LINES) : MAX_LINES)} kept)` : '';
+    return `${lines}${clip} · ${fileCount} file${fileCount === 1 ? '' : 's'} in the log folder`;
   });
+
+  $effect(() => {
+    const q = filterInput;
+    const id = setTimeout(() => (filter = q), 150);
+    return () => clearTimeout(id);
+  });
+
+  /** Keep at most `max` lines (from the end); cheap — scans back from the end. */
+  function capLines(s: string, max: number): { text: string; cut: boolean } {
+    let idx = s.length;
+    // A trailing newline terminates the last line; it doesn't start a new one.
+    if (s.endsWith('\n')) idx -= 1;
+    for (let n = 0; n < max; n++) {
+      idx = s.lastIndexOf('\n', idx - 1);
+      if (idx < 0) return { text: s, cut: false };
+    }
+    return { text: s.slice(idx + 1), cut: true };
+  }
+
+  function lineCap(): number {
+    return mode === 'tail' && selected !== ALL_FILES ? Math.min(Math.max(1, tailLines), MAX_LINES) : MAX_LINES;
+  }
+
+  /** Compare-before-assign: an unchanged read must not re-derive/re-render. */
+  function setContent(next: string, serverTruncated: boolean): void {
+    const { text, cut } = capLines(next, lineCap());
+    if (text !== content) content = text;
+    const c = cut || serverTruncated;
+    if (c !== clipped) clipped = c;
+  }
+
+  function sameFiles(a: DaemonLogs | null, b: DaemonLogs): boolean {
+    if (!a || a.log_dir !== b.log_dir || a.files.length !== b.files.length) return false;
+    return a.files.every((f, i) => f.name === b.files[i].name);
+  }
+
+  function liveFileOf(data: DaemonLogs): string {
+    return data.selected === ALL_FILES ? (data.files.at(-1)?.name ?? '') : data.selected;
+  }
 
   // Severity markers: the level word on each line gets a tone (ERROR/WARN),
   // never the whole line (patterns.md → Logs). Escaped first, so log text can
@@ -87,12 +144,12 @@
     void loadInitial();
   });
 
+  // Shared poll chain: a slow read never overlaps the next, and nothing runs
+  // while the window is hidden (one catch-up read on return).
   $effect(() => {
     if (!autoRefresh) return;
-    const id = window.setInterval(() => {
-      void refreshIncremental();
-    }, 1500);
-    return () => window.clearInterval(id);
+    const p = pollWhileVisible(() => refreshIncremental(), { ms: 1500, immediate: false });
+    return () => p.stop();
   });
 
   async function loadInitial(): Promise<void> {
@@ -102,7 +159,8 @@
       const data = await fetchLogs(mode);
       payload = data;
       selected = data.selected;
-      content = data.content;
+      liveFile = liveFileOf(data);
+      setContent(data.content, data.truncated);
       nextOffset = data.next_offset;
       await maybeFollow();
     } catch (e) {
@@ -116,11 +174,14 @@
 
   async function refreshFull(): Promise<void> {
     refreshing = true;
+    const gen = ++readGen;
     try {
       const data = await fetchLogs(mode);
-      payload = data;
+      if (gen !== readGen) return;
+      if (!sameFiles(payload, data) || payload?.selected !== data.selected || payload?.mode !== data.mode) payload = data;
       selected = data.selected;
-      content = data.content;
+      liveFile = liveFileOf(data);
+      setContent(data.content, data.truncated);
       nextOffset = data.next_offset;
       await maybeFollow();
     } catch (e) {
@@ -130,27 +191,42 @@
     }
   }
 
+  /** Live tick: fetch only the bytes written since the last read of the live
+   *  file (every mode — "All log files" and Tail included) and append. Falls
+   *  back to a full read on rollover (a new newest file) or truncation. */
   async function refreshIncremental(): Promise<void> {
     if (refreshing || loading || loadError) return;
-    if (!selected || selected === ALL_FILES || mode === 'tail') {
+    if (!liveFile) {
       await refreshFull();
       return;
     }
     refreshing = true;
+    let full = false;
+    const gen = readGen;
+    const file = liveFile;
+    const from = nextOffset;
     try {
-      const data = await fetchLogs('since', nextOffset);
-      payload = { ...data, mode: 'all' };
-      selected = data.selected;
-      if (data.content) {
-        content += data.content;
+      const data = await fetchLogs('since', from, file);
+      // A full read (file/mode switch) landed meanwhile — drop this append.
+      if (gen !== readGen || file !== liveFile || from !== nextOffset) return;
+      if (
+        (selected === ALL_FILES && data.files.at(-1)?.name !== liveFile) ||
+        data.next_offset < nextOffset
+      ) {
+        full = true; // new day's file, or the file shrank under us
+      } else {
+        if (!sameFiles(payload, data)) payload = { ...data, selected, mode };
+        if (data.truncated) setContent(data.content, true);
+        else if (data.content) setContent(content + data.content, clipped);
+        nextOffset = data.next_offset;
+        if (data.content) await maybeFollow();
       }
-      nextOffset = data.next_offset;
-      await maybeFollow();
     } catch (e) {
       failed('Couldn’t update the log', e);
     } finally {
       refreshing = false;
     }
+    if (full) await refreshFull();
   }
 
   /** A failed read. While Live is on this ran every 1.5 s and stacked a toast
@@ -165,9 +241,10 @@
     }
   }
 
-  async function fetchLogs(fetchMode: LogMode | 'since', offset?: number): Promise<DaemonLogs> {
+  async function fetchLogs(fetchMode: LogMode | 'since', offset?: number, file?: string): Promise<DaemonLogs> {
     const params = new URLSearchParams();
-    if (selected) params.set('file', selected);
+    const f = file ?? selected;
+    if (f) params.set('file', f);
     params.set('mode', fetchMode);
     if (fetchMode === 'tail') params.set('lines', String(Math.max(1, tailLines)));
     if (fetchMode === 'since') params.set('offset', String(offset ?? 0));
@@ -224,14 +301,14 @@
 
       <label class="field mode">
         <span>Read</span>
-        <!-- The daemon reads every file in full for "All log files" whatever
-             the mode, so Tail is only offered for a single file. -->
+        <!-- "All log files" always reads every file (newest content first,
+             byte-capped by the daemon), so Tail is only offered for a single file. -->
         <select
           class="input"
           bind:value={mode}
           onchange={onModeChange}
           disabled={selected === ALL_FILES}
-          title={selected === ALL_FILES ? 'Pick one file to tail it — all files are always read in full' : undefined}
+          title={selected === ALL_FILES ? 'Pick one file to tail it' : undefined}
         >
           <option value="all">Full file</option>
           <option value="tail">Tail</option>
@@ -255,7 +332,7 @@
 
       <label class="field search-field">
         <span>Filter</span>
-        <input class="input" type="search" placeholder="slack, telegram, bridge…" bind:value={filter} />
+        <input class="input" type="search" placeholder="slack, telegram, bridge…" bind:value={filterInput} />
       </label>
 
       <div class="checks">
@@ -283,7 +360,7 @@
       {#if filter.trim() && !visibleContent}
         <div class="no-match">
           No lines match “{filter.trim()}”.
-          <button class="btn small ghost" onclick={() => (filter = '')}>Clear filter</button>
+          <button class="btn small ghost" onclick={() => (filterInput = filter = '')}>Clear filter</button>
         </div>
       {:else if !content.trim()}
         <!-- A fresh daemon (or a just-rotated file) has nothing yet — say so

@@ -155,8 +155,29 @@ const DEFAULT_SETTINGS: NotificationSettings = {
   session_events: true,
 };
 
+/** Client-side ceiling on held notices: the server list is capped at 200, but
+ *  live `ingest` only prepends, so a long day would otherwise grow forever. */
+export const NOTICE_CAP = 300;
+
+/** Trim `list` (newest first) to `cap`, dropping the oldest READ notices
+ *  first; unread ones go only when they alone exceed the cap. */
+export function capNotices(list: Notice[], cap = NOTICE_CAP): Notice[] {
+  let excess = list.length - cap;
+  if (excess <= 0) return list;
+  const drop = new Set<Notice>();
+  for (let i = list.length - 1; i >= 0 && excess > 0; i--) {
+    if (list[i].read) {
+      drop.add(list[i]);
+      excess--;
+    }
+  }
+  const kept = drop.size ? list.filter((n) => !drop.has(n)) : list;
+  return kept.length > cap ? kept.slice(0, cap) : kept;
+}
+
 class NotificationStore {
-  notices: Notice[] = $state([]);
+  /** Raw: every write replaces the array (and edited notices) wholesale. */
+  notices: Notice[] = $state.raw([]);
   settings: NotificationSettings = $state({ ...DEFAULT_SETTINGS });
   loading = $state(false);
   loaded = $state(false);
@@ -167,10 +188,16 @@ class NotificationStore {
   /** Number of unread notices. */
   unread: number = $derived(this.notices.filter((n) => !n.read).length);
 
+  /** What rows read from the session list — a status flip (the common
+   *  `session_status` event) leaves it equal, so the rows don't rebuild. */
+  private sessionLabels: string = $derived(ws.sessions.map((s) => `${s.id}\u0001${s.title}\u0001${s.provider}`).join('\u0002'));
+
   /** Center rows: session notices grouped per session (see `buildRows`). */
-  rows: NoticeRow[] = $derived(
-    buildRows(this.notices, (id) => ws.sessions.find((s) => s.id === id)),
-  );
+  rows: NoticeRow[] = $derived.by(() => {
+    void this.sessionLabels;
+    const byId = new Map(untrack(() => ws.sessions).map((s) => [s.id, s] as const));
+    return buildRows(this.notices, (id) => byId.get(id));
+  });
 
   /** Unread ROWS — drives the bell badge, so it matches what the panel lists. */
   unreadRows: number = $derived(this.rows.filter((r) => r.unread).length);
@@ -268,7 +295,7 @@ class NotificationStore {
     const known = this.notices.find((n) => n.id === notice.id);
     if (known && known.created_at === notice.created_at) return;
     if (this.isChannelSessionNotice(notice)) return;
-    this.notices = [notice, ...this.notices.filter((n) => n.id !== notice.id)];
+    this.notices = capNotices([notice, ...this.notices.filter((n) => n.id !== notice.id)]);
     if (
       this.settings.native_enabled &&
       (notice.severity === 'warn' || notice.severity === 'error')

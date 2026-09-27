@@ -251,6 +251,28 @@ export function groupTurns(turns: Turn[]): RenderItem[] {
   return out;
 }
 
+/** `groupTurns` that hands back the PREVIOUS render item — the same object —
+ *  for every group built from the very same `Turn` objects as last time. A live
+ *  delta replaces one turn (the growing response) and appends new ones; every
+ *  other item keeps its identity, so the keyed `{#each}` sees no change and its
+ *  `TurnItem` never re-segments or re-renders markdown (was O(all mounted
+ *  markdown) per delta — ~100 ms at 300 turns). `cache` is the caller's memo,
+ *  rewritten in place to hold exactly this call's items. */
+export function stableGroupTurns(turns: Turn[], cache: Map<string, RenderItem>): RenderItem[] {
+  const fresh = groupTurns(turns);
+  const out: RenderItem[] = new Array(fresh.length);
+  const kept: RenderItem[] = new Array(fresh.length);
+  for (let i = 0; i < fresh.length; i++) {
+    const it = fresh[i];
+    const old = cache.get(it.id);
+    const same = old !== undefined && old.turns.length === it.turns.length && old.turns.every((t, j) => t === it.turns[j]);
+    out[i] = kept[i] = same ? old : it;
+  }
+  cache.clear();
+  for (const it of kept) cache.set(it.id, it);
+  return out;
+}
+
 /** Split a response's blocks into prose / step-group segments for rendering. */
 export type Segment =
   | { kind: 'block'; block: Block }

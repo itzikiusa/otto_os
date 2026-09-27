@@ -276,3 +276,43 @@ fn codex_old_era_fixtures_pin_their_features() {
         .iter()
         .any(|n| n.kind == SystemNoteKind::Compaction)));
 }
+
+/// The live tail sends `Folder::turns_since(prev)` instead of
+/// `snapshot().turns_since(prev)` (which cloned the whole fold every poll).
+/// Pushing every fixture one record at a time, the two must agree byte for
+/// byte after each push — pending notes, capped blocks, subagent blocks and
+/// all — for any `since`.
+#[test]
+fn incremental_turns_since_matches_the_snapshot_delta() {
+    use otto_transcript::{read_records, Folder};
+    for (provider, sub) in [
+        (Provider::Claude, "claude"),
+        (Provider::Codex, "codex-new"),
+        (Provider::Codex, "codex-old"),
+    ] {
+        for path in fixtures(sub) {
+            let records = read_records(&path).unwrap();
+            let subagents = if provider == Provider::Claude {
+                read_subagents(&path)
+            } else {
+                Vec::new()
+            };
+            let mut folder = Folder::new(provider, FoldOpts::default());
+            folder.set_subagents(subagents);
+            for (i, r) in records.iter().enumerate() {
+                let prev = folder.record_count();
+                if folder.push(r) {
+                    // A Codex era flip: the tail refolds from record 0.
+                    folder = Folder::new(provider, FoldOpts::default());
+                    folder.seed(&records[..=i]);
+                }
+                let snap = folder.snapshot();
+                for since in [0, prev, prev.saturating_sub(3), folder.record_count()] {
+                    let want = serde_json::to_value(snap.turns_since(since)).unwrap();
+                    let got = serde_json::to_value(folder.turns_since(since)).unwrap();
+                    assert_eq!(got, want, "{} record {i} since {since}", path.display());
+                }
+            }
+        }
+    }
+}

@@ -9,9 +9,17 @@ class Clock {
 
   constructor() {
     if (typeof window !== 'undefined') {
+      // A hidden window paints nothing, so its labels needn't tick: skip the
+      // write (every reader's re-run) and catch up once on becoming visible.
       setInterval(() => {
+        if (typeof document !== 'undefined' && document.hidden) return;
         this.ms = Date.now();
       }, 1000);
+      if (typeof document !== 'undefined') {
+        document.addEventListener('visibilitychange', () => {
+          if (!document.hidden) this.ms = Date.now();
+        });
+      }
     }
   }
 }

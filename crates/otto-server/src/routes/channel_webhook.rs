@@ -127,12 +127,13 @@ pub async fn inbound(
     };
 
     // 2. Validate the key against the keychain value (constant-time).
-    let expected = ctx
-        .secrets
-        .get(&format!("chan-bot-{ws_id}-webhook"))
-        .ok()
-        .flatten()
-        .filter(|k| !k.is_empty());
+    // Per-webhook keychain read: cached, and a miss runs off the async worker.
+    let expected =
+        otto_core::secrets::get_async(&ctx.secrets, &format!("chan-bot-{ws_id}-webhook"))
+            .await
+            .ok()
+            .flatten()
+            .filter(|k| !k.is_empty());
     let Some(expected) = expected else {
         return problem(
             StatusCode::UNAUTHORIZED,
@@ -287,12 +288,13 @@ pub async fn run_inbound(
             )
         }
     };
-    let expected = ctx
-        .secrets
-        .get(&format!("chan-bot-{ws_id}-webhook"))
-        .ok()
-        .flatten()
-        .filter(|k| !k.is_empty());
+    // Per-webhook keychain read: cached, and a miss runs off the async worker.
+    let expected =
+        otto_core::secrets::get_async(&ctx.secrets, &format!("chan-bot-{ws_id}-webhook"))
+            .await
+            .ok()
+            .flatten()
+            .filter(|k| !k.is_empty());
     let Some(expected) = expected else {
         return problem(
             StatusCode::UNAUTHORIZED,

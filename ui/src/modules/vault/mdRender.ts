@@ -13,6 +13,19 @@ export interface RenderCtx {
   resolve: (raw: string) => string | null;
   /** Authenticated blob URL for an attachment path (may be null while loading). */
   assetUrl: (path: string) => string | null;
+  /** Emit `<img data-asset="path">` (no `src`) for every attachment instead of
+   *  asking `assetUrl`: the host fills `src` on the live element, so an image
+   *  landing never re-renders the note (the vault reading view). */
+  lazyAssets?: boolean;
+}
+
+/** An attachment image: a lazy placeholder, a resolved blob, or pending. */
+function assetImg(ctx: RenderCtx, dst: string, alt: string, label: string): string {
+  if (ctx.lazyAssets) return `<img data-asset="${esc(dst)}" alt="${esc(alt)}" loading="lazy" />`;
+  const url = ctx.assetUrl(dst);
+  return url
+    ? `<img src="${esc(url)}" alt="${esc(alt)}" loading="lazy" />`
+    : `<span class="embed-pending" data-path="${esc(dst)}">${esc(label)}</span>`;
 }
 
 function esc(s: string): string {
@@ -118,12 +131,7 @@ function makeMarked(ctx: RenderCtx): Marked {
           const [t] = inner.split('|');
           const [target] = t.split('#');
           const dst = ctx.resolve(target.trim());
-          if (dst && IMG_EXT.test(dst)) {
-            const url = ctx.assetUrl(dst);
-            return url
-              ? `<img src="${esc(url)}" alt="${esc(target.trim())}" loading="lazy" />`
-              : `<span class="embed-pending" data-path="${esc(dst)}">${esc(target.trim())}</span>`;
-          }
+          if (dst && IMG_EXT.test(dst)) return assetImg(ctx, dst, target.trim(), target.trim());
           if (dst) {
             return `<div class="note-embed" data-embed-path="${esc(dst)}"><span class="embed-title">${esc(target.trim())}</span></div>`;
           }
@@ -240,10 +248,7 @@ function makeMarked(ctx: RenderCtx): Marked {
           return `<img src="${esc(href)}" alt="${esc(text)}" loading="lazy" />`;
         }
         const dst = ctx.resolve(raw) ?? raw;
-        const url = ctx.assetUrl(dst);
-        return url
-          ? `<img src="${esc(url)}" alt="${esc(text)}" loading="lazy" />`
-          : `<span class="embed-pending" data-path="${esc(dst)}">${esc(text || raw)}</span>`;
+        return assetImg(ctx, dst, text, text || raw);
       },
     },
   });

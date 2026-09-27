@@ -462,7 +462,7 @@ pub async fn run_agent_session(
         timeout,
         WAITING_IDLE,
         STUCK_IDLE,
-        |t| parse_findings_array(t).is_some(),
+        Some(|t| parse_findings_array(t).is_some()),
         guard,
         |st| async move {
             let (status, note) = match st {
@@ -782,17 +782,15 @@ pub async fn claude_prompt_landed(
     offset: u64,
     wait: Duration,
 ) -> bool {
-    const NEEDLE: &[u8] = b"\"type\":\"user\"";
     let deadline = Instant::now() + wait;
     loop {
         if let Ok(s) = manager.get(sid).await {
             if let Some(psid) = s.provider_session_id.as_deref() {
                 let path = otto_orchestrator::claude_pty::session_jsonl_path(cwd, psid);
-                if let Ok(raw) = std::fs::read(&path) {
-                    let tail = &raw[raw.len().min(offset as usize)..];
-                    if tail.windows(NEEDLE.len()).any(|w| w == NEEDLE) {
-                        return true;
-                    }
+                // Only THIS turn's bytes (past `offset`), read off the runtime:
+                // a reused session's transcript can be tens of MB.
+                if crate::offload::blocking(move || user_record_after(&path, offset)).await {
+                    return true;
                 }
             }
         }
@@ -801,6 +799,25 @@ pub async fn claude_prompt_landed(
         }
         tokio::time::sleep(Duration::from_millis(1000)).await;
     }
+}
+
+/// Whether a `"type":"user"` record was appended to `path` past byte
+/// `offset` (a file shorter than `offset` has none). Reads only the tail.
+fn user_record_after(path: &std::path::Path, offset: u64) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    const NEEDLE: &[u8] = b"\"type\":\"user\"";
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    if len <= offset || f.seek(SeekFrom::Start(offset)).is_err() {
+        return false;
+    }
+    let mut tail = Vec::with_capacity((len - offset) as usize);
+    if f.take(len - offset).read_to_end(&mut tail).is_err() {
+        return false;
+    }
+    tail.windows(NEEDLE.len()).any(|w| w == NEEDLE)
 }
 
 /// One poll of the TUI wait: `Some(true)` ready to paste into, `Some(false)`
@@ -1052,6 +1069,28 @@ pub async fn submit_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_record_after_scans_only_past_the_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("s.jsonl");
+        let old = "{\"type\":\"user\",\"message\":{}}\n";
+        std::fs::write(&p, old).unwrap();
+        let offset = old.len() as u64;
+        // The previous turn's user record is before the offset.
+        assert!(!user_record_after(&p, offset));
+        assert!(user_record_after(&p, 0));
+        let mut s = old.to_string();
+        s.push_str("{\"type\":\"assistant\"}\n");
+        std::fs::write(&p, &s).unwrap();
+        assert!(!user_record_after(&p, offset));
+        s.push_str("{\"type\":\"user\",\"message\":{}}\n");
+        std::fs::write(&p, &s).unwrap();
+        assert!(user_record_after(&p, offset));
+        // Shorter than the offset / missing → nothing landed.
+        assert!(!user_record_after(&p, 10_000));
+        assert!(!user_record_after(&dir.path().join("none.jsonl"), 0));
+    }
 
     #[test]
     fn paste_probe_is_short_normalized_and_skips_blank_lines() {

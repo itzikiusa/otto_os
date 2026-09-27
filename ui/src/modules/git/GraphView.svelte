@@ -14,9 +14,6 @@
     SubmoduleInfo,
     WorktreeInfo,
     RepoStatusResp,
-    DiffResp,
-    FileDiff,
-    DiffLine,
     CleanupBaseResp,
     RebasePreview,
   } from '../../lib/api/types';
@@ -33,6 +30,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import CreatePr from './CreatePr.svelte';
   import WipPanel from './WipPanel.svelte';
+  import GraphCommitDiff from './graph-commit-diff.svelte';
+  import { graphCache, type GraphSnapshot } from './graph-cache';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { runPull } from './pullFlow';
   import { gitBridge } from './gitBridge.svelte';
@@ -144,7 +143,10 @@
   let secCommitsOpen = $state(true);
 
   // ── Refs ──────────────────────────────────────────────────────────────────
-  let refs: RefsResp | null = $state(null);
+  // Server payloads below are `$state.raw`: they are only ever REPLACED, never
+  // mutated in place, and a deep proxy over 10k commits (or a big refs list)
+  // made every lane-layout pass 7-10x slower for no benefit.
+  let refs: RefsResp | null = $state.raw(null);
   let refsLoading = $state(true);
   /** Human cause of a failed `/refs` load — the sidebar shows it with Retry
    *  instead of passing an empty tree off as "No local branches". */
@@ -216,12 +218,35 @@
     return { loose, folders };
   }
 
+  // Grouped once per `refs` change (not re-sorted inside the template on every
+  // render of the section).
+  const EMPTY_GROUPS: { loose: BranchLeaf[]; folders: BranchFolder[] } = { loose: [], folders: [] };
+  const groupedLocal = $derived.by(() => {
+    const r: RefsResp | null = refs;
+    return r ? groupBranches(r.local) : EMPTY_GROUPS;
+  });
+  const groupedRemote = $derived.by(() => {
+    const r: RefsResp | null = refs;
+    return r ? groupBranches(r.remote) : EMPTY_GROUPS;
+  });
+
+  // A repo with thousands of `origin/*` branches must not mount thousands of
+  // rows: each list / folder shows LEAF_PAGE rows, then a "Show more" row.
+  const LEAF_PAGE = 150;
+  let leafLimits = $state<Record<string, number>>({});
+  function leafLimit(key: string): number {
+    return leafLimits[key] ?? LEAF_PAGE;
+  }
+  function showMoreLeaves(key: string): void {
+    leafLimits = { ...leafLimits, [key]: leafLimit(key) + LEAF_PAGE * 4 };
+  }
+
   let checkoutBusy = $state('');
   /** Path of the worktree currently being opened as a git tab (busy guard). */
   let openWtBusy = $state('');
 
   // ── Commits / graph ───────────────────────────────────────────────────────
-  let commits: CommitInfo[] = $state([]);
+  let commits: CommitInfo[] = $state.raw([]);
   let commitsLoading = $state(true);
   /** The history load failed with nothing on screen — rendered inline with
    *  Retry, never as "No commits found." (a later-page failure keeps the rows
@@ -276,21 +301,33 @@
 
   /** (Re)load the refs tree. A failure keeps an empty tree (the graph's chip
    *  lookups need one) but records the cause so the sidebar can say so. */
-  function loadRefs(id: string): void {
+  function loadRefs(id: string): Promise<void> {
     refsLoading = true;
     refsError = null;
-    void api
+    return api
       .get<RefsResp>(`/repos/${id}/refs`)
       .then((r) => {
         if (id !== repoId) return;
-        refs = withoutRemoteHeads(r);
+        setRefs(withoutRemoteHeads(r));
       })
       .catch((e) => {
         if (id !== repoId) return;
-        refs = { local: [], remote: [], tags: [] };
+        setRefs({ local: [], remote: [], tags: [] });
         refsError = loadErrorText(e);
       })
       .finally(() => (refsLoading = false));
+  }
+
+  /** JSON of the refs currently held — compared before every assignment so a
+   *  no-op refresh (the 30 s auto-fetch round, most checkouts) never hands the
+   *  lane layout, chips and sidebar a new object to recompute from. */
+  let refsKey = '';
+  /** Assign `refs` only when the content changed. */
+  function setRefs(next: RefsResp): void {
+    const key = JSON.stringify(next);
+    if (refs !== null && key === refsKey) return;
+    refsKey = key;
+    refs = next;
   }
 
   /** Retry a failed first page (the inline error's Retry). */
@@ -298,6 +335,40 @@
     commitsLoading = true;
     hasMore = true;
     void loadMore().finally(() => (commitsLoading = false));
+  }
+
+  /** Every sha in `commits` (plus any batched page not flushed yet). Kept
+   *  across pages so dedupe and "is it loaded?" are O(1) instead of an O(N)
+   *  rebuild per page. Rebuilt whenever `commits` is replaced wholesale. */
+  let seenShas = new Set<string>();
+  /** >0 while `loadUntil` pages toward an old commit: pages collect in
+   *  `pendingPages` and land in ONE assignment (one lane layout), not one
+   *  full re-layout per 10k-commit page. */
+  let batching = 0;
+  let pendingPages: CommitInfo[] = [];
+  let pendingGen = 0;
+
+  /** Replace the whole history (first page / reload / cache restore). */
+  function setCommits(next: CommitInfo[]): void {
+    pendingPages = [];
+    seenShas = new Set(next.map((c) => c.sha));
+    commits = next;
+  }
+
+  function appendCommits(fresh: CommitInfo[]): void {
+    for (const c of fresh) seenShas.add(c.sha);
+    if (batching > 0) {
+      if (pendingGen !== loadGen) pendingPages = [];
+      pendingGen = loadGen;
+      for (const c of fresh) pendingPages.push(c);
+    } else {
+      commits = commits.concat(fresh);
+    }
+  }
+
+  function flushPending(): void {
+    if (pendingPages.length > 0 && pendingGen === loadGen) commits = commits.concat(pendingPages);
+    pendingPages = [];
   }
 
   async function loadPage(): Promise<boolean> {
@@ -313,9 +384,8 @@
       if (page.length > 0) {
         // `--all` + skip can re-emit a commit if refs moved between pages; dedupe
         // so the lane algorithm never sees the same sha twice.
-        const seen = new Set(commits.map((c) => c.sha));
-        const fresh = page.filter((c) => !seen.has(c.sha));
-        if (fresh.length > 0) commits = [...commits, ...fresh];
+        const fresh = page.filter((c) => !seenShas.has(c.sha));
+        if (fresh.length > 0) appendCommits(fresh);
       }
       return page.length > 0;
     } catch (e) {
@@ -368,7 +438,10 @@
     const el = graphPanelEl;
     if (!el) return;
     syncViewport();
-    const ro = new ResizeObserver(() => syncViewport());
+    const ro = new ResizeObserver(() => {
+      syncViewport();
+      flushResync();
+    });
     ro.observe(el);
     return () => ro.disconnect();
   });
@@ -387,32 +460,43 @@
   /** Page forward until `sha` is loaded (or history runs out). Used when a ref
    *  the user clicked points at a commit older than everything loaded so far. */
   async function loadUntil(sha: string): Promise<boolean> {
-    if (commits.some((c) => c.sha === sha)) return true;
-    while (hasMore) {
-      if (!(await loadMore())) break;
-      if (commits.some((c) => c.sha === sha)) return true;
+    if (seenShas.has(sha)) return true;
+    batching++;
+    try {
+      while (hasMore) {
+        if (!(await loadMore())) break;
+        if (seenShas.has(sha)) break;
+      }
+    } finally {
+      batching--;
+      if (batching === 0) flushPending();
     }
-    return commits.some((c) => c.sha === sha);
+    return seenShas.has(sha);
   }
 
   // ── Stashes (read-only `git stash list`) ──────────────────────────────────
-  let stashes: StashInfo[] = $state([]);
+  let stashes: StashInfo[] = $state.raw([]);
   /** The stash list has been read for the current repo (vs the reset `[]`). */
   let stashesKnown = $state(false);
 
   // ── Worktrees + submodules (sidebar sections; best-effort like stashes) ───
-  let worktrees: WorktreeInfo[] = $state([]);
-  let submodules: SubmoduleInfo[] = $state([]);
+  let worktrees: WorktreeInfo[] = $state.raw([]);
+  let submodules: SubmoduleInfo[] = $state.raw([]);
 
   // ── Commit detail / diff ─────────────────────────────────────────────────
   let selectedSha = $state<string | null>(null);
-  let selectedCommit = $state<CommitInfo | null>(null);
-  let diffResp = $state<DiffResp | null>(null);
-  let diffLoading = $state(false);
-  let diffError = $state<string | null>(null);
-  let diffRequest = 0;
-  // Track which files are collapsed (path → true = collapsed)
-  let fileCollapsed = $state<Record<string, boolean>>({});
+  let selectedCommit = $state.raw<CommitInfo | null>(null);
+  // The commit whose diff the detail pane loads (GraphCommitDiff owns the
+  // fetches, their AbortController and the stale-response guard). It trails
+  // `selectedSha` by DIFF_DEFER_MS on a branch-row click, so the lead click of
+  // a double-click (= checkout) never asks for a diff at all.
+  let diffSha = $state<string | null>(null);
+  /** Selected but deliberately not loaded (a double-click checked it out). */
+  let diffHeld = $state(false);
+  let diffTimer: ReturnType<typeof setTimeout> | null = null;
+  /** File count of the loaded diff (mobile section header). */
+  let diffFileCount = $state<number | null>(null);
+  const DIFF_DEFER_MS = 200;
 
   // ── WIP (working tree) row selection ──────────────────────────────────────
   // GitKraken-style: a dirty working tree renders as a dashed row pinned above
@@ -428,13 +512,9 @@
       return;
     }
     wipSelected = true;
-    diffRequest++;
-    diffError = null;
     selectedSha = null;
     selectedCommit = null;
-    diffResp = null;
-    diffLoading = false;
-    fileCollapsed = {};
+    cancelDiff();
     if (isMobile) secCommitsOpen = false;
   }
 
@@ -457,54 +537,136 @@
     });
   });
 
+  /** Settles when the current repo's first load (or cache revalidation) is
+   *  done. The auto-fetch re-sync waits on it, so a fetch round landing
+   *  mid-mount can't throw away the in-flight first page and re-request it. */
+  let initialLoad: Promise<void> = Promise.resolve();
+
   $effect(() => {
     const id = repoId;
-    refsLoading = true;
-    commitsLoading = true;
-    commitsError = null;
-    refs = null;
-    commits = [];
-    stashes = [];
-    // Reset paging for the new repo and invalidate any in-flight page.
-    loadGen++;
-    hasMore = true;
-    loadingMore = false;
-    skipCursor = 0;
-    inflight = null;
-
-    loadRefs(id);
-
-    // UNTRACKED: loadMore() reads `hasMore` (and pages write it). Reading that
+    // UNTRACKED: the loaders read `hasMore` (and pages write it). Reading that
     // inside the effect would subscribe this loader to it — so the first short
     // page (`hasMore = false`) re-ran the whole effect, which resets `commits`
     // and re-fetches skip=0, silently throwing away every page the user had
     // scrolled in. The repo id read above is this effect's only real dependency.
     untrack(() => {
-      void loadMore().finally(() => (commitsLoading = false));
+      initialLoad = mountRepo(id);
     });
+  });
 
-    // Stashes are best-effort: a failure (or empty list) just leaves the section
-    // empty; it must never block the graph from rendering.
+  async function mountRepo(id: string): Promise<void> {
+    // Reset paging for the new repo and invalidate any in-flight page.
+    loadGen++;
+    loadingMore = false;
+    inflight = null;
+    commitsError = null;
+    refsError = null;
+
+    const snap = graphCache.get(id);
+    if (snap) {
+      // Stale-while-revalidate: paint the last graph for this repo now, then
+      // let the cheap `/refs` check decide whether history needs a re-read.
+      refsKey = '';
+      setRefs(snap.refs);
+      setCommits(snap.commits);
+      stashes = snap.stashes;
+      stashesKnown = snap.stashesKnown;
+      worktrees = snap.worktrees;
+      submodules = snap.submodules;
+      hasMore = snap.hasMore;
+      skipCursor = snap.skipCursor;
+      refsLoading = false;
+      commitsLoading = false;
+      await revalidate(id);
+      return;
+    }
+
+    refsLoading = true;
+    commitsLoading = true;
+    refs = null;
+    setCommits([]);
+    stashes = [];
+    hasMore = true;
+    skipCursor = 0;
+
+    // Stashes / worktrees / submodules are best-effort: a failure (or empty
+    // list) just leaves the section empty; it must never block the graph.
     stashesKnown = false;
-    void api
-      .get<StashInfo[]>(`/repos/${id}/stashes`)
-      .then((s) => {
-        stashes = s;
-        stashesKnown = true;
-      })
-      .catch(() => (stashes = []));
-
-    // Worktrees + submodules: same best-effort contract as stashes.
     worktrees = [];
     submodules = [];
-    void api
-      .get<WorktreeInfo[]>(`/repos/${id}/worktrees`)
-      .then((w) => (worktrees = w))
-      .catch(() => (worktrees = []));
-    void api
-      .get<SubmoduleInfo[]>(`/repos/${id}/submodules`)
-      .then((s) => (submodules = s))
-      .catch(() => (submodules = []));
+    void reloadSideLists(id, true);
+    await Promise.all([loadRefs(id), loadMore().finally(() => (commitsLoading = false))]);
+  }
+
+  /** Stashes + worktrees + submodules — not part of the refs fingerprint, so a
+   *  revalidation re-reads them quietly (each assignment is skipped when
+   *  nothing changed). */
+  async function reloadSideLists(id: string, withSubmodules: boolean): Promise<void> {
+    await Promise.all([
+      api
+        .get<StashInfo[]>(`/repos/${id}/stashes`)
+        .then((s) => {
+          if (id !== repoId) return;
+          if (!sameJson(stashes, s)) stashes = s;
+          stashesKnown = true;
+        })
+        .catch(() => {}),
+      api
+        .get<WorktreeInfo[]>(`/repos/${id}/worktrees`)
+        .then((w) => {
+          if (id === repoId && !sameJson(worktrees, w)) worktrees = w;
+        })
+        .catch(() => {}),
+      withSubmodules
+        ? api
+            .get<SubmoduleInfo[]>(`/repos/${id}/submodules`)
+            .then((s) => {
+              if (id === repoId && !sameJson(submodules, s)) submodules = s;
+            })
+            .catch(() => {})
+        : Promise.resolve(),
+    ]);
+  }
+
+  function sameJson(a: unknown, b: unknown): boolean {
+    return JSON.stringify(a) === JSON.stringify(b);
+  }
+
+  /** After painting a cached graph: refs first, history only if it moved. */
+  async function revalidate(id: string): Promise<void> {
+    const raw = await api.get<RefsResp>(`/repos/${id}/refs`).catch(() => null);
+    if (id !== repoId) return;
+    if (raw && applyRefs(withoutRemoteHeads(raw))) {
+      await reloadGraph();
+      return;
+    }
+    await reloadSideLists(id, true);
+  }
+
+  // Keep the per-repo snapshot current (see graph-cache.ts). Only a complete,
+  // error-free state is worth restoring.
+  $effect(() => {
+    const id = repoId;
+    const r = refs;
+    const c = commits;
+    const st = stashes;
+    const wt = worktrees;
+    const sm = submodules;
+    const more = hasMore;
+    const known = stashesKnown;
+    if (!r || refsError || commitsError || refsLoading || commitsLoading || c.length === 0) return;
+    untrack(() =>
+      graphCache.set(id, {
+        refs: r,
+        commits: c,
+        stashes: st,
+        stashesKnown: known,
+        worktrees: wt,
+        submodules: sm,
+        hasMore: more,
+        skipCursor,
+      } satisfies GraphSnapshot),
+    );
   });
 
   // Auto-fetch runs `fetch --prune` on the daemon but deliberately doesn't
@@ -525,42 +687,97 @@
     }
     if (refsSyncSeen.rev !== rev) {
       refsSyncSeen = { id, rev };
-      void resyncRefs().catch(() => {});
+      untrack(() => requestResync());
     }
   });
 
-  /** Fingerprint of a refs response: every local/remote branch as
-   *  `l|r:name@sha`, plus the tag names and the base branch. `null` means "can't
-   *  tell" — nothing held yet, or a daemon predating `RefBranch.sha` — and is
-   *  never considered equal, so such a response degrades to an unconditional
-   *  re-sync (today's behaviour). */
-  function refsFingerprint(r: RefsResp | null): string | null {
-    if (!r) return null;
-    const branches = [...r.local, ...r.remote];
-    if (branches.some((b) => !b.sha)) return null;
-    return JSON.stringify([
-      branches.map((b) => `${b.remote ? 'r' : 'l'}:${b.name}@${b.sha ?? ''}`),
-      r.tags.map((t) => t.name),
-      r.base_branch ?? null,
-    ]);
+  // Toolbar / merge / recovery ask for a refresh through the bridge instead of
+  // remounting this component. A request that predates this mount is already
+  // covered by the mount's own load.
+  let refreshSeen = gitBridge.graphRefresh?.nonce ?? 0;
+  $effect(() => {
+    const req = gitBridge.graphRefresh;
+    if (!req || req.nonce === refreshSeen) return;
+    refreshSeen = req.nonce;
+    if (req.repoId !== repoId) return;
+    untrack(() => void refreshAfter().catch(() => {}));
+  });
+
+  // A graph nobody can see (window hidden, another module/sub-tab covering
+  // it, the phone accordion folded) doesn't re-sync on every auto-fetch
+  // round: the request is parked and replayed once it is visible again.
+  let resyncPending = false;
+  function graphVisible(): boolean {
+    if (typeof document !== 'undefined' && document.hidden) return false;
+    const el = graphPanelEl;
+    return !!el && el.isConnected && el.getClientRects().length > 0;
+  }
+  function requestResync(): void {
+    if (!graphVisible()) {
+      resyncPending = true;
+      return;
+    }
+    resyncPending = false;
+    void resyncRefs().catch(() => {});
+  }
+  function flushResync(): void {
+    if (resyncPending && graphVisible()) requestResync();
+  }
+  $effect(() => {
+    const onVis = () => flushResync();
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  });
+
+  /** Does moving from `prev` to `next` change what `log --all` returns? Only
+   *  when a ref was REMOVED or MOVED (commits may become unreachable or new
+   *  ones appear), a new ref points outside the loaded history, or the tags
+   *  (whose decorations come from the log) changed. A plain checkout (only
+   *  `is_current` flips), or a new branch/remote on an already-loaded commit,
+   *  moves nothing — HEAD and branch chips come from the typed refs. `true`
+   *  whenever it can't tell (nothing held, or a daemon predating
+   *  `RefBranch.sha`), which degrades to an unconditional re-read. */
+  function historyMoved(prev: RefsResp | null, next: RefsResp): boolean {
+    if (!prev) return true;
+    const pb = [...prev.local, ...prev.remote];
+    const nb = [...next.local, ...next.remote];
+    if (pb.some((b) => !b.sha) || nb.some((b) => !b.sha)) return true;
+    const key = (b: RefBranch) => `${b.remote ? 'r' : 'l'}:${b.name}`;
+    const nextSha = new Map(nb.map((b) => [key(b), b.sha]));
+    for (const b of pb) if (nextSha.get(key(b)) !== b.sha) return true;
+    // Only a NEW ref can bring in unseen history (moved/removed ones were
+    // caught above). An UNCHANGED ref whose tip lies beyond the loaded page
+    // (a stale branch older than the first 10k commits) must not count: a
+    // re-read with the same `limit` would never page it in, so treating it
+    // as "moved" re-read `log --all` on every auto-fetch / checkout / mount.
+    const prevKeys = new Set(pb.map(key));
+    for (const b of nb) if (!prevKeys.has(key(b)) && !seenShas.has(b.sha!)) return true;
+    const tags = (r: RefsResp) => r.tags.map((t) => `${t.name}@${t.sha ?? ''}`).join('\n');
+    return tags(prev) !== tags(next);
+  }
+
+  /** Take a fresh refs response; returns whether the history must be re-read. */
+  function applyRefs(next: RefsResp): boolean {
+    const moved = historyMoved(refs, next);
+    setRefs(next);
+    return moved;
   }
 
   /** Quiet post-auto-fetch re-sync: read the CHEAP `/refs` first and replay the
-   *  EXPENSIVE fan-out (`log --all -n 10000` + stashes + worktrees) only when the
-   *  ref fingerprint actually moved. `refsRev` is bumped after every successful
-   *  auto-fetch — the store can't tell whether anything changed (`statusEq` sees
-   *  only HEAD and its upstream), so the decision lives here, where the
-   *  cheap-vs-expensive split is visible (investigation H4/WP3). */
+   *  EXPENSIVE fan-out (`log --all` + stashes + worktrees) only when history
+   *  actually moved. `refsRev` is bumped after every successful auto-fetch —
+   *  the store can't tell whether anything changed (`statusEq` sees only HEAD
+   *  and its upstream), so the decision lives here, where the cheap-vs-expensive
+   *  split is visible (investigation H4/WP3). */
   async function resyncRefs(): Promise<void> {
     const id = repoId;
+    // Never race the mount's own first load: with nothing held yet every
+    // response looks "moved" and would discard the in-flight first page.
+    await initialLoad;
+    if (id !== repoId) return;
     const raw = await api.get<RefsResp>(`/repos/${id}/refs`).catch(() => null);
     if (!raw || id !== repoId) return; // transient failure — keep what we have, try next round
-    const next = withoutRemoteHeads(raw);
-    const before = refsFingerprint(refs);
-    const after = refsFingerprint(next);
-    refs = next; // Tracking config/counts can change without moving any commit SHA.
-    if (before !== null && after !== null && before === after) return; // history unchanged
-    await reloadGraph();
+    if (applyRefs(withoutRemoteHeads(raw))) await reloadGraph();
   }
 
   // ── Context-menu helpers ────────────────────────────────────────────────────
@@ -575,48 +792,96 @@
   }
 
   /** After a mutating graph op: propagate the returned status (if any) to the
-   *  parent and re-query refs + log so the graph reflects the change. */
+   *  parent and re-query refs + log so the graph reflects the change. Both
+   *  responses are applied in ONE synchronous block, so the lane layout runs
+   *  once instead of once per assignment. */
   async function refreshAfter(status?: RepoStatusResp): Promise<void> {
     if (status) onstatus(status);
-    const refsCall = api
-      .get<RefsResp>(`/repos/${repoId}/refs`)
-      .then((r) => (refs = withoutRemoteHeads(r)))
-      .catch(() => {});
-    await Promise.all([refsCall, reloadGraph()]);
+    const id = repoId;
+    const [r, g] = await Promise.all([
+      api.get<RefsResp>(`/repos/${id}/refs`).catch(() => null),
+      fetchGraph(id),
+    ]);
+    if (id !== repoId) return;
+    if (r) setRefs(withoutRemoteHeads(r));
+    applyGraph(g);
+  }
+
+  /** After a checkout: the switch moves no commit, so read `/refs` (HEAD and
+   *  the current branch come from it) and re-read history only if it moved —
+   *  not `log --all -n 10000` just to move the `HEAD ->` decoration. */
+  async function refreshAfterCheckout(status: RepoStatusResp, stashed: boolean): Promise<void> {
+    onstatus(status);
+    const id = repoId;
+    const hadHead = headSha !== null;
+    const raw = await api.get<RefsResp>(`/repos/${id}/refs`).catch(() => null);
+    if (id !== repoId) return;
+    if (!raw) {
+      await refreshAfter();
+      return;
+    }
+    const moved = applyRefs(withoutRemoteHeads(raw));
+    // Detached before or after: HEAD then lives only in the log decorations.
+    if (moved || !hadHead || headSha === null) {
+      await reloadGraph();
+      return;
+    }
+    if (stashed) await reloadSideLists(id, false);
+  }
+
+  interface GraphFetch {
+    gen: number;
+    want: number;
+    commits: CommitInfo[] | null;
+    error: unknown;
+    stashes: StashInfo[] | null;
+    worktrees: WorktreeInfo[] | null;
   }
 
   /** The EXPENSIVE half of a refresh: the `log --all` page plus stashes and
-   *  worktrees. Split out of [`refreshAfter`] so the auto-fetch path
-   *  ([`resyncRefs`]) can skip it when `/refs` says nothing moved. */
-  async function reloadGraph(): Promise<void> {
-    // Re-read AT LEAST as much history as the user had already paged in, so a
+   *  worktrees. Fetch only — [`applyGraph`] assigns. */
+  async function fetchGraph(id: string): Promise<GraphFetch> {
+    // Re-read exactly as much history as the user had already paged in, so a
     // refresh after a commit/pull doesn't yank the graph back to the first page
-    // and lose their place. Rounded up to a whole page.
-    const want = Math.max(PAGE, Math.ceil((commits.length + 1) / PAGE) * PAGE);
+    // and lose their place — and never MORE: the old `ceil((n + 1) / PAGE)`
+    // grew the request by a whole page on every refresh (10k → 20k → 30k…).
+    const want = Math.max(PAGE, commits.length);
     loadGen++;
     loadingMore = false;
     inflight = null;
-    await Promise.all([
+    const gen = loadGen;
+    const [c, st, wt] = await Promise.all([
       api
-        .get<CommitInfo[]>(`/repos/${repoId}/log?all=true&limit=${want}`)
-        .then((c) => {
-          commits = c;
-          commitsError = null;
-          skipCursor = c.length;
-          hasMore = c.length >= want;
-        })
-        .catch((e) => {
-          if (commits.length === 0) commitsError = loadErrorText(e);
-        }),
-      api
-        .get<StashInfo[]>(`/repos/${repoId}/stashes`)
-        .then((s) => {
-          stashes = s;
-          stashesKnown = true;
-        })
-        .catch(() => {}),
-      api.get<WorktreeInfo[]>(`/repos/${repoId}/worktrees`).then((w) => (worktrees = w)).catch(() => {}),
+        .get<CommitInfo[]>(`/repos/${id}/log?all=true&limit=${want}`)
+        .then((v) => ({ v, e: null as unknown }))
+        .catch((e: unknown) => ({ v: null, e })),
+      api.get<StashInfo[]>(`/repos/${id}/stashes`).catch(() => null),
+      api.get<WorktreeInfo[]>(`/repos/${id}/worktrees`).catch(() => null),
     ]);
+    return { gen, want, commits: c.v, error: c.e, stashes: st, worktrees: wt };
+  }
+
+  function applyGraph(g: GraphFetch): void {
+    if (g.gen !== loadGen) return; // a newer reload / repo switch owns the state
+    if (g.commits) {
+      setCommits(g.commits);
+      commitsError = null;
+      skipCursor = g.commits.length;
+      hasMore = g.commits.length >= g.want;
+    } else if (commits.length === 0) {
+      commitsError = loadErrorText(g.error);
+    }
+    if (g.stashes) {
+      if (!sameJson(stashes, g.stashes)) stashes = g.stashes;
+      stashesKnown = true;
+    }
+    if (g.worktrees && !sameJson(worktrees, g.worktrees)) worktrees = g.worktrees;
+  }
+
+  async function reloadGraph(): Promise<void> {
+    const id = repoId;
+    const g = await fetchGraph(id);
+    if (id === repoId) applyGraph(g);
   }
 
   /** Run a mutating POST that returns RepoStatusResp, then refresh + toast.
@@ -1358,7 +1623,7 @@
     try {
       const s = await api.post<RepoStatusResp>(`/repos/${repoId}/checkout`, { branch, create });
       toasts.success(create ? 'Branch created' : `Switched to ${branch}`, create ? branch : undefined);
-      await refreshAfter(s);
+      await refreshAfterCheckout(s, false);
     } catch (e) {
       if (isDirtyGitRefusal(e)) {
         const ok = await confirmer.ask(
@@ -1380,7 +1645,7 @@
             } else {
               toasts.success(`Switched to ${branch}`);
             }
-            await refreshAfter(s);
+            await refreshAfterCheckout(s, true);
           } catch (e2) {
             // The switch landed but the restore didn't — the daemon's message
             // already ends with "run `git stash pop`".
@@ -1400,6 +1665,7 @@
   }
 
   function checkoutRemote(b: RefBranch): void {
+    holdDiff();
     // strip "origin/" prefix to get local branch name
     const localName = b.name.replace(/^[^/]+\//, '');
     void checkout(localName, true);
@@ -1453,7 +1719,10 @@
     if (ok) await mutate('/rebase', { onto, auto_stash: true }, 'Rebased', onto);
   }
 
-  async function selectCommit(commit: CommitInfo): Promise<void> {
+  /** Select a commit (opens the detail, lights its spine). `deferDiff` holds the
+   *  diff load for DIFF_DEFER_MS — used by controls whose double-click checks
+   *  out, so that gesture's lead click costs nothing. */
+  function selectCommit(commit: CommitInfo, opts: { deferDiff?: boolean } = {}): void {
     if (selectedSha === commit.sha) {
       // clicking again deselects
       clearSelection();
@@ -1464,45 +1733,55 @@
     selectedCommit = commit;
     // On a phone, collapse the commit list so the diff section gets the room.
     if (isMobile) secCommitsOpen = false;
-    await loadCommitDiff(commit);
+    scheduleDiff(commit.sha, opts.deferDiff ? DIFF_DEFER_MS : 0);
   }
 
-  async function loadCommitDiff(commit: CommitInfo): Promise<void> {
-    const request = ++diffRequest;
-    diffResp = null;
-    diffError = null;
-    diffLoading = true;
-    fileCollapsed = {};
-    try {
-      const resp = await api.get<DiffResp>(
-        `/repos/${repoId}/diff?target=${encodeURIComponent('commit:' + commit.sha)}`,
-      );
-      // A different commit, WIP, or closing the detail invalidates this load.
-      if (request !== diffRequest) return;
-      diffResp = resp;
-      const next: Record<string, boolean> = {};
-      for (const f of resp.files) {
-        const { add, del } = changedLinesCount(f);
-        next[f.path] = add + del > 400;
-      }
-      fileCollapsed = next;
-    } catch (e) {
-      if (request !== diffRequest) return;
-      diffError = (e instanceof Error ? e.message : String(e)) || 'The diff could not be loaded.';
-    } finally {
-      if (request === diffRequest) diffLoading = false;
+  function scheduleDiff(sha: string, delay: number): void {
+    cancelDiff();
+    if (delay <= 0) {
+      startDiff(sha);
+      return;
     }
+    diffTimer = setTimeout(() => {
+      diffTimer = null;
+      if (selectedSha === sha) startDiff(sha);
+    }, delay);
+  }
+  let diffStartedAt = 0;
+  function startDiff(sha: string): void {
+    diffStartedAt = performance.now();
+    diffSha = sha;
+  }
+
+  /** Drop any pending/in-flight diff (unmounting the loader aborts it). */
+  function cancelDiff(): void {
+    if (diffTimer) clearTimeout(diffTimer);
+    diffTimer = null;
+    diffSha = null;
+    diffHeld = false;
+  }
+
+  // A pending deferred-diff timer must not fire into an unmounted pane.
+  $effect(() => () => {
+    if (diffTimer) clearTimeout(diffTimer);
+  });
+
+  /** A checkout gesture (double-click) on the selected ref: never load its diff
+   *  under the checkout — the pane offers it on demand instead. */
+  function holdDiff(): void {
+    // Pending, or started by the lead click of a SLOW double-click. A diff the
+    // user has been reading for a while stays put.
+    const recent = diffSha !== null && performance.now() - diffStartedAt < 600;
+    if (diffTimer === null && !recent) return;
+    cancelDiff();
+    if (selectedSha) diffHeld = true;
   }
 
   function clearSelection(): void {
-    diffRequest++;
-    diffError = null;
     wipSelected = false;
     selectedSha = null;
     selectedCommit = null;
-    diffResp = null;
-    diffLoading = false;
-    fileCollapsed = {};
+    cancelDiff();
     // Re-open the commit list when the diff closes (mobile accordion).
     if (isMobile) secCommitsOpen = true;
   }
@@ -1552,15 +1831,53 @@
 
   const LANE_W = 18; // pixels per lane column
   const NODE_R = 5;  // node radius
+  // Gutter width is capped (see gutterWidth), so lanes past this column are
+  // never visible: their segments aren't stored or drawn at all (a 60-lane
+  // `--all` fan-out used to allocate one segment per lane per row).
+  const MAX_GUTTER_W = 260;
+  const MAX_DRAW_COLS = Math.floor((MAX_GUTTER_W - LANE_W / 2) / LANE_W) + 1;
 
   // Hard cap on lane count. Past this we stop opening brand-new lanes for extra
   // (merge) parents and route them to the node's own column, so a pathological
   // `--all` fan-out degrades gracefully instead of exploding sideways.
   const MAX_LANES = 24;
 
+  // Branch name per commit sha, for lane labels (tooltips). Split out of the
+  // layout so the layout depends on `commits` + THIS map only — refs,
+  // worktrees or status changing without renaming any lane (the usual case:
+  // an auto-fetch round, a checkout) no longer re-runs the whole O(N·L) pass.
+  // Same precedence as chipsFor/branchOf: the checked-out branch, then a
+  // local branch, then a remote-tracking one.
+  let prevLaneNames = new Map<string, string>();
+  const laneNames = $derived.by((): Map<string, string> => {
+    const m = new Map<string, string>();
+    const r: RefsResp | null = refs;
+    if (r && haveTypedRefs) {
+      for (const b of r.local) if (b.sha && b.is_current) m.set(b.sha, b.name);
+      for (const b of r.local) if (b.sha && !m.has(b.sha)) m.set(b.sha, b.name);
+      for (const b of r.remote) if (b.sha && !m.has(b.sha)) m.set(b.sha, b.name);
+    } else {
+      // Daemon without typed refs: classify the log decorations.
+      for (const c of commits) {
+        if (c.refs.length === 0) continue;
+        const chips = chipsFor(c);
+        const name = (chips.find((chip) => chip.kind === 'head')
+          ?? chips.find((chip) => chip.kind === 'local')
+          ?? chips.find((chip) => chip.kind === 'remote'))?.label;
+        if (name) m.set(c.sha, name);
+      }
+    }
+    // Same content ⇒ same object, so the layout below doesn't re-run.
+    const prev = prevLaneNames;
+    if (prev.size === m.size && [...m].every(([k, v]) => prev.get(k) === v)) return prev;
+    prevLaneNames = m;
+    return m;
+  });
+
   // The graph: rows + the widest lane count reached (drives the gutter width so
   // it reflects the real fan-out, not just node columns). Computed in one pass.
   const graph = $derived.by((): { rows: LaneRow[]; widest: number } => {
+    const names = laneNames;
     if (commits.length === 0) {
       return { rows: [], widest: 1 };
     }
@@ -1625,14 +1942,10 @@
       return lanes.length - 1;
     }
 
-    /** The branch a commit's decorations name, if any — the checked-out branch
-     *  wins, then a plain local branch, then a remote-tracking one. Tags, stashes
+    /** The branch a commit's refs name, if any (see `laneNames`). Tags, stashes
      *  and a detached HEAD are NOT branches and never name a lane. */
     function branchOf(commit: CommitInfo): string | null {
-      const chips = chipsFor(commit);
-      return (chips.find((chip) => chip.kind === 'head')
-        ?? chips.find((chip) => chip.kind === 'local')
-        ?? chips.find((chip) => chip.kind === 'remote'))?.label ?? null;
+      return names.get(commit.sha) ?? null;
     }
 
     const rows: LaneRow[] = [];
@@ -1668,13 +1981,17 @@
       for (let i = 0; i < lanes.length; i++) {
         if (i === col) continue;
         if (lanes[i] === commit.sha) {
-          lines.push({ fromCol: i, toCol: col, color: laneColorAt(i), kind: 'converge', branch: laneBranch[i] ?? null });
+          if (i < MAX_DRAW_COLS || col < MAX_DRAW_COLS) {
+            lines.push({ fromCol: i, toCol: col, color: laneColorAt(i), kind: 'converge', branch: laneBranch[i] ?? null });
+          }
           lanes[i] = null;
         }
       }
 
-      // Vertical continuations for all active lanes (before node)
-      for (let i = 0; i < lanes.length; i++) {
+      // Vertical continuations for all active lanes (before node) — only the
+      // columns the capped gutter can show.
+      const drawn = Math.min(lanes.length, MAX_DRAW_COLS);
+      for (let i = 0; i < drawn; i++) {
         if (i === col) continue;
         if (lanes[i] !== null) {
           lines.push({ fromCol: i, toCol: i, color: laneColorAt(i), kind: 'vert', branch: laneBranch[i] ?? null });
@@ -1753,8 +2070,7 @@
 
   // Gutter width shared by every row so lane dots line up vertically. Sized to
   // the widest lane count actually reached (plus a half-lane for the node
-  // radius), and capped so a wide fan-out can't blow out the layout.
-  const MAX_GUTTER_W = 260;
+  // radius), and capped (MAX_GUTTER_W) so a wide fan-out can't blow out the layout.
   const gutterWidth = $derived.by(() => {
     if (graph.rows.length === 0) return LANE_W;
     return Math.min(graph.widest * LANE_W + LANE_W / 2, MAX_GUTTER_W);
@@ -1909,6 +2225,7 @@
    *  to checkout a branch already held by another worktree (git errors hard). */
   function activateLocalBranch(b: RefBranch): void {
     if (b.is_current) return;
+    holdDiff();
     const wt = worktreeByBranch.get(b.name);
     if (wt) {
       void openWorktree(wt);
@@ -1980,7 +2297,7 @@
    *  it (opens the detail + lights its spine) and scroll it into view. This is
    *  what a sidebar branch/tag click does — the point is to SHOW WHERE the ref
    *  sits, which a plain selection never did. */
-  async function revealSha(sha: string, label: string): Promise<void> {
+  async function revealSha(sha: string, label: string, opts: { deferDiff?: boolean } = {}): Promise<void> {
     if (!sha) return;
     revealBusy = label;
     try {
@@ -1989,13 +2306,12 @@
         toasts.error('Not in this graph', `${label} points at a commit that isn't reachable here.`);
         return;
       }
-      const c = commits.find((x) => x.sha === sha);
+      const c = bySha.get(sha);
       if (!c) return;
-      // Select WITHOUT awaiting: selectCommit sets the highlight synchronously
-      // and only then fetches the diff. Awaiting it made every jump wait on a
-      // `git diff` round-trip before the graph moved — the single biggest chunk
-      // of the delay, for a panel the user may not even be looking at.
-      if (selectedSha !== c.sha) void selectCommit(c);
+      // Selecting is synchronous (highlight + detail header); the diff pane
+      // loads on its own, deferred for a branch row whose double-click is a
+      // checkout. Never await a diff before the graph moves.
+      if (selectedSha !== c.sha) selectCommit(c, opts);
       scrollToCommit(sha);
     } finally {
       revealBusy = '';
@@ -2012,7 +2328,7 @@
     if (!req || req.nonce === focusSeen) return;
     focusSeen = req.nonce;
     if (req.repoId !== repoId) return;
-    if (commits.some((c) => c.sha === req.sha)) {
+    if (untrack(() => seenShas.has(req.sha))) {
       void revealSha(req.sha, req.sha.slice(0, 8));
     } else {
       toasts.info('Commit not in loaded history', req.sha.slice(0, 8));
@@ -2027,7 +2343,7 @@
    *  predate the field. */
   function selectBranchRow(b: RefBranch): void {
     const sha = b.sha || branchTipCommit(b)?.sha;
-    if (sha) void revealSha(sha, b.name);
+    if (sha) void revealSha(sha, b.name, { deferDiff: true });
   }
 
   /** Tag row SINGLE-click: same jump-to-it-on-the-graph as a branch. The tag's
@@ -2350,7 +2666,7 @@
   // spine via highlightSpine). Idempotent and harmless as the lead click of a
   // double-click, which is what actually checks out.
   function refRowSelect(commit: CommitInfo): void {
-    if (selectedSha !== commit.sha) void selectCommit(commit);
+    if (selectedSha !== commit.sha) selectCommit(commit, { deferDiff: true });
   }
 
   // Double-click a popover row → check it out (or open its worktree). Remote
@@ -2359,6 +2675,7 @@
   function refRowCheckout(chip: RefChip): void {
     // Keep the explicit local/remote identity; their display names may match.
     closeRefMenu();
+    holdDiff();
     if (chip.kind === 'remote') {
       void checkout(chip.label.replace(/^[^/]+\//, ''), true);
       return;
@@ -2391,51 +2708,23 @@
     if (b) branchMenu(e, b);
   }
 
-  // A commit is the HEAD ("you are here") when any decoration is HEAD-ish.
+  /** HEAD's sha from the typed refs (the checked-out branch's tip), so a
+   *  checkout moves the "you are here" marker without re-reading the log.
+   *  `null` = unknown or detached — the log decorations decide then. */
+  const headSha = $derived.by((): string | null => {
+    const r: RefsResp | null = refs;
+    if (!r || !haveTypedRefs) return null;
+    return r.local.find((b) => b.is_current)?.sha ?? null;
+  });
+
+  // A commit is the HEAD ("you are here"): the typed current branch's tip, else
+  // any HEAD-ish decoration.
   function isHeadCommit(c: CommitInfo): boolean {
+    const h = headSha;
+    if (h) return c.sha === h;
     return c.refs.some((r) => r === 'HEAD' || /^HEAD\s*->/.test(r));
   }
 
-  // ── Inline diff helpers ───────────────────────────────────────────────────
-  function changedLinesCount(f: FileDiff): { add: number; del: number } {
-    let add = 0;
-    let del = 0;
-    for (const h of f.hunks) {
-      for (const l of h.lines) {
-        if (l.origin === 'add') add++;
-        else if (l.origin === 'del') del++;
-      }
-    }
-    return { add, del };
-  }
-
-  function toggleFileCollapse(path: string): void {
-    fileCollapsed = { ...fileCollapsed, [path]: !fileCollapsed[path] };
-  }
-
-  function lineClass(origin: DiffLine['origin']): string {
-    if (origin === 'add') return 'dl-add';
-    if (origin === 'del') return 'dl-del';
-    return 'dl-ctx';
-  }
-
-  function lineSign(origin: DiffLine['origin']): string {
-    if (origin === 'add') return '+';
-    if (origin === 'del') return '−';
-    return ' ';
-  }
-
-  const detailTotals = $derived.by(() => {
-    if (!diffResp) return { add: 0, del: 0 };
-    let add = 0;
-    let del = 0;
-    for (const f of diffResp.files) {
-      const c = changedLinesCount(f);
-      add += c.add;
-      del += c.del;
-    }
-    return { add, del };
-  });
 </script>
 
 <!-- Escape closes the open multi-ref popover (top-level: svelte:window can't sit
@@ -2645,6 +2934,15 @@
         </button>
       {/snippet}
 
+      <!-- "Show more" for a list/folder capped at LEAF_PAGE rows. -->
+      {#snippet moreLeaves(key: string, total: number)}
+        {#if total > leafLimit(key)}
+          <button class="ref-more-leaves" onclick={() => showMoreLeaves(key)}>
+            <span class="dim">Show {Math.min(total - leafLimit(key), LEAF_PAGE * 4)} more ({total - leafLimit(key)} hidden)</span>
+          </button>
+        {/if}
+      {/snippet}
+
       <!-- LOCAL -->
       <div class="ref-section">
         <button class="ref-header" onclick={() => (localOpen = !localOpen)} aria-expanded={localOpen}>
@@ -2654,20 +2952,22 @@
           <span class="ref-count">{refs.local.length}</span>
         </button>
         {#if localOpen}
-          {@const grouped = groupBranches(refs.local)}
           {#if refs.local.length === 0}
             <div class="dim ref-empty">No local branches</div>
           {/if}
-          {#each grouped.loose as leaf (leaf.b.name)}
+          {#each groupedLocal.loose.slice(0, leafLimit('local:')) as leaf (leaf.b.name)}
             {@render localRow(leaf, false)}
           {/each}
-          {#each grouped.folders as folder (folder.name)}
+          {@render moreLeaves('local:', groupedLocal.loose.length)}
+          {#each groupedLocal.folders as folder (folder.name)}
+            {@const fk = folderKey('local', folder.name)}
             {@render folderHeader('local', folder)}
-            {#if !collapsedFolders.has(folderKey('local', folder.name))}
+            {#if !collapsedFolders.has(fk)}
               <div class="folder-children">
-                {#each folder.leaves as leaf (leaf.b.name)}
+                {#each folder.leaves.slice(0, leafLimit(fk)) as leaf (leaf.b.name)}
                   {@render localRow(leaf, true)}
                 {/each}
+                {@render moreLeaves(fk, folder.leaves.length)}
               </div>
             {/if}
           {/each}
@@ -2683,20 +2983,22 @@
           <span class="ref-count">{refs.remote.length}</span>
         </button>
         {#if remoteOpen}
-          {@const grouped = groupBranches(refs.remote)}
           {#if refs.remote.length === 0}
             <div class="dim ref-empty">No remote branches</div>
           {/if}
-          {#each grouped.loose as leaf (leaf.b.name)}
+          {#each groupedRemote.loose.slice(0, leafLimit('remote:')) as leaf (leaf.b.name)}
             {@render remoteRow(leaf, false)}
           {/each}
-          {#each grouped.folders as folder (folder.name)}
+          {@render moreLeaves('remote:', groupedRemote.loose.length)}
+          {#each groupedRemote.folders as folder (folder.name)}
+            {@const fk = folderKey('remote', folder.name)}
             {@render folderHeader('remote', folder)}
-            {#if !collapsedFolders.has(folderKey('remote', folder.name))}
+            {#if !collapsedFolders.has(fk)}
               <div class="folder-children">
-                {#each folder.leaves as leaf (leaf.b.name)}
+                {#each folder.leaves.slice(0, leafLimit(fk)) as leaf (leaf.b.name)}
                   {@render remoteRow(leaf, true)}
                 {/each}
+                {@render moreLeaves(fk, folder.leaves.length)}
               </div>
             {/if}
           {/each}
@@ -3229,8 +3531,8 @@
       <span class="grow"></span>
       {#if wipSelected}
         <span class="mob-sec-count">{status.changes.length} file{status.changes.length === 1 ? '' : 's'}</span>
-      {:else if diffResp}
-        <span class="mob-sec-count">{diffResp.files.length} file{diffResp.files.length === 1 ? '' : 's'}</span>
+      {:else if diffFileCount !== null}
+        <span class="mob-sec-count">{diffFileCount} file{diffFileCount === 1 ? '' : 's'}</span>
       {/if}
       <span class="mob-close" aria-hidden="true"><Icon name="x" size={14} /></span>
     </button>
@@ -3302,81 +3604,15 @@
         </div>
       </div>
 
-      <!-- Diff area -->
-      <div class="detail-diff">
-        {#if diffLoading}
-          <div class="detail-diff-loading">
-            <Skeleton rows={8} height={20} />
-          </div>
-        {:else if diffError}
-          <LoadState what="this commit’s changes" error={diffError} empty onretry={() => selectedCommit && void loadCommitDiff(selectedCommit)} />
-        {:else if diffResp !== null}
-          {#if diffResp.files.length === 0}
-            <div class="dim" style="padding: 18px; font-size: var(--fs-s); text-align: center">No file changes.</div>
-          {:else}
-            <!-- Diff summary bar -->
-            <div class="diff-summary-bar">
-              <span class="dim" style="font-size: var(--fs-xs)">{diffResp.files.length} file{diffResp.files.length === 1 ? '' : 's'}</span>
-              <span class="ds-add">+{detailTotals.add}</span>
-              <span class="ds-del">−{detailTotals.del}</span>
-            </div>
-
-            <!-- Per-file diff -->
-            {#each diffResp.files as file (file.path)}
-              {@const stats = changedLinesCount(file)}
-              {@const isCollapsed = fileCollapsed[file.path] ?? false}
-              <div class="df-block">
-                <!-- File header -->
-                <div class="df-head-row">
-                  <button
-                    class="df-head"
-                    onclick={() => toggleFileCollapse(file.path)}
-                    title={file.path}
-                  >
-                    <span class="df-chevron dim" aria-hidden="true"><Icon name={isCollapsed ? 'chevronRight' : 'chevronDown'} size={12} /></span>
-                    <span class="mono df-path" dir="ltr">
-                      {#if file.old_path}<span class="df-rename-from">{file.old_path}</span><span class="df-rename-arrow"> → </span>{/if}{file.path}
-                    </span>
-                    <span class="grow"></span>
-                    <span class="ds-add">+{stats.add}</span>
-                    <span class="ds-del">−{stats.del}</span>
-                  </button>
-                  <button
-                    class="df-tools"
-                    title="File actions"
-                    aria-label="File actions"
-                    onclick={(e) => { e.stopPropagation(); fileToolsMenu(e, file.path); }}
-                  ><Icon name="more" size={13} /></button>
-                </div>
-
-                {#if !isCollapsed}
-                  {#if file.is_binary}
-                    <div class="df-binary dim">Binary file — no text diff.</div>
-                  {:else}
-                    <div class="df-hunks" dir="ltr">
-                      {#each file.hunks as hunk, hi (hi)}
-                        <div class="hunk-header mono">{hunk.header}</div>
-                        <table class="dl-table">
-                          <tbody>
-                            {#each hunk.lines as line, li (li)}
-                              <tr class="dl-row {lineClass(line.origin)}">
-                                <td class="dl-gut dl-old">{line.old_line ?? ''}</td>
-                                <td class="dl-gut dl-new">{line.new_line ?? ''}</td>
-                                <td class="dl-sign">{lineSign(line.origin)}</td>
-                                <td class="dl-code mono">{line.content}</td>
-                              </tr>
-                            {/each}
-                          </tbody>
-                        </table>
-                      {/each}
-                    </div>
-                  {/if}
-                {/if}
-              </div>
-            {/each}
-          {/if}
-        {/if}
-      </div>
+      <!-- Diff area: summary-first, per-file lazy (see graph-commit-diff). -->
+      <GraphCommitDiff
+        {repoId}
+        sha={diffSha}
+        held={diffHeld}
+        onresume={() => selectedSha && scheduleDiff(selectedSha, 0)}
+        onfiletools={fileToolsMenu}
+        bind:fileCount={diffFileCount}
+      />
     {/if}
   </div>
 </div>
@@ -3617,6 +3853,22 @@
     text-align: start;
     overflow: hidden;
     transition: background 100ms ease-out, color 100ms ease-out;
+  }
+  .ref-more-leaves {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    height: 24px;
+    padding-block: 0;
+    padding-inline: 22px 10px;
+    border: none;
+    background: transparent;
+    font-size: var(--fs-xs);
+    cursor: pointer;
+    text-align: start;
+  }
+  .ref-more-leaves:hover {
+    background: var(--surface-2);
   }
   .ref-row:hover:not(:disabled) {
     background: var(--surface-2);
@@ -4469,185 +4721,6 @@
     flex-shrink: 0;
   }
 
-  /* Diff area */
-  .detail-diff {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    overflow-x: hidden;
-  }
-  .detail-diff-loading {
-    padding: 12px;
-  }
-  .diff-summary-bar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 12px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface-2);
-    font-size: var(--fs-xs);
-    position: sticky;
-    top: 0;
-    z-index: 1;
-  }
-  .ds-add {
-    color: var(--success);
-    font-weight: 600;
-    font-size: var(--fs-xs);
-  }
-  .ds-del {
-    color: var(--danger);
-    font-weight: 600;
-    font-size: var(--fs-xs);
-  }
-
-  /* Per-file diff block */
-  .df-block {
-    border-bottom: 1px solid var(--border);
-  }
-  /* The header is a ROW, not a single button: the ⋯ file-tools button can't be
-     nested inside the collapse button (invalid HTML, and the click would fold
-     the file instead of opening the menu). */
-  .df-head-row {
-    display: flex;
-    align-items: stretch;
-    background: var(--surface-2);
-  }
-  .df-tools {
-    display: inline-flex;
-    align-items: center;
-    flex-shrink: 0;
-    padding: 0 9px;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    font-size: var(--fs-m);
-    line-height: 1;
-    cursor: pointer;
-  }
-  .df-tools:hover {
-    color: var(--text);
-    background: color-mix(in srgb, var(--accent) 7%, var(--surface-2));
-  }
-  .df-head {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    flex: 1;
-    min-width: 0;
-    width: 100%;
-    padding: 5px 10px;
-    border: none;
-    background: var(--surface-2);
-    cursor: pointer;
-    font-size: var(--fs-xs);
-    color: var(--text);
-    text-align: start;
-    transition: background 80ms;
-  }
-  .df-head:hover {
-    background: color-mix(in srgb, var(--accent) 7%, var(--surface-2));
-  }
-  .df-chevron {
-    display: inline-flex;
-    flex-shrink: 0;
-  }
-  /* Collapsed points in the reading direction: flip the chevron under RTL. */
-  :global([dir='rtl']) .df-chevron {
-    transform: scaleX(-1);
-  }
-  /* Rename separator: a logical arrow that flips with reading direction so a
-     "from → to" rename reads correctly in RTL too. */
-  :global([dir='rtl']) .df-rename-arrow {
-    /* Mirror the glyph in place rather than swapping characters. */
-    display: inline-block;
-    transform: scaleX(-1);
-  }
-  .df-path {
-    font-size: var(--fs-xs);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    flex: 1;
-    min-width: 0;
-    color: var(--text);
-  }
-  .df-binary {
-    padding: 10px 12px;
-    font-size: var(--fs-xs);
-  }
-  .df-hunks {
-    overflow-x: auto;
-  }
-
-  /* Hunk header */
-  .hunk-header {
-    padding: 2px 10px;
-    font-size: var(--fs-xs);
-    color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 7%, var(--surface));
-    border-top: 1px solid var(--border);
-    border-bottom: 1px solid var(--border);
-  }
-
-  /* Diff line table */
-  .dl-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: var(--fs-xs);
-    line-height: 1.5;
-  }
-  .dl-gut {
-    width: 34px;
-    min-width: 34px;
-    text-align: end;
-    padding: 0 5px 0 3px;
-    color: var(--text-dim);
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    user-select: none;
-    vertical-align: top;
-    border-inline-end: 1px solid var(--border);
-  }
-  .dl-sign {
-    width: 14px;
-    text-align: center;
-    color: var(--text-dim);
-    user-select: none;
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    vertical-align: top;
-    padding: 0 1px;
-  }
-  .dl-code {
-    padding: 0 8px 0 3px;
-    white-space: pre;
-    word-break: normal;
-    user-select: text;
-    font-size: var(--fs-xs);
-    font-family: var(--font-mono);
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  tr.dl-row.dl-add {
-    background: color-mix(in srgb, var(--success) 11%, transparent);
-  }
-  tr.dl-row.dl-add .dl-sign {
-    color: var(--success);
-  }
-  tr.dl-row.dl-del {
-    background: color-mix(in srgb, var(--danger) 10%, transparent);
-  }
-  tr.dl-row.dl-del .dl-sign {
-    color: var(--danger);
-  }
-  tr.dl-row.dl-ctx {
-    /* context lines: slightly dimmed */
-    color: var(--text-dim);
-  }
-
   /* Shared utilities */
   .grow {
     flex: 1;
@@ -4791,35 +4864,6 @@
     .mobile .ref-name { font-size: var(--fs-m); }
     .mobile .ref-header { font-size: var(--fs-s); padding: 8px 12px; }
 
-    /* Diff: bump the tiny code + gutter text so it's legible on a phone. */
-    .mobile .detail-diff { -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
-    .mobile .diff-summary-bar { font-size: var(--fs-m); padding: 9px 12px; }
-    .mobile .diff-summary-bar .dim { font-size: var(--fs-m) !important; }
-    .mobile .ds-add,
-    .mobile .ds-del { font-size: var(--fs-m); }
-    .mobile .df-head { font-size: var(--fs-m); padding: 9px 12px; }
-    .mobile .df-path { font-size: var(--fs-m); }
-    .mobile .hunk-header { font-size: var(--fs-s); padding: 4px 10px; }
-    /* table-layout:fixed pins the gutter/sign columns to their declared widths
-       and hands the rest to the code column, so a long unbroken line wraps
-       INSIDE that column instead of widening the table past the viewport (the
-       auto layout otherwise sizes to the content's min-width and overflows). */
-    .mobile .df-hunks { overflow-x: hidden; }
-    .mobile .dl-table { font-size: var(--fs-s); table-layout: fixed; width: 100%; }
-    /* Wrap long code lines so they're readable without horizontal scrolling.
-       break-word keeps whole words together when they fit; overflow-wrap +
-       a width:auto cell let a 140-char unbroken token still break to fit. */
-    .mobile .dl-code {
-      font-size: var(--fs-s);
-      width: auto;
-      white-space: pre-wrap;
-      word-break: break-word;
-      overflow-wrap: anywhere;
-      overflow: visible;
-      text-overflow: clip;
-    }
-    .mobile .dl-gut { font-size: var(--fs-xs); width: 30px; min-width: 30px; }
-    .mobile .dl-sign { font-size: var(--fs-s); }
     .mobile .detail-subject { font-size: var(--fs-l); }
     .mobile .detail-sha { font-size: var(--fs-s); }
     .mobile .detail-author,

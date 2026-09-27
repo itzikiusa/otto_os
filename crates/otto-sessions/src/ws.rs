@@ -104,6 +104,129 @@ enum ClientFrame {
     // FOCUS, so clicking into a pane reclaims the PTY size from a stale
     // viewer (e.g. a phone tab that typed once and stayed attached).
     Claim,
+    // Flow control (SA-02). The client's renderer is behind: its pending
+    // (received-but-unparsed) bytes crossed the high watermark. Stop
+    // forwarding output to THIS viewer — the PTY, the emulator and every other
+    // viewer carry on — until `resume` or [`FLOW_AUTO_RESUME`]. A repeated
+    // `pause` while paused re-arms the auto-resume deadline (keep-alive).
+    Pause,
+    // The client drained below its low watermark. If output was held back
+    // meanwhile, the server discards it and pushes ONE `scrollback` snapshot
+    // (the lagging-viewer resync) instead of the megabytes it skipped.
+    Resume,
+}
+
+/// A paused viewer that never sends `resume` (renderer wedged, buggy client)
+/// is resumed after this long without a fresh `pause`, so a flow-control bug
+/// can at worst reproduce the pre-flow-control flood — never a frozen pane.
+const FLOW_AUTO_RESUME: Duration = Duration::from_secs(2);
+
+/// Per-connection output gate for client-driven flow control (SA-02).
+///
+/// A browser WebSocket drains the socket eagerly into the JS task queue, so
+/// the daemon never feels TCP backpressure from a slow RENDERER: xterm parses
+/// 5.5–8 MB/s in WebKit while `cat`/`yes` produce far more, and the backlog
+/// (up to xterm's 50 MB discard watermark) kept the screen scrolling for
+/// seconds after `^C`. While paused the output arm of the socket loop is
+/// disabled — this viewer's broadcast receiver just stops reading (the ring is
+/// bounded; the sender never blocks) — and on resume the held-back output is
+/// replaced by one emulator snapshot.
+#[derive(Debug, Default)]
+struct FlowGate {
+    /// `Some(deadline)` while paused; the deadline is the auto-resume instant.
+    paused_until: Option<tokio::time::Instant>,
+}
+
+impl FlowGate {
+    fn pause(&mut self, now: tokio::time::Instant) {
+        self.paused_until = Some(now + FLOW_AUTO_RESUME);
+    }
+
+    fn is_paused(&self) -> bool {
+        self.paused_until.is_some()
+    }
+
+    /// Leave the paused state. `true` when the gate WAS paused (the caller
+    /// then checks whether anything was held back and resyncs).
+    fn resume(&mut self) -> bool {
+        self.paused_until.take().is_some()
+    }
+}
+
+/// Sleep until the gate's auto-resume deadline; pending forever when open.
+async fn flow_deadline(paused_until: Option<tokio::time::Instant>) {
+    match paused_until {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Discard every chunk queued for this viewer. `true` when anything was
+/// discarded — including a lag notice (chunks the ring already overwrote).
+fn drain_backlog(rx: &mut broadcast::Receiver<Bytes>) -> bool {
+    let mut any = false;
+    // Ok / Lagged keep draining; Empty / Closed stop.
+    while matches!(
+        rx.try_recv(),
+        Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_))
+    ) {
+        any = true;
+    }
+    any
+}
+
+/// The `{"type":"scrollback","data":…,"epoch":…}` snapshot frame.
+fn scrollback_frame(data: &[u8], epoch: u64) -> String {
+    format!(
+        r#"{{"type":"scrollback","data":"{}","epoch":{}}}"#,
+        B64.encode(data),
+        epoch
+    )
+}
+
+/// Replace this viewer's backlog with a fresh full snapshot: discard the
+/// queued chunks (their effects are already absorbed by the emulator), take
+/// the snapshot, then discard what raced in while snapshotting. Chunks that
+/// raced in were parsed before the snapshot took the emulator lock, so they
+/// are already reflected in it — discarding them avoids double-applying. (A
+/// chunk parsed in the microseconds after the snapshot released the lock can
+/// be lost here; the next output burst's repaint corrects it, unlike the
+/// unbounded silent loss the lag path replaces.)
+fn resync_frame(
+    rx: &mut broadcast::Receiver<Bytes>,
+    snapshot: impl FnOnce() -> (Vec<u8>, u64),
+) -> String {
+    drain_backlog(rx);
+    let (data, epoch) = snapshot();
+    drain_backlog(rx);
+    scrollback_frame(&data, epoch)
+}
+
+/// Flow-control resume: when output was held back while paused, the
+/// resync snapshot to send; `None` when nothing was skipped (the stream just
+/// continues — no rebuild, no flicker).
+fn resume_frame(
+    rx: &mut broadcast::Receiver<Bytes>,
+    snapshot: impl FnOnce() -> (Vec<u8>, u64),
+) -> Option<String> {
+    drain_backlog(rx).then(|| resync_frame(rx, snapshot))
+}
+
+/// The `search_result` reply. Built with serde_json: matched lines are
+/// ANSI-stripped but keep tabs, BEL, backspace and other C0 bytes, which JSON
+/// forbids raw — the old hand-rolled escaper emitted them verbatim, the
+/// client's `JSON.parse` threw, and the find bar spun on "…" forever (SA-11).
+fn search_result_frame(query: &str, matches: Vec<(usize, String)>) -> String {
+    let matches: Vec<serde_json::Value> = matches
+        .into_iter()
+        .map(|(line, text)| serde_json::json!({ "line": line, "text": text }))
+        .collect();
+    serde_json::json!({
+        "type": "search_result",
+        "query": query,
+        "matches": matches,
+    })
+    .to_string()
 }
 
 /// Maximum number of matches returned per `Search` request.
@@ -477,11 +600,7 @@ async fn revive_viewer<S: SessionsCtx>(
     let data = fresh.snapshot_with_history(DEFAULT_ATTACH_HISTORY_LINES);
     // `epoch` = PTY spawn counter: the client resets its local buffer when it
     // changes (see the Scrollback arm).
-    let frame = format!(
-        r#"{{"type":"scrollback","data":"{}","epoch":{}}}"#,
-        B64.encode(&data),
-        fresh.spawn_seq()
-    );
+    let frame = scrollback_frame(&data, fresh.spawn_seq());
     if socket.send(Message::Text(frame.into())).await.is_err() {
         return Err(());
     }
@@ -656,6 +775,8 @@ async fn serve_terminal<S: SessionsCtx>(
     ping.reset(); // skip the immediate first tick
     let mut revive_tick = tokio::time::interval(REVIVE_POLL);
     revive_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Client-driven flow control (`pause` / `resume` frames).
+    let mut flow = FlowGate::default();
 
     // Re-authorization runs OFF this loop (investigation H2): every arm here
     // must stay free of SQLite, or a slow statement elsewhere in the daemon
@@ -691,9 +812,28 @@ async fn serve_terminal<S: SessionsCtx>(
                 }
             }
 
+            // Flow control: a paused viewer that never resumed. Resume it
+            // anyway (see FLOW_AUTO_RESUME) — held-back output becomes one
+            // snapshot, exactly as for an explicit `resume`.
+            _ = flow_deadline(flow.paused_until), if flow.is_paused() => {
+                flow.resume();
+                tracing::debug!(session = %session_id, "terminal ws flow auto-resume (no resume within {FLOW_AUTO_RESUME:?})");
+                if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
+                    if let Some(frame) = resume_frame(rx, || {
+                        (h.snapshot_with_history(DEFAULT_ATTACH_HISTORY_LINES), h.spawn_seq())
+                    }) {
+                        if socket.send(Message::Text(frame.into())).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+
             // Live PTY output → binary frames. Coalesce rapid bursts into one
             // frame by draining any immediately-available chunks with try_recv.
-            chunk = next_output(&mut out_rx) => {
+            // Disabled while the client has paused this stream (flow control):
+            // the receiver simply stops reading until resume.
+            chunk = next_output(&mut out_rx), if !flow.is_paused() => {
                 match chunk {
                     Ok(first) => {
                         // Attempt a non-blocking drain to merge back-to-back
@@ -723,29 +863,9 @@ async fn serve_terminal<S: SessionsCtx>(
                         // fresh full snapshot; the client rebuilds from it.
                         tracing::debug!(session = %session_id, "terminal ws lagged by {n} chunks; resyncing from snapshot");
                         if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
-                            let drain = |rx: &mut broadcast::Receiver<Bytes>| {
-                                // Ok / Lagged keep draining; Empty / Closed stop.
-                                while matches!(
-                                    rx.try_recv(),
-                                    Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_))
-                                ) {}
-                            };
-                            drain(rx);
-                            let data = h.snapshot_with_history(DEFAULT_ATTACH_HISTORY_LINES);
-                            // Chunks that raced in while snapshotting were
-                            // parsed before the snapshot took the emulator lock,
-                            // so they are already reflected in it — discard them
-                            // rather than double-applying. (A chunk parsed in
-                            // the microseconds after the snapshot released the
-                            // lock can be lost here; the next output burst's
-                            // full repaint corrects it, unlike the unbounded
-                            // silent loss this path replaces.)
-                            drain(rx);
-                            let frame = format!(
-                                r#"{{"type":"scrollback","data":"{}","epoch":{}}}"#,
-                                B64.encode(&data),
-                                h.spawn_seq()
-                            );
+                            let frame = resync_frame(rx, || {
+                                (h.snapshot_with_history(DEFAULT_ATTACH_HISTORY_LINES), h.spawn_seq())
+                            });
                             if socket.send(Message::Text(frame.into())).await.is_err() {
                                 return;
                             }
@@ -879,6 +999,22 @@ async fn serve_terminal<S: SessionsCtx>(
                             ctx.manager().note_input_authority(&session_id, conn_id);
                         }
                     }
+                    // Flow control is per-viewer and read-only safe: it only
+                    // gates what THIS socket is sent, never the PTY.
+                    ClientFrame::Pause => flow.pause(tokio::time::Instant::now()),
+                    ClientFrame::Resume => {
+                        if flow.resume() {
+                            if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
+                                if let Some(frame) = resume_frame(rx, || {
+                                    (h.snapshot_with_history(DEFAULT_ATTACH_HISTORY_LINES), h.spawn_seq())
+                                }) {
+                                    if socket.send(Message::Text(frame.into())).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     ClientFrame::Scrollback { lines } => {
                         // Reproduce the live screen as one coherent frame (what
                         // tmux does on attach) PRECEDED by up to `lines` rows of
@@ -901,10 +1037,9 @@ async fn serve_terminal<S: SessionsCtx>(
                         // rebuilds from this snapshot instead of appending the
                         // fresh screen under stale (possibly narrow-painted)
                         // history. Omitted (0) when no live handle exists.
-                        let frame = format!(
-                            r#"{{"type":"scrollback","data":"{}","epoch":{}}}"#,
-                            B64.encode(&data),
-                            handle.as_ref().map(|h| h.spawn_seq()).unwrap_or(0)
+                        let frame = scrollback_frame(
+                            &data,
+                            handle.as_ref().map(|h| h.spawn_seq()).unwrap_or(0),
                         );
                         // Sent inline, i.e. before any subsequent live bytes.
                         if socket.send(Message::Text(frame.into())).await.is_err() {
@@ -923,27 +1058,7 @@ async fn serve_terminal<S: SessionsCtx>(
                             .as_ref()
                             .map(|h| h.search(&query, MAX_SEARCH_RESULTS))
                             .unwrap_or_default();
-                        // Serialize as `{"type":"search_result","query":"…","matches":[{"line":N,"text":"…"},…]}`
-                        let matches_json = matches
-                            .into_iter()
-                            .map(|(line, text)| {
-                                // Escape text as a JSON string (no serde import in this
-                                // hot path; use a small manual serializer).
-                                let escaped = text
-                                    .replace('\\', "\\\\")
-                                    .replace('"', "\\\"")
-                                    .replace('\n', "\\n")
-                                    .replace('\r', "\\r");
-                                format!(r#"{{"line":{line},"text":"{escaped}"}}"#)
-                            })
-                            .collect::<Vec<_>>()
-                            .join(",");
-                        let query_escaped = query
-                            .replace('\\', "\\\\")
-                            .replace('"', "\\\"");
-                        let frame = format!(
-                            r#"{{"type":"search_result","query":"{query_escaped}","matches":[{matches_json}]}}"#
-                        );
+                        let frame = search_result_frame(&query, matches);
                         if socket.send(Message::Text(frame.into())).await.is_err() {
                             return;
                         }
@@ -1471,5 +1586,125 @@ mod tests {
             verdict, None,
             "a revoked share closes the capability watch (= evict this socket)"
         );
+    }
+
+    // ── Flow control + search_result framing (SA-02 / SA-11) ──────────────
+
+    /// SA-11: a matched line with a TAB (make output, Go/Java stack traces)
+    /// or any other C0 byte used to produce invalid JSON, so the client's
+    /// `JSON.parse` threw and the find bar spun forever.
+    #[test]
+    fn search_result_frame_is_valid_json_for_tabs_and_control_bytes() {
+        let text = "at\tmain.go:12\t\"quoted\" back\\slash \u{7} bell \u{8} bs \u{1b}esc\r\n";
+        let query = "tab\t\"q\"";
+        let frame = search_result_frame(query, vec![(42, text.to_string()), (7, "plain".into())]);
+        let v: serde_json::Value =
+            serde_json::from_str(&frame).expect("search_result must be valid JSON");
+        assert_eq!(v["type"], "search_result");
+        assert_eq!(v["query"], query);
+        assert_eq!(v["matches"][0]["line"], 42);
+        assert_eq!(v["matches"][0]["text"], text, "text round-trips byte-exact");
+        assert_eq!(v["matches"][1]["line"], 7);
+        assert_eq!(v["matches"][1]["text"], "plain");
+        // Empty result set is still a well-formed frame.
+        let empty: serde_json::Value =
+            serde_json::from_str(&search_result_frame("x", Vec::new())).unwrap();
+        assert_eq!(empty["matches"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn client_pause_resume_frames_parse() {
+        assert!(matches!(
+            serde_json::from_str::<ClientFrame>(r#"{"type":"pause"}"#),
+            Ok(ClientFrame::Pause)
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ClientFrame>(r#"{"type":"resume"}"#),
+            Ok(ClientFrame::Resume)
+        ));
+    }
+
+    #[test]
+    fn flow_gate_pause_arms_auto_resume_and_resume_reports_state() {
+        let mut gate = FlowGate::default();
+        assert!(!gate.is_paused());
+        assert!(!gate.resume(), "resume while open is a no-op");
+        let t0 = tokio::time::Instant::now();
+        gate.pause(t0);
+        assert!(gate.is_paused());
+        assert_eq!(gate.paused_until, Some(t0 + FLOW_AUTO_RESUME));
+        // A repeated pause (client keep-alive) re-arms the deadline.
+        let t1 = t0 + Duration::from_millis(1500);
+        gate.pause(t1);
+        assert_eq!(gate.paused_until, Some(t1 + FLOW_AUTO_RESUME));
+        assert!(gate.resume(), "resume reports it was paused");
+        assert!(!gate.is_paused());
+    }
+
+    /// The auto-resume arm fires once the deadline passes (a client that
+    /// never sends `resume` cannot wedge the pane).
+    #[tokio::test]
+    async fn flow_deadline_fires_and_open_gate_never_does() {
+        let at = tokio::time::Instant::now() + Duration::from_millis(20);
+        tokio::time::timeout(Duration::from_secs(2), flow_deadline(Some(at)))
+            .await
+            .expect("deadline must fire");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), flow_deadline(None))
+                .await
+                .is_err(),
+            "an open gate has no deadline"
+        );
+    }
+
+    /// pause → output skipped → resume ⇒ ONE snapshot replaces the backlog,
+    /// then live output flows again. Mirrors the socket loop: while paused the
+    /// output arm is disabled, so chunks pile up in this viewer's receiver.
+    #[test]
+    fn pause_skip_resume_sends_one_snapshot_then_streams() {
+        let (tx, mut rx) = broadcast::channel::<Bytes>(8);
+        let mut gate = FlowGate::default();
+        gate.pause(tokio::time::Instant::now());
+        // A flood while paused — more than the ring holds, so it also lags.
+        for i in 0..20 {
+            tx.send(Bytes::from(format!("y{i}\n"))).unwrap();
+        }
+        assert!(gate.resume());
+        let mut snapshots = 0;
+        let frame = resume_frame(&mut rx, || {
+            snapshots += 1;
+            (b"\x1b[Hsnapshot".to_vec(), 3)
+        })
+        .expect("skipped output must be replaced by a snapshot");
+        assert_eq!(snapshots, 1);
+        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(v["type"], "scrollback");
+        assert_eq!(v["epoch"], 3);
+        assert_eq!(
+            B64.decode(v["data"].as_str().unwrap()).unwrap(),
+            b"\x1b[Hsnapshot"
+        );
+        // The backlog is gone — none of it is forwarded after the snapshot…
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        // …and new output streams normally again.
+        tx.send(Bytes::from_static(b"live")).unwrap();
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"live"));
+    }
+
+    /// Pausing with nothing produced meanwhile must NOT rebuild the client
+    /// (a rebuild resets selection/scroll position for no reason).
+    #[test]
+    fn resume_without_skipped_output_sends_nothing() {
+        let (_tx, mut rx) = broadcast::channel::<Bytes>(8);
+        let mut called = false;
+        assert!(resume_frame(&mut rx, || {
+            called = true;
+            (Vec::new(), 0)
+        })
+        .is_none());
+        assert!(!called, "no snapshot is taken when nothing was skipped");
     }
 }

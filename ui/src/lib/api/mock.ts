@@ -1118,7 +1118,13 @@ const routes: Route[] = [
   {
     method: 'GET',
     re: /^\/workspaces\/([^/]+)\/sessions$/,
-    handle: (m) => ({ json: sessions.filter((s) => s.workspace_id === m[1]) }),
+    handle: (m, _b, q) => ({ json: filterSessions(sessions.filter((s) => s.workspace_id === m[1]), q, null) }),
+  },
+  {
+    // #17b cross-workspace list (archived defaults to false).
+    method: 'GET',
+    re: /^\/sessions$/,
+    handle: (_m, _b, q) => ({ json: filterSessions(sessions, q, false) }),
   },
   {
     method: 'POST',
@@ -2399,6 +2405,17 @@ const routes: Route[] = [
 
 function problemStatus(): RepoStatusResp {
   return { branch: 'main', upstream: null, ahead: 0, behind: 0, changes: [] };
+}
+
+/** The #17 / #17b narrowing filters (the daemon applies them in SQL). */
+function filterSessions(list: Session[], q: URLSearchParams | undefined, archivedDefault: boolean | null): Session[] {
+  const a = q?.get('archived');
+  const archived = a === 'true' ? true : a === 'false' ? false : archivedDefault;
+  const kind = q?.get('kind');
+  const status = q?.get('status');
+  return list.filter(
+    (s) => (archived === null || s.archived === archived) && (!kind || s.kind === kind) && (!status || s.status === status),
+  );
 }
 
 // ---------------------------------------------------------------------------

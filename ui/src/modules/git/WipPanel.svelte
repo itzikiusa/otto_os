@@ -4,7 +4,7 @@
   // stage toggles, discard), a per-file working diff, and the commit composer.
   // Replaces the old separate "Changes" tab — staging now lives on the graph.
   import { untrack } from 'svelte';
-  import { api } from '../../lib/api/client';
+  import { api, isAbortError } from '../../lib/api/client';
   import type {
     CommitConfig,
     CommitInfo,
@@ -18,6 +18,7 @@
   import { git } from '../../lib/stores/git.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import DiffViewer from './DiffViewer.svelte';
+  import { repoDiffFileLoader } from './diff-load';
   import Icon from '../../lib/components/Icon.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -108,7 +109,8 @@
 
   // ── Per-file diff (working tree, server-side scoped) ────────────────────────
   let selectedPath = $state<string | null>(null);
-  let diff = $state<DiffResp | null>(null);
+  // Replaced wholesale, never mutated — `$state.raw` skips deep-proxying hunks.
+  let diff = $state.raw<DiffResp | null>(null);
   let diffLoading = $state(false);
   /** Non-null when the diff LOAD failed — rendered as an error, not as the
    *  "no textual diff" empty state (an error masquerading as emptiness). */
@@ -142,19 +144,36 @@
     if (path === null) {
       diff = null;
       diffError = null;
+      diffLoading = false;
       return;
     }
+    // Drop the previous file's diff at once: its hunk buttons must never act
+    // while the header already names the next file.
+    diff = null;
     diffLoading = true;
     diffError = null;
+    // A newer selection aborts this fetch (effect cleanup) and the stale
+    // guard drops a response that still lands — file A's slow diff used to
+    // overwrite the diff of file B selected after it.
+    const ctl = new AbortController();
+    const stale = () => ctl.signal.aborted;
     void api
-      .get<DiffResp>(`/repos/${repoId}/diff?target=${target}&path=${encodeURIComponent(path)}`)
-      .then((d) => (diff = d))
+      .get<DiffResp>(`/repos/${repoId}/diff?target=${target}&path=${encodeURIComponent(path)}`, ctl.signal)
+      .then((d) => {
+        if (!stale()) diff = d;
+      })
       .catch((e) => {
+        if (stale() || isAbortError(e)) return;
         diff = { files: [] };
         diffError = e instanceof Error ? e.message : String(e);
       })
-      .finally(() => (diffLoading = false));
+      .finally(() => {
+        if (!stale()) diffLoading = false;
+      });
+    return () => ctl.abort();
   });
+  /** Over-cap files ("Load anyway") re-fetch through the same target. */
+  const loadWipFile = $derived(repoDiffFileLoader(repoId, selTarget));
 
   // Agent UI control (lib/uiCommands/git.ts): a pending WIP request for this
   // repo selects a file's diff and/or prefills the composer — so the user sees
@@ -283,10 +302,13 @@
   };
   type TNode = TFile | TFolder;
 
+  // One collator for every compare: `localeCompare` re-resolves the locale
+  // per call, which dominated sorting a 20k-file tree.
+  const collator = new Intl.Collator();
   function sortLevel(nodes: TNode[]): void {
     nodes.sort((a, b) => {
       if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
-      return a.name.localeCompare(b.name);
+      return collator.compare(a.name, b.name);
     });
     for (const n of nodes) if (n.type === 'folder') sortLevel(n.children);
   }
@@ -318,15 +340,45 @@
   const unstagedTree = $derived.by(() => buildTree(unstaged));
   const stagedTree = $derived.by(() => buildTree(staged));
 
-  // Folders collapse by "section:path" so the same folder can fold independently
-  // in the Unstaged and Staged trees.
-  let collapsed = $state<Set<string>>(new Set());
-  function toggleFolder(key: string): void {
-    const next = new Set(collapsed);
-    if (next.has(key)) next.delete(key);
-    else next.add(key);
-    collapsed = next;
+  // Folders fold by "section:path" so the same folder can fold independently
+  // in the Unstaged and Staged trees. A folder the user never toggled starts
+  // collapsed when its subtree holds more than AUTO_COLLAPSE_FILES changes —
+  // an un-ignored `node_modules/` or `dist/` lists tens of thousands of files
+  // (20k rows ≈ 200k DOM nodes ≈ 1.5 s to mount); its count stays visible.
+  const AUTO_COLLAPSE_FILES = 200;
+  /** Rows mounted per section before "Show more" (a huge flat folder). */
+  const ROW_PAGE = 500;
+  let folds = $state.raw<Map<string, boolean>>(new Map());
+  function isCollapsed(key: string, node: TFolder): boolean {
+    return folds.get(key) ?? node.files.length > AUTO_COLLAPSE_FILES;
   }
+  function toggleFolder(key: string, node: TFolder): void {
+    const next = new Map(folds);
+    next.set(key, !isCollapsed(key, node));
+    folds = next;
+  }
+
+  /** The tree as the flat list of VISIBLE rows (collapsed subtrees skipped),
+   *  so each section mounts a bounded slice instead of recursing everything. */
+  type Row = { node: TNode; depth: number; key: string };
+  function visibleRows(nodes: TNode[], section: 'unstaged' | 'staged'): Row[] {
+    const out: Row[] = [];
+    const walk = (level: TNode[], depth: number) => {
+      for (const n of level) {
+        if (n.type === 'folder') {
+          out.push({ node: n, depth, key: `d:${n.path}` });
+          if (!isCollapsed(`${section}:${n.path}`, n)) walk(n.children, depth + 1);
+        } else {
+          out.push({ node: n, depth, key: `f:${n.change.path}` });
+        }
+      }
+    };
+    walk(nodes, 0);
+    return out;
+  }
+  const unstagedRows = $derived(visibleRows(unstagedTree, 'unstaged'));
+  const stagedRows = $derived(visibleRows(stagedTree, 'staged'));
+  let rowLimit = $state({ unstaged: ROW_PAGE, staged: ROW_PAGE });
 
   // Section collapse (GitKraken keeps both open; folding is still handy).
   let unstagedOpen = $state(true);
@@ -454,9 +506,9 @@
   </div>
 {/snippet}
 
-{#snippet treeNode(node: TNode, depth: number, section: 'unstaged' | 'staged')}
-  {#if node.type === 'folder'}
+{#snippet folderRow(node: TFolder, depth: number, section: 'unstaged' | 'staged')}
     {@const key = `${section}:${node.path}`}
+    {@const shut = isCollapsed(key, node)}
     <!-- Folder row: the checkbox stages/unstages EVERY file under the folder
          (recursively — node.files carries the whole subtree) in one call, the
          same affordance file rows have. The name/chevron only folds — a name
@@ -476,11 +528,11 @@
       />
       <button
         class="wp-fold-name"
-        onclick={() => toggleFolder(key)}
+        onclick={() => toggleFolder(key, node)}
         title="{node.path}/ ({node.files.length})"
-        aria-expanded={!collapsed.has(key)}
+        aria-expanded={!shut}
       >
-        <Icon name={collapsed.has(key) ? 'chevronRight' : 'chevronDown'} size={12} />
+        <Icon name={shut ? 'chevronRight' : 'chevronDown'} size={12} />
         <Icon name="folder" size={12} />
         <span class="wp-fold-label">{node.name}</span>
         <span class="wp-fold-count">{node.files.length}</span>
@@ -500,13 +552,22 @@
         <Icon name="trash" size={12} />
       </button>
     </div>
-    {#if !collapsed.has(key)}
-      {#each node.children as child (child.type === 'folder' ? `d:${child.path}` : `f:${child.change.path}`)}
-        {@render treeNode(child, depth + 1, section)}
-      {/each}
+{/snippet}
+
+{#snippet sectionRows(rows: Row[], section: 'unstaged' | 'staged', empty: string)}
+  {#each rows.slice(0, rowLimit[section]) as r (r.key)}
+    {#if r.node.type === 'folder'}
+      {@render folderRow(r.node, r.depth, section)}
+    {:else}
+      {@render fileRow(r.node, r.depth, section)}
     {/if}
   {:else}
-    {@render fileRow(node, depth, section)}
+    <div class="dim wp-empty">{empty}</div>
+  {/each}
+  {#if rows.length > rowLimit[section]}
+    <button class="wp-more" onclick={() => (rowLimit[section] += ROW_PAGE)}>
+      Show {Math.min(ROW_PAGE, rows.length - rowLimit[section])} more ({rows.length - rowLimit[section]} hidden)
+    </button>
   {/if}
 {/snippet}
 
@@ -607,11 +668,7 @@
       </button>
       {#if unstagedOpen}
         <div class="wp-list">
-          {#each unstagedTree as node (node.type === 'folder' ? `d:${node.path}` : `f:${node.change.path}`)}
-            {@render treeNode(node, 0, 'unstaged')}
-          {:else}
-            <div class="dim wp-empty">Nothing unstaged.</div>
-          {/each}
+          {@render sectionRows(unstagedRows, 'unstaged', 'Nothing unstaged.')}
         </div>
       {/if}
     </div>
@@ -659,11 +716,7 @@
       </button>
       {#if stagedOpen}
         <div class="wp-list">
-          {#each stagedTree as node (node.type === 'folder' ? `d:${node.path}` : `f:${node.change.path}`)}
-            {@render treeNode(node, 0, 'staged')}
-          {:else}
-            <div class="dim wp-empty">Nothing staged yet.</div>
-          {/each}
+          {@render sectionRows(stagedRows, 'staged', 'Nothing staged yet.')}
         </div>
       {/if}
     </div>
@@ -697,6 +750,7 @@
           <DiffViewer
             {diff}
             {repoId}
+            loadFile={loadWipFile}
             wip={selTarget === 'working'
               ? undefined
               : {
@@ -892,6 +946,18 @@
   .wp-empty {
     padding: 6px 12px;
     font-size: var(--fs-xs);
+  }
+  .wp-more {
+    display: block;
+    margin: 4px 8px;
+    padding: 3px 8px;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    color: var(--accent-text);
+    border-radius: var(--radius-s);
+  }
+  .wp-more:hover {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .wp-file {
     display: flex;

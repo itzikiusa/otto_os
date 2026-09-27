@@ -77,11 +77,13 @@
     }
   }
 
-  // Reload whenever the selected id changes.
+  // Reload whenever the selected id changes. `load` reads `detail` before its
+  // first await — untracked, or every landed detail re-ran this effect (a
+  // back-to-back GET loop, ~200 req/s, while an item was open).
   $effect(() => {
     void id;
     void wsId;
-    void load();
+    untrack(() => void load());
   });
 
   // Live: reload when THIS item changes (or on a reconnect resync) — the
@@ -96,7 +98,7 @@
     seenTick = tick;
     const resync = evWs === '' && evItem === '';
     const mine = untrack(() => evItem === id && evWs === wsId);
-    if ((resync || mine) && !untrack(() => editing)) void load();
+    if ((resync || mine) && !untrack(() => editing)) untrack(() => void load());
   });
 
   async function saveEdits(): Promise<void> {

@@ -621,8 +621,10 @@ async fn e2e_commit_note(wt: &str, run: &OttoRun) {
 async fn poll_review(ctx: &ServerCtx, review_id: &Id) -> (u64, u64, u64) {
     use otto_core::domain::ReviewStatus;
     for _ in 0..REVIEW_POLL_MAX {
-        if let Ok(rev) = ctx.reviews_store.get_review(review_id).await {
-            if matches!(rev.status, ReviewStatus::Done | ReviewStatus::Error) {
+        // Status only (SI-07): the full row + every comment per 2 s tick was
+        // steady pool traffic for a single column.
+        if let Ok(status) = ctx.reviews_store.review_status(review_id).await {
+            if matches!(status, ReviewStatus::Done | ReviewStatus::Error) {
                 return crate::modules::review_findings_counts(ctx, review_id).await;
             }
         }

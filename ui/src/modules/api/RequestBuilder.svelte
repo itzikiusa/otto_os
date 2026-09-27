@@ -847,7 +847,7 @@
       {#if compact}
         <textarea class="input body-area mono" aria-label="Request message" value={draft.body} oninput={(e) => setField('body', (e.currentTarget as HTMLTextAreaElement).value)} placeholder={'{ }'} spellcheck="false"></textarea>
       {:else}
-        <div class="body-editor"><CodeEditor path="message.json" content={draft.body} root={ws.current?.root_path ?? ''} language="json" readOnly={false} onchange={(v) => setField('body', v)} /></div>
+        <div class="body-editor"><CodeEditor lsp={false} wrap path="message.json" content={draft.body} root={ws.current?.root_path ?? ''} language="json" readOnly={false} onchange={(v) => setField('body', v)} /></div>
       {/if}
     {:else if tab === 'body'}
       <div class="bodybar">
@@ -909,9 +909,9 @@
             {apiClient.graphqlIntrospecting ? 'Loading schema…' : 'Load schema from server'}
           </button>
         </div>
-        <div class="body-editor gql-query"><CodeEditor path="query.graphql" content={draft.body} root={ws.current?.root_path ?? ''} language="" readOnly={false} onchange={(v) => setField('body', v)} /></div>
+        <div class="body-editor gql-query"><CodeEditor lsp={false} path="query.graphql" content={draft.body} root={ws.current?.root_path ?? ''} language="" readOnly={false} onchange={(v) => setField('body', v)} /></div>
         <div class="gql-bar"><span class="sub-label">Variables (JSON)</span></div>
-        <div class="body-editor gql-vars"><CodeEditor path="variables.json" content={draft.graphql_variables ?? ''} root={ws.current?.root_path ?? ''} language="json" readOnly={false} onchange={(v) => setField('graphql_variables', v)} /></div>
+        <div class="body-editor gql-vars"><CodeEditor lsp={false} wrap path="variables.json" content={draft.graphql_variables ?? ''} root={ws.current?.root_path ?? ''} language="json" readOnly={false} onchange={(v) => setField('graphql_variables', v)} /></div>
         {#if apiClient.graphqlSchema}
           <div class="gql-schema">
             <div class="sub-label">Schema: {apiClient.graphqlSchema.length} types</div>
@@ -925,7 +925,7 @@
         {/if}
       {:else}
         <div class="body-editor">
-          <CodeEditor path={editorPath} content={draft.body} root={ws.current?.root_path ?? ''} language={editorLang} readOnly={false} onchange={(v) => setField('body', v)} />
+          <CodeEditor lsp={false} wrap path={editorPath} content={draft.body} root={ws.current?.root_path ?? ''} language={editorLang} readOnly={false} onchange={(v) => setField('body', v)} />
         </div>
       {/if}
     {:else if tab === 'auth'}
@@ -1036,7 +1036,7 @@
             <span class="script-hint mono">pm.environment.set('id', '42') · pm.request.headers.upsert(…)</span>
           </div>
           <div class="script-editor">
-            <CodeEditor path="pre.js" content={draft.pre_request_script ?? ''} root={ws.current?.root_path ?? ''} language="js" readOnly={false} onchange={(v) => setField('pre_request_script', v)} />
+            <CodeEditor lsp={false} path="pre.js" content={draft.pre_request_script ?? ''} root={ws.current?.root_path ?? ''} language="js" readOnly={false} onchange={(v) => setField('pre_request_script', v)} />
           </div>
         </div>
         <div class="script-block">
@@ -1045,7 +1045,7 @@
             <span class="script-hint mono">pm.test('is 200', () =&gt; pm.expect(pm.response.code).toBe(200))</span>
           </div>
           <div class="script-editor">
-            <CodeEditor path="post.js" content={draft.post_response_script ?? ''} root={ws.current?.root_path ?? ''} language="js" readOnly={false} onchange={(v) => setField('post_response_script', v)} />
+            <CodeEditor lsp={false} path="post.js" content={draft.post_response_script ?? ''} root={ws.current?.root_path ?? ''} language="js" readOnly={false} onchange={(v) => setField('post_response_script', v)} />
           </div>
         </div>
       </div>
@@ -1053,7 +1053,7 @@
       <p class="tab-help">Notes for whoever uses this request next, in Markdown. Saved with the request and exported to OpenAPI and Postman.</p>
       <div class="docs-pane">
         <div class="docs-edit">
-          <CodeEditor path="docs.md" content={draft.docs ?? ''} root={ws.current?.root_path ?? ''} language="md" readOnly={false} onchange={(v) => setField('docs', v)} />
+          <CodeEditor lsp={false} wrap path="docs.md" content={draft.docs ?? ''} root={ws.current?.root_path ?? ''} language="md" readOnly={false} onchange={(v) => setField('docs', v)} />
         </div>
         {#if !compact}
           <div class="docs-preview md-body" aria-label="Docs preview">

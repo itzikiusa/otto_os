@@ -362,7 +362,7 @@ async fn get_story<S: ProductCtx>(
         .check(&user, &story.workspace_id, WorkspaceRole::Viewer)
         .await?;
     let source = ctx.product_repo().latest_source_version(&sid).await?;
-    let versions = ctx.product_repo().list_versions(&sid).await?;
+    let version_count = ctx.product_repo().count_versions(&sid).await?;
     let analyses = ctx.product_repo().list_analyses(&sid).await?;
     let questions = ctx.product_repo().list_questions(&sid).await?;
     let notes = ctx.product_repo().list_notes(&sid).await?;
@@ -374,7 +374,7 @@ async fn get_story<S: ProductCtx>(
         story,
         source,
         counts: crate::types::StoryCounts {
-            versions: versions.len() as i64,
+            versions: version_count,
             analyses: analyses.len() as i64,
             open_questions,
             notes: notes.len() as i64,

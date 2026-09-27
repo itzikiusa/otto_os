@@ -3,7 +3,8 @@
   // approve/decline individual draft comments. Supports live per-agent progress
   // cards, a configure-agents modal, and a merge-readiness panel.
   import { onDestroy, untrack } from 'svelte';
-  import { api, ApiError } from '../../lib/api/client';
+  import { api, ApiError, isAbortError } from '../../lib/api/client';
+  import { prDiffFile, prDiffSummary } from './diff-load';
   import type {
     Review,
     ReviewComment,
@@ -13,7 +14,6 @@
     RepoReviewBinding,
     RepoReviewConfigResp,
     StartReviewReq,
-    DiffResp,
     FileDiff,
     DiffLine,
     MergeReadiness,
@@ -70,9 +70,23 @@
   }
   let { repoId, prNumber }: Props = $props();
 
-  let review: Review | null = $state(null);
+  // Server payloads, replaced wholesale (never mutated): `$state.raw`.
+  let review: Review | null = $state.raw(null);
   // History: all past runs (newest first); review is always history[0] when set
-  let history: Review[] = $state([]);
+  let history: Review[] = $state.raw([]);
+  /** JSON of the last review adopted from a poll/bus fetch: an unchanged
+   *  response is dropped instead of re-rendering every comment card. */
+  let lastReviewJson = '';
+  let lastAdopted: Review | null = null;
+  function adoptReview(r: Review): boolean {
+    const json = JSON.stringify(r);
+    if (review !== null && review === lastAdopted && json === lastReviewJson) return false;
+    lastReviewJson = json;
+    lastAdopted = r;
+    review = r;
+    history = history.length > 0 ? [r, ...history.slice(1)] : [r];
+    return true;
+  }
   let loading = $state(true);
   /** A failed history load — shown inline with Retry instead of falling
    *  through to "No review yet" (which offered to start a duplicate run). */
@@ -177,9 +191,13 @@
     );
   }
 
-  // Diff state for per-comment snippets
-  let diffData: DiffResp | null = $state(null);
-  let diffLoading = $state(false);
+  // Diff state for per-comment snippets: ONLY the files that carry a comment,
+  // fetched per file through the PR diff cache shared with the Files tab
+  // (PrDetail) — never the whole PR diff.
+  let snippetFiles: Map<string, FileDiff> = $state.raw(new Map());
+  let diffLoading = false;
+  let diffAbort: AbortController | null = null;
+  onDestroy(() => diffAbort?.abort());
   // Per-comment collapse state: true = expanded (default for draft)
   let diffExpanded: Record<string, boolean> = $state({});
 
@@ -257,12 +275,7 @@
     try {
       const r = await api.get<Review>(`/repos/${repoId}/prs/${prNumber}/review`);
       if (disposed || generation !== reviewGeneration) return;
-      review = r;
-      if (history.length > 0) {
-        history = [r, ...history.slice(1)];
-      } else {
-        history = [r];
-      }
+      adoptReview(r);
       // Kill the fallback poll if the review is now terminal.
       if (r.status !== 'running') {
         if (pollTimer !== null) { clearTimeout(pollTimer); pollTimer = null; }
@@ -338,7 +351,7 @@
     const generation = ++reviewGeneration;
     loading = true;
     loadError = null;
-    diffData = null;
+    resetSnippets();
     mergeReadiness = null;
     findings = [];
     try {
@@ -350,6 +363,8 @@
         // Start the fallback poll while waiting for WS events.
         schedulePoll();
       }
+      lastReviewJson = review ? JSON.stringify(review) : '';
+      lastAdopted = review;
       if (review?.status === 'done') {
         if (review.comments.length > 0) void loadDiff(rid, num);
         // Load persistent findings + merge-readiness for the done review.
@@ -368,15 +383,52 @@
     }
   }
 
+  function resetSnippets(): void {
+    diffAbort?.abort();
+    diffAbort = null;
+    diffLoading = false;
+    snippetFiles = new Map();
+  }
+
+  /** Fetch the files the current review's comments point at (summary first
+   *  for rename pairing, then one per-file request each, 4 at a time). */
   async function loadDiff(rid: string, num: number): Promise<void> {
-    if (diffData !== null || diffLoading) return;
+    const r = review;
+    if (!r || diffLoading) return;
+    const want = new Set<string>();
+    for (const c of r.comments) if (c.path !== null && c.line !== null && !snippetFiles.has(c.path)) want.add(c.path);
+    if (want.size === 0) return;
     diffLoading = true;
+    const ctl = new AbortController();
+    diffAbort = ctl;
+    const stale = () => disposed || ctl.signal.aborted || rid !== repoId || num !== prNumber;
     try {
-      diffData = await api.get<DiffResp>(`/repos/${rid}/prs/${num}/diff`);
+      const sum = await prDiffSummary(rid, num, ctl.signal);
+      if (stale()) return;
+      const files = sum.files.filter((f) => want.has(f.path));
+      const got = new Map(snippetFiles);
+      for (let i = 0; i < files.length; i += 4) {
+        const batch = await Promise.all(
+          files.slice(i, i + 4).map((f) =>
+            f.hunks.length > 0 && !f.hunks_omitted
+              ? Promise.resolve(f)
+              : prDiffFile(rid, num, f, false, ctl.signal).catch((e: unknown) => {
+                  if (isAbortError(e)) throw e;
+                  return null; // non-blocking: that snippet simply won't show
+                }),
+          ),
+        );
+        if (stale()) return;
+        for (const f of batch) if (f && f.hunks.length > 0) got.set(f.path, f);
+      }
+      snippetFiles = got;
     } catch {
       // non-blocking: diff preview simply won't show
     } finally {
-      diffLoading = false;
+      if (diffAbort === ctl) {
+        diffAbort = null;
+        diffLoading = false;
+      }
     }
   }
 
@@ -402,13 +454,8 @@
     try {
       const r = await api.get<Review>(`/repos/${repoId}/prs/${prNumber}/review`);
       if (disposed || generation !== reviewGeneration) return;
-      // Update the latest run in-place within history
-      review = r;
-      if (history.length > 0) {
-        history = [r, ...history.slice(1)];
-      } else {
-        history = [r];
-      }
+      // Update the latest run within history (skipped when nothing changed).
+      adoptReview(r);
       // Keep polling while the review runs OR any agent is still in progress
       // (covers a single agent retried after the overall review finished).
       const anyActive = r.agents.some(
@@ -433,7 +480,7 @@
     if (pollTimer !== null) clearTimeout(pollTimer);
     starting = true;
     pollCount = 0;
-    diffData = null;
+    resetSnippets();
     mergeReadiness = null;
     findings = [];
     try {
@@ -892,27 +939,41 @@
 
   const CONTEXT_LINES = 3;
 
-  function getSnippetLines(c: ReviewComment): DiffLine[] | null {
-    if (!diffData || c.path === null || c.line === null) return null;
-    const fileDiff: FileDiff | undefined = diffData.files.find((f) => f.path === c.path);
-    if (!fileDiff) return null;
-
-    // Collect all lines from all hunks into a flat array
-    const allLines: DiffLine[] = [];
-    for (const hunk of fileDiff.hunks) {
+  // Flattened lines + line-number indexes, built once per loaded file (the
+  // old code re-flattened the whole file and ran two linear scans for EVERY
+  // comment on every re-render, i.e. every 2 s poll while a review ran).
+  interface SnippetIndex {
+    lines: DiffLine[];
+    byNew: Map<number, number>;
+    byOld: Map<number, number>;
+  }
+  const snippetIndex = new WeakMap<FileDiff, SnippetIndex>();
+  function indexOf(f: FileDiff): SnippetIndex {
+    let ix = snippetIndex.get(f);
+    if (ix) return ix;
+    ix = { lines: [], byNew: new Map(), byOld: new Map() };
+    for (const hunk of f.hunks) {
       for (const line of hunk.lines) {
-        allLines.push(line);
+        const i = ix.lines.push(line) - 1;
+        if (line.new_line !== null && !ix.byNew.has(line.new_line)) ix.byNew.set(line.new_line, i);
+        if (line.old_line !== null && !ix.byOld.has(line.old_line)) ix.byOld.set(line.old_line, i);
       }
     }
+    snippetIndex.set(f, ix);
+    return ix;
+  }
 
+  function getSnippetLines(c: ReviewComment): DiffLine[] | null {
+    if (c.path === null || c.line === null) return null;
+    const fileDiff = snippetFiles.get(c.path);
+    if (!fileDiff) return null;
+    const ix = indexOf(fileDiff);
     // Find the target line index — match new_line first, fallback old_line
-    let targetIdx = allLines.findIndex((l) => l.new_line === c.line);
-    if (targetIdx < 0) targetIdx = allLines.findIndex((l) => l.old_line === c.line);
-    if (targetIdx < 0) return null;
-
+    const targetIdx = ix.byNew.get(c.line) ?? ix.byOld.get(c.line);
+    if (targetIdx === undefined) return null;
     const start = Math.max(0, targetIdx - CONTEXT_LINES);
-    const end = Math.min(allLines.length - 1, targetIdx + CONTEXT_LINES);
-    return allLines.slice(start, end + 1);
+    const end = Math.min(ix.lines.length - 1, targetIdx + CONTEXT_LINES);
+    return ix.lines.slice(start, end + 1);
   }
 
   function isDiffExpandedDefault(c: ReviewComment): boolean {

@@ -212,6 +212,7 @@
       });
       qid = r.query_execution_id;
       qstate = 'QUEUED';
+      pollN = 0;
       schedulePoll(0);
     } catch (e) {
       qstate = 'FAILED';
@@ -219,6 +220,16 @@
     } finally {
       submitting = false;
     }
+  }
+
+  // Status-poll backoff: each poll is an `aws` CLI process (~0.3 s CPU), so a
+  // 10-minute scan polled every second burned ~30% of a core. 1,1,2,2,3,5 s…
+  // capped at 5 s (15 s while the window is hidden).
+  const POLL_BACKOFF = [1000, 1000, 2000, 2000, 3000, 5000];
+  let pollN = 0;
+  function nextPollMs(): number {
+    const ms = POLL_BACKOFF[Math.min(pollN++, POLL_BACKOFF.length - 1)];
+    return typeof document !== 'undefined' && document.visibilityState === 'hidden' ? Math.max(ms, 15_000) : ms;
   }
 
   function schedulePoll(ms: number): void {
@@ -236,7 +247,7 @@
       scanned = s.stats?.data_scanned_bytes ?? 0;
       execMs = s.stats?.execution_ms ?? 0;
       if (s.state === 'QUEUED' || s.state === 'RUNNING') {
-        schedulePoll(1000);
+        schedulePoll(nextPollMs());
         return;
       }
       if (s.state === 'SUCCEEDED') {
@@ -287,6 +298,7 @@
     scanned = x.data_scanned_bytes ?? 0;
     execMs = x.execution_ms ?? 0;
     tab = 'results';
+    pollN = 0;
     schedulePoll(0);
   }
 

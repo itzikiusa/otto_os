@@ -204,10 +204,48 @@ pub fn follow_target(k: &Kubectl, ns: &str, target: LogTarget<'_>, q: &LogsQuery
     Ok(Body::from_stream(child_stream(child, stdout, stderr)))
 }
 
+/// Last bytes of stderr kept while a follow stream runs.
+const STDERR_RING: usize = 8 * 1024;
+
+/// Drain `stderr` for the life of the child into a ring of its last
+/// `STDERR_RING` bytes. Draining concurrently matters: kubectl blocks once
+/// 64 KiB of unread stderr (warnings across a 100-pod selector stream) fills
+/// the pipe, which silently stalled the log stream.
+fn drain_stderr(
+    stderr: Option<tokio::process::ChildStderr>,
+) -> (
+    std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    Option<tokio::task::JoinHandle<()>>,
+) {
+    let ring = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let Some(mut err) = stderr else {
+        return (ring, None);
+    };
+    let sink = ring.clone();
+    let task = tokio::spawn(async move {
+        let mut buf = vec![0u8; 4096];
+        loop {
+            match err.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let mut r = sink.lock().unwrap_or_else(|p| p.into_inner());
+                    r.extend_from_slice(&buf[..n]);
+                    if r.len() > STDERR_RING {
+                        let cut = r.len() - STDERR_RING;
+                        r.drain(..cut);
+                    }
+                }
+            }
+        }
+    });
+    (ring, Some(task))
+}
+
 /// Chunked reader over the child's stdout; the `Child` travels inside the
-/// state so it is dropped (⇒ killed) together with the stream. When stdout
-/// closes, stderr is drained into the tail so an auth/RBAC failure that
-/// produced no log lines is still visible to the client.
+/// state so it is dropped (⇒ killed) together with the stream. stderr is
+/// drained concurrently (see [`drain_stderr`]); when stdout closes its tail is
+/// appended so an auth/RBAC failure that produced no log lines is still
+/// visible to the client.
 fn child_stream(
     child: Child,
     stdout: tokio::process::ChildStdout,
@@ -216,14 +254,24 @@ fn child_stream(
     struct St {
         child: Child,
         stdout: tokio::process::ChildStdout,
-        stderr: Option<tokio::process::ChildStderr>,
+        ring: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        drain: Option<tokio::task::JoinHandle<()>>,
         done: bool,
     }
+    impl Drop for St {
+        fn drop(&mut self) {
+            if let Some(t) = self.drain.take() {
+                t.abort();
+            }
+        }
+    }
+    let (ring, drain) = drain_stderr(stderr);
     stream::unfold(
         St {
             child,
             stdout,
-            stderr,
+            ring,
+            drain,
             done: false,
         },
         |mut st| async move {
@@ -235,17 +283,15 @@ fn child_stream(
                 Ok(0) => {
                     st.done = true;
                     let mut tail = Vec::new();
-                    if let Some(mut err) = st.stderr.take() {
-                        let mut s = String::new();
-                        let _ = tokio::time::timeout(
-                            Duration::from_secs(2),
-                            err.read_to_string(&mut s),
-                        )
-                        .await;
-                        let s = cli::redact(s.trim());
-                        if !s.is_empty() {
-                            tail.extend_from_slice(format!("\n[kubectl] {s}\n").as_bytes());
-                        }
+                    // Let the drainer see stderr's EOF (the child is exiting).
+                    if let Some(t) = st.drain.take() {
+                        let _ = tokio::time::timeout(Duration::from_secs(2), t).await;
+                    }
+                    let raw =
+                        std::mem::take(&mut *st.ring.lock().unwrap_or_else(|p| p.into_inner()));
+                    let s = cli::redact(String::from_utf8_lossy(&raw).trim());
+                    if !s.is_empty() {
+                        tail.extend_from_slice(format!("\n[kubectl] {s}\n").as_bytes());
                     }
                     let _ = st.child.start_kill();
                     if tail.is_empty() {
@@ -380,6 +426,35 @@ mod tests {
         let all = String::from_utf8(chunks.concat()).unwrap();
         assert!(all.starts_with("a\nb\n"));
         assert!(all.contains("[kubectl] oops"));
+    }
+
+    #[tokio::test]
+    async fn heavy_stderr_does_not_stall_stdout() {
+        // 200 KiB of stderr before stdout: without a concurrent drain the
+        // child blocks on the full stderr pipe and stdout never arrives.
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            "i=0; while [ $i -lt 4000 ]; do echo 'warning: some noisy kubectl message here' >&2; i=$((i+1)); done; echo done",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+        let mut child = cmd.spawn().unwrap();
+        let out = child.stdout.take().unwrap();
+        let err = child.stderr.take();
+        let chunks = tokio::time::timeout(
+            Duration::from_secs(20),
+            child_stream(child, out, err)
+                .map(|c| c.unwrap())
+                .collect::<Vec<Vec<u8>>>(),
+        )
+        .await
+        .expect("stream stalled on a full stderr pipe");
+        let all = String::from_utf8(chunks.concat()).unwrap();
+        assert!(all.starts_with("done\n"));
+        let tail = all.split("[kubectl] ").nth(1).unwrap();
+        assert!(tail.len() <= STDERR_RING + 2);
     }
 
     #[tokio::test]

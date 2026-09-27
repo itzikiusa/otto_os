@@ -68,7 +68,16 @@
   let follow = $state(false);
   let timestamps = $state(false);
   let search = $state('');
-  let lines: string[] = $state([]);
+  // Raw ring buffers (replaced, never mutated): a deep proxy over 20k lines
+  // made every per-frame flush copy the buffer through the proxy.
+  let lines = $state.raw<string[]>([]);
+  /** `lines` narrowed by the pod filter + search — maintained incrementally
+   *  per flush (only the new lines are tested); recomputed in full only when
+   *  the filter itself changes. */
+  let shown = $state.raw<string[]>([]);
+  /** Pods seen since the stream started (workload mode) — grown per flush. */
+  let pods = $state.raw<string[]>([]);
+  const podSet = new Set<string>();
   let streaming = $state(false);
   let error = $state('');
   let autoScroll = $state(true);
@@ -81,12 +90,41 @@
   let pending: string[] = [];
   let flushRaf: number | null = null;
 
+  function matches(l: string, qq: string, pf: string): boolean {
+    if (multi && pf && !l.startsWith(`[pod/${pf}/`)) return false;
+    return !qq || l.toLowerCase().includes(qq);
+  }
+
   function flush(): void {
     flushRaf = null;
     if (!pending.length) return;
     const add = pending;
     pending = [];
-    const next = lines.length + add.length > MAX_LINES ? [...lines, ...add].slice(-MAX_LINES) : [...lines, ...add];
+    const combined = lines.concat(add);
+    const overflow = Math.max(0, combined.length - MAX_LINES);
+    const next = overflow ? combined.slice(overflow) : combined;
+    if (multi) {
+      let grew = false;
+      for (const l of add) {
+        const m = PREFIX.exec(l);
+        if (m && !podSet.has(m[1])) {
+          podSet.add(m[1]);
+          grew = true;
+        }
+      }
+      if (grew) pods = [...podSet].sort();
+    }
+    const qq = q;
+    const pf = podFilter;
+    if (!qq && !(multi && pf)) {
+      shown = next;
+    } else {
+      // Append the new matches; drop as many matches as the ring trimmed.
+      let drop = 0;
+      for (let i = 0; i < overflow; i++) if (matches(combined[i], qq, pf)) drop++;
+      const grown = shown.concat(add.filter((l) => matches(l, qq, pf)));
+      shown = drop ? grown.slice(drop) : grown;
+    }
     lines = next;
   }
 
@@ -102,6 +140,9 @@
     const ac = new AbortController();
     abort = ac;
     lines = [];
+    shown = [];
+    podSet.clear();
+    pods = [];
     pending = [];
     carry = '';
     error = '';
@@ -157,22 +198,28 @@
     };
   });
 
-  const q = $derived(search.trim().toLowerCase());
-  /** Pods seen in the buffer (workload mode) — the pod filter's options. */
-  const pods = $derived.by(() => {
-    if (!multi) return [] as string[];
-    const set = new Set<string>();
-    for (const l of lines) {
-      const m = PREFIX.exec(l);
-      if (m) set.add(m[1]);
+  // The search applies ~100 ms after typing stops on a big buffer (each
+  // change re-filters every buffered line).
+  let searchQ = $state('');
+  $effect(() => {
+    const v = search;
+    const big = untrack(() => lines.length) > 2000;
+    if (!big) {
+      searchQ = v;
+      return;
     }
-    return [...set].sort();
+    const t = setTimeout(() => (searchQ = v), 100);
+    return () => clearTimeout(t);
   });
-  const shown = $derived.by(() => {
-    let out = lines;
-    if (multi && podFilter) out = out.filter((l) => l.startsWith(`[pod/${podFilter}/`));
-    if (q) out = out.filter((l) => l.toLowerCase().includes(q));
-    return out;
+  const q = $derived(searchQ.trim().toLowerCase());
+  // Full recompute only when the filter changes (flush() keeps it current).
+  $effect(() => {
+    const qq = q;
+    const pf = podFilter;
+    const m = multi;
+    untrack(() => {
+      shown = qq || (m && pf) ? lines.filter((l) => matches(l, qq, pf)) : lines;
+    });
   });
   const matchCount = $derived(q ? shown.length : 0);
 

@@ -11,8 +11,11 @@ use std::time::Duration;
 const MAX_POINTS: usize = 120;
 /// Minimum interval between full watermark sweeps. The UI polls every 4 s;
 /// sweeps are expensive over a tunnel, so we reuse the last value within this
-/// window. The sweep runs on the FIRST call and then every WATERMARK_TTL_MS.
+/// window. The sweep runs on the FIRST call and then every WATERMARK_TTL_MS —
+/// stretched to `SWEEP_TTL_FACTOR ×` the last sweep's duration when sweeps are
+/// slow (big cluster / tunnel), so the brokers are never swept back-to-back.
 const WATERMARK_TTL_MS: i64 = 8_000;
+const SWEEP_TTL_FACTOR: i64 = 3;
 
 /// One parsed Prometheus line: `name{labels} value`.
 #[derive(Debug, Clone)]
@@ -128,6 +131,8 @@ pub struct ClusterMetricState {
     last_total: Option<(i64, i64)>,
     /// Cached watermark total (ts_ms, total) from the last sweep.
     cached_watermark: Option<(i64, i64)>,
+    /// Wall time the last sweep took (drives the adaptive TTL).
+    last_sweep_ms: i64,
     /// instance → (ts_ms, summed cpu-seconds counter) from the previous scrape.
     last_cpu: HashMap<String, (i64, f64)>,
     /// topic → (ts_ms, high-watermark message count) from the previous
@@ -140,14 +145,25 @@ impl ClusterMetricState {
     pub fn needs_sweep(&self) -> bool {
         match self.cached_watermark {
             None => true,
-            Some((ts, _)) => chrono::Utc::now().timestamp_millis() - ts >= WATERMARK_TTL_MS,
+            Some((ts, _)) => chrono::Utc::now().timestamp_millis() - ts >= self.sweep_ttl_ms(),
         }
+    }
+
+    /// Adaptive TTL: `max(WATERMARK_TTL_MS, SWEEP_TTL_FACTOR × last sweep)`.
+    pub fn sweep_ttl_ms(&self) -> i64 {
+        WATERMARK_TTL_MS.max(self.last_sweep_ms.saturating_mul(SWEEP_TTL_FACTOR))
     }
 
     /// Store a freshly-fetched watermark total and return it.
     pub fn store_watermark(&mut self, total: i64) -> i64 {
         self.cached_watermark = Some((chrono::Utc::now().timestamp_millis(), total));
         total
+    }
+
+    /// [`Self::store_watermark`] plus the sweep's wall time (adaptive TTL).
+    pub fn store_sweep(&mut self, total: i64, took: Duration) -> i64 {
+        self.last_sweep_ms = took.as_millis().min(i64::MAX as u128) as i64;
+        self.store_watermark(total)
     }
 
     /// Return the cached total without fetching.
@@ -207,12 +223,45 @@ impl ClusterMetricState {
         rate
     }
 
+    /// Assemble the metrics response from the CACHED sweep total. A throughput
+    /// point is recorded only when the sweep is new (timestamped at the sweep,
+    /// not the request), so polls served from the cache between sweeps don't
+    /// append flat `0 msg/s` points to the sparkline.
+    pub fn build_cached(&mut self, prometheus: Option<&str>) -> ClusterMetrics {
+        let now = Utc::now();
+        let now_ms = now.timestamp_millis();
+        let (total_messages, rate) = match self.cached_watermark {
+            Some((ts, total)) if self.last_total.map(|(t, _)| t) != Some(ts) => {
+                (total, self.record_throughput(ts, total))
+            }
+            Some((_, total)) => (
+                total,
+                self.throughput
+                    .back()
+                    .map(|p| p.messages_per_sec)
+                    .unwrap_or(0.0),
+            ),
+            None => (0, 0.0),
+        };
+        self.assemble(now, now_ms, total_messages, rate, prometheus)
+    }
+
     /// Assemble the metrics response, folding in an optional Prometheus scrape.
     pub fn build(&mut self, total_messages: i64, prometheus: Option<&str>) -> ClusterMetrics {
         let now = Utc::now();
         let now_ms = now.timestamp_millis();
         let rate = self.record_throughput(now_ms, total_messages);
+        self.assemble(now, now_ms, total_messages, rate, prometheus)
+    }
 
+    fn assemble(
+        &mut self,
+        now: chrono::DateTime<Utc>,
+        now_ms: i64,
+        total_messages: i64,
+        rate: f64,
+        prometheus: Option<&str>,
+    ) -> ClusterMetrics {
         let (brokers, prometheus_available) = match prometheus {
             Some(text) => (self.brokers_from_prometheus(now_ms, text), true),
             None => (Vec::new(), false),
@@ -397,6 +446,23 @@ mod tests {
         let text2 = "redpanda_cpu_busy_seconds_total{shard=\"0\"} 0.5\n";
         let m2 = st.build(100, Some(text2));
         assert!(m2.brokers[0].cpu_percent.unwrap() > 49.0);
+    }
+
+    #[test]
+    fn adaptive_ttl_and_cached_build() {
+        let mut st = ClusterMetricState::default();
+        assert!(st.needs_sweep());
+        assert_eq!(st.sweep_ttl_ms(), WATERMARK_TTL_MS);
+        st.store_sweep(1_000, Duration::from_secs(20));
+        assert_eq!(st.sweep_ttl_ms(), 60_000);
+        assert!(!st.needs_sweep());
+        // First cached build records one point; re-serving the same sweep
+        // doesn't append a flat point.
+        let m = st.build_cached(None);
+        assert_eq!(m.total_messages, 1_000);
+        assert_eq!(m.throughput.len(), 1);
+        let m = st.build_cached(None);
+        assert_eq!(m.throughput.len(), 1);
     }
 
     #[test]

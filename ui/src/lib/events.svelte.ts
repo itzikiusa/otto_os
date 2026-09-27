@@ -2,7 +2,7 @@
 // Feeds the workspace store (session statuses) and the toast store (notices).
 
 import { wsConnect } from './api/client';
-import type { NodeRunState, OttoEvent } from './api/types';
+import type { EventsResyncFrame, NodeRunState, OttoEvent } from './api/types';
 import { ws } from './stores/workspace.svelte';
 import { notifications } from './stores/notifications.svelte';
 import { activity } from './stores/activity.svelte';
@@ -306,8 +306,19 @@ export class DesignBus {
     const seq = this.seq + 1;
     this.log.push({ seq, ev });
     if (this.log.length > 200) this.log.splice(0, this.log.length - 200);
+    // Only the newest few entries keep their inline `content` (views consume
+    // events within a tick); older ones drop it so the log can't pin
+    // 200 document bodies — a late reader falls back to re-fetching.
+    const old = this.log.length - 1 - DesignBus.KEEP_CONTENT;
+    if (old >= 0) {
+      const e = this.log[old];
+      if (e.ev.type === 'design_artifact_updated' && e.ev.content != null) {
+        e.ev = { ...e.ev, content: null };
+      }
+    }
     this.seq = seq;
   }
+  private static readonly KEEP_CONTENT = 16;
 
   /** Events newer than `after`, oldest first. */
   since(after: number): DesignBusEvent[] {
@@ -365,6 +376,9 @@ class EventsClient {
   // True once any connection has opened — distinguishes a RE-connect (which
   // must resync event-driven stores; events were lost) from the first connect.
   private everConnected = false;
+  // Pending `resync` frame (server lagged → dropped events for this socket).
+  // Trailing-debounced so a burst of lag frames costs one refetch.
+  private lagResyncTimer: ReturnType<typeof setTimeout> | null = null;
   // Agent UI control (ws.md §2): this socket is no longer receive-only — it
   // introduces the document (`hello`) and keeps the daemon's picture of it
   // current (`presence`, debounced), so an agent's `ui_command` reaches the
@@ -486,6 +500,14 @@ class EventsClient {
     assistant.resync();
   }
 
+  private scheduleLagResync(): void {
+    if (this.lagResyncTimer) clearTimeout(this.lagResyncTimer);
+    this.lagResyncTimer = setTimeout(() => {
+      this.lagResyncTimer = null;
+      this.resyncAfterReconnect();
+    }, 500);
+  }
+
   private connect(): void {
     if (this.stopped) return;
     this.wirePresence();
@@ -516,6 +538,12 @@ class EventsClient {
       if (typeof ev.data !== 'string') return;
       try {
         const data: unknown = JSON.parse(ev.data);
+        // Per-connection `resync` (ws.md): the daemon's bounded bus dropped
+        // events for this socket — refetch like after a reconnect.
+        if ((data as Partial<EventsResyncFrame> | null)?.type === 'resync') {
+          this.scheduleLagResync();
+          return;
+        }
         // Per-connection UI-control frames (hello_ack / ui_command /
         // ui_command_cancel) never reach the event stores.
         if (handleUiFrame(data)) return;

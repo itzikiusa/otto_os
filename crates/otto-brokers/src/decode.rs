@@ -41,6 +41,7 @@ pub fn decode_payload(bytes: Option<&[u8]>, requested: ValueFormat) -> DecodedPa
             text: String::new(),
             schema_id: None,
             raw_base64: None,
+            truncated: false,
         };
     };
     match requested {
@@ -49,12 +50,14 @@ pub fn decode_payload(bytes: Option<&[u8]>, requested: ValueFormat) -> DecodedPa
             text: hex::encode(bytes),
             schema_id: None,
             raw_base64: raw_for(bytes),
+            truncated: false,
         },
         ValueFormat::Base64 => DecodedPayload {
             format: "base64".into(),
             text: b64(bytes),
             schema_id: None,
             raw_base64: raw_for(bytes),
+            truncated: false,
         },
         ValueFormat::Utf8 => as_string(bytes),
         ValueFormat::Json => match serde_json::from_slice::<Value>(bytes) {
@@ -63,6 +66,7 @@ pub fn decode_payload(bytes: Option<&[u8]>, requested: ValueFormat) -> DecodedPa
                 text: pretty(&v),
                 schema_id: None,
                 raw_base64: raw_for(bytes),
+                truncated: false,
             },
             Err(_) => as_string(bytes),
         },
@@ -72,6 +76,7 @@ pub fn decode_payload(bytes: Option<&[u8]>, requested: ValueFormat) -> DecodedPa
                 text: pretty(&v),
                 schema_id: None,
                 raw_base64: raw_for(bytes),
+                truncated: false,
             },
             None => as_hex(bytes),
         },
@@ -88,6 +93,7 @@ fn as_string(bytes: &[u8]) -> DecodedPayload {
             text: s.to_string(),
             schema_id: None,
             raw_base64: raw_for(bytes),
+            truncated: false,
         },
         _ => as_hex(bytes),
     }
@@ -99,6 +105,7 @@ fn as_hex(bytes: &[u8]) -> DecodedPayload {
         text: hex::encode(bytes),
         schema_id: None,
         raw_base64: raw_for(bytes),
+        truncated: false,
     }
 }
 
@@ -113,6 +120,7 @@ fn auto_decode(bytes: &[u8]) -> DecodedPayload {
                 text: pretty(&v),
                 schema_id: None,
                 raw_base64: raw_for(bytes),
+                truncated: false,
             };
         }
     }
@@ -123,6 +131,7 @@ fn auto_decode(bytes: &[u8]) -> DecodedPayload {
                 text: s.to_string(),
                 schema_id: None,
                 raw_base64: raw_for(bytes),
+                truncated: false,
             };
         }
     }
@@ -132,6 +141,7 @@ fn auto_decode(bytes: &[u8]) -> DecodedPayload {
             text: pretty(&v),
             schema_id: None,
             raw_base64: raw_for(bytes),
+            truncated: false,
         };
     }
     as_hex(bytes)
@@ -145,6 +155,7 @@ pub fn avro_payload(value: &Value, schema_id: i32, raw: &[u8]) -> DecodedPayload
         text: pretty(value),
         schema_id: Some(schema_id),
         raw_base64: raw_for(raw),
+        truncated: false,
     }
 }
 
@@ -274,11 +285,44 @@ fn decode_proto(buf: &[u8], depth: usize) -> Option<Value> {
 
 /// Decode an Avro datum (single-object, no header) against `schema_json`.
 pub fn avro_to_json(schema_json: &str, body: &[u8]) -> anyhow::Result<Value> {
-    use apache_avro::Schema;
-    let schema = Schema::parse_str(schema_json)?;
+    let schema = apache_avro::Schema::parse_str(schema_json)?;
+    avro_to_json_with(&schema, body)
+}
+
+/// [`avro_to_json`] against an already-parsed schema (the consume path caches
+/// parsed schemas per registry id — parsing per message was the hot cost).
+pub fn avro_to_json_with(schema: &apache_avro::Schema, body: &[u8]) -> anyhow::Result<Value> {
     let mut cursor = std::io::Cursor::new(body);
-    let value = apache_avro::from_avro_datum(&schema, &mut cursor, None)?;
+    let value = apache_avro::from_avro_datum(schema, &mut cursor, None)?;
     Ok(avro_value_to_json(value))
+}
+
+/// List-mode preview cap for a decoded payload's text (bytes, cut on a char
+/// boundary). The peek table only renders a one-line snippet; the full value
+/// is fetched when a message is opened.
+pub const PREVIEW_BYTES: usize = 2 * 1024;
+
+/// Shrink a decoded payload to a list preview: text capped at
+/// [`PREVIEW_BYTES`], `raw_base64` dropped, `truncated` set — only when the
+/// payload is actually bigger than the cap (small payloads pass untouched, so
+/// the common case needs no detail fetch).
+pub fn to_preview(p: &mut DecodedPayload) {
+    let raw_big = p
+        .raw_base64
+        .as_ref()
+        .is_some_and(|r| r.len() > PREVIEW_BYTES);
+    if p.text.len() <= PREVIEW_BYTES && !raw_big {
+        return;
+    }
+    if p.text.len() > PREVIEW_BYTES {
+        let mut cut = PREVIEW_BYTES;
+        while !p.text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        p.text.truncate(cut);
+    }
+    p.raw_base64 = None;
+    p.truncated = true;
 }
 
 fn avro_value_to_json(v: apache_avro::types::Value) -> Value {
@@ -392,5 +436,22 @@ mod tests {
         let v = avro_to_json(schema, &body).unwrap();
         assert_eq!(v["id"], json!(42));
         assert_eq!(v["name"], json!("neo"));
+    }
+
+    #[test]
+    fn preview_caps_big_payloads_only() {
+        let small = decode_payload(Some(br#"{"a":1}"#), ValueFormat::Auto);
+        let mut p = small.clone();
+        to_preview(&mut p);
+        assert!(!p.truncated);
+        assert_eq!(p.text, small.text);
+        assert!(p.raw_base64.is_some());
+
+        let big = format!("{{\"k\":\"{}\"}}", "é".repeat(4000));
+        let mut p = decode_payload(Some(big.as_bytes()), ValueFormat::Auto);
+        to_preview(&mut p);
+        assert!(p.truncated);
+        assert!(p.text.len() <= PREVIEW_BYTES);
+        assert!(p.raw_base64.is_none());
     }
 }

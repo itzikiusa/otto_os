@@ -36,7 +36,7 @@ pub use images::ImageStore;
 pub use model::*;
 pub use peek::{peek, Peek};
 pub use records::{parse_records, read_head_tail, read_records};
-pub use subagents::{read_subagents, subagent_path, subagents_dir};
+pub use subagents::{read_subagents, subagent_path, subagents_dir, SubagentScanner};
 pub use tailer::{TailDelta, Tailer};
 pub use util::{TOOL_INPUT_CAP, TOOL_TEXT_CAP};
 
@@ -109,6 +109,23 @@ impl<'a> Folder<'a> {
         match self {
             Folder::Claude(c) => c.snapshot(),
             Folder::Codex(c) => c.snapshot(),
+        }
+    }
+
+    /// The live-tail delta: exactly `snapshot().turns_since(since)`, but only
+    /// the touched turns are cloned (see `Fold::turns_since`).
+    pub fn turns_since(&self, since: usize) -> Vec<Turn> {
+        match self {
+            Folder::Claude(c) => c.turns_since(since),
+            Folder::Codex(c) => c.turns_since(since),
+        }
+    }
+
+    /// Artifacts registered so far, in first-seen order.
+    pub fn artifacts(&self) -> &[Artifact] {
+        match self {
+            Folder::Claude(c) => c.artifacts(),
+            Folder::Codex(c) => c.artifacts(),
         }
     }
 }

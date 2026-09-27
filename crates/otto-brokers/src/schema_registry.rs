@@ -19,7 +19,17 @@ pub struct SchemaRegistry {
     via_tunnel: bool,
     /// schema id → schema document (registries are append-only, so cacheable).
     cache: DashMap<i32, String>,
+    /// schema id → PARSED Avro schema (parsing per consumed message was the
+    /// hot cost of an Avro peek).
+    parsed: DashMap<i32, std::sync::Arc<apache_avro::Schema>>,
+    /// Last subject listing + when it was fetched (`SUBJECTS_TTL`).
+    subjects_cache: std::sync::Mutex<Option<(std::time::Instant, Vec<SchemaSubject>)>>,
 }
+
+/// How long a subject listing is reused (the Schema tab reloads on every visit).
+const SUBJECTS_TTL: Duration = Duration::from_secs(60);
+/// Concurrent `GET /subjects/{s}/versions/latest` requests while listing.
+const SUBJECTS_CONCURRENCY: usize = 8;
 
 impl SchemaRegistry {
     pub fn new(
@@ -66,6 +76,8 @@ impl SchemaRegistry {
             auth,
             via_tunnel,
             cache: DashMap::new(),
+            parsed: DashMap::new(),
+            subjects_cache: std::sync::Mutex::new(None),
         })
     }
 
@@ -118,8 +130,46 @@ impl SchemaRegistry {
         Ok(body.schema)
     }
 
-    /// List subjects with their latest registered version.
+    /// The parsed Avro schema for a registry id (fetched + parsed once).
+    pub async fn parsed_schema_by_id(
+        &self,
+        id: i32,
+    ) -> Result<std::sync::Arc<apache_avro::Schema>> {
+        if let Some(s) = self.parsed.get(&id) {
+            return Ok(s.clone());
+        }
+        let doc = self.schema_by_id(id).await?;
+        let schema = apache_avro::Schema::parse_str(&doc)
+            .map_err(|e| Error::Upstream(format!("schema {id} is not valid Avro: {e}")))?;
+        let schema = std::sync::Arc::new(schema);
+        self.parsed.insert(id, schema.clone());
+        Ok(schema)
+    }
+
+    /// List subjects with their latest registered version. Reused for
+    /// `SUBJECTS_TTL`; the per-subject lookups run `SUBJECTS_CONCURRENCY` at a
+    /// time (was strictly sequential: 1000 subjects × RTT = minutes).
     pub async fn subjects(&self) -> Result<Vec<SchemaSubject>> {
+        if let Some((at, list)) = self
+            .subjects_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+        {
+            if at.elapsed() < SUBJECTS_TTL {
+                return Ok(list.clone());
+            }
+        }
+        let out = self.fetch_subjects().await?;
+        *self
+            .subjects_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some((std::time::Instant::now(), out.clone()));
+        Ok(out)
+    }
+
+    async fn fetch_subjects(&self) -> Result<Vec<SchemaSubject>> {
+        use futures_util::stream::{self, StreamExt};
         let url = format!("{}/subjects", self.base);
         self.guard(&url).await?;
         let resp = self.get(url).send().await.map_err(up)?;
@@ -141,25 +191,26 @@ impl SchemaRegistry {
             schema_type: Option<String>,
         }
 
-        let mut out = Vec::with_capacity(names.len());
-        for subject in names {
-            let url = format!("{}/subjects/{subject}/versions/latest", self.base);
-            let Ok(resp) = self.get(url).send().await else {
-                continue;
-            };
-            if !resp.status().is_success() {
-                continue;
-            }
-            if let Ok(v) = resp.json::<Version>().await {
-                out.push(SchemaSubject {
+        let mut out: Vec<SchemaSubject> = stream::iter(names)
+            .map(|subject| async move {
+                let url = format!("{}/subjects/{subject}/versions/latest", self.base);
+                let resp = self.get(url).send().await.ok()?;
+                if !resp.status().is_success() {
+                    return None;
+                }
+                let v = resp.json::<Version>().await.ok()?;
+                Some(SchemaSubject {
                     subject: v.subject,
                     version: v.version,
                     id: v.id,
                     schema_type: v.schema_type.unwrap_or_else(|| "AVRO".into()),
                     schema: v.schema,
-                });
-            }
-        }
+                })
+            })
+            .buffer_unordered(SUBJECTS_CONCURRENCY)
+            .filter_map(|s| async move { s })
+            .collect()
+            .await;
         out.sort_by(|a, b| a.subject.cmp(&b.subject));
         Ok(out)
     }

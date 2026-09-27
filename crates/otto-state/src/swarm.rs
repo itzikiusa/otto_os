@@ -1338,15 +1338,38 @@ impl SwarmRepo {
 
     /// Tasks ready to run: status='todo' with all dependencies done.
     pub async fn ready_tasks(&self, swarm_id: &Id) -> Result<Vec<SwarmTask>> {
-        let all = self.list_tasks_for_swarm(swarm_id).await?;
-        let done: std::collections::HashSet<&str> = all
-            .iter()
-            .filter(|t| t.status == "done")
-            .map(|t| t.id.as_str())
-            .collect();
-        let mut ready: Vec<SwarmTask> = all
-            .iter()
-            .filter(|t| t.status == "todo")
+        // The coordinator calls this every tick per active swarm. Load only the
+        // `todo` rows (full), and just the ids of `done` ones for the dependency
+        // check — never every task's description/labels (backlog B6 / SE-10).
+        let rows = sqlx::query(
+            "SELECT * FROM swarm_tasks WHERE swarm_id = ? AND status = 'todo' \
+             ORDER BY order_idx, created_at",
+        )
+        .bind(swarm_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("ready tasks"))?;
+        let todo = rows.iter().map(row_to_task).collect::<Result<Vec<_>>>()?;
+        let has_deps = todo.iter().any(|t| {
+            t.depends_on
+                .as_array()
+                .is_some_and(|d| d.iter().any(|v| v.is_string()))
+        });
+        let done: std::collections::HashSet<String> = if has_deps {
+            sqlx::query_scalar::<_, String>(
+                "SELECT id FROM swarm_tasks WHERE swarm_id = ? AND status = 'done'",
+            )
+            .bind(swarm_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("ready tasks deps"))?
+            .into_iter()
+            .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+        let mut ready: Vec<SwarmTask> = todo
+            .into_iter()
             .filter(|t| {
                 t.depends_on
                     .as_array()
@@ -1357,7 +1380,6 @@ impl SwarmRepo {
                     })
                     .unwrap_or(true)
             })
-            .cloned()
             .collect();
         // Priority order then manual order.
         let rank = |p: &str| match p {
@@ -1595,7 +1617,28 @@ impl SwarmRepo {
     }
 
     pub async fn list_runs(&self, f: &RunFilter) -> Result<Vec<SwarmRun>> {
-        let mut sql = String::from("SELECT * FROM swarm_runs WHERE 1=1");
+        self.list_runs_projected(f, false).await
+    }
+
+    /// The run list WITHOUT `result_json` (except `kind='recruit'`, whose
+    /// Runs-list "Hire" button reads the proposal). A run's result blob is
+    /// ~8 KB and the list is 500 rows, reloaded on every open/resync/run —
+    /// clients that need one run's result read `GET /swarm/runs/{rid}`
+    /// (backlog B6 / SE-09).
+    pub async fn list_runs_lite(&self, f: &RunFilter) -> Result<Vec<SwarmRun>> {
+        self.list_runs_projected(f, true).await
+    }
+
+    async fn list_runs_projected(&self, f: &RunFilter, lite: bool) -> Result<Vec<SwarmRun>> {
+        let mut sql = String::from(if lite {
+            "SELECT id, swarm_id, workspace_id, project_id, task_id, agent_id, session_id, \
+             kind, trigger, status, attempt, summary, \
+             CASE WHEN kind = 'recruit' THEN result_json END AS result_json, \
+             error, tokens_input, tokens_output, cost_usd, enqueued_at, started_at, \
+             finished_at FROM swarm_runs WHERE 1=1"
+        } else {
+            "SELECT * FROM swarm_runs WHERE 1=1"
+        });
         if f.workspace_id.is_some() {
             sql.push_str(" AND workspace_id = ?");
         }
@@ -1630,6 +1673,31 @@ impl SwarmRepo {
         }
         let rows = q.fetch_all(&self.pool).await.map_err(dberr("list runs"))?;
         rows.iter().map(row_to_run).collect()
+    }
+
+    /// `task_id → session_id` of each task's most recent run that has a
+    /// session — the only thing the dependency graph needs from runs. Two
+    /// narrow columns via the `(swarm_id, enqueued_at)` index instead of 500
+    /// full rows with their `result_json` parsed (backlog B6 / SE-06).
+    pub async fn latest_task_sessions(
+        &self,
+        swarm_id: &Id,
+    ) -> Result<std::collections::HashMap<String, String>> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT task_id, session_id FROM swarm_runs \
+             WHERE swarm_id = ? AND task_id IS NOT NULL AND session_id IS NOT NULL \
+             ORDER BY enqueued_at DESC",
+        )
+        .bind(swarm_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("latest task sessions"))?;
+        let mut out = std::collections::HashMap::new();
+        for (tid, sid) in rows {
+            // Newest first: the first row per task wins.
+            out.entry(tid).or_insert(sid);
+        }
+        Ok(out)
     }
 
     pub async fn runs_for_swarm(&self, swarm_id: &Id, limit: i64) -> Result<Vec<SwarmRun>> {
@@ -2157,6 +2225,62 @@ mod tests {
             kind: "task".into(),
             trigger: "coordinator".into(),
         }
+    }
+
+    /// B6: the lite run list drops `result` (recruit runs keep it), and the
+    /// graph projection maps each task to its NEWEST run that has a session.
+    #[tokio::test]
+    async fn lite_runs_and_latest_task_sessions() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool);
+        let ws = new_id();
+        let swarm = repo.create_swarm(new_swarm(&ws)).await.unwrap();
+        let task = repo.create_task(new_task(&swarm.id, "todo")).await.unwrap();
+        let mk = |kind: &str| NewRun {
+            swarm_id: swarm.id.clone(),
+            workspace_id: swarm.workspace_id.clone(),
+            project_id: Some(task.project_id.clone()),
+            task_id: Some(task.id.clone()),
+            agent_id: new_id(),
+            kind: kind.into(),
+            trigger: "coordinator".into(),
+        };
+        let with = |sid: Option<&str>| RunPatch {
+            session_id: sid.map(|s| Some(s.to_string())),
+            result: Some(Some(serde_json::json!({"summary": "big"}))),
+            ..Default::default()
+        };
+        let old = repo.create_run(mk("task")).await.unwrap();
+        repo.update_run(&old.id, with(Some("sess-old")))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let recruit = repo.create_run(mk("recruit")).await.unwrap();
+        repo.update_run(&recruit.id, with(None)).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let newest = repo.create_run(mk("task")).await.unwrap();
+        repo.update_run(&newest.id, with(Some("sess-new")))
+            .await
+            .unwrap();
+
+        let f = RunFilter {
+            swarm_id: Some(swarm.id.clone()),
+            ..Default::default()
+        };
+        let full = repo.list_runs(&f).await.unwrap();
+        let lite = repo.list_runs_lite(&f).await.unwrap();
+        assert_eq!(
+            full.iter().map(|r| &r.id).collect::<Vec<_>>(),
+            lite.iter().map(|r| &r.id).collect::<Vec<_>>(),
+            "same rows, same order"
+        );
+        assert!(full.iter().all(|r| r.result.is_some()));
+        for r in &lite {
+            assert_eq!(r.result.is_some(), r.kind == "recruit", "run {}", r.kind);
+        }
+        let sessions = repo.latest_task_sessions(&swarm.id).await.unwrap();
+        assert_eq!(sessions.get(&task.id).map(String::as_str), Some("sess-new"));
+        assert_eq!(sessions.len(), 1);
     }
 
     /// D3: a fresh swarm defaults to `max_attempts = 3` and unlimited budgets,

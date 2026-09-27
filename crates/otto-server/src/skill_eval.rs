@@ -627,18 +627,6 @@ fn unified_diff(old: &str, new: &str, context_lines: usize) -> String {
     let b: Vec<&str> = new.lines().collect();
     let (n, m) = (a.len(), b.len());
 
-    // LCS length table (same algorithm, now drives a proper hunk builder).
-    let mut lcs = vec![vec![0u32; m + 1]; n + 1];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            lcs[i][j] = if a[i] == b[j] {
-                lcs[i + 1][j + 1] + 1
-            } else {
-                lcs[i + 1][j].max(lcs[i][j + 1])
-            };
-        }
-    }
-
     // Collect edit operations: ('=', old_line), ('-', old_line), ('+', new_line).
     #[derive(Clone)]
     enum Op {
@@ -647,27 +635,65 @@ fn unified_diff(old: &str, new: &str, context_lines: usize) -> String {
         Insert(usize),      // b_idx
     }
     let mut ops: Vec<Op> = Vec::with_capacity(n + m);
-    let (mut i, mut j) = (0usize, 0usize);
-    while i < n && j < m {
-        if a[i] == b[j] {
-            ops.push(Op::Keep(i, j));
+
+    // Common prefix/suffix are kept verbatim — an improver edit usually
+    // touches a few lines, so the O(n·m) LCS below only sees the changed middle.
+    let mut pre = 0usize;
+    while pre < n && pre < m && a[pre] == b[pre] {
+        pre += 1;
+    }
+    let mut suf = 0usize;
+    while suf < n - pre && suf < m - pre && a[n - 1 - suf] == b[m - 1 - suf] {
+        suf += 1;
+    }
+    for k in 0..pre {
+        ops.push(Op::Keep(k, k));
+    }
+    let (an, bm) = (n - pre - suf, m - pre - suf);
+    // LCS length table over the middle only, and only below a cell cap (the
+    // table is u32 per cell: 4M cells = 16 MB). Past the cap the middle is
+    // emitted as a whole delete + insert — still a valid unified diff.
+    const MAX_LCS_CELLS: usize = 4_000_000;
+    if an.saturating_mul(bm) <= MAX_LCS_CELLS {
+        let (a, b) = (&a[pre..pre + an], &b[pre..pre + bm]);
+        let mut lcs = vec![vec![0u32; bm + 1]; an + 1];
+        for i in (0..an).rev() {
+            for j in (0..bm).rev() {
+                lcs[i][j] = if a[i] == b[j] {
+                    lcs[i + 1][j + 1] + 1
+                } else {
+                    lcs[i + 1][j].max(lcs[i][j + 1])
+                };
+            }
+        }
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < an && j < bm {
+            if a[i] == b[j] {
+                ops.push(Op::Keep(pre + i, pre + j));
+                i += 1;
+                j += 1;
+            } else if lcs[i + 1][j] >= lcs[i][j + 1] {
+                ops.push(Op::Delete(pre + i));
+                i += 1;
+            } else {
+                ops.push(Op::Insert(pre + j));
+                j += 1;
+            }
+        }
+        while i < an {
+            ops.push(Op::Delete(pre + i));
             i += 1;
-            j += 1;
-        } else if lcs[i + 1][j] >= lcs[i][j + 1] {
-            ops.push(Op::Delete(i));
-            i += 1;
-        } else {
-            ops.push(Op::Insert(j));
+        }
+        while j < bm {
+            ops.push(Op::Insert(pre + j));
             j += 1;
         }
+    } else {
+        ops.extend((pre..pre + an).map(Op::Delete));
+        ops.extend((pre..pre + bm).map(Op::Insert));
     }
-    while i < n {
-        ops.push(Op::Delete(i));
-        i += 1;
-    }
-    while j < m {
-        ops.push(Op::Insert(j));
-        j += 1;
+    for k in 0..suf {
+        ops.push(Op::Keep(n - suf + k, m - suf + k));
     }
 
     if ops.is_empty() {
@@ -895,6 +921,12 @@ async fn run_agent_capture(
     let deadline = Instant::now() + timeout;
     let mut flagged_waiting = false;
     let mut last_turn: Option<String> = None;
+    let mut transcript = match session.provider_session_id.as_deref() {
+        Some(psid) if provider == "claude" => Some(crate::turn_oracle::ClaudeTail::new(
+            otto_orchestrator::claude_pty::session_jsonl_path(cwd, psid),
+        )),
+        _ => None,
+    };
 
     loop {
         // 0. Cancelled — kill the session and bail.
@@ -917,23 +949,17 @@ async fn run_agent_capture(
             };
         }
 
-        // 2. claude transcript fallback.
-        if provider == "claude" {
-            if let Some(psid) = session.provider_session_id.as_deref() {
-                let jsonl = otto_orchestrator::claude_pty::session_jsonl_path(cwd, psid);
-                if let Ok(raw) = std::fs::read_to_string(&jsonl) {
-                    if let Some(turn) = otto_orchestrator::claude_pty::completed_turn_text(&raw) {
-                        if findings_mode && !parse_findings(&turn).is_empty() {
-                            return AgentOutcome {
-                                session_id: Some(sid),
-                                text: turn,
-                                errored: false,
-                            };
-                        }
-                        last_turn = Some(turn);
-                    }
-                }
+        // 2. claude transcript fallback (read incrementally, off the runtime).
+        let scan = crate::turn_oracle::poll_claude_tail(&mut transcript).await;
+        if let Some(turn) = scan.and_then(|s| s.last_turn_text) {
+            if findings_mode && !parse_findings(&turn).is_empty() {
+                return AgentOutcome {
+                    session_id: Some(sid),
+                    text: turn,
+                    errored: false,
+                };
             }
+            last_turn = Some(turn);
         }
 
         match manager.live_handle(&sid) {
@@ -1531,7 +1557,13 @@ async fn run_skill_eval_core(
                     .find(|(i, _, _)| *i == chosen)
                     .map(|(_, b, _)| b.clone())
                     .unwrap_or_else(|| skill_body.clone());
-                let diff = simple_diff(&base_body, &imp.skill);
+                // O(n·m) worst case — keep it off the async runtime.
+                let diff = {
+                    let (old, new) = (base_body.clone(), imp.skill.clone());
+                    tokio::task::spawn_blocking(move || simple_diff(&old, &new))
+                        .await
+                        .unwrap_or_default()
+                };
                 ctx.skill_evals_store
                     .set_iter_improvement(&iter_id, Some(&imp.skill), &imp.summary, &diff)
                     .await?;
@@ -2067,18 +2099,48 @@ pub(crate) async fn launch_eval(
     Ok(eval)
 }
 
+/// `?summary=1[&limit=&cursor=&skill=]` → one keyset page of list rows
+/// (`SkillEvalSummaryPage`, single query, no iterations). Without `summary`
+/// the legacy full list (every run with every iteration) is returned.
+#[derive(serde::Deserialize, Default)]
+struct ListEvalsQuery {
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    skill: Option<String>,
+}
+
 async fn list_evals(
     AxPath(ws_id): AxPath<Id>,
+    AxQuery(q): AxQuery<ListEvalsQuery>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<Vec<SkillEval>>> {
+) -> ApiResult<axum::response::Response> {
+    use axum::response::IntoResponse;
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Viewer).await?;
+    if matches!(q.summary.as_deref(), Some("1" | "true")) {
+        let page = ctx
+            .skill_evals_store
+            .list_summaries(
+                &ws_id,
+                q.skill.as_deref().filter(|s| !s.is_empty()),
+                q.limit.unwrap_or(200),
+                q.cursor.as_deref().filter(|s| !s.is_empty()),
+            )
+            .await
+            .map_err(ApiError)?;
+        return Ok(Json(page).into_response());
+    }
     let evals = ctx
         .skill_evals_store
         .list_for_workspace(&ws_id)
         .await
         .map_err(ApiError)?;
-    Ok(Json(evals))
+    Ok(Json(evals).into_response())
 }
 
 async fn get_eval(
@@ -2749,13 +2811,26 @@ async fn impl_diff(
         .await
         .map_err(|e| ApiError(Error::Internal(format!("git diff: {e}"))))?;
     let mut diff = String::from_utf8_lossy(&out.stdout).into_owned();
-    const CAP: usize = 200 * 1024;
-    let truncated = diff.len() > CAP;
-    if truncated {
-        diff.truncate(CAP);
-        diff.push_str("\n… (diff truncated)");
-    }
+    let truncated = cap_impl_diff(&mut diff, IMPL_DIFF_CAP);
     Ok(Json(ImplDiffResp { diff, truncated }))
+}
+
+const IMPL_DIFF_CAP: usize = 200 * 1024;
+
+/// Cap `diff` at `cap` bytes, backing off to a char boundary — a bare
+/// `String::truncate` at a byte inside a multi-byte char (any non-ASCII diff)
+/// panics. Returns whether anything was cut (a marker is appended then).
+fn cap_impl_diff(diff: &mut String, cap: usize) -> bool {
+    if diff.len() <= cap {
+        return false;
+    }
+    let mut end = cap;
+    while end > 0 && !diff.is_char_boundary(end) {
+        end -= 1;
+    }
+    diff.truncate(end);
+    diff.push_str("\n… (diff truncated)");
+    true
 }
 
 async fn retry_validation(
@@ -2991,6 +3066,22 @@ pub fn routes() -> Router<ServerCtx> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cap_impl_diff_backs_off_to_a_char_boundary() {
+        // "é" is 2 bytes: a cap landing mid-char used to panic in `truncate`.
+        let mut d = "é".repeat(10);
+        assert!(super::cap_impl_diff(&mut d, 5));
+        assert!(d.starts_with("éé\n"), "{d:?}");
+        let mut emoji = "a🦀🦀".to_string();
+        for cap in 0..emoji.len() {
+            let mut s = emoji.clone();
+            assert!(super::cap_impl_diff(&mut s, cap));
+            assert!(s.ends_with("(diff truncated)"));
+        }
+        assert!(!super::cap_impl_diff(&mut emoji, 64));
+        assert_eq!(emoji, "a🦀🦀");
+    }
+
     use super::*;
 
     #[test]
@@ -3058,6 +3149,23 @@ mod tests {
         assert!(d.contains("+B"), "added line marked: {d}");
         assert!(d.contains(" a"), "context line preserved: {d}");
         assert!(d.contains("@@"), "unified-diff hunk header present: {d}");
+    }
+
+    #[test]
+    fn diff_trims_common_ends_and_caps_the_lcs() {
+        // Prefix/suffix trimming must keep the line numbers absolute.
+        let old: String = (0..50).map(|i| format!("l{i}\n")).collect();
+        let new = old.replace("l25\n", "L25\n");
+        let d = simple_diff(&old, &new);
+        assert!(d.contains("-l25") && d.contains("+L25"), "{d}");
+        assert!(d.contains("@@ -23,7 +23,7 @@"), "{d}");
+        // Past the cell cap the middle degrades to delete + insert, no blow-up.
+        let big_a: String = (0..3000).map(|i| format!("a{i}\n")).collect();
+        let big_b: String = (0..3000).map(|i| format!("b{i}\n")).collect();
+        let d = simple_diff(&big_a, &big_b);
+        assert_eq!(d.lines().filter(|l| l.starts_with("-a")).count(), 3000);
+        assert_eq!(d.lines().filter(|l| l.starts_with("+b")).count(), 3000);
+        assert_eq!(simple_diff("same\n", "same\n"), "");
     }
 
     #[test]

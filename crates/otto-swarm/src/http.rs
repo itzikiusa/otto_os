@@ -377,6 +377,10 @@ struct RunsQuery {
     project_id: Option<Id>,
     agent_id: Option<Id>,
     status: Option<String>,
+    /// `lite=true`: omit each run's `result` (except `kind='recruit'`); read
+    /// one run's result via `GET /swarm/runs/{rid}`.
+    #[serde(default)]
+    lite: bool,
 }
 
 async fn list_runs<S: SwarmCtx>(
@@ -395,6 +399,9 @@ async fn list_runs<S: SwarmCtx>(
         agent_id: q.agent_id,
         status: q.status,
     };
+    if q.lite {
+        return Ok(Json(s.swarm().list_runs_lite(&f).await?));
+    }
     Ok(Json(s.swarm().list_runs(&f).await?))
 }
 

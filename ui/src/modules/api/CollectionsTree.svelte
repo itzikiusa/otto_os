@@ -5,6 +5,7 @@
   // right-click menu per row instead of four always-visible icons.
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import VirtualList from '../../lib/components/VirtualList.svelte';
   import MethodTag from './MethodTag.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { api } from '../../lib/api/client';
@@ -24,37 +25,84 @@
     col: ApiCollection;
     items: ApiRequest[];
     children: TreeNode[];
+    /** Requests in this node + all descendants (as shown — filtered while searching). */
+    count: number;
   }
+  /** One flattened, fixed-height row of the windowed tree. */
+  type Row =
+    | { kind: 'col'; id: string; node: TreeNode; depth: number; open: boolean }
+    | { kind: 'req'; id: string; r: ApiRequest; depth: number }
+    | { kind: 'empty'; id: string; col: ApiCollection; depth: number }
+    | { kind: 'section'; id: string };
+  const ROW_H = 29; // 28 px row + 1 px gap
 
   let collapsed: Record<string, boolean> = $state({});
   const canEdit = $derived(ws.myRole !== 'viewer');
+  // Rows compare against this derived, NOT `apiClient.draft.requestId`: the
+  // draft is replaced on every keystroke in the builder, and a derived only
+  // notifies when its value changes — so typing no longer re-runs every row.
+  const activeRequestId = $derived(apiClient.draft.requestId ?? null);
 
   // Search: every whitespace-separated token must match the request's
   // method/name/url (so "get users staging" narrows by all three). A collection
-  // whose own name matches keeps all of its requests.
+  // whose own name matches keeps all of its requests. The input is debounced
+  // into `query`, and each request's haystack is lowercased once per list
+  // change (not per keystroke × request).
   let search = $state('');
-  const tokens = $derived(search.trim().toLowerCase().split(/\s+/).filter(Boolean));
+  let query = $state('');
+  let _searchTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    const v = search;
+    clearTimeout(_searchTimer);
+    // Clearing is instant; typing settles for 120 ms.
+    if (!v.trim()) query = '';
+    else _searchTimer = setTimeout(() => { query = v; }, 120);
+    return () => clearTimeout(_searchTimer);
+  });
+  const tokens = $derived(query.trim().toLowerCase().split(/\s+/).filter(Boolean));
   function matchesTokens(hay: string): boolean {
     return tokens.every((t) => hay.includes(t));
   }
+  const hay = $derived(new Map(apiClient.requests.map((r) => [r.id, `${r.method} ${r.name} ${r.url}`.toLowerCase()])));
   function requestMatches(r: ApiRequest): boolean {
-    return matchesTokens(`${r.method} ${r.name} ${r.url}`.toLowerCase());
+    return matchesTokens(hay.get(r.id) ?? '');
   }
 
-  function countAll(node: TreeNode): number {
-    return node.items.length + node.children.reduce((n, c) => n + countAll(c), 0);
-  }
-  function buildTree(parentId: string | null): TreeNode[] {
-    return apiClient.collections
-      .filter((c) => (c.parent_id ?? null) === parentId)
-      .sort((a, b) => a.position - b.position || a.name.localeCompare(b.name))
-      .map((col) => ({
-        col,
-        items: apiClient.requests
-          .filter((r) => r.collection_id === col.id)
-          .sort((a, b) => a.position - b.position || a.name.localeCompare(b.name)),
-        children: buildTree(col.id),
-      }));
+  // Index once per list change: O(R log R + C log C), instead of re-filtering
+  // every request and collection for every collection (O(C·(R+C))).
+  const byOrder = <T extends { position: number; name: string }>(a: T, b: T): number =>
+    a.position - b.position || a.name.localeCompare(b.name);
+  const childCols = $derived.by(() => {
+    const m = new Map<string | null, ApiCollection[]>();
+    for (const c of apiClient.collections) {
+      const k = c.parent_id ?? null;
+      const list = m.get(k);
+      if (list) list.push(c);
+      else m.set(k, [c]);
+    }
+    for (const list of m.values()) list.sort(byOrder);
+    return m;
+  });
+  const reqsByCol = $derived.by(() => {
+    const m = new Map<string, ApiRequest[]>();
+    for (const r of apiClient.requests) {
+      if (!r.collection_id) continue;
+      const list = m.get(r.collection_id);
+      if (list) list.push(r);
+      else m.set(r.collection_id, [r]);
+    }
+    for (const list of m.values()) list.sort(byOrder);
+    return m;
+  });
+
+  function buildTree(parentId: string | null, seen: Set<string>): TreeNode[] {
+    return (childCols.get(parentId) ?? []).flatMap((col) => {
+      if (seen.has(col.id)) return []; // a parent_id cycle must not recurse forever
+      seen.add(col.id);
+      const items = reqsByCol.get(col.id) ?? [];
+      const children = buildTree(col.id, seen);
+      return [{ col, items, children, count: items.length + children.reduce((n, c) => n + c.count, 0) }];
+    });
   }
   // Prune the tree to matching branches: keep a node when its own name matches
   // (all items kept), when any of its requests match (only those kept), or when
@@ -65,22 +113,53 @@
       const items = node.items.filter(requestMatches);
       const children = filterTree(node.children);
       if (items.length === 0 && children.length === 0) return [];
-      return [{ col: node.col, items, children }];
+      return [{ col: node.col, items, children, count: items.length + children.reduce((n, c) => n + c.count, 0) }];
     });
   }
-  const tree = $derived.by(() => {
-    const full = buildTree(null);
-    return tokens.length ? filterTree(full) : full;
-  });
+  const fullTree = $derived(buildTree(null, new Set()));
+  const tree = $derived(tokens.length ? filterTree(fullTree) : fullTree);
   const ungrouped = $derived(
     apiClient.requests
       .filter((r) => !r.collection_id && (tokens.length === 0 || requestMatches(r)))
       .sort((a, b) => a.name.localeCompare(b.name)),
   );
   const isEmpty = $derived(apiClient.collections.length === 0 && apiClient.requests.length === 0);
+  // Big workspaces open with folders collapsed (an explicit toggle wins).
+  const defaultCollapsed = $derived(apiClient.requests.length > 500);
+  function isCollapsed(id: string): boolean {
+    return collapsed[id] ?? defaultCollapsed;
+  }
+
+  // Flatten the visible tree for the windowed list (only ~viewport rows mount).
+  const rows = $derived.by(() => {
+    const out: Row[] = [];
+    const filtering = tokens.length > 0;
+    const walk = (nodes: TreeNode[], depth: number): void => {
+      for (const node of nodes) {
+        // While filtering, force branches open so matches are never hidden.
+        const open = filtering || !isCollapsed(node.col.id);
+        out.push({ kind: 'col', id: `c:${node.col.id}`, node, depth, open });
+        if (!open) continue;
+        walk(node.children, depth + 1);
+        for (const r of node.items) out.push({ kind: 'req', id: `r:${r.id}`, r, depth: depth + 1 });
+        if (node.items.length === 0 && node.children.length === 0 && !filtering) {
+          out.push({ kind: 'empty', id: `e:${node.col.id}`, col: node.col, depth: depth + 1 });
+        }
+      }
+    };
+    walk(tree, 0);
+    if (ungrouped.length > 0) {
+      out.push({ kind: 'section', id: 'ungrouped' });
+      for (const r of ungrouped) out.push({ kind: 'req', id: `r:${r.id}`, r, depth: 0 });
+    }
+    return out;
+  });
+  const reqCount = $derived(rows.reduce((n, row) => n + (row.kind === 'req' ? 1 : 0), 0));
+  // Keep the open request's row mounted (and its highlight) while scrolled away.
+  const activeIndex = $derived(activeRequestId ? rows.findIndex((row) => row.kind === 'req' && row.r.id === activeRequestId) : -1);
 
   function toggle(id: string): void {
-    collapsed[id] = !collapsed[id];
+    collapsed[id] = !isCollapsed(id);
   }
 
   async function newCollection(parentId: string | null): Promise<void> {
@@ -219,65 +298,60 @@
         <button class="btn ghost small" onclick={() => newCollection(null)}><Icon name="folder" size={12} />New collection</button>
       {/if}
     </EmptyState>
-  {:else if tokens.length > 0 && tree.length === 0 && ungrouped.length === 0}
+  {:else if tokens.length > 0 && rows.length === 0}
     <div class="state no-match">
-      No requests match “{search.trim()}”.
+      No requests match “{query.trim()}”.
       <button class="btn ghost small" onclick={() => (search = '')}>Clear search</button>
     </div>
   {:else}
-    <div class="tree">
-      {#each tree as node (node.col.id)}
-        {@render collectionNode(node, 0)}
-      {/each}
-
-      {#if ungrouped.length > 0}
-        <div class="section-title ungrouped">Ungrouped</div>
-        {#each ungrouped as r (r.id)}
-          {@render requestRow(r, 0)}
-        {/each}
-      {/if}
-    </div>
+    <VirtualList items={rows} estimateHeight={ROW_H} class="tree" key={(r) => r.id} pinnedIndex={activeIndex}>
+      {#snippet row(item: Row)}
+        {#if item.kind === 'col'}
+          {@render collectionNode(item.node, item.depth, item.open)}
+        {:else if item.kind === 'req'}
+          {@render requestRow(item.r, item.depth)}
+        {:else if item.kind === 'empty'}
+          <div class="vrow">
+            <button class="empty-folder" style:padding-inline-start="{item.depth * 14 + 22}px" onclick={() => newRequestIn(item.col)}>
+              Empty — add a request
+            </button>
+          </div>
+        {:else}
+          <div class="vrow"><div class="section-title ungrouped">Ungrouped</div></div>
+        {/if}
+      {/snippet}
+    </VirtualList>
+    {#if tokens.length > 0}<span class="sr-only" role="status">{reqCount} matching requests</span>{/if}
   {/if}
 </div>
 
-{#snippet collectionNode(node: TreeNode, depth: number)}
-  <!-- While filtering, force branches open so matches are never hidden. -->
-  {@const isOpen = tokens.length > 0 || !collapsed[node.col.id]}
-  <div class="col-head" style:padding-inline-start="{depth * 14 + 2}px">
-    <button class="col-toggle" onclick={() => toggle(node.col.id)} oncontextmenu={(e) => collectionMenu(e, node.col)} aria-expanded={isOpen}>
-      <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-      <Icon name="folder" size={14} />
-      <span class="col-name" title={node.col.name}>{node.col.name}</span>
-      <span class="count" title="{countAll(node)} requests">{countAll(node)}</span>
-    </button>
-    <button class="icon-btn row-more" title="Actions for {node.col.name}" aria-label="Actions for {node.col.name}" onclick={(e) => collectionMenu(e, node.col)}>
-      <Icon name="more" size={14} />
-    </button>
-  </div>
-  {#if isOpen}
-    {#each node.children as child (child.col.id)}
-      {@render collectionNode(child, depth + 1)}
-    {/each}
-    {#each node.items as r (r.id)}
-      {@render requestRow(r, depth + 1)}
-    {/each}
-    {#if node.items.length === 0 && node.children.length === 0 && tokens.length === 0}
-      <button class="empty-folder" style:padding-inline-start="{(depth + 1) * 14 + 22}px" onclick={() => newRequestIn(node.col)}>
-        Empty — add a request
+{#snippet collectionNode(node: TreeNode, depth: number, isOpen: boolean)}
+  <div class="vrow">
+    <div class="col-head" style:padding-inline-start="{depth * 14 + 2}px">
+      <button class="col-toggle" onclick={() => toggle(node.col.id)} oncontextmenu={(e) => collectionMenu(e, node.col)} aria-expanded={isOpen}>
+        <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
+        <Icon name="folder" size={14} />
+        <span class="col-name" title={node.col.name}>{node.col.name}</span>
+        <span class="count" title="{node.count} requests">{node.count}</span>
       </button>
-    {/if}
-  {/if}
+      <button class="icon-btn row-more" title="Actions for {node.col.name}" aria-label="Actions for {node.col.name}" onclick={(e) => collectionMenu(e, node.col)}>
+        <Icon name="more" size={14} />
+      </button>
+    </div>
+  </div>
 {/snippet}
 
 {#snippet requestRow(r: ApiRequest, depth: number)}
-  <div class="req-row" class:active={apiClient.draft.requestId === r.id} style:padding-inline-start="{depth * 14 + 20}px">
-    <button class="req-open" onclick={() => openRequest(r)} oncontextmenu={(e) => requestMenu(e, r)} title="{r.method} {r.url}" aria-current={apiClient.draft.requestId === r.id ? 'true' : undefined}>
-      <MethodTag method={r.method} fixed />
-      <span class="rname">{r.name}</span>
-    </button>
-    <button class="icon-btn row-more" title="Actions for {r.name}" aria-label="Actions for {r.name}" onclick={(e) => requestMenu(e, r)}>
-      <Icon name="more" size={14} />
-    </button>
+  <div class="vrow">
+    <div class="req-row" class:active={activeRequestId === r.id} style:padding-inline-start="{depth * 14 + 20}px">
+      <button class="req-open" onclick={() => openRequest(r)} oncontextmenu={(e) => requestMenu(e, r)} title="{r.method} {r.url}" aria-current={activeRequestId === r.id ? 'true' : undefined}>
+        <MethodTag method={r.method} fixed />
+        <span class="rname">{r.name}</span>
+      </button>
+      <button class="icon-btn row-more" title="Actions for {r.name}" aria-label="Actions for {r.name}" onclick={(e) => requestMenu(e, r)}>
+        <Icon name="more" size={14} />
+      </button>
+    </div>
   </div>
 {/snippet}
 
@@ -286,6 +360,7 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+    flex: 1;
     gap: 8px;
   }
   .tree-tools {
@@ -355,19 +430,30 @@
     font-size: var(--fs-xs);
     word-break: break-word;
   }
-  .tree {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
+  /* Windowed list: every row is a fixed 29 px slot (28 px + 1 px gap). */
+  .tree-wrap :global(.tree) {
+    flex: 1;
+    min-height: 0;
+  }
+  .vrow {
+    height: 29px;
+    padding-bottom: 1px;
+    box-sizing: border-box;
   }
   .ungrouped {
-    margin: 12px 0 4px 4px;
+    display: flex;
+    align-items: flex-end;
+    height: 100%;
+    margin: 0;
+    padding-inline-start: 4px;
+    padding-bottom: 4px;
+    box-sizing: border-box;
   }
   .col-head,
   .req-row {
     display: flex;
     align-items: center;
-    min-height: 28px;
+    height: 28px;
     padding-inline-end: 2px;
     border-radius: var(--radius-s);
   }
@@ -428,7 +514,8 @@
     opacity: 1;
   }
   .empty-folder {
-    height: 26px;
+    width: 100%;
+    height: 28px;
     border: none;
     background: transparent;
     color: var(--text-dim);

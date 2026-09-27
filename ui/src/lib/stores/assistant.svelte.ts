@@ -13,6 +13,7 @@
 // the very state the loader writes and loop.
 import { untrack } from 'svelte';
 import { api, ApiError } from '../api/client';
+import { mapLimit } from '../poll';
 import type { ProviderUsage, UsageSummary } from '../api/usage.svelte';
 import { assistantApi } from '../api/assistant';
 import { needsYouByThread, reduceNeedsYou, upsertNewer, type NeedsYouAction, type NeedsYouState } from '../../modules/assistant/model';
@@ -70,6 +71,11 @@ export interface PendingTurn {
   attachments: AssistantAttachment[];
   created_at: string;
 }
+
+/** How long a provider-account sign-in check result is reused (SI-03). */
+const SIGNIN_TTL_MS = 5 * 60_000;
+/** Concurrent sign-in checks: leaves ≥ 4 of the webview's 6 sockets free. */
+const SIGNIN_CONCURRENCY = 2;
 
 class AssistantStore {
   threads: Loadable<AssistantThread[]> = $state(initial([]));
@@ -177,27 +183,53 @@ class AssistantStore {
     }
   }
 
-  async loadAccounts(): Promise<void> {
+  /** Per-account CLI sign-in results, reused for {@link SIGNIN_TTL_MS}: each
+   *  check boots the provider CLI (1–3 s, ≤ 10 s) and holds a webview socket
+   *  the whole time, so re-opening Settings must not re-run them all. */
+  private signedInCache = new Map<string, { value: boolean | null; at: number }>();
+
+  /** `force` (an explicit Refresh) re-checks every account; otherwise cached
+   *  sign-in results younger than the TTL are reused. */
+  async loadAccounts(force = false): Promise<void> {
     const current = this.ticket('accounts');
     const was = untrack(() => this.accounts);
     this.accounts = { ...was, state: was.state === 'ready' ? 'ready' : 'loading' };
     try {
       const list = await api.get<ProviderAccount[]>('/auth/provider-accounts');
       if (!current()) return;
-      this.accounts = { state: 'ready', data: list.map((a) => ({ ...a, signed_in: null })), error: '' };
-      // Sign-in checks run the CLI's own status command (≤ 10 s each) — fill in as they land.
-      await Promise.all(
-        list.map(async (a) => {
-          const signed = await api
-            .get<{ signed_in: boolean }>(`/auth/provider-accounts/${encodeURIComponent(a.id)}/status`)
-            .then((r) => r.signed_in)
-            .catch(() => null);
-          if (current()) this.accounts = { ...this.accounts, data: this.accounts.data.map((x) => (x.id === a.id ? { ...x, signed_in: signed } : x)) };
-        }),
-      );
+      const now = Date.now();
+      const cached = (id: string): boolean | null | undefined => {
+        const hit = this.signedInCache.get(id);
+        return !force && hit && now - hit.at < SIGNIN_TTL_MS ? hit.value : undefined;
+      };
+      this.accounts = {
+        state: 'ready',
+        data: list.map((a) => ({ ...a, signed_in: cached(a.id) ?? null })),
+        error: '',
+      };
+      // Sign-in checks run the CLI's own status command (≤ 10 s each) — fill
+      // in as they land, at most SIGNIN_CONCURRENCY at a time: N parallel
+      // checks used to take every one of the webview's 6 sockets (and spawn N
+      // CLIs at once) while they booted.
+      const stale = list.filter((a) => cached(a.id) === undefined);
+      await mapLimit(stale, SIGNIN_CONCURRENCY, async (a) => {
+        if (!current()) return;
+        const signed = await api
+          .get<{ signed_in: boolean }>(`/auth/provider-accounts/${encodeURIComponent(a.id)}/status`)
+          .then((r) => r.signed_in)
+          .catch(() => null);
+        if (signed !== null) this.signedInCache.set(a.id, { value: signed, at: Date.now() });
+        if (current()) this.accounts = { ...this.accounts, data: this.accounts.data.map((x) => (x.id === a.id ? { ...x, signed_in: signed } : x)) };
+      });
     } catch (e) {
       if (current()) this.accounts = { state: isMissingRoute(e) ? 'unsupported' : 'error', data: [], error: describeError(e) };
     }
+  }
+
+  /** Drop a cached sign-in result (after a login/logout flow for `id`). */
+  forgetSignIn(id?: string): void {
+    if (id) this.signedInCache.delete(id);
+    else this.signedInCache.clear();
   }
 
   async loadLimits(): Promise<void> {

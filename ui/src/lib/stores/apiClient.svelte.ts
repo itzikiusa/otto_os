@@ -301,11 +301,13 @@ class ApiClientStore {
   sshConnections: Connection[] = $state([]);
 
   /** Last runAutomation() report, shown in the run panel. */
-  lastRun: ApiRunResult | null = $state(null);
+  // Raw states: run records are replaced wholesale (a 1,000-step report was
+  // deep-proxied on every 500 ms poll).
+  lastRun: ApiRunResult | null = $state.raw(null);
   /** In-flight automation run. */
   running = $state(false);
-  automationRuns: ApiAutomationRun[] = $state([]);
-  currentRun: ApiAutomationRun | null = $state(null);
+  automationRuns: ApiAutomationRun[] = $state.raw([]);
+  currentRun: ApiAutomationRun | null = $state.raw(null);
 
   /** Bumped to ask ApiPage to show the request editor (it may be showing the
    *  environments or an automation) — used by agent UI control
@@ -465,7 +467,8 @@ class ApiClientStore {
     this.lastResponse = null;
   }
   /** Last execute() result, shown in the ResponseViewer. */
-  lastResponse: ApiResponse | null = $state(null);
+  // Raw (not deep-proxied): a response is replaced wholesale, never edited in place.
+  lastResponse: ApiResponse | null = $state.raw(null);
   /** Why the active tab's last send failed (shown inline in the response
    *  pane instead of the previous response); null after a success. */
   lastError: string | null = $state(null);
@@ -625,6 +628,18 @@ class ApiClientStore {
     await this.historyRefresh.request();
   }
 
+  /** Server-side history search — the sidebar list only holds the newest 100
+   *  summaries. `q` matches method/URL (case-insensitive, literal); `status`
+   *  is exact. Newest first, up to 500. */
+  async searchHistory(params: { q?: string; status?: number }, signal?: AbortSignal): Promise<ApiHistorySummary[]> {
+    const wid = this.wsId();
+    if (!wid) return [];
+    const query = new URLSearchParams({ limit: '500' });
+    if (params.q) query.set('q', params.q);
+    if (params.status != null) query.set('status', String(params.status));
+    return api.get<ApiHistorySummary[]>(`/workspaces/${wid}/api-client/history/summaries?${query}`, signal);
+  }
+
   /** Direct sends and WS append events share one metadata-only refresh. */
   noteHistoryAppended(workspaceId: string, entryId?: string): void {
     if (workspaceId === this.wsId()) void this.historyRefresh.request(entryId);
@@ -714,27 +729,44 @@ class ApiClientStore {
       await this.importEnvironment(parsed, quiet);
       return;
     }
+    const base = this.base();
     const root = await this.saveCollection({ name: parsed.name, parent_id: null });
-    if (!root) return;
+    if (!root || !base) return;
+    // Items are created in order (the daemon assigns positions by count), but
+    // in bulk: no per-item list reassignment / tree rebuild — one reload at
+    // the end — and one summary toast instead of one per failure.
     const folderCache = new Map<string, Id>();
-    for (const req of parsed.requests) {
-      let parentId: Id = root.id;
-      let pathKey = '';
-      for (const folder of req.folderPath) {
-        pathKey += '/' + folder;
-        if (!folderCache.has(pathKey)) {
-          const f = await this.saveCollection({ name: folder, parent_id: parentId });
-          if (f) folderCache.set(pathKey, f.id);
+    let failed = 0;
+    let firstError = '';
+    const note = (e: unknown): void => { failed++; firstError ||= errMsg(e); };
+    try {
+      for (const req of parsed.requests) {
+        if (this.base() !== base) break; // workspace switched mid-import
+        let parentId: Id = root.id;
+        let pathKey = '';
+        for (const folder of req.folderPath) {
+          pathKey += '/' + folder;
+          if (!folderCache.has(pathKey)) {
+            try {
+              folderCache.set(pathKey, (await api.post<ApiCollection>(`${base}/collections`, { name: folder, parent_id: parentId })).id);
+            } catch (e) { note(e); }
+          }
+          parentId = folderCache.get(pathKey) ?? parentId;
         }
-        parentId = folderCache.get(pathKey) ?? parentId;
+        try {
+          await api.post<ApiRequest>(`${base}/requests`, {
+            collection_id: parentId, name: req.name, method: req.method, url: req.url,
+            headers: req.headers, query: req.query, body_mode: req.body_mode, body: req.body, auth: req.auth,
+            extras: req.extras ?? null,
+          } satisfies UpsertApiRequestReq);
+        } catch (e) { note(e); }
       }
-      await this.saveRequest({
-        collection_id: parentId, name: req.name, method: req.method, url: req.url,
-        headers: req.headers, query: req.query, body_mode: req.body_mode, body: req.body, auth: req.auth,
-        extras: req.extras ?? null,
-      });
+    } finally {
+      await Promise.all([this.loadCollections(), this.loadRequests()]);
     }
-    await this.loadRequests();
+    if (failed > 0) {
+      toasts.error(`${failed} item(s) of “${parsed.name}” weren’t imported`, firstError);
+    }
     if (!quiet) {
       toasts.success('Imported', `${parsed.name} · ${parsed.requests.length} request(s) (${parsed.format})`);
     }
@@ -1354,12 +1386,24 @@ class ApiClientStore {
     this.running = true;
     try {
       let run = await api.post<ApiAutomationRun>(`${base}/automations/${id}/runs`,options);
+      this.currentRun = run; this.lastRun = run.report;
       while (base === this.base()) {
-        this.currentRun = run; this.lastRun = run.report;
         if (run.status !== 'running') {void this.loadAutomationRuns(id); return run.report;}
         await new Promise(resolve => setTimeout(resolve,500));
         if (base !== this.base()) break;
-        run = await api.get<ApiAutomationRun>(`${base}/automation-runs/${run.id}`);
+        // Delta poll: only the steps after the ones we have (+ status); the
+        // snapshot is not re-sent. Nothing new → no reassignment, no re-render.
+        const have = run.report.steps.length;
+        const delta = await api.get<ApiAutomationRun>(`${base}/automation-runs/${run.id}?after=${have}`);
+        if (delta.report.steps.length === 0 && delta.status === run.status && delta.error === run.error) continue;
+        run = {
+          ...delta,
+          snapshot: run.snapshot,
+          report: { ...delta.report, steps: [...run.report.steps, ...delta.report.steps] },
+          result_rows: [...run.result_rows, ...delta.result_rows],
+          result_ids: [...run.result_ids, ...delta.result_ids],
+        };
+        this.currentRun = run; this.lastRun = run.report;
       }
       return null;
     } catch (e) {toasts.error('Run automation failed',errMsg(e)); return null;}

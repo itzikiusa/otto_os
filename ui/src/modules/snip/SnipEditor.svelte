@@ -21,6 +21,7 @@
     type Anno,
     type Tool,
     render,
+    renderOver,
     drawSelection,
     hitTest,
     hitHandle,
@@ -116,6 +117,8 @@
     void loadImage();
     return () => {
       destroyed = true;
+      if (frameQueued) cancelAnimationFrame(frameQueued);
+      if (baseLayer) { baseLayer.width = baseLayer.height = 0; baseLayer = null; }
       if (copyTimer) {
         // Closed inside the 800 ms debounce: still copy/save the last
         // annotation instead of silently dropping it. (The loaded image stays
@@ -128,23 +131,62 @@
     };
   });
 
+  // Committed layer (image + `annos`) cached off-screen while a shape/pen
+  // stroke is being drawn, so each frame blits it and draws only the stroke
+  // (a pen path used to re-render the full-resolution image + every
+  // annotation + the whole growing path on every pointer move).
+  let baseLayer: HTMLCanvasElement | null = null;
+  let baseFor: Anno[] | null = null;
+  function committedLayer(image: HTMLImageElement): HTMLCanvasElement | null {
+    if (baseLayer && baseFor === annos && baseLayer.width === image.width && baseLayer.height === image.height) return baseLayer;
+    baseLayer ??= document.createElement('canvas');
+    baseLayer.width = image.width;
+    baseLayer.height = image.height;
+    const bctx = baseLayer.getContext('2d');
+    if (!bctx) return null;
+    render(bctx, image, annos);
+    baseFor = annos;
+    return baseLayer;
+  }
+
   function redraw(): void {
     if (!canvasEl || !img) return;
     if (canvasEl.width !== img.width) canvasEl.width = img.width;
     if (canvasEl.height !== img.height) canvasEl.height = img.height;
     const ctx = canvasEl.getContext('2d');
     if (!ctx) return;
-    const list = drafting ? [...annos, drafting] : annos;
-    render(ctx, img, list);
+    const base = drafting ? committedLayer(img) : null;
+    if (drafting && base) renderOver(ctx, base, img, [drafting]);
+    else {
+      render(ctx, img, drafting ? [...annos, drafting] : annos);
+      // Nothing is being drawn: free the off-screen copy (a 5K snip is ~60 MB).
+      if (baseLayer) { baseLayer.width = baseLayer.height = 0; baseLayer = null; baseFor = null; }
+    }
     const sel = annos.find((a) => a.id === selected);
     if (sel) drawSelection(ctx, sel);
   }
 
+  // At most one repaint per frame, however many pointer events / state
+  // changes arrive in between (trackpads and 120 Hz displays deliver several
+  // pointermoves per frame).
+  let frameQueued = 0;
+  function requestRedraw(): void {
+    if (frameQueued) return;
+    frameQueued = requestAnimationFrame(() => {
+      frameQueued = 0;
+      redraw();
+    });
+  }
+
   $effect(() => {
-    // Redraw on any committed state change (annos/selected are reactive).
+    // Redraw on any committed state change (annos/selected are reactive), and
+    // once the image / canvas exist — the repaint itself runs in a frame
+    // callback, outside this effect, so every dependency is read here.
     void annos;
     void selected;
-    redraw();
+    void img;
+    void canvasEl;
+    requestRedraw();
   });
 
   // ── History + auto-copy ────────────────────────────────────────────────────
@@ -309,7 +351,7 @@
       drafting.x2 = p.x;
       drafting.y2 = p.y;
       drafting.points?.push(p);
-      redraw();
+      requestRedraw();
     } else if (dragMode === 'move' && selected !== null) {
       const dx = p.x - dragLast.x;
       const dy = p.y - dragLast.y;
@@ -331,7 +373,7 @@
         commit([...annos, drafting]);
       }
       drafting = null;
-      redraw();
+      requestRedraw();
     } else if ((dragMode === 'move' || dragMode === 'resize') && dragChanged) {
       scheduleCopy();
     }

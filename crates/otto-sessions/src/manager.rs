@@ -703,6 +703,50 @@ fn agy_conversation_fresh(
 /// conversation the user had running in it, or `None` when the terminal never
 /// had one (a plain shell, which simply respawns empty).
 ///
+/// Per-launch miss backoff for [`SessionManager::capture_nested_agents`]:
+/// `(session, nested pid)` → (consecutive misses, next probe at). The first
+/// [`NESTED_FREE_MISSES`] misses keep the loop's own cadence (a fresh agent
+/// writes its transcript only once prompted); after that the gap doubles from
+/// one minute up to [`NESTED_MAX_BACKOFF`].
+type NestedMisses = std::collections::HashMap<(Id, u32), (u32, std::time::Instant)>;
+
+const NESTED_FREE_MISSES: u32 = 6;
+const NESTED_MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
+
+fn nested_misses() -> &'static std::sync::Mutex<NestedMisses> {
+    static M: std::sync::OnceLock<std::sync::Mutex<NestedMisses>> = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+fn nested_probe_due(id: &Id, pid: u32) -> bool {
+    let m = nested_misses().lock().unwrap_or_else(|p| p.into_inner());
+    m.get(&(id.clone(), pid))
+        .is_none_or(|(_, at)| std::time::Instant::now() >= *at)
+}
+
+fn nested_probe_missed(id: &Id, pid: u32) {
+    let mut m = nested_misses().lock().unwrap_or_else(|p| p.into_inner());
+    // A new launch in the same terminal starts from zero.
+    m.retain(|(sid, p), _| sid != id || *p == pid);
+    let e = m
+        .entry((id.clone(), pid))
+        .or_insert((0, std::time::Instant::now()));
+    e.0 += 1;
+    let extra = e.0.saturating_sub(NESTED_FREE_MISSES);
+    e.1 = std::time::Instant::now()
+        + if extra == 0 {
+            Duration::ZERO
+        } else {
+            Duration::from_secs(60u64.saturating_mul(1 << extra.min(8)) / 2)
+                .min(NESTED_MAX_BACKOFF)
+        };
+}
+
+fn nested_probe_forget(id: &Id) {
+    let mut m = nested_misses().lock().unwrap_or_else(|p| p.into_inner());
+    m.retain(|(sid, _), _| sid != id);
+}
+
 /// Reads what [`SessionManager::capture_nested_agents`] recorded: the provider,
 /// its conversation id (stored in the row's `provider_session_id`, exactly like
 /// a first-class agent session's) and the directory the agent was launched
@@ -2697,6 +2741,17 @@ impl SessionManager {
         self.repo.list_by_workspace_for_user(ws, user_id).await
     }
 
+    /// Sessions across one or many workspace scopes with every narrowing
+    /// filter applied in SQL (see [`otto_state::SessionsRepo::list_filtered`]) — the list
+    /// endpoints' path, so a live-only list never decodes archived history.
+    pub async fn list_filtered(
+        &self,
+        scopes: &[otto_state::SessionScope],
+        filter: &otto_state::SessionListFilter,
+    ) -> Result<Vec<Session>> {
+        self.repo.list_filtered(scopes, filter).await
+    }
+
     /// True when the session has a live PTY in this daemon process.
     pub fn is_live(&self, id: &Id) -> bool {
         self.live.contains_key(id)
@@ -3024,6 +3079,11 @@ impl SessionManager {
             .iter()
             .map(|e| (e.key().clone(), e.value().pid()))
             .collect();
+        {
+            // Backoff entries die with their session.
+            let mut m = nested_misses().lock().unwrap_or_else(|p| p.into_inner());
+            m.retain(|(sid, _), _| live.iter().any(|(id, _)| id == sid));
+        }
         if live.is_empty() {
             return 0;
         }
@@ -3059,12 +3119,24 @@ impl SessionManager {
             if same_launch && session.provider_session_id.is_some() {
                 continue;
             }
+            // An agent that never writes a transcript used to be probed (an
+            // `lsof` subprocess + transcript scans) every tick forever; after
+            // a few misses the probe backs off (capped), per launch.
+            if !nested_probe_due(&id, proc.pid) {
+                continue;
+            }
             // The agent files its transcript under the directory IT runs in,
             // which is not the session cwd when the user `cd`-ed first.
-            let cwd = crate::nested::process_cwd(proc.pid).unwrap_or_else(|| session.cwd.clone());
-            let cwd = std::fs::canonicalize(&cwd)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or(cwd);
+            // `lsof` (a 30–40 ms subprocess) + canonicalize: off the runtime.
+            let (fallback, ppid) = (session.cwd.clone(), proc.pid);
+            let cwd = tokio::task::spawn_blocking(move || {
+                let cwd = crate::nested::process_cwd(ppid).unwrap_or(fallback);
+                std::fs::canonicalize(&cwd)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or(cwd)
+            })
+            .await
+            .unwrap_or_else(|_| session.cwd.clone());
             let floor = proc
                 .started
                 .checked_sub(Duration::from_secs(15))
@@ -3074,22 +3146,37 @@ impl SessionManager {
             // same fresh rollout in the same cwd).
             let _guard = self.codex_capture_lock.lock().await;
             let claimed_rows = self.repo.provider_session_ids().await.unwrap_or_default();
-            let claimed: std::collections::HashSet<&str> =
-                claimed_rows.iter().map(String::as_str).collect();
-            let found = match provider {
-                "claude" => {
-                    crate::nested::claude_transcript_in_window(&home, &cwd, proc.started, &claimed)
-                }
-                "codex" => {
-                    match pick_codex_rollout(&codex_sessions_root(), &cwd, floor, &claimed, None) {
+            // Transcript / rollout directory scans: off the runtime too.
+            let (home_b, cwd_b, started) = (home.clone(), cwd.clone(), proc.started);
+            let found = tokio::task::spawn_blocking(move || {
+                let claimed: std::collections::HashSet<&str> =
+                    claimed_rows.iter().map(String::as_str).collect();
+                match provider {
+                    "claude" => crate::nested::claude_transcript_in_window(
+                        &home_b, &cwd_b, started, &claimed,
+                    ),
+                    "codex" => match pick_codex_rollout(
+                        &codex_sessions_root(),
+                        &cwd_b,
+                        floor,
+                        &claimed,
+                        None,
+                    ) {
                         RolloutPick::Claim(psid) => Some(psid),
                         RolloutPick::Ambiguous | RolloutPick::Nothing => None,
-                    }
+                    },
+                    "agy" => scan_agy_conversation(&agy_cli_root(), &cwd_b, floor, &claimed),
+                    _ => None,
                 }
-                "agy" => scan_agy_conversation(&agy_cli_root(), &cwd, floor, &claimed),
-                _ => None,
+            })
+            .await
+            .ok()
+            .flatten();
+            let Some(psid) = found else {
+                nested_probe_missed(&id, proc.pid);
+                continue;
             };
-            let Some(psid) = found else { continue };
+            nested_probe_forget(&id);
             if let Err(e) = self.repo.set_provider_session(&id, &psid).await {
                 tracing::warn!(session = %id, "nested-agent capture: persist failed: {e}");
                 continue;
@@ -3397,6 +3484,25 @@ impl SessionManager {
         if psid.is_empty() || psid.contains(['/', '\\', '\0']) || psid.contains("..") {
             return None;
         }
+        // Every lookup below is filesystem work (canonicalize, a rollout-tree
+        // walk, stats) — resolve the inputs here, then run it off the runtime.
+        let provider_home = self.provider_home(&session);
+        let codex_root = self.codex_root_for(&session);
+        tokio::task::spawn_blocking(move || {
+            Self::locate_activity_artifact(&session, &psid, provider_home, &codex_root)
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// [`Self::activity_artifact`]'s filesystem half. Blocking.
+    fn locate_activity_artifact(
+        session: &Session,
+        psid: &str,
+        provider_home: Option<std::path::PathBuf>,
+        codex_root: &std::path::Path,
+    ) -> Option<std::path::PathBuf> {
         let path = match session.provider.as_str() {
             // `~/.claude/projects/<enc(cwd)>/<psid>.jsonl`. claude symlink-
             // resolves the spawn cwd for its transcript dir, so canonicalize
@@ -3410,7 +3516,7 @@ impl SessionManager {
                     .chars()
                     .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
                     .collect();
-                self.provider_home(&session).unwrap_or_else(|| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude"))
+                provider_home.unwrap_or_else(|| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude"))
                     .join("projects")
                     .join(enc)
                     .join(format!("{psid}.jsonl"))
@@ -3423,7 +3529,7 @@ impl SessionManager {
                     .checked_sub(Duration::from_secs(2))
                     .unwrap_or(std::time::UNIX_EPOCH);
                 let suffix = format!("-{psid}.jsonl");
-                recent_codex_rollouts(&self.codex_root_for(&session), floor)
+                recent_codex_rollouts(codex_root, floor)
                     .into_iter()
                     .find(|p| {
                         p.file_name()
@@ -3461,7 +3567,9 @@ impl SessionManager {
     /// error is swallowed. All file reads run on the blocking pool. Returns the
     /// number of sessions renamed this sweep. Driven by a ~20s loop in ottod.
     pub async fn refresh_provider_titles(&self) -> usize {
-        let Ok(sessions) = self.repo.list_all().await else {
+        // SQL pre-filter (SG-06): the sweep used to decode EVERY session ever
+        // (archived too) every 20 s to find a handful of candidates.
+        let Ok(sessions) = self.repo.list_title_candidates().await else {
             return 0;
         };
         let mut renamed = 0;
@@ -5349,6 +5457,43 @@ mod tests {
         writer.join().unwrap();
         // Unknown psid → never blocks a resume.
         assert!(!rollout_actively_written(tmp.path(), "NOPE", Duration::from_millis(50)).await);
+    }
+
+    /// SG-04: a nested agent that never writes a transcript is probed at the
+    /// loop's cadence for the first misses, then with a doubling (capped) gap;
+    /// a capture or a new launch in the terminal resets it.
+    #[test]
+    fn nested_probe_backs_off_after_misses_and_resets() {
+        let id: Id = "nested-backoff-test".into();
+        nested_probe_forget(&id);
+        for _ in 0..NESTED_FREE_MISSES {
+            assert!(nested_probe_due(&id, 42));
+            nested_probe_missed(&id, 42);
+        }
+        assert!(nested_probe_due(&id, 42), "free misses keep the cadence");
+        nested_probe_missed(&id, 42);
+        assert!(!nested_probe_due(&id, 42), "backing off now");
+        {
+            let m = nested_misses().lock().unwrap();
+            let (n, at) = m[&(id.clone(), 42)];
+            assert_eq!(n, NESTED_FREE_MISSES + 1);
+            let gap = at.saturating_duration_since(std::time::Instant::now());
+            assert!(gap > Duration::from_secs(50) && gap <= Duration::from_secs(60));
+        }
+        for _ in 0..20 {
+            nested_probe_missed(&id, 42);
+        }
+        {
+            let m = nested_misses().lock().unwrap();
+            let gap = m[&(id.clone(), 42)].1.saturating_duration_since(std::time::Instant::now());
+            assert!(gap <= NESTED_MAX_BACKOFF);
+        }
+        // A new launch (other pid) in the same terminal starts from zero.
+        assert!(nested_probe_due(&id, 43));
+        nested_probe_missed(&id, 43);
+        assert!(nested_probe_due(&id, 42), "the old launch's entry is gone");
+        nested_probe_forget(&id);
+        assert!(nested_probe_due(&id, 43));
     }
 
     #[test]

@@ -52,7 +52,14 @@ fn main() -> ExitCode {
     // daemon (back-compat: the daemon historically ignores extra argv, and a
     // leading flag like `--version` should keep the daemon's behaviour).
     if std::env::args().nth(1).as_deref() == Some("mcp-tools") {
-        let runtime = match tokio::runtime::Runtime::new() {
+        // One stdio relay per agent session: a current-thread runtime, not a
+        // worker per core (a multi-thread runtime started ~18 threads and
+        // ~12 MB RSS in every per-session bridge). Blocking work (stdin, DB
+        // file I/O) still goes to tokio's on-demand blocking pool.
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
             Ok(rt) => rt,
             Err(e) => {
                 eprintln!("ottod mcp-tools: tokio runtime: {e}");
@@ -73,7 +80,14 @@ fn main() -> ExitCode {
     // (a restricted `kind='mcp'` token) and calls the eight `otto.*` tools, every
     // one governed by the control plane (design §7).
     if std::env::args().nth(1).as_deref() == Some("mcp-server") {
-        let runtime = match tokio::runtime::Runtime::new() {
+        // One stdio relay per agent session: a current-thread runtime, not a
+        // worker per core (a multi-thread runtime started ~18 threads and
+        // ~12 MB RSS in every per-session bridge). Blocking work (stdin, DB
+        // file I/O) still goes to tokio's on-demand blocking pool.
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
             Ok(rt) => rt,
             Err(e) => {
                 eprintln!("ottod mcp-server: tokio runtime: {e}");
@@ -198,6 +212,13 @@ async fn run(cfg: Config) -> Result<(), String> {
         .recover_interrupted()
         .await
         .map_err(|e| format!("recover interrupted database changes: {e}"))?;
+    // Self-improvement runs are in-process: nothing can still be running at
+    // boot, and an orphaned `running` row blocks that workspace's runs forever.
+    match ImprovementsRepo::new(pool.clone()).fail_orphaned_runs().await {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!("marked {n} interrupted self-improvement run(s) failed"),
+        Err(e) => tracing::warn!("recover interrupted self-improvement runs: {e}"),
+    }
     let secrets = otto_keychain::from_env(&cfg.data_dir);
     let (events, _) = broadcast::channel::<Event>(1024);
 
@@ -822,6 +843,41 @@ async fn run(cfg: Config) -> Result<(), String> {
                 let n = manager.prune_activity_trail(KEEP_PER_SESSION).await;
                 if n > 0 {
                     tracing::info!("pruned {n} old activity-trail row(s)");
+                }
+                tokio::time::sleep(interval).await;
+            }
+        });
+    }
+
+    // Audit/event-table retention (work_events, mcp_tool_calls, mcp_call_log,
+    // audit_log — all append-only with no other delete path). Policy comes from
+    // the `data_retention` setting, re-read each pass so a change applies
+    // within the hour; windows are floored in otto-state (never deletes a row
+    // younger than its window). See docs/features/backup-restore.md.
+    {
+        let pool = pool.clone();
+        let interval = std::time::Duration::from_secs(60 * 60); // hourly
+        tokio::spawn(async move {
+            let settings = SettingsRepo::new(pool.clone());
+            let repo = otto_state::RetentionRepo::new(pool);
+            loop {
+                let raw = settings
+                    .get(otto_state::retention::SETTING_KEY)
+                    .await
+                    .ok()
+                    .flatten();
+                let policy = otto_state::RetentionPolicy::from_setting(raw.as_ref());
+                match repo.prune(&policy).await {
+                    Ok(r) if r.total() > 0 => tracing::info!(
+                        "retention: pruned {} work_events, {} mcp_tool_calls, \
+                         {} mcp_call_log, {} audit_log row(s)",
+                        r.work_events,
+                        r.mcp_tool_calls,
+                        r.mcp_call_log,
+                        r.audit_log
+                    ),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("retention prune failed: {e}"),
                 }
                 tokio::time::sleep(interval).await;
             }

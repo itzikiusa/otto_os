@@ -1393,13 +1393,21 @@ pub async fn list(
         args.push("-l".into());
         args.push(l.to_string());
     }
-    let list = k.json(args).await?;
-    let now = Utc::now();
-    let mut rows: Vec<K8sRow> = arr(&list, "/items")
-        .iter()
-        .map(|item| normalize(kind, item, now))
-        .filter(|r| q.is_none_or(|q| matches_query(r, q)))
-        .collect();
+    // Parse + normalize off the async runtime: 5k pods is ~42 MB of JSON and
+    // ~120 ms into a `Value` (every 10 s with auto-refresh on).
+    let out = k.run(args).await?;
+    let q_owned = q.map(str::to_string);
+    let mut rows: Vec<K8sRow> = tokio::task::spawn_blocking(move || -> Result<Vec<K8sRow>> {
+        let list = crate::cli::parse_json(&out.stdout)?;
+        let now = Utc::now();
+        Ok(arr(&list, "/items")
+            .iter()
+            .map(|item| normalize(kind, item, now))
+            .filter(|r| q_owned.as_deref().is_none_or(|q| matches_query(r, q)))
+            .collect())
+    })
+    .await
+    .map_err(|e| Error::Internal(format!("k8s list task: {e}")))??;
     let mut has_metrics = false;
     if kind == Kind::Pods && metrics_server && !rows.is_empty() {
         // Best-effort: a metrics hiccup must not blank the pod table.

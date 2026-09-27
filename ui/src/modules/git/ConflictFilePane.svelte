@@ -25,7 +25,9 @@
   }
   let { repoId, path, oursLabel = 'OURS', theirsLabel = 'THEIRS', onresolved }: Props = $props();
 
-  let file = $state<ConflictFile | null>(null);
+  // Replaced wholesale on load, never mutated: raw skips deep-proxying every
+  // line of a lockfile-sized conflict.
+  let file = $state.raw<ConflictFile | null>(null);
   let loading = $state(true);
   let loadError = $state<string | null>(null);
   let saving = $state(false);
@@ -110,13 +112,24 @@
 
   /** The live recomposition shown in the Output pane: context verbatim, each
    *  conflict either its chosen lines or an explicit "unresolved" marker. */
+  // Context segments are immutable per load: join each once, not on every
+  // pick (a huge file re-joined all of its context per click).
+  const joined = new WeakMap<object, string>();
+  function contextText(seg: { lines: string[] }): string {
+    let t = joined.get(seg);
+    if (t === undefined) {
+      t = seg.lines.join('\n');
+      joined.set(seg, t);
+    }
+    return t;
+  }
   const outputSegs = $derived.by((): OutSeg[] => {
-    if (!file) return [];
+    if (!file || !outputOpen) return [];
     const out: OutSeg[] = [];
     let ord = -1;
     for (const seg of file.segments) {
       if (seg.kind === 'context') {
-        if (seg.lines.length > 0) out.push({ kind: 'context', text: seg.lines.join('\n') });
+        if (seg.lines.length > 0) out.push({ kind: 'context', text: contextText(seg) });
       } else {
         ord++;
         const choice = choices[ord];
