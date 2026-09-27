@@ -166,7 +166,11 @@
       noteText = '';
       markMode = false;
       await tick();
-      markButton?.focus();
+      // Return focus to the trigger only if it was left on the (now removed)
+      // composer: an attached agent's AskBar takes it on the new mark
+      // (`browser.markTick`), and that nudge must win.
+      const at = document.activeElement;
+      if (!at || at === document.body) markButton?.focus();
     } catch (e) {
       toasts.error('Failed to save mark', e instanceof Error ? e.message : undefined);
     } finally {
