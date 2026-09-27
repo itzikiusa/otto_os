@@ -39,7 +39,10 @@ class FakeDOMParser {
 }
 (globalThis as unknown as { DOMParser: unknown }).DOMParser = FakeDOMParser;
 
-const { renderMarkdownGfm } = await import('../src/lib/md.ts');
+// A non-literal specifier keeps md.ts/sanitize.ts (DOM-typed browser code,
+// already covered by svelte-check) out of this no-DOM tsconfig's program.
+const MD_MODULE: string = '../src/lib/md.ts';
+const { renderMarkdownGfm } = (await import(MD_MODULE)) as { renderMarkdownGfm: (md: string) => string };
 
 test('renderMarkdownGfm parses the HTML once and focus-tags pre/table on that tree', () => {
   parses = 0;
