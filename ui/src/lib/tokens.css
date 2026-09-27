@@ -310,6 +310,11 @@ html[data-transparency='reduced'] {
 }
 html.otto-vibrant .sidebar-material {
   background: var(--glass-tint-native);
+  /* The native NSVisualEffectView already blurs the desktop; the page behind
+     the sidebar is transparent here, so a CSS blur only samples empty pixels
+     and re-composites a window-tall backdrop layer on every sidebar repaint. */
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 /* A chrome strip (toolbar row, status bar): the ambient, fixed to the

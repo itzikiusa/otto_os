@@ -19,8 +19,22 @@ export interface RenderItem {
 }
 import type { Provider } from './model';
 
+/** Index turns are replaced (never mutated) when they change, so the render
+ *  item can live as long as its turn object: the chat re-merges on every live
+ *  delta, and a fresh item per turn would re-render every message's markdown. */
+const indexItems = new WeakMap<AssistantTurn, RenderItem>();
+
 /** A thread index turn as a Conversation-view render item (prose only). */
 export function indexToRenderItem(t: AssistantTurn): RenderItem {
+  let item = indexItems.get(t);
+  if (!item) {
+    item = buildIndexItem(t);
+    indexItems.set(t, item);
+  }
+  return item;
+}
+
+function buildIndexItem(t: AssistantTurn): RenderItem {
   return {
     id: t.id,
     role: t.role === 'user' ? 'user' : 'assistant',

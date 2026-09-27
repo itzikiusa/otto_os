@@ -13,7 +13,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import TurnItem from '../agents/conversation/TurnItem.svelte';
-  import { groupTurns } from '../agents/conversation/format';
+  import { stableGroupTurns, type RenderItem } from '../agents/conversation/format';
   import { CONV_CTX, type ConvContext } from '../agents/conversation/context';
   import { transcript } from '../../lib/stores/transcript.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -72,7 +72,10 @@
     ctx.provider = conv?.transcript?.provider ?? (thread.provider === 'codex' ? 'codex' : 'claude');
   });
 
-  const live = $derived(conv ? groupTurns(conv.turns) : []);
+  // Stable items (format.ts `stableGroupTurns`): only the reply that changed
+  // gets a new object, so a live delta doesn't re-render every message.
+  const liveCache = new Map<string, RenderItem>();
+  const live = $derived(conv ? stableGroupTurns(conv.turns, liveCache) : []);
   const messages = $derived(mergeWithTranscript(turns, live, thread.session_id));
   const cards = $derived(threadCards(turns, assistant.tasks.data, thread.id));
   const timeline = $derived(
@@ -144,6 +147,9 @@
         {#each timeline as entry (entry.kind === 'turn' ? `t:${entry.turn.id}` : cardKey(entry.card))}
           {#if entry.kind === 'turn'}
             {@const m = entry.turn.m}
+            {@const item = m.item}
+            <!-- `item` is a @const (not `m.item` inline) so TurnItem sees the SAME
+                 item object across re-merges and skips re-rendering it. -->
             {#if m.item.role === 'assistant'}
               {@const w = author(m)}
               <div class="msg agent" data-testid="assistant-message">
@@ -154,11 +160,11 @@
                   {#if m.item.ts}<span class="dim">· <time datetime={m.item.ts} title={new Date(m.item.ts).toLocaleString()}>{clock(m.item.ts)}</time></span>{/if}
                 </div>
                 <MemoryChips cards={entry.memory} onreview={onopenmemory} />
-                <TurnItem item={m.item} />
+                <TurnItem {item} />
               </div>
             {:else}
               <div class="msg user">
-                <TurnItem item={m.item} />
+                <TurnItem {item} />
                 {#if m.turn?.attachments.length}
                   <ul class="atts" aria-label="Attachments">
                     {#each m.turn.attachments as a (a.id)}

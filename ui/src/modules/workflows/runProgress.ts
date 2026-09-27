@@ -11,8 +11,14 @@ export function mergeRunProgress(current: WorkflowRun, next: WorkflowRun): boole
   current.context_dir = context;
   current.nodes = next.nodes.map(node => {
     const old = nodes.get(node.node_id);
-    if (old) {Object.assign(old, node); return old;}
-    return node;
+    if (!old) return node;
+    // `detail_version` hashes the node's whole server state: equal version +
+    // status ⇒ nothing changed, so skip the Object.assign that rewrote its
+    // fresh logs/sessions/activity objects (and re-rendered the step) on every
+    // merge (backlog B6 / W4).
+    if (node.detail_version && old.detail_version === node.detail_version && old.status === node.status) return old;
+    Object.assign(old, node);
+    return old;
   });
   if (next.summary) current.checkpoints = generation === next.checkpoint_generation ? checkpoints : [];
   return true;

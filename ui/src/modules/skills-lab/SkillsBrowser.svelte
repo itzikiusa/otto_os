@@ -61,7 +61,8 @@
   // Some (not all) sources failed: the list still shows, with a note saying
   // which copies are missing so they don't read as "not installed".
   let partialError = $state<string | null>(null);
-  let bodies = $state<Record<string, string>>({});
+  // Only ever reassigned (never mutated): raw, no per-key proxy.
+  let bodies = $state.raw<Record<string, string>>({});
 
   async function loadAll(): Promise<void> {
     loadError = null;
@@ -118,14 +119,33 @@
       for (let n = queue.shift(); n; n = queue.shift()) {
         try {
           const p = await skillLabApi.getProvider(n.source, n.name);
-          bodies = { ...bodies, [bodyKey(n.source, n.name)]: p.body };
+          landBody(bodyKey(n.source, n.name), p.body);
         } catch {
           // Unreadable copy: record an empty marker so the check settles.
-          bodies = { ...bodies, [bodyKey(n.source, n.name)]: '' };
+          landBody(bodyKey(n.source, n.name), '');
         }
       }
     };
     void Promise.all([worker(), worker(), worker(), worker()]);
+  });
+
+  // Landed bodies are batched into ONE `bodies` write per ~150 ms: each write
+  // regroups every skill and re-renders the list, so a per-body write (with an
+  // O(N) object spread) made the drift check quadratic.
+  let pendingBodies: Record<string, string> = {};
+  let bodyFlush: ReturnType<typeof setTimeout> | null = null;
+  function landBody(key: string, body: string): void {
+    pendingBodies[key] = body;
+    if (bodyFlush) return;
+    bodyFlush = setTimeout(() => {
+      bodyFlush = null;
+      const batch = pendingBodies;
+      pendingBodies = {};
+      bodies = { ...bodies, ...batch };
+    }, 150);
+  }
+  $effect(() => () => {
+    if (bodyFlush) clearTimeout(bodyFlush);
   });
 
   // ---- Filters ----------------------------------------------------------------

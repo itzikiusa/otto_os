@@ -5,6 +5,7 @@
 import type {
   K8sCapabilities,
   K8sCluster,
+  K8sContainer,
   K8sHealth,
   K8sResourceKind,
 } from '../../lib/api/types';
@@ -148,4 +149,36 @@ export function kubectlErrorSummary(raw: string | null | undefined): string {
   const human = lines.filter((l) => !/^[EWI]\d{4} \d{2}:\d{2}:\d{2}/.test(l));
   const pick = (human.length ? human[human.length - 1] : lines[lines.length - 1]) ?? text;
   return pick.length > 240 ? `${pick.slice(0, 237)}…` : pick;
+}
+
+/** A pod manifest's containers (init first) with their live status — the
+ *  client-side twin of the daemon's `pod_containers`, so the resource drawer
+ *  derives them from the `/resource` manifest it already has instead of a
+ *  second `kubectl get pod` per open. */
+export function podContainers(pod: unknown): K8sContainer[] {
+  type Ctr = { name?: string; image?: string };
+  type St = { name?: string; ready?: boolean; restartCount?: number; state?: Record<string, { reason?: string }> };
+  const p = (pod ?? {}) as {
+    spec?: { containers?: Ctr[]; initContainers?: Ctr[] };
+    status?: { containerStatuses?: St[]; initContainerStatuses?: St[] };
+  };
+  const out: K8sContainer[] = [];
+  const add = (specs: Ctr[] | undefined, statuses: St[] | undefined, init: boolean): void => {
+    for (const c of specs ?? []) {
+      const name = c.name ?? '';
+      const st = (statuses ?? []).find((x) => x.name === name);
+      const first = st?.state ? Object.entries(st.state)[0] : undefined;
+      out.push({
+        name,
+        image: c.image ?? '',
+        ready: st?.ready ?? false,
+        state: first ? (first[1]?.reason ? `${first[0]}:${first[1].reason}` : first[0]) : 'unknown',
+        restarts: st?.restartCount ?? 0,
+        init,
+      });
+    }
+  };
+  add(p.spec?.initContainers, p.status?.initContainerStatuses, true);
+  add(p.spec?.containers, p.status?.containerStatuses, false);
+  return out;
 }

@@ -9,6 +9,7 @@
   // Untrusted content stays isolated: HTML and rendered diagrams only ever run
   // inside `sandbox=""` iframes (no scripts, opaque origin); SVG renders as an
   // <img>; scene3d JSON is parsed + validated before it reaches the viewport.
+  import { untrack } from 'svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import type { DesignArtifact } from '../../lib/api/types';
@@ -81,18 +82,51 @@
       return null;
     }
   });
-  /** What actually renders: the diagram kind + its inner source. */
-  const inner = $derived.by<{ kind: 'mermaid' | 'd2' | 'excalidraw' | 'html' | 'svg' | null; src: string }>(() => {
+  type Inner = { kind: 'mermaid' | 'd2' | 'excalidraw' | 'html' | 'svg' | null; src: string };
+  function innerOf(doc: CanvasDoc | null, src: string | null): Inner {
     if (kind === 'canvas') {
-      const f = canvasDoc?.format;
+      const f = doc?.format;
       const k = f === 'mermaid' || f === 'd2' || f === 'excalidraw' ? f : null;
-      return { kind: k, src: typeof canvasDoc?.source === 'string' ? canvasDoc.source : '' };
+      return { kind: k, src: typeof doc?.source === 'string' ? doc.source : '' };
     }
     if (kind === 'mermaid' || kind === 'd2' || kind === 'excalidraw' || kind === 'html' || kind === 'svg') {
-      return { kind, src: source ?? '' };
+      return { kind, src: src ?? '' };
     }
     return { kind: null, src: '' };
+  }
+  /** The LIVE inner source: the source pane, edits and interactive boards. */
+  const inner = $derived<Inner>(innerOf(canvasDoc, source));
+
+  // ── Preview source (debounced while typing) ───────────────────────────────
+  // Replacing an iframe's `srcdoc` tears the document down and re-parses,
+  // re-lays-out and re-fetches it — per keystroke that is tens-to-hundreds of
+  // ms and a flashing preview. Edits typed in the source pane refresh the
+  // preview once typing settles; any other change (version switch, a live
+  // update, a board edit) lands immediately.
+  const PREVIEW_DEBOUNCE_MS = 350;
+  let preview = $state<string | null>(untrack(() => source));
+  let lastTyped: string | null = null;
+  $effect(() => {
+    const s = source;
+    if (s === null || s !== lastTyped || untrack(() => preview) === null) {
+      preview = s;
+      return;
+    }
+    const t = setTimeout(() => (preview = s), PREVIEW_DEBOUNCE_MS);
+    return () => clearTimeout(t);
   });
+  const previewDoc = $derived.by<CanvasDoc | null>(() => {
+    if (kind !== 'canvas') return null;
+    if (preview === source) return canvasDoc;
+    try {
+      const d = preview ? JSON.parse(preview) : null;
+      return d && typeof d === 'object' ? (d as CanvasDoc) : null;
+    } catch {
+      return null;
+    }
+  });
+  /** What the (non-interactive) previews render: iframe, SVG, diagrams. */
+  const shown = $derived<Inner>(preview === source ? inner : innerOf(previewDoc, preview));
 
   /** Emit an edit of the inner source, re-wrapped for canvas docs. */
   function emitInner(next: string): void {
@@ -106,8 +140,8 @@
   let diagramError = $state<string | null>(null);
   let renderSeq = 0;
   $effect(() => {
-    const k = inner.kind;
-    const src = inner.src;
+    const k = shown.kind;
+    const src = shown.src;
     if (k !== 'mermaid' && k !== 'd2') return;
     const my = ++renderSeq;
     const t = setTimeout(async () => {
@@ -128,7 +162,7 @@
   }
 
   const svgDataUrl = $derived(
-    inner.kind === 'svg' && inner.src.trim() ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(inner.src)}` : null,
+    shown.kind === 'svg' && shown.src.trim() ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(shown.src)}` : null,
   );
 
   // ── scene3d / models ──────────────────────────────────────────────────────
@@ -157,9 +191,9 @@
 
   // ── Brand kit ─────────────────────────────────────────────────────────────
   const brandDoc = $derived.by<Record<string, unknown> | null>(() => {
-    if (kind !== 'brand' || !source) return null;
+    if (kind !== 'brand' || !preview) return null;
     try {
-      return JSON.parse(source) as Record<string, unknown>;
+      return JSON.parse(preview) as Record<string, unknown>;
     } catch {
       return null;
     }
@@ -178,8 +212,15 @@
   /** The source pane edits the INNER source for canvas docs, the document otherwise. */
   const paneSource = $derived(kind === 'canvas' ? inner.src : (source ?? ''));
   function onPane(v: string): void {
-    if (kind === 'canvas') emitInner(v);
-    else if (editable) onchange?.(v);
+    if (!editable) return;
+    if (kind === 'canvas') {
+      // emitInner re-wraps the doc; remember the wrapped value it emits.
+      lastTyped = canvasDoc ? JSON.stringify({ ...canvasDoc, source: v }) : null;
+      emitInner(v);
+    } else {
+      lastTyped = v;
+      onchange?.(v);
+    }
   }
 </script>
 
@@ -196,7 +237,7 @@
             class="doc scaled"
             title={artifact.title}
             sandbox=""
-            srcdoc={inner.src}
+            srcdoc={shown.src}
             style:width={`${FIT_W}px`}
             style:height={`${Math.ceil(fitH / fitScale)}px`}
             style:transform={`scale(${fitScale})`}
@@ -205,14 +246,14 @@
         </div>
       {:else}
         <DeviceFrame {device}>
-          <iframe class="doc" title={artifact.title} sandbox="" srcdoc={inner.src}></iframe>
+          <iframe class="doc" title={artifact.title} sandbox="" srcdoc={shown.src}></iframe>
         </DeviceFrame>
       {/if}
-    {:else if inner.kind === 'svg'}
+    {:else if shown.kind === 'svg'}
       <div class="paper center">
         {#if svgDataUrl}<img class="svg" src={svgDataUrl} alt={artifact.title} />{:else}<p class="msg">Empty SVG.</p>{/if}
       </div>
-    {:else if inner.kind === 'mermaid' || inner.kind === 'd2'}
+    {:else if shown.kind === 'mermaid' || shown.kind === 'd2'}
       {#if diagramError}
         <div class="msg err" role="status"><Icon name="warning" size={14} /> {diagramError}</div>
       {/if}

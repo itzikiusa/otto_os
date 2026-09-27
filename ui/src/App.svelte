@@ -1,10 +1,6 @@
 <script lang="ts">
   // Boot flow: GET /meta → onboarding wizard | login | main shell.
-  import Shell from './shell/App.svelte';
-  import Onboarding from './modules/settings/Onboarding.svelte';
-  import Login from './modules/settings/Login.svelte';
   import Toasts from './lib/components/Toasts.svelte';
-  import SharePage from './modules/share/SharePage.svelte';
   import BarHost from './modules/desktop/BarHost.svelte';
   import TrayPage from './modules/desktop/TrayPage.svelte';
   import { auth } from './lib/stores/auth.svelte';
@@ -13,6 +9,22 @@
   import { isEmbedded } from './lib/desktop';
 
   ui.applyTheme();
+
+  // The shell (the whole app: ~every module + store) and the boot screens load
+  // as their own chunks, on demand. The desktop's hidden, always-alive `bar`
+  // and `tray` webviews render only BarHost / TrayPage, so they no longer parse
+  // and compile the entire app — and start its global timers — at launch.
+  // One promise per chunk, so re-renders never re-import.
+  let shellChunk: Promise<typeof import('./shell/App.svelte')> | null = null;
+  let onboardingChunk: Promise<typeof import('./modules/settings/Onboarding.svelte')> | null = null;
+  let loginChunk: Promise<typeof import('./modules/settings/Login.svelte')> | null = null;
+  let shareChunk: Promise<typeof import('./modules/share/SharePage.svelte')> | null = null;
+  const shell = () => (shellChunk ??= import('./shell/App.svelte'));
+  const onboarding = () => (onboardingChunk ??= import('./modules/settings/Onboarding.svelte'));
+  const login = () => (loginChunk ??= import('./modules/settings/Login.svelte'));
+  const share = () => (shareChunk ??= import('./modules/share/SharePage.svelte'));
+  // The main window fetches the shell chunk while /meta is still in flight.
+  if (router.module !== 'bar' && router.module !== 'tray' && router.module !== 's') void shell().catch(() => {});
 
   $effect(() => {
     void auth.boot();
@@ -31,7 +43,7 @@
   <!-- Guest share view: a scoped share-link recipient has no account, so this
        route must bypass the login/onboarding gate entirely and render the
        single-session SharePage using the token captured from the URL fragment. -->
-  <SharePage sessionId={router.parts[1] ?? ''} />
+  {#await share() then m}<m.default sessionId={router.parts[1] ?? ''} />{:catch}{@render chunkError()}{/await}
 {:else if router.module === 'bar'}
   <!-- Desktop shell's assistant bar panel (`otto-bar`): a transparent
        chromeless window, so it never renders the boot screens or the Shell —
@@ -58,12 +70,24 @@
     <button class="btn primary" onclick={() => auth.boot(true)}>Retry now</button>
   </div>
 {:else if auth.phase === 'onboarding'}
-  <Onboarding />
+  {#await onboarding()}{@render chunkWait()}{:then m}<m.default />{:catch}{@render chunkError()}{/await}
 {:else if auth.phase === 'login'}
-  <Login />
+  {#await login()}{@render chunkWait()}{:then m}<m.default />{:catch}{@render chunkError()}{/await}
 {:else}
-  <Shell />
+  {#await shell()}{@render chunkWait()}{:then m}<m.default />{:catch}{@render chunkError()}{/await}
 {/if}
+
+{#snippet chunkWait()}
+  <div class="boot" aria-busy="true"></div>
+{/snippet}
+
+{#snippet chunkError()}
+  <div class="boot">
+    <div class="boot-mark">Otto</div>
+    <div class="boot-sub" role="alert">Otto couldn’t finish loading.</div>
+    <button class="btn primary" onclick={() => location.reload()}>Reload</button>
+  </div>
+{/snippet}
 
 <Toasts />
 

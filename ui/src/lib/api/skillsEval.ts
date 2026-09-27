@@ -16,6 +16,7 @@ import type {
   RunGoldenReq,
   SkillEval,
   SkillEvalConfig,
+  SkillEvalSummaryPage,
   SkillSourcesResp,
   StartMatrixReq,
   StartSkillEvalReq,
@@ -35,9 +36,20 @@ export const skillsEvalApi = {
   start: (wsId: string, body: StartSkillEvalReq) =>
     api.post<SkillEval>(`/workspaces/${wsId}/skill-evaluations`, body),
 
-  /** All runs for a workspace, newest first. */
+  /** All runs for a workspace, newest first — FULL payloads (every
+   *  iteration). Prefer `listSummaries` for lists. */
   list: (wsId: string) =>
     api.get<SkillEval[]>(`/workspaces/${wsId}/skill-evaluations`),
+
+  /** One page of run summaries (single query, no iterations), newest first;
+   *  `skill` keeps runs of that skill (source or matrix dimension). */
+  listSummaries: (wsId: string, p: { limit?: number; cursor?: string | null; skill?: string } = {}) => {
+    const q = new URLSearchParams({ summary: '1' });
+    if (p.limit) q.set('limit', String(p.limit));
+    if (p.cursor) q.set('cursor', p.cursor);
+    if (p.skill) q.set('skill', p.skill);
+    return api.get<SkillEvalSummaryPage>(`/workspaces/${wsId}/skill-evaluations?${q}`);
+  },
 
   /** A single run with all its iterations (poll while running). */
   get: (evalId: string) => api.get<SkillEval>(`/skill-evaluations/${evalId}`),

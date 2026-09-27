@@ -40,6 +40,30 @@
   const rooms = $derived(personalAgents.rooms);
   const selected = $derived(rooms.find((r) => r.room.id === selectedId) ?? null);
   const messages = $derived(selectedId ? (personalAgents.messagesByRoom[selectedId] ?? []) : []);
+  // Render the newest RENDER_STEP messages; "Show earlier" reveals more of
+  // what is held, then pages older history from the server (backlog B6 /
+  // SA-08 — a busy room rendered up to 5,000 rows).
+  const RENDER_STEP = 200;
+  let renderCount = $state(RENDER_STEP);
+  $effect(() => {
+    void selectedId;
+    renderCount = RENDER_STEP;
+  });
+  const shown = $derived(messages.length > renderCount ? messages.slice(messages.length - renderCount) : messages);
+  const hiddenHeld = $derived(messages.length - shown.length);
+  const hasOlder = $derived(hiddenHeld > 0 || (selectedId ? !!personalAgents.olderByRoom[selectedId] : false));
+  async function showEarlier(): Promise<void> {
+    const el = feedEl;
+    const before = el ? el.scrollHeight - el.scrollTop : 0;
+    if (hiddenHeld > 0) renderCount += RENDER_STEP;
+    else if (selectedId) {
+      await personalAgents.loadOlder(selectedId);
+      renderCount += RENDER_STEP;
+    }
+    await tick();
+    // Keep the message the user was reading in place (content grew above it).
+    if (el) el.scrollTop = el.scrollHeight - before;
+  }
   const nonMembers = $derived(
     personalAgents.agents.filter((a) => !(selected?.members ?? []).includes(a.id)),
   );
@@ -62,10 +86,11 @@
     const id = selectedId;
     if (id) untrack(() => void personalAgents.loadMessages(id));
   });
-  // Keep the feed pinned to the latest message.
+  // Keep the feed pinned to the latest message — on a NEW newest message
+  // only, so paging older history in doesn't yank the view to the bottom.
   $effect(() => {
-    void messages.length;
-    if (feedEl) feedEl.scrollTop = feedEl.scrollHeight;
+    void messages.at(-1)?.id;
+    if (feedEl) untrack(() => { if (feedEl) feedEl.scrollTop = feedEl.scrollHeight; });
   });
 
   function authorName(m: AgentRoomMessage): string {
@@ -268,7 +293,13 @@
             {#snippet emptyView()}
               <div class="meta pad">No messages yet. Member agents post here while they run, and anything you send is visible to all of them.</div>
             {/snippet}
-          {#each messages as m (m.id)}
+          {#if hasOlder && messages.length > 0}
+            <button class="btn small ghost earlier" onclick={() => void showEarlier()}
+              disabled={!!personalAgents.olderLoading[selectedId ?? '']}>
+              {personalAgents.olderLoading[selectedId ?? ''] ? 'Loading…' : 'Show earlier messages'}
+            </button>
+          {/if}
+          {#each shown as m (m.id)}
             {@const agentMsg = m.author_kind !== 'user'}
             {@const a = agentMsg ? personalAgents.agent(m.author_id) : undefined}
             <div class="msg" class:agent={agentMsg}>
@@ -352,6 +383,7 @@
     border: 1px solid var(--border); border-radius: var(--radius-m); background: var(--surface); padding: 10px;
   }
   .msg { display: flex; gap: 8px; align-items: flex-start; }
+  .earlier { align-self: center; }
   /* Agent-authored: a 2px inline-start rule + an Agent label (patterns.md §2). */
   .msg.agent .msg-body { border-inline-start: 2px solid var(--border-strong); padding-inline-start: 10px; }
   .me-avatar {

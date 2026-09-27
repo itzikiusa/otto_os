@@ -645,8 +645,12 @@
   // menu, which is otherwise undiscoverable). Registered only when a session is
   // focused; the closures act on ws.activeSession at run time. Hand over is
   // agent-only, matching the ⋯ menu.
+  // Keyed on id + kind (all the commands use): a status flip replaces the
+  // session object and would otherwise re-register them.
+  const focusedKey = $derived(ws.activeSession ? `${ws.activeSession.id}\u0001${ws.activeSession.kind}` : '');
   $effect(() => {
-    const active = ws.activeSession;
+    void focusedKey;
+    const active = untrack(() => ws.activeSession);
     if (!active) return registry.register('focused-session', []);
     const isAgent = active.kind === 'agent';
     const cmds = [
@@ -685,12 +689,20 @@
     void ui.applyNativeZoom();
   });
 
+  // Only what the commands show: a `session_status` flip (every few seconds
+  // per working agent) rewrites ws.sessions but must not re-register the set
+  // (and re-rank the ⌘K bar).
+  const sessionCmdKey = $derived(
+    ws.sessions.map((s) => (s.archived ? '' : `${s.id}\u0001${s.title}\u0001${s.provider}`)).join('\u0002'),
+  );
   $effect(() => {
+    void sessionCmdKey;
     // Archived sessions are parked (restore them from the sidebar's Archived
     // list); "Focus" on one opened a dead tab. Same rule as the ⌥Space bar.
+    const list = untrack(() => ws.sessions);
     const unreg = registry.register(
       'sessions',
-      ws.sessions.filter((s) => !s.archived).map((s) => ({
+      list.filter((s) => !s.archived).map((s) => ({
         id: `session.${s.id}`,
         title: `Focus session: ${s.title}`,
         group: 'Sessions',

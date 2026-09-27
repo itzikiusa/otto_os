@@ -11,8 +11,8 @@ function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: an
   const ws = {currentId: 'A'};
   const api = {get: async () => [], patch: async () => ({}), post: async () => ({}), ...overrides};
   const context = {exports: {} as Record<string, any>,
-    $state: Object.assign((v: unknown) => v, {snapshot: (v: unknown) => v}), $derived: (v: unknown) => v,
-    crypto: {randomUUID}, URL, AbortController, DOMException, setTimeout, clearTimeout,
+    $state: Object.assign((v: unknown) => v, {snapshot: (v: unknown) => v, raw: (v: unknown) => v}), $derived: (v: unknown) => v,
+    crypto: {randomUUID}, URL, URLSearchParams, AbortController, DOMException, setTimeout, clearTimeout,
     localStorage: {getItem() {return null;},setItem() {}},
     require: (p: string) => p.endsWith('/client') ? {api, isAbortError: () => false}
       : p.includes('workspace.svelte') ? {ws}
@@ -21,6 +21,7 @@ function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: an
       : p.endsWith('/apiSecretShapes') ? secretShapes
       : p.endsWith('/scriptRunner') ? {runScript}
       : p.endsWith('/scripts') ? {runPreRequest: () => ({logs:[],tests:[]})}
+      : p.endsWith('/importers') ? {isImportedEnvironment: (d: any) => d.format === 'postman-env'}
       : p.endsWith('/types') ? {isSecretRef: (v: any) => !!v?.$secret} : {},
   };
   runInNewContext(ts.transpileModule(readFileSync(new URL('../src/lib/stores/apiClient.svelte.ts',import.meta.url),'utf8'),
@@ -157,4 +158,41 @@ test('history replay rehydrates masked credentials from the saved request, never
   assert.deepEqual(v.draft.auth, {type:'bearer',token:''});
   assert.equal(v.draft.headers[0].value, '');
   assert.equal(v.draft.headers[0].enabled, false);
+});
+
+test('automation runs poll deltas and append only the new steps', async () => {
+  const gets: string[] = [];
+  const step = (name: string) => ({request_id:'r',name,status:200,duration_ms:1,ok:true,assertions:[],error:null});
+  const run = {id:'run1',workspace_id:'A',automation_id:'auto',environment_id:null,created_by:'u',created_at:'',finished_at:null,stop_on_failure:false,dataset_rows:1,error:null};
+  const {v} = setup({
+    post: async () => ({...run,status:'running',snapshot:[{request_id:'r'}],report:{automation_id:'auto',steps:[step('one')],passed:false},result_rows:[0],result_ids:['s1']}),
+    get: async (url: string) => {
+      if (!url.includes('/automation-runs/run1')) return [];
+      gets.push(url);
+      return {...run,status:'passed',snapshot:null,report:{automation_id:'auto',steps:[step('two')],passed:true},result_rows:[0],result_ids:['s2']};
+    },
+  });
+  const report = await v.runAutomation('auto');
+  assert.equal(gets.length, 1);
+  assert.match(gets[0], /\/automation-runs\/run1\?after=1$/);
+  // Values come from the store's vm realm: compare as JSON.
+  assert.equal(JSON.stringify(report.steps.map((s: any) => s.name)), '["one","two"]');
+  assert.equal(report.passed, true);
+  assert.equal(JSON.stringify(v.currentRun.result_ids), '["s1","s2"]');
+  assert.equal(JSON.stringify(v.currentRun.snapshot), '[{"request_id":"r"}]');
+});
+
+test('import creates every item in order and reloads the lists once', async () => {
+  const posts: string[] = [];
+  const gets: string[] = [];
+  let n = 0;
+  const {v} = setup({
+    post: async (url: string, body: any) => { posts.push(`${url.split('/api-client')[1]}:${body.name}`); return {id:`id-${n++}`,name:body.name,position:0}; },
+    get: async (url: string) => { gets.push(url.split('/api-client')[1] ?? url); return []; },
+  });
+  const req = (name: string, folderPath: string[]) => ({name,method:'GET',url:'https://x.test',folderPath,headers:[],query:[],body_mode:'none',body:'',auth:{type:'none'}});
+  await v.importParsed({name:'Imported',format:'postman',requests:[req('a',['F']),req('b',['F']),req('c',[])]}, true);
+  assert.deepEqual(posts, ['/collections:Imported','/collections:F','/requests:a','/requests:b','/requests:c']);
+  assert.equal(gets.filter((g) => g === '/requests').length, 1);
+  assert.equal(gets.filter((g) => g === '/collections').length, 1);
 });

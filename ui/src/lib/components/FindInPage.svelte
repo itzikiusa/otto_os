@@ -6,6 +6,7 @@
   // Mount once in App.svelte next to <ContextMenu />.
   // Opened via the `findInPage` store (Cmd+F when no terminal is focused).
 
+  import { untrack } from 'svelte';
   import { findInPage } from '../findinpage.svelte';
   import Icon from './Icon.svelte';
 
@@ -13,26 +14,45 @@
   let query = $state('');
   let currentIdx = $state(0);
   let totalCount = $state(0);
+  /** The walk stopped at MAX_MATCHES — the label reads "N+". */
+  let truncated = $state(false);
   let inputEl: HTMLInputElement | null = $state(null);
+
+  /** Matches past this aren't collected: a one-letter query on a 100k-line
+   *  diff would otherwise build (and highlight) hundreds of thousands. */
+  const MAX_MATCHES = 5000;
 
   // ---- feature detection ----
   const supportsHighlight =
     typeof CSS !== 'undefined' &&
     typeof (CSS as unknown as { highlights?: unknown }).highlights !== 'undefined' &&
     typeof Highlight !== 'undefined';
+  const supportsStatic = typeof StaticRange !== 'undefined';
 
-  // All matched ranges in document order.
-  let ranges: Range[] = [];
+  // All matched ranges in document order. StaticRange, not Range: the document
+  // tracks every live Range and walks them all on EACH DOM mutation anywhere
+  // in the app (5.7 ms per mutation at 30k matches). A static range goes stale
+  // if its text re-renders — next()/prev() re-search when that happens.
+  let ranges: AbstractRange[] = [];
+
+  function dropRanges(): void {
+    clearHighlights();
+    ranges = [];
+  }
 
   // ---- open / close reactions ----
   $effect(() => {
     if (findInPage.open) {
       // Focus the input on next microtask so the bar is rendered first.
       queueMicrotask(() => inputEl?.focus());
-      // Run search in case a previous query is still in state.
-      if (query) runSearch();
+      // Run search in case a previous query is still in state. Untracked: the
+      // effect must not re-run (and search undebounced) on every keystroke.
+      untrack(() => {
+        if (query) runSearch();
+      });
     } else {
-      clearHighlights();
+      // Hidden by any path: release the matches, not just their paint.
+      dropRanges();
     }
   });
 
@@ -58,9 +78,18 @@
     return roots.length > 0 ? roots : [document.getElementById('app') ?? document.body];
   }
 
+  function makeRange(node: Text, start: number, end: number): AbstractRange {
+    if (supportsStatic) return new StaticRange({ startContainer: node, startOffset: start, endContainer: node, endOffset: end });
+    const r = document.createRange();
+    r.setStart(node, start);
+    r.setEnd(node, end);
+    return r;
+  }
+
   // ---- core search ----
   function runSearch(): void {
     clearHighlights();
+    truncated = false;
     if (!query) {
       totalCount = 0;
       currentIdx = 0;
@@ -69,17 +98,21 @@
     }
 
     const lower = query.toLowerCase();
-    const found: Range[] = [];
+    const found: AbstractRange[] = [];
+    const bar = document.querySelector('.otto-find-bar');
 
-    for (const root of getContentRoots()) {
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    outer: for (const root of getContentRoots()) {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
         acceptNode(node) {
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            // Whole subtrees skipped once at their root (was a closest() walk
+            // up from every text node).
+            const tag = (node as Element).localName;
+            if (node === bar || tag === 'script' || tag === 'style') return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_SKIP;
+          }
           const parent = node.parentElement;
           if (!parent) return NodeFilter.FILTER_REJECT;
-          // Skip find bar itself, script, style, and hidden elements.
-          if (parent.closest('.otto-find-bar')) return NodeFilter.FILTER_REJECT;
-          const tag = parent.tagName.toLowerCase();
-          if (tag === 'script' || tag === 'style') return NodeFilter.FILTER_REJECT;
           if ((parent as HTMLElement).offsetParent === null && parent.tagName !== 'BODY') {
             // hidden via display:none or visibility:hidden — skip
             const style = getComputedStyle(parent);
@@ -93,14 +126,17 @@
 
       let textNode: Text | null;
       while ((textNode = walker.nextNode() as Text | null)) {
-        const content = textNode.textContent ?? '';
+        const content = textNode.data;
+        // Cheap pre-check before lowercasing the node (most nodes don't match).
+        if (content.length < lower.length) continue;
         const contentLower = content.toLowerCase();
         let pos = 0;
         while ((pos = contentLower.indexOf(lower, pos)) !== -1) {
-          const range = document.createRange();
-          range.setStart(textNode, pos);
-          range.setEnd(textNode, pos + lower.length);
-          found.push(range);
+          found.push(makeRange(textNode, pos, pos + lower.length));
+          if (found.length >= MAX_MATCHES) {
+            truncated = true;
+            break outer;
+          }
           pos += lower.length;
         }
       }
@@ -114,31 +150,35 @@
   }
 
   // ---- highlight helpers ----
+  type HighlightRegistry = { set: (k: string, v: unknown) => void; delete: (k: string) => void };
+  const registry = (): HighlightRegistry => (CSS as unknown as { highlights: HighlightRegistry }).highlights;
+
+  /** Paint every match (once per search). */
   function applyHighlights(): void {
     if (!supportsHighlight) return;
-    const hl = (CSS as unknown as { highlights: Map<string, unknown> }).highlights;
+    const hl = registry();
     if (ranges.length === 0) {
       hl.delete('otto-find');
       hl.delete('otto-find-current');
       return;
     }
-    // All matches.
-    (hl as unknown as { set: (k: string, v: unknown) => void }).set(
-      'otto-find',
-      new Highlight(...ranges),
-    );
-    // Current match.
-    if (currentIdx >= 0 && currentIdx < ranges.length) {
-      (hl as unknown as { set: (k: string, v: unknown) => void }).set(
-        'otto-find-current',
-        new Highlight(ranges[currentIdx]),
-      );
-    }
+    const all = new Highlight();
+    for (const r of ranges) all.add(r);
+    hl.set('otto-find', all);
+    applyCurrent();
+  }
+
+  /** Repaint only the current match (next / prev). */
+  function applyCurrent(): void {
+    if (!supportsHighlight) return;
+    const hl = registry();
+    if (currentIdx >= 0 && currentIdx < ranges.length) hl.set('otto-find-current', new Highlight(ranges[currentIdx]));
+    else hl.delete('otto-find-current');
   }
 
   function clearHighlights(): void {
     if (!supportsHighlight) return;
-    const hl = (CSS as unknown as { highlights: Map<string, unknown> }).highlights;
+    const hl = registry();
     hl.delete('otto-find');
     hl.delete('otto-find-current');
   }
@@ -152,18 +192,27 @@
   }
 
   // ---- navigation ----
+  /** Move to match `idx`; when its text node was re-rendered away (static
+   *  ranges don't follow DOM edits), re-search and land as close as possible. */
+  function goTo(idx: number): void {
+    if (!ranges[idx]?.startContainer.isConnected) {
+      runSearch();
+      if (totalCount === 0) return;
+      idx = Math.min(idx, totalCount - 1);
+    }
+    currentIdx = idx;
+    applyCurrent();
+    scrollToCurrent();
+  }
+
   function next(): void {
     if (totalCount === 0) return;
-    currentIdx = (currentIdx + 1) % totalCount;
-    applyHighlights();
-    scrollToCurrent();
+    goTo((currentIdx + 1) % totalCount);
   }
 
   function prev(): void {
     if (totalCount === 0) return;
-    currentIdx = (currentIdx - 1 + totalCount) % totalCount;
-    applyHighlights();
-    scrollToCurrent();
+    goTo((currentIdx - 1 + totalCount) % totalCount);
   }
 
   function close(): void {
@@ -193,7 +242,7 @@
       ? query
         ? '0 results'
         : ''
-      : `${currentIdx + 1} / ${totalCount}`,
+      : `${currentIdx + 1} / ${totalCount}${truncated ? '+' : ''}`,
   );
 </script>
 

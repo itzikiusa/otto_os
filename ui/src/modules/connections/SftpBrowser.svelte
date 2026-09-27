@@ -11,6 +11,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
+  import { TableWindow } from '../../lib/tableWindow.svelte';
 
   interface Props {
     conn: Connection;
@@ -35,6 +36,24 @@
   const shownEntries = $derived.by(() => {
     const q = query.trim().toLowerCase();
     return q ? view.entries.filter((e) => e.name.toLowerCase().includes(q)) : view.entries;
+  });
+
+  // Window the listing: a 50k-entry directory (/var/log, a spool, /tmp) took
+  // ~6 s of layout and 1M nodes rendered whole. Only the visible rows (plus
+  // overscan) are mounted, between two spacers.
+  const tw = new TableWindow(300);
+  let listEl = $state<HTMLDivElement | null>(null);
+  const win = $derived(tw.range(shownEntries.length));
+  const rowsWindow = $derived(shownEntries.slice(win.start, win.end));
+  $effect(() => {
+    void rowsWindow;
+    tw.measure(listEl, '.sftp-row.entry');
+  });
+  // A new directory (or filter) starts at the top.
+  $effect(() => {
+    void view.entries;
+    void query;
+    tw.reset(listEl);
   });
 
   // Initial load: resolve the remote home/working dir then list it.
@@ -270,7 +289,7 @@
     </div>
 
     <!-- Listing -->
-    <div class="list">
+    <div class="list" bind:this={listEl} bind:clientHeight={tw.viewH} onscroll={tw.onscroll}>
       {#if view.loading}
         <div class="dim pad">Loading files…</div>
       {:else if view.error}
@@ -287,8 +306,9 @@
           <span class="cell perms mono">Perms</span>
           <span class="cell actions"></span>
         </div>
-        {#each shownEntries as e (e.name)}
-          <div class="sftp-row">
+        {#if win.top}<div class="tw-spacer" aria-hidden="true" style="height:{win.top}px"></div>{/if}
+        {#each rowsWindow as e (e.name)}
+          <div class="sftp-row entry">
             <button
               class="cell name nav"
               onclick={() => onRowActivate(e)}
@@ -342,6 +362,7 @@
             </span>
           </div>
         {/each}
+        {#if win.bottom}<div class="tw-spacer" aria-hidden="true" style="height:{win.bottom}px"></div>{/if}
       {/if}
     </div>
   </div>

@@ -8,6 +8,7 @@
   import { router } from '../../lib/router.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { mcpCpApi } from '../../lib/api/mcp';
+  import { pollWhileVisible } from '../../lib/poll';
   import { loadErrorText } from '../../lib/loadError';
   import type { McpServerDetail } from '../../lib/api/types';
   import ServersTab from './ServersTab.svelte';
@@ -93,10 +94,11 @@
     void loadServers();
   });
 
+  // Pending-approvals badge: shared poll chain (in-flight guard, paused while
+  // hidden, jittered) instead of a bare 15 s interval.
   $effect(() => {
-    void loadPending();
-    const interval = window.setInterval(() => void loadPending(), 15_000);
-    return () => window.clearInterval(interval);
+    const p = pollWhileVisible(() => loadPending(), { ms: 15_000 });
+    return () => p.stop();
   });
 
   function patchServer(updated: McpServerDetail): void {

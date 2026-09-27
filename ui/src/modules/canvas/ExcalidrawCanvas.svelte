@@ -242,14 +242,47 @@
     };
   }
 
-  function scheduleSave(): void {
+  // Excalidraw fires onChange on every drag frame, scroll, zoom and selection.
+  // Serializing the whole scene (base64 files included) per call cost ~1.5 ms
+  // and a MB of garbage per frame. Instead: a cheap fingerprint (element
+  // version sum + file count + background) drops no-op changes, and the
+  // snapshot is taken once, when the 700 ms save timer fires (or on unmount).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let sceneVersionOf: ((els: readonly any[]) => number) | null = null;
+  let lastFingerprint: string | null = null;
+  let changePending = false;
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function onSceneChange(elements: readonly any[], appState: any, files: any): void {
+    const fp = sceneVersionOf
+      ? `${sceneVersionOf(elements)}:${files ? Object.keys(files).length : 0}:${appState?.viewBackgroundColor ?? ''}`
+      : null;
+    const unchanged = fp !== null && fp === lastFingerprint;
+    const baseline = lastFingerprint === null && fp !== null;
+    lastFingerprint = fp;
+    // Loads / agent edits (suppressSave) and the mount's first report only
+    // set the baseline; a scroll, zoom or selection is not an edit.
+    if (baseline || unchanged) return;
     if (canvas.saveContext !== saveContext || readonly || suppressSave || !sceneId) return;
+    changePending = true;
+    if (canvas.currentId === sceneId) canvas.dirty = true; // unsaved, before the snapshot
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      if (commitPending()) void saveNow();
+    }, 700);
+  }
+
+  /** Snapshot + stage the pending change; false when there is nothing new. */
+  function commitPending(): boolean {
+    if (!changePending || !sceneId) return false;
+    changePending = false;
+    if (canvas.saveContext !== saveContext) return false;
     const doc = snapshotDoc();
-    if (!doc || doc.source === pendingDoc?.source) return;
+    if (!doc || doc.source === pendingDoc?.source) return false;
     pendingDoc = doc;
     canvas.stageDoc(sceneId, doc, saveContext);
-    if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => { saveTimer = null; void saveNow(); }, 700);
+    return true;
   }
 
   async function saveNow(): Promise<void> {
@@ -297,6 +330,8 @@
     await import('@excalidraw/excalidraw/index.css');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     restore = (Ex as any).restoreElements ?? null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    sceneVersionOf = (Ex as any).getSceneVersion ?? null;
     if (destroyed || !host) return;
     root = createRoot(host);
     root.render(
@@ -307,7 +342,7 @@
           liveApi = a;
         },
         initialData: initialData(),
-        onChange: scheduleSave,
+        onChange: onSceneChange,
         theme: ui.resolvedScheme,
         name: canvas.scene?.title ?? 'Canvas',
         viewModeEnabled: readonly,
@@ -320,6 +355,9 @@
     destroyed = true;
     if (saveTimer) {
       clearTimeout(saveTimer);
+      saveTimer = null;
+      // The last edit is staged here (the timer that would have done it is gone).
+      commitPending();
       void saveNow();
     }
     try {

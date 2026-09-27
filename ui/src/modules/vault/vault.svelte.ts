@@ -43,6 +43,7 @@ import { ws } from '../../lib/stores/workspace.svelte';
 import { toasts } from '../../lib/toast.svelte';
 import { confirmer } from '../../lib/confirm.svelte';
 import { lsGet, lsSet } from '../../lib/storage';
+import { pollWhileVisible, type Poller } from '../../lib/poll';
 
 export type LeftMode = 'files' | 'search' | 'tags';
 export type CenterMode = 'note' | 'graph' | 'empty' | 'docs-agents' | 'file' | 'trash' | 'history';
@@ -193,7 +194,12 @@ class VaultStore {
       const runs = await listDocsRuns(this.wsId, vaultId);
       // Async guard: drop the result if the vault changed under us.
       if (this.current?.id !== vaultId) return;
-      this.docsRuns = runs;
+      // Polled every 5 s: an identical list must not re-render every consumer.
+      const sig = JSON.stringify(runs);
+      if (sig !== this.docsRunsSig) {
+        this.docsRunsSig = sig;
+        this.docsRuns = runs;
+      }
       // A run just finished (possibly launched outside this UI, e.g. over
       // MCP) — its drafts were consolidated/trashed, so refresh the tree.
       const finished = runs.some(
@@ -216,8 +222,16 @@ class VaultStore {
   private searchSeq = 0;
   private savePromise: Promise<boolean> | null = null;
 
-  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private poller: Poller | null = null;
+  private docsRunsSig = '';
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Bumped by every successful own save — a status poll that raced one
+   *  leaves the cascade to the save's own (targeted) refresh. */
+  private saveEpoch = 0;
+  /** Debounced localStorage draft (see `persistDraft`). */
+  private draftPending: { key: string; content: string; hash: string | undefined; dirty: boolean } | null = null;
+  private draftTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly onPageHide = (): void => this.flushDraft();
   /** Consecutive "vault busy" save failures — drives the retry backoff. */
   private busyRetries = 0;
 
@@ -280,6 +294,7 @@ class VaultStore {
     this.roots = [];
     this.docsRun = null;
     this.docsRuns = [];
+    this.docsRunsSig = '';
     this.docsAgentsDir = '';
     this.tabs = [];
     this.activeTab = -1;
@@ -295,41 +310,65 @@ class VaultStore {
 
   startPolling(): void {
     this.stopPolling();
-    this.pollTimer = setInterval(() => {
-      if (this.current && !document.hidden) {
-        void this.refreshStatus();
+    // A settle-then-schedule chain (lib/poll): never two status requests in
+    // flight, paused while the window is hidden.
+    this.poller = pollWhileVisible(async () => {
+      if (!this.current) return;
+      await Promise.all([
+        this.refreshStatus(),
         // Keep the runs list fresh even when the Docs agent view isn't
         // mounted — the topbar chip is the always-visible signal that
         // agents are writing into this vault right now.
-        void this.refreshDocsRuns();
-      }
-    }, 5000);
+        this.refreshDocsRuns(),
+      ]);
+    }, { ms: 5000, immediate: false });
+    if (typeof window !== 'undefined') window.addEventListener('pagehide', this.onPageHide);
   }
 
   stopPolling(): void {
-    if (this.pollTimer) clearInterval(this.pollTimer);
-    this.pollTimer = null;
+    this.poller?.stop();
+    this.poller = null;
+    if (typeof window !== 'undefined') window.removeEventListener('pagehide', this.onPageHide);
+    this.flushDraft();
   }
 
-  async refreshStatus(): Promise<void> {
+  /**
+   * Poll the index status and react to what changed. Assigns `status` ONLY
+   * when a field differs — the graph and typeahead key off it, and a fresh
+   * but equal object every 5 s used to refetch + re-lay-out the whole graph.
+   *
+   * `own` = the refresh that follows OUR save: saving note X cannot change
+   * X's backlinks, and the PUT already returned X's meta, so the cascade is
+   * limited to what the save could have changed (tree titles/counts, tags).
+   */
+  async refreshStatus(own?: { titleChanged: boolean; tagsChanged: boolean }): Promise<void> {
     if (!this.current) return;
-    const id = this.current.id;
+    const id = this.current.id, epoch = this.saveEpoch;
     try {
       const prev = this.status;
       const next = await vaultStatus(this.wsId, id);
       if (this.current?.id !== id) return;
-      this.status = next;
+      // A save landed while this poll was in flight: its own refresh handles it.
+      if (!own && (this.saving || epoch !== this.saveEpoch)) return;
+      if (!sameVaultStatus(prev, next)) this.status = next;
+      if (!prev) return;
       // Completed timestamps cover content-only edits and scans too fast to
       // observe the intermediate scanning state.
-      if (prev && ((next.generation != null ? prev.generation !== next.generation : prev.last_scan_at !== next.last_scan_at) ||
-          (prev.scan_state === 'scanning' && next.scan_state === 'idle') ||
-          prev.notes !== next.notes || prev.attachments !== next.attachments)) {
-        void this.refreshTree();
-        void this.loadTags();
-        await this.refreshOpenNote();
-        if (this.notePath) void this.reloadBacklinks();
+      const countsChanged = prev.notes !== next.notes || prev.attachments !== next.attachments;
+      const changed = (next.generation != null ? prev.generation !== next.generation : prev.last_scan_at !== next.last_scan_at) ||
+          (prev.scan_state === 'scanning' && next.scan_state === 'idle') || countsChanged;
+      if (!changed) return;
+      if (own) {
+        if (countsChanged || own.titleChanged) void this.refreshTree();
+        if (own.tagsChanged || prev.tags !== next.tags) void this.loadTags();
         if (this.leftMode === 'search' && this.searchQuery) void this.runSearch();
+        return;
       }
+      void this.refreshTree();
+      void this.loadTags();
+      await this.refreshOpenNote();
+      if (this.notePath) void this.reloadBacklinks();
+      if (this.leftMode === 'search' && this.searchQuery) void this.runSearch();
     } catch { /* transient — next poll retries */ }
   }
 
@@ -531,6 +570,7 @@ class VaultStore {
       this.dirty = false;
       this.conflict = false;
       try {
+        this.flushDraft(); // a debounced draft of this note must be on disk first
         const saved = JSON.parse(lsGet(this.draftKey(id, path)) ?? 'null');
         if (saved && typeof saved.content === 'string' && saved.content !== n.raw) {
           this.draft = saved.content;
@@ -553,11 +593,32 @@ class VaultStore {
     return `otto_vault_draft:${id}:${path}`;
   }
 
-  private persistDraft(): void {
+  /**
+   * Keep the draft on this Mac. `debounce` (per keystroke) captures the
+   * note's key and the draft string by reference — O(1) — and writes once
+   * typing pauses; stringifying + a synchronous localStorage copy of a
+   * 300 KB note on every key was the cost. Saves, note switches, leaving
+   * the page and `pagehide` flush it.
+   */
+  private persistDraft(debounce = false): void {
     if (!this.current || !this.notePath) return;
+    const key = this.draftKey(this.current.id, this.notePath);
+    if (this.draftPending && this.draftPending.key !== key) this.flushDraft();
+    this.draftPending = { key, content: this.draft, hash: this.note?.meta.hash, dirty: this.dirty };
+    if (this.draftTimer) clearTimeout(this.draftTimer);
+    this.draftTimer = null;
+    if (debounce) this.draftTimer = setTimeout(() => this.flushDraft(), 400);
+    else this.flushDraft();
+  }
+
+  private flushDraft(): void {
+    if (this.draftTimer) clearTimeout(this.draftTimer);
+    this.draftTimer = null;
+    const p = this.draftPending;
+    this.draftPending = null;
+    if (!p) return;
     try {
-      lsSet(this.draftKey(this.current.id, this.notePath), this.dirty
-        ? JSON.stringify({content: this.draft, hash: this.note?.meta.hash}) : 'null');
+      lsSet(p.key, p.dirty ? JSON.stringify({content: p.content, hash: p.hash}) : 'null');
     } catch { /* storage quota must never interrupt editing or the save timer */ }
   }
 
@@ -751,7 +812,7 @@ class VaultStore {
   onDraftChange(content: string): void {
     this.draft = content;
     this.dirty = content !== (this.note?.raw ?? '');
-    this.persistDraft();
+    this.persistDraft(true);
     if (this.saveTimer) clearTimeout(this.saveTimer);
     if (this.dirty && !this.conflict && !this.holdAutosave) {
       this.saveTimer = setTimeout(() => void this.saveNow(), 800);
@@ -768,6 +829,7 @@ class VaultStore {
     if (!this.current || !this.notePath || !this.note || (this.conflict && !overwrite)) return false;
     if (this.saveTimer) clearTimeout(this.saveTimer);
     const id = this.current.id, path = this.notePath, wsId = this.wsId;
+    const before = this.note;
     this.saving = true;
     this.savePromise = (async () => {
       try {
@@ -786,7 +848,8 @@ class VaultStore {
           this.persistDraft();
         } while (this.dirty);
         this.busyRetries = 0;
-        void this.reloadBacklinks();
+        this.saveEpoch += 1;
+        // No backlinks reload: saving X cannot change X's INCOMING links.
         return true;
       } catch (e) {
         const kind = vaultConflictKind(e);
@@ -800,7 +863,16 @@ class VaultStore {
     })();
     const success = await this.savePromise;
     this.savePromise = null;
-    if (success) { void this.refreshOpenNote(); void this.refreshStatus(); }
+    if (success) {
+      const after = this.note;
+      // The PUT returned the meta; only a changed link set needs the note
+      // re-read (its resolved `outgoing` list).
+      if (!before || !after || linkSignature(before.raw) !== linkSignature(after.raw)) void this.refreshOpenNote();
+      void this.refreshStatus({
+        titleChanged: before?.meta.title !== after?.meta.title,
+        tagsChanged: (before?.meta.tags ?? []).join('\n') !== (after?.meta.tags ?? []).join('\n'),
+      });
+    }
     return success;
   }
 
@@ -827,7 +899,11 @@ class VaultStore {
         `Discard your unsaved edits to "${this.notePath}" and load the version on disk? This cannot be undone.`,
         { title: 'Discard your edits?', confirmLabel: 'Discard my edits', danger: true },
       ))) return;
-      if (this.current) lsSet(this.draftKey(this.current.id, this.notePath), 'null');
+      if (this.current) {
+        const key = this.draftKey(this.current.id, this.notePath);
+        if (this.draftPending?.key === key) this.draftPending = null; // don't resurrect it
+        lsSet(key, 'null');
+      }
       this.dirty = false;
       this.conflict = false;
       await this.open(this.notePath);
@@ -1142,3 +1218,19 @@ function msg(e: unknown): string {
 }
 
 export const vault = new VaultStore();
+
+/** Field-wise equality of two status snapshots (assign only on change). */
+function sameVaultStatus(a: VaultStatus | null, b: VaultStatus): boolean {
+  return !!a && a.id === b.id && (a.generation ?? null) === (b.generation ?? null) &&
+    a.scan_state === b.scan_state && a.last_scan_at === b.last_scan_at && a.notes === b.notes &&
+    a.links === b.links && a.unresolved === b.unresolved && a.tags === b.tags &&
+    a.attachments === b.attachments;
+}
+
+/** The note's link targets (`[[wiki]]`, `![[embed]]`, `](md link)`), in
+ *  order: equal before/after a save → its resolved `outgoing` list is too. */
+export function linkSignature(raw: string): string {
+  const out: string[] = [];
+  for (const m of raw.matchAll(/\[\[([^\]\n]+)\]\]|\]\(([^)\s]+)/g)) out.push(m[1] ?? m[2] ?? '');
+  return out.join('\n');
+}

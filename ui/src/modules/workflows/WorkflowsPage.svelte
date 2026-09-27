@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { pollWhileVisible } from '../../lib/poll';
   import PathField from '../../lib/components/PathField.svelte';
   // Workflows: build automations by *describing* them (agent mode) or by hand
   // on the canvas. Left = generate + list + running; center = node-graph editor + run.
@@ -20,6 +21,7 @@
   import FileTree from '../panels/FileTree.svelte';
   import TriggersPanel from './TriggersPanel.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { startMouseDrag } from '../../lib/dragCursor';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -105,16 +107,29 @@
   const selectedSummary = $derived(selectedId ? (runStates[selectedId] ?? null) : null);
   let inspectorBody = $state<NodeRunState | null>(null);
   const selectedRun = $derived(inspectorBody ?? selectedSummary);
+  // A RUNNING node's detail_version bumps per log line: refetch its body at
+  // most ~1/s (first read of a newly selected node is immediate), and abort a
+  // superseded read instead of letting it hold a connection (backlog B6 /
+  // SD-12). The previous body stays shown until the new one lands.
+  let inspectorFor = '';
   $effect(() => {
     const id = run?.id, node = selectedSummary;
-    inspectorBody = null;
+    const target = id && node ? `${id}\0${node.node_id}` : '';
+    if (target !== inspectorFor) {
+      inspectorFor = target;
+      inspectorBody = null;
+    }
     if (!id || !node?.detail_version) return;
     const expected = node.detail_version;
-    let active = true;
-    void workflowNodeDetail(id,node.node_id).then(result => {
-      if (active && result.detail_version === expected) inspectorBody = result.body;
-    }).catch(() => {});
-    return () => {active = false;};
+    const ctl = new AbortController();
+    // untrack: reading the body must not re-run this effect when it lands.
+    const delay = untrack(() => inspectorBody) && node.status === 'running' ? 1000 : 0;
+    const timer = setTimeout(() => {
+      void workflowNodeDetail(id, node.node_id, ctl.signal).then(result => {
+        if (!ctl.signal.aborted && result.detail_version === expected) inspectorBody = result.body;
+      }).catch(() => {});
+    }, delay);
+    return () => { clearTimeout(timer); ctl.abort(); };
   });
   const instructionsDirty = $derived(wfInstructions !== (current?.instructions ?? ''));
 
@@ -210,8 +225,9 @@
     if (!cur) return;
     if (cur.status !== 'pending' && cur.status !== 'running') return;
     const id = cur.id;
-    const iv = setInterval(() => void refetchRun(id), 2500);
-    return () => clearInterval(iv);
+    // Shared poll chain: no overlapping refetch, paused while hidden.
+    const p = pollWhileVisible(() => refetchRun(id), { ms: 2500, immediate: false });
+    return () => p.stop();
   });
 
   // ── final-output panel ──────────────────────────────────────────────────
@@ -1009,32 +1025,12 @@
       // Side dock: drag the inspector's LEFT edge — leftward widens it.
       const startX = e.clientX;
       const startW = ui.wfInspSideWidth;
-      const onMove = (ev: MouseEvent) => ui.setWfInspSideWidth(startW + (startX - ev.clientX));
-      const onUp = () => {
-        window.removeEventListener('mousemove', onMove);
-        window.removeEventListener('mouseup', onUp);
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-      };
-      window.addEventListener('mousemove', onMove);
-      window.addEventListener('mouseup', onUp);
-      document.body.style.cursor = 'col-resize';
-      document.body.style.userSelect = 'none';
+      startMouseDrag(e, { onMove: (ev) => ui.setWfInspSideWidth(startW + (startX - ev.clientX)) });
       return;
     }
     const startY = e.clientY;
     const startH = ui.runDetailHeight;
-    const onMove = (ev: MouseEvent) => ui.setRunDetailHeight(startH + (startY - ev.clientY));
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    document.body.style.cursor = 'row-resize';
-    document.body.style.userSelect = 'none';
+    startMouseDrag(e, { cursor: 'row-resize', onMove: (ev) => ui.setRunDetailHeight(startH + (startY - ev.clientY)) });
   }
 
   // Left panel (Workflows list + Running) resize: drag its right edge (anchored
@@ -1043,17 +1039,7 @@
     e.preventDefault();
     const startX = e.clientX;
     const startW = ui.wfSideWidth;
-    const onMove = (ev: MouseEvent) => ui.setWfSideWidth(startW + (ev.clientX - startX));
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
+    startMouseDrag(e, { onMove: (ev) => ui.setWfSideWidth(startW + (ev.clientX - startX)) });
   }
 
   // Short run id + per-workflow ordinal, so two concurrent runs of the SAME
@@ -1123,17 +1109,7 @@
     e.preventDefault();
     const startX = e.clientX;
     const startW = ui.wfCtxWidth;
-    const onMove = (ev: MouseEvent) => ui.setWfCtxWidth(startW + (startX - ev.clientX));
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
+    startMouseDrag(e, { onMove: (ev) => ui.setWfCtxWidth(startW + (startX - ev.clientX)) });
   }
 
   // Runs popover load state: a failed load says so (with Retry) instead of

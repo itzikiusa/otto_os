@@ -4,6 +4,7 @@ import { untrack } from 'svelte';
 import { accessApi } from '../api/access';
 import { getToken } from '../api/client';
 import { auth } from './auth.svelte';
+import { mapLimit, pollWhileVisible } from '../poll';
 import type { Capability, EffectiveAccess, Feature, ResourceKind } from '../api/types';
 
 type Entry = {
@@ -100,19 +101,20 @@ class ResourceAccessStore {
     this.loading.clear();
     this.notify({ type: 'reset', identity });
   }
+  /** Re-check every cached decision, at most 2 requests at a time: the cache
+   *  holds one entry per resource ever shown (every connection row), and an
+   *  unbounded fan-out took every webview socket each 15 s tick. */
   async refresh() {
     const entries = Object.values(this.entries);
-    await Promise.allSettled(entries.map((e) => this.load(e.kind, e.id, e.child, true)));
+    await mapLimit(entries, 2, (e) => this.load(e.kind, e.id, e.child, true).catch(() => {}));
   }
 }
 export const resourceAccess = new ResourceAccessStore();
 if (typeof window !== 'undefined') {
-  window.setInterval(() => {
-    if (!document.hidden) void resourceAccess.refresh();
-  }, 15000);
-  window.addEventListener('focus', () => {
-    void resourceAccess.refresh();
-  });
+  // Shared poll chain: a slow refresh never overlaps the next, nothing runs
+  // while the window is hidden (one catch-up refresh on return), jittered.
+  const refresher = pollWhileVisible(() => resourceAccess.refresh(), { ms: 15_000, immediate: false });
+  window.addEventListener('focus', () => refresher.now());
   window.addEventListener('otto:auth-changed', () => resourceAccess.invalidate(true));
   window.addEventListener('storage', (event) => {
     if (event.key === 'otto_token') resourceAccess.invalidate(true);

@@ -282,6 +282,27 @@ function dropLead(lines: string[], lead: string): string[] {
   return out;
 }
 
+/** Memo for {@link parseSummaryCached}, keyed by the exact summary text. */
+const PARSE_MEMO = new Map<string, ParsedSummary>();
+const PARSE_MEMO_MAX = 1000;
+
+/** {@link parseSummary}, memoised by text: the Insights page re-derives every
+ *  report's parse whenever its list is reassigned (a 3 s run poll); an
+ *  unchanged summary now returns the SAME object, so nothing downstream
+ *  re-renders (backlog B6 / SE-17). Treat the result as read-only. */
+export function parseSummaryCached(md: string | null | undefined): ParsedSummary {
+  const key = md ?? '';
+  const hit = PARSE_MEMO.get(key);
+  if (hit) return hit;
+  const parsed = parseSummary(key);
+  if (PARSE_MEMO.size >= PARSE_MEMO_MAX) {
+    const oldest = PARSE_MEMO.keys().next().value;
+    if (oldest !== undefined) PARSE_MEMO.delete(oldest);
+  }
+  PARSE_MEMO.set(key, parsed);
+  return parsed;
+}
+
 /** Parse one report's summary markdown. Never throws. */
 export function parseSummary(md: string | null | undefined): ParsedSummary {
   const src = (md ?? '').replace(/\r\n?/g, '\n');

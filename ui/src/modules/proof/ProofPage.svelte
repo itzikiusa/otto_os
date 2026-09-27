@@ -86,6 +86,9 @@
     void proof.loadSummary(id);
   });
 
+  // Event-driven list/detail refreshes run only while this page is mounted.
+  $effect(() => proof.watch());
+
   const detail = $derived(proof.detail);
 
   // Never open onto an empty "select a pack" pane when packs exist: restore the
@@ -202,9 +205,14 @@
     for (const url of Object.values(mediaUrls)) URL.revokeObjectURL(url);
   }));
 
+  // Media is fetched LAZILY (backlog B6 / SE-16): a screenshot when its
+  // placeholder scrolls into view, a video only on "Load video" — opening a
+  // pack used to pull every blob (≤25 MiB each) up front.
+  let wantedMedia = new Set<string>();
+  const mediaInflight = new Set<string>();
   function syncMedia(wanted: string[]): void {
     const set = new Set(wanted);
-    for (const id of wanted) if (!(id in mediaUrls)) void fetchMedia(id);
+    wantedMedia = set;
     const stale = Object.keys(mediaUrls).some((id) => !set.has(id));
     if (stale) {
       const next: Record<string, string> = {};
@@ -217,13 +225,39 @@
   }
 
   async function fetchMedia(id: string): Promise<void> {
-    if (id in mediaUrls) return;
+    if (id in mediaUrls || mediaInflight.has(id)) return;
+    mediaInflight.add(id);
     delete mediaErrors[id];
     try {
-      mediaUrls[id] = await artifactBlobUrl(id);
+      const url = await artifactBlobUrl(id);
+      // The pack was switched (or the artifact removed) while it loaded:
+      // revoke instead of leaking the object URL until the page unmounts.
+      if (!wantedMedia.has(id)) URL.revokeObjectURL(url);
+      else mediaUrls[id] = url;
     } catch (e) {
-      mediaErrors[id] = loadErrorText(e);
+      if (wantedMedia.has(id)) mediaErrors[id] = loadErrorText(e);
+    } finally {
+      mediaInflight.delete(id);
     }
+  }
+
+  /** Svelte action: run `load` once the node is (nearly) on screen. */
+  function whenVisible(node: HTMLElement, load: () => void) {
+    if (typeof IntersectionObserver === 'undefined') {
+      load();
+      return {};
+    }
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          io.disconnect();
+          load();
+        }
+      },
+      { rootMargin: '200px' },
+    );
+    io.observe(node);
+    return { destroy: () => io.disconnect() };
   }
 
   // ---- Add-artifact modal --------------------------------------------------
@@ -822,7 +856,7 @@
                   {#if MEDIA_KINDS.has(a.kind)}
                     {#if mediaUrls[a.id]}
                       {#if a.kind === 'video'}
-                        <video class="art-media" controls src={mediaUrls[a.id]}><track kind="captions" /></video>
+                        <video class="art-media" controls preload="none" src={mediaUrls[a.id]}><track kind="captions" /></video>
                       {:else}
                         <img class="art-media" src={mediaUrls[a.id]} alt={a.title} />
                       {/if}
@@ -832,8 +866,12 @@
                         <p class="dim">{mediaErrors[a.id]}</p>
                         <button class="btn small" aria-label="Retry media" onclick={() => void fetchMedia(a.id)}>Retry</button>
                       </div>
+                    {:else if a.kind === 'video'}
+                      <button class="btn small media-load" onclick={() => void fetchMedia(a.id)}>
+                        <Icon name="play" size={12} /> Load video
+                      </button>
                     {:else}
-                      <p class="dim media-loading">Loading media…</p>
+                      <p class="dim media-loading" use:whenVisible={() => void fetchMedia(a.id)}>Loading media…</p>
                     {/if}
                   {/if}
                   {#if a.kind === 'pr_check'}
@@ -1468,6 +1506,9 @@
   .media-loading {
     margin: 8px 0 0;
     font-size: var(--fs-xs);
+  }
+  .media-load {
+    margin-block-start: 8px;
   }
   .modal-hint {
     font-size: var(--fs-s);

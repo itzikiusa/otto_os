@@ -145,3 +145,33 @@ test('transient busy 409 keeps the draft, raises no conflict banner and retries'
   await new Promise((r) => setTimeout(r, 700));
   assert.equal(calls, 2); assert.equal(v.dirty, false); assert.equal(v.conflict, false);
 });
+
+test('an equal status poll keeps the status object (graph effects key off it)', async () => {
+  const s = {id: 1, generation: '7', scan_state: 'idle', last_scan_at: 'x', notes: 1, links: 0, unresolved: 0, tags: 0, attachments: 0};
+  const v = setup({vaultStatus: async () => ({...s})});
+  v.dirty = false; v.status = s;
+  await v.refreshStatus();
+  assert.equal(v.status, s, 'identical fields must not replace the object');
+});
+
+test('own save skips the backlinks reload and the note re-read when links are unchanged', async () => {
+  let backlinks = 0, reads = 0;
+  const v = setup({
+    vaultBacklinks: async () => {backlinks += 1; return [];},
+    vaultNote: async (_ws: string, _id: number, p: string) => {reads += 1; return note(p);},
+  });
+  v.status = {generation: '1', scan_state: 'idle', last_scan_at: 'x', notes: 1, links: 0, unresolved: 0};
+  assert.equal(await v.saveNow(), true);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(backlinks, 0, 'saving X cannot change X\'s incoming links');
+  assert.equal(reads, 0, 'the PUT already returned the meta');
+});
+
+test('own save re-reads the note once when its link set changed', async () => {
+  let reads = 0;
+  const v = setup({vaultNote: async (_ws: string, _id: number, p: string) => {reads += 1; return note(p);}});
+  v.draft = 'now links [[b]]';
+  assert.equal(await v.saveNow(), true);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(reads, 1);
+});

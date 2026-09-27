@@ -39,7 +39,7 @@
     indexPathFrom,
     itemStatus,
     parseIndex,
-    parseSummary,
+    parseSummaryCached,
     periodKey,
     reportMetrics,
     siblingPath,
@@ -157,7 +157,7 @@
 
   const parsedByKey = $derived.by(() => {
     const m = new Map<string, ParsedSummary>();
-    for (const r of reports) m.set(keyOf(r), parseSummary(fullMd[keyOf(r)] ?? r.summary));
+    for (const r of reports) m.set(keyOf(r), parseSummaryCached(fullMd[keyOf(r)] ?? r.summary));
     return m;
   });
   const seriesByKey = $derived(new Map(index.series.map((s) => [s.periodKey, s])));
@@ -432,6 +432,7 @@
     }
   }
 
+  let lastReportsSig = '';
   function schedulePoll(): void {
     if (disposed) return;
     if (pollCount >= POLL_MAX || !pollRunId) {
@@ -443,11 +444,22 @@
       return;
     }
     pollTimer = setTimeout(async () => {
+      // Hidden window: wait (the tick isn't counted against POLL_MAX).
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        schedulePoll();
+        return;
+      }
       pollCount += 1;
       try {
         const next = await insightsApi.listReports();
         if (disposed) return;
-        reports = next;
+        // Assign only a changed list: an identical tick used to re-parse and
+        // re-render every row and the open report (backlog B6 / SE-17).
+        const sig = JSON.stringify(next);
+        if (sig !== lastReportsSig) {
+          lastReportsSig = sig;
+          reports = next;
+        }
       } catch {
         /* keep polling; the next tick retries */
       }
@@ -670,7 +682,7 @@
           {/if}
           <section class="detail-pane" class:hide-phone={viewport.isPhone && !phoneDetail && !detailOnly}>
             {#if selected}
-              {@const parsed = parsedByKey.get(keyOf(selected)) ?? parseSummary(selected.summary)}
+              {@const parsed = parsedByKey.get(keyOf(selected)) ?? parseSummaryCached(selected.summary)}
               {@const prev = previousOf(selected)}
               <ReportDetail
                 report={selected}

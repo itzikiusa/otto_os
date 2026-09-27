@@ -592,9 +592,36 @@
     tag_off: [0], tag_ids: [], tag_labels: [], flags: [], edges: [], truncated: false,
   };
   let reqSeq = 0;
+  // A PRIMITIVE change token: effects reading it re-run only when its value
+  // changes — not whenever the status poll hands back an equal object.
+  const gen = $derived(vault.status?.generation ?? vault.status?.last_scan_at ?? null);
+  /** FNV-1a over everything `ingest` reads: an identical refetch (an edit that
+   *  moved no link, title, tag or type) must not restart the layout. */
+  function payloadSig(p: VaultGraphPayload): string {
+    let h = 0x811c9dc5;
+    const mix = (x: number): void => {
+      h = Math.imul(h ^ x, 0x01000193);
+    };
+    const str = (t: string | null | undefined): void => {
+      const u = t ?? '';
+      for (let i = 0; i < u.length; i++) mix(u.charCodeAt(i));
+      mix(0x1f);
+    };
+    for (const a of [p.flags, p.types, p.services, p.tag_off, p.tag_ids, p.edges]) {
+      mix(a.length);
+      for (let i = 0; i < a.length; i++) mix(a[i]);
+    }
+    for (const a of [p.paths, p.titles, p.type_labels, p.service_labels, p.tag_labels]) {
+      mix(a.length);
+      for (const t of a) str(t);
+    }
+    mix(p.truncated ? 1 : 0);
+    return `${p.paths.length}:${p.edges.length}:${h >>> 0}`;
+  }
+  let lastPayloadSig = '';
   $effect(() => {
     const v = vault.current;
-    void (vault.status?.generation ?? vault.status?.last_scan_at); // content/link changes only
+    void gen; // content/link changes only
     const wsId = vault.wsId;
     const path = local ? vault.notePath : null;
     const q: VaultGraphQuery = {
@@ -612,6 +639,7 @@
     }
     if (!v || !wsId || (local && !path)) {
       reqSeq++;
+      lastPayloadSig = '';
       ingest(EMPTY_PAYLOAD);
       return;
     }
@@ -620,7 +648,11 @@
     errorMsg = '';
     vaultGraph(wsId, v.id, q)
       .then((p) => {
-        if (seq === reqSeq) ingest(p);
+        if (seq !== reqSeq) return;
+        const sig = payloadSig(p);
+        if (sig === lastPayloadSig) return; // same graph: keep layout, pins, camera
+        lastPayloadSig = sig;
+        ingest(p);
       })
       .catch((e: unknown) => {
         if (seq === reqSeq) errorMsg = e instanceof Error ? e.message : String(e);
@@ -708,7 +740,7 @@
   $effect(() => {
     const q = anchorQuery.trim();
     const v = vault.current;
-    void (vault.status?.generation ?? vault.status?.last_scan_at); // content/link changes only
+    void gen; // content/link changes only
     const wsId = vault.wsId;
     if (!q || !v || !wsId) {
       anchorHits = [];

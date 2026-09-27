@@ -9,6 +9,7 @@ import {
   parseActionItem,
   parseIndex,
   parseSummary,
+  parseSummaryCached,
   periodKey,
   reportMetrics,
   siblingPath,
@@ -199,4 +200,13 @@ test('period keys and sibling artifact paths', () => {
   assert.equal(indexPathFrom(html), '/data/insights/index.json');
   assert.equal(siblingPath('/x/other.html', 'summary'), null);
   assert.equal(indexPathFrom('report.html'), null);
+});
+
+test('parseSummaryCached returns the same object for the same text', () => {
+  const a = parseSummaryCached(DAILY);
+  const b = parseSummaryCached(DAILY);
+  assert.equal(a, b);
+  assert.deepEqual(a, parseSummary(DAILY));
+  assert.notEqual(parseSummaryCached(DAILY + '\n'), a);
+  assert.equal(parseSummaryCached(null), parseSummaryCached(''));
 });

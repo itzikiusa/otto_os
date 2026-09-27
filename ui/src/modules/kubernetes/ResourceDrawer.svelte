@@ -1,3 +1,9 @@
+<script lang="ts" module>
+  /** When the previous drawer instance mounted. The workspace re-keys the
+   *  drawer per target, so a mount right after another one is j/k navigation. */
+  let lastMountAt = 0;
+</script>
+
 <script lang="ts">
   import { dialogFocus } from '../../lib/dialogFocus';
   import { ui } from '../../lib/stores/ui.svelte';
@@ -20,7 +26,7 @@
   import type { K8sContainer, K8sResourceDetail, K8sResourceKind, K8sRow } from '../../lib/api/types';
   import type { ActionDef } from './actions';
   import { actionsFor } from './actions';
-  import { formatAge, formatBytes, formatMillicores, healthClass, kindDef } from './k8s-util';
+  import { formatAge, formatBytes, formatMillicores, healthClass, kindDef, podContainers } from './k8s-util';
   import LogsView from './LogsView.svelte';
   import ExecView from './ExecView.svelte';
   import MetricsView from './MetricsView.svelte';
@@ -100,7 +106,9 @@
   let detail = $state<K8sResourceDetail | null>(null);
   let detailError = $state('');
   let detailLoading = $state(false);
-  let containers: K8sContainer[] = $state([]);
+  // Derived from the pod manifest `/resource` already returns (was a second
+  // `/containers` call → another `kubectl get pod -o json` per open).
+  const containers = $derived<K8sContainer[]>(isPod && detail ? podContainers(detail.manifest) : []);
 
   async function load(): Promise<void> {
     const ac = new AbortController();
@@ -109,12 +117,11 @@
     detail = null;
     detailError = '';
     detailLoading = true;
-    containers = [];
     const cid = clusterId;
     const k = kind;
     const n = ns;
     const nm = name;
-    const detailP = k8sApi
+    await k8sApi
       .resource(cid, k, n, nm, sig)
       .then((d) => {
         if (!sig.aborted) detail = d;
@@ -125,17 +132,6 @@
       .finally(() => {
         if (!sig.aborted) detailLoading = false;
       });
-    const ctrP = isPod
-      ? k8sApi
-          .containers(cid, n, nm, sig)
-          .then((r) => {
-            if (!sig.aborted) containers = r.containers;
-          })
-          .catch(() => {
-            /* logs/exec fall back to kubectl's default container */
-          })
-      : Promise.resolve();
-    await Promise.all([detailP, ctrP]);
   }
 
   function retry(): void {
@@ -143,16 +139,35 @@
     void load();
   }
 
+  // Rapid target changes (j/k with the drawer open — ~30 Hz on key repeat,
+  // each re-keying this drawer) settle for 150 ms before the get + describe +
+  // events kubectl calls go out; the overview renders from the row meanwhile.
+  // A deliberate open (nothing mounted just before) loads at once.
   $effect(() => {
     void clusterId;
     void kind;
     void ns;
     void name;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     untrack(() => {
       current?.abort();
-      void load();
+      current = null;
+      const now = performance.now();
+      const rapid = now - lastMountAt < 400;
+      lastMountAt = now;
+      if (!rapid) {
+        void load();
+        return;
+      }
+      detail = null;
+      detailError = '';
+      detailLoading = true;
+      timer = setTimeout(() => void load(), 150);
     });
-    return () => current?.abort();
+    return () => {
+      if (timer) clearTimeout(timer);
+      current?.abort();
+    };
   });
 
   const yaml = $derived.by(() => {

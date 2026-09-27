@@ -25,8 +25,9 @@
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
   import { activity } from '../../../lib/stores/activity.svelte';
   import { toasts } from '../../../lib/toast.svelte';
-  import { groupTurns, activeQueued, fmtCost, fmtDuration, fmtTokens } from './format';
-  import type { SessionStatus, TranscriptUnavailableReason } from '../../../lib/api/types';
+  import { stableGroupTurns, activeQueued, fmtCost, fmtDuration, fmtTokens } from './format';
+  import type { SessionStatus, TranscriptUnavailableReason, Turn } from '../../../lib/api/types';
+  import type { RenderItem } from './format';
   import { CONV_CTX, type ConvContext } from './context';
 
   let { sessionId, transcriptPath, workspaceId, readonly = false }: ConversationViewProps = $props();
@@ -48,7 +49,11 @@
     ctx.readonly = readonly || !sessionId;
     ctx.provider = conv.transcript?.provider ?? 'claude';
     // "Queued: …" chips survive only until a later dequeue/remove of that text.
-    ctx.queuedLive = activeQueued(conv.turns).map((q) => q.text);
+    // Compare before assigning: a fresh array on every delta would re-run
+    // every mounted TurnItem's `visibleBlocks`.
+    const queued = activeQueued(conv.turns).map((q) => q.text);
+    const prevQueued = untrack(() => ctx.queuedLive);
+    if (queued.length !== prevQueued.length || queued.some((q, i) => q !== prevQueued[i])) ctx.queuedLive = queued;
   });
 
   // The lease owns initial/reconnect reads and releases them on source change.
@@ -79,7 +84,21 @@
   );
   const winEnd = $derived(Math.min(conv.turns.length, winStart + MAX_MOUNTED));
   const hasLater = $derived(winEnd < conv.turns.length);
-  const items = $derived(groupTurns(conv.turns.slice(winStart, winEnd)));
+  // Stable items: unchanged responses keep their object across live deltas, so
+  // only the growing response re-renders (format.ts `stableGroupTurns`).
+  const itemCache = new Map<string, RenderItem>();
+  const items = $derived(stableGroupTurns(conv.turns.slice(winStart, winEnd), itemCache));
+  // The store drops the oldest turns of a very long live chat (TURN_CAP); keep
+  // a pinned window on the same turns when the head shifts under it.
+  let droppedSeen = { key: '', n: 0 };
+  $effect(() => {
+    const key = conv.key;
+    const n = conv.headDropped;
+    const prev = untrack(() => droppedSeen);
+    droppedSeen = { key, n };
+    if (prev.key !== key || n <= prev.n) return;
+    if (!untrack(() => followTail)) manualStart = Math.max(0, untrack(() => manualStart) - (n - prev.n));
+  });
   function loadLater(): void {
     const next = manualStart + STEP;
     if (next + MAX_MOUNTED >= conv.turns.length) followTail = true;
@@ -149,22 +168,44 @@
   // ---- search within the loaded conversation ---------------------------------
   let searchOpen = $state(false);
   let query = $state('');
+  // What the hits are computed against: `query` settled for SEARCH_DEBOUNCE_MS
+  // (Enter flushes it), so a keystroke doesn't rescan megabytes of tool text.
+  let searchQ = $state('');
+  const SEARCH_DEBOUNCE_MS = 150;
+  $effect(() => {
+    const q = query;
+    if (q === untrack(() => searchQ)) return;
+    if (!q) {
+      searchQ = '';
+      return;
+    }
+    const id = setTimeout(() => (searchQ = q), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(id);
+  });
   let searchEl = $state<HTMLInputElement | null>(null);
   let hitIdx = $state(0);
-  function turnText(turn: (typeof conv.turns)[number]): string {
+  // Lowercased search text per Turn object. Turns are replaced (never mutated)
+  // when they change, so an unchanged turn is lowercased once per session.
+  const turnTextCache = new WeakMap<Turn, string>();
+  function turnText(turn: Turn): string {
+    const hit = turnTextCache.get(turn);
+    if (hit !== undefined) return hit;
     const parts: string[] = [];
     for (const b of turn.blocks) {
       if (b.kind === 'text') parts.push(b.md);
       else if (b.kind === 'tool_call') parts.push(b.title, b.name, b.result?.text ?? '');
       else if (b.kind === 'queued') parts.push(b.text);
     }
-    return parts.join('\n').toLowerCase();
+    const text = parts.join('\n').toLowerCase();
+    turnTextCache.set(turn, text);
+    return text;
   }
   const hits = $derived.by(() => {
-    const q = query.trim().toLowerCase();
+    const q = searchQ.trim().toLowerCase();
     if (!q) return [] as string[];
     return conv.turns.filter((turn) => turnText(turn).includes(q)).map((turn) => turn.id);
   });
+  const hitSet = $derived(new Set(hits));
   $effect(() => {
     void hits.length;
     hitIdx = 0;
@@ -199,6 +240,12 @@
       closeSearch();
     } else if (e.key === 'Enter') {
       e.preventDefault();
+      if (searchQ !== query) {
+        // Typed faster than the debounce: search now, land on the first hit.
+        searchQ = query;
+        jumpTo(0);
+        return;
+      }
       jumpTo(hitIdx + (e.shiftKey ? -1 : 1));
     }
   }
@@ -343,7 +390,7 @@
           aria-label="Search this conversation"
           onkeydown={onSearchKey}
         />
-        <span class="search-n dim" data-search-hits={hits.length}>{hits.length ? `${hitIdx + 1}/${hits.length}` : query ? '0' : ''}</span>
+        <span class="search-n dim" data-search-hits={hits.length}>{hits.length ? `${hitIdx + 1}/${hits.length}` : query && searchQ === query ? '0' : ''}</span>
         <button class="icon-btn" title="Previous match (⇧⏎)" aria-label="Previous match" disabled={!hits.length} onclick={() => jumpTo(hitIdx - 1)}><Icon name="chevronUp" size={11} /></button>
         <button class="icon-btn" title="Next match (⏎)" aria-label="Next match" disabled={!hits.length} onclick={() => jumpTo(hitIdx + 1)}><Icon name="chevronDown" size={11} /></button>
         <button class="icon-btn" title="Close (Esc)" aria-label="Close search" onclick={closeSearch}><Icon name="x" size={11} /></button>
@@ -412,7 +459,7 @@
         <TurnItem
           {item}
           live={live && !hasLater && i === items.length - 1 && item.role === 'assistant'}
-          hit={!!query && hits.includes(item.id)}
+          hit={!!searchQ && hitSet.has(item.id)}
           current={item.id === currentHit}
         />
       {/each}

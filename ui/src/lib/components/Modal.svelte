@@ -25,17 +25,34 @@
       else node.removeAttribute('tabindex');
     };
     const resize = new ResizeObserver(update);
+    // Children are observed too: the body's own box is capped, so content
+    // growth shows up only as a child resize. Re-observe only when the child
+    // list actually changed, and at most once per frame — streaming content
+    // (logs, progress) mutates many times a frame.
+    let observed: Element[] = [];
     const observeChildren = () => {
-      resize.disconnect();
-      resize.observe(node);
-      for (const child of node.children) resize.observe(child);
+      const kids = Array.from(node.children);
+      if (kids.length !== observed.length || kids.some((k, i) => k !== observed[i])) {
+        resize.disconnect();
+        resize.observe(node);
+        for (const child of kids) resize.observe(child);
+        observed = kids;
+      }
       update();
     };
-    const content = new MutationObserver(observeChildren);
+    let raf = 0;
+    const content = new MutationObserver(() => {
+      if (!raf) raf = requestAnimationFrame(() => ((raf = 0), observeChildren()));
+    });
     observeChildren();
     content.observe(node, { childList: true, subtree: true, characterData: true });
-    update();
-    return { destroy() { resize.disconnect(); content.disconnect(); } };
+    return {
+      destroy() {
+        if (raf) cancelAnimationFrame(raf);
+        resize.disconnect();
+        content.disconnect();
+      },
+    };
   }
   const FOCUSABLE =
     'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';

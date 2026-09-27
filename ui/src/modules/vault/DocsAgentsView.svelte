@@ -35,6 +35,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { DOCS_TEMPLATES } from './docsTemplates';
   import { vault } from './vault.svelte';
+  import { pollWhileVisible, type Poller } from '../../lib/poll';
 
   interface AgentRow {
     provider: string;
@@ -177,16 +178,17 @@
   }
 
   // -- run + polling ---------------------------------------------------------------
-  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  // lib/poll: one request in flight at a time, paused while hidden.
+  let poller: Poller | null = null;
 
   function stopPoll(): void {
-    if (pollTimer) clearInterval(pollTimer);
-    pollTimer = null;
+    poller?.stop();
+    poller = null;
   }
 
   function startPoll(): void {
     stopPoll();
-    pollTimer = setInterval(() => void poll(), 1500);
+    poller = pollWhileVisible(() => poll(), { ms: 1500, immediate: false });
   }
 
   async function poll(): Promise<void> {

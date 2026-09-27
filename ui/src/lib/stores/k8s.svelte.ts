@@ -101,11 +101,10 @@ export function nodeToRow(n: K8sNode): K8sRow {
   };
 }
 
-/** Case-insensitive substring match over the columns a user would scan
- *  (name, namespace, status, node, ip, extra values, images, labels). */
-export function rowMatches(r: K8sRow, q: string): boolean {
-  if (!q) return true;
-  const hay = [
+/** The lowercased text a filter matches against: the columns a user would
+ *  scan (name, namespace, status, node, ip, extra values, images, labels). */
+export function rowHaystack(r: K8sRow): string {
+  return [
     r.name,
     r.namespace,
     r.status,
@@ -117,7 +116,12 @@ export function rowMatches(r: K8sRow, q: string): boolean {
   ]
     .join('\n')
     .toLowerCase();
-  return hay.includes(q);
+}
+
+/** Case-insensitive substring match over [`rowHaystack`]. */
+export function rowMatches(r: K8sRow, q: string): boolean {
+  if (!q) return true;
+  return rowHaystack(r).includes(q);
 }
 
 class K8sStore {
@@ -197,7 +201,9 @@ class K8sStore {
   autoRefresh = $state(lsGet(AUTO_KEY) !== '0');
 
   // --- resource cache -----------------------------------------------------------
-  rows: K8sRow[] = $state([]);
+  /** Raw (not deep-proxied), replaced wholesale on every load: 5k pods behind
+   *  a deep proxy made each filter keystroke ~40 ms. */
+  rows: K8sRow[] = $state.raw([]);
   /** The (cluster, kind, ns) the cached rows belong to — the table shows a
    *  skeleton, not stale rows, when the selection moved on. */
   rowsKey = $state('');
@@ -218,10 +224,15 @@ class K8sStore {
   );
   readonly currentKey = $derived(`${this.clusterId ?? ''}|${this.kind}|${this.namespace}`);
   /** Rows for the CURRENT selection only, narrowed by the free-text filter. */
+  /** Lowercased filter haystack per row — built once per load, not per row
+   *  per keystroke (and per 10 s refresh while a filter is active). */
+  private readonly hay = $derived(this.rows.map(rowHaystack));
   readonly filteredRows = $derived.by(() => {
     if (this.rowsKey !== this.currentKey) return [];
     const q = this.filter.trim().toLowerCase();
-    return q ? this.rows.filter((r) => rowMatches(r, q)) : this.rows;
+    if (!q) return this.rows;
+    const hay = this.hay;
+    return this.rows.filter((_, i) => hay[i].includes(q));
   });
   readonly selectedRow = $derived(
     this.selected

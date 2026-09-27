@@ -3,6 +3,7 @@
 // across every workspace).
 
 import { api } from './client';
+import { pollWhileVisible, type Poller } from '../poll';
 import { toasts } from '../toast.svelte';
 import { loadErrorText } from '../loadError';
 import { exportCsv, downloadJson } from '../components/exporters';
@@ -182,7 +183,9 @@ const METRICS_REFRESH_THROTTLE_MS = 10_000;
 class UsageStore {
   status: UsageStatus | null = $state(null);
   summary: UsageSummary | null = $state(null);
-  metrics: MetricPoint[] = $state([]);
+  /** Server payload, replaced wholesale on every fetch — `$state.raw`, no
+   *  deep proxy over 180 points (X2). */
+  metrics: MetricPoint[] = $state.raw([]);
   /** Selected look-back window for usage rollups, in days. */
   days = $state(30);
   /** When true, show only sessions that ran inside Otto (exclude the user's own
@@ -206,7 +209,7 @@ class UsageStore {
   // --- Auto-refresh (opt-in) -----------------------------------------------
   /** Whether the dashboard should auto-refresh the full summary on a timer. */
   autoRefresh = $state(false);
-  private autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  private autoRefreshPoll: Poller | null = null;
   /** Default auto-refresh cadence in ms (mirrors the Brokers panel pattern). */
   static readonly AUTO_REFRESH_MS = 60_000;
 
@@ -218,6 +221,21 @@ class UsageStore {
   // --- Metrics-tick throttle -----------------------------------------------
   private lastMetricsFetch = 0;
   private metricsFetching = false;
+  /** Mounted readers of `metrics` (the Usage page). The `usage_metrics_tick`
+   *  refetch runs only while one is mounted — it used to refetch 180 minutes of
+   *  points every minute for the app's lifetime after one visit (SF-10). */
+  private metricsSubscribers = 0;
+
+  /** Register a mounted reader of `metrics`; call the returned fn on unmount. */
+  watchMetrics(): () => void {
+    this.metricsSubscribers += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.metricsSubscribers = Math.max(0, this.metricsSubscribers - 1);
+    };
+  }
 
   /** Query string shared by every summary fetch (window + scope). */
   private summaryQuery(): string {
@@ -320,16 +338,14 @@ class UsageStore {
   setAutoRefresh(on: boolean): void {
     this.autoRefresh = on;
     if (on) {
-      if (!this.autoRefreshTimer) {
-        this.autoRefreshTimer = setInterval(() => {
-          void this.loadAll();
-        }, UsageStore.AUTO_REFRESH_MS);
-      }
+      // Shared poll chain: no overlapping loadAll, paused while hidden.
+      this.autoRefreshPoll ??= pollWhileVisible(() => this.loadAll(), {
+        ms: UsageStore.AUTO_REFRESH_MS,
+        immediate: false,
+      });
     } else {
-      if (this.autoRefreshTimer) {
-        clearInterval(this.autoRefreshTimer);
-        this.autoRefreshTimer = null;
-      }
+      this.autoRefreshPoll?.stop();
+      this.autoRefreshPoll = null;
     }
   }
 
@@ -340,12 +356,14 @@ class UsageStore {
    *  ticks doesn't hammer the API. Kept as a capped fallback even if ticks stop. */
   applyMetricsTick(): void {
     if (!this.status?.available) return;
+    if (this.metricsSubscribers === 0) return;
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
     const now = Date.now();
     if (now - this.lastMetricsFetch < METRICS_REFRESH_THROTTLE_MS) return;
     if (this.metricsFetching) return;
     this.metricsFetching = true;
     this.lastMetricsFetch = now;
-    api
+    api.bg
       .get<MetricPoint[]>('/usage/metrics?minutes=180')
       .then((m) => {
         this.metrics = m;

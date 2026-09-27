@@ -15,6 +15,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { mcpCpApi } from '../../lib/api/mcp';
+  import { pollWhileVisible } from '../../lib/poll';
   import { toasts } from '../../lib/toast.svelte';
   import type { McpApproval } from '../../lib/api/types';
   import McpPill from './McpPill.svelte';
@@ -38,32 +39,35 @@
       ? 'You raised this request yourself — another admin has to decide it'
       : 'You don’t have approve access to this server';
 
-  async function load(): Promise<void> {
+  let loadSeq = 0;
+  async function load(): Promise<boolean> {
+    const seq = ++loadSeq;
     loading = true;
     try {
-      approvals = await mcpCpApi.cpApprovals(showAll ? undefined : 'pending');
+      const list = await mcpCpApi.cpApprovals(showAll ? undefined : 'pending');
+      if (seq !== loadSeq) return true; // a newer load (filter flip) owns the view
+      approvals = list;
       loadError = null;
+      return true;
     } catch (e) {
-      loadError = loadErrorText(e);
+      if (seq === loadSeq) loadError = loadErrorText(e);
+      return false;
     } finally {
-      loading = false;
+      if (seq === loadSeq) loading = false;
     }
   }
 
-  // Poll every 5s, and immediately whenever the tab/window regains focus.
+  // Poll every 5 s through the shared chain (no overlapping loads, paused
+  // while the window is hidden with a catch-up load on return, backoff while
+  // failing), and immediately whenever the window regains focus.
   $effect(() => {
     void showAll; // re-load when the filter flips
-    void load();
-    const t = setInterval(() => void load(), 5000);
-    const onVis = (): void => {
-      if (document.visibilityState === 'visible') void load();
-    };
-    document.addEventListener('visibilitychange', onVis);
-    window.addEventListener('focus', onVis);
+    const p = pollWhileVisible(() => load(), { ms: 5000 });
+    const onFocus = (): void => p.now();
+    window.addEventListener('focus', onFocus);
     return () => {
-      clearInterval(t);
-      document.removeEventListener('visibilitychange', onVis);
-      window.removeEventListener('focus', onVis);
+      p.stop();
+      window.removeEventListener('focus', onFocus);
     };
   });
 

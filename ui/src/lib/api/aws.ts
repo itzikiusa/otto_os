@@ -31,6 +31,7 @@ import type {
   RdsInstance,
   RdsInstanceDetail,
   S3Bucket,
+  S3DownloadJob,
   S3ListObjectsResp,
   S3ObjectHead,
   S3PreviewResp,
@@ -106,6 +107,17 @@ export const awsApi = {
   /** Handler-relative path of the streamed download (feed to `awsDownloadBlob`). */
   s3DownloadPath: (id: string, bucket: string, key: string) =>
     `${acct(id)}/s3/buckets/${encodeURIComponent(bucket)}/download${qs({ key })}`,
+  /** Large objects: the daemon writes the object into `localDir` (a directory
+   *  on the daemon host) — nothing is buffered in the webview. Poll the job. */
+  s3DownloadTo: (id: string, bucket: string, key: string, localDir: string) =>
+    api.post<S3DownloadJob>(`${acct(id)}/s3/buckets/${encodeURIComponent(bucket)}/download-to`, {
+      key,
+      local_dir: localDir,
+    }),
+  s3DownloadJob: (id: string, job: string, signal?: AbortSignal) =>
+    api.get<S3DownloadJob>(`${acct(id)}/s3/download-jobs/${encodeURIComponent(job)}`, signal),
+  s3DownloadCancel: (id: string, job: string) =>
+    api.post<S3DownloadJob>(`${acct(id)}/s3/download-jobs/${encodeURIComponent(job)}/cancel`, {}),
 
   // --- SQS ---
   sqsQueues: (id: string, prefix = '') =>

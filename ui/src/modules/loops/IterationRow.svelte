@@ -30,6 +30,24 @@
   // svelte-ignore state_referenced_locally
   let expanded = $state(open);
 
+  // The loop detail is a SUMMARY: only the newest iteration carries its plan /
+  // context bodies. Expanding an older one reads it in full (cached per
+  // idx+status in the store, so a finished iteration is fetched once).
+  const needsBodies = $derived(!iter.plan && !iter.context_out && !iter.context_in);
+  let bodyError = $state<string | null>(null);
+  $effect(() => {
+    if (!expanded || !needsBodies) return;
+    const it = iter;
+    if (loops.fullIteration(loopId, it)) return;
+    const ctl = new AbortController();
+    bodyError = null;
+    loops.loadIteration(loopId, it, ctl.signal).catch((e: unknown) => {
+      if (!ctl.signal.aborted) bodyError = e instanceof Error ? e.message : String(e);
+    });
+    return () => ctl.abort();
+  });
+  const bodies = $derived(needsBodies ? (loops.fullIteration(loopId, iter) ?? iter) : iter);
+
   function dotClass(status: string): string {
     switch (status) {
       case 'running':
@@ -74,10 +92,13 @@
 
   {#if expanded}
     <div class="body">
-      {#if iter.plan}
+      {#if bodyError}
+        <p class="fb" role="status">Couldn’t load this iteration’s plan: {bodyError}</p>
+      {/if}
+      {#if bodies.plan}
         <section>
           <h4>Plan</h4>
-          <pre class="text">{iter.plan}</pre>
+          <pre class="text">{bodies.plan}</pre>
         </section>
       {/if}
 
@@ -116,10 +137,10 @@
         </section>
       {/if}
 
-      {#if iter.context_out}
+      {#if bodies.context_out}
         <section>
           <h4>Context carried forward</h4>
-          <pre class="text dim">{iter.context_out}</pre>
+          <pre class="text dim">{bodies.context_out}</pre>
         </section>
       {/if}
     </div>

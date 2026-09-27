@@ -209,6 +209,30 @@
     }
   }
 
+  /**
+   * A live `content` event only ADDS versions at the head: fetch the newest
+   * few and prepend the unseen ones instead of re-listing the whole history.
+   * No overlap with what we hold (a gap, or nothing loaded yet) → full reload.
+   */
+  async function loadNewVersions(): Promise<void> {
+    if (versions.length === 0) return loadVersions();
+    const my = ++versionsSeq;
+    try {
+      const v = await api.listVersions(id, { limit: 10 });
+      if (my !== versionsSeq) return;
+      const have = new Set(versions.map((x) => x.id));
+      const fresh = v.filter((x) => !have.has(x.id));
+      if (fresh.length === v.length) return loadVersions();
+      if (fresh.length) versions = [...fresh, ...versions];
+      versionsError = null;
+    } catch {
+      if (my === versionsSeq) return loadVersions();
+    } finally {
+      // This bumped versionsSeq, so a superseded full load won't clear it.
+      if (my === versionsSeq) versionsLoading = false;
+    }
+  }
+
   async function loadLinks(): Promise<void> {
     const my = ++linksSeq;
     linksLoading = true;
@@ -281,7 +305,7 @@
             continue;
           }
           if (ev.change === 'content' || ev.change === 'created') {
-            void loadVersions();
+            void loadNewVersions();
             if (ev.version_id && ev.version_id === baseVersionId) continue; // our own save
             if (dirty) {
               newerHead = ev.version_id;

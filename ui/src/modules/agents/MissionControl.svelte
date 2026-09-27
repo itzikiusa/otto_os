@@ -7,6 +7,7 @@
 
   import { onMount, onDestroy } from 'svelte';
   import { api } from '../../lib/api/client';
+  import { pollWhileVisible, type Poller } from '../../lib/poll';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -234,18 +235,20 @@
 
   // 30 s fallback poll — the buses cover most live updates; this catches
   // anything that doesn't have a WS event (e.g. new sessions, Idle transitions).
-  let pollInterval: ReturnType<typeof setInterval>;
+  // Shared poll chain: never overlaps a pending load, pauses while the window
+  // is hidden (one catch-up load on return), backs off while the daemon fails.
+  let fallbackPoll: Poller | null = null;
 
   onMount(() => {
-    // The `$effect(wsId)` below fires on mount too — no initial load() here,
+    // The `$effect(wsId)` below fires on mount too — no immediate load here,
     // or the view loads twice back to back.
-    pollInterval = setInterval(() => load(false), 30_000);
+    fallbackPoll = pollWhileVisible(() => load(false), { ms: 30_000, immediate: false });
   });
 
   onDestroy(() => {
     alive = false;
     ++loadGeneration;
-    clearInterval(pollInterval);
+    fallbackPoll?.stop();
     clearTimeout(refreshTimer);
   });
 

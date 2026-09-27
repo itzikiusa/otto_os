@@ -172,6 +172,8 @@ export interface SwarmRun {
   status: RunStatus;
   attempt: number;
   summary?: string | null;
+  /** Omitted (`null`) in a `lite=true` run list except for `kind='recruit'`;
+   *  `GET /swarm/runs/{rid}` and live `swarm_run_updated` events carry it. */
   result?: Record<string, unknown> | null;
   error?: string | null;
   tokens_input?: number | null;

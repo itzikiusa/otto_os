@@ -93,6 +93,21 @@ export function normalizeBody(s: string): string {
     .trim();
 }
 
+// groupSkills re-runs on every landed provider body; without a memo each run
+// re-normalized BOTH sides of every comparable pair — O(N²) over the drift
+// check. Keyed by the body string itself (engines cache a string's hash, so a
+// repeat lookup of the same string is O(1)); bounded.
+const normMemo = new Map<string, string>();
+const NORM_MEMO_MAX = 8000;
+function normalizedOnce(s: string): string {
+  const hit = normMemo.get(s);
+  if (hit !== undefined) return hit;
+  const n = normalizeBody(s);
+  if (normMemo.size >= NORM_MEMO_MAX) normMemo.clear();
+  normMemo.set(s, n);
+  return n;
+}
+
 function orderOf(s: VariantSource): number {
   const i = SOURCE_ORDER.indexOf(s);
   return i < 0 ? SOURCE_ORDER.length : i;
@@ -186,7 +201,7 @@ export function groupSkills(
         unknown = true;
         continue;
       }
-      if (normalizeBody(b) !== normalizeBody(refBody)) {
+      if (normalizedOnce(b) !== normalizedOnce(refBody)) {
         drift.push(`${sourceLabel(v.source)} copy differs from ${sourceLabel(reference)}`);
         driftedSources.push(v.source);
       }

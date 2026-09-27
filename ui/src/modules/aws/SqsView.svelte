@@ -1,5 +1,6 @@
 <script lang="ts">
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
+  import { mapLimit } from '../../lib/poll';
   // SQS: queue list with approximate counts → queue detail tabs: Messages
   // (Peek N, JSON-pretty body viewer, delete-message per row [Edit]), Send
   // (body + attributes, FIFO fields only for `.fifo`) [Edit], Attributes,
@@ -60,9 +61,14 @@
     try {
       const list = await aws.loadSqsQueues(account.id);
       error = '';
-      // Approximate counts: fan out, but cap so a 500-queue account doesn't
-      // fire 500 CLI calls on open (the rest load when selected).
-      await Promise.all(list.slice(0, 40).map((q) => aws.loadSqsAttrs(account.id, q.url)));
+      // Approximate counts: capped so a 500-queue account doesn't fire 500 CLI
+      // calls on open (the rest load when selected), and at most 2 in flight —
+      // each is an `aws` process, and 40 at once took every webview socket to
+      // the daemon for seconds. The list is usable while they fill in.
+      loading = false;
+      void mapLimit(list.slice(0, 40), 2, (q) =>
+        aws.loadSqsAttrs(account.id, q.url).catch(() => undefined),
+      );
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {

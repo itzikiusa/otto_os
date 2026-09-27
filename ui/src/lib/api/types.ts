@@ -52,6 +52,14 @@ export interface WsSearchResultFrame {
   matches: TermSearchMatch[];
 }
 
+/** Client→server flow-control frames (docs/contracts/ws.md §1 "Flow control"):
+ *  `pause` above the client's pending-bytes high watermark, `resume` below the
+ *  low one. On resume the server sends one `scrollback` snapshot if it held
+ *  output back; a paused stream auto-resumes 2 s after the last `pause`. */
+export interface WsTermFlowFrame {
+  type: 'pause' | 'resume';
+}
+
 export interface Session {
   id: Id;
   workspace_id: Id;
@@ -72,6 +80,20 @@ export interface Session {
   live?: boolean;
   /** Transient (list/get only): attached `/ws/term` viewer count. */
   viewers?: number;
+}
+
+/** Query for `GET /workspaces/{id}/sessions` (#17) and the cross-workspace
+ *  `GET /sessions` (#17b; there `archived` defaults to `false`). Every filter
+ *  runs in SQL. `limit` (1–1000) keeps the newest N rows (still oldest-first);
+ *  `before` is an RFC 3339 `created_at` cursor for paging back. */
+export interface SessionListQuery {
+  archived?: boolean;
+  kind?: SessionKind;
+  /** Exact `meta.source`; `'none'` = no string source (foreground sessions). */
+  source?: string;
+  status?: SessionStatus;
+  limit?: number;
+  before?: string;
 }
 
 /** Body for `POST /sessions/bulk`. */
@@ -1004,6 +1026,8 @@ export interface GoalLoopIteration {
 
 export interface GoalLoopDetail {
   loop: GoalLoop;
+  /** With `?summary=true`: `plan`/`context_in`/`context_out` are `""` on all
+   *  but the newest iteration — `GET /goal-loops/{id}/iterations/{idx}`. */
   iterations: GoalLoopIteration[];
 }
 
@@ -1036,6 +1060,14 @@ export interface UpdateGoalLoopReq {
   name?: string;
   limits?: GoalLoopLimits;
   config?: GoalLoopConfig;
+}
+
+/** Per-connection `/ws/events` frame (ws.md "Lag resync frame"): the daemon
+ *  dropped `skipped` events for this socket — refetch event-fed state. Never an
+ *  `OttoEvent` variant. */
+export interface EventsResyncFrame {
+  type: 'resync';
+  skipped: number;
 }
 
 export type OttoEvent =
@@ -2546,8 +2578,13 @@ export interface DaemonLogs {
   selected: string;
   mode: 'all' | 'tail' | 'since';
   content: string;
+  /** Byte offset in the live file where `content` starts. */
   offset: number;
+  /** Pass back as `offset` with `mode=since`. Refers to the live file: the
+   *  selected one, or for `__all__` the newest (`files[last]`). */
   next_offset: number;
+  /** Older content was dropped to honour the daemon's per-response byte cap. */
+  truncated: boolean;
 }
 
 export interface AddRepoReq {
@@ -2782,20 +2819,32 @@ export interface Hunk {
   lines: DiffLine[];
 }
 
+/** How a file changed (git's A/D/M/R/C/T status letters). */
+export type FileChangeStatus = 'added' | 'deleted' | 'modified' | 'renamed' | 'copied' | 'typechange';
+
 export interface FileDiff {
   fingerprint?: string;
   path: string;
   old_path: string | null;
   is_binary: boolean;
   hunks: Hunk[];
+  /** Per-file cap hit (rendered text > 200 KB or > 5,000 lines): `hunks` is `[]`; `?full=true` loads it. */
   too_large?: boolean | null;
+  /** Hunks not included (summary mode, per-file cap, or response budget): fetch via `?path=` (+`old_path=`). */
+  hunks_omitted?: boolean | null;
+  /** Always populated by the server (numstat); null only for binary files. */
   added?: number | null;
   deleted?: number | null;
+  status?: FileChangeStatus | null;
   language?: string | null;
 }
 
 export interface DiffResp {
   files: FileDiff[];
+  /** Response budget hit (20,000 lines / 4 MB of hunks); later files carry `hunks_omitted`. */
+  truncated?: boolean | null;
+  total_added?: number | null;
+  total_deleted?: number | null;
 }
 
 export interface StagePathsReq {
@@ -2945,6 +2994,9 @@ export interface PrSummary {
   /** Create-response only: e.g. a reviewer request that failed after the PR
    *  was opened. Empty/omitted everywhere else. */
   reviewer_warnings?: string[];
+  /** Source-branch head commit as the provider reports it (Bitbucket
+   *  abbreviates). Opaque — pass back as the PR diff's `rev=`. */
+  head_sha?: string | null;
 }
 
 /** `GET /repos/{id}/prs?state=&page=&per_page=` — one page. `has_more` is the
@@ -4586,9 +4638,13 @@ export interface ApiResponse {
   status_text: string;
   headers: ApiKeyVal[];
   body: string;
-  /** Full response bytes, base64 (binary preview + save to disk). Empty when too_large. */
+  /** Full response bytes, base64 — only for `image/*` bodies ≤ 5 MiB (the
+   *  preview); '' otherwise. An exact UTF-8 `body` is the whole payload. */
   body_base64: string;
-  /** `body` was truncated for display (full bytes still in body_base64). */
+  /** Set when `body` is NOT the exact payload (truncated / non-UTF-8): fetch the
+   *  full bytes from `GET …/api-client/responses/{body_id}/raw` (kept 10 min). */
+  body_id?: string | null;
+  /** `body` was truncated for display (full bytes via `body_id`). */
   truncated: boolean;
   /** Body exceeded the inline cap: body + body_base64 are empty, only save-from-server unavailable. */
   too_large: boolean;
@@ -4818,6 +4874,40 @@ export interface SkillEval {
   promoted_at?: string | null;
   promoted_by?: string | null;
   created_at: string;
+}
+
+/** A run's list row — `GET /workspaces/{id}/skill-evaluations?summary=1`.
+ *  The headline columns of {@link SkillEval} (same names) without
+ *  `iterations` / `config`, plus the iteration count. */
+export interface SkillEvalSummary {
+  id: Id;
+  workspace_id: Id;
+  source_skill: string;
+  task: string;
+  impl_cli: string;
+  target_iterations: number;
+  status: SkillEvalStatus;
+  error?: string | null;
+  summary: string;
+  best_iteration?: number | null;
+  best_score?: number | null;
+  mode?: string;
+  golden_task_id?: string | null;
+  matrix_id?: string | null;
+  dim_provider?: string | null;
+  dim_skill?: string | null;
+  dim_prompt?: string | null;
+  composite_score?: number | null;
+  promoted?: boolean;
+  iteration_count: number;
+  created_at: string;
+}
+
+/** One keyset page of run summaries, newest first. */
+export interface SkillEvalSummaryPage {
+  items: SkillEvalSummary[];
+  /** Pass back as `cursor` for the next (older) page; null on the last. */
+  next_cursor: string | null;
 }
 
 /** A reusable, per-repo evaluation task (golden corpus + regression cases). */
@@ -5533,6 +5623,10 @@ export interface QueryResult {
   stats: QueryStats;
   message?: string | null;
   truncated: boolean;
+  /** Why the result was clipped when it was NOT the row cap: `bytes` = the
+   *  response reached the daemon's 32 MB budget (estimated JSON) first. Absent
+   *  for an unclipped result or a row-cap clip. */
+  truncated_reason?: 'bytes' | null;
   /** True when the server ran cell values through `otto_core::redact` (QueryRequest.mask=true). */
   masked?: boolean;
   /** Later result sets from a multi-statement batch, in execution order (the
@@ -6715,6 +6809,13 @@ export interface ConsumeReq {
    * `otto_core::redact` before returning. Raw payloads never leave the server
    * when this flag is set. The response `masked` field confirms it. */
   mask?: boolean;
+  /** List mode: values over 2 KiB come back cut to a 2 KiB preview with
+   * `raw_base64` dropped and `truncated: true`; fetch the one message
+   * (`partition` + `start: offset` + `limit: 1`) for the full value. */
+  preview?: boolean;
+  /** Live tail: consume ONLY these partitions, each from its own offset, in
+   * one request. Overrides `start` / `partition`. */
+  start_offsets?: { partition: number; offset: number }[] | null;
 }
 
 export interface DecodedPayload {
@@ -6722,6 +6823,8 @@ export interface DecodedPayload {
   text: string;
   schema_id?: number;
   raw_base64?: string;
+  /** Set on a `preview: true` peek when `text` was cut to 2 KiB. */
+  truncated?: boolean;
 }
 
 export interface MessageHeader {
@@ -7884,6 +7987,20 @@ export interface S3PreviewResp {
   truncated?: boolean;
   content_type?: string | null;
   binary?: boolean;
+}
+
+/** `POST …/s3/buckets/{bucket}/download-to` / `GET …/s3/download-jobs/{job}` —
+ *  a daemon-side download of a large object into a local directory. */
+export interface S3DownloadJob {
+  id: string;
+  bucket: string;
+  key: string;
+  /** Final file path (present once `state` is `completed`). */
+  local_path: string;
+  state: 'running' | 'completed' | 'failed' | 'cancelled';
+  bytes: number;
+  total: number;
+  error?: string | null;
 }
 
 // --- SQS ---
