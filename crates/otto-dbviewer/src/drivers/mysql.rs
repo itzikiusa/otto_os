@@ -716,11 +716,20 @@ impl Driver for MysqlDriver {
         let snap = self.completion_snapshot(cfg, &scope_db).await;
         let sql_ctx = crate::complete::sql::analyze(&ctx.prefix, &ctx.suffix);
         let items = crate::complete::sql::assemble(&sql_ctx, &snap, KEYWORDS, FUNCTIONS);
-        Ok(CompletionResponse { items })
+        Ok(CompletionResponse { items, ..Default::default() })
     }
 
     async fn invalidate_completion_cache(&self, cfg: &ResolvedConfig) {
         self.completions.invalidate(&cfg.cache_key());
+    }
+
+    fn assemble_completion(
+        &self,
+        snap: &crate::complete::SchemaSnapshot,
+        ctx: &CompletionContext,
+    ) -> Vec<crate::types::CompletionItem> {
+        let sql_ctx = crate::complete::sql::analyze(&ctx.prefix, &ctx.suffix);
+        crate::complete::sql::assemble(&sql_ctx, snap, KEYWORDS, FUNCTIONS)
     }
 
     /// Streaming export: use sqlx's row CURSOR (`.fetch(&mut conn)`) so the

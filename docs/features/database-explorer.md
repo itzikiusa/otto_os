@@ -422,6 +422,18 @@ keystroke. The snapshot is held **until you refresh** (the schema tree's
 Mongo samples a collection's fields only when that collection is in context, then
 caches them.
 
+**Bounded per keystroke.** The daemon drops items that can't match the word being
+typed (an in-order, case-insensitive character match — never stricter than the
+editor's own fuzzy filter) and returns at most **1,500** items, best score first;
+a capped answer is flagged `truncated`, and the editor then re-asks on the next
+key instead of filtering a clipped list. A word typed while a request is still in
+flight (a cold snapshot build on a remote DB) is served by that one request — the
+editor no longer cancels and re-sends on every key; the snapshot build itself runs
+detached, so it completes and is cached even if nobody waits for it.
+**Access-enforced connections** complete the same way — context-aware and PK-first
+— from a snapshot of what the caller may browse (its authorized schema graph,
+≤ 300 tables), cached per user + schema for ~60 s and cleared by **Refresh**.
+
 What each engine contributes to the candidate pool:
 
 - **MySQL** — ~50 SQL keywords, ~65 functions, plus live database / table /
@@ -1123,7 +1135,8 @@ result.
   **rejected with its row number** (it is never silently padded or clipped).
   The dialog's Cancel button aborts a running import mid-stream.
 - **Same write guard.** Every batch runs **through the normal guarded `run`
-  path** — there is no parallel guard — so masking/history apply and a
+  path** — there is no parallel guard — so masking applies (history gets **one
+  summary row** for the whole import, not one INSERT text per batch) and a
   **Prod/read-only connection refuses the import** until you type the connection
   name (the identical typed-confirmation flow a write query uses); the client
   then retries with `confirm_write`. The dialog streams an `application/x-ndjson`
@@ -1157,7 +1170,8 @@ execution/cancel/export = `ws editor` (global connections: `Database:Edit`):
 | `POST …/db/mcp-query` | read-only query surface for agents over MCP — writes/DDL refused before any driver call, rows capped at 200, masking forced on (`ws viewer`) |
 | `POST …/db/completion` | context-aware, index-first completion (`{prefix, suffix?, database?, node?}` → `{items:[…]}` with per-item `score`) |
 | `POST …/db/completion/refresh` | drop the cached completion snapshot for the connection (204) — wired to the schema **Refresh** button |
-| `GET …/db/history` | recent query history (per-user for non-root) |
+| `GET …/db/history` | recent query history (per-user for non-root); statements are 16 KiB previews (`statement_len` = full length when clipped) |
+| `GET …/db/history/{entry}` | one history row with its full statement (opening a clipped row fetches it) |
 | `POST …/db/explain-with-agent` | spawn an agent to explain a schema/result |
 | `POST …/db/export` | uncapped result as a CSV/JSON browser download |
 | `POST …/db/export-to-path` | stream an uncapped result to a local file (selectable format) |

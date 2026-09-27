@@ -234,6 +234,7 @@ pub fn api_router<S: DbViewerCtx>() -> Router<S> {
         .route("/connections/{id}/db/import", post(import_query::<S>))
         .route("/connections/{id}/db/nl-to-sql", post(nl_to_sql::<S>))
         .route("/connections/{id}/db/history", get(history::<S>))
+        .route("/connections/{id}/db/history/{entry}", get(history_entry::<S>))
         // Daemon-level probe (no `{id}` — the binary is per-machine, not
         // per-connection): is the `mongosh` CLI available for script runs?
         .route("/db/mongosh", get(mongosh_info::<S>))
@@ -516,7 +517,35 @@ async fn run_query<S: DbViewerCtx>(
     if req.confirm_write && conn.is_write_guarded() && is_write {
         ctx.on_confirmed_write(&user, &conn, &req.statement);
     }
-    Ok(Json(result).into_response())
+    Ok(result_response(result).await)
+}
+
+/// Results with at least this many cells are serialized on the blocking pool.
+const OFF_RUNTIME_SERIALIZE_CELLS: usize = 50_000;
+
+/// JSON-encode a query result. A big one (up to the 32 MB response budget) is
+/// tens to hundreds of ms of serde work; doing it on a runtime worker stalled
+/// every other request queued there, so large results serialize on the blocking
+/// pool. Small results keep the plain inline `Json` path.
+async fn result_response(result: crate::types::QueryResult) -> Response {
+    let cells = result.rows.len() * result.columns.len().max(1)
+        + result
+            .more_results
+            .iter()
+            .map(|r| r.rows.len() * r.columns.len().max(1))
+            .sum::<usize>();
+    if cells < OFF_RUNTIME_SERIALIZE_CELLS {
+        return Json(result).into_response();
+    }
+    match tokio::task::spawn_blocking(move || serde_json::to_vec(&result)).await {
+        Ok(Ok(body)) => (
+            [(header::CONTENT_TYPE, "application/json")],
+            axum::body::Bytes::from(body),
+        )
+            .into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, format!("encode result: {e}")).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("encode task failed: {e}")).into_response(),
+    }
 }
 
 /// Request body for the structured query-plan endpoint.
@@ -1119,6 +1148,22 @@ async fn history<S: DbViewerCtx>(
         ctx.db().list_history_for_user(&id, &user.id, limit).await?
     };
     Ok(Json(entries).into_response())
+}
+
+/// `GET /connections/{id}/db/history/{entry}` — one history row with its FULL
+/// statement (the list clips statements to a preview; see `statement_len`).
+async fn history_entry<S: DbViewerCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path((id, entry)): Path<(Id, Id)>,
+) -> ApiResult<Response> {
+    let conn = ctx.db().get_connection(&id).await?;
+    check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
+    let row = ctx
+        .db()
+        .get_history(&id, &user.id, &entry, user.is_root)
+        .await?;
+    Ok(Json(row).into_response())
 }
 
 /// `GET /db/mongosh` — whether the `mongosh` CLI is on the daemon's PATH (and

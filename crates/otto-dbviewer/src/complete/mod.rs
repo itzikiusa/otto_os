@@ -39,6 +39,77 @@ pub const COMPLETION_TTL: Duration = Duration::from_secs(300);
 /// "Refresh schema" ([`CompletionCache::invalidate`]) clears it immediately.
 pub const COMPLETION_NEGATIVE_TTL: Duration = Duration::from_secs(20);
 
+/// Most completion items one response carries. A 5k-table × 50-column schema
+/// otherwise ships ~250k items (tens of MB of JSON) per word typed, and the
+/// editor re-sorts all of them. Past the cap the best-scored items win and the
+/// response says `truncated`, so the editor re-asks on the next keystroke
+/// instead of filtering a clipped list (see `finalize`).
+pub const MAX_COMPLETION_ITEMS: usize = 1500;
+
+/// The identifier being typed at the end of `prefix` — the segment after the
+/// last `.` (a qualifier is not part of what the editor matches) — lowercased.
+/// Empty right after a `.`, a space or an operator.
+pub fn typed_word(prefix: &str) -> String {
+    let tail_start = prefix
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| c.is_alphanumeric() || *c == '_' || *c == '$')
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(prefix.len());
+    prefix[tail_start..].to_lowercase()
+}
+
+/// `true` when every char of `word` (already lowercased) appears in `label` in
+/// order, case-insensitively. This is a SUPERSET of what CodeMirror's fuzzy
+/// matcher shows for `word` or any longer word the user goes on to type, so a
+/// server-side filter by it never hides an option the editor would have shown.
+pub fn fuzzy_contains(label: &str, word: &str) -> bool {
+    if word.is_empty() {
+        return true;
+    }
+    let mut want = word.chars();
+    let mut next = want.next();
+    for c in label.chars().flat_map(char::to_lowercase) {
+        match next {
+            Some(w) if w == c => next = want.next(),
+            Some(_) => {}
+            None => break,
+        }
+    }
+    next.is_none()
+}
+
+/// Bound a completion response for the word being typed at the end of `prefix`:
+/// drop items that can't match it (see [`fuzzy_contains`]), then keep at most
+/// [`MAX_COMPLETION_ITEMS`] — highest score first, a prefix match before a
+/// scattered one, shorter labels first — and flag `truncated` when anything was
+/// cut. Applied centrally by the service to every engine's answer.
+pub fn finalize(resp: &mut crate::types::CompletionResponse, prefix: &str) {
+    let word = typed_word(prefix);
+    if !word.is_empty() {
+        resp.items.retain(|it| fuzzy_contains(&it.label, &word));
+    }
+    if resp.items.len() <= MAX_COMPLETION_ITEMS {
+        return;
+    }
+    let starts = |label: &str| {
+        !word.is_empty()
+            && label
+                .get(..word.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(&word))
+    };
+    resp.items.sort_by(|a, b| {
+        b.score
+            .unwrap_or(0)
+            .cmp(&a.score.unwrap_or(0))
+            .then_with(|| starts(&b.label).cmp(&starts(&a.label)))
+            .then_with(|| a.label.len().cmp(&b.label.len()))
+    });
+    resp.items.truncate(MAX_COMPLETION_ITEMS);
+    resp.truncated = true;
+}
+
 /// Index membership of a column / field — the basis for "indexes first".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rank {
@@ -134,6 +205,46 @@ impl SchemaSnapshot {
     }
 }
 
+/// A completion snapshot from an access-scoped [`crate::types::SchemaGraph`] —
+/// what the enforced path may see. Primary-key columns lead each object (the
+/// assembler's fields are index-first); FK / other index membership isn't in the
+/// graph, so the rest rank as plain columns. `databases` is just the one
+/// authorized schema.
+pub fn snapshot_from_graph(graph: &crate::types::SchemaGraph) -> SchemaSnapshot {
+    use crate::types::NodeKind;
+    let objects = graph
+        .tables
+        .iter()
+        .map(|t| {
+            let (mut pk, mut rest): (Vec<FieldSnap>, Vec<FieldSnap>) = (Vec::new(), Vec::new());
+            for c in &t.columns {
+                let ty = (!c.data_type.is_empty()).then(|| c.data_type.clone());
+                if c.primary_key {
+                    pk.push(FieldSnap::new(c.name.clone(), ty, Rank::Pk));
+                } else {
+                    rest.push(FieldSnap::new(c.name.clone(), ty, Rank::Plain));
+                }
+            }
+            pk.append(&mut rest);
+            ObjectSnap {
+                name: t.name.clone(),
+                kind: match t.kind {
+                    NodeKind::View => ObjKind::View,
+                    NodeKind::Collection => ObjKind::Collection,
+                    _ => ObjKind::Table,
+                },
+                fields: pk,
+                fields_ready: true,
+            }
+        })
+        .collect();
+    SchemaSnapshot {
+        databases: vec![graph.schema.clone()],
+        objects,
+        routines: Vec::new(),
+    }
+}
+
 /// Relative ranking hints mapped to CodeMirror's `boost`. Higher sorts earlier
 /// among equally-matching options. Tuned so: in-scope index columns lead, then
 /// in-scope plain columns, then everything else; tables lead in a table slot.
@@ -215,8 +326,9 @@ impl<T> Cached<T> {
 /// Shared across connections that share a `cache_key` (same endpoint+db+user) —
 /// exactly the reuse the connection pool already assumes. Invalidated wholesale
 /// for a connection by [`CompletionCache::invalidate`] (the refresh action).
-#[derive(Default)]
 pub struct CompletionCache {
+    /// Lifetime of a successful snapshot ([`COMPLETION_TTL`] by default).
+    ttl: Duration,
     snapshots: Mutex<HashMap<SnapKey, Cached<SchemaSnapshot>>>,
     /// Mongo only: a collection's sampled field paths, cached independently of
     /// the (cheap) collection list so we sample only what's actually in context.
@@ -232,9 +344,28 @@ pub struct CompletionCache {
     first_db: Mutex<HashMap<String, Cached<Option<String>>>>,
 }
 
+impl Default for CompletionCache {
+    fn default() -> Self {
+        Self::with_ttl(COMPLETION_TTL)
+    }
+}
+
 impl CompletionCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A cache whose successful snapshots live `ttl` instead of
+    /// [`COMPLETION_TTL`] — the access-enforced path keeps them short so a
+    /// narrowed grant stops completing hidden names quickly.
+    pub fn with_ttl(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            snapshots: Mutex::default(),
+            fields: Mutex::default(),
+            building: Mutex::default(),
+            first_db: Mutex::default(),
+        }
     }
 
     /// A fresh-enough cached snapshot, or `None` (the caller builds + `put`s).
@@ -297,7 +428,7 @@ impl CompletionCache {
         db: &str,
         snap: SchemaSnapshot,
     ) -> Arc<SchemaSnapshot> {
-        self.put_snapshot_ttl(cache_key, db, snap, COMPLETION_TTL)
+        self.put_snapshot_ttl(cache_key, db, snap, self.ttl)
     }
 
     fn put_snapshot_ttl(
@@ -500,6 +631,130 @@ mod tests {
         assert!(s.object("USERS").is_some());
         assert!(s.object("users").is_some());
         assert!(s.object("nope").is_none());
+    }
+
+    #[test]
+    fn typed_word_is_the_segment_after_the_qualifier() {
+        assert_eq!(typed_word("SELECT * FROM us"), "us");
+        assert_eq!(typed_word("SELECT u.Na"), "na");
+        assert_eq!(typed_word("SELECT u."), "");
+        assert_eq!(typed_word("WHERE a = "), "");
+        assert_eq!(typed_word("db.orders.fi"), "fi");
+        assert_eq!(typed_word("$ma"), "$ma");
+        assert_eq!(typed_word(""), "");
+    }
+
+    #[test]
+    fn fuzzy_contains_is_an_in_order_case_insensitive_subsequence() {
+        assert!(fuzzy_contains("user_id", "uid"));
+        assert!(fuzzy_contains("USER_ID", "id"));
+        assert!(fuzzy_contains("anything", ""));
+        assert!(!fuzzy_contains("user_id", "diu"), "order matters");
+        assert!(!fuzzy_contains("orders", "ordersx"));
+    }
+
+    fn items(n: usize, score: i32, stem: &str) -> Vec<crate::types::CompletionItem> {
+        (0..n)
+            .map(|i| {
+                crate::types::CompletionItem::new(
+                    format!("{stem}{i}"),
+                    crate::types::CompletionKind::Column,
+                )
+                .scored(score)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn finalize_filters_by_the_typed_word_without_truncating_small_lists() {
+        let mut resp = crate::types::CompletionResponse {
+            items: [items(3, 55, "user_"), items(3, 55, "order_")].concat(),
+            ..Default::default()
+        };
+        finalize(&mut resp, "SELECT * FROM t WHERE usr");
+        assert_eq!(resp.items.len(), 3, "only labels that can match `usr` stay");
+        assert!(resp.items.iter().all(|i| i.label.starts_with("user_")));
+        assert!(!resp.truncated);
+    }
+
+    #[test]
+    fn finalize_caps_huge_lists_keeping_the_best_scored_and_flags_truncated() {
+        // 5k tables × 50 cols worth of out-of-scope columns + a few PK columns.
+        let mut all = items(250_000, score::OUT_OF_SCOPE_COL, "col_");
+        all.extend(items(5, score::PK, "id_"));
+        let mut resp = crate::types::CompletionResponse {
+            items: all,
+            ..Default::default()
+        };
+        finalize(&mut resp, "SELECT * FROM t WHERE ");
+        assert_eq!(resp.items.len(), MAX_COMPLETION_ITEMS);
+        assert!(resp.truncated, "a clipped list must make the editor re-ask");
+        assert!(
+            resp.items[..5].iter().all(|i| i.score == Some(score::PK)),
+            "the strongest items survive the cap, first"
+        );
+    }
+
+    #[test]
+    fn finalize_prefers_prefix_matches_when_capping() {
+        let mut all = items(MAX_COMPLETION_ITEMS + 10, 55, "xa_");
+        all.push(
+            crate::types::CompletionItem::new("amount", crate::types::CompletionKind::Column)
+                .scored(55),
+        );
+        let mut resp = crate::types::CompletionResponse {
+            items: all,
+            ..Default::default()
+        };
+        finalize(&mut resp, "WHERE a");
+        assert!(resp.truncated);
+        assert_eq!(resp.items[0].label, "amount");
+    }
+
+    #[test]
+    fn graph_snapshot_ranks_pk_first_for_the_enforced_path() {
+        use crate::types::{GraphColumn, GraphTable, NodeKind, SchemaGraph};
+        let col = |name: &str, pk: bool| GraphColumn {
+            name: name.into(),
+            data_type: "int".into(),
+            nullable: !pk,
+            primary_key: pk,
+            foreign_key: false,
+        };
+        let graph = SchemaGraph {
+            schema: "shop".into(),
+            tables: vec![GraphTable {
+                id: "db:shop/table:customers".into(),
+                schema: "shop".into(),
+                name: "customers".into(),
+                kind: NodeKind::Table,
+                columns: vec![col("country", false), col("id", true), col("name", false)],
+            }],
+            edges: Vec::new(),
+            relationships: true,
+            truncated: false,
+        };
+        let snap = snapshot_from_graph(&graph);
+        assert_eq!(snap.databases, vec!["shop".to_string()]);
+        let names: Vec<&str> = snap.objects[0].fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["id", "country", "name"]);
+
+        // Context-aware like the driver path: in a WHERE over `customers`, the
+        // PK column out-ranks the plain ones, and no out-of-scope noise leads.
+        let ctx = sql::analyze("SELECT * FROM customers WHERE ", "");
+        let items = sql::assemble(&ctx, &snap, &["SELECT"], &[]);
+        let best = items
+            .iter()
+            .filter(|i| i.kind == crate::types::CompletionKind::Column)
+            .max_by_key(|i| i.score.unwrap_or(0))
+            .unwrap();
+        assert_eq!(best.label, "id");
+        assert_eq!(best.score, Some(score::PK));
+        // In a table slot the table itself is offered, not its columns.
+        let ctx = sql::analyze("SELECT * FROM cu", "");
+        let items = sql::assemble(&ctx, &snap, &[], &[]);
+        assert!(items.iter().any(|i| i.label == "customers"));
+        assert!(items.iter().all(|i| i.kind != crate::types::CompletionKind::Column));
     }
 
     #[test]
