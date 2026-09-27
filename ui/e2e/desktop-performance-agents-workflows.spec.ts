@@ -45,6 +45,7 @@ test('empty History continuation remains actionable and mounted visibility recov
 });
 
 test('workflow summary polls leave closed bodies unloaded and expansion fetches exact version once',async({page})=>{
+  test.setTimeout(90_000);
   const workflow={id:'wf-performance',workspace_id:workspace,name:'Lazy workflow fixture',description:'',icon:'',graph:{nodes:[{id:'step',kind:'log',name:'Lazy step',x:0,y:0,params:{}}],edges:[]},created_at:now,updated_at:now,created_by:'fixture',version:1};
   const node={node_id:'step',status:'success',started_at:now,duration_ms:1,attempts:1,sessions:[],activity:null,error:null,logs:[],output:null,log_count:1,has_output:true,detail_version:'body-v1'};
   const run={id:'run-performance',workflow_id:workflow.id,workspace_id:workspace,status:'running',nodes:[node],checkpoints:[],input:null,error:null,started_at:now,finished_at:now,rev:1,waiting_approval:false,workflow_version:1,resume_attempts:0,summary:true,checkpoint_rev:0,checkpoint_generation:0,checkpoint_count:0,checkpoint_done:0};
@@ -63,7 +64,9 @@ test('workflow summary polls leave closed bodies unloaded and expansion fetches 
   await page.getByTestId(`wf-row-${workflow.id}`).locator('.row-main').click();
   await page.getByRole('button',{name:'Runs',exact:true}).click();await page.getByTestId('run-item').first().click();
   await expect(page.locator('.run-detail details.step')).toBeVisible();
-  await expect.poll(()=>conditional).toBeGreaterThan(0);
+  // With the event socket up the conditional progress re-read is the run
+  // view's 15 s safety net (WorkflowsPage liveQuery safetyMs), not a 2.5 s poll.
+  await expect.poll(()=>conditional,{timeout:25_000}).toBeGreaterThan(0);
   expect(details).toBe(0);expect(fullReads).toBe(0);
   await page.locator('.run-detail details.step > summary').click();
   await expect(page.getByText('Exact lazy log',{exact:true})).toBeVisible();expect(details).toBe(1);
