@@ -496,7 +496,7 @@ pub async fn create_collection(
     if req.name.trim().is_empty() {
         return Err(Error::Invalid("collection name must not be empty".into()).into());
     }
-    let position = repo(&ctx).list_collections(&wid).await?.len() as i64;
+    let position = repo(&ctx).count_collections(&wid).await?;
     let col = repo(&ctx)
         .create_collection(NewApiCollection {
             workspace_id: wid,
@@ -615,9 +615,8 @@ pub async fn create_request(
         extras = Some(stamp_agent(extras, session_id.as_deref()));
     }
     let position = repo(&ctx)
-        .list_requests(&wid, req.collection_id.as_ref())
-        .await?
-        .len() as i64;
+        .count_requests(&wid, req.collection_id.as_ref())
+        .await?;
 
     // Pre-generate the id so secret members can move to the Keychain BEFORE the
     // row exists (lazy migration on save; plaintext never touches SQLite).
@@ -629,7 +628,11 @@ pub async fn create_request(
         &BTreeMap::new(),
     )
     .map_err(|m| ApiError(Error::Invalid(m)))?;
-    api_secrets::store_blob(ctx.secrets.as_ref(), &own_ref, &blob)?;
+    // A brand-new id has no Keychain item: an empty blob would only issue a
+    // synchronous Keychain delete per created request (3k on an import).
+    if !blob.is_empty() {
+        api_secrets::store_blob(ctx.secrets.as_ref(), &own_ref, &blob)?;
+    }
 
     let mut new = req_to_new(&wid, req, position, extras);
     new.id = Some(id);
@@ -1780,7 +1783,12 @@ pub async fn run_saved_request(
     let allow_local = workspace_allows_local(&ctx, &wid).await;
     let mut response = match build_and_send(&wid, &exec, &vars, proxy.as_deref(), allow_local).await
     {
-        Ok(response) => response,
+        Ok((mut response, raw)) => {
+            // Image preview only: this route serves agents/tools, never the
+            // UI's "Save to disk", so nothing is parked for download.
+            attach_body(&mut response, raw, None);
+            response
+        }
         Err(error) => {
             let error = api_secrets::scrub_str(&error, &secret_values);
             record_history(
@@ -2009,7 +2017,7 @@ pub async fn execute(
         Err(msg) => Err(msg),
     };
     match send {
-        Ok(resp) => {
+        Ok((mut resp, raw)) => {
             let (_, secret_values) = collect_secrets(
                 &env_blob,
                 environment
@@ -2039,6 +2047,7 @@ pub async fn execute(
                 None,
             )
             .await;
+            attach_body(&mut resp, raw, Some((&wid, &user.id)));
             Ok(Json(resp))
         }
         Err(err) => {
@@ -2603,7 +2612,7 @@ async fn build_and_send(
     vars: &serde_json::Map<String, Value>,
     proxy: Option<&str>,
     allow_local: bool,
-) -> Result<ApiResponse, String> {
+) -> Result<(ApiResponse, Vec<u8>), String> {
     let (builder, url, header_count) = prepare_request(wid, req, vars, proxy, allow_local).await?;
     // Trace: resolved request + per-phase timing for the response "Trace" tab.
     let method_str = req.method.to_uppercase();
@@ -2671,9 +2680,11 @@ async fn build_and_send(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    // Body: keep the full bytes (base64) for preview/save and a UTF-8 (lossy)
-    // text rendering capped for display. Beyond MAX_INLINE we keep neither.
-    const MAX_INLINE: usize = 25 * 1024 * 1024; // 25 MB raw → base64 inlined
+    // Body: the UTF-8 (lossy) text capped for display goes in the response;
+    // the raw bytes go back to the caller, which decides whether the UI gets
+    // them (`attach_body`) — never base64 by default. Beyond MAX_INLINE we
+    // keep neither.
+    const MAX_INLINE: usize = 25 * 1024 * 1024; // 25 MB raw
     const MAX_TEXT_DISPLAY: usize = 512 * 1024; // 512 KB rendered as text
     let dl_start = Instant::now();
     let mut response = resp;
@@ -2709,37 +2720,78 @@ async fn build_and_send(
         },
     ));
 
-    let (body, body_base64, truncated, too_large) = if bytes.len() > MAX_INLINE {
-        (String::new(), String::new(), false, true)
+    let (body, truncated, too_large) = if bytes.len() > MAX_INLINE {
+        bytes = Vec::new();
+        (String::new(), false, true)
     } else {
-        use base64::engine::general_purpose::STANDARD as B64;
-        use base64::Engine;
-        let b64 = B64.encode(&bytes);
-        let text = String::from_utf8_lossy(&bytes);
-        if text.len() > MAX_TEXT_DISPLAY {
-            let mut end = MAX_TEXT_DISPLAY;
+        // Decode only the displayed prefix (+ one char's worth of slack) —
+        // not the whole body — then cut on a char boundary.
+        let prefix = &bytes[..bytes.len().min(MAX_TEXT_DISPLAY + 4)];
+        let text = String::from_utf8_lossy(prefix);
+        if bytes.len() > prefix.len() || text.len() > MAX_TEXT_DISPLAY {
+            let mut end = MAX_TEXT_DISPLAY.min(text.len());
             while end > 0 && !text.is_char_boundary(end) {
                 end -= 1;
             }
-            (text[..end].to_string(), b64, true, false)
+            (text[..end].to_string(), true, false)
         } else {
-            (text.into_owned(), b64, false, false)
+            (text.into_owned(), false, false)
         }
     };
 
-    Ok(ApiResponse {
-        status: status_code,
-        status_text,
-        headers: Value::Array(resp_headers),
-        body,
-        body_base64,
-        truncated,
-        too_large,
-        duration_ms,
-        size_bytes,
-        content_type,
-        trace,
-    })
+    Ok((
+        ApiResponse {
+            status: status_code,
+            status_text,
+            headers: Value::Array(resp_headers),
+            body,
+            body_base64: String::new(),
+            body_id: None,
+            truncated,
+            too_large,
+            duration_ms,
+            size_bytes,
+            content_type,
+            trace,
+        },
+        bytes,
+    ))
+}
+
+/// Largest `image/*` body inlined as base64 for the viewer's preview.
+const INLINE_PREVIEW_MAX: usize = 5 * 1024 * 1024;
+
+/// Give the UI what it needs to preview / save the body without shipping the
+/// whole thing as base64: an image (≤ 5 MiB) is inlined for the preview; an
+/// exact UTF-8 `body` already is the payload; anything else (truncated text,
+/// binary) is parked in the bounded response cache behind `body_id` — only
+/// when `cache_for` (workspace, user) is given (the interactive UI route).
+fn attach_body(resp: &mut ApiResponse, raw: Vec<u8>, cache_for: Option<(&Id, &Id)>) {
+    if resp.too_large || raw.is_empty() {
+        return;
+    }
+    let image = resp
+        .content_type
+        .as_deref()
+        .is_some_and(|c| c.trim_start().to_ascii_lowercase().starts_with("image/"));
+    if image && raw.len() <= INLINE_PREVIEW_MAX {
+        use base64::engine::general_purpose::STANDARD as B64;
+        use base64::Engine;
+        resp.body_base64 = B64.encode(&raw);
+        return;
+    }
+    let Some((wid, user)) = cache_for else {
+        return;
+    };
+    if !resp.truncated && std::str::from_utf8(&raw).is_ok_and(|t| t == resp.body) {
+        return;
+    }
+    resp.body_id = Some(super::api_response_cache::put(
+        wid,
+        user,
+        resp.content_type.clone(),
+        raw,
+    ));
 }
 
 fn trace_step(
@@ -3116,7 +3168,8 @@ pub(crate) async fn run_step(
     // Send via the shared single-request path (same reqwest logic as /execute).
     let allow_local = workspace_allows_local(ctx, wid).await;
     match build_and_send(wid, &exec, vars, proxy.as_deref(), allow_local).await {
-        Ok(resp) => {
+        // Steps only read status/body/timing — the raw bytes are dropped here.
+        Ok((resp, _raw)) => {
             // Parse the body as JSON once for json_path assertions/extraction;
             // a non-JSON body yields Null (assertions/extracts simply miss).
             let body_json = serde_json::from_str::<Value>(&resp.body).unwrap_or(Value::Null);
@@ -4047,6 +4100,7 @@ mod tests {
             headers: json!([]),
             body,
             body_base64,
+            body_id: None,
             truncated: false,
             too_large: false,
             duration_ms: 1,
@@ -4064,6 +4118,44 @@ mod tests {
         assert!(response.truncated);
         assert!(response.body_base64.is_empty());
         assert!(response.body.is_char_boundary(response.body.len()));
+    }
+
+    #[test]
+    fn attach_body_ships_only_what_the_viewer_needs() {
+        let (wid, user) = ("w-attach".to_string(), "u-attach".to_string());
+        // Exact UTF-8 text: `body` already is the payload — no base64, no id.
+        let mut text = api_response("{\"a\":1}".into(), String::new());
+        attach_body(&mut text, b"{\"a\":1}".to_vec(), Some((&wid, &user)));
+        assert!(text.body_base64.is_empty());
+        assert!(text.body_id.is_none());
+
+        // A small image is inlined for the preview.
+        let mut img = api_response(String::new(), String::new());
+        img.content_type = Some("Image/PNG".into());
+        attach_body(&mut img, vec![0x89, b'P', b'N', b'G'], Some((&wid, &user)));
+        assert!(!img.body_base64.is_empty());
+        assert!(img.body_id.is_none());
+
+        // Truncated text: parked behind a body id (UI route) …
+        let mut big = api_response("x".repeat(10), String::new());
+        big.truncated = true;
+        attach_body(&mut big, vec![b'x'; 20], Some((&wid, &user)));
+        assert!(big.body_base64.is_empty());
+        assert!(big.body_id.is_some());
+        // … but never for a caller that can't download it (agents/tools).
+        let mut tool = api_response("x".repeat(10), String::new());
+        tool.truncated = true;
+        attach_body(&mut tool, vec![b'x'; 20], None);
+        assert!(tool.body_id.is_none() && tool.body_base64.is_empty());
+
+        // Non-UTF-8 bytes (lossy `body`) are downloadable too; too_large is not.
+        let mut bin = api_response("\u{FFFD}".into(), String::new());
+        attach_body(&mut bin, vec![0xff], Some((&wid, &user)));
+        assert!(bin.body_id.is_some());
+        let mut huge = api_response(String::new(), String::new());
+        huge.too_large = true;
+        attach_body(&mut huge, Vec::new(), Some((&wid, &user)));
+        assert!(huge.body_id.is_none());
     }
 
     #[test]

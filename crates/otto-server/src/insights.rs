@@ -651,7 +651,12 @@ async fn put_config(
 
 async fn get_reports(State(ctx): State<ServerCtx>) -> ApiResult<Json<Vec<ReportView>>> {
     let dir = insights_dir(&ctx);
-    Ok(Json(list_reports(&dir)))
+    // ~300 reads + ~900 stats of synchronous std::fs: off the async runtime
+    // (the Insights page polls this every 3 s during a run — backlog B6 / SE-17).
+    let reports = tokio::task::spawn_blocking(move || list_reports(&dir))
+        .await
+        .map_err(|e| ApiError(otto_core::Error::Internal(format!("list insights reports: {e}"))))?;
+    Ok(Json(reports))
 }
 
 /// Query for serving a single report's HTML (`?path=<absolute html_path>`).

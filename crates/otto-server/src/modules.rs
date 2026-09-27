@@ -324,6 +324,10 @@ impl otto_connections::DbTester for DbViewerTester {
             })
         })
     }
+
+    fn forget_secret(&self, secret_ref: &str) {
+        self.db.forget_secret(secret_ref);
+    }
 }
 
 impl otto_dbviewer::DbViewerCtx for ServerCtx {

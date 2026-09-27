@@ -372,7 +372,7 @@ pub async fn run_lens_session(
         timeout,
         WAITING_IDLE,
         STUCK_IDLE,
-        |t| extract_json_block(t).is_some(),
+        Some(|t| extract_json_block(t).is_some()),
         |st| async move {
             if let Some(aid) = agent_id {
                 let status = match st {

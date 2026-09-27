@@ -559,6 +559,7 @@ mod tests {
             headers: json!([]),
             body: String::new(),
             body_base64: String::new(),
+            body_id: None,
             truncated: false,
             too_large: false,
             duration_ms: 1,

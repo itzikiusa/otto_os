@@ -23,6 +23,97 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// `reqwest::Client` is `Clone` and internally reference-counted — cheap to clone out.
 static CLIENT_CACHE: OnceLock<Mutex<HashMap<String, reqwest::Client>>> = OnceLock::new();
 
+/// Issues requested per `/search/jql` call (the endpoint's max is 100).
+const JQL_PAGE: u32 = 100;
+/// Issues returned per `search_jql` call — the offset-paged contract the UI's
+/// "Load more" relies on (a full window ⇒ there may be more).
+const JQL_WINDOW: u32 = 25;
+/// Memoised walks kept at once / how long one stays valid.
+const JQL_WALKS_MAX: usize = 32;
+const JQL_WALK_TTL: Duration = Duration::from_secs(600);
+/// Pages of issues kept per walk (8 × 100 summaries — small).
+const JQL_PAGES_KEPT: usize = 8;
+
+/// One (account, JQL) token walk: which `nextPageToken` fetches the page at
+/// each offset, plus the most recent pages themselves. `/search/jql` is
+/// token-paginated only, so without this every offset request re-walked the
+/// result set from page 0.
+#[derive(Default)]
+struct JqlWalk {
+    /// Page start offset → the token that fetches it (offset 0 needs none).
+    tokens: std::collections::BTreeMap<u32, String>,
+    /// Page start offset → (its issues, the token for the page after it).
+    pages: std::collections::BTreeMap<u32, (Vec<IssueSummary>, Option<String>)>,
+    touched: Option<std::time::Instant>,
+}
+
+impl JqlWalk {
+    /// The best place to resume a walk for a window starting at `start`: the
+    /// greatest known page start ≤ `start` and its token.
+    fn resume(&self, start: u32) -> (u32, Option<String>) {
+        self.tokens
+            .range(..=start)
+            .next_back()
+            .map(|(o, t)| (*o, Some(t.clone())))
+            .unwrap_or((0, None))
+    }
+
+    fn cached_page(&self, offset: u32) -> Option<(Vec<IssueSummary>, Option<String>)> {
+        self.pages.get(&offset).cloned()
+    }
+
+    fn record(&mut self, offset: u32, issues: Vec<IssueSummary>, next: Option<String>) {
+        let n = issues.len() as u32;
+        if n > 0 {
+            if let Some(t) = &next {
+                self.tokens.insert(offset + n, t.clone());
+            }
+        }
+        self.pages.insert(offset, (issues, next));
+        while self.pages.len() > JQL_PAGES_KEPT {
+            let Some(first) = self.pages.keys().next().copied() else {
+                break;
+            };
+            self.pages.remove(&first);
+        }
+        self.touched = Some(std::time::Instant::now());
+    }
+}
+
+static JQL_WALKS: OnceLock<Mutex<HashMap<u64, JqlWalk>>> = OnceLock::new();
+
+/// Walk-cache key: the account (auth header — never stored, only hashed) and
+/// the exact JQL.
+fn jql_walk_key(auth_header: &str, jql: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    auth_header.hash(&mut h);
+    jql.hash(&mut h);
+    h.finish()
+}
+
+/// Run `f` on the walk cache (expired / excess walks evicted first). Never
+/// held across an await. A poisoned lock degrades to an empty scratch map.
+fn jql_walks<R>(f: impl FnOnce(&mut HashMap<u64, JqlWalk>) -> R) -> R {
+    let cache = JQL_WALKS.get_or_init(|| Mutex::new(HashMap::new()));
+    match cache.lock() {
+        Ok(mut map) => {
+            map.retain(|_, w| w.touched.is_none_or(|t| t.elapsed() < JQL_WALK_TTL));
+            while map.len() > JQL_WALKS_MAX {
+                let oldest = map.iter().min_by_key(|(_, w)| w.touched).map(|(k, _)| *k);
+                match oldest {
+                    Some(k) => {
+                        map.remove(&k);
+                    }
+                    None => break,
+                }
+            }
+            f(&mut map)
+        }
+        Err(_) => f(&mut HashMap::new()),
+    }
+}
+
 /// Return a cached `reqwest::Client` for the given auth_header, building one on first use.
 /// Falls back to a freshly-built client if the cache lock is poisoned (keeps callers infallible).
 fn get_or_build_client(auth_header: &str) -> reqwest::Client {
@@ -380,65 +471,102 @@ impl JiraClient {
     /// (only reached when the new endpoint is missing — 404/405) honors
     /// `startAt` directly.
     pub async fn search_jql(&self, jql: &str, start_at: u32) -> Result<Vec<IssueSummary>> {
-        const PAGE: u32 = 25;
-        // Hard cap on the token walk (40 pages = 1000 issues deep) — a runaway
+        // Hard cap on one token walk (Jira calls per request) — a runaway
         // "load more" can't turn into an unbounded crawl.
-        const MAX_PAGES: u32 = 40;
+        const MAX_PAGES: u32 = 10;
         let fields = "summary,status,issuetype";
         let new_url = format!("{}/rest/api/3/search/jql", self.base_url);
+        let key = jql_walk_key(&self.auth_header, jql);
+        let page_size = JQL_PAGE.to_string();
 
-        let mut collected: Vec<IssueSummary> = Vec::new();
-        let mut token: Option<String> = None;
-        for page in 0..MAX_PAGES {
-            let mut req = self
-                .http
-                .get(&new_url)
-                .header("Authorization", &self.auth_header)
-                .header("Accept", "application/json")
-                .query(&[("jql", jql), ("maxResults", "25"), ("fields", fields)]);
-            if let Some(t) = &token {
-                req = req.query(&[("nextPageToken", t.as_str())]);
+        // Resume from the memoised token nearest to `start_at` — "Load more"
+        // used to re-walk every page from 0, so the Nth click made N sequential
+        // Jira calls (12–28 s by click 40, backlog B6 / SE-07). A fresh search
+        // (start_at 0) always starts a fresh walk.
+        let (mut offset, mut token) = jql_walks(|walks| {
+            if start_at == 0 {
+                walks.remove(&key);
+                return (0, None);
             }
-            let resp = req
-                .send()
-                .await
-                .map_err(|e| Error::Upstream(format!("jira search request: {e}")))?;
+            walks
+                .get(&key)
+                .map(|w| w.resume(start_at))
+                .unwrap_or((0, None))
+        });
 
-            if !resp.status().is_success() {
-                // New endpoint UNAVAILABLE (404/405 — older Server/DC): classic
-                // fallback (startAt works there). Only sensible on the first
-                // page — a mid-walk failure surfaces. Any other failure (a JQL
-                // 400, 401, 429, 5xx) is the real answer: falling back masked it
-                // behind the classic endpoint's "410 Gone" on Cloud.
-                if page == 0 && new_search_unavailable(resp.status()) {
-                    return self.search_jql_classic(jql, start_at, fields).await;
+        let window_end = start_at.saturating_add(JQL_WINDOW);
+        let mut out: Vec<IssueSummary> = Vec::new();
+        for _ in 0..MAX_PAGES {
+            // A page this walk already fetched (the 4 "load more" windows of
+            // one 100-issue page cost one Jira call).
+            let cached = jql_walks(|walks| walks.get(&key).and_then(|w| w.cached_page(offset)));
+            let (issues, next) = match cached {
+                Some(hit) => hit,
+                None => {
+                    let mut req = self
+                        .http
+                        .get(&new_url)
+                        .header("Authorization", &self.auth_header)
+                        .header("Accept", "application/json")
+                        .query(&[
+                            ("jql", jql),
+                            ("maxResults", page_size.as_str()),
+                            ("fields", fields),
+                        ]);
+                    if let Some(t) = &token {
+                        req = req.query(&[("nextPageToken", t.as_str())]);
+                    }
+                    let resp = req
+                        .send()
+                        .await
+                        .map_err(|e| Error::Upstream(format!("jira search request: {e}")))?;
+
+                    if !resp.status().is_success() {
+                        // New endpoint UNAVAILABLE (404/405 — older Server/DC):
+                        // classic fallback (startAt works there). Only sensible on
+                        // the first page — a mid-walk failure surfaces. Any other
+                        // failure (a JQL 400, 401, 429, 5xx) is the real answer:
+                        // falling back masked it behind the classic endpoint's
+                        // "410 Gone" on Cloud.
+                        if token.is_none() && new_search_unavailable(resp.status()) {
+                            return self.search_jql_classic(jql, start_at, fields).await;
+                        }
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        return Err(Error::Upstream(format!(
+                            "jira search failed ({status}): {body}"
+                        )));
+                    }
+
+                    let body: serde_json::Value = resp
+                        .json()
+                        .await
+                        .map_err(|e| Error::Upstream(format!("jira search parse: {e}")))?;
+                    let issues = self.parse_issue_summaries(&body);
+                    let next = body
+                        .get("nextPageToken")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    let (i2, n2) = (issues.clone(), next.clone());
+                    jql_walks(|walks| walks.entry(key).or_default().record(offset, i2, n2));
+                    (issues, next)
                 }
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(Error::Upstream(format!(
-                    "jira search failed ({status}): {body}"
-                )));
+            };
+
+            let n = issues.len() as u32;
+            for (i, issue) in issues.into_iter().enumerate() {
+                let at = offset + i as u32;
+                if at >= start_at && at < window_end {
+                    out.push(issue);
+                }
             }
-
-            let body: serde_json::Value = resp
-                .json()
-                .await
-                .map_err(|e| Error::Upstream(format!("jira search parse: {e}")))?;
-            collected.extend(self.parse_issue_summaries(&body));
-            token = body
-                .get("nextPageToken")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-
-            let have_window = collected.len() as u32 >= start_at.saturating_add(PAGE);
-            if have_window || token.is_none() {
+            offset += n;
+            token = next;
+            if offset >= window_end || token.is_none() || n == 0 {
                 break;
             }
         }
-
-        let from = (start_at as usize).min(collected.len());
-        let to = (start_at.saturating_add(PAGE) as usize).min(collected.len());
-        Ok(collected[from..to].to_vec())
+        Ok(out)
     }
 
     /// The caller's open assigned issues (the Focus view's "my work"): every
@@ -2424,6 +2552,73 @@ pub(crate) fn dedupe_dev_status(status: &mut DevStatus) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn issues(from: u32, n: u32) -> Vec<IssueSummary> {
+        (from..from + n)
+            .map(|i| IssueSummary {
+                key: format!("K-{i}"),
+                summary: String::new(),
+                status: String::new(),
+                issue_type: String::new(),
+                url: String::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn jql_walk_resumes_from_the_nearest_known_token() {
+        let mut w = JqlWalk::default();
+        assert_eq!(
+            w.resume(250),
+            (0, None),
+            "nothing known: walk from the start"
+        );
+        w.record(0, issues(0, 100), Some("t100".into()));
+        w.record(100, issues(100, 100), Some("t200".into()));
+        // Window 125..150 lives in the page at 100 — resume there, not at 0.
+        assert_eq!(w.resume(125), (100, Some("t100".into())));
+        assert_eq!(w.resume(250), (200, Some("t200".into())));
+        assert_eq!(w.resume(25), (0, None));
+        // The page itself is memoised with the token for the page after it.
+        let (hit, next) = w.cached_page(100).expect("page cached");
+        assert_eq!(hit.first().map(|i| i.key.as_str()), Some("K-100"));
+        assert_eq!(next.as_deref(), Some("t200"));
+    }
+
+    #[test]
+    fn jql_walk_last_page_and_page_cap() {
+        let mut w = JqlWalk::default();
+        w.record(0, issues(0, 40), None);
+        assert_eq!(w.resume(30), (0, None));
+        assert_eq!(
+            w.cached_page(0).map(|(_, n)| n),
+            Some(None),
+            "last page has no next"
+        );
+        // An empty page never registers a token at its own offset.
+        let mut e = JqlWalk::default();
+        e.record(0, Vec::new(), Some("t".into()));
+        assert!(e.tokens.is_empty());
+        // Only the newest JQL_PAGES_KEPT pages are kept; tokens all survive.
+        let mut big = JqlWalk::default();
+        for p in 0..(JQL_PAGES_KEPT as u32 + 3) {
+            big.record(
+                p * 100,
+                issues(p * 100, 100),
+                Some(format!("t{}", (p + 1) * 100)),
+            );
+        }
+        assert_eq!(big.pages.len(), JQL_PAGES_KEPT);
+        assert!(big.cached_page(0).is_none());
+        assert_eq!(big.tokens.len(), JQL_PAGES_KEPT + 3);
+    }
+
+    #[test]
+    fn jql_walk_key_separates_accounts_and_queries() {
+        assert_ne!(jql_walk_key("Basic a", "q"), jql_walk_key("Basic b", "q"));
+        assert_ne!(jql_walk_key("Basic a", "q1"), jql_walk_key("Basic a", "q2"));
+        assert_eq!(jql_walk_key("Basic a", "q"), jql_walk_key("Basic a", "q"));
+    }
 
     #[test]
     fn test_is_issue_key() {

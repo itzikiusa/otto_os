@@ -5,8 +5,8 @@
 //! sampler state. Blocking librdkafka calls run on `spawn_blocking`; admin /
 //! producer calls are awaited directly.
 
-use crate::decode::{avro_payload, avro_to_json, confluent_frame, decode_payload};
-use crate::kafka::{is_internal, KafkaClient, KafkaConnSpec};
+use crate::decode::{avro_payload, avro_to_json_with, confluent_frame, decode_payload, to_preview};
+use crate::kafka::{is_internal, KafkaClient, KafkaConnSpec, MAX_CONSUME_BYTES};
 use crate::metrics::{self, ClusterMetricState};
 use crate::proxy::BrokerTunnel;
 use crate::schema_registry::SchemaRegistry;
@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const POOL_TTL: Duration = Duration::from_secs(30 * 60);
+const POLICY_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_CONSUME: usize = 5000;
 
 struct Pooled {
@@ -52,7 +53,16 @@ pub struct BrokersService {
     /// Two maps, because `client_for`'s miss path calls `tunnel_for`.
     client_locks: DashMap<Id, Arc<tokio::sync::Mutex<()>>>,
     tunnel_locks: DashMap<Id, Arc<tokio::sync::Mutex<()>>>,
-    samplers: DashMap<Id, Mutex<ClusterMetricState>>,
+    samplers: DashMap<Id, Arc<Mutex<ClusterMetricState>>>,
+    /// Per-cluster single-flight gate for the metrics watermark sweep. Held by
+    /// the (uncancellable) blocking sweep itself, so a poll that arrives while
+    /// one runs — or after its HTTP request was dropped — serves the cached
+    /// total instead of starting a second cluster-wide ListOffsets pass.
+    sweep_locks: DashMap<Id, Arc<tokio::sync::Mutex<()>>>,
+    /// `(cluster, topic)` → (fetched_at, cleanup.policy). The policy almost
+    /// never changes; the Topics tab refreshes counts every 5 s and used to
+    /// re-describe 50 topic configs serially each time.
+    policy_cache: DashMap<(Id, String), (Instant, Option<String>)>,
     /// Per-cluster negative cache: present once a consumer-group operation has
     /// been refused by the broker's ACLs (`GroupAuthorizationFailed`). While
     /// present we short-circuit group ops instead of re-hitting the broker (no
@@ -99,6 +109,8 @@ impl BrokersService {
             client_locks: DashMap::new(),
             tunnel_locks: DashMap::new(),
             samplers: DashMap::new(),
+            sweep_locks: DashMap::new(),
+            policy_cache: DashMap::new(),
             group_denied: DashMap::new(),
             audit,
             ops: None,
@@ -283,6 +295,7 @@ impl BrokersService {
         self.repo.delete(id).await?;
         self.evict(id);
         self.samplers.remove(id);
+        self.policy_cache.retain(|(cid, _), _| cid != id);
         Ok(())
     }
 
@@ -575,16 +588,13 @@ impl BrokersService {
         };
         // Cleanup policy comes from topic config; some clusters/users can't read
         // configs (e.g. MSK without DESCRIBE_CONFIGS) — degrade gracefully.
-        let cleanup_policy = client.topic_configs(topic).await.ok().and_then(|cfgs| {
-            cfgs.into_iter()
-                .find(|c| c.name == "cleanup.policy")
-                .and_then(|c| c.value)
-        });
+        let cleanup_policy = self
+            .cleanup_policies(id, &client, &[topic.to_string()])
+            .await
+            .remove(topic)
+            .flatten();
         let msg_per_sec = {
-            let sampler = self
-                .samplers
-                .entry(id.clone())
-                .or_insert_with(|| Mutex::new(ClusterMetricState::default()));
+            let sampler = self.sampler(id);
             let mut state = sampler.lock().unwrap_or_else(|p| p.into_inner());
             state.topic_rate(topic, count)
         };
@@ -608,45 +618,21 @@ impl BrokersService {
             return Ok(std::collections::HashMap::new());
         }
         let (client, _) = self.client_for(id).await?;
-        // Fan-out message counts using the existing WATERMARK_WORKERS pool.
+        // One metadata pass + one batched watermark pass for every partition
+        // of every requested topic (was a per-topic, per-partition fan-out).
         let counts: std::collections::HashMap<String, i64> = {
             let client = client.clone();
             let ns = names.clone();
-            tokio::task::spawn_blocking(move || {
-                use std::sync::atomic::{AtomicUsize, Ordering};
-                use std::sync::Mutex;
-                let results = Mutex::new(std::collections::HashMap::new());
-                let next = AtomicUsize::new(0);
-                let workers = crate::kafka::WATERMARK_WORKERS.min(ns.len());
-                std::thread::scope(|s| {
-                    for _ in 0..workers {
-                        s.spawn(|| loop {
-                            let i = next.fetch_add(1, Ordering::Relaxed);
-                            let Some(name) = ns.get(i) else { break };
-                            match client.topic_message_count(name) {
-                                Ok(n) => {
-                                    results.lock().unwrap().insert(name.clone(), n);
-                                }
-                                Err(_) => {
-                                    results.lock().unwrap().insert(name.clone(), -1);
-                                }
-                            }
-                        });
-                    }
-                });
-                results.into_inner().unwrap()
-            })
-            .await
-            .map_err(join)?
+            tokio::task::spawn_blocking(move || client.topics_message_counts(&ns))
+                .await
+                .map_err(join)?
+                .unwrap_or_else(|_| names.iter().map(|n| (n.clone(), -1)).collect())
         };
 
         // Derive per-topic msg/s from the previous sample. Done in one sync pass
         // (no await) so we never hold the state lock across the config fetch.
         let rates: std::collections::HashMap<String, Option<f64>> = {
-            let sampler = self
-                .samplers
-                .entry(id.clone())
-                .or_insert_with(|| Mutex::new(ClusterMetricState::default()));
+            let sampler = self.sampler(id);
             let mut state = sampler.lock().unwrap_or_else(|p| p.into_inner());
             names
                 .iter()
@@ -657,31 +643,68 @@ impl BrokersService {
                 .collect()
         };
 
-        // Fetch cleanup policies (best-effort; fail silently per topic).
+        // Cleanup policies: cached per topic, misses fetched in ONE batched
+        // DescribeConfigs. Only for topics whose count succeeded (avoids
+        // double-erroring when the cluster can't be reached at all).
+        let reachable: Vec<String> = names
+            .iter()
+            .filter(|n| counts.get(*n).copied().unwrap_or(-1) >= 0)
+            .cloned()
+            .collect();
+        let mut policies = self.cleanup_policies(id, &client, &reachable).await;
         let mut out = std::collections::HashMap::with_capacity(names.len());
         for name in &names {
-            let count = counts.get(name).copied().unwrap_or(-1);
-            // Only fetch config if the count succeeded (avoids double-erroring on
-            // permission issues where the cluster can't be reached at all).
-            let cleanup_policy = if count >= 0 {
-                client.topic_configs(name).await.ok().and_then(|cfgs| {
-                    cfgs.into_iter()
-                        .find(|c| c.name == "cleanup.policy")
-                        .and_then(|c| c.value)
-                })
-            } else {
-                None
-            };
             out.insert(
                 name.clone(),
                 TopicStats {
-                    message_count: count,
-                    cleanup_policy,
+                    message_count: counts.get(name).copied().unwrap_or(-1),
+                    cleanup_policy: policies.remove(name).flatten(),
                     msg_per_sec: rates.get(name).copied().flatten(),
                 },
             );
         }
         Ok(out)
+    }
+
+    /// `cleanup.policy` per topic from the 10-minute cache, fetching all misses
+    /// in one batched DescribeConfigs. Denied/failed topics are cached as
+    /// `None` too, so a principal without DESCRIBE_CONFIGS isn't re-probed
+    /// every refresh.
+    async fn cleanup_policies(
+        &self,
+        id: &Id,
+        client: &KafkaClient,
+        topics: &[String],
+    ) -> std::collections::HashMap<String, Option<String>> {
+        let mut out = std::collections::HashMap::with_capacity(topics.len());
+        let mut misses = Vec::new();
+        for t in topics {
+            match self.policy_cache.get(&(id.clone(), t.clone())) {
+                Some(e) if e.0.elapsed() < POLICY_TTL => {
+                    out.insert(t.clone(), e.1.clone());
+                }
+                _ => misses.push(t.clone()),
+            }
+        }
+        if !misses.is_empty() {
+            let fetched = client.topics_cleanup_policy(&misses).await;
+            let now = Instant::now();
+            for t in misses {
+                let v = fetched.get(&t).cloned().flatten();
+                self.policy_cache
+                    .insert((id.clone(), t.clone()), (now, v.clone()));
+                out.insert(t, v);
+            }
+        }
+        out
+    }
+
+    /// The (shared) metrics state for a cluster, created on first use.
+    fn sampler(&self, id: &Id) -> Arc<Mutex<ClusterMetricState>> {
+        self.samplers
+            .entry(id.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(ClusterMetricState::default())))
+            .clone()
     }
 
     pub async fn topic_configs(&self, id: &Id, topic: &str) -> Result<Vec<TopicConfigEntry>> {
@@ -1121,6 +1144,23 @@ impl BrokersService {
     }
 
     pub async fn consume(&self, id: &Id, topic: &str, req: &ConsumeReq) -> Result<ConsumeResp> {
+        self.consume_with(id, topic, req, &ConsumeOpts::default())
+            .await
+    }
+
+    /// Peek + decode. The blocking librdkafka read and the CPU-heavy decode /
+    /// filter / mask pass both run off the async runtime; registry schemas are
+    /// resolved (async, parsed + cached per id) between the two. Viewer
+    /// options: `preview` (2 KiB list previews) and `start_offsets` (the live
+    /// tail's single multi-partition request). Every viewer peek carries the
+    /// `MAX_CONSUME_BYTES` budget.
+    pub async fn consume_with(
+        &self,
+        id: &Id,
+        topic: &str,
+        req: &ConsumeReq,
+        opts: &ConsumeOpts,
+    ) -> Result<ConsumeResp> {
         let (client, registry) = self.client_for(id).await?;
         let raw = {
             let client = client.clone();
@@ -1129,130 +1169,58 @@ impl BrokersService {
                 limit: req.limit.clamp(1, MAX_CONSUME),
                 ..req.clone()
             };
-            tokio::task::spawn_blocking(move || client.consume_raw(&t, &req2))
-                .await
-                .map_err(join)??
+            let starts: Option<std::collections::HashMap<i32, i64>> = opts
+                .start_offsets
+                .as_ref()
+                .map(|v| v.iter().map(|s| (s.partition, s.offset)).collect());
+            tokio::task::spawn_blocking(move || {
+                client.consume_raw_from(&t, &req2, starts.as_ref(), Some(MAX_CONSUME_BYTES))
+            })
+            .await
+            .map_err(join)??
         };
 
-        // key_filter is applied server-side in consume_raw (raw bytes, pre-decode)
-        // so we only post-filter on value here, which requires decoding first.
-        let value_filter = req.value_filter.as_ref().map(|s| s.to_lowercase());
-
-        let mut messages = Vec::with_capacity(raw.messages.len());
-        for m in raw.messages {
-            let key = self
-                .decode_kv(m.key.as_deref(), ValueFormat::Auto, &registry)
-                .await;
-            let value = self
-                .decode_kv(m.value.as_deref(), req.decode, &registry)
-                .await;
-            if let Some(f) = &value_filter {
-                if !value
-                    .as_ref()
-                    .is_some_and(|v| v.text.to_lowercase().contains(f))
-                {
-                    continue;
+        // Resolve every registry schema this batch references (keys always
+        // try Avro; values when Auto/Avro is requested) — a handful of ids.
+        let mut schemas: std::collections::HashMap<i32, Arc<apache_avro::Schema>> =
+            std::collections::HashMap::new();
+        if let Some(reg) = &registry {
+            let value_avro = matches!(req.decode, ValueFormat::Auto | ValueFormat::Avro);
+            let mut ids = std::collections::BTreeSet::new();
+            for m in &raw.messages {
+                if let Some((sid, _)) = m.key.as_deref().and_then(confluent_frame) {
+                    ids.insert(sid);
                 }
-            }
-            messages.push(KafkaMessage {
-                partition: m.partition,
-                offset: m.offset,
-                timestamp_ms: m.timestamp_ms,
-                key,
-                value,
-                headers: m
-                    .headers
-                    .into_iter()
-                    .map(|(k, v)| MessageHeader {
-                        key: k,
-                        value: String::from_utf8_lossy(&v).into_owned(),
-                    })
-                    .collect(),
-                size_bytes: m.size,
-            });
-        }
-        // Apply server-side PII masking when the caller opts in. Key text, value
-        // text, and header values are run through `otto_core::redact::redact_text`
-        // before leaving the server — raw payloads never reach the client when
-        // this flag is set.
-        let masked = req.mask == Some(true);
-        if masked {
-            for msg in &mut messages {
-                if let Some(ref mut kp) = msg.key {
-                    kp.text = redact::redact_text(&kp.text).value;
-                }
-                if let Some(ref mut vp) = msg.value {
-                    vp.text = redact::redact_text(&vp.text).value;
-                }
-                for hdr in &mut msg.headers {
-                    hdr.value = redact::redact_text(&hdr.value).value;
-                }
-            }
-        }
-        Ok(ConsumeResp {
-            messages,
-            partitions: raw.partitions,
-            truncated: raw.truncated,
-            masked,
-        })
-    }
-
-    /// Decode a key/value, consulting the schema registry for Confluent-framed
-    /// Avro when `Auto`/`Avro` is requested.
-    async fn decode_kv(
-        &self,
-        bytes: Option<&[u8]>,
-        fmt: ValueFormat,
-        registry: &Option<Arc<SchemaRegistry>>,
-    ) -> Option<DecodedPayload> {
-        let bytes = bytes?;
-        if matches!(fmt, ValueFormat::Auto | ValueFormat::Avro) {
-            if let (Some(reg), Some((schema_id, body))) = (registry, confluent_frame(bytes)) {
-                if let Ok(schema) = reg.schema_by_id(schema_id).await {
-                    if let Ok(v) = avro_to_json(&schema, body) {
-                        return Some(avro_payload(&v, schema_id, bytes));
+                if value_avro {
+                    if let Some((sid, _)) = m.value.as_deref().and_then(confluent_frame) {
+                        ids.insert(sid);
                     }
                 }
             }
+            for sid in ids {
+                if let Ok(schema) = reg.parsed_schema_by_id(sid).await {
+                    schemas.insert(sid, schema);
+                }
+            }
         }
-        Some(decode_payload(Some(bytes), fmt))
+
+        let req = req.clone();
+        let preview = opts.preview;
+        tokio::task::spawn_blocking(move || decode_batch(raw, &req, &schemas, preview))
+            .await
+            .map_err(join)
     }
 
     pub async fn metrics(&self, id: &Id) -> Result<ClusterMetrics> {
         let row = self.repo.get(id).await?;
         let (client, _) = self.client_for(id).await?;
+        let state = self.sampler(id);
 
-        // Check if the cached watermark total has expired; if so, re-sweep.
-        // The sweep is expensive over a tunnel (hundreds of ListOffsets round-trips),
-        // so we skip it when the cached value is still fresh (< 8 s).
-        let needs_sweep = self
-            .samplers
-            .entry(id.clone())
-            .or_insert_with(|| Mutex::new(ClusterMetricState::default()))
-            .lock()
-            .map_err(|_| Error::Internal("metrics lock".into()))?
-            .needs_sweep();
-
-        let total = if needs_sweep {
-            let swept = tokio::task::spawn_blocking(move || client.total_messages())
-                .await
-                .map_err(join)??;
-            // Store fresh total; hold the ref in a named binding to extend lifetime.
-            let entry = self
-                .samplers
-                .entry(id.clone())
-                .or_insert_with(|| Mutex::new(ClusterMetricState::default()));
-            entry
-                .lock()
-                .map_err(|_| Error::Internal("metrics lock".into()))?
-                .store_watermark(swept);
-            swept
-        } else {
-            self.samplers
-                .get(id)
-                .and_then(|e| e.lock().ok().and_then(|g| g.cached_total()))
-                .unwrap_or(0)
-        };
+        // Single-flight, adaptive-TTL watermark sweep (see `sweep_if_due`).
+        sweep_if_due(open_lock(&self.sweep_locks, id), state.clone(), move || {
+            client.total_messages()
+        })
+        .await?;
 
         // Reach a private metrics endpoint through the same SSH SOCKS tunnel.
         let socks = self.tunnels.get(id).map(|t| t.socks_url());
@@ -1265,18 +1233,165 @@ impl BrokersService {
             _ => None,
         };
 
-        let entry = self
-            .samplers
-            .entry(id.clone())
-            .or_insert_with(|| Mutex::new(ClusterMetricState::default()));
-        let mut guard = entry
+        let mut guard = state
             .lock()
             .map_err(|_| Error::Internal("metrics lock".into()))?;
-        Ok(guard.build(total, prom.as_deref()))
+        Ok(guard.build_cached(prom.as_deref()))
     }
 }
 
+/// Run the cluster-wide watermark `sweep` if the cached total is stale, at most
+/// ONE at a time per cluster. The sweep (a blocking librdkafka pass that can't
+/// be cancelled) owns the gate and stores its own result, so:
+/// - a request arriving while a sweep runs returns at once (the caller serves
+///   the cached total) instead of starting a second sweep;
+/// - a sweep whose HTTP request was dropped still lands its total;
+/// - the next sweep isn't due until `max(8 s, 3 × last sweep)` has passed.
+///
+/// The very first call (nothing cached yet) waits for the in-flight sweep so
+/// the first response carries a real total.
+async fn sweep_if_due<F>(
+    gate: Arc<tokio::sync::Mutex<()>>,
+    state: Arc<Mutex<ClusterMetricState>>,
+    sweep: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Result<i64> + Send + 'static,
+{
+    let due =
+        |st: &Arc<Mutex<ClusterMetricState>>| st.lock().map(|g| g.needs_sweep()).unwrap_or(true);
+    if !due(&state) {
+        return Ok(());
+    }
+    let guard = match gate.clone().try_lock_owned() {
+        Ok(g) => g,
+        Err(_) => {
+            let cold = state
+                .lock()
+                .map(|g| g.cached_total().is_none())
+                .unwrap_or(false);
+            if cold {
+                // First load: wait for the running sweep's result.
+                drop(gate.lock().await);
+            }
+            return Ok(());
+        }
+    };
+    // Re-check under the gate: a sweep may have finished between the check
+    // and the lock.
+    if !due(&state) {
+        return Ok(());
+    }
+    let st = state.clone();
+    tokio::task::spawn_blocking(move || {
+        let _gate = guard;
+        let started = Instant::now();
+        let total = sweep()?;
+        st.lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .store_sweep(total, started.elapsed());
+        Ok(())
+    })
+    .await
+    .map_err(join)?
+}
+
 // ---- helpers --------------------------------------------------------------
+
+/// Decode a key/value, using the pre-resolved registry schema for
+/// Confluent-framed Avro when `Auto`/`Avro` is requested.
+fn decode_kv(
+    bytes: Option<&[u8]>,
+    fmt: ValueFormat,
+    schemas: &std::collections::HashMap<i32, Arc<apache_avro::Schema>>,
+) -> Option<DecodedPayload> {
+    let bytes = bytes?;
+    if matches!(fmt, ValueFormat::Auto | ValueFormat::Avro) {
+        if let Some((schema_id, body)) = confluent_frame(bytes) {
+            if let Some(schema) = schemas.get(&schema_id) {
+                if let Ok(v) = avro_to_json_with(schema, body) {
+                    return Some(avro_payload(&v, schema_id, bytes));
+                }
+            }
+        }
+    }
+    Some(decode_payload(Some(bytes), fmt))
+}
+
+/// The synchronous decode → value-filter → mask → preview pass over a raw
+/// peek (runs on a blocking thread: pretty-printing 50 × 1.6 MB JSON is
+/// ~0.7 s of CPU).
+fn decode_batch(
+    raw: crate::kafka::RawConsume,
+    req: &ConsumeReq,
+    schemas: &std::collections::HashMap<i32, Arc<apache_avro::Schema>>,
+    preview: bool,
+) -> ConsumeResp {
+    // key_filter is applied server-side in consume_raw (raw bytes, pre-decode)
+    // so we only post-filter on value here, which requires decoding first.
+    let value_filter = req.value_filter.as_ref().map(|s| s.to_lowercase());
+    // Server-side PII masking when the caller opts in: key text, value text and
+    // header values run through `otto_core::redact::redact_text` before leaving
+    // the server — raw payloads never reach the client when this flag is set.
+    // Masking runs on the FULL text, before any preview cut.
+    let masked = req.mask == Some(true);
+
+    let mut messages = Vec::with_capacity(raw.messages.len());
+    for m in raw.messages {
+        let key = decode_kv(m.key.as_deref(), ValueFormat::Auto, schemas);
+        let value = decode_kv(m.value.as_deref(), req.decode, schemas);
+        if let Some(f) = &value_filter {
+            if !value
+                .as_ref()
+                .is_some_and(|v| v.text.to_lowercase().contains(f))
+            {
+                continue;
+            }
+        }
+        let mut msg = KafkaMessage {
+            partition: m.partition,
+            offset: m.offset,
+            timestamp_ms: m.timestamp_ms,
+            key,
+            value,
+            headers: m
+                .headers
+                .into_iter()
+                .map(|(k, v)| MessageHeader {
+                    key: k,
+                    value: String::from_utf8_lossy(&v).into_owned(),
+                })
+                .collect(),
+            size_bytes: m.size,
+        };
+        if masked {
+            // `raw_base64` is the unmasked bytes — never ship it masked.
+            if let Some(ref mut kp) = msg.key {
+                kp.text = redact::redact_text(&kp.text).value;
+                kp.raw_base64 = None;
+            }
+            if let Some(ref mut vp) = msg.value {
+                vp.text = redact::redact_text(&vp.text).value;
+                vp.raw_base64 = None;
+            }
+            for hdr in &mut msg.headers {
+                hdr.value = redact::redact_text(&hdr.value).value;
+            }
+        }
+        if preview {
+            if let Some(ref mut vp) = msg.value {
+                to_preview(vp);
+            }
+        }
+        messages.push(msg);
+    }
+    ConsumeResp {
+        messages,
+        partitions: raw.partitions,
+        truncated: raw.truncated,
+        masked,
+    }
+}
 
 fn row_to_cluster(r: BrokerClusterRow) -> BrokerCluster {
     BrokerCluster {
@@ -1454,6 +1569,36 @@ fn lag_alert_from_row(
 #[cfg(test)]
 mod single_flight_tests {
     use super::*;
+
+    /// Two polls racing a cold cache run exactly one sweep; a later poll
+    /// inside the TTL runs none.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn metrics_sweep_is_single_flight() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let state = Arc::new(Mutex::new(ClusterMetricState::default()));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mk = || {
+            let runs = runs.clone();
+            move || {
+                runs.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(200));
+                Ok(42)
+            }
+        };
+        // Two concurrent polls (plus a third right after) ⇒ ONE sweep.
+        let (a, b) = tokio::join!(
+            sweep_if_due(gate.clone(), state.clone(), mk()),
+            sweep_if_due(gate.clone(), state.clone(), mk()),
+        );
+        a.unwrap();
+        b.unwrap();
+        sweep_if_due(gate.clone(), state.clone(), mk())
+            .await
+            .unwrap();
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(state.lock().unwrap().cached_total(), Some(42));
+    }
 
     /// Concurrent first opens of ONE cluster serialize on one lock (so the
     /// later caller reuses the tunnel/client instead of replacing a live one);

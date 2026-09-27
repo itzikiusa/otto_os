@@ -459,14 +459,35 @@ pub async fn get_transcript(
     };
     let sub = q.sub.as_deref().filter(|s| !s.is_empty());
     let provider = resolved.provider;
-    let snapshot = cached_fold(&ctx, provider, &resolved.path, sub).await?;
-    let mut t = page(
-        &snapshot.folded,
-        before,
-        limit,
-        sub,
-        snapshot.subagents.clone(),
-    );
+    // A running tail already holds this file's fold: page from memory (no
+    // disk re-fold, no "busy" while the agent writes). Otherwise the cache.
+    let live = match sub {
+        None => crate::transcript_tail::live_page(&id, provider, &resolved.path).await,
+        Some(_) => None,
+    };
+    // Paging sizes (serializes) up to a 2 MB page of turns — off the runtime.
+    let sub_owned = sub.map(str::to_string);
+    let mut t = match live {
+        Some((folded, subagents)) => {
+            crate::offload::blocking(move || {
+                page(&folded, before, limit, sub_owned.as_deref(), subagents)
+            })
+            .await
+        }
+        None => {
+            let snapshot = cached_fold(&ctx, provider, &resolved.path, sub).await?;
+            crate::offload::blocking(move || {
+                page(
+                    &snapshot.folded,
+                    before,
+                    limit,
+                    sub_owned.as_deref(),
+                    snapshot.subagents.clone(),
+                )
+            })
+            .await
+        }
+    };
     if t.session_id.is_none() {
         t.session_id = session.provider_session_id.clone();
     }

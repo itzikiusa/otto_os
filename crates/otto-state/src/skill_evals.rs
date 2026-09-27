@@ -15,6 +15,43 @@ use sqlx::{Row, SqlitePool};
 
 use crate::convert::{dberr, fmt, ts};
 
+/// A run's list row (`GET …/skill-evaluations?summary=1`): the headline columns
+/// of [`SkillEval`] (incl. its one-paragraph `summary`) without `iterations`
+/// or `config`, plus the iteration count. Field names match `SkillEval` so the UI can treat a full
+/// run as a summary.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SkillEvalSummary {
+    pub id: Id,
+    pub workspace_id: Id,
+    pub source_skill: String,
+    pub task: String,
+    pub impl_cli: String,
+    pub target_iterations: u32,
+    pub status: SkillEvalStatus,
+    pub error: Option<String>,
+    pub summary: String,
+    pub best_iteration: Option<u32>,
+    pub best_score: Option<f64>,
+    pub mode: String,
+    pub golden_task_id: Option<String>,
+    pub matrix_id: Option<String>,
+    pub dim_provider: Option<String>,
+    pub dim_skill: Option<String>,
+    pub dim_prompt: Option<String>,
+    pub composite_score: Option<f64>,
+    pub promoted: bool,
+    pub iteration_count: u32,
+    pub created_at: chrono::DateTime<Utc>,
+}
+
+/// One keyset page of [`SkillEvalSummary`] rows, newest first.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SkillEvalSummaryPage {
+    pub items: Vec<SkillEvalSummary>,
+    /// Pass back as `cursor` for the next (older) page; `None` on the last one.
+    pub next_cursor: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct SkillEvalsRepo {
     pool: SqlitePool,
@@ -504,6 +541,7 @@ impl SkillEvalsRepo {
     }
 
     /// All runs for a workspace, newest first, each with its iterations.
+    /// Iterations come from ONE query for the whole workspace (was one per run).
     pub async fn list_for_workspace(&self, workspace_id: &Id) -> Result<Vec<SkillEval>> {
         let rows = sqlx::query(
             "SELECT * FROM skill_evals WHERE workspace_id = ? ORDER BY created_at DESC",
@@ -512,14 +550,112 @@ impl SkillEvalsRepo {
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("list skill evals"))?;
+        let iter_rows = sqlx::query(
+            "SELECT i.* FROM skill_eval_iterations i JOIN skill_evals e ON e.id = i.eval_id \
+             WHERE e.workspace_id = ? ORDER BY i.eval_id, i.iter",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("skill eval iterations"))?;
+        let mut by_eval: std::collections::HashMap<String, Vec<EvalIteration>> =
+            std::collections::HashMap::new();
+        for r in &iter_rows {
+            let eval_id: String = r.get("eval_id");
+            by_eval
+                .entry(eval_id)
+                .or_default()
+                .push(row_to_iteration(r)?);
+        }
 
         let mut evals = Vec::with_capacity(rows.len());
         for r in &rows {
             let id: String = r.get("id");
-            let iterations = self.iterations_for_eval(&id).await?;
+            let iterations = by_eval.remove(&id).unwrap_or_default();
             evals.push(row_to_eval(r, iterations)?);
         }
         Ok(evals)
+    }
+
+    /// One page of run SUMMARIES for a workspace, newest first: the list
+    /// columns only (no iterations, config or skill bodies) in a single query,
+    /// with the iteration count aggregated. `skill` keeps runs whose
+    /// `source_skill` or matrix `dim_skill` equals it. `cursor` is the opaque
+    /// `next_cursor` of the previous page (`created_at|id` keyset).
+    pub async fn list_summaries(
+        &self,
+        workspace_id: &Id,
+        skill: Option<&str>,
+        limit: u32,
+        cursor: Option<&str>,
+    ) -> Result<SkillEvalSummaryPage> {
+        let limit = limit.clamp(1, 1000);
+        let (c_at, c_id) = match cursor.and_then(|c| c.split_once('|')) {
+            Some((a, b)) => (Some(a.to_string()), Some(b.to_string())),
+            None => (None, None),
+        };
+        let rows = sqlx::query(
+            "SELECT e.id, e.workspace_id, e.source_skill, e.task, e.impl_cli, \
+                    e.target_iterations, e.status, e.error, e.summary, e.best_iteration, \
+                    e.best_score, \
+                    e.mode, e.golden_task_id, e.matrix_id, e.dim_provider, e.dim_skill, \
+                    e.dim_prompt, e.composite_score, e.promoted, e.created_at, \
+                    (SELECT COUNT(*) FROM skill_eval_iterations i WHERE i.eval_id = e.id) \
+                      AS iteration_count \
+             FROM skill_evals e \
+             WHERE e.workspace_id = ?1 \
+               AND (?2 IS NULL OR e.source_skill = ?2 OR e.dim_skill = ?2) \
+               AND (?3 IS NULL OR e.created_at < ?3 OR (e.created_at = ?3 AND e.id < ?4)) \
+             ORDER BY e.created_at DESC, e.id DESC \
+             LIMIT ?5",
+        )
+        .bind(workspace_id)
+        .bind(skill)
+        .bind(c_at)
+        .bind(c_id)
+        .bind(i64::from(limit) + 1)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list skill eval summaries"))?;
+        let has_more = rows.len() > limit as usize;
+        let mut items = Vec::with_capacity(rows.len().min(limit as usize));
+        let mut next_cursor = None;
+        for r in rows.iter().take(limit as usize) {
+            let created_raw: String = r.get("created_at");
+            let id: String = r.get("id");
+            if has_more {
+                next_cursor = Some(format!("{created_raw}|{id}"));
+            }
+            let best_iter: Option<i64> = r.get("best_iteration");
+            items.push(SkillEvalSummary {
+                id,
+                workspace_id: r.get("workspace_id"),
+                source_skill: r.get("source_skill"),
+                task: r.get("task"),
+                impl_cli: r.get("impl_cli"),
+                target_iterations: r.get::<i64, _>("target_iterations") as u32,
+                status: SkillEvalStatus::parse(&r.get::<String, _>("status"))
+                    .ok_or_else(|| Error::Internal("bad skill eval status".into()))?,
+                error: r.get("error"),
+                summary: r.get("summary"),
+                best_iteration: best_iter.map(|v| v as u32),
+                best_score: r.get("best_score"),
+                mode: r.try_get("mode").unwrap_or_else(|_| "generate".into()),
+                golden_task_id: r.try_get("golden_task_id").ok().flatten(),
+                matrix_id: r.try_get("matrix_id").ok().flatten(),
+                dim_provider: r.try_get("dim_provider").ok().flatten(),
+                dim_skill: r.try_get("dim_skill").ok().flatten(),
+                dim_prompt: r.try_get("dim_prompt").ok().flatten(),
+                composite_score: r.try_get("composite_score").ok().flatten(),
+                promoted: r
+                    .try_get::<i64, _>("promoted")
+                    .map(|v| v != 0)
+                    .unwrap_or(false),
+                iteration_count: r.get::<i64, _>("iteration_count") as u32,
+                created_at: ts(&created_raw)?,
+            });
+        }
+        Ok(SkillEvalSummaryPage { items, next_cursor })
     }
 
     // -- private helpers ----------------------------------------------------
@@ -646,6 +782,67 @@ mod tests {
 
         let list = repo.list_for_workspace(&"ws1".into()).await.unwrap();
         assert_eq!(list.len(), 1);
+        assert_eq!(list[0].iterations.len(), 1, "batched iterations attach");
+    }
+
+    #[tokio::test]
+    async fn summaries_page_by_keyset_and_filter_by_skill() {
+        let pool = mem_pool().await;
+        let repo = SkillEvalsRepo::new(pool.clone());
+        let ws: Id = "ws1".into();
+        let mut ids = Vec::new();
+        for i in 0..5 {
+            let skill = if i % 2 == 0 { "even" } else { "odd" };
+            let e = repo
+                .create_eval(&ws, skill, "t", "claude", 1, &serde_json::json!({}))
+                .await
+                .unwrap();
+            repo.add_iteration(&e.id, 1, None, "b", "s", "claude", &[])
+                .await
+                .unwrap();
+            ids.push(e.id);
+        }
+        // Other workspace never leaks in.
+        repo.create_eval(
+            &"ws2".into(),
+            "even",
+            "t",
+            "claude",
+            1,
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+
+        let p1 = repo.list_summaries(&ws, None, 2, None).await.unwrap();
+        assert_eq!(p1.items.len(), 2);
+        assert_eq!(p1.items[0].iteration_count, 1);
+        let p2 = repo
+            .list_summaries(&ws, None, 2, p1.next_cursor.as_deref())
+            .await
+            .unwrap();
+        let p3 = repo
+            .list_summaries(&ws, None, 2, p2.next_cursor.as_deref())
+            .await
+            .unwrap();
+        assert_eq!(p3.items.len(), 1);
+        assert!(p3.next_cursor.is_none());
+        let mut seen: Vec<String> = [p1.items, p2.items, p3.items]
+            .concat()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        seen.sort();
+        let mut want = ids.clone();
+        want.sort();
+        assert_eq!(seen, want, "every run exactly once across pages");
+
+        let even = repo
+            .list_summaries(&ws, Some("even"), 50, None)
+            .await
+            .unwrap();
+        assert_eq!(even.items.len(), 3);
+        assert!(even.items.iter().all(|s| s.source_skill == "even"));
     }
 
     #[tokio::test]

@@ -31,7 +31,7 @@ use axum::{Json, Router};
 use chrono::Utc;
 use otto_core::domain::{SessionKind, SessionStatus, WorkspaceRole};
 use otto_core::Id;
-use otto_state::{NewSavedView, SavedView, SavedViewsRepo, WorkflowsRepo};
+use otto_state::{NewSavedView, SavedView, SavedViewsRepo};
 use serde::{Deserialize, Serialize};
 use sqlx::Row as _;
 use tokio::sync::Mutex;
@@ -216,6 +216,29 @@ async fn build_view(ctx: &ServerCtx, ws_id: &Id) -> MissionView {
         .await
         .unwrap_or_default();
 
+        // Unposted draft counts for every "done" review in ONE grouped query
+        // (it was one COUNT(*) per review, SA-09).
+        let done_ids: Vec<String> = rows
+            .iter()
+            .filter(|r| r.get::<String, _>("status") != "running")
+            .map(|r| r.get::<String, _>("id"))
+            .collect();
+        let mut drafts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        if !done_ids.is_empty() {
+            let mut q = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+                "SELECT review_id, COUNT(*) AS n FROM pr_review_comments
+                 WHERE state = 'draft' AND posted = 0 AND review_id IN (",
+            );
+            let mut sep = q.separated(", ");
+            for id in &done_ids {
+                sep.push_bind(id.clone());
+            }
+            q.push(") GROUP BY review_id");
+            for r in q.build().fetch_all(&ctx.pool).await.unwrap_or_default() {
+                drafts.insert(r.get("review_id"), r.get("n"));
+            }
+        }
+
         for row in &rows {
             let review_id: String = row.get("id");
             let pr_number: i64 = row.get("pr_number");
@@ -239,14 +262,7 @@ async fn build_view(ctx: &ServerCtx, ws_id: &Id) -> MissionView {
                 });
             } else {
                 // "done" — check for unposted draft comments.
-                let draft_count: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM pr_review_comments
-                     WHERE review_id = ? AND state = 'draft' AND posted = 0",
-                )
-                .bind(&review_id)
-                .fetch_one(&ctx.pool)
-                .await
-                .unwrap_or(0);
+                let draft_count: i64 = drafts.get(&review_id).copied().unwrap_or(0);
 
                 if draft_count > 0 {
                     view.review_ready.push(MissionItem {
@@ -275,31 +291,35 @@ async fn build_view(ctx: &ServerCtx, ws_id: &Id) -> MissionView {
     //    workspace for runs in "error" status, bounded to 20 most recent.
     // ------------------------------------------------------------------
     {
-        let wf_repo = WorkflowsRepo::new(ctx.pool.clone());
-        let workflows = wf_repo.list(ws_id).await.unwrap_or_default();
-        let mut failed_runs = 0usize;
-        'wf: for wf in &workflows {
-            let runs = wf_repo.list_runs(&wf.id).await.unwrap_or_default();
-            for run in &runs {
-                use otto_core::workflows::RunStatus;
-                if matches!(run.status, RunStatus::Error) {
-                    let age = (now - run.started_at).num_seconds().max(0);
-                    view.failed.push(MissionItem {
-                        kind: "workflow_run".into(),
-                        id: run.id.clone(),
-                        title: format!("{} run failed", wf.name),
-                        status: "error".into(),
-                        session_id: None,
-                        repo: None,
-                        cost_usd: None,
-                        age_secs: age,
-                    });
-                    failed_runs += 1;
-                    if failed_runs >= 20 {
-                        break 'wf;
-                    }
-                }
-            }
+        // One query for the workspace's 20 most recent failed runs (it was
+        // `list_runs` — 50 full rows with their node/state JSON — per
+        // workflow, SA-09).
+        let rows = sqlx::query(
+            "SELECT r.id, r.started_at, w.name
+               FROM workflow_runs r
+               JOIN workflows w ON w.id = r.workflow_id
+              WHERE w.workspace_id = ? AND r.status = 'error'
+              ORDER BY r.started_at DESC
+              LIMIT 20",
+        )
+        .bind(ws_id)
+        .fetch_all(&ctx.pool)
+        .await
+        .unwrap_or_default();
+        for row in &rows {
+            let started_raw: String = row.get("started_at");
+            let started = otto_state::convert::ts(&started_raw).unwrap_or(now);
+            let name: String = row.get("name");
+            view.failed.push(MissionItem {
+                kind: "workflow_run".into(),
+                id: row.get("id"),
+                title: format!("{name} run failed"),
+                status: "error".into(),
+                session_id: None,
+                repo: None,
+                cost_usd: None,
+                age_secs: (now - started).num_seconds().max(0),
+            });
         }
     }
 

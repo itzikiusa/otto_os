@@ -204,23 +204,19 @@ impl ProductService {
     pub(crate) async fn story_detail(&self, story_id: &Id) -> Result<ProductStoryDetail> {
         let story = self.repo.get_story(story_id).await?;
         let source = self.repo.latest_source_version(story_id).await?;
-        let versions = self.repo.list_versions(story_id).await?;
+        let version_count = self.repo.count_versions(story_id).await?;
         let analyses = self.repo.list_analyses(story_id).await?;
         let questions = self.repo.list_questions(story_id).await?;
         let notes = self.repo.list_notes(story_id).await?;
-        let runs = self.repo.list_testcase_runs(story_id).await?;
         let open_questions = questions.iter().filter(|q| q.status == "open").count() as i64;
-        let mut testcase_count: i64 = 0;
-        for run in &runs {
-            let tcs = self.repo.list_testcases(&run.id).await?;
-            testcase_count += tcs.len() as i64;
-        }
+        // One COUNT(*) (was: every run's testcases loaded, one query per run).
+        let testcase_count = self.repo.count_testcases_for_story(story_id).await?;
         let swarm_link = self.repo.swarm_link_for_story(story_id).await?;
         Ok(ProductStoryDetail {
             story,
             source,
             counts: StoryCounts {
-                versions: versions.len() as i64,
+                versions: version_count,
                 analyses: analyses.len() as i64,
                 open_questions,
                 notes: notes.len() as i64,
@@ -569,11 +565,8 @@ impl ProductService {
     /// before versions were recorded) — the publish then keeps its old
     /// last-writer-wins behaviour rather than raising a false conflict.
     async fn synced_page_version(&self, story_id: &Id) -> Result<Option<i64>> {
-        let versions = self.repo.list_versions(story_id).await?; // newest first
-        Ok(versions
-            .iter()
-            .find(|v| v.kind == "source" || v.kind == "published")
-            .and_then(|v| raw_page_version(v.raw_json.as_deref())))
+        // One indexed row + json_extract in SQL (was: every version loaded).
+        self.repo.synced_page_version(story_id).await
     }
 
     /// Publish a suggested version to the issue tracker.

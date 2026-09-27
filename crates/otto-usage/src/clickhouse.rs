@@ -404,6 +404,15 @@ fn free_loopback_port() -> std::io::Result<u16> {
 /// Generate the minimal server config and return its path. Loopback-only, empty
 /// default user (machine-local trust boundary, same as the old `local` mode),
 /// memory-capped to stay desktop-light.
+///
+/// Footprint (SE-15: 808 threads / ~450 MB RSS idle for ~19 MB of data): the
+/// global pool no longer parks up to 1000 idle threads, the schedule pools
+/// (engines Otto doesn't use: Kafka, Distributed, Buffer) are shrunk, the mark
+/// cache is 64 MB, and async metrics refresh every 60 s instead of 1 s.
+/// Deliberately NOT touched: `background_pool_size` / merge pools — MergeTree
+/// validates its `number_of_free_entries_in_pool_*` settings against them and
+/// refuses to attach tables when the pool is smaller; and `max_thread_pool_size`
+/// (a hard cap makes queries fail with "no free thread" instead of waiting).
 fn write_server_config(data_dir: &Path, port: u16) -> Result<PathBuf> {
     let server_dir = data_dir.join("server");
     std::fs::create_dir_all(&server_dir)
@@ -422,8 +431,15 @@ fn write_server_config(data_dir: &Path, port: u16) -> Result<PathBuf> {
          <listen_host>127.0.0.1</listen_host>\n\
          <path>{path}</path>\n\
          <tmp_path>{tmp}</tmp_path>\n\
-         <mark_cache_size>268435456</mark_cache_size>\n\
+         <mark_cache_size>67108864</mark_cache_size>\n\
+         <uncompressed_cache_size>0</uncompressed_cache_size>\n\
          <max_server_memory_usage_to_ram_ratio>0.3</max_server_memory_usage_to_ram_ratio>\n\
+         <max_thread_pool_free_size>16</max_thread_pool_free_size>\n\
+         <background_schedule_pool_size>16</background_schedule_pool_size>\n\
+         <background_message_broker_schedule_pool_size>2</background_message_broker_schedule_pool_size>\n\
+         <background_distributed_schedule_pool_size>2</background_distributed_schedule_pool_size>\n\
+         <background_buffer_flush_schedule_pool_size>2</background_buffer_flush_schedule_pool_size>\n\
+         <asynchronous_metrics_update_period_s>60</asynchronous_metrics_update_period_s>\n\
          <users><default><password/><networks><ip>127.0.0.1</ip></networks>\
          <profile>default</profile><quota>default</quota></default></users>\n\
          <profiles><default/></profiles><quotas><default/></quotas>\n\

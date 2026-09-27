@@ -10,7 +10,7 @@
 //! `agent_run` (review engine) consumes `scan_claude`/`progress_stamp`.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 /// How long the transcript must stay quiet after a native end-turn + handoff
@@ -77,6 +77,10 @@ pub struct ClaudeScan {
     /// the Agents tab a sub-agent's duration. Ids whose notification line had no
     /// parseable timestamp are absent.
     pub notified_at: BTreeMap<String, SystemTime>,
+    /// `claude_pty::last_user_text` verbatim: the latest typed user prompt
+    /// (sidechain lines included, like the whole-file helper) — what the
+    /// submit-confirm loop matches its prompt slice against.
+    pub last_user_text: Option<String>,
 }
 
 /// Live phase of a step's agent turn (drives the log lines + `activity`).
@@ -203,30 +207,66 @@ pub struct OracleOpts {
 /// Walk a claude session JSONL once: turn count/text, the tail state, the
 /// pending/notified task sets and the api-error fail-fast. One pass, no I/O.
 pub fn scan_claude(jsonl: &str) -> ClaudeScan {
-    let mut s = ClaudeScan {
-        api_error: otto_orchestrator::claude_pty::transcript_api_error(jsonl),
-        ..Default::default()
-    };
+    let mut st = ClaudeScanState::default();
+    for line in jsonl.lines() {
+        st.feed_line(line);
+    }
+    st.view()
+}
+
+/// [`scan_claude`] as a left fold over lines, so a poller can feed only the
+/// lines appended since its last tick ([`ClaudeTail`]) and still get exactly
+/// the whole-file answer. Every field is either append-only or "state after
+/// the last line", which is what makes the fold exact.
+#[derive(Debug, Clone, Default)]
+pub struct ClaudeScanState {
+    scan: ClaudeScan,
+    /// 0-based index of the next line (empty lines count, like `lines()`).
+    line: usize,
     // Tail state, folded forward: `tail_end_turn` is "the last message line was
     // an assistant end_turn and nothing since wakes the parent"; the queue flags
     // record whether the ONLY thing since was a queue-operation line.
-    let mut tail_end_turn = false;
-    let mut post_end_turn_queue_only = false;
-    let mut saw_queue_after_end_turn = false;
+    tail_end_turn: bool,
+    post_end_turn_queue_only: bool,
+    saw_queue_after_end_turn: bool,
+}
 
-    for (i, line) in jsonl.lines().enumerate() {
+impl ClaudeScanState {
+    /// The scan as of the lines fed so far.
+    pub fn view(&self) -> ClaudeScan {
+        let mut s = self.scan.clone();
+        s.tail_is_assistant_end_turn = self.tail_end_turn;
+        s.tail_evidence_is_queue_only =
+            self.post_end_turn_queue_only && self.saw_queue_after_end_turn;
+        s
+    }
+
+    /// Fold one line (without its `\n`).
+    pub fn feed_line(&mut self, line: &str) {
+        let i = self.line;
+        self.line += 1;
+        let s = &mut self.scan;
         let line = line.trim();
         if line.is_empty() {
-            continue;
+            return;
         }
         // A partially-written trailing line (and any metadata shape we don't
         // parse) contributes nothing — exactly what `completed_turn_count` does.
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
+            return;
         };
+        // `transcript_api_error` semantics: the FIRST api-error line wins, and
+        // it is checked before the sidechain filter (it never had one).
+        if s.api_error.is_none() {
+            s.api_error = api_error_text(&v);
+        }
+        // `last_user_text` semantics: also checked before the sidechain filter.
+        if let Some(t) = user_prompt_text(&v) {
+            s.last_user_text = Some(t);
+        }
         // Legacy in-file sub-agent lines: never a parent turn, never a task.
         if v.get("isSidechain").and_then(|b| b.as_bool()) == Some(true) {
-            continue;
+            return;
         }
         let ts = v
             .get("timestamp")
@@ -254,13 +294,13 @@ pub fn scan_claude(jsonl: &str) -> ClaudeScan {
                 Some(t) => {
                     s.completed_turns += 1;
                     s.last_turn_text = Some(t);
-                    tail_end_turn = true;
-                    post_end_turn_queue_only = true;
-                    saw_queue_after_end_turn = false;
+                    self.tail_end_turn = true;
+                    self.post_end_turn_queue_only = true;
+                    self.saw_queue_after_end_turn = false;
                 }
                 None => {
-                    tail_end_turn = false;
-                    post_end_turn_queue_only = false;
+                    self.tail_end_turn = false;
+                    self.post_end_turn_queue_only = false;
                 }
             }
         }
@@ -328,21 +368,145 @@ pub fn scan_claude(jsonl: &str) -> ClaudeScan {
             let removed =
                 is_queue_op && v.get("operation").and_then(|o| o.as_str()) == Some("remove");
             if !removed {
-                tail_end_turn = false;
+                self.tail_end_turn = false;
                 if !is_queue_op {
                     // A real wake-up line: the tail is no longer queue-only.
-                    post_end_turn_queue_only = false;
+                    self.post_end_turn_queue_only = false;
                 }
             }
         }
         if is_queue_op {
-            saw_queue_after_end_turn = true;
+            self.saw_queue_after_end_turn = true;
+        }
+    }
+}
+
+/// `otto_orchestrator::claude_pty::transcript_api_error` for ONE parsed line
+/// (the scan parses each line once and shares it).
+fn api_error_text(v: &serde_json::Value) -> Option<String> {
+    if v.get("isApiErrorMessage").and_then(|b| b.as_bool()) != Some(true) {
+        return None;
+    }
+    let msg = v.get("message")?;
+    if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+        return None;
+    }
+    for b in msg.get("content")?.as_array()? {
+        if b.get("type").and_then(|t| t.as_str()) == Some("text") {
+            if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
+                if !t.trim().is_empty() {
+                    return Some(t.trim().to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Poll an incremental claude transcript reader off the runtime (the reader
+/// moves into the blocking task and back). `None` without a reader or a file.
+pub async fn poll_claude_tail(tail: &mut Option<ClaudeTail>) -> Option<ClaudeScan> {
+    let mut t = tail.take()?;
+    let (t, scan) = crate::offload::blocking(move || {
+        let scan = t.poll();
+        (t, scan)
+    })
+    .await;
+    *tail = Some(t);
+    scan
+}
+
+/// `otto_orchestrator::claude_pty::last_user_text` for ONE parsed line: the
+/// typed text of a `role:"user"` message (tool results carry no text blocks),
+/// `None` when it has none.
+fn user_prompt_text(v: &serde_json::Value) -> Option<String> {
+    let msg = v.get("message")?;
+    if msg.get("role").and_then(|r| r.as_str()) != Some("user") {
+        return None;
+    }
+    let text = match msg.get("content")? {
+        serde_json::Value::String(s) => s.trim().to_string(),
+        serde_json::Value::Array(blocks) => {
+            let mut t = String::new();
+            for block in blocks {
+                if block.get("type").and_then(|k| k.as_str()) != Some("text") {
+                    continue;
+                }
+                if let Some(s) = block.get("text").and_then(|s| s.as_str()) {
+                    if !s.is_empty() {
+                        if !t.is_empty() {
+                            t.push('\n');
+                        }
+                        t.push_str(s);
+                    }
+                }
+            }
+            t.trim().to_string()
+        }
+        _ => return None,
+    };
+    (!text.is_empty()).then_some(text)
+}
+
+/// Incremental reader of one claude session JSONL for pollers: each
+/// [`poll`](Self::poll) reads only the bytes appended since the last one,
+/// folds the complete lines into a [`ClaudeScanState`] and answers exactly
+/// what `scan_claude(&whole_file)` would. A 68 MB transcript used to be read
+/// (9 ms) and parsed (63 ms) whole once a second per running agent; now the
+/// first poll reads it once and every later poll costs O(new bytes).
+///
+/// A trailing line without its `\n` yet is evaluated on a scratch copy of the
+/// state (whole-file `scan_claude` sees it too) and re-fed once complete. A
+/// file that shrank or was replaced (different inode) restarts from byte 0.
+/// Blocking IO — call off the runtime (see [`crate::offload::blocking`]).
+#[derive(Debug, Clone)]
+pub struct ClaudeTail {
+    lines: LineTail,
+    state: ClaudeScanState,
+}
+
+impl ClaudeTail {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            lines: LineTail::new(path.into()),
+            state: ClaudeScanState::default(),
         }
     }
 
-    s.tail_is_assistant_end_turn = tail_end_turn;
-    s.tail_evidence_is_queue_only = post_end_turn_queue_only && saw_queue_after_end_turn;
-    s
+    /// Scan only what lies past byte `offset` — `completed_turn_text` of the
+    /// tail a reused session appended after a brief. A file that shrinks below
+    /// `offset` (or is replaced) is re-read from `offset`, never from 0: an
+    /// older turn must not be mistaken for this one.
+    pub fn from_offset(path: impl Into<PathBuf>, offset: u64) -> Self {
+        Self {
+            lines: LineTail::from(path.into(), offset),
+            state: ClaudeScanState::default(),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.lines.path
+    }
+
+    /// Bytes consumed so far (complete lines + the carried partial line).
+    pub fn offset(&self) -> u64 {
+        self.lines.offset
+    }
+
+    /// Read what was appended and return the up-to-date scan. `None` when the
+    /// file does not exist / cannot be opened (the whole-file callers got no
+    /// scan in that case either).
+    pub fn poll(&mut self) -> Option<ClaudeScan> {
+        self.lines.read(&mut self.state)?;
+        Some(match self.lines.partial() {
+            None => self.state.view(),
+            Some(p) => {
+                let mut scratch = self.state.clone();
+                scratch.feed_line(&p);
+                scratch.view()
+            }
+        })
+    }
 }
 
 /// Concatenated non-empty `type:"text"` blocks of an assistant message, or
@@ -472,50 +636,205 @@ fn tag_value(seg: &str, tag: &str, from: usize) -> Option<(String, usize)> {
 pub fn scan_codex(rollout: &str, after_ordinal: u64) -> CodexScan {
     let mut s = CodexScan::default();
     for line in rollout.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let ordinal = v.get("ordinal").and_then(|o| o.as_u64()).unwrap_or(0);
-        if ordinal <= after_ordinal {
-            continue;
-        }
-        if v.get("type").and_then(|t| t.as_str()) != Some("event_msg") {
-            continue;
-        }
-        s.last_event_ordinal = s.last_event_ordinal.max(ordinal);
-        let Some(payload) = v.get("payload") else {
-            continue;
-        };
-        let turn_id = payload.get("turn_id").and_then(|t| t.as_str());
-        match payload.get("type").and_then(|t| t.as_str()).unwrap_or("") {
-            "task_started" => {
-                s.latest_turn = turn_id.map(str::to_string);
-                s.turn_complete = false;
-                s.aborted_at = None;
-            }
-            "turn_aborted" if turn_id.is_some() && turn_id == s.latest_turn.as_deref() => {
-                s.latest_turn = None;
-                s.aborted_at = v
-                    .get("timestamp")
-                    .and_then(|t| t.as_str())
-                    .and_then(parse_ts)
-                    .or_else(|| Some(SystemTime::now()));
-            }
-            "task_complete" if turn_id.is_some() && turn_id == s.latest_turn.as_deref() => {
-                s.turn_complete = true;
-                s.last_agent_message = payload
-                    .get("last_agent_message")
-                    .and_then(|m| m.as_str())
-                    .map(str::to_string);
-            }
-            _ => {}
-        }
+        feed_codex_line(&mut s, line, after_ordinal);
     }
     s
+}
+
+/// [`scan_codex`] for one line — the scan is a left fold, so [`CodexTail`]
+/// feeds only appended lines and gets the whole-file answer.
+fn feed_codex_line(s: &mut CodexScan, line: &str, after_ordinal: u64) {
+    let line = line.trim();
+    if line.is_empty() {
+        return;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return;
+    };
+    let ordinal = v.get("ordinal").and_then(|o| o.as_u64()).unwrap_or(0);
+    if ordinal <= after_ordinal {
+        return;
+    }
+    if v.get("type").and_then(|t| t.as_str()) != Some("event_msg") {
+        return;
+    }
+    s.last_event_ordinal = s.last_event_ordinal.max(ordinal);
+    let Some(payload) = v.get("payload") else {
+        return;
+    };
+    let turn_id = payload.get("turn_id").and_then(|t| t.as_str());
+    match payload.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+        "task_started" => {
+            s.latest_turn = turn_id.map(str::to_string);
+            s.turn_complete = false;
+            s.aborted_at = None;
+        }
+        "turn_aborted" if turn_id.is_some() && turn_id == s.latest_turn.as_deref() => {
+            s.latest_turn = None;
+            s.aborted_at = v
+                .get("timestamp")
+                .and_then(|t| t.as_str())
+                .and_then(parse_ts)
+                .or_else(|| Some(SystemTime::now()));
+        }
+        "task_complete" if turn_id.is_some() && turn_id == s.latest_turn.as_deref() => {
+            s.turn_complete = true;
+            s.last_agent_message = payload
+                .get("last_agent_message")
+                .and_then(|m| m.as_str())
+                .map(str::to_string);
+        }
+        _ => {}
+    }
+}
+
+/// A left fold over transcript lines that [`LineTail`] drives.
+trait LineSink {
+    fn reset(&mut self);
+    fn feed(&mut self, line: &str);
+}
+
+impl LineSink for ClaudeScanState {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+    fn feed(&mut self, line: &str) {
+        self.feed_line(line);
+    }
+}
+
+/// `CodexScan` + its submit baseline.
+#[derive(Debug, Clone, Default)]
+struct CodexSink {
+    scan: CodexScan,
+    after_ordinal: u64,
+}
+
+impl LineSink for CodexSink {
+    fn reset(&mut self) {
+        self.scan = CodexScan::default();
+    }
+    fn feed(&mut self, line: &str) {
+        feed_codex_line(&mut self.scan, line, self.after_ordinal);
+    }
+}
+
+/// Byte-offset line reader shared by [`ClaudeTail`] / [`CodexTail`]: reads
+/// only what was appended since the last call, hands out complete lines and
+/// carries the partial one. A file that shrank or was replaced (new inode)
+/// reports `restarted` and is re-read from byte 0. Blocking IO.
+#[derive(Debug, Clone)]
+struct LineTail {
+    path: PathBuf,
+    /// Where reading starts (and restarts): 0, or a caller's baseline.
+    base: u64,
+    offset: u64,
+    partial: Vec<u8>,
+    ino: Option<u64>,
+}
+
+impl LineTail {
+    fn new(path: PathBuf) -> Self {
+        Self::from(path, 0)
+    }
+
+    fn from(path: PathBuf, base: u64) -> Self {
+        Self {
+            path,
+            base,
+            offset: base,
+            partial: Vec::new(),
+            ino: None,
+        }
+    }
+
+    /// Feed each newly completed line to `sink` (reset first when the file
+    /// restarted). `None` when the file cannot be opened.
+    fn read<S: LineSink>(&mut self, sink: &mut S) -> Option<()> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = std::fs::File::open(&self.path).ok()?;
+        let meta = f.metadata().ok()?;
+        let len = meta.len();
+        #[cfg(unix)]
+        let ino = {
+            use std::os::unix::fs::MetadataExt;
+            Some(meta.ino())
+        };
+        #[cfg(not(unix))]
+        let ino: Option<u64> = None;
+        let restarted = len < self.offset || (self.ino.is_some() && self.ino != ino);
+        self.ino = ino;
+        if restarted {
+            self.offset = self.base;
+            self.partial.clear();
+            sink.reset();
+        }
+        if len > self.offset {
+            let mut fresh = Vec::with_capacity((len - self.offset) as usize);
+            let ok = f.seek(SeekFrom::Start(self.offset)).is_ok()
+                && f.take(len - self.offset).read_to_end(&mut fresh).is_ok();
+            if ok {
+                self.offset += fresh.len() as u64;
+                let mut buf = std::mem::take(&mut self.partial);
+                buf.extend_from_slice(&fresh);
+                match buf.iter().rposition(|b| *b == b'\n') {
+                    Some(nl) => {
+                        for l in buf[..nl].split(|b| *b == b'\n') {
+                            sink.feed(&String::from_utf8_lossy(l));
+                        }
+                        self.partial = buf[nl + 1..].to_vec();
+                    }
+                    None => self.partial = buf,
+                }
+            }
+        }
+        Some(())
+    }
+
+    /// The trailing line still being written (whole-file scans see it too).
+    fn partial(&self) -> Option<std::borrow::Cow<'_, str>> {
+        (!self.partial.is_empty()).then(|| String::from_utf8_lossy(&self.partial))
+    }
+}
+
+/// Incremental [`scan_codex`] over one rollout (see [`ClaudeTail`]).
+#[derive(Debug, Clone)]
+pub struct CodexTail {
+    lines: LineTail,
+    sink: CodexSink,
+}
+
+impl CodexTail {
+    pub fn new(path: impl Into<PathBuf>, after_ordinal: u64) -> Self {
+        Self {
+            lines: LineTail::new(path.into()),
+            sink: CodexSink {
+                scan: CodexScan::default(),
+                after_ordinal,
+            },
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.lines.path
+    }
+
+    pub fn after_ordinal(&self) -> u64 {
+        self.sink.after_ordinal
+    }
+
+    /// `scan_codex(&whole_file, after_ordinal)`, reading only new bytes.
+    pub fn poll(&mut self) -> Option<CodexScan> {
+        self.lines.read(&mut self.sink)?;
+        Some(match self.lines.partial() {
+            None => self.sink.scan.clone(),
+            Some(p) => {
+                let mut s = self.sink.scan.clone();
+                feed_codex_line(&mut s, &p, self.sink.after_ordinal);
+                s
+            }
+        })
+    }
 }
 
 /// The rollout's highest `ordinal` (0 for a missing/empty file) — the submit
@@ -533,33 +852,68 @@ pub fn codex_last_ordinal(rollout: &str) -> u64 {
 /// `<psid>/subagents/agent-<id>.meta.json`, status strictly from `scan`. Ids
 /// without a meta file still appear. Never reads a child's transcript.
 pub fn subagents(project_dir: &Path, psid: &str, scan: &ClaudeScan) -> Vec<SubagentInfo> {
+    subagents_cached(project_dir, psid, scan, &mut SubagentMetaCache::default())
+}
+
+/// Per-sidecar `(len, mtime) → description` memo for [`subagents_cached`]: a
+/// step with hundreds of sub-agents re-opened and re-parsed every sidecar on
+/// every probe; now only new/changed ones are read (the rest is one `stat`).
+#[derive(Debug, Default, Clone)]
+pub struct SubagentMetaCache {
+    /// id → (len, mtime, description).
+    files: std::collections::HashMap<String, (u64, Option<SystemTime>, Option<String>)>,
+}
+
+impl SubagentMetaCache {
+    /// id → (description, meta mtime) for every valid sidecar in `dir`.
+    fn read(&mut self, dir: &Path) -> BTreeMap<String, (Option<String>, Option<SystemTime>)> {
+        let mut meta = BTreeMap::new();
+        let mut seen = std::collections::HashMap::with_capacity(self.files.len());
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                let Some(stem) = name.strip_suffix(".meta.json") else {
+                    continue;
+                };
+                let Some(id) = stem.strip_prefix("agent-") else {
+                    continue;
+                };
+                if !valid_id(id) {
+                    continue;
+                }
+                let md = e.metadata().ok();
+                let len = md.as_ref().map_or(u64::MAX, |m| m.len());
+                let mtime = md.and_then(|m| m.modified().ok());
+                let desc = match self.files.remove(id) {
+                    Some((l, t, d)) if l == len && t == mtime && mtime.is_some() => d,
+                    _ => std::fs::read_to_string(e.path())
+                        .ok()
+                        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+                        .and_then(|v| {
+                            v.get("description")
+                                .and_then(|d| d.as_str())
+                                .map(|d| truncate_chars(d, 80))
+                        }),
+                };
+                seen.insert(id.to_string(), (len, mtime, desc.clone()));
+                meta.insert(id.to_string(), (desc, mtime));
+            }
+        }
+        self.files = seen;
+        meta
+    }
+}
+
+/// [`subagents`] with a sidecar memo the caller keeps across probes.
+pub fn subagents_cached(
+    project_dir: &Path,
+    psid: &str,
+    scan: &ClaudeScan,
+    cache: &mut SubagentMetaCache,
+) -> Vec<SubagentInfo> {
     let dir = project_dir.join(psid).join("subagents");
     // id → (description, meta mtime)
-    let mut meta: BTreeMap<String, (Option<String>, Option<SystemTime>)> = BTreeMap::new();
-    if let Ok(rd) = std::fs::read_dir(&dir) {
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            let Some(stem) = name.strip_suffix(".meta.json") else {
-                continue;
-            };
-            let Some(id) = stem.strip_prefix("agent-") else {
-                continue;
-            };
-            if !valid_id(id) {
-                continue;
-            }
-            let desc = std::fs::read_to_string(e.path())
-                .ok()
-                .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-                .and_then(|v| {
-                    v.get("description")
-                        .and_then(|d| d.as_str())
-                        .map(|d| truncate_chars(d, 80))
-                });
-            let mtime = e.metadata().ok().and_then(|m| m.modified().ok());
-            meta.insert(id.to_string(), (desc, mtime));
-        }
-    }
+    let meta = cache.read(&dir);
     let mut out: Vec<SubagentInfo> = Vec::new();
     let ids = scan
         .pending
@@ -1033,6 +1387,186 @@ mod tests {
         Instant::now()
     }
 
+    /// Every line shape the scan reacts to, in an order that exercises the
+    /// tail flags (end_turn → queue-only → wake-up → end_turn again).
+    fn scan_corpus() -> Vec<String> {
+        vec![
+            user("2026-09-12T08:00:00Z", "go"),
+            tool_use("2026-09-12T08:00:01Z"),
+            launch("2026-09-12T08:00:02Z", "aa", "Sweep chunk é✓"),
+            background("2026-09-12T08:00:03Z", "bb", "cargo test"),
+            sidechain_end_turn("2026-09-12T08:00:04Z", "child done"),
+            end_turn("2026-09-12T08:00:05Z", "waiting on aa"),
+            queue_op("2026-09-12T08:00:06Z", "enqueue", "aa", "completed"),
+            notif_user("2026-09-12T08:00:07Z", "aa", "completed"),
+            r#"{"type":"user","timestamp":"2026-09-12T08:00:08Z","message":{"role":"user","content":[{"type":"tool_result","content":"stopped"}]},"toolUseResult":{"message":"Successfully stopped task: bb (cargo test)","task_id":"bb","task_type":"local_bash"}}"#.to_string(),
+            resume("2026-09-12T08:00:09Z", "aa"),
+            notif_tool_result("2026-09-12T08:00:10Z", "aa", "failed"),
+            String::new(),
+            "not json at all".to_string(),
+            r#"{"type":"assistant","isApiErrorMessage":true,"timestamp":"2026-09-12T08:00:11Z","message":{"role":"assistant","content":[{"type":"text","text":"  API Error: 529  "}]}}"#.to_string(),
+            r#"{"type":"assistant","isApiErrorMessage":true,"message":{"role":"assistant","content":[{"type":"text","text":"second error"}]}}"#.to_string(),
+            end_turn("2026-09-12T08:00:12Z", "final answer"),
+            queue_op("2026-09-12T08:00:13Z", "remove", "zz", "completed"),
+        ]
+    }
+
+    fn same_scan(a: &ClaudeScan, b: &ClaudeScan) -> bool {
+        format!("{a:?}") == format!("{b:?}")
+    }
+
+    #[test]
+    fn claude_tail_matches_whole_file_scan_across_ticks() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut whole = String::new();
+        for l in scan_corpus() {
+            whole.push_str(&l);
+            whole.push('\n');
+        }
+        // A trailing line with no newline yet, then completed.
+        whole.push_str(&end_turn("2026-09-12T08:00:14Z", "tail"));
+        let bytes = whole.as_bytes();
+        let mut f = std::fs::File::create(&path).unwrap();
+        let mut tail = ClaudeTail::new(&path);
+        // Missing content → an (empty) scan, like reading an empty file.
+        assert!(same_scan(&tail.poll().unwrap(), &scan_claude("")));
+        // Append in odd-sized chunks that split lines (and a multi-byte char)
+        // anywhere; after every tick the incremental answer is the whole-file one.
+        let mut at = 0;
+        for (k, step) in [1usize, 7, 64, 3, 200, 13, 999, 5, 4096]
+            .iter()
+            .cycle()
+            .enumerate()
+        {
+            if at >= bytes.len() {
+                break;
+            }
+            let end = (at + step).min(bytes.len());
+            f.write_all(&bytes[at..end]).unwrap();
+            f.flush().unwrap();
+            at = end;
+            if k % 2 == 1 && at < bytes.len() {
+                continue; // two appends between some polls
+            }
+            let got = tail.poll().unwrap();
+            let so_far = String::from_utf8_lossy(&bytes[..at]).to_string();
+            let want = scan_claude(&so_far);
+            assert!(
+                same_scan(&got, &want),
+                "at byte {at}:\n{got:?}\n!=\n{want:?}"
+            );
+        }
+        let got = tail.poll().unwrap();
+        let want = scan_claude(&whole);
+        assert!(same_scan(&got, &want));
+        assert_eq!(tail.offset(), bytes.len() as u64);
+        // The pieces the watchers used to compute with separate passes.
+        use otto_orchestrator::claude_pty as cp;
+        assert_eq!(got.api_error, cp::transcript_api_error(&whole));
+        assert_eq!(got.api_error.as_deref(), Some("API Error: 529"));
+        assert_eq!(got.completed_turns, cp::completed_turn_count(&whole));
+        assert_eq!(got.last_turn_text, cp::completed_turn_text(&whole));
+        assert_eq!(got.last_turn_text.as_deref(), Some("tail"));
+        assert_eq!(got.last_user_text, cp::last_user_text(&whole));
+        assert!(got.last_user_text.is_some());
+        // Nothing new → same answer, no re-read.
+        assert!(same_scan(&tail.poll().unwrap(), &want));
+    }
+
+    #[test]
+    fn claude_tail_restarts_on_a_replaced_or_truncated_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let first = format!(
+            "{}\n{}\n",
+            user("2026-09-12T08:00:00Z", "go"),
+            end_turn("2026-09-12T08:00:01Z", "one")
+        );
+        std::fs::write(&path, &first).unwrap();
+        let mut tail = ClaudeTail::new(&path);
+        assert_eq!(tail.poll().unwrap().completed_turns, 1);
+        // Truncated to something shorter.
+        let short = format!("{}\n", end_turn("2026-09-12T08:00:02Z", "x"));
+        std::fs::write(&path, &short).unwrap();
+        let got = tail.poll().unwrap();
+        assert!(same_scan(&got, &scan_claude(&short)));
+        // Replaced (new inode) by a LONGER file: still a restart, not a splice.
+        let other = dir.path().join("o.jsonl");
+        let longer = format!("{first}{}\n", end_turn("2026-09-12T08:00:03Z", "three"));
+        std::fs::write(&other, &longer).unwrap();
+        std::fs::rename(&other, &path).unwrap();
+        let got = tail.poll().unwrap();
+        assert!(same_scan(&got, &scan_claude(&longer)));
+        assert_eq!(got.completed_turns, 2);
+        // Missing file → None (the whole-file readers got no scan either).
+        std::fs::remove_file(&path).unwrap();
+        assert!(tail.poll().is_none());
+    }
+
+    #[test]
+    fn codex_tail_matches_whole_file_scan_across_ticks() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        let lines = [
+            codex(
+                1,
+                "2026-09-12T08:00:00Z",
+                r#"{"type":"task_started","turn_id":"t0"}"#,
+            ),
+            codex(
+                2,
+                "2026-09-12T08:00:01Z",
+                r#"{"type":"task_complete","turn_id":"t0","last_agent_message":"old"}"#,
+            ),
+            codex(
+                3,
+                "2026-09-12T08:00:02Z",
+                r#"{"type":"task_started","turn_id":"t1"}"#,
+            ),
+            codex(
+                4,
+                "2026-09-12T08:00:03Z",
+                r#"{"type":"turn_aborted","turn_id":"t1"}"#,
+            ),
+            "garbage".to_string(),
+            codex(
+                5,
+                "2026-09-12T08:00:04Z",
+                r#"{"type":"task_started","turn_id":"t2"}"#,
+            ),
+            codex(
+                6,
+                "2026-09-12T08:00:05Z",
+                r#"{"type":"task_complete","turn_id":"t2","last_agent_message":"new ✓"}"#,
+            ),
+        ];
+        let whole: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        let bytes = whole.as_bytes();
+        let mut f = std::fs::File::create(&path).unwrap();
+        let mut tail = CodexTail::new(&path, 2);
+        let mut at = 0;
+        for step in [5usize, 50, 1, 170, 9, 400, 3, 10_000].iter().cycle() {
+            if at >= bytes.len() {
+                break;
+            }
+            let end = (at + step).min(bytes.len());
+            f.write_all(&bytes[at..end]).unwrap();
+            f.flush().unwrap();
+            at = end;
+            let got = tail.poll().unwrap();
+            let want = scan_codex(&String::from_utf8_lossy(&bytes[..at]), 2);
+            assert_eq!(format!("{got:?}"), format!("{want:?}"), "at byte {at}");
+        }
+        let got = tail.poll().unwrap();
+        assert!(got.turn_complete);
+        assert_eq!(got.last_agent_message.as_deref(), Some("new ✓"));
+        assert_eq!(got.last_event_ordinal, 6);
+        assert_eq!(tail.after_ordinal(), 2);
+    }
+
     #[test]
     fn early_end_turn_with_pending_async_is_not_complete() {
         // The exact false positive: 4 launches, then the parent's "waiting on
@@ -1216,6 +1750,50 @@ mod tests {
         assert_eq!(zz.status, SubStatus::Running);
         assert_eq!(zz.description, "Sweep with no files at all");
         assert!(zz.started_at.is_none());
+    }
+
+    #[test]
+    fn cached_subagents_match_and_reread_only_changed_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        let psid = "sess-2";
+        let subs = dir.path().join(psid).join("subagents");
+        std::fs::create_dir_all(&subs).unwrap();
+        std::fs::write(
+            subs.join("agent-aa.meta.json"),
+            r#"{"description":"first"}"#,
+        )
+        .unwrap();
+        let jsonl = format!(
+            "{}\n{}\n",
+            launch("2026-09-12T08:07:17Z", "aa", "launch aa"),
+            launch("2026-09-12T08:07:18Z", "bb", "launch bb"),
+        );
+        let scan = scan_claude(&jsonl);
+        let mut cache = SubagentMetaCache::default();
+        let key = |v: &[SubagentInfo]| format!("{v:?}");
+        assert_eq!(
+            key(&subagents_cached(dir.path(), psid, &scan, &mut cache)),
+            key(&subagents(dir.path(), psid, &scan))
+        );
+        // A new sidecar is picked up; the unchanged one comes from the memo.
+        cache.files.get_mut("aa").unwrap().2 = Some("memo".into());
+        std::fs::write(
+            subs.join("agent-bb.meta.json"),
+            r#"{"description":"second"}"#,
+        )
+        .unwrap();
+        let got = subagents_cached(dir.path(), psid, &scan, &mut cache);
+        let desc = |id: &str| got.iter().find(|s| s.id == id).unwrap().description.clone();
+        assert_eq!(desc("aa"), "memo", "unchanged sidecar not re-read");
+        assert_eq!(desc("bb"), "second");
+        // A rewritten sidecar (different length) is re-read.
+        std::fs::write(
+            subs.join("agent-aa.meta.json"),
+            r#"{"description":"first, edited"}"#,
+        )
+        .unwrap();
+        let got = subagents_cached(dir.path(), psid, &scan, &mut cache);
+        assert_eq!(key(&got), key(&subagents(dir.path(), psid, &scan)));
     }
 
     #[test]

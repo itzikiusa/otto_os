@@ -844,6 +844,12 @@ async fn run_skill_review_agent(
 
     let deadline = Instant::now() + AGENT_TIMEOUT;
     let mut flagged_waiting = false;
+    let mut transcript = match session.provider_session_id.as_deref() {
+        Some(psid) if provider == "claude" => Some(crate::turn_oracle::ClaudeTail::new(
+            otto_orchestrator::claude_pty::session_jsonl_path(&cwd, psid),
+        )),
+        _ => None,
+    };
     loop {
         if is_cancelled(cancel) {
             let _ = ctx.manager.archive(&sid).await;
@@ -861,22 +867,17 @@ async fn run_skill_review_agent(
             let _ = repo.set_agent_at(review_id, index, &row).await;
             return findings;
         }
-        if provider == "claude" {
-            if let Some(psid) = session.provider_session_id.as_deref() {
-                let jsonl = otto_orchestrator::claude_pty::session_jsonl_path(&cwd, psid);
-                if let Ok(raw) = std::fs::read_to_string(&jsonl) {
-                    if let Some(turn) = otto_orchestrator::claude_pty::completed_turn_text(&raw) {
-                        let findings = parse_skill_findings(&turn);
-                        if !findings.is_empty() {
-                            let n = findings.len();
-                            row.status = "done".into();
-                            row.note = format!("{n} finding(s)");
-                            row.findings = findings.clone();
-                            let _ = repo.set_agent_at(review_id, index, &row).await;
-                            return findings;
-                        }
-                    }
-                }
+        // The claude transcript, read incrementally and off the runtime.
+        let scan = crate::turn_oracle::poll_claude_tail(&mut transcript).await;
+        if let Some(turn) = scan.and_then(|s| s.last_turn_text) {
+            let findings = parse_skill_findings(&turn);
+            if !findings.is_empty() {
+                let n = findings.len();
+                row.status = "done".into();
+                row.note = format!("{n} finding(s)");
+                row.findings = findings.clone();
+                let _ = repo.set_agent_at(review_id, index, &row).await;
+                return findings;
             }
         }
         match ctx.manager.live_handle(&sid) {

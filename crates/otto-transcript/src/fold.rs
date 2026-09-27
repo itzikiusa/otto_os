@@ -130,6 +130,42 @@ pub(crate) struct BlockRef {
     pub block: usize,
 }
 
+/// Size discipline (design §6): prose, queued text, tool input and results
+/// are all capped so one record cannot dominate a page.
+fn cap_block(block: Block) -> Block {
+    match block {
+        Block::Text { md } => Block::Text {
+            md: cap_text(&md).0,
+        },
+        Block::Queued { op, text, injected } => Block::Queued {
+            op,
+            text: cap_text(&text).0,
+            injected,
+        },
+        Block::ToolCall {
+            id,
+            name,
+            tool,
+            title,
+            input,
+            mut result,
+        } => {
+            if let Some(r) = result.as_mut() {
+                r.cap();
+            }
+            Block::ToolCall {
+                id,
+                name,
+                tool,
+                title,
+                input: clip_input(input),
+                result,
+            }
+        }
+        other => other,
+    }
+}
+
 /// Shared fold state. Provider adapters push turns/blocks through this so the
 /// invariants (stable ids, result attachment, note placement, artifact dedup,
 /// stats) live in one place.
@@ -254,39 +290,7 @@ impl<'a> Fold<'a> {
 
     /// Append a block to turn `t` and return its block index.
     pub fn push_block(&mut self, t: usize, block: Block, idx: usize) -> usize {
-        // Size discipline (design §6): prose, queued text, tool input and
-        // results are all capped so one record cannot dominate a page.
-        let block = match block {
-            Block::Text { md } => Block::Text {
-                md: cap_text(&md).0,
-            },
-            Block::Queued { op, text, injected } => Block::Queued {
-                op,
-                text: cap_text(&text).0,
-                injected,
-            },
-            Block::ToolCall {
-                id,
-                name,
-                tool,
-                title,
-                input,
-                mut result,
-            } => {
-                if let Some(r) = result.as_mut() {
-                    r.cap();
-                }
-                Block::ToolCall {
-                    id,
-                    name,
-                    tool,
-                    title,
-                    input: clip_input(input),
-                    result,
-                }
-            }
-            other => other,
-        };
+        let block = cap_block(block);
         let is_call = matches!(block, Block::ToolCall { .. });
         let ft = &mut self.turns[t];
         ft.turn.blocks.push(block);
@@ -518,6 +522,49 @@ impl<'a> Fold<'a> {
         self.clone().finish(record_count)
     }
 
+    /// Exactly `self.snapshot(n).turns_since(since)` — the live-tail delta —
+    /// but cloning only the turns touched since `since` (plus what `finish`
+    /// would add to them: the pending notes/blocks on the last turn and the
+    /// `subagent` blocks). A 4k-turn fold no longer clones every turn, tool-call
+    /// index and artifact per poll to send the one or two turns that moved.
+    /// `finish` never moves a turn's `last`, so the touched set is the same.
+    pub fn turns_since(&self, since: usize) -> Vec<Turn> {
+        let Some(last) = self.last_turn() else {
+            // No turn yet: `finish` may synthesize one from pending notes —
+            // that path is tiny (no turns to clone), so just run it.
+            return self.clone().finish(0).turns_since(since);
+        };
+        let mut out: std::collections::BTreeMap<usize, Turn> = self
+            .turns
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.last >= since)
+            .map(|(i, t)| (i, t.turn.clone()))
+            .collect();
+        if out.is_empty() {
+            return Vec::new();
+        }
+        // `finish` flushes leftovers onto the last turn before placing
+        // subagents; appending at the end never shifts a placement's index.
+        if let Some(t) = out.get_mut(&last) {
+            t.system.extend(self.pending_notes.iter().cloned());
+            t.blocks
+                .extend(self.pending_blocks.iter().cloned().map(cap_block));
+        }
+        for (r, block) in self.subagent_placements(|turn| out.contains_key(&turn)) {
+            if let Some(t) = out.get_mut(&r.turn) {
+                let at = (r.block + 1).min(t.blocks.len());
+                t.blocks.insert(at, block);
+            }
+        }
+        out.into_values().collect()
+    }
+
+    /// Every artifact registered so far (the live tail diffs these by id).
+    pub fn artifacts(&self) -> &[Artifact] {
+        &self.artifacts
+    }
+
     /// Finish: flush pending notes/blocks onto the last turn, attach subagent
     /// blocks, finalize stats.
     pub fn finish(mut self, record_count: usize) -> Folded {
@@ -569,18 +616,34 @@ impl<'a> Fold<'a> {
     /// names via `toolUseId`; agents whose result carried an `agentId` but have
     /// no sidecar still get one from the call's input.
     fn attach_subagents(&mut self) {
+        let placements = self.subagent_placements(|_| true);
+        for (r, block) in placements {
+            if let Some(ft) = self.turns.get_mut(r.turn) {
+                let at = (r.block + 1).min(ft.turn.blocks.len());
+                ft.turn.blocks.insert(at, block);
+            }
+        }
+    }
+
+    /// The `subagent` blocks `attach_subagents` inserts, sorted back-to-front
+    /// (so inserting in order keeps earlier indices valid). `keep` filters by
+    /// turn index BEFORE a block is built (the live delta only needs the
+    /// touched turns').
+    fn subagent_placements(&self, keep: impl Fn(usize) -> bool) -> Vec<(BlockRef, Block)> {
         let mut placements: Vec<(BlockRef, Block)> = Vec::new();
-        let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let metas = self.opts.subagents.clone();
-        for meta in &metas {
+        let mut covered: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for meta in &self.opts.subagents {
             let Some(tid) = meta.tool_use_id.as_deref() else {
                 continue;
             };
             let Some(&r) = self.tool_calls.get(tid) else {
                 continue;
             };
+            covered.insert(tid);
+            if !keep(r.turn) {
+                continue;
+            }
             let status = self.subagent_status(r);
-            covered.insert(tid.to_string());
             placements.push((
                 r,
                 Block::Subagent {
@@ -595,8 +658,9 @@ impl<'a> Fold<'a> {
         let orphans: Vec<(String, BlockRef)> = self
             .agent_ids
             .iter()
-            .filter(|(tid, _)| !covered.contains(*tid))
+            .filter(|(tid, _)| !covered.contains(tid.as_str()))
             .filter_map(|(tid, agent_id)| self.tool_calls.get(tid).map(|r| (agent_id.clone(), *r)))
+            .filter(|(_, r)| keep(r.turn))
             .collect();
         for (agent_id, r) in orphans {
             let Some(input) = self.call_input(r).cloned() else {
@@ -625,12 +689,7 @@ impl<'a> Fold<'a> {
         }
         // Insert from the back so earlier block indices stay valid.
         placements.sort_by_key(|(r, _)| std::cmp::Reverse((r.turn, r.block)));
-        for (r, block) in placements {
-            if let Some(ft) = self.turns.get_mut(r.turn) {
-                let at = (r.block + 1).min(ft.turn.blocks.len());
-                ft.turn.blocks.insert(at, block);
-            }
-        }
+        placements
     }
 
     fn subagent_status(&self, r: BlockRef) -> Option<SubagentStatus> {

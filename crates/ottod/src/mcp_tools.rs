@@ -141,6 +141,10 @@ struct Ctx {
     source: Option<String>,
     /// Audit sink. `None` when the DB can't be opened (audit degrades to logs).
     audit: Option<McpAuditRepo>,
+    /// In-flight audit inserts. They run off the reply path (an insert waits on
+    /// the daemon's WAL writer lock, up to the 5 s busy timeout) and are
+    /// drained when stdin closes so the last calls are still recorded.
+    audit_tasks: std::sync::Mutex<tokio::task::JoinSet<()>>,
 }
 
 impl Ctx {
@@ -478,21 +482,37 @@ impl Ctx {
             return;
         };
         // The arguments are redacted before persisting (defense-in-depth: a
-        // caller could pass a secret-looking value).
+        // caller could pass a secret-looking value). The repo also caps long
+        // string values (`otto_state::mcp_audit::cap_args_json`).
         let args_json = redact_json(args).value.to_string();
-        if let Err(e) = audit
-            .record(NewMcpToolCall {
-                workspace_id: self.workspace_id.clone(),
-                session_id: self.session_id.clone(),
-                tool: tool.to_string(),
-                args_json,
-                ok,
-                rows,
-            })
-            .await
-        {
-            eprintln!("ottod mcp-tools: audit insert failed: {e}");
-        }
+        let audit = audit.clone();
+        let row = NewMcpToolCall {
+            workspace_id: self.workspace_id.clone(),
+            session_id: self.session_id.clone(),
+            tool: tool.to_string(),
+            args_json,
+            ok,
+            rows,
+        };
+        let mut tasks = self.audit_tasks.lock().unwrap_or_else(|p| p.into_inner());
+        // Reap finished inserts so the set stays small in a long session.
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn(async move {
+            if let Err(e) = audit.record(row).await {
+                eprintln!("ottod mcp-tools: audit insert failed: {e}");
+            }
+        });
+    }
+
+    /// Wait (bounded) for in-flight audit inserts — called when stdin closes.
+    async fn drain_audit(&self) {
+        let mut tasks = std::mem::take(
+            &mut *self.audit_tasks.lock().unwrap_or_else(|p| p.into_inner()),
+        );
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(6), async {
+            while tasks.join_next().await.is_some() {}
+        })
+        .await;
     }
 }
 
@@ -603,12 +623,36 @@ fn tail_text(text: &str, max: usize) -> (String, bool) {
 /// Assistant tools (which [`tool_catalog_for_source`] shows only to
 /// assistant sessions).
 fn tool_catalog() -> Value {
+    TOOL_CATALOG.clone()
+}
+
+/// Built once per process: the catalogs are static JSON, and `tools/list`
+/// used to rebuild them once per governed spec (O(N²), ~24 ms warm and
+/// ~0.7 s on the first call).
+static TOOL_CATALOG: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
     let mut catalog = base_tool_catalog();
     if let Some(tools) = catalog["tools"].as_array_mut() {
         tools.extend(assistant_tool_specs());
     }
     catalog
-}
+});
+
+/// `otto_server::mcp_outward::otto_tool_specs()`, built once per process.
+static GOVERNED_SPECS: std::sync::LazyLock<Vec<Value>> =
+    std::sync::LazyLock::new(otto_server::mcp_outward::otto_tool_specs);
+
+/// Native tool names, built once per process.
+static NATIVE_TOOL_NAMES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+    TOOL_CATALOG["tools"]
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|t| t["name"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+});
 
 // ---------------------------------------------------------------------------
 // Otto Assistant tools (native; only advertised to `source: "assistant"`
@@ -1501,23 +1545,16 @@ fn governed_stdio_name(spec_name: &str) -> String {
 }
 
 /// Names of the tools served natively by this binary (the static catalog).
+#[cfg(test)]
 fn native_tool_names() -> Vec<String> {
-    tool_catalog()["tools"]
-        .as_array()
-        .map(|tools| {
-            tools
-                .iter()
-                .filter_map(|t| t["name"].as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+    NATIVE_TOOL_NAMES.clone()
 }
 
 /// The governed spec a stdio tool name proxies to, or `None` when the name is
 /// served natively (by the same or an aliased name) or is not a governed tool.
 fn governed_spec_for_stdio_name(name: &str) -> Option<Value> {
     let short = name.strip_prefix("otto_")?;
-    let native = native_tool_names();
+    let native: &[String] = &NATIVE_TOOL_NAMES;
     if native.iter().any(|n| n == name)
         || GOVERNED_ALIASED_BY_NATIVE
             .iter()
@@ -1525,9 +1562,11 @@ fn governed_spec_for_stdio_name(name: &str) -> Option<Value> {
     {
         return None;
     }
-    otto_server::mcp_outward::otto_tool_specs()
-        .into_iter()
-        .find(|s| s["name"].as_str() == Some(&format!("otto.{short}")))
+    let full = format!("otto.{short}");
+    GOVERNED_SPECS
+        .iter()
+        .find(|s| s["name"].as_str() == Some(full.as_str()))
+        .cloned()
 }
 
 /// The governed (`otto.*`) name a stdio tool name proxies to, if any.
@@ -1538,8 +1577,8 @@ fn governed_tool_for_stdio_name(name: &str) -> Option<String> {
 /// The `tools/list` entries for the control-plane-enabled governed tools that
 /// have no native equivalent here. `enabled` holds full `otto.*` names.
 fn governed_tools_for(enabled: &[String]) -> Vec<Value> {
-    otto_server::mcp_outward::otto_tool_specs()
-        .into_iter()
+    GOVERNED_SPECS
+        .iter()
         .filter(|s| {
             s["name"]
                 .as_str()
@@ -3970,6 +4009,7 @@ pub async fn run() -> Result<(), String> {
         workspace_id,
         source,
         audit,
+        audit_tasks: Default::default(),
     };
 
     let stdin = tokio::io::stdin();
@@ -4003,6 +4043,7 @@ pub async fn run() -> Result<(), String> {
             write_line(&mut stdout, &resp).await?;
         }
     }
+    ctx.drain_audit().await;
     Ok(())
 }
 
@@ -5864,6 +5905,7 @@ mod tests {
             workspace_id: Some("ws-test".into()),
             source: None,
             audit: None,
+            audit_tasks: Default::default(),
         }
     }
 }

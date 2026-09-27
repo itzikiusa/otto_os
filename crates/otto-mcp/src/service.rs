@@ -151,7 +151,7 @@ impl McpService {
     }
 
     /// Resolve the keychain secret blob `{env:{},headers:{}}` for a server.
-    fn resolve_secrets(
+    async fn resolve_secrets(
         &self,
         server: &McpServerDetail,
     ) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
@@ -160,7 +160,11 @@ impl McpService {
         if !server.has_secret {
             return (env, headers);
         }
-        if let Ok(Some(blob)) = self.secrets.get(&Self::secret_ref(&server.id)) {
+        // Every governed invoke + health check lands here: cache hit inline,
+        // a keychain miss on the blocking pool (never a stalled worker).
+        if let Ok(Some(blob)) =
+            otto_core::secrets::get_async(&self.secrets, &Self::secret_ref(&server.id)).await
+        {
             if let Ok(v) = serde_json::from_str::<Value>(&blob) {
                 if let Some(e) = v.get("env").and_then(Value::as_object) {
                     for (k, val) in e {
@@ -183,8 +187,8 @@ impl McpService {
 
     /// Build an outbound client for a server, overlaying keychain secrets onto the
     /// plaintext config.
-    fn client_for(&self, server: &McpServerDetail) -> McpClient {
-        let (secret_env, secret_headers) = self.resolve_secrets(server);
+    async fn client_for(&self, server: &McpServerDetail) -> McpClient {
+        let (secret_env, secret_headers) = self.resolve_secrets(server).await;
         match server.transport.as_str() {
             "http" => {
                 let mut headers = server.headers.clone();
@@ -212,7 +216,7 @@ impl McpService {
     /// Discover a server's tools, label their risk, and upsert the catalog.
     pub async fn discover(&self, server_id: &str) -> Result<Vec<McpTool>> {
         let server = self.registry().get(&server_id.to_string()).await?;
-        let client = self.client_for(&server);
+        let client = self.client_for(&server).await;
         let raw = client
             .list_tools()
             .await
@@ -258,7 +262,7 @@ impl McpService {
                 .await?;
             return self.registry().get(&server.id).await;
         }
-        let client = self.client_for(&server);
+        let client = self.client_for(&server).await;
         let start = Instant::now();
         let res = client.health().await;
         let latency = start.elapsed().as_millis() as i64;
@@ -600,7 +604,7 @@ impl McpService {
             })
             .await?; // ← propagates: no audit row ⇒ no execution (fail-closed)
 
-        let client = self.client_for(&server);
+        let client = self.client_for(&server).await;
         let start = Instant::now();
         let latest = otto_state::ResourceAccessRepo::new(self.pool.clone())
             .get_policy(otto_core::access::ResourceKind::McpServer, &server.id)

@@ -30,10 +30,10 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std"] }
 rustls-pki-types = "1"
 webpki-roots = "1"
+futures-util = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 sqlx = { workspace = true }
-futures-util = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

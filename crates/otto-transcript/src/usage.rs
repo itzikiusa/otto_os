@@ -263,6 +263,31 @@ impl CursorStore {
         self.offsets.insert(key(file), offset);
     }
 
+    /// Like [`Self::set`], but reports whether the stored value changed — lets
+    /// a caller skip rewriting the cursor file on scans that consumed nothing.
+    pub fn set_if_changed(&mut self, file: &Path, offset: u64) -> bool {
+        match self.offsets.get(&key(file)) {
+            Some(&cur) if cur == offset => false,
+            _ => {
+                self.offsets.insert(key(file), offset);
+                true
+            }
+        }
+    }
+
+    /// Drop cursors whose key fails `keep` (e.g. transcripts the CLI has since
+    /// pruned). Returns how many were removed.
+    pub fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) -> usize {
+        let before = self.offsets.len();
+        self.offsets.retain(|k, _| keep(k));
+        before - self.offsets.len()
+    }
+
+    /// Tracked file keys (lossy UTF-8 paths), in no particular order.
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.offsets.keys().map(String::as_str)
+    }
+
     /// Number of tracked files.
     pub fn len(&self) -> usize {
         self.offsets.len()
@@ -454,12 +479,24 @@ impl CodexCounterStore {
 /// don't re-count, and FIFO-capped so it can't grow without bound: at real
 /// transcript rates the cap covers months of history, far longer than any
 /// resume replays reach back.
+///
+/// Persistence is two files: the frozen JSON array at `path` (a compacted
+/// snapshot) plus an append-only sidecar `<path>.log` (one key per line) that
+/// [`Self::append_pending`] extends with just the keys inserted since the last
+/// write. That turns the per-scan persist from rewriting a multi-MB array into
+/// appending a few hundred bytes; [`Self::save`] compacts (rewrites the array,
+/// empties the log). `load` replays the log over the array, so a crash between
+/// the two is harmless — a torn final log line is at worst one junk key.
 #[derive(Debug)]
 pub struct SeenKeys {
     path: PathBuf,
     cap: usize,
     set: std::collections::HashSet<String>,
     order: std::collections::VecDeque<String>,
+    /// Keys inserted since the last `save`/`append_pending`.
+    pending: Vec<String>,
+    /// Lines currently in the sidecar log (drives compaction).
+    log_lines: usize,
 }
 
 impl SeenKeys {
@@ -477,9 +514,70 @@ impl SeenKeys {
             cap: cap.max(1),
             set: order.iter().cloned().collect(),
             order,
+            pending: Vec::new(),
+            log_lines: 0,
         };
+        // Replay the append-only sidecar (keys persisted since the last
+        // compaction). Missing file = nothing appended yet.
+        if let Ok(log) = std::fs::read_to_string(s.log_path()) {
+            for k in log.lines().filter(|l| !l.is_empty()) {
+                s.log_lines += 1;
+                if s.set.insert(k.to_string()) {
+                    s.order.push_back(k.to_string());
+                }
+            }
+        }
         s.evict();
         s
+    }
+
+    fn log_path(&self) -> PathBuf {
+        let mut name = self
+            .path
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+        name.push(".log");
+        self.path.with_file_name(name)
+    }
+
+    /// True when keys were inserted since the last persist.
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Persist only the keys inserted since the last write by appending them
+    /// to the sidecar log; compacts via [`Self::save`] once the log holds more
+    /// than `compact_after` lines (or a key can't be line-encoded).
+    pub fn append_pending(&mut self, compact_after: usize) -> std::io::Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        if self.log_lines + self.pending.len() > compact_after
+            || self
+                .pending
+                .iter()
+                .any(|k| k.contains('\n') || k.is_empty())
+        {
+            return self.save();
+        }
+        use std::io::Write;
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut buf = String::with_capacity(self.pending.len() * 48);
+        for k in &self.pending {
+            buf.push_str(k);
+            buf.push('\n');
+        }
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.log_path())?;
+        f.write_all(buf.as_bytes())?;
+        self.log_lines += self.pending.len();
+        self.pending.clear();
+        Ok(())
     }
 
     pub fn contains(&self, key: &str) -> bool {
@@ -493,6 +591,7 @@ impl SeenKeys {
             return false;
         }
         self.order.push_back(key.to_string());
+        self.pending.push(key.to_string());
         self.evict();
         true
     }
@@ -513,8 +612,10 @@ impl SeenKeys {
         self.order.is_empty()
     }
 
-    /// Atomically persist (tmp file + rename), like [`CursorStore::save`].
-    pub fn save(&self) -> std::io::Result<()> {
+    /// Atomically persist the full set (tmp file + rename), like
+    /// [`CursorStore::save`], then empty the append-only sidecar (its keys are
+    /// now in the array). Clears the pending list.
+    pub fn save(&mut self) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -523,6 +624,13 @@ impl SeenKeys {
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, json.as_bytes())?;
         std::fs::rename(&tmp, &self.path)?;
+        match std::fs::remove_file(self.log_path()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        self.log_lines = 0;
+        self.pending.clear();
         Ok(())
     }
 }
@@ -882,5 +990,51 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let seen = SeenKeys::load(dir.path().join("does-not-exist.json"), 10);
         assert!(seen.is_empty());
+    }
+
+    #[test]
+    fn seen_keys_append_log_replays_and_compacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("seen.json");
+        let log = dir.path().join("seen.json.log");
+        let mut seen = SeenKeys::load(&path, 100);
+        seen.insert("a");
+        seen.save().unwrap();
+        assert!(!seen.has_pending());
+        seen.insert("b");
+        seen.insert("c");
+        assert!(seen.has_pending());
+        seen.append_pending(10).unwrap();
+        assert!(!seen.has_pending());
+        // Array still holds only the compacted key; the log holds the rest.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), r#"["a"]"#);
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "b\nc\n");
+        let reloaded = SeenKeys::load(&path, 100);
+        assert_eq!(reloaded.len(), 3);
+        assert!(reloaded.contains("a") && reloaded.contains("b") && reloaded.contains("c"));
+
+        // Past the compaction threshold the whole set is rewritten, log gone.
+        let mut seen = reloaded;
+        seen.insert("d");
+        seen.append_pending(2).unwrap();
+        assert!(!log.exists());
+        let reloaded = SeenKeys::load(&path, 100);
+        assert_eq!(reloaded.len(), 4);
+        // Nothing pending → no-op, no log created.
+        let mut seen = reloaded;
+        seen.append_pending(2).unwrap();
+        assert!(!log.exists());
+    }
+
+    #[test]
+    fn cursor_set_if_changed_and_retain() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = CursorStore::load(dir.path().join("cur.json"));
+        assert!(c.set_if_changed(Path::new("/a"), 5));
+        assert!(!c.set_if_changed(Path::new("/a"), 5));
+        assert!(c.set_if_changed(Path::new("/a"), 6));
+        c.set(Path::new("/b"), 1);
+        assert_eq!(c.retain(|k| k != "/b"), 1);
+        assert_eq!(c.keys().collect::<Vec<_>>(), vec!["/a"]);
     }
 }

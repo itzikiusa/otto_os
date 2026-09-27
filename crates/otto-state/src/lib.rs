@@ -50,6 +50,7 @@ pub mod provider_models;
 pub mod provider_accounts;
 pub mod repo_rules;
 pub mod resource_access;
+pub mod retention;
 pub mod review_findings;
 pub mod review_proof_packs;
 pub mod reviews;
@@ -154,6 +155,7 @@ pub use product_refinement::{
 };
 pub use repo_rules::RepoRulesRepo;
 pub use resource_access::ResourceAccessRepo;
+pub use retention::{RetentionPolicy, RetentionReport, RetentionRepo};
 pub use review_findings::{
     compute_fingerprint, FindingPatch, FindingState, NewFinding, ReviewFindingRow,
     ReviewFindingsRepo,
@@ -165,12 +167,12 @@ pub use saved_views::{NewSavedView, SavedView, SavedViewsRepo};
 pub use scheduled_tasks::{
     FinishRun, NewRun as NewScheduledRun, NewScheduledTask, ScheduledTaskPatch, ScheduledTasksRepo,
 };
-pub use sessions::{NewSession, SessionsRepo, UsageAttrRow};
+pub use sessions::{NewSession, SessionListFilter, SessionScope, SessionsRepo, UsageAttrRow};
 pub use settings::{
     otto_mcp_enabled_for, pr_draft_model_from, SettingsRepo, OTTO_MCP_ENABLED_KEY,
     PR_DRAFT_MODEL_DEFAULT, PR_DRAFT_MODEL_KEY,
 };
-pub use skill_evals::SkillEvalsRepo;
+pub use skill_evals::{SkillEvalSummary, SkillEvalSummaryPage, SkillEvalsRepo};
 pub use skill_reviews::SkillReviewsRepo;
 pub use transcript_index::{TranscriptIndexRepo, TranscriptIndexRow};
 pub use vault_docs_runs::{VaultDocsRunRow, VaultDocsRunsRepo};

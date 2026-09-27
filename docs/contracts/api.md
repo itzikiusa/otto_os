@@ -39,7 +39,8 @@ connection library unusable for every non-root account.)
 | 15 | GET /api/v1/workspaces/{id}/members | ws admin | — | `MemberEntry[]` |
 | 16 | PUT /api/v1/workspaces/{id}/members | ws admin | SetMembersReq | `MemberEntry[]` |
 | 16a | GET /api/v1/workspaces/scratch | Agents:View | — | `Workspace` — the daemon's system-owned **scratch** workspace (`id: "scratch"`, `root_path` = daemon `$HOME`). Hidden from `GET /workspaces`; every authenticated user holds Editor there implicitly, so `POST /workspaces/scratch/sessions` starts a **workspace-less session** and `GET /workspaces/scratch/sessions` lists the caller's own (root: all). `PATCH`/`DELETE /workspaces/scratch` and member edits → 409. **Only the session routes exist under `scratch`** (`…/sessions…`, plus `…/broadcast`, `…/activity/summary` and `…/members` for the 409 above): every other `/workspaces/scratch/…` route family answers **404**, so the implicit Editor never reaches another workspace-scoped API. |
-| 17 | GET /api/v1/workspaces/{id}/sessions | ws viewer, **owner-scoped** (non-admins see only their own sessions; root/ws-admin get the full list) | optional query `?archived=&kind=&source=&status=` (all narrowing; `source=none` = sessions with no `meta.source`) | `Session[]` — each row carries transient `live: bool` + `viewers: number` |
+| 17 | GET /api/v1/workspaces/{id}/sessions | ws viewer, **owner-scoped** (non-admins see only their own sessions; root/ws-admin get the full list) | optional query `?archived=&kind=&source=&status=&limit=&before=` (all narrowing and all applied **in SQL**; `source=none` = sessions with no string `meta.source`; `limit` (1–1000) keeps the **newest** N matching rows, still returned oldest-first; `before` = RFC 3339 cursor — only rows created strictly before it, pass the oldest row's `created_at` to page back; a malformed `before` → 400) | `Session[]` oldest-first — each row carries transient `live: bool` + `viewers: number`. Callers that only need live rows should pass `archived=false` (the archived history is the bulk of the table) |
+| 17b | GET /api/v1/sessions | Agents:View; each workspace **owner-scoped** exactly as #17 (root: every workspace, full rows; otherwise every workspace the caller is a member of — full rows where they are ws-admin, their own rows elsewhere — plus their own `scratch` sessions) | same query as #17; **`archived` defaults to `false`** here | `Session[]` (same shape as #17) across all of the caller's workspaces in ONE query — the tray / all-workspaces sidebar feed, replacing one #17 call per workspace |
 | 18 | POST /api/v1/workspaces/{id}/sessions | ws editor | CreateSessionReq | Session |
 | 19 | GET /api/v1/sessions/{id} | ws viewer + **session owner-or-admin** | — | Session (with transient `live` + `viewers`) |
 | 20 | PATCH /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | UpdateSessionReq | Session — `meta.ui_control` and `meta.client_id` are **server-owned**: a PATCH that changes either is `403` (an unchanged round-trip is accepted and dropped). The grant is written only by `POST /sessions/{id}/ui-control`; session creation strips any client-supplied `meta.ui_control` |
@@ -67,7 +68,7 @@ connection library unusable for every non-root account.)
 | 37 | GET /api/v1/repos/{id}/status | ws viewer | — | RepoStatusResp — includes `op_in_progress` (`"merge"\|"rebase"\|"cherry_pick"\|"revert"`, absent when none), detected from the git dir's state files; conflicted files can exist without it (a conflicting stash pop). Local git refusals across the git routes (dirty tree, unresolved index, bad ref, index.lock, …) map to 409 with git's own message; 502 is reserved for genuine remote/auth failures, and forge HTTP errors map by status (401/403 → 403 credential-rejected, 404 → 404, 405/409/422 → 409). |
 | 38 | GET /api/v1/repos/{id}/branches | ws viewer | — | `BranchInfo[]` |
 | 39 | GET /api/v1/repos/{id}/log?limit=50&skip=0&all=false | ws viewer | — | `CommitInfo[]` — `limit` defaults to 50 and is **uncapped**; `limit=0` means the whole reachable history (no `-n`). Page with `skip` + `limit`; ordering is stable across pages for a fixed set of refs. Also accepts `&path=<p>&follow=true&grep=<s>&author=<s>` — `path` is passed after `--` (any filename), `follow` needs exactly one path (400 otherwise), `grep`/`author` are fixed-string, case-insensitive. |
-| 40 | GET /api/v1/repos/{id}/diff?target=worktree\|staged\|commit:<sha>\|range:<a>..<b> | ws viewer | — | DiffResp. Option-like revs (`commit:--x`, `range:--a..b`) → 400. |
+| 40 | GET /api/v1/repos/{id}/diff?target=worktree\|working\|staged\|commit:<sha>\|range:<a>..<b>\|range:<a>...<b>&path=&old_path=&summary=&full= | ws viewer | — | DiffResp. Option-like revs (`commit:--x`, `range:--a..b`) → 400. `range:a..b` is `git diff a..b` (tree of `a` vs tree of `b` — unchanged); `range:a...b` is branch-vs-base (`b` against the merge-base of `a` and `b`). `path=` scopes to one LITERAL file; `old_path=` (a rename's origin, from the summary) is passed with it so the rename still pairs (a lone new path comes back as an add). `summary=true`: file list only from ONE `--raw --numstat -z` pass — never a patch — every file `hunks: []`, `hunks_omitted: true`, with `status`, `old_path`, `is_binary`, `added`/`deleted` (null only for binary) and `total_added`/`total_deleted` (~40–100 KB for a 1,500-file / 100k-line commit). Non-summary responses are capped: a file over 200 KB of rendered text or 5,000 lines ⇒ `too_large: true`, `hunks_omitted: true`, `hunks: []` (counts, status, fingerprint kept); a whole-response budget of 20,000 lines / 4 MB of hunks — the first file that doesn't fit and every file after it come back `hunks_omitted: true` and the response `truncated: true`. `full=true` (only with `path=`) lifts the per-file cap to a hard 50,000 lines / 5 MB (still `too_large` beyond). Rename detection is `-M -l1000` (git's default limit, pinned: above it moves show as delete + add). Commit/range responses are memoized in the daemon (keyed by the resolved commit ids + path/old_path/mode, 64 MB LRU of serialized bodies; header `x-otto-diff-cache: hit\|miss\|off`), identical concurrent requests share one computation, and a request aborted by every caller kills its `git`. `added`/`deleted`/`status` are filled on every response (binary: null counts). Internal Rust callers of `LocalGit::diff` are uncapped. |
 | 41 | POST /api/v1/repos/{id}/stage | ws editor | StagePathsReq | RepoStatusResp |
 | 42 | POST /api/v1/repos/{id}/unstage | ws editor | StagePathsReq | RepoStatusResp |
 | 43 | POST /api/v1/repos/{id}/commit | ws editor | CommitReq | `{"sha":"..."}` — `sign?: bool` — `true` → `-S`, `false` → `--no-gpg-sign`, absent → repo config. |
@@ -78,7 +79,7 @@ connection library unusable for every non-root account.)
 | 48 | GET /api/v1/repos/{id}/prs?state=open\|merged\|declined\|all&page=1&per_page=50 | ws viewer | — | `PrListResp {items: PrSummary[], has_more, page, per_page}` (`per_page` 1..=100) |
 | 49 | POST /api/v1/repos/{id}/prs | ws editor | CreatePrReq (optional `draft` — GitHub native flag, GitLab `Draft:` title prefix, Bitbucket Cloud draft field; optional `reviewers: string[]` of provider-native handles) | PrSummary (`reviewer_warnings: string[]` — reviewer requests/lookups that failed after the PR opened; never fails the creation) |
 | 50 | GET /api/v1/repos/{id}/prs/{number} | ws viewer | — | PrDetail |
-| 51 | GET /api/v1/repos/{id}/prs/{number}/diff | ws viewer | — | DiffResp |
+| 51 | GET /api/v1/repos/{id}/prs/{number}/diff?summary=&path=&old_path=&full=&rev= | ws viewer | — | DiffResp — same `summary`, `path`/`old_path`, `full`, per-file cap, response budget and `truncated` semantics as #40, computed from the provider's diff. The provider diff is fetched once and memoized per (repo, remote, PR number, git account, `rev`) for 60 s (identical concurrent fetches coalesce); `rev` is an opaque revision token — clients pass the PR's `head_sha`, so a push lands on a new key instead of serving the pre-push diff for up to a minute, so the file list, the Review tab and each lazy per-file request share ONE download; access (role + the caller's provider credential) is checked on every request before the memo. GitHub refuses the `.diff` media type past 300 files / 20k lines (406): the diff is then rebuilt from `GET /pulls/{n}/files` (paginated, ≤ 2,000 files) — every file with counts and status, hunks from its `patch`, and files GitHub sends without a patch come back `too_large: true`. Other provider failures surface as the usual Problem JSON (502 `upstream`). |
 | 52 | PATCH /api/v1/repos/{id}/prs/{number} | ws editor | UpdatePrReq | 204 |
 | 53 | POST /api/v1/repos/{id}/prs/{number}/comments | ws editor | NewPrCommentReq | PrComment (carries `resolved: bool` + `thread_id?: string` on thread heads — Bitbucket comment id, GitLab discussion id, GitHub GraphQL reviewThread node id) |
 | 53b | POST /api/v1/repos/{id}/prs/{number}/comments/{cid}/resolve | ws editor | ResolvePrThreadReq `{"resolved": bool}` — `{cid}` is `PrComment.thread_id`; `false` reopens | 204 |
@@ -228,7 +229,7 @@ workspace from the row.
 | 77 | PATCH /api/v1/swarm/tasks/{tid} | ws editor | UpdateTaskReq | SwarmTask |
 | 78 | DELETE /api/v1/swarm/tasks/{tid} | ws editor | — | 204 |
 | 79 | POST /api/v1/swarm/tasks/{tid}/run | ws editor | — | SwarmRun. 409 when the task is not todo/blocked/backlog, the swarm is aborted or budget-paused/over budget, or the picked agent is busy (another turn / verification) |
-| 80 | GET /api/v1/workspaces/{id}/swarm/runs?swarm_id=&project_id=&agent_id=&status= | ws viewer | — | `SwarmRun[]` — this workspace's runs only (newest first, ≤ 500) |
+| 80 | GET /api/v1/workspaces/{id}/swarm/runs?swarm_id=&project_id=&agent_id=&status=&lite= | ws viewer | — | `SwarmRun[]` — this workspace's runs only (newest first, ≤ 500). `lite=true` (additive): each run's `result` is omitted (`null`) except `kind='recruit'` runs (the Runs-list "Hire" reads the proposal) — read one run's result via `GET /swarm/runs/{rid}` |
 | 81 | GET /api/v1/swarm/runs/{rid} | ws viewer | — | SwarmRun |
 | 82 | POST /api/v1/swarm/runs/{rid}/stop | ws editor | — | SwarmRun — stops an in-flight run (conditional: a finished run is left as is) AND kills its agent session; the task is parked as `blocked` |
 | 83 | GET /api/v1/swarm/swarms/{sid}/graph | ws viewer | — | SwarmGraph |
@@ -873,6 +874,18 @@ pages by `offset` on the same forced order, so Prev lands on exactly the page
 Next produced. An undecodable cursor is a `400`. `next_cursor` is omitted from
 the wire when absent (back-compat); every other engine ignores `cursor`.
 
+`QueryResult.truncated_reason?: "bytes"` — **response byte budget (MySQL,
+Postgres).** Besides the row cap (`max_rows`, up to "All" = 1,000,000), a read
+stops once the response's estimated JSON size passes **32 MiB** (summed over
+every result set of a batch; at least one row is always kept). It is then
+`truncated: true` with `truncated_reason: "bytes"`; a row-cap clip leaves
+`truncated_reason` absent (omitted from the wire — back-compat). "Export all
+rows…" still streams the full result to a file. Past either cap the driver stops
+pulling rows and discards the session instead of draining the rest of a
+non-LIMIT-able read (UNION, batch statements, SHOW…). MySQL cells decode by
+column type: only a native `JSON` column is parsed as JSON — text that looks
+like JSON (`'null'`, `'123'`, a 30-digit id) is returned as the string it is.
+
 **BSON type fidelity.** Result cells keep their type as Extended-JSON sentinels:
 `{"$oid"}`, `{"$date"}`, `{"$numberDecimal"}`, and now `{"$numberLong": "<digits>"}`
 (only for an Int64 whose magnitude exceeds 2^53 — smaller longs stay plain
@@ -1207,7 +1220,7 @@ values) and `folder`, alongside the existing `cwd/stage/watch_enabled/watch_cade
 | DELETE /product/stories/{sid} | ws editor | — | 204 (re-parents children; removes attachment/annotation rows + `product/attachments/<sid>/` + each artifact's `product/mockup_assist/<aid>/` scratch dir, best effort) |
 | POST /product/stories/{sid}/children | ws editor | CreateChildReq `{ title?, tree_kind?: 'story'\|'doc' (default doc), folder? }` | ProductStoryDetail — a draft child filed under the epic `sid` (400 if `sid` is itself a child or `tree_kind` is `epic`) |
 | POST /product/stories/{sid}/refresh | ws editor | — | re-pull the source story |
-| GET /product/stories/{sid}/versions | ws viewer | — | `Version[]` |
+| GET /product/stories/{sid}/versions | ws viewer | — | `Version[]` newest first; `body_md` is `""` and `raw_json` is SLIM — `{"version": n}` (the Confluence page version) when the row recorded one, else `null`. Read one version in full via `GET /product/versions/{vid}`. The story detail's `source` carries the same slim `raw_json` (with its full `body_md`) |
 | GET /product/versions/{vid} | ws viewer | — | Version |
 | POST /product/versions/{vid}/publish | ws editor | — | publish a version back to the source. **409** (Confluence) when the page changed since Otto last synced it (refresh the story first), or when the page holds content the Markdown round-trip would delete (images, links, mentions, task lists, unsupported macros); **409** (Jira) under the description rule above |
 | GET /product/stories/{sid}/analyses | ws viewer | — | `Analysis[]` |
@@ -1381,7 +1394,7 @@ configured Jira/Confluence account.
 | PATCH /issue/accounts/{id} | member (owner) | UpdateIssueAccountReq | IssueAccount |
 | DELETE /issue/accounts/{id} | member (owner) | — | 204 |
 | GET /issue/projects | member | — | available projects |
-| GET /issue/search | member | — | issue search results (JQL) |
+| GET /issue/search | member | — | issue search results (JQL). `?start_at=` offset paging (windows of 25; a full window ⇒ maybe more). Jira Cloud's `/search/jql` is token-paged: the daemon fetches 100-issue pages and memoises the (account, JQL) token walk for 10 min, so "load more" resumes from the nearest token instead of re-walking from page 0; `start_at=0` always starts a fresh walk |
 | GET /issue/my-work?account_id= | member | — | `MyWorkIssue[]` — the caller's open assigned issues (`assignee = currentUser()`, statusCategory != Done, newest first, one page of 100) with parent/project context for the Focus view hierarchy |
 | GET /issue/confluence/spaces | member | — | Confluence spaces |
 | GET /issue/confluence/search | member | — | Confluence page search |
@@ -1515,7 +1528,7 @@ and a `human_rating`.
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | POST /workspaces/{id}/skill-evaluations | ws editor | StartSkillEvalReq | SkillEval |
-| GET /workspaces/{id}/skill-evaluations | ws viewer | — | `SkillEval[]` |
+| GET /workspaces/{id}/skill-evaluations | ws viewer | `?summary=1&limit=&cursor=&skill=` (all optional) | Without `summary`: `SkillEval[]` (every run with every iteration — legacy, heavy). With `summary=1`: `SkillEvalSummaryPage {items: SkillEvalSummary[], next_cursor}` — one query, newest first; a row is `SkillEval`'s headline fields (same names, incl. `summary`) minus `iterations`/`config`/`promoted_at`/`promoted_by`, plus `iteration_count`. `limit` 1–1000 (default 200); `cursor` = the previous page's opaque `next_cursor` (`null` on the last page); `skill` keeps runs whose `source_skill` or matrix `dim_skill` equals it |
 | GET /workspaces/{id}/skill-sources | ws viewer | — | available evaluation sources |
 | GET /skill-evaluations/{id} | ws viewer | — | SkillEval (with iterations) |
 | DELETE /skill-evaluations/{id} | ws editor | — | 204 |
@@ -2047,6 +2060,7 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | GET /workspaces/{wid}/api-client/history/{id} | ws viewer | — | one history entry; cross-workspace ids return 404 |
 | DELETE /workspaces/{wid}/api-client/history | ws editor | — | clear history |
 | POST /workspaces/{wid}/api-client/execute | ws editor | ExecuteRequestReq | execute an HTTP request. 409 `needs_confirm=new_host: a stored secret would be sent to host '<host>', which it is not bound to; …` when a `$secret` marker or Keychain env variable would leave its bound host (see **Secret host binding**) — a person re-sends with `confirm_new_host:true`; agent callers can never confirm |
+| GET /workspaces/{wid}/api-client/responses/{id}/raw | ws editor | — | the full bytes (`{id}` = `ApiResponse.body_id`) of a recent `execute` response whose `body_id` was set (truncated or non-UTF-8 body), `Content-Type` = the upstream one, `Content-Disposition: attachment`. Held in a daemon-memory cache for 10 min, ≤ 128 MiB total (oldest evicted first), served only to the user + workspace that executed it; 404 once gone |
 | POST /workspaces/{wid}/api-client/secure-all | ws editor | — | `{requests_secured, env_keys_secured}` — one-pass Keychain sweep |
 | POST /workspaces/{wid}/api-client/grpc/describe | ws editor | GrpcDescribeReq | service/method descriptors |
 | POST /workspaces/{wid}/api-client/grpc/invoke | ws editor | GrpcInvokeReq | gRPC call result |
@@ -2061,7 +2075,7 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | POST /workspaces/{wid}/api-client/automations/{id}/run | ws editor | `StartApiAutomationRunReq?` | synchronous `ApiRunResult`; execution also persists a durable report |
 | POST /workspaces/{wid}/api-client/automations/{id}/runs | ws editor | `StartApiAutomationRunReq` | `ApiAutomationRun` immediately; runs in background |
 | GET /workspaces/{wid}/api-client/automation-runs?automation_id=&before= | ws editor | — | latest 50 `ApiAutomationRun` rows, newest id first; `before` is the last run id |
-| GET /workspaces/{wid}/api-client/automation-runs/{id} | ws editor | — | `ApiAutomationRun`; foreign workspace is 404 |
+| GET /workspaces/{wid}/api-client/automation-runs/{id}?after= | ws editor | — | `ApiAutomationRun`; foreign workspace is 404. `after=N` (delta poll while running): `report.steps`, `result_rows` and `result_ids` hold only the entries after the first N, and `snapshot` is `null` — the client appends to what it already has |
 | POST /workspaces/{wid}/api-client/automation-runs/{id}/cancel | ws editor | `{}` | current `ApiAutomationRun`; cancellation is asynchronous/idempotent |
 | POST /workspaces/{wid}/api-client/oauth2/authorize | ws editor | `{request_id}` | `{flow_id,authorization_url,redirect_uri,expires_in:600}` |
 | GET /workspaces/{wid}/api-client/oauth2/flows/{id} | initiating user + ws editor | — | `{status:pending\|exchanging\|completed\|failed,error?,request_id}`; expired/foreign flow is 404 |
@@ -2157,7 +2171,7 @@ resolution or tunnel failure is reported as a `502` and recorded in history.
 
 **Streaming open frame.** Send `{action:"open",kind:"sse"|"websocket",request:ExecuteApiReq}`; follow with `{action:"send",data}` for WebSocket or `{action:"close"}`. SSE uses shared HTTP environment/runtime variables, query, Keychain auth, body, timeout, redirect, TLS and SSH settings. SSH requires governed connection `shell` authorization for the initiating actor. WebSocket supports GET/query/headers/auth/connection timeout; bodies, SSH, and disabling TLS verification produce explicit errors; no redirects. Scripts are HTTP-only. Daemon messages remain `open|event|message|error|closed`; SSE buffered events and WS frames/messages are capped at 1 MiB. UI keeps at most 1000 messages / 4 MiB, clips each message at 64 KiB, and reports dropped messages.
 
-**Output limits and redaction.** HTTP download stops at 25 MiB plus one byte; `too_large:true` means `size_bytes` is a lower bound and body/base64 are empty. Saved execution scrubs known secret values from script labels, warnings and nested response metadata as well as bodies/headers. An explicit `{v:1}` extras object clears previously saved extensions; null/omitted PATCH extras still preserve them. Saved gRPC proto/method use `extras.grpc` within the existing 256 KiB extras limit.
+**Output limits and redaction.** HTTP download stops at 25 MiB plus one byte; `too_large:true` means `size_bytes` is a lower bound and body/base64 are empty. `body` is the UTF-8 (lossy) text capped at 512 KiB (`truncated:true` when cut). The full bytes are NOT inlined by default: `body_base64` is set only for `image/*` bodies ≤ 5 MiB (the preview); `execute` sets `body_id` (see `…/responses/{body_id}/raw`) when `body` isn't the exact payload (truncated or non-UTF-8); an exact UTF-8 body has neither — `body` is the payload. Saved-request runs (`…/requests/{id}/run`), automation steps and gRPC responses never set `body_id`. Saved execution scrubs known secret values from script labels, warnings and nested response metadata as well as bodies/headers. An explicit `{v:1}` extras object clears previously saved extensions; null/omitted PATCH extras still preserve them. Saved gRPC proto/method use `extras.grpc` within the existing 256 KiB extras limit.
 
 ## Notifications (notification center)
 
@@ -2350,8 +2364,10 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 |---|---|---|---|
 | GET /fs/browse?path= | member | — | complete directory listing (for shared path pickers; optional `files=true`). Authorized filesystem work runs off async workers, with four admitted listings globally and a 10-second response deadline. Saturation returns retryable 409; timeout returns 502. Canceled/timed-out OS work retains admission until it really exits. Picker search still filters the complete listing; no silent entry truncation. |
 | GET /fs/read?path= | member | — | regular-file contents, bounded to 400 KiB; binary content returns an empty string with `truncated:true`. Four admitted reads globally, 10-second response deadline; 409 when busy, 502 on timeout. |
-| GET /logs/daemon | root | — | recent daemon log lines |
+| GET /logs/daemon | root | `?file=&mode=all\|tail\|since&lines=&offset=` | `DaemonLogs {log_dir, files[], selected, mode, content, offset, next_offset, truncated}` — see below |
 | POST /client/errors | any authed user | `{kind, message, stack?, route?, action?}` | **204**. The UI's last-resort error hook (`ui/src/main.ts`) files a fatal client-side failure — e.g. Svelte's `effect_update_depth_exceeded`, which freezes the shell until a reload — before it self-heals. Logged (clipped) at ERROR under target `otto_client` with the user and route; nothing is stored or interpreted |
+
+**`GET /logs/daemon`.** Log dir = `$OTTO_LOG_DIR`, else `$OTTO_DATA_DIR/logs` when `OTTO_DATA_DIR` is set (test/dev daemons), else `~/Library/Logs/Otto`. `file` = a `files[].name`, `__all__` (every `ottod.log*`, oldest first under `===== name =====` headers), or empty for the newest. `mode=all` reads the whole file, `tail` the last `lines` (default 500, max 50 000), `since` the bytes from `offset` to EOF. `content` is capped at **4 MiB** per response: older bytes are dropped at a line boundary and `truncated: true` is set. `offset`/`next_offset` are byte positions in the **live file** — the selected file, or for `__all__` the newest one — so a client follows any mode with `mode=since&file=<live file>&offset=<next_offset>` and appends; if `next_offset` goes backwards (rotation/truncation) or `__all__` gains a newer file, re-read in full. Reads run off the async runtime.
 
 Filesystem paths are on the **daemon host**, including when the caller uses a remote browser. Both filesystem endpoints follow the permissions of the OS account running the daemon; there is no additional allowed-root, hidden-directory, secret-filename, root-user, or managed-agent path restriction. Authentication and existing share/MCP endpoint scopes still apply. Directory listings include hidden names (including `.git`) and accessible directory/file symlinks; broken links and special files are omitted. Paths are canonicalized on open, so symlinks resolve to their target; a leading `~` refers to the daemon account's home. The daemon does not elevate privileges. OS permission failures return 403 with the attempted path, missing paths return 404, and incompatible path types return 400. Reads reject nonregular files, including devices, sockets and FIFOs, before consuming content; the opened file handle is checked again. Read/list workers remain bounded after cancellation or timeout. Session artifact endpoints retain their separate resource and path policies.
 
@@ -2382,14 +2398,19 @@ Filesystem paths are on the **daemon host**, including when the caller uses a re
 - `summary_md?: string | null` — short markdown summary of findings.
 
 **`FileDiff` DTO additions (A2 — additive, optional):**
-- `too_large?: boolean | null` — true when the file diff was capped server-side (cap = 200 KB rendered text).
-- `added?: number | null` / `deleted?: number | null` — line counts for merge-readiness display.
+- `too_large?: boolean | null` — true when the file hit the per-file cap on a `/diff` or PR-diff response (> 200 KB of rendered text or > 5,000 lines; `full=true` + `path=` lifts it to 50,000 lines / 5 MB): `hunks` is `[]`, counts/status/fingerprint are kept. Also set for GitHub PR files sent without a patch.
+- `hunks_omitted?: boolean | null` — true when `hunks` was left out: summary mode (every file), the per-file cap, or the whole-response budget (20,000 lines / 4 MB). Fetch the file with `?path=` (+`old_path=` for a rename).
+- `status?: "added" | "deleted" | "modified" | "renamed" | "copied" | "typechange" | null` — git's A/D/M/R/C/T. (A full patch splits a type change into a delete + an add; the summary reports one `typechange` row.)
+- `added?: number | null` / `deleted?: number | null` — line counts, filled by the server on every diff response (null only for binary files).
 - `language?: string | null` — detected language hint for syntax highlighting.
+
+**`DiffResp` additions (additive, optional):** `truncated?: boolean | null` (the response budget was hit; later files carry `hunks_omitted`), `total_added?: number | null`, `total_deleted?: number | null` (sums over the files, binary counting 0).
 
 **`PrSummary` DTO additions (A2 — additive, optional):**
 - `draft?: boolean | null` — true for draft PRs (GitHub only currently).
 - `ci_status?: string | null` — simplified CI status: `"passing" | "failing" | "pending" | "unknown"`.
 - `labels?: string[]` — PR label names.
+- `head_sha?: string | null` — the source branch's head commit as the provider reports it (GitHub `head.sha`, GitLab `sha`, Bitbucket `source.commit.hash` — abbreviated there). Opaque: clients pass it back as the PR diff's `rev=` so a push re-keys every diff cache.
 
 **`review_findings` table (migration 0049):** fingerprinted persistent finding identity across runs; `review_merge_readiness` view aggregates blocker counts per (repo_id, pr_number). No new HTTP routes — queried internally by the summarizer and surfaced via the `Review` DTO fields above.
 
@@ -2568,7 +2589,7 @@ DTOs (`Vault`, `VaultStatus`, `VaultDirListing`, `VaultNote`, `VaultNoteMeta`,
 | DELETE /workspaces/{ws}/vault/vaults/{id}/note | ws editor | `?path=` | 204 — soft delete → `<vault>/.trash/` (never destroys files) |
 | POST /workspaces/{ws}/vault/vaults/{id}/rename | ws editor | `{from, to}` | `VaultRenameResult{links_updated}` — file OR folder move; rewrites every referencing wikilink/markdown link across the vault on disk (style-preserving); case-only renames use a two-step move |
 | POST /workspaces/{ws}/vault/vaults/{id}/folder | ws editor | `{path}` | 204 |
-| GET /workspaces/{ws}/vault/vaults/{id}/backlinks | ws viewer | `?path=` | `VaultBacklink[]` (linked mentions with a context snippet) |
+| GET /workspaces/{ws}/vault/vaults/{id}/backlinks | ws viewer | `?path=` | `VaultBacklink[]` (linked mentions with a context snippet; the snippet is cached per source note's indexed hash, so only changed sources are re-read) |
 | POST /workspaces/{ws}/vault/vaults/{id}/search | ws viewer | `{query, tag?, path_prefix?, okf_type?, limit?}` | `VaultSearchHit[]` — FTS5 bm25 + snippets; `tag:`/`path:`/`type:` operators inside `query` |
 | GET /workspaces/{ws}/vault/vaults/{id}/switcher | ws viewer | `?q=` | `VaultSwitchHit[]` — server-side fuzzy over title/aliases/path (quick switcher + `[[` completion) |
 | GET /workspaces/{ws}/vault/vaults/{id}/tags | ws viewer | — | `VaultTagCount[]` |
@@ -2592,7 +2613,7 @@ Notes:
 - `index.md`/`log.md` are OKF reserved files: flagged `reserved`, excluded from
   the switcher and (by default) the graph.
 - Notes >4 MiB are indexed metadata-only: `NoteMeta.content_index_status` is `size_limited` (`full` otherwise; older absent values mean `full`). Body-derived tags, aliases, headings, description/frontmatter and outgoing links are empty; filename/title discovery and incoming path links remain available. Source bytes are unchanged. Exact SHA-256 is streamed with bounded buffers; only bodies within the limit are parsed, in bounded blocking jobs. `parse_error` remains a YAML parse error, never a size indicator. Explicit raw-note reads return the complete source and its matching hash with this same metadata policy.
-- A successful API write publishes that file's metadata, tags/links, search and directory/switcher indexes before responding; content-only changes do not rescan the entire Vault. External edits retain the five-second freshness policy. Incomplete directory enumeration preserves existing indexed entries and reports an incomplete scan; removal candidates are rechecked for absence. A warm directory lookup reads cached direct children (directory badge counts retain existing descendant-file semantics).
+- A successful API write publishes that file's metadata, tags/links, search and directory/switcher indexes before responding; content-only changes do not rescan the entire Vault. External edits surface within a 30-second freshness window (was five seconds: every 5 s status poll walked the whole vault); a background rescan that changes nothing writes no `scan_state`/`last_scan_at` (so `last_scan_at` is the last scan that changed the index or recovered from an error). Incomplete directory enumeration preserves existing indexed entries and reports an incomplete scan; removal candidates are rechecked for absence. A warm directory lookup reads cached direct children (directory badge counts retain existing descendant-file semantics).
 
 
 Recovery and freshness details:
@@ -2768,7 +2789,7 @@ responses. The Schema Registry + metrics endpoints ride the same SOCKS tunnel. O
 | DELETE /brokers/clusters/{id}/topics/{topic}?confirm=B | ws editor | — | 204 |
 | GET /brokers/clusters/{id}/topics/{topic}/configs | ws viewer | — | `TopicConfigEntry[]` |
 | PUT /brokers/clusters/{id}/topics/{topic}/configs | ws editor | `AlterConfigsReq` | `TopicConfigEntry[]` (merges over existing dynamic overrides) |
-| POST /brokers/clusters/{id}/topics/{topic}/consume | ws viewer | `ConsumeReq` | `ConsumeResp` (peek; key/value decoded per `decode`) |
+| POST /brokers/clusters/{id}/topics/{topic}/consume | ws viewer | `ConsumeReq` + optional `preview?: bool`, `start_offsets?: {partition, offset}[]` | `ConsumeResp` (peek; key/value decoded per `decode`). Every peek stops at 16 MiB of raw key+value bytes (`truncated: true`). `preview: true` cuts each value over 2 KiB to a 2 KiB preview, drops its `raw_base64` and sets `value.truncated` — fetch that one message (`partition` + `start: {type: offset}` + `limit: 1`) for the full value. `start_offsets` reads ONLY those partitions, each from its own offset, in one request (live tail). `mask: true` also drops `raw_base64`. "Latest N" across partitions splits N over the partitions (≤ N assigned in total) |
 | POST /brokers/clusters/{id}/topics/{topic}/produce | ws editor | `ProduceReq` | `ProduceResp` |
 | GET /brokers/clusters/{id}/groups | ws viewer | — | `GroupSummary[]` |
 | GET /brokers/clusters/{id}/groups/{group} | ws viewer | — | `GroupDetail` (members + per-partition lag) |
@@ -2963,7 +2984,8 @@ UpdateGoalLoopReq}` and domain types `otto_core::domain::{GoalLoop, GoalLoopDeta
 | 91 | POST /api/v1/workspaces/{id}/goal-loops/define | ws editor | DefineGoalReq | GoalLoopDraft (runs the AI definer; creates a managed definer session; `feedback` refines) |
 | 92 | GET /api/v1/workspaces/{id}/goal-loops | ws viewer | — | `GoalLoop[]` |
 | 93 | POST /api/v1/workspaces/{id}/goal-loops | ws editor | CreateGoalLoopReq | GoalLoop (validates non-empty `verify`; starts when `autostart`) |
-| 94 | GET /api/v1/goal-loops/{id} | ws viewer | — | GoalLoopDetail (`{loop, iterations}`) |
+| 94 | GET /api/v1/goal-loops/{id}?summary= | ws viewer | — | GoalLoopDetail (`{loop, iterations}`). `summary=true` (additive): `plan`, `context_in` and `context_out` are `""` on every iteration except the newest — read one via row 94a |
+| 94a | GET /api/v1/goal-loops/{id}/iterations/{idx} | ws viewer | — | GoalLoopIteration — one iteration in full (`idx` is 1-based) |
 | 95 | PATCH /api/v1/goal-loops/{id} | ws editor | UpdateGoalLoopReq | GoalLoop (`name` non-terminal; `limits` not while Running; `config` Draft-only) |
 | 96 | POST /api/v1/goal-loops/{id}/start | ws editor | — | GoalLoop |
 | 97 | POST /api/v1/goal-loops/{id}/pause | ws editor | — | GoalLoop |
@@ -3123,7 +3145,7 @@ to (`dst_kind: "story"` — `implements` — links), sorted;
 | POST /api/v1/design/artifacts/{id}/links | ws editor (+ viewer on an artifact target) | `CreateDesignLinkReq {rel, dst_kind, dst_id, dst_node?, src_node?, policy?, pinned_version_id?, meta?}` | 201 `DesignLink` (`origin:"explicit"`). 400 unknown rel/dst_kind/policy or non-http(s) url; 404 missing artifact/story; **409 render cycle** (embeds/uses_component/uses_tokens) or duplicate. Default policy: render rels `follow_approved`; `derived_from`/`references`/`variant_of`/`resized_from` `pinned` (pinned to approved/head when no version given); others `follow_latest` |
 | DELETE /api/v1/design/artifacts/{id}/links/{link_id} | ws editor | — | 204; 409 for an `extracted` link (edit the document instead) |
 | GET /api/v1/design/links | design view (+ ws viewer per artifact) | `?artifact_ids=a,b,c&dir=out\|in\|both` (default both; 1–100 comma-separated ids) | `DesignLinksResp {links, artifacts}` — the links FROM (`out`) and/or TO (`in`) any of the ids in one call (Product's design strip), each link once even when both ends were requested, ordered by source (≤ 10 000 rows); ids that don't exist or whose workspace the caller can't view are skipped (never an error); `artifacts` = the OTHER ends the caller may view (not the requested ones). 400 no ids / > 100 ids / bad `dir` |
-| GET /api/v1/design/search | design view | `?q=` + the `GET /design/artifacts` filters (default limit 50) | `DesignSearchHit[] {artifact, snippet, score, reference_count, story_ids}` — FTS5 over title, tags, extracted text (copy, layer/object names, token names), linked story keys+titles and project name; AND of terms, last term prefix-matched; shipped → approved → review → draft, then relevance. Empty `q` = filter listing. Powers the References drawer |
+| GET /api/v1/design/search | design view | `?q=` + the `GET /design/artifacts` filters (default limit 50) | `DesignSearchHit[] {artifact, snippet, score, reference_count, story_ids}` (enriched with one grouped query per page, not two per hit; `story_ids` sorted) — FTS5 over title, tags, extracted text (copy, layer/object names, token names), linked story keys+titles and project name; AND of terms, last term prefix-matched; shipped → approved → review → draft, then relevance. Empty `q` = filter listing. Powers the References drawer |
 | GET /api/v1/design/signals | design view | `?workspace_id=&artifact_id=&kind=&since=&limit=` | `DesignSignal[]` (newest first) |
 | POST /api/v1/design/signals | design edit + ws editor on the artifact | `DesignSignalReq {artifact_id, kind, version_id?, actor_kind?, session_id?, payload?}` | 201 `DesignSignal`; kinds `variant_chosen`, `variant_accepted`, `variant_rejected`, `agent_draft`, `edit_after_draft`, `review_comment`, `critique_finding`, `a11y_fix`, `brand_correction`, `rule_feedback`, `status_change`, `shipped`, `restored`, `reference_added`, `forked` (`variant_accepted` / `agent_draft` are normally server-recorded — see Design assist). The last three are client-recorded and need a payload key (400 otherwise): `restored` — `version_id` = the new head, `payload.from_version_id` = the version restored; `reference_added` — `payload.target_artifact_id` (the artifact added as a reference); `forked` — recorded on the NEW artifact, `payload.source_artifact_id` (+ optional `source_version_id`). Payload a JSON object ≤ 8 KB, ≤ 8 levels (400/413); emits `design_learning_update` |
 | POST /api/v1/design/admin/import | design admin | — | `DesignImportReport {attachments_scanned, scenes_scanned, created, synced, unchanged, skipped, links_created, errors}` — re-runs the idempotent legacy import (also runs at daemon start) |
@@ -3817,7 +3839,7 @@ without `session_id` is a user post. Posts are capped at 16 KB.
 | DELETE /api/v1/agent-rooms/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
 | POST /api/v1/agent-rooms/{id}/members | scheduled_tasks edit + ws editor | `{agent_id}` | `{ok:true}` |
 | DELETE /api/v1/agent-rooms/{id}/members/{agent_id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
-| GET /api/v1/agent-rooms/{id}/messages | scheduled_tasks view + ws viewer | query `after?`, `limit?`, `session_id?` | `AgentRoomMessage[]` (agent reads via `session_id` are membership-checked) |
+| GET /api/v1/agent-rooms/{id}/messages | scheduled_tasks view + ws viewer | query `after?`, `before?`, `tail?`, `limit?` (≤ 500), `session_id?` | `AgentRoomMessage[]` oldest first (agent reads via `session_id` are membership-checked). `after`: messages after that id. Additive backwards paging (ignored when `after` is set): `before=<id>` → the `limit` messages before it; `tail=true` with no cursor → the room's newest `limit` |
 | POST /api/v1/agent-rooms/{id}/messages | scheduled_tasks edit + ws editor | `{text, session_id?}` | AgentRoomMessage |
 
 ## Otto Assistant (`/assistant/*`)
@@ -4474,6 +4496,9 @@ sso_start_url?, sso_session?, role_arn?, source: "config"|"credentials" }`.
 | GET /aws/accounts/{id}/s3/buckets/{bucket}/object | `?key=&region=` | `{ key, size, content_type, last_modified, etag, metadata, storage_class }` (`head-object`) |
 | GET /aws/accounts/{id}/s3/buckets/{bucket}/preview | `?key=&max_bytes=&region=` (default 64 KiB, cap 1 MiB) | `{ text?, truncated, content_type, binary? }` — ranged `get-object`; non-text types (anything but `text/*`, JSON/NDJSON/XML/YAML/CSV/JS/SQL, or an `octet-stream` with a text-looking extension) and NUL-bearing bodies return `{ binary: true }` without text |
 | GET /aws/accounts/{id}/s3/buckets/{bucket}/download | `?key=&region=` | streamed body (`aws s3 cp s3://… -` stdout), `Content-Disposition: attachment; filename="<basename>"`, `Content-Length` from the head; objects over **2 GiB** are refused with 413. The child is killed when the client disconnects. |
+| POST /aws/accounts/{id}/s3/buckets/{bucket}/download-to | `{key, local_dir, region?}` | `S3DownloadJob {id, bucket, key, local_path, state (running\|completed\|failed\|cancelled), bytes, total, error?}`. The daemon pipes `aws s3 cp s3://… -` into `<local_dir>/<basename>.otto-part` and renames it on success — never overwriting (` (n)` suffix). `local_dir` must be an existing absolute directory on the daemon host (`~/` expanded) → else 400. No 2 GiB cap (disk-bound). The UI uses it for objects over 100 MB instead of buffering them in the webview. AwsS3:View on the bucket. |
+| GET /aws/accounts/{id}/s3/download-jobs/{job} | — | `S3DownloadJob` (live `bytes`). Jobs are in memory; finished ones are kept 15 min. 404 for another account's job. |
+| POST /aws/accounts/{id}/s3/download-jobs/{job}/cancel | — | `S3DownloadJob` (`cancelled`; the part file is removed). A finished job is returned unchanged. |
 
 ### SQS
 

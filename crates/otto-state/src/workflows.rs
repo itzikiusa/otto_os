@@ -92,7 +92,14 @@ fn row_to_run(r: &sqlx::sqlite::SqliteRow) -> Result<WorkflowRun> {
 }
 
 fn row_to_active_run(r: &sqlx::sqlite::SqliteRow) -> Result<ActiveWorkflowRun> {
-    let nodes: Vec<NodeRunState> =
+    // Only the per-node status is needed. `nodes_json` here is the small
+    // `progress_json` projection whenever it is published (it carries the same
+    // `status` per node, logs/output stripped); the full body is the fallback.
+    #[derive(serde::Deserialize)]
+    struct NodeStatusOnly {
+        status: NodeStatus,
+    }
+    let nodes: Vec<NodeStatusOnly> =
         serde_json::from_str(&r.get::<String, _>("nodes_json")).unwrap_or_default();
     let nodes_total = nodes.len() as u32;
     let nodes_done = nodes
@@ -603,7 +610,8 @@ impl WorkflowsRepo {
     pub async fn list_active_runs(&self, workspace_id: &Id) -> Result<Vec<ActiveWorkflowRun>> {
         let rows = sqlx::query(
             "SELECT r.id AS run_id, r.workflow_id, r.workspace_id, r.status,
-                    r.started_at, r.nodes_json, r.waiting_approval, w.name AS workflow_name
+                    r.started_at, COALESCE(r.progress_json, r.nodes_json) AS nodes_json,
+                    r.waiting_approval, w.name AS workflow_name
              FROM workflow_runs r
              JOIN workflows w ON w.id = r.workflow_id
              WHERE r.workspace_id = ? AND r.status IN ('pending','running')
@@ -1005,9 +1013,14 @@ impl WorkflowsRepo {
     /// monotonic `rev` like [`update_run`], so callers can still stamp the WS
     /// event with it.
     pub async fn update_run_progress(&self, id: &Id, nodes: &[NodeRunState]) -> Result<i64> {
-        let nodes_json =
-            serde_json::to_string(nodes).map_err(|e| Error::Internal(e.to_string()))?;
-        let projection = crate::workflow_progress::nodes_projection(nodes)?;
+        // Serialize + project off the runtime: on a big run this is tens of ms
+        // per write (the clone that moves it there is a fraction of that).
+        let (run, nodes) = (id.to_string(), nodes.to_vec());
+        let (nodes_json, projection) = tokio::task::spawn_blocking(move || {
+            crate::workflow_progress::progress_write(&run, &nodes)
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("workflow progress write: {e}")))??;
         let mut tx = self
             .pool
             .begin()

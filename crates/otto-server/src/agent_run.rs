@@ -215,7 +215,7 @@ pub async fn watch_for_result<F, Fut>(
     timeout: Duration,
     waiting_idle: Duration,
     stuck_idle: Duration,
-    transcript_ok: fn(&str) -> bool,
+    transcript_ok: Option<fn(&str) -> bool>,
     on_status: F,
 ) -> RunOutcome
 where
@@ -267,7 +267,7 @@ pub async fn watch_for_result_guarded<F, Fut, G, GFut>(
     timeout: Duration,
     waiting_idle: Duration,
     stuck_idle: Duration,
-    transcript_ok: fn(&str) -> bool,
+    transcript_ok: Option<fn(&str) -> bool>,
     guard: WatchGuard,
     mut on_status: F,
     mut on_note: G,
@@ -291,14 +291,25 @@ where
     let mut held_since: Option<SystemTime> = None;
     let mut last_note: Option<String> = None;
     let mut last_note_at: Option<Instant> = None;
+    // The claude transcript, read incrementally (only the bytes appended since
+    // the previous tick) and off the runtime. Only armed when something reads
+    // it: the guard, or a caller that accepts a transcript turn (`None` — the
+    // swarm's reused sessions, goal-loop executors — never reads it at all).
+    let mut tail: Option<turn_oracle::ClaudeTail> =
+        if provider == "claude" && (guarded || transcript_ok.is_some()) {
+            provider_session_id.map(|psid| {
+                turn_oracle::ClaudeTail::new(otto_orchestrator::claude_pty::session_jsonl_path(
+                    cwd, psid,
+                ))
+            })
+        } else {
+            None
+        };
     loop {
         // One transcript read per tick feeds BOTH guards below. Unguarded, this
         // stays exactly where it was — after the out-file check.
         let scan = if guarded {
-            provider_session_id
-                .map(|psid| otto_orchestrator::claude_pty::session_jsonl_path(cwd, psid))
-                .and_then(|p| std::fs::read_to_string(p).ok())
-                .map(|raw| turn_oracle::scan_claude(&raw))
+            turn_oracle::poll_claude_tail(&mut tail).await
         } else {
             None
         };
@@ -339,7 +350,7 @@ where
         // claude writes a JSONL transcript; codex/agy don't, so the out-file is
         // their only signal. The caller decides what counts as a complete turn.
         if provider == "claude" && decision != GuardDecision::Hold {
-            if let Some(psid) = provider_session_id {
+            if let (Some(_), Some(transcript_ok)) = (provider_session_id, transcript_ok) {
                 // Guarded: an end-turn is only a FINISHED turn when nothing the
                 // parent launched is still outstanding (it ends one every time a
                 // sub-agent reports back, and one right after launching them).
@@ -348,13 +359,12 @@ where
                     .map(|s| s.tail_is_assistant_end_turn && s.pending.is_empty())
                     .unwrap_or(true);
                 if settled {
-                    let jsonl = otto_orchestrator::claude_pty::session_jsonl_path(cwd, psid);
-                    if let Ok(raw) = std::fs::read_to_string(&jsonl) {
-                        if let Some(turn) = otto_orchestrator::claude_pty::completed_turn_text(&raw)
-                        {
-                            if transcript_ok(&turn) {
-                                return RunOutcome::ok(turn, sid.clone());
-                            }
+                    // `completed_turn_text` of the file as of now: the scan's
+                    // last turn text (O(new bytes) since the guard's read).
+                    let scan = turn_oracle::poll_claude_tail(&mut tail).await;
+                    if let Some(turn) = scan.and_then(|s| s.last_turn_text) {
+                        if transcript_ok(&turn) {
+                            return RunOutcome::ok(turn, sid.clone());
                         }
                     }
                 }
@@ -400,7 +410,10 @@ where
                 // Guarded, the stuck clock follows the artifacts (sub-agents
                 // write their own transcripts while the parent's PTY is mute).
                 let quiet_for = if guarded {
-                    progress_idle(cwd, provider_session_id).unwrap_or(idle)
+                    let (cwd, psid) = (cwd.to_string(), provider_session_id.map(str::to_string));
+                    crate::offload::blocking(move || progress_idle(&cwd, psid.as_deref()))
+                        .await
+                        .unwrap_or(idle)
                 } else {
                     idle
                 };

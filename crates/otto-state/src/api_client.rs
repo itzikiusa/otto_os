@@ -186,6 +186,16 @@ impl ApiClientRepo {
         rows.iter().map(row_to_collection).collect()
     }
 
+    /// `list_collections(ws).len()` without loading or decoding a row — the
+    /// next `position` on create (import creates thousands in a row).
+    pub async fn count_collections(&self, ws: &Id) -> Result<i64> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM api_collections WHERE workspace_id = ?")
+            .bind(ws)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("count api collections"))
+    }
+
     pub async fn get_collection(&self, id: &Id) -> Result<ApiCollection> {
         let r = sqlx::query("SELECT * FROM api_collections WHERE id = ?")
             .bind(id)
@@ -249,6 +259,25 @@ impl ApiClientRepo {
     }
 
     // --- requests -----------------------------------------------------------
+
+    /// `list_requests(ws, collection_id).len()` without loading every row's
+    /// headers/body — the next `position` on create.
+    pub async fn count_requests(&self, ws: &Id, collection_id: Option<&Id>) -> Result<i64> {
+        match collection_id {
+            Some(cid) => sqlx::query_scalar(
+                "SELECT COUNT(*) FROM api_requests WHERE workspace_id = ? AND collection_id = ?",
+            )
+            .bind(ws)
+            .bind(cid)
+            .fetch_one(&self.pool)
+            .await,
+            None => sqlx::query_scalar("SELECT COUNT(*) FROM api_requests WHERE workspace_id = ?")
+                .bind(ws)
+                .fetch_one(&self.pool)
+                .await,
+        }
+        .map_err(dberr("count api requests"))
+    }
 
     pub async fn list_requests(
         &self,
@@ -846,6 +875,12 @@ mod tests {
         // filter by collection
         let in_col = repo.list_requests(&ws, Some(&col.id)).await.unwrap();
         assert_eq!(in_col.len(), 1);
+        // Counts (next `position` on create) agree with the list lengths.
+        assert_eq!(repo.count_requests(&ws, Some(&col.id)).await.unwrap(), 1);
+        assert_eq!(repo.count_requests(&ws, Some(&new_id())).await.unwrap(), 0);
+        assert_eq!(repo.count_requests(&ws, None).await.unwrap(), 1);
+        assert_eq!(repo.count_collections(&ws).await.unwrap(), 1);
+        assert_eq!(repo.count_collections(&new_id()).await.unwrap(), 0);
 
         // update
         let updated = repo

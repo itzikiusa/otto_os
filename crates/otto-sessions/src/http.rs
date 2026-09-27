@@ -13,7 +13,7 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use otto_core::api::{CreateSessionReq, Problem, UpdateSessionReq};
 use otto_core::auth::{session_owner_or_admin, AuthUser, RoleChecker};
-use otto_core::domain::{Session, User, WorkspaceRole};
+use otto_core::domain::{Session, User, WorkspaceRole, SCRATCH_WORKSPACE_ID};
 use otto_core::workref::WorkRef;
 use otto_core::{Error, Id};
 use otto_state::WorkspacesRepo;
@@ -109,6 +109,9 @@ pub fn api_router<S: SessionsCtx>() -> Router<S> {
             "/workspaces/{id}/sessions",
             get(list_sessions::<S>).post(create_session::<S>),
         )
+        // Cross-workspace live list (tray / all-workspaces sidebar): one query
+        // instead of one `/workspaces/{id}/sessions` per workspace.
+        .route("/sessions", get(list_all_sessions::<S>))
         .route(
             "/sessions/{id}",
             get(get_session::<S>)
@@ -147,8 +150,10 @@ fn with_live<S: SessionsCtx>(ctx: &S, session: Session) -> SessionOut {
     }
 }
 
-/// Optional filters for `GET /workspaces/{id}/sessions`. All narrowing; absent
-/// params keep today's full owner-scoped list.
+/// Optional filters for `GET /workspaces/{id}/sessions` and `GET /sessions`.
+/// All narrowing and all applied in SQL; absent params keep today's full
+/// owner-scoped list (except `GET /sessions`, where `archived` defaults to
+/// `false`).
 #[derive(Default, serde::Deserialize)]
 struct ListSessionsQuery {
     /// `true` → only archived rows; `false` → only active rows.
@@ -160,6 +165,46 @@ struct ListSessionsQuery {
     source: Option<String>,
     /// Match the session status string ("running", "idle", "exited", …).
     status: Option<String>,
+    /// Keep only the newest `limit` matching rows (1–1000; still returned
+    /// oldest-first). For paging the archived history.
+    limit: Option<u32>,
+    /// Paging cursor: only rows created strictly before this RFC 3339 instant
+    /// (the `created_at` of the oldest row of the previous page).
+    before: Option<String>,
+}
+
+/// Hard ceiling on `?limit=`.
+const MAX_LIST_LIMIT: u32 = 1000;
+
+impl ListSessionsQuery {
+    fn into_filter(self) -> Result<otto_state::SessionListFilter, Error> {
+        if let Some(k) = self.kind.as_deref() {
+            if !matches!(k, "agent" | "connection") {
+                // Unknown kind: the old Rust filter matched nothing.
+                return Ok(otto_state::SessionListFilter {
+                    limit: Some(0),
+                    ..Default::default()
+                });
+            }
+        }
+        let before = match self.before {
+            Some(b) => Some(
+                chrono::DateTime::parse_from_rfc3339(&b)
+                    .map_err(|_| Error::Invalid("before must be an RFC 3339 timestamp".into()))?
+                    .with_timezone(&chrono::Utc)
+                    .to_rfc3339(),
+            ),
+            None => None,
+        };
+        Ok(otto_state::SessionListFilter {
+            archived: self.archived,
+            kind: self.kind,
+            status: self.status,
+            source: self.source,
+            limit: self.limit.map(|l| l.clamp(1, MAX_LIST_LIMIT)),
+            before,
+        })
+    }
 }
 
 /// POST /app/kill-sessions — terminate every live PTY. Called by the desktop
@@ -202,44 +247,70 @@ async fn list_sessions<S: SessionsCtx>(
             .check(&user, &ws_id, WorkspaceRole::Admin)
             .await
             .is_ok();
-    let sessions = if admin {
-        ctx.manager().list_by_workspace(&ws_id).await?
-    } else {
-        ctx.manager()
-            .list_by_workspace_for_user(&ws_id, &user.id)
-            .await?
+    let scope = otto_state::SessionScope {
+        workspace_id: ws_id,
+        owner: (!admin).then(|| user.id.clone()),
     };
-    let mut visible = Vec::new();
-    for session in sessions {
-        if ctx.check_resource(&user, &session).await.is_ok() {
-            visible.push(session);
-        }
-    }
-    let sessions = visible
-        .into_iter()
-        .filter(|s| q.archived.is_none_or(|a| s.archived == a))
-        .filter(|s| q.kind.as_deref().is_none_or(|k| kind_str(s) == k))
-        .filter(|s| {
-            q.source.as_deref().is_none_or(|want| {
-                let src = s.meta.get("source").and_then(|v| v.as_str());
-                if want == "none" {
-                    src.is_none()
-                } else {
-                    src == Some(want)
-                }
-            })
-        })
-        .filter(|s| q.status.as_deref().is_none_or(|st| s.status.as_str() == st))
-        .map(|s| with_live(&ctx, s))
-        .collect();
-    Ok(Json(sessions))
+    let filter = q.into_filter()?;
+    let sessions = ctx.manager().list_filtered(&[scope], &filter).await?;
+    Ok(Json(visible_out(&ctx, &user, sessions).await))
 }
 
-fn kind_str(s: &Session) -> &'static str {
-    match s.kind {
-        otto_core::domain::SessionKind::Agent => "agent",
-        otto_core::domain::SessionKind::Connection => "connection",
+/// GET /sessions — the caller's sessions across EVERY workspace they belong to
+/// (plus the scratch workspace) in ONE query, with the same filters and the
+/// same per-workspace owner scoping as #17 (root / workspace Admin → every
+/// row; otherwise only the caller's own). `archived` defaults to `false`: this
+/// is the tray / all-workspaces-sidebar feed, which used to fan #17 out once
+/// per workspace (16 concurrent full-history reads every 20 s, starving the
+/// 8-connection SQLite pool and the webview's 6 sockets).
+async fn list_all_sessions<S: SessionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Query(mut q): Query<ListSessionsQuery>,
+) -> ApiResult<Json<Vec<SessionOut>>> {
+    q.archived = Some(q.archived.unwrap_or(false));
+    let scopes: Vec<otto_state::SessionScope> = if user.is_root {
+        ctx.workspaces()
+            .list_all()
+            .await?
+            .into_iter()
+            .map(|w| otto_state::SessionScope { workspace_id: w.id, owner: None })
+            .collect()
+    } else {
+        let mut scopes: Vec<otto_state::SessionScope> = ctx
+            .workspaces()
+            .list_for_user(&user.id)
+            .await?
+            .into_iter()
+            .filter(|(w, _)| w.id != SCRATCH_WORKSPACE_ID)
+            .map(|(w, role)| otto_state::SessionScope {
+                workspace_id: w.id,
+                owner: (role != WorkspaceRole::Admin).then(|| user.id.clone()),
+            })
+            .collect();
+        // Everyone is an implicit Editor (never Admin) on scratch, so it is
+        // owner-scoped — the same answer #17 gives for `/workspaces/scratch/sessions`.
+        scopes.push(otto_state::SessionScope {
+            workspace_id: SCRATCH_WORKSPACE_ID.to_string(),
+            owner: Some(user.id.clone()),
+        });
+        scopes
+    };
+    let filter = q.into_filter()?;
+    let sessions = ctx.manager().list_filtered(&scopes, &filter).await?;
+    Ok(Json(visible_out(&ctx, &user, sessions).await))
+}
+
+/// Drop rows whose bound resource the caller may no longer reach, and attach
+/// the live PTY state.
+async fn visible_out<S: SessionsCtx>(ctx: &S, user: &User, sessions: Vec<Session>) -> Vec<SessionOut> {
+    let mut out = Vec::with_capacity(sessions.len());
+    for session in sessions {
+        if ctx.check_resource(user, &session).await.is_ok() {
+            out.push(with_live(ctx, session));
+        }
     }
+    out
 }
 
 /// #18 POST /workspaces/{id}/sessions — editor

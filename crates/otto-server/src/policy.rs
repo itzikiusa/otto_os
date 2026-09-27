@@ -503,6 +503,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/workspaces/{id}/sessions" {
         return Require(Agents, if get { View } else { Edit });
     }
+    if p == "/sessions" {
+        // Cross-workspace live session list (tray / all-workspaces sidebar);
+        // the handler owner-scopes each workspace exactly like the one above.
+        return Require(Agents, View);
+    }
     // Dynamic model catalog: reading the discovered model lists = Agents View
     // (every session surface's model picker needs it); forcing a refresh (an
     // outbound-fetch write) = Agents Edit.
@@ -2179,6 +2184,7 @@ mod tests {
             pol(Method::POST, "/api/v1/workspaces/{id}/sessions"),
             Require(Agents, Edit)
         );
+        assert_eq!(pol(Method::GET, "/api/v1/sessions"), Require(Agents, View));
         assert_eq!(
             pol(Method::GET, "/api/v1/sessions/{id}"),
             Require(Agents, View)

@@ -871,6 +871,34 @@ impl AgentRoomsRepo {
         .map_err(dberr("list agent room messages"))?;
         rows.iter().map(row_to_message).collect()
     }
+
+    /// The `limit` messages immediately BEFORE `before` (or the room's newest
+    /// `limit` when `before` is `None`), returned oldest first. Lets a client
+    /// open a busy room on its tail and page backwards, instead of walking
+    /// forward from the first message (backlog B6 / SA-08).
+    pub async fn list_messages_before(
+        &self,
+        room_id: &str,
+        before: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<AgentRoomMessage>> {
+        let rows = sqlx::query(
+            "SELECT * FROM (SELECT m.*, m.rowid AS seq FROM agent_room_messages m \
+               WHERE m.room_id = ? \
+                 AND (? IS NULL OR m.rowid < \
+                      COALESCE((SELECT rowid FROM agent_room_messages WHERE id = ?), 0)) \
+               ORDER BY m.rowid DESC LIMIT ?) \
+             ORDER BY seq ASC",
+        )
+        .bind(room_id)
+        .bind(before)
+        .bind(before.unwrap_or(""))
+        .bind(limit.clamp(1, 500))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list agent room messages before"))?;
+        rows.iter().map(row_to_message).collect()
+    }
 }
 
 #[cfg(test)]
@@ -1097,6 +1125,22 @@ mod tests {
             .unwrap();
         assert_eq!(page.len(), 1);
         assert_eq!(page[0].id, m2.id);
+        // Backwards paging: the tail (newest `limit`, oldest first), then the
+        // page before a cursor; an unknown cursor reads nothing.
+        let tail = rooms.list_messages_before(&room.id, None, 1).await.unwrap();
+        assert_eq!(tail.iter().map(|m| &m.id).collect::<Vec<_>>(), vec![&m2.id]);
+        let both = rooms.list_messages_before(&room.id, None, 50).await.unwrap();
+        assert_eq!(both.iter().map(|m| &m.id).collect::<Vec<_>>(), vec![&m1.id, &m2.id]);
+        let older = rooms
+            .list_messages_before(&room.id, Some(&m2.id), 50)
+            .await
+            .unwrap();
+        assert_eq!(older.iter().map(|m| &m.id).collect::<Vec<_>>(), vec![&m1.id]);
+        assert!(rooms
+            .list_messages_before(&room.id, Some(&m1.id), 50)
+            .await
+            .unwrap()
+            .is_empty());
 
         // Deleting an agent cascades its membership but keeps its messages
         // (the transcript stays user-visible).

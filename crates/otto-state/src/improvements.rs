@@ -249,6 +249,23 @@ impl ImprovementsRepo {
         rows.iter().map(row_to_run).collect()
     }
 
+    /// Boot-time recovery: runs execute in-process, so any row still
+    /// `running` when the daemon starts lost its worker (crash, kill, update).
+    /// Left alone it blocked every later scheduled/live run in its workspace
+    /// forever (`has_running`). Marks them `failed`; returns how many.
+    pub async fn fail_orphaned_runs(&self) -> Result<u64> {
+        let r = sqlx::query(
+            "UPDATE improvement_runs SET status = 'failed', \
+             error = COALESCE(error, 'interrupted: the daemon restarted while this run was in progress'), \
+             finished_at = ? WHERE status = 'running'",
+        )
+        .bind(fmt(Utc::now()))
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("fail orphaned runs"))?;
+        Ok(r.rows_affected())
+    }
+
     /// True if the workspace currently has a run in `status = 'running'`.
     pub async fn has_running(&self, ws: &Id) -> Result<bool> {
         let r = sqlx::query(
@@ -359,5 +376,49 @@ impl ImprovementsRepo {
         .await
         .map_err(dberr("set edit status"))?;
         self.get_edit(id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn orphaned_running_runs_fail_at_boot() {
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(false);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::migrate!().run(&pool).await.unwrap();
+        let repo = ImprovementsRepo::new(pool);
+        let ws: Id = "w1".into();
+        let stuck = repo
+            .create_run(&ws, ImprovementTrigger::Manual)
+            .await
+            .unwrap();
+        let done = repo
+            .create_run(&ws, ImprovementTrigger::Manual)
+            .await
+            .unwrap();
+        repo.finish_run(&done.id, ImprovementRunStatus::Done, "ok", 1, 0, 0, None)
+            .await
+            .unwrap();
+        assert!(repo.has_running(&ws).await.unwrap());
+        assert_eq!(repo.fail_orphaned_runs().await.unwrap(), 1);
+        assert!(!repo.has_running(&ws).await.unwrap());
+        let s = repo.get_run(&stuck.id).await.unwrap();
+        assert_eq!(s.status, ImprovementRunStatus::Failed);
+        assert!(s.error.unwrap_or_default().contains("interrupted"));
+        let d = repo.get_run(&done.id).await.unwrap();
+        assert_eq!(
+            d.status,
+            ImprovementRunStatus::Done,
+            "finished runs untouched"
+        );
+        assert_eq!(repo.fail_orphaned_runs().await.unwrap(), 0);
     }
 }
