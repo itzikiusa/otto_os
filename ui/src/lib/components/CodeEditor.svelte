@@ -39,6 +39,7 @@
   import { sql } from '@codemirror/lang-sql';
   import { sqlDialect as dialectFor, type SqlDialectName } from '../sql-dialects';
   import { redisLang } from './redis-lang';
+  import { createChangeEmitter } from './changeEmitter';
 
   // LSP — use the all-in-one factory that manages the WS transport internally
   import { languageServer } from '@marimo-team/codemirror-languageserver';
@@ -85,7 +86,12 @@
     root: string;
     language?: string;
     readOnly?: boolean;
-    /** Fired with the full document text on every edit (only when !readOnly). */
+    /**
+     * Fired with the full document text after edits (only when !readOnly).
+     * Synchronous per edit below 256 K chars; at/above that it is coalesced
+     * (one emit after 150 ms of quiet, flushed on blur, ⌘/Ctrl-chords, submit,
+     * doc switch and unmount) so a multi-MB body doesn't copy itself per key.
+     */
     onchange?: (value: string) => void;
     /**
      * Optional custom autocompletion source. When set, it overrides the default
@@ -138,12 +144,13 @@
      */
     keepStates?: boolean;
     /**
-     * Attach a language server for this doc (default true — the Files viewer).
-     * Pass `false` for scratch / virtual-path editors (API request body,
-     * scripts, docs, response viewer): the daemon spawns one server PROCESS per
-     * editor socket with `cwd` = `root`, so a fake `pre.js` would start a
-     * tsserver indexing the whole workspace for a 3-line script, and every
-     * remount (tab switch, new response) would spawn/kill another.
+     * Attach a language server for this doc. OPT-IN (default false): only an
+     * editor showing a REAL file under `root` (the Files viewer) passes it.
+     * Scratch / virtual-path editors (API body/scripts, canvases, vault notes,
+     * skill/context files, Athena SQL, conflict hunks, response viewer) must
+     * not: a server runs with `cwd` = `root` (indexing the whole workspace for
+     * a 3-line `pre.js`) and a partial/fake doc only yields noise diagnostics.
+     * The daemon shares one server per `(lang, root)` across editors.
      */
     lsp?: boolean;
     /**
@@ -173,7 +180,7 @@
     placeholder = '',
     wrap = false,
     keepStates = false,
-    lsp = true,
+    lsp = false,
     sqlDialect = 'standard',
   }: Props = $props();
 
@@ -311,12 +318,36 @@
   // drop the cursor).
   let lastEmitted: string | null = null;
 
-  /** Emits the full doc text on edits so editable callers stay in sync. */
+  /** Large docs defer the (whole-doc) emit; small ones emit per edit. */
+  const LAZY_CHANGE_MIN = 256 * 1024;
+  const changes = createChangeEmitter({
+    threshold: LAZY_CHANGE_MIN,
+    delayMs: 150,
+    read: () => view?.state.doc.toString() ?? null,
+    emit: (value) => {
+      lastEmitted = value;
+      onchange?.(value);
+    },
+  });
+
+  /** Emits the doc text on edits so editable callers stay in sync. */
   const changeListener = EditorView.updateListener.of((update) => {
     if (!update.docChanged || !onchange) return;
-    const value = update.state.doc.toString();
-    lastEmitted = value;
-    onchange(value);
+    changes.changed(update.state.doc.length);
+  });
+
+  /** Flush a deferred emit before anything that may act on the value: focus
+   *  leaving the editor, or a ⌘/Ctrl chord (Send / Run / Save shortcuts are
+   *  handled by window listeners after the editor sees the key). */
+  const changeFlushHandlers = EditorView.domEventHandlers({
+    blur: () => {
+      changes.flush();
+      return false;
+    },
+    keydown: (e) => {
+      if ((e.metaKey || e.ctrlKey) && changes.pending) changes.flush();
+      return false;
+    },
   });
 
   // ── Send-to-agent handler ─────────────────────────────────────────────────
@@ -383,6 +414,12 @@
   // ── Tear-down helpers ──────────────────────────────────────────────────────
 
   function teardownEditor(): void {
+    // A deferred emit can't be delivered once `path` moved on: `onchange` is
+    // the NEW doc's binding by now (it'd write this text into the wrong tab).
+    // Real switches flush first anyway — the click blurs, ⌘-chords flush — so
+    // this only drops an edit under a programmatic switch mid-debounce.
+    // Unmount (same path) flushes in onDestroy before calling this.
+    changes.cancel();
     try { view?.destroy(); } catch { /* ignore */ }
     view = null;
     // Release the global find opener if this editor still holds it (blur may not
@@ -491,6 +528,7 @@
       key: 'Mod-Enter',
       run: () => {
         if (onsubmit) {
+          changes.flush();
           onsubmit();
           return true;
         }
@@ -528,6 +566,7 @@
       lspCompartment.of([]),
       selectionListener,
       changeListener,
+      changeFlushHandlers,
       submitKeymap,
       // When this editor owns find, claim the global Cmd/Ctrl+F opener while it
       // has focus so the keymap opens THIS editor's search/replace panel (with
@@ -620,6 +659,8 @@
    */
   function swapState(fromPath: string, toPath: string, toContent: string): void {
     if (!view) return;
+    // See teardownEditor: `onchange` already targets `toPath`.
+    changes.cancel();
     keptStates.delete(fromPath);
     keptStates.set(fromPath, {
       state: view.state,
@@ -804,6 +845,8 @@
   });
 
   onDestroy(() => {
+    // Same doc, going away (a tab/view toggle): deliver its last edit.
+    changes.flush();
     teardownEditor();
   });
 </script>

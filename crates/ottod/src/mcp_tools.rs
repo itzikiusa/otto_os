@@ -3377,7 +3377,7 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
             let url = arg_str(args, "url")?;
             let raw = ctx
                 .get_json(&format!(
-                    "/workspaces/{}/browser/page?url={}",
+                    "/workspaces/{}/browser/page?url={}&include_html=0",
                     seg(ws),
                     seg(&url)
                 ))

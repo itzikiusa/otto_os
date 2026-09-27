@@ -7385,6 +7385,7 @@ export interface BrowserPage {
   url: string;
   title: string;
   markdown: string;
+  /** Raw markup; `""` when fetched with `include_html=0` (the reader does). */
   html: string;
   /** `"lightpanda"` | `"fallback"` | `"mock"` — which engine produced this page. */
   engine: string;

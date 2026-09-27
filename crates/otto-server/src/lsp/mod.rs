@@ -5,8 +5,13 @@
 //!   GET  /api/v1/lsp/capabilities              → LspCapabilities (authed)
 //!   POST /api/v1/workspaces/{id}/lsp/install   → Session (Editor role)
 //!   GET  /ws/lsp?lang=&root=&token=            → WebSocket bridge (token auth)
+//!
+//! The bridge does NOT spawn a server per socket: sockets attach to the shared
+//! [`pool::LspPool`] (one process per `(lang, root)`, ref-counted, reaped
+//! [`pool::IDLE_TIMEOUT`] after its last socket leaves).
 
 pub mod framing;
+pub mod pool;
 pub mod servers;
 
 use std::sync::Arc;
@@ -22,8 +27,6 @@ use otto_core::auth::TokenAuthenticator;
 use otto_core::domain::{SessionKind, WorkspaceRole};
 use otto_core::{Error, Id};
 use serde::{Deserialize, Serialize};
-use tokio::io::BufReader;
-use tokio::process::Command;
 
 use crate::auth::CurrentUser;
 use crate::error::{ApiError, ApiResult};
@@ -197,6 +200,8 @@ struct LspWsState {
     auth: Arc<dyn TokenAuthenticator>,
     #[allow(dead_code)]
     ctx: ServerCtx,
+    /// Shared servers, one per `(lang, root)`.
+    pool: Arc<pool::LspPool>,
 }
 
 #[derive(Deserialize)]
@@ -285,102 +290,59 @@ async fn lsp_ws(
         );
     }
 
+    // One pooled server per (lang, canonical root): `/a/../a` and `/a` share.
+    let root = std::fs::canonicalize(root_path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or(root);
+    let key = pool::PoolKey { lang, root };
     let cmd = resolved.command.clone();
     let args = resolved.args.clone();
-    let root_owned = root.clone();
-    let lang_owned = lang.clone();
+    let pool = Arc::clone(&st.pool);
 
     ws.on_upgrade(move |socket| async move {
-        serve_lsp(socket, cmd, args, root_owned, lang_owned).await;
+        serve_lsp(socket, pool, key, cmd, args).await;
     })
 }
 
-/// Drive the WS↔stdio relay for one LSP session.
+/// Relay one socket to its pooled server until either side goes away.
 async fn serve_lsp(
     mut socket: WebSocket,
+    pool: Arc<pool::LspPool>,
+    key: pool::PoolKey,
     cmd: String,
     args: Vec<String>,
-    root: String,
-    lang: String,
 ) {
-    // Spawn the language server.
-    let mut child = match Command::new(&cmd)
-        .args(&args)
-        .current_dir(&root)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-    {
-        Ok(c) => c,
+    let mut attached = match pool.attach(key.clone(), &cmd, &args) {
+        Ok(a) => a,
         Err(e) => {
-            tracing::error!(lang, cmd, "failed to spawn language server: {e}");
-            let err = format!(
-                r#"{{"type":"error","code":"spawn_failed","message":"{}"}}"#,
-                e
-            );
-            let _ = socket.send(Message::Text(err.into())).await;
+            tracing::error!(lang = key.lang.as_str(), cmd, "failed to spawn language server: {e}");
+            let err = serde_json::json!({
+                "type": "error",
+                "code": "spawn_failed",
+                "message": e.to_string(),
+            });
+            let _ = socket.send(Message::Text(err.to_string().into())).await;
             return;
         }
     };
 
-    let mut stdin = child.stdin.take().expect("piped stdin");
-    let stdout = child.stdout.take().expect("piped stdout");
-    let stderr = child.stderr.take().expect("piped stderr");
-
-    let mut stdout_reader = BufReader::new(stdout);
-
-    // Drain stderr to debug logs in a background task.
-    tokio::spawn(async move {
-        use tokio::io::AsyncBufReadExt;
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            tracing::debug!(lang = lang.as_str(), "lsp stderr: {line}");
-        }
-    });
-
-    // Main relay loop.
     loop {
         tokio::select! {
-            // Server stdout → WS text frame (strip Content-Length framing).
-            msg = framing::read_message(&mut stdout_reader) => {
-                match msg {
-                    Ok(Some(body)) => {
-                        match String::from_utf8(body) {
-                            Ok(text) => {
-                                if socket.send(Message::Text(text.into())).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(_) => {
-                                tracing::debug!("lsp: server sent non-UTF-8 body, dropping");
-                            }
-                        }
-                    }
-                    Ok(None) => {
-                        // Server stdout closed (process exited).
-                        tracing::debug!("lsp: server stdout closed");
-                        break;
-                    }
-                    Err(e) => {
-                        tracing::warn!("lsp: stdout framing error: {e}");
-                        break;
-                    }
+            // Pooled server → this socket (already routed + id-restored).
+            out = attached.rx.recv() => {
+                let Some(text) = out else { break };
+                if socket.send(Message::Text(text.into())).await.is_err() {
+                    break;
                 }
             }
-
-            // WS text frame → server stdin (add Content-Length framing).
+            // This socket → pooled server.
             ws_msg = socket.recv() => {
                 let Some(Ok(ws_msg)) = ws_msg else {
-                    // WS closed or error.
                     break;
                 };
                 match ws_msg {
                     Message::Text(text) => {
-                        let bytes = text.as_bytes();
-                        if let Err(e) = framing::write_message(&mut stdin, bytes).await {
-                            tracing::warn!("lsp: stdin write error: {e}");
+                        if !attached.send(text.to_string()).await {
                             break;
                         }
                     }
@@ -391,9 +353,8 @@ async fn serve_lsp(
             }
         }
     }
-
-    // Kill the server and close the socket.
-    let _ = child.kill().await;
+    // Dropping `attached` detaches: its docs close, and the server is reaped
+    // once no socket is left for IDLE_TIMEOUT.
 }
 
 // ---------------------------------------------------------------------------
@@ -414,5 +375,6 @@ pub fn ws_router(authenticator: Arc<dyn TokenAuthenticator>, ctx: ServerCtx) -> 
         .with_state(LspWsState {
             auth: authenticator,
             ctx,
+            pool: pool::LspPool::new(pool::process_spawner(), pool::IDLE_TIMEOUT),
         })
 }

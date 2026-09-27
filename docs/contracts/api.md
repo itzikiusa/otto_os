@@ -2500,7 +2500,7 @@ These self-authenticate via the `?token=` query parameter and are merged at the 
 |---|---|---|
 | GET /ws/term/{session_id} | `?token=`; ws viewer attach, editor input | terminal stream (see ws.md) |
 | GET /ws/events | `Sec-WebSocket-Protocol: otto-bearer, <token>` (preferred — keeps the token out of the URL) or `?token=` fallback; member | daemon event stream (see ws.md) |
-| GET /ws/lsp?lang=&root=&token= | `?token=`; ws editor | LSP WebSocket bridge |
+| GET /ws/lsp?lang=&root=&token= | `?token=`; ws editor | LSP WebSocket bridge. Sockets share ONE server process per `(lang, canonical root)` (ref-counted; reaped 60 s after the last socket leaves): request ids are rewritten per socket, `initialize` is answered from the first result, `didOpen`/`didClose` are ref-counted per URI, `publishDiagnostics` goes to sockets holding the URI |
 | GET /ws/api-client/stream?token= | `?token=`; ws editor | API-client streaming-response bridge |
 | GET /browser/proxy?url=&token= | `?token=` | in-app browser HTTP proxy |
 
@@ -4164,7 +4164,7 @@ denylist/fallback policy with `/page`. Broadcasts `browser_tab_updated`
 | POST /api/v1/workspaces/{wid}/browser/tabs | ws editor · Browser Edit | `{url}` | `BrowserTab` (created in `mode:"reader"`) |
 | PATCH /api/v1/browser/tabs/{id} | ws editor · Browser Edit | `{url?, title?, mode?}` (`mode` ∈ `reader`\|`live`) | `BrowserTab` |
 | DELETE /api/v1/browser/tabs/{id} | ws editor · Browser Edit | — | 204 |
-| GET /api/v1/workspaces/{wid}/browser/page?url=… | ws editor · Browser Edit | — | `{url, title, markdown, html, engine, degraded}` — netguard-checked; `degraded:true` means the plain-fetch fallback ran (no JS) |
+| GET /api/v1/workspaces/{wid}/browser/page?url=…[&include_html=0] | ws editor · Browser Edit | — | `{url, title, markdown, html, engine, degraded}` — netguard-checked; `degraded:true` means the plain-fetch fallback ran (no JS). `include_html=0` (or `false`) returns `html: ""` — the reader UI and the `browser_page` MCP tool pass it (raw markup is up to 2 MB); default includes it |
 | GET /api/v1/workspaces/{wid}/browser/query?url=…&selector=… | ws editor · Browser Edit | — | `{matches: [{selector, outer_html, text}]}` — netguard-checked, same as `/page`; CSS-selector matches against the settled page |
 | GET /api/v1/workspaces/{wid}/browser/annotations | ws viewer · Browser View | query `url?` (filters to one page) | `BrowserAnnotation[]` |
 | POST /api/v1/workspaces/{wid}/browser/annotations | ws editor · Browser Edit | `{url, selector, excerpt?, text?, comment?, color?, tab_id?}` (`excerpt`/`text` default `""`, `color` defaults `"yellow"`) | `BrowserAnnotation` |

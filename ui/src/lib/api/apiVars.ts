@@ -72,11 +72,28 @@ export function splitVars(s: string): { text: string; isVar: boolean; name?: str
   return out;
 }
 
-/** Every text a request sends, for variable discovery. */
-export function requestTexts(d: { url: string; headers: ApiKeyVal[]; query: ApiKeyVal[]; body: string; auth: unknown }): string[] {
+type RequestTextSource = { url: string; headers: ApiKeyVal[]; query: ApiKeyVal[]; body: string; auth: unknown };
+
+/** The texts a request sends, split around the body so the (possibly huge)
+ *  body can be scanned on its own schedule: `[...before, body, ...after]`. */
+export function requestTextParts(d: RequestTextSource): { before: string[]; body: string; after: string[] } {
   const live = (rows: ApiKeyVal[]) => rows.filter((r) => r.enabled !== false).flatMap((r) => [r.key, r.value]);
   const auth = Object.values((d.auth ?? {}) as Record<string, unknown>).filter((v): v is string => typeof v === 'string');
-  return [d.url, ...live(d.query), ...live(d.headers), d.body, ...auth];
+  return { before: [d.url, ...live(d.query), ...live(d.headers)], body: d.body, after: auth };
+}
+
+/** Every text a request sends, for variable discovery. */
+export function requestTexts(d: RequestTextSource): string[] {
+  const p = requestTextParts(d);
+  return [...p.before, p.body, ...p.after];
+}
+
+/** `varNames` over the request, with the body's names supplied by the caller
+ *  (so a large body is scanned debounced instead of per keystroke). Same
+ *  first-seen order as `varNames(...requestTexts(d))`. */
+export function requestVarNames(d: RequestTextSource, bodyNames: string[]): string[] {
+  const p = requestTextParts(d);
+  return [...new Set([...varNames(...p.before), ...bodyNames, ...varNames(...p.after)])];
 }
 
 export type MethodTone = 'get' | 'post' | 'put' | 'delete' | 'other';

@@ -882,17 +882,7 @@ impl BrowserEngine for LightpandaEngine {
     /// Caller must netguard-check `url` first — see crate docs.
     async fn fetch_page(&self, url: &str) -> Result<Page, EngineError> {
         let html = self.navigate_and_snapshot(url).await?;
-        let title = crate::extract_title(&html);
-        let cleaned = crate::readability(&html);
-        let markdown = crate::html_to_markdown(&cleaned);
-        Ok(Page {
-            url: url.to_string(),
-            title,
-            html,
-            markdown,
-            degraded: false,
-            engine: self.name().to_string(),
-        })
+        crate::build_page(url, html, false, self.name()).await
     }
 
     /// Caller must netguard-check `url` first — see crate docs.

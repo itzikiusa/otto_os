@@ -30,8 +30,6 @@ export interface ConnState {
   retryInMs: number;
   /** Why it ended / what the last failure was — human-readable. */
   reason: string;
-  /** Wall-clock ms of the last frame (0 = none yet). */
-  lastFrameAt: number;
   /** Wall-clock ms of the first input sent since the last frame (0 = none
    *  pending) — the start of a latency sample. */
   awaitingSince: number;
@@ -54,7 +52,6 @@ export const INITIAL: ConnState = {
   attempt: 0,
   retryInMs: 0,
   reason: '',
-  lastFrameAt: 0,
   awaitingSince: 0,
   hasFrame: false,
 };
@@ -88,8 +85,12 @@ export function reduce(s: ConnState, ev: ConnEvent, jitter = 0.5): ConnState {
       if (s.status !== 'connecting') return s;
       return { ...s, status: 'live', attempt: 0, retryInMs: 0, reason: '', awaitingSince: 0 };
     case 'frame':
+      // Steady-state frames change nothing: return `s` itself so a 30 fps
+      // stream doesn't re-run every effect that reads the connection (perf
+      // SB-17). Only the first frame and one answering an input are news.
       if (s.status !== 'live') return s;
-      return { ...s, lastFrameAt: ev.at, awaitingSince: 0, hasFrame: true };
+      if (s.hasFrame && !s.awaitingSince) return s;
+      return { ...s, awaitingSince: 0, hasFrame: true };
     case 'input':
       if (s.status !== 'live' || s.awaitingSince) return s;
       return { ...s, awaitingSince: ev.at };

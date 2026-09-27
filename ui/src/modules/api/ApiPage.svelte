@@ -28,6 +28,7 @@
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { startMouseDrag } from '../../lib/dragCursor';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
@@ -197,41 +198,30 @@
   let gitOpen = $state(false);
 
   // ── drag-to-resize: sidebar width + builder height (both persisted) ────────
+  // Overlay cursor + one size write per frame + one localStorage write on
+  // release (lib/dragCursor.ts) — no per-mousemove persist, no body.style
+  // restyle of the whole app.
   function startSideResize(e: MouseEvent): void {
-    e.preventDefault();
     const startX = e.clientX;
     const startW = ui.apiSideWidth;
     const rtl = document.documentElement.dir === 'rtl';
-    const onMove = (ev: MouseEvent) => ui.setApiSideWidth(startW + (rtl ? startX - ev.clientX : ev.clientX - startX));
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
+    startMouseDrag(e, {
+      cursor: 'col-resize',
+      onMove: (ev) => ui.setApiSideWidth(startW + (rtl ? startX - ev.clientX : ev.clientX - startX), false),
+      onEnd: () => ui.setApiSideWidth(ui.apiSideWidth),
+    });
   }
   let builderEl: HTMLDivElement | null = $state(null);
   function startBuilderResize(e: MouseEvent): void {
-    e.preventDefault();
     const startY = e.clientY;
     // Until the first drag the height is CSS-driven — seed from the rendered
     // height so the divider doesn't jump on grab.
     const startH = ui.apiBuilderHeight || builderEl?.offsetHeight || 300;
-    const onMove = (ev: MouseEvent) => ui.setApiBuilderHeight(startH + (ev.clientY - startY));
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    document.body.style.cursor = 'row-resize';
-    document.body.style.userSelect = 'none';
+    startMouseDrag(e, {
+      cursor: 'row-resize',
+      onMove: (ev) => ui.setApiBuilderHeight(startH + (ev.clientY - startY), false),
+      onEnd: () => ui.setApiBuilderHeight(ui.apiBuilderHeight),
+    });
   }
   function resizeKey(e: KeyboardEvent, axis: 'x' | 'y'): void {
     const step = e.shiftKey ? 40 : 10;

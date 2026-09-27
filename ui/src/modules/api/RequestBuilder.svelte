@@ -16,7 +16,7 @@
   import { apiStream } from '../../lib/stores/apiStream.svelte';
   import { api, newHostConfirmHost } from '../../lib/api/client';
   import { generateCode, CODE_LANGS, type CodeLang } from '../../lib/api/codegen';
-  import { collectionPaths, requestTexts, resolveVar, splitVars, varNames } from '../../lib/api/apiVars';
+  import { collectionPaths, requestVarNames, resolveVar, splitVars, varNames } from '../../lib/api/apiVars';
   import { marked } from 'marked';
   import { sanitizeHtml } from '../../lib/sanitize';
   import type { ApiAuth, ApiBodyMode, ApiKeyVal, ApiResponse, ApiSecretable } from '../../lib/api/types';
@@ -175,8 +175,20 @@
   // ── {{variables}} ──────────────────────────────────────────────────────────
   const urlSegments = $derived(splitVars(draft.url));
   const envForVars = $derived(apiClient.activeEnv);
+  // The body's `{{vars}}` are scanned per keystroke only while it is small;
+  // above 64 KB the scan (a regex over the whole body) runs 300 ms after the
+  // last edit. URL / query / headers / auth stay live.
+  const BODY_VAR_SCAN_SYNC_MAX = 64 * 1024;
+  let deferredBodyVars = $state.raw<string[]>([]);
+  $effect(() => {
+    const body = draft.body;
+    if (body.length <= BODY_VAR_SCAN_SYNC_MAX) return;
+    const t = setTimeout(() => { deferredBodyVars = varNames(body); }, 300);
+    return () => clearTimeout(t);
+  });
+  const bodyVars = $derived(draft.body.length <= BODY_VAR_SCAN_SYNC_MAX ? varNames(draft.body) : deferredBodyVars);
   const usedVars = $derived(
-    varNames(...requestTexts(draft)).map((n) => resolveVar(n, apiClient.runtimeVars, envForVars)),
+    requestVarNames(draft, bodyVars).map((n) => resolveVar(n, apiClient.runtimeVars, envForVars)),
   );
   const missingVars = $derived(usedVars.filter((v) => v.kind === 'missing').length);
 
