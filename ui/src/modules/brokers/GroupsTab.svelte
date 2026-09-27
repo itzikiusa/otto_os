@@ -196,6 +196,10 @@
   let groupsEl = $state<HTMLDivElement>();
   $effect(() => {
     void groupsWin;
+    // The rows mount one flush AFTER `groups` lands (`loading` clears in the
+    // load's `.finally`); without this the row height stays the 30 px guess,
+    // the spacers are ~40 % short and scrolling to the end lands mid-list.
+    void loading;
     groupsTw.measure(groupsEl, '.grow-row');
   });
   const offsetsTw = new TableWindow();
