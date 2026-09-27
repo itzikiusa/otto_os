@@ -2052,6 +2052,31 @@ fn review_agent_cancel_key(review_id: &str, index: usize) -> String {
 /// Register (or replace) the cancel flag for one review agent. Returns the
 /// fresh, un-tripped flag — replacing matters on retry, where a stale tripped
 /// flag would short-circuit the new run instantly.
+/// Default cap on review agents (claude/codex PTYs) running at once across
+/// the daemon — `OTTO_REVIEWER_CONCURRENCY` overrides (≥ 1). Each lens is a CLI
+/// process + whole-diff read + transcript watcher; a 10-lens review next to a
+/// workflow's `review_run` node used to start them all at once (perf SI-11).
+const DEFAULT_REVIEWER_CONCURRENCY: usize = 4;
+
+fn reviewer_concurrency(env: Option<&str>) -> usize {
+    env.and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n >= 1)
+        .unwrap_or(DEFAULT_REVIEWER_CONCURRENCY)
+}
+
+/// The daemon-wide reviewer slots. A reviewer takes its permit INSIDE its
+/// spawned task, so queued lenses cost nothing but a parked future; its own
+/// timeout starts only once it runs.
+fn reviewer_slots() -> Arc<tokio::sync::Semaphore> {
+    static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    SLOTS
+        .get_or_init(|| {
+            let n = reviewer_concurrency(std::env::var("OTTO_REVIEWER_CONCURRENCY").ok().as_deref());
+            Arc::new(tokio::sync::Semaphore::new(n))
+        })
+        .clone()
+}
+
 fn register_review_agent_cancel(
     reg: &crate::skill_eval::CancelRegistry,
     review_id: &str,
@@ -2889,7 +2914,11 @@ async fn run_review_core(
             tracing::warn!(review = %review_id, agent = i, "could not persist agent prompt: {e}");
         }
         let max_attempts = cfg.max_attempts;
+        let slots = reviewer_slots();
         set.spawn(async move {
+            // SI-11: wait for a reviewer slot (a closed semaphore never
+            // happens — it lives for the process).
+            let _slot = slots.acquire_owned().await.ok();
             let res = crate::review_session::run_agent_session_with_recovery(
                 &manager,
                 &reviews,
@@ -3593,6 +3622,44 @@ fn severity_rank(severity: &str) -> u8 {
         FindingSeverity::Medium => 2,
         FindingSeverity::Low => 3,
         FindingSeverity::Info => 4,
+    }
+}
+
+#[cfg(test)]
+mod reviewer_slot_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn concurrency_env_parses_with_a_floor_of_one() {
+        assert_eq!(reviewer_concurrency(None), DEFAULT_REVIEWER_CONCURRENCY);
+        assert_eq!(reviewer_concurrency(Some("2")), 2);
+        assert_eq!(reviewer_concurrency(Some(" 7 ")), 7);
+        assert_eq!(reviewer_concurrency(Some("0")), DEFAULT_REVIEWER_CONCURRENCY);
+        assert_eq!(reviewer_concurrency(Some("lots")), DEFAULT_REVIEWER_CONCURRENCY);
+    }
+
+    /// The fan-out pattern (permit taken inside the spawned task) never runs
+    /// more than N reviewers at once, however many lenses are spawned.
+    #[tokio::test]
+    async fn spawned_reviewers_never_exceed_the_cap() {
+        let slots = Arc::new(tokio::sync::Semaphore::new(reviewer_concurrency(Some("3"))));
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..12 {
+            let (slots, live, peak) = (slots.clone(), live.clone(), peak.clone());
+            set.spawn(async move {
+                let _slot = slots.acquire_owned().await.ok();
+                let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+                live.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+        while set.join_next().await.is_some() {}
+        assert_eq!(peak.load(Ordering::SeqCst), 3);
+        assert!(reviewer_slots().available_permits() >= 1, "the daemon pool exists and is non-empty");
     }
 }
 
@@ -5782,7 +5849,9 @@ async fn retry_review_agent(
     // prior Stop) so the retried agent is stoppable exactly like the original.
     let agent_cancel = register_review_agent_cancel(&ctx.review_agent_cancels, &review_id, index);
     let agent_cancels_reg = ctx.review_agent_cancels.clone();
+    let slots = reviewer_slots();
     tokio::spawn(async move {
+        let _slot = slots.acquire_owned().await.ok(); // SI-11 reviewer cap
         crate::review_session::run_agent_session_with_recovery(
             &manager,
             &reviews,

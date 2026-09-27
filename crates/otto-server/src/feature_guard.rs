@@ -54,7 +54,14 @@ impl HasGrants for ServerCtx {
         Some(self.pool.clone())
     }
     fn grants(&self) -> GrantsRepo {
-        GrantsRepo::new(self.pool.clone())
+        // SG-11: the guard runs on every non-root request; answer it from the
+        // shared per-user grant cache (flushed by the grants routes through
+        // `AuthCache::invalidate_user`; 10 s TTL backstop).
+        let repo = GrantsRepo::new(self.pool.clone());
+        match self.auth_cache.grant_cache() {
+            Some(cache) => repo.with_cache(cache),
+            None => repo,
+        }
     }
 }
 

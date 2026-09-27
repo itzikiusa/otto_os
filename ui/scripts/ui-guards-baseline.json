@@ -2,6 +2,13 @@
   "accent-text": {
     "src/app.css": 1
   },
+  "body-style": {
+    "src/modules/api/ApiPage.svelte": 8,
+    "src/modules/git/DiffViewer.svelte": 4,
+    "src/modules/git/GraphView.svelte": 8,
+    "src/modules/vault/GraphView.svelte": 4,
+    "src/modules/vault/VaultPage.svelte": 4
+  },
   "color-literal": {
     "src/app.css": 11,
     "src/lib/components/ResourceAccess.svelte": 2,
@@ -279,6 +286,11 @@
     "src/modules/workflows/WorkflowCanvas.svelte": 5,
     "src/modules/workflows/WorkflowsPage.svelte": 1,
     "src/shell/NotificationBell.svelte": 3
+  },
+  "raw-set-interval": {
+    "src/modules/connections/SessionNetworkStatus.svelte": 1,
+    "src/modules/database/DatabaseChanges.svelte": 1,
+    "src/modules/panels/BrowserPanel.svelte": 1
   },
   "z-index-literal": {
     "src/lib/components/CodeEditor.svelte": 1,

@@ -1,46 +1,41 @@
 //! SwarmScheduler: wakes scheduled agents on their cadence and enqueues a
 //! `kind=scheduled` run the agent executes with its standing directive (e.g. a
 //! daily trend researcher, a periodic PM status report). Modeled on
-//! `otto-improve::Scheduler`: 60s tick, responsive cancel slices, DB-cursor
+//! `otto-improve::Scheduler`: 60s tick (one timer, woken by `CancelSignal`), DB-cursor
 //! idempotency (the agent's `schedule_json.last_run`).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use otto_state::{AgentPatch, NewRun, RunPatch, TaskPatch};
 use serde_json::{json, Value};
 
+use crate::cancel_signal::CancelSignal;
 use crate::state::ServerCtx;
 use crate::swarm_run;
 
 const SCAN: Duration = Duration::from_secs(60);
-const SLICE: Duration = Duration::from_millis(500);
 
-/// Start the scheduler supervisor. Returns a cancel flag.
-pub fn start(ctx: ServerCtx) -> Arc<AtomicBool> {
-    let cancel = Arc::new(AtomicBool::new(false));
+/// Start the scheduler supervisor. Returns its cancel signal.
+pub fn start(ctx: ServerCtx) -> CancelSignal {
+    let cancel = CancelSignal::new();
     tokio::spawn(supervise(ctx, cancel.clone()));
     cancel
 }
 
-async fn supervise(ctx: ServerCtx, cancel: Arc<AtomicBool>) {
+async fn supervise(ctx: ServerCtx, cancel: CancelSignal) {
     loop {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.is_cancelled() {
             return;
         }
         if let Err(e) = tick(&ctx).await {
             tracing::warn!("swarm scheduler tick: {e}");
         }
-        let mut waited = Duration::ZERO;
-        while waited < SCAN {
-            if cancel.load(Ordering::Relaxed) {
-                return;
-            }
-            tokio::time::sleep(SLICE).await;
-            waited += SLICE;
+        // One timer per scan; cancel() wakes it (no 500 ms polling slices).
+        if cancel.sleep(SCAN).await {
+            return;
         }
     }
 }

@@ -1,7 +1,7 @@
 //! Workflow trigger scheduler: fires `schedule`-kind triggers on their cadence
 //! (interval / daily / weekly) and starts a workflow run in the background.
 //!
-//! Modeled on [`crate::swarm_scheduler`]: 60-second tick, 500ms cancel slices,
+//! Modeled on [`crate::swarm_scheduler`]: 60-second tick (one timer, woken by `CancelSignal`),
 //! DB-cursor idempotency via `last_run` stored in the trigger's `spec_json`.
 //!
 //! Schedule spec keys (mirrors the swarm-scheduler format):
@@ -22,34 +22,30 @@ use otto_state::{TriggersRepo, WorkflowsRepo};
 use serde_json::{json, Value};
 use tracing::{info, warn};
 
+use crate::cancel_signal::CancelSignal;
 use crate::state::ServerCtx;
 
 const SCAN: Duration = Duration::from_secs(60);
-const SLICE: Duration = Duration::from_millis(500);
 
-/// Start the scheduler supervisor task. Returns a cancel flag; set to `true`
-/// to stop the loop (mirrors the swarm/insights/cli-update pattern).
-pub fn start(ctx: ServerCtx) -> Arc<AtomicBool> {
-    let cancel = Arc::new(AtomicBool::new(false));
+/// Start the scheduler supervisor task. Returns its cancel signal; `cancel()`
+/// stops the loop at once (mirrors the swarm/insights/cli-update pattern).
+pub fn start(ctx: ServerCtx) -> CancelSignal {
+    let cancel = CancelSignal::new();
     tokio::spawn(supervise(ctx, cancel.clone()));
     cancel
 }
 
-async fn supervise(ctx: ServerCtx, cancel: Arc<AtomicBool>) {
+async fn supervise(ctx: ServerCtx, cancel: CancelSignal) {
     loop {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.is_cancelled() {
             return;
         }
         if let Err(e) = tick(&ctx).await {
             warn!("workflow trigger scheduler tick: {e}");
         }
-        let mut waited = Duration::ZERO;
-        while waited < SCAN {
-            if cancel.load(Ordering::Relaxed) {
-                return;
-            }
-            tokio::time::sleep(SLICE).await;
-            waited += SLICE;
+        // One timer per scan; cancel() wakes it (no 500 ms polling slices).
+        if cancel.sleep(SCAN).await {
+            return;
         }
     }
 }
@@ -259,7 +255,7 @@ fn filter_matches(filter: Option<&Value>, event_payload: &Value) -> bool {
 }
 
 /// Start the event-trigger listener task. Returns a cancel flag; set to `true`
-/// to stop the loop (mirrors the schedule scheduler pattern).
+/// to stop the loop (it parks on the event bus, so it costs no idle wakeups).
 pub fn spawn_workflow_event_trigger_listener(ctx: ServerCtx) -> Arc<AtomicBool> {
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel2 = Arc::clone(&cancel);

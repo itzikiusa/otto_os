@@ -621,7 +621,9 @@ fn spawn_fix_watcher(ctx: ServerCtx, finding_id: String, worktree: String, base_
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
             waited += 5;
-            if let Some(sha) = finding_agent::stamp_fix(Some(&base_head), &dir) {
+            if let Some(sha) =
+                finding_agent::stamp_fix_async(Some(base_head.clone()), dir.clone()).await
+            {
                 if let Ok(f) = ctx.findings_store.get_full(&finding_id).await {
                     // Gate: never auto-advance a finding awaiting human approval.
                     if f.requires_human_approval && f.approved_at.is_none() {
@@ -674,13 +676,16 @@ fn spawn_regression_watcher(
     worktree: String,
     before: std::collections::HashSet<String>,
 ) {
+    let before = std::sync::Arc::new(before);
     tokio::spawn(async move {
         let dir = std::path::PathBuf::from(&worktree);
         let mut waited = 0u64;
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
             waited += 5;
-            if let Some(test) = finding_agent::detect_new_test(&before, &dir) {
+            if let Some(test) =
+                finding_agent::detect_new_test_async(before.clone(), dir.clone()).await
+            {
                 let _ = ctx
                     .findings_store
                     .set_fields(
@@ -860,7 +865,9 @@ async fn verify(
     let finding = if let Ok(evidence) = &verdict {
         if cur.linked_commit.is_none() {
             let head_dir = worktree.as_deref().unwrap_or(repo.path.as_str());
-            if let Some(head) = finding_agent::head_of(std::path::Path::new(head_dir)) {
+            if let Some(head) =
+                finding_agent::head_of_async(std::path::PathBuf::from(head_dir)).await
+            {
                 let _ = ctx
                     .findings_store
                     .set_fields(
@@ -934,7 +941,7 @@ async fn regression_test(
     let provider = finding_agent_provider(&ctx, &cur.workspace_id).await;
     let session_id = match finding_agent::provision_worktree(&repo.path, &cur.id).await {
         Ok((wt, _)) => {
-            let before = finding_agent::list_test_files(std::path::Path::new(&wt));
+            let before = finding_agent::list_test_files_async(std::path::PathBuf::from(&wt)).await;
             let sid = finding_agent::spawn_session(
                 &ctx,
                 &cur.workspace_id,

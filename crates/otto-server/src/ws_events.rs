@@ -114,7 +114,9 @@ fn scope_denied(auth: &AuthContext) -> bool {
 }
 
 async fn handle_events(socket: WebSocket, ctx: ServerCtx, user: User, ui_capable: bool) {
-    let mut events = ctx.events.subscribe();
+    // Shared serialize-once fan-out (ws_fanout.rs): a recv is an Arc clone and
+    // the JSON text is built at most once per event across every socket.
+    let mut events = crate::ws_fanout::subscribe(&ctx.events);
     // Agent UI control: a human's socket is registered as a (not yet
     // addressable) Otto document; its `hello` makes it a command target and
     // `ui_frames` carries the per-connection frames (hello_ack, ui_command,
@@ -143,19 +145,24 @@ async fn handle_events(socket: WebSocket, ctx: ServerCtx, user: User, ui_capable
     loop {
         tokio::select! {
             event = events.recv() => match event {
-                Ok(event) => {
+                Ok(crate::ws_fanout::FanItem::Event(frame)) => {
+                    let event = &frame.event;
                     if topics.as_ref().is_some_and(|t| !t.contains(event.type_name())) {
                         continue;
                     }
-                    if !allowed(&ctx, &user, &event, &mut role_cache, &mut owner_cache).await {
+                    if !allowed(&ctx, &user, event, &mut role_cache, &mut owner_cache).await {
                         continue;
                     }
-                    let Ok(text) = serde_json::to_string(&event) else { continue };
-                    if sink.send(Message::Text(text.into())).await.is_err() {
+                    let Some(text) = frame.text() else { continue };
+                    if sink.send(Message::Text(text)).await.is_err() {
                         break;
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                // The shared pump fell behind the bus (every socket missed
+                // the same events), or this socket fell behind the pump:
+                // either way this client refetches (ws.md "Lag resync frame").
+                Ok(crate::ws_fanout::FanItem::Lagged(skipped))
+                | Err(broadcast::error::RecvError::Lagged(skipped)) => {
                     // The bounded bus dropped events this socket hadn't read
                     // yet. Logging alone left the client silently stale until
                     // its next reconnect; tell it to refetch instead (it reuses
