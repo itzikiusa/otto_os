@@ -187,7 +187,8 @@ fn read_capped(path: &Path, start: u64, cap: u64) -> std::io::Result<Chunk> {
         truncated = true;
     }
     file.seek(SeekFrom::Start(start))?;
-    let mut bytes = Vec::with_capacity((size - start) as usize);
+    // Grown by read_to_end; `take` bounds it to `cap` (never pre-sized from the request).
+    let mut bytes = Vec::new();
     (&mut file).take(size - start).read_to_end(&mut bytes)?;
     let mut skip = 0usize;
     if truncated {
