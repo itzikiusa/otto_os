@@ -715,7 +715,10 @@
         ? engine
         : null;
     if (fe) {
-      const base = statement ?? '';
+      // The ACTIVE query is the editor's — what applyFilterQuery rewrites — not
+      // the ran `statement`: "Add to query" after an un-run "Query by value"
+      // must AND onto that WHERE. Read on right-click only (not reactive).
+      const base = (connectionId ? database.tab?.statement : undefined) || statement || '';
       const setQ = buildFilteredQuery(fe, base, col, v, 'set');
       const andQ = buildFilteredQuery(fe, base, col, v, 'and');
       if (setQ || andQ) {
