@@ -9,7 +9,10 @@ otto-core = { workspace = true }
 otto-state = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+# Brand-kit tokens become CSS vars in the kit's own order (theme.rs). ottod
+# already gets insertion order via bson's `preserve_order`; declaring it here
+# keeps `cargo test -p otto-design` on the same (non-alphabetical) map.
+serde_json = { workspace = true, features = ["preserve_order"] }
 sqlx = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
