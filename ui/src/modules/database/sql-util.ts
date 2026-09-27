@@ -9,17 +9,18 @@
 // trivially testable and reusable.
 
 /**
- * Mark every character position as "code" (true) or "inside a string/comment"
- * (false). Handles `'…'`, `"…"`, `` `…` `` strings (with doubled-quote AND
+ * Mark every character position as "code" (1) or "inside a string/comment"
+ * (0). Handles `'…'`, `"…"`, `` `…` `` strings (with doubled-quote AND
  * backslash escapes — covers MySQL's default mode and standard SQL), `--`/`#`
  * line comments, and `/* … *​/` block comments.
  */
-function codeMask(sql: string, mode: SplitMode = 'sql'): boolean[] {
+function codeMask(sql: string, mode: SplitMode = 'sql'): Uint8Array {
   const n = sql.length;
-  const mask = new Array<boolean>(n).fill(true);
+  // A byte per char (1 = code): a memset fill, 4–8× smaller than boolean[].
+  const mask = new Uint8Array(n).fill(1);
   let i = 0;
   const off = (a: number, b: number) => {
-    for (let k = a; k < b && k < n; k++) mask[k] = false;
+    mask.fill(0, a, Math.min(b, n));
   };
   while (i < n) {
     const c = sql[i];
@@ -218,6 +219,152 @@ export function countStatements(sql: string, mode: SplitMode = 'sql'): number {
   return segments(sql, mode).filter((s) => stripTrailingSemi(sql.slice(s.from, s.to))).length;
 }
 
+/** JS whitespace (the set `String.prototype.trim` and `\s` strip). */
+function isWs(c: number): boolean {
+  if (c <= 32) return c === 32 || (c >= 9 && c <= 13);
+  if (c < 0xa0) return false;
+  return (
+    c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) || c === 0x2028 ||
+    c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff
+  );
+}
+const isWord = (c: number) =>
+  (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95;
+const isIdentStart = (c: number) => (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95;
+
+/**
+ * `countStatements` + `extractVars` in ONE allocation-free pass (no mask array,
+ * no per-segment slices; quoted spans are skipped with `indexOf`). Identical
+ * results by construction — the same quote/escape/comment rules as `codeMask`,
+ * the same `:name` / `{name}` / `{{name}}` rules as `matchVars`, the same
+ * "non-empty after stripTrailingSemi" rule as `countStatements` — and pinned by
+ * a differential test (ui/unit/dbSqlScan.test.ts). This is what the editor
+ * derives the "Run all" count and the Variables bar from while you type; the
+ * run path still re-extracts from the statement it actually executes.
+ */
+export function analyzeStatement(
+  sql: string,
+  mode: SplitMode = 'sql',
+): { count: number; vars: string[] } {
+  const n = sql.length;
+  const line = mode === 'line';
+  const vars: string[] = [];
+  let seen: Set<string> | null = null;
+  const add = (name: string) => {
+    seen ??= new Set();
+    if (!seen.has(name)) {
+      seen.add(name);
+      vars.push(name);
+    }
+  };
+  // Statement count. sql: a segment ends at a CODE `;` and counts when it holds
+  // any non-whitespace besides that `;` (comments included, as trim() sees them).
+  // line: a line counts unless it is blank or a lone `;` (stripTrailingSemi).
+  let count = 0;
+  let segHas = false; // sql: segment has content
+  let lineNonWs = 0; // line: non-ws chars on the current line
+  let lineLast = 0; // line: last non-ws char code
+  const endLine = () => {
+    if (lineNonWs > 1 || (lineNonWs === 1 && lineLast !== 59)) count++;
+    lineNonWs = 0;
+  };
+  // `line` mode counts per physical line independently of string/comment state,
+  // so its per-char bookkeeping runs for every char, including skipped spans.
+  const lineTrack = (from: number, to: number) => {
+    for (let k = from; k < to && k < n; k++) {
+      const d = sql.charCodeAt(k);
+      if (d === 10) endLine();
+      else if (!isWs(d)) {
+        lineNonWs++;
+        lineLast = d;
+      }
+    }
+  };
+  // Next backslash at/after the scan point (-1 = none left); refreshed lazily.
+  let nextBs = sql.indexOf('\\');
+  let i = 0;
+  while (i < n) {
+    const c = sql.charCodeAt(i);
+    const c2 = i + 1 < n ? sql.charCodeAt(i + 1) : -1;
+    let j = -1; // end of a skipped string/comment span
+    if ((c === 45 && c2 === 45) || c === 35) {
+      const e = sql.indexOf('\n', i);
+      j = e < 0 ? n : e;
+    } else if (c === 47 && c2 === 42) {
+      const e = sql.indexOf('*/', i + 2);
+      j = e < 0 ? n : e + 2;
+    } else if (c === 39 || c === 34 || (!line && c === 96)) {
+      // Quoted span: jump between quote chars with indexOf (native memchr)
+      // rather than walking each char; a backslash escapes the next char and a
+      // doubled quote is a literal quote (codeMask's rules).
+      const q = c === 39 ? "'" : c === 34 ? '"' : '`';
+      j = i + 1;
+      for (;;) {
+        const e = sql.indexOf(q, j);
+        if (e < 0) {
+          j = n;
+          break;
+        }
+        if (nextBs >= 0 && nextBs < j) nextBs = sql.indexOf('\\', j);
+        if (nextBs >= 0 && nextBs < e) {
+          j = nextBs + 2;
+          continue;
+        }
+        if (e + 1 < n && sql.charCodeAt(e + 1) === c) {
+          j = e + 2;
+          continue;
+        }
+        j = e + 1;
+        break;
+      }
+      if (j > n) j = n;
+    }
+    if (j >= 0) {
+      segHas = true;
+      if (line) lineTrack(i, j);
+      i = j;
+      continue;
+    }
+    // Code position.
+    if (c === 58 && isIdentStart(c2)) {
+      const p = i > 0 ? sql.charCodeAt(i - 1) : -1;
+      let e = i + 2;
+      while (e < n && isWord(sql.charCodeAt(e))) e++;
+      if (!(isWord(p) || p === 58 || p === 125)) add(sql.slice(i + 1, e));
+    } else if (c === 123 && !line) {
+      if (c2 === 123) {
+        // {{name}}
+        if (i + 2 < n && isIdentStart(sql.charCodeAt(i + 2))) {
+          let e = i + 3;
+          while (e < n && isWord(sql.charCodeAt(e))) e++;
+          if (sql.charCodeAt(e) === 125 && sql.charCodeAt(e + 1) === 125) add(sql.slice(i + 2, e));
+        }
+      } else if (isIdentStart(c2) && !(i > 0 && sql.charCodeAt(i - 1) === 123)) {
+        // {name} (the inner `{name}` of a `{{name}}` is skipped by the prev check)
+        let e = i + 2;
+        while (e < n && isWord(sql.charCodeAt(e))) e++;
+        if (sql.charCodeAt(e) === 125) add(sql.slice(i + 1, e));
+      }
+    }
+    if (line) {
+      if (c === 10) endLine();
+      else if (!isWs(c)) {
+        lineNonWs++;
+        lineLast = c;
+      }
+    } else if (c === 59) {
+      if (segHas) count++;
+      segHas = false;
+    } else if (!isWs(c)) {
+      segHas = true;
+    }
+    i++;
+  }
+  if (line) endLine();
+  else if (segHas) count++;
+  return { count, vars };
+}
+
 /**
  * The statement containing `cursor` (trimmed, no trailing `;`). With a single
  * statement, returns the whole thing. When the cursor sits in trailing
@@ -396,4 +543,17 @@ export function looksLikeMongoshScript(statement: string): boolean {
     }
   }
   return false;
+}
+
+/**
+ * A bounded one-line preview of a (possibly huge) statement for list rows and
+ * tooltips: the first `max` chars with whitespace runs collapsed. History and
+ * saved-query rows used to render the FULL text — a 150 KB pasted script became
+ * one non-wrapping 150 KB text run (and `title`) per row, laid out on every
+ * sidebar reflow.
+ */
+export function stmtPreview(statement: string, max = 300): string {
+  const head = statement.length > max + 64 ? statement.slice(0, max + 64) : statement;
+  const flat = head.replace(/\s+/g, ' ').trim();
+  return flat.length > max || head.length < statement.length ? `${flat.slice(0, max)}…` : flat;
 }

@@ -31,6 +31,14 @@ pub mod sql;
 /// arbitrarily stale schema.
 pub const COMPLETION_TTL: Duration = Duration::from_secs(300);
 
+/// How long a FAILED snapshot build (unreachable server, no
+/// `information_schema` access, a timeout) is remembered as an empty snapshot.
+/// Without it every completion request — one per word typed — re-ran the pool
+/// acquire + bulk introspection (or waited out a connect timeout) against a sick
+/// connection. Short, so a recovered server completes again within seconds;
+/// "Refresh schema" ([`CompletionCache::invalidate`]) clears it immediately.
+pub const COMPLETION_NEGATIVE_TTL: Duration = Duration::from_secs(20);
+
 /// Index membership of a column / field — the basis for "indexes first".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rank {
@@ -184,6 +192,22 @@ type FieldKey = (String, String, String);
 struct Cached<T> {
     value: Arc<T>,
     built_at: Instant,
+    /// [`COMPLETION_TTL`], or [`COMPLETION_NEGATIVE_TTL`] for a failed build.
+    ttl: Duration,
+}
+
+impl<T> Cached<T> {
+    fn new(value: Arc<T>, ttl: Duration) -> Self {
+        Self {
+            value,
+            built_at: Instant::now(),
+            ttl,
+        }
+    }
+
+    fn fresh(&self) -> bool {
+        self.built_at.elapsed() < self.ttl
+    }
 }
 
 /// A driver-owned cache of completion snapshots, keyed by connection + database.
@@ -197,6 +221,15 @@ pub struct CompletionCache {
     /// Mongo only: a collection's sampled field paths, cached independently of
     /// the (cheap) collection list so we sample only what's actually in context.
     fields: Mutex<HashMap<FieldKey, Cached<Vec<FieldSnap>>>>,
+    /// Single-flight gates for snapshot builds, one per key while a build runs:
+    /// concurrent misses (several words typed before the first introspection
+    /// lands, or the TTL expiring mid-typing) wait for the ONE build instead of
+    /// each running the same remote introspection. Removed when the build ends.
+    building: Mutex<HashMap<SnapKey, Arc<tokio::sync::Mutex<()>>>>,
+    /// Mongo only: the first user database per connection, used to seed
+    /// collection completion before a database is chosen (`None` = the server
+    /// was unreachable — negatively cached like a failed snapshot).
+    first_db: Mutex<HashMap<String, Cached<Option<String>>>>,
 }
 
 impl CompletionCache {
@@ -208,8 +241,54 @@ impl CompletionCache {
     pub fn get_snapshot(&self, cache_key: &str, db: &str) -> Option<Arc<SchemaSnapshot>> {
         let map = self.snapshots.lock().unwrap();
         map.get(&(cache_key.to_string(), db.to_string()))
-            .filter(|c| c.built_at.elapsed() < COMPLETION_TTL)
+            .filter(|c| c.fresh())
             .map(|c| c.value.clone())
+    }
+
+    /// The cached snapshot for `(cache_key, db)`, else the result of `build` —
+    /// run by at most ONE caller per key at a time (the others wait, then read
+    /// what it cached). A `None` build is remembered as an empty snapshot for
+    /// [`COMPLETION_NEGATIVE_TTL`] so a failing connection isn't re-introspected
+    /// on every completion request.
+    pub async fn snapshot_or_build<F, Fut>(
+        &self,
+        cache_key: &str,
+        db: &str,
+        build: F,
+    ) -> Arc<SchemaSnapshot>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Option<SchemaSnapshot>>,
+    {
+        if let Some(s) = self.get_snapshot(cache_key, db) {
+            return s;
+        }
+        let key = (cache_key.to_string(), db.to_string());
+        let gate = self
+            .building
+            .lock()
+            .unwrap()
+            .entry(key.clone())
+            .or_default()
+            .clone();
+        let guard = gate.lock().await;
+        // Another caller may have finished the build while we waited.
+        if let Some(s) = self.get_snapshot(cache_key, db) {
+            return s;
+        }
+        let out = match build().await {
+            Some(snap) => self.put_snapshot(cache_key, db, snap),
+            None => self.put_snapshot_ttl(
+                cache_key,
+                db,
+                SchemaSnapshot::default(),
+                COMPLETION_NEGATIVE_TTL,
+            ),
+        };
+        drop(guard);
+        // Waiters hold their own clone of the gate; later callers hit the cache.
+        self.building.lock().unwrap().remove(&key);
+        out
     }
 
     pub fn put_snapshot(
@@ -218,15 +297,43 @@ impl CompletionCache {
         db: &str,
         snap: SchemaSnapshot,
     ) -> Arc<SchemaSnapshot> {
+        self.put_snapshot_ttl(cache_key, db, snap, COMPLETION_TTL)
+    }
+
+    fn put_snapshot_ttl(
+        &self,
+        cache_key: &str,
+        db: &str,
+        snap: SchemaSnapshot,
+        ttl: Duration,
+    ) -> Arc<SchemaSnapshot> {
         let value = Arc::new(snap);
         self.snapshots.lock().unwrap().insert(
             (cache_key.to_string(), db.to_string()),
-            Cached {
-                value: value.clone(),
-                built_at: Instant::now(),
-            },
+            Cached::new(value.clone(), ttl),
         );
         value
+    }
+
+    /// Mongo: the cached first-user-database pick for a connection. The outer
+    /// `None` is a miss; `Some(None)` is a remembered failure.
+    pub fn get_first_db(&self, cache_key: &str) -> Option<Option<String>> {
+        let map = self.first_db.lock().unwrap();
+        map.get(cache_key)
+            .filter(|c| c.fresh())
+            .map(|c| (*c.value).clone())
+    }
+
+    pub fn put_first_db(&self, cache_key: &str, db: Option<String>) {
+        let ttl = if db.is_some() {
+            COMPLETION_TTL
+        } else {
+            COMPLETION_NEGATIVE_TTL
+        };
+        self.first_db
+            .lock()
+            .unwrap()
+            .insert(cache_key.to_string(), Cached::new(Arc::new(db), ttl));
     }
 
     /// A collection's cached field paths (Mongo), or `None`.
@@ -238,7 +345,7 @@ impl CompletionCache {
     ) -> Option<Arc<Vec<FieldSnap>>> {
         let map = self.fields.lock().unwrap();
         map.get(&(cache_key.to_string(), db.to_string(), object.to_string()))
-            .filter(|c| c.built_at.elapsed() < COMPLETION_TTL)
+            .filter(|c| c.fresh())
             .map(|c| c.value.clone())
     }
 
@@ -252,10 +359,7 @@ impl CompletionCache {
         let value = Arc::new(fields);
         self.fields.lock().unwrap().insert(
             (cache_key.to_string(), db.to_string(), object.to_string()),
-            Cached {
-                value: value.clone(),
-                built_at: Instant::now(),
-            },
+            Cached::new(value.clone(), COMPLETION_TTL),
         );
         value
     }
@@ -271,6 +375,7 @@ impl CompletionCache {
             .lock()
             .unwrap()
             .retain(|(k, _, _), _| k != cache_key);
+        self.first_db.lock().unwrap().remove(cache_key);
     }
 
     /// Total cached snapshot entries — for the refresh endpoint's warm summary.
@@ -320,6 +425,73 @@ mod tests {
         assert!(c.get_snapshot("conn-a", "db").is_none());
         assert!(c.get_fields("conn-a", "db", "users").is_none());
         assert!(c.get_snapshot("conn-b", "db").is_some(), "conn-b untouched");
+    }
+
+    #[tokio::test]
+    async fn failed_build_is_negatively_cached_until_invalidated() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let c = CompletionCache::new();
+        let builds = AtomicUsize::new(0);
+        for _ in 0..3 {
+            let s = c
+                .snapshot_or_build("ck", "db", || async {
+                    builds.fetch_add(1, Ordering::SeqCst);
+                    None
+                })
+                .await;
+            assert!(s.objects.is_empty());
+        }
+        assert_eq!(builds.load(Ordering::SeqCst), 1, "a failure is remembered");
+        c.invalidate("ck");
+        let s = c
+            .snapshot_or_build("ck", "db", || async {
+                builds.fetch_add(1, Ordering::SeqCst);
+                Some(snap())
+            })
+            .await;
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            2,
+            "refresh clears the negative entry"
+        );
+        assert_eq!(s.objects.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_misses_share_one_build() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let c = Arc::new(CompletionCache::new());
+        let builds = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let (c, builds) = (c.clone(), builds.clone());
+            tasks.push(tokio::spawn(async move {
+                c.snapshot_or_build("ck", "db", || async move {
+                    builds.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    Some(snap())
+                })
+                .await
+                .objects
+                .len()
+            }));
+        }
+        for t in tasks {
+            assert_eq!(t.await.unwrap(), 1);
+        }
+        assert_eq!(builds.load(Ordering::SeqCst), 1, "single-flight");
+    }
+
+    #[test]
+    fn first_db_cache_roundtrip_and_invalidate() {
+        let c = CompletionCache::new();
+        assert_eq!(c.get_first_db("ck"), None);
+        c.put_first_db("ck", Some("app".into()));
+        assert_eq!(c.get_first_db("ck"), Some(Some("app".into())));
+        c.put_first_db("other", None);
+        assert_eq!(c.get_first_db("other"), Some(None), "failure remembered");
+        c.invalidate("ck");
+        assert_eq!(c.get_first_db("ck"), None);
     }
 
     #[test]

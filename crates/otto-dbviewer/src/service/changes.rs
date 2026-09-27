@@ -34,7 +34,7 @@ impl DbViewerService {
         .await?;
         let profile = self.connections.get(&profile_id).await?;
         let secret = match &profile.secret_ref {
-            Some(key) => self.secrets.get(key)?,
+            Some(key) => self.read_secret(key, SecretRead::Fresh).await?,
             None => None,
         };
         let value = serde_json::json!({

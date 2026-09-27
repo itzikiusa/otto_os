@@ -198,14 +198,13 @@ impl ClickhouseDriver {
         cfg: &ResolvedConfig,
         db: &str,
     ) -> std::sync::Arc<crate::complete::SchemaSnapshot> {
-        let cache_key = cfg.cache_key();
-        if let Some(s) = self.completions.get_snapshot(&cache_key, db) {
-            return s;
-        }
-        match self.build_completion_snapshot(cfg, db).await {
-            Some(snap) => self.completions.put_snapshot(&cache_key, db, snap),
-            None => std::sync::Arc::new(crate::complete::SchemaSnapshot::default()),
-        }
+        // Single-flight + negatively cached: a failed build is remembered
+        // briefly instead of re-introspecting on every completion request.
+        self.completions
+            .snapshot_or_build(&cfg.cache_key(), db, || {
+                self.build_completion_snapshot(cfg, db)
+            })
+            .await
     }
 
     /// Introspect `system.*` into a snapshot: databases, the scoped db's

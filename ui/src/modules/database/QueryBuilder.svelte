@@ -211,6 +211,15 @@
   let dragUid = $state<string | null>(null);
   let dragOffX = 0;
   let dragOffY = 0;
+  // The dragged card's LIVE position. `tables` is written once, on drop: every
+  // derived downstream of it (the SQL chain, issues, suggestions, each clause
+  // row's column <option> list, the builder cache) re-ran per pointermove when
+  // the drag rewrote `tables`. Only geometry reads this (`cardX`/`cardY`).
+  let dragPos = $state<{ x: number; y: number } | null>(null);
+  let dragFrame = 0;
+  let dragNext: { x: number; y: number } | null = null;
+  const cardX = (t: CardTable): number => (dragPos && dragUid === t.uid ? dragPos.x : t.x);
+  const cardY = (t: CardTable): number => (dragPos && dragUid === t.uid ? dragPos.y : t.y);
   let pending = $state<{ fromUid: string; fromCol: string; side: 'l' | 'r' } | null>(null);
   let pendingPt = $state<{ x: number; y: number } | null>(null);
   let editEdge = $state<string | null>(null);
@@ -527,13 +536,29 @@
   function onCanvasMove(ev: PointerEvent): void {
     if (dragUid) {
       const pt = canvasPoint(ev);
-      const nx = Math.max(0, pt.x - dragOffX);
-      const ny = Math.max(0, pt.y - dragOffY);
-      tables = tables.map((t) => (t.uid === dragUid ? { ...t, x: nx, y: ny } : t));
+      dragNext = { x: Math.max(0, pt.x - dragOffX), y: Math.max(0, pt.y - dragOffY) };
+      // One geometry update per frame, however fast the pointer reports.
+      if (!dragFrame) {
+        dragFrame = requestAnimationFrame(() => {
+          dragFrame = 0;
+          if (dragUid && dragNext) dragPos = dragNext;
+        });
+      }
     } else if (pending) pendingPt = canvasPoint(ev);
   }
-  function onCanvasUp(ev: PointerEvent): void {
+  /** Drop: commit the dragged card's final position to `tables` (once). */
+  function endDrag(): void {
+    if (dragFrame) cancelAnimationFrame(dragFrame);
+    dragFrame = 0;
+    const uid = dragUid;
+    const pos = dragNext ?? dragPos;
+    dragNext = null;
+    dragPos = null;
     dragUid = null;
+    if (uid && pos) tables = tables.map((t) => (t.uid === uid ? { ...t, x: pos.x, y: pos.y } : t));
+  }
+  function onCanvasUp(ev: PointerEvent): void {
+    endDrag();
     if (pending) {
       const el = document.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement | null;
       const target = el?.closest<HTMLElement>('.handle, .col-row');
@@ -553,7 +578,7 @@
     return Math.min(BODY_MAX_H, (t.columns?.length ?? 1) * ROW_H + BODY_PAD * 2);
   }
   function handleY(t: CardTable, col: string): number {
-    const bodyTop = t.y + HEADER_H;
+    const bodyTop = cardY(t) + HEADER_H;
     const y = bodyTop + BODY_PAD + colIndex(t, col) * ROW_H + ROW_H / 2 - (bodyScroll.get(t.uid) ?? 0);
     return Math.min(bodyTop + Math.max(2, visibleBodyH(t) - 2), Math.max(bodyTop + 2, y));
   }
@@ -561,8 +586,8 @@
     const c = BODY_PAD + colIndex(t, col) * ROW_H + ROW_H / 2 - (bodyScroll.get(t.uid) ?? 0);
     return c < 0 || c > visibleBodyH(t);
   }
-  const handleX = (t: CardTable, side: 'l' | 'r'): number => (side === 'l' ? t.x : t.x + CARD_W);
-  const sideFacing = (t: CardTable, otherX: number): 'l' | 'r' => (otherX < t.x + CARD_W / 2 ? 'l' : 'r');
+  const handleX = (t: CardTable, side: 'l' | 'r'): number => (side === 'l' ? cardX(t) : cardX(t) + CARD_W);
+  const sideFacing = (t: CardTable, otherX: number): 'l' | 'r' => (otherX < cardX(t) + CARD_W / 2 ? 'l' : 'r');
   function bezier(x1: number, y1: number, s1: 'l' | 'r', x2: number, y2: number, s2: 'l' | 'r'): string {
     const k = Math.max(40, Math.abs(x2 - x1) / 2);
     const c1x = s1 === 'r' ? x1 + k : x1 - k;
@@ -573,8 +598,8 @@
     let w = 700;
     let h = 260;
     for (const t of tables) {
-      w = Math.max(w, t.x + CARD_W + 60);
-      h = Math.max(h, t.y + HEADER_H + BODY_PAD * 2 + Math.min(BODY_MAX_H, (t.columns?.length ?? 1) * ROW_H) + 60);
+      w = Math.max(w, cardX(t) + CARD_W + 60);
+      h = Math.max(h, cardY(t) + HEADER_H + BODY_PAD * 2 + Math.min(BODY_MAX_H, (t.columns?.length ?? 1) * ROW_H) + 60);
     }
     return { w, h };
   });
@@ -585,8 +610,8 @@
         const a = byUid.get(e.fromUid);
         const b = byUid.get(e.toUid);
         if (!a || !b) return null;
-        const sa = sideFacing(a, b.x + CARD_W / 2);
-        const sb = sideFacing(b, a.x + CARD_W / 2);
+        const sa = sideFacing(a, cardX(b) + CARD_W / 2);
+        const sb = sideFacing(b, cardX(a) + CARD_W / 2);
         const x1 = handleX(a, sa);
         const y1 = handleY(a, e.fromCol);
         const x2 = handleX(b, sb);
@@ -846,7 +871,7 @@
 
             {#each tables as t, ti (t.uid)}
               {@const nSel = clauses.select.filter((s) => s.kind === 'column' && s.ref.alias === t.alias).length}
-              <div class="node" class:base={ti === 0} style="left:{t.x}px; top:{t.y}px; width:{CARD_W}px">
+              <div class="node" class:base={ti === 0} style="left:{cardX(t)}px; top:{cardY(t)}px; width:{CARD_W}px">
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <div class="node-head" onpointerdown={(e) => startDrag(e, t.uid)}>
                   <input

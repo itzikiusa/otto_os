@@ -438,7 +438,14 @@ async fn update_connection<S: ConnectionsCtx>(
     if owner_private_enabled(&ctx).await && !ctx.connections().is_enforced(&conn.id).await? {
         require_conn_owner_or_root(&user, &conn)?;
     }
-    Ok(Json(ctx.connections().update(&id, &user.id, req).await?))
+    let replacing_secret = req.secret.is_some();
+    let updated = ctx.connections().update(&id, &user.id, req).await?;
+    if replacing_secret {
+        if let (Some(tester), Some(secret_ref)) = (ctx.db_tester(), updated.secret_ref.as_deref()) {
+            tester.forget_secret(secret_ref);
+        }
+    }
+    Ok(Json(updated))
 }
 
 async fn duplicate_connection<S: ConnectionsCtx>(
@@ -463,6 +470,9 @@ async fn delete_connection<S: ConnectionsCtx>(
         require_conn_owner_or_root(&user, &conn)?;
     }
     ctx.connections().delete(&id, &user.id).await?;
+    if let (Some(tester), Some(secret_ref)) = (ctx.db_tester(), conn.secret_ref.as_deref()) {
+        tester.forget_secret(secret_ref);
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

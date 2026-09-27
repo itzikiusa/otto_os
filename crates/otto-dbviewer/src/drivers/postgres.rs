@@ -685,6 +685,7 @@ impl Driver for PostgresDriver {
         let mut rows = sqlx::query(statement).fetch(&mut *conn);
         let mut sink = ExportSink::new(w, format);
         let mut header_written = false;
+        let mut decoders: Vec<PgCell> = Vec::new();
         let mut n: usize = 0;
         while let Some(row) = rows.try_next().await.map_err(types::upstream)? {
             if let Some(cap) = max_rows {
@@ -702,8 +703,17 @@ impl Driver for PostgresDriver {
                     .map_err(|e| otto_core::Error::Internal(format!("write export header: {e}")))?;
                 header_written = true;
             }
-            let cells: Vec<Value> = (0..row.columns().len())
-                .map(|i| pg_value_to_json(&row, i))
+            if decoders.is_empty() {
+                decoders = row
+                    .columns()
+                    .iter()
+                    .map(|c| pg_cell_decoder(c.type_info().name()))
+                    .collect();
+            }
+            let cells: Vec<Value> = decoders
+                .iter()
+                .enumerate()
+                .map(|(i, dec)| pg_cell(&row, i, *dec))
                 .collect();
             sink.write_row(&cells)
                 .map_err(|e| otto_core::Error::Internal(format!("write export row: {e}")))?;
@@ -1139,14 +1149,13 @@ impl PostgresDriver {
         cfg: &ResolvedConfig,
         schema: &str,
     ) -> std::sync::Arc<crate::complete::SchemaSnapshot> {
-        let cache_key = cfg.cache_key();
-        if let Some(s) = self.completions.get_snapshot(&cache_key, schema) {
-            return s;
-        }
-        match self.build_completion_snapshot(cfg, schema).await {
-            Some(snap) => self.completions.put_snapshot(&cache_key, schema, snap),
-            None => std::sync::Arc::new(crate::complete::SchemaSnapshot::default()),
-        }
+        // Single-flight + negatively cached: a failed build is remembered
+        // briefly instead of re-introspecting on every completion request.
+        self.completions
+            .snapshot_or_build(&cfg.cache_key(), schema, || {
+                self.build_completion_snapshot(cfg, schema)
+            })
+            .await
     }
 
     /// Introspect the catalog into a [`SchemaSnapshot`]: the database's schemas
@@ -1488,7 +1497,19 @@ async fn run_read(
     if types::sql_leaves_session_state(statement) {
         conn.close_on_drop();
     }
-    let out = exec_read_conn(&mut conn, statement, max_rows).await;
+    let out = exec_read_conn(
+        &mut conn,
+        statement,
+        max_rows,
+        &mut types::ByteBudget::default(),
+    )
+    .await?;
+    if out.unread {
+        // Rows left on the wire: discard the session (no RESET — it would
+        // drain them first; a closed session takes its timeout with it).
+        conn.close_on_drop();
+        return Ok(out.result);
+    }
     // Best-effort: don't leave the per-statement cap on the pooled session for
     // the tree/completion queries that share it (the next run sets its own).
     if timeout_ms.is_some() {
@@ -1496,7 +1517,7 @@ async fn run_read(
             .execute(sqlx::raw_sql("RESET statement_timeout"))
             .await;
     }
-    out
+    Ok(out.result)
 }
 
 async fn run_write(
@@ -1535,11 +1556,21 @@ async fn run_batch(
         conn.close_on_drop();
     }
     let mut results: Vec<QueryResult> = Vec::with_capacity(spans.len());
+    // One budget for the whole response, shared by every statement's rows.
+    let mut budget = types::ByteBudget::default();
+    let mut unread = false;
     for span in spans {
         let stmt = span.text.as_str();
         let started = Instant::now();
         let outcome = if is_read_statement(stmt) {
-            exec_read_conn(&mut conn, stmt, max_rows).await
+            exec_read_conn(&mut conn, stmt, max_rows, &mut budget)
+                .await
+                .map(|out| {
+                    // A later statement drains them anyway (same session); the
+                    // last one's are skipped by closing it.
+                    unread = out.unread;
+                    out.result
+                })
         } else {
             exec_write_conn(&mut conn, stmt).await
         };
@@ -1559,7 +1590,9 @@ async fn run_batch(
             }
         }
     }
-    if timeout_ms.is_some() {
+    if unread {
+        conn.close_on_drop();
+    } else if timeout_ms.is_some() {
         let _ = (&mut *conn)
             .execute(sqlx::raw_sql("RESET statement_timeout"))
             .await;
@@ -1567,46 +1600,175 @@ async fn run_batch(
     Ok(types::fold_batch_results(results))
 }
 
+/// A shaped read plus whether rows were left UNREAD on the wire (see the
+/// MySQL driver's `ReadOut`): the caller then discards the session instead of
+/// letting its next use drain them.
+struct ReadOut {
+    result: QueryResult,
+    unread: bool,
+}
+
+/// Run a row-returning statement and shape it into a `QueryResult`, capped at
+/// `max_rows` rows and at the response `budget`. Stops pulling at the cap
+/// instead of draining the rest of a non-LIMIT-able read (a batch statement,
+/// `TABLE t`, VALUES…), and decodes each column with the decoder picked once
+/// from its type ([`PgCell`]) instead of up to ~20 typed `try_get`s per cell.
 async fn exec_read_conn(
     conn: &mut sqlx::PgConnection,
     statement: &str,
     max_rows: usize,
-) -> Result<QueryResult> {
+    budget: &mut types::ByteBudget,
+) -> Result<ReadOut> {
     use futures_util::TryStreamExt as _;
 
-    // Stream rows instead of `fetch_all`: the auto-LIMIT injector bails on
-    // SHOW/EXPLAIN/`TABLE t`/VALUES and batches never get a LIMIT — with
-    // `fetch_all` those buffered the ENTIRE result in daemon RAM before the cap
-    // applied. Here at most `max_rows` decoded rows are retained; rows past the
-    // cap are drained one at a time (keeping the connection clean) and dropped.
     let mut stream = sqlx::query(statement).fetch(&mut *conn);
     let mut columns: Vec<Column> = Vec::new();
+    let mut decoders: Vec<PgCell> = Vec::new();
     let mut out_rows: Vec<Vec<Value>> = Vec::new();
     let mut truncated = false;
+    let mut truncated_reason = None;
+    let mut unread = false;
     while let Some(row) = stream.try_next().await.map_err(types::upstream)? {
         if columns.is_empty() {
             for col in row.columns() {
                 columns.push(Column::typed(col.name(), col.type_info().name()));
+                decoders.push(pg_cell_decoder(col.type_info().name()));
             }
         }
         if out_rows.len() >= max_rows {
             truncated = true;
-            continue; // drain without retaining
+            unread = true;
+            break;
         }
         // Cap oversized cells (text/bytea/JSON) like ClickHouse does — an
         // uncapped multi-MB cell freezes the grid and bloats the WS frame.
-        let cells = (0..columns.len())
-            .map(|i| types::cap_cell(pg_value_to_json(&row, i)))
+        let cells: Vec<Value> = decoders
+            .iter()
+            .enumerate()
+            .map(|(i, dec)| types::cap_cell(pg_cell(&row, i, *dec)))
             .collect();
+        let bytes = 2 + cells
+            .iter()
+            .map(|c| types::approx_json_len(c) + 1)
+            .sum::<usize>();
+        // Always keep at least one row so a single huge row still shows.
+        if !budget.charge(bytes) && !out_rows.is_empty() {
+            truncated = true;
+            truncated_reason = Some(types::TruncatedReason::Bytes);
+            unread = true;
+            break;
+        }
         out_rows.push(cells);
     }
 
-    Ok(QueryResult {
-        columns,
-        rows: out_rows,
-        truncated,
-        ..QueryResult::empty()
+    Ok(ReadOut {
+        result: QueryResult {
+            columns,
+            rows: out_rows,
+            truncated,
+            truncated_reason,
+            ..QueryResult::empty()
+        },
+        unread,
     })
+}
+
+/// How one Postgres result column decodes, chosen ONCE from its type name
+/// (sqlx `PgTypeInfo::name()`). The common types take exactly one `try_get`;
+/// everything else runs the full [`pg_value_to_json`] cascade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PgCell {
+    Int2,
+    Int4,
+    Int8,
+    Bool,
+    Float4,
+    Float8,
+    Json,
+    Numeric,
+    Text,
+    TimestampTz,
+    Timestamp,
+    Date,
+    Time,
+    Uuid,
+    Cascade,
+}
+
+fn pg_cell_decoder(type_name: &str) -> PgCell {
+    match type_name {
+        "INT2" => PgCell::Int2,
+        "INT4" => PgCell::Int4,
+        "INT8" => PgCell::Int8,
+        "BOOL" => PgCell::Bool,
+        "FLOAT4" => PgCell::Float4,
+        "FLOAT8" => PgCell::Float8,
+        "JSON" | "JSONB" => PgCell::Json,
+        "NUMERIC" => PgCell::Numeric,
+        "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" => PgCell::Text,
+        "TIMESTAMPTZ" => PgCell::TimestampTz,
+        "TIMESTAMP" => PgCell::Timestamp,
+        "DATE" => PgCell::Date,
+        "TIME" => PgCell::Time,
+        "UUID" => PgCell::Uuid,
+        _ => PgCell::Cascade,
+    }
+}
+
+/// Decode one cell with its column's decoder — the same shaping the cascade
+/// applies to that type; a rejected value falls back to the cascade.
+fn pg_cell(row: &PgRow, idx: usize, dec: PgCell) -> Value {
+    use sqlx::types::chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+    use sqlx::types::{BigDecimal, Uuid};
+    fn text<T: ToString>(v: Option<T>) -> Value {
+        v.map(|t| Value::String(t.to_string()))
+            .unwrap_or(Value::Null)
+    }
+    let hit = match dec {
+        PgCell::Int2 => row
+            .try_get::<Option<i16>, _>(idx)
+            .map(|v| v.map(|n| Value::from(n as i64)).unwrap_or(Value::Null))
+            .ok(),
+        PgCell::Int4 => row
+            .try_get::<Option<i32>, _>(idx)
+            .map(|v| v.map(Value::from).unwrap_or(Value::Null))
+            .ok(),
+        PgCell::Int8 => row
+            .try_get::<Option<i64>, _>(idx)
+            .map(|v| v.map(types::i64_to_json).unwrap_or(Value::Null))
+            .ok(),
+        PgCell::Bool => row
+            .try_get::<Option<bool>, _>(idx)
+            .map(|v| v.map(Value::Bool).unwrap_or(Value::Null))
+            .ok(),
+        PgCell::Float4 => row
+            .try_get::<Option<f32>, _>(idx)
+            .map(|v| float_to_json(v.map(|n| n as f64)))
+            .ok(),
+        PgCell::Float8 => row.try_get::<Option<f64>, _>(idx).map(float_to_json).ok(),
+        PgCell::Json => row
+            .try_get::<Option<Value>, _>(idx)
+            .map(|v| v.unwrap_or(Value::Null))
+            .ok(),
+        PgCell::Numeric => row.try_get::<Option<BigDecimal>, _>(idx).map(text).ok(),
+        PgCell::Text => row
+            .try_get::<Option<String>, _>(idx)
+            .map(|v| v.map(Value::String).unwrap_or(Value::Null))
+            .ok(),
+        PgCell::TimestampTz => row
+            .try_get::<Option<DateTime<Utc>>, _>(idx)
+            .map(|v| {
+                v.map(|t| Value::String(t.to_rfc3339()))
+                    .unwrap_or(Value::Null)
+            })
+            .ok(),
+        PgCell::Timestamp => row.try_get::<Option<NaiveDateTime>, _>(idx).map(text).ok(),
+        PgCell::Date => row.try_get::<Option<NaiveDate>, _>(idx).map(text).ok(),
+        PgCell::Time => row.try_get::<Option<NaiveTime>, _>(idx).map(text).ok(),
+        PgCell::Uuid => row.try_get::<Option<Uuid>, _>(idx).map(text).ok(),
+        PgCell::Cascade => None,
+    };
+    hit.unwrap_or_else(|| pg_value_to_json(row, idx))
 }
 
 async fn exec_write_conn(conn: &mut sqlx::PgConnection, statement: &str) -> Result<QueryResult> {
@@ -2055,6 +2217,8 @@ async fn governed_read(
     let max_rows = req.max_rows.unwrap_or(DEFAULT_MAX_ROWS);
     let single = spans.len() == 1;
     let mut results = Vec::new();
+    let mut budget = types::ByteBudget::default();
+    let mut unread = false;
     for span in spans {
         let started = Instant::now();
         let sql = if single {
@@ -2062,12 +2226,15 @@ async fn governed_read(
         } else {
             types::inject_row_limit(&span.text, usize::MAX, None)
         };
-        let mut result = exec_read_conn(
+        let out = exec_read_conn(
             &mut tx,
             if single { &sql.sql } else { &span.text },
             max_rows,
+            &mut budget,
         )
         .await?;
+        unread |= out.unread;
+        let mut result = out.result;
         result.stats.duration_ms = started.elapsed().as_millis() as u64;
         result.stats.row_count = result.rows.len();
         if single {
@@ -2077,13 +2244,51 @@ async fn governed_read(
         }
         results.push(result);
     }
-    tx.rollback().await.map_err(types::upstream)?;
+    if unread {
+        // A ROLLBACK would first drain the unread rows: drop the transaction
+        // and discard the session (the server rolls back on disconnect).
+        drop(tx);
+        conn.close_on_drop();
+    } else {
+        tx.rollback().await.map_err(types::upstream)?;
+    }
     Ok(types::fold_batch_results(results))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pg_cell_decoder_is_chosen_by_column_type() {
+        for (name, want) in [
+            ("INT2", PgCell::Int2),
+            ("INT4", PgCell::Int4),
+            ("INT8", PgCell::Int8),
+            ("BOOL", PgCell::Bool),
+            ("FLOAT4", PgCell::Float4),
+            ("FLOAT8", PgCell::Float8),
+            ("JSON", PgCell::Json),
+            ("JSONB", PgCell::Json),
+            ("NUMERIC", PgCell::Numeric),
+            ("TEXT", PgCell::Text),
+            ("VARCHAR", PgCell::Text),
+            ("BPCHAR", PgCell::Text),
+            ("NAME", PgCell::Text),
+            ("TIMESTAMPTZ", PgCell::TimestampTz),
+            ("TIMESTAMP", PgCell::Timestamp),
+            ("DATE", PgCell::Date),
+            ("TIME", PgCell::Time),
+            ("UUID", PgCell::Uuid),
+            // Arrays, intervals, money, inet, bytea, enums… keep the cascade.
+            ("INT4[]", PgCell::Cascade),
+            ("INTERVAL", PgCell::Cascade),
+            ("BYTEA", PgCell::Cascade),
+            ("mood", PgCell::Cascade),
+        ] {
+            assert_eq!(pg_cell_decoder(name), want, "{name}");
+        }
+    }
 
     #[test]
     fn interval_renders_iso_ish() {

@@ -2,9 +2,13 @@
   // SQL / Redis / Mongo editor. Wraps the shared CodeEditor with a server-backed
   // completion source (debounced /db/completion). Cmd/Ctrl+Enter runs; toolbar
   // has Run / Save / Explain-with-agent. Results render in the ResultsGrid below.
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import type { Completion, CompletionContext, CompletionResult } from '@codemirror/autocomplete';
+  import { syntaxTree } from '@codemirror/language';
+  import { isInertAt } from './completion-gate';
+  import type { EditorState } from '@codemirror/state';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
+  import { sqlDialectForKind } from '../../lib/sql-dialects';
   import ResultsGrid from './ResultsGrid.svelte';
   import PlanView from './PlanView.svelte';
   import VarsPrompt from './VarsPrompt.svelte';
@@ -27,7 +31,7 @@
   import type { DbCompletionKind } from '../../lib/api/types';
   import {
     statementAtCursor,
-    countStatements,
+    analyzeStatement,
     extractVars,
     substituteVars,
     renderVar,
@@ -64,7 +68,8 @@
     { label: '5,000', value: 5000 },
     { label: '10,000', value: 10000 },
     { label: '50,000', value: 50000 },
-    { label: 'All', value: ROW_LIMIT_ALL },
+    // Unbounded rows, still bounded by the daemon's 32 MB response budget.
+    { label: 'All (≤ 32 MB)', value: ROW_LIMIT_ALL },
   ];
 
   // Editor language (drives syntax highlighting): a small Redis highlighter for
@@ -78,15 +83,70 @@
         ? 'js'
         : 'sql',
   );
+  // The connection's SQL dialect: it decides what the editor tokenizes as a
+  // string or comment (MySQL `\'` escapes and `#` comments), which gates
+  // completion inside literals and scopes the completion span to a statement.
+  const sqlDialect = $derived(sqlDialectForKind(database.selectedConn?.kind));
   // Re-key the editor on tab id + engine so it rebuilds cleanly per query tab.
   const editorPath = $derived(`query-${tab.id}.${lang}`);
   // Statement separator: redis is one command per line; others use `;`.
   const splitMode = $derived<SplitMode>(database.queryLanguage === 'redis' ? 'line' : 'sql');
   // Live selection + cursor (from CodeEditor) → run only the selected/current
-  // statement instead of the whole buffer.
-  let editorSel = $state<{ text: string; cursor: number }>({ text: '', cursor: 0 });
+  // statement instead of the whole buffer. Plain (non-reactive) on purpose:
+  // only run() reads it, and `text` is a lazy getter — nothing re-renders or
+  // copies the selection per cursor move. CodeEditor re-announces it whenever
+  // it switches documents (tab switch), so it never describes another tab.
+  let editorSel: { readonly text: string; cursor: number } = { text: '', cursor: 0 };
+
+  // ── Buffer analysis (statement count, variables, mongosh-script) ─────────
+  // Derived from a SETTLED copy of the buffer, not per keystroke: above
+  // ANALYZE_SYNC_MAX chars it recomputes only after ANALYZE_IDLE_MS of quiet
+  // (one allocation-free pass — `analyzeStatement`). It only drives the "Run
+  // all N" button, the Variables bar and the script notice; Run / Run all /
+  // Format re-derive from the ACTUAL statement when they execute.
+  const ANALYZE_SYNC_MAX = 16_384;
+  const ANALYZE_IDLE_MS = 150;
+  interface BufferAnalysis {
+    count: number;
+    vars: string[];
+    script: boolean;
+  }
+  let analysis = $state.raw<BufferAnalysis>({ count: 0, vars: [], script: false });
+  let analyzedTabId = -1;
+  $effect(() => {
+    const text = tab.statement;
+    const mode = splitMode;
+    const mongo = database.queryLanguage === 'mongo';
+    const id = tab.id;
+    const apply = (): void => {
+      const r = analyzeStatement(text, mode);
+      const script = mongo && looksLikeMongoshScript(text);
+      const prev = untrack(() => analysis);
+      analyzedTabId = id;
+      // Keep the identity when nothing changed so `{#each queryVars}` and the
+      // toolbar don't re-render on every settle.
+      if (r.count === prev.count && script === prev.script && sameList(r.vars, prev.vars)) return;
+      analysis = { count: r.count, vars: r.vars, script };
+    };
+    // A tab switch (or a small buffer) is analysed at once — a new tab must
+    // never show the previous tab's Variables bar.
+    if (text.length <= ANALYZE_SYNC_MAX || id !== analyzedTabId) {
+      apply();
+      return;
+    }
+    const h = setTimeout(apply, ANALYZE_IDLE_MS);
+    return () => clearTimeout(h);
+  });
+  function sameList(a: string[], b: string[]): boolean {
+    return a.length === b.length && a.every((v, i) => v === b[i]);
+  }
+  /** Synchronous mongosh-script check for the run paths (the settled
+   *  `isMongoshScript` may lag the buffer by ANALYZE_IDLE_MS). */
+  function isScriptNow(): boolean {
+    return database.queryLanguage === 'mongo' && looksLikeMongoshScript(tab.statement);
+  }
   // Variables the current tab's statement references (:name / {name}).
-  const queryVars = $derived(extractVars(tab.statement, splitMode));
+  const queryVars = $derived(analysis.vars);
   let varsBarEl = $state<HTMLElement | null>(null);
   // Run-time prompt for query variables without a value (VarsPrompt): the
   // base statement is kept so the run resumes once the values are filled in.
@@ -109,9 +169,7 @@
   // through the actual `mongosh` CLI. Probe the daemon for the binary the
   // FIRST time a script is detected so a missing mongosh becomes an inline
   // install hint here, before the run — never a surprise run-time error.
-  const isMongoshScript = $derived(
-    database.queryLanguage === 'mongo' && looksLikeMongoshScript(tab.statement),
-  );
+  const isMongoshScript = $derived(analysis.script);
   let mongoshInfo = $state<MongoshInfo | null>(null);
   let mongoshProbed = false;
   async function probeMongosh(): Promise<void> {
@@ -128,20 +186,15 @@
     void probeMongosh();
   });
 
-  // Reset the tracked selection/cursor when switching query tabs, so a stale
-  // selection from another tab can never run against the newly-active one.
-  $effect(() => {
-    void tab.id;
-    editorSel = { text: '', cursor: 0 };
-  });
-
   // ── Tab labels ────────────────────────────────────────────────────────────
   // Derive a short, human label from a tab's SQL: prefer an explicit user name,
   // else the table after FROM/INTO/UPDATE, else a leading keyword snippet,
   // falling back to "Query N".
   function tabLabel(t: QueryTab, index: number): string {
     if (t.name && t.name !== 'Query') return t.name;
-    const sql = t.statement.trim();
+    // The head of the buffer is enough for a label — never regex-scan a pasted
+    // 150 KB script on every keystroke.
+    const sql = t.statement.slice(0, 2048).trim();
     if (!sql) return `Query ${index + 1}`;
     const from = sql.match(/\b(?:from|into|update|join)\s+`?([\w.$]+)`?/i);
     if (from) {
@@ -288,20 +341,67 @@
 
   // Word boundary the completion replaces (identifiers, incl. dotted prefixes).
   const TOKEN_RE = /[\w$.]*$/;
+  /** Quiet time after the last keystroke before a completion request goes out
+   *  (on top of CodeMirror's own activate-on-typing delay). */
+  const COMPLETION_DELAY_MS = 60;
+  /** The completion request carries at most this much text around the cursor
+   *  — the daemon only analyses the statement the cursor is in. */
+  const CTX_BEFORE = 8192;
+  const CTX_AFTER = 2048;
+  /** True when the cursor sits in a literal/comment where completion is noise
+   *  (e.g. editing INSERT … VALUES data) — see `completion-gate.ts`. */
+  function inInertNode(state: EditorState, pos: number): boolean {
+    return isInertAt(state, pos, database.queryLanguage === 'mongo');
+  }
 
-  // Server-driven completion source. Debounced via a shared in-flight promise so
-  // fast typing collapses to the latest prefix. Failures degrade to no results.
-  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-  function completionSource(ctx: CompletionContext): Promise<CompletionResult | null> {
+  /**
+   * The span sent to the daemon: the top-level statement around the cursor
+   * (lang-sql `Statement`, JS `ExpressionStatement`; the line for redis),
+   * clamped to CTX_BEFORE/CTX_AFTER. Never the whole buffer — that shipped a
+   * 150 KB script twice per completion request.
+   */
+  function completionSpan(state: EditorState, pos: number): { from: number; to: number } {
+    const doc = state.doc;
+    let from = Math.max(0, pos - CTX_BEFORE);
+    let to = Math.min(doc.length, pos + CTX_AFTER);
+    let stmtFrom = -1;
+    if (splitMode === 'line') {
+      const line = doc.lineAt(pos);
+      stmtFrom = line.from;
+      to = Math.min(to, line.to);
+    } else {
+      let n = syntaxTree(state).resolveInner(pos, -1);
+      while (n.parent && n.parent.parent) n = n.parent;
+      if (n.parent) {
+        stmtFrom = n.from;
+        to = Math.min(to, n.to);
+      }
+    }
+    if (stmtFrom >= from) {
+      from = stmtFrom;
+    } else if (from > 0) {
+      // Clamped inside a long statement: start at the next line so the window
+      // doesn't open mid-token (bounded — never walk back to a far line start).
+      const line = doc.lineAt(from);
+      if (line.from !== from && line.to < pos) from = line.to + 1;
+    }
+    return { from, to };
+  }
+
+  // Server-driven completion source. Each query waits COMPLETION_DELAY_MS and
+  // is aborted (timer + fetch) the moment CodeMirror drops it — any doc change
+  // restarts it — so fast typing collapses to one request for the latest text
+  // and superseded requests never reach (or keep running on) the daemon.
+  let inflight: AbortController | null = null;
+  function completionSource(ctx: CompletionContext): Promise<CompletionResult | null> | null {
     const before = ctx.matchBefore(TOKEN_RE);
     const word = before?.text ?? '';
     // Only auto-open when there's a token or the user explicitly triggered.
-    if (!ctx.explicit && word.length === 0) return Promise.resolve(null);
-
-    const prefix = ctx.state.sliceDoc(0, ctx.pos);
-    // Text after the cursor lets the server resolve the FROM table list even
-    // when the cursor sits in the SELECT list before it.
-    const suffix = ctx.state.sliceDoc(ctx.pos);
+    if (!ctx.explicit && word.length === 0) return null;
+    // Numbers, string values and comments: nothing to complete while TYPING.
+    // An explicit Ctrl-Space still completes there (a column name inside a
+    // Mongo `$expr` string, a dynamic-SQL string, a mis-tokenized region).
+    if (!ctx.explicit && (/^\d/.test(word) || inInertNode(ctx.state, ctx.pos))) return null;
 
     // Where the accepted completion is inserted, and what text the popup filters
     // against. A leading qualifier is NOT part of the identifier, so only the
@@ -322,11 +422,21 @@
       }
     }
 
+    const { state, pos } = ctx;
     return new Promise((resolve) => {
-      if (debounceTimer) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(async () => {
-        const items = await database.complete(prefix, suffix);
-        if (items.length === 0) {
+      inflight?.abort();
+      const ac = new AbortController();
+      inflight = ac;
+      const timer = setTimeout(async () => {
+        // Sliced HERE, after the quiet period — not per keystroke.
+        const span = completionSpan(state, pos);
+        const prefix = state.sliceDoc(span.from, pos);
+        // Text after the cursor lets the server resolve the FROM table list even
+        // when the cursor sits in the SELECT list before it.
+        const suffix = state.sliceDoc(pos, span.to);
+        const items = await database.complete(prefix, suffix, undefined, ac.signal);
+        if (inflight === ac) inflight = null;
+        if (ac.signal.aborted || items.length === 0) {
           resolve(null);
           return;
         }
@@ -340,7 +450,17 @@
           boost: it.score ?? undefined,
         }));
         resolve({ from, options, validFor: TOKEN_RE });
-      }, 120);
+      }, COMPLETION_DELAY_MS);
+      ctx.addEventListener(
+        'abort',
+        () => {
+          clearTimeout(timer);
+          ac.abort();
+          if (inflight === ac) inflight = null;
+          resolve(null);
+        },
+        { onDocChange: true },
+      );
     });
   }
 
@@ -390,7 +510,7 @@
     // `const …;`) or dies on an undefined variable from an earlier fragment.
     // With no explicit selection, Run therefore executes the whole buffer,
     // exactly what the script notice above the editor promises.
-    if (isMongoshScript && !editorSel.text.trim()) {
+    if (isScriptNow() && !editorSel.text.trim()) {
       execBase(tab.statement);
       return;
     }
@@ -404,7 +524,10 @@
 
   // Run the WHOLE buffer as one multi-statement batch (the backend splits it and
   // returns one result set per statement — the grid shows a result switcher).
-  const stmtCount = $derived(countStatements(tab.statement, splitMode));
+  const stmtCount = $derived(analysis.count);
+  /** Whether the buffer holds anything but whitespace — stops at the first
+   *  non-space char instead of trimming the whole buffer per render. */
+  const hasStatement = $derived(/\S/.test(tab.statement));
   function runAll(): void {
     if (!canQuery) return;
     execBase(tab.statement);
@@ -477,6 +600,28 @@
     const vh = typeof window !== 'undefined' ? window.innerHeight : 1000;
     return Math.max(180, vh - 260);
   }
+  // Soft-wrap long lines in the editor. ON by default: unwrapped long lines
+  // (a pasted INSERT dump) make every keystroke re-lay out every rendered line
+  // — 20–41 ms/key in WebKit at 150 KB, vs ~3 ms wrapped. Per device, like the
+  // editor height.
+  const WRAP_KEY = 'db.editorWrap';
+  let wrapLines = $state(loadWrap());
+  function loadWrap(): boolean {
+    try {
+      return localStorage.getItem(WRAP_KEY) !== '0';
+    } catch {
+      return true;
+    }
+  }
+  function setWrap(on: boolean): void {
+    wrapLines = on;
+    try {
+      localStorage.setItem(WRAP_KEY, on ? '1' : '0');
+    } catch {
+      /* ignore */
+    }
+  }
+
   function persistEditorH(): void {
     // Per-tab in memory (the tab itself is session state), plus one global
     // fallback on disk so a fresh tab opens at a size you already liked.
@@ -630,7 +775,7 @@
     // ⌘S — save the query.
     if (cmd && !e.shiftKey && !e.altKey && e.code === 'KeyS') {
       e.preventDefault();
-      if (canEdit && tab.statement.trim()) void openSave();
+      if (canEdit && hasStatement) void openSave();
       return;
     }
     // ⇧⌘F — format (⌘F alone stays the app-global find). A mongosh SCRIPT is
@@ -638,7 +783,7 @@
     // breaks ASI statement boundaries — so Format is gated off for scripts.
     if (cmd && e.shiftKey && !e.altKey && e.code === 'KeyF') {
       e.preventDefault();
-      if (database.queryLanguage !== 'redis' && !isMongoshScript && tab.statement.trim() && !tab.running) {
+      if (database.queryLanguage !== 'redis' && !isScriptNow() && hasStatement && !tab.running) {
         database.formatStatement();
         editorSel = { text: '', cursor: 0 };
       }
@@ -859,7 +1004,7 @@
       <button
         class="btn small ghost"
         onclick={openSave}
-        disabled={!tab.statement.trim()}
+        disabled={!hasStatement}
         title={savedLinked ? 'Update the saved query (or Save as new)' : 'Save this query'}
       >
         <Icon name="check" size={12} />{savedLinked ? 'Update' : 'Save'}
@@ -870,7 +1015,7 @@
         class="btn small ghost"
         class:on={database.planOpen}
         onclick={() => void database.explainPlan()}
-        disabled={!tab.statement.trim() || tab.running}
+        disabled={!hasStatement || tab.running}
         title="Show the query plan (EXPLAIN) — a normalized tree with cost warnings"
         aria-label="Explain"
       >
@@ -904,7 +1049,7 @@
           database.formatStatement();
           editorSel = { text: '', cursor: 0 };
         }}
-        disabled={!tab.statement.trim() || tab.running || isMongoshScript}
+        disabled={!hasStatement || tab.running || isMongoshScript}
         title={isMongoshScript
           ? 'Format is disabled for mongosh scripts — reflowing real JavaScript breaks its statement boundaries'
           : 'Format / beautify the SQL'}
@@ -1004,6 +1149,22 @@
       />
       <Icon name="lock" size={12} />
       {#if tab.mask}<span class="qe-masked-badge">Masked</span>{:else}<span>Mask</span>{/if}
+    </label>
+    <label
+      class="qe-mask qe-wrap"
+      class:active={wrapLines}
+      title={wrapLines
+        ? 'Long lines wrap (fast with big pasted scripts) — turn off to scroll long lines horizontally'
+        : 'Long lines scroll horizontally — wrapping keeps typing fast in big pasted scripts'}
+    >
+      <input
+        type="checkbox"
+        class="sr-only"
+        checked={wrapLines}
+        onchange={(e) => setWrap((e.currentTarget as HTMLInputElement).checked)}
+      />
+      <Icon name="text" size={12} />
+      <span>Wrap</span>
     </label>
     <span class="qe-lang mono" title="Query language">{database.queryLanguage}</span>
     </div>
@@ -1126,6 +1287,9 @@
       readOnly={false}
       minimal={true}
       findOwner={true}
+      wrap={wrapLines}
+      keepStates={true}
+      {sqlDialect}
       placeholder={lang === 'redis' ? 'Write a command — ⌘↵ to run' : 'Write a query — ⌘↵ to run'}
       completionSource={database.selectedConnId ? completionSource : null}
       onchange={(v) => database.setStatement(v)}
@@ -1160,12 +1324,14 @@
         <PlanView plan={database.queryPlan} onclose={() => database.closePlan()} />
       </div>
     {/if}
-    <!-- `statement` is the one that PRODUCED these rows, not the live buffer: the
-         grid describes what is on screen (see QueryTab.ran_statement). -->
+    <!-- `statement` is the one that PRODUCED what is on screen — the rows
+         (ran_statement) or the error (err_statement) — never the live buffer:
+         the grid, ErrorPanel's caret and "Ask AI to fix" describe what RAN, and
+         the live buffer re-ran the grid's effects on every keystroke. -->
     <ResultsGrid
       result={tab.result}
       error={tab.error}
-      statement={tab.ran_statement ?? tab.statement}
+      statement={(tab.error ? tab.err_statement : tab.ran_statement) ?? undefined}
       connectionId={database.selectedConnId}
       ranNode={tab.ran_node}
       running={tab.running}
