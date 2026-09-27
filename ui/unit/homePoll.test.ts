@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
 
 const lib = loadSource(new URL('../src/lib/poll.ts', import.meta.url), {});
+const live = loadSource(new URL('../src/lib/live.ts', import.meta.url), { './poll': lib });
 const { poll } = loadSource(new URL('../src/modules/home/boxes/poll.ts', import.meta.url), {
   '../../../lib/poll': lib,
+  '../../../lib/live': live,
 });
 
 test('now() during an in-flight fetch coalesces into one rerun, not a new chain', async () => {

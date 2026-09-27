@@ -54,7 +54,7 @@ connection library unusable for every non-root account.)
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
 | 1 | GET /api/v1/health | public | — | `{"ok":true}` |
-| 2 | GET /api/v1/meta | public | — | MetaResp |
+| 2 | GET /api/v1/meta | public | — | MetaResp (incl. `alt_loopback_base`, see "Transport lanes") |
 | 3 | POST /api/v1/onboarding/root | public, only while 0 users exist (else 409) | OnboardRootReq | LoginResp |
 | 4 | POST /api/v1/auth/login | public | LoginReq | LoginResp (401 on bad creds/disabled) |
 | 5 | POST /api/v1/auth/logout | member | — | 204 |
@@ -5327,3 +5327,27 @@ outside `skill_allowlist` (up to 16 × 8 KiB bodies and a 100-entry review catal
 This does not expand auto-apply authorization: edits to unallowlisted skills
 remain `pending`. Up to 64 safe skill names persist with each source checkpoint
 so subsequent corrections can refer to an earlier skill invocation.
+
+### Transport lanes (2026-09, TRANSPORT_PLAN stages 1–2)
+
+The desktop webview reaches the daemon over HTTP/1.1, and the engine pools ~6
+sockets per HOST for every Otto window together. Two additive changes keep a
+background poll or a slow call from queueing what the user just clicked:
+
+- **Second loopback host.** `ottod` also binds `[::1]:<port>` (still
+  loopback-only; fail-soft; `OTTO_ALT_LOOPBACK=0` disables it) and `GET /meta`
+  adds `alt_loopback_base: "http://localhost:<port>" | null`. It is non-null
+  only when the daemon holds BOTH `127.0.0.1` and `[::1]` on the port, so
+  `localhost` reaches this daemon whichever address the resolver picks (`localhost`
+  rather than `[::1]`: CSP host-sources cannot express IPv6 literals, and the
+  desktop CSP already allows `localhost:7700`). Every route, auth rule, CORS
+  origin check and body limit is identical on both hosts — it is the same router.
+  The UI (`ui/src/lib/api/client.ts`) sends its `bg` lane (pollers) and `long`
+  lane (`LONG_PATHS`: remote git fetch/pull/push, provider PR routes, provider-CLI
+  auth status, `/sessions/{id}/wait`, `/k8s/*`, `/aws/*`, Kafka sub-routes, DB
+  query/NL/assist/explain) there, only when its interactive base is
+  `127.0.0.1` on the same port; a network failure on the alias drops it (a GET
+  is retried once on the interactive base).
+- **Events instead of polls.** New invalidation events `mcp_approval_changed`,
+  `resource_access_changed`, `notifications_changed`, the `/ws/events`
+  `subscribe` topic filter and `boot_id` (`ws.md`). No REST shape changed.

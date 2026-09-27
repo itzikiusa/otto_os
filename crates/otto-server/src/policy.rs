@@ -2254,6 +2254,14 @@ mod tests {
             Require(Agents, View)
         );
         assert_eq!(
+            pol(Method::GET, "/api/v1/sessions/{id}/transcript/tool/{tool_id}"),
+            Require(Agents, View)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/workspaces/{wid}/history/artifacts"),
+            Require(Agents, View)
+        );
+        assert_eq!(
             pol(Method::GET, "/api/v1/sessions/{id}/artifacts"),
             Require(Agents, View)
         );

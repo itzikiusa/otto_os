@@ -4,6 +4,7 @@
   // to the pod total (requests/limits aren't in the payload); refreshed every
   // 10 s while the tab is open.
   import { untrack } from 'svelte';
+  import { pollWhileVisible } from '../../lib/poll';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { k8sApi } from '../../lib/api/k8s';
   import type { K8sPodMetrics } from '../../lib/api/types';
@@ -41,8 +42,8 @@
     void pod;
     loading = true;
     untrack(() => void load());
-    const t = setInterval(() => untrack(() => void load()), 10_000);
-    return () => clearInterval(t);
+    const t = pollWhileVisible(() => untrack(() => load()), { ms: 10_000, immediate: false });
+    return () => t.stop();
   });
 
   const maxCpu = $derived(Math.max(1, ...(metrics?.containers.map((c) => c.cpu_millicores) ?? [1])));

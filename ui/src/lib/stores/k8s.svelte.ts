@@ -9,6 +9,7 @@
 // mutation happens in a method the page calls from an effect or a handler.
 
 import { auth } from './auth.svelte';
+import { pollWhileVisible, type Poller } from '../poll';
 import { resourceAccess, type ResourceAccessChange } from './resource-access.svelte';
 import { ApiError } from '../api/client';
 import { formatBytes, formatMillicores } from '../../modules/kubernetes/k8s-util';
@@ -216,7 +217,7 @@ class K8sStore {
   k9sSessionId: string | null = $state(null);
 
   private rowsAbort: AbortController | null = null;
-  private refreshTimer: ReturnType<typeof setInterval> | null = null;
+  private refreshTimer: Poller | null = null;
 
   readonly cluster = $derived(this.clusters.find((c) => c.id === this.clusterId) ?? null);
   readonly caps = $derived(
@@ -490,14 +491,20 @@ class K8sStore {
   startAutoRefresh(): void {
     this.stopAutoRefresh();
     if (!this.autoRefresh) return;
-    this.refreshTimer = setInterval(() => {
-      if (document.hidden || !this.clusterId || this.rowsLoading) return;
-      void this.loadResources(true);
-    }, AUTO_REFRESH_MS);
+    // Shared chain (lib/poll): never overlaps a slow kubectl list, paused
+    // while hidden, backs off while the cluster fails; `/k8s/*` rides the
+    // long lane (api/client.ts), off the interactive socket pool.
+    this.refreshTimer = pollWhileVisible(
+      async () => {
+        if (!this.clusterId || this.rowsLoading) return;
+        await this.loadResources(true);
+      },
+      { ms: AUTO_REFRESH_MS, immediate: false },
+    );
   }
 
   stopAutoRefresh(): void {
-    if (this.refreshTimer) clearInterval(this.refreshTimer);
+    this.refreshTimer?.stop();
     this.refreshTimer = null;
   }
 

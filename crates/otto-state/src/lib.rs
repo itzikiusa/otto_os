@@ -125,7 +125,7 @@ pub use k8s_clusters::{
 pub use k8s_monitor::{K8sMonitorConfigRow, K8sMonitorRepo, K8sMonitorStatusRow};
 pub use mcp_audit::{McpAuditRepo, McpToolCallRow, NewMcpToolCall};
 pub use mcp_control::{
-    CallLogQuery, DiscoveredTool, McpAllowlistEntry, McpAllowlistRepo, McpApproval,
+    set_approval_change_hook, ApprovalChange, CallLogQuery, DiscoveredTool, McpAllowlistEntry, McpAllowlistRepo, McpApproval,
     McpApprovalRepo, McpCallLogRepo, McpCallLogRow, McpPolicy, McpPolicyRepo, McpRegistryRepo,
     McpServerDetail, McpTool, McpToolStats, McpToolsRepo, NewAllowlistEntry, NewApproval,
     NewCallLog, NewPolicy, NewServerRow,

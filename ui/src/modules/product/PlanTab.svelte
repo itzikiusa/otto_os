@@ -3,7 +3,8 @@
   // story, render it as a task tree with 3-state checkboxes the PO can toggle,
   // and persist toggles in place. Modeled on RewriteTab's load/poll pattern.
   import { product } from '../../lib/stores/product.svelte';
-  import { pollWhileVisible, type Poller } from '../../lib/poll';
+  import type { Poller } from '../../lib/poll';
+  import { liveQuery } from '../../lib/live';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
@@ -160,7 +161,9 @@
     clearPoll();
     pollStartedAt = Date.now();
     // Immediate first poll, then every POLL_INTERVAL_MS after each settles.
-    pollTimer = pollWhileVisible(() => pollForPlan(), { ms: POLL_INTERVAL_MS, jitter: 0 });
+    // `product_changed` (onSectionChange, below) settles it; this chain is
+    // a 15 s safety net while events flow, POLL_INTERVAL_MS while they cannot.
+    pollTimer = liveQuery({ run: () => pollForPlan(), on: [], fallbackMs: POLL_INTERVAL_MS, safetyMs: 15_000, jitter: 0 });
   }
 
   // ── Initial load + reset on story change ─────────────────────────────────────

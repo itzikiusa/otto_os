@@ -211,6 +211,24 @@ async fn run(cfg: Config) -> Result<(), String> {
     let loopback = tokio::net::TcpListener::bind(("127.0.0.1", cfg.port))
         .await
         .map_err(|e| format!("bind 127.0.0.1:{}: {e}", cfg.port))?;
+    // Second LOOPBACK host for the same port (TRANSPORT_PLAN §3d). Browsers
+    // cap HTTP/1.1 sockets per host (~6, shared by every Otto window), so the
+    // UI sends background polls + known-slow calls to `[::1]` and keeps
+    // `127.0.0.1` for what the user clicked. Still loopback-only; fail-soft
+    // (IPv6 off / port taken → no alias, and `/meta` advertises none, so the
+    // UI never sends its token to an address this daemon does not hold).
+    // `OTTO_ALT_LOOPBACK=0` turns it off.
+    let alt_loopback = if std::env::var("OTTO_ALT_LOOPBACK").as_deref() == Ok("0") {
+        None
+    } else {
+        match tokio::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, cfg.port)).await {
+            Ok(l) => Some(l),
+            Err(e) => {
+                tracing::warn!("alt loopback [::1]:{} not bound ({e}) — single-host transport", cfg.port);
+                None
+            }
+        }
+    };
 
     let pool = otto_state::open(&cfg.db_path())
         .await
@@ -228,6 +246,19 @@ async fn run(cfg: Config) -> Result<(), String> {
     }
     let secrets = otto_keychain::from_env(&cfg.data_dir);
     let (events, _) = broadcast::channel::<Event>(1024);
+    // Every MCP approval write (governance pipeline, outward MCP, assistant,
+    // live browser) pushes `mcp_approval_changed` — the tray, the MCP badge
+    // and Home stop polling `/mcp/approvals` for it.
+    {
+        let tx = events.clone();
+        otto_state::set_approval_change_hook(move |c| {
+            let _ = tx.send(Event::McpApprovalChanged {
+                approval_id: c.approval_id,
+                workspace_id: c.workspace_id,
+                status: c.status,
+            });
+        });
+    }
 
     // Module construction (Task A9): provider registry (with settings
     // overrides), session manager, connections service, spawner bridge,
@@ -1273,6 +1304,33 @@ async fn run(cfg: Config) -> Result<(), String> {
         }
     }
 
+    let alt_task = alt_loopback.map(|listener| {
+        // Advertised as `localhost`, not `[::1]`: a distinct pool key from
+        // `127.0.0.1` either way, CSP host-sources cannot express IPv6
+        // literals (the Tauri CSP already allows `localhost:7700`), and with
+        // BOTH loopback addresses held by this process `localhost` reaches
+        // this daemon whichever one the resolver picks.
+        let base = format!("http://localhost:{}", cfg.port);
+        tracing::info!("alt loopback lane on {base} ([::1] + 127.0.0.1 both held)");
+        otto_server::transport::set_alt_loopback_base(base);
+        let router = router.clone();
+        let mut rx = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let shutdown = async move {
+                let _ = rx.changed().await;
+            };
+            if let Err(e) = axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown)
+            .await
+            {
+                tracing::error!("alt loopback listener: {e}");
+            }
+        })
+    });
+
     let mut rx = shutdown_rx.clone();
     let shutdown = async move {
         let _ = rx.changed().await;
@@ -1289,6 +1347,9 @@ async fn run(cfg: Config) -> Result<(), String> {
     .map_err(|e| format!("serve: {e}"))?;
 
     if let Some(task) = network_task {
+        let _ = task.await;
+    }
+    if let Some(task) = alt_task {
         let _ = task.await;
     }
 

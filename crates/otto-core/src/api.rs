@@ -54,6 +54,14 @@ pub struct MetaResp {
     /// a provider without a template hides it (never a silent drop).
     #[serde(default)]
     pub model_flags: std::collections::HashMap<String, bool>,
+    /// A second LOOPBACK base for the same daemon (`http://localhost:<port>`
+    /// — `ottod` holds both `127.0.0.1` and `[::1]` on the port), or `null`
+    /// when it could not bind `[::1]` (IPv6 off / port taken). Browsers pool
+    /// HTTP/1.1 sockets per host, so the UI sends background polls and
+    /// known-slow calls here and keeps `127.0.0.1` free for interactive ones.
+    /// Only ever a loopback address the daemon itself holds.
+    #[serde(default)]
+    pub alt_loopback_base: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

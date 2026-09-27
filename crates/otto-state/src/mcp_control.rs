@@ -1207,6 +1207,37 @@ fn row_to_approval(r: &sqlx::sqlite::SqliteRow) -> McpApproval {
     }
 }
 
+/// One `mcp_approvals` state change, handed to the process-wide hook (see
+/// [`set_approval_change_hook`]). `approval_id` is `None` for a bulk expiry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalChange {
+    pub approval_id: Option<Id>,
+    pub workspace_id: Option<String>,
+    pub status: String,
+}
+
+type ApprovalHook = Box<dyn Fn(ApprovalChange) + Send + Sync>;
+static APPROVAL_HOOK: std::sync::OnceLock<ApprovalHook> = std::sync::OnceLock::new();
+
+/// Install the process-wide approval-change hook (first call wins). `ottod`
+/// points it at the event bus (`mcp_approval_changed`), so every writer —
+/// the governance pipeline, the outward MCP server, the assistant, the live
+/// browser — pushes the change without each call site knowing about events.
+/// The repo is constructed ad hoc in many places, hence a hook, not a field.
+pub fn set_approval_change_hook(f: impl Fn(ApprovalChange) + Send + Sync + 'static) {
+    let _ = APPROVAL_HOOK.set(Box::new(f));
+}
+
+fn approval_changed(approval_id: Option<&str>, workspace_id: Option<&str>, status: &str) {
+    if let Some(hook) = APPROVAL_HOOK.get() {
+        hook(ApprovalChange {
+            approval_id: approval_id.map(str::to_string),
+            workspace_id: workspace_id.map(str::to_string),
+            status: status.to_string(),
+        });
+    }
+}
+
 #[derive(Clone)]
 pub struct McpApprovalRepo {
     pool: SqlitePool,
@@ -1229,7 +1260,9 @@ impl McpApprovalRepo {
         .bind(&n.risk_label).bind(&n.requested_by).bind(&n.requested_by_kind).bind(&now)
         .bind(&n.expires_at)
         .execute(&self.pool).await.map_err(dberr("create approval"))?;
-        self.get(&id).await
+        let row = self.get(&id).await?;
+        approval_changed(Some(&row.id), row.workspace_id.as_deref(), &row.status);
+        Ok(row)
     }
 
     pub async fn get(&self, id: &Id) -> Result<McpApproval> {
@@ -1307,7 +1340,9 @@ impl McpApprovalRepo {
         )
         .bind(status).bind(decided_by).bind(note).bind(fmt(Utc::now())).bind(id)
         .execute(&self.pool).await.map_err(dberr("decide approval"))?;
-        self.get(id).await
+        let row = self.get(id).await?;
+        approval_changed(Some(&row.id), row.workspace_id.as_deref(), &row.status);
+        Ok(row)
     }
 
     /// Find an approved-and-unconsumed approval that binds to exactly this call:
@@ -1354,7 +1389,11 @@ impl McpApprovalRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("consume approval"))?;
-        Ok(res.rows_affected() == 1)
+        let consumed = res.rows_affected() == 1;
+        if consumed {
+            approval_changed(Some(id), None, "consumed");
+        }
+        Ok(consumed)
     }
 
     /// Expire pending approvals past their `expires_at` (best-effort housekeeping).
@@ -1367,7 +1406,11 @@ impl McpApprovalRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("expire approvals"))?;
-        Ok(res.rows_affected())
+        let n = res.rows_affected();
+        if n > 0 {
+            approval_changed(None, None, "expired");
+        }
+        Ok(n)
     }
 }
 
@@ -1532,6 +1575,67 @@ mod tests {
         let a = repo.create(none).await.unwrap();
         assert!(!a.requester_may_decide());
         assert!(repo.decide(&a.id, true, "owner", None).await.is_err());
+    }
+
+    /// Every state change reaches the process-wide hook (→ the WS event
+    /// `mcp_approval_changed`): create, decide, consume and a bulk expiry.
+    #[tokio::test]
+    async fn approval_changes_reach_the_hook() {
+        use std::sync::{Arc, Mutex};
+        let seen: Arc<Mutex<Vec<ApprovalChange>>> = Arc::default();
+        let sink = seen.clone();
+        set_approval_change_hook(move |c| sink.lock().unwrap().push(c));
+        let pool = mem_pool().await;
+        let (ws, _user) = seed(&pool).await;
+        let repo = McpApprovalRepo::new(pool.clone());
+        let mk = |expires_at: Option<String>| NewApproval {
+            workspace_id: Some(ws.clone()),
+            kind: "tool_call".into(),
+            server_id: None,
+            server_name: None,
+            tool: Some("hook_probe".into()),
+            title: "hook_probe".into(),
+            detail: None,
+            args_redacted_json: "{}".into(),
+            args_hash: Some("HOOK".into()),
+            risk_label: None,
+            requested_by: Some("requester".into()),
+            requested_by_kind: Some("ui".into()),
+            expires_at,
+        };
+        let a = repo.create(mk(None)).await.unwrap();
+        repo.decide(&a.id, true, "approver", None).await.unwrap();
+        assert!(repo.consume(&a.id).await.unwrap());
+        assert!(!repo.consume(&a.id).await.unwrap(), "a replay is not a change");
+        let old = fmt(Utc::now() - chrono::Duration::seconds(5));
+        let b = repo.create(mk(Some(old))).await.unwrap();
+        assert_eq!(repo.expire_stale().await.unwrap(), 1);
+
+        // Other tests in this binary share the hook: keep only this test's rows.
+        let all = seen.lock().unwrap().clone();
+        let got: Vec<ApprovalChange> = all
+            .iter()
+            .filter(|c| {
+                c.approval_id.as_deref() == Some(a.id.as_str())
+                    || c.approval_id.as_deref() == Some(b.id.as_str())
+            })
+            .cloned()
+            .collect();
+        let ch = |id: Option<&str>, ws: Option<&str>, st: &str| ApprovalChange {
+            approval_id: id.map(str::to_string),
+            workspace_id: ws.map(str::to_string),
+            status: st.into(),
+        };
+        assert_eq!(
+            got,
+            vec![
+                ch(Some(&a.id), Some(&ws), "pending"),
+                ch(Some(&a.id), Some(&ws), "approved"),
+                ch(Some(&a.id), None, "consumed"),
+                ch(Some(&b.id), Some(&ws), "pending"),
+            ]
+        );
+        assert!(all.contains(&ch(None, None, "expired")), "bulk expiry signalled");
     }
 
     #[tokio::test]

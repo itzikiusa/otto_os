@@ -18,6 +18,7 @@
 // a slow poll as a fallback while a job runs.
 
 import * as liveApi from '../api/browserLive';
+import { appLive } from '../live';
 import { ApiError } from '../api/client';
 import type {
   BrowserChromeBuild,
@@ -174,7 +175,9 @@ class BrowserLiveStore {
         /* transient: keep polling while the last known state says installing */
       }
       if (this.engineState === 'installing') this.schedulePoll();
-    }, POLL_MS);
+      // `browser_engine_install_updated` (applyEvent) carries the progress
+      // while the event socket is up: this re-read is then a 15 s safety net.
+    }, appLive.connected() ? 15_000 : POLL_MS);
   }
 }
 

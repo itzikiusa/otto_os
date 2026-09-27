@@ -2,6 +2,7 @@
 // Feeds the workspace store (session statuses) and the toast store (notices).
 
 import { wsConnect } from './api/client';
+import { appLive, type LiveEvent } from './live';
 import type { EventsResyncFrame, NodeRunState, OttoEvent } from './api/types';
 import { ws } from './stores/workspace.svelte';
 import { notifications } from './stores/notifications.svelte';
@@ -366,6 +367,14 @@ export const designAssistBus = new DesignAssistBus();
 
 export type EventsState = 'connecting' | 'connected' | 'offline';
 
+/** Generic subscription registry over this window's `/ws/events` stream
+ *  (TRANSPORT_PLAN stage 2; `appLive` from lib/live.ts, fed here):
+ *  `liveEvents.on(types, fn)` next to the
+ *  hard-coded store dispatch below, plus `onResync` (reconnect / lag) and
+ *  `onConnection`. `liveQuery` (lib/live.ts) uses it as its default source, so
+ *  a new event-fed view never has to be added to `resyncAfterReconnect`. */
+export const liveEvents = appLive;
+
 class EventsClient {
   state: EventsState = $state('offline');
 
@@ -447,6 +456,7 @@ class EventsClient {
     this.sock?.close();
     this.sock = null;
     this.state = 'offline';
+    liveEvents.setConnected(false);
   }
 
   /** Force an immediate reconnect: cancel any pending backoff timer, drop the
@@ -481,6 +491,8 @@ class EventsClient {
    *  badges and unread counts, until a full reload. Page-scoped stores reload
    *  on mount; swarm + open transcripts resync themselves. */
   private resyncAfterReconnect(): void {
+    // Every liveQuery refetches (coalesced) — registered views resync for free.
+    liveEvents.resync();
     void swarm.resync();
     transcript.resyncVisible();
     missionControlBus.resync();
@@ -528,6 +540,7 @@ class EventsClient {
       this.everConnected = true;
       this.state = 'connected';
       this.backoff = 1000;
+      liveEvents.setConnected(true);
       this.sendHello();
       if (reconnected) this.resyncAfterReconnect();
       // The Assistant's needs-you badge lives in the sidebar, so it loads on
@@ -548,6 +561,9 @@ class EventsClient {
         // ui_command_cancel) never reach the event stores.
         if (handleUiFrame(data)) return;
         const parsed = data as OttoEvent;
+        // Generic subscribers first (liveQuery views); the store dispatch
+        // below is unchanged.
+        liveEvents.dispatch(parsed as unknown as LiveEvent);
         if (parsed.type === 'notification') {
           notifications.ingest(parsed.notice);
           // A "waiting"/blocked notice (Claude's Notification hook) means a
@@ -760,6 +776,7 @@ class EventsClient {
     };
     this.sock.onclose = () => {
       this.state = 'offline';
+      liveEvents.setConnected(false);
       uiSocketClosed();
       this.scheduleReconnect();
     };

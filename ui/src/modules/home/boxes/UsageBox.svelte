@@ -40,9 +40,9 @@
     const mine = ++seq;
     const span = days;
     try {
-      const st = await api.get<UsageStatus>('/usage/status');
+      const st = await api.bg.get<UsageStatus>('/usage/status');
       const sum = st.available
-        ? await api.get<UsageSummary>(`/usage/summary?days=${span}&otto_only=false`)
+        ? await api.bg.get<UsageSummary>(`/usage/summary?days=${span}&otto_only=false`)
         : null;
       if (mine !== seq) return true;
       status = st;

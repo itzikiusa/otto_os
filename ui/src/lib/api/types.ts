@@ -60,6 +60,16 @@ export interface WsTermFlowFrame {
   type: 'pause' | 'resume';
 }
 
+/** Client → server `/ws/term` frame (docs/contracts/ws.md §1): the user typed
+ *  while more than 256 KB was queued in front of the emulator; the client
+ *  dropped that queue and asks for ONE snapshot of up to `lines` rows. The
+ *  server discards this viewer's queued output (already in the snapshot),
+ *  leaves any flow-control pause and always answers with a `scrollback`. */
+export interface WsTermResyncFrame {
+  type: 'resync';
+  lines: number;
+}
+
 export interface Session {
   id: Id;
   workspace_id: Id;
@@ -1070,6 +1080,22 @@ export interface EventsResyncFrame {
   skipped: number;
 }
 
+/** Client → `/ws/events` (any socket, ws.md "Topic subscription"): deliver
+ *  only these event types (an empty list clears the filter). ≤ 64 topics of
+ *  ≤ 64 chars; `resync` frames are always delivered. */
+export interface EventsSubscribeFrame {
+  type: 'subscribe';
+  topics: string[];
+}
+
+/** Server → that socket: the active filter (`null` = everything) and the
+ *  daemon's boot id (a different id than before = the daemon restarted). */
+export interface EventsSubscribeAckFrame {
+  type: 'subscribe_ack';
+  topics: string[] | null;
+  boot_id: string;
+}
+
 export type OttoEvent =
   | { type: 'session_status'; session_id: Id; workspace_id: Id; status: SessionStatus }
   | { type: 'session_created'; session: Session }
@@ -1602,6 +1628,30 @@ export type OttoEvent =
       module: string;
       /** The catalog command name, e.g. `db_run_query` (tool `otto.ui_db_run_query`). */
       command: string;
+    }
+  | {
+      /** An MCP approval was created (`pending`), decided, `consumed` or
+       *  `expired` — an invalidation cue only (no title/tool/args): refetch
+       *  `GET /mcp/approvals`. `approval_id` is absent for a bulk expiry;
+       *  `workspace_id` for workspace-less rows and consume/expire. */
+      type: 'mcp_approval_changed';
+      approval_id?: Id;
+      workspace_id?: Id;
+      status: string;
+    }
+  | {
+      /** Effective resource access may have changed (resource policy, access
+       *  group/role, user grants, workspace membership). With `kind` +
+       *  `resource_id`: that one resource; without: re-check everything. */
+      type: 'resource_access_changed';
+      kind?: string;
+      resource_id?: Id;
+    }
+  | {
+      /** The caller's notice list changed without a new notice (read,
+       *  read-all, dismiss, clear) — owner-only; refetch `/notifications`. */
+      type: 'notifications_changed';
+      user_id: Id;
     };
 
 // ---------------------------------------------------------------------------
@@ -1940,6 +1990,10 @@ export interface MetaResp {
   /** Per-provider: whether the CLI accepts a model flag (its spec carries a
    *  `model_args` template). Pickers hide the model control when false. */
   model_flags: Record<string, boolean>;
+  /** Second LOOPBACK base for the same daemon (`http://localhost:<port>`; the
+   *  daemon holds both 127.0.0.1 and [::1]) — a separate browser socket pool
+   *  for background/slow calls. `null`/absent → single-host transport. */
+  alt_loopback_base?: string | null;
 }
 
 export interface OnboardRootReq {
@@ -8657,6 +8711,11 @@ export interface ToolResult {
   /** Capped at 64 KB (`truncated: true`). */
   text: string | null;
   truncated: boolean;
+  /** Only in a live `transcript_appended` delta that would exceed 64 KB:
+   *  `text` (then `patch`) was shortened for the push; the full result is
+   *  `GET /sessions/{id}/transcript/tool/{tool_id}`. `bytes`/`truncated`
+   *  still describe the stored result. Absent everywhere else. */
+  elided?: boolean;
   bytes: number;
   /** Images extracted from the result — `GET …/transcript/images/{id}`. */
   image_ids: string[];
@@ -10510,6 +10569,8 @@ export interface UiPresenceFrame {
 export interface UiHelloAckFrame {
   type: 'hello_ack';
   conn_id: string;
+  /** This daemon process's boot id (changes on every daemon restart). */
+  boot_id?: string;
 }
 
 /** Server → this connection: run one UI command. */

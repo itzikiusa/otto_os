@@ -42,6 +42,7 @@ pub mod history_index;
 pub mod improve_channels;
 pub mod insights;
 pub mod k8s_monitor_scheduler;
+pub mod live_events;
 pub mod login_throttle;
 pub mod lsp;
 pub mod mcp_capabilities;
@@ -96,6 +97,7 @@ pub mod swarm_scheduler;
 pub mod swarm_verify;
 pub mod swarm_workspace;
 pub mod transcript_cache;
+pub mod transport;
 pub mod transcript_tail;
 pub mod turn_oracle;
 pub mod ui_bridge;
@@ -170,6 +172,7 @@ pub fn build_router(
         ));
 
     let api = routes::public_routes().merge(rooms::public_routes()).merge(protected);
+    let events_tx = ctx.events.clone();
 
     let mut app = Router::new()
         .nest("/api/v1", api)
@@ -182,7 +185,14 @@ pub fn build_router(
         app = app.merge(extra);
     }
 
-    app.layer(TraceLayer::new_for_http()).layer(cors_layer())
+    // Access-affecting writes broadcast `resource_access_changed` (the UI's
+    // access cache refreshes on change instead of polling; live_events.rs).
+    app.layer(axum::middleware::from_fn_with_state(
+        events_tx,
+        live_events::notify_access_changes,
+    ))
+    .layer(TraceLayer::new_for_http())
+    .layer(cors_layer())
 }
 
 /// CORS policy for the daemon.

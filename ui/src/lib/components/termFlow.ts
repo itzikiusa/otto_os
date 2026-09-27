@@ -3,6 +3,11 @@
 // "Flow control" and the SA-02 / SA-03 notes in Terminal.svelte.
 import type { WsTermFlowFrame } from '../api/types';
 
+/** xterm scrollback depth (lines) for a PRIMARY terminal — the one pane the
+ *  user works in (SessionView: agents main/split panes, the maximized tile,
+ *  swarm/loop session panes; the share page; the DB SSH shell). Each line
+ *  costs ~12 B/cell, so 10k × 200 cols ≈ 24 MB of JS heap. */
+export const PRIMARY_SCROLLBACK = 10_000;
 /** Pending (handed to xterm, not yet parsed) bytes above which the client
  *  asks the server to `pause` this stream. xterm parses 5.5–8 MB/s in WebKit,
  *  so this bounds the on-screen lag after ^C to a few hundred ms. */

@@ -79,8 +79,12 @@ const SIGNIN_CONCURRENCY = 2;
 
 class AssistantStore {
   threads: Loadable<AssistantThread[]> = $state(initial([]));
-  /** thread_id → its turn index (oldest first). */
-  turns: Record<string, Loadable<AssistantTurn[]>> = $state({});
+  /** thread_id → its turn index (oldest first). `$state.raw` (A6): turns are
+   *  replaced, never mutated, so deep proxies over every turn's text and
+   *  blocks bought nothing but proxy cost on each read. Write through
+   *  `setTurns`, which reassigns the map (a raw object's properties are not
+   *  reactive). */
+  turns: Record<string, Loadable<AssistantTurn[]>> = $state.raw({});
   pending: Record<string, PendingTurn[]> = $state({});
   needs: NeedsYouState = $state({ items: [], seen: {} });
   needsState: LoadState = $state('idle');
@@ -129,18 +133,18 @@ class AssistantStore {
   async loadTurns(threadId: string): Promise<void> {
     const current = this.ticket(`turns:${threadId}`);
     const have = untrack(() => this.turns[threadId]);
-    this.turns[threadId] = { state: have?.state === 'ready' ? 'ready' : 'loading', data: have?.data ?? [], error: '' };
+    this.setTurns(threadId, { state: have?.state === 'ready' ? 'ready' : 'loading', data: have?.data ?? [], error: '' });
     try {
       const data = await assistantApi.turns(threadId);
       if (!current()) return;
       // Keep live-appended rows the GET raced past.
       const ids = new Set(data.map((t) => t.id));
       const extra = (this.turns[threadId]?.data ?? []).filter((t) => !ids.has(t.id) && t.created_at > (data.at(-1)?.created_at ?? ''));
-      this.turns[threadId] = { state: 'ready', data: [...data, ...extra], error: '' };
+      this.setTurns(threadId, { state: 'ready', data: [...data, ...extra], error: '' });
       this.settlePending(threadId, data);
     } catch (e) {
       if (!current()) return;
-      this.turns[threadId] = { state: 'error', data: have?.data ?? [], error: describeError(e) };
+      this.setTurns(threadId, { state: 'error', data: have?.data ?? [], error: describeError(e) });
     }
   }
 
@@ -387,8 +391,12 @@ class AssistantStore {
     if (!have) return; // not open — it loads fresh when opened
     const i = have.data.findIndex((t) => t.id === turn.id);
     const data = i < 0 ? [...have.data, turn] : have.data.map((t, j) => (j === i ? turn : t));
-    this.turns[threadId] = { ...have, data };
+    this.setTurns(threadId, { ...have, data });
     this.settlePending(threadId, [turn]);
+  }
+
+  private setTurns(threadId: string, v: Loadable<AssistantTurn[]>): void {
+    this.turns = { ...untrack(() => this.turns), [threadId]: v };
   }
 
   private settlePending(threadId: string, turns: AssistantTurn[]): void {
