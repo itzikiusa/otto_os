@@ -28,6 +28,7 @@
   import { registerSelectAll } from '../selectall';
   import TermKeysBar from './TermKeysBar.svelte';
   import Icon from './Icon.svelte';
+  import { terminalReply } from './terminalInput';
 
   interface Props {
     sessionId: string;
@@ -62,6 +63,10 @@
      *  (SharePage) so the scoped share token never touches localStorage.
      *  Default = undefined → falls back to today's wsUrl() behaviour. */
     shareToken?: string;
+    /** Capability-only room transport; bypasses owner authentication entirely. */
+    socketFactory?: () => WebSocket;
+    transformFrame?: (frame: unknown) => unknown | null;
+    readOnlyReason?: string;
     onstatus?: (status: SessionStatus) => void;
     /** The font size actually drawn (px) — below the user's size while the
      *  pane is too narrow for 80 columns (with an 11px readability floor). */
@@ -89,7 +94,7 @@
      *  this. Default false. */
     claimOnAttach?: boolean;
   }
-  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, onstatus, onfontfit, onsearchresult, showToolbar = true, autoFocus = false, claimOnAttach = false }: Props = $props();
+  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, socketFactory, transformFrame, readOnlyReason, onstatus, onfontfit, onsearchresult, showToolbar = true, autoFocus = false, claimOnAttach = false }: Props = $props();
 
   const effScheme = $derived(forceDark ? 'dark' : ui.resolvedScheme);
 
@@ -279,7 +284,8 @@
   }
 
   function sendJson(obj: unknown): void {
-    if (sock && sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify(obj));
+    const frame = transformFrame ? transformFrame(obj) : obj;
+    if (frame !== null && sock && sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify(frame));
   }
 
   // ── sendSeqToTerm (Task 5.2) ─────────────────────────────────────────────
@@ -341,6 +347,7 @@
    *  "bytes in → file on disk → path out" (it backs the snipping tool), so the
    *  paste rides that rather than inventing a second image store. */
   async function uploadPastedImage(file: File): Promise<void> {
+    if (socketFactory || readOnly) return;
     try {
       const png = await toPngBytes(file);
       const snip = await snipApi.upload(bytesToBase64(png), file.name || 'pasted.png');
@@ -402,7 +409,9 @@
     // subprotocol so the token travels in Sec-WebSocket-Protocol instead of
     // the URL query string (keeps it out of access logs). The stored owner
     // login token path (wsUrl) is unchanged for all normal sessions.
-    if (shareToken) {
+    if (socketFactory) {
+      sock = socketFactory();
+    } else if (shareToken) {
       const wsBase = wsUrl(`/ws/term/${sessionId}`).replace(/\?token=.*$/, '');
       sock = new WebSocket(wsBase, [WS_BEARER_SUBPROTOCOL, shareToken]);
     } else {
@@ -845,12 +854,13 @@
   // interpreting output as a shell command or application route.
   function localFileContext(): { cwd: string; allowed: boolean } {
     const session = ws.sessions.find(s => s.id === sessionId);
-    return { cwd: session?.cwd ?? '', allowed: !shareToken && session?.kind === 'agent' };
+    return { cwd: session?.cwd ?? '', allowed: !shareToken && !socketFactory && session?.kind === 'agent' };
   }
 
   function activateLink(event: MouseEvent, link: TerminalLink): void {
     event.preventDefault();
     if (link.kind === 'url') {
+      if (socketFactory) { void copyText(link.text).then(ok => { if (ok) toasts.success('Link copied'); }); return; }
       void openExternal(link.text);
     } else if (link.path) {
       const context = localFileContext();
@@ -1124,7 +1134,7 @@
 
     term.onData((data) => {
       if (readOnly) return;
-      sendJson({ type: 'input', data: textToBase64(data) });
+      sendJson({ type: 'input', data: textToBase64(data), user: !terminalReply(data) });
     });
 
     term.onSelectionChange(() => {
@@ -1244,6 +1254,7 @@
       if (!file) return;
       e.preventDefault();
       e.stopPropagation();
+      if (socketFactory) { toasts.info('Room terminals accept text only'); return; }
       void uploadPastedImage(file);
     };
     container.addEventListener('paste', onPaste, true);
@@ -1452,7 +1463,7 @@
   let lastInjN = 0;
   $effect(() => {
     const inj = ws.injections[sessionId];
-    if (!inj || readOnly || inj.n <= lastInjN) return;
+    if (!inj || readOnly || socketFactory || inj.n <= lastInjN) return;
     lastInjN = inj.n;
     sendJson({ type: 'input', data: textToBase64(`\x1b[200~${inj.text}\x1b[201~`) });
   });
@@ -1618,7 +1629,7 @@
       <div class="ro-strip" role="note">
         <Icon name="lock" size={12} />
         <span class="ro-label">Read-only</span>
-        <span class="ro-why" title="Your viewer role can watch this session but not type in it.">Your viewer role can watch this session but not type in it.</span>
+        <span class="ro-why" title={readOnlyReason ?? "Your viewer role can watch this session but not type in it."}>{readOnlyReason ?? 'Your viewer role can watch this session but not type in it.'}</span>
       </div>
     {/if}
 

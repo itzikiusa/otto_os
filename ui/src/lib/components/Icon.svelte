@@ -4,6 +4,7 @@
   // map, so svelte-check rejects a name that isn't here (an unknown name used
   // to render silently as a dot).
   const paths = {
+    people: 'M6 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4ZM2 13v-1a4 4 0 0 1 8 0v1M11 3a2 2 0 0 1 0 4m1 2a3 3 0 0 1 2 3v1',
     // modules
     home: 'M2.5 8.2 8 3l5.5 5.2M4 7.2V13h8V7.2M6.5 13V9.5h3V13',
     terminal: 'M2.5 3.5h11a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1Zm2 3 2 1.7-2 1.8M8.5 10.5h3',

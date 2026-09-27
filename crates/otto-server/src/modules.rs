@@ -30,7 +30,7 @@ use otto_state::{GitStore, IntegrationsRepo, IssuesRepo, WorkspacesRepo};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::auth::CurrentUser;
+use crate::auth::{CurrentUser, CurrentAuthContext};
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 
@@ -73,12 +73,9 @@ async fn input_session(ctx: &ServerCtx, user_id: &Id, id: &Id) -> Result<Session
 /// Send both the paste and its delayed submit through current authorization.
 async fn submit_session_text(ctx: &ServerCtx, user_id: &Id, id: &Id, text: &str) -> Result<()> {
     input_session(ctx, user_id, id).await?;
-    ctx.manager
-        .input(id, format!("\x1b[200~{text}\x1b[201~").as_bytes())
-        .await?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    input_session(ctx, user_id, id).await?;
-    ctx.manager.input(id, b"\r").await?;
+    ctx.manager.human_submit_text_checked(id, user_id, false, text, || async {
+        input_session(ctx, user_id, id).await.map(|_| ())
+    }).await?;
     ctx.manager.record_user_message(id, text).await;
     Ok(())
 }
@@ -141,7 +138,7 @@ fn delay_session_input(
             }
             input_session(&ctx, &user_id, &session_id).await?;
             ctx.manager
-                .input(&session_id, format!("{text}\n").as_bytes())
+                .human_input(&session_id, &user_id, false, true, format!("{text}\n").as_bytes())
                 .await
         }
         .await;
@@ -691,7 +688,7 @@ impl Spawner for PtySpawner {
                         let current = manager.get(&session_id).await?;
                         input_user(&pool, &user_id, &current).await?;
                         manager
-                            .input(&session_id, format!("{cmd}\n").as_bytes())
+                            .human_input(&session_id, &user_id, false, true, format!("{cmd}\n").as_bytes())
                             .await
                     }
                     .await;
@@ -7304,6 +7301,7 @@ async fn send_input(
     Path(session_id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<otto_core::api::SendInputReq>,
 ) -> ApiResult<axum::http::StatusCode> {
     // Resolve the session and check that the caller has Editor access to the
@@ -7323,18 +7321,18 @@ async fn send_input(
         && matches!(session.provider.as_str(), "claude" | "codex");
     if req.submit.unwrap_or(true) && bracketed_tui {
         ctx.manager
-            .submit_text(&session_id, &req.text)
+            .human_submit_text(&session_id, &user.id, auth.scope.is_some(), &req.text)
             .await
             .map_err(ApiError)?;
     } else if req.submit.unwrap_or(true) {
         // Shells / connections / bridges: a plain line + newline runs it.
         ctx.manager
-            .input(&session_id, format!("{}\n", req.text).as_bytes())
+            .human_input(&session_id, &user.id, auth.scope.is_some(), true, format!("{}\n", req.text).as_bytes())
             .await
             .map_err(ApiError)?;
     } else {
         ctx.manager
-            .input(&session_id, req.text.as_bytes())
+            .human_input(&session_id, &user.id, auth.scope.is_some(), true, req.text.as_bytes())
             .await
             .map_err(ApiError)?;
     }

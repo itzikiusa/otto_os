@@ -41,6 +41,13 @@ use tracing_subscriber::util::SubscriberInitExt;
 use crate::config::Config;
 
 fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("room-ocr") {
+        return if otto_server::run_room_ocr_helper() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
     augment_path();
 
     // Subcommand dispatch. `ottod mcp-tools` runs the first-party read-only MCP
@@ -503,6 +510,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         db_explorer,
         db_assist: otto_server::db_assist::new_registry(),
         transcript_cache: Default::default(),
+        rooms: Default::default(),
         brokers,
         mcp,
         spawner,

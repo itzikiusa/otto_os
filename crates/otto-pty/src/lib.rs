@@ -3,7 +3,10 @@
 
 pub mod ring;
 
-use std::io::{Read, Write};
+pub mod input_authority;
+pub use input_authority::InputAuthorization;
+
+use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -180,6 +183,7 @@ enum WriteDone {
 
 struct WriteJob {
     data: Vec<u8>,
+    authorization: Option<InputAuthorization>,
     done: WriteDone,
 }
 
@@ -372,8 +376,9 @@ impl PtyHandle {
         std::thread::spawn(move || {
             let mut writer = writer;
             while let Ok(job) = input_rx.recv() {
-                let res = writer.write_all(&job.data).and_then(|()| writer.flush());
-                let failed = res.is_err();
+                let res = input_authority::write_authorized(writer.as_mut(), &job.data, job.authorization.as_ref());
+                // Revocation rejects this job, not the PTY writer or later valid jobs.
+                let failed = res.as_ref().is_err_and(|e| e.kind() != std::io::ErrorKind::PermissionDenied);
                 match job.done {
                     WriteDone::Blocking(tx) => {
                         let _ = tx.send(res);
@@ -416,6 +421,7 @@ impl PtyHandle {
         self.input_tx
             .send(WriteJob {
                 data: data.to_vec(),
+                authorization: None,
                 done: WriteDone::Blocking(tx),
             })
             .map_err(|_| input_closed())?;
@@ -434,9 +440,17 @@ impl PtyHandle {
     /// queued and are delivered if the child resumes reading); `Internal` when
     /// the PTY is gone.
     pub async fn write_async(&self, data: &[u8], timeout: Duration) -> Result<()> {
+        self.write_async_authorized(data, timeout, None).await
+    }
+
+    /// Carry revocable room authority through the queue to the actual writer.
+    /// Timeout retains legacy delivery semantics, but an epoch change discards
+    /// a queued job (or any unwritten tail) when the writer next makes progress.
+    pub async fn write_async_authorized(&self, data: &[u8], timeout: Duration, authorization: Option<InputAuthorization>) -> Result<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         match self.input_tx.try_send(WriteJob {
             data: data.to_vec(),
+            authorization,
             done: WriteDone::Async(tx),
         }) {
             Ok(()) => {}
@@ -448,7 +462,11 @@ impl PtyHandle {
             Err(TrySendError::Disconnected(_)) => return Err(input_closed()),
         }
         match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(res)) => res.map_err(|e| Error::Internal(format!("pty write: {e}"))),
+            Ok(Ok(res)) => res.map_err(|e| {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    Error::Forbidden("terminal control changed".into())
+                } else { Error::Internal(format!("pty write: {e}")) }
+            }),
             Ok(Err(_)) => Err(input_closed()),
             Err(_) => Err(Error::Conflict(format!(
                 "session is not accepting input (not drained within {}s; still queued)",

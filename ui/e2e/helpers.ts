@@ -5,6 +5,8 @@ import AxeBuilder from '@axe-core/playwright';
 // (it needs a scoped token) and is covered separately.
 export const PAGES = [
   'agents',
+  'rooms',
+  'rooms/recaps',
   'home',
   'assistant',
   'mission-control',

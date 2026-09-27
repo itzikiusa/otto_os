@@ -77,6 +77,14 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     //    it precedes the feature families below).
     // ----------------------------------------------------------------------
 
+    if p == "/room-join" { return Exempt; }
+    if p == "/room-recap-settings" { return Require(Settings, Admin); }
+    if p == "/room-recap-capabilities" || p.starts_with("/room-recaps") || p == "/rooms/{id}/recaps" { return Require(Agents, Edit); }
+    if p == "/room-settings" { return Require(Settings, Admin); }
+    if p == "/rooms" || p == "/rooms/{id}" || p == "/rooms/{id}/invites" || p == "/sessions/{id}/room" {
+        return Require(Agents, Edit);
+    }
+
     // Public (also served outside the bearer middleware, but the guard may still
     // see them — keep them exempt regardless).
     if matches!(p, "/health" | "/meta" | "/onboarding/root" | "/auth/login") {

@@ -168,7 +168,10 @@ async fn test_ctx(pool: &SqlitePool, data_dir: PathBuf) -> ServerCtx {
         secrets.clone(),
     ));
     let usage = otto_usage::UsageEngine::start(
-        otto_usage::UsageConfig::default(),
+        otto_usage::UsageConfig {
+            enabled: false, // This fixture does not exercise metrics or start ClickHouse.
+            ..Default::default()
+        },
         PathBuf::from("/tmp/otto-test-usage-snips"),
     )
     .await;
@@ -196,6 +199,7 @@ async fn test_ctx(pool: &SqlitePool, data_dir: PathBuf) -> ServerCtx {
         db_explorer,
         db_assist: otto_server::db_assist::new_registry(),
         transcript_cache: Default::default(),
+        rooms: Default::default(),
         brokers,
         mcp,
         spawner: Arc::new(NoopSpawner),

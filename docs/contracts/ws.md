@@ -1,7 +1,10 @@
 # Otto WebSocket Contract (FROZEN)
 
-Three WS endpoints. Auth for all: a bearer token validated BEFORE the upgrade
+Ordinary WS endpoints below use a bearer token validated BEFORE the upgrade
 completes; invalid token → HTTP 401, no upgrade.
+
+Session rooms have separate capability-authenticated [room sockets](./rooms.md);
+room credentials are never accepted by ordinary terminal/event sockets.
 
 - The event stream (`/ws/events`) accepts the token via the
   `Sec-WebSocket-Protocol` request header — the client offers
@@ -44,12 +47,23 @@ below). Clients need no change: keep sending, and treat a dropped socket or a
 ### Client → server (JSON text frames)
 
 ```json
-{"type":"input","data":"<base64 bytes>"}
+{"type":"input","data":"<base64 bytes>","user":true}
 {"type":"resize","cols":120,"rows":32}
 {"type":"scrollback","lines":2000}
 {"type":"search","query":"foo"}                     // server-side ring-buffer search (see below)
 {"type":"claim"}                                    // claim size authority (sent on terminal focus)
 ```
+
+**Room control.** `input.user` defaults to `true` for older clients. Current clients
+send `false` for automatic terminal replies (DA/DSR/OSC responses); these and
+`resize`/`claim` never take control from a room driver. During an active room,
+only explicit input from the unscoped session owner can reclaim the driver seat.
+Scoped shares and other users, including administrators, cannot bypass the room
+through this socket or ordinary HTTP input. Grant epochs are rechecked by the
+PTY writer, including queued input and partial-write tails. A write attempt
+already in flight cannot be recalled; authorized writes use chunks of at most
+256 bytes, with a fresh epoch check before each attempt. Ending the room leaves
+its process alive.
 
 **Size authority.** Multiple viewers share one PTY; the connection that most
 recently sent `input` or `claim` (editor+ only) owns the session's size, and

@@ -81,11 +81,13 @@ struct TokenQuery {
     token: Option<String>,
 }
 
+fn user_input_default() -> bool { true }
+
 /// Client → server control frames.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientFrame {
-    Input { data: String },
+    Input { data: String, #[serde(default = "user_input_default")] user: bool },
     Resize { cols: u16, rows: u16 },
     // Request a history-inclusive snapshot: up to `lines` rows of scrollback
     // history (rows that scrolled off above the visible screen) followed by a
@@ -263,6 +265,7 @@ async fn ws_auth_gate<S: SessionsCtx>(
     //
     //  - **Unscoped token** (`scope == None`): unchanged behaviour — the
     //    owner-or-admin gate (#L9) plus the Editor probe for write capability.
+    let scoped = auth.scope.is_some();
     let can_input = match auth.scope {
         Some(scope) => {
             if scope.session_id != session_id {
@@ -315,6 +318,7 @@ async fn ws_auth_gate<S: SessionsCtx>(
     // Propagate auth results to the handler via extensions.
     req.extensions_mut().insert(LiveTerminalAuth {
         user: user.clone(),
+        scoped,
         token,
         auth: st.auth.clone(),
     });
@@ -334,6 +338,7 @@ struct CanInput(bool);
 
 #[derive(Clone)]
 struct LiveTerminalAuth {
+    scoped: bool,
     user: otto_core::domain::User,
     token: String,
     auth: Arc<dyn TokenAuthenticator>,
@@ -668,6 +673,8 @@ async fn serve_terminal<S: SessionsCtx>(
     } else {
         REAUTH_INTERVAL
     };
+    let input_user = live_auth.user.id.clone();
+    let input_scoped = live_auth.scoped;
     tokio::spawn(reauth_loop(
         ctx.clone(),
         session_id.clone(),
@@ -806,7 +813,7 @@ async fn serve_terminal<S: SessionsCtx>(
                     continue;
                 };
                 match frame {
-                    ClientFrame::Input { data } => {
+                    ClientFrame::Input { data, user } => {
                         if !can_input {
                             if !warned_forbidden {
                                 warned_forbidden = true;
@@ -830,10 +837,9 @@ async fn serve_terminal<S: SessionsCtx>(
                             {
                                 return;
                             }
-                            // Typing claims size authority for this viewer.
-                            ctx.manager().note_input_authority(&session_id, conn_id);
+                            // Successful explicit typing claims size authority.
                             let started = std::time::Instant::now();
-                            let res = ctx.manager().input(&session_id, &bytes).await;
+                            let res = ctx.manager().human_input(&session_id, &input_user, input_scoped, user, &bytes).await;
                             let elapsed = started.elapsed();
                             if elapsed > INPUT_SLOW {
                                 tracing::debug!(
@@ -843,7 +849,10 @@ async fn serve_terminal<S: SessionsCtx>(
                                 );
                             }
                             match res {
-                                Ok(()) => warned_input = false,
+                                Ok(()) => {
+                                    warned_input = false;
+                                    if user { ctx.manager().note_input_authority(&session_id, conn_id); }
+                                },
                                 Err(e) if !warned_input => {
                                     warned_input = true;
                                     let frame = serde_json::json!({
@@ -862,7 +871,7 @@ async fn serve_terminal<S: SessionsCtx>(
                     }
                     ClientFrame::Resize { cols, rows } => {
                         if can_input && ctx.manager().may_resize(&session_id, conn_id) {
-                            let _ = ctx.manager().resize(&session_id, cols, rows).await;
+                            let _ = ctx.manager().human_resize(&session_id, &input_user, input_scoped, cols, rows).await;
                         } else if can_input {
                             // Forensic trail for the half-width bug class: a
                             // denied resize is a viewer that WOULD have re-pinned
@@ -876,7 +885,7 @@ async fn serve_terminal<S: SessionsCtx>(
                     }
                     ClientFrame::Claim => {
                         if can_input {
-                            ctx.manager().note_input_authority(&session_id, conn_id);
+                            let _ = ctx.manager().human_claim_size(&session_id, &input_user, input_scoped, conn_id).await;
                         }
                     }
                     ClientFrame::Scrollback { lines } => {
@@ -1434,6 +1443,7 @@ mod tests {
             .expect("share token authenticates")
             .effective_user;
         let live_auth = LiveTerminalAuth {
+            scoped: true,
             user,
             token: token.clone(),
             auth: st.auth.clone(),

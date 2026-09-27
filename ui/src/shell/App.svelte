@@ -15,6 +15,9 @@
   //
   // Special case: `router.module === 's'` is the guest share view — it renders
   // SharePage full-screen and skips all the usual shell chrome entirely.
+  import RoomPage from '../modules/rooms/RoomPage.svelte';
+  import RoomRecapsPage from '../modules/rooms/RoomRecapsPage.svelte';
+  import RoomLobby from '../modules/rooms/RoomLobby.svelte';
   import SharePage from '../modules/share/SharePage.svelte';
   import Rail from './Rail.svelte';
   import Navigator from './Navigator.svelte';
@@ -995,6 +998,8 @@
   <div class="content">
     {#if moduleName === 'agents'}
       <AgentsPage />
+    {:else if moduleName === 'rooms'}
+      {#if router.parts[1] === 'recaps'}<RoomRecapsPage />{:else if router.parts[1]}{#key router.parts[1]}<RoomPage roomId={router.parts[1]} />{/key}{:else}<RoomLobby />{/if}
     {:else if moduleName === 'home'}
       <HomePage />
     {:else if moduleName === 'assistant'}

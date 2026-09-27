@@ -160,8 +160,14 @@ async fn test_ctx(pool: &SqlitePool, base_url: String, tmp: &std::path::Path) ->
         IssuesRepo::new(pool.clone()),
         secrets.clone(),
     ));
-    let usage =
-        otto_usage::UsageEngine::start(otto_usage::UsageConfig::default(), tmp.join("usage")).await;
+    let usage = otto_usage::UsageEngine::start(
+        otto_usage::UsageConfig {
+            enabled: false, // This fixture does not exercise metrics or start ClickHouse.
+            ..Default::default()
+        },
+        tmp.join("usage"),
+    )
+    .await;
     ServerCtx {
         pool: pool.clone(),
         secrets,
@@ -184,6 +190,7 @@ async fn test_ctx(pool: &SqlitePool, base_url: String, tmp: &std::path::Path) ->
         db_explorer,
         db_assist: otto_server::db_assist::new_registry(),
         transcript_cache: Default::default(),
+        rooms: Default::default(),
         brokers,
         mcp,
         spawner: Arc::new(NoopSpawner),

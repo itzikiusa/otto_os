@@ -10434,3 +10434,6 @@ export interface UiControlGrant {
   granted_at?: string;
   granted_by?: Id;
 }
+
+export type * from './room-types';
+export type * from './room-recap-types';

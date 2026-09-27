@@ -13,6 +13,7 @@ import { SvelteMap } from 'svelte/reactivity';
 import { winKey } from './win';
 import { lsGet, lsSet } from './storage';
 import { isEmbedded } from './desktop';
+import { captureRoomInvite } from '../modules/rooms/room-access';
 
 // ---------------------------------------------------------------------------
 // Share-token in-memory store (Task 3.1)
@@ -52,14 +53,14 @@ function restoreLastRoute(): void {
   if (h !== '' && h !== '#/' && h !== '#') return; // explicit route wins
   const saved = lsGet(winKey(LS_LAST_ROUTE));
   // Never restore into a share route (`#/s/…` is one-time-view by design).
-  if (saved && saved.startsWith('#/') && !saved.startsWith('#/s/')) {
+  if (saved && saved.startsWith('#/') && !saved.startsWith('#/s/') && !saved.startsWith('#/room/')) {
     history.replaceState(null, '', saved);
   }
 }
 
 function persistLastRoute(hash: string): void {
   if (!IS_TAURI) return;
-  if (hash.startsWith('#/s/')) return; // share tokens/views are never sticky
+  if (hash.startsWith('#/s/') || hash.startsWith('#/room/')) return; // share tokens/views are never sticky
   lsSet(winKey(LS_LAST_ROUTE), hash);
 }
 
@@ -136,6 +137,15 @@ class Router {
   private parse(): void {
     const raw = window.location.hash.replace(/^#\/?/, '');
     this.parts = raw === '' ? [] : raw.split('/').map(safeDecode);
+
+    if (this.parts[0] === 'room' && this.parts.length === 3) {
+      const [, roomId, invite] = this.parts;
+      if (/^[A-Za-z0-9_-]+$/.test(roomId) && /^[A-Za-z0-9_-]+$/.test(invite)) {
+        captureRoomInvite(roomId, invite);
+        history.replaceState(null, '', `#/room/${encodeURIComponent(roomId)}`);
+        this.parts = ['room', roomId];
+      }
+    }
 
     // Task 3.1: share route `#/s/<sessionId>/<token>` — capture the token
     // into _shareTokens then strip it from the visible URL + history so it

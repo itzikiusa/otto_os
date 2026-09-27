@@ -1340,6 +1340,8 @@ pub struct SessionManager {
     engine_turns: Arc<DashMap<Id, usize>>,
     /// Size-authority owner per session: the conn that most recently typed.
     size_owner: Arc<DashMap<Id, u64>>,
+    /// Per-session authority locks issue epochs rechecked by the PTY writer.
+    room_authority: crate::room_authority::RoomAuthorityMap,
     /// Last observed cumulative CPU (ms) of each live session's DESCENDANT
     /// process tree (excluding the direct child), sampled by the idle-suspend
     /// sweep. A tree that accrued CPU since the previous sweep is running a
@@ -1448,6 +1450,7 @@ impl SessionManager {
             viewed: Arc::new(DashMap::new()),
             engine_turns: Arc::new(DashMap::new()),
             size_owner: Arc::new(DashMap::new()),
+            room_authority: Default::default(),
             suspend_cpu: Arc::new(DashMap::new()),
             suspend_hold: Arc::new(DashMap::new()),
             repo,
@@ -3184,11 +3187,213 @@ impl SessionManager {
         self.live.get(id).map(|h| Arc::clone(&h))
     }
 
-    /// Write input bytes to a live session.
-    pub async fn input(&self, id: &Id, data: &[u8]) -> Result<()> {
+    /// Begin exclusive room authority, pinned to the current process.
+    pub async fn begin_room_authority(
+        &self,
+        id: &Id,
+        room: &str,
+        owner: &Id,
+        host_member: &str,
+    ) -> Result<()> {
+        let mut permit = self.room_authority.entry(id).lock_owned().await;
         let handle = self
             .live_handle(id)
             .ok_or_else(|| Error::Conflict("session is not live".into()))?;
+        permit.begin(room, owner, host_member, handle.spawn_seq())
+    }
+
+    pub async fn set_room_driver(&self, id: &Id, room: &str, member: Option<&str>) -> Result<u64> {
+        self.room_authority
+            .entry(id)
+            .lock_owned()
+            .await
+            .grant(room, member)
+    }
+
+    /// Reconnect fences old frames without trusting a possibly stale room snapshot.
+    pub async fn fence_room_connection(&self, id: &Id, room: &str, member: &str) -> Result<u64> {
+        self.room_authority
+            .entry(id)
+            .lock_owned()
+            .await
+            .connect(room, member)
+    }
+
+    pub async fn end_room_authority(&self, id: &Id, room: &str) {
+        self.room_authority.entry(id).lock_owned().await.end(room);
+    }
+
+    pub async fn room_authority_snapshot(
+        &self,
+        id: &Id,
+    ) -> Option<crate::room_authority::RoomAuthoritySnapshot> {
+        self.room_authority.entry(id).lock_owned().await.snapshot()
+    }
+
+    /// A room frame carries the grant epoch observed by its sender. Checking it
+    /// under the authority lock and again in the writer rejects stale queued input.
+    pub async fn room_input(
+        &self,
+        id: &Id,
+        room: &str,
+        member: &str,
+        epoch: u64,
+        data: &[u8],
+    ) -> Result<()> {
+        let permit = self.room_authority.entry(id).lock_owned().await;
+        let handle = self
+            .live_handle(id)
+            .ok_or_else(|| Error::Conflict("session is not live".into()))?;
+        permit.check_room(room, member, epoch, handle.spawn_seq())?;
+        let authorization = permit.authorization();
+        drop(permit);
+        self.write_pty(id, &handle, data, Some(authorization)).await
+    }
+
+    pub async fn room_resize(
+        &self,
+        id: &Id,
+        room: &str,
+        member: &str,
+        epoch: u64,
+        cols: u16,
+        rows: u16,
+    ) -> Result<()> {
+        if !(1..=500).contains(&cols) || !(1..=300).contains(&rows) {
+            return Err(Error::Invalid("terminal dimensions out of range".into()));
+        }
+        let permit = self.room_authority.entry(id).lock_owned().await;
+        let handle = self
+            .live_handle(id)
+            .ok_or_else(|| Error::Conflict("session is not live".into()))?;
+        permit.check_room(room, member, epoch, handle.spawn_seq())?;
+        self.resize_pty(id, &handle, cols, rows)
+    }
+
+    /// Human input has already passed the caller's normal auth checks. Scoped
+    /// shares and non-host administrators must not bypass a room's driver seat.
+    pub async fn human_input(
+        &self,
+        id: &Id,
+        user: &Id,
+        scoped: bool,
+        user_initiated: bool,
+        data: &[u8],
+    ) -> Result<()> {
+        let mut permit = self.room_authority.entry(id).lock_owned().await;
+        let handle = self
+            .live_handle(id)
+            .ok_or_else(|| Error::Conflict("session is not live".into()))?;
+        permit.human(user, scoped, !user_initiated, handle.spawn_seq())?;
+        let authorization = permit.authorization();
+        drop(permit);
+        self.write_pty(id, &handle, data, Some(authorization)).await
+    }
+
+    /// Size-only traffic is passive: it never takes back the guest's driver seat.
+    pub async fn human_resize(
+        &self,
+        id: &Id,
+        user: &Id,
+        scoped: bool,
+        cols: u16,
+        rows: u16,
+    ) -> Result<()> {
+        let mut permit = self.room_authority.entry(id).lock_owned().await;
+        let handle = self
+            .live_handle(id)
+            .ok_or_else(|| Error::Conflict("session is not live".into()))?;
+        permit.human(user, scoped, true, handle.spawn_seq())?;
+        self.resize_pty(id, &handle, cols, rows)
+    }
+
+    pub async fn human_claim_size(
+        &self,
+        id: &Id,
+        user: &Id,
+        scoped: bool,
+        conn_id: u64,
+    ) -> Result<()> {
+        let mut permit = self.room_authority.entry(id).lock_owned().await;
+        let handle = self
+            .live_handle(id)
+            .ok_or_else(|| Error::Conflict("session is not live".into()))?;
+        permit.human(user, scoped, true, handle.spawn_seq())?;
+        self.note_input_authority(id, conn_id);
+        Ok(())
+    }
+
+    /// Human bracketed paste and delayed Enter share one revocable epoch.
+    pub async fn human_submit_text(
+        &self,
+        id: &Id,
+        user: &Id,
+        scoped: bool,
+        text: &str,
+    ) -> Result<()> {
+        self.human_submit_text_checked(id, user, scoped, text, || async { Ok(()) })
+            .await
+    }
+
+    /// Callers with delayed access checks can reauthorize without issuing a new
+    /// input grant. A revoke and regrant during the delay still cancels Enter.
+    pub async fn human_submit_text_checked<F, Fut>(
+        &self,
+        id: &Id,
+        user: &Id,
+        scoped: bool,
+        text: &str,
+        reauthorize: F,
+    ) -> Result<()>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
+        let mut permit = self.room_authority.entry(id).lock_owned().await;
+        let handle = self
+            .live_handle(id)
+            .ok_or_else(|| Error::Conflict("session is not live".into()))?;
+        permit.human(user, scoped, false, handle.spawn_seq())?;
+        let authorization = permit.authorization();
+        drop(permit);
+        let text: String = text
+            .chars()
+            .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+            .collect();
+        self.write_pty(
+            id,
+            &handle,
+            format!("\x1b[200~{text}\x1b[201~").as_bytes(),
+            Some(authorization.clone()),
+        )
+        .await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        reauthorize().await?;
+        if self
+            .live_handle(id)
+            .is_none_or(|current| current.spawn_seq() != handle.spawn_seq())
+        {
+            return Err(Error::Conflict(
+                "session process changed before submit".into(),
+            ));
+        }
+        self.write_pty(id, &handle, b"\r", Some(authorization))
+            .await
+    }
+    /// Trusted internal automation. HTTP/WebSocket human callers use
+    /// `human_input` instead so guest credentials cannot impersonate automation.
+    pub async fn input(&self, id: &Id, data: &[u8]) -> Result<()> {
+        let mut permit = self.room_authority.entry(id).lock_owned().await;
+        let handle = self.live_handle(id).ok_or_else(|| Error::Conflict("session is not live".into()))?;
+        permit.automation(handle.spawn_seq())?;
+        let authorization = permit.authorization();
+        drop(permit);
+        self.write_pty(id, &handle, data, Some(authorization)).await
+    }
+
+    /// The writer rechecks the captured epoch after queueing. Do not hold the
+    /// async permit while a child is hung: the host must still be able to revoke.
+    async fn write_pty(&self, id: &Id, handle: &Arc<PtyHandle>, data: &[u8], authorization: Option<otto_pty::InputAuthorization>) -> Result<()> {
         // Feed the pending provider-id capture's probe (absent for sessions
         // without one — the common case, a single map lookup).
         if let Some(mut probe) = self.capture_probes.get_mut(id) {
@@ -3203,14 +3408,18 @@ impl SessionManager {
         // Never a blocking `write_all` on a tokio worker: a child that stops
         // reading its tty used to park one worker per keystroke/paste until
         // the pool was exhausted and the whole daemon froze.
-        handle.write_async(data, INPUT_WRITE_TIMEOUT).await
+        handle.write_async_authorized(data, INPUT_WRITE_TIMEOUT, authorization).await
     }
 
-    /// Resize a live session's terminal.
+    /// Trusted internal terminal resize; normal viewers use `human_resize`.
     pub async fn resize(&self, id: &Id, cols: u16, rows: u16) -> Result<()> {
-        let handle = self
-            .live_handle(id)
-            .ok_or_else(|| Error::Conflict("session is not live".into()))?;
+        let mut permit = self.room_authority.entry(id).lock_owned().await;
+        let handle = self.live_handle(id).ok_or_else(|| Error::Conflict("session is not live".into()))?;
+        permit.automation(handle.spawn_seq())?;
+        self.resize_pty(id, &handle, cols, rows)
+    }
+
+    fn resize_pty(&self, id: &Id, handle: &Arc<PtyHandle>, cols: u16, rows: u16) -> Result<()> {
         // Same-size resizes are a no-op end to end — no SIGWINCH, no emulator
         // rewrap, no meta write — so clients can re-push their grid freely.
         let (old_cols, old_rows) = handle.size();
@@ -5319,6 +5528,106 @@ mod tests {
         assert!(mgr.capture_probes.get(&other).is_none());
     }
 
+    #[tokio::test]
+    async fn room_authority_gates_all_human_input_and_process_replacement() {
+        let (mgr, repo, ws, owner) = test_manager().await;
+        let id = seed_session(&repo, &ws, &owner, None).await;
+        let spec = CommandSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            cwd: Some("/".into()),
+            env: vec![],
+        };
+        mgr.live
+            .insert(id.clone(), Arc::new(PtyHandle::spawn(&spec).unwrap()));
+        mgr.begin_room_authority(&id, "room", &owner, "host")
+            .await
+            .unwrap();
+        let epoch = mgr
+            .set_room_driver(&id, "room", Some("guest"))
+            .await
+            .unwrap();
+        mgr.room_input(&id, "room", "guest", epoch, b"guest\n")
+            .await
+            .unwrap();
+        assert!(mgr
+            .human_input(&id, &owner, true, true, b"scoped\n")
+            .await
+            .is_err());
+        assert!(mgr
+            .human_input(&id, &Id::from("admin"), false, true, b"admin\n")
+            .await
+            .is_err());
+        assert!(mgr
+            .human_input(&id, &owner, false, false, b"response")
+            .await
+            .is_err());
+        assert!(mgr.human_resize(&id, &owner, false, 80, 24).await.is_err());
+        assert_eq!(mgr.room_authority_snapshot(&id).await.unwrap().epoch, epoch);
+        mgr.human_input(&id, &owner, false, true, b"host\n")
+            .await
+            .unwrap();
+        assert!(mgr
+            .room_input(&id, "room", "guest", epoch, b"stale\n")
+            .await
+            .is_err());
+        let new_epoch = mgr
+            .set_room_driver(&id, "room", Some("guest"))
+            .await
+            .unwrap();
+        assert!(new_epoch > epoch);
+        assert!(mgr
+            .room_input(&id, "room", "guest", epoch, b"stale\n")
+            .await
+            .is_err());
+        let old = mgr
+            .live
+            .insert(id.clone(), Arc::new(PtyHandle::spawn(&spec).unwrap()));
+        assert!(mgr
+            .room_input(&id, "room", "guest", new_epoch, b"wrong process\n")
+            .await
+            .is_err());
+        mgr.end_room_authority(&id, "room").await;
+        assert!(
+            mgr.live_handle(&id).is_some(),
+            "ending a room must leave the process alive"
+        );
+        mgr.human_input(&id, &owner, false, true, b"normal\n")
+            .await
+            .unwrap();
+        drop(old);
+        mgr.live.remove(&id);
+    }
+    #[tokio::test]
+    async fn room_authority_delayed_submit_keeps_its_original_epoch() {
+        let (mgr, repo, ws, owner) = test_manager().await;
+        let id = seed_session(&repo, &ws, &owner, None).await;
+        let spec = CommandSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            cwd: Some("/".into()),
+            env: vec![],
+        };
+        mgr.live
+            .insert(id.clone(), Arc::new(PtyHandle::spawn(&spec).unwrap()));
+        mgr.begin_room_authority(&id, "room", &owner, "host")
+            .await
+            .unwrap();
+        let result = mgr
+            .human_submit_text_checked(&id, &owner, false, "draft", || async {
+                mgr.set_room_driver(&id, "room", Some("guest")).await?;
+                mgr.set_room_driver(&id, "room", None).await?;
+                Ok(())
+            })
+            .await;
+        assert!(
+            matches!(result, Err(Error::Forbidden(_))),
+            "a delayed Enter must not acquire a fresh epoch"
+        );
+        assert_eq!(mgr.room_authority_snapshot(&id).await.unwrap().driver, None);
+        mgr.end_room_authority(&id, "room").await;
+        mgr.live.remove(&id);
+    }
     /// Resume-fork guard: a rollout that another live process is appending to
     /// must be detected so ensure_live refuses to `codex resume` a fork of it.
     #[tokio::test]

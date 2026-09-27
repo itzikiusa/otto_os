@@ -4,6 +4,9 @@
   import Onboarding from './modules/settings/Onboarding.svelte';
   import Login from './modules/settings/Login.svelte';
   import Toasts from './lib/components/Toasts.svelte';
+  import RoomPage from './modules/rooms/RoomPage.svelte';
+  import ConfirmDialog from './lib/components/ConfirmDialog.svelte';
+  import ContextMenu from './lib/components/ContextMenu.svelte';
   import SharePage from './modules/share/SharePage.svelte';
   import BarHost from './modules/desktop/BarHost.svelte';
   import TrayPage from './modules/desktop/TrayPage.svelte';
@@ -15,19 +18,22 @@
   ui.applyTheme();
 
   $effect(() => {
-    void auth.boot();
+    if (router.module !== 'room') void auth.boot();
   });
 
   // First launch installs + starts the daemon in the background; poll until
   // it answers instead of parking on a manual Retry button.
   $effect(() => {
-    if (auth.phase !== 'offline') return;
+    if (router.module === 'room' || auth.phase !== 'offline') return;
     const timer = setInterval(() => void auth.boot(true), 2000);
     return () => clearInterval(timer);
   });
 </script>
 
-{#if router.module === 's'}
+{#if router.module === 'room'}
+  {#key router.parts[1]}<RoomPage roomId={router.parts[1] ?? ''} guest />{/key}
+  <ConfirmDialog /><ContextMenu />
+{:else if router.module === 's'}
   <!-- Guest share view: a scoped share-link recipient has no account, so this
        route must bypass the login/onboarding gate entirely and render the
        single-session SharePage using the token captured from the URL fragment. -->

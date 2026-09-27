@@ -93,6 +93,7 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   // found on disk), read-only, resumable. Lives in the Agents group and shares
   // its RBAC gate; the route is `#/history` (NOT `#/agents/…`, whose second
   // segment is a session id). See docs/design/conversation-view.md §5.3.
+  { id: 'rooms', icon: 'people', label: 'Rooms', group: 'work', feature: 'agents', keywords: 'collaborate join invite session room chat voice' },
   { id: 'history', icon: 'clock', label: 'History', group: 'work', feature: 'agents', keywords: 'conversations transcripts past resume' },
   { id: 'run-with-otto', icon: 'play', label: 'Run with Otto', group: 'work', feature: 'run_with_otto', keywords: 'one button launch jira github issue pr confluence finding test story channel review proof approval' },
   { id: 'mission-control', icon: 'radar', label: 'Mission Control', group: 'work', feature: 'mission_control', keywords: 'work graph overview approvals spend running waiting' },
