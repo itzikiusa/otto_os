@@ -124,23 +124,23 @@ async function openAndRun(page: Page, statement: string): Promise<void> {
   await expect(page.locator('.grid-scroll tbody td.cell').first()).toBeVisible({ timeout: 60_000 });
 }
 
-/** Time one programmatic scroll: script + style + layout, no vsync wait. */
+/** Time one programmatic scroll: script + style + layout, no vsync wait.
+ *  The sample ends on a microtask, not a MessageChannel task: each step
+ *  starts in a rAF callback, so a posted task always ran after that frame's
+ *  whole style/layout/PAINT and every sample counted a paint. */
 async function scrollSteps(page: Page, dy: number, steps: number): Promise<number[]> {
   return page.evaluate(
     async ({ dy, steps }) => {
       const el = document.querySelector('.grid-scroll') as HTMLElement;
-      const macrotask = () =>
-        new Promise<void>((r) => {
-          const ch = new MessageChannel();
-          ch.port1.onmessage = () => r();
-          ch.port2.postMessage(0);
-        });
+      // The scroll handler queued Svelte's flush microtask first, so it (and
+      // every effect it runs) has finished when this one resolves.
+      const flushed = () => new Promise<void>((r) => queueMicrotask(r));
       const out: number[] = [];
       for (let i = 0; i < steps; i++) {
         const t0 = performance.now();
         el.scrollTop += dy;
         el.dispatchEvent(new Event('scroll'));
-        await macrotask(); // Svelte flushes its effects in a microtask before this
+        await flushed();
         void (document.body as HTMLElement).offsetHeight; // force style + layout
         out.push(performance.now() - t0);
         await new Promise((r) => requestAnimationFrame(() => r(null)));
@@ -175,11 +175,7 @@ test('100k × 30 result: bounded DOM, fast scroll / jump / sort / search', async
     const t0 = performance.now();
     el.scrollTop = el.scrollHeight / 2;
     el.dispatchEvent(new Event('scroll'));
-    await new Promise<void>((r) => {
-      const ch = new MessageChannel();
-      ch.port1.onmessage = () => r();
-      ch.port2.postMessage(0);
-    });
+    await new Promise<void>((r) => queueMicrotask(r)); // Svelte's flush ran first
     void (document.body as HTMLElement).offsetHeight;
     return performance.now() - t0;
   });
@@ -219,14 +215,13 @@ test('100k × 30 result: bounded DOM, fast scroll / jump / sort / search', async
   });
   await expect(page.locator('.grid-scroll tbody tr:not(.spacer)').first()).toBeVisible();
 
-  test.info().annotations.push({
-    type: 'perf',
-    description:
+  const perfLine =
       `100k×30: DOM ${nodes} nodes; scroll step p50 ${pct(steps, 0.5).toFixed(1)} / p95 ${stepP95.toFixed(1)} ms; ` +
       `jump ${jump.toFixed(1)} ms; sort ${sortMs.toFixed(0)} ms; search key→frame ${searchMs.keyFrame.toFixed(1)} ms, ` +
-      `key→filtered ${searchMs.applied.toFixed(0)} ms`,
-  });
-  expect(stepP95, `scroll step p95 ${stepP95.toFixed(1)} ms`).toBeLessThan(12);
+      `key→filtered ${searchMs.applied.toFixed(0)} ms`;
+  console.log(`[perf] ${perfLine}`);
+  test.info().annotations.push({ type: 'perf', description: perfLine });
+  expect(stepP95, `scroll step p50 ${pct(steps, 0.5).toFixed(1)} / p95 ${stepP95.toFixed(1)} ms`).toBeLessThan(12);
   expect(jump, `jump ${jump.toFixed(1)} ms`).toBeLessThan(35);
   expect(sortMs, `sort ${sortMs.toFixed(0)} ms`).toBeLessThan(250);
   expect(searchMs.keyFrame, `search key→frame ${searchMs.keyFrame.toFixed(1)} ms`).toBeLessThan(50);
@@ -245,10 +240,9 @@ test('40 × 50 KB documents: complex cells preview without serializing whole doc
   // Scroll the documents in and out: each step re-renders newly visible cells.
   const steps = [...(await scrollSteps(page, 120, 12)), ...(await scrollSteps(page, -120, 12))];
   const worst = Math.max(...steps);
-  test.info().annotations.push({
-    type: 'perf',
-    description: `fat docs: scroll-in step p50 ${pct(steps, 0.5).toFixed(1)} ms, max ${worst.toFixed(1)} ms`,
-  });
+  const fatLine = `fat docs: scroll-in step p50 ${pct(steps, 0.5).toFixed(1)} ms, max ${worst.toFixed(1)} ms`;
+  console.log(`[perf] ${fatLine}`);
+  test.info().annotations.push({ type: 'perf', description: fatLine });
   expect(pct(steps, 0.95), `fat-doc scroll step p95 ${pct(steps, 0.95).toFixed(1)} ms`).toBeLessThan(16);
   // The expand glyph is CSS, not an <svg> per cell.
   expect(await page.locator('.grid-scroll .cell-expand svg').count()).toBe(0);
