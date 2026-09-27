@@ -1,6 +1,8 @@
 <script lang="ts">
   // Analysis tab — multi-provider per-lens config, summarizer select, live polling.
   import { rel } from '../../lib/stores/now.svelte';
+  import type { Poller } from '../../lib/poll';
+  import { liveQuery } from '../../lib/live';
   import { untrack } from 'svelte';
   import { product } from '../../lib/stores/product.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -95,14 +97,14 @@
   });
 
   // ── Polling ────────────────────────────────────────────────────────────────────
-  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let pollTimer: Poller | null = null;
   const POLL_INTERVAL_MS = 3000;
   const POLL_MAX_MS = 120_000;
   let pollStartedAt = 0;
 
   function clearPoll(): void {
     if (pollTimer !== null) {
-      clearInterval(pollTimer);
+      pollTimer.stop();
       pollTimer = null;
     }
   }
@@ -131,8 +133,10 @@
     clearPoll();
     activeId = id;
     pollStartedAt = Date.now();
-    void pollOnce();
-    pollTimer = setInterval(() => { void pollOnce(); }, POLL_INTERVAL_MS);
+    // Immediate first poll, then a settle-then-schedule chain: `product_changed`
+    // (onSectionChange, below) settles it; 15 s safety net while events flow,
+    // POLL_INTERVAL_MS while the event socket is down.
+    pollTimer = liveQuery({ run: () => pollOnce(), on: [], fallbackMs: POLL_INTERVAL_MS, safetyMs: 15_000, jitter: 0 });
   }
 
   // Subscribe to `product_changed { section: 'analysis' }` WS events so we can

@@ -128,6 +128,10 @@ async fn handle_events(socket: WebSocket, ctx: ServerCtx, user: User, ui_capable
     let (mut sink, mut stream) = socket.split();
     let mut ping = tokio::time::interval(Duration::from_secs(30));
     ping.tick().await; // consume the immediate first tick
+    // Optional per-connection topic filter (`subscribe` frame): a socket that
+    // only needs a few event types (the menu-bar tray) never pays for the
+    // rest — they are dropped before the authorization check and serializing.
+    let mut topics: Option<std::collections::HashSet<String>> = None;
 
     // Role-check results cached per workspace for this connection's lifetime.
     let mut role_cache: HashMap<Id, bool> = HashMap::new();
@@ -140,6 +144,9 @@ async fn handle_events(socket: WebSocket, ctx: ServerCtx, user: User, ui_capable
         tokio::select! {
             event = events.recv() => match event {
                 Ok(event) => {
+                    if topics.as_ref().is_some_and(|t| !t.contains(event.type_name())) {
+                        continue;
+                    }
                     if !allowed(&ctx, &user, &event, &mut role_cache, &mut owner_cache).await {
                         continue;
                     }
@@ -183,6 +190,16 @@ async fn handle_events(socket: WebSocket, ctx: ServerCtx, user: User, ui_capable
                 // frames (parsed strictly, ≤ 64 KiB); everything else, and
                 // anything from a non-human socket, is ignored.
                 Some(Ok(Message::Text(text))) => {
+                    // `subscribe` (any socket, see ws.md): set/clear the topic
+                    // filter and acknowledge with this daemon's boot id.
+                    if let Some(filter) = parse_subscribe(text.as_str()) {
+                        let ack = subscribe_ack(filter.as_ref());
+                        topics = filter;
+                        if sink.send(Message::Text(ack.into())).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
                     if let Some(conn) = &ui_conn {
                         ctx.ui_bridge.on_client_frame(conn, text.as_str());
                     }
@@ -195,6 +212,47 @@ async fn handle_events(socket: WebSocket, ctx: ServerCtx, user: User, ui_capable
     if let Some(conn) = &ui_conn {
         ctx.ui_bridge.unregister(conn);
     }
+}
+
+/// Most topics one `subscribe` frame may name, and the longest topic accepted.
+const MAX_TOPICS: usize = 64;
+const MAX_TOPIC_LEN: usize = 64;
+
+/// Parse a client `{"type":"subscribe","topics":[…]}` frame. `None` = not a
+/// (valid) subscribe frame; `Some(None)` = clear the filter (an empty list);
+/// `Some(Some(set))` = deliver only these event types. Over-long lists or
+/// topics are rejected whole (the frame is then ignored).
+fn parse_subscribe(text: &str) -> Option<Option<std::collections::HashSet<String>>> {
+    #[derive(Deserialize)]
+    struct Subscribe {
+        #[serde(rename = "type")]
+        kind: String,
+        topics: Vec<String>,
+    }
+    let f: Subscribe = serde_json::from_str(text).ok()?;
+    if f.kind != "subscribe"
+        || f.topics.len() > MAX_TOPICS
+        || f.topics.iter().any(|t| t.is_empty() || t.len() > MAX_TOPIC_LEN)
+    {
+        return None;
+    }
+    Some((!f.topics.is_empty()).then(|| f.topics.into_iter().collect()))
+}
+
+/// `subscribe_ack`: the active filter (sorted; `null` = everything) and the
+/// daemon's boot id (a changed id means the daemon restarted).
+fn subscribe_ack(filter: Option<&std::collections::HashSet<String>>) -> String {
+    let topics = filter.map(|t| {
+        let mut v: Vec<&String> = t.iter().collect();
+        v.sort();
+        v
+    });
+    serde_json::json!({
+        "type": "subscribe_ack",
+        "topics": topics,
+        "boot_id": crate::transport::boot_id(),
+    })
+    .to_string()
 }
 
 /// Per-connection `resync` frame sent when the broadcast receiver lagged and
@@ -389,6 +447,19 @@ fn scope_of(event: &Event) -> Scope<'_> {
         // The Chromium download job is machine-wide, like the k8s installer.
         | Event::BrowserEngineInstallUpdated { .. }
         | Event::K8sMonitorCycle { .. } => Scope::Everyone,
+        // MCP approval invalidations go to the approval's workspace members.
+        // Workspace-less ones (and the row-less consume/expiry signals) carry
+        // only an opaque id + status — no title/tool/args — so every
+        // authenticated client may use them as a "refetch your list" cue; the
+        // REST list applies visibility. Same for the access-changed cue.
+        Event::McpApprovalChanged {
+            workspace_id: Some(workspace_id),
+            ..
+        } => Scope::Workspace(workspace_id),
+        Event::McpApprovalChanged {
+            workspace_id: None, ..
+        }
+        | Event::ResourceAccessChanged { .. } => Scope::Everyone,
         // Otto Assistant events are personal: the owner only (no root fan-out).
         Event::AssistantTurn { user_id, .. }
         | Event::AssistantTaskUpdate { user_id, .. }
@@ -396,7 +467,9 @@ fn scope_of(event: &Event) -> Scope<'_> {
         | Event::AssistantLimit { user_id, .. }
         // Agent UI control asks ONLY the session's owner (the one person who
         // can grant it) — not workspace admins, not root.
-        | Event::UiControlRequested { user_id, .. } => Scope::Owner(user_id),
+        | Event::UiControlRequested { user_id, .. }
+        // A notice-list change (read/dismiss) cues only the actor's windows.
+        | Event::NotificationsChanged { user_id } => Scope::Owner(user_id),
     }
 }
 
@@ -515,6 +588,60 @@ mod tests {
     use otto_core::{Error, Result};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    #[test]
+    fn subscribe_frame_parses_caps_and_clears() {
+        let set = parse_subscribe(r#"{"type":"subscribe","topics":["session_status","notification"]}"#)
+            .expect("valid frame")
+            .expect("a filter");
+        assert!(set.contains("session_status") && set.contains("notification"));
+        assert_eq!(set.len(), 2);
+        // An empty list clears the filter (all events again).
+        assert_eq!(parse_subscribe(r#"{"type":"subscribe","topics":[]}"#), Some(None));
+        // Not a subscribe frame / malformed / over the caps → ignored.
+        assert_eq!(parse_subscribe(r#"{"type":"hello","topics":["x"]}"#), None);
+        assert_eq!(parse_subscribe("not json"), None);
+        let many: Vec<String> = (0..=MAX_TOPICS).map(|i| format!("t{i}")).collect();
+        let frame = serde_json::json!({"type":"subscribe","topics":many}).to_string();
+        assert_eq!(parse_subscribe(&frame), None);
+        let long = "x".repeat(MAX_TOPIC_LEN + 1);
+        let frame = serde_json::json!({"type":"subscribe","topics":[long]}).to_string();
+        assert_eq!(parse_subscribe(&frame), None);
+    }
+
+    #[test]
+    fn subscribe_ack_carries_sorted_topics_and_boot_id() {
+        let set: std::collections::HashSet<String> =
+            ["notification", "mcp_approval_changed"].map(String::from).into();
+        let v: serde_json::Value = serde_json::from_str(&subscribe_ack(Some(&set))).unwrap();
+        assert_eq!(v["type"], "subscribe_ack");
+        assert_eq!(v["topics"], serde_json::json!(["mcp_approval_changed", "notification"]));
+        assert_eq!(v["boot_id"], crate::transport::boot_id());
+        let v: serde_json::Value = serde_json::from_str(&subscribe_ack(None)).unwrap();
+        assert!(v["topics"].is_null());
+    }
+
+    #[test]
+    fn transport_invalidation_events_are_scoped() {
+        let ws: Id = "ws1".into();
+        let scoped = Event::McpApprovalChanged {
+            approval_id: Some("a".into()),
+            workspace_id: Some(ws.clone()),
+            status: "pending".into(),
+        };
+        assert!(matches!(scope_of(&scoped), Scope::Workspace(w) if w == &ws));
+        let global = Event::McpApprovalChanged {
+            approval_id: None,
+            workspace_id: None,
+            status: "expired".into(),
+        };
+        assert!(matches!(scope_of(&global), Scope::Everyone));
+        let access = Event::ResourceAccessChanged { kind: None, resource_id: None };
+        assert!(matches!(scope_of(&access), Scope::Everyone));
+        let uid: Id = "u1".into();
+        let notes = Event::NotificationsChanged { user_id: uid.clone() };
+        assert!(matches!(scope_of(&notes), Scope::Owner(u) if u == &uid));
+    }
 
     #[test]
     fn resync_frame_shape() {

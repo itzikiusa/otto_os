@@ -5,6 +5,7 @@
   // refetches). The kubectl panel auto-continues: once `status.kubectl.installed`
   // flips, the page's `needsInstall` derived turns false and the module renders.
   import { untrack } from 'svelte';
+  import { liveQuery } from '../../lib/live';
   import { k8s } from '../../lib/stores/k8s.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -33,12 +34,15 @@
       : 'k9s is a terminal UI for Kubernetes. Otto can install it on demand (Homebrew when available, otherwise the GitHub release tarball into Otto’s bin directory).',
   );
 
-  // Poll while running. The dependency is the job state only; the fetch is
-  // untracked so the status refresh never re-arms the interval mid-tick.
+  // Refresh while running. The dependency is the job state only; the fetch is
+  // untracked so the status refresh never re-arms the chain mid-tick.
+  // `k8s_install_updated` already re-reads the status (k8s.applyEvent) while
+  // the event socket is up — this is a 10 s safety net then; POLL_MS only
+  // while it is down.
   $effect(() => {
     if (job?.state !== 'running') return;
-    const t = setInterval(() => untrack(() => void k8s.loadStatus()), POLL_MS);
-    return () => clearInterval(t);
+    const p = liveQuery({ run: () => untrack(() => k8s.loadStatus()), on: [], fallbackMs: POLL_MS, safetyMs: 10_000, immediate: false });
+    return () => p.stop();
   });
 
   // Announce the terminal states once.

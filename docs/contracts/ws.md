@@ -300,13 +300,15 @@ MCP token, a share link — are ignored, so such a socket is never a target):
 Server → that ONE connection:
 
 ```json
-{"type":"hello_ack","conn_id":"01J…"}
+{"type":"hello_ack","conn_id":"01J…","boot_id":"01J…"}
 {"type":"ui_command","id":"01J…","session_id":"…","agent":{"session_id":"…","title":"Fix the report","provider":"claude"},"command":"db_run_query","args":{"tab_id":"…"},"deadline_ms":45000}
 {"type":"ui_command_cancel","id":"01J…","reason":"timeout"}
 ```
 
 - `hello_ack` — `conn_id` is ephemeral (this socket only); the document sends it
   back as `X-Otto-Ui-Conn` on `POST /ui/commands/{id}/result|progress`.
+  `boot_id` (additive) is minted once per daemon process: a different value than
+  the one seen before means the daemon restarted (every ephemeral id is gone).
 - `ui_command` — `command` is the bare catalog name (no `ui_` prefix); `args`
   are validated against the entry's schema, with `connection_id` already
   resolved to the canonical id; `deadline_ms` is the DURATION (ms) the daemon
@@ -337,6 +339,33 @@ server sends that ONE connection:
   (Otto: `resyncAfterReconnect`, trailing-debounced 500 ms so a burst of lag
   frames costs one refetch). Older clients ignore the unknown `type`.
 
+### Topic subscription (per connection)
+
+Any `/ws/events` socket (not only a human's) may narrow what it receives — the
+menu-bar tray needs a handful of types and should not pay for the rest:
+
+```json
+{"type":"subscribe","topics":["session_status","notification","mcp_approval_changed"]}
+```
+
+- `topics` — `Event` `type` tags; at most 64, each 1–64 chars (a frame over the
+  caps, or malformed, is ignored whole). An **empty list clears** the filter.
+  Unknown tags are allowed (they simply never match).
+- The filter is applied **before** authorization and serialization; delivery
+  scopes are unchanged (a topic never widens what a socket may see).
+- Per-connection frames (`resync`, `hello_ack`, `ui_command`, …) are always
+  delivered.
+- The server answers that connection with the active filter (sorted; `null` =
+  everything) and the daemon's `boot_id`:
+
+```json
+{"type":"subscribe_ack","topics":["mcp_approval_changed","notification","session_status"],"boot_id":"01J…"}
+```
+
+A socket that only subscribes (never sends `hello`) is never an agent
+UI-control target. Older daemons ignore the frame (the client then just sees
+every event it is allowed). Otto: `ui/src/lib/topicSocket.ts` (the tray).
+
 ### Full event catalog
 
 Every variant of `otto_core::event::Event` (`crates/otto-core/src/event.rs`). The tag is
@@ -349,9 +378,10 @@ Delivery scope: **session-family events** (`session_status`, `session_created`,
 `api_history_appended`) reach
 every member with `viewer`+ on the event's `workspace_id` (root receives all);
 **owner-scoped events** (`assistant_turn`, `assistant_task_update`,
-`assistant_needs_you`, `assistant_limit`, `ui_control_requested`) reach only the
-user named by their `user_id` (not root);
-**broadcast events** (`Notice`) reach every authenticated client. There are 70
+`assistant_needs_you`, `assistant_limit`, `ui_control_requested`,
+`notifications_changed`) reach only the user named by their `user_id` (not root);
+**broadcast events** (`Notice`, `resource_access_changed`, a workspace-less
+`mcp_approval_changed`) reach every authenticated client. There are 73
 variants (the sections below cover them; each `## …`/`### …` heading is one
 feature family).
 
@@ -1312,3 +1342,42 @@ proceeds on Allow and otherwise answers `pending_grant`.
 
 `module` is the paneKey the command targets (`shell` for navigation), `command`
 the bare catalog name. Emitted by `crates/otto-server/src/ui_bridge.rs`.
+
+### `mcp_approval_changed` / `resource_access_changed` / `notifications_changed`
+
+Invalidation cues (TRANSPORT_PLAN stage 2) that let the UI drop its pollers:
+each says "the list you cached changed — refetch it"; none carries the data.
+
+```json
+{"type":"mcp_approval_changed","approval_id":"01J…","workspace_id":"01J…","status":"pending"}
+{"type":"mcp_approval_changed","status":"expired"}
+{"type":"resource_access_changed","kind":"connection","resource_id":"01J…"}
+{"type":"resource_access_changed"}
+{"type":"notifications_changed","user_id":"01J…"}
+```
+
+- `mcp_approval_changed` — an `mcp_approvals` row was created (`pending`),
+  decided (`approved` / `denied`), `consumed`, or a sweep `expired` some
+  (`approval_id` absent). Emitted from `McpApprovalRepo` itself (a process-wide
+  hook `ottod` points at the bus), so every writer — governance pipeline,
+  outward MCP, assistant, live browser — is covered. **Scope:** with
+  `workspace_id` → that workspace's members (viewer+); without (workspace-less
+  approvals, consume/expiry) → every authenticated client. It carries no
+  title/tool/args; `GET /mcp/approvals` applies visibility on the refetch.
+  Consumers: the tray, the MCP page badge + Approvals tab, Home.
+- `resource_access_changed` — a successful write that can change effective
+  access: `PUT /access/{kind}/{id}` (→ `kind` + `resource_id`), access
+  groups/roles, `/users/{id}/grants|plugin-grants`, `PATCH|DELETE /users/{id}`,
+  `/workspaces/{id}/members…` (→ no fields = "re-check everything"). Emitted by
+  an outer middleware (`crates/otto-server/src/live_events.rs`) after a 2xx.
+  **Scope:** every authenticated client (opaque ids only). Consumer: the UI's
+  access-decision cache (`resource-access.svelte.ts`), which re-checks the
+  named resource (or all) instead of every resource every 15 s.
+- `notifications_changed` — the caller's notice list changed without a new
+  notice (`POST /notifications/{id}/read`, `/notifications/read-all`,
+  `DELETE /notifications/{id}`, `DELETE /notifications`). **Owner-scoped**
+  (`user_id` only). Consumer: the tray's "needs you" glyph.
+
+Clients keep a slow safety poll (Otto: 5 min, `ui/src/lib/live.ts` `liveQuery`)
+and refetch after a reconnect / `resync`; while the socket is down they fall
+back to their old poll cadence.

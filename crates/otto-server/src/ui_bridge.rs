@@ -535,7 +535,15 @@ impl UiBridge {
                 });
                 let _ = entry
                     .tx
-                    .try_send(json!({"type":"hello_ack","conn_id":conn_id}).to_string());
+                    .try_send(
+                        json!({
+                            "type": "hello_ack",
+                            "conn_id": conn_id,
+                            // A changed boot id = the daemon restarted (ws.md).
+                            "boot_id": crate::transport::boot_id(),
+                        })
+                        .to_string(),
+                    );
             }
             ClientFrame::Presence(p) => {
                 if let Some(info) = entry.info.as_mut() {
@@ -1470,7 +1478,10 @@ mod tests {
                 "module":"connections","focused":true,"visible":true,"capabilities":["db_run_query"]}"#,
         );
         let ack: Value = serde_json::from_str(&rx.try_recv().expect("hello_ack")).unwrap();
-        assert_eq!(ack, json!({"type":"hello_ack","conn_id":conn}));
+        assert_eq!(
+            ack,
+            json!({"type":"hello_ack","conn_id":conn,"boot_id":crate::transport::boot_id()})
+        );
     }
 
     fn next_frame(rx: &mut mpsc::Receiver<String>) -> Value {

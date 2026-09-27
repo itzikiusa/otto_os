@@ -3,7 +3,8 @@
   // before/after diff vs the current source version, and allow publishing
   // back to Jira/Confluence.
   import { product } from '../../lib/stores/product.svelte';
-  import { pollWhileVisible, type Poller } from '../../lib/poll';
+  import type { Poller } from '../../lib/poll';
+  import { liveQuery } from '../../lib/live';
   import { toasts } from '../../lib/toast.svelte';
   import { renderMarkdown } from '../../lib/md';
   import DiffView from '../../lib/components/DiffView.svelte';
@@ -74,7 +75,9 @@
     pollStartedAt = Date.now();
     // Immediate first poll, then interval.
     // Immediate first poll, then every POLL_INTERVAL_MS after each settles.
-    pollTimer = pollWhileVisible(() => pollVersions(), { ms: POLL_INTERVAL_MS, jitter: 0 });
+    // `product_changed` (onSectionChange, below) settles it; this chain is
+    // a 15 s safety net while events flow, POLL_INTERVAL_MS while they cannot.
+    pollTimer = liveQuery({ run: () => pollVersions(), on: [], fallbackMs: POLL_INTERVAL_MS, safetyMs: 15_000, jitter: 0 });
   }
 
   // Clear on unmount or story change.

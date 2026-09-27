@@ -1,8 +1,9 @@
 <script lang="ts">
   // Menu-bar popover (`#/tray`, the desktop shell's `otto-tray` panel, 360×520
-  // over native popover vibrancy). Loaded once, hidden, at app start: it polls
+  // over native popover vibrancy). Loaded once, hidden, at app start: it reads
   // the existing endpoints — sessions, pending MCP approvals, notifications —
-  // lists Needs you · Running · Today, and reports the counts to the shell so
+  // again only when their events say they changed (see below), lists
+  // Needs you · Running · Today, and reports the counts to the shell so
   // the menu-bar glyph shows a dot while work runs and turns amber when
   // something needs you. Rows open the full Otto window at the right route.
   // The assistant's own threads/reminders arrive with the assistant API.
@@ -10,7 +11,9 @@
   import Icon from '../../lib/components/Icon.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import { api, isAbortError } from '../../lib/api/client';
-  import { pollWhileVisible, type Poller } from '../../lib/poll';
+  import type { Poller } from '../../lib/poll';
+  import { liveQuery } from '../../lib/live';
+  import { TopicSocket } from '../../lib/topicSocket';
   import type { McpApproval, Notice, Session, WorkspaceWithRole } from '../../lib/api/types';
   import { auth } from '../../lib/stores/auth.svelte';
   import { isForeground, SCRATCH_WORKSPACE_ID, visibleOnThisDevice } from '../../lib/stores/workspace.svelte';
@@ -38,12 +41,30 @@
     route: string;
   }
 
-  let running: RunningRow[] = $state([]);
-  let needs: NeedsRow[] = $state([]);
-  let today: Notice[] = $state([]);
-  let loaded = $state(false);
-  let loadError: string | null = $state(null);
+  // Event-fed (TRANSPORT_PLAN stage 2): the tray opens its OWN topic-filtered
+  // `/ws/events` socket (lib/topicSocket.ts) and re-reads a list only when an
+  // event says it changed — each list on its own, so a session flipping
+  // working↔idle costs one small query, not four. While the socket is up a
+  // 5-min safety net replaces the old 20 s × 4-request poll (which ran while
+  // hidden too); while it is down the old 20 s cadence comes back.
+  const TOPICS = [
+    'session_status',
+    'session_created',
+    'session_removed',
+    'notification',
+    'notifications_changed',
+    'mcp_approval_changed',
+  ] as const;
+
+  let workspaces: WorkspaceWithRole[] | null = $state(null);
+  let working: Session[] | null = $state(null);
+  let approvals: McpApproval[] | null = $state(null);
+  let notices: Notice[] | null = $state(null);
+  let errors: Record<string, string> = $state({});
   let askChord = $state('');
+
+  const loaded = $derived(workspaces !== null && working !== null && approvals !== null && notices !== null);
+  const loadError = $derived(Object.values(errors)[0] ?? null);
 
   function sessionIdOf(n: Notice): string | null {
     if (n.action?.type === 'open_session') return n.action.session_id;
@@ -77,78 +98,92 @@
       .join('');
   }
 
-  async function refresh(signal?: AbortSignal): Promise<boolean> {
-    if (auth.phase !== 'ready') return true;
-    try {
-      // ONE cross-workspace query for the working rows (`GET /sessions`,
-      // filtered in SQL) instead of one full-history list per workspace every
-      // tick — 16 of those at once starved the daemon's SQLite pool and every
-      // socket this window shares with the app. Failures propagate: an
-      // unavailable list must never read as "no agents need attention".
-      const [workspaces, working, approvals, notices] = await Promise.all([
-        api.bg.get<WorkspaceWithRole[]>('/workspaces', signal),
-        api.bg.get<Session[]>('/sessions?archived=false&status=working', signal),
-        api.bg.get<McpApproval[]>('/mcp/approvals?status=pending', signal),
-        api.bg.get<Notice[]>('/notifications', signal),
-      ]);
-      const names = new Map(workspaces.map((w) => [w.id, w.name]));
-      names.set(SCRATCH_WORKSPACE_ID, 'No workspace');
+  const running: RunningRow[] = $derived.by(() => {
+    if (!working) return [];
+    const names = new Map((workspaces ?? []).map((w) => [w.id, w.name]));
+    names.set(SCRATCH_WORKSPACE_ID, 'No workspace');
+    return working
+      .filter(visibleOnThisDevice)
+      .filter((s) => !s.archived && s.status === 'working' && isForeground(s))
+      .map((s) => ({ session: s, workspace: names.get(s.workspace_id) ?? '' }));
+  });
 
-      running = working
-        .filter(visibleOnThisDevice)
-        .filter((s) => !s.archived && s.status === 'working' && isForeground(s))
-        .map((s) => ({ session: s, workspace: names.get(s.workspace_id) ?? '' }));
+  const needs: NeedsRow[] = $derived.by(() => {
+    const list = notices ?? [];
+    const waiting = list.filter(
+      (n) => !n.read && n.kind === 'session' && (n.source_key ?? '').endsWith(':waiting'),
+    );
+    const alerts = list.filter((n) => !n.read && n.severity !== 'info' && !waiting.includes(n));
+    return [
+      ...(approvals ?? []).map((a) => ({
+        id: `approval:${a.id}`,
+        title: a.title,
+        detail: a.server_name ? `Approval · ${a.server_name}` : 'Approval',
+        icon: 'shield' as const,
+        route: 'mcp/activity',
+      })),
+      ...waiting.map((n) => {
+        const sid = sessionIdOf(n);
+        return {
+          id: `notice:${n.id}`,
+          title: n.title,
+          detail: 'Waiting for your input',
+          icon: 'terminal' as const,
+          route: sid ? `agents/${sid}` : 'agents',
+        };
+      }),
+      ...alerts.map((n) => {
+        const sid = sessionIdOf(n);
+        return {
+          id: `notice:${n.id}`,
+          title: n.title,
+          detail: n.body,
+          icon: 'warning' as const,
+          route: sid ? `agents/${sid}` : 'settings/notifications',
+        };
+      }),
+    ];
+  });
 
-      const waiting = notices.filter(
-        (n) => !n.read && n.kind === 'session' && (n.source_key ?? '').endsWith(':waiting'),
-      );
-      const alerts = notices.filter(
-        (n) => !n.read && n.severity !== 'info' && !waiting.includes(n),
-      );
-      needs = [
-        ...approvals.map((a) => ({
-          id: `approval:${a.id}`,
-          title: a.title,
-          detail: a.server_name ? `Approval · ${a.server_name}` : 'Approval',
-          icon: 'shield' as const,
-          route: 'mcp/activity',
-        })),
-        ...waiting.map((n) => {
-          const sid = sessionIdOf(n);
-          return {
-            id: `notice:${n.id}`,
-            title: n.title,
-            detail: 'Waiting for your input',
-            icon: 'terminal' as const,
-            route: sid ? `agents/${sid}` : 'agents',
-          };
-        }),
-        ...alerts.map((n) => {
-          const sid = sessionIdOf(n);
-          return {
-            id: `notice:${n.id}`,
-            title: n.title,
-            detail: n.body,
-            icon: 'warning' as const,
-            route: sid ? `agents/${sid}` : 'settings/notifications',
-          };
-        }),
-      ];
-      const needIds = new Set(needs.map((r) => r.id));
-      today = notices
-        .filter((n) => isToday(n.created_at) && !needIds.has(`notice:${n.id}`))
-        .slice(0, TODAY_MAX);
+  const today: Notice[] = $derived.by(() => {
+    const needIds = new Set(needs.map((r) => r.id));
+    return (notices ?? [])
+      .filter((n) => isToday(n.created_at) && !needIds.has(`notice:${n.id}`))
+      .slice(0, TODAY_MAX);
+  });
 
-      loadError = null;
-      loaded = true;
-      void tray.setStatus(running.length, needs.length).catch(() => {});
-      return true;
-    } catch (e) {
-      if (isAbortError(e)) return true;
-      loadError = e instanceof Error ? e.message : String(e);
-      return false;
-    }
+  // The glyph reports only a COMPLETE, error-free picture: an unavailable
+  // list must never read as "no agents need attention".
+  $effect(() => {
+    if (!loaded || loadError) return;
+    void tray.setStatus(running.length, needs.length).catch(() => {});
+  });
+
+  /** One list: fetch on the background lane, keep the last good value on
+   *  failure (the error shows with Retry). */
+  function part<T>(key: string, path: string, set: (v: T) => void) {
+    return async (signal: AbortSignal): Promise<boolean> => {
+      if (auth.phase !== 'ready') return true;
+      try {
+        set(await api.bg.get<T>(path, signal));
+        if (key in errors) {
+          const rest = { ...errors };
+          delete rest[key];
+          errors = rest;
+        }
+        return true;
+      } catch (e) {
+        if (isAbortError(e)) return true;
+        errors = { ...errors, [key]: e instanceof Error ? e.message : String(e) };
+        return false;
+      }
+    };
   }
+
+  let pollers: Poller[] = [];
+  const refreshAll = (): void => {
+    for (const p of pollers) p.now();
+  };
 
   function open(route?: string): void {
     void openInOtto(route).catch(() => {});
@@ -162,19 +197,29 @@
     if (e.key === 'Escape') void tray.hidePopover().catch(() => {});
   }
 
-  let poller: Poller | null = null;
-
-  // Poll only once signed in; the boot flow (App.svelte) moves the phase. The
-  // popover is hidden most of its life, yet its counts drive the menu-bar
-  // glyph — so it keeps polling while hidden (`hidden: POLL_MS`), but through
-  // the shared chain: never overlapping, backing off while the daemon fails.
+  // Live only once signed in; the boot flow (App.svelte) moves the phase.
   $effect(() => {
     if (auth.phase !== 'ready') return;
-    const p = pollWhileVisible((signal) => refresh(signal), { ms: POLL_MS, hidden: POLL_MS });
-    poller = p;
+    const sock = new TopicSocket(TOPICS);
+    sock.start();
+    // Hidden most of its life, yet its counts drive the menu-bar glyph: with
+    // the socket down it keeps the old cadence while hidden (`hidden`).
+    const q = (on: readonly string[], run: (s: AbortSignal) => Promise<boolean>) =>
+      liveQuery({ run, on, fallbackMs: POLL_MS, hidden: POLL_MS }, sock.registry);
+    const ps = [
+      q([], part<WorkspaceWithRole[]>('workspaces', '/workspaces', (v) => (workspaces = v))),
+      q(
+        ['session_status', 'session_created', 'session_removed'],
+        part<Session[]>('working', '/sessions?archived=false&status=working', (v) => (working = v)),
+      ),
+      q(['mcp_approval_changed'], part<McpApproval[]>('approvals', '/mcp/approvals?status=pending', (v) => (approvals = v))),
+      q(['notification', 'notifications_changed'], part<Notice[]>('notices', '/notifications', (v) => (notices = v))),
+    ];
+    pollers = ps;
     return () => {
-      p.stop();
-      if (poller === p) poller = null;
+      for (const p of ps) p.stop();
+      sock.stop();
+      if (pollers === ps) pollers = [];
     };
   });
 
@@ -188,7 +233,7 @@
       })
       .catch(() => {});
     let unlisten: (() => void) | null = null;
-    void onDesktopEvent('otto://tray-shown', () => poller?.now()).then((fn) => (unlisten = fn));
+    void onDesktopEvent('otto://tray-shown', refreshAll).then((fn) => (unlisten = fn));
     return () => unlisten?.();
   });
 </script>
@@ -214,7 +259,7 @@
       <div class="state" role="alert">
         <p>Couldn't refresh your work: {loadError}</p>
         {#if loaded}<p>Showing the last loaded activity.</p>{/if}
-        <button class="btn small" onclick={() => (poller ? poller.now() : void refresh())}>Retry</button>
+        <button class="btn small" onclick={refreshAll}>Retry</button>
       </div>
     {/if}
     {#if auth.phase === 'loading' || (auth.phase === 'ready' && !loaded && !loadError)}

@@ -23,6 +23,7 @@
     MissionFilterQuery,
   } from '../../lib/api/types';
   import { WORK_KINDS, WORK_STATUSES, RISK_LEVELS, KIND_LABEL, STATUS_LABEL, RISK_LABEL, fmtCost } from './lib';
+  import { liveDebounce } from './liveDebounce';
   import WorkItemList from './WorkItemList.svelte';
   import WorkGraphView from './WorkGraphView.svelte';
   import WorkItemDetail from './WorkItemDetail.svelte';
@@ -151,8 +152,14 @@
   // Live work_graph_updated ticks: only THIS workspace's (or a reconnect
   // resync, which carries none), debounced. Every tick from every workspace
   // used to refetch summary + 300 items + the graph, once per item transition.
+  // The max wait keeps a steady stream (a busy swarm) from starving the
+  // refresh forever — at most one reload per LIVE_MAX_WAIT_MS meanwhile (A7).
   const LIVE_DEBOUNCE_MS = 500;
-  let liveTimer: ReturnType<typeof setTimeout> | null = null;
+  const LIVE_MAX_WAIT_MS = 3000;
+  const live = liveDebounce(() => {
+    const cur = ws.currentId;
+    if (cur) void reload(cur);
+  }, LIVE_DEBOUNCE_MS, LIVE_MAX_WAIT_MS);
   let seenTick = untrack(() => missionControlBus.tick);
   $effect(() => {
     const tick = missionControlBus.tick;
@@ -161,16 +168,9 @@
     seenTick = tick;
     const id = untrack(() => ws.currentId);
     if (!id || (evWs !== '' && evWs !== id)) return;
-    if (liveTimer) clearTimeout(liveTimer);
-    liveTimer = setTimeout(() => {
-      liveTimer = null;
-      const cur = ws.currentId;
-      if (cur) void reload(cur);
-    }, LIVE_DEBOUNCE_MS);
+    live.trigger();
   });
-  onDestroy(() => {
-    if (liveTimer) clearTimeout(liveTimer);
-  });
+  onDestroy(() => live.cancel());
 
   async function runBackfill(): Promise<void> {
     const id = ws.currentId;

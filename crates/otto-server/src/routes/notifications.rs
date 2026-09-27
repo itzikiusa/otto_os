@@ -34,6 +34,14 @@ fn access_for(user: &User) -> NoticeAccess {
     }
 }
 
+/// Tell the caller's other windows (the menu-bar tray's glyph) that their
+/// notice list changed — reads/dismissals have no `notification` event.
+fn changed(ctx: &ServerCtx, user: &User) {
+    let _ = ctx.events.send(otto_core::event::Event::NotificationsChanged {
+        user_id: user.id.clone(),
+    });
+}
+
 /// `GET /api/v1/notifications`
 pub async fn list(
     State(ctx): State<ServerCtx>,
@@ -52,6 +60,7 @@ pub async fn mark_read(
     NotificationsRepo::new(ctx.pool.clone())
         .mark_read(&id, &access_for(&user))
         .await?;
+    changed(&ctx, &user);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -63,6 +72,7 @@ pub async fn mark_all_read(
     NotificationsRepo::new(ctx.pool.clone())
         .mark_all_read(&access_for(&user))
         .await?;
+    changed(&ctx, &user);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -75,6 +85,7 @@ pub async fn dismiss(
     NotificationsRepo::new(ctx.pool.clone())
         .dismiss(&id, &access_for(&user))
         .await?;
+    changed(&ctx, &user);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -86,6 +97,7 @@ pub async fn clear(
     NotificationsRepo::new(ctx.pool.clone())
         .clear(&access_for(&user))
         .await?;
+    changed(&ctx, &user);
     Ok(StatusCode::NO_CONTENT)
 }
 

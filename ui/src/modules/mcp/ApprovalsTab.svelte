@@ -15,7 +15,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { mcpCpApi } from '../../lib/api/mcp';
-  import { pollWhileVisible } from '../../lib/poll';
+  import { liveQuery } from '../../lib/live';
   import { toasts } from '../../lib/toast.svelte';
   import type { McpApproval } from '../../lib/api/types';
   import McpPill from './McpPill.svelte';
@@ -57,12 +57,13 @@
     }
   }
 
-  // Poll every 5 s through the shared chain (no overlapping loads, paused
-  // while the window is hidden with a catch-up load on return, backoff while
-  // failing), and immediately whenever the window regains focus.
+  // Event-fed: reload when `mcp_approval_changed` says the list changed (plus
+  // a safety net / reconnect resync); the old 5 s poll runs only while the
+  // event socket is down. Same chain rules (no overlap, paused while hidden,
+  // backoff), and immediately whenever the window regains focus.
   $effect(() => {
     void showAll; // re-load when the filter flips
-    const p = pollWhileVisible(() => load(), { ms: 5000 });
+    const p = liveQuery({ run: () => load(), on: ['mcp_approval_changed'], fallbackMs: 5000 });
     const onFocus = (): void => p.now();
     window.addEventListener('focus', onFocus);
     return () => {

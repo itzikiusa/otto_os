@@ -9,6 +9,8 @@
   import { skillReviewApi } from '../../lib/api/skillReview';
   import { skillLabApi } from '../../lib/api/skillLab';
   import { skillReviewBus } from '../../lib/events.svelte';
+  import type { Poller } from '../../lib/poll';
+  import { liveQuery } from '../../lib/live';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import SkillReviewAgents from './SkillReviewAgents.svelte';
@@ -237,16 +239,18 @@
     if (selected && skillReviewBus.reviewId === selected.id) void openReview(selected.id, true);
   });
 
-  // Fallback poll while the open review is running (covers dropped sockets).
-  let poll: ReturnType<typeof setInterval> | null = null;
+  // Fallback poll while the open review is running (covers dropped sockets):
+  // `skill_review_updated` (above) drives it while the event socket is up, so
+  // this is a 15 s safety net then; 2.5 s only while the socket is down.
+  let poll: Poller | null = null;
   $effect(() => {
-    if (poll) { clearInterval(poll); poll = null; }
+    if (poll) { poll.stop(); poll = null; }
     if (activeReview && selected) {
       const id = selected.id;
-      poll = setInterval(() => { void openReview(id, true); }, 2500);
+      poll = liveQuery({ run: () => openReview(id, true), on: [], fallbackMs: 2500, safetyMs: 15_000, immediate: false });
     }
   });
-  onDestroy(() => { detailGeneration++; if (poll) clearInterval(poll); });
+  onDestroy(() => { detailGeneration++; if (poll) poll.stop(); });
 
   // Load on workspace change.
   let loadedWs = '';

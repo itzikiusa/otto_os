@@ -23,7 +23,7 @@ connection library unusable for every non-root account.)
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
 | 1 | GET /api/v1/health | public | — | `{"ok":true}` |
-| 2 | GET /api/v1/meta | public | — | MetaResp |
+| 2 | GET /api/v1/meta | public | — | MetaResp (incl. `alt_loopback_base`, see "Transport lanes") |
 | 3 | POST /api/v1/onboarding/root | public, only while 0 users exist (else 409) | OnboardRootReq | LoginResp |
 | 4 | POST /api/v1/auth/login | public | LoginReq | LoginResp (401 on bad creds/disabled) |
 | 5 | POST /api/v1/auth/logout | member | — | 204 |
@@ -745,9 +745,10 @@ profile's `ws viewer`; queries that hit the live DB use `ws editor`.
 | POST /connections/{id}/db/close | ws viewer | — | `{"closed": true}` — tear down all server-side state for the connection: cancels its in-flight queries (engine-native, best-effort), evicts and closes the driver's cached connection pool, and drops the cached SSH tunnel (killing the ssh child). Idempotent — closing an already-closed/never-opened connection succeeds. Fired by the UI when a connection tab is closed. |
 | POST /connections/{id}/db/mcp-query | ws viewer | `{statement, max_rows?, node?}` | Read-only DB query for agents over MCP: writes/DDL are refused server-side **before any driver call** (403, `mcp_read_only:` prefix) independent of the write-guard — statements are split with the engine's own lexer and, on MySQL/PostgreSQL, a `SELECT`/`WITH`/`EXPLAIN`/`DESCRIBE` must parse as a provable read (unparseable = refused). What passes then **executes in the engine's native read-only mode** (MySQL `START TRANSACTION READ ONLY`, PostgreSQL `BEGIN READ ONLY`, ClickHouse HTTP `readonly=2`); MongoDB and Redis run only allow-listed read operations. Rows hard-capped at 200; PII masking forced on. Response: QueryResult. |
 | POST /connections/{id}/db/query-status | ws editor | `{query_id}` | `QueryStatus` — re-attach probe for a run whose HTTP wait was lost (queries with a `query_id` execute detached from their request): `{status:"running"}` while it executes, `{status:"done", result?/error?}` while the parked outcome is retained (TTL 10m, capped), `{status:"unknown"}` otherwise. Scoped to the connection — never serves another connection's outcome. |
-| POST /connections/{id}/db/completion | ws viewer | `{prefix, suffix?, database?, node?}` | Context-aware completion items (`{items:[DbCompletionItem]}`). The daemon parses `prefix` (text before the cursor) + `suffix` (text after, to resolve a `FROM` that follows the cursor) to decide intent — tables after `FROM`/`JOIN`, columns after `WHERE`/`AND`/`alias.`, Mongo collections/methods/field-keys (incl. embedded `x.a`). Each item carries a `score` (→ CodeMirror `boost`) so **index columns/fields rank first**, then the rest of the schema. Backed by a per-connection schema snapshot **cached until refresh** (see below; ~5-min TTL safety net). |
+| POST /connections/{id}/db/completion | ws viewer | `{prefix, suffix?, database?, node?}` | Context-aware completion items (`{items:[DbCompletionItem]}`). The daemon parses `prefix` (text before the cursor) + `suffix` (text after, to resolve a `FROM` that follows the cursor) to decide intent — tables after `FROM`/`JOIN`, columns after `WHERE`/`AND`/`alias.`, Mongo collections/methods/field-keys (incl. embedded `x.a`). Each item carries a `score` (→ CodeMirror `boost`) so **index columns/fields rank first**, then the rest of the schema. Items that can't match the identifier being typed at the end of `prefix` (an in-order, case-insensitive subsequence test — a superset of the editor's fuzzy match) are dropped, and at most **1,500** items are returned (best score first); when that cap clips the list the response carries `truncated: true` (omitted otherwise) and the editor must re-ask on the next keystroke instead of filtering the clipped list. Access-enforced connections get the same context-aware, ranked items, built from the caller's authorized schema graph (cached ~60 s per user + schema). Backed by a per-connection schema snapshot **cached until refresh** (see below; ~5-min TTL safety net). |
 | POST /connections/{id}/db/completion/refresh | ws viewer | `{}` | 204 — drop the connection's cached completion snapshot so the next completion re-introspects. Wired to the UI "Refresh schema" action. No-op for engines without a snapshot cache (Redis). |
-| GET /connections/{id}/db/history | ws viewer | — | recent query history |
+| GET /connections/{id}/db/history | ws viewer | `?limit=` (1–1000, default 100) | recent query history (`DbHistoryEntry[]`, newest first; non-root callers see only their own rows). `statement` is a **preview clipped to 16 KiB**; a clipped row also carries `statement_len` (the full length, chars) — fetch the whole text by id. Rows are never pruned by this. A file import records **one summary row** (`import N row(s) in B batch(es) → <table>`), not one per INSERT batch. |
+| GET /connections/{id}/db/history/{entry} | ws viewer | — | one `DbHistoryEntry` with its FULL `statement` (no `statement_len`). 404 when the row belongs to another connection or (non-root) another user. |
 | GET /db/mongosh | member (Database:View) | — | `MongoshInfo {available, version?}` — whether the `mongosh` CLI (used to run pasted mongosh **scripts** and by Mongo terminal sessions) is on the daemon's PATH; probed via `mongosh --version`, cached ~60s. The query editor calls this when it detects a script so a missing binary is an inline install hint before the run |
 | POST /connections/{id}/db/explain-with-agent | ws editor | `{sql}` | AI explanation of a query (spawns an agent) |
 | POST /connections/{id}/db/export | ws editor | `{statement, format?, node?}` | **Uncapped, streamed** CSV/JSON browser download (`Content-Disposition: attachment`). Bytes are produced by the driver's streaming exporter and piped straight to the response body — no row cap and no full-result buffering (fixes the prior silent truncation at the driver default). `format`: `csv` (header + rows) or `json` (array of objects). A write/DDL on a guarded connection is rejected up front. If the driver errors mid-stream the response body terminates early (truncated download + connection reset) rather than reporting success. |
@@ -875,7 +876,7 @@ Next produced. An undecodable cursor is a `400`. `next_cursor` is omitted from
 the wire when absent (back-compat); every other engine ignores `cursor`.
 
 `QueryResult.truncated_reason?: "bytes"` — **response byte budget (MySQL,
-Postgres).** Besides the row cap (`max_rows`, up to "All" = 1,000,000), a read
+Postgres, ClickHouse, MongoDB `find`/`aggregate`).** Besides the row cap (`max_rows`, up to "All" = 1,000,000), a read
 stops once the response's estimated JSON size passes **32 MiB** (summed over
 every result set of a batch; at least one row is always kept). It is then
 `truncated: true` with `truncated_reason: "bytes"`; a row-cap clip leaves
@@ -5295,3 +5296,27 @@ outside `skill_allowlist` (up to 16 × 8 KiB bodies and a 100-entry review catal
 This does not expand auto-apply authorization: edits to unallowlisted skills
 remain `pending`. Up to 64 safe skill names persist with each source checkpoint
 so subsequent corrections can refer to an earlier skill invocation.
+
+### Transport lanes (2026-09, TRANSPORT_PLAN stages 1–2)
+
+The desktop webview reaches the daemon over HTTP/1.1, and the engine pools ~6
+sockets per HOST for every Otto window together. Two additive changes keep a
+background poll or a slow call from queueing what the user just clicked:
+
+- **Second loopback host.** `ottod` also binds `[::1]:<port>` (still
+  loopback-only; fail-soft; `OTTO_ALT_LOOPBACK=0` disables it) and `GET /meta`
+  adds `alt_loopback_base: "http://localhost:<port>" | null`. It is non-null
+  only when the daemon holds BOTH `127.0.0.1` and `[::1]` on the port, so
+  `localhost` reaches this daemon whichever address the resolver picks (`localhost`
+  rather than `[::1]`: CSP host-sources cannot express IPv6 literals, and the
+  desktop CSP already allows `localhost:7700`). Every route, auth rule, CORS
+  origin check and body limit is identical on both hosts — it is the same router.
+  The UI (`ui/src/lib/api/client.ts`) sends its `bg` lane (pollers) and `long`
+  lane (`LONG_PATHS`: remote git fetch/pull/push, provider PR routes, provider-CLI
+  auth status, `/sessions/{id}/wait`, `/k8s/*`, `/aws/*`, Kafka sub-routes, DB
+  query/NL/assist/explain) there, only when its interactive base is
+  `127.0.0.1` on the same port; a network failure on the alias drops it (a GET
+  is retried once on the interactive base).
+- **Events instead of polls.** New invalidation events `mcp_approval_changed`,
+  `resource_access_changed`, `notifications_changed`, the `/ws/events`
+  `subscribe` topic filter and `boot_id` (`ws.md`). No REST shape changed.

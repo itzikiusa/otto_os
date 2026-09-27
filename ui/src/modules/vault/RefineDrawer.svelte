@@ -8,6 +8,8 @@
   // The drawer is remounted per note ({#key vault.notePath} in NoteView), so
   // on mount we reattach to any session an earlier open of this note started.
   import { onMount } from 'svelte';
+  import type { Poller } from '../../lib/poll';
+  import { liveQuery } from '../../lib/live';
   import Icon from '../../lib/components/Icon.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import { refineNote, refineSession, resetRefineSession } from '../../lib/api/vault';
@@ -28,12 +30,15 @@
   const providers = $derived(agentProviders());
 
   // -- session polling (starts ~800ms after the POST goes out) -----------------
+  // Event-fed: the refine agent's session announces itself (`session_created`);
+  // a disciplined 1 s poll (in-flight guard, hidden pause) only while the
+  // event socket is down, a 10 s safety net otherwise.
   let pollDelay: ReturnType<typeof setTimeout> | null = null;
-  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let pollTimer: Poller | null = null;
 
   function stopPolling(): void {
     if (pollDelay) clearTimeout(pollDelay);
-    if (pollTimer) clearInterval(pollTimer);
+    pollTimer?.stop();
     pollDelay = null;
     pollTimer = null;
   }
@@ -41,7 +46,7 @@
   function startSessionPoll(): void {
     stopPolling();
     pollDelay = setTimeout(() => {
-      pollTimer = setInterval(() => void checkSession(), 1000);
+      pollTimer = liveQuery({ run: () => checkSession(), on: ['session_created'], fallbackMs: 1000, safetyMs: 10_000 });
     }, 800);
   }
 

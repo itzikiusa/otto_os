@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { pollWhileVisible } from '../../lib/poll';
+  import { liveQuery } from '../../lib/live';
   import PathField from '../../lib/components/PathField.svelte';
   // Workflows: build automations by *describing* them (agent mode) or by hand
   // on the canvas. Left = generate + list + running; center = node-graph editor + run.
@@ -218,15 +218,17 @@
     });
   });
 
-  // (2) Guaranteed: a slow safety poll while the viewed run is non-terminal,
-  // so the view still converges with no WS connection at all.
+  // (2) Guaranteed: a safety poll while the viewed run is non-terminal, so
+  // the view still converges with no WS connection at all — 2.5 s while the
+  // event socket is down, 15 s while `workflow_run_updated` flows (and a
+  // refetch after a reconnect/lag resync). Shared chain: no overlap, paused
+  // while hidden.
   $effect(() => {
     const cur = run;
     if (!cur) return;
     if (cur.status !== 'pending' && cur.status !== 'running') return;
     const id = cur.id;
-    // Shared poll chain: no overlapping refetch, paused while hidden.
-    const p = pollWhileVisible(() => refetchRun(id), { ms: 2500, immediate: false });
+    const p = liveQuery({ run: () => refetchRun(id), on: [], fallbackMs: 2500, safetyMs: 15_000, immediate: false });
     return () => p.stop();
   });
 

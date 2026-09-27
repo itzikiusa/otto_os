@@ -11,7 +11,7 @@
   import { router } from '../../../lib/router.svelte';
   import type { InsightReport } from '../../../lib/api/types';
   import type { HomeBox } from '../home.svelte';
-  import { poll, type Poller } from './poll';
+  import { livePoll, type Poller } from './poll';
 
   interface Props {
     box: HomeBox;
@@ -39,7 +39,8 @@
 
   let poller: Poller | null = null;
   $effect(() => {
-    poller = poll(load, 300_000);
+    // A finished report arrives as `insight_ready`; 300 s only while offline.
+    poller = livePoll(load, 300_000, ['insight_ready']);
     return () => poller?.stop();
   });
   $effect(() => {

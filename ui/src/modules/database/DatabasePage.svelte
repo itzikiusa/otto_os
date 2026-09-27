@@ -27,6 +27,7 @@
   import ClusterForm from '../brokers/ClusterForm.svelte';
   import ClusterViewer from '../brokers/ClusterViewer.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
+  import { PRIMARY_SCROLLBACK } from '../../lib/components/termFlow';
   import ImportDialog from './ImportDialog.svelte';
   import ExportDialog from './ExportDialog.svelte';
   import { stmtPreview } from './sql-util';
@@ -1174,7 +1175,7 @@
         {#if activeSsh}
           <div class="term-pane">
             {#key activeSsh.sessionId}
-              <Terminal sessionId={activeSsh.sessionId} />
+              <Terminal sessionId={activeSsh.sessionId} scrollback={PRIMARY_SCROLLBACK} />
             {/key}
           </div>
         {:else}

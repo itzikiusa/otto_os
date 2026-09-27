@@ -91,23 +91,108 @@ export function setToken(token: string | null): void {
  *  page failing with scattered error toasts instead of returning to login. */
 export const UNAUTHORIZED_EVENT = 'otto:unauthorized';
 
+// ---------------------------------------------------------------------------
+// Request lanes (TRANSPORT_PLAN §3d/§4). The webview reaches the daemon over
+// HTTP/1.1 and the engine keeps ~6 sockets per HOST, shared by EVERY Otto
+// window (one network process). A poll or a 20 s git fetch holding those
+// sockets made a click wait for seconds ("barely usable while agents work").
+//
+//  - `int`  — what the user just did; always on the interactive base.
+//  - `bg`   — pollers and safety resyncs (`api.bg.*`), ≤ BG_MAX per window.
+//  - `long` — calls known to hold a socket for seconds (remote git, provider
+//             PRs, CLI auth checks, kubectl/Kafka/AWS, DB queries, agent
+//             turns, `/wait`): `api.long.*`, or any path in LONG_PATHS.
+//
+// When the daemon advertises `alt_loopback_base` (`/meta`; it binds BOTH
+// loopback addresses) `bg`/`long` go to that second host — a physically
+// separate socket pool, across all windows — and `127.0.0.1` stays free for
+// `int`. Without it (remote mode, IPv6 off, older daemon) every lane uses the
+// one base, exactly as before.
+// ---------------------------------------------------------------------------
+
+export type Lane = 'int' | 'bg' | 'long';
+
+/** Paths that hold a socket for seconds. Matched against the `/api/v1`-relative
+ *  path (query included); a caller can still force a lane explicitly. */
+export const LONG_PATHS: readonly RegExp[] = [
+  /^\/repos\/[^/]+\/(fetch|pull|push)([/?]|$)/,
+  /^\/repos\/[^/]+\/(prs|collaborators)([/?]|$)/,
+  /^\/auth\/provider-accounts\/[^/]+\/status([/?]|$)/,
+  /^\/sessions\/[^/]+\/wait([/?]|$)/,
+  /(^|\/)k8s\//,
+  /(^|\/)aws\//,
+  /^\/brokers\/clusters\/[^/]+\/[^?]/, // every sub-route dials Kafka
+  /^\/connections\/[^/]+\/db\/(query|nl-to-sql|assist|explain)([/?]|$)/,
+];
+
+export function isLongPath(path: string): boolean {
+  return LONG_PATHS.some((re) => re.test(path));
+}
+
+let altBase: string | null = null;
+
+/** Adopt (or drop) the daemon's advertised second loopback base. Accepted only
+ *  when the interactive base is the loopback IP, the alias is a loopback host
+ *  on the SAME port and a DIFFERENT host (else it is not a separate pool). */
+export function setAltLoopbackBase(alt: string | null | undefined): void {
+  altBase = null;
+  if (!alt) return;
+  try {
+    const b = new URL(baseUrl());
+    const a = new URL(alt);
+    const loopback = ['localhost', '127.0.0.1', '[::1]'];
+    if (
+      a.protocol === b.protocol &&
+      b.hostname === '127.0.0.1' &&
+      loopback.includes(a.hostname) &&
+      a.hostname !== b.hostname &&
+      a.port === b.port
+    ) {
+      altBase = `${a.protocol}//${a.host}`;
+    }
+  } catch {
+    /* malformed — single-host transport */
+  }
+}
+
+/** The base a lane's requests go to (exported for tests / diagnostics). */
+export function laneBase(lane: Lane): string {
+  return lane !== 'int' && altBase ? altBase : baseUrl();
+}
+
 async function request<T>(
   method: string,
   path: string,
   body?: unknown,
   signal?: AbortSignal,
+  lane?: Lane,
 ): Promise<T> {
   const headers: Record<string, string> = {};
   const token = getToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
 
-  const resp = await fetch(`${baseUrl()}/api/v1${path}`, {
+  const effLane: Lane = lane ?? (isLongPath(path) ? 'long' : 'int');
+  const init: RequestInit = {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
     signal,
-  });
+  };
+  const base = laneBase(effLane);
+  let resp: Response;
+  try {
+    resp = await fetch(`${base}/api/v1${path}`, init);
+  } catch (e) {
+    // The alias host failed at the NETWORK level (not an HTTP error, not an
+    // abort): drop it, so a broken alias degrades to today's single-host
+    // behaviour instead of an outage. Only a GET is retried — a write may have
+    // reached the daemon before the connection broke.
+    if (base === baseUrl() || isAbortError(e)) throw e;
+    altBase = null;
+    if (method !== 'GET') throw e;
+    resp = await fetch(`${baseUrl()}/api/v1${path}`, init);
+  }
 
   // Surface git-provider outages (the daemon maps provider failures to a 502)
   // — but ONLY from provider-backed endpoints. A 5xx anywhere else (local git,
@@ -136,13 +221,13 @@ async function request<T>(
   return text.trim() === '' ? undefined as T : JSON.parse(text) as T;
 }
 
-// Background-request lane. The webview reaches the daemon over HTTP/1.1 and
-// WebKit opens at most 6 connections per host, shared by every fetch in this
-// window. Pollers opt in via `api.bg.get`: at most BG_MAX of them are on the
-// wire at once, so at least 3 sockets always stay free for what the user just
-// clicked. Interactive calls (`api.get` & co.) never wait on this lane. It is
-// per-window JS state — the tray/side-pane windows each get their own lane.
-const BG_MAX = 3;
+// Background-request lane. Pollers use `api.bg.get`: at most BG_MAX of them
+// are on the wire at once per window, so background work can never take the
+// whole pool — on the alias host that leaves room for `long` calls (three
+// windows × BG_MAX still < 6); without an alias, for interactive ones.
+// Interactive calls (`api.get` & co.) never wait on this lane. The count is
+// per-window JS state; the socket pool itself is shared by every window.
+const BG_MAX = 2;
 let bgActive = 0;
 const bgWaiters: (() => void)[] = [];
 
@@ -181,10 +266,20 @@ async function withBgSlot<T>(run: () => Promise<T>, signal?: AbortSignal): Promi
 }
 
 export const api = {
-  /** Background (poll) lane — see {@link withBgSlot}. GET only: pollers read. */
+  /** Background (poll) lane — see {@link withBgSlot}. */
   bg: {
     get: <T>(path: string, signal?: AbortSignal) =>
-      withBgSlot(() => request<T>('GET', path, undefined, signal), signal),
+      withBgSlot(() => request<T>('GET', path, undefined, signal, 'bg'), signal),
+    /** A background WRITE that tolerates delay (a keep-alive ping). */
+    post: <T>(path: string, body?: unknown, signal?: AbortSignal) =>
+      withBgSlot(() => request<T>('POST', path, body, signal, 'bg'), signal),
+  },
+  /** Known-slow lane (remote git, CLI checks, infra sweeps): the alias host
+   *  when advertised, never queued in JS. Paths in LONG_PATHS get it anyway. */
+  long: {
+    get: <T>(path: string, signal?: AbortSignal) => request<T>('GET', path, undefined, signal, 'long'),
+    post: <T>(path: string, body?: unknown, signal?: AbortSignal) =>
+      request<T>('POST', path, body, signal, 'long'),
   },
   get: <T>(path: string, signal?: AbortSignal) => request<T>('GET', path, undefined, signal),
   post: <T>(path: string, body?: unknown, signal?: AbortSignal) =>

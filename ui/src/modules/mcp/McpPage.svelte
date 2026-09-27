@@ -8,7 +8,7 @@
   import { router } from '../../lib/router.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { mcpCpApi } from '../../lib/api/mcp';
-  import { pollWhileVisible } from '../../lib/poll';
+  import { liveQuery } from '../../lib/live';
   import { loadErrorText } from '../../lib/loadError';
   import type { McpServerDetail } from '../../lib/api/types';
   import ServersTab from './ServersTab.svelte';
@@ -94,10 +94,10 @@
     void loadServers();
   });
 
-  // Pending-approvals badge: shared poll chain (in-flight guard, paused while
-  // hidden, jittered) instead of a bare 15 s interval.
+  // Pending-approvals badge: event-fed (`mcp_approval_changed`); the 15 s
+  // poll chain only while the event socket is down.
   $effect(() => {
-    const p = pollWhileVisible(() => loadPending(), { ms: 15_000 });
+    const p = liveQuery({ run: () => loadPending(), on: ['mcp_approval_changed'], fallbackMs: 15_000 });
     return () => p.stop();
   });
 
