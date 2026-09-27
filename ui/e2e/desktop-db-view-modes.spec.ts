@@ -161,7 +161,7 @@ test('pinned tab survives close-all', async ({ page }) => {
   await page.waitForTimeout(300);
   await tabs.first().click({ button: 'right' });
   await expect(page.locator('.ctx-menu')).toBeVisible();
-  await page.locator('.ctx-item', { hasText: /^Pin tab$/ }).click();
+  await page.getByRole('menuitem', { name: 'Pin tab', exact: true }).click();
   await expect(page.locator('.ctx-menu')).toBeHidden();
   await expect(tabs.first().locator('.qe-tab-pin')).toBeVisible();
 
@@ -183,10 +183,10 @@ test('pinned tab survives close-all', async ({ page }) => {
   // "Close all" from the unpinned tab's menu keeps the pinned one.
   await tabs.nth(1).click({ button: 'right' });
   await expect(page.locator('.ctx-menu')).toBeVisible();
-  await expect(page.locator('.ctx-item', { hasText: /^Close all/ })).toHaveText(
+  await expect(page.getByRole('menuitem', { name: /^Close all/ })).toHaveText(
     /keeps pinned tabs/,
   );
-  await page.locator('.ctx-item', { hasText: /^Close all/ }).click();
+  await page.getByRole('menuitem', { name: /^Close all/ }).click();
   await expect(page.locator('.ctx-menu')).toBeHidden();
 
   // Only the pinned tab is left, still pinned, still not closable.
