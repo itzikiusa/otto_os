@@ -284,3 +284,76 @@ test('a binding-only publisher replacement triggers forwarding to another guest'
   }
   assert.equal(viewer.senders.length, 2, 'relay replacements keep a bounded audio/video sender pair');
 });
+
+test('offer glare still accepts ICE for the current remote generation', async t => {
+  const fixture = mediaPeerFixture(), added: string[] = [], errors: (string | null)[] = [];
+  Object.assign(fixture.pc, {
+    remoteDescription: {type: 'answer', sdp: 'v=0\r\na=ice-ufrag:current\r\n'},
+    async setRemoteDescription() {fixture.pc.signalingState = 'stable';},
+    async addIceCandidate(candidate: RTCIceCandidateInit) {
+      if (candidate.usernameFragment !== 'current') throw new Error('Unknown ICE generation');
+      added.push(candidate.usernameFragment);
+    },
+  });
+  const client = new RoomMediaClient({memberId: 'guest', send: () => {}, environment: fixture.environment, onState: state => errors.push(state.error)});
+  t.after(() => client.dispose());
+  client.update({...snapshot, member_id: 'guest', members: [{...snapshot.members![0], audio_joined: true}, guestMember]});
+  await client.joinAudio(); await flushMedia();
+  fixture.pc.signalingState = 'have-local-offer';
+  const signal = (media: unknown) => client.handleEvent({type: 'signal', from: 'host', to: 'guest', generation: 1, media});
+  signal({version: 1, kind: 'description', description: {type: 'offer', sdp: 'v=0\r\na=ice-ufrag:ignored\r\n'}, bindings: []});
+  signal({version: 1, kind: 'ice', candidate: {candidate: 'candidate:current', usernameFragment: 'current', sdpMid: '0'}});
+  signal({version: 1, kind: 'ice', candidate: {candidate: 'candidate:ignored', usernameFragment: 'ignored', sdpMid: '0'}});
+  await flushMedia();
+  assert.deepEqual(added, ['current'], 'ignoring an offer must not discard candidates matching the accepted remote description');
+  assert.equal(errors.some(Boolean), false, 'unknown candidates from the ignored offer remain harmless');
+  signal({version: 1, kind: 'description', description: {type: 'answer', sdp: 'v=0\r\na=ice-ufrag:current\r\n'}, bindings: []});
+  signal({version: 1, kind: 'ice', candidate: {candidate: 'candidate:unrelated', usernameFragment: 'unrelated', sdpMid: '0'}});
+  await flushMedia();
+  assert.equal(errors.some(Boolean), true, 'an unrelated candidate outside ignored-offer glare must still report negotiation failure');
+});
+
+test('initial ignored-offer candidates are not replayed into a different accepted generation', async t => {
+  const fixture = mediaPeerFixture(), attempted: string[] = [], errors: (string | null)[] = [];
+  Object.assign(fixture.pc, {remoteDescription: null as RTCSessionDescriptionInit | null,
+    async setRemoteDescription(description: RTCSessionDescriptionInit) {Object.assign(fixture.pc, {remoteDescription: description, signalingState: 'stable'});},
+    async addIceCandidate(candidate: RTCIceCandidateInit) {attempted.push(candidate.usernameFragment!); throw new Error('Unknown ICE generation');},
+  });
+  const client = new RoomMediaClient({memberId: 'guest', send: () => {}, environment: fixture.environment, onState: state => errors.push(state.error)});
+  t.after(() => client.dispose());
+  client.update({...snapshot, member_id: 'guest', members: [{...snapshot.members![0], audio_joined: true}, guestMember]});
+  await client.joinAudio(); await flushMedia(); fixture.pc.signalingState = 'have-local-offer';
+  const signal = (media: unknown) => client.handleEvent({type: 'signal', from: 'host', to: 'guest', generation: 1, media});
+  signal({version: 1, kind: 'description', description: {type: 'offer', sdp: 'v=0\r\na=ice-ufrag:ignored\r\n'}, bindings: []});
+  signal({version: 1, kind: 'ice', candidate: {candidate: 'candidate:ignored', usernameFragment: 'ignored', sdpMid: '0'}});
+  signal({version: 1, kind: 'description', description: {type: 'answer', sdp: 'v=0\r\na=ice-ufrag:accepted\r\n'}, bindings: []});
+  await flushMedia();
+  assert.deepEqual(attempted, []);
+  assert.equal(errors.some(Boolean), false);
+});
+
+test('negotiation chooses the local description after a pending remote offer changes signaling state', async t => {
+  const fixture = mediaPeerFixture(), errors: (string | null)[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => {release = resolve;});
+  let chosen: RTCSdpType | undefined;
+  Object.assign(fixture.pc, {
+    localDescription: null,
+    async createOffer() {await gate; return {type: 'offer', sdp: 'v=0\r\n'};},
+    async setLocalDescription(description?: RTCSessionDescriptionInit) {
+      await gate;
+      const type = description?.type ?? (fixture.pc.signalingState === 'have-remote-offer' ? 'answer' : 'offer');
+      if (type === 'offer' && fixture.pc.signalingState === 'have-remote-offer') throw new Error('Cannot set an offer while a remote offer is pending');
+      chosen = type;
+      Object.assign(fixture.pc, {localDescription: {toJSON: () => ({type, sdp: 'v=0\r\n'})}});
+    },
+  });
+  const client = new RoomMediaClient({memberId: 'host', send: () => {}, environment: fixture.environment, onState: state => errors.push(state.error)});
+  t.after(() => client.dispose());
+  client.update({...snapshot, members: [{...snapshot.members![0], audio_joined: true}, guestMember]});
+  await client.joinAudio(); await flushMedia();
+  const negotiation = (fixture.pc as unknown as {onnegotiationneeded(): Promise<void>}).onnegotiationneeded();
+  fixture.pc.signalingState = 'have-remote-offer'; release(); await negotiation;
+  assert.equal(errors.some(Boolean), false, 'remote-offer overlap must not raise the observed InvalidStateError');
+  assert.equal(chosen, 'answer');
+});

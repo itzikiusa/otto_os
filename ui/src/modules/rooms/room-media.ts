@@ -324,9 +324,12 @@ export class RoomMediaClient {
       pc.onicecandidate = e => this.signal(peer, { version: 1, kind: 'ice', candidate: e.candidate?.toJSON() ?? null });
       pc.onnegotiationneeded = async () => {
         try {
+          if (this.peers.get(peer.id) !== peer) return;
           peer.makingOffer = true;
-          if (pc.signalingState !== 'stable') return;
-          await pc.setLocalDescription(await pc.createOffer());
+          // Let the browser choose and apply the description in one operation;
+          // a remote offer may arrive while an explicit createOffer is pending.
+          await pc.setLocalDescription();
+          if (this.peers.get(peer.id) !== peer) return;
           if (pc.localDescription) this.signal(peer, { version: 1, kind: 'description', description: pc.localDescription.toJSON(), bindings: this.bindings(peer) });
         } catch { if (this.peers.get(peer.id) === peer) this.error('Media negotiation could not start. Check the host connection setup.'); }
         finally { peer.makingOffer = false; }
@@ -354,11 +357,19 @@ export class RoomMediaClient {
   private async applySignal(peer: Peer, media: Exclude<MediaEnvelope, { kind: 'demand' }>): Promise<void> {
     if (this.peers.get(peer.id) !== peer) return;
     if (media.kind === 'ice') {
-      if (peer.ignoreOffer) return;
       if (!peer.pc.remoteDescription) {
+        // No accepted generation exists yet. Do not replay ignored-offer ICE
+        // after an answer installs an unrelated generation.
+        if (peer.ignoreOffer) return;
         if (peer.pendingIce.length >= 128) { this.closePeer(peer.id); return; }
         peer.pendingIce.push(media.candidate);
-      } else await peer.pc.addIceCandidate(media.candidate ?? undefined);
+      } else {
+        // A colliding offer can reuse the accepted ICE generation. Attempt its
+        // candidates; only rejected candidates from the ignored offer are safe
+        // to suppress, otherwise the viable connection path may be discarded.
+        try { await peer.pc.addIceCandidate(media.candidate ?? undefined); }
+        catch (error) { if (!peer.ignoreOffer) throw error; }
+      }
       return;
     }
     peer.bindings = media.bindings.filter(b => {
@@ -375,14 +386,18 @@ export class RoomMediaClient {
     const collision = media.description.type === 'offer' && (peer.makingOffer || (pc.signalingState !== 'stable' && !peer.settingAnswer));
     peer.ignoreOffer = collision && this.options.memberId < peer.id;
     if (peer.ignoreOffer) return;
-    if (collision && pc.signalingState !== 'stable') await pc.setLocalDescription({ type: 'rollback' });
     peer.settingAnswer = media.description.type === 'answer';
+    // setRemoteDescription performs rollback atomically when accepting glare.
     try { await pc.setRemoteDescription(media.description); } finally { peer.settingAnswer = false; }
     if (this.peers.get(peer.id) !== peer) return;
     this.bindIncoming(peer);
-    for (const candidate of peer.pendingIce.splice(0)) await pc.addIceCandidate(candidate ?? undefined);
+    for (const candidate of peer.pendingIce.splice(0)) {
+      await pc.addIceCandidate(candidate ?? undefined);
+      if (this.peers.get(peer.id) !== peer) return;
+    }
     if (media.description.type === 'offer') {
-      await pc.setLocalDescription(await pc.createAnswer());
+      await pc.setLocalDescription();
+      if (this.peers.get(peer.id) !== peer) return;
       if (pc.localDescription) this.signal(peer, { version: 1, kind: 'description', description: pc.localDescription.toJSON(), bindings: this.bindings(peer) });
     }
     this.schedule();
