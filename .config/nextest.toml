@@ -1,0 +1,29 @@
+# Comparison and resource audit: docs/testing/ci-performance.md.
+# nextest does not run doctests: follow it with `cargo test --workspace --doc`.
+nextest-version = "0.9.146"
+
+[profile.default]
+# Bound process-per-test fan-out, including each test's own Tokio/SQLite threads.
+test-threads = 8
+retries = 0
+
+[profile.ci]
+# Keep fan-out bounded on the smaller hosted runner; inherit resource groups.
+test-threads = 4
+
+[test-groups]
+# e2e.rs has an in-process SERIAL mutex around ClickHouse startup. Reproduce
+# that exclusion across processes; temp directories/ephemeral ports alone
+# do not prevent concurrent server startup from exceeding readiness deadlines.
+clickhouse = { max-threads = 1 }
+# PTY/session tests spawn real shells and use short readiness/kill deadlines.
+# Keep their system process pressure bounded across all test binaries.
+processes = { max-threads = 2 }
+
+[[profile.default.overrides]]
+filter = '(package(otto-usage) & binary(e2e)) | (package(otto-server) & binary(k8s_monitor_clickhouse))'
+test-group = 'clickhouse'
+
+[[profile.default.overrides]]
+filter = 'package(otto-pty) | package(otto-sessions) | package(otto-sandbox)'
+test-group = 'processes'
