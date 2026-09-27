@@ -331,7 +331,7 @@ test('S3: 100k objects mount ≤ 200 rows; auto-refresh re-reads one page and ke
   const scrolled = await page.locator('.tbl-wrap').evaluate((el) => el.scrollTop);
 
   const log = requestLog(page, /\/s3\/buckets\/perf-bucket\/objects/);
-  await page.getByLabel('Auto').check();
+  await page.getByRole('checkbox', { name: 'Auto', exact: true }).check();
   await page.waitForTimeout(12_500); // one 10 s (±10 %) tick; the next is ≥ 9 s later
   log.stop();
   const s = log.stats();
