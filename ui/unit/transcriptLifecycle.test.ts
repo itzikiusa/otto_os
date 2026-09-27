@@ -12,7 +12,7 @@ function setup(get?: (url: string, signal?: AbortSignal) => Promise<any>) {
   const globals = {$state: Object.assign((v: unknown) => v, {raw: (v: unknown) => v}), document, AbortController, URLSearchParams, setTimeout, clearTimeout, localStorage: browserStorage, sessionStorage: browserStorage};
   const load = (file: URL): Record<string, any> => {
     const context = {...globals, exports: {} as Record<string, any>, require: (p: string): any => {
-      if (p.endsWith('/client')) return {api: {get: async (url: string, signal?: AbortSignal) => {gets.push(url); return get ? get(url, signal) : page();}, post: async (url: string) => {posts.push(url);}}};
+      if (p.endsWith('/client')) { const post = async (url: string) => {posts.push(url);}; return {api: {get: async (url: string, signal?: AbortSignal) => {gets.push(url); return get ? get(url, signal) : page();}, post, bg: {post}}}; }
       if (p.endsWith('/win')) return {winKey: (k: string) => k};
       if (p.endsWith('transcriptLifecycle')) return load(new URL('../src/lib/stores/transcriptLifecycle.ts', import.meta.url));
       return {};

@@ -12,8 +12,8 @@
   import { WebglAddon } from '@xterm/addon-webgl';
   import '@xterm/xterm/css/xterm.css';
   import { wsUrl, WS_BEARER_SUBPROTOCOL } from '../api/client';
-  import type { SessionStatus, TermSearchMatch, WsSearchResultFrame } from '../api/types';
-  import { TermFlow, hasCursorOrErase, withInOrderReset } from './termFlow';
+  import type { SessionStatus, TermSearchMatch, WsSearchResultFrame, WsTermResyncFrame } from '../api/types';
+  import { EMBED_SCROLLBACK, TermFlow, WriteQueue, hasCursorOrErase, withInOrderReset } from './termFlow';
   import { textToBase64, base64ToBytes, bytesToBase64 } from '../b64';
   import { terminalTheme } from '../termtheme';
   import { ui } from '../stores/ui.svelte';
@@ -91,13 +91,15 @@
     claimOnAttach?: boolean;
     /** Local xterm scrollback depth (lines). Each line costs ~12 B/cell, so
      *  10k lines × 200 cols ≈ 24 MB of JS heap per terminal — fine for the one
-     *  primary pane, 150–360 MB across a 15-tile grid (SA-05). Hosts that
-     *  mount many terminals at once (tiles) pass a smaller depth; the daemon
-     *  keeps 4000 rows, so maximizing/reconnecting still restores depth.
-     *  Also the `lines` requested in every `scrollback` snapshot. */
+     *  primary pane, 150–360 MB across a 15-tile grid (SA-05). Default
+     *  EMBED_SCROLLBACK (2k): tiles and embedded previews mount many at once.
+     *  PRIMARY hosts (SessionView, the share page, the DB SSH shell) pass
+     *  PRIMARY_SCROLLBACK (10k); the daemon keeps 4000 rows, so maximizing/
+     *  reconnecting still restores depth. Also the `lines` requested in every
+     *  `scrollback` snapshot. */
     scrollback?: number;
   }
-  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, onstatus, onfontfit, onsearchresult, showToolbar = true, autoFocus = false, claimOnAttach = false, scrollback = 10_000 }: Props = $props();
+  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, onstatus, onfontfit, onsearchresult, showToolbar = true, autoFocus = false, claimOnAttach = false, scrollback = EMBED_SCROLLBACK }: Props = $props();
 
   const effScheme = $derived(forceDark ? 'dark' : ui.resolvedScheme);
 
@@ -303,6 +305,27 @@
   // on screen as soon as the ≤2 MB backlog drains.
   // Thresholds + keep-alive live in termFlow.ts (HIGH 2 MB / LOW 256 KB).
   const flow = new TermFlow((frame) => sendJson(frame));
+  // A3: received bytes wait in `writes` and reach xterm ≤ 64 KB at a time
+  // with ≤ 128 KB inside it, so the undroppable part of a backlog is tiny.
+  // A keystroke over a big queue (^C mid-flood) drops the queue and asks for
+  // ONE `resync` snapshot: the interrupt shows up after ≤ 128 KB of parsing
+  // plus one snapshot, not after the whole ≤ 2 MB backlog scrolled past.
+  const writes = new WriteQueue(
+    (bytes, done) => {
+      if (!term) return done();
+      term.write(bytes, done);
+    },
+    flow,
+    () => sock?.readyState === WebSocket.OPEN,
+  );
+  /** A `resync` is in flight: don't ask again until its snapshot lands. */
+  let resyncPending = false;
+  function resyncOnInput(): void {
+    if (resyncPending || !sock || sock.readyState !== WebSocket.OPEN) return;
+    resyncPending = writes.resyncOnInput(() =>
+      sendJson({ type: 'resync', lines: term?.options.scrollback ?? scrollback } satisfies WsTermResyncFrame),
+    );
+  }
 
   // ── sendSeqToTerm (Task 5.2) ─────────────────────────────────────────────
   // Shared send path for TermKeysBar — identical to what term.onData uses.
@@ -310,6 +333,7 @@
   function sendSeqToTerm(seq: string): void {
     if (readOnly) return;
     sendJson({ type: 'input', data: textToBase64(seq) });
+    resyncOnInput();
   }
 
   // ── Touch scroll handlers (Task 5.3) ─────────────────────────────────────
@@ -420,9 +444,13 @@
     connectedSid = sessionId;
     compactPending = false;
     snapshotEpoch = null;
-    // A fresh server stream starts unpaused. `flow.pending` stays: it is the
-    // local xterm backlog, which the next frame re-checks against HIGH.
+    // A fresh server stream starts unpaused. Bytes still queued in front of
+    // xterm belong to the old stream and are superseded by the snapshot this
+    // socket requests on open — drop them. What is already inside xterm stays
+    // counted (`flow.pending`) and parses; the snapshot resets after it.
     flow.resetStream();
+    writes.dropQueued();
+    resyncPending = false;
     // When a shareToken is supplied (guest share view) use the otto-bearer
     // subprotocol so the token travels in Sec-WebSocket-Protocol instead of
     // the URL query string (keeps it out of access logs). The stored owner
@@ -473,7 +501,9 @@
             // A delayed optional compact must not erase a selection or reading
             // position established after its request. A new process/connection still rebuilds: its
             // epoch differs (or was cleared on connect).
-            const compact = compactPending && snapshotEpoch === msg.epoch;
+            // A `resync` reply always rebuilds: its request already dropped
+            // the queued bytes this snapshot replaces.
+            const compact = compactPending && !resyncPending && snapshotEpoch === msg.epoch;
             compactPending = false;
             snapshotEpoch = msg.epoch;
             const buffer = term?.buffer.active;
@@ -488,7 +518,11 @@
             // rebuild keeps the buffer identical to what a fresh attach sees.
             if (msg.data) {
               const snap = base64ToBytes(msg.data);
-              if (flow.pending === 0) {
+              // Everything received before this frame is already in it: the
+              // queued part never needs to parse (A3).
+              writes.dropQueued();
+              resyncPending = false;
+              if (writes.inflight === 0) {
                 term?.reset();
                 // Snapshot is a full-screen paint already; still force a clean
                 // redraw so nothing from the previous process lingers.
@@ -807,7 +841,8 @@
    *   cursor or erase (↑ history etc.).
    * - `alwaysRedraw`: snapshots / forced paths — next-frame full redraw.
    *
-   * Every write is also counted for flow control (`flow`, termFlow.ts).
+   * Every write goes through the `writes` queue (≤ 64 KB slices, ≤ 128 KB
+   * inside xterm) and is counted for flow control (`flow`, termFlow.ts).
    */
   function paintPtyBytes(bytes: Uint8Array, alwaysRedraw = false): void {
     if (!term) return;
@@ -819,17 +854,7 @@
         : n < TUI_FRAME_BYTES && hasCursorOrErase(bytes)
           ? scheduleFullRedraw
           : null;
-    flow.add(n, sock?.readyState === WebSocket.OPEN);
-    try {
-      term.write(bytes, () => {
-        flow.done(n);
-        redraw?.();
-      });
-    } catch {
-      // xterm throws (and drops the data) past its 50 MB discard watermark;
-      // the callback never fires, so un-count it or the gate would stay shut.
-      flow.done(n);
-    }
+    writes.push(bytes, redraw ?? undefined);
   }
 
   /** Force the emulator to repaint every visible row (a true redraw). Does
@@ -1230,6 +1255,7 @@
     term.onData((data) => {
       if (readOnly) return;
       sendJson({ type: 'input', data: textToBase64(data) });
+      resyncOnInput();
     });
 
     term.onSelectionChange(() => {
@@ -1386,7 +1412,24 @@
     // the container still has no size, safeFit() no-ops and the RO handles it.
     requestAnimationFrame(() => requestAnimationFrame(refit));
 
+    // Perf-spec probe (e2e/desktop-terminal-flood-perf.spec.ts): opt-in by a
+    // `window.__ottoTermProbe` array the spec installs — one property check
+    // per mount otherwise. Exposes the flow backlog + scrollback depth only.
+    const probeList = (window as unknown as { __ottoTermProbe?: unknown[] }).__ottoTermProbe;
+    const probe = Array.isArray(probeList)
+      ? {
+          sessionId: () => sessionId,
+          pending: () => flow.pending,
+          queued: () => writes.queued,
+          scrollback: () => term?.options.scrollback ?? 0,
+          disposed: false,
+        }
+      : null;
+    if (probe) probeList!.push(probe);
+
     return () => {
+      if (probe) probe.disposed = true;
+      writes.dropQueued();
       ro.disconnect();
       linkProvider.dispose();
       for (const t of verifyTimers) clearTimeout(t);

@@ -7,7 +7,8 @@
 
   import { onMount, onDestroy } from 'svelte';
   import { api } from '../../lib/api/client';
-  import { pollWhileVisible, type Poller } from '../../lib/poll';
+  import type { Poller } from '../../lib/poll';
+  import { liveQuery } from '../../lib/live';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -242,7 +243,20 @@
   onMount(() => {
     // The `$effect(wsId)` below fires on mount too — no immediate load here,
     // or the view loads twice back to back.
-    fallbackPoll = pollWhileVisible(() => load(false), { ms: 30_000, immediate: false });
+    // Event-fed: session lifecycle/status (no dedicated bus) + work-graph
+    // changes for this workspace, coalesced so a burst of working↔idle flips
+    // costs at most one reload per ~15 s. The 30 s cadence returns only while
+    // the event socket is down (5-min safety net otherwise).
+    fallbackPoll = liveQuery({
+      run: () => load(false),
+      on: ['session_created', 'session_status', 'session_removed', 'work_graph_updated'],
+      match: (ev) => ev.workspace_id === undefined || ev.workspace_id === ws.currentId,
+      fallbackMs: 30_000,
+      debounceMs: 3000,
+      maxWaitMs: 15_000,
+      minIntervalMs: 15_000,
+      immediate: false,
+    });
   });
 
   onDestroy(() => {

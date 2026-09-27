@@ -594,6 +594,44 @@ pub async fn transcript_image(
     serve_image(&ctx, resolved.provider, &resolved.path, &img_id).await
 }
 
+/// `GET /sessions/{id}/transcript/tool/{tool_id}` — one `tool_call` block
+/// in full (result `text`/`patch` at the 64 KB fold cap, never `elided`).
+/// The lazy half of the live push's oversize trim (SA-04): an over-cap
+/// `transcript_appended` delta ships each tool result cut to 4 KB with
+/// `elided: true`, and the conversation view fetches the rest here when the
+/// step is expanded. Served from the running tail's fold when there is one
+/// (no disk read), else from the fold cache. Unknown id → 404.
+pub async fn transcript_tool(
+    AxPath((id, tool_id)): AxPath<(Id, String)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<otto_transcript::Block>> {
+    let session = session_gate(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
+    let resolved = resolve_transcript(&ctx, &session)
+        .await
+        .map_err(|_| ApiError(Error::NotFound("transcript not available".into())))?;
+    let block = match crate::transcript_tail::live_page(&id, resolved.provider, &resolved.path)
+        .await
+    {
+        Some((folded, _)) => {
+            crate::offload::blocking(move || {
+                crate::transcript_tail::find_tool_block(&folded, &tool_id)
+            })
+            .await
+        }
+        None => {
+            let snapshot = cached_fold(&ctx, resolved.provider, &resolved.path, None).await?;
+            crate::offload::blocking(move || {
+                crate::transcript_tail::find_tool_block(&snapshot.folded, &tool_id)
+            })
+            .await
+        }
+    };
+    block
+        .map(Json)
+        .ok_or_else(|| ApiError(Error::NotFound("tool call not found".into())))
+}
+
 async fn serve_image(
     ctx: &ServerCtx,
     provider: Provider,
@@ -623,9 +661,7 @@ async fn session_artifacts(ctx: &ServerCtx, session: &Session) -> ApiResult<Vec<
         return Ok(Vec::new());
     };
     let snapshot = cached_fold(ctx, resolved.provider, &resolved.path, None).await?;
-    let mut arts = snapshot.folded.artifacts.clone();
-    arts.sort_by(|a, b| b.produced_at.cmp(&a.produced_at));
-    Ok(arts)
+    Ok(newest_first(&snapshot.folded.artifacts))
 }
 
 /// `GET /sessions/{id}/artifacts` — everything the agent produced (design §4.7).
@@ -1215,6 +1251,37 @@ pub async fn history_transcript(
         sub,
         snapshot.subagents.clone(),
     )))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HistoryArtifactsQuery {
+    pub path: String,
+}
+
+/// `GET /workspaces/{wid}/history/artifacts?path=` — the artifacts an
+/// on-disk transcript produced, newest first (the same order as
+/// `GET /sessions/{id}/artifacts`). History's "Outputs" used to pull 500
+/// full turns (up to the 2 MB page budget) just to pick the artifact chips
+/// out of their blocks (SA-07); the fold already collects them. Same path
+/// confinement and gate as `history/transcript`.
+pub async fn history_artifacts(
+    AxPath(wid): AxPath<Id>,
+    Query(q): Query<HistoryArtifactsQuery>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<Vec<Artifact>>> {
+    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
+    let (path, provider) = confine_history_path(&ctx, &q.path)?;
+    history_path_gate(&ctx, &user, &wid, &path).await?;
+    let snapshot = cached_fold(&ctx, provider, &path, None).await?;
+    Ok(Json(newest_first(&snapshot.folded.artifacts)))
+}
+
+/// Artifacts sorted newest first (stable for equal timestamps).
+fn newest_first(arts: &[Artifact]) -> Vec<Artifact> {
+    let mut arts = arts.to_vec();
+    arts.sort_by(|a, b| b.produced_at.cmp(&a.produced_at));
+    arts
 }
 
 #[derive(Debug, Deserialize)]

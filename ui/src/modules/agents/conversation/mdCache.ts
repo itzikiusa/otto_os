@@ -19,11 +19,14 @@ export interface MdCache {
   get(md: string, cacheable?: boolean): string;
   readonly size: number;
   readonly chars: number;
+  /** Renders (cache misses) so far — the perf spec's "≤ 1 parse per delta". */
+  readonly renders: number;
 }
 
 export function createMdCache(render: (md: string) => string, opts: MdCacheOptions): MdCache {
   const map = new Map<string, string>();
   let chars = 0;
+  let renders = 0;
   const evict = (): void => {
     for (const [k, v] of map) {
       if (map.size <= opts.maxEntries && chars <= opts.maxChars) break;
@@ -40,6 +43,7 @@ export function createMdCache(render: (md: string) => string, opts: MdCacheOptio
         return hit;
       }
       const html = render(md);
+      renders++;
       if (cacheable && md.length + html.length <= opts.maxEntryChars) {
         map.set(md, html);
         chars += md.length + html.length;
@@ -52,6 +56,9 @@ export function createMdCache(render: (md: string) => string, opts: MdCacheOptio
     },
     get chars() {
       return chars;
+    },
+    get renders() {
+      return renders;
     },
   };
 }

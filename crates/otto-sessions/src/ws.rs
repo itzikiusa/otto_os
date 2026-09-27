@@ -114,6 +114,17 @@ enum ClientFrame {
     // meanwhile, the server discards it and pushes ONE `scrollback` snapshot
     // (the lagging-viewer resync) instead of the megabytes it skipped.
     Resume,
+    // The user typed (typically ^C) while the client still had a large
+    // backlog queued in front of its emulator: the client DROPPED that queue
+    // and needs the current screen. Unlike `scrollback`, the server first
+    // discards this viewer's own queued chunks (already reflected in the
+    // snapshot — forwarding them after it would double-apply them), then
+    // sends ONE snapshot of up to `lines` rows, and leaves any flow-control
+    // pause (the dropped backlog was the reason for it).
+    Resync {
+        #[serde(default)]
+        lines: usize,
+    },
 }
 
 /// A paused viewer that never sends `resume` (renderer wedged, buggy client)
@@ -210,6 +221,18 @@ fn resume_frame(
     snapshot: impl FnOnce() -> (Vec<u8>, u64),
 ) -> Option<String> {
     drain_backlog(rx).then(|| resync_frame(rx, snapshot))
+}
+
+/// Client `resync`: open the flow gate (the backlog it guarded was dropped
+/// client-side) and replace this viewer's queued output with one snapshot.
+/// Always answers — the client already discarded bytes and relies on it.
+fn client_resync_frame(
+    flow: &mut FlowGate,
+    rx: &mut broadcast::Receiver<Bytes>,
+    snapshot: impl FnOnce() -> (Vec<u8>, u64),
+) -> String {
+    flow.resume();
+    resync_frame(rx, snapshot)
 }
 
 /// The `search_result` reply. Built with serde_json: matched lines are
@@ -1015,6 +1038,23 @@ async fn serve_terminal<S: SessionsCtx>(
                             }
                         }
                     }
+                    ClientFrame::Resync { lines } => {
+                        let want = if lines == 0 {
+                            DEFAULT_ATTACH_HISTORY_LINES
+                        } else {
+                            lines
+                        };
+                        if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
+                            let frame = client_resync_frame(&mut flow, rx, || {
+                                (h.snapshot_with_history(want), h.spawn_seq())
+                            });
+                            if socket.send(Message::Text(frame.into())).await.is_err() {
+                                return;
+                            }
+                        } else {
+                            flow.resume();
+                        }
+                    }
                     ClientFrame::Scrollback { lines } => {
                         // Reproduce the live screen as one coherent frame (what
                         // tmux does on attach) PRECEDED by up to `lines` rows of
@@ -1690,6 +1730,49 @@ mod tests {
             Err(broadcast::error::TryRecvError::Empty)
         ));
         // …and new output streams normally again.
+        tx.send(Bytes::from_static(b"live")).unwrap();
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"live"));
+    }
+
+    /// A client `resync` (typed while its queue was dropped) always gets
+    /// exactly one snapshot — even with nothing queued server-side — opens a
+    /// paused gate, and nothing that was queued before it is forwarded after
+    /// (it is already in the snapshot). A later `resume` is then a no-op.
+    #[test]
+    fn client_resync_opens_the_gate_and_replaces_the_backlog_with_one_snapshot() {
+        assert!(matches!(
+            serde_json::from_str::<ClientFrame>(r#"{"type":"resync","lines":2000}"#),
+            Ok(ClientFrame::Resync { lines: 2000 })
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ClientFrame>(r#"{"type":"resync"}"#),
+            Ok(ClientFrame::Resync { lines: 0 })
+        ));
+        let (tx, mut rx) = broadcast::channel::<Bytes>(64);
+        let mut gate = FlowGate::default();
+        gate.pause(tokio::time::Instant::now());
+        for i in 0..10 {
+            tx.send(Bytes::from(format!("flood{i}\n"))).unwrap();
+        }
+        let mut snapshots = 0;
+        let frame = client_resync_frame(&mut gate, &mut rx, || {
+            snapshots += 1;
+            (b"screen".to_vec(), 9)
+        });
+        assert_eq!(snapshots, 1);
+        assert!(!gate.is_paused(), "resync leaves the paused state");
+        assert!(!gate.resume(), "a trailing resume finds the gate open");
+        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(v["type"], "scrollback");
+        assert_eq!(v["epoch"], 9);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        // Nothing queued and not paused: still answers with a snapshot.
+        let frame = client_resync_frame(&mut gate, &mut rx, || (b"s2".to_vec(), 9));
+        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(B64.decode(v["data"].as_str().unwrap()).unwrap(), b"s2");
         tx.send(Bytes::from_static(b"live")).unwrap();
         assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"live"));
     }

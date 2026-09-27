@@ -311,7 +311,7 @@ export class Conversation {
     const sid = this.sessionId;
     if (!sid || !this.isActive()) return;
     try {
-      await api.post<void>(`/sessions/${encodeURIComponent(sid)}/transcript/touch`, {});
+      await api.bg.post<void>(`/sessions/${encodeURIComponent(sid)}/transcript/touch`, {});
     } catch {
       /* 409 = no transcript yet (the view is retrying the GET); anything else is transient */
     }
