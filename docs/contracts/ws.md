@@ -52,9 +52,44 @@ below). Clients need no change: keep sending, and treat a dropped socket or a
 {"type":"pause"}                                    // flow control: stop sending me output (see below)
 {"type":"resume"}                                   // flow control: send again (+ one snapshot if anything was held back)
 {"type":"resync","lines":2000}                      // typed over a dropped local backlog: discard my queued output, send ONE snapshot (see below)
+{"type":"credit","window":1048576}                  // credit flow control: send me at most `window` unacknowledged binary bytes (see below)
+{"type":"ack","bytes":4194304}                      // credit: cumulative binary bytes consumed (parsed or dropped) since the grant
 ```
 
-**Flow control (`pause` / `resume`).** A browser WebSocket drains the socket
+**Credit flow control (`credit` / `ack`) — preferred.** `pause`/`resume`
+cannot bound the client's backlog: whatever the server sends during the
+pause frame's round trip still lands, so the overshoot grows with the send
+rate (Otto measured 3–14 MB against a 2 MB watermark). A client that opts in
+sends `credit` first thing on the socket; the server answers
+`{"type":"credit","window":W}` (the offer clamped to 64 KB–8 MB; 0/absent →
+1 MB) and from that frame on (frames are ordered) never has more than `W`
+binary bytes out that the client has not acknowledged. The client acks the
+**cumulative** count of credited binary bytes it consumed — parsed by its
+emulator OR dropped (a queue superseded by a snapshot) — at least every
+`W/4` (Otto: every 64 KB); an unreported remainder below that never stalls
+the stream. Snapshots and other text frames are not counted. Per viewer,
+read-only safe, never affects the PTY or other viewers.
+
+- Output produced while the window is full is held server-side, up to one
+  more window: any burst up to `2 × W` is delivered losslessly, in order.
+- Beyond that the held output is discarded and, once the client has drained
+  to `≤ W/4` unacknowledged, replaced by ONE unsolicited `scrollback`
+  snapshot (the lagging-viewer resync). Normal output never gets there.
+- `input` while output is held (the viewer is more than a window behind,
+  e.g. `^C` mid-flood) turns the held output into that snapshot too, so the
+  interrupt is not queued behind a window of stale output.
+- Any snapshot the server sends (`scrollback` reply, `resync`, lag, revival)
+  supersedes held output; it is never sent after it.
+- No ack progress for **2 s** while output waits → the server treats all
+  sent bytes as consumed (same guarantee as the pause auto-resume: a lost ack
+  can never freeze a pane).
+- Stale, duplicate or too-large acks are clamped/ignored. A new connection
+  starts without credit. `pause`/`resume` are still honored on a credit socket.
+- **Compatibility.** An older server ignores `credit`/`ack` (unknown frames)
+  and never answers — the client stays on `pause`/`resume`. Clients that never
+  send `credit` get exactly the `pause`/`resume` behavior below.
+
+**Flow control (`pause` / `resume`) — fallback.** A browser WebSocket drains the socket
 eagerly, so the daemon never feels TCP backpressure from a slow *renderer*
 (xterm parses ~5.5–8 MB/s in WebKit; `cat`/`yes` produce far more). Clients
 count bytes handed to their emulator until it has parsed them and send
@@ -130,6 +165,7 @@ while the viewport is scrolled up (a rebuild yanks it to the bottom).
 - **JSON text frames**:
 
 ```json
+{"type":"credit","window":1048576}                  // grant for a client `credit` offer; binary frames after it count against `window`
 {"type":"scrollback","data":"<base64 bytes>","epoch":3}  // response to scrollback request; send BEFORE live bytes resume.
                                                     // `data` is a FULL rebuild: formatted history rows + a coherent
                                                     // current-screen frame + input-mode restoration (bracketed paste,

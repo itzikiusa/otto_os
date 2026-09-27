@@ -134,6 +134,19 @@ enum ClientFrame {
         #[serde(default)]
         lines: usize,
     },
+    // Credit-based flow control (supersedes `pause`/`resume` for clients that
+    // opt in). Sent once, first thing on a new socket: from the server's
+    // `{"type":"credit","window":W}` reply on, it sends at most W binary bytes
+    // this viewer has not acknowledged. See [`CreditGate`].
+    Credit {
+        #[serde(default)]
+        window: u64,
+    },
+    // Cumulative binary bytes (since the `credit` reply) the client's emulator
+    // has parsed OR the client dropped. Sent every ~64 KB consumed.
+    Ack {
+        bytes: u64,
+    },
 }
 
 /// A paused viewer that never sends `resume` (renderer wedged, buggy client)
@@ -242,6 +255,222 @@ fn client_resync_frame(
 ) -> String {
     flow.resume();
     resync_frame(rx, snapshot)
+}
+
+/// Default / bounds for a client-proposed credit window (`credit` frame).
+const CREDIT_WINDOW_DEFAULT: u64 = 1024 * 1024;
+const CREDIT_WINDOW_MIN: u64 = 64 * 1024;
+const CREDIT_WINDOW_MAX: u64 = 8 * 1024 * 1024;
+
+/// Per-connection credit window (the successor of [`FlowGate`] for clients
+/// that send `credit`).
+///
+/// `pause`/`resume` cannot bound the client's backlog: every byte sent during
+/// the pause frame's round trip still lands, so the overshoot grew with the
+/// send rate (2.5 MB budget → 3.0–4.4 MB peak at ~26 MB/s, 14 MB at ~100 MB/s).
+/// Here the SERVER counts: it sends at most `window` bytes the client has not
+/// acknowledged (`ack` = cumulative bytes parsed or dropped), so the client's
+/// backlog of live output is ≤ `window` whatever the producer's rate.
+///
+/// Output that arrives while the window is closed is held here — up to one
+/// more window, so any burst up to 2 × window is delivered losslessly (the
+/// same 2 MB a pause-mode client absorbed before pausing). Beyond that the
+/// held bytes are dropped (`skipped`) and, once the client has drained to a
+/// quarter window, replaced by ONE snapshot: the lagging-viewer resync. The
+/// broadcast receiver keeps being read throughout, so the ring never lags.
+#[derive(Debug)]
+struct CreditGate {
+    window: u64,
+    /// Binary bytes sent since the grant.
+    sent: u64,
+    /// Cumulative bytes the client reported consumed (≤ `sent`).
+    acked: u64,
+    /// Output waiting for credit (≤ `window` bytes).
+    held: bytes::BytesMut,
+    /// Held output overflowed and was dropped: next reopen sends a snapshot.
+    skipped: bool,
+    /// Since when this gate has waited on the client without progress.
+    stalled_since: Option<tokio::time::Instant>,
+}
+
+/// What the socket loop must do after a [`CreditGate`] step.
+#[derive(Debug, PartialEq)]
+enum CreditStep {
+    Idle,
+    /// Send these bytes as one binary frame (already counted as sent).
+    Send(Bytes),
+    /// Replace the skipped output with one snapshot ([`resync_frame`]).
+    Resync,
+}
+
+impl CreditGate {
+    fn new(requested: u64) -> Self {
+        let window = if requested == 0 {
+            CREDIT_WINDOW_DEFAULT
+        } else {
+            requested.clamp(CREDIT_WINDOW_MIN, CREDIT_WINDOW_MAX)
+        };
+        Self {
+            window,
+            sent: 0,
+            acked: 0,
+            held: bytes::BytesMut::new(),
+            skipped: false,
+            stalled_since: None,
+        }
+    }
+
+    /// The `{"type":"credit","window":W}` grant; binary frames sent after it
+    /// are counted (WS frames are ordered, so both sides agree where).
+    fn grant_frame(&self) -> String {
+        format!(r#"{{"type":"credit","window":{}}}"#, self.window)
+    }
+
+    fn unacked(&self) -> u64 {
+        self.sent - self.acked
+    }
+
+    fn available(&self) -> usize {
+        self.window.saturating_sub(self.unacked()) as usize
+    }
+
+    /// Waiting on the client: output is held with no credit, or a skip waits
+    /// for the client to drain.
+    fn waiting(&self) -> bool {
+        self.skipped || (!self.held.is_empty() && self.available() == 0)
+    }
+
+    fn track_stall(&mut self, now: tokio::time::Instant) {
+        if !self.waiting() {
+            self.stalled_since = None;
+        } else if self.stalled_since.is_none() {
+            self.stalled_since = Some(now);
+        }
+    }
+
+    /// Hand out as much held output as the window allows.
+    fn take(&mut self) -> CreditStep {
+        let n = self.available().min(self.held.len());
+        if n == 0 {
+            return CreditStep::Idle;
+        }
+        self.sent += n as u64;
+        CreditStep::Send(self.held.split_to(n).freeze())
+    }
+
+    /// New live output for this viewer (one coalesced chunk).
+    fn push(&mut self, chunk: Vec<u8>, now: tokio::time::Instant) -> CreditStep {
+        let step = if self.skipped {
+            CreditStep::Idle
+        } else if self.held.is_empty() && chunk.len() <= self.available() {
+            // Fast path (all normal output): straight through, no copy.
+            self.sent += chunk.len() as u64;
+            CreditStep::Send(Bytes::from(chunk))
+        } else {
+            self.held.extend_from_slice(&chunk);
+            if self.held.len() as u64 > self.window {
+                // More than a window behind on top of a full window in the
+                // client: stop buffering, rebuild from a snapshot later.
+                self.held = bytes::BytesMut::new();
+                self.skipped = true;
+                CreditStep::Idle
+            } else {
+                self.take()
+            }
+        };
+        self.track_stall(now);
+        step
+    }
+
+    /// The window (re)opened: send held output, or the pending snapshot once
+    /// the client is down to a quarter window.
+    fn reopen(&mut self) -> CreditStep {
+        if self.skipped {
+            if self.unacked() > self.window / 4 {
+                return CreditStep::Idle;
+            }
+            self.skipped = false;
+            return CreditStep::Resync;
+        }
+        self.take()
+    }
+
+    /// Client `ack` (cumulative). Stale or out-of-range values are clamped.
+    fn ack(&mut self, cumulative: u64, now: tokio::time::Instant) -> CreditStep {
+        let c = cumulative.min(self.sent);
+        if c > self.acked {
+            self.acked = c;
+            if self.waiting() {
+                // Progress: the client is draining, restart the stall clock.
+                self.stalled_since = Some(now);
+            }
+        }
+        let step = self.reopen();
+        self.track_stall(now);
+        step
+    }
+
+    /// The user typed while this viewer is more than a window behind: they
+    /// want the present, not the held backlog (the server-side twin of the
+    /// client's `resync` on input). The held output becomes a snapshot.
+    fn skip_on_input(&mut self, now: tokio::time::Instant) {
+        if !self.held.is_empty() {
+            self.held = bytes::BytesMut::new();
+            self.skipped = true;
+            self.track_stall(now);
+        }
+    }
+
+    /// A snapshot just went out (lag / client resync / revive / request): it
+    /// already reflects everything held here — sending that after it would
+    /// double-apply it.
+    fn superseded(&mut self) {
+        self.held = bytes::BytesMut::new();
+        self.skipped = false;
+        self.stalled_since = None;
+    }
+
+    /// No `ack` progress for [`FLOW_AUTO_RESUME`] while waiting: the client
+    /// is wedged or buggy. Mirrors the pause gate's auto-resume so a lost ack
+    /// can at worst reproduce the pre-flow-control flood, never freeze a pane.
+    fn stall_deadline(&self) -> Option<tokio::time::Instant> {
+        self.stalled_since.map(|t| t + FLOW_AUTO_RESUME)
+    }
+
+    /// The stall deadline passed: treat everything sent as consumed.
+    fn forgive(&mut self, now: tokio::time::Instant) -> CreditStep {
+        self.acked = self.sent;
+        self.stalled_since = None;
+        let step = self.reopen();
+        self.track_stall(now);
+        step
+    }
+}
+
+/// Carry out a [`CreditStep`] on the socket. `Err` = the socket is gone.
+async fn apply_credit_step(
+    step: CreditStep,
+    socket: &mut WebSocket,
+    out_rx: &mut Option<broadcast::Receiver<Bytes>>,
+    handle: Option<&Arc<PtyHandle>>,
+) -> std::result::Result<(), ()> {
+    let msg = match step {
+        CreditStep::Idle => return Ok(()),
+        CreditStep::Send(bytes) => Message::Binary(bytes),
+        CreditStep::Resync => {
+            let (Some(rx), Some(h)) = (out_rx.as_mut(), handle) else {
+                return Ok(());
+            };
+            let frame = resync_frame(rx, || {
+                (
+                    h.snapshot_with_history(DEFAULT_ATTACH_HISTORY_LINES),
+                    h.spawn_seq(),
+                )
+            });
+            Message::Text(frame.into())
+        }
+    };
+    socket.send(msg).await.map_err(|_| ())
 }
 
 /// The `search_result` reply. Built with serde_json: matched lines are
@@ -809,6 +1038,9 @@ async fn serve_terminal<S: SessionsCtx>(
     revive_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Client-driven flow control (`pause` / `resume` frames).
     let mut flow = FlowGate::default();
+    // Credit-based flow control, once the client sends `credit` (else the
+    // legacy pause gate above is all there is).
+    let mut credit: Option<CreditGate> = None;
 
     // Re-authorization runs OFF this loop (investigation H2): every arm here
     // must stay free of SQLite, or a slow statement elsewhere in the daemon
@@ -857,7 +1089,23 @@ async fn serve_terminal<S: SessionsCtx>(
                         if socket.send(Message::Text(frame.into())).await.is_err() {
                             return;
                         }
+                        if let Some(c) = credit.as_mut() {
+                            c.superseded();
+                        }
                     }
+                }
+            }
+
+            // Credit flow control: the client stopped acknowledging while
+            // output waits (see CreditGate::stall_deadline).
+            _ = flow_deadline(credit.as_ref().and_then(CreditGate::stall_deadline)),
+                if credit.as_ref().is_some_and(|c| c.stalled_since.is_some()) =>
+            {
+                let Some(c) = credit.as_mut() else { continue };
+                tracing::debug!(session = %session_id, "terminal ws credit stalled {FLOW_AUTO_RESUME:?} without an ack; reopening");
+                let step = c.forgive(tokio::time::Instant::now());
+                if apply_credit_step(step, &mut socket, &mut out_rx, handle.as_ref()).await.is_err() {
+                    return;
                 }
             }
 
@@ -881,7 +1129,13 @@ async fn serve_terminal<S: SessionsCtx>(
                                 }
                             }
                         }
-                        if socket.send(Message::Binary(Bytes::from(buf))).await.is_err() {
+                        // Credit mode: send only what the window allows (the
+                        // rest is held, or skipped → one snapshot later).
+                        let step = match credit.as_mut() {
+                            Some(c) => c.push(buf, tokio::time::Instant::now()),
+                            None => CreditStep::Send(Bytes::from(buf)),
+                        };
+                        if apply_credit_step(step, &mut socket, &mut out_rx, handle.as_ref()).await.is_err() {
                             return;
                         }
                     }
@@ -900,6 +1154,9 @@ async fn serve_terminal<S: SessionsCtx>(
                             });
                             if socket.send(Message::Text(frame.into())).await.is_err() {
                                 return;
+                            }
+                            if let Some(c) = credit.as_mut() {
+                                c.superseded();
                             }
                         }
                     }
@@ -928,11 +1185,14 @@ async fn serve_terminal<S: SessionsCtx>(
             // happens while this loop holds the dead handle — `exit_rx` is the
             // reliable "my process is gone" signal.) Armed only while dead.
             _ = revive_tick.tick(), if exit_rx.is_none() || out_rx.is_none() => {
-                if revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx)
-                    .await
-                    .is_err()
-                {
-                    return;
+                match revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx).await {
+                    Err(()) => return,
+                    Ok(true) => {
+                        if let Some(c) = credit.as_mut() {
+                            c.superseded();
+                        }
+                    }
+                    Ok(false) => {}
                 }
             }
             // Forced disconnect: the session was terminated (admin terminate or
@@ -975,12 +1235,21 @@ async fn serve_terminal<S: SessionsCtx>(
                             // respawn first (the user then sees where the
                             // keystroke lands); with nothing live, `input`
                             // fails and the notice below says so.
-                            if exit_rx.is_none()
-                                && revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx)
-                                    .await
-                                    .is_err()
-                            {
-                                return;
+                            if exit_rx.is_none() {
+                                match revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx).await {
+                                    Err(()) => return,
+                                    Ok(true) => {
+                                        if let Some(c) = credit.as_mut() {
+                                            c.superseded();
+                                        }
+                                    }
+                                    Ok(false) => {}
+                                }
+                            }
+                            // Typed while more than a window behind (^C mid-
+                            // flood): the held backlog becomes one snapshot.
+                            if let Some(c) = credit.as_mut() {
+                                c.skip_on_input(tokio::time::Instant::now());
                             }
                             // Typing claims size authority for this viewer.
                             ctx.manager().note_input_authority(&session_id, conn_id);
@@ -1043,6 +1312,9 @@ async fn serve_terminal<S: SessionsCtx>(
                                     if socket.send(Message::Text(frame.into())).await.is_err() {
                                         return;
                                     }
+                                    if let Some(c) = credit.as_mut() {
+                                        c.superseded();
+                                    }
                                 }
                             }
                         }
@@ -1060,8 +1332,26 @@ async fn serve_terminal<S: SessionsCtx>(
                             if socket.send(Message::Text(frame.into())).await.is_err() {
                                 return;
                             }
+                            if let Some(c) = credit.as_mut() {
+                                c.superseded();
+                            }
                         } else {
                             flow.resume();
+                        }
+                    }
+                    ClientFrame::Credit { window } => {
+                        let gate = CreditGate::new(window);
+                        if socket.send(Message::Text(gate.grant_frame().into())).await.is_err() {
+                            return;
+                        }
+                        credit = Some(gate);
+                    }
+                    ClientFrame::Ack { bytes } => {
+                        if let Some(c) = credit.as_mut() {
+                            let step = c.ack(bytes, tokio::time::Instant::now());
+                            if apply_credit_step(step, &mut socket, &mut out_rx, handle.as_ref()).await.is_err() {
+                                return;
+                            }
                         }
                     }
                     ClientFrame::Scrollback { lines } => {
@@ -1093,6 +1383,10 @@ async fn serve_terminal<S: SessionsCtx>(
                         // Sent inline, i.e. before any subsequent live bytes.
                         if socket.send(Message::Text(frame.into())).await.is_err() {
                             return;
+                        }
+                        // Output held for credit is already in this snapshot.
+                        if let Some(c) = credit.as_mut() {
+                            c.superseded();
                         }
                     }
                     ClientFrame::Search { query } => {
@@ -1798,5 +2092,246 @@ mod tests {
         })
         .is_none());
         assert!(!called, "no snapshot is taken when nothing was skipped");
+    }
+
+    // ── Credit-based flow control ─────────────────────────────────────────
+
+    const KB: u64 = 1024;
+
+    fn sent_len(step: &CreditStep) -> usize {
+        match step {
+            CreditStep::Send(b) => b.len(),
+            _ => 0,
+        }
+    }
+
+    #[test]
+    fn credit_and_ack_frames_parse_and_the_window_is_clamped() {
+        assert!(matches!(
+            serde_json::from_str::<ClientFrame>(r#"{"type":"credit","window":1048576}"#),
+            Ok(ClientFrame::Credit { window: 1_048_576 })
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ClientFrame>(r#"{"type":"credit"}"#),
+            Ok(ClientFrame::Credit { window: 0 })
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ClientFrame>(r#"{"type":"ack","bytes":65536}"#),
+            Ok(ClientFrame::Ack { bytes: 65_536 })
+        ));
+        assert_eq!(CreditGate::new(0).window, CREDIT_WINDOW_DEFAULT);
+        assert_eq!(CreditGate::new(1).window, CREDIT_WINDOW_MIN);
+        assert_eq!(CreditGate::new(u64::MAX).window, CREDIT_WINDOW_MAX);
+        let grant: serde_json::Value =
+            serde_json::from_str(&CreditGate::new(512 * KB).grant_frame()).unwrap();
+        assert_eq!(grant["type"], "credit");
+        assert_eq!(grant["window"], 512 * KB);
+    }
+
+    /// Normal output (the client keeps up) passes straight through, frame for
+    /// frame — identical to the no-credit path.
+    #[test]
+    fn credit_normal_output_is_untouched() {
+        let now = tokio::time::Instant::now();
+        let mut g = CreditGate::new(1024 * KB);
+        let mut acked = 0u64;
+        for i in 0..10_000u64 {
+            let chunk = format!("line {i}\r\n").into_bytes();
+            let n = chunk.len();
+            assert_eq!(
+                g.push(chunk.clone(), now),
+                CreditStep::Send(Bytes::from(chunk))
+            );
+            acked += n as u64;
+            if i % 100 == 0 {
+                assert_eq!(g.ack(acked, now), CreditStep::Idle);
+            }
+        }
+        assert!(!g.waiting());
+        assert!(g.stall_deadline().is_none());
+    }
+
+    /// THE property: whatever the producer's rate, the client never has more
+    /// than `window` unacknowledged bytes, and a burst up to 2 × window is
+    /// delivered losslessly and in order.
+    #[test]
+    fn credit_bounds_unacked_bytes_independent_of_send_rate() {
+        let now = tokio::time::Instant::now();
+        for burst in [1usize, 2, 8, 64] {
+            let mut g = CreditGate::new(1024 * KB);
+            let mut delivered: Vec<u8> = Vec::new();
+            let mut produced: Vec<u8> = Vec::new();
+            let mut client_backlog = 0u64;
+            let mut consumed = 0u64;
+            let mut peak = 0u64;
+            // 2 MB total arrives `burst` 64 KB chunks per client parse step.
+            let mut seq = 0u8;
+            while produced.len() < 2 * 1024 * 1024 {
+                for _ in 0..burst {
+                    if produced.len() >= 2 * 1024 * 1024 {
+                        break;
+                    }
+                    let chunk: Vec<u8> =
+                        (0..64 * 1024).map(|i| seq.wrapping_add(i as u8)).collect();
+                    seq = seq.wrapping_add(1);
+                    produced.extend_from_slice(&chunk);
+                    if let CreditStep::Send(b) = g.push(chunk, now) {
+                        client_backlog += b.len() as u64;
+                        delivered.extend_from_slice(&b);
+                    }
+                    peak = peak.max(client_backlog);
+                    assert!(
+                        g.unacked() <= g.window,
+                        "burst {burst}: unacked {} > window",
+                        g.unacked()
+                    );
+                }
+                // The client parses 64 KB and acks.
+                let parsed = client_backlog.min(64 * KB);
+                client_backlog -= parsed;
+                consumed += parsed;
+                if let CreditStep::Send(b) = g.ack(consumed, now) {
+                    client_backlog += b.len() as u64;
+                    delivered.extend_from_slice(&b);
+                }
+                peak = peak.max(client_backlog);
+            }
+            // Drain the rest.
+            while client_backlog > 0 || !g.held.is_empty() {
+                consumed += client_backlog;
+                client_backlog = 0;
+                match g.ack(consumed, now) {
+                    CreditStep::Send(b) => {
+                        client_backlog += b.len() as u64;
+                        delivered.extend_from_slice(&b);
+                    }
+                    CreditStep::Idle => {}
+                    CreditStep::Resync => panic!("burst {burst}: a 2 × window burst must not skip"),
+                }
+            }
+            assert!(
+                peak <= 1024 * KB,
+                "burst {burst}: client backlog peaked at {peak}"
+            );
+            assert_eq!(delivered, produced, "burst {burst}: lossless and in order");
+        }
+    }
+
+    /// Past window + one held window the backlog is skipped and replaced by
+    /// ONE snapshot once the client drained to a quarter window.
+    #[test]
+    fn credit_flood_skips_to_one_snapshot_at_a_quarter_window() {
+        let now = tokio::time::Instant::now();
+        let mut g = CreditGate::new(1024 * KB);
+        let chunk = || vec![b'y'; 64 * 1024];
+        let mut sent = 0usize;
+        for _ in 0..16 {
+            sent += sent_len(&g.push(chunk(), now));
+        }
+        assert_eq!(sent as u64, g.window, "the first window goes out");
+        for _ in 0..16 {
+            assert_eq!(g.push(chunk(), now), CreditStep::Idle, "held");
+        }
+        assert_eq!(g.held.len() as u64, g.window);
+        assert!(!g.skipped);
+        assert_eq!(g.push(chunk(), now), CreditStep::Idle);
+        assert!(
+            g.skipped && g.held.is_empty(),
+            "overflow drops the held bytes"
+        );
+        // Everything after the skip is discarded without buffering.
+        for _ in 0..100 {
+            assert_eq!(g.push(chunk(), now), CreditStep::Idle);
+            assert!(g.held.is_empty());
+        }
+        // The client drains: no snapshot until ≤ window/4 unacked, then one.
+        assert_eq!(g.ack(512 * KB, now), CreditStep::Idle);
+        assert_eq!(g.ack(768 * KB, now), CreditStep::Resync);
+        assert!(!g.skipped);
+        assert_eq!(g.ack(1024 * KB, now), CreditStep::Idle, "exactly one");
+        // …and live output streams again.
+        assert_eq!(sent_len(&g.push(b"live".to_vec(), now)), 4);
+    }
+
+    /// ^C while more than a window behind: the held backlog becomes a
+    /// snapshot instead of making the user watch it scroll past.
+    #[test]
+    fn credit_input_while_behind_skips_the_held_backlog() {
+        let now = tokio::time::Instant::now();
+        let mut g = CreditGate::new(256 * KB);
+        g.push(vec![0; 256 * 1024], now);
+        g.push(vec![1; 100 * 1024], now);
+        assert_eq!(g.held.len(), 100 * 1024);
+        g.skip_on_input(now);
+        assert!(g.skipped && g.held.is_empty());
+        // The client's resync (queue dropped + acked) answers it; the socket
+        // loop marks the gate superseded after sending that snapshot.
+        g.superseded();
+        assert_eq!(g.ack(256 * KB, now), CreditStep::Idle);
+        assert_eq!(sent_len(&g.push(b"^C".to_vec(), now)), 2);
+        // Input while caught up changes nothing.
+        let mut h = CreditGate::new(256 * KB);
+        h.push(vec![0; 1024], now);
+        h.skip_on_input(now);
+        assert!(!h.skipped);
+    }
+
+    /// Stale / duplicate / future acks are harmless.
+    #[test]
+    fn credit_ack_is_cumulative_and_clamped() {
+        let now = tokio::time::Instant::now();
+        let mut g = CreditGate::new(64 * KB);
+        g.push(vec![0; 64 * 1024], now);
+        assert_eq!(g.push(vec![1; 10], now), CreditStep::Idle);
+        assert_eq!(
+            g.ack(u64::MAX, now),
+            CreditStep::Send(Bytes::from(vec![1u8; 10]))
+        );
+        assert_eq!(g.acked, 64 * KB, "clamped to what was sent");
+        assert_eq!(g.ack(5, now), CreditStep::Idle, "a regression is ignored");
+        assert_eq!(g.acked, 64 * KB);
+    }
+
+    /// A client that stops acking cannot freeze the pane: the stall deadline
+    /// reopens the window (held output flows, or a skip resyncs).
+    #[test]
+    fn credit_stall_deadline_reopens_a_wedged_window() {
+        let t0 = tokio::time::Instant::now();
+        let mut g = CreditGate::new(64 * KB);
+        g.push(vec![0; 64 * 1024], t0);
+        assert!(g.stall_deadline().is_none(), "full but nothing waiting");
+        g.push(vec![1; 10], t0);
+        assert_eq!(g.stall_deadline(), Some(t0 + FLOW_AUTO_RESUME));
+        // Progress restarts the clock.
+        let t1 = t0 + Duration::from_millis(1500);
+        assert_eq!(
+            g.ack(1024, t1),
+            CreditStep::Send(Bytes::from(vec![1u8; 10]))
+        );
+        assert!(g.stall_deadline().is_none(), "nothing held any more");
+        // 1014 bytes of credit left: those go out, the rest waits.
+        assert_eq!(sent_len(&g.push(vec![2; 2048], t1)), 1014);
+        assert_eq!(g.stall_deadline(), Some(t1 + FLOW_AUTO_RESUME));
+        assert_eq!(sent_len(&g.forgive(t1 + FLOW_AUTO_RESUME)), 1034);
+        assert!(g.stall_deadline().is_none());
+        // A skipped gate resyncs on forgiveness.
+        let mut s = CreditGate::new(64 * KB);
+        s.push(vec![0; 64 * 1024], t0);
+        s.push(vec![0; 64 * 1024], t0);
+        s.push(vec![0; 1], t0);
+        assert!(s.skipped);
+        assert_eq!(s.forgive(t1), CreditStep::Resync);
+    }
+
+    /// Any snapshot supersedes held output: nothing held is sent after it.
+    #[test]
+    fn credit_snapshot_supersedes_held_output() {
+        let now = tokio::time::Instant::now();
+        let mut g = CreditGate::new(64 * KB);
+        g.push(vec![0; 64 * 1024], now);
+        g.push(vec![1; 1000], now);
+        g.superseded();
+        assert!(g.held.is_empty() && !g.skipped && g.stall_deadline().is_none());
+        assert_eq!(g.ack(64 * KB, now), CreditStep::Idle);
     }
 }
