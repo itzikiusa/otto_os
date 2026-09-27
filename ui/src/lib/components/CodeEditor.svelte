@@ -3,7 +3,7 @@
   // readOnly=true by default (Files viewer is read-only; LSP still works).
   import { onDestroy, untrack } from 'svelte';
   import { EditorView, lineNumbers, keymap, drawSelection, placeholder as cmPlaceholder } from '@codemirror/view';
-  import { EditorState, Compartment, Prec, type StateEffect } from '@codemirror/state';
+  import { EditorState, Compartment, Prec, Text, type StateEffect } from '@codemirror/state';
   import { defaultKeymap, history, historyKeymap, selectAll } from '@codemirror/commands';
   import { search, searchKeymap, openSearchPanel } from '@codemirror/search';
   import {
@@ -23,7 +23,7 @@
     defaultHighlightStyle,
     syntaxHighlighting,
   } from '@codemirror/language';
-  import { oneDark } from '@codemirror/theme-one-dark';
+  import { oneDark, oneDarkTheme } from '@codemirror/theme-one-dark';
   import type { Extension } from '@codemirror/state';
 
   // Language packages
@@ -71,7 +71,9 @@
     },
     { dark: false },
   );
-  function themeExt(scheme: 'light' | 'dark'): Extension {
+  function themeExt(scheme: 'light' | 'dark', plain = false): Extension {
+    // `plain` (see `highlightLineLimit`): the same theme without syntax colours.
+    if (plain) return scheme === 'dark' ? oneDarkTheme : lightTheme;
     // Dark: oneDark already bundles a syntax highlight style. Light: pair the
     // light theme with the default (light-oriented) highlight style so SQL — and
     // every language — is actually COLORED in light mode (previously it wasn't).
@@ -168,6 +170,16 @@
      * remount. The DB query editor passes the connection's engine.
      */
     sqlDialect?: SqlDialectName;
+    /**
+     * Drop syntax COLOURING while any line is longer than this many chars
+     * (0 = never; opt-in). The language itself stays — brackets, indentation,
+     * folding, completion behave the same. A 200 KB minified JSON body is one
+     * soft-wrapped line of ~26k highlight spans, and every typed character
+     * re-laid out all of them (11–21 ms/key vs ~4 ms uncoloured). VS Code
+     * skips tokenizing lines past 20k chars for the same reason. Re-checked as
+     * the doc changes (Format brings the colours back).
+     */
+    highlightLineLimit?: number;
   }
 
   let {
@@ -190,6 +202,7 @@
     keepStates = false,
     lsp = false,
     sqlDialect = 'standard',
+    highlightLineLimit = 0,
   }: Props = $props();
 
   // ── Container ─────────────────────────────────────────────────────────────
@@ -216,6 +229,62 @@
   function placeholderExt(text: string): Extension {
     return text ? cmPlaceholder(text) : [];
   }
+
+  // ── Long-line plain mode (highlightLineLimit) ───────────────────────────────
+  /** Whether the live view is currently uncoloured (plain field — not reactive). */
+  let appliedPlain = false;
+  let plainRecheck: ReturnType<typeof setTimeout> | null = null;
+
+  /** Any line of `doc` longer than `limit`? Walks the line strings the doc
+   *  already holds (no slicing) — O(lines). */
+  function hasLongLine(doc: Text, limit: number): boolean {
+    if (doc.length <= limit) return false;
+    let run = 0;
+    for (const it = doc.iter(); !it.next().done; ) {
+      if (it.lineBreak) run = 0;
+      else if ((run += it.value.length) > limit) return true;
+    }
+    return false;
+  }
+
+  function setPlain(target: EditorView, on: boolean): void {
+    if (on === appliedPlain) return;
+    appliedPlain = on;
+    // Called from an update listener: reconfigure once that update is done.
+    queueMicrotask(() => {
+      if (view !== target) return;
+      const scheme = untrack(() => ui.resolvedScheme);
+      target.dispatch({ effects: themeCompartment.reconfigure(themeExt(scheme, appliedPlain)) });
+    });
+  }
+
+  /** Enter plain mode when an edit leaves a long line behind (only the lines
+   *  the edit touched are measured); leave it once no long line is left
+   *  (a whole-doc scan, debounced — typing inside the long line keeps it). */
+  const plainWatch = EditorView.updateListener.of((u) => {
+    const limit = highlightLineLimit;
+    if (!u.docChanged || limit <= 0) return;
+    if (appliedPlain) {
+      if (plainRecheck) clearTimeout(plainRecheck);
+      const target = u.view;
+      plainRecheck = setTimeout(() => {
+        plainRecheck = null;
+        if (view === target && !hasLongLine(target.state.doc, limit)) setPlain(target, false);
+      }, 300);
+      return;
+    }
+    const doc = u.state.doc;
+    let long = false;
+    u.changes.iterChangedRanges((_fa, _ta, fromB, toB) => {
+      for (let pos = fromB; !long; ) {
+        const line = doc.lineAt(pos);
+        if (line.length > limit) long = true;
+        if (line.to >= toB) break;
+        pos = line.to + 1;
+      }
+    });
+    if (long) setPlain(u.view, true);
+  });
 
   // ── Language extension map ─────────────────────────────────────────────────
 
@@ -428,6 +497,8 @@
     // this only drops an edit under a programmatic switch mid-debounce.
     // Unmount (same path) flushes in onDestroy before calling this.
     changes.cancel();
+    if (plainRecheck) clearTimeout(plainRecheck);
+    plainRecheck = null;
     try { view?.destroy(); } catch { /* ignore */ }
     view = null;
     // Release the global find opener if this editor still holds it (blur may not
@@ -558,6 +629,11 @@
    *  the current compartments (so live reconfigures keep reaching it). */
   function createState(filePath: string, fileContent: string): EditorState {
     appliedDialect = sqlDialect;
+    // Long-line plain mode needs the doc's lines up front (to pick the theme);
+    // split them once here instead of letting EditorState.create do it again.
+    const limit = highlightLineLimit;
+    const doc = limit > 0 ? Text.of(fileContent.split(/\r\n?|\n/)) : null;
+    appliedPlain = !!doc && hasLongLine(doc, limit);
     const langExt = cmLangFor(filePath, language);
     const baseExtensions: Extension[] = [
       ...(minimal ? [] : [lineNumbers(), foldGutter()]),
@@ -573,10 +649,11 @@
       wrapCompartment.of(wrapExt((appliedWrap = wrap))),
       placeholderTheme,
       search({ top: false }),
-      themeCompartment.of(themeExt(ui.resolvedScheme)),
+      themeCompartment.of(themeExt(ui.resolvedScheme, appliedPlain)),
       lspCompartment.of([]),
       selectionListener,
       changeListener,
+      ...(limit > 0 ? [plainWatch] : []),
       changeFlushHandlers,
       submitKeymap,
       // When this editor owns find, claim the global Cmd/Ctrl+F opener while it
@@ -621,7 +698,7 @@
     ];
 
     return EditorState.create({
-      doc: fileContent,
+      doc: doc ?? fileContent,
       extensions: baseExtensions,
     });
   }
@@ -689,13 +766,16 @@
       view.setState(createState(toPath, toContent));
     } else {
       view.setState(kept.state);
+      if (plainRecheck) clearTimeout(plainRecheck);
+      plainRecheck = null;
+      appliedPlain = highlightLineLimit > 0 && hasLongLine(kept.state.doc, highlightLineLimit);
       // Options may have changed while the state was parked; the text may have
       // been edited from outside (store/agent) — reconcile both, undoably.
       const effects: StateEffect<unknown>[] = [
         completionCompartment.reconfigure(completionExt()),
         placeholderCompartment.reconfigure(placeholderExt((appliedPlaceholder = placeholder))),
         wrapCompartment.reconfigure(wrapExt((appliedWrap = wrap))),
-        themeCompartment.reconfigure(themeExt(ui.resolvedScheme)),
+        themeCompartment.reconfigure(themeExt(ui.resolvedScheme, appliedPlain)),
         kept.scroll,
       ];
       // Re-parse only when the dialect changed while parked (a connection
@@ -838,7 +918,7 @@
   // Re-theme live when the app scheme (light/dark) changes.
   $effect(() => {
     const scheme = ui.resolvedScheme;
-    if (view) view.dispatch({ effects: themeCompartment.reconfigure(themeExt(scheme)) });
+    if (view) view.dispatch({ effects: themeCompartment.reconfigure(themeExt(scheme, appliedPlain)) });
   });
 
   // Re-reveal when the target line/col changes for an already-mounted doc (e.g.

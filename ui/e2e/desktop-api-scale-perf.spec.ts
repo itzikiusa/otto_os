@@ -182,6 +182,7 @@ test('URL keystrokes cost < 4 ms (p95) at 3,000 requests', async ({ page }) => {
   await watchKeyCosts(page);
   await url.pressSequentially('https://api.example.com/v1/{{tenant}}/orders?page=2', { delay: 15 });
   const d = dist(await keyCosts(page));
+  console.log(`[perf] URL keystroke cost ${JSON.stringify(d)}`);
   expect(d.n).toBeGreaterThan(30);
   expect(d.p95, `URL keystroke cost ${JSON.stringify(d)}`).toBeLessThan(4);
 });
@@ -202,6 +203,7 @@ test('body keystrokes cost < 16 ms (p95) on 200 KB of minified JSON', async ({ p
   await page.keyboard.type('"typed"', { delay: 20 });
   for (let i = 0; i < 20; i++) await page.keyboard.press('Backspace', { delay: 20 });
   const d = dist(await keyCosts(page));
+  console.log(`[perf] body keystroke cost ${JSON.stringify(d)}`);
   expect(d.n).toBeGreaterThan(20);
   expect(d.p95, `body keystroke cost ${JSON.stringify(d)}`).toBeLessThan(16);
 });

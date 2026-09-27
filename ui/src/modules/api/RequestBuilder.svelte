@@ -42,6 +42,11 @@
   const draft = $derived(apiClient.draft);
   const canEdit = $derived(ws.myRole !== 'viewer');
 
+  /** Body editors stop colouring while a line is longer than this: a pasted
+   *  minified JSON is one wrapped line of tens of thousands of highlight spans
+   *  that every typed character re-laid out (see CodeEditor's prop). */
+  const LONG_LINE_PLAIN = 20_000;
+
   // ── Body types ─────────────────────────────────────────────────────────────
   // One plain-language picker over the backend modes: "Text" covers 'raw' (with
   // a sub-type for the Content-Type), "JSON" is 'json'.
@@ -859,7 +864,7 @@
       {#if compact}
         <textarea class="input body-area mono" aria-label="Request message" value={draft.body} oninput={(e) => setField('body', (e.currentTarget as HTMLTextAreaElement).value)} placeholder={'{ }'} spellcheck="false"></textarea>
       {:else}
-        <div class="body-editor"><CodeEditor lsp={false} wrap path="message.json" content={draft.body} root={ws.current?.root_path ?? ''} language="json" readOnly={false} onchange={(v) => setField('body', v)} /></div>
+        <div class="body-editor"><CodeEditor lsp={false} wrap highlightLineLimit={LONG_LINE_PLAIN} path="message.json" content={draft.body} root={ws.current?.root_path ?? ''} language="json" readOnly={false} onchange={(v) => setField('body', v)} /></div>
       {/if}
     {:else if tab === 'body'}
       <div class="bodybar">
@@ -923,7 +928,7 @@
         </div>
         <div class="body-editor gql-query"><CodeEditor lsp={false} path="query.graphql" content={draft.body} root={ws.current?.root_path ?? ''} language="" readOnly={false} onchange={(v) => setField('body', v)} /></div>
         <div class="gql-bar"><span class="sub-label">Variables (JSON)</span></div>
-        <div class="body-editor gql-vars"><CodeEditor lsp={false} wrap path="variables.json" content={draft.graphql_variables ?? ''} root={ws.current?.root_path ?? ''} language="json" readOnly={false} onchange={(v) => setField('graphql_variables', v)} /></div>
+        <div class="body-editor gql-vars"><CodeEditor lsp={false} wrap highlightLineLimit={LONG_LINE_PLAIN} path="variables.json" content={draft.graphql_variables ?? ''} root={ws.current?.root_path ?? ''} language="json" readOnly={false} onchange={(v) => setField('graphql_variables', v)} /></div>
         {#if apiClient.graphqlSchema}
           <div class="gql-schema">
             <div class="sub-label">Schema: {apiClient.graphqlSchema.length} types</div>
@@ -937,7 +942,7 @@
         {/if}
       {:else}
         <div class="body-editor">
-          <CodeEditor lsp={false} wrap path={editorPath} content={draft.body} root={ws.current?.root_path ?? ''} language={editorLang} readOnly={false} onchange={(v) => setField('body', v)} />
+          <CodeEditor lsp={false} wrap highlightLineLimit={LONG_LINE_PLAIN} path={editorPath} content={draft.body} root={ws.current?.root_path ?? ''} language={editorLang} readOnly={false} onchange={(v) => setField('body', v)} />
         </div>
       {/if}
     {:else if tab === 'auth'}
