@@ -103,3 +103,22 @@ export function cellMatchesFilter(display: string, isNull: boolean, raw: string)
   }
   return display.toLowerCase().includes(lower);
 }
+
+/** Split a cell's display text around every (case-insensitive) occurrence of
+ *  the toolbar search `needleLc` (already lower-cased) so the hits can render
+ *  as <mark>. No needle → the whole text as one plain segment. */
+export function highlightParts(text: string, needleLc: string | null): { t: string; hit: boolean }[] {
+  if (!needleLc) return [{ t: text, hit: false }];
+  const lc = text.toLowerCase();
+  const out: { t: string; hit: boolean }[] = [];
+  let i = 0;
+  let found = lc.indexOf(needleLc);
+  while (found !== -1) {
+    if (found > i) out.push({ t: text.slice(i, found), hit: false });
+    out.push({ t: text.slice(found, found + needleLc.length), hit: true });
+    i = found + needleLc.length;
+    found = lc.indexOf(needleLc, i);
+  }
+  if (i < text.length) out.push({ t: text.slice(i), hit: false });
+  return out.length ? out : [{ t: text, hit: false }];
+}
