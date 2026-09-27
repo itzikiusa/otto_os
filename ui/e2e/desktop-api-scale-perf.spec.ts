@@ -126,33 +126,36 @@ test('API client editors never open a language-server socket', async ({ page }) 
 
 // ── GAPS §5 gates ─────────────────────────────────────────────────────────────
 
-/** Per-keystroke main-thread cost: keydown (capture) → the macrotask after
- *  the `input` event (or after a consumed keydown), i.e. every sync handler +
- *  the reactive flush
- *  (microtasks) the key caused — no Playwright IPC gap, no paint. */
+/** Per-keystroke main-thread cost: keydown (capture) → a microtask queued by
+ *  the window's bubble-phase `input` listener (or the bubble-phase keydown,
+ *  for a key an editor keymap consumes — Backspace/Enter in CodeMirror fire
+ *  no `input`). keydown→input run in ONE task and microtasks drain after
+ *  every listener, so by then every sync handler and the reactive flush the
+ *  key caused have run — no Playwright IPC gap, no paint.
+ *  (A MessageChannel task used to end the sample; the browser may render a
+ *  frame before that task, so every other keystroke at a 15 ms cadence
+ *  counted a full style/layout/paint — p95 ~9 ms with ~0.8 ms of script.) */
 async function watchKeyCosts(page: Page): Promise<void> {
   await page.evaluate(() => {
     const w = window as unknown as { __kc: number[]; __kcOn?: boolean };
     w.__kc = [];
     if (w.__kcOn) return;
     w.__kcOn = true;
-    const ch = new MessageChannel();
     let t0 = 0;
     let armed = false;
-    ch.port1.onmessage = () => {
-      if (!armed) return;
-      armed = false;
-      w.__kc.push(performance.now() - t0);
-    };
+    const end = () =>
+      queueMicrotask(() => {
+        if (!armed) return;
+        armed = false;
+        w.__kc.push(performance.now() - t0);
+      });
     window.addEventListener('keydown', () => {
       t0 = performance.now();
       armed = true;
     }, true);
-    window.addEventListener('input', () => ch.port2.postMessage(0));
-    // Keys an editor keymap consumes (Backspace/Enter in CodeMirror) fire no
-    // `input`; end their sample after the keydown handlers instead.
+    window.addEventListener('input', end);
     window.addEventListener('keydown', (e) => {
-      if (e.defaultPrevented) ch.port2.postMessage(0);
+      if (e.defaultPrevented) end();
     });
   });
 }
