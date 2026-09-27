@@ -380,6 +380,15 @@ fn row_to_story(r: &sqlx::sqlite::SqliteRow) -> Result<ProductStory> {
     })
 }
 
+/// `raw_json` projected down to `{"version": n}` (the Confluence page version
+/// — the only field any reader of a version LIST uses), else NULL. The full
+/// blob stays readable through `get_version`.
+/// (Nested CASE, not AND: SQLite may evaluate both AND operands, and the
+/// JSON functions raise on a malformed blob.)
+const SLIM_RAW_JSON: &str = "CASE WHEN json_valid(raw_json) THEN \
+     CASE WHEN json_type(raw_json, '$.version') IN ('integer', 'real') \
+     THEN json_object('version', json_extract(raw_json, '$.version')) END END AS raw_json";
+
 fn row_to_version(r: &sqlx::sqlite::SqliteRow) -> Result<ProductStoryVersion> {
     Ok(ProductStoryVersion {
         id: r.get("id"),
@@ -821,17 +830,22 @@ impl ProductRepo {
         self.get_version(&id).await
     }
 
-    /// List versions for a story; `body_md` is omitted (empty string) for brevity.
+    /// List versions for a story; `body_md` is omitted (empty string) for
+    /// brevity and `raw_json` is SLIM (see [`SLIM_RAW_JSON`]). A Confluence
+    /// row's `raw_json` is the whole page storage body, and the Rewrite/Plan
+    /// tabs poll this list every 3 s: 30 versions × 500 KB was 16.8 MB per
+    /// poll (backlog B6 / SE-03). Read one version in full via `get_version`.
     pub async fn list_versions(&self, story: &Id) -> Result<Vec<ProductStoryVersion>> {
-        let rows = sqlx::query(
-            "SELECT id, story_id, version_no, kind, title, '' AS body_md, raw_json,
+        let sql = format!(
+            "SELECT id, story_id, version_no, kind, title, '' AS body_md, {SLIM_RAW_JSON},
                     change_notes, created_by, created_at
-             FROM product_story_versions WHERE story_id = ? ORDER BY version_no DESC",
-        )
-        .bind(story)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("list versions"))?;
+             FROM product_story_versions WHERE story_id = ? ORDER BY version_no DESC"
+        );
+        let rows = sqlx::query(&sql)
+            .bind(story)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("list versions"))?;
         rows.iter().map(row_to_version).collect()
     }
 
@@ -844,16 +858,50 @@ impl ProductRepo {
         row_to_version(&row)
     }
 
-    pub async fn latest_source_version(&self, story: &Id) -> Result<Option<ProductStoryVersion>> {
-        let row = sqlx::query(
-            "SELECT * FROM product_story_versions
-             WHERE story_id = ? AND kind = 'source'
+    /// Number of versions a story has (the detail's `counts.versions`).
+    pub async fn count_versions(&self, story: &Id) -> Result<i64> {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM product_story_versions WHERE story_id = ?",
+        )
+        .bind(story)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("count versions"))
+    }
+
+    /// The Confluence page `version` in the newest `source`/`published` row's
+    /// `raw_json` — read in SQL instead of loading every version's body.
+    pub async fn synced_page_version(&self, story: &Id) -> Result<Option<i64>> {
+        let row: Option<(Option<i64>,)> = sqlx::query_as(
+            "SELECT CASE WHEN json_valid(raw_json)
+                         THEN CAST(json_extract(raw_json, '$.version') AS INTEGER) END
+             FROM product_story_versions
+             WHERE story_id = ? AND kind IN ('source', 'published')
              ORDER BY version_no DESC LIMIT 1",
         )
         .bind(story)
         .fetch_optional(&self.pool)
         .await
-        .map_err(dberr("latest source version"))?;
+        .map_err(dberr("synced page version"))?;
+        Ok(row.and_then(|(v,)| v))
+    }
+
+    /// Newest `source` version with its full `body_md` but a SLIM `raw_json`
+    /// (only the page `version` survives) — every story-detail response
+    /// carries this row, and nothing reads the raw page body from it.
+    pub async fn latest_source_version(&self, story: &Id) -> Result<Option<ProductStoryVersion>> {
+        let sql = format!(
+            "SELECT id, story_id, version_no, kind, title, body_md, {SLIM_RAW_JSON},
+                    change_notes, created_by, created_at
+             FROM product_story_versions
+             WHERE story_id = ? AND kind = 'source'
+             ORDER BY version_no DESC LIMIT 1"
+        );
+        let row = sqlx::query(&sql)
+            .bind(story)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("latest source version"))?;
         row.as_ref().map(row_to_version).transpose()
     }
 
@@ -2135,6 +2183,72 @@ mod tests {
             .await
             .unwrap();
         assert!(agent2.session_id.is_some());
+    }
+
+    /// B6 / SE-03: version lists and the latest source carry a SLIM
+    /// `raw_json` (just the page version), counts and the synced page version
+    /// come from SQL, and the full blob stays readable per version.
+    #[tokio::test]
+    async fn version_lists_ship_slim_raw_json() {
+        let pool = mem_pool().await;
+        let repo = ProductRepo::new(pool.clone());
+        let user = seed_user(&pool).await;
+        let ws = seed_workspace(&pool, &user).await;
+        let story = repo
+            .create_story(new_story_input(&ws, &user))
+            .await
+            .unwrap();
+        let add = |kind: &str, raw: Option<&str>| NewVersion {
+            story_id: story.id.clone(),
+            kind: kind.into(),
+            title: "t".into(),
+            body_md: "the body".into(),
+            raw_json: raw.map(str::to_string),
+            change_notes: None,
+            created_by: user.clone(),
+        };
+        let big = r#"{"id":"1","body_storage":"<p>huge</p>","version":7,"title":"t"}"#;
+        let src = repo.add_version(add("source", Some(big))).await.unwrap();
+        repo.add_version(add("suggested", Some("not json")))
+            .await
+            .unwrap();
+        repo.add_version(add("suggested", Some(r#"{"key":"PROJ-1"}"#)))
+            .await
+            .unwrap();
+        assert_eq!(repo.synced_page_version(&story.id).await.unwrap(), Some(7));
+        repo.add_version(add("published", Some(r#"{"version":8}"#)))
+            .await
+            .unwrap();
+
+        let list = repo.list_versions(&story.id).await.unwrap();
+        assert_eq!(list.len(), 4);
+        assert_eq!(repo.count_versions(&story.id).await.unwrap(), 4);
+        let raw: Vec<Option<&str>> = list.iter().map(|v| v.raw_json.as_deref()).collect();
+        assert_eq!(
+            raw,
+            vec![
+                Some(r#"{"version":8}"#),
+                None,
+                None,
+                Some(r#"{"version":7}"#)
+            ]
+        );
+        assert!(list.iter().all(|v| v.body_md.is_empty()));
+        assert_eq!(repo.synced_page_version(&story.id).await.unwrap(), Some(8));
+
+        let latest = repo
+            .latest_source_version(&story.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.id, src.id);
+        assert_eq!(latest.body_md, "the body");
+        assert_eq!(latest.raw_json.as_deref(), Some(r#"{"version":7}"#));
+        // The full row still has the whole blob.
+        assert_eq!(
+            repo.get_version(&src.id).await.unwrap().raw_json.as_deref(),
+            Some(big)
+        );
     }
 
     // -----------------------------------------------------------------------

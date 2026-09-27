@@ -242,3 +242,42 @@ async fn needle_in_haystack_over_http() {
     );
     assert!(hits.len() <= 5);
 }
+
+/// `kinds` is applied before the candidate LIMIT: a rare kind buried under
+/// more (better-matching) rows of another kind must still come back.
+#[tokio::test]
+async fn kinds_filter_applies_before_limit() {
+    let (pool, ws, user) = otto_memory::test_support::mem_pool().await;
+    let svc = MemoryService::with_defaults(pool);
+    haystack(&svc, &ws, &user, 120).await; // all kind "fact", all mention "logging"
+    svc.save(
+        &ws,
+        &user,
+        vec![nm(
+            "decision",
+            "Logging decision",
+            "We keep request logging at info level.",
+        )],
+    )
+    .await
+    .unwrap();
+    let hits = svc
+        .search(
+            &ws,
+            MemoryQuery {
+                text: Some("request logging".into()),
+                kinds: vec!["decision".into()],
+                k: 2,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        hits.len(),
+        1,
+        "got {:?}",
+        hits.iter().map(|h| &h.memory.title).collect::<Vec<_>>()
+    );
+    assert_eq!(hits[0].memory.kind, "decision");
+}

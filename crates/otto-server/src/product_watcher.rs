@@ -105,8 +105,14 @@ impl WatcherManager {
 /// In-memory map from story_id → last-polled Instant.
 type LastPollMap = HashMap<Id, Instant>;
 
+/// Stories polled at once. Every story is due on the first scan after boot,
+/// and each poll makes several Atlassian calls (plus a possible reconcile
+/// agent) — unbounded, they all fired together (backlog B6 / SE-13).
+const MAX_CONCURRENT_POLLS: usize = 4;
+
 async fn supervise(watcher: WatcherManager, cancel: Arc<AtomicBool>) {
     let mut last_poll: LastPollMap = HashMap::new();
+    let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_POLLS));
 
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -165,7 +171,12 @@ async fn supervise(watcher: WatcherManager, cancel: Arc<AtomicBool>) {
                 );
             }
 
+            let permits = Arc::clone(&permits);
             tokio::spawn(async move {
+                // Closed only if the semaphore is dropped — never, while this runs.
+                let Ok(_permit) = permits.acquire_owned().await else {
+                    return;
+                };
                 if let Err(e) =
                     poll_story(story, product_repo, product, orchestrator, improve, events).await
                 {

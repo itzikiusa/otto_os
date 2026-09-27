@@ -3718,6 +3718,7 @@ dependencies = [
  "keyring",
  "otto-core",
  "serde_json",
+ "tokio",
  "tracing",
 ]
 

@@ -17,7 +17,7 @@
   }
   let { repoId, path, onclose }: Props = $props();
 
-  let commits = $state<CommitInfo[]>([]);
+  let commits = $state.raw<CommitInfo[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
   let retryRev = $state(0);
@@ -28,20 +28,25 @@
     const p = path;
     loading = true;
     error = null;
+    // Switching files aborts the previous request; a late response is dropped.
+    const ctl = new AbortController();
     api
       .get<CommitInfo[]>(
         `/repos/${id}/log?all=true&limit=200&follow=true&path=${encodeURIComponent(p)}`,
+        ctl.signal,
       )
       .then((rows) => {
-        commits = rows;
+        if (!ctl.signal.aborted) commits = rows;
       })
       .catch((e: unknown) => {
+        if (ctl.signal.aborted) return;
         commits = [];
         error = loadErrorText(e);
       })
       .finally(() => {
-        loading = false;
+        if (!ctl.signal.aborted) loading = false;
       });
+    return () => ctl.abort();
   });
 
   function when(date: string): string {

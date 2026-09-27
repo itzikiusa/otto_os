@@ -448,6 +448,25 @@ async fn room_http_auth_admission_driver_and_terminal_process_are_isolated() {
         .ends_with(&guest.member_id));
     let mut terminal = connect(&origin, &term_path, &guest.token).await.unwrap();
     until(&mut terminal, |v| v["type"] == "scrollback").await;
+    // A viewer may pause its own output without acquiring terminal control.
+    let authority = ctx.manager.room_authority_snapshot(&session.id).await.unwrap();
+    send(&mut terminal, json!({"type":"pause"})).await;
+    // The ordered snapshot response proves the pause was handled first.
+    send(&mut terminal, json!({"type":"snapshot"})).await;
+    let ack = until(&mut terminal, |v| v["type"] == "scrollback" || v["type"] == "error").await;
+    assert_eq!(ack["type"], "scrollback", "viewer flow frames must be accepted");
+    ctx.manager.human_input(&session.id, &owner.id, false, true, b"PAUSED-ROOM-OUTPUT\n").await.unwrap();
+    let handle = ctx.manager.live_handle(&session.id).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !String::from_utf8_lossy(&handle.snapshot_with_history(100)).contains("PAUSED-ROOM-OUTPUT") {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(100), terminal.next()).await.is_err(), "paused viewers must not receive live output");
+    send(&mut terminal, json!({"type":"resume"})).await;
+    let resync = until(&mut terminal, |v| v["type"] == "scrollback").await;
+    assert!(String::from_utf8_lossy(&STANDARD.decode(resync["data"].as_str().unwrap()).unwrap()).contains("PAUSED-ROOM-OUTPUT"));
+    assert_eq!(ctx.manager.room_authority_snapshot(&session.id).await.unwrap(), authority);
     send(&mut terminal,json!({"type":"input","data":STANDARD.encode(b"VIEWER-MUST-NOT-WRITE\n"),"grant_epoch":admitted["room"]["grant_epoch"]})).await;
     until(&mut terminal, |v| v["type"] == "error").await;
     send(

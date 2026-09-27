@@ -52,6 +52,7 @@ pub mod mockup_assist;
 pub mod model_catalog;
 pub mod modules;
 pub mod monitor;
+pub mod offload;
 pub mod personal_agents_engine;
 mod personal_agent_documents;
 pub mod personal_agents_scheduler;
@@ -218,7 +219,15 @@ fn cors_layer() -> CorsLayer {
             // (event-socket connection) the command was sent to.
             header::HeaderName::from_static("x-otto-ui-conn"),
         ])
+        // Every call carries `Authorization`, so every call is preflighted.
+        // Without a max-age WebKit caches a preflight ~5 s (per URL), so a
+        // poller paid an extra OPTIONS round-trip on almost every tick. 600 s
+        // is WebKit's (and Chromium's 7200 s) accepted ceiling.
+        .max_age(CORS_PREFLIGHT_MAX_AGE)
 }
+
+/// How long a browser may reuse a CORS preflight (`Access-Control-Max-Age`).
+const CORS_PREFLIGHT_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Whether a request `Origin` is trusted by [`cors_layer`].
 ///
@@ -271,4 +280,49 @@ pub mod state_archive;
 /// Private-process entry point used by `ottod room-ocr`; never starts a server.
 pub fn run_room_ocr_helper() -> bool {
     rooms::recap_engines::run_ocr_stdio()
+}
+
+#[cfg(test)]
+mod cors_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn preflight_is_cacheable_for_allowed_origins_only() {
+        // A fallback, not a `.route(…)`: the preflight is answered by the CORS
+        // layer itself, and route_inventory/policy_coverage scan `.route(` literals.
+        let app = Router::new()
+            .fallback(|| async { "ok" })
+            .layer(cors_layer());
+        let preflight = |origin: &'static str| {
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/api/v1/health")
+                .header(header::ORIGIN, origin)
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "authorization")
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let ok = app
+            .clone()
+            .oneshot(preflight("tauri://localhost"))
+            .await
+            .unwrap();
+        let h = ok.headers();
+        assert_eq!(h[header::ACCESS_CONTROL_MAX_AGE], "600");
+        assert_eq!(h[header::ACCESS_CONTROL_ALLOW_ORIGIN], "tauri://localhost");
+
+        let denied = app
+            .oneshot(preflight("https://evil.example"))
+            .await
+            .unwrap();
+        assert!(denied
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none());
+    }
 }

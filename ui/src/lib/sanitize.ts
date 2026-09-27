@@ -25,7 +25,9 @@ const REMOVE_TAGS = new Set([
 const GLOBAL_ATTRS = new Set(['class', 'id', 'title', 'dir', 'lang']);
 const TAG_ATTRS: Record<string, Set<string>> = {
   a: new Set(['href', 'target', 'rel']),
-  img: new Set(['src', 'alt', 'width', 'height', 'loading']),
+  // data-asset: a vault attachment path; the reading view sets `src` to an
+  // authed blob URL on the live element (blob: never passes `urlOk`).
+  img: new Set(['src', 'alt', 'width', 'height', 'loading', 'data-asset']),
   input: new Set(['type', 'checked', 'disabled']),
   ol: new Set(['start']),
   td: new Set(['colspan', 'rowspan', 'align']),
@@ -57,17 +59,15 @@ export function sanitizeHtml(html: string): string {
   const doc = new DOMParser().parseFromString(`<body>${html}</body>`, 'text/html');
   const body = doc.body;
 
-  // Pass 1 — structure, to a fixpoint. Re-query after every change so hoisted
-  // children (and anything nested in them) are examined too.
-  for (let el = firstDisallowed(body); el; el = firstDisallowed(body)) {
-    if (REMOVE_TAGS.has(el.tagName.toLowerCase())) {
-      el.remove();
-    } else {
-      const parent = el.parentNode!;
-      while (el.firstChild) parent.insertBefore(el.firstChild, el);
-      el.remove();
-    }
+  // Pass 1 — structure. Removing or unwrapping never CREATES an element, so
+  // every disallowed element is already in one up-front list: handle each once
+  // (O(n); re-querying the whole tree after every change was O(k·n)). One
+  // nested in a removed container is handled inside the detached subtree —
+  // harmless. The fixpoint loop stays as a guard and normally finds nothing.
+  for (const el of Array.from(body.querySelectorAll('*'))) {
+    if (!ALLOWED_TAGS.has(el.tagName.toLowerCase())) dropOrUnwrap(el);
   }
+  for (let el = firstDisallowed(body); el; el = firstDisallowed(body)) dropOrUnwrap(el);
 
   // Pass 2 — attributes on every remaining element.
   for (const node of Array.from(body.querySelectorAll('*'))) {
@@ -101,6 +101,16 @@ export function sanitizeHtml(html: string): string {
     }
   }
   return body.innerHTML;
+}
+
+function dropOrUnwrap(el: Element): void {
+  if (REMOVE_TAGS.has(el.tagName.toLowerCase())) {
+    el.remove();
+    return;
+  }
+  const parent = el.parentNode;
+  if (parent) while (el.firstChild) parent.insertBefore(el.firstChild, el);
+  el.remove();
 }
 
 function firstDisallowed(root: Element): Element | null {

@@ -24,6 +24,7 @@ import { layout, type Axis } from './splitLayout.svelte';
 import { MAX_PANES, LS_PANES } from './splitLayout';
 import { isEmbedded } from '../desktop';
 import { SCRATCH_WORKSPACE_ID } from './sessionScope';
+import { patchSessionIn } from './sessionPatch';
 
 // Layout state is per-WINDOW (multi-window): winKey() namespaces these by the
 // window's label so two windows never clobber each other's workspace/tabs/view.
@@ -282,24 +283,24 @@ class WorkspaceStore {
   );
 
   /** Load sessions of every non-current workspace (for the grouped sidebar
-   *  view). Failures are per-workspace and silent — one revoked membership
-   *  must not blank the rest. */
+   *  view) in ONE cross-workspace call (`GET /sessions`, live rows only —
+   *  the daemon owner-scopes each workspace). It used to fan
+   *  `/workspaces/{id}/sessions` out per workspace, each decoding that
+   *  workspace's whole archived history. A failure is silent and keeps the
+   *  previous groups. */
   async refreshOtherSessions(): Promise<void> {
     if (!this.allWorkspaces) return;
     const token = getToken();
     const selection = this.selectionGeneration;
-    const others = this.workspaces.filter((w) => w.id !== this.currentId);
-    const lists = await Promise.all(
-      others.map(async (w) => {
-        try {
-          return await api.get<Session[]>(`/workspaces/${w.id}/sessions`);
-        } catch {
-          return [] as Session[];
-        }
-      }),
-    );
+    const others = new Set(this.workspaces.filter((w) => w.id !== this.currentId).map((w) => w.id));
+    let rows: Session[];
+    try {
+      rows = await api.get<Session[]>('/sessions?archived=false');
+    } catch {
+      return;
+    }
     if (token !== getToken() || selection !== this.selectionGeneration || !this.allWorkspaces) return;
-    const flat = lists.flat().filter((s) => !s.archived && visibleOnThisDevice(s));
+    const flat = rows.filter((s) => others.has(s.workspace_id) && !s.archived && visibleOnThisDevice(s));
     this.otherWsSessions = flat;
     // Seed statuses without clobbering fresher event-fed values.
     for (const s of flat) if (!(s.id in this.statusMap)) this.statusMap[s.id] = s.status;
@@ -1249,6 +1250,15 @@ class WorkspaceStore {
     this.otherWsSessions = this.otherWsSessions.map((x) => (x.id === id ? s : x));
   }
 
+  /** Patch one session in whichever list holds it; a list without it (or an
+   *  unchanged patch) keeps its identity, so nothing downstream re-runs. */
+  private patchSession(id: Id, patch: (s: Session) => Session): void {
+    const mine = patchSessionIn(this.sessions, id, patch);
+    if (mine !== this.sessions) this.sessions = mine;
+    const other = patchSessionIn(this.otherWsSessions, id, patch);
+    if (other !== this.otherWsSessions) this.otherWsSessions = other;
+  }
+
   /** Event-bus feed (WS /ws/events). */
   applyEvent(ev: OttoEvent): void {
     switch (ev.type) {
@@ -1270,12 +1280,8 @@ class WorkspaceStore {
         // of whatever the row said when the list loaded (a session that just
         // went working → idle showed "37m idle · suspending…").
         const lastActiveAt = new Date().toISOString();
-        this.sessions = this.sessions.map((s) =>
-          s.id === ev.session_id ? { ...s, status: ev.status, last_active_at: lastActiveAt } : s,
-        );
-        this.otherWsSessions = this.otherWsSessions.map((s) =>
-          s.id === ev.session_id ? { ...s, status: ev.status, last_active_at: lastActiveAt } : s,
-        );
+        const stamp = (s: Session): Session => ({ ...s, status: ev.status, last_active_at: lastActiveAt });
+        this.patchSession(ev.session_id, stamp);
         // The agent resuming work means the operator already responded to
         // whatever it was blocked on — clear the sticky "needs you" flag. Also
         // clear it once the session exits or becomes reconnectable: a dead agent
@@ -1320,12 +1326,7 @@ class WorkspaceStore {
         // Replace the cached session's meta in place (e.g. live handover flags).
         // Mirrors session_renamed: BOTH lists, so cross-workspace sidebar rows
         // (issue chips, handover flags) don't go stale.
-        this.sessions = this.sessions.map((s) =>
-          s.id === ev.session_id ? { ...s, meta: ev.meta } : s,
-        );
-        this.otherWsSessions = this.otherWsSessions.map((s) =>
-          s.id === ev.session_id ? { ...s, meta: ev.meta } : s,
-        );
+        this.patchSession(ev.session_id, (s) => ({ ...s, meta: ev.meta }));
         break;
       }
       case 'session_renamed': {
@@ -1333,12 +1334,7 @@ class WorkspaceStore {
         // adopting the CLI's own session title. `session_meta_updated` only
         // carries meta, so this is the only event that refreshes `title` live;
         // pane header and sidebar re-render off `session.title` reactively.
-        this.sessions = this.sessions.map((s) =>
-          s.id === ev.session_id ? { ...s, title: ev.title } : s,
-        );
-        this.otherWsSessions = this.otherWsSessions.map((s) =>
-          s.id === ev.session_id ? { ...s, title: ev.title } : s,
-        );
+        this.patchSession(ev.session_id, (s) => (s.title === ev.title ? s : { ...s, title: ev.title }));
         break;
       }
       case 'session_removed': {

@@ -51,6 +51,8 @@ export interface ProductStoryVersion {
   kind: string;
   title: string;
   body_md: string;
+  /** Full only from `GET /product/versions/{vid}`. In a version LIST (and the
+   *  story detail's `source`) it is slim: `{"version": n}` or `null`. */
   raw_json: string | null;
   change_notes: string | null;
   created_by: string;

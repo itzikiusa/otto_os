@@ -128,7 +128,7 @@ class GitStore {
    *  the Git page's global list when the active workspace changes. */
   allRepos: Repo[] = $state([]);
   primary: Repo | null = $state(null);
-  primaryStatus: RepoStatusResp | null = $state(null);
+  primaryStatus: RepoStatusResp | null = $state.raw(null);
   prs: PrSummary[] = $state([]);
   prsLoading = $state(false);
   /** Non-null when the last PR fetch failed (e.g. bad token / 401). */
@@ -157,7 +157,7 @@ class GitStore {
   // Each open tab's branch chip (GitTabs), the active repo's toolbar (RepoView)
   // and the auto-fetch loop all read/write THIS map, so one fetch updates every
   // view. `null` is an in-flight / load-attempted marker.
-  statusById: Record<string, RepoStatusResp | null> = $state({});
+  statusById: Record<string, RepoStatusResp | null> = $state.raw({});
   /** Per-repo status-load failure (human text); cleared on the next success. A
    *  stale `statusById` entry stays in place alongside it. */
   statusErrorById: Record<string, string> = $state({});
@@ -430,7 +430,7 @@ class GitStore {
   setStatus(repoId: string, s: RepoStatusResp): boolean {
     const prev = this.statusById[repoId];
     if (prev && statusEq(prev, s)) return false;
-    this.statusById[repoId] = s;
+    this.statusById = { ...this.statusById, [repoId]: s };
     if (this.primary?.id === repoId) this.primaryStatus = s;
     return true;
   }
@@ -454,7 +454,7 @@ class GitStore {
    *  in-flight / attempted load so we don't refetch on every render. */
   ensureStatus(repoId: string): void {
     if (repoId in this.statusById) return;
-    this.statusById[repoId] = null;
+    this.statusById = { ...this.statusById, [repoId]: null };
     void this.refreshStatus(repoId);
   }
 

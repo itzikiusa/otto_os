@@ -12,6 +12,8 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { WorkflowRun, Review, Session } from '../../lib/api/types';
   import { api } from '../../lib/api/client';
+  import { mapLimit, pollWhileVisible } from '../../lib/poll';
+  import { untrack } from 'svelte';
   import { runStatus } from '../../lib/status';
   import { reviewIds, reviewSessions, reviewAgentStatus } from './reviewAgents';
 
@@ -30,25 +32,46 @@
   // sub-agent rows must not wait for the session.
   let reviews = $state<Record<string, Review>>({});
   let sessionDetails = $state<Record<string, Session>>({});
-  const relatedIds = $derived([...new Set((run.nodes ?? []).flatMap(reviewIds))]);
+  // A STRING key: the id array was rebuilt on every run merge (a WS tick), so
+  // the effect below restarted — and refetched every review — per merge
+  // (backlog B6 / SD-20).
+  const relatedKey = $derived([...new Set((run.nodes ?? []).flatMap(reviewIds))].join(','));
+  const relatedIds = $derived(relatedKey ? relatedKey.split(',') : []);
   // Reviews outlive await:false steps and may be retried after the workflow is
-  // complete. Keep their durable association active while this panel is open.
-  // Each effect owns its requests, so a late response cannot enter another run.
+  // complete. Keep their durable association active while this panel is open:
+  // running reviews every 2 s, finished ones (a retry can revive them) every
+  // 30 s, nothing while the window is hidden (shared poll helper). Each effect
+  // owns its requests, so a late response cannot enter another run.
+  const TERMINAL_RECHECK_MS = 30_000;
   $effect(() => {
     const runId = run.id;
-    const ids = relatedIds;
-    let alive = true;
-    let timer: ReturnType<typeof setTimeout>;
-    async function refresh() {
-      const results = await Promise.all(ids.map(async (id) => {
-        try { return await api.get<Review>(`/reviews/${id}`); } catch { return null; }
-      }));
-      if (!alive || run.id !== runId) return;
-      for (const review of results) if (review) reviews[review.id] = review;
-      timer = setTimeout(refresh, 2000);
-    }
-    if (ids.length) void refresh();
-    return () => { alive = false; clearTimeout(timer); };
+    const ids = relatedKey ? relatedKey.split(',') : [];
+    if (!ids.length) return;
+    const fetchedAt = new Map<string, number>();
+    const lastJson = new Map<string, string>();
+    const poller = pollWhileVisible(async (signal) => {
+      const now = Date.now();
+      const due = ids.filter((id) => {
+        const r = untrack(() => reviews[id]);
+        if (!r || r.status === 'running') return true;
+        return now - (fetchedAt.get(id) ?? 0) >= TERMINAL_RECHECK_MS;
+      });
+      if (!due.length) return;
+      const results = await mapLimit(due, 3, async (id) => {
+        try { return await api.bg.get<Review>(`/reviews/${id}`, signal); } catch { return null; }
+      });
+      if (signal.aborted || run.id !== runId) return;
+      for (const review of results) {
+        if (!review) continue;
+        fetchedAt.set(review.id, Date.now());
+        // Assign only a changed review: an unchanged tick re-renders nothing.
+        const json = JSON.stringify(review);
+        if (lastJson.get(review.id) === json) continue;
+        lastJson.set(review.id, json);
+        reviews[review.id] = review;
+      }
+    }, { ms: 2000 });
+    return () => poller.stop();
   });
   const groups = $derived(
     (run.nodes ?? [])

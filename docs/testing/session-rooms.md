@@ -17,8 +17,10 @@ npx playwright test --config playwright.rooms.config.ts
 
 - UI guards, Svelte and all TypeScript configurations: zero errors/warnings.
 - Production UI build: passed.
-- Focused room/recap unit tests: 27 passed.
-- Synthetic browser suite: 13 passed, eight intentionally skipped duplicate
+- The complete UI unit suite passed 535 tests, including 13 media regressions.
+  Repeated sharing/audio cycles, binding-only relays and permission cancellation
+  during pending sender replacement are covered.
+- Synthetic browser suite: 16 passed, eight intentionally skipped duplicate
   media/finalization runs. Layout and user flows run in desktop light, desktop
   dark and phone projects; synthetic four-peer WebRTC, AudioWorklet and host-End
   finalization pipelines run once in desktop light. A layout-only rerun also
@@ -48,18 +50,33 @@ CARGO_BUILD_JOBS=2 cargo test -p otto-server --lib --test rooms_api room -- --te
 The route inventory passed both checks after adding every room and recap route
 to the main API index. The full workspace build and
 `cargo clippy --workspace --all-targets -- -D warnings` passed. All 28 new Rust files
-pass `rustfmt --check`, and `git diff --check` is clean. The repository-wide
+pass `rustfmt --check`, and the rooms diff against integrated main is whitespace-clean. The repository-wide
 advisory formatting check still reports existing formatting debt (including
 untouched `otto-browser/src/cdp.rs`); no broad reformat was applied.
 
-The full workspace test run also passed: 3,620 tests passed, zero failed and
-66 ignored across 126 suite/doc-test results. It used
-`CARGO_BUILD_JOBS=2 cargo test --workspace -- --test-threads=1` to bound validation
-resource use and preserve the existing suite's sequential test assumptions.
-The final source-lifecycle cleanup was then verified separately: its focused
-regression passed, including 100 source replacements without retaining obsolete
-revocation tokens or screen-sequence keys. The full workspace suite was not
-repeated for that isolated cleanup.
+After integrating main-worktree commit `3c0f9478`, the full workspace nextest
+run passed **3,730 tests, zero failed, 69 skipped**. Compilation took 5m54s and
+execution took 189.195s on the shared development machine:
+
+```sh
+CARGO_BUILD_JOBS=8 cargo nextest run --workspace --profile ci --no-fail-fast
+```
+
+This includes the atomic PTY snapshot/subscription regression, viewer pause/resume
+with real HTTP/WebSocket/PTY traffic, and safe cleanup of inactive room authority
+state while queued writers and mutex holders retain their fences. The fresh daemon
+build passed in 3m25s. The separate `cargo test --workspace --doc` gate passed. The integrated full
+workspace/all-target Clippy gate passed with warnings denied (1m22s).
+
+A separate live-daemon browser test passed with temporary state and a shim shell
+session: host invitation and admission, denied viewer input, room-only chat,
+editor control, revocation, stale-input rejection, and host End while the same
+underlying PTY remains alive and accepts owner input. This is actual HTTP and
+WebSocket transport, rather than a mocked API. Run it with distinct reserved ports:
+
+```sh
+OTTO_E2E_SLOT=rooms-live OTTO_E2E_PORT=7806 OTTO_E2E_PW_PORT=5296 OTTO_E2E_SWEEP_ORPHANS=0 OTTO_E2E_BIN=/absolute/path/to/target/debug/ottod npx playwright test --config e2e/rooms-live.config.ts
+```
 
 The browser fixtures test host admission, viewer/editor control, personal pins,
 annotation grants, capture consent, bounded real PCM/JPEG ingestion requests,
@@ -73,6 +90,8 @@ generations, recognition cancellation and summary process isolation.
 
 See [native media validation](room-media-native.md) for measured synthetic
 WKWebView results and unmet frame-rate targets, and [recap validation](room-recap.md)
-for local speech/OCR and subscription-backed Codex probes. Real two-Mac
-networking/TURN, physical capture and sustained combined performance still need
-hardware acceptance; synthetic tests do not establish them.
+for local speech/OCR and subscription-backed Codex probes. The isolated native Tauri probe also passed twenty synthetic audio cycles at each
+origin and native guest IPC confinement. Forced TURN passed with six relay-selected
+peers in a disposable loopback-only coturn fixture. Real two-Mac networking, physical
+capture and sustained combined performance still need hardware acceptance; synthetic
+and local-relay tests do not establish them.

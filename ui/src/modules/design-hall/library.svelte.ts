@@ -16,8 +16,13 @@ function errText(e: unknown): string {
 }
 
 class DesignLibrary {
-  hits: DesignSearchHit[] = $state([]);
-  projects: DesignProject[] = $state([]);
+  // Replaced wholesale on every load, never mutated → raw (no deep proxy over
+  // up to 500 hits), with id-keyed indexes for the per-card lookups.
+  hits: DesignSearchHit[] = $state.raw([]);
+  projects: DesignProject[] = $state.raw([]);
+  #hitById = $derived(new Map(this.hits.map((h) => [h.artifact.id, h])));
+  #projectById = $derived(new Map(this.projects.map((p) => [p.id, p])));
+  #artifacts = $derived(this.hits.map((h) => h.artifact));
   /** story id → the story (key + title + parent), for chips and the epic strip. */
   stories: Record<string, StoryRef> = $state({});
   loading = $state(false);
@@ -30,15 +35,15 @@ class DesignLibrary {
   private tried = new Set<string>();
 
   get artifacts(): DesignArtifact[] {
-    return this.hits.map((h) => h.artifact);
+    return this.#artifacts;
   }
 
   hitOf(id: string): DesignSearchHit | undefined {
-    return this.hits.find((h) => h.artifact.id === id);
+    return this.#hitById.get(id);
   }
 
   projectOf(id: string | null | undefined): DesignProject | undefined {
-    return id ? this.projects.find((p) => p.id === id) : undefined;
+    return id ? this.#projectById.get(id) : undefined;
   }
 
   /** Story keys ("LOY-142") an artifact implements, resolved where known. */

@@ -9,6 +9,7 @@ pub mod admin_sessions;
 pub(crate) mod api_automation_runs;
 pub mod api_client;
 pub(crate) mod api_oauth;
+pub(crate) mod api_response_cache;
 pub mod api_stream;
 pub mod audit;
 pub mod auth_routes;
@@ -469,6 +470,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route(
             "/workspaces/{wid}/api-client/execute",
             post(api_client::execute),
+        )
+        .route(
+            "/workspaces/{wid}/api-client/responses/{id}/raw",
+            get(api_response_cache::raw),
         )
         .route(
             "/workspaces/{wid}/api-client/secure-all",

@@ -18,6 +18,7 @@
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { formatBytes, formatSeconds } from '../../lib/metric-format';
   import { parseSetCookies } from '../../lib/api/apiVars';
+  import { authedBlobUrl } from '../../lib/api/client';
 
   interface Props {
     compact?: boolean;
@@ -119,6 +120,15 @@
     return base;
   });
 
+  // Soft-wrap whenever the shown text may be one huge line (raw / minified /
+  // over the pretty limit / not JSON): an unwrapped multi-hundred-KB line makes
+  // every layout pass measure it. Pretty-printed JSON reads better unwrapped.
+  // `.by` (a closure): a bare `$derived(expr)` is type-checked where `bodyView`
+  // is still narrowed to its `'pretty'` initializer.
+  const respWrap = $derived.by(
+    () => !!resp && (respLang !== 'json' || bodyView === 'raw' || parsed === undefined || resp.body.length > PRETTY_SIZE_LIMIT),
+  );
+
   // ── Streams ─────────────────────────────────────────────────────────────────
   const streamItems = $derived(
     apiStream.items.length > STREAM_RING_MAX ? apiStream.items.slice(apiStream.items.length - STREAM_RING_MAX) : apiStream.items,
@@ -184,26 +194,36 @@
     for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
     return new Blob([arr], { type: ct || 'application/octet-stream' });
   }
-  function saveToDisk(): void {
+  async function saveToDisk(): Promise<void> {
     if (!resp) return;
+    const r = resp;
+    let url = '';
     try {
-      const blob = resp.body_base64
-        ? base64ToBlob(resp.body_base64, resp.content_type ?? '')
-        : new Blob([resp.body], { type: resp.content_type ?? 'text/plain' });
-      const url = URL.createObjectURL(blob);
+      if (r.body_id && ws.currentId) {
+        // Truncated / non-UTF-8 body: the full bytes wait in the daemon's
+        // short-lived response cache (never inlined as base64 any more).
+        url = await authedBlobUrl(`/workspaces/${ws.currentId}/api-client/responses/${encodeURIComponent(r.body_id)}/raw`);
+      } else {
+        const blob = r.body_base64
+          ? base64ToBlob(r.body_base64, r.content_type ?? '')
+          : new Blob([r.body], { type: r.content_type ?? 'text/plain' });
+        url = URL.createObjectURL(blob);
+      }
       const a = document.createElement('a');
       a.href = url;
       a.download = fileName();
       document.body.appendChild(a);
       a.click();
       a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1500);
       toasts.success('Response downloaded', a.download);
-    } catch {
-      toasts.error('Couldn’t save the response', 'The file could not be written.');
+    } catch (e) {
+      toasts.error('Couldn’t save the response', r.body_id && e instanceof Error ? e.message : 'The file could not be written.');
+    } finally {
+      const u = url;
+      if (u) setTimeout(() => URL.revokeObjectURL(u), 1500);
     }
   }
-  const canDownload = $derived(!!resp && (!!resp.body_base64 || (!!resp.body && !resp.too_large)));
+  const canDownload = $derived(!!resp && (!!resp.body_id || !!resp.body_base64 || (!!resp.body && !resp.too_large)));
 
   async function copyBody(): Promise<void> {
     if (!resp) return;
@@ -231,7 +251,7 @@
   function moreMenu(e: MouseEvent): void {
     const items: MenuItem[] = [
       { label: 'Add to Docs as example', icon: 'note', action: addAsExample, disabled: !resp || resp.too_large || isImage },
-      { label: 'Download response…', icon: 'download', action: saveToDisk, disabled: !canDownload },
+      { label: 'Download response…', icon: 'download', action: () => void saveToDisk(), disabled: !canDownload },
     ];
     if (ws.current) items.push({ separator: true }, { label: 'Send to an agent…', icon: 'send', action: () => (sendToAgentOpen = true) });
     ctxMenu.show(e, items);
@@ -406,7 +426,7 @@
             <div class="tree-wrap"><JsonTree value={parsed} query={filterDebounced} /></div>
           {:else}
             <div class="resp-editor">
-              <CodeEditor path={respPath} content={displayBody} root={ws.current?.root_path ?? ''} language={respLang} readOnly={true} />
+              <CodeEditor lsp={false} wrap={respWrap} path={respPath} content={displayBody} root={ws.current?.root_path ?? ''} language={respLang} readOnly={true} />
             </div>
           {/if}
         {/if}

@@ -4,6 +4,7 @@
   // switcher, state filter…). `/` focuses the filter from anywhere in the view.
   import type { Snippet } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { pollWhileVisible } from '../../lib/poll';
 
   interface Props {
     title: string;
@@ -12,7 +13,8 @@
     filterPlaceholder?: string;
     loading?: boolean;
     auto?: boolean;
-    onrefresh?: () => void;
+    /** Return the load's promise so auto-refresh chains after it settles. */
+    onrefresh?: () => void | Promise<unknown>;
     children?: Snippet;
     actions?: Snippet;
   }
@@ -30,12 +32,14 @@
 
   let filterEl = $state<HTMLInputElement | null>(null);
 
-  // Auto-refresh timer: re-armed whenever the toggle flips; cleared on unmount.
+  // Auto-refresh: re-armed whenever the toggle flips; stopped on unmount. A
+  // chain (next tick 10 s after the previous refresh SETTLES), paused while
+  // the window is hidden — an interval stacked slow `aws` CLI refreshes.
   $effect(() => {
     if (!auto || !onrefresh) return;
     const fn = onrefresh;
-    const t = setInterval(() => fn(), 10_000);
-    return () => clearInterval(t);
+    const poller = pollWhileVisible(async () => { await fn(); }, { ms: 10_000, immediate: false });
+    return () => poller.stop();
   });
 
   function onKey(e: KeyboardEvent): void {

@@ -9,7 +9,8 @@
   import { onMount } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
-  import { api } from '../../lib/api/client';
+  import { api, isAbortError } from '../../lib/api/client';
+  import { pollWhileVisible, type Poller } from '../../lib/poll';
   import type { McpApproval, Notice, Session, WorkspaceWithRole } from '../../lib/api/types';
   import { auth } from '../../lib/stores/auth.svelte';
   import { isForeground, SCRATCH_WORKSPACE_ID, visibleOnThisDevice } from '../../lib/stores/workspace.svelte';
@@ -43,7 +44,6 @@
   let loaded = $state(false);
   let loadError: string | null = $state(null);
   let askChord = $state('');
-  let inflight = false;
 
   function sessionIdOf(n: Notice): string | null {
     if (n.action?.type === 'open_session') return n.action.session_id;
@@ -77,27 +77,25 @@
       .join('');
   }
 
-  async function sessionsOf(wsId: string): Promise<Session[]> {
-    // Honour device isolation, but propagate failures: an unavailable list
-    // must never be presented as proof that no agents need attention.
-    return (await api.get<Session[]>(`/workspaces/${wsId}/sessions`)).filter(visibleOnThisDevice);
-  }
-
-  async function refresh(): Promise<void> {
-    if (inflight || auth.phase !== 'ready') return;
-    inflight = true;
+  async function refresh(signal?: AbortSignal): Promise<boolean> {
+    if (auth.phase !== 'ready') return true;
     try {
-      const workspaces = await api.get<WorkspaceWithRole[]>('/workspaces');
+      // ONE cross-workspace query for the working rows (`GET /sessions`,
+      // filtered in SQL) instead of one full-history list per workspace every
+      // tick — 16 of those at once starved the daemon's SQLite pool and every
+      // socket this window shares with the app. Failures propagate: an
+      // unavailable list must never read as "no agents need attention".
+      const [workspaces, working, approvals, notices] = await Promise.all([
+        api.bg.get<WorkspaceWithRole[]>('/workspaces', signal),
+        api.bg.get<Session[]>('/sessions?archived=false&status=working', signal),
+        api.bg.get<McpApproval[]>('/mcp/approvals?status=pending', signal),
+        api.bg.get<Notice[]>('/notifications', signal),
+      ]);
       const names = new Map(workspaces.map((w) => [w.id, w.name]));
       names.set(SCRATCH_WORKSPACE_ID, 'No workspace');
-      const [lists, approvals, notices] = await Promise.all([
-        Promise.all([...names.keys()].map((id) => sessionsOf(id))),
-        api.get<McpApproval[]>('/mcp/approvals?status=pending'),
-        api.get<Notice[]>('/notifications'),
-      ]);
 
-      running = lists
-        .flat()
+      running = working
+        .filter(visibleOnThisDevice)
         .filter((s) => !s.archived && s.status === 'working' && isForeground(s))
         .map((s) => ({ session: s, workspace: names.get(s.workspace_id) ?? '' }));
 
@@ -144,10 +142,11 @@
       loadError = null;
       loaded = true;
       void tray.setStatus(running.length, needs.length).catch(() => {});
+      return true;
     } catch (e) {
+      if (isAbortError(e)) return true;
       loadError = e instanceof Error ? e.message : String(e);
-    } finally {
-      inflight = false;
+      return false;
     }
   }
 
@@ -163,12 +162,20 @@
     if (e.key === 'Escape') void tray.hidePopover().catch(() => {});
   }
 
-  // Poll only once signed in; the boot flow (App.svelte) moves the phase.
+  let poller: Poller | null = null;
+
+  // Poll only once signed in; the boot flow (App.svelte) moves the phase. The
+  // popover is hidden most of its life, yet its counts drive the menu-bar
+  // glyph — so it keeps polling while hidden (`hidden: POLL_MS`), but through
+  // the shared chain: never overlapping, backing off while the daemon fails.
   $effect(() => {
     if (auth.phase !== 'ready') return;
-    void refresh();
-    const timer = setInterval(() => void refresh(), POLL_MS);
-    return () => clearInterval(timer);
+    const p = pollWhileVisible((signal) => refresh(signal), { ms: POLL_MS, hidden: POLL_MS });
+    poller = p;
+    return () => {
+      p.stop();
+      if (poller === p) poller = null;
+    };
   });
 
   onMount(() => {
@@ -181,7 +188,7 @@
       })
       .catch(() => {});
     let unlisten: (() => void) | null = null;
-    void onDesktopEvent('otto://tray-shown', () => void refresh()).then((fn) => (unlisten = fn));
+    void onDesktopEvent('otto://tray-shown', () => poller?.now()).then((fn) => (unlisten = fn));
     return () => unlisten?.();
   });
 </script>
@@ -207,7 +214,7 @@
       <div class="state" role="alert">
         <p>Couldn't refresh your work: {loadError}</p>
         {#if loaded}<p>Showing the last loaded activity.</p>{/if}
-        <button class="btn small" onclick={() => void refresh()}>Retry</button>
+        <button class="btn small" onclick={() => (poller ? poller.now() : void refresh())}>Retry</button>
       </div>
     {/if}
     {#if auth.phase === 'loading' || (auth.phase === 'ready' && !loaded && !loadError)}

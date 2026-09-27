@@ -13,6 +13,7 @@
   import { browser } from '../../lib/stores/browser.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { startMouseDrag } from '../../lib/dragCursor';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
@@ -92,22 +93,15 @@
   // Drag the dock's top edge to resize it (persisted).
   let resizing = $state(false);
   function startResize(e: MouseEvent): void {
-    e.preventDefault();
     resizing = true;
     const startY = e.clientY;
     const startH = ui.browserAgentH;
-    const onMove = (ev: MouseEvent) => ui.setBrowserAgentH(startH + (startY - ev.clientY));
-    const onUp = () => {
-      resizing = false;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    document.body.style.cursor = 'row-resize';
-    document.body.style.userSelect = 'none';
+    // Overlay cursor + one write per frame (lib/dragCursor.ts).
+    startMouseDrag(e, {
+      cursor: 'row-resize',
+      onMove: (ev) => ui.setBrowserAgentH(startH + (startY - ev.clientY)),
+      onEnd: () => (resizing = false),
+    });
   }
 </script>
 

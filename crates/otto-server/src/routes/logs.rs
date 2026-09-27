@@ -20,6 +20,10 @@ use otto_core::Error;
 const ALL_FILES: &str = "__all__";
 const DEFAULT_TAIL_LINES: usize = 500;
 const MAX_TAIL_LINES: usize = 50_000;
+/// Upper bound on `content` per response. "All log files" used to return every
+/// `ottod.log*` in full (11 MB measured) on every Live tick; anything over the
+/// cap is dropped from the OLD end (at a line boundary) and `truncated` is set.
+const MAX_CONTENT_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LogsParams {
@@ -47,8 +51,14 @@ pub struct DaemonLogs {
     pub selected: String,
     pub mode: String,
     pub content: String,
+    /// Byte offset in the live file where `content` starts (see `next_offset`).
     pub offset: u64,
+    /// Byte offset to pass as `offset` with `mode=since` to get only what was
+    /// written after this response. It always refers to the LIVE file: the
+    /// selected file, or for `__all__` the newest file (`files[last]`).
     pub next_offset: u64,
+    /// True when older content was dropped to honour the response byte cap.
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,14 +93,22 @@ pub async fn daemon_logs(
 ) -> ApiResult<Json<DaemonLogs>> {
     require_root(&user)?;
     let log_dir = daemon_log_dir();
-    read_daemon_logs(&log_dir, params)
+    // Directory walk + multi-MB reads: keep them off the async workers.
+    tokio::task::spawn_blocking(move || read_daemon_logs(&log_dir, params))
+        .await
+        .map_err(|e| ApiError(Error::Internal(format!("read logs task: {e}"))))?
         .map(Json)
         .map_err(ApiError)
 }
 
+/// Same resolution order as `ottod`'s `Config::log_dir`: `$OTTO_LOG_DIR`, then
+/// `$OTTO_DATA_DIR/logs` (test/dev daemons), then `~/Library/Logs/Otto`.
 fn daemon_log_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("OTTO_LOG_DIR") {
         return PathBuf::from(dir);
+    }
+    if let Some(data) = std::env::var_os("OTTO_DATA_DIR") {
+        return PathBuf::from(data).join("logs");
     }
     dirs::home_dir()
         .map(|h| h.join("Library/Logs/Otto"))
@@ -112,30 +130,20 @@ fn read_daemon_logs(log_dir: &Path, params: LogsParams) -> Result<DaemonLogs, Er
         .unwrap_or_else(|| files.last().map(|f| f.name.as_str()).unwrap_or(ALL_FILES))
         .to_string();
 
-    let (content, offset, next_offset) = if selected == ALL_FILES {
+    let chunk = if selected == ALL_FILES {
         read_all_files(log_dir, &files)?
     } else {
         let path = safe_log_path(log_dir, &selected, &files)?;
         match mode {
-            ReadMode::All => {
-                let content = std::fs::read_to_string(&path)
-                    .map_err(|e| Error::Internal(format!("read log {}: {e}", selected)))?;
-                let next_offset = std::fs::metadata(&path)
-                    .map(|m| m.len())
-                    .unwrap_or(content.len() as u64);
-                (content, 0, next_offset)
-            }
+            ReadMode::All => read_since(&path, 0)
+                .map_err(|e| Error::Internal(format!("read log {}: {e}", selected)))?,
             ReadMode::Tail => {
                 let lines = params
                     .lines
                     .unwrap_or(DEFAULT_TAIL_LINES)
                     .clamp(1, MAX_TAIL_LINES);
-                let content = tail_lines(&path, lines)
-                    .map_err(|e| Error::Internal(format!("tail log {}: {e}", selected)))?;
-                let next_offset = std::fs::metadata(&path)
-                    .map(|m| m.len())
-                    .unwrap_or(content.len() as u64);
-                (content, 0, next_offset)
+                tail_lines(&path, lines)
+                    .map_err(|e| Error::Internal(format!("tail log {}: {e}", selected)))?
             }
             ReadMode::Since => {
                 let offset = params.offset.unwrap_or(0);
@@ -150,9 +158,50 @@ fn read_daemon_logs(log_dir: &Path, params: LogsParams) -> Result<DaemonLogs, Er
         files,
         selected,
         mode: mode.as_str().to_string(),
-        content,
-        offset,
-        next_offset,
+        content: chunk.content,
+        offset: chunk.offset,
+        next_offset: chunk.next_offset,
+        truncated: chunk.truncated,
+    })
+}
+
+/// One read: `content` = bytes `[offset, next_offset)` of the live file (for
+/// `__all__`, older files' text is prepended and `offset` is 0).
+struct Chunk {
+    content: String,
+    offset: u64,
+    next_offset: u64,
+    truncated: bool,
+}
+
+/// Read `path[start..size]`, keeping at most `MAX_CONTENT_BYTES` from the end
+/// (the cut moves forward to the next line start). Returns the text, the real
+/// start offset, the size read up to, and whether anything was dropped.
+fn read_capped(path: &Path, start: u64, cap: u64) -> std::io::Result<Chunk> {
+    let mut file = std::fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    let mut start = start.min(size);
+    let mut truncated = false;
+    if size - start > cap {
+        start = size - cap;
+        truncated = true;
+    }
+    file.seek(SeekFrom::Start(start))?;
+    // Grown by read_to_end; `take` bounds it to `cap` (never pre-sized from the request).
+    let mut bytes = Vec::new();
+    (&mut file).take(size - start).read_to_end(&mut bytes)?;
+    let mut skip = 0usize;
+    if truncated {
+        // Don't start mid-line (or mid-UTF-8 sequence).
+        if let Some(nl) = bytes.iter().position(|&b| b == b'\n') {
+            skip = nl + 1;
+        }
+    }
+    Ok(Chunk {
+        content: String::from_utf8_lossy(&bytes[skip..]).into_owned(),
+        offset: start + skip as u64,
+        next_offset: start + bytes.len() as u64,
+        truncated,
     })
 }
 
@@ -200,37 +249,62 @@ fn safe_log_path(log_dir: &Path, selected: &str, files: &[LogFileEntry]) -> Resu
     Ok(log_dir.join(selected))
 }
 
-fn read_all_files(log_dir: &Path, files: &[LogFileEntry]) -> Result<(String, u64, u64), Error> {
-    let mut out = String::new();
-    for file in files {
+/// Every `ottod.log*` concatenated (oldest first, each under a `=====` header),
+/// newest-first within the byte budget: once `MAX_CONTENT_BYTES` is spent the
+/// older files are left out and `truncated` is set. `next_offset` is the byte
+/// position in the NEWEST file, so a client can follow it with `mode=since`.
+fn read_all_files(log_dir: &Path, files: &[LogFileEntry]) -> Result<Chunk, Error> {
+    let mut parts: Vec<(String, String)> = Vec::new();
+    let mut budget = MAX_CONTENT_BYTES;
+    let mut truncated = false;
+    let mut next_offset = 0u64;
+    for (i, file) in files.iter().enumerate().rev() {
+        if budget == 0 {
+            truncated = true;
+            break;
+        }
         let path = safe_log_path(log_dir, &file.name, files)?;
+        let chunk = read_capped(&path, 0, budget)
+            .map_err(|e| Error::Internal(format!("read log {}: {e}", file.name)))?;
+        if i + 1 == files.len() {
+            next_offset = chunk.next_offset;
+        }
+        budget = budget.saturating_sub(chunk.content.len() as u64);
+        truncated |= chunk.truncated;
+        parts.push((file.name.clone(), chunk.content));
+    }
+    let mut out = String::new();
+    for (name, content) in parts.iter().rev() {
         if !out.is_empty() {
             out.push('\n');
         }
-        out.push_str(&format!("===== {} =====\n", file.name));
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| Error::Internal(format!("read log {}: {e}", file.name)))?;
-        out.push_str(&content);
+        out.push_str(&format!("===== {name} =====\n"));
+        out.push_str(content);
     }
-    let next_offset = out.len() as u64;
-    Ok((out, 0, next_offset))
+    Ok(Chunk {
+        content: out,
+        offset: 0,
+        next_offset,
+        truncated,
+    })
 }
 
-fn tail_lines(path: &Path, lines: usize) -> std::io::Result<String> {
-    let content = std::fs::read_to_string(path)?;
-    let parts: Vec<&str> = content.split_inclusive('\n').collect();
+/// The last `lines` lines, reading at most `MAX_CONTENT_BYTES` from the end.
+fn tail_lines(path: &Path, lines: usize) -> std::io::Result<Chunk> {
+    let mut chunk = read_capped(path, 0, MAX_CONTENT_BYTES)?;
+    let parts: Vec<&str> = chunk.content.split_inclusive('\n').collect();
     let start = parts.len().saturating_sub(lines);
-    Ok(parts[start..].concat())
+    if start > 0 {
+        let dropped: usize = parts[..start].iter().map(|p| p.len()).sum();
+        chunk.offset += dropped as u64;
+        chunk.content = parts[start..].concat();
+    }
+    Ok(chunk)
 }
 
-fn read_since(path: &Path, offset: u64) -> std::io::Result<(String, u64, u64)> {
-    let mut file = std::fs::File::open(path)?;
-    let size = file.metadata()?.len();
-    let start = offset.min(size);
-    file.seek(SeekFrom::Start(start))?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    Ok((String::from_utf8_lossy(&bytes).into_owned(), start, size))
+/// Bytes from `offset` to EOF (capped; see [`read_capped`]).
+fn read_since(path: &Path, offset: u64) -> std::io::Result<Chunk> {
+    read_capped(path, offset, MAX_CONTENT_BYTES)
 }
 
 #[cfg(test)]
@@ -322,6 +396,64 @@ mod tests {
         assert_eq!(logs.content, "second\n");
         assert_eq!(logs.offset, 6);
         assert_eq!(logs.next_offset, 13);
+        assert!(!logs.truncated);
+    }
+
+    #[test]
+    fn capped_read_keeps_newest_whole_lines() {
+        let dir = temp_log_dir();
+        let path = dir.path().join("ottod.log.2026-06-13");
+        std::fs::write(&path, "aaaa\nbbbb\ncccc\n").unwrap();
+        let c = read_capped(&path, 0, 7).unwrap();
+        // Last 7 bytes are "b\ncccc\n" → cut forward to the line start.
+        assert!(c.truncated);
+        assert_eq!(c.content, "cccc\n");
+        assert_eq!(c.offset, 10);
+        assert_eq!(c.next_offset, 15);
+        let full = read_capped(&path, 0, 100).unwrap();
+        assert!(!full.truncated);
+        assert_eq!(full.content.len(), 15);
+    }
+
+    #[test]
+    fn all_files_next_offset_tracks_newest_file() {
+        let dir = temp_log_dir();
+        std::fs::write(dir.path().join("ottod.log.2026-06-12"), "old\n").unwrap();
+        std::fs::write(dir.path().join("ottod.log.2026-06-13"), "new1\nnew2\n").unwrap();
+        let logs = read_daemon_logs(
+            dir.path(),
+            LogsParams {
+                file: Some(ALL_FILES.into()),
+                mode: Some("all".into()),
+                lines: None,
+                offset: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            logs.content,
+            "===== ottod.log.2026-06-12 =====\nold\n\n===== ottod.log.2026-06-13 =====\nnew1\nnew2\n"
+        );
+        assert_eq!(logs.next_offset, 10, "offset within the newest file");
+        assert!(!logs.truncated);
+    }
+
+    #[test]
+    fn tail_reports_offset_of_first_kept_line() {
+        let dir = temp_log_dir();
+        std::fs::write(dir.path().join("ottod.log.2026-06-13"), "a\nb\nc\nd\n").unwrap();
+        let logs = read_daemon_logs(
+            dir.path(),
+            LogsParams {
+                file: Some("ottod.log.2026-06-13".into()),
+                mode: Some("tail".into()),
+                lines: Some(2),
+                offset: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(logs.content, "c\nd\n");
+        assert_eq!((logs.offset, logs.next_offset), (4, 8));
     }
 }
 

@@ -196,6 +196,44 @@ pub struct SearchFilter {
     pub story_id: Option<String>,
     pub include_inactive: bool,
     pub limit: i64,
+    /// Restrict to these `kind`s (empty = any). Applied in SQL, BEFORE the
+    /// LIMIT — filtering after it let a section come back empty even though
+    /// matching memories existed.
+    pub kinds: Vec<String>,
+    /// Hide OTHER users' private memories (non-`private` rows, or this user's
+    /// own). `None` sees everything.
+    pub viewer: Option<String>,
+}
+
+impl SearchFilter {
+    /// SQL for the `kinds`/`viewer` predicates (`col` = column prefix, e.g.
+    /// `"m."`), bound by [`Self::bind_extra`] in the same order.
+    fn extra_sql(&self, col: &str) -> String {
+        let mut sql = String::new();
+        if !self.kinds.is_empty() {
+            let marks = vec!["?"; self.kinds.len()].join(",");
+            sql.push_str(&format!(" AND {col}kind IN ({marks})"));
+        }
+        if self.viewer.is_some() {
+            sql.push_str(&format!(
+                " AND ({col}visibility != 'private' OR {col}created_by = ?)"
+            ));
+        }
+        sql
+    }
+
+    fn bind_extra<'q>(
+        &'q self,
+        mut q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
+    ) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
+        for k in &self.kinds {
+            q = q.bind(k);
+        }
+        if let Some(v) = &self.viewer {
+            q = q.bind(v);
+        }
+        q
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -398,6 +436,7 @@ impl MemoriesRepo {
         if f.story_id.is_some() {
             sql.push_str(" AND story_id = ?");
         }
+        sql.push_str(&f.extra_sql(""));
         if !terms.is_empty() {
             sql.push_str(" AND (");
             for (i, _) in terms.iter().enumerate() {
@@ -408,7 +447,16 @@ impl MemoriesRepo {
             }
             sql.push(')');
         }
-        sql.push_str(" LIMIT 2000");
+        let lim = if f.limit > 0 { f.limit as usize } else { 50 };
+        if terms.is_empty() {
+            // No terms: every row scores 0 — return the newest `lim`, not an
+            // arbitrary 2 000-row slice decoded only to be truncated.
+            sql.push_str(&format!(" ORDER BY updated_at DESC LIMIT {lim}"));
+        } else {
+            // Candidates for the term-hit ranking below; bounded relative to
+            // the page (was a flat 2 000 rows / ~3 MB decoded per miss).
+            sql.push_str(&format!(" LIMIT {}", (lim * 10).clamp(100, 1000)));
+        }
         let mut q = sqlx::query(&sql).bind(ws);
         if let Some(c) = &f.collection {
             q = q.bind(c);
@@ -416,6 +464,7 @@ impl MemoriesRepo {
         if let Some(s) = &f.story_id {
             q = q.bind(s);
         }
+        q = f.bind_extra(q);
         for t in &terms {
             q = q.bind(format!("%{t}%"));
         }
@@ -433,7 +482,6 @@ impl MemoriesRepo {
             })
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let lim = if f.limit > 0 { f.limit as usize } else { 50 };
         scored.truncate(lim);
         Ok(scored)
     }
@@ -1008,6 +1056,7 @@ impl MemoriesRepo {
         if f.story_id.is_some() {
             sql.push_str(" AND m.story_id = ?");
         }
+        sql.push_str(&f.extra_sql("m."));
         sql.push_str(" ORDER BY rank ASC LIMIT ?");
         let mut q = sqlx::query(&sql).bind(&mq).bind(ws);
         if let Some(c) = &f.collection {
@@ -1016,6 +1065,7 @@ impl MemoriesRepo {
         if let Some(s) = &f.story_id {
             q = q.bind(s);
         }
+        q = f.bind_extra(q);
         let lim = if f.limit > 0 { f.limit } else { 50 };
         q = q.bind(lim);
         let rows = q

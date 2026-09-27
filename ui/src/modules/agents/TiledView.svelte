@@ -29,6 +29,10 @@
   // recently-focused tiles win the budget; everything else stays a placeholder.
   // ONE source of truth with the split view's pane cap.
   const MAX_LIVE_TILES = MAX_PANES;
+  // Per-tile xterm scrollback (SA-05): up to MAX_LIVE_TILES terminals are live
+  // at once, each line ~12 B/cell. The maximized tile keeps the 10k default,
+  // and the daemon's 4000-row snapshot restores depth on maximize/reconnect.
+  const TILE_SCROLLBACK = 2000;
 
   // C3a: the user's drag order on top of the store order (unknown ids append,
   // dead ids are skipped) — everything below counts/lays out `ordered`.
@@ -481,6 +485,7 @@
             showClose={false}
             showZoom={true}
             showGrip={ordered.length > 1}
+            scrollback={TILE_SCROLLBACK}
             dragKey={s.id}
             ondragpane={(phase) => (tileDragId = phase === 'start' ? s.id : null)}
             onfocus={() => {

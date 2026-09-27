@@ -5,6 +5,7 @@
   // publish to Confluence.
   import { rel } from '../../lib/stores/now.svelte';
   import { product } from '../../lib/stores/product.svelte';
+  import { pollWhileVisible, type Poller } from '../../lib/poll';
   import { toasts } from '../../lib/toast.svelte';
   import type {
     ProductTestcaseRunDetail,
@@ -161,7 +162,9 @@
   let caseActions = $state<Record<string, CaseAction>>({});
 
   // ── Polling ──────────────────────────────────────────────────────────────────
-  let pollTimer = $state<ReturnType<typeof setInterval> | null>(null);
+  // Shared poll helper (lib/poll.ts): paused while hidden, never stacked,
+  // aborted on stop. `pollTimer !== null` still means "polling" to the UI.
+  let pollTimer = $state.raw<Poller | null>(null);
   const POLL_INTERVAL_MS = 3000;
   const POLL_MAX_MS = 120_000;
   let pollStartedAt = 0;
@@ -169,7 +172,7 @@
 
   function clearPoll(): void {
     if (pollTimer !== null) {
-      clearInterval(pollTimer);
+      pollTimer.stop();
       pollTimer = null;
     }
   }
@@ -198,8 +201,8 @@
     clearPoll();
     runsCountAtStart = product.testcaseRuns.length;
     pollStartedAt = Date.now();
-    void pollTestcases();
-    pollTimer = setInterval(() => { void pollTestcases(); }, POLL_INTERVAL_MS);
+    // Immediate first poll, then every POLL_INTERVAL_MS after each settles.
+    pollTimer = pollWhileVisible(() => pollTestcases(), { ms: POLL_INTERVAL_MS, jitter: 0 });
   }
 
   /** A failed load — inline with Retry, never as "No test cases yet". */

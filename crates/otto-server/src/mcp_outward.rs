@@ -449,10 +449,14 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "repo_id":{"type":"string","description":REPO_REF_DESC},"number":{"type":"integer","description":PR_NUMBER_DESC},
                 "pr_number":{"type":"integer","description":"Alias of `number`."}}}}),
         json!({"name":"otto.get_pr_diff","mutating":false,"category":"Git",
-            "description":"A pull request's diff (files + hunks). Off by default (streams code); enable to let agents read PR diffs. Read-only.",
+            "description":"A pull request's diff (files + hunks). The whole-PR response is capped (5,000 lines / 200 KB per file, 20,000 lines / 4 MB in total): files past a cap come back with `too_large` or `hunks_omitted` and no hunks (`truncated` marks the response). For a big PR call it with `summary: true` for the file list + counts, then once per file with `path` (+ `old_path` for a rename; `full: true` lifts the per-file cap to 50,000 lines). Off by default (streams code); enable to let agents read PR diffs. Read-only.",
             "inputSchema":{"type":"object","properties":{
                 "repo_id":{"type":"string","description":REPO_REF_DESC},"number":{"type":"integer","description":PR_NUMBER_DESC},
-                "pr_number":{"type":"integer","description":"Alias of `number`."}}}}),
+                "pr_number":{"type":"integer","description":"Alias of `number`."},
+                "summary":{"type":"boolean","description":"File list + per-file counts only, no hunks."},
+                "path":{"type":"string","description":"Only this file (its current path; a deleted file's old path)."},
+                "old_path":{"type":"string","description":"A renamed file's origin, alongside `path`."},
+                "full":{"type":"boolean","description":"With `path`: lift the per-file cap (5,000 lines) to 50,000 lines."}}}}),
         json!({"name":"otto.merge_pr","mutating":true,"category":"Git",
             "description":"Merge a pull request on the provider. `strategy` = merge | squash | rebase (provider default when omitted); `delete_source_branch` optional. Check otto.get_pr (mergeable) and otto.get_pr_checks first. DANGEROUS: outward-facing and irreversible — approval-gated.",
             "inputSchema":{"type":"object","properties":{
@@ -3012,7 +3016,18 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "get_pr_diff" => {
             let repo = arg_str(args, "repo_id")?;
             let n = arg_i64(args, "number")?;
-            SelfCall::get(format!("/api/v1/repos/{}/prs/{}/diff", seg(&repo), n))
+            // The route caps a whole-PR diff; these page it per file.
+            let q = opt_query(
+                args,
+                &[
+                    ("summary", "summary"),
+                    ("path", "path"),
+                    ("old_path", "old_path"),
+                    ("full", "full"),
+                ],
+            );
+            let base = format!("/api/v1/repos/{}/prs/{}/diff", seg(&repo), n);
+            SelfCall::get(if q.is_empty() { base } else { format!("{base}?{q}") })
         }
         "merge_pr" => {
             let repo = arg_str(args, "repo_id")?;
@@ -6344,6 +6359,22 @@ mod tests {
                 .unwrap()
                 .path,
             "/api/v1/repos/r/prs/9/checks"
+        );
+        // get_pr_diff pages a capped PR diff per file.
+        assert_eq!(
+            route_for("get_pr_diff", &json!({"repo_id":"r","number":9}))
+                .unwrap()
+                .path,
+            "/api/v1/repos/r/prs/9/diff"
+        );
+        assert_eq!(
+            route_for(
+                "get_pr_diff",
+                &json!({"repo_id":"r","number":9,"path":"src/a b.rs","full":true})
+            )
+            .unwrap()
+            .path,
+            "/api/v1/repos/r/prs/9/diff?path=src%2Fa%20b.rs&full=true"
         );
         assert_eq!(
             route_for(

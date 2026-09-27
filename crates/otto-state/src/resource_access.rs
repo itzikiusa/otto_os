@@ -470,6 +470,37 @@ impl ResourceAccessRepo {
         Ok(policy)
     }
 
+    /// Ids of every `kind` resource whose CURRENT policy is `Enforced`, in one
+    /// query — list endpoints use it instead of one [`Self::get_policy`] (two
+    /// round-trips) per row. A resource without a policy row is Legacy, so it
+    /// is simply absent.
+    pub async fn enforced_ids(&self, kind: ResourceKind) -> Result<std::collections::HashSet<Id>> {
+        let rows = sqlx::query(
+            "SELECT p.resource_id, v.policy_json
+               FROM resource_access_policies p
+               JOIN resource_access_policy_versions v
+                 ON v.resource_kind = p.resource_kind
+                AND v.resource_id = p.resource_id
+                AND v.revision = p.revision
+              WHERE p.resource_kind = ?",
+        )
+        .bind(kind.as_str())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("enforced resource policies"))?;
+        let mut out = std::collections::HashSet::new();
+        for row in rows {
+            let json: String = row.get("policy_json");
+            let policy: AccessPolicy = serde_json::from_str(&json).map_err(|error| {
+                Error::Internal(format!("decode resource access policy: {error}"))
+            })?;
+            if policy.mode == AccessMode::Enforced {
+                out.insert(row.get::<String, _>("resource_id"));
+            }
+        }
+        Ok(out)
+    }
+
     pub async fn get_policy_version(
         &self,
         kind: ResourceKind,

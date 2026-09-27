@@ -45,7 +45,7 @@
 //!   * **Crash-resilient.** A bad file/line logs and is skipped; the loop never
 //!     panics.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -56,6 +56,7 @@ use otto_usage::{
     estimate_cost, parse_claude_line, parse_codex_line, parse_codex_session_meta,
     CodexCounterStore, CursorStore, SeenKeys, UsageEngine, UsageEvent, EXTERNAL_WORKSPACE,
 };
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 /// How often to scan for new transcript bytes.
@@ -74,6 +75,11 @@ const CODEX_COUNTERS_CAP: usize = 20_000;
 /// `estimate_cost` prices this at the gpt tier (substring match on "codex").
 const CODEX_FALLBACK_MODEL: &str = "codex";
 
+/// Append-only seen-key log lines tolerated before the next persist compacts
+/// them into the JSON array. ~5k keys ≈ a few days of active use; each append
+/// is a few hundred bytes instead of a multi-MB rewrite.
+const SEEN_LOG_COMPACT_AFTER: usize = 5_000;
+
 // ---------------------------------------------------------------------------
 // Public handle
 // ---------------------------------------------------------------------------
@@ -82,12 +88,16 @@ const CODEX_FALLBACK_MODEL: &str = "codex";
 /// lifetime; dropping it sets the cancel flag and stops the loop.
 pub struct UsageTailerHandle {
     cancel: Arc<AtomicBool>,
+    wake: Arc<Notify>,
     _task: JoinHandle<()>,
 }
 
 impl Drop for UsageTailerHandle {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
+        // `notify_one` stores a permit if the loop isn't parked yet, so the
+        // next sleep returns immediately either way.
+        self.wake.notify_one();
     }
 }
 
@@ -103,6 +113,13 @@ pub struct UsageTailer {
     /// Daemon data dir — holds the cursor/seen files and the rebuild marker.
     data_dir: PathBuf,
     cursors: CursorStore,
+    /// Set when a cursor actually moved (or a dead one was evicted), so the
+    /// cursor file is only rewritten when it changed — not every 20 s.
+    cursors_dirty: bool,
+    /// Parsed `session_meta` per codex rollout. The first line is written once
+    /// at rollout creation and never changes, so it is read at most once per
+    /// file per daemon lifetime (and only once the file has new bytes).
+    codex_meta: HashMap<PathBuf, otto_usage::CodexMeta>,
     /// Response-level dedup for claude lines (see module docs).
     seen: SeenKeys,
     /// Set when [`Self::scan_once`] recorded a new claude key, so the seen file
@@ -151,6 +168,8 @@ impl UsageTailer {
             home,
             data_dir,
             cursors,
+            cursors_dirty: false,
+            codex_meta: HashMap::new(),
             seen,
             seen_dirty: false,
             codex_counters,
@@ -162,6 +181,8 @@ impl UsageTailer {
     pub fn start(mut self) -> UsageTailerHandle {
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_task = Arc::clone(&cancel);
+        let wake = Arc::new(Notify::new());
+        let wake_task = Arc::clone(&wake);
         let task = tokio::spawn(async move {
             // One-time (marker-gated): purge the pre-dedup tailer's inflated
             // claude rows and re-derive them from the full transcripts.
@@ -177,19 +198,17 @@ impl UsageTailer {
                 if let Err(e) = self.scan_once().await {
                     tracing::warn!("usage tailer: scan failed: {e}");
                 }
-                // Sleep in short slices so cancellation is responsive.
-                let mut slept = Duration::ZERO;
-                while slept < SCAN_INTERVAL {
-                    if cancel_task.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    slept += Duration::from_millis(500);
+                // One timer per scan; dropping the handle wakes us at once
+                // (no 500 ms polling slices — they cost idle wakeups).
+                tokio::select! {
+                    _ = tokio::time::sleep(SCAN_INTERVAL) => {}
+                    _ = wake_task.notified() => return,
                 }
             }
         });
         UsageTailerHandle {
             cancel,
+            wake,
             _task: task,
         }
     }
@@ -232,12 +251,22 @@ impl UsageTailer {
         let attr = self.build_attribution().await;
         // Oldest-first so that, if the seen-set cap ever evicts, it evicts the
         // keys least likely to be replayed again.
-        let mut files = self.claude_files();
-        files.sort_by_key(|f| {
-            std::fs::metadata(f)
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-        });
+        let home = self.home.clone();
+        let files: Vec<PathBuf> = tokio::task::spawn_blocking(move || {
+            let mut files: Vec<(PathBuf, std::time::SystemTime)> = list_claude_files(&home)
+                .into_iter()
+                .map(|(f, _)| {
+                    let m = std::fs::metadata(&f)
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    (f, m)
+                })
+                .collect();
+            files.sort_by_key(|(_, m)| *m);
+            files.into_iter().map(|(f, _)| f).collect()
+        })
+        .await
+        .unwrap_or_default();
 
         let mut events: Vec<UsageEvent> = Vec::new();
         let mut keys: Vec<String> = Vec::new();
@@ -384,11 +413,11 @@ impl UsageTailer {
     /// the first append after upgrading would look like an all-history delta.
     async fn seed_existing_files(&mut self) {
         let mut seeded = 0usize;
-        for f in self.claude_files() {
+        let (claude, codex) = self.list_files().await;
+        for (f, size) in claude {
             if self.cursors.contains(&f) {
                 continue;
             }
-            let size = file_size(&f).await.unwrap_or(0);
             self.cursors.set(&f, size);
             seeded += 1;
         }
@@ -396,7 +425,7 @@ impl UsageTailer {
         let mut codex_baselines = 0usize;
         let mut catchup_files = 0usize;
         let mut new_baseline_sessions = std::collections::HashSet::new();
-        for f in self.codex_files() {
+        for (f, size) in codex {
             let meta = read_codex_meta(&f).await;
             let session_id = meta
                 .as_ref()
@@ -413,13 +442,15 @@ impl UsageTailer {
                 } else {
                     // Preserve the existing no-historical-backfill policy for
                     // sessions Otto has never observed.
-                    let size = file_size(&f).await.unwrap_or(0);
                     self.cursors.set(&f, size);
                     seeded += 1;
                 }
             }
             if needs_baseline {
                 new_baseline_sessions.insert(session_id.clone());
+            }
+            if let Some(m) = &meta {
+                self.codex_meta.insert(f.clone(), m.clone());
             }
             let model = meta
                 .and_then(|m| m.model)
@@ -451,47 +482,116 @@ impl UsageTailer {
 
     /// One full scan: rebuild attribution, tail both providers, persist cursors.
     async fn scan_once(&mut self) -> Result<(), String> {
-        let attr = self.build_attribution().await;
+        // Stat-first: one blocking walk lists every transcript WITH its size, so
+        // unchanged files (the vast majority — ~1 of ~1k rollouts grows on a
+        // given day) cost a map lookup, not a spawn_blocking hop + head read.
+        let (claude, codex) = self.list_files().await;
+        let has_new = claude
+            .iter()
+            .chain(codex.iter())
+            .any(|(f, size)| self.cursors.get(f) != Some(*size));
 
-        for file in self.claude_files() {
-            if let Err(e) = self.tail_claude_file(&file, &attr).await {
+        let attr = if has_new {
+            self.build_attribution().await
+        } else {
+            Attribution::default()
+        };
+        for (file, size) in &claude {
+            if let Err(e) = self.tail_claude_file(file, *size, &attr).await {
                 tracing::debug!("usage tailer: claude file {} skipped: {e}", file.display());
             }
         }
-        for file in self.codex_files() {
-            if let Err(e) = self.tail_codex_file(&file, &attr).await {
+        for (file, size) in &codex {
+            if let Err(e) = self.tail_codex_file(file, *size, &attr).await {
                 tracing::debug!("usage tailer: codex file {} skipped: {e}", file.display());
             }
         }
-
-        let mut guards_persisted = true;
-        if self.seen_dirty {
-            match self.seen.save() {
-                Ok(()) => self.seen_dirty = false,
-                Err(e) => {
-                    guards_persisted = false;
-                    tracing::warn!("usage tailer: failed to persist seen keys: {e}");
-                }
-            }
-        }
-        if self.codex_counters_dirty {
-            match self.codex_counters.save() {
-                Ok(()) => self.codex_counters_dirty = false,
-                Err(e) => {
-                    guards_persisted = false;
-                    tracing::warn!("usage tailer: failed to persist Codex counters: {e}");
-                }
-            }
-        }
-        // Persist provider-level dedup baselines before advancing byte offsets.
-        // If a guard write fails, replaying lines is safe in-process and safer
-        // across restart than committing a cursor ahead of its dedup state.
-        if guards_persisted {
-            if let Err(e) = self.cursors.save() {
-                tracing::warn!("usage tailer: failed to persist cursors: {e}");
-            }
-        }
+        self.evict_dead_cursors(&claude, &codex);
+        self.persist();
         Ok(())
+    }
+
+    /// Persist whatever changed this scan, off the async worker. Provider-level
+    /// dedup baselines are written before byte offsets: if a guard write fails,
+    /// replaying lines is safe in-process and safer across restart than
+    /// committing a cursor ahead of its dedup state.
+    fn persist(&mut self) {
+        blocking_io(|| {
+            let mut guards_persisted = true;
+            if self.seen_dirty || self.seen.has_pending() {
+                // Append-only: only the keys new since the last write hit disk.
+                match self.seen.append_pending(SEEN_LOG_COMPACT_AFTER) {
+                    Ok(()) => self.seen_dirty = false,
+                    Err(e) => {
+                        guards_persisted = false;
+                        tracing::warn!("usage tailer: failed to persist seen keys: {e}");
+                    }
+                }
+            }
+            if self.codex_counters_dirty {
+                match self.codex_counters.save() {
+                    Ok(()) => self.codex_counters_dirty = false,
+                    Err(e) => {
+                        guards_persisted = false;
+                        tracing::warn!("usage tailer: failed to persist Codex counters: {e}");
+                    }
+                }
+            }
+            if guards_persisted && self.cursors_dirty {
+                match self.cursors.save() {
+                    Ok(()) => self.cursors_dirty = false,
+                    Err(e) => tracing::warn!("usage tailer: failed to persist cursors: {e}"),
+                }
+            }
+        });
+    }
+
+    /// Drop cursors (and cached codex metas) for transcripts that no longer
+    /// exist — Claude prunes transcripts after ~30 days, which left over half
+    /// the cursor map pointing at deleted files. A key missing from this scan's
+    /// listing is only dropped after an explicit existence check, so a
+    /// transient `read_dir` failure can never reset a live file's cursor.
+    fn evict_dead_cursors(&mut self, claude: &[(PathBuf, u64)], codex: &[(PathBuf, u64)]) {
+        let listed: HashSet<String> = claude
+            .iter()
+            .chain(codex.iter())
+            .map(|(f, _)| f.to_string_lossy().into_owned())
+            .collect();
+        let candidates: Vec<String> = self
+            .cursors
+            .keys()
+            .filter(|k| !listed.contains(*k))
+            .map(str::to_string)
+            .collect();
+        if !candidates.is_empty() {
+            let dead: HashSet<String> = blocking_io(|| {
+                candidates
+                    .into_iter()
+                    .filter(|k| !Path::new(k).exists())
+                    .collect()
+            });
+            if !dead.is_empty() {
+                let removed = self.cursors.retain(|k| !dead.contains(k));
+                self.cursors_dirty |= removed > 0;
+                tracing::debug!("usage tailer: evicted {removed} cursor(s) of deleted transcripts");
+            }
+        }
+        if self.codex_meta.len() > codex.len() {
+            let live: HashSet<&PathBuf> = codex.iter().map(|(f, _)| f).collect();
+            self.codex_meta.retain(|f, _| live.contains(f));
+        }
+    }
+
+    /// List both transcript trees (with sizes) in ONE blocking task.
+    async fn list_files(&self) -> (Vec<(PathBuf, u64)>, Vec<(PathBuf, u64)>) {
+        let home = self.home.clone();
+        tokio::task::spawn_blocking(move || (list_claude_files(&home), list_codex_files(&home)))
+            .await
+            .unwrap_or_default()
+    }
+
+    fn set_cursor(&mut self, file: &Path, offset: u64) {
+        self.cursors_dirty |= self.cursors.set_if_changed(file, offset);
     }
 
     /// Rebuild the claude (by provider-session-id) and codex (by cwd)
@@ -526,18 +626,13 @@ impl UsageTailer {
 
     // ── Claude ────────────────────────────────────────────────────────────────
 
-    /// All claude transcript files: `~/.claude/projects/*/*.jsonl`.
-    fn claude_files(&self) -> Vec<PathBuf> {
-        let root = self.home.join(".claude").join("projects");
-        let mut out = Vec::new();
-        for project in read_subdirs(&root) {
-            out.extend(read_files_with_ext(&project, "jsonl"));
-        }
-        out
-    }
-
-    async fn tail_claude_file(&mut self, file: &Path, attr: &Attribution) -> Result<(), String> {
-        let (chunk, new_offset) = match self.read_new_bytes(file).await? {
+    async fn tail_claude_file(
+        &mut self,
+        file: &Path,
+        size: u64,
+        attr: &Attribution,
+    ) -> Result<(), String> {
+        let (chunk, new_offset) = match self.read_new_bytes(file, size).await? {
             Some(v) => v,
             None => return Ok(()),
         };
@@ -590,39 +685,37 @@ impl UsageTailer {
             });
         }
 
-        self.cursors.set(file, new_offset);
+        self.set_cursor(file, new_offset);
         Ok(())
     }
 
     // ── Codex ─────────────────────────────────────────────────────────────────
 
-    /// All codex transcript files:
-    /// `~/.codex/sessions/*/*/*/rollout-*.jsonl`.
-    fn codex_files(&self) -> Vec<PathBuf> {
-        let root = self.home.join(".codex").join("sessions");
-        let mut out = Vec::new();
-        for y in read_subdirs(&root) {
-            for m in read_subdirs(&y) {
-                for d in read_subdirs(&m) {
-                    for f in read_files_with_ext(&d, "jsonl") {
-                        if f.file_name()
-                            .and_then(|n| n.to_str())
-                            .map(|n| n.starts_with("rollout-"))
-                            .unwrap_or(false)
-                        {
-                            out.push(f);
-                        }
-                    }
+    async fn tail_codex_file(
+        &mut self,
+        file: &Path,
+        size: u64,
+        attr: &Attribution,
+    ) -> Result<(), String> {
+        // Growth check FIRST: an unchanged rollout costs nothing — no head read,
+        // no 18 KB session_meta parse (that used to run for every rollout ever
+        // written, every scan).
+        let (chunk, new_offset) = match self.read_new_bytes(file, size).await? {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+        // The session_meta (id + cwd + model) lives on the first line and never
+        // changes; read it once per file (just the head) and cache it.
+        let meta = match self.codex_meta.get(file) {
+            Some(m) => Some(m.clone()),
+            None => {
+                let m = read_codex_meta(file).await;
+                if let Some(m) = &m {
+                    self.codex_meta.insert(file.to_path_buf(), m.clone());
                 }
+                m
             }
-        }
-        out
-    }
-
-    async fn tail_codex_file(&mut self, file: &Path, attr: &Attribution) -> Result<(), String> {
-        // The session_meta (id + cwd + model) lives on the first line; read it once
-        // (cheaply, just the head) so we can attribute and price every turn.
-        let meta = read_codex_meta(file).await;
+        };
         let cwd = meta.as_ref().and_then(|m| m.cwd.clone());
         let thread_uuid = codex_thread_uuid(file);
         let codex_session_id = meta
@@ -647,11 +740,6 @@ impl UsageTailer {
                 }
             })
         });
-
-        let (chunk, new_offset) = match self.read_new_bytes(file).await? {
-            Some(v) => v,
-            None => return Ok(()),
-        };
 
         for line in chunk.lines() {
             let Some(total) = parse_codex_line(line, &model) else {
@@ -688,7 +776,7 @@ impl UsageTailer {
             });
         }
 
-        self.cursors.set(file, new_offset);
+        self.set_cursor(file, new_offset);
         Ok(())
     }
 
@@ -698,11 +786,12 @@ impl UsageTailer {
     /// the complete-lines slice and the byte offset of the last consumed
     /// newline. Returns `Ok(None)` when there's nothing new (or only a partial
     /// trailing line). Handles truncation/rotation by resetting the cursor to 0.
-    async fn read_new_bytes(&mut self, file: &Path) -> Result<Option<(String, u64)>, String> {
-        let size = match file_size(file).await {
-            Some(s) => s,
-            None => return Ok(None), // file vanished mid-scan
-        };
+    /// `size` comes from the scan's directory listing (stat-first).
+    async fn read_new_bytes(
+        &mut self,
+        file: &Path,
+        size: u64,
+    ) -> Result<Option<(String, u64)>, String> {
         let mut cursor = self.cursors.get(file).unwrap_or(0);
         if cursor > size {
             // Truncated / rotated under us — restart from the top.
@@ -730,6 +819,48 @@ impl UsageTailer {
 // Free helpers (filesystem, run on blocking threads to keep the loop snappy)
 // ---------------------------------------------------------------------------
 
+/// Run short synchronous file I/O (state-file saves, existence checks) without
+/// parking a runtime worker: `block_in_place` hands the worker's other tasks
+/// off on the multi-thread runtime; on a current-thread runtime (unit tests)
+/// it just runs inline.
+fn blocking_io<R>(f: impl FnOnce() -> R) -> R {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
+    }
+}
+
+/// All claude transcript files with their sizes:
+/// `<home>/.claude/projects/*/*.jsonl`. Blocking — call off the runtime.
+fn list_claude_files(home: &Path) -> Vec<(PathBuf, u64)> {
+    let root = home.join(".claude").join("projects");
+    let mut out = Vec::new();
+    for project in read_subdirs(&root) {
+        out.extend(read_files_with_ext(&project, "jsonl", |_| true));
+    }
+    out
+}
+
+/// All codex rollout files with their sizes:
+/// `<home>/.codex/sessions/*/*/*/rollout-*.jsonl`. Blocking — call off the
+/// runtime.
+fn list_codex_files(home: &Path) -> Vec<(PathBuf, u64)> {
+    let root = home.join(".codex").join("sessions");
+    let mut out = Vec::new();
+    for y in read_subdirs(&root) {
+        for m in read_subdirs(&y) {
+            for d in read_subdirs(&m) {
+                out.extend(read_files_with_ext(&d, "jsonl", |n| {
+                    n.starts_with("rollout-")
+                }));
+            }
+        }
+    }
+    out
+}
+
 /// Immediate subdirectories of `dir` (empty on any error).
 fn read_subdirs(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -742,15 +873,35 @@ fn read_subdirs(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Files in `dir` with the given extension (non-recursive; empty on any error).
-fn read_files_with_ext(dir: &Path, ext: &str) -> Vec<PathBuf> {
+/// Files in `dir` with the given extension whose name passes `name_ok`, with
+/// their sizes (non-recursive; empty on any error; unstat-able files skipped).
+fn read_files_with_ext(
+    dir: &Path,
+    ext: &str,
+    name_ok: impl Fn(&str) -> bool,
+) -> Vec<(PathBuf, u64)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
     entries
         .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some(ext))
+        .filter_map(|e| {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some(ext) {
+                return None;
+            }
+            if !p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(&name_ok)
+                .unwrap_or(false)
+            {
+                return None;
+            }
+            // `metadata` follows symlinks like the old `tokio::fs::metadata`.
+            let len = std::fs::metadata(&p).ok()?.len();
+            Some((p, len))
+        })
         .collect()
 }
 
@@ -863,6 +1014,33 @@ mod tests {
         let f =
             Path::new("/x/rollout-2026-06-18T08-53-25-019ed94a-994a-7010-b01f-9b840c5b7068.jsonl");
         assert_eq!(codex_thread_uuid(f), "019ed94a-994a-7010-b01f-9b840c5b7068");
+    }
+
+    #[test]
+    fn listings_carry_sizes_and_filter_names() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("otto-usage-list-test-{nonce}"));
+        let home = root.as_path();
+        let day = home.join(".codex/sessions/2026/09/27");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(day.join("rollout-a.jsonl"), b"12345").unwrap();
+        std::fs::write(day.join("other.jsonl"), b"x").unwrap();
+        std::fs::write(day.join("rollout-b.txt"), b"x").unwrap();
+        let proj = home.join(".claude/projects/-p");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("s.jsonl"), b"abc").unwrap();
+        std::fs::write(proj.join("s.meta.json"), b"{}").unwrap();
+
+        let codex = list_codex_files(home);
+        assert_eq!(codex, vec![(day.join("rollout-a.jsonl"), 5)]);
+        let claude = list_claude_files(home);
+        assert_eq!(claude, vec![(proj.join("s.jsonl"), 3)]);
+        // Missing trees are empty, not errors.
+        assert!(list_codex_files(&home.join("nope")).is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[tokio::test]

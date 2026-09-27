@@ -4,10 +4,15 @@
 //!   `"com.otto.daemon"`). The default for normal operation.
 //! - [`FileStore`]: a 0600-permission JSON file under the data dir, selected
 //!   with `OTTO_SECRETS=file` (dev/CI fallback, secrets stored in plaintext).
+//! - [`CachingSecretStore`]: a TTL read-through cache in front of either, so
+//!   hot request paths (MCP invoke, Jira/Confluence, webhooks) don't pay a
+//!   Keychain IPC round trip — or a `secrets.json` re-parse — per call.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Result};
@@ -17,14 +22,120 @@ pub const SERVICE_NAME: &str = "com.otto.daemon";
 
 /// Pick the secret store implementation from the environment:
 /// `OTTO_SECRETS=file` → [`FileStore`] under `data_dir`, anything else →
-/// [`KeychainStore`].
+/// [`KeychainStore`]. Either way it is fronted by a [`CachingSecretStore`]
+/// with [`DEFAULT_CACHE_TTL`].
 pub fn from_env(data_dir: &Path) -> Arc<dyn SecretStore> {
-    if std::env::var("OTTO_SECRETS").as_deref() == Ok("file") {
+    let inner: Arc<dyn SecretStore> = if std::env::var("OTTO_SECRETS").as_deref() == Ok("file") {
         tracing::info!("secret store: file ({}/secrets.json)", data_dir.display());
         Arc::new(FileStore::new(data_dir))
     } else {
         tracing::info!("secret store: macOS Keychain (service {SERVICE_NAME})");
         Arc::new(KeychainStore::new())
+    };
+    Arc::new(CachingSecretStore::new(inner, DEFAULT_CACHE_TTL))
+}
+
+// ---------------------------------------------------------------------------
+// Read-through cache
+// ---------------------------------------------------------------------------
+
+/// How long a cached read (value or "absent") is served before the backend is
+/// asked again. Writes through this store evict immediately; the TTL only
+/// bounds staleness for edits made OUTSIDE the daemon (Keychain Access, a
+/// second process) — the same window the auth cache accepts.
+pub const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// Upper bound on cached keys — secrets are a few dozen items in practice; the
+/// cap only keeps a pathological caller (unique key per request) bounded.
+const CACHE_MAX_KEYS: usize = 1024;
+
+/// TTL read-through cache over any [`SecretStore`]. `get` hits are served from
+/// memory (including cached "absent"); `put`/`delete` write through and then
+/// evict the key, so the next read always sees the new value. Backend errors
+/// are never cached. Values stay in process memory only — the same place the
+/// callers hold them anyway.
+pub struct CachingSecretStore {
+    inner: Arc<dyn SecretStore>,
+    ttl: Duration,
+    entries: Mutex<HashMap<String, (Instant, Option<String>)>>,
+    /// Bumped by every put/delete. A read that raced a write (started before
+    /// it, finished after) must not cache the value it fetched — it may be the
+    /// pre-write one.
+    generation: AtomicU64,
+}
+
+impl CachingSecretStore {
+    pub fn new(inner: Arc<dyn SecretStore>, ttl: Duration) -> Self {
+        Self {
+            inner,
+            ttl,
+            entries: Mutex::new(HashMap::new()),
+            generation: AtomicU64::new(0),
+        }
+    }
+
+    fn lookup(&self, key: &str) -> Option<Option<String>> {
+        let map = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        match map.get(key) {
+            Some((at, v)) if at.elapsed() < self.ttl => Some(v.clone()),
+            _ => None,
+        }
+    }
+
+    fn remember(&self, key: &str, value: Option<String>, read_gen: u64) {
+        let mut map = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        // Checked under the map lock: `evict` bumps the generation under the
+        // same lock, so a write can't slip in between this check and insert.
+        if self.generation.load(Ordering::SeqCst) != read_gen {
+            return;
+        }
+        if map.len() >= CACHE_MAX_KEYS && !map.contains_key(key) {
+            let ttl = self.ttl;
+            map.retain(|_, (at, _)| at.elapsed() < ttl);
+            if map.len() >= CACHE_MAX_KEYS {
+                map.clear();
+            }
+        }
+        map.insert(key.to_string(), (Instant::now(), value));
+    }
+
+    fn evict(&self, key: &str) {
+        let mut map = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        map.remove(key);
+    }
+}
+
+impl SecretStore for CachingSecretStore {
+    fn put(&self, key: &str, value: &str) -> Result<()> {
+        // Evict (and bump the generation) on both sides of the write, so a
+        // concurrent reader that raced the backend write can't leave the old
+        // value cached afterwards.
+        self.evict(key);
+        let r = self.inner.put(key, value);
+        self.evict(key);
+        r
+    }
+
+    fn get(&self, key: &str) -> Result<Option<String>> {
+        if let Some(hit) = self.lookup(key) {
+            return Ok(hit);
+        }
+        let read_gen = self.generation.load(Ordering::SeqCst);
+        let v = self.inner.get(key)?;
+        self.remember(key, v.clone(), read_gen);
+        Ok(v)
+    }
+
+    fn delete(&self, key: &str) -> Result<()> {
+        self.evict(key);
+        let r = self.inner.delete(key);
+        self.evict(key);
+        r
+    }
+
+    fn get_cached(&self, key: &str) -> Option<Option<String>> {
+        self.lookup(key)
     }
 }
 
@@ -152,5 +263,94 @@ impl SecretStore for FileStore {
             self.save(&map)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// In-memory backend that counts reads so tests can see cache hits.
+    #[derive(Default)]
+    struct Counting {
+        map: Mutex<BTreeMap<String, String>>,
+        gets: AtomicUsize,
+    }
+
+    impl SecretStore for Counting {
+        fn put(&self, key: &str, value: &str) -> Result<()> {
+            self.map.lock().unwrap().insert(key.into(), value.into());
+            Ok(())
+        }
+        fn get(&self, key: &str) -> Result<Option<String>> {
+            self.gets.fetch_add(1, Ordering::SeqCst);
+            Ok(self.map.lock().unwrap().get(key).cloned())
+        }
+        fn delete(&self, key: &str) -> Result<()> {
+            self.map.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    fn store(ttl: Duration) -> (Arc<Counting>, CachingSecretStore) {
+        let inner = Arc::new(Counting::default());
+        let s = CachingSecretStore::new(inner.clone(), ttl);
+        (inner, s)
+    }
+
+    #[test]
+    fn cache_hit_skips_backend_including_absent() {
+        let (inner, s) = store(Duration::from_secs(60));
+        inner.put("a", "1").unwrap();
+        assert_eq!(s.get("a").unwrap().as_deref(), Some("1"));
+        assert_eq!(s.get("a").unwrap().as_deref(), Some("1"));
+        assert_eq!(s.get("missing").unwrap(), None);
+        assert_eq!(s.get("missing").unwrap(), None);
+        assert_eq!(inner.gets.load(Ordering::SeqCst), 2);
+        assert_eq!(s.get_cached("a"), Some(Some("1".into())));
+        assert_eq!(s.get_cached("missing"), Some(None));
+        assert_eq!(s.get_cached("never-read"), None);
+    }
+
+    #[test]
+    fn put_and_delete_evict() {
+        let (inner, s) = store(Duration::from_secs(60));
+        assert_eq!(s.get("k").unwrap(), None); // cached "absent"
+        s.put("k", "v1").unwrap();
+        assert_eq!(s.get("k").unwrap().as_deref(), Some("v1"));
+        s.put("k", "v2").unwrap(); // rotation
+        assert_eq!(s.get("k").unwrap().as_deref(), Some("v2"));
+        s.delete("k").unwrap();
+        assert_eq!(s.get("k").unwrap(), None);
+        assert_eq!(inner.gets.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn ttl_expiry_rereads_backend() {
+        let (inner, s) = store(Duration::from_millis(0));
+        inner.put("k", "v").unwrap();
+        s.get("k").unwrap();
+        s.get("k").unwrap();
+        assert_eq!(inner.gets.load(Ordering::SeqCst), 2);
+        assert_eq!(s.get_cached("k"), None);
+    }
+
+    #[test]
+    fn get_async_uses_cache_then_blocking_pool() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (inner, s) = store(Duration::from_secs(60));
+        inner.put("k", "v").unwrap();
+        let s: Arc<dyn SecretStore> = Arc::new(s);
+        rt.block_on(async {
+            let a = otto_core::secrets::get_async(&s, "k").await.unwrap();
+            let b = otto_core::secrets::get_async(&s, "k").await.unwrap();
+            assert_eq!(a.as_deref(), Some("v"));
+            assert_eq!(b.as_deref(), Some("v"));
+        });
+        assert_eq!(inner.gets.load(Ordering::SeqCst), 1);
     }
 }

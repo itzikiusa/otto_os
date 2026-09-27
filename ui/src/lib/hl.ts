@@ -59,17 +59,42 @@ export function langFromPath(path: string): string | null {
   return lang;
 }
 
-function escapeHtml(s: string): string {
+export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// Memoized highlight results. Diff lines are re-rendered wholesale on every
-// reactive flush (view-mode toggle, hljs arrival, comment updates), and large
-// PRs repeat many identical lines (imports, braces, blank context) — without a
-// cache each flush re-runs the tokenizer over every visible line and stalls
-// the main thread. Bounded so a huge PR can't hold the whole diff in memory.
+// Memoized highlight results. Diff lines are re-rendered on every reactive
+// flush (view-mode toggle, hljs arrival, comment updates, scrolling a windowed
+// diff back over rows it already showed), and large PRs repeat many identical
+// lines (imports, braces, blank context) — without a cache each flush re-runs
+// the tokenizer over every visible line and stalls the main thread. Bounded so
+// a huge PR can't hold the whole diff in memory. LRU (a Map re-inserted on hit
+// keeps insertion order = recency): the old clear-all-when-full turned the
+// second pass over a >20k-unique-line diff into 100 % misses.
 const hlCache = new Map<string, string>();
 const HL_CACHE_MAX = 20_000;
+/** Evicted together once the cap is hit, so eviction isn't a per-insert cost. */
+const HL_EVICT_BATCH = 2_000;
+
+function cacheGet(key: string): string | undefined {
+  const hit = hlCache.get(key);
+  if (hit !== undefined) {
+    hlCache.delete(key);
+    hlCache.set(key, hit);
+  }
+  return hit;
+}
+
+function cachePut(key: string, html: string): void {
+  if (hlCache.size >= HL_CACHE_MAX) {
+    let n = 0;
+    for (const k of hlCache.keys()) {
+      hlCache.delete(k);
+      if (++n >= HL_EVICT_BATCH) break;
+    }
+  }
+  hlCache.set(key, html);
+}
 
 /** Languages tried by [`autoLang`] — the ones agents actually print
  *  (file dumps, command output, JSON/YAML). Kept short: hljs auto-detection
@@ -107,7 +132,7 @@ export function highlightBlock(text: string, lang: string | null): string {
 export function highlightLine(content: string, lang: string | null): string {
   if (!lang || !hljs || !hljs.getLanguage(lang)) return escapeHtml(content);
   const key = `${lang} ${content}`;
-  const hit = hlCache.get(key);
+  const hit = cacheGet(key);
   if (hit !== undefined) return hit;
   let out: string;
   try {
@@ -115,7 +140,18 @@ export function highlightLine(content: string, lang: string | null): string {
   } catch {
     out = escapeHtml(content);
   }
-  if (hlCache.size >= HL_CACHE_MAX) hlCache.clear();
-  hlCache.set(key, out);
+  cachePut(key, out);
   return out;
+}
+
+/** Cached highlight for a line WITHOUT tokenizing on a miss (`undefined`), so
+ *  a windowed renderer can paint escaped text now and highlight later. */
+export function peekHighlight(content: string, lang: string): string | undefined {
+  return cacheGet(`${lang} ${content}`);
+}
+
+/** True once hljs is loaded and knows `lang` (i.e. `highlightLine` would
+ *  actually tokenize rather than escape). */
+export function canHighlight(lang: string | null): lang is string {
+  return !!lang && !!hljs && !!hljs.getLanguage(lang);
 }

@@ -2,6 +2,8 @@
   // Browser module page: tab strip + URL bar + reader-mode page. Mirrors the
   // shape of VaultPage/LoopsPage (a thin view over a $state store).
 
+  import { untrack } from 'svelte';
+  import { pollWhileVisible } from '../../lib/poll';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { browser } from '../../lib/stores/browser.svelte';
@@ -289,8 +291,10 @@
     if (!active) return;
     const id = active.id;
     const url = active.url;
-    const timer = setInterval(() => void pollOverlay(id, url), 700);
-    return () => clearInterval(timer);
+    // Shared poll chain: never overlaps a stalled `browser_eval`, and pauses
+    // while the Otto window is hidden (SB-14) — one catch-up tick on return.
+    const p = pollWhileVisible(() => untrack(() => pollOverlay(id, url)), { ms: 700, floorMs: 500, maxBackoff: 4 });
+    return () => p.stop();
   });
 
   // ── Live tab: credential autofill (user-triggered, key icon) ───────────
@@ -384,11 +388,12 @@
       );
       if (!cancelled) hasLoginForm = raw === 'true';
     };
-    void check();
-    const timer = setInterval(() => void check(), 1000);
+    // In-flight guard + hidden pause (SB-14): a stalled `browser_eval` used to
+    // stack one more call every second.
+    const p = pollWhileVisible(() => untrack(() => check()), { ms: 1000, maxBackoff: 4 });
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      p.stop();
     };
   });
 

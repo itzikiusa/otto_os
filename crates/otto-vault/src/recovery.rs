@@ -55,6 +55,15 @@ impl VaultEngine {
         Ok(names)
     }
 
+    /// [`Self::recovery_names`] off the async runtime: the history directory
+    /// grows by one entry per save and is listed with blocking `read_dir`.
+    async fn recovery_names_off_runtime(root: &str, dir: &str) -> Result<Vec<String>> {
+        let (root, dir) = (root.to_string(), dir.to_string());
+        tokio::task::spawn_blocking(move || Self::recovery_names(&root, &dir))
+            .await
+            .map_err(|e| Error::Internal(format!("list recovery directory: {e}")))?
+    }
+
     pub(crate) async fn prepare_revision(
         root: &str,
         path: &str,
@@ -125,7 +134,7 @@ impl VaultEngine {
             Self::check_rel(path)?;
         }
         let mut out = Vec::new();
-        for name in Self::recovery_names(&v.root_path, ".otto-history")? {
+        for name in Self::recovery_names_off_runtime(&v.root_path, ".otto-history").await? {
             if before.is_some_and(|cursor| name.as_str() >= cursor) {
                 continue;
             }
@@ -223,7 +232,7 @@ impl VaultEngine {
     pub async fn trash_entries(&self, ws: &str, id: i64) -> Result<Vec<VaultTrashEntry>> {
         let v = self.get_scoped(ws, id).await?;
         let mut out = Vec::new();
-        for name in Self::recovery_names(&v.root_path, ".trash/.otto-index")? {
+        for name in Self::recovery_names_off_runtime(&v.root_path, ".trash/.otto-index").await? {
             let entry: VaultTrashEntry = serde_json::from_slice(
                 &Self::recovery_read(&v.root_path, &format!(".trash/.otto-index/{name}")).await?,
             )

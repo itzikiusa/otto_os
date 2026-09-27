@@ -66,20 +66,69 @@ class ProofStore {
     }
   }
 
+  /** Monotonic open() token: only the newest open may land (a slow pack A
+   *  must never overwrite pack B opened after it). */
+  private openSeq = 0;
+
   /** Open one pack's detail into the right pane. */
   async open(id: string): Promise<void> {
+    const seq = ++this.openSeq;
     this.loading = true;
     try {
-      this.detail = await getProofPack(id);
+      const d = await getProofPack(id);
+      if (seq !== this.openSeq) return;
+      this.detail = d;
       this.detailError = null;
     } catch (e) {
+      if (seq !== this.openSeq) return;
       // A refresh failure of the SAME pack keeps it on screen; another pack's
       // detail never stands in for the one that failed to open.
       if (this.detail?.pack.id !== id) this.detail = null;
       this.detailError = loadErrorText(e);
     } finally {
-      this.loading = false;
+      if (seq === this.openSeq) this.loading = false;
     }
+  }
+
+  /** Mounted Proof pages. The pack list + open detail refresh on events only
+   *  while one is; the sidebar summary chips always do. */
+  private viewers = 0;
+  private stale = false;
+  watch(): () => void {
+    this.viewers += 1;
+    if (this.stale) {
+      this.stale = false;
+      if (this.detail) void this.refreshDetail();
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.viewers = Math.max(0, this.viewers - 1);
+    };
+  }
+
+  /** Trailing-coalesced event refresh: assembling a pack with 10 artifacts
+   *  fired 10 events × (summary + list + detail) = 30 requests. */
+  private pendingDetail = new Set<string>();
+  private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private scheduleRefresh(): void {
+    if (this.refreshTimer) return;
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = null;
+      const wsId = this.wsId;
+      if (wsId) {
+        void this.loadSummary(wsId);
+        if (this.viewers > 0) void this.loadPacks(wsId, this.lastFilter);
+        else this.stale = true;
+      }
+      const openId = this.detail?.pack.id;
+      if (openId && this.pendingDetail.has(openId)) {
+        if (this.viewers > 0) void this.refreshDetail();
+        else this.stale = true;
+      }
+      this.pendingDetail.clear();
+    }, 300);
   }
 
   /** Refresh the open pack's detail (after a mutation). */
@@ -97,17 +146,14 @@ class ProofStore {
     if (ev.type !== 'proof_pack_updated') return false;
     // Only refresh data the open workspace owns (a different workspace's pack
     // change isn't on screen).
-    if (this.wsId && ev.workspace_id === this.wsId) {
-      // Cheapest correct refresh: re-pull the workspace summary so every sidebar
-      // chip reflects the new status/risk/badges, and reload the list preserving
-      // the page's active filter (never clobber the chosen view).
-      void this.loadSummary(this.wsId);
-      void this.loadPacks(this.wsId, this.lastFilter);
-    }
-    // Keep the open detail live regardless of the list filter.
-    if (this.detail?.pack.id === ev.proof_pack_id) {
-      void this.refreshDetail();
-    }
+    // Cheapest correct refresh (coalesced, 300 ms trailing): re-pull the
+    // workspace summary so every sidebar chip reflects the new status/risk/
+    // badges, and — while the page is mounted — reload the list preserving the
+    // page's active filter and keep the open detail live.
+    const ours = !!this.wsId && ev.workspace_id === this.wsId;
+    const open = this.detail?.pack.id === ev.proof_pack_id;
+    if (open) this.pendingDetail.add(ev.proof_pack_id);
+    if (ours || open) this.scheduleRefresh();
     return true;
   }
 }

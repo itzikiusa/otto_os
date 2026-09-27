@@ -605,6 +605,36 @@ impl Store {
             .collect())
     }
 
+    /// [`Self::backlinks`] plus each source note's indexed content hash (the
+    /// backlink-context cache key).
+    pub async fn backlinks_hashed(
+        &self,
+        vault: i64,
+        path: &str,
+    ) -> Result<Vec<(String, String, String, String)>> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT l.src_path, n.title, l.kind, n.hash FROM vault_links l \
+             JOIN vault_notes n ON n.vault_id = l.vault_id AND n.path = l.src_path \
+             WHERE l.vault_id = ? AND l.dst_path = ? ORDER BY l.src_path",
+        )
+        .bind(vault)
+        .bind(path)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("vault.backlinks"))?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (
+                    r.get("src_path"),
+                    r.get("title"),
+                    r.get("kind"),
+                    r.get("hash"),
+                )
+            })
+            .collect())
+    }
+
     /// Every src_path that has at least one link whose dst is `path`.
     pub async fn linking_sources(&self, vault: i64, path: &str) -> Result<Vec<String>> {
         let rows = sqlx::query(

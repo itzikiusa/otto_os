@@ -30,8 +30,41 @@
     const hay = `${h.method} ${h.url} ${h.status ?? ''}`.toLowerCase();
     return tokens.every((t) => hay.includes(t));
   }
+  // The list holds only the newest HISTORY_PAGE summaries. Once it is full, a
+  // search also asks the daemon (debounced, aborted on the next keystroke) so
+  // older entries are findable; results merge with the local rows and go
+  // through the same all-tokens filter below.
+  const HISTORY_PAGE = 100;
+  let serverRows = $state.raw<ApiHistorySummary[] | null>(null);
+  $effect(() => {
+    const t = tokens;
+    const full = apiClient.history.length >= HISTORY_PAGE;
+    serverRows = null;
+    if (!t.length || !full) return;
+    // The daemon matches ONE literal against method/URL (or an exact status):
+    // send the most selective token; the rest narrow client-side.
+    const text = t.filter((x) => !/^\d{3}$/.test(x)).sort((a, b) => b.length - a.length)[0];
+    const params = text ? { q: text } : { status: Number(t[0]) };
+    const ctl = new AbortController();
+    const timer = setTimeout(() => {
+      apiClient.searchHistory(params, ctl.signal).then(
+        (rows) => { if (!ctl.signal.aborted) serverRows = rows; },
+        () => { /* aborted / offline: the local rows still filter */ },
+      );
+    }, 200);
+    return () => { clearTimeout(timer); ctl.abort(); };
+  });
+  const searchPool = $derived.by(() => {
+    if (!serverRows) return apiClient.history;
+    const seen = new Set(apiClient.history.map((h) => h.id));
+    const extra = serverRows.filter((h) => !seen.has(h.id));
+    if (!extra.length) return apiClient.history;
+    return [...apiClient.history, ...extra].sort((a, b) =>
+      a.executed_at === b.executed_at ? (a.id < b.id ? 1 : -1) : a.executed_at < b.executed_at ? 1 : -1,
+    );
+  });
   const filtered = $derived(
-    apiClient.history.filter(
+    searchPool.filter(
       (h) =>
         (!apiClient.historyAgentOnly || apiClient.historySource(h)?.kind === 'agent') &&
         (!tokens.length || entryMatches(h)),

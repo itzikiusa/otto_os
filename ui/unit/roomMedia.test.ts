@@ -18,6 +18,7 @@ function fakeStream(kind: 'audio' | 'video') {
 
 test('signal parser rejects oversized, malformed and unknown media envelopes', () => {
   assert.equal(parseMediaEnvelope({ version: 1, kind: 'description', description: { type: 'offer', sdp: 'x'.repeat(65537) }, bindings: [] }), null);
+  assert.equal(parseMediaEnvelope({ version: 1, kind: 'description', description: { type: 'offer', sdp: 'm=video\r\n'.repeat(9) }, bindings: [] }), null);
   assert.equal(parseMediaEnvelope({ version: 1, kind: 'ice', candidate: { candidate: 'x'.repeat(2049) } }), null);
   assert.equal(parseMediaEnvelope({ version: 1, kind: 'bindings', bindings: [{ streamId: 's', sourceId: 'p', generation: -1 }] }), null);
   assert.equal(parseMediaEnvelope({ version: 1, kind: 'execute', command: 'anything' }), null);
@@ -114,4 +115,172 @@ test('recap accessor exposes only the host raw live microphone and withdraws mut
   const source = client.getRecapAudioSources().get('host');
   assert.equal(source?.stream, captured.stream); assert.equal(source?.generation, 1);
   client.mute(); assert.equal(client.getRecapAudioSources().size, 0);
+});
+
+function mediaPeerFixture() {
+  let delayed: {promise: Promise<void>; started: boolean} | null = null;
+  function holdNextReplacement() {
+    let release!: () => void;
+    const gate = {promise: new Promise<void>(resolve => {release = resolve;}), started: false};
+    delayed = gate;
+    return {gate, release};
+  }
+  const senders: {track: MediaStreamTrack | null; replaceTrack(track: MediaStreamTrack | null): Promise<void>; getParameters(): RTCRtpSendParameters}[] = [];
+  const pc = {
+    signalingState: 'stable', connectionState: 'connected',
+    ontrack: null as ((event: RTCTrackEvent) => void) | null,
+    addTrack(track: MediaStreamTrack) {
+      const sender = {track: track as MediaStreamTrack | null, async replaceTrack(next: MediaStreamTrack | null) {
+        const gate = delayed; delayed = null;
+        if (gate) {gate.started = true; await gate.promise;}
+        this.track = next;
+      }, getParameters: () => ({encodings: []} as unknown as RTCRtpSendParameters)};
+      senders.push(sender); return sender;
+    },
+    removeTrack(sender: typeof senders[number]) {sender.track = null;},
+    getReceivers: () => [], close() {},
+  };
+  let streamId = 0;
+  const stream = (tracks: MediaStreamTrack[]) => ({id: `stream-${++streamId}`, getTracks: () => tracks,
+    getAudioTracks: () => tracks.filter(t => t.kind === 'audio'), getVideoTracks: () => tracks.filter(t => t.kind === 'video')}) as unknown as MediaStream;
+  const node = {disconnect() {}, connect() {}};
+  const mixTracks: ReturnType<typeof fakeStream>['track'][] = [];
+  const context = () => ({resume: async () => {}, close: async () => {}, destination: node,
+    createMediaStreamSource: () => node, createMediaStreamDestination: () => {
+      const track = fakeStream('audio').track; mixTracks.push(track);
+      return {...node, stream: stream([track as unknown as MediaStreamTrack])};
+    }}) as unknown as AudioContext;
+  const environment: Partial<RoomMediaEnvironment> = {createPeer: () => pc as unknown as RTCPeerConnection,
+    createStream: stream, createAudioContext: context, getDisplayMedia: async () => fakeStream('video').stream};
+  return {pc, senders, environment, stream, holdNextReplacement, mixTracks};
+}
+async function flushMedia() {for (let i = 0; i < 100; i++) await Promise.resolve();}
+const guestMember = {...snapshot.members![0], id: 'guest', role: 'editor' as const, audio_joined: true};
+
+test('25 screen source replacements and 25 audio rejoins reuse negotiated sender slots', async t => {
+  const fixture = mediaPeerFixture(), actions: RoomAction[] = [];
+  const client = new RoomMediaClient({memberId: 'host', send: action => actions.push(action), environment: fixture.environment});
+  t.after(() => client.dispose());
+  let room: RoomSnapshot = {...snapshot, members: [{...snapshot.members![0], audio_joined: true}, guestMember]};
+  client.update(room); await client.joinAudio(); await flushMedia();
+  let bindingStream: string | undefined;
+  for (let cycle = 0; cycle < 25; cycle++) {
+    await client.startPresentation();
+    const source = {id: `screen-${cycle}`, member_id: 'host', title: 'Screen', generation: 1, width: 1280, height: 720, clear_epoch: 1};
+    room = {...room, presentations: [source]}; client.update(room);
+    client.handleEvent({type: 'subscription', member_id: 'guest', source_id: source.id, source_generation: 1, tier: 'grid'});
+    await flushMedia();
+    const signal = actions.filter(a => a.type === 'signal').at(-1);
+    const envelope = signal?.type === 'signal' ? parseMediaEnvelope(signal.media) : null;
+    assert.equal(envelope?.kind, 'bindings');
+    if (envelope?.kind === 'bindings') {
+      assert.equal(envelope.bindings[0].sourceId, source.id);
+      bindingStream ??= envelope.bindings[0].streamId;
+      assert.equal(envelope.bindings[0].streamId, bindingStream, 'receiver association survives a new source ID');
+    }
+    assert.equal(fixture.senders.length, 2, 'one audio and one video sender across every replacement');
+    room = {...room, presentations: [{...source, generation: 2, width: 1920, height: 1080}]}; client.update(room);
+    client.handleEvent({type: 'subscription', member_id: 'guest', source_id: source.id, source_generation: 2, tier: 'grid'});
+    await flushMedia();
+    const resizeSignal = actions.filter(a => a.type === 'signal').at(-1);
+    const resized = resizeSignal?.type === 'signal' ? parseMediaEnvelope(resizeSignal.media) : null;
+    assert.equal(resized?.kind, 'bindings');
+    if (resized?.kind === 'bindings') assert.deepEqual(resized.bindings, [{streamId: bindingStream, sourceId: source.id, generation: 2}]);
+    const pendingStop = fixture.holdNextReplacement();
+    client.leaveAudio(); await client.joinAudio(); await flushMedia();
+    assert.equal(pendingStop.gate.started, true, 'the prior audio stop is still pending when rejoining');
+    pendingStop.release(); await flushMedia();
+    assert.equal(fixture.senders.length, 2, 'voice leave/rejoin must not append SDP m-lines');
+    assert.equal(fixture.senders[0].track?.readyState, 'live');
+    client.stopPresentation(); room = {...room, presentations: []}; client.update(room); await flushMedia();
+    assert.equal(fixture.senders[1].track, null, 'revoked video stops sending immediately');
+  }
+});
+
+test('removing a member during a pending video replacement cannot recreate its audio mix', async t => {
+  const fixture = mediaPeerFixture();
+  const client = new RoomMediaClient({memberId: 'host', send: () => {}, environment: fixture.environment});
+  t.after(() => client.dispose());
+  let room: RoomSnapshot = {...snapshot, members: [{...snapshot.members![0], audio_joined: true}, guestMember]};
+  client.update(room); await client.joinAudio(); await client.startPresentation();
+  const source = {id: 'screen', member_id: 'host', title: 'Screen', generation: 1, width: 1280, height: 720, clear_epoch: 1};
+  room = {...room, presentations: [source]}; client.update(room);
+  client.handleEvent({type: 'subscription', member_id: 'guest', source_id: source.id, source_generation: 1, tier: 'grid'});
+  await flushMedia(); assert.equal(fixture.mixTracks.length, 1);
+  const pendingStop = fixture.holdNextReplacement();
+  room = {...room, presentations: []}; client.update(room); await flushMedia();
+  assert.equal(pendingStop.gate.started, true);
+  client.update({...room, members: [room.members![0]]});
+  assert.equal(fixture.mixTracks[0].stopped, true);
+  pendingStop.release(); await flushMedia();
+  assert.equal(fixture.mixTracks.length, 1, 'the stale reconcile must not allocate a new mix on a closed peer');
+});
+
+test('revoking a source during pending slot reuse clears the newly attached video track', async t => {
+  const fixture = mediaPeerFixture();
+  const client = new RoomMediaClient({memberId: 'host', send: () => {}, environment: fixture.environment});
+  t.after(() => client.dispose());
+  let room: RoomSnapshot = {...snapshot, members: [{...snapshot.members![0], audio_joined: true}, guestMember]};
+  client.update(room); await client.joinAudio(); await flushMedia();
+  for (let cycle = 0; cycle < 2; cycle++) {
+    await client.startPresentation();
+    const source = {id: `screen-${cycle}`, member_id: 'host', title: 'Screen', generation: 1, width: 1280, height: 720, clear_epoch: 1};
+    const pending = cycle === 1 ? fixture.holdNextReplacement() : null;
+    room = {...room, presentations: [source]}; client.update(room);
+    client.handleEvent({type: 'subscription', member_id: 'guest', source_id: source.id, source_generation: 1, tier: 'grid'});
+    await flushMedia();
+    if (pending) assert.equal(pending.gate.started, true);
+    room = {...room, presentations: []}; client.update(room);
+    pending?.release(); await flushMedia();
+    assert.equal(fixture.senders[1].track, null, 'even a slot attached during revocation must be tracked and cleared');
+  }
+});
+
+test('a retained receiver stream binds new source IDs without another ontrack event', async t => {
+  const fixture = mediaPeerFixture(); let shown = new Map<string, MediaStream>();
+  const client = new RoomMediaClient({memberId: 'guest', send: () => {}, environment: fixture.environment, onStreams: streams => {shown = streams;}});
+  t.after(() => client.dispose());
+  const members = [{...snapshot.members![0], audio_joined: true}, guestMember];
+  const stream = fixture.stream([fakeStream('video').track as unknown as MediaStreamTrack]);
+  let room: RoomSnapshot = {...snapshot, member_id: 'guest', members};
+  client.update(room); await client.joinAudio(); await flushMedia();
+  for (let cycle = 0; cycle < 25; cycle++) {
+    const source = {id: `remote-${cycle}`, member_id: 'host', title: `Screen ${cycle}`, generation: cycle + 1, width: 1280, height: 720, clear_epoch: 1};
+    room = {...room, presentations: [source]}; client.update(room);
+    client.setSubscriptions([{sourceId: source.id, generation: source.generation, tier: 'grid'}]); await flushMedia();
+    client.handleEvent({type: 'signal', from: 'host', to: 'guest', generation: 1, media: {version: 1, kind: 'bindings', bindings: [{streamId: stream.id, sourceId: source.id, generation: source.generation}]}});
+    await flushMedia();
+    if (cycle === 0) fixture.pc.ontrack!({track: stream.getVideoTracks()[0], streams: [stream]} as unknown as RTCTrackEvent);
+    await flushMedia(); assert.deepEqual([...shown.keys()], [source.id]);
+    room = {...room, presentations: []}; client.update(room);
+    client.handleEvent({type: 'signal', from: 'host', to: 'guest', generation: 1, media: {version: 1, kind: 'bindings', bindings: []}});
+    await flushMedia(); assert.equal(shown.size, 0, 'old source disappears when its grant is removed');
+  }
+});
+
+test('a binding-only publisher replacement triggers forwarding to another guest', async t => {
+  const publisher = mediaPeerFixture(), viewer = mediaPeerFixture(), actions: RoomAction[] = [];
+  let peerCount = 0;
+  const client = new RoomMediaClient({memberId: 'host', send: action => actions.push(action), environment: {
+    ...publisher.environment, createPeer: () => (peerCount++ === 0 ? publisher.pc : viewer.pc) as unknown as RTCPeerConnection,
+  }});
+  t.after(() => client.dispose());
+  let room: RoomSnapshot = {...snapshot, members: [{...snapshot.members![0], audio_joined: true}, guestMember, {...guestMember, id: 'viewer'}]};
+  const stream = publisher.stream([fakeStream('video').track as unknown as MediaStreamTrack]);
+  client.update(room); await client.joinAudio(); await flushMedia();
+  for (let cycle = 0; cycle < 25; cycle++) {
+    const source = {id: `publisher-${cycle}`, member_id: 'guest', title: 'Screen', generation: 1, width: 1280, height: 720, clear_epoch: 1};
+    room = {...room, presentations: [source]}; client.update(room);
+    client.handleEvent({type: 'subscription', member_id: 'viewer', source_id: source.id, source_generation: 1, tier: 'grid'});
+    await flushMedia();
+    client.handleEvent({type: 'signal', from: 'guest', to: 'host', generation: 1, media: {version: 1, kind: 'bindings', bindings: [{streamId: stream.id, sourceId: source.id, generation: 1}]}});
+    if (cycle === 0) publisher.pc.ontrack!({track: stream.getVideoTracks()[0], streams: [stream]} as unknown as RTCTrackEvent);
+    await flushMedia();
+    const signal = actions.filter(a => a.type === 'signal' && a.to === 'viewer').at(-1);
+    const envelope = signal?.type === 'signal' ? parseMediaEnvelope(signal.media) : null;
+    assert.equal(envelope?.kind, 'bindings');
+    if (envelope?.kind === 'bindings') assert.deepEqual(envelope.bindings.map(b => b.sourceId), [source.id], 'new binding must relay without another ontrack or room event');
+    room = {...room, presentations: []}; client.update(room); await flushMedia();
+  }
+  assert.equal(viewer.senders.length, 2, 'relay replacements keep a bounded audio/video sender pair');
 });

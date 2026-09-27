@@ -62,6 +62,64 @@ fn record_association(state: &mut NodeRunState, association: AgentAssociation) -
 /// line. Keeps `nodes_json` and `NODE_EVENT_MAX_BYTES` bounded. See design R5.5.
 const NODE_LOG_CAP: usize = 200;
 
+/// While a node RUNS its live log is capped here (same phase-only eviction as
+/// [`NODE_LOG_CAP`], which still applies at node end): a chatty step used to
+/// grow the vector without bound, and every persist re-serializes it.
+const NODE_LIVE_LOG_CAP: usize = 5 * NODE_LOG_CAP;
+
+/// Live log lines are persisted at most this often per node (plus a flush
+/// every [`LOG_PERSIST_LINES`] lines): each persist rewrites the whole run's
+/// `nodes_json` (O(run size)), so one write per line made a 500-step run cost
+/// O(lines × run size). The run view refetches on the persisted rev, so a line
+/// shows up at most this late.
+const LOG_PERSIST_EVERY: Duration = Duration::from_millis(250);
+const LOG_PERSIST_LINES: usize = 20;
+
+/// Live-log persist coalescing for one running node (see
+/// [`LOG_PERSIST_EVERY`]): the first line after a quiet spell is written at
+/// once, a burst is written every [`LOG_PERSIST_LINES`] lines or on a trailing
+/// flush [`LOG_PERSIST_EVERY`] after the previous log write.
+#[derive(Debug, Default)]
+struct LogPersist {
+    /// Lines appended but not yet written.
+    unpersisted: usize,
+    /// When the last write for a LOG line happened.
+    last: Option<Instant>,
+    /// Trailing flush deadline while lines are buffered.
+    flush_at: Option<Instant>,
+}
+
+impl LogPersist {
+    /// A line was appended at `now`: `true` = write the run now.
+    fn on_line(&mut self, now: Instant) -> bool {
+        self.unpersisted += 1;
+        let due = self.unpersisted >= LOG_PERSIST_LINES
+            || self
+                .last
+                .is_none_or(|t| now.saturating_duration_since(t) >= LOG_PERSIST_EVERY);
+        if due {
+            self.wrote_log(now);
+        } else if self.flush_at.is_none() {
+            self.flush_at = self.last.map(|t| t + LOG_PERSIST_EVERY);
+        }
+        due
+    }
+
+    /// The trailing flush (or an `on_line` write) went out at `now`.
+    fn wrote_log(&mut self, now: Instant) {
+        self.last = Some(now);
+        self.unpersisted = 0;
+        self.flush_at = None;
+    }
+
+    /// Some other write of the run (session association, activity) carried
+    /// the buffered lines too.
+    fn carried(&mut self) {
+        self.unpersisted = 0;
+        self.flush_at = None;
+    }
+}
+
 /// True in the offline E2E daemon (same test as `agent_session`'s short-circuit).
 fn otto_e2e() -> bool {
     matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true"))
@@ -883,17 +941,24 @@ async fn apply_done_file_oracle(
         if s.provider != "claude" {
             continue;
         }
-        let Some(psid) = s.provider_session_id.as_deref() else {
+        let Some(psid) = s.provider_session_id.clone() else {
             continue;
         };
-        let cwd = std::fs::canonicalize(&s.cwd)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| s.cwd.clone());
-        let path = otto_orchestrator::claude_pty::session_jsonl_path(&cwd, psid);
-        let Ok(jsonl) = std::fs::read_to_string(&path) else {
+        let cwd = s.cwd.clone();
+        // Whole-file read + parse, once per interrupted step — off the runtime.
+        let scan = crate::offload::blocking(move || {
+            let cwd = std::fs::canonicalize(&cwd)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or(cwd);
+            let path = otto_orchestrator::claude_pty::session_jsonl_path(&cwd, &psid);
+            std::fs::read_to_string(&path)
+                .ok()
+                .map(|jsonl| turn_oracle::scan_claude(&jsonl))
+        })
+        .await;
+        let Some(scan) = scan else {
             continue;
         };
-        let scan = turn_oracle::scan_claude(&jsonl);
         if !scan.pending.is_empty() || !scan.tail_is_assistant_end_turn {
             state.logs.push(format!(
                 "⚠ handoff found after restart but the session had {} tasks pending / an open turn — re-running the step",
@@ -2230,6 +2295,8 @@ pub async fn run_workflow(
         // `update_run_progress` rewrites `nodes_json`.
         let (activity_tx, mut activity_rx) = tokio::sync::mpsc::unbounded_channel::<NodeActivity>();
         let mut last_activity_persist: Option<Instant> = None;
+        // Live-log persist coalescing (see LOG_PERSIST_EVERY).
+        let mut log_persist = LogPersist::default();
         // Snapshot when the (latest) attempt began: a step file the agent wrote
         // during a FAILED earlier attempt must not be mistaken for the winning
         // attempt's handoff (persist_step compares mtimes against this).
@@ -2299,13 +2366,33 @@ pub async fn run_workflow(
                                 .update_run_progress(&run_id, &states)
                                 .await
                                 .unwrap_or(0);
+                            // The write carried any buffered log lines too.
+                            log_persist.carried();
                             emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
                         }
                     }
                     Some(line) = log_rx.recv() => {
-                        // Live progress line (R9) — append to the node's logs and push
-                        // it to the run detail immediately.
+                        // Live progress line (R9) — append to the node's logs. The
+                        // first line after a quiet spell is written (and pushed to
+                        // the run detail) at once; a burst is coalesced into one
+                        // write per LOG_PERSIST_EVERY / LOG_PERSIST_LINES.
                         states[idx].logs.push(line);
+                        if states[idx].logs.len() > NODE_LIVE_LOG_CAP {
+                            cap_node_logs(&mut states[idx].logs, NODE_LIVE_LOG_CAP);
+                        }
+                        if log_persist.on_line(Instant::now()) {
+                            let rev = repo
+                                .update_run_progress(&run_id, &states)
+                                .await
+                                .unwrap_or(0);
+                            emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
+                        }
+                    }
+                    () = tokio::time::sleep_until(tokio::time::Instant::from_std(
+                        log_persist.flush_at.unwrap_or_else(Instant::now),
+                    )), if log_persist.flush_at.is_some() => {
+                        // Trailing flush of a coalesced log burst.
+                        log_persist.wrote_log(Instant::now());
                         let rev = repo
                             .update_run_progress(&run_id, &states)
                             .await
@@ -2323,6 +2410,7 @@ pub async fn run_workflow(
                                 .update_run_progress(&run_id, &states)
                                 .await
                                 .unwrap_or(0);
+                            log_persist.carried();
                             emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
                         }
                     }
@@ -6642,6 +6730,8 @@ struct PhaseFeed {
     /// Remembered for the completion line's `{n}` / `{id}`.
     pending: usize,
     running_id: Option<String>,
+    /// Incremental reader behind the sub-agent snapshot (see [`StepProbe`]).
+    probe: Option<StepProbe>,
 }
 
 impl PhaseFeed {
@@ -6656,6 +6746,7 @@ impl PhaseFeed {
             last_progress_at: None,
             pending: 0,
             running_id: None,
+            probe: None,
         }
     }
 
@@ -6683,7 +6774,7 @@ impl PhaseFeed {
                 .is_none_or(|t| t.elapsed() >= Duration::from_secs(5))
         {
             self.last_probe = Some(Instant::now());
-            if let Some((subs, stamp)) = step_activity_probe(ctx, sid).await {
+            if let Some((subs, stamp)) = step_activity_probe(ctx, sid, &mut self.probe).await {
                 self.running_id = subs
                     .iter()
                     .find(|s| s.status == turn_oracle::SubStatus::Running)
@@ -6822,29 +6913,83 @@ fn bound_activity(mut a: NodeActivity) -> NodeActivity {
 /// The running step's sub-agents + newest child-file mtime, straight from the
 /// oracle. `None` until the session exists (or for a provider with no
 /// transcript) — the snapshot then simply carries no rows.
+///
+/// Each probe used to re-read and re-parse the WHOLE step transcript on the
+/// runtime (once per sub-agent start/finish — ~40 × 40 ms on a 30 MB step). The
+/// [`StepProbe`] kept in `slot` reads only what was appended since the last
+/// probe and re-reads only new/changed sidecars, off the runtime.
 async fn step_activity_probe(
     ctx: &ServerCtx,
     sid: Option<&Id>,
+    slot: &mut Option<StepProbe>,
 ) -> Option<(
     Vec<turn_oracle::SubagentInfo>,
     Option<std::time::SystemTime>,
 )> {
-    let s = ctx.manager.get(sid?).await.ok()?;
+    let sid = sid?;
+    let s = ctx.manager.get(sid).await.ok()?;
     if s.provider != "claude" {
         return None;
     }
-    let psid = s.provider_session_id.as_deref()?;
-    // claude symlink-resolves the spawn cwd for its transcript dir.
-    let cwd = std::fs::canonicalize(&s.cwd)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| s.cwd.clone());
-    let proj = otto_orchestrator::claude_pty::project_dir(&cwd);
-    let main = proj.join(format!("{psid}.jsonl"));
-    let jsonl = tokio::fs::read_to_string(&main).await.ok()?;
-    let scan = turn_oracle::scan_claude(&jsonl);
-    let subdir = proj.join(psid).join("subagents");
-    let stamp = turn_oracle::progress_stamp(&main, Some(&subdir), None);
-    Some((turn_oracle::subagents(&proj, psid, &scan), stamp))
+    let psid = s.provider_session_id.clone()?;
+    let mut probe = match slot.take() {
+        Some(p) if &p.sid == sid && p.psid == psid => p,
+        _ => {
+            let (sid, cwd) = (sid.clone(), s.cwd.clone());
+            crate::offload::blocking(move || StepProbe::new(sid, &cwd, psid)).await
+        }
+    };
+    let (probe, out) = crate::offload::blocking(move || {
+        let out = probe.run();
+        (probe, out)
+    })
+    .await;
+    *slot = Some(probe);
+    out
+}
+
+/// Per-step incremental state for [`step_activity_probe`].
+struct StepProbe {
+    sid: Id,
+    psid: String,
+    proj: std::path::PathBuf,
+    main: std::path::PathBuf,
+    tail: turn_oracle::ClaudeTail,
+    metas: turn_oracle::SubagentMetaCache,
+}
+
+impl StepProbe {
+    /// Resolve the transcript paths. Blocking (canonicalize).
+    fn new(sid: Id, cwd: &str, psid: String) -> Self {
+        // claude symlink-resolves the spawn cwd for its transcript dir.
+        let cwd = std::fs::canonicalize(cwd)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| cwd.to_string());
+        let proj = otto_orchestrator::claude_pty::project_dir(&cwd);
+        let main = proj.join(format!("{psid}.jsonl"));
+        Self {
+            sid,
+            tail: turn_oracle::ClaudeTail::new(&main),
+            psid,
+            proj,
+            main,
+            metas: turn_oracle::SubagentMetaCache::default(),
+        }
+    }
+
+    /// One probe. Blocking IO (only the appended bytes + changed sidecars).
+    fn run(
+        &mut self,
+    ) -> Option<(
+        Vec<turn_oracle::SubagentInfo>,
+        Option<std::time::SystemTime>,
+    )> {
+        let scan = self.tail.poll()?;
+        let subdir = self.proj.join(&self.psid).join("subagents");
+        let stamp = turn_oracle::progress_stamp(&self.main, Some(&subdir), None);
+        let subs = turn_oracle::subagents_cached(&self.proj, &self.psid, &scan, &mut self.metas);
+        Some((subs, stamp))
+    }
 }
 
 /// Parse the E2E sub-agent sentinel from a step prompt:
@@ -9075,6 +9220,76 @@ mod tests {
         let long = "x".repeat(500);
         let (_, _, reason) = retry_backoff(&long, &policy, 1, 1, 0).expect("retryable");
         assert!(reason.chars().count() <= 121, "{}", reason.chars().count());
+    }
+
+    /// SD-01: 1 000 streamed lines (one per ms) on a 500-node run used to be
+    /// 1 000 whole-run writes. Coalesced, they are ≤ one write per 20 lines /
+    /// 250 ms, a lone line after a quiet spell is still written at once, and
+    /// the trailing flush delivers the last lines.
+    #[test]
+    fn log_persist_coalesces_bursts_and_flushes_the_tail() {
+        let t0 = Instant::now();
+        let mut lp = LogPersist::default();
+        let mut writes = 0usize;
+        let mut buffered = 0usize;
+        let mut delivered = 0usize;
+        for i in 0..1000u64 {
+            let now = t0 + Duration::from_millis(i);
+            // A due trailing flush fires before the next line is taken.
+            if lp.flush_at.is_some_and(|at| at <= now) {
+                lp.wrote_log(now);
+                writes += 1;
+                delivered += std::mem::take(&mut buffered);
+            }
+            buffered += 1;
+            if lp.on_line(now) {
+                writes += 1;
+                delivered += std::mem::take(&mut buffered);
+            }
+        }
+        if let Some(at) = lp.flush_at {
+            lp.wrote_log(at);
+            writes += 1;
+            delivered += std::mem::take(&mut buffered);
+        }
+        assert_eq!(delivered, 1000, "every line is written");
+        assert!(writes <= 1000 / LOG_PERSIST_LINES + 1, "{writes} writes");
+        assert!(lp.flush_at.is_none() && lp.unpersisted == 0);
+        // Quiet spell → the next line is written immediately.
+        let later = t0 + Duration::from_secs(10);
+        assert!(lp.on_line(later));
+        // A second line right after waits for the trailing flush…
+        assert!(!lp.on_line(later + Duration::from_millis(1)));
+        assert_eq!(lp.flush_at, Some(later + LOG_PERSIST_EVERY));
+        // …unless another write of the run carried it.
+        lp.carried();
+        assert!(lp.flush_at.is_none() && lp.unpersisted == 0);
+        // The live cap evicts only phase lines, oldest first, like the end cap.
+        let mut logs: Vec<String> = (0..NODE_LIVE_LOG_CAP + 50)
+            .map(|i| if i % 2 == 0 { format!("⏳ phase {i}") } else { format!("▶ line {i}") })
+            .collect();
+        cap_node_logs(&mut logs, NODE_LIVE_LOG_CAP);
+        assert_eq!(logs.len(), NODE_LIVE_LOG_CAP);
+        assert!(logs.iter().filter(|l| l.starts_with('▶')).count() == (NODE_LIVE_LOG_CAP + 50) / 2);
+        // Capping while running changes nothing about the node-end result.
+        let lines: Vec<String> = (0..3000u32)
+            .map(|i| match i.wrapping_mul(2_654_435_761) % 7 {
+                0 => format!("✓ decision {i}"),
+                1 | 2 => format!("🧩 sub-agents {i}"),
+                _ => format!("⏳ working {i}"),
+            })
+            .collect();
+        let mut batch = lines.clone();
+        cap_node_logs(&mut batch, NODE_LOG_CAP);
+        let mut live = Vec::new();
+        for l in &lines {
+            live.push(l.clone());
+            if live.len() > NODE_LIVE_LOG_CAP {
+                cap_node_logs(&mut live, NODE_LIVE_LOG_CAP);
+            }
+        }
+        cap_node_logs(&mut live, NODE_LOG_CAP);
+        assert_eq!(live, batch);
     }
 
     #[test]

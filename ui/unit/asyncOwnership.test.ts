@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deferred, loadSource } from './sourceHarness.ts';
 import * as sessionScope from '../src/lib/stores/sessionScope.ts';
+import * as sessionPatch from '../src/lib/stores/sessionPatch.ts';
 
 function workspace() {
   const requests: { path: string; result: ReturnType<typeof deferred<any[]>> }[] = [];
@@ -17,7 +18,7 @@ function workspace() {
     './ui.svelte': { ui: { sessionIsolation: false }, clientId: () => 'test' },
     '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'otto_panes_' },
     '../storage': { lsGet: () => null, lsSet() {}, lsRemove() {} },
-    '../desktop': { isEmbedded: false }, './sessionScope': sessionScope,
+    '../desktop': { isEmbedded: false }, './sessionScope': sessionScope, './sessionPatch': sessionPatch,
   });
   ws.refreshOtherSessions = async () => {};
   return { ws, requests, restored };

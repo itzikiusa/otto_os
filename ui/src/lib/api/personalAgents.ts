@@ -86,6 +86,15 @@ export const personalAgentsApi = {
     q.set('limit', String(limit));
     return api.get<AgentRoomMessage[]>(`/agent-rooms/${roomId}/messages?${q}`);
   },
+  /** Backwards page, oldest first: the `limit` messages before `before`, or
+   *  the room's newest `limit` when `before` is omitted (`tail=true`). */
+  messagesBefore: (roomId: string, before?: string, limit = 200) => {
+    const q = new URLSearchParams();
+    if (before) q.set('before', before);
+    else q.set('tail', 'true');
+    q.set('limit', String(limit));
+    return api.get<AgentRoomMessage[]>(`/agent-rooms/${roomId}/messages?${q}`);
+  },
   /** A user post (no session_id — agent posts go through the room MCP tools). */
   postMessage: (roomId: string, text: string) =>
     api.post<AgentRoomMessage>(`/agent-rooms/${roomId}/messages`, { text }),

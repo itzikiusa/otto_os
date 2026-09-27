@@ -211,18 +211,39 @@ pub async fn list(
             .map_err(db_error)?,
     ))
 }
+#[derive(Deserialize)]
+pub struct GetQuery {
+    /// Delta poll: return only the step results after the first `after` (and
+    /// no `snapshot`) — the running view already holds the rest.
+    pub after: Option<usize>,
+}
 pub async fn get(
     Path((wid, id)): Path<(Id, Id)>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    Query(q): Query<GetQuery>,
 ) -> ApiResult<Json<ApiAutomationRun>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    Ok(Json(
-        ApiRunsRepo(ctx.pool)
-            .get(&wid, &id)
-            .await
-            .map_err(db_error)?,
-    ))
+    let mut run = ApiRunsRepo(ctx.pool)
+        .get(&wid, &id)
+        .await
+        .map_err(db_error)?;
+    if let Some(after) = q.after {
+        tail_after(&mut run, after);
+    }
+    Ok(Json(run))
+}
+
+/// Keep only the step results after the first `after` (the three per-step
+/// vectors stay index-aligned) and drop the snapshot.
+fn tail_after(run: &mut ApiAutomationRun, after: usize) {
+    let steps = std::mem::take(&mut run.report.steps);
+    run.report.steps = steps.into_iter().skip(after).collect();
+    let rows = std::mem::take(&mut run.result_rows);
+    run.result_rows = rows.into_iter().skip(after).collect();
+    let ids = std::mem::take(&mut run.result_ids);
+    run.result_ids = ids.into_iter().skip(after).collect();
+    run.snapshot = Value::Null;
 }
 pub async fn cancel(
     Path((wid, id)): Path<(Id, Id)>,
@@ -252,5 +273,48 @@ mod tests {
         };
         assert!(validate(&options, 100).is_err());
         assert!(validate(&options, 90).is_ok());
+    }
+
+    #[test]
+    fn tail_after_returns_only_new_steps_and_no_snapshot() {
+        let step = |name: &str| otto_core::api::ApiRunStepResult {
+            request_id: "r".into(),
+            name: name.into(),
+            status: Some(200),
+            duration_ms: 1,
+            ok: true,
+            assertions: json!([]),
+            error: None,
+        };
+        let mut run = ApiAutomationRun {
+            id: "run".into(),
+            workspace_id: "w".into(),
+            automation_id: "a".into(),
+            environment_id: None,
+            created_by: "u".into(),
+            status: "running".into(),
+            created_at: String::new(),
+            finished_at: None,
+            stop_on_failure: false,
+            dataset_rows: 1,
+            snapshot: json!([{"request_id": "r"}]),
+            report: ApiRunResult {
+                automation_id: "a".into(),
+                steps: vec![step("one"), step("two"), step("three")],
+                passed: false,
+            },
+            result_rows: vec![0, 0, 1],
+            result_ids: vec!["s1".into(), "s2".into(), "s3".into()],
+            error: None,
+        };
+        let mut past_end = run.clone();
+        tail_after(&mut run, 2);
+        assert_eq!(run.report.steps.len(), 1);
+        assert_eq!(run.report.steps[0].name, "three");
+        assert_eq!(run.result_rows, vec![1]);
+        assert_eq!(run.result_ids, vec!["s3".to_string()]);
+        assert!(run.snapshot.is_null());
+        tail_after(&mut past_end, 10);
+        assert!(past_end.report.steps.is_empty() && past_end.result_ids.is_empty());
     }
 }

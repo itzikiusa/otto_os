@@ -83,8 +83,18 @@ class ContextMenuStore {
   /** Where focus goes back to on close (not reactive). */
   private returnTo: HTMLElement | null = null;
   /** The last trigger — the fallback anchor for a menu opened by a control
-   *  that is itself hidden (a button collapsed into PageHeader's ⋯ menu). */
-  private lastTrigger: HTMLElement | null = null;
+   *  that is itself hidden (a button collapsed into PageHeader's ⋯ menu).
+   *  Held WEAKLY: this store is an app-lifetime singleton, and a strong ref
+   *  pinned the last trigger's whole detached page subtree (and every
+   *  component closure reachable from it) after the user navigated away. */
+  private lastTrigger: WeakRef<HTMLElement> | null = null;
+
+  private liveTrigger(): HTMLElement | null {
+    const el = this.lastTrigger?.deref() ?? null;
+    if (el && el.isConnected) return el;
+    this.lastTrigger = null;
+    return null;
+  }
 
   private reset(items: MenuItem[], opts?: MenuOptions): void {
     this.items = items;
@@ -130,8 +140,9 @@ class ContextMenuStore {
     if (!r) {
       // Hidden trigger (e.g. clicked from PageHeader's ⋯ menu): anchor to the
       // control that opened the previous menu instead.
-      r = visibleRect(this.lastTrigger);
-      target = r ? this.lastTrigger : null;
+      const last = this.liveTrigger();
+      r = visibleRect(last);
+      target = r ? last : null;
     }
     this.reset(items, opts);
     this.align = opts?.align ?? 'start';
@@ -143,7 +154,7 @@ class ContextMenuStore {
       this.x = Math.round(window.innerWidth / 2 - 100);
       this.y = Math.round(window.innerHeight / 4);
     }
-    if (target) this.lastTrigger = target;
+    if (target) this.lastTrigger = new WeakRef(target);
     this.rememberFocus(target);
     this.seq++;
     this.open = true;
@@ -158,6 +169,10 @@ class ContextMenuStore {
     const ours = !active || active === document.body || (active instanceof HTMLElement && !!active.closest('.ctx-menu'));
     const back = this.returnTo;
     this.returnTo = null;
+    // The rows' `action` closures capture whichever component opened the
+    // menu; don't keep them (and that component) alive while closed. The
+    // clicked item was already taken by the caller, which runs it after this.
+    this.items = [];
     if (ours && back?.isConnected) back.focus({ preventScroll: true });
   }
 }

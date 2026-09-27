@@ -29,6 +29,7 @@
   import Terminal from '../../lib/components/Terminal.svelte';
   import ImportDialog from './ImportDialog.svelte';
   import ExportDialog from './ExportDialog.svelte';
+  import { stmtPreview } from './sql-util';
   import { databaseAccessChild } from '../../lib/access-options';
   import { database, engineGlyph, type DbMainTab } from '../../lib/stores/database.svelte';
   import { brokers } from '../../lib/stores/brokers.svelte';
@@ -114,18 +115,29 @@
   let historySearch = $state('');
   let renamingId = $state<string | null>(null);
   let renameDraft = $state('');
+  // Lower-cased search text per row, memoized on the row's text — not
+  // re-lowercasing every full statement (which can be a whole pasted script)
+  // on each search keystroke.
+  const searchText = new WeakMap<object, { src: string; lower: string }>();
+  function lowered(row: object, text: string): string {
+    const hit = searchText.get(row);
+    if (hit && hit.src === text) return hit.lower;
+    const lower = text.toLowerCase();
+    searchText.set(row, { src: text, lower });
+    return lower;
+  }
   const filteredSaved = $derived.by(() => {
     const s = savedSearch.trim().toLowerCase();
     if (!s) return database.savedQueries;
     return database.savedQueries.filter(
-      (q) => q.name.toLowerCase().includes(s) || q.statement.toLowerCase().includes(s),
+      (q) => q.name.toLowerCase().includes(s) || lowered(q, q.statement).includes(s),
     );
   });
   const filteredHistory = $derived.by(() => {
     const s = historySearch.trim().toLowerCase();
     if (!s) return database.history;
-    return database.history.filter(
-      (h) => h.statement.toLowerCase().includes(s) || (h.error ?? '').toLowerCase().includes(s),
+    return database.history.filter((h) =>
+      lowered(h, h.error ? `${h.statement}\n${h.error}` : h.statement).includes(s),
     );
   });
   function startRename(q: DbSavedQuery): void {
@@ -1569,7 +1581,7 @@
               aria-label="Rename saved query"
             />
           {:else}
-            <button class="saved-open" onclick={() => database.openSavedQuery(q)} title={q.statement}>
+            <button class="saved-open" onclick={() => database.openSavedQuery(q)} title={stmtPreview(q.statement, 1000)}>
               <Icon name="file" size={12} />
               <span class="ellipsis">{q.name}</span>
             </button>
@@ -1611,9 +1623,10 @@
       <div class="list-empty">No history matches “{historySearch}”.</div>
     {:else}
       {#each filteredHistory as h (h.id)}
-        <button class="hist-row" class:bad={!h.ok} onclick={() => database.openHistory(h)} title={h.error ?? h.statement}>
+        <!-- Bounded previews: a history row can hold a whole pasted script. -->
+        <button class="hist-row" class:bad={!h.ok} onclick={() => database.openHistory(h)} title={h.error ? stmtPreview(h.error, 1000) : stmtPreview(h.statement, 1000)}>
           <span class="hist-dot" class:ok={h.ok}></span>
-          <span class="hist-stmt ellipsis mono">{h.statement}</span>
+          <span class="hist-stmt ellipsis mono">{stmtPreview(h.statement)}</span>
           <span class="hist-meta">{h.ok ? `${h.row_count}r` : 'err'} · {fmtAgo(h.created_at)}</span>
         </button>
       {/each}

@@ -232,6 +232,14 @@ pub struct PtyHandle {
     child_pid: Option<u32>,
 }
 
+/// A coherent replay followed by only the output produced after that replay.
+pub struct OutputSnapshot {
+    pub data: Vec<u8>,
+    pub cols: u16,
+    pub rows: u16,
+    pub output: broadcast::Receiver<Bytes>,
+}
+
 fn lock_unpoisoned<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -338,7 +346,11 @@ impl PtyHandle {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             last.store(epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
-                            lock_unpoisoned(&parser).process(&buf[..n]);
+                            // Publish under the same lock as the emulator update:
+                            // snapshot_and_subscribe must never include a chunk
+                            // in its replay and then receive that chunk again.
+                            let mut parser = lock_unpoisoned(&parser);
+                            parser.process(&buf[..n]);
                             lock_unpoisoned(&ring).push(&buf[..n]);
                             // No receivers is fine — the screen state still records.
                             let _ = tx.send(Bytes::copy_from_slice(&buf[..n]));
@@ -603,7 +615,24 @@ impl PtyHandle {
 
     pub fn snapshot_with_history(&self, lines: usize) -> Vec<u8> {
         let parser = lock_unpoisoned(&self.parser);
-        let screen = parser.screen();
+        Self::format_snapshot(parser.screen(), lines)
+    }
+
+    /// Atomically replace a viewer's backlog with emulator state and a new
+    /// output subscription. Nothing is drained after unlocking: subsequent
+    /// chunks are absent from the replay and must reach this receiver.
+    pub fn snapshot_and_subscribe(&self, lines: usize) -> OutputSnapshot {
+        let parser = lock_unpoisoned(&self.parser);
+        let (rows, cols) = parser.screen().size();
+        OutputSnapshot {
+            data: Self::format_snapshot(parser.screen(), lines),
+            cols,
+            rows,
+            output: self.tx.subscribe(),
+        }
+    }
+
+    fn format_snapshot(screen: &vt100::Screen, lines: usize) -> Vec<u8> {
         if lines == 0 {
             let mut out = b"\x1b[2J\x1b[H".to_vec();
             out.extend_from_slice(&screen.state_formatted());
@@ -1138,6 +1167,50 @@ mod tests {
             snap.contains("TSCPT_0040"),
             "latest transcript tail missing"
         );
+    }
+
+    /// Hold publication between the emulator update and broadcast. A snapshot
+    /// must wait for that chunk to be published, then exclude it from its new
+    /// receiver; otherwise clients apply the same output twice.
+    #[test]
+    fn snapshot_subscription_waits_for_output_publication() {
+        let spec = CommandSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            cwd: None,
+            env: vec![],
+        };
+        let handle = Arc::new(PtyHandle::spawn(&spec).unwrap());
+        let ring = lock_unpoisoned(&handle.ring);
+        handle.write(b"SNAPSHOT-BARRIER").unwrap();
+        // The reader takes parser before ring. Blocking ring holds it at the
+        // publication boundary rather than relying on timing a live flood.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if handle.parser.try_lock().is_err() { break; }
+            assert!(Instant::now() < deadline, "reader did not retain emulator lock through publication");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let copy = handle.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let snapshot = std::thread::spawn(move || assert!(tx.send(copy.snapshot_and_subscribe(100)).is_ok()));
+        assert!(rx.recv_timeout(Duration::from_millis(50)).is_err(), "snapshot overtook an unpublished emulator update");
+        drop(ring);
+        let mut replay = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        snapshot.join().unwrap();
+        assert!(String::from_utf8_lossy(&replay.data).contains("SNAPSHOT-BARRIER"));
+        assert!(matches!(replay.output.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+        handle.write(b"-NEXT").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut received = Vec::new();
+        loop {
+            if let Ok(bytes) = replay.output.try_recv() { received.extend_from_slice(&bytes); }
+            if String::from_utf8_lossy(&received).contains("-NEXT") { break; }
+            assert!(Instant::now() < deadline, "post-snapshot output was lost");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!String::from_utf8_lossy(&received).contains("SNAPSHOT-BARRIER"));
+        handle.kill().unwrap();
     }
 
     /// Drive a PTY to completion and return the history-inclusive snapshot

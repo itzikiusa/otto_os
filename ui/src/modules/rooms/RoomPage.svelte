@@ -68,6 +68,8 @@
   function terminalFrame(frame: unknown): unknown | null {
     if (!frame || typeof frame !== 'object' || !('type' in frame)) return null;
     const data = frame as {type: string; data?: string; cols?: number; rows?: number; lines?: number};
+    // Backpressure controls only this viewer's output stream, never PTY authority.
+    if (data.type === 'pause' || data.type === 'resume') return {type: data.type};
     if (data.type === 'scrollback') return {type: 'scrollback', lines: data.lines};
     if (!canType || room?.grant_epoch === undefined) return null;
     if (data.type === 'input') return {type: 'input', data: data.data, grant_epoch: room.grant_epoch};

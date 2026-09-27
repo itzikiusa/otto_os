@@ -36,6 +36,9 @@
     if (ws.currentId) void personalAgents.loadAgents(ws.currentId);
   });
 
+  // Live run events refetch runs/schedules only while this page is mounted.
+  $effect(() => personalAgents.watch());
+
   const agents = $derived(personalAgents.agents);
   const loadError = $derived(loadErrorOf(personalAgents, 'agentsError'));
 

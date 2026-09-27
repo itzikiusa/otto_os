@@ -209,6 +209,32 @@ impl GoalLoopsRepo {
         rows.iter().map(row_to_loop).collect()
     }
 
+    /// The detail with every iteration's heavy text bodies (`plan`,
+    /// `context_in`, `context_out`) blanked EXCEPT the newest iteration's —
+    /// the Loop page polls/refetches this per event, and 200 iterations of
+    /// plans + digests were 2–4 MB per fetch (backlog B6 / SE-08). Older
+    /// bodies are read one at a time via [`Self::get_iteration`].
+    pub async fn get_detail_summary(&self, id: &Id) -> Result<GoalLoopDetail> {
+        let loop_ = self.get(id).await?;
+        let rows = sqlx::query(
+            "SELECT id, loop_id, workspace_id, idx, status, agents_json, evaluation_json, \
+                    tokens_input, tokens_output, cost_usd, started_at, finished_at, \
+                    CASE WHEN idx = m.max_idx THEN plan ELSE '' END AS plan, \
+                    CASE WHEN idx = m.max_idx THEN context_in ELSE '' END AS context_in, \
+                    CASE WHEN idx = m.max_idx THEN context_out ELSE '' END AS context_out \
+             FROM goal_loop_iterations, \
+                  (SELECT MAX(idx) AS max_idx FROM goal_loop_iterations WHERE loop_id = ?) AS m \
+             WHERE loop_id = ? ORDER BY idx",
+        )
+        .bind(id)
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("goal loop iteration summaries"))?;
+        let iterations = rows.iter().map(row_to_iter).collect::<Result<Vec<_>>>()?;
+        Ok(GoalLoopDetail { loop_, iterations })
+    }
+
     async fn iterations_for(&self, loop_id: &Id) -> Result<Vec<GoalLoopIteration>> {
         let rows = sqlx::query("SELECT * FROM goal_loop_iterations WHERE loop_id = ? ORDER BY idx")
             .bind(loop_id)
@@ -748,6 +774,54 @@ mod tests {
             config: GoalLoopConfig::default(),
             created_by: "u1".into(),
         }
+    }
+
+    /// B6: the summary detail blanks older iterations' bodies (the newest
+    /// keeps them), and one iteration reads back in full.
+    #[tokio::test]
+    async fn summary_detail_keeps_only_the_newest_bodies() {
+        let repo = GoalLoopsRepo::new(mem_pool().await);
+        let l = repo.create(new_loop()).await.unwrap();
+        let execs = l.config.executors.clone();
+        for idx in 1..=3u32 {
+            let it = repo
+                .add_iteration(&l.id, &l.workspace_id, idx, &format!("in{idx}"), &execs)
+                .await
+                .unwrap();
+            repo.set_iter_plan(&it.id, &format!("plan{idx}"))
+                .await
+                .unwrap();
+            repo.set_iter_context_out(&it.id, &format!("out{idx}"))
+                .await
+                .unwrap();
+        }
+        let sum = repo.get_detail_summary(&l.id).await.unwrap();
+        assert_eq!(
+            sum.iterations.iter().map(|i| i.idx).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        for it in &sum.iterations[..2] {
+            assert!(it.plan.is_empty() && it.context_in.is_empty() && it.context_out.is_empty());
+            assert_eq!(it.agents.len(), execs.len(), "summaries keep agents");
+        }
+        let newest = &sum.iterations[2];
+        assert_eq!(
+            (newest.plan.as_str(), newest.context_out.as_str()),
+            ("plan3", "out3")
+        );
+        let one = repo.get_iteration(&l.id, 1).await.unwrap();
+        assert_eq!(
+            (one.plan.as_str(), one.context_in.as_str()),
+            ("plan1", "in1")
+        );
+        // An empty loop summarises to no iterations.
+        let empty = repo.create(new_loop()).await.unwrap();
+        assert!(repo
+            .get_detail_summary(&empty.id)
+            .await
+            .unwrap()
+            .iterations
+            .is_empty());
     }
 
     #[tokio::test]

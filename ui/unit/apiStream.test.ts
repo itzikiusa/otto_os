@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 import ts from 'typescript';
-function setup() {
+function setup(extra:Record<string,unknown>={}) {
   const sockets: any[]=[];
   class Socket {onopen:any;onmessage:any;onclose:any;onerror:any;sent:string[]=[];url:string;constructor(url:string){this.url=url;sockets.push(this);}send(s:string){this.sent.push(s);}close(){}}
-  const context={exports:{} as any,$state:(v:any)=>v,URL,WebSocket:Socket,require:()=>({baseUrl:()=> 'http://localhost:7700',getToken:()=> 'token'})};
+  const context:any={exports:{} as any,$state:Object.assign((v:any)=>v,{raw:(v:any)=>v}),URL,WebSocket:Socket,require:()=>({baseUrl:()=> 'http://localhost:7700',getToken:()=> 'token'}),...extra};
   runInNewContext(ts.transpileModule(readFileSync(new URL('../src/lib/stores/apiStream.svelte.ts',import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,context);
   return {v:context.exports.apiStream,sockets};
 }
@@ -22,4 +22,15 @@ test('stream console retains a bounded tail and counts discarded messages',()=>{
  const {v,sockets}=setup();v.connect('A','sse',{url:'https://example.test',method:'GET',headers:[]});
  for(let n=0;n<2100;n++) sockets[0].onmessage({data:JSON.stringify({type:'event',data:String(n)})});
  assert.equal(v.items.length,1000);assert.equal(v.dropped,1100);assert.equal(v.items.at(-1).data,'2099');
+});
+test('a message burst updates the console once per animation frame',()=>{
+ const frames:(()=>void)[]=[];
+ const {v,sockets}=setup({requestAnimationFrame:(cb:()=>void)=>{frames.push(cb);return frames.length;}});
+ v.connect('A','sse',{url:'https://example.test',method:'GET',headers:[]});
+ const before=v.items;
+ for(let n=0;n<1500;n++) sockets[0].onmessage({data:JSON.stringify({type:'event',data:String(n)})});
+ assert.equal(v.items,before);assert.equal(frames.length,1);
+ frames.shift()!();
+ assert.equal(v.items.length,1000);assert.equal(v.dropped,500);assert.equal(v.items[0].data,'500');assert.equal(v.items.at(-1).data,'1499');
+ v.clear();assert.equal(v.items.length,0);assert.equal(v.dropped,0);
 });

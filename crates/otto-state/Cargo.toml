@@ -8,7 +8,8 @@ license.workspace = true
 otto-core.workspace = true
 sqlx.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# raw_value: node detail finds its node without building every node's Value.
+serde_json = { workspace = true, features = ["raw_value"] }
 chrono.workspace = true
 sha2.workspace = true
 hex.workspace = true

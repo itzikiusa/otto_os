@@ -24,6 +24,7 @@
   import { popoutItems } from '../../lib/popoutMenu';
   import { now } from '../../lib/stores/now.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { startMouseDrag } from '../../lib/dragCursor';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { router } from '../../lib/router.svelte';
   import { untrack } from 'svelte';
@@ -59,8 +60,12 @@
     dragKey?: string;
     /** Drag lifecycle, so the host can arm its drop targets while one is in flight. */
     ondragpane?: (phase: 'start' | 'end') => void;
+    /** Local terminal scrollback depth; unset = the Terminal default (10k).
+     *  The tiled grid passes a smaller depth — 15 live tiles × 10k lines was
+     *  150–360 MB of xterm buffers (SA-05). */
+    scrollback?: number;
   }
-  let { sessionId, focused, showClose, onfocus, onclosepane, showZoom = false, showGrip = false, dragKey, ondragpane, closeTitle = 'Close pane (keeps running)' }: Props = $props();
+  let { sessionId, focused, showClose, onfocus, onclosepane, showZoom = false, showGrip = false, dragKey, ondragpane, closeTitle = 'Close pane (keeps running)', scrollback }: Props = $props();
 
   const maximized = $derived(ws.maximizedId === sessionId);
 
@@ -411,22 +416,17 @@
     splitResizing = true;
     const rect = el.getBoundingClientRect();
     const rtl = getComputedStyle(el).direction === 'rtl';
-    const onMove = (ev: MouseEvent) => {
-      const x = rtl ? rect.right - ev.clientX : ev.clientX - rect.left;
-      chatFrac = Math.min(0.8, Math.max(0.3, x / rect.width));
-    };
-    const onUp = () => {
-      splitResizing = false;
-      transcript.setSplitFrac(sessionId, chatFrac);
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
+    // Overlay cursor + one write per frame (lib/dragCursor.ts).
+    startMouseDrag(e, {
+      onMove: (ev) => {
+        const x = rtl ? rect.right - ev.clientX : ev.clientX - rect.left;
+        chatFrac = Math.min(0.8, Math.max(0.3, x / rect.width));
+      },
+      onEnd: () => {
+        splitResizing = false;
+        transcript.setSplitFrac(sessionId, chatFrac);
+      },
+    });
   }
   let dirsOpen = $state(false);
   let dirsBusy = $state(false);
@@ -985,7 +985,7 @@
     {/if}
     {#if effView !== 'chat'}
       <div class="pane-term">
-        <Terminal bind:this={termRef} {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} restartNonce={ws.restartNonces[sessionId] ?? 0} onstatus={onTermStatus} onfontfit={(px) => (drawnFont = px)} showToolbar={false} autoFocus={kbFocused} preferDom={isAgent} claimOnAttach={!readOnly} />
+        <Terminal bind:this={termRef} {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} restartNonce={ws.restartNonces[sessionId] ?? 0} onstatus={onTermStatus} onfontfit={(px) => (drawnFont = px)} showToolbar={false} autoFocus={kbFocused} preferDom={isAgent} claimOnAttach={!readOnly} {scrollback} />
       </div>
     {/if}
   </div>

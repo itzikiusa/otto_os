@@ -568,9 +568,10 @@ class UiStore {
     lsSet(LS.rightTab, tab);
   }
 
-  setRightWidth(px: number): void {
+  /** `persist=false` while a drag is live — localStorage is written once, on release. */
+  setRightWidth(px: number, persist = true): void {
     this.rightWidth = clampRight(px);
-    lsSet(LS.rightWidth, String(this.rightWidth));
+    if (persist) lsSet(LS.rightWidth, String(this.rightWidth));
   }
 
   /** Width to restore to when un-expanding the right panel. */
@@ -626,9 +627,10 @@ class UiStore {
   }
 
 
-  setRailWidth(px: number): void {
+  /** `persist=false` while a drag is live — localStorage is written once, on release. */
+  setRailWidth(px: number, persist = true): void {
     this.railWidth = clampRail(px);
-    lsSet(LS.railWidth, String(this.railWidth));
+    if (persist) lsSet(LS.railWidth, String(this.railWidth));
   }
 
   setGitSideWidth(px: number): void {

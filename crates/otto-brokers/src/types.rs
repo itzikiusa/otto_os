@@ -424,6 +424,38 @@ fn default_limit() -> usize {
     50
 }
 
+/// One partition's explicit start offset for a multi-partition peek.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct PartitionStart {
+    pub partition: i32,
+    pub offset: i64,
+}
+
+/// Viewer-only consume options that ride the HTTP body next to [`ConsumeReq`]
+/// (kept out of `ConsumeReq` so in-process callers — replay, workflows, MCP —
+/// are unchanged).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ConsumeOpts {
+    /// List mode: cap each value's text at 2 KiB and drop `raw_base64` for
+    /// payloads bigger than that (`DecodedPayload::truncated`). Default false.
+    #[serde(default)]
+    pub preview: bool,
+    /// Live tail: consume ONLY these partitions, each from its own offset, in
+    /// one request (replaces one request per partition). Overrides `start` /
+    /// `partition`.
+    #[serde(default)]
+    pub start_offsets: Option<Vec<PartitionStart>>,
+}
+
+/// The `/consume` request body: a [`ConsumeReq`] plus [`ConsumeOpts`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConsumeHttpReq {
+    #[serde(flatten)]
+    pub req: ConsumeReq,
+    #[serde(flatten)]
+    pub opts: ConsumeOpts,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ConsumeResp {
     pub messages: Vec<KafkaMessage>,
@@ -465,6 +497,11 @@ pub struct DecodedPayload {
     pub schema_id: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_base64: Option<String>,
+    /// Set on a list-mode preview (`preview: true` peek) whose text was cut to
+    /// 2 KiB (and `raw_base64` dropped); the UI fetches the full message when
+    /// it's opened.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

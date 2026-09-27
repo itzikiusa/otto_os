@@ -66,6 +66,37 @@ export function fetchTranscript(
 export const PAGE_TURNS = 60;
 /** A WS delta above this is not trusted to be complete — re-fetch the tail. */
 const DELTA_CAP_BYTES = 64 * 1024;
+/** A chat left open on a working agent keeps appending turns. Past TURN_CAP
+ *  the oldest are dropped down to TURN_KEEP ("Load earlier" pages them back),
+ *  so memory and per-delta work stay bounded however long the session runs. */
+export const TURN_CAP = 600;
+export const TURN_KEEP = 500;
+
+/**
+ * Drop the head of a live turn list that outgrew `cap`. The server pages by
+ * RECORD index (`before` = exclusive first-record index), which turns don't
+ * carry, so the list may only be cut in front of a turn with a known `before`
+ * bound (`bounds`: turn id → a cursor B such that every turn ahead of it
+ * started before B). Over-estimated bounds are safe — "Load earlier" dedupes
+ * by id. Returns null when nothing can be dropped; otherwise the kept turns
+ * and the cursor to page earlier from. `bounds` loses the dropped ids.
+ */
+export function trimTurnHead(
+  turns: Turn[],
+  bounds: Map<string, string>,
+  cap = TURN_CAP,
+  keep = TURN_KEEP,
+): { turns: Turn[]; cursor: string; dropped: number } | null {
+  if (turns.length <= cap) return null;
+  // Cut as close to `keep` as a known bound allows, but never below half of it.
+  for (let j = turns.length - keep; j <= turns.length - Math.ceil(keep / 2); j++) {
+    const cursor = bounds.get(turns[j].id);
+    if (cursor === undefined) continue;
+    for (let i = 0; i < j; i++) bounds.delete(turns[i].id);
+    return { turns: turns.slice(j), cursor, dropped: j };
+  }
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // Per-source conversation
@@ -74,7 +105,12 @@ const DELTA_CAP_BYTES = 64 * 1024;
 export class Conversation {
   readonly src: TranscriptSource;
   transcript: Transcript | null = $state(null);
-  turns: Turn[] = $state([]);
+  /** Raw: turns are replaced (never mutated), and identity is what lets the
+   *  view reuse render items and the search cache for unchanged turns. */
+  turns: Turn[] = $state.raw([]);
+  /** Turns dropped off the head by the TURN_CAP trim so far (the view shifts
+   *  a pinned window by the difference). */
+  headDropped = $state(0);
   loading = $state(false);
   loadingEarlier = $state(false);
   error: string | null = $state(null);
@@ -100,6 +136,11 @@ export class Conversation {
   private inflight: AbortController | null = null;
   /** Index of the last record the client has folded (from the WS delta). */
   private tailCursor: string | null = null;
+  /** Turn id → a `before` cursor that pages everything ahead of it (see
+   *  `trimTurnHead`). Only ids still in `turns` are kept. */
+  private headBounds = new Map<string, string>();
+  /** The reader paged history in on purpose — don't trim it back out. */
+  private holdCap = false;
 
   retainedBytes = 4096;
   private retain(value: unknown): void {
@@ -157,11 +198,15 @@ export class Conversation {
       if (replace || this.transcript == null || this.transcript.unavailable_reason) {
         this.turns = t.turns;
         this.transcript = t;
+        this.headBounds.clear();
+        this.holdCap = false;
       } else {
         const ids = new Set(t.turns.map(turn => turn.id));
         this.turns = [...this.turns.filter(turn => !ids.has(turn.id)), ...t.turns];
         this.transcript = {...t, cursor: this.transcript.cursor, has_earlier: this.transcript.has_earlier};
       }
+      // A page's cursor is the exact first record of its oldest turn.
+      if (t.turns.length) this.headBounds.set(t.turns[0].id, t.cursor);
       this.tailCursor = null;
       this.tailTick++;
       return true;
@@ -188,6 +233,8 @@ export class Conversation {
       const known = new Set(this.turns.map((x) => x.id));
       this.turns = [...page.turns.filter((x) => !known.has(x.id)), ...this.turns];
       this.transcript = { ...t, cursor: page.cursor, has_earlier: page.has_earlier };
+      if (page.turns.length) this.headBounds.set(page.turns[0].id, page.cursor);
+      this.holdCap = true;
     } catch (e) {
       if (epoch === this.readEpoch && this.isActive()) this.error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -212,24 +259,38 @@ export class Conversation {
       return;
     }
     if (!moved && turns.length === 0) return;
+    const prevCursor = this.tailCursor;
     this.tailCursor = cursor;
-    const next = [...this.turns];
+    let next = [...this.turns];
+    let firstNew = true;
     for (const t of turns) {
       const i = next.findIndex((x) => x.id === t.id);
       if (i >= 0) next[i] = t;
-      else next.push(t);
+      else {
+        // Every turn already held started at or before the previous delta's
+        // last record, so `prev + 1` pages exactly the turns ahead of the
+        // first NEW turn of this delta.
+        if (firstNew && prevCursor != null) this.headBounds.set(t.id, String(Number(prevCursor) + 1));
+        firstNew = false;
+        next.push(t);
+      }
     }
     // `stats.turns` stays the SERVER total (the loaded page is a window of it);
     // bump it only by the genuinely new turns.
     const added = next.length - this.turns.length;
     this.retain(turns);
+    let transcript = this.transcript;
+    const trimmed = this.holdCap ? null : trimTurnHead(next, this.headBounds);
+    if (trimmed) {
+      next = trimmed.turns;
+      transcript = { ...transcript, cursor: trimmed.cursor, has_earlier: true };
+      this.headDropped += trimmed.dropped;
+    }
     this.turns = next;
     if (added > 0) {
-      this.transcript = {
-        ...this.transcript,
-        stats: { ...this.transcript.stats, turns: this.transcript.stats.turns + added },
-      };
+      transcript = { ...transcript, stats: { ...transcript.stats, turns: transcript.stats.turns + added } };
     }
+    if (transcript !== this.transcript) this.transcript = transcript;
     this.tailTick += 1;
     this.lastAppendAt = Date.now();
   }

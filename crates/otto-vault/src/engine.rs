@@ -23,12 +23,16 @@ use crate::types::*;
 
 /// Reads served without a rescan for this long after the last one (freshness
 /// window — external edits surface within it; API/MCP writes rescan eagerly).
-const STALE_AFTER_SECS: i64 = 5;
+/// The Vault page polls status every 5 s: at 5 s here every poll walked the
+/// whole tree (10k files ≈ 27 ms of stat calls) and wrote `scan_state` twice.
+const STALE_AFTER_SECS: i64 = 30;
 /// `mode=full` graph default edge budget (override via `edge_budget`).
 const DEFAULT_EDGE_BUDGET: usize = 2_000_000;
 
 type VaultWriteKey = (i64, String);
 type VaultWriteLock = Arc<tokio::sync::Mutex<()>>;
+/// (vault, source, target) → (source content hash, context line).
+type BacklinkCtxCache = HashMap<(i64, String, String), (String, String)>;
 
 /// Created only while publication is held, and dropped before that lock. Errors
 /// or cancellation after a durable write invalidate derived caches, never source.
@@ -68,6 +72,13 @@ pub struct VaultEngine {
     pending_scans: Mutex<HashSet<i64>>,
     /// Unix seconds of the last completed scan per vault (staleness probe).
     last_scan: Mutex<HashMap<i64, Arc<AtomicI64>>>,
+    /// Vaults whose row already reads `idle` from a scan this process ran: a
+    /// background rescan that changes nothing then writes no `scan_state`.
+    quiet_scans: Mutex<HashSet<i64>>,
+    /// Backlink context lines keyed (vault, source, target) → (source content
+    /// hash, line): a backlinks call re-reads only sources whose indexed hash
+    /// moved, not every linking file in full.
+    backlink_ctx: Mutex<BacklinkCtxCache>,
     generations: Mutex<HashMap<i64, Arc<AtomicI64>>>,
     /// Serialize vault mutations, including folder moves and link rewrites.
     /// Scans have their own lock; mutation holders may await a scan.
@@ -90,6 +101,8 @@ impl VaultEngine {
             scans: Mutex::new(HashMap::new()),
             pending_scans: Mutex::new(HashSet::new()),
             last_scan: Mutex::new(HashMap::new()),
+            quiet_scans: Mutex::new(HashSet::new()),
+            backlink_ctx: Mutex::new(HashMap::new()),
             generations: Mutex::new(HashMap::new()),
             writes: Mutex::new(HashMap::new()),
             fts_ok: std::sync::atomic::AtomicU8::new(0),
@@ -384,6 +397,7 @@ impl VaultEngine {
         let v = self.store.get_vault(id).await?;
         let root = PathBuf::from(&v.root_path);
         if !root.is_dir() {
+            self.quiet_scans.lock().unwrap().remove(&id);
             self.store
                 .set_scan_state(
                     id,
@@ -396,15 +410,27 @@ impl VaultEngine {
                 v.root_path
             )));
         }
-        self.store.set_scan_state(id, "scanning", false).await?;
+        // A quiet vault (row already `idle`) skips the `scanning` write, and
+        // its `idle` + `last_scan_at` write too unless the scan changed the
+        // index — freshness rescans are mostly no-ops.
+        let quiet = self.quiet_scans.lock().unwrap().contains(&id);
+        if !quiet {
+            self.store.set_scan_state(id, "scanning", false).await?;
+        }
+        let gen_before = self.generation(id).load(Ordering::Relaxed);
         let res = self.scan_inner(id, &root).await;
         match &res {
             Ok(()) => {
-                self.store.set_scan_state(id, "idle", true).await?;
+                let changed = self.generation(id).load(Ordering::Relaxed) != gen_before;
+                if !quiet || changed {
+                    self.store.set_scan_state(id, "idle", true).await?;
+                }
+                self.quiet_scans.lock().unwrap().insert(id);
                 self.last_scan_cell(id)
                     .store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
             }
             Err(e) => {
+                self.quiet_scans.lock().unwrap().remove(&id);
                 let _ = self
                     .store
                     .set_scan_state(id, &format!("error: {e}"), false)
@@ -1462,33 +1488,40 @@ impl VaultEngine {
         let v = self.get_scoped(ws, id).await?;
         self.ensure_fresh(id);
         let rel = Self::check_rel(path)?;
+        let stem = rel.rsplit('/').next().unwrap_or(&rel);
+        let stem_noext = stem.strip_suffix(".md").unwrap_or(stem).to_lowercase();
+        let rel_lower = rel.to_lowercase();
         let mut out = Vec::new();
-        for (src, title, kind) in self.store.backlinks(id, &rel).await? {
-            // Context: first line mentioning the target (wikilink or md link).
-            // A source that resolves outside the vault contributes no context.
-            let abs = Self::abs_confined(&v.root_path, &src).ok();
-            let context = match abs {
-                Some(abs) => tokio::fs::read_to_string(&abs).await.ok(),
-                None => None,
-            }
-            .and_then(|c| {
-                let stem = rel.rsplit('/').next().unwrap_or(&rel);
-                let stem_noext = stem.strip_suffix(".md").unwrap_or(stem).to_lowercase();
-                c.lines()
-                    .find(|l| {
-                        let ll = l.to_lowercase();
-                        ll.contains(&stem_noext) || ll.contains(&rel.to_lowercase())
-                    })
-                    .map(|l| {
-                        let t = l.trim();
-                        if t.chars().count() > 240 {
-                            t.chars().take(240).collect::<String>()
-                        } else {
-                            t.to_string()
-                        }
-                    })
-            })
-            .unwrap_or_default();
+        for (src, title, kind, hash) in self.store.backlinks_hashed(id, &rel).await? {
+            let key = (id, src.clone(), rel.clone());
+            let cached = self
+                .backlink_ctx
+                .lock()
+                .unwrap()
+                .get(&key)
+                .filter(|(h, _)| !hash.is_empty() && *h == hash)
+                .map(|(_, c)| c.clone());
+            let context = match cached {
+                Some(c) => c,
+                None => {
+                    // Context: first line mentioning the target (wikilink or
+                    // md link). A source that resolves outside the vault
+                    // contributes no context.
+                    let abs = Self::abs_confined(&v.root_path, &src).ok();
+                    let c = match abs {
+                        Some(abs) => tokio::fs::read_to_string(&abs).await.ok(),
+                        None => None,
+                    }
+                    .and_then(|c| backlink_context(&c, &stem_noext, &rel_lower))
+                    .unwrap_or_default();
+                    let mut cache = self.backlink_ctx.lock().unwrap();
+                    if cache.len() >= 20_000 {
+                        cache.clear();
+                    }
+                    cache.insert(key, (hash, c.clone()));
+                    c
+                }
+            };
             out.push(Backlink {
                 path: src,
                 title,
@@ -1987,3 +2020,22 @@ fn shellexpand_home(p: &str) -> String {
 #[cfg(test)]
 #[path = "performance_tests.rs"]
 mod performance_tests;
+
+/// The first line of `content` mentioning the backlink target (its lowercased
+/// stem or path), trimmed and capped at 240 chars.
+fn backlink_context(content: &str, stem_noext: &str, rel_lower: &str) -> Option<String> {
+    content
+        .lines()
+        .find(|l| {
+            let ll = l.to_lowercase();
+            ll.contains(stem_noext) || ll.contains(rel_lower)
+        })
+        .map(|l| {
+            let t = l.trim();
+            if t.chars().count() > 240 {
+                t.chars().take(240).collect::<String>()
+            } else {
+                t.to_string()
+            }
+        })
+}

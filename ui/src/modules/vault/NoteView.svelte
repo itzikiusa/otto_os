@@ -1,3 +1,36 @@
+<script module lang="ts">
+  import { authedBlobUrl as fetchBlobUrl } from '../../lib/api/client';
+  import { assetPath as vaultAssetPath } from '../../lib/api/vault';
+
+  /** Rendered reading-view HTML per (vault, path, hash, resolved links). */
+  const renderCache = new Map<string, string>();
+  const RENDER_CACHE_MAX = 8;
+
+  /** Attachment blob URLs, shared across note switches (LRU; the evicted URL
+   *  is revoked — an <img> that already decoded it keeps showing). */
+  const assetUrls = new Map<string, Promise<string>>();
+  const ASSET_CACHE_MAX = 200;
+
+  function assetBlobUrl(wsId: string, vaultId: number, path: string): Promise<string> {
+    const key = `${wsId}:${vaultId}:${path}`;
+    const hit = assetUrls.get(key);
+    if (hit) {
+      assetUrls.delete(key);
+      assetUrls.set(key, hit);
+      return hit;
+    }
+    const p = fetchBlobUrl(vaultAssetPath(wsId, vaultId, path));
+    p.catch(() => assetUrls.delete(key)); // a failed load retries next render
+    assetUrls.set(key, p);
+    while (assetUrls.size > ASSET_CACHE_MAX) {
+      const [k, old] = assetUrls.entries().next().value!;
+      assetUrls.delete(k);
+      void old.then((u) => URL.revokeObjectURL(u), () => {});
+    }
+    return p;
+  }
+</script>
+
 <script lang="ts">
   // The note pane: breadcrumb + edit⇄read toggle, CodeMirror markdown editor
   // (autosave + wikilink completion) or the sanitized reading view (wikilink
@@ -6,8 +39,7 @@
   import type { Completion, CompletionContext, CompletionResult } from '@codemirror/autocomplete';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import { authedBlobUrl } from '../../lib/api/client';
-  import { assetPath, vaultNote } from '../../lib/api/vault';
+  import { vaultNote } from '../../lib/api/vault';
   import { ui } from '../../lib/stores/ui.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { renderMermaid } from '../canvas/mermaid';
@@ -37,32 +69,54 @@
     }
   });
 
-  // -- attachments: authed blob URLs, cached per path -------------------------
-  let assetUrls = $state<Record<string, string>>({});
-  const pendingAssets = new Set<string>();
+  // -- attachments: authed blob URLs, patched into the live <img> -------------
+  // The renderer emits `<img data-asset="path">` with no src (lazyAssets); an
+  // effect fills `src` in place once the blob lands. Images used to be a
+  // dependency of the whole render: N images = N+1 full re-renders, embed
+  // re-fetches and diagram re-renders (and blob: srcs never passed the
+  // sanitizer anyway).
+  const noAssetUrl = (): null => null;
 
-  function assetUrl(path: string): string | null {
-    const hit = assetUrls[path];
-    if (hit) return hit;
-    if (!pendingAssets.has(path) && vault.current) {
-      pendingAssets.add(path);
-      void authedBlobUrl(assetPath(vault.wsId, vault.current.id, path))
-        .then((u) => (assetUrls = { ...assetUrls, [path]: u }))
-        .catch(() => pendingAssets.delete(path));
+  function hydrateImages(root: ParentNode): void {
+    const v = vault.current;
+    if (!v) return;
+    const wsId = vault.wsId, vaultId = v.id;
+    for (const el of Array.from(root.querySelectorAll<HTMLImageElement>('img[data-asset]:not([src])'))) {
+      const path = el.getAttribute('data-asset')!;
+      void assetBlobUrl(wsId, vaultId, path).then(
+        (u) => { el.src = u; },
+        () => el.classList.add('asset-error'),
+      );
     }
-    return null;
   }
 
   // -- reading view ------------------------------------------------------------
+  /** Parse + highlight + sanitize once per note content: toggling Edit⇄Read or
+   *  an equal poll refresh reuses the HTML instead of re-rendering 300 KB. */
   const rendered = $derived.by(() => {
     const n = vault.note;
     if (!n || vault.editing) return '';
-    // assetUrls is a dependency: images re-render once their blob URL lands.
-    void assetUrls;
-    return renderNote(stripFrontmatter(vault.editing ? vault.draft : n.raw), {
+    const key = `${vault.current?.id}:${n.meta.path}:${n.meta.hash}:${n.outgoing.map((o) => o.dst_path ?? '').join('|')}`;
+    const hit = renderCache.get(key);
+    if (hit !== undefined) {
+      renderCache.delete(key);
+      renderCache.set(key, hit); // LRU touch
+      return hit;
+    }
+    const html = renderNote(stripFrontmatter(n.raw), {
       resolve: resolverFrom(n.outgoing),
-      assetUrl,
+      assetUrl: noAssetUrl,
+      lazyAssets: true,
     });
+    renderCache.set(key, html);
+    while (renderCache.size > RENDER_CACHE_MAX) renderCache.delete(renderCache.keys().next().value!);
+    return html;
+  });
+
+  $effect(() => {
+    void rendered;
+    const host = readEl;
+    if (host) untrack(() => hydrateImages(host));
   });
 
   let readEl = $state<HTMLElement | undefined>();
@@ -145,7 +199,8 @@
           const html = renderNote(stripFrontmatter(n.raw), {
             // Embedded content resolves its own links but never re-embeds.
             resolve: resolverFrom(n.outgoing),
-            assetUrl,
+            assetUrl: noAssetUrl,
+            lazyAssets: true,
           });
           const body = document.createElement('div');
           body.className = 'embed-body md-body';
@@ -153,6 +208,7 @@
           // Strip nested embeds inside the embed (depth guard).
           body.querySelectorAll('div.note-embed').forEach((x) => x.removeAttribute('data-embed-path'));
           el.appendChild(body);
+          hydrateImages(body);
         } catch {
           el.classList.add('embed-error');
         }
@@ -306,6 +362,7 @@
           language="markdown"
           readOnly={false}
           minimal
+          wrap
           completionSource={vaultCompletions}
           onchange={(c: string) => vault.onDraftChange(c)}
         />

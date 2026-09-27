@@ -3,6 +3,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { pollWhileVisible } from '../../lib/poll';
   import type { ClusterMetrics, ClusterOverview, Id } from '../../lib/api/types';
 
   interface Props {
@@ -57,15 +58,18 @@
         if (alive) loading = false;
       });
 
-    const poll = () =>
-      api
-        .get<ClusterMetrics>(`/brokers/clusters/${id}/metrics`)
-        .then((m) => {
-          if (alive) metrics = m;
-        })
-        .catch(() => {});
-    void poll();
-    const timer = setInterval(() => void poll(), 4000);
+    // Chained (never overlapping), paused while hidden, aborted on leave: the
+    // metrics sweep is a cluster-wide ListOffsets pass that can outlast a 4 s
+    // interval over a tunnel — an interval stacked sweeps and pinned sockets.
+    const poller = pollWhileVisible(
+      (signal) =>
+        api
+          .get<ClusterMetrics>(`/brokers/clusters/${id}/metrics`, signal)
+          .then((m) => {
+            if (alive) metrics = m;
+          }),
+      { ms: 4000 },
+    );
     // An unreachable broker can hang the first metadata call for a long time;
     // say so instead of an open-ended "Connecting…".
     slow = false;
@@ -73,7 +77,7 @@
 
     return () => {
       alive = false;
-      clearInterval(timer);
+      poller.stop();
       clearTimeout(slowTimer);
     };
   });

@@ -1,9 +1,9 @@
 <script lang="ts">
   // CodeMirror 6 editor with LSP hover/diagnostics/completion/definitions.
   // readOnly=true by default (Files viewer is read-only; LSP still works).
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { EditorView, lineNumbers, keymap, drawSelection, placeholder as cmPlaceholder } from '@codemirror/view';
-  import { EditorState, Compartment, Prec } from '@codemirror/state';
+  import { EditorState, Compartment, Prec, type StateEffect } from '@codemirror/state';
   import { defaultKeymap, history, historyKeymap, selectAll } from '@codemirror/commands';
   import { search, searchKeymap, openSearchPanel } from '@codemirror/search';
   import {
@@ -37,6 +37,7 @@
   import { markdown } from '@codemirror/lang-markdown';
   import { java } from '@codemirror/lang-java';
   import { sql } from '@codemirror/lang-sql';
+  import { sqlDialect as dialectFor, type SqlDialectName } from '../sql-dialects';
   import { redisLang } from './redis-lang';
 
   // LSP — use the all-in-one factory that manages the WS transport internally
@@ -121,6 +122,38 @@
     /** Hint shown while the document is EMPTY (e.g. "Write a query — ⌘↵ to
      *  run"). Reapplied live; '' / omitted shows nothing. */
     placeholder?: string;
+    /**
+     * Soft-wrap long lines (`EditorView.lineWrapping`). Reapplied live (no
+     * remount). Off by default; the DB query editor turns it on — unwrapped
+     * long, highlighted lines (a pasted INSERT dump) make every keystroke
+     * re-lay out every rendered line (20–41 ms/key in WebKit at 150 KB vs ~3 ms
+     * wrapped), because the edited line changes the content's intrinsic width.
+     */
+    wrap?: boolean;
+    /**
+     * Keep each `path`'s EditorState when `path` changes and restore it when
+     * that path comes back, instead of rebuilding the view: switching between
+     * documents (DB query tabs) then re-parses nothing and keeps each doc's
+     * undo history, selection and scroll. Bounded (LRU); opt-in.
+     */
+    keepStates?: boolean;
+    /**
+     * Attach a language server for this doc (default true — the Files viewer).
+     * Pass `false` for scratch / virtual-path editors (API request body,
+     * scripts, docs, response viewer): the daemon spawns one server PROCESS per
+     * editor socket with `cwd` = `root`, so a fake `pre.js` would start a
+     * tsserver indexing the whole workspace for a 3-line script, and every
+     * remount (tab switch, new response) would spawn/kill another.
+     */
+    lsp?: boolean;
+    /**
+     * SQL dialect for `.sql` docs (default `standard`). Drives tokenizing, so it
+     * decides what a string or comment IS: StandardSQL has no `\'` escapes and
+     * no `#` comments, so MySQL data like `'O\'Brien'` flips every later
+     * string/code boundary. Reapplied live (a connection switch) without a
+     * remount. The DB query editor passes the connection's engine.
+     */
+    sqlDialect?: SqlDialectName;
   }
 
   let {
@@ -138,6 +171,10 @@
     gotoCol = null,
     findOwner = false,
     placeholder = '',
+    wrap = false,
+    keepStates = false,
+    lsp = true,
+    sqlDialect = 'standard',
   }: Props = $props();
 
   // ── Container ─────────────────────────────────────────────────────────────
@@ -151,6 +188,12 @@
   let placeholderCompartment = new Compartment();
   /** The hint the live view currently carries (plain field — not reactive). */
   let appliedPlaceholder = '';
+  let wrapCompartment = new Compartment();
+  /** Whether the live view currently soft-wraps (plain field — not reactive). */
+  let appliedWrap = false;
+  function wrapExt(on: boolean): Extension {
+    return on ? EditorView.lineWrapping : [];
+  }
   // Placeholder text uses the app's dim token in BOTH schemes (oneDark ships none).
   const placeholderTheme = EditorView.theme({
     '.cm-placeholder': { color: 'var(--text-dim)', fontStyle: 'normal' },
@@ -162,6 +205,11 @@
   // ── Language extension map ─────────────────────────────────────────────────
 
   type AnyLangExtension = ReturnType<typeof javascript>;
+
+  /** The dialect the live view's language was built with (plain field). */
+  let appliedDialect: SqlDialectName = 'standard';
+  /** Holds the language extension so a dialect change reaches a live view. */
+  let langCompartment = new Compartment();
 
   const EXT_TO_CM_LANG: Record<string, () => AnyLangExtension> = {
     js:   () => javascript(),
@@ -184,7 +232,7 @@
     md:   () => markdown(),
     mdx:  () => markdown(),
     java: () => java(),
-    sql:  () => sql(),
+    sql:  () => sql({ dialect: dialectFor(appliedDialect) }),
     redis: () => redisLang() as AnyLangExtension,
   };
 
@@ -217,29 +265,45 @@
 
   // ── Selection state ───────────────────────────────────────────────────────
 
+  // Offsets only: the selected TEXT is sliced lazily (Send to agent / the
+  // caller's `onselect.text`), never on every selection change — a ⌘A over a
+  // 150 KB buffer used to copy the whole doc twice per selection update.
   interface Sel {
-    text: string;
+    from: number;
+    to: number;
     startLine: number;
     endLine: number;
   }
 
   let sel: Sel | null = $state(null);
 
-  /** CodeMirror update listener that tracks the current text selection. */
-  const selectionListener = EditorView.updateListener.of((update) => {
-    if (!update.selectionSet && !update.docChanged) return;
-    const { from, to, head } = update.state.selection.main;
+  /** Mirror `state`'s main selection into `sel` and the caller's `onselect`. */
+  function emitSelection(state: EditorState): void {
+    const { from, to, head } = state.selection.main;
     if (from === to) {
       sel = null;
     } else {
-      const text = update.state.sliceDoc(from, to);
-      const startLine = update.state.doc.lineAt(from).number;
-      const endLine = update.state.doc.lineAt(to).number;
-      sel = { text, startLine, endLine };
+      const startLine = state.doc.lineAt(from).number;
+      const endLine = state.doc.lineAt(to).number;
+      sel = { from, to, startLine, endLine };
     }
+    if (!onselect) return;
     // Surface selection + cursor so callers can run only the selected/current
-    // statement (text is '' when there's no selection).
-    onselect?.({ text: from === to ? '' : update.state.sliceDoc(from, to), cursor: head });
+    // statement (text is '' when there's no selection). `text` is a getter over
+    // this immutable state, sliced once on first read.
+    let text: string | undefined = from === to ? '' : undefined;
+    onselect({
+      get text() {
+        return (text ??= state.sliceDoc(from, to));
+      },
+      cursor: head,
+    });
+  }
+
+  /** CodeMirror update listener that tracks the current text selection. */
+  const selectionListener = EditorView.updateListener.of((update) => {
+    if (!update.selectionSet && !update.docChanged) return;
+    emitSelection(update.state);
   });
 
   // Last value we emitted via onchange — lets the rebuild effect ignore the
@@ -258,7 +322,8 @@
   // ── Send-to-agent handler ─────────────────────────────────────────────────
 
   async function sendToAgent(): Promise<void> {
-    if (!sel) return;
+    if (!sel || !view) return;
+    const text = view.state.sliceDoc(sel.from, sel.to);
 
     const sessionId = ws.activeSessionId;
     if (!sessionId || ws.activeSession?.kind !== 'agent') {
@@ -268,7 +333,7 @@
 
     const ext = extOf(path);
     const langHint = ext || '';
-    const snippet = `Re: ${path}:${sel.startLine}-${sel.endLine}\n\n\`\`\`${langHint}\n${sel.text}\n\`\`\`\n\n`;
+    const snippet = `Re: ${path}:${sel.startLine}-${sel.endLine}\n\n\`\`\`${langHint}\n${text}\n\`\`\`\n\n`;
 
     try {
       await api.post(`/sessions/${sessionId}/input`, { text: snippet, submit: false });
@@ -359,7 +424,18 @@
   /** The autocompletion extension for the current completionSource (if any). */
   function completionExt(): Extension {
     return completionSource
-      ? [autocompletion({ override: [completionSource], activateOnTyping: true }), autoTriggerExt()]
+      ? [
+          autocompletion({
+            override: [completionSource],
+            activateOnTyping: true,
+            // The popup renders at most this many rows (CM's default is 100).
+            // Mounting ~100–200 option rows was a 49–160 ms forced-layout frame
+            // on every popup open while typing identifiers; the list still
+            // filters over every option, only the DOM is capped.
+            maxRenderedOptions: 40,
+          }),
+          autoTriggerExt(),
+        ]
       : autocompletion();
   }
 
@@ -367,6 +443,11 @@
   // immediately offers tables, `where `/`and ` offers columns).
   const SPACE_TRIGGER_RE =
     /(?:^|[\s({,])(?:from|join|where|and|or|on|into|update|set|by|using|select)\s$/i;
+  // Languages where a space after `(` / `{` / `,` opens completion (Mongo's
+  // `find({ `, `{ a: 1, `). NOT SQL: there `, ` is what you type between every
+  // INSERT value, and forcing the popup open there sent a completion request
+  // per value while editing data.
+  const PUNCT_TRIGGER_LANGS = new Set(['js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'json', 'jsonc']);
 
   /**
    * Open the completion popup proactively for the DB query editor (only when a
@@ -382,13 +463,18 @@
       for (const tr of u.transactions) {
         if (!tr.isUserEvent('input.type') && !tr.isUserEvent('input.paste')) continue;
         tr.changes.iterChanges((_fa, _ta, _fb, _tb, inserted) => {
+          // Only a single typed char can trigger — never stringify a paste.
+          if (inserted.length !== 1) return;
           const text = inserted.toString();
           if (text === '.') {
             fire = true;
           } else if (text === ' ') {
             const head = u.state.selection.main.head;
             const back = u.state.sliceDoc(Math.max(0, head - 48), head);
-            if (SPACE_TRIGGER_RE.test(back) || /[({,]\s$/.test(back)) fire = true;
+            if (SPACE_TRIGGER_RE.test(back)) fire = true;
+            else if (/[({,]\s$/.test(back) && PUNCT_TRIGGER_LANGS.has(extOf(path) || (language ?? ''))) {
+              fire = true;
+            }
           }
         });
       }
@@ -419,16 +505,11 @@
     if (view) openSearchPanel(view);
   }
 
-  function buildEditor(el: HTMLDivElement, filePath: string, fileContent: string, rootPath: string): void {
-    teardownEditor();
-    lspCompartment = new Compartment();
-    completionCompartment = new Compartment();
-    placeholderCompartment = new Compartment();
-
+  /** A fresh EditorState for `filePath` with the full extension set, wired to
+   *  the current compartments (so live reconfigures keep reaching it). */
+  function createState(filePath: string, fileContent: string): EditorState {
+    appliedDialect = sqlDialect;
     const langExt = cmLangFor(filePath, language);
-    // Reset selection when a new file is opened
-    sel = null;
-
     const baseExtensions: Extension[] = [
       ...(minimal ? [] : [lineNumbers(), foldGutter()]),
       indentOnInput(),
@@ -440,6 +521,7 @@
       drawSelection(),
       completionCompartment.of(completionExt()),
       placeholderCompartment.of(placeholderExt((appliedPlaceholder = placeholder))),
+      wrapCompartment.of(wrapExt((appliedWrap = wrap))),
       placeholderTheme,
       search({ top: false }),
       themeCompartment.of(themeExt(ui.resolvedScheme)),
@@ -484,25 +566,103 @@
         ...foldKeymap,
         ...(readOnly ? [] : historyKeymap),
       ]),
-      ...(langExt ? [langExt] : []),
+      langCompartment.of(langExt ?? []),
       ...(readOnly ? [] : [history()]),
     ];
 
-    const state = EditorState.create({
+    return EditorState.create({
       doc: fileContent,
       extensions: baseExtensions,
     });
+  }
 
-    view = new EditorView({ state, parent: el });
+  function buildEditor(el: HTMLDivElement, filePath: string, fileContent: string, rootPath: string): void {
+    teardownEditor();
+    lspCompartment = new Compartment();
+    completionCompartment = new Compartment();
+    placeholderCompartment = new Compartment();
+    wrapCompartment = new Compartment();
+    langCompartment = new Compartment();
+    // Kept states are wired to the compartments just replaced — drop them.
+    keptStates.clear();
+    // Reset selection when a new file is opened
+    sel = null;
+
+    view = new EditorView({ state: createState(filePath, fileContent), parent: el });
 
     // A caller-supplied completion source replaces LSP for this doc; only attach
     // the language server when no custom source is wired.
-    if (!completionSource) void attachLsp(view, filePath, rootPath);
+    if (!completionSource && lsp) void attachLsp(view, filePath, rootPath);
 
     // Jump to the requested line on first paint (e.g. a `file:line` ref clicked
     // in the terminal). Done after layout settles so scrollIntoView measures the
     // real geometry.
     if (gotoLine != null) revealLine(gotoLine, gotoCol);
+    // A new document starts with a collapsed cursor at 0 — say so, so a caller
+    // tracking the selection never keeps the previous document's.
+    const built = view;
+    untrack(() => emitSelection(built.state));
+  }
+
+  // ── Kept per-path states (keepStates) ──────────────────────────────────────
+
+  /** Parked EditorStates by path, oldest first (Map order = LRU order). */
+  const keptStates = new Map<
+    string,
+    { state: EditorState; scroll: StateEffect<unknown>; dialect: SqlDialectName }
+  >();
+  const MAX_KEPT_STATES = 8;
+
+  /**
+   * Switch the live view from `fromPath` to `toPath` without rebuilding it:
+   * park the current state, then restore `toPath`'s parked state (brought up
+   * to date with `content` and the current live options) or create a fresh one.
+   */
+  function swapState(fromPath: string, toPath: string, toContent: string): void {
+    if (!view) return;
+    keptStates.delete(fromPath);
+    keptStates.set(fromPath, {
+      state: view.state,
+      scroll: view.scrollSnapshot(),
+      dialect: appliedDialect,
+    });
+    while (keptStates.size > MAX_KEPT_STATES) {
+      const oldest = keptStates.keys().next().value;
+      if (oldest === undefined) break;
+      keptStates.delete(oldest);
+    }
+    const kept = keptStates.get(toPath);
+    keptStates.delete(toPath);
+    if (!kept) {
+      view.setState(createState(toPath, toContent));
+    } else {
+      view.setState(kept.state);
+      // Options may have changed while the state was parked; the text may have
+      // been edited from outside (store/agent) — reconcile both, undoably.
+      const effects: StateEffect<unknown>[] = [
+        completionCompartment.reconfigure(completionExt()),
+        placeholderCompartment.reconfigure(placeholderExt((appliedPlaceholder = placeholder))),
+        wrapCompartment.reconfigure(wrapExt((appliedWrap = wrap))),
+        themeCompartment.reconfigure(themeExt(ui.resolvedScheme)),
+        kept.scroll,
+      ];
+      // Re-parse only when the dialect changed while parked (a connection
+      // switch) — a plain tab switch keeps the parked tree.
+      appliedDialect = kept.dialect;
+      if (sqlDialect !== kept.dialect) {
+        appliedDialect = sqlDialect;
+        effects.push(langCompartment.reconfigure(cmLangFor(toPath, language) ?? []));
+      }
+      const doc = view.state.doc;
+      const stale = doc.length !== toContent.length || doc.toString() !== toContent;
+      view.dispatch({
+        effects,
+        ...(stale ? { changes: { from: 0, to: doc.length, insert: toContent } } : {}),
+      });
+    }
+    prevCompletion = completionSource;
+    // setState fires no update listeners — re-announce the restored selection.
+    emitSelection(view.state);
   }
 
   /** Scroll to + select the given 1-based line (clamped to the doc), centering
@@ -548,7 +708,13 @@
     // rebuild when the content prop merely echoes back an edit we just emitted
     // (editable mode), which would remount the view and drop the cursor.
     const contentEchoed = curContent === lastEmitted;
-    if (!view || curPath !== prevPath || curRoot !== prevRoot) {
+    if (view && keepStates && curPath !== prevPath && curRoot === prevRoot) {
+      // Another document in the same editor (a DB query tab): swap states.
+      const fromPath = prevPath;
+      prevPath = curPath;
+      prevContent = curContent;
+      untrack(() => swapState(fromPath, curPath, curContent));
+    } else if (!view || curPath !== prevPath || curRoot !== prevRoot) {
       // Structural (re)build: first mount, a different file, or a new root.
       prevPath = curPath;
       prevRoot = curRoot;
@@ -589,6 +755,24 @@
     if (src === prevCompletion) return;
     prevCompletion = src;
     view.dispatch({ effects: completionCompartment.reconfigure(completionExt()) });
+  });
+
+  // Toggle soft-wrapping live (no remount).
+  $effect(() => {
+    const on = wrap;
+    if (!view || on === appliedWrap) return;
+    appliedWrap = on;
+    view.dispatch({ effects: wrapCompartment.reconfigure(wrapExt(on)) });
+  });
+
+  // Re-tokenize with the new SQL dialect live (no remount) — e.g. the DB query
+  // editor switching from a Postgres to a MySQL connection.
+  $effect(() => {
+    const d = sqlDialect;
+    if (!view || d === appliedDialect) return;
+    appliedDialect = d;
+    const langExt = untrack(() => cmLangFor(path, language));
+    if (langExt) view.dispatch({ effects: langCompartment.reconfigure(langExt) });
   });
 
   // Swap the empty-doc hint live (no remount) when the caller changes it.

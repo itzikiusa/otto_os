@@ -434,6 +434,24 @@ export function viewModeReason(a: ViewModeInputs): string {
   return 'engine default';
 }
 
+// A prototype Svelte's `proxy()` does not recognise as plain: an object with it
+// is stored in `$state` AS IS (proxy() only wraps Object/Array prototypes).
+const RAW_RESULT_PROTO: object = Object.create(Object.prototype);
+
+/**
+ * Keep a query result OUT of the deep `tabs` proxy tree. Results are immutable
+ * snapshots (edits re-query, nothing patches rows in place), but assigned into
+ * a deep `$state` they became lazy proxies: a 100k-row result then cost 43–52 ms
+ * to land, 0.7–0.9 s for the first grid-search key (82 ms each after) and
+ * 38–54 ms to stringify complex cells — vs ~1 ms raw. Swapping the prototype
+ * (still an ordinary object for JSON, spread and property access) makes Svelte
+ * store it by reference; replacing `tab.result` wholesale stays reactive.
+ */
+export function rawResult<T extends object>(r: T): T {
+  if (Object.getPrototypeOf(r) === Object.prototype) Object.setPrototypeOf(r, RAW_RESULT_PROTO);
+  return r;
+}
+
 /** An open query tab: an editable statement + its last result + quick filters. */
 export interface QueryTab {
   id: number;
@@ -459,6 +477,13 @@ export interface QueryTab {
   ran_node: string | null;
   running: boolean;
   error: string | null;
+  /**
+   * The statement whose run produced `error` — what ErrorPanel's line/caret
+   * excerpt and "Ask AI to fix" describe. Runs are transient (the statement at
+   * the cursor, variable-substituted), so an engine's "at line N" is relative to
+   * THIS text, not to the editor buffer. Transient, like `ran_statement`.
+   */
+  err_statement: string | null;
   /** Quick-filter chips that own the statement's WHERE clause. */
   filters: FilterCond[];
   /**
@@ -501,7 +526,7 @@ export interface QueryTab {
    * result. Persisted so a full reload can still re-attach; cleared when the
    * result lands, the user stops the query, or the server no longer knows the id.
    */
-  pending?: { queryId: string; connId: Id } | null;
+  pending?: PendingRun | null;
   /**
    * The user's explicit result view for this tab (segmented control / ⇧⌘V);
    * `null`/absent = automatic (threshold → connection memory → engine default,
@@ -522,6 +547,28 @@ export interface QueryTab {
    */
   agent?: QueryTabAgent | null;
 }
+
+/**
+ * A run a tab is attached to (see {@link QueryTab.pending}). `sql` / `node` are
+ * the statement and scope it was issued with, so a re-attached result (or
+ * error) describes — and pages — what actually ran, never the editor buffer.
+ * Absent on markers persisted by older builds or when the statement was too
+ * large to persist; the re-attached result then has no pager.
+ */
+export interface PendingRun {
+  queryId: string;
+  connId: Id;
+  sql?: string;
+  node?: string | null;
+}
+
+/** Hard cap on each side of a completion request's cursor context. */
+const COMPLETION_CTX_MAX = 16_384;
+/** Quiet period after a failed completion request (per connection). */
+const COMPLETION_BACKOFF_MS = 5_000;
+
+/** Longest statement persisted inside a pending-run marker (localStorage). */
+const PENDING_SQL_MAX = 32_768;
 
 /** Who drove a query tab (see {@link QueryTab.agent}). */
 export interface QueryTabAgent {
@@ -573,6 +620,7 @@ function blankTab(statement = ''): QueryTab {
     ran_node: null,
     running: false,
     error: null,
+    err_statement: null,
     filters: [],
     timeout_ms: null,
     mask: false,
@@ -875,7 +923,10 @@ class DatabaseStore {
   historyLoading = $state(false);
   historyError: string | null = $state(null);
   private historyRequest = 0;
-  history: DbHistoryEntry[] = $state([]);
+  // Raw: only ever replaced wholesale (a refetch after each run). Deep, every
+  // refetch proxied up to 1,000 FULL statements (an import batch is a
+  // ~0.3 MB INSERT) and the sidebar's filter walked them through proxies.
+  history: DbHistoryEntry[] = $state.raw([]);
   /** How many history rows the current window requested. Bumped by "Load more"
    *  (100 → up to the API's 1000 cap). Reset to 100 on a fresh connection load. */
   historyLimit = $state(100);
@@ -1135,6 +1186,7 @@ class DatabaseStore {
         tab.ran_statement = null;
         tab.ran_node = null;
         tab.error = null;
+        tab.err_statement = null;
       }
       state.capabilities = null;
       state.connView = null;
@@ -1451,21 +1503,41 @@ class DatabaseStore {
     this.persistTabsTimer = null;
     this.persistTabsNow();
   }
+  /** Flush queued tab persistence now — the page is being hidden or torn down
+   *  (reload, quit, app switch), so the last ≤300 ms of typing isn't lost. */
+  flushTabDrafts(): void {
+    this.flushPersistTabs();
+  }
+  /** The JSON last written per tabs key: an unchanged payload skips the
+   *  synchronous setItem (and the `storage` event every other same-origin
+   *  document receives with both old and new values). */
+  private persistedTabsJson = new Map<string, string>();
+  /** The quota warning is shown once per session. */
+  private tabsQuotaWarned = false;
   private persistTabsNow(connId: Id | null = this.selectedConnId): void {
     if (typeof localStorage === 'undefined' || !connId) return;
     const state = connId === this.selectedConnId ? this : this.snapshots.get(connId);
     if (!state) return;
     const key = this.tabsKey(connId);
+    let json: string;
     try {
-      localStorage.setItem(
-        key,
-        JSON.stringify({
+      json = JSON.stringify({
           tabs: state.tabs.map((t) => ({
             name: t.name,
             statement: t.statement,
             vars: t.vars,
             savedQueryId: t.savedQueryId,
-            pending: t.pending ?? undefined,
+            // The marker keeps the issued statement when it's small enough —
+            // a re-attach after reload then still knows what ran.
+            pending: t.pending
+              ? {
+                  queryId: t.pending.queryId,
+                  connId: t.pending.connId,
+                  ...(t.pending.sql !== undefined && t.pending.sql.length <= PENDING_SQL_MAX
+                    ? { sql: t.pending.sql, node: t.pending.node ?? null }
+                    : {}),
+                }
+              : undefined,
             // Data-protection toggles survive a reload with the tab.
             timeout_ms: t.timeout_ms ?? undefined,
             mask: t.mask || undefined,
@@ -1478,10 +1550,42 @@ class DatabaseStore {
           })),
           activeTab: state.activeTab,
           activeDb: state.activeDb,
-        }),
-      );
+      });
     } catch {
-      /* storage full / unavailable — non-fatal */
+      return;
+    }
+    if (this.persistedTabsJson.get(key) === json) return;
+    try {
+      localStorage.setItem(key, json);
+      this.persistedTabsJson.set(key, json);
+      // A successful write supersedes any quota fallback copy.
+      try {
+        sessionStorage.removeItem(key);
+      } catch {
+        /* unavailable */
+      }
+    } catch (e) {
+      if (!isQuotaError(e)) return; // storage unavailable — non-fatal
+      // Over the origin quota (large drafts across connections): keep the
+      // drafts in sessionStorage so at least a reload restores them, and say
+      // so ONCE instead of silently dropping every later write.
+      let kept = false;
+      try {
+        sessionStorage.setItem(key, json);
+        this.persistedTabsJson.set(key, json);
+        kept = true;
+      } catch {
+        /* over quota there too */
+      }
+      if (!this.tabsQuotaWarned) {
+        this.tabsQuotaWarned = true;
+        toasts.warn(
+          'Query drafts are too large to save',
+          kept
+            ? 'Browser storage is full — open tabs survive a reload but not a restart. Save important queries.'
+            : 'Browser storage is full — open query tabs will not survive a reload. Save important queries.',
+        );
+      }
     }
   }
   private restoreTabs(
@@ -1490,8 +1594,16 @@ class DatabaseStore {
     if (typeof localStorage === 'undefined') return null;
     // Global key first; fall back to the legacy per-workspace entry (upgrade).
     const legacy = this.legacyTabsKey(connId);
+    const key = this.tabsKey(connId);
+    // A quota-fallback copy (sessionStorage) is newer than the localStorage one.
+    let fallback: string | null = null;
+    try {
+      fallback = sessionStorage.getItem(key);
+    } catch {
+      /* unavailable */
+    }
     const raw =
-      localStorage.getItem(this.tabsKey(connId)) ?? (legacy ? localStorage.getItem(legacy) : null);
+      fallback ?? localStorage.getItem(key) ?? (legacy ? localStorage.getItem(legacy) : null);
     if (!raw) return null;
     try {
       const p = JSON.parse(raw) as {
@@ -1500,7 +1612,7 @@ class DatabaseStore {
           statement?: string;
           vars?: unknown;
           savedQueryId?: string;
-          pending?: { queryId?: string; connId?: string } | null;
+          pending?: { queryId?: string; connId?: string; sql?: unknown; node?: unknown } | null;
           timeout_ms?: number;
           mask?: boolean;
           viewMode?: unknown;
@@ -1521,7 +1633,16 @@ class DatabaseStore {
         // THIS connection — reattach polls it against the server.
         pending:
           t.pending && t.pending.queryId && t.pending.connId === connId
-            ? { queryId: t.pending.queryId, connId: t.pending.connId }
+            ? {
+                queryId: t.pending.queryId,
+                connId: t.pending.connId,
+                ...(typeof t.pending.sql === 'string'
+                  ? {
+                      sql: t.pending.sql,
+                      node: typeof t.pending.node === 'string' ? t.pending.node : null,
+                    }
+                  : {}),
+              }
             : null,
         // Unknown view names (a newer build's mode) fall back to automatic.
         viewMode: isViewMode(t.viewMode) ? t.viewMode : null,
@@ -2591,18 +2712,19 @@ class DatabaseStore {
     const queryId = newQueryId();
     const accessEpoch=this.accessEpoch;
     this.runControllers.set(t.id, { controller, queryId, connId: id });
+    // Scope to the active database (so unqualified tables resolve) unless a
+    // node was passed — `null` included, which means "no scope".
+    const scopeNode = node === undefined ? this.activeDb || null : node;
     t.running = true;
     t.error = null;
-    t.pending = { queryId, connId: id };
+    t.err_statement = null;
+    t.pending = { queryId, connId: id, sql, node: scopeNode };
     this.persistTabs();
     try {
       // Honor an explicit LIMIT in the SQL; otherwise apply the configured
       // default row cap. The server also injects this LIMIT into the SQL so a
       // huge table isn't fully scanned — this value just sizes that cap.
       const explicit = parseExplicitLimit(sql);
-      // Scope to the active database (so unqualified tables resolve) unless a
-      // node was passed — `null` included, which means "no scope".
-      const scopeNode = node === undefined ? this.activeDb || null : node;
       // Per-tab timeout (opt-in; null / 0 = no limit).
       const tabTimeoutMs = this.tab?.timeout_ms ?? null;
 
@@ -2679,9 +2801,10 @@ class DatabaseStore {
         if (outcome) Object.assign(outcome, { status: 'aborted', error: 'the run was stopped or superseded' });
         return null;
       }
-      t.result = result;
+      t.result = rawResult(result);
       t.ran_statement = sql;
       t.ran_node = scopeNode;
+      t.err_statement = null;
       this.clearPending(t);
       void this.loadHistory(id);
       if (outcome) outcome.status = 'ok';
@@ -2700,6 +2823,9 @@ class DatabaseStore {
         if (outcome) Object.assign(outcome, { status: 'failed', error: errMsg(e) });
         this.clearPending(t);
         t.error = errMsg(e);
+        // What failed — ErrorPanel's caret / "Ask AI to fix" describe THIS, not
+        // the (possibly much larger, since edited) editor buffer.
+        t.err_statement = sql;
         // The tab's inline ErrorPanel already says this when it's on screen —
         // only toast when the failing tab is NOT the one the person is looking at.
         if (!this.isVisibleTab(id, t)) toasts.error('Query failed', errMsg(e));
@@ -2738,7 +2864,9 @@ class DatabaseStore {
   ): Promise<QueryResult | null> {
     const t = this.tab;
     const pageSize = t?.result?.auto_limited ?? 0;
-    if (!t || pageSize <= 0) return Promise.resolve(null);
+    // No known producing statement (a re-attached run from an older marker):
+    // never fall back to re-running the whole editor buffer.
+    if (!t || pageSize <= 0 || !t.ran_statement) return Promise.resolve(null);
     const next = Math.max(0, t.offset + delta * pageSize);
     if (next === t.offset) return Promise.resolve(null);
     // The cursor belongs to the page the user is LEAVING — read it before the
@@ -2850,6 +2978,7 @@ class DatabaseStore {
     const accessEpoch=this.accessEpoch;
     t.running = true;
     t.error = null;
+    t.err_statement = null;
     try {
       const body: Record<string, unknown> = isSql
         ? { statement: `EXPLAIN ${stmt}`, max_rows: this.rowLimit, node: this.activeDb || null }
@@ -2858,12 +2987,13 @@ class DatabaseStore {
       if (opts?.readOnly) body.read_only = true;
       const result = await api.post<QueryResult>(`${this.connBase(id)}/query`, body);
       if(accessEpoch!==this.accessEpoch)return null;
-      t.result = result;
+      t.result = rawResult(result);
       t.ran_statement = stmt;
       t.ran_node = this.activeDb || null;
       return result;
     } catch (e) {
       t.error = errMsg(e);
+      t.err_statement = stmt;
       toasts.error('Explain failed', errMsg(e));
       return null;
     } finally {
@@ -3025,7 +3155,7 @@ class DatabaseStore {
 
   private async reattachLoop(
     t: QueryTab,
-    pending: { queryId: string; connId: Id },
+    pending: PendingRun,
   ): Promise<void> {
     t.running = true;
     let failures = 0;
@@ -3055,13 +3185,18 @@ class DatabaseStore {
       }
       if (t.pending?.queryId !== pending.queryId) return; // superseded mid-poll
       if (st.status === 'done') {
-        if (st.error != null) t.error = st.error;
-        else if (st.result) {
-          t.result = st.result;
-          // A re-attached run's statement is whatever was in the editor when it
-          // started; the server doesn't hand it back, so fall back to the buffer.
-          t.ran_statement = t.ran_statement ?? t.statement;
+        if (st.error != null) {
+          t.error = st.error;
+          t.err_statement = pending.sql ?? null;
+        } else if (st.result) {
+          t.result = rawResult(st.result);
+          // The statement + scope the run was ISSUED with (kept in the marker).
+          // Never the editor buffer: it is usually a multi-statement script the
+          // run only took one statement of, and the pager re-runs ran_statement.
+          t.ran_statement = pending.sql ?? null;
+          t.ran_node = pending.node ?? null;
           t.error = null;
+          t.err_statement = null;
         }
         void this.loadHistory(pending.connId);
       }
@@ -3342,22 +3477,46 @@ class DatabaseStore {
     this.persistTabs();
   }
 
-  /** Fetch completions for the text before the cursor. */
-  async complete(prefix: string, suffix = '', node?: string): Promise<DbCompletionItem[]> {
+  /** Until when (epoch ms) completion stays quiet after a failed request, per
+   *  connection — a broken connection must not be re-asked on every word. */
+  private completionBackoff = new Map<Id, number>();
+
+  /**
+   * Fetch completions for the text around the cursor. Callers scope `prefix` /
+   * `suffix` to the current statement; both are capped here as a backstop so a
+   * request can never carry a whole large buffer (or trip the daemon's body
+   * limit). `signal` aborts a superseded request.
+   */
+  async complete(
+    prefix: string,
+    suffix = '',
+    node?: string,
+    signal?: AbortSignal,
+  ): Promise<DbCompletionItem[]> {
     const id = this.selectedConnId;
     if (!id) return [];
+    if ((this.completionBackoff.get(id) ?? 0) > Date.now()) return [];
     try {
-      const res = await api.post<{ items: DbCompletionItem[] }>(`${this.connBase(id)}/completion`, {
-        prefix,
-        suffix,
-        database:
-          this.activeDb ??
-          (this.selectedConn?.params?.db ? String(this.selectedConn.params.db) : undefined),
-        node: node ?? null,
-      });
+      const res = await api.post<{ items: DbCompletionItem[] }>(
+        `${this.connBase(id)}/completion`,
+        {
+          prefix: prefix.length > COMPLETION_CTX_MAX ? prefix.slice(-COMPLETION_CTX_MAX) : prefix,
+          suffix: suffix.length > COMPLETION_CTX_MAX ? suffix.slice(0, COMPLETION_CTX_MAX) : suffix,
+          database:
+            this.activeDb ??
+            (this.selectedConn?.params?.db ? String(this.selectedConn.params.db) : undefined),
+          node: node ?? null,
+        },
+        signal,
+      );
+      this.completionBackoff.delete(id);
       return res.items ?? [];
-    } catch {
-      // Completion failures must never break typing — degrade silently.
+    } catch (e) {
+      // Completion failures must never break typing — degrade silently, and
+      // back off briefly (a superseded, aborted request is not a failure).
+      if (!isAbortError(e) && !signal?.aborted) {
+        this.completionBackoff.set(id, Date.now() + COMPLETION_BACKOFF_MS);
+      }
       return [];
     }
   }
@@ -3723,5 +3882,21 @@ class DatabaseStore {
   }
 }
 
+/** A storage write refused for space (WebKit/Chromium/Firefox spellings). */
+function isQuotaError(e: unknown): boolean {
+  return (
+    e instanceof DOMException &&
+    (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.code === 22)
+  );
+}
+
 export const database = new DatabaseStore();
+if (typeof window !== 'undefined') {
+  // The tab-draft write is debounced 300 ms — flush it when the page goes away
+  // (reload / quit) or is hidden (app switch), so the last edits survive.
+  window.addEventListener('pagehide', () => database.flushTabDrafts());
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') database.flushTabDrafts();
+  });
+}
 resourceAccess.subscribe(change=>database.onAccessChange(change));

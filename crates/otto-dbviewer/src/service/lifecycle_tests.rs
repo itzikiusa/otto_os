@@ -342,3 +342,225 @@ async fn cancel_without_native_handle_aborts_the_task_and_reports_it() {
         CancelStatus::NotStoppable
     );
 }
+
+/// A secret store that counts reads and serves a swappable value.
+struct CountingSecrets {
+    reads: AtomicUsize,
+    value: std::sync::Mutex<String>,
+}
+impl SecretStore for CountingSecrets {
+    fn put(&self, _: &str, _: &str) -> Result<()> {
+        Ok(())
+    }
+    fn get(&self, _: &str) -> Result<Option<String>> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(self.value.lock().unwrap().clone()))
+    }
+    fn delete(&self, _: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn completion_reuses_a_recent_secret_read_and_fresh_reads_refresh_it() {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let secrets = Arc::new(CountingSecrets {
+        reads: AtomicUsize::new(0),
+        value: std::sync::Mutex::new("old".into()),
+    });
+    let service = DbViewerService::new(
+        ConnectionsRepo::new(pool.clone()),
+        secrets.clone(),
+        DbExplorerRepo::new(pool),
+    );
+    let cached = SecretRead::CompletionCached;
+
+    // Completion: one Keychain read serves the next requests.
+    assert_eq!(
+        service.read_secret("k", cached).await.unwrap().as_deref(),
+        Some("old")
+    );
+    assert_eq!(
+        service.read_secret("k", cached).await.unwrap().as_deref(),
+        Some("old")
+    );
+    assert_eq!(secrets.reads.load(Ordering::SeqCst), 1);
+
+    // A credential edit, then an ordinary operation: it reads fresh AND
+    // refreshes completion's copy, so completion never lags behind it.
+    *secrets.value.lock().unwrap() = "new".into();
+    assert_eq!(
+        service
+            .read_secret("k", SecretRead::Fresh)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("new")
+    );
+    assert_eq!(
+        service.read_secret("k", cached).await.unwrap().as_deref(),
+        Some("new")
+    );
+    assert_eq!(secrets.reads.load(Ordering::SeqCst), 2);
+
+    // Ordinary operations never populate the completion cache on their own.
+    service
+        .read_secret("other", SecretRead::Fresh)
+        .await
+        .unwrap();
+    service
+        .read_secret("other", SecretRead::Fresh)
+        .await
+        .unwrap();
+    assert_eq!(secrets.reads.load(Ordering::SeqCst), 4);
+    assert!(!service
+        .completion_secrets
+        .lock()
+        .unwrap()
+        .contains_key("other"));
+}
+
+/// A driver whose completion blocks until released, counting finished runs.
+struct SlowCompletion {
+    started: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Semaphore>,
+    finished: Arc<AtomicUsize>,
+}
+#[async_trait::async_trait]
+impl Driver for SlowCompletion {
+    fn engine(&self) -> Engine {
+        Engine::Mysql
+    }
+    fn capabilities(&self) -> Capabilities {
+        unreachable!()
+    }
+    async fn test(&self, _: &ResolvedConfig) -> Result<TestResult> {
+        unreachable!()
+    }
+    async fn schema_root(&self, _: &ResolvedConfig) -> Result<Vec<SchemaNode>> {
+        unreachable!()
+    }
+    async fn schema_children(
+        &self,
+        _: &ResolvedConfig,
+        _: &crate::types::NodePath,
+        _: Option<&str>,
+    ) -> Result<Vec<SchemaNode>> {
+        unreachable!()
+    }
+    async fn object_detail(
+        &self,
+        _: &ResolvedConfig,
+        _: &crate::types::NodePath,
+    ) -> Result<ObjectDetail> {
+        unreachable!()
+    }
+    async fn run(&self, _: &ResolvedConfig, _: &QueryRequest) -> Result<QueryResult> {
+        unreachable!()
+    }
+    async fn completion(
+        &self,
+        _: &ResolvedConfig,
+        _: &crate::types::CompletionContext,
+    ) -> Result<CompletionResponse> {
+        // Stands in for the first schema-snapshot build of a slow remote DB.
+        self.started.add_permits(1);
+        self.release.acquire().await.unwrap().forget();
+        self.finished.fetch_add(1, Ordering::SeqCst);
+        Ok(CompletionResponse { items: Vec::new() })
+    }
+}
+
+/// BUG-1: the editor aborts a superseded completion request on every keystroke,
+/// which drops the HTTP handler future. The work behind it (the first schema
+/// build) must still run to completion so the next request finds it cached.
+#[tokio::test]
+async fn completion_work_survives_the_request_being_dropped() {
+    let (mut service, conn, user) = fixture().await;
+    let driver = Arc::new(SlowCompletion {
+        started: Arc::new(tokio::sync::Semaphore::new(0)),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+        finished: Arc::new(AtomicUsize::new(0)),
+    });
+    service.registry.set_for_test(Engine::Mysql, driver.clone());
+    // New connections start Enforced (which answers completion from the schema
+    // graph, not the driver); a Legacy connection takes the driver path.
+    let repo = otto_state::resource_access::ResourceAccessRepo::new(service.connections.pool());
+    let current = repo
+        .get_policy(otto_core::access::ResourceKind::Connection, &conn)
+        .await
+        .unwrap();
+    repo.put_policy(
+        &otto_core::access::AccessPolicy {
+            revision: current.revision,
+            ..otto_core::access::AccessPolicy::legacy(
+                otto_core::access::ResourceKind::Connection,
+                conn.clone(),
+            )
+        },
+        current.revision,
+        &otto_core::access::AccessActor {
+            real_user_id: user.clone(),
+            effective_user_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    let svc = service.clone();
+    let (c, u) = (conn.clone(), user.clone());
+    let mut request = tokio::spawn(async move {
+        svc.completion(&c, &u, &crate::types::CompletionContext::default())
+            .await
+    });
+    tokio::select! {
+        permit = driver.started.acquire() => permit.unwrap().forget(),
+        early = &mut request => panic!("completion never reached the driver: {early:?}"),
+        _ = tokio::time::sleep(Duration::from_secs(5)) => panic!("completion never started"),
+    }
+    // The client gave up (next keystroke): the request future is dropped.
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    driver.release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while driver.finished.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the detached completion work finished after its request was dropped");
+}
+
+#[tokio::test]
+async fn forget_secret_evicts_completions_cached_copy() {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let secrets = Arc::new(CountingSecrets {
+        reads: AtomicUsize::new(0),
+        value: std::sync::Mutex::new("old".into()),
+    });
+    let service = DbViewerService::new(
+        ConnectionsRepo::new(pool.clone()),
+        secrets.clone(),
+        DbExplorerRepo::new(pool),
+    );
+    let cached = SecretRead::CompletionCached;
+    assert_eq!(
+        service.read_secret("k", cached).await.unwrap().as_deref(),
+        Some("old")
+    );
+    // The credential is edited: the connections route evicts completion's copy.
+    *secrets.value.lock().unwrap() = "new".into();
+    service.forget_secret("k");
+    assert_eq!(
+        service.read_secret("k", cached).await.unwrap().as_deref(),
+        Some("new")
+    );
+    assert_eq!(secrets.reads.load(Ordering::SeqCst), 2);
+}

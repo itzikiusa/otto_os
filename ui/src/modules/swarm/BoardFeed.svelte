@@ -223,6 +223,10 @@
     border-radius: var(--radius-s);
     padding: 8px 12px;
     background: var(--surface);
+    /* Variable-height posts (VirtualList needs uniform rows): the store caps
+       the feed at 300 and offscreen posts skip layout/paint (backlog B6). */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 72px;
   }
   .msg-head {
     display: flex;

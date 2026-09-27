@@ -178,6 +178,13 @@ struct PostMessageReq {
 struct MessagesQuery {
     #[serde(default)]
     after: Option<String>,
+    /// Page BACKWARDS: the `limit` messages before this id (oldest first).
+    /// Ignored when `after` is set.
+    #[serde(default)]
+    before: Option<String>,
+    /// `tail=true` with no cursor: the room's newest `limit` messages.
+    #[serde(default)]
+    tail: Option<bool>,
     #[serde(default)]
     limit: Option<i64>,
     /// Same session→agent resolution as posting: an agent read is
@@ -807,7 +814,16 @@ async fn list_messages(
             )));
         }
     }
-    repo.list_messages(&id, q.after.as_deref(), q.limit.unwrap_or(100))
+    let limit = q.limit.unwrap_or(100);
+    let backwards = q.after.is_none() && (q.before.is_some() || q.tail == Some(true));
+    if backwards {
+        return repo
+            .list_messages_before(&id, q.before.as_deref(), limit)
+            .await
+            .map(Json)
+            .map_err(ApiError);
+    }
+    repo.list_messages(&id, q.after.as_deref(), limit)
         .await
         .map(Json)
         .map_err(ApiError)

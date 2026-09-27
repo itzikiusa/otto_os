@@ -26,6 +26,7 @@
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { swarmPagePort } from '../../lib/uiCommands/swarm';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { startMouseDrag } from '../../lib/dragCursor';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -93,20 +94,15 @@
     e.preventDefault();
     const el = bodyEl;
     if (!el) return;
-    const onMove = (ev: MouseEvent) => {
-      const rect = el.getBoundingClientRect();
-      const pct = ((ev.clientX - rect.left) / rect.width) * 100;
-      viewPct = Math.min(80, Math.max(20, pct));
-    };
-    const onUp = () => {
-      persistViewPct();
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      document.body.style.userSelect = '';
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    document.body.style.userSelect = 'none';
+    // Overlay cursor + one write per frame (lib/dragCursor.ts).
+    startMouseDrag(e, {
+      onMove: (ev) => {
+        const rect = el.getBoundingClientRect();
+        const pct = ((ev.clientX - rect.left) / rect.width) * 100;
+        viewPct = Math.min(80, Math.max(20, pct));
+      },
+      onEnd: () => persistViewPct(),
+    });
   }
 
   // --- Resizable swarms rail (drag the divider) -----------------------------
@@ -215,6 +211,10 @@
     }
   }
 
+  // Live swarm events apply only while this page is mounted; a remount after
+  // missed events resyncs the open swarm (backlog B6 / SE-04).
+  $effect(() => swarm.watch());
+
   // Agent UI control (lib/uiCommands/swarm.ts) opens a swarm / switches the view.
   $effect(() => swarmPagePort.bind({ openSwarm, setView: (v) => (view = v) }));
 
@@ -253,8 +253,8 @@
   // retry): the page-level empty state owns the page then.
   // (A failed first load is shown by the main pane's inline error + Retry.)
   const showRail = $derived(swarm.swarms.length > 0);
-  const queued = $derived(swarm.runs.filter((r) => r.status === 'queued').length);
-  const running = $derived(swarm.runs.filter((r) => r.status === 'running' || r.status === 'waiting').length);
+  const queued = $derived(swarm.runStats.queued);
+  const running = $derived(swarm.runStats.running);
   const cap = $derived(detail?.config.max_parallel_sessions ?? 4);
 
   // View switcher = a real tablist: ←/→ (and Home/End) move between views,

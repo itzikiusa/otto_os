@@ -317,6 +317,25 @@ pub struct WorkItemUpsert {
     pub started_by_id: Option<String>,
 }
 
+/// True when applying `up` to `prev` would change nothing. Mirrors the UPDATE
+/// in [`WorkGraphRepo::upsert_item`]: `title`/`status`/`owner`/`owner_kind` are
+/// overwritten, the `COALESCE(?, col)` fields only when `up` carries a value.
+fn upsert_is_noop(prev: &WorkItem, up: &WorkItemUpsert) -> bool {
+    fn same_opt<T: PartialEq>(new: &Option<T>, cur: &Option<T>) -> bool {
+        new.is_none() || new == cur
+    }
+    prev.title == up.title
+        && prev.status == up.status
+        && prev.owner == up.owner
+        && prev.owner_kind == up.owner_kind
+        && same_opt(&up.repo_id, &prev.repo_id)
+        && same_opt(&up.branch, &prev.branch)
+        && same_opt(&up.result_summary, &prev.result_summary)
+        && same_opt(&up.context_summary, &prev.context_summary)
+        && up.cost_so_far.is_none_or(|c| c == prev.cost_so_far)
+        && same_opt(&up.started_by_id, &prev.started_by_id)
+}
+
 /// Outcome of an upsert, so the caller knows which audit events to append.
 #[derive(Debug, Clone)]
 pub struct UpsertResult {
@@ -575,6 +594,18 @@ impl WorkGraphRepo {
             .find_by_source(&up.workspace_id, up.kind, &up.source_id)
             .await?
         {
+            // Compare-before-update: the 5-minute reconcile sweep re-derives
+            // every item, and an unconditional UPDATE bumped `updated_at` on all
+            // of them — ~650 write txns per sweep, and Mission Control's
+            // "recent" order (ORDER BY updated_at) tracked the sweep instead of
+            // real activity. Unchanged → no write, no refetch.
+            if upsert_is_noop(&prev, up) {
+                return Ok(UpsertResult {
+                    prev_status: Some(prev.status),
+                    item: prev,
+                    created: false,
+                });
+            }
             sqlx::query(
                 "UPDATE work_items SET title = ?, status = ?, owner = ?, owner_kind = ?, \
                  repo_id = COALESCE(?, repo_id), branch = COALESCE(?, branch), \
@@ -1330,6 +1361,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(list.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unchanged_upsert_does_not_touch_updated_at() {
+        let repo = WorkGraphRepo::new(mem_pool().await);
+        let up = upsert("w1", WorkKind::Session, "s1", "t", WorkStatus::Running);
+        let r1 = repo.upsert_item(&up).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        // Identical re-derive (the reconcile sweep) → no write.
+        let r2 = repo.upsert_item(&up).await.unwrap();
+        assert!(!r2.created);
+        assert_eq!(r2.item.updated_at, r1.item.updated_at);
+        // `None` on a COALESCE field is "keep", so still a no-op.
+        let mut keep = up.clone();
+        keep.cost_so_far = None;
+        keep.branch = None;
+        let r3 = repo.upsert_item(&keep).await.unwrap();
+        assert_eq!(r3.item.updated_at, r1.item.updated_at);
+        // A real change writes and bumps.
+        let mut changed = up.clone();
+        changed.cost_so_far = Some(2.0);
+        let r4 = repo.upsert_item(&changed).await.unwrap();
+        assert!(r4.item.updated_at > r1.item.updated_at);
+        assert_eq!(r4.item.cost_so_far, 2.0);
     }
 
     #[tokio::test]

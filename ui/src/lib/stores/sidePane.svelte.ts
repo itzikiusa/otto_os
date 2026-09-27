@@ -89,14 +89,21 @@ class SidePaneStore {
     this.placement = saved.placement;
   }
 
+  // Booleans as $derived (not plain getters over `width`): readers — the
+  // 'split' / 'side-pane-commands' registry effects in App — then re-run only
+  // when the answer flips, not on every px of a window resize.
+  private supportedNow = $derived(!isEmbedded && !isPopout && viewport.isDesktop);
+  private fitsNow = $derived(this.width === 0 || fitsTwoPanes(this.width));
+  private showingNow = $derived(this.supportedNow && this.route !== null && this.fitsNow && this.key !== this.primaryKey);
+
   /** The window can host a side pane at all (main window, desktop width). */
   get supported(): boolean {
-    return !isEmbedded && !isPopout && viewport.isDesktop;
+    return this.supportedNow;
   }
 
   /** The content column is wide enough for two panes. */
   get fits(): boolean {
-    return this.width === 0 || fitsTwoPanes(this.width);
+    return this.fitsNow;
   }
 
   /** The side pane's module key (see `paneKey`), null without a pane. */
@@ -112,7 +119,7 @@ class SidePaneStore {
   /** The pane is on screen. A pane that can't show right now (a narrow
    *  window, the main pane on the same module) is hidden, never cleared. */
   get showing(): boolean {
-    return this.supported && this.route !== null && this.fits && this.key !== this.primaryKey;
+    return this.showingNow;
   }
 
   /** The leading pane's fraction (divider position, aria-valuenow). */

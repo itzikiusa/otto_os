@@ -47,7 +47,7 @@
   }
 
   function runCount(agentId: string): number {
-    return swarm.runs.filter((r) => r.agent_id === agentId && (r.status === 'running' || r.status === 'waiting')).length;
+    return swarm.agentRunStats(agentId).live;
   }
 
   let open = $state<Record<string, boolean>>({});

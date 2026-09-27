@@ -16,7 +16,9 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
+  import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import JsonTree from '../database/JsonTree.svelte';
+  import { TableWindow } from '../../lib/tableWindow.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
   import { fmtAgo, fmtBytes, fmtDate, splitBucketSegment, awsErrorText } from './util';
   import type { AwsAccount, S3Object, S3PreviewResp } from '../../lib/api/types';
@@ -64,8 +66,10 @@
   }
 
   // ── objects ──
-  let prefixes = $state<string[]>([]);
-  let objects = $state<S3Object[]>([]);
+  // Raw (not deep-proxied) and appended with `concat`: "Load more" grows a
+  // flat prefix to 100k objects; the rows are windowed below.
+  let prefixes = $state.raw<string[]>([]);
+  let objects = $state.raw<S3Object[]>([]);
   let nextToken = $state<string | null>(null);
   let objLoading = $state(false);
   let objError = $state('');
@@ -81,6 +85,16 @@
     return q ? all.filter((r) => r.name.toLowerCase().includes(q)) : all;
   });
 
+  // Window the object table (only the visible slice + spacers is in the DOM).
+  const tw = new TableWindow();
+  let objWrap = $state<HTMLDivElement | null>(null);
+  const win = $derived(tw.range(rowsShown.length));
+  const rowsWindow = $derived(rowsShown.slice(win.start, win.end));
+  $effect(() => {
+    void rowsWindow;
+    tw.measure(objWrap);
+  });
+
   function leaf(key: string): string {
     const trimmed = key.endsWith('/') ? key.slice(0, -1) : key;
     return trimmed.slice(trimmed.lastIndexOf('/') + 1) || key;
@@ -93,8 +107,9 @@
     try {
       const r = await awsApi.s3Objects(account.id, bucket, prefix, more ? nextToken : undefined);
       if (request !== objectRequest) return;
-      prefixes = more ? [...prefixes, ...r.prefixes] : r.prefixes;
-      objects = more ? [...objects, ...r.objects] : r.objects;
+      prefixes = more ? prefixes.concat(r.prefixes) : r.prefixes;
+      objects = more ? objects.concat(r.objects) : r.objects;
+      if (!more) tw.reset(objWrap);
       nextToken = r.is_truncated ? (r.next_token ?? null) : null;
       objError = '';
     } catch (e) {
@@ -127,6 +142,7 @@
 
   // ── preview drawer ──
   let preview = $state<{ obj: S3Object; data: S3PreviewResp | null; loading: boolean; error: string } | null>(null);
+  const selKey = $derived(preview?.obj.key ?? '');
   const previewKind = $derived.by<'json' | 'csv' | 'text' | 'binary' | null>(() => {
     const d = preview?.data;
     if (!d) return null;
@@ -168,20 +184,82 @@
   }
 
   // ── download ──
-  let dl = $state<{ key: string; received: number; total: number | null; ctrl: AbortController } | null>(null);
+  // Objects over BIG_DOWNLOAD go daemon-side straight to a local folder (the
+  // in-webview path holds every chunk plus a Blob — up to 2× the object in
+  // WKWebView memory); smaller ones stream into a Blob as before.
+  const BIG_DOWNLOAD = 100 * 1024 * 1024;
+  const DL_DIR_KEY = 'otto_s3_download_dir';
+  let dl = $state<{ key: string; received: number; total: number | null; ctrl: AbortController; job?: string } | null>(null);
+  let pickDirFor = $state<S3Object | null>(null);
+  function lastDir(): string {
+    try {
+      return localStorage.getItem(DL_DIR_KEY) || '~/Downloads';
+    } catch {
+      return '~/Downloads';
+    }
+  }
+
+  async function downloadToDir(o: S3Object, dir: string): Promise<void> {
+    pickDirFor = null;
+    if (dl) {
+      toasts.warn('A download is already running', leaf(dl.key));
+      return;
+    }
+    try {
+      localStorage.setItem(DL_DIR_KEY, dir);
+    } catch {
+      /* remembered dir is a convenience */
+    }
+    const ctrl = new AbortController();
+    const acct = account.id;
+    dl = { key: o.key, received: 0, total: o.size || null, ctrl };
+    try {
+      let job = await awsApi.s3DownloadTo(acct, bucket, o.key, dir);
+      if (dl) dl = { ...dl, job: job.id };
+      while (job.state === 'running') {
+        await new Promise((r) => setTimeout(r, 700));
+        if (ctrl.signal.aborted) {
+          job = await awsApi.s3DownloadCancel(acct, job.id);
+          break;
+        }
+        job = await awsApi.s3DownloadJob(acct, job.id);
+        if (dl) dl = { ...dl, received: job.bytes, total: job.total || dl.total };
+      }
+      if (job.state === 'completed') toasts.success('Downloaded', job.local_path);
+      else if (job.state === 'failed') toasts.error('Download failed', job.error ?? 'The download failed.');
+    } catch (e) {
+      toasts.error('Download failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      dl = null;
+    }
+  }
+
   async function download(o: S3Object): Promise<void> {
     if (!canRead) return;
     if (dl) {
       toasts.warn('A download is already running', leaf(dl.key));
       return;
     }
+    if (o.size > BIG_DOWNLOAD) {
+      pickDirFor = o;
+      return;
+    }
     const ctrl = new AbortController();
     dl = { key: o.key, received: 0, total: o.size || null, ctrl };
+    // Progress lands once per frame, not per 64 KiB chunk (~32k state writes
+    // for a 2 GiB object).
+    let pending: { received: number; total: number | null } | null = null;
+    let raf = 0;
     try {
       const { blob, filename } = await awsDownloadBlob(
         awsApi.s3DownloadPath(account.id, bucket, o.key),
         (received, total) => {
-          if (dl) dl = { ...dl, received, total: total ?? dl.total };
+          pending = { received, total };
+          if (raf) return;
+          raf = requestAnimationFrame(() => {
+            raf = 0;
+            if (dl && pending) dl = { ...dl, received: pending.received, total: pending.total ?? dl.total };
+          });
         },
         ctrl.signal,
       );
@@ -191,6 +269,7 @@
       if (!(e instanceof DOMException && e.name === 'AbortError'))
         toasts.error('Download failed', e instanceof Error ? e.message : String(e));
     } finally {
+      if (raf) cancelAnimationFrame(raf);
       dl = null;
     }
   }
@@ -234,7 +313,7 @@
     filterPlaceholder="Filter buckets…"
     loading={bucketsLoading}
     bind:auto
-    onrefresh={() => void loadBuckets()}
+    onrefresh={() => loadBuckets()}
   />
   {#if bucketsLoading && !buckets}
     <div class="pad" role="status"><p class="load-note">Loading buckets…</p><Skeleton rows={6} /></div>
@@ -274,7 +353,7 @@
     filterPlaceholder="Filter this folder…"
     loading={objLoading}
     bind:auto
-    onrefresh={() => void loadObjects()}
+    onrefresh={() => loadObjects()}
   >
     <nav class="crumbs" aria-label="Prefix">
       <button class="crumb" onclick={() => goTo('', '')} title="All buckets" aria-label="All buckets"><Icon name="archive" size={12} /></button>
@@ -288,7 +367,7 @@
   </ViewToolbar>
 
   <div class="split" class:with-drawer={preview !== null && !viewport.isMobile}>
-    <div class="tbl-wrap">
+    <div class="tbl-wrap" bind:this={objWrap} bind:clientHeight={tw.viewH} onscroll={tw.onscroll}>
       {#if objLoading && objects.length === 0 && prefixes.length === 0}
         <div class="pad" role="status"><p class="load-note">Loading objects…</p><Skeleton rows={8} /></div>
       {:else if objError}
@@ -299,10 +378,11 @@
         <table class="tbl">
           <thead><tr><th>Name</th><th class="num">Size</th><th class="hide-sm">Modified</th><th class="hide-sm">Class</th><th class="act"></th></tr></thead>
           <tbody>
-            {#each rowsShown as r (r.key)}
+            {#if win.top}<tr class="tw-spacer" aria-hidden="true"><td colspan="5" style="height:{win.top}px"></td></tr>{/if}
+            {#each rowsWindow as r (r.key)}
               <tr
                 class="trow"
-                class:sel={preview?.obj.key === r.key}
+                class:sel={selKey === r.key}
                 tabindex="0"
                 onclick={() => (r.kind === 'folder' ? goTo(bucket, r.key) : void openPreview(r.obj))}
                 onkeydown={(e) => { if (e.key === 'Enter') r.kind === 'folder' ? goTo(bucket, r.key) : void openPreview(r.obj); }}
@@ -322,6 +402,7 @@
                 </td>
               </tr>
             {/each}
+            {#if win.bottom}<tr class="tw-spacer" aria-hidden="true"><td colspan="5" style="height:{win.bottom}px"></td></tr>{/if}
           </tbody>
         </table>
         {#if nextToken}
@@ -353,6 +434,15 @@
     <span class="dim">{fmtBytes(dl.received)}{dl.total ? ` / ${fmtBytes(dl.total)}` : ''}</span>
     <button class="btn small" onclick={() => dl?.ctrl.abort()}>Cancel</button>
   </div>
+{/if}
+
+{#if pickDirFor}
+  <FolderPicker
+    title={`Download “${leaf(pickDirFor.key)}” (${fmtBytes(pickDirFor.size)}) to…`}
+    start={lastDir()}
+    onpick={(dir) => pickDirFor && void downloadToDir(pickDirFor, dir)}
+    onclose={() => (pickDirFor = null)}
+  />
 {/if}
 
 {#snippet previewBody()}
@@ -448,6 +538,10 @@
   }
   .trow {
     cursor: pointer;
+  }
+  .tbl .tw-spacer td {
+    padding: 0;
+    border: 0;
   }
   .trow:hover,
   .trow:focus-visible {

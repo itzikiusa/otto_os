@@ -140,7 +140,10 @@
 
   onMount(() => {
     if (auth.isRoot) void usage.loadAll();
+    // Live metric ticks refetch the sparkline only while this page is mounted.
+    const unwatch = usage.watchMetrics();
     return () => {
+      unwatch();
       // Tear down auto-refresh on unmount so we don't poll in the background.
       usage.setAutoRefresh(false);
     };

@@ -14,6 +14,10 @@ import type {
 } from '../api/types';
 import { loadErrorText } from '../loadError';
 
+/** Room messages per request / kept in memory on live appends. */
+const ROOM_PAGE = 200;
+const ROOM_KEEP = 500;
+
 class PersonalAgentsStore {
   agents: PersonalAgent[] = $state([]);
   loadingAgents = $state(false);
@@ -30,8 +34,14 @@ class PersonalAgentsStore {
    *  failed load keeps the last known runs, so it never reads as "no runs yet". */
   runsError: Record<string, string> = $state({});
   rooms: AgentRoomWithMembers[] = $state([]);
-  /** room_id → its messages, oldest first (appended via `after` paging). */
-  messagesByRoom: Record<string, AgentRoomMessage[]> = $state({});
+  /** room_id → its messages, oldest first (appended via `after` paging).
+   *  Raw (replaced wholesale) and capped at ROOM_KEEP on live appends — a busy
+   *  room used to load up to 5,000 messages into deep state (backlog B6 /
+   *  SA-08). Older history pages in on demand via {@link loadOlder}. */
+  messagesByRoom: Record<string, AgentRoomMessage[]> = $state.raw({});
+  /** room_id → the server has messages older than the first one held. */
+  olderByRoom: Record<string, boolean> = $state({});
+  olderLoading: Record<string, boolean> = $state({});
   messagesLoading: Record<string, boolean> = $state({});
   messagesError: Record<string, string> = $state({});
   private messageRequests = new Map<string, number>();
@@ -188,23 +198,36 @@ class PersonalAgentsStore {
     if (this.wsId) await this.loadRooms(this.wsId);
   }
 
-  /** Fetch messages after the cached cursor and append. Pages forward (ULID
-   *  ids are chronological) until a short page, bounded so a huge backlog
-   *  can't wedge the tab. */
+  /** Fetch messages after the cached cursor and append. A room with nothing
+   *  cached opens on its TAIL (newest ROOM_PAGE); after that it pages
+   *  forward (ULID ids are chronological) until a short page, bounded, and
+   *  keeps only the newest ROOM_KEEP in memory. */
   async loadMessages(roomId: string): Promise<void> {
-    const PAGE = 200;
-    const MAX_PAGES = 25;
+    const PAGE = ROOM_PAGE;
+    const MAX_PAGES = 5;
     const request = (this.messageRequests.get(roomId) ?? 0) + 1;
     this.messageRequests.set(roomId, request);
     this.messagesLoading[roomId] = true;
     this.messagesError[roomId] = '';
     let have = this.messagesByRoom[roomId] ?? [];
     try {
+      if (have.length === 0) {
+        const tail = await personalAgentsApi.messagesBefore(roomId, undefined, PAGE);
+        if (this.messageRequests.get(roomId) !== request) return;
+        this.messagesByRoom = { ...this.messagesByRoom, [roomId]: tail };
+        this.olderByRoom[roomId] = tail.length >= PAGE;
+        return;
+      }
       for (let i = 0; i < MAX_PAGES; i++) {
         const after = have.length > 0 ? have[have.length - 1].id : undefined;
         const page = await personalAgentsApi.messages(roomId, after, PAGE);
         if (this.messageRequests.get(roomId) !== request) return;
-        have = [...have, ...page];
+        if (page.length === 0) break;
+        have = have.concat(page);
+        if (have.length > ROOM_KEEP) {
+          have = have.slice(have.length - ROOM_KEEP);
+          this.olderByRoom[roomId] = true;
+        }
         this.messagesByRoom = { ...this.messagesByRoom, [roomId]: have };
         if (page.length < PAGE) break;
       }
@@ -212,6 +235,25 @@ class PersonalAgentsStore {
       if (this.messageRequests.get(roomId) === request) this.messagesError[roomId] = loadErrorText(e);
     } finally {
       if (this.messageRequests.get(roomId) === request) this.messagesLoading[roomId] = false;
+    }
+  }
+
+  /** Page one batch of OLDER history in front of what is held ("Load older"). */
+  async loadOlder(roomId: string): Promise<void> {
+    const have = this.messagesByRoom[roomId] ?? [];
+    if (this.olderLoading[roomId] || have.length === 0) return;
+    this.olderLoading[roomId] = true;
+    try {
+      const page = await personalAgentsApi.messagesBefore(roomId, have[0].id, ROOM_PAGE);
+      const cur = this.messagesByRoom[roomId] ?? [];
+      // A reset/delete in between: don't resurrect the room.
+      if (cur.length === 0 || cur[0].id !== have[0].id) return;
+      this.messagesByRoom = { ...this.messagesByRoom, [roomId]: page.concat(cur) };
+      this.olderByRoom[roomId] = page.length >= ROOM_PAGE;
+    } catch (e) {
+      this.messagesError[roomId] = loadErrorText(e);
+    } finally {
+      this.olderLoading[roomId] = false;
     }
   }
 
@@ -224,11 +266,30 @@ class PersonalAgentsStore {
 
   // -- Live events ----------------------------------------------------------
 
-  /** Live WS tick: refresh the affected agent's runs + schedules (cursors moved). */
+  /** Mounted Personal Agents pages. Run events refetch only while one is. */
+  private viewers = 0;
+
+  /** Register a mounted page; call the returned fn on unmount. */
+  watch(): () => void {
+    this.viewers += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.viewers = Math.max(0, this.viewers - 1);
+    };
+  }
+
+  /** Live WS tick: refresh the affected agent's runs + schedules (cursors
+   *  moved) — only what is cached AND only while a page shows it (SI-10). A
+   *  15-min check agent used to refetch 100 runs + schedules per run event for
+   *  the app's lifetime. Off-page, both reload when the page mounts (the list
+   *  load refreshes schedules; the Runs tab reloads runs). */
   applyRunEvent(ev: Extract<OttoEvent, { type: 'personal_agent_run_updated' }>): void {
     if (this.wsId && ev.workspace_id !== this.wsId) return;
-    void this.loadRuns(ev.agent_id);
-    void this.loadSchedules(ev.agent_id);
+    if (this.viewers === 0) return;
+    if (ev.agent_id in this.runsByAgent) void this.loadRuns(ev.agent_id);
+    if (ev.agent_id in this.schedulesByAgent) void this.loadSchedules(ev.agent_id);
   }
 
   /** Live WS tick: fetch the room's messages after our cursor. */

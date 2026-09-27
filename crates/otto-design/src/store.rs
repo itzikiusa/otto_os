@@ -1560,6 +1560,32 @@ impl Store {
         .map_err(dberr("design.links.refcount"))
     }
 
+    /// [`Self::reference_count`] for many artifacts in ONE grouped query
+    /// (search enrichment: was two sequential queries per hit). Ids with no
+    /// references are absent from the map (→ 0).
+    pub async fn reference_counts(&self, artifact_ids: &[&str]) -> Result<HashMap<Id, i64>> {
+        let mut out = HashMap::new();
+        // Stay well under SQLite's bound-parameter limit.
+        for chunk in artifact_ids.chunks(500) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT dst_id, COUNT(DISTINCT src_artifact_id) FROM design_links \
+                 WHERE dst_kind = 'artifact' AND dst_id IN ({marks}) \
+                   AND src_artifact_id != dst_id GROUP BY dst_id"
+            );
+            let mut q = sqlx::query_as::<_, (String, i64)>(&sql);
+            for id in chunk {
+                q = q.bind(*id);
+            }
+            let rows = q
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("design.links.refcounts"))?;
+            out.extend(rows);
+        }
+        Ok(out)
+    }
+
     /// `"<KEY> <title>"` of a product story, for the search index.
     pub async fn story_label(&self, story_id: &str) -> Result<Option<String>> {
         let row = sqlx::query("SELECT source_key, title FROM product_stories WHERE id = ?")
@@ -1950,6 +1976,40 @@ mod tests {
             s.get_version_by_seq("A", 2).await.unwrap().unwrap().id,
             v2.id
         );
+    }
+
+    #[tokio::test]
+    async fn reference_counts_batch_matches_the_single_count() {
+        let s = store().await;
+        for id in ["A", "B", "C", "D"] {
+            s.insert_artifact(&art(id, "w1")).await.unwrap();
+        }
+        s.insert_link(&link("B", "A", "embeds", "user"))
+            .await
+            .unwrap();
+        s.insert_link(&link("C", "A", "references", "user"))
+            .await
+            .unwrap();
+        // Same source twice counts once; a self-link never counts.
+        s.insert_link(&link("C", "A", "derives_from", "user"))
+            .await
+            .unwrap();
+        s.insert_link(&link("A", "A", "references", "user"))
+            .await
+            .unwrap();
+        s.insert_link(&link("A", "B", "references", "user"))
+            .await
+            .unwrap();
+        let m = s.reference_counts(&["A", "B", "C", "D"]).await.unwrap();
+        for id in ["A", "B", "C", "D"] {
+            assert_eq!(
+                m.get(id).copied().unwrap_or(0),
+                s.reference_count(id).await.unwrap(),
+                "{id}"
+            );
+        }
+        assert_eq!(m.get("A"), Some(&2));
+        assert!(s.reference_counts(&[]).await.unwrap().is_empty());
     }
 
     #[tokio::test]

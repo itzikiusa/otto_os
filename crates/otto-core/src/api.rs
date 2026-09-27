@@ -1465,6 +1465,19 @@ pub struct Hunk {
     pub lines: Vec<DiffLine>,
 }
 
+/// How a file changed — git's `A/D/M/R/C/T` status letters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileChangeStatus {
+    Added,
+    Deleted,
+    Modified,
+    Renamed,
+    Copied,
+    /// File type changed (regular file ↔ symlink ↔ submodule).
+    Typechange,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileDiff {
     /// SHA-256 of the byte-exact file diff; required by hunk mutations.
@@ -1474,24 +1487,41 @@ pub struct FileDiff {
     pub old_path: Option<String>,
     pub is_binary: bool,
     pub hunks: Vec<Hunk>,
-    /// True when the file diff was capped server-side due to size.
+    /// True when the file diff hit the server's per-file cap (rendered text >
+    /// 200 KB or > 5,000 lines): `hunks` is empty, counts are kept.
     #[serde(default)]
     pub too_large: Option<bool>,
-    /// Number of added lines (populated by the diff parser).
+    /// True when `hunks` was left out (summary mode, per-file cap or the
+    /// whole-response budget) — fetch them with `?path=`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hunks_omitted: Option<bool>,
+    /// Number of added lines (populated by the diff parser; `None` for binary).
     #[serde(default)]
     pub added: Option<u32>,
-    /// Number of deleted lines (populated by the diff parser).
+    /// Number of deleted lines (populated by the diff parser; `None` for binary).
     #[serde(default)]
     pub deleted: Option<u32>,
+    /// A/D/M/R/C/T. `None` only where the source can't tell (provider diffs
+    /// without headers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<FileChangeStatus>,
     /// Detected language hint (e.g. "rust", "typescript").
     #[serde(default)]
     pub language: Option<String>,
 }
 
-/// `GET /repos/{id}/diff?target=worktree|staged|commit:<sha>|range:<a>..<b>`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `GET /repos/{id}/diff?target=worktree|staged|commit:<sha>|range:<a>..<b>|range:<a>...<b>`
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DiffResp {
     pub files: Vec<FileDiff>,
+    /// The whole-response budget was hit; later files carry `hunks_omitted`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+    /// Σ `files[].added` / `files[].deleted` (binary files count 0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_added: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_deleted: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1710,6 +1740,11 @@ pub struct PrSummary {
     /// omitted from JSON) everywhere else.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviewer_warnings: Vec<String>,
+    /// The source branch's head commit as the provider reports it (Bitbucket
+    /// abbreviates it). Opaque: clients pass it back as the PR diff's `rev=`
+    /// so a push re-keys the diff memo instead of serving the old diff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
 }
 
 /// One page of `GET /repos/{id}/prs`. `has_more` is the provider's own
@@ -2850,11 +2885,19 @@ pub struct ApiResponse {
     pub headers: Value,
     /// UTF-8 (lossy) body for display, truncated to a display cap when large.
     pub body: String,
-    /// Full response bytes, base64-encoded — used for binary preview (images)
-    /// and "save to disk". Empty when the response is `too_large`.
+    /// Full response bytes, base64-encoded — only for `image/*` bodies up to
+    /// 5 MiB (the inline preview). Empty otherwise: an exact UTF-8 `body` is
+    /// already the whole payload, and anything else is downloaded through
+    /// `body_id`. Empty when the response is `too_large`.
     #[serde(default)]
     pub body_base64: String,
-    /// `body` was cut to the display cap (full bytes still in `body_base64`).
+    /// Handle for `GET /workspaces/{wid}/api-client/responses/{body_id}/raw`
+    /// (the full bytes, for "Save to disk") when neither `body` nor
+    /// `body_base64` carries them — a truncated or non-UTF-8 body. Held in a
+    /// bounded daemon-side cache (10 min, per user); absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_id: Option<String>,
+    /// `body` was cut to the display cap (full bytes via `body_id`).
     #[serde(default)]
     pub truncated: bool,
     /// Body exceeded the inline cap: neither `body` nor `body_base64` is set.

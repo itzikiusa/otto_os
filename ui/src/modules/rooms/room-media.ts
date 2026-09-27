@@ -59,12 +59,14 @@ export function parseMediaEnvelope(v: unknown): MediaEnvelope | null {
     || (d.sdp.match(/^m=/gm)?.length ?? 0) > 8) return null;
   return { version: 1, kind: 'description', description: { type: d.type, sdp: d.sdp }, bindings };
 }
-interface Outgoing { sender: RTCRtpSender; stream: MediaStream; source: RoomPresentation }
+interface VideoSlot { sender: RTCRtpSender; stream: MediaStream }
+interface Outgoing extends VideoSlot { source: RoomPresentation }
 interface Incoming { stream: MediaStream; generation: number }
 interface Peer {
   id: string; generation: number; pc: RTCPeerConnection; makingOffer: boolean; ignoreOffer: boolean; settingAnswer: boolean;
   pendingIce: (RTCIceCandidateInit | null)[]; signals: Promise<void>; pendingSignals: number; bindings: Binding[];
   unbound: Map<string, MediaStream>; outgoing: Map<string, Outgoing>; incoming: Map<string, Incoming>;
+  videoSlots: VideoSlot[]; audioWork: Promise<void>;
   audio: MediaStreamTrack | null; audioStream: MediaStream | null; audioSender: RTCRtpSender | null; mix: MediaStreamAudioDestinationNode | null;
   deadline: ReturnType<typeof setTimeout> | null; demandKey: string; bindingKey: string;
 }
@@ -317,7 +319,7 @@ export class RoomMediaClient {
       const pc = this.env.createPeer(this.rtc);
       const peer: Peer = { id: member.id, generation: member.generation, pc, makingOffer: false, ignoreOffer: false, settingAnswer: false,
         pendingIce: [], signals: Promise.resolve(), pendingSignals: 0, bindings: [], unbound: new Map(), outgoing: new Map(), incoming: new Map(),
-        audio: null, audioStream: null, audioSender: null, mix: null, deadline: null, demandKey: '', bindingKey: '' };
+        videoSlots: [], audioWork: Promise.resolve(), audio: null, audioStream: null, audioSender: null, mix: null, deadline: null, demandKey: '', bindingKey: '' };
       this.peers.set(member.id, peer);
       pc.onicecandidate = e => this.signal(peer, { version: 1, kind: 'ice', candidate: e.candidate?.toJSON() ?? null });
       pc.onnegotiationneeded = async () => {
@@ -363,7 +365,12 @@ export class RoomMediaClient {
       const source = this.source(b.sourceId);
       return source?.generation === b.generation && (!this.isHost || source.member_id === peer.id);
     });
-    if (media.kind === 'bindings') { this.bindIncoming(peer); return; }
+    if (media.kind === 'bindings') {
+      this.bindIncoming(peer);
+      // A reused receiver emits no new ontrack event. Relay its newly bound
+      // source to downstream viewers even when no other room event follows.
+      this.schedule(); return;
+    }
     const pc = peer.pc;
     const collision = media.description.type === 'offer' && (peer.makingOffer || (pc.signalingState !== 'stable' && !peer.settingAnswer));
     peer.ignoreOffer = collision && this.options.memberId < peer.id;
@@ -387,7 +394,10 @@ export class RoomMediaClient {
       if (!source || source.generation !== b.generation || !stream || (this.isHost && source.member_id !== peer.id)) continue;
       peer.incoming.set(source.id, { stream, generation: source.generation });
     }
-    for (const id of peer.unbound.keys()) if (!peer.bindings.some(b => b.streamId === id)) peer.unbound.delete(id);
+    // replaceTrack reuses the receiver without firing ontrack. Keep its bounded
+    // stream association while no source is bound, so a later source ID or
+    // generation can reuse the slot. Only bindings expose it to the UI.
+    for (const [id, stream] of peer.unbound) if (stream.getVideoTracks().every(track => track.readyState === 'ended')) peer.unbound.delete(id);
     this.publishStreams();
   }
   private trackFor(source: RoomPresentation): MediaStreamTrack | undefined {
@@ -410,6 +420,9 @@ export class RoomMediaClient {
   }
   private async reconcile(): Promise<void> {
     const self = this.self(), snapshot = this.snapshot, lifecycle = this.lifecycle;
+    // A snapshot may revoke a source or remove a later target while a sender
+    // operation is pending. update() queues a fresh pass; abandon this one.
+    const stale = () => this.lifecycle !== lifecycle || this.snapshot !== snapshot;
     if (!self?.connected || !snapshot?.host_member_id) return;
     const members = snapshot.members ?? [], sources = snapshot.presentations ?? [];
     const targets = this.isHost ? members.filter(m => m.id !== self.id && m.connected && m.admission === 'admitted')
@@ -428,17 +441,33 @@ export class RoomMediaClient {
         if (key !== peer.demandKey) { peer.demandKey = key; this.signal(peer, { version: 1, kind: 'demand', sourceId: s.id, generation: s.generation, tier }); }
       }
       for (const [id, outgoing] of peer.outgoing) if (!wanted.some(s => s.id === id && s.generation === outgoing.source.generation)) {
-        peer.pc.removeTrack(outgoing.sender); peer.outgoing.delete(id);
+        await outgoing.sender.replaceTrack(null); peer.outgoing.delete(id);
+        if (stale() || this.peers.get(peer.id) !== peer) return;
       }
       for (const source of wanted) {
         const track = this.trackFor(source); if (!track || track.readyState === 'ended') continue;
         const current = peer.outgoing.get(source.id);
         if (current) { if (current.sender.track !== track) await current.sender.replaceTrack(track); }
-        else { const stream = this.env.createStream([track]); peer.outgoing.set(source.id, { source, stream, sender: peer.pc.addTrack(track, stream) }); }
-        if (this.lifecycle !== lifecycle) return;
+        else {
+          // removeTrack/addTrack cannot reliably reuse a previously negotiated
+          // sending transceiver. Reserve at most one slot per possible remote
+          // presentation and replace its track while retaining its SDP stream ID.
+          let slot = peer.videoSlots.find(slot => ![...peer.outgoing.values()].some(v => v.sender === slot.sender));
+          if (slot) await slot.sender.replaceTrack(track);
+          else {
+            if (peer.videoSlots.length >= (this.isHost ? 3 : 1)) continue;
+            const stream = this.env.createStream([track]);
+            slot = {stream, sender: peer.pc.addTrack(track, stream)};
+            peer.videoSlots.push(slot);
+          }
+          // Record an attached track even if its source was revoked during the
+          // await; the fresh pass must be able to find and clear that sender.
+          peer.outgoing.set(source.id, {source, ...slot});
+        }
+        if (stale() || this.peers.get(peer.id) !== peer) return;
       }
       if (wantAudio) await this.setAudio(peer); else this.removeAudio(peer);
-      if (this.lifecycle !== lifecycle) return;
+      if (stale() || this.peers.get(peer.id) !== peer) return;
       const bindings = this.bindings(peer), key = JSON.stringify(bindings);
       if (key !== peer.bindingKey) { peer.bindingKey = key; this.signal(peer, { version: 1, kind: 'bindings', bindings }); }
       if (!wantAudio && !wanted.length && !needIncoming) this.closePeer(peer.id);
@@ -469,7 +498,7 @@ export class RoomMediaClient {
         encoding.maxFramerate = b.maxFramerate || 1; encoding.scaleResolutionDownBy = b.scaleResolutionDownBy;
       }
       await sender.setParameters(parameters);
-      if (this.lifecycle !== lifecycle) return;
+      if (stale() || this.peers.get(peer.id) !== peer) return;
     }
     const own = sources.find(s => s.member_id === self.id), track = this.screen.value?.getVideoTracks()[0];
     if (own && track) {
@@ -490,7 +519,7 @@ export class RoomMediaClient {
         }
       }
     }
-    if (this.lifecycle !== lifecycle) return;
+    if (stale()) return;
     this.publishStreams(); this.appliedAudioEpoch = snapshot.audio_epoch ?? null; this.ackAudio();
   }
   private async setAudio(peer: Peer): Promise<void> {
@@ -498,11 +527,21 @@ export class RoomMediaClient {
     if (this.isHost && this.context) { peer.mix ??= this.context.createMediaStreamDestination(); stream = peer.mix.stream; }
     else if (!this.state.muted) stream = this.mic.value;
     const track = stream?.getAudioTracks()[0] ?? null;
-    if (peer.audioSender) { if (peer.audioSender.track !== track) await peer.audioSender.replaceTrack(track); }
+    if (peer.audioSender) await this.replaceAudio(peer, track);
     else if (track && stream) peer.audioSender = peer.pc.addTrack(track, stream);
   }
+  private replaceAudio(peer: Peer, track: MediaStreamTrack | null): Promise<void> {
+    // leaveAudio is synchronous; serialize its null replacement with an
+    // immediate rejoin so an older stop cannot mute the replacement capture.
+    const sender = peer.audioSender;
+    const update = peer.audioWork.then(async () => {
+      if (this.peers.get(peer.id) === peer && sender && sender.track !== track) await sender.replaceTrack(track);
+    });
+    peer.audioWork = update.catch(() => {});
+    return update;
+  }
   private removeAudio(peer: Peer): void {
-    if (peer.audioSender) { peer.pc.removeTrack(peer.audioSender); peer.audioSender = null; }
+    if (peer.audioSender) void this.replaceAudio(peer, null).catch(() => {});
     if (peer.mix) { for (const t of peer.mix.stream.getTracks()) t.stop(); peer.mix.disconnect(); peer.mix = null; }
   }
   private clearGraph(): void { for (const node of this.graphNodes) node.disconnect(); this.graphNodes = []; }

@@ -234,21 +234,28 @@
     return [...seen.values()];
   });
 
+  // One pass over the cells builds both lookups; a `cells.find` per <td> and a
+  // full scan per row was O(rows × cols × cells) per render (57 ms at 200×5).
+  const cellIndex = $derived.by(() => {
+    const byKey = new Map<string, MatrixCell>();
+    const winners = new Map<string, MatrixCell>();
+    for (const c of selected?.cells ?? []) {
+      const key = `${c.prompt}\u0000${c.provider}\u0000${c.skill}`;
+      if (!byKey.has(key)) byKey.set(key, c); // first match, as `find` did
+      if (c.composite_score == null) continue;
+      const best = winners.get(c.prompt);
+      if (!best || (best.composite_score ?? -Infinity) < c.composite_score) winners.set(c.prompt, c);
+    }
+    return { byKey, winners };
+  });
+
   function cellAt(prompt: string, provider: string, skill: string): MatrixCell | undefined {
-    return selected?.cells.find(
-      (c) => c.prompt === prompt && c.provider === provider && c.skill === skill,
-    );
+    return cellIndex.byKey.get(`${prompt}\u0000${provider}\u0000${skill}`);
   }
 
   // eval_id of the winning (max composite) cell within a prompt row.
   function rowWinnerId(prompt: string): string | null {
-    if (!selected) return null;
-    let best: MatrixCell | null = null;
-    for (const c of selected.cells) {
-      if (c.prompt !== prompt || c.composite_score == null) continue;
-      if (!best || (best.composite_score ?? -Infinity) < c.composite_score) best = c;
-    }
-    return best ? best.eval_id : null;
+    return cellIndex.winners.get(prompt)?.eval_id ?? null;
   }
 
   function proofClass(status: string | undefined): string {

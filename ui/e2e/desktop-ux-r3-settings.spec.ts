@@ -92,7 +92,8 @@ test('Groups preserve unsaved fields when another group is selected', async ({ p
 test('Skills Review and Evaluator list failures recover without starting agents', async ({ page }) => {
  const { ctx, base } = await apiCtx(); await seedWorkspace(ctx, base);
  let fail = true;
- for (const path of ['skill-reviews', 'skill-evaluations']) await page.route(`**/api/v1/workspaces/*/${path}`, r => fail ? r.fulfill({ status: 503, json: { code: 'upstream', message: 'Synthetic history unavailable' } }) : r.fulfill({ json: [] }));
+ // `*` after the path: the Evaluator list reads `?summary=1` pages ({items, next_cursor}).
+ for (const path of ['skill-reviews', 'skill-evaluations']) await page.route(`**/api/v1/workspaces/*/${path}*`, r => fail ? r.fulfill({ status: 503, json: { code: 'upstream', message: 'Synthetic history unavailable' } }) : r.fulfill({ json: new URL(r.request().url()).searchParams.has('summary') ? { items: [], next_cursor: null } : [] }));
  await page.route('**/api/v1/library/provider-skills', r => r.fulfill({ json: [] }));
  for (const tab of ['review', 'evaluator']) {
   fail = true; await page.goto(`/#/skills-eval/${tab}`);

@@ -8,7 +8,8 @@ const admitted: RoomSnapshot = {
   ], messages: [], presentations: [], annotation_grants: [], annotations: [], annotations_enabled: true,
 };
 test('guest admission, driver handoff and chat stay isolated from owner APIs', async ({page}, testInfo) => {
-  const requests: string[] = [], terminalInput: unknown[] = [], actions: Record<string, unknown>[] = [];
+  const requests: string[] = [], shellRequests: string[] = [], terminalInput: unknown[] = [], actions: Record<string, unknown>[] = [];
+  page.on('request', request => { if (new URL(request.url()).pathname === '/src/shell/App.svelte') shellRequests.push(request.url()); });
   let membership: WebSocketRoute | undefined;
   await page.addInitScript(() => { localStorage.setItem('otto_token', 'owner-secret-must-not-travel'); });
   await page.route('**/api/v1/**', async route => {
@@ -34,6 +35,7 @@ test('guest admission, driver handoff and chat stay isolated from owner APIs', a
   await expect(page.getByRole('heading', {name: 'Join this session'})).toBeVisible();
   await expect(page).toHaveURL(/#\/room\/demo$/);
   expect(requests).toEqual([]);
+  expect(shellRequests, 'A remote guest must not bootstrap the owner shell').toEqual([]);
   await page.getByLabel('Your display name').fill('Alex');
   await page.getByRole('button', {name: 'Request entry'}).click();
   await expect(page.getByText('Waiting for the host')).toBeVisible();
@@ -154,4 +156,29 @@ test('four real browser media clients negotiate synthetic audio and screen forwa
     await testInfo.attach('media-topology', {body: await page.evaluate(() => JSON.stringify((window as unknown as {mediaSmoke: {summary(): unknown}}).mediaSmoke.summary())), contentType: 'application/json'});
     await page.evaluate(() => (window as unknown as {mediaSmoke: {stop(): void}}).mediaSmoke.stop());
   }
+});
+
+
+test('read-only room terminal applies backpressure and resumes after parsing a large snapshot', async ({page}) => {
+  const frames: {type: string}[] = [];
+  let terminal: WebSocketRoute | undefined;
+  await page.route('**/api/v1/room-join', route => route.fulfill({json: {room_id: 'demo', member_id: 'guest', token: 'guest-token'}}));
+  await page.routeWebSocket('**/ws/rooms/demo', ws => {
+    ws.send(JSON.stringify({type: 'snapshot', room: admitted}));
+    ws.onMessage(raw => { if (JSON.parse(String(raw)).type === 'heartbeat') ws.send(JSON.stringify({type: 'heartbeat'})); });
+  });
+  await page.routeWebSocket('**/ws/rooms/demo/terminal', ws => {
+    terminal = ws;
+    ws.onMessage(raw => frames.push(JSON.parse(String(raw))));
+  });
+  await page.goto('/#/room/demo/invite_1234567890');
+  await page.getByLabel('Your display name').fill('Alex');
+  await page.getByRole('button', {name: 'Request entry'}).click();
+  await expect(page.getByText(/Maya controls the terminal/)).toBeVisible();
+  await expect.poll(() => frames.some(frame => frame.type === 'scrollback')).toBeTruthy();
+  // One snapshot above xterm's high watermark deterministically exercises the
+  // actual Terminal → room transport path, even on a fast renderer.
+  terminal!.send(JSON.stringify({type: 'scrollback', data: Buffer.from('x'.repeat(2 * 1024 * 1024 + 1)).toString('base64'), cols: 80, rows: 24, epoch: 1}));
+  await expect.poll(() => frames.filter(frame => ['pause', 'resume'].includes(frame.type)).map(frame => frame.type)).toEqual(['pause', 'resume']);
+  expect(frames.some(frame => ['input', 'resize', 'claim'].includes(frame.type))).toBeFalsy();
 });

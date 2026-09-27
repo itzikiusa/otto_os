@@ -3,6 +3,7 @@
   // before/after diff vs the current source version, and allow publishing
   // back to Jira/Confluence.
   import { product } from '../../lib/stores/product.svelte';
+  import { pollWhileVisible, type Poller } from '../../lib/poll';
   import { toasts } from '../../lib/toast.svelte';
   import { renderMarkdown } from '../../lib/md';
   import DiffView from '../../lib/components/DiffView.svelte';
@@ -32,7 +33,9 @@
   let diffView = $state<'split' | 'source' | 'suggested'>('split');
 
   // ── Polling ──────────────────────────────────────────────────────────────────
-  let pollTimer = $state<ReturnType<typeof setInterval> | null>(null);
+  // Shared poll helper (lib/poll.ts): paused while hidden, never stacked,
+  // aborted on stop. `pollTimer !== null` still means "polling" to the UI.
+  let pollTimer = $state.raw<Poller | null>(null);
   const POLL_INTERVAL_MS = 3000;
   const POLL_MAX_MS = 120_000;
   let pollStartedAt = 0;
@@ -41,7 +44,7 @@
 
   function clearPoll(): void {
     if (pollTimer !== null) {
-      clearInterval(pollTimer);
+      pollTimer.stop();
       pollTimer = null;
     }
   }
@@ -70,8 +73,8 @@
     versionsCountAtStart = product.versions.length;
     pollStartedAt = Date.now();
     // Immediate first poll, then interval.
-    void pollVersions();
-    pollTimer = setInterval(() => { void pollVersions(); }, POLL_INTERVAL_MS);
+    // Immediate first poll, then every POLL_INTERVAL_MS after each settles.
+    pollTimer = pollWhileVisible(() => pollVersions(), { ms: POLL_INTERVAL_MS, jitter: 0 });
   }
 
   // Clear on unmount or story change.

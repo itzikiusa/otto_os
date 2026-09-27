@@ -250,6 +250,39 @@ async fn mysql_batch_partial_on_error() {
     );
 }
 
+/// The governed (access-enforced, read-only transaction) path keeps the same
+/// partial-batch contract: completed results + an `errored` terminal entry.
+#[tokio::test]
+#[ignore]
+async fn mysql_governed_batch_partial_on_error() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+
+    let mut c = cfg();
+    c.params = json!({ "__read_only_execution": true });
+    let d = MysqlDriver::default();
+    let res = d
+        .run(
+            &c,
+            &query("SELECT 1 AS a; SELECT * FROM no_such_table_xyz; SELECT 3"),
+        )
+        .await
+        .expect("governed batch returns Ok with a partial result, not Err");
+    assert_eq!(res.rows[0][0].as_i64(), Some(1));
+    assert_eq!(
+        res.more_results.len(),
+        1,
+        "stopped at the failing statement"
+    );
+    assert!(res.more_results[0].errored, "second entry flagged errored");
+    // A single failing statement is still the request's error.
+    assert!(d
+        .run(&c, &query("SELECT * FROM no_such_table_xyz"))
+        .await
+        .is_err());
+}
+
 /// After `FROM`, completion offers the tables (orders, customers) ranked above
 /// keywords.
 #[tokio::test]
@@ -549,4 +582,69 @@ async fn mysql_query_plan_flags_full_scan() {
         "expected a full-table-scan warning; root: {:?}",
         plan.root
     );
+}
+
+/// SH-02: text that merely LOOKS like JSON stays the string it is — only the
+/// native JSON type is parsed. (sqlx's JSON type accepts every text column, so
+/// the old per-cell cascade returned `'null'` as NULL, `'123'` as a number, and
+/// a 30-digit id as a lossy float.)
+#[tokio::test]
+#[ignore]
+async fn mysql_text_that_looks_like_json_stays_text() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let d = MysqlDriver::default();
+    let cfg = cfg();
+    let stmt = "SELECT v, CAST(v AS JSON) AS j FROM (\
+        SELECT CAST('null' AS CHAR) AS v UNION ALL SELECT '123' UNION ALL SELECT 'true' \
+        UNION ALL SELECT '[1,2]' UNION ALL SELECT '{\"a\":1}' UNION ALL SELECT '1e5' \
+        UNION ALL SELECT '123456789012345678901234567890') t";
+    let res = d.run(&cfg, &query(stmt)).await.expect("run");
+    let texts: Vec<_> = res.rows.iter().map(|r| r[0].clone()).collect();
+    assert_eq!(
+        texts,
+        vec![
+            json!("null"),
+            json!("123"),
+            json!("true"),
+            json!("[1,2]"),
+            json!("{\"a\":1}"),
+            json!("1e5"),
+            json!("123456789012345678901234567890"),
+        ]
+    );
+    // The native JSON column still decodes to JSON values.
+    assert_eq!(res.rows[0][1], json!(null));
+    assert_eq!(res.rows[1][1], json!(123));
+    assert_eq!(res.rows[3][1], json!([1, 2]));
+}
+
+/// SH-06: a read the auto-LIMIT can't touch (UNION) stops pulling at the cap
+/// instead of draining the whole server result, and the pool stays usable.
+#[tokio::test]
+#[ignore]
+async fn mysql_uncapped_read_stops_at_the_row_cap() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let d = MysqlDriver::default();
+    let cfg = cfg();
+    // A cross join of the catalog: far more rows than the cap, and the UNION
+    // keeps the auto-LIMIT injector away.
+    let stmt = "SELECT 1 AS n UNION ALL SELECT a.ORDINAL_POSITION \
+        FROM information_schema.columns a CROSS JOIN information_schema.columns b";
+    let req = QueryRequest {
+        statement: stmt.into(),
+        max_rows: Some(100),
+        ..Default::default()
+    };
+    let started = std::time::Instant::now();
+    let res = d.run(&cfg, &req).await.expect("run");
+    assert_eq!(res.rows.len(), 100);
+    assert!(res.truncated);
+    eprintln!("capped UNION in {:?}", started.elapsed());
+    // The next query on the pool is unaffected by the abandoned result.
+    let next = d.run(&cfg, &query("SELECT 7")).await.expect("next run");
+    assert_eq!(next.rows[0][0], json!(7));
 }

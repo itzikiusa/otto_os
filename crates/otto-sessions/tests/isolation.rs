@@ -340,6 +340,73 @@ async fn list_is_owner_scoped_for_non_admin() {
     }
 }
 
+/// `GET /sessions` (#17b): one call answers every workspace the caller belongs
+/// to, owner-scoped per workspace exactly like #17, live rows only by default,
+/// and never a workspace the caller is not a member of.
+#[tokio::test]
+async fn cross_workspace_list_is_owner_scoped_per_workspace() {
+    let pool = mem_pool().await;
+    seed_user(&pool, "alice", false).await;
+    seed_user(&pool, "bob", false).await;
+    seed_workspace(&pool, "ws1").await;
+    seed_workspace(&pool, "ws2").await;
+    seed_workspace(&pool, "ws3").await;
+    set_member(&pool, "ws1", "alice", "editor").await; // own rows only
+    set_member(&pool, "ws1", "bob", "editor").await;
+    set_member(&pool, "ws2", "alice", "admin").await; // every row
+    set_member(&pool, "ws2", "bob", "editor").await;
+    set_member(&pool, "ws3", "bob", "editor").await; // alice is not a member
+
+    let repo = SessionsRepo::new(pool.clone());
+    let a1 = insert_session(&repo, "ws1", "alice").await;
+    let _b1 = insert_session(&repo, "ws1", "bob").await;
+    let a2 = insert_session(&repo, "ws2", "alice").await;
+    let b2 = insert_session(&repo, "ws2", "bob").await;
+    let _b3 = insert_session(&repo, "ws3", "bob").await;
+    let archived = insert_session(&repo, "ws2", "alice").await;
+    repo.set_archived(&archived, true).await.unwrap();
+    let app = app(&pool).await;
+
+    let get = |uri: &'static str, caller: User| {
+        let app = app.clone();
+        async move {
+            let mut req = Request::builder()
+                .method(Method::GET)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut().insert(AuthUser(caller));
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = http_body_util::BodyExt::collect(resp.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
+            let rows: Vec<Session> = serde_json::from_slice(&body).unwrap();
+            let mut ids: Vec<String> = rows.into_iter().map(|s| s.id).collect();
+            ids.sort();
+            ids
+        }
+    };
+    let mut want = vec![a1.clone(), a2.clone(), b2.clone()];
+    want.sort();
+    assert_eq!(
+        get("/sessions", user("alice", false)).await,
+        want,
+        "live rows, owner-scoped per workspace"
+    );
+    assert_eq!(
+        get("/sessions?archived=true", user("alice", false)).await,
+        vec![archived.clone()]
+    );
+    assert_eq!(
+        get("/sessions?status=exited", user("alice", false)).await,
+        Vec::<String>::new()
+    );
+    // Root sees every live row in every workspace.
+    assert_eq!(get("/sessions", user("root", true)).await.len(), 5);
+}
+
 /// GET the workspace session list as `caller`, returning the deserialized rows.
 async fn list_sessions(app: &Router, caller: &User, ws: &str) -> Vec<Session> {
     let mut req = Request::builder()

@@ -21,6 +21,21 @@ impl RoomAuthorityMap {
     pub fn entry(&self, session: &Id) -> Arc<Mutex<AuthorityState>> {
         self.0.entry(session.clone()).or_default().clone()
     }
+
+    /// The shard lock serializes this check with entry().clone(). A queued
+    /// mutex waiter pins the state Arc; a queued PTY write independently pins
+    /// its epoch Arc. Neither may survive removal and acquire a fresh epoch.
+    pub fn prune_idle(&self, session: &Id) {
+        self.0.remove_if(session, |_, state| {
+            if Arc::strong_count(state) != 1 {
+                return false;
+            }
+            let Ok(state) = state.try_lock() else {
+                return false;
+            };
+            state.room.is_none() && Arc::strong_count(&state.writer_epoch) == 1
+        });
+    }
 }
 
 #[derive(Default)]
@@ -178,6 +193,57 @@ mod tests {
         let mut state = AuthorityState::default();
         state.begin("room", &Id::from("owner"), "host", 7).unwrap();
         state
+    }
+
+    #[tokio::test]
+    async fn idle_cleanup_preserves_active_rooms_and_cloned_lock_waiters() {
+        let map = RoomAuthorityMap::default();
+        let id = Id::from("session");
+        let waiting = map.entry(&id);
+        let held = waiting.clone().lock_owned().await;
+        map.prune_idle(&id);
+        assert!(Arc::ptr_eq(&waiting, &map.entry(&id)));
+        drop(held);
+        map.prune_idle(&id);
+        assert!(
+            Arc::ptr_eq(&waiting, &map.entry(&id)),
+            "an acquired Arc may lock later"
+        );
+        waiting
+            .lock()
+            .await
+            .begin("room", &Id::from("owner"), "host", 7)
+            .unwrap();
+        drop(waiting);
+        map.prune_idle(&id);
+        assert!(
+            map.0.contains_key(&id),
+            "a live room must retain its authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_cleanup_waits_for_revoked_queued_writer_authorization() {
+        let map = RoomAuthorityMap::default();
+        let id = Id::from("session");
+        let state = map.entry(&id);
+        let mut held = state.lock().await;
+        held.begin("room", &Id::from("owner"), "host", 7).unwrap();
+        let queued = held.authorization();
+        held.end("room");
+        assert_ne!(queued.epoch.load(Ordering::Acquire), queued.expected);
+        drop(held);
+        drop(state);
+        map.prune_idle(&id);
+        assert!(
+            map.0.contains_key(&id),
+            "queued writes must keep their revocation epoch"
+        );
+        assert_ne!(queued.epoch.load(Ordering::Acquire), queued.expected);
+        drop(queued);
+        map.prune_idle(&id);
+        assert!(!map.0.contains_key(&id));
+        assert_eq!(map.entry(&id).lock().await.epoch, 0);
     }
     #[test]
     fn room_authority_only_current_driver_and_process_can_write() {

@@ -8,6 +8,7 @@
   import ProviderIcon, { hasProviderIcon } from '../lib/components/ProviderIcon.svelte';
   import { router } from '../lib/router.svelte';
   import { ui } from '../lib/stores/ui.svelte';
+  import { startMouseDrag } from '../lib/dragCursor';
   import { ws, SCRATCH_WORKSPACE_ID } from '../lib/stores/workspace.svelte';
   import { assistant } from '../lib/stores/assistant.svelte';
   import { auth } from '../lib/stores/auth.svelte';
@@ -221,23 +222,19 @@
 
   // Drag-to-resize the navigator from its right edge (widens the session area).
   let resizing = $state(false);
+  // Overlay cursor + one width write per frame + one localStorage write on
+  // release (lib/dragCursor.ts) — no body.style restyle of the whole app.
   function startResize(e: MouseEvent): void {
-    e.preventDefault();
     resizing = true;
     const startX = e.clientX;
     const startW = ui.railWidth;
-    const onMove = (ev: MouseEvent) => ui.setRailWidth(startW + (ev.clientX - startX));
-    const onUp = () => {
-      resizing = false;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
+    startMouseDrag(e, {
+      onMove: (ev) => ui.setRailWidth(startW + (ev.clientX - startX), false),
+      onEnd: () => {
+        resizing = false;
+        ui.setRailWidth(ui.railWidth);
+      },
+    });
   }
 
   function openSession(id: string): void {

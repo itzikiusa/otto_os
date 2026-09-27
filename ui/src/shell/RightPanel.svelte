@@ -12,6 +12,7 @@
   import CanvasPanel from '../modules/panels/CanvasPanel.svelte';
   import ApiPanel from '../modules/api/ApiPanel.svelte';
   import { ui, type RightTab } from '../lib/stores/ui.svelte';
+  import { startMouseDrag } from '../lib/dragCursor';
   import { ws } from '../lib/stores/workspace.svelte';
   import { getToken } from '../lib/api/client';
   import { toasts } from '../lib/toast.svelte';
@@ -29,23 +30,19 @@
   // Drag-to-resize: the panel is anchored right, so dragging the left edge
   // leftwards (smaller clientX) widens it.
   let resizing = $state(false);
+  // Overlay cursor + one width write per frame + one localStorage write on
+  // release (lib/dragCursor.ts) — no body.style restyle of the whole app.
   function startResize(e: MouseEvent): void {
-    e.preventDefault();
     resizing = true;
     const startX = e.clientX;
     const startW = ui.rightWidth;
-    const onMove = (ev: MouseEvent) => ui.setRightWidth(startW + (startX - ev.clientX));
-    const onUp = () => {
-      resizing = false;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
+    startMouseDrag(e, {
+      onMove: (ev) => ui.setRightWidth(startW + (startX - ev.clientX), false),
+      onEnd: () => {
+        resizing = false;
+        ui.setRightWidth(ui.rightWidth);
+      },
+    });
   }
 
   // A narrow panel can't fit all nine labels. The row used to scroll, so the

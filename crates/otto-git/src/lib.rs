@@ -2,6 +2,9 @@
 //! provider clients (GitHub / Bitbucket Cloud / GitLab) plus the axum router
 //! implementing contract endpoints #31–#56.
 
+mod diff_cache;
+#[cfg(test)]
+mod diff_tests;
 pub mod history;
 pub mod http;
 pub mod local;
@@ -15,6 +18,6 @@ pub mod types;
 mod worktree_probe;
 
 pub use http::{router, GitCtx};
-pub use local::{clone_repo, DiffTarget, LocalGit, ResolvedBase};
+pub use local::{clone_repo, DiffOpts, DiffTarget, LocalGit, ResolvedBase};
 pub use providers::{detect, make_provider, GitProvider, RemoteRef};
 pub use types::CiStatus;

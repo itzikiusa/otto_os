@@ -298,7 +298,7 @@ pub async fn run_swarm_agent(
             SWARM_RUN_TIMEOUT,
             WAITING_IDLE,
             SWARM_STUCK_IDLE,
-            transcript_ok,
+            Some(transcript_ok),
             move |st| {
                 let rid = cb_run_id.clone();
                 async move {

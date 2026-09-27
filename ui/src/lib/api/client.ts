@@ -136,7 +136,56 @@ async function request<T>(
   return text.trim() === '' ? undefined as T : JSON.parse(text) as T;
 }
 
+// Background-request lane. The webview reaches the daemon over HTTP/1.1 and
+// WebKit opens at most 6 connections per host, shared by every fetch in this
+// window. Pollers opt in via `api.bg.get`: at most BG_MAX of them are on the
+// wire at once, so at least 3 sockets always stay free for what the user just
+// clicked. Interactive calls (`api.get` & co.) never wait on this lane. It is
+// per-window JS state — the tray/side-pane windows each get their own lane.
+const BG_MAX = 3;
+let bgActive = 0;
+const bgWaiters: (() => void)[] = [];
+
+function abortError(): DOMException {
+  return new DOMException('The operation was aborted.', 'AbortError');
+}
+
+async function withBgSlot<T>(run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal?.aborted) throw abortError();
+  if (bgActive < BG_MAX) {
+    bgActive += 1;
+  } else {
+    // Wait for a finishing request to hand its slot over (no re-count, so a
+    // newcomer can never slip in between the release and this resume).
+    await new Promise<void>((resolve, reject) => {
+      const go = (): void => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      };
+      const onAbort = (): void => {
+        const i = bgWaiters.indexOf(go);
+        if (i >= 0) bgWaiters.splice(i, 1);
+        reject(abortError());
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      bgWaiters.push(go);
+    });
+  }
+  try {
+    return await run();
+  } finally {
+    const next = bgWaiters.shift();
+    if (next) next();
+    else bgActive -= 1;
+  }
+}
+
 export const api = {
+  /** Background (poll) lane — see {@link withBgSlot}. GET only: pollers read. */
+  bg: {
+    get: <T>(path: string, signal?: AbortSignal) =>
+      withBgSlot(() => request<T>('GET', path, undefined, signal), signal),
+  },
   get: <T>(path: string, signal?: AbortSignal) => request<T>('GET', path, undefined, signal),
   post: <T>(path: string, body?: unknown, signal?: AbortSignal) =>
     request<T>('POST', path, body, signal),

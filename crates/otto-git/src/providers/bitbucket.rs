@@ -271,6 +271,7 @@ fn summary_from(v: &Value) -> PrSummary {
         ci_status: None,
         labels: vec![],
         reviewer_warnings: Vec::new(),
+        head_sha: super::vstr_opt(v, &["source", "commit", "hash"]),
     }
 }
 

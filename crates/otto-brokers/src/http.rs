@@ -424,10 +424,15 @@ async fn consume<S: BrokersCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path((id, topic)): Path<(Id, String)>,
-    Json(req): Json<ConsumeReq>,
+    Json(body): Json<ConsumeHttpReq>,
 ) -> ApiResult<Response> {
     authorize(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
-    Ok(Json(ctx.brokers().consume(&id, &topic, &req).await?).into_response())
+    Ok(Json(
+        ctx.brokers()
+            .consume_with(&id, &topic, &body.req, &body.opts)
+            .await?,
+    )
+    .into_response())
 }
 
 async fn produce<S: BrokersCtx>(

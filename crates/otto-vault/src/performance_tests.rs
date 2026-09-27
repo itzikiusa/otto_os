@@ -701,3 +701,46 @@ fn held_file_stat_timestamp_matches_standard_metadata_precision() {
         "held-fd index signature must retain subsecond precision"
     );
 }
+
+#[tokio::test]
+async fn backlink_context_is_cached_per_source_hash() {
+    let (e, dir, id) = fixture().await;
+    let first = e.backlinks("ws", id, "b.md").await.unwrap();
+    assert_eq!(first.len(), 1);
+    let ctx0 = first[0].context.clone();
+    assert!(!ctx0.is_empty());
+    // Same indexed hash → served from the cache, even if the file is not
+    // re-read (prove it by making the file unreadable as text meanwhile).
+    std::fs::write(dir.path().join("a.md"), [0xff_u8, 0xfe]).unwrap();
+    let cached = e.backlinks("ws", id, "b.md").await.unwrap();
+    assert_eq!(cached[0].context, ctx0);
+    // A save moves the hash → the context is recomputed from the new body.
+    e.write_note("ws", id, "a.md", "# A\nsee [[b]] here", None)
+        .await
+        .unwrap();
+    let fresh = e.backlinks("ws", id, "b.md").await.unwrap();
+    assert_eq!(fresh[0].context, "see [[b]] here");
+}
+
+#[tokio::test]
+async fn quiet_rescan_writes_no_scan_state() {
+    let (e, dir, id) = fixture().await;
+    let before = e.store.get_vault(id).await.unwrap();
+    assert_eq!(before.scan_state, "idle");
+    // Mark the row so a write would be visible.
+    sqlx::query("UPDATE vaults SET scan_state = 'marker' WHERE id = ?")
+        .bind(id)
+        .execute(e.store.pool())
+        .await
+        .unwrap();
+    e.scan(id).await.unwrap();
+    assert_eq!(
+        e.store.get_vault(id).await.unwrap().scan_state,
+        "marker",
+        "a no-op rescan must not touch scan_state"
+    );
+    // A scan that changes the index does write `idle` again.
+    std::fs::write(dir.path().join("c.md"), "# C").unwrap();
+    e.scan(id).await.unwrap();
+    assert_eq!(e.store.get_vault(id).await.unwrap().scan_state, "idle");
+}

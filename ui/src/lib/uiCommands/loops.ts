@@ -8,6 +8,7 @@
 import { registerUiCommands, registerUiState, UiCommandError, type UiCommandCtx } from '../uiCommands';
 import { router } from '../router.svelte';
 import { loops } from '../stores/loops.svelte';
+import { mapLimit } from '../poll';
 import { ws } from '../stores/workspace.svelte';
 import { confirmer } from '../confirm.svelte';
 import { toasts } from '../toast.svelte';
@@ -65,10 +66,17 @@ registerUiCommands('loops', {
   async loops_open(args: { loop: string }, ctx) {
     await openLoop(args.loop, ctx);
     const d = loops.detail!;
+    // The store holds the SUMMARY detail (older iterations' plans blank):
+    // read the last 10 in full, 3 at a time.
+    const last = d.iterations.slice(-10);
+    const newest = last[last.length - 1]?.idx;
+    const full = await mapLimit(last, 3, (it) =>
+      it.idx === newest ? Promise.resolve(it) : loops.loadIteration(d.loop.id, it, ctx.signal).catch(() => it),
+    );
     return {
       loop: summary(d.loop),
       definition: d.loop.definition,
-      iterations: d.iterations.slice(-10).map((it) => ({
+      iterations: full.map((it) => ({
         idx: it.idx,
         status: it.status,
         plan: it.plan.slice(0, 2000),

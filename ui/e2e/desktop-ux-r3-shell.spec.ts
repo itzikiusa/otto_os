@@ -189,7 +189,8 @@ for (const scheme of ['light', 'dark']) {
     await page.addInitScript(scheme => localStorage.setItem('otto_scheme', scheme), scheme);
     await page.route('**/api/v1/workspaces', route => route.fulfill({ json: [{ id: workspaceId, name: 'Release workspace', role: 'owner' }] }));
     let fail = true;
-    await page.route('**/api/v1/workspaces/*/sessions', route => route.fulfill(fail ? { status: 502, json: { code: 'upstream', message: 'Sessions temporarily unavailable' } } : { json: [] }));
+    // The tray reads every workspace's working sessions in ONE cross-workspace call.
+    await page.route(url => url.pathname === '/api/v1/sessions', route => route.fulfill(fail ? { status: 502, json: { code: 'upstream', message: 'Sessions temporarily unavailable' } } : { json: [] }));
     await page.route('**/api/v1/mcp/approvals?*', route => route.fulfill({ json: [] }));
     await page.route('**/api/v1/notifications', route => route.fulfill({ json: [] }));
     await page.goto('/#/tray');
@@ -245,7 +246,7 @@ test('tray long approval list stays scrollable and opens its review destination'
   await page.setViewportSize({ width: 360, height: 520 });
   await page.addInitScript(() => { localStorage.setItem('otto_theme', 'warm'); localStorage.setItem('otto_scheme', 'dark'); });
   await page.route('**/api/v1/workspaces', route => route.fulfill({ json: [{ id: workspaceId, name: 'Release workspace', role: 'owner' }] }));
-  await page.route('**/api/v1/workspaces/*/sessions', route => route.fulfill({ json: [] }));
+  await page.route(url => url.pathname === '/api/v1/sessions', route => route.fulfill({ json: [] }));
   await page.route('**/api/v1/mcp/approvals?*', route => route.fulfill({ json: Array.from({ length: 16 }, (_, i) => ({ id: `approval-${i}`, title: `Review release package ${i + 1} before publishing its generated documentation`, server_name: 'Release tools' })) }));
   await page.route('**/api/v1/notifications', route => route.fulfill({ json: [] }));
   await page.goto('/#/tray');

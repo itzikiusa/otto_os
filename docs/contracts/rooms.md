@@ -143,7 +143,12 @@ annotations before dispatch.
 Terminal `input.data` uses **base64** (the existing terminal protocol), with a
 32 KiB decoded input limit. Read-only `{type:"scrollback",lines?:number}` and
 `{type:"snapshot"}` are supported, at1/second burst2; history is capped at10,000
-lines. Other terminal frames, including binary input, are rejected. Input
+lines. All admitted viewers may send `{type:"pause"}` and `{type:"resume"}`
+without a driver grant. Pause stops output to that terminal socket only; it
+does not stop the PTY or change driver authority. Resume sends one full
+scrollback snapshot if output was skipped, otherwise streaming simply continues.
+A repeated pause renews the two-second auto-resume deadline. Other terminal
+frames, including binary input, are rejected. Input
 already in an OS write cannot be retracted: the writer checks revocation before
 each subsequent bounded256-byte write attempt. This does not undo commands
 already delivered to the process.

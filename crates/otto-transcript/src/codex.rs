@@ -119,6 +119,16 @@ impl<'a> CodexFolder<'a> {
         Self::with_tokens(self.st.clone()).f.finish(self.count)
     }
 
+    /// `snapshot().turns_since(since)` without cloning the untouched turns
+    /// (token totals only feed `stats`, never a turn).
+    pub fn turns_since(&self, since: usize) -> Vec<Turn> {
+        self.st.f.turns_since(since)
+    }
+
+    pub fn artifacts(&self) -> &[Artifact] {
+        self.st.f.artifacts()
+    }
+
     pub fn into_folded(self) -> Folded {
         Self::with_tokens(self.st).f.finish(self.count)
     }

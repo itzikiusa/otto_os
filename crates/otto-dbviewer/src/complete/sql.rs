@@ -556,25 +556,35 @@ pub fn current_statement(prefix: &str) -> &str {
 
 /// The substring after the last top-level `;` (string/comment aware).
 fn last_statement(s: &str) -> &str {
-    let idx = top_level_semis(s).last().copied();
-    match idx {
+    let mut last = None;
+    scan_top_level_semis(s, |j| {
+        last = Some(j);
+        true
+    });
+    match last {
         Some(j) => &s[j + 1..],
         None => s,
     }
 }
 
-/// The substring up to the first top-level `;`.
+/// The substring up to the first top-level `;`. Stops scanning there — the
+/// suffix can be the rest of a large buffer.
 fn first_statement(s: &str) -> &str {
-    match top_level_semis(s).first().copied() {
+    let mut first = None;
+    scan_top_level_semis(s, |j| {
+        first = Some(j);
+        false
+    });
+    match first {
         Some(j) => &s[..j],
         None => s,
     }
 }
 
-/// Byte indices of `;` that are not inside a string/comment.
-fn top_level_semis(s: &str) -> Vec<usize> {
+/// Calls `on_semi` with the byte index of each `;` that is not inside a
+/// string/comment, in order, until it returns `false`.
+fn scan_top_level_semis(s: &str, mut on_semi: impl FnMut(usize) -> bool) {
     let b = s.as_bytes();
-    let mut out = Vec::new();
     let mut i = 0;
     while i < b.len() {
         let c = b[i] as char;
@@ -595,13 +605,12 @@ fn top_level_semis(s: &str) -> Vec<usize> {
         } else if c == '`' {
             i = skip_quoted(b, i, b'`', false);
         } else {
-            if c == ';' {
-                out.push(i);
+            if c == ';' && !on_semi(i) {
+                return;
             }
             i += 1;
         }
     }
-    out
 }
 
 #[cfg(test)]

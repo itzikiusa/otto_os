@@ -160,7 +160,7 @@
     const wsId = spaceWorkspace;
     if (!wsId) return;
     const [sessions, repos] = await Promise.all([
-      api.get<Session[]>(`/workspaces/${wsId}/sessions`).catch(() => [] as Session[]),
+      api.get<Session[]>(`/workspaces/${wsId}/sessions?archived=false`).catch(() => [] as Session[]),
       api.get<Repo[]>(`/workspaces/${wsId}/repos`).catch(() => [] as Repo[]),
     ]);
     windowCommands = [
@@ -253,6 +253,10 @@
     if (thread.length > 0) return 'thread';
     return inApp && rows.length > 0 ? 'recent' : null;
   });
+  // NB: short-circuiting this (and the clamp effect above) while the bar is
+  // closed left the ranking serving a stale command list on open (⌘K "go to
+  // vault" lost every Go-to entry, desktop-floating-bar e2e) — the closed-bar
+  // ranking cost is cut at the source instead (registry churn, frecency memo).
   const showPanel = $derived(view !== null && (inApp ? open : true));
   const listOpen = $derived(showPanel && (view === 'results' || view === 'recent'));
   const activeId = $derived(listOpen && selected >= 0 ? `fb-opt-${selected}` : undefined);
@@ -463,13 +467,14 @@
   });
 
   // Toasts sit bottom-right over the same column: while the pill floats
-  // there, lift the stack above it (--toast-lift, read by Toasts.svelte).
-  // While the panel (⌘K results / a reply) is open, the stack goes above the
-  // whole surface — a toast used to sit on top of the panel's right edge.
+  // there, lift the stack above it (barStore.toastLift → `--toast-lift` on the
+  // toast stack only). While the panel (⌘K results / a reply) is open, the
+  // stack goes above the whole surface — a toast used to sit on top of the
+  // panel's right edge. Never on <html>: an inherited custom property there
+  // restyles the whole document (0.4–0.8 s on a 100k-line diff) per change.
   $effect(() => {
     if (!inApp) return;
     const base = presence === 'full' ? PILL_H + 12 : presence === 'rest' ? 36 + 12 : 0;
-    const root = document.documentElement;
     const apply = () => {
       let lift = base;
       const surface = showPanel ? rootEl?.querySelector<HTMLElement>('.surface') : null;
@@ -477,21 +482,26 @@
         // Toasts sit at bottom: 38px + lift; keep 12px clear of the surface top.
         lift = Math.max(base, Math.round(window.innerHeight - surface.getBoundingClientRect().top - 26));
       }
-      root.style.setProperty('--toast-lift', `${lift}px`);
+      barStore.setToastLift(lift);
     };
     apply();
     let ro: ResizeObserver | null = null;
+    let raf = 0;
     if (showPanel) {
       void tick().then(apply);
       const surface = rootEl?.querySelector<HTMLElement>('.surface');
       if (surface) {
-        ro = new ResizeObserver(apply);
+        // One measure per frame however many resize notifications land.
+        ro = new ResizeObserver(() => {
+          if (!raf) raf = requestAnimationFrame(() => ((raf = 0), apply()));
+        });
         ro.observe(surface);
       }
     }
     return () => {
       ro?.disconnect();
-      root.style.removeProperty('--toast-lift');
+      if (raf) cancelAnimationFrame(raf);
+      barStore.setToastLift(0);
     };
   });
 
@@ -563,26 +573,42 @@
         offHidden?.();
       };
     }
-    let scrollTimer: ReturnType<typeof setTimeout> | null = null;
-    const onScroll = (e: Event): void => {
-      const t = e.target as Node | null;
-      if (t && rootEl?.contains(t)) return;
-      scrolling = true;
-      if (scrollTimer) clearTimeout(scrollTimer);
-      scrollTimer = setTimeout(() => (scrolling = false), SCROLL_SETTLE_MS);
-    };
     const onFocusChange = (): void => {
       workFocus = isWorkTarget(document.activeElement);
     };
     const onFocusOut = (): void => queueMicrotask(onFocusChange);
-    document.addEventListener('scroll', onScroll, { capture: true, passive: true });
     document.addEventListener('focusin', onFocusChange);
     document.addEventListener('focusout', onFocusOut);
     return () => {
-      if (scrollTimer) clearTimeout(scrollTimer);
-      document.removeEventListener('scroll', onScroll, { capture: true });
       document.removeEventListener('focusin', onFocusChange);
       document.removeEventListener('focusout', onFocusOut);
+    };
+  });
+
+  // `scrolling` only moves the pill in auto mode on Home (barPresence), so the
+  // app-wide capture scroll listener exists only there — not on every scroll
+  // of a diff, grid, editor or terminal elsewhere.
+  const watchScroll = $derived(inApp && barStore.pref === 'auto' && router.module === 'home');
+  $effect(() => {
+    if (!watchScroll) return;
+    let scrollTimer: ReturnType<typeof setTimeout> | null = null;
+    let armedAt = 0;
+    const onScroll = (e: Event): void => {
+      const t = e.target as Node | null;
+      if (t && rootEl?.contains(t)) return;
+      scrolling = true;
+      // Re-arm the settle timer at most every 100 ms of continuous scrolling.
+      const now = performance.now();
+      if (scrollTimer && now - armedAt < 100) return;
+      armedAt = now;
+      if (scrollTimer) clearTimeout(scrollTimer);
+      scrollTimer = setTimeout(() => ((scrollTimer = null), (scrolling = false)), SCROLL_SETTLE_MS);
+    };
+    document.addEventListener('scroll', onScroll, { capture: true, passive: true });
+    return () => {
+      if (scrollTimer) clearTimeout(scrollTimer);
+      document.removeEventListener('scroll', onScroll, { capture: true });
+      scrolling = false;
     };
   });
 

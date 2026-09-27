@@ -9,6 +9,7 @@
 //! | [`cli`] | kubectl runner: base flags (§4.1), timeouts, `forbidden` → 403, `not installed` |
 //! | [`install`] | locate ladder + background installers for `kubectl` / `k9s` |
 //! | [`clusters`] | registry CRUD, kubeconfig discovery / import, test, capability probe |
+//! | [`eks_token`] | EKS exec-plugin token cache (0600 kubeconfig overlay until expiry) |
 //! | [`resources`] | `get -o json` → `K8sRow` per kind (pods health rules, Argo extras, secret redaction, metrics merge) |
 //! | [`logs`] | one-shot + `follow` streaming pod logs |
 //! | [`actions`] | every §4.6 verb as a planned kubectl argv list |
@@ -30,6 +31,7 @@ pub mod access;
 pub mod actions;
 pub mod cli;
 pub mod clusters;
+pub mod eks_token;
 pub mod http;
 pub mod install;
 pub mod logs;

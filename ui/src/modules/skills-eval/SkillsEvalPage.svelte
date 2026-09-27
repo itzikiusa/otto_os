@@ -1,6 +1,7 @@
 <script lang="ts">
   // Skills Evaluator module: a left list of past runs + "New evaluation", and a
   // right pane showing either the start form or a selected run's live report.
+  import { untrack } from 'svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -8,7 +9,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { skillsEvalApi } from '../../lib/api/skillsEval';
-  import type { SkillEval, StartSkillEvalReq } from '../../lib/api/types';
+  import type { SkillEval, SkillEvalSummary, StartSkillEvalReq } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import { runStatus } from '../../lib/status';
   import { rel } from '../../lib/stores/now.svelte';
@@ -53,7 +54,16 @@
     void openRunById(id);
   });
 
-  let runs: SkillEval[] = $state([]);
+  // List rows are SUMMARIES (one paged query, no iterations); the detail pane
+  // and Compare fetch full runs by id. Only ever reassigned → raw.
+  let runs: SkillEvalSummary[] = $state.raw([]);
+  const PAGE = 200;
+  let nextCursor = $state<string | null>(null);
+  let loadingMore = $state(false);
+  function toSummary(e: SkillEval): SkillEvalSummary {
+    const { iterations, config: _config, promoted_at: _pa, promoted_by: _pb, ...rest } = e;
+    return { ...rest, iteration_count: iterations.length };
+  }
   let loading = $state(true);
   // Inline load failure (with Retry) instead of a toast over an empty list.
   let loadError: string | null = $state(null);
@@ -97,7 +107,7 @@
     mode = 'detail';
   }
   function openRun(e: SkillEval): void {
-    runs = [e, ...runs.filter((r) => r.id !== e.id)];
+    runs = [toSummary(e), ...runs.filter((r) => r.id !== e.id)];
     void openRunById(e.id);
   }
 
@@ -113,7 +123,23 @@
   // Compare mode: pick 2+ runs from the list to view side by side.
   let compareMode = $state(false);
   let compareSel = $state<Set<string>>(new Set());
-  const compareRuns = $derived(runs.filter((r) => compareSel.has(r.id)));
+  // Compare reads iterations: full runs are fetched for the selected ids only.
+  let compareFull = $state.raw<Record<string, SkillEval>>({});
+  $effect(() => {
+    const ids = [...compareSel];
+    untrack(() => {
+      for (const id of ids) {
+        if (compareFull[id]) continue;
+        void skillsEvalApi.get(id).then(
+          (e) => (compareFull = { ...compareFull, [id]: e }),
+          () => {},
+        );
+      }
+    });
+  });
+  const compareRuns = $derived(
+    runs.filter((r) => compareSel.has(r.id)).map((r) => compareFull[r.id]).filter((e): e is SkillEval => !!e),
+  );
 
   function toggleCompare(): void {
     compareMode = !compareMode;
@@ -136,6 +162,7 @@
     mode = 'form';
     compareMode = false;
     compareSel = new Set();
+    compareFull = {};
     if (wsId) {
       void loadList(wsId);
     } else {
@@ -150,7 +177,9 @@
     loading = true;
     loadError = null;
     try {
-      runs = await skillsEvalApi.list(wsId);
+      const page = await skillsEvalApi.listSummaries(wsId, { limit: PAGE });
+      runs = page.items;
+      nextCursor = page.next_cursor;
       // Default to the newest run's detail if one exists; else the start form.
       if (runs.length > 0 && selectedId === null && !formSkill) {
         selectedId = runs[0].id;
@@ -160,6 +189,23 @@
       loadError = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
+    }
+  }
+
+  async function loadMore(): Promise<void> {
+    const wsId = ws.currentId;
+    if (!wsId || !nextCursor || loadingMore) return;
+    loadingMore = true;
+    try {
+      const page = await skillsEvalApi.listSummaries(wsId, { limit: PAGE, cursor: nextCursor });
+      if (ws.currentId !== wsId) return;
+      const have = new Set(runs.map((r) => r.id));
+      runs = [...runs, ...page.items.filter((r) => !have.has(r.id))];
+      nextCursor = page.next_cursor;
+    } catch (e) {
+      toasts.error("Couldn't load more evaluations", e instanceof Error ? e.message : String(e));
+    } finally {
+      loadingMore = false;
     }
   }
 
@@ -181,7 +227,7 @@
     starting = true;
     try {
       const created = await skillsEvalApi.start(wsId, req);
-      runs = [created, ...runs];
+      runs = [toSummary(created), ...runs];
       formSkill = null;
       selectedId = created.id;
       mode = 'detail';
@@ -195,7 +241,16 @@
 
   // Keep the list entry in sync with the live detail (status, score).
   function onRunUpdate(e: SkillEval): void {
-    runs = runs.map((r) => (r.id === e.id ? e : r));
+    const i = runs.findIndex((r) => r.id === e.id);
+    if (i < 0) return;
+    const next = toSummary(e);
+    const cur = runs[i];
+    // RunDetail polls: re-render the list only when a shown field moved.
+    if (cur.status === next.status && cur.best_score === next.best_score && cur.iteration_count === next.iteration_count && cur.composite_score === next.composite_score) return;
+    const copy = [...runs];
+    copy[i] = next;
+    runs = copy;
+    if (compareFull[e.id]) compareFull = { ...compareFull, [e.id]: e };
   }
 
   function onRunDeleted(id: string): void {
@@ -345,6 +400,11 @@
             </div>
           </button>
         {/each}
+        {#if nextCursor}
+          <button class="btn small ghost se-more" onclick={() => void loadMore()} disabled={loadingMore}>
+            {loadingMore ? 'Loading…' : 'Load older evaluations'}
+          </button>
+        {/if}
       {/if}
     </div>
   </aside>
@@ -521,6 +581,11 @@
   .se-err-detail {
     color: var(--text-dim);
     font-size: var(--fs-xs);
+  }
+  .se-more {
+    margin-block: 8px;
+    margin-inline: auto;
+    display: block;
   }
   .se-item {
     text-align: start;

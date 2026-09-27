@@ -17,6 +17,32 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD, Engine};
 use otto_core::{api::RoomEvent, Error, Result};
 use serde::Deserialize;
+use std::time::Duration;
+use tokio::sync::broadcast;
+
+const FLOW_AUTO_RESUME: Duration = Duration::from_secs(2);
+
+/// Output flow belongs to this viewer, independently of the room driver.
+#[derive(Default)]
+struct FlowGate {
+    paused_until: Option<tokio::time::Instant>,
+}
+impl FlowGate {
+    fn pause(&mut self) {
+        self.paused_until = Some(tokio::time::Instant::now() + FLOW_AUTO_RESUME);
+    }
+    fn resume(&mut self, output: &mut broadcast::Receiver<axum::body::Bytes>) -> bool {
+        // Inspect a fixed backlog count, never chase a continuously producing
+        // PTY with a drain loop. The snapshot replaces this receiver atomically.
+        self.paused_until.take().is_some() && !output.is_empty()
+    }
+}
+async fn flow_deadline(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum Frame {
@@ -34,6 +60,8 @@ enum Frame {
         lines: Option<usize>,
     },
     Snapshot,
+    Pause,
+    Resume,
 }
 pub async fn upgrade(
     State(ctx): State<ServerCtx>,
@@ -80,12 +108,9 @@ async fn snapshot(
     lines: usize,
     output: &mut tokio::sync::broadcast::Receiver<axum::body::Bytes>,
 ) -> Result<()> {
-    let data = handle.snapshot_with_history(lines.min(10_000));
-    // Drain synchronously before the send await; draining afterwards loses
-    // chunks that arrived while the socket was backpressured.
-    while output.try_recv().is_ok() {}
-    let (cols, rows) = handle.size();
-    let value = serde_json::json!({"type":"scrollback","data":STANDARD.encode(data),"cols":cols,"rows":rows,"epoch":handle.spawn_seq()});
+    let replay = handle.snapshot_and_subscribe(lines.min(10_000));
+    *output = replay.output;
+    let value = serde_json::json!({"type":"scrollback","data":STANDARD.encode(replay.data),"cols":replay.cols,"rows":replay.rows,"epoch":handle.spawn_seq()});
     send_frame(socket, Message::Text(value.to_string().into())).await
 }
 async fn valid(shared: &SharedRoom, member: &str, generation: u64) -> bool {
@@ -165,10 +190,15 @@ async fn serve(
     }
     let mut frame_rate = Rate::new(120.0);
     let mut history_rate = Rate::new(2.0);
+    let mut flow = FlowGate::default();
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
     loop {
         tokio::select! {
-            chunk=output.recv()=>{
+            _=flow_deadline(flow.paused_until), if flow.paused_until.is_some()=>{
+                if !valid(&shared,&member,generation).await{break;}
+                if flow.resume(&mut output) && snapshot(&mut socket,&handle,10_000,&mut output).await.is_err(){break;}
+            }
+            chunk=output.recv(), if flow.paused_until.is_none()=>{
                 if !valid(&shared,&member,generation).await{break;}
                 match chunk {
                     Ok(chunk)=>if send_frame(&mut socket,Message::Binary(chunk)).await.is_err(){break;},
@@ -193,6 +223,8 @@ async fn serve(
                     Frame::Resize{cols,rows,grant_epoch}=>ctx.manager.room_resize(&session,&room_id,&member,grant_epoch,cols,rows).await,
                     Frame::Scrollback{lines}=>match history_rate.take(1.0,2.0){Ok(())=>snapshot(&mut socket,&handle,lines.unwrap_or(10_000),&mut output).await,Err(e)=>Err(e)},
                     Frame::Snapshot=>match history_rate.take(1.0,2.0){Ok(())=>snapshot(&mut socket,&handle,0,&mut output).await,Err(e)=>Err(e)},
+                    Frame::Pause=>{flow.pause();Ok(())},
+                    Frame::Resume=>{if flow.resume(&mut output){snapshot(&mut socket,&handle,10_000,&mut output).await}else{Ok(())}},
                 };
                 if let Err(error)=result {if send(&mut socket,&RoomEvent::Error{code:error.code().into(),message:error.to_string()}).await.is_err(){break;}}
             }
@@ -226,5 +258,66 @@ mod tests {
     fn input_decodes_the_existing_terminal_wire_format() {
         assert_eq!(decode_input("aGVsbG8NCg==").unwrap(), b"hello\r\n");
         assert!(decode_input("%invalid").is_err());
+    }
+
+    #[test]
+    fn terminal_flow_frames_need_no_driver_epoch() {
+        assert!(matches!(
+            serde_json::from_str::<Frame>(r#"{"type":"pause"}"#),
+            Ok(Frame::Pause)
+        ));
+        assert!(matches!(
+            serde_json::from_str::<Frame>(r#"{"type":"resume"}"#),
+            Ok(Frame::Resume)
+        ));
+    }
+
+    #[test]
+    fn resume_requests_one_snapshot_only_when_output_was_skipped() {
+        let (tx, mut output) = broadcast::channel(2);
+        let mut flow = FlowGate::default();
+        flow.pause();
+        assert!(
+            !flow.resume(&mut output),
+            "quiet pause must not rebuild the screen"
+        );
+        flow.pause();
+        for _ in 0..8 {
+            tx.send(axum::body::Bytes::from_static(b"output")).unwrap();
+        }
+        assert!(
+            flow.resume(&mut output),
+            "lagged receiver must resynchronize"
+        );
+        assert!(
+            !flow.resume(&mut output),
+            "duplicate resume must not send another snapshot"
+        );
+        // The caller replaces the old receiver with the snapshot subscription.
+        // Flow detection itself never drains a live producer.
+        assert!(!output.is_empty());
+        output = tx.subscribe();
+        tx.send(axum::body::Bytes::from_static(b"live")).unwrap();
+        assert_eq!(output.try_recv().unwrap(), b"live"[..]);
+    }
+
+    #[tokio::test]
+    async fn repeated_pause_rearms_auto_resume() {
+        let (tx, mut output) = broadcast::channel(2);
+        let mut flow = FlowGate::default();
+        flow.pause();
+        let first = flow.paused_until.unwrap();
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        flow.pause();
+        assert!(flow.paused_until.unwrap() > first);
+        assert!(flow.paused_until.unwrap() > tokio::time::Instant::now() + Duration::from_secs(1));
+        // Expire the deadline without spending two wall-clock seconds in a unit test.
+        flow.paused_until = Some(tokio::time::Instant::now());
+        tx.send(axum::body::Bytes::from_static(b"held")).unwrap();
+        tokio::time::timeout(Duration::from_millis(100), flow_deadline(flow.paused_until))
+            .await
+            .unwrap();
+        assert!(flow.resume(&mut output));
+        assert!(flow.paused_until.is_none());
     }
 }

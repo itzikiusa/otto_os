@@ -7,6 +7,8 @@
   import ResponseViewer from './ResponseViewer.svelte';
   import EnvSelector from './EnvSelector.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
 
   // Load on first mount / workspace change — keyed on the workspace only
   // (loadAll's synchronous prologue reads the tabs, which must not re-trigger).
@@ -14,20 +16,27 @@
     if (ws.currentId) untrack(() => void apiClient.loadAll());
   });
 
-  // A flat picker: pick a saved request or a history entry to load into the builder.
-  function onPick(e: Event): void {
-    const v = (e.currentTarget as HTMLSelectElement).value;
-    if (!v) return;
-    if (v.startsWith('r:')) {
-      const r = apiClient.requests.find((x) => x.id === v.slice(2));
-      if (r) apiClient.loadRequestIntoDraft(r);
-    } else if (v.startsWith('h:')) {
-      const h = apiClient.history.find((x) => x.id === v.slice(2));
-      if (h) void apiClient.selectHistory(h.id);
-    } else if (v === 'new') {
-      apiClient.newDraft();
+  // A flat, filterable picker (one shared menu, built on open) — a native
+  // <select> mounted one <option> per saved request for as long as the panel
+  // was open. Pinned rows (New request + the 15 most recent history entries)
+  // always show; saved requests are searched by method/name/url, 50 at a time.
+  function openPicker(e: MouseEvent): void {
+    const items: MenuItem[] = [
+      { label: 'New request', icon: 'plus', pinned: true, action: () => apiClient.newDraft() },
+      ...apiClient.history.slice(0, 15).map((h): MenuItem => ({
+        label: `${h.method} · ${h.url}`,
+        icon: 'clock',
+        pinned: true,
+        action: () => void apiClient.selectHistory(h.id),
+      })),
+    ];
+    if (apiClient.requests.length > 0) {
+      items.push({ separator: true, pinned: true });
+      for (const r of apiClient.requests) {
+        items.push({ label: `${r.method} · ${r.name} · ${r.url}`, action: () => apiClient.loadRequestIntoDraft(r) });
+      }
     }
-    (e.currentTarget as HTMLSelectElement).value = '';
+    ctxMenu.show(e, items, { filter: true, filterPlaceholder: 'Search saved requests', maxVisible: 50 });
   }
 </script>
 
@@ -39,24 +48,10 @@
     </div>
   {/if}
   <div class="picker-row">
-    <select class="input picker" onchange={onPick} aria-label="Load request">
-      <option value="">Load…</option>
-      <option value="new">New request</option>
-      {#if apiClient.requests.length > 0}
-        <optgroup label="Saved">
-          {#each apiClient.requests as r (r.id)}
-            <option value="r:{r.id}">{r.method} · {r.name}</option>
-          {/each}
-        </optgroup>
-      {/if}
-      {#if apiClient.history.length > 0}
-        <optgroup label="Recent">
-          {#each apiClient.history.slice(0, 15) as h (h.id)}
-            <option value="h:{h.id}">{h.method} · {h.url}</option>
-          {/each}
-        </optgroup>
-      {/if}
-    </select>
+    <button type="button" class="input picker" aria-label="Load request" aria-haspopup="menu" title="Load a saved or recent request" onclick={openPicker}>
+      <span class="picker-label">Load…</span>
+      <Icon name="chevronDown" size={12} />
+    </button>
   </div>
 
   <div class="builder-wrap">
@@ -97,7 +92,21 @@
   }
   .picker {
     width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 6px;
     cursor: pointer;
+    text-align: start;
+  }
+  .picker-label {
+    flex: 1;
+    min-width: 0;
+    color: var(--text-dim);
+  }
+  .picker:focus-visible {
+    outline: none;
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .builder-wrap {
     flex-shrink: 0;

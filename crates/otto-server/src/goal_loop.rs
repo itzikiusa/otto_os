@@ -1539,7 +1539,8 @@ async fn run_executor_attempt(
             timeout,
             EXECUTOR_WAITING_IDLE,
             EXECUTOR_STUCK_IDLE,
-            |_| false,
+            // The out-file is the executor's only result channel.
+            None,
             |st| {
                 let ctx = ctx.clone();
                 let exec = exec.clone();

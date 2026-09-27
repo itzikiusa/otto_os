@@ -154,8 +154,8 @@
     // Refresh refs/commits is handled inside GraphView's own effect on status
     // change; force a light status reconcile + PR refresh via the store.
     if (git.primary?.id === repo.id) void git.refreshPrimary();
-    // Re-mount the graph so its refs/commits effect re-runs after history moved.
-    graphKey++;
+    // Re-read refs + log in place (keeps the graph's selection and scroll).
+    gitBridge.refreshGraph(repo.id);
   }
 
   function onConflicts(result: MergeResult): void {
@@ -177,16 +177,14 @@
     merging = false;
     setStatusFromDaemon();
     if (git.primary?.id === repo.id) void git.refreshPrimary();
-    graphKey++;
+    // The graph remounts when the resolver closes; its cached snapshot is
+    // revalidated against `/refs`, and this covers a graph that stayed mounted.
+    gitBridge.refreshGraph(repo.id);
   }
 
   function setStatusFromDaemon(): void {
     void git.refreshStatus(repo.id);
   }
-
-  // Bumping this key re-mounts GraphView so its refs/commits effect re-runs
-  // after a merge changes history.
-  let graphKey = $state(0);
 
   // Remote CRUD lives behind a header button + modal (the branch bar is a
   // different owner's surface, and remotes are a repo-level setting, not a
@@ -356,7 +354,7 @@
     </div>
     <span class="grow"></span>
     {#if status}
-      <GitToolbar repoId={repo.id} {status} onstatus={setStatus} onrefresh={() => graphKey++} />
+      <GitToolbar repoId={repo.id} {status} onstatus={setStatus} onrefresh={() => gitBridge.refreshGraph(repo.id)} />
     {:else if !statusError}
       <div class="toolbar-skeleton" aria-label="Loading repository status"></div>
     {/if}
@@ -433,17 +431,15 @@
       <div class="rv-graph">
         <GraphSearchBar repoId={repo.id} />
         <div class="rv-graph-body">
-          {#key graphKey}
-            <GraphView
-              repoId={repo.id}
-              repoPath={repo.path}
-              workspaceId={repo.workspace_id}
-              {status}
-              onstatus={setStatus}
-              onmergerequest={requestMerge}
-              onresolveconflicts={openResolver}
-            />
-          {/key}
+          <GraphView
+            repoId={repo.id}
+            repoPath={repo.path}
+            workspaceId={repo.workspace_id}
+            {status}
+            onstatus={setStatus}
+            onmergerequest={requestMerge}
+            onresolveconflicts={openResolver}
+          />
           {#if fileTool}
             <aside class="rv-drawer">
               {#if fileTool.kind === 'history'}
@@ -730,7 +726,7 @@
 {#if gitBridge.recovery?.repoId === repo.id}
   {#key repo.id}
     <RecoveryTools repoId={repo.id} initialMode={gitBridge.recovery.mode} initialOnto={gitBridge.recovery.onto}
-      onclose={() => { gitBridge.recovery = null; graphKey++; }}
+      onclose={() => { gitBridge.recovery = null; gitBridge.refreshGraph(repo.id); }}
       onresolve={() => { gitBridge.recovery = null; resolving = true; }} />
   {/key}
 {/if}

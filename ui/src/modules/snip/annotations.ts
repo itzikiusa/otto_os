@@ -89,6 +89,21 @@ export function render(
   for (const a of annos) drawAnno(ctx, img, a);
 }
 
+/** Blit a pre-rendered `base` layer (the image + committed annotations) and
+ *  draw only `extra` on top — a live drag/pen stroke then costs one blit plus
+ *  the stroke per frame instead of re-rendering every annotation. `img` stays
+ *  the source that pixelate samples, exactly as {@link render} does. */
+export function renderOver(
+  ctx: CanvasRenderingContext2D,
+  base: CanvasImageSource,
+  img: CanvasImageSource & { width: number; height: number },
+  extra: Anno[],
+): void {
+  ctx.clearRect(0, 0, img.width, img.height);
+  ctx.drawImage(base, 0, 0);
+  for (const a of extra) drawAnno(ctx, img, a);
+}
+
 function drawAnno(
   ctx: CanvasRenderingContext2D,
   img: CanvasImageSource & { width: number; height: number },
@@ -336,6 +351,17 @@ export async function flatten(
 }
 
 export async function blobToB64(blob: Blob): Promise<string> {
+  // Native encoder (FileReader) instead of a String.fromCharCode loop over
+  // ~8 MB of PNG on the main thread.
+  if (typeof FileReader !== 'undefined') {
+    const url = await new Promise<string>((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result ?? ''));
+      r.onerror = () => reject(r.error ?? new Error('Could not read the image'));
+      r.readAsDataURL(blob);
+    });
+    return url.slice(url.indexOf(',') + 1);
+  }
   const buf = new Uint8Array(await blob.arrayBuffer());
   let bin = '';
   const CHUNK = 0x8000;

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { toasts, type Toast } from '../toast.svelte';
+  import { barStore } from '../stores/bar.svelte';
   import Icon, { type IconName } from './Icon.svelte';
 
   // The stripe carries the tone, and the glyph repeats it (colour is never
@@ -12,7 +13,8 @@
   };
 </script>
 
-<div class="toasts" aria-live="polite">
+<!-- The lift is set HERE, not on :root — see FloatingBar's toast-lift effect. -->
+<div class="toasts" aria-live="polite" style:--toast-lift="{barStore.toastLift}px">
   {#each toasts.toasts as t (t.id)}
     <!-- An error interrupts (assertive); everything else waits its turn. The
          timer holds while the pointer or focus is on the toast. -->

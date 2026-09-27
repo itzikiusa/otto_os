@@ -853,6 +853,11 @@ pub struct QueryResult {
     /// True when `max_rows` clipped the result.
     #[serde(default)]
     pub truncated: bool,
+    /// Why the result was clipped when it was NOT the row cap: `bytes` = the
+    /// response hit [`RESULT_BYTE_BUDGET`] (estimated JSON size) first. Absent
+    /// for an unclipped result or a row-cap clip (and then omitted on the wire).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated_reason: Option<TruncatedReason>,
     /// Set when the result cells were run through `otto_core::redact` server-side
     /// (because `QueryRequest::mask` was `true`). The UI surfaces this as a badge.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -901,6 +906,7 @@ impl QueryResult {
             stats: QueryStats::default(),
             message: None,
             truncated: false,
+            truncated_reason: None,
             masked: false,
             more_results: Vec::new(),
             statement: None,
@@ -1660,6 +1666,71 @@ pub fn u64_to_json(n: u64) -> Value {
 /// driver (MySQL, Postgres, ClickHouse) so oversized cells behave identically.
 pub const MAX_CELL_CHARS: usize = 1_048_576;
 
+/// Why a result was clipped before its row cap (see [`QueryResult::truncated_reason`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TruncatedReason {
+    /// The response reached [`RESULT_BYTE_BUDGET`].
+    Bytes,
+}
+
+/// Soft cap on one query response's estimated JSON size, across every result
+/// set of a batch. The row cap alone didn't bound it: "All" is 1,000,000 rows
+/// and a cell may hold up to [`MAX_CELL_CHARS`], so a wide or text-heavy result
+/// reached ~0.5 GB of JSON (and GBs of daemon RAM) — enough to OOM the webview
+/// that parses it. Past the budget the read stops, flagged `truncated` with
+/// reason `bytes`; "Export all rows…" still streams everything to a file.
+pub const RESULT_BYTE_BUDGET: usize = 32 * 1024 * 1024;
+
+/// Running estimate of a response's JSON size against [`RESULT_BYTE_BUDGET`].
+#[derive(Debug, Clone)]
+pub struct ByteBudget {
+    used: usize,
+    limit: usize,
+}
+
+impl Default for ByteBudget {
+    fn default() -> Self {
+        Self::new(RESULT_BYTE_BUDGET)
+    }
+}
+
+impl ByteBudget {
+    pub fn new(limit: usize) -> Self {
+        Self { used: 0, limit }
+    }
+
+    /// Charge `bytes`; `false` once the total is past the limit.
+    pub fn charge(&mut self, bytes: usize) -> bool {
+        self.used = self.used.saturating_add(bytes);
+        self.used <= self.limit
+    }
+
+    pub fn used(&self) -> usize {
+        self.used
+    }
+}
+
+/// Cheap upper-ish estimate of a value's serialized JSON length (no escaping
+/// accounted for; numbers counted at their typical width). Used for the
+/// response byte budget — never for anything that must be exact.
+pub fn approx_json_len(v: &serde_json::Value) -> usize {
+    use serde_json::Value;
+    match v {
+        Value::Null => 4,
+        Value::Bool(_) => 5,
+        Value::Number(_) => 12,
+        Value::String(s) => s.len() + 2,
+        Value::Array(a) => 2 + a.iter().map(|x| approx_json_len(x) + 1).sum::<usize>(),
+        Value::Object(o) => {
+            2 + o
+                .iter()
+                .map(|(k, x)| k.len() + 4 + approx_json_len(x))
+                .sum::<usize>()
+        }
+    }
+}
+
 /// Recursively cap oversized string values in a result cell (covers nested
 /// Array/Tuple/Map columns too). Non-strings pass through unchanged.
 pub fn cap_cell(v: serde_json::Value) -> serde_json::Value {
@@ -1964,6 +2035,50 @@ mod tests {
         assert!(r.hits.is_empty());
         assert!(!r.truncated);
         assert_eq!(r.scanned, 0);
+    }
+
+    #[test]
+    fn byte_budget_trips_past_its_limit() {
+        let mut b = ByteBudget::new(10);
+        assert!(b.charge(6));
+        assert!(b.charge(4)); // exactly at the limit is still within
+        assert!(!b.charge(1));
+        assert_eq!(b.used(), 11);
+        assert_eq!(ByteBudget::default().used(), 0);
+    }
+
+    #[test]
+    fn approx_json_len_tracks_the_serialized_size() {
+        use serde_json::json;
+        for v in [
+            json!(null),
+            json!("hello"),
+            json!(["a", "bb", null]),
+            json!({"key": "value", "n": [1, 2]}),
+        ] {
+            let real = serde_json::to_string(&v).unwrap().len();
+            let est = approx_json_len(&v);
+            // Within a small constant of the real size (numbers are counted wide).
+            assert!(
+                est + 4 >= real && est <= real + 40,
+                "{v}: est {est} vs {real}"
+            );
+        }
+        let big = serde_json::Value::String("x".repeat(1_000_000));
+        assert_eq!(approx_json_len(&big), 1_000_002);
+    }
+
+    #[test]
+    fn truncated_reason_is_omitted_unless_set() {
+        let plain = serde_json::to_value(QueryResult::empty()).unwrap();
+        assert!(plain.get("truncated_reason").is_none());
+        let clipped = QueryResult {
+            truncated: true,
+            truncated_reason: Some(TruncatedReason::Bytes),
+            ..QueryResult::empty()
+        };
+        let v = serde_json::to_value(clipped).unwrap();
+        assert_eq!(v["truncated_reason"], "bytes");
     }
 
     #[test]
