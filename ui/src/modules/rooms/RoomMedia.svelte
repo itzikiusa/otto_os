@@ -36,7 +36,7 @@
       {#if devices.length > 1}<label>Microphone <select bind:value={microphone} onchange={() => { media?.mute(); }}><option value="">System default</option>{#each devices as device}<option value={device.deviceId}>{device.label || 'Microphone'}</option>{/each}</select></label>{/if}
     {:else}<button class="btn small" disabled={!connected || busy} onclick={() => act(async () => { await media?.joinAudio(); })}>Join audio</button>{/if}
     {#if mediaState.presenting}<button class="btn small" onclick={() => media?.stopPresentation()}>Stop sharing screen</button>
-    {:else if self?.presenter_allowed}<button class="btn small" disabled={!connected || busy} onclick={() => act(async () => { await media?.startPresentation(); })}>Share screen…</button>
+    {:else if self?.role === 'host' || self?.presenter_allowed}<button class="btn small" disabled={!connected || busy} onclick={() => act(async () => { await media?.startPresentation(); })}>Share screen…</button>
     {:else}<button class="btn small" disabled={!connected || self?.presenter_requested} onclick={() => send({type: 'request_present'})}>{self?.presenter_requested ? 'Presentation requested' : 'Request to present'}</button>{/if}
     {#if room.member_id === room.host_member_id}<button class="btn small" aria-pressed={room.annotations_enabled !== false} onclick={() => send({type: 'annotations_enabled', enabled: room.annotations_enabled === false})}>{room.annotations_enabled === false ? 'Allow annotations' : 'Disable annotations'}</button>{/if}
   </div>

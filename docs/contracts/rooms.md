@@ -147,7 +147,16 @@ lines. All admitted viewers may send `{type:"pause"}` and `{type:"resume"}`
 without a driver grant. Pause stops output to that terminal socket only; it
 does not stop the PTY or change driver authority. Resume sends one full
 scrollback snapshot if output was skipped, otherwise streaming simply continues.
-A repeated pause renews the two-second auto-resume deadline. Other terminal
+A repeated pause renews the two-second auto-resume deadline.
+After discarding local renderer backlog, a viewer sends
+`{type:"resync",lines?:number}` to request a full recovery snapshot even when
+the server has no pending output. Resync clears the viewer's pause without
+changing driver authority; a trailing resume does not duplicate the snapshot.
+The first resync answers immediately. Further requests coalesce into one
+pending recovery (latest requested history depth, capped at 10,000 lines), at
+most twice per second. They are delayed rather than rejected by the history
+rate limiter. Live output waits behind the pending snapshot, and its new
+subscription starts atomically after the replay. Other terminal
 frames, including binary input, are rejected. Input
 already in an OS write cannot be retracted: the writer checks revocation before
 each subsequent bounded256-byte write attempt. This does not undo commands

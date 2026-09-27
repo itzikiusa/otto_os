@@ -357,3 +357,15 @@ test('negotiation chooses the local description after a pending remote offer cha
   assert.equal(errors.some(Boolean), false, 'remote-offer overlap must not raise the observed InvalidStateError');
   assert.equal(chosen, 'answer');
 });
+
+test('local preview demand never subscribes to the publisher through the server', async t => {
+  const fixture = mediaPeerFixture(), actions: RoomAction[] = [];
+  const client = new RoomMediaClient({memberId: 'host', send: action => actions.push(action), environment: fixture.environment});
+  t.after(() => client.dispose());
+  const source = {id: 'local', member_id: 'host', title: 'Local', generation: 1, width: 640, height: 360, clear_epoch: 1};
+  client.update({...snapshot, members: [...snapshot.members!, guestMember], presentations: [source, {...source, id: 'remote', member_id: 'guest'}]});
+  client.setSubscriptions([{sourceId: 'local', generation: 1, tier: 'full'}, {sourceId: 'remote', generation: 1, tier: 'grid'}]);
+  client.setSubscriptions([{sourceId: 'local', generation: 1, tier: 'preview'}, {sourceId: 'remote', generation: 1, tier: 'grid'}]);
+  client.setSubscriptions([{sourceId: 'remote', generation: 1, tier: 'grid'}]);
+  assert.deepEqual(actions.filter(action => action.type === 'subscribe'), [{type: 'subscribe', source_id: 'remote', source_generation: 1, tier: 'grid'}]);
+});

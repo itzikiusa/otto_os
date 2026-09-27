@@ -44,8 +44,14 @@ pub const EXIT_GRACE: Duration = Duration::from_secs(60);
 /// pings `POST …/transcript/touch` every 60 s, so two minutes means "the
 /// view has been closed" — tails never outlive the view that armed them.
 pub const IDLE_STOP: Duration = Duration::from_secs(2 * 60);
-/// `transcript_appended` payloads above this are sent with `turns: []`.
+/// `transcript_appended` payloads above this are first shrunk
+/// ([`trim_oversized`]); only a delta still above it after that is sent with
+/// `turns: []` (the client then re-fetches the page).
 pub const EVENT_CAP: usize = 64 * 1024;
+/// An oversized delta keeps this many bytes of each tool result's `text`
+/// (then `patch`), marked `elided: true`; the full result is one
+/// `GET …/transcript/tool/{tool_id}` away (SA-04).
+pub const TRIM_TEXT: usize = 4 * 1024;
 /// `transcript_live` drafts are capped to this many bytes (tail kept).
 pub const LIVE_CAP: usize = 16 * 1024;
 
@@ -240,6 +246,86 @@ fn refold_with(
     })
 }
 
+/// Serialized size of `turns`; `usize::MAX` if they do not serialize.
+fn json_size(turns: &[serde_json::Value]) -> usize {
+    serde_json::to_vec(turns)
+        .map(|v| v.len())
+        .unwrap_or(usize::MAX)
+}
+
+/// Cut `s` to at most `max` bytes on a char boundary. `true` when cut.
+fn cut_str(s: &mut String, max: usize) -> bool {
+    if s.len() <= max {
+        return false;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+    true
+}
+
+/// Elide `key` (`text` / `patch`) of every tool result in `turns` longer than
+/// `keep` bytes: cut it and mark the result `elided: true`. `truncated` and
+/// `bytes` keep describing the stored result (the 64 KB fold cap and the
+/// original size), so the UI can tell "shortened for the live push" (fetch
+/// the rest) from "capped on disk" (nothing more to fetch).
+fn elide_results(turns: &mut [serde_json::Value], key: &str, keep: usize) {
+    for turn in turns {
+        let Some(blocks) = turn.get_mut("blocks").and_then(|b| b.as_array_mut()) else {
+            continue;
+        };
+        for block in blocks {
+            if block.get("kind").and_then(|k| k.as_str()) != Some("tool_call") {
+                continue;
+            }
+            let Some(result) = block.get_mut("result").and_then(|r| r.as_object_mut()) else {
+                continue;
+            };
+            let cut = match result.get_mut(key) {
+                Some(serde_json::Value::String(s)) => cut_str(s, keep),
+                _ => false,
+            };
+            if cut {
+                result.insert("elided".into(), serde_json::Value::Bool(true));
+            }
+        }
+    }
+}
+
+/// Keep a `transcript_appended` delta under [`EVENT_CAP`] when possible by
+/// eliding tool-result bodies in rounds — `text` before `patch` (a diff is
+/// worth keeping whole while shorter texts make it fit), at [`TRIM_TEXT`],
+/// then 1 KB, 256 B and finally nothing (a Codex answer turn carries every
+/// tool call of its user turn, so dozens of 4 KB previews can still
+/// overflow). Stops at the first round that fits. Returns the final
+/// serialized size — above the cap only when prose/inputs alone exceed it.
+fn trim_oversized(turns: &mut [serde_json::Value]) -> usize {
+    let mut size = json_size(turns);
+    for keep in [TRIM_TEXT, 1024, 256, 0] {
+        for key in ["text", "patch"] {
+            if size <= EVENT_CAP {
+                return size;
+            }
+            elide_results(turns, key, keep);
+            size = json_size(turns);
+        }
+    }
+    size
+}
+
+/// The full `tool_call` block `tool_id` from a fold (newest turn first — the
+/// lazy load is for a step the live push just elided). `None` when absent.
+pub fn find_tool_block(folded: &Folded, tool_id: &str) -> Option<otto_transcript::Block> {
+    folded.turns.iter().rev().find_map(|t| {
+        t.turn.blocks.iter().find_map(|b| match b {
+            otto_transcript::Block::ToolCall { id, .. } if id == tool_id => Some(b.clone()),
+            _ => None,
+        })
+    })
+}
+
 /// One poll's worth of transcript work, produced off the runtime.
 struct Step {
     turns: Vec<serde_json::Value>,
@@ -287,18 +373,18 @@ fn step(
         st.folder.set_subagents(st.subagents.tree().to_vec());
     }
     st.snap = None;
-    let turns: Vec<serde_json::Value> = st
+    let mut turns: Vec<serde_json::Value> = st
         .folder
         .turns_since(prev_count)
         .iter()
         .filter_map(|t| serde_json::to_value(t).ok())
         .collect();
     let cursor = st.folder.record_count().saturating_sub(1).to_string();
-    // Size the frame ONCE; over the cap the client re-fetches (served from
+    // Size the frame; over the cap, elide tool-result bodies first (the one
+    // part of a turn that routinely reaches 64 KB) and only when even that
+    // does not fit send `turns: []` so the client re-fetches (served from
     // this tail's memory by `live_page`).
-    let size = serde_json::to_vec(&turns)
-        .map(|v| v.len())
-        .unwrap_or(usize::MAX);
+    let size = trim_oversized(&mut turns);
     let new_artifacts = st
         .folder
         .artifacts()
@@ -785,6 +871,109 @@ mod tests {
                 assert_eq!(known.len(), want.artifacts.len());
             }
         }
+    }
+
+    /// A fold of fixture 01 whose every tool result is blown up to `n`
+    /// bytes of text (+ a patch of the same size) — the shape of a delta
+    /// carrying several near-cap Read/Bash results.
+    fn fat_fold(n: usize) -> Folded {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../otto-transcript/fixtures/claude/01-basic-tools.jsonl");
+        let mut f = otto_transcript::fold_file(Provider::Claude, &path, Default::default())
+            .unwrap();
+        let mut i = 0usize;
+        for t in &mut f.turns {
+            for b in &mut t.turn.blocks {
+                if let otto_transcript::Block::ToolCall { result, .. } = b {
+                    i += 1;
+                    let r = result.get_or_insert_with(Default::default);
+                    // Multi-byte chars so the cut has to find a boundary.
+                    r.text = Some(format!("{i}é{}", "λx\n".repeat(n / 4)));
+                    r.patch = Some(format!("@@ -1 +1 @@\n-{}", "y".repeat(n)));
+                }
+            }
+        }
+        assert!(i >= 2, "fixture must carry several tool calls");
+        f
+    }
+
+    fn tool_results(turns: &[serde_json::Value]) -> Vec<(String, serde_json::Value)> {
+        turns
+            .iter()
+            .flat_map(|t| t["blocks"].as_array().cloned().unwrap_or_default())
+            .filter(|b| b["kind"] == "tool_call" && b["result"].is_object())
+            .map(|b| (b["id"].as_str().unwrap().to_string(), b["result"].clone()))
+            .collect()
+    }
+
+    /// SA-04: an over-cap delta is shrunk (tool-result bodies elided to
+    /// 4 KB and flagged) instead of being dropped to `turns: []`; the lazy
+    /// tool endpoint's lookup returns the whole stored result.
+    #[test]
+    fn oversized_delta_is_trimmed_under_the_cap_and_the_tool_lookup_is_full() {
+        let folded = fat_fold(30 * 1024);
+        let mut turns: Vec<serde_json::Value> = folded
+            .turns_since(0)
+            .iter()
+            .map(|t| serde_json::to_value(t).unwrap())
+            .collect();
+        let before = tool_results(&turns);
+        assert!(json_size(&turns) > EVENT_CAP, "fixture must start over the cap");
+        let size = trim_oversized(&mut turns);
+        assert!(size <= EVENT_CAP, "trimmed delta must fit: {size}");
+        assert_eq!(size, json_size(&turns));
+        let after = tool_results(&turns);
+        assert_eq!(after.len(), before.len());
+        for ((id, full), (_, cut)) in before.iter().zip(&after) {
+            assert_eq!(cut["elided"], true, "{id} elided");
+            let (ft, ct) = (full["text"].as_str().unwrap(), cut["text"].as_str().unwrap());
+            assert!(ct.len() <= TRIM_TEXT && ft.starts_with(ct), "{id} text is a prefix");
+            // The stored-result facts are untouched.
+            assert_eq!(cut["bytes"], full["bytes"]);
+            assert_eq!(cut["truncated"], full["truncated"]);
+            // The lazy load gets it all back, never elided.
+            let block = find_tool_block(&folded, id).expect("tool block");
+            let v = serde_json::to_value(&block).unwrap();
+            assert_eq!(v["result"]["text"].as_str().unwrap(), ft);
+            assert_eq!(v["result"]["patch"], full["patch"]);
+            assert!(v["result"].get("elided").is_none());
+        }
+        assert!(find_tool_block(&folded, "no-such-tool").is_none());
+    }
+
+    /// Text elision alone is tried first: a patch survives whole when the
+    /// cut texts already fit, and a delta under the cap is never touched.
+    #[test]
+    fn trim_prefers_text_and_leaves_small_deltas_alone() {
+        let folded = fat_fold(20 * 1024);
+        let mut turns: Vec<serde_json::Value> = folded
+            .turns_since(0)
+            .iter()
+            .map(|t| serde_json::to_value(t).unwrap())
+            .collect();
+        // Shrink the patches so only the texts overflow.
+        for t in &mut turns {
+            for b in t["blocks"].as_array_mut().unwrap() {
+                if b["kind"] == "tool_call" && b["result"].is_object() {
+                    b["result"]["patch"] = serde_json::json!("@@ -1 +1 @@\n-a\n+b");
+                }
+            }
+        }
+        assert!(json_size(&turns) > EVENT_CAP);
+        trim_oversized(&mut turns);
+        for (_, r) in tool_results(&turns) {
+            assert_eq!(r["patch"], "@@ -1 +1 @@\n-a\n+b");
+            assert_eq!(r["elided"], true);
+        }
+        let small = fat_fold(512);
+        let mut turns: Vec<serde_json::Value> = small
+            .turns_since(0)
+            .iter()
+            .map(|t| serde_json::to_value(t).unwrap())
+            .collect();
+        let untouched = turns.clone();
+        assert!(trim_oversized(&mut turns) <= EVENT_CAP);
+        assert_eq!(turns, untouched);
     }
 
     #[test]

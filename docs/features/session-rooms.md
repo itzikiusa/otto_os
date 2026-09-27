@@ -79,6 +79,13 @@ terminal can still work when media connectivity fails. Room credentials do not
 grant ordinary API access, and invitations carry their secret in the URL
 fragment, which the guest page immediately removes from visible history.
 
+Same-computer rooms still use WebRTC for voice and screens. An empty ICE
+configuration may fail to gather usable addresses even on the same computer,
+depending on the browser and its permissions. Configure an appropriate STUN or
+TURN service in **Connection settings** if media cannot connect; Otto does not
+silently add a third-party service. A working room page or chat connection does
+not establish that the media connection is ready.
+
 Native guest windows are ephemeral and isolated from the local app's native
 capabilities. They are confined to the invited origin and room. Credentials live
 only in window memory, so reloading or closing the window may require a new
@@ -111,8 +118,9 @@ No unattended desktop access, file transfer or clipboard synchronization is adde
 - **Cannot type:** view-only access cannot receive control. Editors must be the
   current driver. Reconnects and permission changes invalidate old input.
 - **Chat works but media does not:** check capture/microphone permissions,
-  secure-origin support, and STUN/TURN configuration. Joining audio requires a
-  deliberate click to resume the browser audio context.
+  secure-origin support, and STUN/TURN configuration, including for same-computer
+  tests. Joining audio requires a deliberate click to resume the browser audio
+  context.
 - **Sharing stops after a connection loss:** this is deliberate. Rejoin media
   and request the relevant permission again after reconnecting.
 - **Room closed after host disconnect:** membership has a thirty-second grace

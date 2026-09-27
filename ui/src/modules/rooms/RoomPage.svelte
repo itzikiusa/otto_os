@@ -4,6 +4,7 @@
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
+  import { PRIMARY_SCROLLBACK } from '../../lib/components/termFlow';
   import Modal from '../../lib/components/Modal.svelte';
   import RoomRecap from './RoomRecap.svelte';
   import RoomMedia from './RoomMedia.svelte';
@@ -70,7 +71,7 @@
     const data = frame as {type: string; data?: string; cols?: number; rows?: number; lines?: number};
     // Backpressure controls only this viewer's output stream, never PTY authority.
     if (data.type === 'pause' || data.type === 'resume') return {type: data.type};
-    if (data.type === 'scrollback') return {type: 'scrollback', lines: data.lines};
+    if (data.type === 'scrollback' || data.type === 'resync') return {type: data.type, lines: data.lines};
     if (!canType || room?.grant_epoch === undefined) return null;
     if (data.type === 'input') return {type: 'input', data: data.data, grant_epoch: room.grant_epoch};
     if (data.type === 'resize') return {type: 'resize', cols: data.cols, rows: data.rows, grant_epoch: room.grant_epoch};
@@ -127,7 +128,7 @@
       {#if error}<div class="error" role="alert">{error}<button class="btn small" onclick={() => error = ''}>Dismiss</button></div>{/if}
       <RoomRecap bind:this={recapPanel} {room} {connected} {send} audioSources={() => mediaPanel?.getRecapAudioSources() ?? new Map()} screenStreams={() => mediaPanel?.getPresentationStreams() ?? new Map()} />
       <nav class="mobile-tabs" aria-label="Room view"><button class="btn" aria-pressed={tab === 'session'} onclick={() => tab = 'session'}>Session</button><button class="btn" aria-pressed={tab === 'conversation'} onclick={() => tab = 'conversation'}>People & chat</button></nav>
-      <div class="room-workspace"><main class:mobile-hidden={tab !== 'session'}><RoomMedia bind:this={mediaPanel} {room} {send} {connected} /><div class="terminal-pane">{#if room.session_id && client && connected}<Terminal sessionId={room.session_id} socketFactory={() => client!.terminal()} transformFrame={terminalFrame} readOnly={!canType} readOnlyReason={self?.role === 'viewer' ? 'View only. The host decides who can control the terminal.' : `${driver?.name ?? 'The host'} currently controls the terminal.`} showToolbar={false} preferDom />{/if}</div></main>
+      <div class="room-workspace"><main class:mobile-hidden={tab !== 'session'}><RoomMedia bind:this={mediaPanel} {room} {send} {connected} /><div class="terminal-pane">{#if room.session_id && client && connected}<Terminal sessionId={room.session_id} socketFactory={() => client!.terminal()} transformFrame={terminalFrame} readOnly={!canType} readOnlyReason={self?.role === 'viewer' ? 'View only. The host decides who can control the terminal.' : `${driver?.name ?? 'The host'} currently controls the terminal.`} showToolbar={false} scrollback={PRIMARY_SCROLLBACK} preferDom />{/if}</div></main>
         <aside class:mobile-hidden={tab !== 'conversation'}><RoomParticipants {room} {send} disabled={!connected} /><RoomChat messages={room.messages ?? []} {send} {connected} /></aside>
       </div>
     {/if}

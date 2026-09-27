@@ -8,6 +8,13 @@ import type { WsTermFlowFrame } from '../api/types';
  *  swarm/loop session panes; the share page; the DB SSH shell). Each line
  *  costs ~12 B/cell, so 10k × 200 cols ≈ 24 MB of JS heap. */
 export const PRIMARY_SCROLLBACK = 10_000;
+/** Default depth for every other Terminal: grid tiles and the embedded
+ *  previews that mount several terminals at once (review/docs/analysis/run
+ *  agents, assistant panels, docks, exec views). 10k there was 150–360 MB
+ *  across a busy grid (SA-05); the daemon keeps 4000 rows, so maximizing or
+ *  reconnecting in a primary pane still restores depth. */
+export const EMBED_SCROLLBACK = 2_000;
+
 /** Pending (handed to xterm, not yet parsed) bytes above which the client
  *  asks the server to `pause` this stream. xterm parses 5.5–8 MB/s in WebKit,
  *  so this bounds the on-screen lag after ^C to a few hundred ms. */
@@ -64,6 +71,133 @@ export class TermFlow {
   /** A new socket: its server stream starts unpaused. */
   resetStream(): void {
     this.paused = false;
+  }
+}
+
+/** Largest slice handed to xterm in one `write()` (A3). */
+export const WRITE_SLICE = 64 * 1024;
+/** Bytes allowed INSIDE xterm (handed over, not yet parsed). The rest waits in
+ *  [`WriteQueue`], where it can still be dropped: xterm has no API to cancel
+ *  queued writes, so everything handed to it will parse — 2 MB of it after ^C
+ *  was ~0.35 s of scrolling. Two slices keep its parser busy (one parses while
+ *  the next waits), so throughput is unchanged. */
+export const WRITE_INFLIGHT = 2 * WRITE_SLICE;
+/** Queued (not yet handed to xterm) bytes above which a keystroke drops the
+ *  queue and asks the server for a `resync` snapshot instead of making the
+ *  user watch it scroll by. Below this the backlog drains in ≲ 40 ms anyway. */
+export const RESYNC_ON_INPUT = 256 * 1024;
+
+interface Pending {
+  bytes: Uint8Array;
+  /** Runs once this frame's LAST byte has been parsed. */
+  onParsed?: () => void;
+}
+
+/**
+ * A byte queue in front of xterm (A3). Frames are fed to `write` in slices of
+ * at most WRITE_SLICE while at most WRITE_INFLIGHT bytes are inside the
+ * emulator; each parse callback refills. Every byte is counted in `flow`
+ * (TermFlow watermarks) from arrival until parsed or dropped, so pause/resume
+ * see the whole backlog. `dropQueued()` discards what xterm has not been
+ * handed yet — safe only when a snapshot that supersedes it follows (a
+ * `resync` reply, or a snapshot frame already received).
+ */
+export class WriteQueue {
+  private q: Pending[] = [];
+  /** Bytes waiting here (droppable). */
+  queued = 0;
+  /** Bytes handed to xterm and not yet parsed. */
+  inflight = 0;
+  private readonly write: (bytes: Uint8Array, done: () => void) => void;
+  private readonly flow: TermFlow;
+  private readonly canSend: () => boolean;
+
+  constructor(
+    write: (bytes: Uint8Array, done: () => void) => void,
+    flow: TermFlow,
+    canSend: () => boolean = () => true,
+  ) {
+    this.write = write;
+    this.flow = flow;
+    this.canSend = canSend;
+  }
+
+  /** Whole local backlog (queued + inside xterm). */
+  get backlog(): number {
+    return this.queued + this.inflight;
+  }
+
+  /** Enqueue one received frame. `onParsed` fires after its last byte parses. */
+  push(bytes: Uint8Array, onParsed?: () => void): void {
+    const n = bytes.byteLength;
+    if (n === 0) {
+      onParsed?.();
+      return;
+    }
+    this.flow.add(n, this.canSend());
+    this.q.push({ bytes, onParsed });
+    this.queued += n;
+    this.pump();
+  }
+
+  /** Hand slices to xterm while there is room inside it. */
+  private pump(): void {
+    while (this.q.length && this.inflight < WRITE_INFLIGHT) {
+      const head = this.q[0];
+      let slice: Uint8Array;
+      let hook: (() => void) | undefined;
+      if (head.bytes.byteLength <= WRITE_SLICE) {
+        this.q.shift();
+        slice = head.bytes;
+        hook = head.onParsed;
+      } else {
+        slice = head.bytes.subarray(0, WRITE_SLICE);
+        head.bytes = head.bytes.subarray(WRITE_SLICE);
+      }
+      const n = slice.byteLength;
+      this.queued -= n;
+      this.inflight += n;
+      let settled = false;
+      const done = (): void => {
+        if (settled) return;
+        settled = true;
+        this.inflight = Math.max(0, this.inflight - n);
+        this.flow.done(n);
+        hook?.();
+        this.pump();
+      };
+      try {
+        this.write(slice, done);
+      } catch {
+        // xterm throws (dropping the data) past its discard watermark; the
+        // callback never fires — un-count it or the gate would stay shut.
+        done();
+      }
+    }
+  }
+
+  /**
+   * User input over a big queue (A3): when more than RESYNC_ON_INPUT bytes
+   * wait here, call `requestResync` (send the `resync` frame) and THEN drop
+   * the queue — dropping can un-pause the stream (`resume`), and the server
+   * must see `resync` (which opens its gate itself) first, or a resume
+   * snapshot and the resync snapshot would both rebuild. `true` = resynced.
+   */
+  resyncOnInput(requestResync: () => void): boolean {
+    if (this.queued <= RESYNC_ON_INPUT) return false;
+    requestResync();
+    this.dropQueued();
+    return true;
+  }
+
+  /** Discard everything not yet handed to xterm. Returns the bytes dropped. */
+  dropQueued(): number {
+    const n = this.queued;
+    if (n === 0) return 0;
+    this.q = [];
+    this.queued = 0;
+    this.flow.done(n);
+    return n;
   }
 }
 

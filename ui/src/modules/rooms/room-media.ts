@@ -259,10 +259,13 @@ export class RoomMediaClient {
     const previous = this.subscriptions.get(this.options.memberId) ?? new Map<string, RoomMediaSubscription>();
     const current = new Map<string, RoomMediaSubscription>();
     for (const sub of values.slice(0, 4)) if (this.source(sub.sourceId)?.generation === sub.generation) current.set(sub.sourceId, sub);
+    // Local preview demand controls capture quality, but the server only
+    // accepts subscriptions to another participant's source.
+    const remote = (id: string) => this.source(id)?.member_id !== this.options.memberId;
     // Release old pins before upgrading new ones.
-    for (const [id, sub] of previous) if (!current.has(id) || (sub.tier === 'full' && current.get(id)?.tier !== 'full'))
+    for (const [id, sub] of previous) if (remote(id) && (!current.has(id) || (sub.tier === 'full' && current.get(id)?.tier !== 'full')))
       this.send({ type: 'subscribe', source_id: id, source_generation: sub.generation, tier: 'hidden' });
-    for (const [id, sub] of current) if (previous.get(id)?.tier !== sub.tier || previous.get(id)?.generation !== sub.generation)
+    for (const [id, sub] of current) if (remote(id) && (previous.get(id)?.tier !== sub.tier || previous.get(id)?.generation !== sub.generation))
       this.send({ type: 'subscribe', source_id: id, source_generation: sub.generation, tier: sub.tier });
     this.subscriptions.set(this.options.memberId, current); this.publishStreams(); this.schedule();
   }

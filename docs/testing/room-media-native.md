@@ -97,17 +97,186 @@ leak: the run did not perform twenty cycles or force collection.
   best effort. The production client additionally constrains local capture frame rate to
   the highest subscribed tier, without lowering a full viewer for a preview.
 - Actual microphone capture/playback, display/window/application selection,
-  source permission denial, real source resize behavior, host sleep, packaged
+  source permission denial, real source resize behavior, host sleep, signed-release
   remote-window IPC denial, physical cleanup and two-Mac networking remain
   unverified. ScreenCaptureKit's picker requires macOS 14; Otto's deployment
   target remains 12.0. No native ScreenCaptureKit bridge is claimed.
-- The ten-minute reference workload, constrained-network and TURN fixtures,
-  pin-to-sharp-frame time, voice latency, terminal latency delta, twenty-cycle
-  cleanup, GPU/power/thermal measurements and Intel hardware remain untested.
-  The run does not justify claiming performance acceptance or rejecting the
+- For this WKWebView benchmark, the ten-minute reference workload, constrained-
+  network and TURN fixtures, pin-to-sharp-frame time, voice latency, terminal
+  latency delta, twenty full room cycles, GPU/power/thermal measurements and Intel
+  hardware remain untested. Separate Tauri lifecycle and Chromium relay evidence
+  appears below. This benchmark does not justify claiming performance acceptance or rejecting the
   architecture in favor of an SFU based on per-host resource cost.
 
 ## Production implementation checks
+
+### Isolated Tauri runtime probe
+
+The standalone desktop example deliberately omits Otto's daemon supervisor,
+window restoration, shortcuts, plugins and product SPA. It uses the production
+`rooms.rs` command, Tauri context and capabilities, a blank bundled-origin page,
+and a temporary loopback guest server. Its generated app has a separate bundle
+identifier and ephemeral windows. Build and run it without installing Otto:
+
+```sh
+TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml --example room_native_probe
+python3 scripts/room-media-probe/native.py --binary apps/desktop/src-tauri/target/debug/examples/room_native_probe --cycles 20
+```
+
+When using `CARGO_TARGET_DIR`, pass the corresponding executable path. The runner
+records its results in a new temporary directory and has a 45-second deadline.
+It checks local IPC as a positive control, guest denial of native window creation,
+window access and event subscriptions, secret-free rejection messages, blocked
+navigation and popups, and the production recap AudioWorklet with generated
+oscillator audio in both webviews. A harmless, unguarded `daemon_restart` stand-in
+must run exactly once for the local positive control and never for the guest;
+the native counter independently detects entry to that handler. `--cycles 20`
+repeats audio-context creation, module loading, synthetic stream processing,
+flush and cleanup twenty times per window. This is audio lifecycle coverage,
+not twenty full room/presentation cycles or a memory-leak measurement.
+It never calls `getUserMedia` or
+`getDisplayMedia`, starts a daemon, or loads the user's Otto state. API exposure
+is only a capability check; this fixture cannot establish real capture, picker
+selection, full production startup, packaging/signing or hardware performance.
+
+The existing plain WKWebView benchmark has no `WKUIDelegate`, unlike Wry. A
+separate temporary delegate fixture on 2026-09-27 exposed both capture methods
+and ran the production recap worklet: 105,728 samples at 48 kHz, synthetic RMS
+0.699, successful flush, closed audio context and ended destination track. It
+made no capture request. Historical delegate-related display-capture failures
+were [fixed upstream in WebKit in June 2024](https://bugs.webkit.org/show_bug.cgi?id=274896);
+they do not prove a current failure or success. Real source-picker validation
+must still cover both the current system and Otto's oldest supported macOS.
+
+The isolated Tauri example passed on 2026-09-27 with `--cycles 20` using the
+actual desktop dependency lockfile and production room command/capabilities:
+
+```text
+Artifacts: /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-room-tauri-probe-8mzdh_dq
+Exit: 0; passed: True
+custom_command_calls: 1; navigation_confined: true; window_count: 2
+main: 20 audio cycles passed; room-1: 20 audio cycles passed
+```
+
+Both origins exposed capture APIs. The local custom-command positive control
+ran once; the guest's call was rejected before the handler, leaving the native
+counter at one. Guest creation, local-window read/mutation and event listening
+were denied without echoing the synthetic invitation secret. Navigation to
+`tauri://localhost/`, `https://tauri.localhost/` and another path at the guest
+origin was blocked, and the popup created no additional window. Every audio
+cycle verified synthetic PCM, flush completion, ended owned tracks and a closed
+context. This establishes these boundaries in an isolated unsigned Tauri app;
+it does not establish physical capture or a complete signed Otto release.
+
+For a person at the test Mac, the same example supports an opt-in physical check:
+
+```sh
+python3 scripts/room-media-probe/native.py --binary apps/desktop/src-tauri/target/debug/examples/room_native_probe --physical
+```
+
+This opens separate local and guest diagnostic windows for up to fifteen minutes.
+Nothing captures on launch. In each window, explicitly enable the microphone,
+speak briefly, choose a neutral display/window, resize it, use the system stop
+control, and press Stop all. After checking the OS indicators clear, check the
+confirmation box and finish that window. Only sample/frame counts, RMS, geometry,
+permission error names and cleanup metadata are saved; no media, device names,
+screen titles or transcripts are retained. This mode has been prepared but has
+not been run with a person or physical capture. It is not full room-call or
+performance acceptance.
+
+### Production-client stability and local TURN
+
+`stability.mjs` runs four real `RoomMediaClient` objects in a blank Chromium page
+served by an isolated Vite instance. Captures are generated 640×360 canvases
+at 3 fps and oscillator tones;
+signaling is in-process. It repeatedly stops/restarts a presenter, checks all four
+sources at every client and all six connected peers, verifies advancing received
+audio bytes/packets and decoded video frames, requires all four voice members
+to be joined and unmuted, and checks that every owned track, peer and audio context
+is ended/closed during cleanup. The standard workload is:
+
+```sh
+node scripts/room-media-probe/stability.mjs --stun --task-signaling --seconds 600 --cycles 20
+```
+
+The `--stun` option starts a temporary loopback-only STUN Binding responder.
+`--task-signaling` delivers fixture messages as event-loop tasks, like incoming
+WebSocket messages; the default retains immediate microtask delivery for stress
+investigation. Both modes retain the strict six-connected-peer startup gate.
+The runner records the selected modes and bounded signaling/RTC diagnostics.
+Audio startup waits for each membership/mute snapshot acknowledgment before
+continuing, matching server-mediated room state rather than assuming an
+immediate in-process response. The fixture rejects self-subscriptions, as the
+real backend does.
+
+A separate control imports no product code and implements W3C perfect
+negotiation with generated audio/video. Compare startup conditions with:
+
+```sh
+node scripts/room-media-probe/negotiation-control.mjs
+node scripts/room-media-probe/negotiation-control.mjs --stun
+node scripts/room-media-probe/negotiation-control.mjs --stun --permission
+node scripts/room-media-probe/negotiation-control.mjs --stun --fake-capture
+```
+
+On this Chromium build, simultaneous offers sometimes left the polite peer
+permanently gathering with zero candidates, independently of `RoomMediaClient`.
+Noncolliding control offers connected. Loopback STUN, browser microphone
+permission alone, and task delivery did not reliably resolve the independent
+collision failure. Explicit fake-device capture passed five collision controls,
+but a production-client run with the same fake-capture mode still failed startup.
+This evidence does not establish a general workaround or physical-capture
+behavior. `--fake-capture` launches Chromium with both explicit fake-device
+flags; it never opens a physical device and stops its generated capture track.
+The four clients share a page, so this mode also cannot establish behavior of a
+separate muted host browser. Reports preserve failed runs; a connected sustained
+run is lifecycle evidence, not proof that all startup conditions pass.
+
+The ten-minute synthetic run passed on 2026-09-27: 20 presentation replacements,
+21 samples, six connected peers, all four voice participants joined/unmuted,
+advancing audio bytes/packets and decoded video frames at every sample, and
+four media sections per peer. Cleanup closed all six peers and eight audio
+contexts and ended all 31 owned tracks. Artifacts:
+`/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-room-stability-UmB7ei`.
+This run loaded the lifecycle/negotiation fixes before the later own-source
+subscription suppression change; the subsequent 25-cycle relay run below
+includes that change and a fixture that rejects self-subscriptions. The earlier
+25-cycle presentation-only result is not counted as voice acceptance: delayed
+fixture snapshots had left guests out of audio. Awaited membership and explicit
+audio RTP assertions corrected that test gap. This 640×360/3 fps single-browser
+workload is not the native reference-performance workload or a leak measurement.
+
+The initial sustained test exposed a production defect at the fifth presentation
+restart: new transceivers accumulated until SDP exceeded the eight-media-section
+limit. The parser correctly rejected that SDP, leaving two guests without the
+new source. Sender/receiver reuse fixes this without raising the protocol limits.
+
+An optional local relay fixture uses the [official coturn image](https://github.com/coturn/coturn/tree/master/docker/coturn)
+for release `4.18.0-r0`, pinned to manifest digest
+`sha256:bbefd3e1fdfdc0d58770fe01b581fd8b00d9f3a5580d00acb77cf719a6bc78e3`.
+Download it explicitly before running the fixture:
+
+```sh
+docker pull coturn/coturn@sha256:bbefd3e1fdfdc0d58770fe01b581fd8b00d9f3a5580d00acb77cf719a6bc78e3
+node scripts/room-media-probe/stability.mjs --relay --task-signaling --seconds 30 --cycles 2
+```
+
+The container has a unique name, loopback-only published ports, a bounded
+32-port relay range, no host-network mode or mounted user data, and is removed
+in cleanup. Test credentials are temporary. Loopback peers are allowed only in
+this disposable fixture. The run passed with all six selected local candidates
+of type `relay` and production `iceTransportPolicy: relay`. The final-source
+60-second run passed 25 presentation replacements and 26 samples with all four
+voice participants joined/unmuted, increasing audio bytes/packets and decoded
+video frames on every peer, four media sections per peer throughout, and six
+closed peers, 36 ended tracks and eight closed audio contexts. Artifacts:
+`/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-room-stability-kHSgfA`.
+A deliberate SIGTERM test also wrote an interrupted report and removed its
+container. Vite middleware mode and runner-owned signal handling keep cleanup
+under the fixture's control.
+This demonstrates forced relay on one machine through Docker; it does not
+establish cross-network NAT traversal, TURN/TLS, lossy-network performance,
+WKWebView relay behavior, or per-Mac resource budgets.
 
 `ui/e2e/fixtures/room-media-smoke.ts` uses four real `RoomMediaClient` objects
 with generated canvas/audio streams and local signaling. Its Playwright test
@@ -136,5 +305,5 @@ Native desktop tests cover invitation schemes, loopback exceptions, reserved
 confinement and capability policy. The full standalone test suite passed
 27/27, first with fixture `frontendDist`, then again with the actual production UI
 build and a test-only empty `externalBin` override. The isolated worktree lacks
-the packaging sidecar. This is compile/unit evidence, not a packaged runtime IPC
-exploit test.
+the packaging sidecar. That suite is compile/unit evidence; the separate isolated Tauri runtime
+boundary checks are described above.

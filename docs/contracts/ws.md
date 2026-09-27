@@ -54,6 +54,7 @@ below). Clients need no change: keep sending, and treat a dropped socket or a
 {"type":"claim"}                                    // claim size authority (sent on terminal focus)
 {"type":"pause"}                                    // flow control: stop sending me output (see below)
 {"type":"resume"}                                   // flow control: send again (+ one snapshot if anything was held back)
+{"type":"resync","lines":2000}                      // typed over a dropped local backlog: discard my queued output, send ONE snapshot (see below)
 ```
 
 **Flow control (`pause` / `resume`).** A browser WebSocket drains the socket
@@ -73,6 +74,17 @@ PTY or other viewers:
   rule), so a lost `resume` can never freeze a pane. A client still draining
   above its low watermark re-sends `pause` about once a second to stay paused.
 - A new connection always starts unpaused.
+
+**`resync`.** Clients may keep received output in a queue in front of their
+emulator (Otto feeds xterm ≤ 64 KB at a time, ≤ 128 KB inside it). When the
+user types while more than 256 KB is queued (typically `^C` mid-flood), the
+client drops that queue — it would only scroll past what the interrupt
+already stopped — and sends `resync`. The server discards this viewer's own
+queued output (already reflected in the emulator), leaves any `pause`, and
+ALWAYS answers with one `scrollback` snapshot of up to `lines` rows (0 → the
+full emulator depth) before live bytes continue. Clients send `resync` before
+any `resume` its drop triggers; a `resume` arriving after it is a no-op.
+Read-only safe (per viewer, never touches the PTY).
 
 A snapshot can therefore arrive while the client still has older output queued
 in its emulator; it must apply the reset IN ORDER after that backlog (Otto
@@ -1160,8 +1172,13 @@ Conversation view (`docs/design/conversation-view.md` §4.3). Emitted by
 - `transcript_appended` — the session's transcript grew. `turns` are the turns
   touched by the new records, each sent WHOLE (a turn whose tool results just
   landed is re-sent) — clients replace by `Turn.id`. `cursor` is the index of the
-  LAST folded record (`after_cursor`). A payload over 64 KB is sent with
-  `turns: []`: re-fetch `GET …/transcript`. Session-family scoped
+  LAST folded record (`after_cursor`). A payload over 64 KB is first shrunk:
+  tool results' `text` (then `patch`) are cut to 4 KB (then 1 KB, 256 B, 0)
+  and flagged `result.elided: true` — fetch the whole block with
+  `GET …/transcript/tool/{tool_id}` when the step is expanded (`bytes` /
+  `truncated` still describe the stored result). Only a delta that is still
+  over 64 KB after that (prose/inputs alone) is sent with `turns: []`:
+  re-fetch `GET …/transcript`. Session-family scoped
   (owner / workspace admin / root, viewer-gated) — transcript prose and tool
   output never reach other users.
 - `transcript_live` — the agent's in-progress response as currently drawn on

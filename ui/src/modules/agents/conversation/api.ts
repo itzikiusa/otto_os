@@ -28,7 +28,7 @@ export function fetchSlashCommands(sessionId: string): Promise<SlashCommand[]> {
 
 /** Keep the live tail armed for an open chat (`POST …/transcript/touch`). */
 export function touchTranscript(sessionId: string): Promise<void> {
-  return api.post<void>(`/sessions/${encodeURIComponent(sessionId)}/transcript/touch`, {});
+  return api.bg.post<void>(`/sessions/${encodeURIComponent(sessionId)}/transcript/touch`, {});
 }
 
 export function submitPrompt(sessionId: string, text: string): Promise<void> {

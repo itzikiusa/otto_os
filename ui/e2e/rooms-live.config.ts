@@ -4,11 +4,14 @@ const port = process.env.OTTO_E2E_PW_PORT ?? '5296';
 const origin = process.env.OTTO_E2E_UI ?? `http://localhost:${port}`;
 export default defineConfig({
   ...base,
-  use: {...base.use, baseURL: origin, actionTimeout: 15000},
+  use: {...base.use, baseURL: origin, actionTimeout: 15000,
+    permissions: ['microphone'],
+    launchOptions: {args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream']},
+  },
   testDir: '.', testMatch: 'desktop-rooms-live.spec.ts',
   globalSetup: './global-setup.ts', globalTeardown: './global-teardown.ts',
   workers: 1, timeout: 90000, reporter: 'list',
-  outputDir: '/tmp/otto-rooms-live-results',
+  outputDir: `/tmp/otto-rooms-live-results-${process.env.OTTO_E2E_SLOT ?? port}`,
   webServer: {command: `npm run dev -- --config e2e/fixtures/rooms-live-vite.config.ts --port ${port} --strictPort`, url: origin, reuseExistingServer: false},
   projects: [{name: 'rooms-live', use: {...devices['Desktop Chrome'], viewport: {width: 1280, height: 800}}}],
 });

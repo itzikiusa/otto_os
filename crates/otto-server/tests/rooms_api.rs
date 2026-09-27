@@ -463,9 +463,35 @@ async fn room_http_auth_admission_driver_and_terminal_process_are_isolated() {
         }
     }).await.unwrap();
     assert!(tokio::time::timeout(std::time::Duration::from_millis(100), terminal.next()).await.is_err(), "paused viewers must not receive live output");
+    // The renderer discarded its backlog: resync must answer even though a
+    // trailing resume clears the old pause in the same WebSocket batch.
+    send(&mut terminal, json!({"type":"resync","lines":1000})).await;
     send(&mut terminal, json!({"type":"resume"})).await;
     let resync = until(&mut terminal, |v| v["type"] == "scrollback").await;
     assert!(String::from_utf8_lossy(&STANDARD.decode(resync["data"].as_str().unwrap()).unwrap()).contains("PAUSED-ROOM-OUTPUT"));
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(100), terminal.next()).await.is_err(), "trailing resume must not duplicate the recovery snapshot");
+    // Nothing new was produced. Recovery still answers, with a burst retained
+    // as one pending snapshot instead of rejected by the history rate limiter.
+    for _ in 0..3 {
+        send(&mut terminal, json!({"type":"resync","lines":1000})).await;
+    }
+    let idle = until(&mut terminal, |v| v["type"] == "scrollback" || v["type"] == "error").await;
+    assert_eq!(idle["type"], "scrollback", "idle recovery must not be rate-rejected");
+    assert!(String::from_utf8_lossy(&STANDARD.decode(idle["data"].as_str().unwrap()).unwrap()).contains("PAUSED-ROOM-OUTPUT"));
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(100), terminal.next()).await.is_err(), "coalesced recovery must answer once");
+    ctx.manager.human_input(&session.id, &owner.id, false, true, b"AFTER-ROOM-RESYNC\n").await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut bytes = vec![];
+        loop {
+            match terminal.next().await.unwrap().unwrap() {
+                Message::Binary(chunk) => {
+                    bytes.extend_from_slice(&chunk);
+                    if String::from_utf8_lossy(&bytes).contains("AFTER-ROOM-RESYNC") { break; }
+                }
+                other => panic!("expected ordered live output after recovery, got {other:?}"),
+            }
+        }
+    }).await.unwrap();
     assert_eq!(ctx.manager.room_authority_snapshot(&session.id).await.unwrap(), authority);
     send(&mut terminal,json!({"type":"input","data":STANDARD.encode(b"VIEWER-MUST-NOT-WRITE\n"),"grant_epoch":admitted["room"]["grant_epoch"]})).await;
     until(&mut terminal, |v| v["type"] == "error").await;

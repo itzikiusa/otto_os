@@ -21,6 +21,33 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 
 const FLOW_AUTO_RESUME: Duration = Duration::from_secs(2);
+const RESYNC_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Recovery cannot be rejected after the client discards its renderer backlog.
+/// Keep one pending request, coalescing bursts without delaying its deadline.
+#[derive(Default)]
+struct ResyncQueue {
+    pending: Option<(usize, tokio::time::Instant)>,
+    next_allowed: Option<tokio::time::Instant>,
+}
+impl ResyncQueue {
+    fn request(&mut self, lines: usize, now: tokio::time::Instant) {
+        let due = self.next_allowed.unwrap_or(now).max(now);
+        self.pending = Some((lines.min(10_000), self.pending.map_or(due, |(_, at)| at)));
+    }
+    fn deadline(&self) -> Option<tokio::time::Instant> {
+        self.pending.map(|(_, at)| at)
+    }
+    fn take_ready(&mut self, now: tokio::time::Instant) -> Option<usize> {
+        let (lines, at) = self.pending?;
+        if now < at {
+            return None;
+        }
+        self.pending = None;
+        self.next_allowed = Some(now + RESYNC_INTERVAL);
+        Some(lines)
+    }
+}
 
 /// Output flow belongs to this viewer, independently of the room driver.
 #[derive(Default)]
@@ -60,6 +87,10 @@ enum Frame {
         lines: Option<usize>,
     },
     Snapshot,
+    Resync {
+        #[serde(default)]
+        lines: Option<usize>,
+    },
     Pause,
     Resume,
 }
@@ -191,14 +222,21 @@ async fn serve(
     let mut frame_rate = Rate::new(120.0);
     let mut history_rate = Rate::new(2.0);
     let mut flow = FlowGate::default();
+    let mut recovery = ResyncQueue::default();
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
     loop {
         tokio::select! {
-            _=flow_deadline(flow.paused_until), if flow.paused_until.is_some()=>{
+            _=flow_deadline(recovery.deadline()), if recovery.pending.is_some()=>{
+                if !valid(&shared,&member,generation).await{break;}
+                if let Some(lines)=recovery.take_ready(tokio::time::Instant::now()) {
+                    if snapshot(&mut socket,&handle,lines,&mut output).await.is_err(){break;}
+                }
+            }
+            _=flow_deadline(flow.paused_until), if flow.paused_until.is_some() && recovery.pending.is_none()=>{
                 if !valid(&shared,&member,generation).await{break;}
                 if flow.resume(&mut output) && snapshot(&mut socket,&handle,10_000,&mut output).await.is_err(){break;}
             }
-            chunk=output.recv(), if flow.paused_until.is_none()=>{
+            chunk=output.recv(), if flow.paused_until.is_none() && recovery.pending.is_none()=>{
                 if !valid(&shared,&member,generation).await{break;}
                 match chunk {
                     Ok(chunk)=>if send_frame(&mut socket,Message::Binary(chunk)).await.is_err(){break;},
@@ -223,8 +261,14 @@ async fn serve(
                     Frame::Resize{cols,rows,grant_epoch}=>ctx.manager.room_resize(&session,&room_id,&member,grant_epoch,cols,rows).await,
                     Frame::Scrollback{lines}=>match history_rate.take(1.0,2.0){Ok(())=>snapshot(&mut socket,&handle,lines.unwrap_or(10_000),&mut output).await,Err(e)=>Err(e)},
                     Frame::Snapshot=>match history_rate.take(1.0,2.0){Ok(())=>snapshot(&mut socket,&handle,0,&mut output).await,Err(e)=>Err(e)},
+                    Frame::Resync{lines}=>{
+                        flow.paused_until=None;
+                        let now=tokio::time::Instant::now();
+                        recovery.request(lines.unwrap_or(10_000),now);
+                        if let Some(lines)=recovery.take_ready(now){snapshot(&mut socket,&handle,lines,&mut output).await}else{Ok(())}
+                    },
                     Frame::Pause=>{flow.pause();Ok(())},
-                    Frame::Resume=>{if flow.resume(&mut output){snapshot(&mut socket,&handle,10_000,&mut output).await}else{Ok(())}},
+                    Frame::Resume=>{if flow.resume(&mut output) && recovery.pending.is_none(){snapshot(&mut socket,&handle,10_000,&mut output).await}else{Ok(())}},
                 };
                 if let Err(error)=result {if send(&mut socket,&RoomEvent::Error{code:error.code().into(),message:error.to_string()}).await.is_err(){break;}}
             }
@@ -270,6 +314,37 @@ mod tests {
             serde_json::from_str::<Frame>(r#"{"type":"resume"}"#),
             Ok(Frame::Resume)
         ));
+        assert!(matches!(
+            serde_json::from_str::<Frame>(r#"{"type":"resync","lines":1000}"#),
+            Ok(Frame::Resync { lines: Some(1000) })
+        ));
+    }
+
+    #[test]
+    fn resync_bursts_coalesce_without_starving_recovery() {
+        let now = tokio::time::Instant::now();
+        let mut recovery = ResyncQueue::default();
+        recovery.request(100, now);
+        assert_eq!(
+            recovery.take_ready(now),
+            Some(100),
+            "first recovery is immediate"
+        );
+        recovery.request(200, now + Duration::from_millis(10));
+        for ms in 11..500 {
+            recovery.request(usize::MAX, now + Duration::from_millis(ms));
+            assert_eq!(recovery.take_ready(now + Duration::from_millis(ms)), None);
+            assert_eq!(recovery.deadline(), Some(now + RESYNC_INTERVAL));
+        }
+        assert_eq!(recovery.take_ready(now + RESYNC_INTERVAL), Some(10_000));
+        assert_eq!(
+            recovery.take_ready(now + RESYNC_INTERVAL),
+            None,
+            "one response per coalesced burst"
+        );
+        recovery.request(0, now + RESYNC_INTERVAL);
+        assert_eq!(recovery.deadline(), Some(now + 2 * RESYNC_INTERVAL));
+        assert_eq!(recovery.take_ready(now + 2 * RESYNC_INTERVAL), Some(0));
     }
 
     #[test]

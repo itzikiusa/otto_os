@@ -158,6 +158,49 @@ test('four real browser media clients negotiate synthetic audio and screen forwa
   }
 });
 
+test('driver interruption drops queued output and forwards a room resync', async ({page}) => {
+  const frames: Record<string, unknown>[] = [];
+  let terminal: WebSocketRoute | undefined;
+  await page.route('**/api/v1/room-join', route => route.fulfill({json: {room_id: 'demo', member_id: 'guest', token: 'guest-token'}}));
+  await page.routeWebSocket('**/ws/rooms/demo', ws => {
+    ws.send(JSON.stringify({type: 'snapshot', room: {...admitted, driver_member_id: 'guest', grant_epoch: 7}}));
+    ws.onMessage(raw => {if (JSON.parse(String(raw)).type === 'heartbeat') ws.send(JSON.stringify({type: 'heartbeat'}));});
+  });
+  await page.routeWebSocket('**/ws/rooms/demo/terminal', ws => {
+    terminal = ws;
+    ws.send(JSON.stringify({type: 'scrollback', data: btoa('Driver ready\r\n'), cols: 80, rows: 24, epoch: 1}));
+    ws.onMessage(raw => {
+      const frame = JSON.parse(String(raw)); frames.push(frame);
+      if (frame.type === 'resync') ws.send(JSON.stringify({type: 'scrollback', data: btoa('Resynchronized driver\r\n'), cols: 80, rows: 24, epoch: 1}));
+    });
+  });
+  await page.goto('/#/room/demo/invite_1234567890');
+  await page.evaluate(async () => {
+    const modulePath = '/src/modules/rooms/room-client.ts';
+    const {RoomClient} = await import(modulePath), open = RoomClient.prototype.terminal;
+    RoomClient.prototype.terminal = function () {
+      const socket: WebSocket = open.call(this), send = socket.send.bind(socket);
+      socket.send = data => {
+        send(data);
+        if (typeof data !== 'string' || JSON.parse(data).type !== 'pause') return;
+        // A key reaches the real xterm handler at the high-water boundary,
+        // before its scheduled parser drains the production write queue.
+        queueMicrotask(() => document.querySelector('.xterm-helper-textarea')?.dispatchEvent(new KeyboardEvent('keydown', {key: 'c', code: 'KeyC', keyCode: 67, ctrlKey: true, bubbles: true})));
+      };
+      return socket;
+    };
+  });
+  await page.getByLabel('Your display name').fill('Alex');
+  await page.getByRole('button', {name: 'Request entry'}).click();
+  await expect(page.locator('.xterm-rows')).toContainText('Driver ready');
+  await page.locator('.xterm-helper-textarea').focus();
+  terminal!.send(Buffer.from('queued output\r\n'.repeat(160000)));
+  await expect.poll(() => frames.some(frame => frame.type === 'resync')).toBeTruthy();
+  expect(frames.find(frame => frame.type === 'resync')).toEqual({type: 'resync', lines: 10000});
+  expect(frames.some(frame => frame.type === 'input' && frame.data === btoa('\x03') && frame.grant_epoch === 7)).toBeTruthy();
+  await expect(page.locator('.xterm-rows')).toContainText('Resynchronized driver');
+});
+
 
 test('read-only room terminal applies backpressure and resumes after parsing a large snapshot', async ({page}) => {
   const frames: {type: string}[] = [];
