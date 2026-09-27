@@ -35,7 +35,23 @@ pub struct HistoryEntry {
     /// where `user_id` matches the caller; legacy rows are invisible to them.
     pub user_id: Option<Id>,
     pub created_at: DateTime<Utc>,
+    /// Full length (chars) of `statement` when a LIST response clipped it to
+    /// [`HISTORY_PREVIEW_CHARS`]; absent when `statement` is the whole text.
+    /// The full text comes from [`DbExplorerRepo::get_history`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statement_len: Option<i64>,
 }
+
+/// How much of each statement a history LIST returns. An import or a pasted
+/// script can store hundreds of KB per row, and the sidebar re-lists up to
+/// 1,000 rows after every run — the rows stay intact in the DB (no retention
+/// change); only the list payload is a preview.
+pub const HISTORY_PREVIEW_CHARS: i64 = 16 * 1024;
+
+/// Column list for history LIST queries: the statement is clipped in SQL so the
+/// full text never leaves SQLite.
+const HISTORY_LIST_COLS: &str = "id, connection_id, ok, duration_ms, row_count, error, user_id, \
+     created_at, substr(statement, 1, 16384) AS statement, length(statement) AS statement_len";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dashboard {
@@ -120,6 +136,11 @@ fn row_to_history(r: &sqlx::sqlite::SqliteRow) -> Result<HistoryEntry> {
         error: r.get("error"),
         user_id: r.get("user_id"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
+        // Only list queries select `statement_len`; set it only when clipped.
+        statement_len: r
+            .try_get::<i64, _>("statement_len")
+            .ok()
+            .filter(|n| *n > HISTORY_PREVIEW_CHARS),
     })
 }
 
@@ -262,10 +283,10 @@ impl DbExplorerRepo {
 
     /// Return all history for a connection, unfiltered. For root / workspace-Admin use.
     pub async fn list_history(&self, connection_id: &Id, limit: i64) -> Result<Vec<HistoryEntry>> {
-        let rows = sqlx::query(
-            "SELECT * FROM db_query_history WHERE connection_id = ?
-             ORDER BY created_at DESC LIMIT ?",
-        )
+        let rows = sqlx::query(&format!(
+            "SELECT {HISTORY_LIST_COLS} FROM db_query_history WHERE connection_id = ?
+             ORDER BY created_at DESC LIMIT ?"
+        ))
         .bind(connection_id)
         .bind(limit)
         .fetch_all(&self.pool)
@@ -285,10 +306,10 @@ impl DbExplorerRepo {
         user_id: &Id,
         limit: i64,
     ) -> Result<Vec<HistoryEntry>> {
-        let rows = sqlx::query(
-            "SELECT * FROM db_query_history WHERE connection_id = ? AND user_id = ?
-             ORDER BY created_at DESC LIMIT ?",
-        )
+        let rows = sqlx::query(&format!(
+            "SELECT {HISTORY_LIST_COLS} FROM db_query_history WHERE connection_id = ? AND user_id = ?
+             ORDER BY created_at DESC LIMIT ?"
+        ))
         .bind(connection_id)
         .bind(user_id)
         .bind(limit)
@@ -296,6 +317,17 @@ impl DbExplorerRepo {
         .await
         .map_err(dberr("list history for user"))?;
         rows.iter().map(row_to_history).collect()
+    }
+
+    /// One history row with its FULL statement (the list returns previews).
+    pub async fn get_history(&self, id: &Id) -> Result<HistoryEntry> {
+        let row = sqlx::query("SELECT * FROM db_query_history WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("get history"))?
+            .ok_or_else(|| otto_core::Error::NotFound(format!("history entry {id}")))?;
+        row_to_history(&row)
     }
 
     /// Return all saved queries for a workspace, unfiltered. For root / workspace-Admin use.
@@ -721,6 +753,41 @@ mod tests {
             Some(user_a.as_str()),
             "user_id must be stored in the history row"
         );
+    }
+
+    /// The LIST clips a huge statement to a preview (with its full length);
+    /// the row itself is untouched and `get_history` returns the whole text.
+    #[tokio::test]
+    async fn history_list_previews_big_statements_and_get_returns_full_text() {
+        let pool = mem_pool().await;
+        let repo = DbExplorerRepo::new(pool.clone());
+        let user_a = seed_user(&pool, "alice", false).await;
+        let ws_id = seed_workspace(&pool).await;
+        let conn_id = seed_connection(&pool, &ws_id, &user_a).await;
+
+        let big = format!("INSERT INTO t VALUES {}", "(1),".repeat(20_000));
+        repo.add_history(&conn_id, &user_a, &big, true, 7, 1, None)
+            .await
+            .unwrap();
+        repo.add_history(&conn_id, &user_a, "SELECT 1", true, 7, 1, None)
+            .await
+            .unwrap();
+
+        for list in [
+            repo.list_history(&conn_id, 100).await.unwrap(),
+            repo.list_history_for_user(&conn_id, &user_a, 100).await.unwrap(),
+        ] {
+            let small = list.iter().find(|e| e.statement == "SELECT 1").unwrap();
+            assert_eq!(small.statement_len, None, "an unclipped row has no length");
+            let clipped = list.iter().find(|e| e.statement != "SELECT 1").unwrap();
+            assert_eq!(clipped.statement.len() as i64, HISTORY_PREVIEW_CHARS);
+            assert!(big.starts_with(&clipped.statement));
+            assert_eq!(clipped.statement_len, Some(big.len() as i64));
+            let full = repo.get_history(&clipped.id).await.unwrap();
+            assert_eq!(full.statement, big);
+            assert_eq!(full.statement_len, None);
+        }
+        assert!(repo.get_history(&"missing".to_string()).await.is_err());
     }
 
     // ── Saved-query isolation (#L12) ─────────────────────────────────────────

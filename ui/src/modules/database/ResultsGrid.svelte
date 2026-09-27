@@ -214,7 +214,7 @@
     // new result has the SAME columns (a re-run of the same query), so the grid
     // doesn't jump; reset them only when the shape actually changes.
     if (colKey !== prevColKey) {
-      search = '';
+      setSearch('');
       sortCol = null;
       sortDir = null;
       colFilters = {};
@@ -292,7 +292,31 @@
   });
 
   // ── Search / filter ─────────────────────────────────────────────────────────
+  // `searchInput` is what the box shows; `search` is what filters. Above
+  // SEARCH_DEBOUNCE_ROWS loaded rows the filter pass (every row, plus the
+  // highlight of every visible cell) runs once typing pauses, not per key —
+  // the box itself stays instant.
+  let searchInput = $state('');
   let search = $state('');
+  const SEARCH_DEBOUNCE_ROWS = 20_000;
+  const SEARCH_DEBOUNCE_MS = 120;
+  let searchTimer: ReturnType<typeof setTimeout> | null = null;
+  function setSearch(value: string, debounce = false): void {
+    searchInput = value;
+    if (searchTimer !== null) clearTimeout(searchTimer);
+    searchTimer = null;
+    if (!debounce || value === '' || liveRows.length <= SEARCH_DEBOUNCE_ROWS) {
+      search = value;
+      return;
+    }
+    searchTimer = setTimeout(() => {
+      searchTimer = null;
+      search = value;
+    }, SEARCH_DEBOUNCE_MS);
+  }
+  $effect(() => () => {
+    if (searchTimer !== null) clearTimeout(searchTimer);
+  });
   const searchLc = $derived(search.trim().toLowerCase());
   const filtering = $derived(searchLc.length > 0);
 
@@ -568,11 +592,16 @@
   $effect(()=>{if(connectionId&&editAccessChild!==accessChild)void resourceAccess.load('connection',connectionId,editAccessChild);});
 
   const flow = new EditFlow();
+  // While an error is shown, `result` is still the PREVIOUS run's while
+  // `statement` is the failed one — never pair them (BUG-7: the edit flow and
+  // the PK lookup ran the old rows against the failed statement's table). The
+  // ErrorPanel / agent paths keep the failed `statement`.
+  const gridStatement = $derived(error ? undefined : statement);
   $effect(() => {
     flow.update({
       result,
       liveRows,
-      statement,
+      statement: gridStatement,
       connectionId,
       ranNode,
       engine,
@@ -589,7 +618,7 @@
   // the capabilities change — `resolveTarget` reads its inputs synchronously
   // before the first await, so they're tracked as well.
   $effect(() => {
-    void statement;
+    void gridStatement;
     void connectionId;
     void ranNode;
     void result?.columns;
@@ -1113,12 +1142,13 @@
             type="text"
             placeholder="Search rows…"
             aria-label="Search rows"
-            bind:value={search}
+            value={searchInput}
+            oninput={(e) => setSearch(e.currentTarget.value, true)}
             spellcheck="false"
             autocomplete="off"
           />
-          {#if filtering}
-            <button class="gt-search-clear" title="Clear search" aria-label="Clear search" onclick={() => (search = '')}>
+          {#if filtering || searchInput}
+            <button class="gt-search-clear" title="Clear search" aria-label="Clear search" onclick={() => setSearch('')}>
               <Icon name="x" size={10} />
             </button>
           {/if}

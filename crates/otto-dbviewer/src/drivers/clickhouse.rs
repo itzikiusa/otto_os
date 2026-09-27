@@ -103,6 +103,9 @@ fn is_native_port(port: u16) -> bool {
 /// the auto-LIMIT injector can't rewrite; exceeding it is a clear 502, not an OOM.
 const HTTP_RESPONSE_BYTE_CAP: usize = 128 * 1024 * 1024;
 
+/// Replies at least this big are JSON-decoded on the blocking pool.
+const OFF_RUNTIME_PARSE_BYTES: usize = 1024 * 1024;
+
 /// Server-side `max_execution_time` (seconds) for an HTTP request whose tab
 /// sets no timeout — just under the client's default 60s wall clock, so the
 /// server stops the query itself instead of running on after the client left.
@@ -670,15 +673,23 @@ impl ClickhouseDriver {
             .collect();
 
         let total = resp.data.len();
-        let truncated = total > max_rows;
+        let mut truncated = total > max_rows;
         // Cap oversized cells (e.g. AggregateFunction/*State blobs) so a giant
-        // value can't break the grid.
-        let rows: Vec<Vec<Value>> = resp
-            .data
-            .into_iter()
-            .take(max_rows)
-            .map(|row| row.into_iter().map(cap_cell).collect())
-            .collect();
+        // value can't break the grid, and stop at the response byte budget like
+        // the MySQL/Postgres readers (at least one row is always kept).
+        let mut budget = types::ByteBudget::default();
+        let mut truncated_reason = None;
+        let mut rows: Vec<Vec<Value>> = Vec::with_capacity(total.min(max_rows));
+        for row in resp.data.into_iter().take(max_rows) {
+            let row: Vec<Value> = row.into_iter().map(cap_cell).collect();
+            let size = row.iter().map(|v| types::approx_json_len(v) + 1).sum();
+            if !budget.charge(size) && !rows.is_empty() {
+                truncated = true;
+                truncated_reason = Some(types::TruncatedReason::Bytes);
+                break;
+            }
+            rows.push(row);
+        }
         let row_count = rows.len();
 
         Ok(QueryResult {
@@ -690,6 +701,7 @@ impl ClickhouseDriver {
                 bytes_read: Some(resp.bytes_read),
             },
             truncated,
+            truncated_reason,
             ..QueryResult::empty()
         })
     }
@@ -805,7 +817,16 @@ impl Conn {
     async fn query_json(&self, sql: &str) -> Result<JsonResponse> {
         let body = format!("{sql}\nFORMAT JSONCompact");
         let text = self.post(body).await?;
-        serde_json::from_str(&text).map_err(types::upstream)
+        // A big reply (up to HTTP_RESPONSE_BYTE_CAP) is hundreds of ms of JSON
+        // parsing — do that on the blocking pool, not a runtime worker every
+        // other request shares. Small replies (introspection) stay inline.
+        if text.len() < OFF_RUNTIME_PARSE_BYTES {
+            return serde_json::from_str(&text).map_err(types::upstream);
+        }
+        tokio::task::spawn_blocking(move || serde_json::from_str(&text))
+            .await
+            .map_err(|e| types::upstream(format!("clickhouse: decode task failed: {e}")))?
+            .map_err(types::upstream)
     }
 
     /// Run a statement and return the raw response text (for DDL / SHOW CREATE
@@ -896,7 +917,10 @@ impl Conn {
             }
             buf.extend_from_slice(&chunk);
         }
-        let text = String::from_utf8_lossy(&buf).into_owned();
+        // Valid UTF-8 (the normal case) moves the buffer; only a broken body
+        // pays the lossy copy.
+        let text = String::from_utf8(buf)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
         if !status.is_success() {
             return Err(types::upstream(text.trim().to_string()));
         }
@@ -1910,11 +1934,20 @@ impl Driver for ClickhouseDriver {
         let snap = self.completion_snapshot(cfg, &scope_db).await;
         let sql_ctx = crate::complete::sql::analyze(&ctx.prefix, &ctx.suffix);
         let items = crate::complete::sql::assemble(&sql_ctx, &snap, KEYWORDS, FUNCTIONS);
-        Ok(CompletionResponse { items })
+        Ok(CompletionResponse { items, ..Default::default() })
     }
 
     async fn invalidate_completion_cache(&self, cfg: &ResolvedConfig) {
         self.completions.invalidate(&cfg.cache_key());
+    }
+
+    fn assemble_completion(
+        &self,
+        snap: &crate::complete::SchemaSnapshot,
+        ctx: &CompletionContext,
+    ) -> Vec<crate::types::CompletionItem> {
+        let sql_ctx = crate::complete::sql::analyze(&ctx.prefix, &ctx.suffix);
+        crate::complete::sql::assemble(&sql_ctx, snap, KEYWORDS, FUNCTIONS)
     }
 
     /// Streaming export. On the HTTP transport (the common case, incl. over an

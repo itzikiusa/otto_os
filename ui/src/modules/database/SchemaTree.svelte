@@ -3,7 +3,7 @@
   // keys; collections → fields). Mirrors CollectionsTree: chevron expand, indent
   // by depth, an icon per node kind, dimmed `detail`. Clicking a leaf object
   // opens its Structure; right-click offers "Explain with agent".
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import RedisKeyFilter from './RedisKeyFilter.svelte';
@@ -184,14 +184,33 @@
     return false;
   }
 
-  const filteredRoot = $derived.by(() => {
+  // The filter the TREE applies. The box (and the debounced server search)
+  // follow every keystroke, but walking every cached subtree per key is what
+  // made typing lag with thousands of cached nodes: past FILTER_DEBOUNCE_NODES
+  // the client-side filter applies once typing pauses.
+  const FILTER_DEBOUNCE_NODES = 2000;
+  const FILTER_DEBOUNCE_MS = 150;
+  let treeFilterQ = $state('');
+  function cachedNodeCount(): number {
+    let n = database.schemaRoot.length;
+    for (const kids of database.childrenCache.values()) n += kids.length;
+    return n;
+  }
+  $effect(() => {
     const q = database.objectSearchQuery.trim().toLowerCase();
+    if (!q || untrack(cachedNodeCount) <= FILTER_DEBOUNCE_NODES) {
+      treeFilterQ = q;
+      return;
+    }
+    const timer = setTimeout(() => (treeFilterQ = q), FILTER_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  });
+
+  const filteredRoot = $derived.by(() => {
+    const q = treeFilterQ;
     if (!q) return database.schemaRoot;
     return database.schemaRoot.filter((n) => nodeMatchesFilter(n, q));
   });
-
-  /** Live filter query, shared with the child-level pruning in the snippet. */
-  const treeFilterQ = $derived(database.objectSearchQuery.trim().toLowerCase());
 
   /** Children a node actually renders: pruned by the filter (keeping ancestors
    *  of matches; a node whose own name matched shows its whole subtree). */
@@ -204,6 +223,84 @@
   /** Cap rendered children per node so a 5k-table schema can't flood the DOM;
    *  a tail row reports how many were held back. */
   const CHILD_CAP = 1000;
+
+  // ── Flattened, windowed rows ────────────────────────────────────────────
+  // The visible tree (roots, then each OPEN node's filtered children, depth
+  // first) as one flat list. Past WINDOW_MIN rows only the slice in view of
+  // the sidebar's scroller (+ overscan) is mounted, between two spacers — a
+  // few open 1,000-table schemas were ~8 DOM nodes and 2–3 Icons per row.
+  // Every row is ROW_H tall in that mode (`.node` already is). A Redis
+  // keyspace's inline key filter isn't fixed-height, so a tree showing one
+  // renders unwindowed (Redis key lists are capped server-side anyway).
+  type FlatRow =
+    | { t: 'node' | 'failed' | 'redis'; node: SchemaNode; depth: number; key: string }
+    | { t: 'empty'; depth: number; text: string; key: string }
+    | { t: 'more'; depth: number; shown: number; key: string };
+  const flat = $derived.by<FlatRow[]>(() => {
+    const out: FlatRow[] = [];
+    const walk = (node: SchemaNode, depth: number): void => {
+      out.push({ t: 'node', node, depth, key: node.id });
+      const open = database.isExpanded(node.id);
+      if (!open) {
+        if (failedNodes.has(node.id)) out.push({ t: 'failed', node, depth, key: `failed:${node.id}` });
+        return;
+      }
+      if (node.kind === 'keyspace') out.push({ t: 'redis', node, depth, key: `redis:${node.id}` });
+      const children = database.childrenOf(node.id);
+      if (!children) return;
+      const shown = visibleChildren(node, children);
+      if (shown.length === 0) {
+        const text = treeFilterQ && children.length > 0 ? 'no match' : 'empty';
+        out.push({ t: 'empty', depth, text, key: `empty:${node.id}` });
+      }
+      for (const child of shown.length > CHILD_CAP ? shown.slice(0, CHILD_CAP) : shown) walk(child, depth + 1);
+      if (shown.length > CHILD_CAP) out.push({ t: 'more', depth, shown: shown.length, key: `more:${node.id}` });
+    };
+    for (const n of filteredRoot) walk(n, 0);
+    return out;
+  });
+
+  const ROW_H = 25; // == .node height
+  const WINDOW_MIN = 400;
+  const OVERSCAN = 20;
+  const windowed = $derived(flat.length > WINDOW_MIN && !flat.some((r) => r.t === 'redis'));
+  let listEl = $state<HTMLElement | null>(null);
+  let winFirst = $state(0);
+  let winCount = $state(60);
+  /** The element that actually scrolls the tree (the sidebar body). */
+  function scrollerOf(el: HTMLElement): HTMLElement {
+    for (let p = el.parentElement; p; p = p.parentElement) {
+      const oy = getComputedStyle(p).overflowY;
+      if (oy === 'auto' || oy === 'scroll') return p;
+    }
+    return (document.scrollingElement as HTMLElement | null) ?? document.documentElement;
+  }
+  $effect(() => {
+    const list = listEl;
+    if (!windowed || !list) return;
+    const scroller = scrollerOf(list);
+    const measure = (): void => {
+      const offset = list.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+      winFirst = Math.max(0, Math.floor(-offset / ROW_H));
+      winCount = Math.ceil(scroller.clientHeight / ROW_H) + 1;
+    };
+    let raf = 0;
+    const schedule = (): void => {
+      if (!raf) raf = requestAnimationFrame(() => ((raf = 0), measure()));
+    };
+    measure();
+    scroller.addEventListener('scroll', schedule, { passive: true });
+    const ro = new ResizeObserver(schedule);
+    ro.observe(scroller);
+    return () => {
+      scroller.removeEventListener('scroll', schedule);
+      ro.disconnect();
+      cancelAnimationFrame(raf);
+    };
+  });
+  const start = $derived(windowed ? Math.min(Math.max(0, winFirst - OVERSCAN), flat.length) : 0);
+  const end = $derived(windowed ? Math.min(flat.length, winFirst + winCount + OVERSCAN) : flat.length);
+  const visibleFlat = $derived(windowed ? flat.slice(start, end) : flat);
 
   // ── Keyboard navigation (roving focus over the rendered treeitems) ─────────
   let treeEl = $state<HTMLElement | null>(null);
@@ -528,13 +625,39 @@
   {:else if filteredRoot.length === 0}
     <div class="tree-empty">No match for "{database.objectSearchQuery}".</div>
   {:else}
-    {#each filteredRoot as node (node.id)}
-      {@render treeNode(node, 0)}
-    {/each}
+    <div class="tree-rows" bind:this={listEl}>
+      {#if windowed && start > 0}
+        <div class="tree-pad" style="height: {start * ROW_H}px" aria-hidden="true"></div>
+      {/if}
+      {#each visibleFlat as row (row.key)}
+        {#if row.t === 'node'}
+          {@render nodeRow(row.node, row.depth)}
+        {:else if row.t === 'failed'}
+          <div class="node-failed" class:fixed-h={windowed} style="padding-inline-start: {(row.depth + 1) * 13 + 18}px">
+            <Icon name="x" size={10} />
+            <span>failed to load</span>
+            <button class="node-failed-retry" onclick={() => expandNode(row.node)}>retry</button>
+          </div>
+        {:else if row.t === 'redis'}
+          <RedisKeyFilter node={row.node} depth={row.depth} />
+        {:else if row.t === 'empty'}
+          <div class="node-empty" class:fixed-h={windowed} style="padding-inline-start: {(row.depth + 1) * 13 + 18}px">
+            {row.text}
+          </div>
+        {:else}
+          <div class="node-more" class:fixed-h={windowed} style="padding-inline-start: {(row.depth + 1) * 13 + 18}px">
+            showing {CHILD_CAP.toLocaleString()} of {row.shown.toLocaleString()} — refine filter
+          </div>
+        {/if}
+      {/each}
+      {#if windowed && end < flat.length}
+        <div class="tree-pad" style="height: {(flat.length - end) * ROW_H}px" aria-hidden="true"></div>
+      {/if}
+    </div>
   {/if}
 </div>
 
-{#snippet treeNode(node: SchemaNode, depth: number)}
+{#snippet nodeRow(node: SchemaNode, depth: number)}
   {@const open = database.isExpanded(node.id)}
   {@const selected = database.selectedObjectPath === node.id}
   <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
@@ -573,34 +696,6 @@
       {#if node.detail}<span class="nl-detail ellipsis">{node.detail}</span>{/if}
     </button>
   </div>
-  {#if !open && failedNodes.has(node.id)}
-    <div class="node-failed" style="padding-inline-start: {(depth + 1) * 13 + 18}px">
-      <Icon name="x" size={10} />
-      <span>failed to load</span>
-      <button class="node-failed-retry" onclick={() => expandNode(node)}>retry</button>
-    </div>
-  {/if}
-  {#if open}
-    {#if node.kind === 'keyspace'}
-      <RedisKeyFilter {node} {depth} />
-    {/if}
-    {@const children = database.childrenOf(node.id)}
-    {#if children}
-      {@const shown = visibleChildren(node, children)}
-      {#each shown.slice(0, CHILD_CAP) as child (child.id)}
-        {@render treeNode(child, depth + 1)}
-      {:else}
-        <div class="node-empty" style="padding-inline-start: {(depth + 1) * 13 + 18}px">
-          {treeFilterQ && children.length > 0 ? 'no match' : 'empty'}
-        </div>
-      {/each}
-      {#if shown.length > CHILD_CAP}
-        <div class="node-more" style="padding-inline-start: {(depth + 1) * 13 + 18}px">
-          showing {CHILD_CAP.toLocaleString()} of {shown.length.toLocaleString()} — refine filter
-        </div>
-      {/if}
-    {/if}
-  {/if}
 {/snippet}
 
 <style>
@@ -746,6 +841,23 @@
     /* Engine/detail is secondary: shrinks (and ellipsises away) ~100× faster
        than the name, so a long engine never crowds out the table name. */
     flex: 0 100 auto;
+  }
+  /* Windowed mode: every row is exactly one .node tall (see ROW_H). */
+  .fixed-h {
+    display: flex;
+    align-items: center;
+    height: 25px;
+    padding-top: 0;
+    padding-bottom: 0;
+    box-sizing: border-box;
+  }
+  .tree-rows {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .tree-pad {
+    flex-shrink: 0;
   }
   .node-empty {
     font-size: var(--fs-xs);

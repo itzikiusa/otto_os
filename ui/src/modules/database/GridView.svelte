@@ -19,7 +19,7 @@
   import { bsonScalar } from './bson';
   import type { QueryResult } from '../../lib/api/types';
   import { SET_EMPTY, SET_NULL, type EditFlow } from './EditFlow.svelte';
-  import { cellDisplay, cellStr, clip, compactJson, copyText, isComplex, prettyJson } from './results-format';
+  import { CELL_MAX, cellDisplay, cellStr, clip, copyText, isComplex, previewJson } from './results-format';
   import { columnKind, moveColumn, rowNumberWidthCh, type ColumnKind } from './grid-format';
 
   interface Props {
@@ -286,6 +286,63 @@
   // a complex / read-only cell), ⌘/Ctrl+C copies the cell, and ContextMenu /
   // Shift+F10 opens the row menu anchored to the cell.
   let focusCell = $state<{ r: number; c: number } | null>(null);
+
+  // ── Delegated cell events ───────────────────────────────────────────────
+  // One click / dblclick / contextmenu listener on <tbody> instead of three
+  // closures (plus an Icon component) per rendered cell: a scroll step that
+  // swaps in 40 rows × 30 columns no longer allocates ~3,600 handlers. Each
+  // cell carries data-r (its liveRows index), data-c (original column index),
+  // data-p (display position) and data-k (kind: d = parked draft, u = nested
+  // change under it, n = NULL, j = JSON, p = plain); its <tr> carries data-v
+  // (the virtual row position the keyboard cursor uses).
+  type CellHit = { idx: number; ci: number; pos: number; vpos: number; kind: string; expand: boolean };
+  function cellHit(e: Event): CellHit | null {
+    const target = e.target instanceof Element ? e.target : null;
+    const td = target?.closest<HTMLElement>('td[data-c]');
+    if (!td) return null;
+    return {
+      idx: Number(td.dataset.r),
+      ci: Number(td.dataset.c),
+      pos: Number(td.dataset.p),
+      vpos: Number((td.parentElement as HTMLElement | null)?.dataset.v),
+      kind: td.dataset.k ?? 'p',
+      expand: !!target?.closest('.cell-expand'),
+    };
+  }
+  function cellValue(h: CellHit): unknown {
+    return liveRows[h.idx]?.[h.ci];
+  }
+  function onBodyClick(e: MouseEvent): void {
+    const h = cellHit(e);
+    if (!h) return;
+    if (h.expand) {
+      flow.openCell(cellValue(h), h.idx, h.ci);
+      return;
+    }
+    focusCell = { r: h.vpos, c: h.pos };
+    if (h.kind === 'j') flow.openCell(cellValue(h), h.idx, h.ci);
+  }
+  function onBodyDblClick(e: MouseEvent): void {
+    const h = cellHit(e);
+    if (!h || h.expand) return;
+    if (h.kind === 'u') {
+      flow.openCell(cellValue(h), h.idx, h.ci);
+    } else if (h.kind === 'j') {
+      flow.openCell(cellValue(h), h.idx, h.ci);
+      flow.startViewerEdit();
+    } else {
+      flow.beginEdit(h.idx, h.ci);
+    }
+  }
+  function onBodyContextMenu(e: MouseEvent): void {
+    const h = cellHit(e);
+    if (h) oncellmenu(e, h.ci, cellValue(h), h.idx);
+  }
+  /** Editability per ORIGINAL column index, derived once per result/flow
+   *  change instead of re-asked by every rendered cell. */
+  const editableCols = $derived(result.columns.map((_c, ci) => flow.isEditableCell(ci)));
+  /** Skip the per-cell pending lookups entirely while nothing is parked. */
+  const anyPending = $derived(flow.pending.size > 0);
   /** Sticky-header height the top of a row must clear to be visible. */
   const HEAD_H = $derived(filterRow ? 70 : 40);
 
@@ -497,13 +554,14 @@
         </tr>
       {/if}
     </thead>
-    <tbody>
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_click_events_have_key_events -->
+    <tbody onclick={onBodyClick} ondblclick={onBodyDblClick} oncontextmenu={onBodyContextMenu}>
       {#if padTop > 0}
         <tr class="spacer" aria-hidden="true"><td colspan={result.columns.length + 1} style="height:{padTop}px"></td></tr>
       {/if}
       {#each windowRows as { row, idx }, wi (idx)}
         {@const vpos = startIdx + wi}
-        <tr class:odd={idx % 2 === 1} class:selected={flow.selected.has(idx)} class:cursor={focusCell?.r === vpos}>
+        <tr class:odd={idx % 2 === 1} class:selected={flow.selected.has(idx)} class:cursor={focusCell?.r === vpos} data-v={vpos}>
           <td class="rownum">
             <span class="sel-slot">
               {#if flow.editable}
@@ -535,6 +593,10 @@
             {@const v = row[ci]}
             {@const w = widthFor(ci)}
             {@const kind = kinds[ci]}
+            {@const pv = anyPending ? flow.pendingValue(idx, ci) : undefined}
+            <!-- Cell clicks / double-clicks / context menus are delegated to
+                 <tbody> (data-r row, data-c column, data-p display position,
+                 data-k cell kind) — no per-cell closures on a scroll step. -->
             {#if flow.editing && flow.editing.rowIdx === idx && flow.editing.colIdx === ci}
               <td class="cell editing" style="width:{w}ch; max-width:{w}ch;">
                 <!-- svelte-ignore a11y_autofocus -->
@@ -546,74 +608,70 @@
                   onblur={() => flow.commitEdit()}
                 />
               </td>
-            {:else if flow.pendingValue(idx, ci) !== undefined}
-              {@const pv = flow.pendingValue(idx, ci) ?? ''}
-              <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+            {:else if pv !== undefined}
               <td
                 class="cell dirty"
                 class:num={kind === 'num'}
                 class:kbd-focus={focusCell?.r === vpos && focusCell?.c === pos}
                 title="Pending change — Review & apply (bar below) writes it; double-click to keep editing"
                 style="width:{w}ch; max-width:{w}ch;"
-                onclick={() => (focusCell = { r: vpos, c: pos })}
-                ondblclick={() => flow.beginEdit(idx, ci)}
-                oncontextmenu={(e) => oncellmenu(e, ci, v, idx)}
+                data-r={idx}
+                data-c={ci}
+                data-p={pos}
+                data-k="d"
               >{#if pv === '' || pv === SET_NULL}<span class="null-glyph">NULL</span>{:else if pv === SET_EMPTY}<span class="null-glyph">''</span>{:else}{pv}{/if}</td>
-            {:else if flow.hasPendingUnder(idx, _c.name)}
+            {:else if anyPending && flow.hasPendingUnder(idx, _c.name)}
               <!-- A path-level change (Vertical view: $set/$unset/$rename inside
                    this document field) — the cell keeps showing the stored value
                    but wears the dirty marker so it isn't edited over blindly. -->
-              <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
               <td
                 class="cell dirty"
                 class:kbd-focus={focusCell?.r === vpos && focusCell?.c === pos}
                 title="Nested change pending — Review & apply (bar below) writes it; see the Vertical view"
                 style="width:{w}ch; max-width:{w}ch;"
-                onclick={() => (focusCell = { r: vpos, c: pos })}
-                ondblclick={() => flow.openCell(v, idx, ci)}
-                oncontextmenu={(e) => oncellmenu(e, ci, v, idx)}
-              >{v === null || v === undefined ? '' : clip(cellStr(v))}</td>
+                data-r={idx}
+                data-c={ci}
+                data-p={pos}
+                data-k="u"
+              >{v === null || v === undefined ? '' : isComplex(v) ? clip(previewJson(v)) : clip(cellStr(v))}</td>
             {:else if v === null || v === undefined}
-              <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
               <td
                 class="cell null"
                 class:num={kind === 'num'}
-                class:editable={flow.isEditableCell(ci)}
+                class:editable={editableCols[ci]}
                 class:kbd-focus={focusCell?.r === vpos && focusCell?.c === pos}
                 title="NULL"
                 style="width:{w}ch; max-width:{w}ch;"
-                onclick={() => (focusCell = { r: vpos, c: pos })}
-                ondblclick={() => flow.beginEdit(idx, ci)}
-                oncontextmenu={(e) => oncellmenu(e, ci, v, idx)}
+                data-r={idx}
+                data-c={ci}
+                data-p={pos}
+                data-k="n"
               ><span class="null-glyph">NULL</span></td>
             {:else if isComplex(v)}
-              <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
               <td
                 class="cell json"
                 class:wrap={expandJson}
                 class:kbd-focus={focusCell?.r === vpos && focusCell?.c === pos}
                 title="Click to expand"
                 style="width:{w}ch; max-width:{w}ch;"
-                onclick={() => {
-                  focusCell = { r: vpos, c: pos };
-                  flow.openCell(v, idx, ci);
-                }}
-                ondblclick={() => { flow.openCell(v, idx, ci); flow.startViewerEdit(); }}
-                oncontextmenu={(e) => oncellmenu(e, ci, v, idx)}
-              >{clip(expandJson ? prettyJson(v) : compactJson(v))}<button class="cell-expand" title="Expand value" aria-label="Expand value" onclick={(e) => { e.stopPropagation(); flow.openCell(v, idx, ci); }}><Icon name="maximize" size={9} /></button></td>
+                data-r={idx}
+                data-c={ci}
+                data-p={pos}
+                data-k="j"
+              >{clip(previewJson(v, CELL_MAX, expandJson))}<button class="cell-expand" title="Expand value" aria-label="Expand value"></button></td>
             {:else}
-              <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
               <td
                 class="cell"
                 class:num={kind === 'num'}
                 class:bool={kind === 'bool'}
-                class:editable={flow.isEditableCell(ci)}
+                class:editable={editableCols[ci]}
                 class:kbd-focus={focusCell?.r === vpos && focusCell?.c === pos}
                 style="width:{w}ch; max-width:{w}ch;"
-                onclick={() => (focusCell = { r: vpos, c: pos })}
-                ondblclick={() => flow.beginEdit(idx, ci)}
-                oncontextmenu={(e) => oncellmenu(e, ci, v, idx)}
-              >{#if filtering}{#each highlightParts(cellDisplay(v)) as part}{#if part.hit}<mark>{part.t}</mark>{:else}{part.t}{/if}{/each}{:else}{cellDisplay(v)}{/if}<button class="cell-expand" title="Expand value" aria-label="Expand value" onclick={(e) => { e.stopPropagation(); flow.openCell(v, idx, ci); }}><Icon name="maximize" size={9} /></button></td>
+                data-r={idx}
+                data-c={ci}
+                data-p={pos}
+                data-k="p"
+              >{#if filtering}{#each highlightParts(cellDisplay(v)) as part}{#if part.hit}<mark>{part.t}</mark>{:else}{part.t}{/if}{/each}{:else}{cellDisplay(v)}{/if}<button class="cell-expand" title="Expand value" aria-label="Expand value"></button></td>
             {/if}
           {/each}
         </tr>
@@ -985,6 +1043,16 @@
   /* Expand-to-viewer affordance, revealed on cell hover (top-right corner). */
   .grid td.cell {
     position: relative;
+  }
+  /* The expand glyph is CSS (a masked SVG in currentColor), not an <Icon>
+     component per cell. */
+  .cell-expand::before {
+    content: '';
+    width: 9px;
+    height: 9px;
+    background: currentColor;
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='currentColor' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 2.5H2.5V6M10 2.5h3.5V6M6 13.5H2.5V10M10 13.5h3.5V10'/%3E%3C/svg%3E") center / contain no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='currentColor' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 2.5H2.5V6M10 2.5h3.5V6M6 13.5H2.5V10M10 13.5h3.5V10'/%3E%3C/svg%3E") center / contain no-repeat;
   }
   .cell-expand {
     position: absolute;
