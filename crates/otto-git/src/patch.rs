@@ -347,7 +347,9 @@ impl LocalGit {
                 ))
             }
         };
-        let mut cmd = GitCmd::diff("diff").args(["-U3", "-M"]);
+        let mut cmd = GitCmd::diff("diff")
+            .args(["-U3"])
+            .args(crate::local::RENAMES);
         if cached {
             cmd = cmd.args(["--cached"]);
         }
@@ -508,7 +510,19 @@ pub(crate) async fn run_hunk_op(git: &LocalGit, req: &StageHunkReq) -> Result<St
     };
     Ok(StageHunkResp {
         status: git.status().await?,
-        diff: git.diff(target, Some(&req.path)).await?,
+        // Capped like the per-file `/diff?path=&full=true` the UI loaded the
+        // file with (a "Load anyway" file must not come back as 40k lines of
+        // JSON on every hunk click; past the ceiling it is `too_large`).
+        diff: git
+            .diff_with(
+                &target,
+                &crate::local::DiffOpts {
+                    path: Some(req.path.clone()),
+                    caps: Some(crate::parse::DiffCaps::FULL_FILE),
+                    ..Default::default()
+                },
+            )
+            .await?,
         backup_stash,
     })
 }

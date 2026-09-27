@@ -20,7 +20,7 @@
   }
   let { repoId, path, rev, onclose }: Props = $props();
 
-  let blame = $state<BlameResp | null>(null);
+  let blame = $state.raw<BlameResp | null>(null);
   let loading = $state(true);
   let error = $state<string | null>(null);
   let retryRev = $state(0);
@@ -32,20 +32,25 @@
     const r = rev ?? 'HEAD';
     loading = true;
     error = null;
+    // Switching files aborts the previous blame; a late response is dropped.
+    const ctl = new AbortController();
     api
       .get<BlameResp>(
         `/repos/${id}/blame?path=${encodeURIComponent(p)}&rev=${encodeURIComponent(r)}`,
+        ctl.signal,
       )
       .then((b) => {
-        blame = b;
+        if (!ctl.signal.aborted) blame = b;
       })
       .catch((e: unknown) => {
+        if (ctl.signal.aborted) return;
         blame = null;
         error = loadErrorText(e);
       })
       .finally(() => {
-        loading = false;
+        if (!ctl.signal.aborted) loading = false;
       });
+    return () => ctl.abort();
   });
 
   function day(at: string): string {

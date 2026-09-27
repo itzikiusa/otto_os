@@ -3,7 +3,7 @@
   // threads, general comments, approve/merge/decline, "open as session".
   // Three tabs: Summary | Files | Review (AI agents).
   import { onDestroy, untrack } from 'svelte';
-  import { api } from '../../lib/api/client';
+  import { api, isAbortError } from '../../lib/api/client';
   import type { DiffResp, PrComment, PrCommit, PrDetail } from '../../lib/api/types';
   import { guardUnsaved } from '../../lib/leaveGuard';
   import { router } from '../../lib/router.svelte';
@@ -15,6 +15,7 @@
   import { renderMarkdown } from '../../lib/md';
   import { openExternal } from '../../lib/external';
   import DiffViewer from './DiffViewer.svelte';
+  import { notePrHead, prDiffFileLoader, prDiffHead, prDiffSummary } from './diff-load';
   import CommentThread from './CommentThread.svelte';
   import ReviewPanel from './ReviewPanel.svelte';
   import PrMergeModal from './PrMergeModal.svelte';
@@ -49,9 +50,18 @@
     localStorage.setItem(`otto_pr_tab_${repoId}_${number}`, t);
   }
 
-  let pr: PrDetail | null = $state(null);
-  let diff: DiffResp | null = $state(null);
-  let commits: PrCommit[] | null = $state(null);
+  // Server payloads are replaced wholesale, never mutated: `$state.raw` keeps
+  // Svelte from proxying every hunk/line (a deep proxy over a 100k-line diff
+  // cost ~100 ms per walk vs ~2 ms raw).
+  let pr: PrDetail | null = $state.raw(null);
+  let diff: DiffResp | null = $state.raw(null);
+  let commits: PrCommit[] | null = $state.raw(null);
+  // The Files tab paints the summary (file list + counts) and DiffViewer
+  // pulls each file's hunks on demand through the shared PR diff cache (the
+  // Review tab's snippets reuse the same fetches).
+  const loadPrFile = $derived(prDiffFileLoader(repoId, number));
+  let diffAbort: AbortController | null = null;
+  onDestroy(() => diffAbort?.abort());
   let loading = $state(true);
   let diffLoading = $state(false);
   let commitsLoading = $state(false);
@@ -84,8 +94,12 @@
     const rid = repoId;
     const num = number;
     untrack(() => {
+      diffAbort?.abort();
+      diffAbort = null;
+      diffLoading = false;
       pr = null;
       diff = null;
+      diffHead = '';
       commits = null;
       prError = null;
       diffError = null;
@@ -123,6 +137,14 @@
       if (disposed || rid !== repoId || num !== number) return; // switched PRs mid-flight
       pr = next;
       prError = null;
+      // A push moved the head: the loaded diff is the pre-push one. Re-read it
+      // under the new head (quietly — the old diff stays up until it lands).
+      const head = next.head_sha ?? '';
+      if (head && diff && diffHead && diffHead !== head) void loadDiff(rid, num);
+      else {
+        notePrHead(rid, num, head);
+        if (head && diff && !diffHead) diffHead = head;
+      }
     } catch (e) {
       if (!disposed && rid === repoId && num === number) prError = loadErrorText(e);
     } finally {
@@ -130,17 +152,28 @@
     }
   }
 
+  /** The PR head the shown diff belongs to ('' = unknown). */
+  let diffHead = '';
+
   async function loadDiff(rid: string, num: number): Promise<void> {
+    diffAbort?.abort();
+    const ctl = new AbortController();
+    diffAbort = ctl;
     diffLoading = true;
     try {
-      const next = await api.get<DiffResp>(`/repos/${rid}/prs/${num}/diff`);
-      if (disposed || rid !== repoId || num !== number) return;
+      const next = await prDiffSummary(rid, num, ctl.signal, pr?.head_sha);
+      if (disposed || ctl.signal.aborted || rid !== repoId || num !== number) return;
       diff = next;
+      diffHead = prDiffHead(rid, num);
       diffError = null;
     } catch (e) {
+      if (isAbortError(e) || ctl.signal.aborted) return;
       if (!disposed && rid === repoId && num === number) diffError = loadErrorText(e);
     } finally {
-      if (!disposed) diffLoading = false;
+      if (!disposed && diffAbort === ctl) {
+        diffLoading = false;
+        diffAbort = null;
+      }
     }
   }
 
@@ -597,6 +630,7 @@
             onAddComment={(path, line, body) => postComment(body, path, line)}
             onReplyComment={(parentId, body) => postComment(body, undefined, undefined, parentId)}
             onResolveComment={resolveThread}
+            loadFile={loadPrFile}
           />
         {/if}
       </section>

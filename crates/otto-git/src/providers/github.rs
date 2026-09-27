@@ -92,6 +92,31 @@ impl Github {
             .await
     }
 
+    /// A PR's diff rebuilt from `GET /pulls/{n}/files` (paginated; GitHub
+    /// lists at most 3,000 files and omits `patch` for the biggest ones —
+    /// those come back `too_large` with their counts). The paginator stops at
+    /// 20 pages × 100 rows: a full 2,000-row list may be cut, so it is marked
+    /// `truncated` instead of passing as the whole PR.
+    async fn pr_files_diff(&self, r: &RemoteRef, number: u64) -> Result<DiffResp> {
+        let rows = self
+            .http
+            .paginate_json(
+                self.req(
+                    reqwest::Method::GET,
+                    &format!("{}/{number}/files", Self::prs_path(r)),
+                )
+                .query(&[("per_page", "100")]),
+                self.http.client(),
+                self.auth_header(),
+            )
+            .await?;
+        let mut d = diff_from_pr_files(&rows);
+        if rows.len() >= 2_000 {
+            d.truncated = Some(true);
+        }
+        Ok(d)
+    }
+
     /// POST /graphql with the bound token. GraphQL failures come back as 200 +
     /// an `errors` array — surface those as `Upstream` like REST errors.
     async fn graphql(&self, query: &str, variables: Value) -> Result<Value> {
@@ -317,6 +342,59 @@ pub(crate) fn checks_from_statuses(v: &Value) -> Vec<PrCheck> {
     out
 }
 
+/// GitHub's "this diff is too big for the `.diff` media type" refusal.
+fn diff_too_large(e: &otto_core::Error) -> bool {
+    match e {
+        otto_core::Error::Upstream(m) | otto_core::Error::Conflict(m) => {
+            m.starts_with("github 406") || m.contains("diff exceeded the maximum")
+        }
+        _ => false,
+    }
+}
+
+/// `GET /pulls/{n}/files` rows → a [`DiffResp`]. `patch` is a bare hunk body
+/// (no `diff --git` headers); a row without one on a non-empty change is a
+/// file GitHub would not render.
+pub(crate) fn diff_from_pr_files(rows: &[Value]) -> DiffResp {
+    use otto_core::api::{FileChangeStatus, FileDiff};
+    let mut resp = DiffResp::default();
+    for row in rows {
+        let path = vstr(row, &["filename"]);
+        let prev = vstr(row, &["previous_filename"]);
+        let status = match vstr(row, &["status"]).as_str() {
+            "added" => FileChangeStatus::Added,
+            "removed" => FileChangeStatus::Deleted,
+            "renamed" => FileChangeStatus::Renamed,
+            "copied" => FileChangeStatus::Copied,
+            _ => FileChangeStatus::Modified,
+        };
+        let count = |k: &str| row.get(k).and_then(Value::as_u64).map(|n| n as u32);
+        let (added, deleted) = (count("additions"), count("deletions"));
+        let patch = row.get("patch").and_then(Value::as_str);
+        let changed = added.unwrap_or(0) + deleted.unwrap_or(0) > 0;
+        let (hunks, too_large, is_binary) = match patch {
+            Some(p) => (crate::parse::parse_hunks(p), None, false),
+            None if changed => (Vec::new(), Some(true), false),
+            None => (Vec::new(), None, status == FileChangeStatus::Modified),
+        };
+        resp.files.push(FileDiff {
+            fingerprint: String::new(),
+            language: crate::parse::lang_from_ext(&path),
+            path,
+            old_path: (!prev.is_empty()).then_some(prev),
+            is_binary,
+            hunks,
+            hunks_omitted: too_large,
+            too_large,
+            added: if is_binary { None } else { added },
+            deleted: if is_binary { None } else { deleted },
+            status: Some(status),
+        });
+    }
+    crate::parse::fill_totals(&mut resp);
+    resp
+}
+
 fn summary_from(v: &Value) -> PrSummary {
     let state = if vstr_opt(v, &["merged_at"]).is_some() {
         PrState::Merged
@@ -333,6 +411,7 @@ fn summary_from(v: &Value) -> PrSummary {
         updated_at: ts(&vstr(v, &["updated_at"])),
         url: vstr(v, &["html_url"]),
         reviewer_warnings: Vec::new(),
+        head_sha: vstr_opt(v, &["head", "sha"]),
         draft: Some(v.get("draft").and_then(|d| d.as_bool()).unwrap_or(false)),
         ci_status: None,
         labels: v
@@ -602,8 +681,16 @@ impl super::GitProvider for Github {
                 )
                 .header("Accept", "application/vnd.github.diff"),
             )
-            .await?;
-        Ok(crate::parse::parse_diff(&text))
+            .await;
+        match text {
+            Ok(text) => Ok(crate::parse::parse_diff(&text)),
+            // GitHub refuses the `.diff` media type past 300 files / 20k
+            // lines (406 "the diff exceeded the maximum…"). The per-file
+            // listing still answers: counts for every file and a patch for
+            // all but the biggest — a degraded diff instead of an error.
+            Err(e) if diff_too_large(&e) => self.pr_files_diff(r, number).await,
+            Err(e) => Err(e),
+        }
     }
 
     async fn create_pr(&self, r: &RemoteRef, req: &CreatePrReq) -> Result<PrSummary> {
