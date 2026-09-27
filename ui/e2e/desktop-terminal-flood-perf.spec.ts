@@ -19,11 +19,20 @@ import { apiCtx, seedWorkspace } from './seed';
 // ─────────────────────────────────────────────────────────────────────────────
 
 test.setTimeout(120_000);
+// WebKit: the app's engine (xterm parses ~5.5–8 MB/s there, termFlow.ts).
+test.use({ browserName: 'webkit' });
 
 const MB = 1024 * 1024;
 const FRAME = 64 * 1024;
 const LINE = 'y'.repeat(78) + '\r\n';
 const FLOOD_FRAME = Buffer.from(LINE.repeat(Math.floor(FRAME / LINE.length)));
+/** Frames per mock tick. One 64 KB frame per macrotask is ~13 MB/s through
+ *  Playwright's WS route, which xterm kept up with (peak backlog 0.4–0.9 MB,
+ *  never FLOW_HIGH), so nothing paused; a PTY `cat` outruns the parser.
+ *  Measured peak backlog by BURST (WebKit, merge-2): 2 → 3.0–4.4 MB,
+ *  4 → 9.7–10.8 MB, 8 → 14.1–14.6 MB — `pause` stops the producer, but bytes
+ *  already sent keep landing, so the overshoot scales with the send rate. */
+const BURST = 2;
 
 type Probe = { sessionId: () => string; pending: () => number; queued: () => number; scrollback: () => number; disposed: boolean };
 
@@ -57,7 +66,7 @@ async function fixturePage(page: Page): Promise<void> {
 
 /** The daemon's side of `/ws/term` for one flood. */
 function mockDaemon(page: Page, opts: { totalBytes: number; onCtrlC?: string }) {
-  const stats = { clientFrames: [] as string[], sent: 0, snapshots: 0, interruptedAt: 0 };
+  const stats = { clientFrames: [] as string[], sent: 0, snapshots: 0, interruptedAt: 0, floodFrom: -1, snapshotsBeforeCtrlC: 0 };
   let screenTail = 'READY$ ';
   let paused = false;
   let skipped = false;
@@ -70,14 +79,17 @@ function mockDaemon(page: Page, opts: { totalBytes: number; onCtrlC?: string }) 
   const flood = async (ws: WebSocketRoute): Promise<void> => {
     if (flooding) return;
     flooding = true;
+    stats.floodFrom = stats.clientFrames.length;
     while (stats.sent < opts.totalBytes && !interrupted) {
       if (paused) {
         // A paused viewer's output is held back (and dropped by the ring).
         skipped = true;
         stats.sent += FRAME;
       } else {
-        ws.send(FLOOD_FRAME);
-        stats.sent += FLOOD_FRAME.byteLength;
+        for (let i = 0; i < BURST && !paused && stats.sent < opts.totalBytes; i++) {
+          ws.send(FLOOD_FRAME);
+          stats.sent += FLOOD_FRAME.byteLength;
+        }
       }
       screenTail = LINE.repeat(3);
       await new Promise((r) => setTimeout(r, 0));
@@ -98,8 +110,11 @@ function mockDaemon(page: Page, opts: { totalBytes: number; onCtrlC?: string }) 
           switch (frame.type) {
             case 'scrollback':
               snapshot(ws);
-              // Start once the attach snapshot has painted (READY$ visible).
-              setTimeout(() => void flood(ws), 500);
+              // Start once the attach has settled: READY$ painted AND the
+              // one post-attach resize compaction (Terminal.svelte: confirm
+              // 150 ms + RESIZE_COMPACT_MS 900 ms → a 2nd `scrollback`) is
+              // done, so the flood's own rebuild requests can be counted.
+              setTimeout(() => void flood(ws), 1500);
               break;
             case 'pause':
               paused = true;
@@ -120,6 +135,7 @@ function mockDaemon(page: Page, opts: { totalBytes: number; onCtrlC?: string }) 
               if (text.includes('\x03') && opts.onCtrlC) {
                 interrupted = true;
                 stats.interruptedAt = Date.now();
+                stats.snapshotsBeforeCtrlC = stats.snapshots;
                 screenTail = `${LINE}^C\r\n${opts.onCtrlC}`;
                 if (!paused) ws.send(Buffer.from(`^C\r\n${opts.onCtrlC}`));
                 else skipped = true;
@@ -143,14 +159,18 @@ test('a 20 MB flood pauses, keeps the backlog ≤ 2.5 MB, and ends on the last l
   await fixturePage(page);
   await expect(page.locator('.xterm-rows')).toContainText('FLOOD-END$', { timeout: 60_000 });
   const f = daemon.stats.clientFrames;
+  const peak = await page.evaluate(() => (window as unknown as { __ottoMaxPending: number }).__ottoMaxPending);
+  console.log(`[flood] 20MB: peak backlog ${(peak / MB).toFixed(2)} MB, frames ${JSON.stringify(f)}, snapshots ${daemon.stats.snapshots}`);
   expect(f.filter((t) => t === 'pause').length, 'the client asked the daemon to pause').toBeGreaterThan(0);
-  expect(f.filter((t) => t === 'scrollback'), 'only the attach snapshot is requested').toHaveLength(1);
+  expect(f.slice(daemon.stats.floodFrom).filter((t) => t === 'scrollback'), 'the flood requests no rebuild').toHaveLength(0);
+  expect(f.filter((t) => t === 'scrollback').length, 'attach + at most the resize compaction').toBeLessThanOrEqual(2);
   expect(f.filter((t) => t === 'resync'), 'no input → no resync').toHaveLength(0);
   const maxPending = await page.evaluate(() => (window as unknown as { __ottoMaxPending: number }).__ottoMaxPending);
   expect(maxPending, `peak backlog ${(maxPending / MB).toFixed(2)} MB`).toBeLessThanOrEqual(2.5 * MB);
-  // Every held-back window was replaced by exactly one snapshot, never more.
+  // Every requested or held-back window was replaced by exactly one
+  // snapshot, never more.
   const resumes = f.filter((t) => t === 'resume').length;
-  expect(daemon.stats.snapshots).toBeLessThanOrEqual(1 + resumes);
+  expect(daemon.stats.snapshots).toBeLessThanOrEqual(f.filter((t) => t === 'scrollback').length + resumes);
 });
 
 test('^C mid-flood shows up in under 150 ms (queue dropped, one resync)', async ({ page }) => {
@@ -179,9 +199,12 @@ test('^C mid-flood shows up in under 150 ms (queue dropped, one resync)', async 
   await expect(page.locator('.xterm-rows')).toContainText('INTERRUPTED$', { timeout: 10_000 });
   const t = await page.evaluate(() => (window as unknown as { __ctrlC: { down: number; seen: number } }).__ctrlC);
   const ms = t.seen - t.down;
+  console.log(`[flood] ^C: ${ms.toFixed(0)} ms, frames ${JSON.stringify(daemon.stats.clientFrames)}, snapshots ${daemon.stats.snapshots}`);
   expect(ms, `^C visible after ${ms.toFixed(0)} ms`).toBeLessThan(150);
   expect(daemon.stats.clientFrames.filter((x) => x === 'resync').length).toBeLessThanOrEqual(1);
-  expect(daemon.stats.snapshots, 'attach + at most one resync/resume rebuild').toBeLessThanOrEqual(3);
+  // Pause/resume cycles before the ^C each rebuild once (the 20 MB test's
+  // invariant); the ^C itself may cost one resync + one resume rebuild.
+  expect(daemon.stats.snapshots - daemon.stats.snapshotsBeforeCtrlC, 'at most one resync/resume rebuild after ^C').toBeLessThanOrEqual(2);
 });
 
 test.describe('tiled scrollback budget', () => {
@@ -227,7 +250,14 @@ test.describe('tiled scrollback budget', () => {
     const depths = await live();
     expect(depths.every((d) => d <= 2000), `tile depths ${depths.join(',')}`).toBe(true);
 
-    await page.locator('[data-tile-id]').first().locator('button[title="Zoom in on this session"]').click();
+    // 15 tiles are narrow: the header folds Zoom into its ⋯ menu (tier ≥ 5).
+    const tile = page.locator('[data-tile-id]').first();
+    const zoom = tile.locator('button[title="Zoom in on this session"]');
+    if (await zoom.isVisible()) await zoom.click();
+    else {
+      await tile.locator('button[title="More…"]').click();
+      await page.getByRole('menuitem', { name: 'Zoom in on this session' }).click();
+    }
     await expect(page.locator('.tiled.single .pane')).toHaveCount(1);
     await expect.poll(async () => (await live()).includes(10_000), { timeout: 15_000 }).toBe(true);
   });
