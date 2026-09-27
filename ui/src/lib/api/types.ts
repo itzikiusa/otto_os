@@ -5939,6 +5939,16 @@ export interface DbHistoryEntry {
   row_count: number;
   error?: string | null;
   created_at: string;
+  /** Present when a history LIST clipped `statement` to a 16 KiB preview: the
+   *  full length (chars). Fetch `GET …/db/history/{id}` for the whole text. */
+  statement_len?: number;
+}
+
+/** `POST …/db/completion` reply. `truncated` (omitted when false) means the
+ *  daemon capped the list for the typed word — re-ask on the next keystroke. */
+export interface DbCompletionResponse {
+  items: DbCompletionItem[];
+  truncated?: boolean;
 }
 
 /** Supported widget visualizations. */
