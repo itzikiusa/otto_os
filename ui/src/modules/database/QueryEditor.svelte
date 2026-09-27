@@ -1294,6 +1294,7 @@
       {sqlDialect}
       placeholder={lang === 'redis' ? 'Write a command — ⌘↵ to run' : 'Write a query — ⌘↵ to run'}
       completionSource={database.selectedConnId ? completionSource : null}
+      autoTriggerGate={(s, pos) => !inInertNode(s, pos)}
       onchange={(v) => database.setStatement(v)}
       onsubmit={run}
       onselect={(s) => (editorSel = s)}

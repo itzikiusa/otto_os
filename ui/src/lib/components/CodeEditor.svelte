@@ -100,6 +100,13 @@
      * Compartment so callers can toggle it without remounting the editor.
      */
     completionSource?: CompletionSource | null;
+    /**
+     * With `completionSource`: may the popup open proactively (after `.` or a
+     * clause keyword + space) at `pos`? `startCompletion` is an EXPLICIT query,
+     * which the source can't tell from Ctrl-Space, so a gate the source only
+     * applies to typing (e.g. "not inside a string") must also be passed here.
+     */
+    autoTriggerGate?: ((state: EditorState, pos: number) => boolean) | null;
     /** Hide the gutters (line numbers + fold) for a leaner single-statement editor. */
     minimal?: boolean;
     /** Run handler bound to Cmd/Ctrl+Enter (e.g. execute the query). */
@@ -171,6 +178,7 @@
     readOnly = true,
     onchange,
     completionSource = null,
+    autoTriggerGate = null,
     minimal = false,
     onsubmit,
     onselect,
@@ -515,6 +523,9 @@
           }
         });
       }
+      // `and ` inside `'O\'Brien and …` must not open (and hold open) an
+      // explicit query that then asks the daemon on every letter.
+      if (fire && autoTriggerGate && !autoTriggerGate(u.state, u.state.selection.main.head)) fire = false;
       if (fire) {
         const view = u.view;
         setTimeout(() => startCompletion(view), 0);

@@ -341,5 +341,5 @@ test('completion: one request per word, re-ask when truncated, smooth popup, dia
     await page.waitForTimeout(30);
   }
   await page.waitForTimeout(400);
-  expect(seen.length - inString, "no completion inside 'O\\'Brien …").toBe(0);
+  expect(seen.length - inString, `no completion inside 'O\\'Brien … (asked: ${JSON.stringify(seen.slice(inString).map((r) => r.tail))})`).toBe(0);
 });
