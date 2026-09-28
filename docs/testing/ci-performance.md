@@ -46,3 +46,56 @@ or a GitHub Linux performance guarantee. CI uses fewer test processes, and
 actual Actions/cache/disk timing remains to be measured after publication.
 Local transfer validation covers workflow syntax, configuration parsing,
 the fixture-only diff and this worktree's deployment verification tests.
+
+## Perf gates on WebKit (round 3, r3-10-02)
+
+The Playwright perf specs (`ui/e2e/desktop-*perf*.spec.ts`) used to run only
+in the `desktop-browser` project (Chrome). The app renders in WKWebView, where
+style, layout and paint dominate, so the gates could not see its regressions.
+
+- **Project.** `desktop-webkit` (`ui/playwright.config.ts`) runs every perf
+  spec on Playwright WebKit (Desktop Safari, 1280×800, service worker blocked
+  so `page.route` fixtures apply). Specs gate on `isDesktopProject()`;
+  WebKit-calibrated timing gates (DB results/editor, terminal flood) on
+  `isWebkitProject()`; Chromium-only probes (long tasks, CDP heap) skip
+  themselves on WebKit. `desktop-transport-perf` stays in `desktop-browser`:
+  it launches both engines itself.
+- **After paint.** Timings end after the frame's paint, not at a microtask:
+  `watchKeyFrameCosts` (keystroke script + the next frame's rendering work)
+  and `scrollFrameWork` (a scroll step to its painted frame), both in
+  `ui/e2e/perf.ts`. Neither counts the idle wait for vsync. Budgets are
+  measured on WebKit (M-series Mac): URL keystroke + frame p95 2–4 ms (budget
+  12), 200 KB JSON body keystroke + frame p95 6–7 ms (24), 100k-row grid scroll
+  step to painted frame p95 18–19 ms (40).
+- **Budget scale.** `OTTO_PERF_BUDGET_SCALE` multiplies timing budgets
+  (`budgetMs()`); DOM and request counts are never scaled.
+- **CI.** The `perf-gates` job runs a small subset on the Ubuntu runner:
+  `desktop-git-sidebar-perf`, `desktop-docs-orch-perf`, `desktop-infra-perf`
+  and `desktop-db-results-perf`, with `OTTO_PERF_BUDGET_SCALE=3`. It is
+  advisory (`continue-on-error`) until it has a green history: it is the first
+  job to run the daemon and Playwright WebKit on Linux. Promote it by removing
+  `continue-on-error`.
+- **Run locally** (isolated daemon; pick a free slot/port):
+
+  ```sh
+  cargo build -p ottod
+  cd ui && OTTO_E2E_BIN=../target/debug/ottod OTTO_E2E_SLOT=7 OTTO_E2E_PORT=7897 \
+    OTTO_E2E_PW_PORT=5197 npx playwright test --project=desktop-webkit --workers=1
+  ```
+
+- **Known gaps (September 28, 2026).** `desktop-terminal-flood-perf` fails in
+  both engines at this commit (`.xterm-rows` never appears in its harness page;
+  it failed the same way before the move to `desktop-webkit`).
+  `desktop-conversation-perf` is skipped on WebKit: its seeded session never
+  reaches the session list there.
+
+The Rust runtime-lag gate (`crates/otto-server/tests/runtime_lag.rs`) also has
+a burst case again: 200 × 64 KB events queued at once and drained by a socket
+loop modelled on `ws_events`. It measured 208 ms of blocked worker before the
+events socket started pacing itself (`ws_fanout::Pacer`), 2–4 ms after, under
+the unchanged 20 ms budget.
+
+## Parallel-load CPU/RAM test
+
+`ui/scripts/loadtest/` holds the round-3 load driver (isolated daemon, agent
+emulator, Chromium-driven UI). See its README.
