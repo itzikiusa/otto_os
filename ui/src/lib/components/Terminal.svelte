@@ -1733,10 +1733,22 @@
   // rebuilds with the right backend (a keepAlive terminal parks and
   // re-adopts itself, keeping its buffer).
   $effect(() => {
-    // Tracked reads: toggling RTL / phone layout re-runs this effect so the
-    // terminal is rebuilt with the correct renderer (WebGL vs DOM).
+    // Tracked reads — the ONLY ones: toggling RTL / phone layout re-runs this
+    // effect so the terminal is rebuilt with the correct renderer (WebGL vs DOM).
     const rtl = ui.rtlBidi;
     const wantDom = viewport.isPhone || FORCE_DOM_RENDERER;
+    // Everything else is untracked. Loading the WebGL addon (and the xterm
+    // callbacks it fires synchronously) reads component state such as
+    // `connected`; tracked, the socket opening re-ran this effect, whose
+    // cleanup parks the engine (connected = false) and whose re-run adopts it
+    // back (connected = true) — an endless park/adopt loop minting a WebGL
+    // context per turn until Svelte aborted it (effect_update_depth_exceeded,
+    // then a fatal reload; only where WebGL loads, e.g. WebKit).
+    return untrack(() => mountEngine(rtl, wantDom));
+  });
+
+  /** Effect 1's body, run untracked (see above). Returns its teardown. */
+  function mountEngine(rtl: boolean, wantDom: boolean): () => void {
     // Decided once per mount: the host's intent and transport are fixed for
     // a Terminal's lifetime (props may already read as torn down in cleanup).
     const parkable = untrack(() => keepAlive && !shareToken && !socketFactory);
@@ -1932,7 +1944,7 @@
         disposeEngine();
       }
     };
-  });
+  }
 
   // ── Effect 2: reactive session-switch — retarget the WS when sessionId changes
   // Runs after Effect 1 (Svelte 5 effects run in declaration order). On the very

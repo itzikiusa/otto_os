@@ -1,6 +1,6 @@
 import { test, expect, type APIRequestContext, type Page, type WebSocketRoute } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
-import { isWebkitProject } from './perf';
+import { isWebkitProject, watchFatalUiErrors } from './perf';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Terminal flood regression gates (GAPS_TO_9_5 §4, I3 A3/A4/A8).
@@ -381,6 +381,7 @@ test.describe('tiled scrollback budget', () => {
       if (!r.ok()) throw new Error(`seed ${title} → ${r.status()} ${await r.text()}`);
     }
     await installProbe(page);
+    const fatal = watchFatalUiErrors(page);
     await page.addInitScript((id) => {
       localStorage.setItem('otto_workspace', id as string);
       localStorage.setItem('otto_firstrun_dismissed', '1');
@@ -412,5 +413,6 @@ test.describe('tiled scrollback budget', () => {
     }
     await expect(page.locator('.tiled.single .pane')).toHaveCount(1);
     await expect.poll(async () => (await live()).includes(10_000), { timeout: 15_000 }).toBe(true);
+    expect(fatal, 'no fatal UI error (the WebGL park/adopt effect loop reloaded the page)').toEqual([]);
   });
 });

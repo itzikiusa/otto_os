@@ -24,6 +24,18 @@ export function isWebkitProject(name: string): boolean {
   return name === 'desktop-webkit';
 }
 
+/** Collect the app's fatal UI errors (main.ts: an effect loop or crash that
+ *  reloads the page). A perf number measured across such a reload is noise,
+ *  so gates assert the returned list stays empty. */
+export function watchFatalUiErrors(page: Page): string[] {
+  const fatal: string[] = [];
+  page.on('console', (m) => {
+    const t = m.text();
+    if (t.includes('fatal UI error')) fatal.push(t.slice(0, 200));
+  });
+  return fatal;
+}
+
 /** A timing budget scaled by `OTTO_PERF_BUDGET_SCALE` (default 1): a shared
  *  CI runner is slower than a dev Mac, so CI widens TIMINGS only — DOM and
  *  request counts are never scaled. */

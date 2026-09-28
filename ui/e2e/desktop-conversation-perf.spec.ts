@@ -3,7 +3,7 @@ import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx, seedWorkspace } from './seed';
-import { isDesktopProject } from './perf';
+import { budgetMs, isDesktopProject, isWebkitProject, percentile, watchFatalUiErrors } from './perf';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Conversation live-delta regression gates (GAPS_TO_9_5 §4, I3 A1).
@@ -67,13 +67,10 @@ let wsId = '';
 let session = '';
 let dir = '';
 let transcript = '';
+let fatal: string[] = [];
 
 test.beforeEach(async ({ page }, info) => {
   test.skip(!isDesktopProject(info.project.name), 'desktop projects only');
-  // Under Playwright WebKit the seeded session never reaches the session list
-  // ("No sessions"), so the gate can't start there yet — Chromium only until
-  // the fixture is fixed (see perf-plan round3 fix-w2c).
-  test.skip(info.project.name === 'desktop-webkit', 'fixture does not load under WebKit yet');
   ({ ctx: root, base } = await apiCtx());
   wsId = await seedWorkspace(root, base);
   dir = mkdtempSync(join(tmpdir(), 'otto-conv-perf-'));
@@ -88,6 +85,9 @@ test.beforeEach(async ({ page }, info) => {
   session = (await created.json()).id as string;
   await expect.poll(async () => (await (await root.get(`${base}/api/v1/sessions/${session}`)).json()).live).toBe(true);
 
+  // The WebKit fixture failure was a WebGL-only effect loop in Terminal.svelte
+  // that reloaded the page: fail loudly if anything reloads it again.
+  fatal = watchFatalUiErrors(page);
   await page.addInitScript((id) => {
     localStorage.setItem('otto_workspace', id as string);
     localStorage.setItem('otto_firstrun_dismissed', '1');
@@ -101,17 +101,20 @@ test.beforeEach(async ({ page }, info) => {
 });
 
 test.afterEach(async () => {
+  const seen = fatal;
+  fatal = [];
   if (session && root) await root.delete(`${base}/api/v1/sessions/${session}`).catch(() => {});
   session = '';
   await root?.dispose();
   if (dir) rmSync(dir, { recursive: true, force: true });
   dir = '';
+  expect(seen, 'no fatal UI error (effect loop / reload) during the run').toEqual([]);
 });
 
 const renders = (page: Page) =>
   page.evaluate(() => (window as unknown as { __ottoMdProbe: { cache?: { renders: number } } }).__ottoMdProbe.cache?.renders ?? 0);
 
-test('20 live deltas over 300 turns: p95 < 5 ms main thread, ≤ 1 markdown render each', async ({ page }) => {
+test('20 live deltas over 300 turns: p95 < 5 ms main thread (WebKit 12), ≤ 1 markdown render each', async ({ page }) => {
   // The tail's initial fold must land before the first append.
   await page.waitForTimeout(2000);
   await page.evaluate(() => {
@@ -153,9 +156,17 @@ test('20 live deltas over 300 turns: p95 < 5 ms main thread, ≤ 1 markdown rend
     });
   });
   costs.sort((a, b) => a - b);
-  const p95 = costs[Math.min(costs.length - 1, Math.floor(costs.length * 0.95))] ?? 0;
+  // Nearest-rank p95 (the old `floor(n × 0.95)` index was the MAX of 20
+  // samples, so one stray long frame failed the gate).
+  const p95 = percentile(costs, 95);
+  // The rAF-interval method also counts the style/layout/paint of the new
+  // turn, which WebKit does inside the frame: measured p95 2–10 ms on WebKit
+  // over 6 runs (Chromium 0–1.4 ms). Still under one frame; a full
+  // re-render of the thread costs 100s of ms.
+  const budget = budgetMs(isWebkitProject(test.info().project.name) ? 12 : 5);
+  console.log(`[conv] ${test.info().project.name} per-delta p95 ${p95.toFixed(1)} ms / ${budget} (${costs.map((c) => c.toFixed(0)).join(',')}), ${perDelta} md renders`);
   expect(costs.length).toBeGreaterThanOrEqual(DELTAS * 0.8);
-  expect(p95, `per-delta main-thread p95 ${p95.toFixed(1)} ms (${costs.map((c) => c.toFixed(0)).join(',')})`).toBeLessThan(5);
+  expect(p95, `per-delta main-thread p95 ${p95.toFixed(1)} ms (${costs.map((c) => c.toFixed(0)).join(',')})`).toBeLessThan(budget);
 });
 
 test('a 70 KB tool result arrives trimmed (no page re-fetch) and loads in full on expand', async ({ page }) => {
