@@ -4,7 +4,7 @@ use crate::panes_policy as policy;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, MutexGuard};
 use tauri::{
     AppHandle, Emitter, EventTarget, LogicalPosition, LogicalSize, Manager, PhysicalPosition,
     PhysicalSize, Webview, WebviewBuilder, WebviewUrl, Window, WindowBuilder,
@@ -20,6 +20,12 @@ pub struct ProbeIsolation {
 
 pub const PREFIX: &str = "otto-pane-window-";
 static PAIRS: LazyLock<Mutex<HashMap<String, Pair>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// The pane registry, even if a panic poisoned its lock: window events call
+/// this from AppKit's dispatch, where a second panic would abort the app, and
+/// the map itself stays consistent (every write is a single insert/remove).
+fn pairs() -> MutexGuard<'static, HashMap<String, Pair>> {
+    PAIRS.lock().unwrap_or_else(|e| e.into_inner())
+}
 // Never hold PAIRS while dispatching native operations: their window events
 // can re-enter Rust on the AppKit thread. Commands are serialized separately.
 static ACTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -91,9 +97,7 @@ fn local(view: &Webview) -> Result<(), String> {
 
 fn pair_for(view: &Webview) -> Result<Pair, String> {
     local(view)?;
-    PAIRS
-        .lock()
-        .unwrap()
+    pairs()
         .values()
         .find(|p| policy::owns(&p.host, &p.child, view.label()))
         .cloned()
@@ -147,9 +151,7 @@ fn emit(app: &AppHandle, pair: &Pair) -> PaneState {
     value
 }
 fn put(pair: &Pair) {
-    PAIRS
-        .lock()
-        .unwrap()
+    pairs()
         .insert(pair.host.clone(), pair.clone());
 }
 /// On macOS Tauri 2.11 reports the first webview's bounds as inner_size
@@ -212,7 +214,7 @@ pub async fn pane_open(
     if !route_ok(&route) {
         return Err("Invalid pane route".into());
     }
-    let existing = PAIRS.lock().unwrap().get(webview.label()).cloned();
+    let existing = pairs().get(webview.label()).cloned();
     if let Some(pair) = existing {
         return Ok(state(&app, &pair));
     }
@@ -255,7 +257,7 @@ pub async fn pane_open(
         LogicalPosition::new(pair.bounds.x, pair.bounds.y),
         LogicalSize::new(pair.bounds.width, pair.bounds.height),
     ) {
-        PAIRS.lock().unwrap().remove(&host);
+        pairs().remove(&host);
         return Err(err(e));
     }
     Ok(emit(&app, &pair))
@@ -287,9 +289,7 @@ pub async fn pane_layout(
 pub async fn pane_state(app: AppHandle, webview: Webview) -> Result<Option<PaneState>, String> {
     local(&webview)?;
     if !policy::host_label(webview.label())
-        && !PAIRS
-            .lock()
-            .unwrap()
+        && !pairs()
             .values()
             .any(|p| p.child == webview.label())
     {
@@ -674,7 +674,7 @@ pub async fn pane_close(app: AppHandle, webview: Webview) -> Result<(), String> 
     host_only(&webview, &pair)?;
     return_pair(&app, &mut pair)?;
     child_view(&app, &pair)?.close().map_err(err)?;
-    PAIRS.lock().unwrap().remove(&pair.host);
+    pairs().remove(&pair.host);
     app.emit_to(
         EventTarget::webview(&pair.host),
         "otto://pane-state",
@@ -688,9 +688,7 @@ pub fn intercept_close(app: &AppHandle, label: &str) -> bool {
     if crate::windows::is_quitting() {
         return false;
     }
-    let pair = PAIRS
-        .lock()
-        .unwrap()
+    let pair = pairs()
         .values()
         .find(|p| p.mode != Mode::Attached && (p.host == label || companion_label(p) == label))
         .cloned();
@@ -698,7 +696,7 @@ pub fn intercept_close(app: &AppHandle, label: &str) -> bool {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             let _guard = ACTION.lock().await;
-            if let Some(current) = PAIRS.lock().unwrap().get(&pair.host).cloned() {
+            if let Some(current) = pairs().get(&pair.host).cloned() {
                 pair = current;
             }
             if let Err(e) = return_pair(&app, &mut pair) {
@@ -711,9 +709,7 @@ pub fn intercept_close(app: &AppHandle, label: &str) -> bool {
     }
 }
 pub fn resized(app: &AppHandle, label: &str) {
-    let pair = PAIRS
-        .lock()
-        .unwrap()
+    let pair = pairs()
         .values()
         .find(|p| companion_label(p) == label || p.host == label)
         .cloned();
@@ -721,7 +717,7 @@ pub fn resized(app: &AppHandle, label: &str) {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             let _guard = ACTION.lock().await;
-            let current = PAIRS.lock().unwrap().get(&pair.host).cloned();
+            let current = pairs().get(&pair.host).cloned();
             if let Some(pair) = current {
                 let _ = layout_child(&app, &pair);
                 emit(&app, &pair);
@@ -730,7 +726,7 @@ pub fn resized(app: &AppHandle, label: &str) {
     }
 }
 pub fn destroyed(app: &AppHandle, label: &str) {
-    let pair = PAIRS.lock().unwrap().remove(label);
+    let pair = pairs().remove(label);
     if let Some(pair) = pair {
         if let Some(win) = app.get_window(&companion_label(&pair)) {
             let _ = win.destroy();
@@ -740,7 +736,7 @@ pub fn destroyed(app: &AppHandle, label: &str) {
 /// Persist original host geometry during a detach, including direct OS Quit.
 /// This avoids dispatching reparent synchronously inside AppKit exit callbacks.
 pub fn original_frame(label: &str) -> Option<crate::windows::WinFrame> {
-    let pairs = PAIRS.lock().unwrap();
+    let pairs = pairs();
     let p = pairs.get(label)?;
     let s = p.saved.as_ref()?;
     Some(crate::windows::WinFrame {
@@ -755,9 +751,7 @@ pub fn original_frame(label: &str) -> Option<crate::windows::WinFrame> {
 /// Map a companion's physical window back to its one logical host. For an
 /// attached child, its focus message already tracks which pane owns the menu.
 pub fn menu_host(app: &AppHandle, label: &str) -> String {
-    let pair = PAIRS
-        .lock()
-        .unwrap()
+    let pair = pairs()
         .values()
         .find(|p| companion_label(p) == label)
         .cloned();

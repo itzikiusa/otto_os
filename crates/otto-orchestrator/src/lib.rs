@@ -244,14 +244,28 @@ fn build_plan_prompt(text: &str, ctx: &OrchestratorContext) -> String {
 // Headless CLI exec helper (for codex / agy and other non-claude providers)
 // ---------------------------------------------------------------------------
 
+/// How the prompt reaches a headless CLI.
+#[derive(Clone, Copy, Debug)]
+pub enum PromptArg<'a> {
+    /// `… -- <prompt>`: a positional after end-of-options (codex `exec`,
+    /// claude-style `-p` switches). The `--` keeps a prompt that starts with
+    /// `-` (skill frontmatter `---`) from being read as a flag.
+    Positional,
+    /// `… <flag>=<prompt>`: CLIs whose print flag TAKES the prompt as its
+    /// value (agy's pflag `--print`). Inline `=` so neither a following flag
+    /// nor a leading `---` is swallowed as the value (r3 agy runs failed with
+    /// `-p took "--dangerously-skip-permissions" as` its prompt).
+    Flag(&'a str),
+}
+
 /// Run `program exec_args… -- prompt` in `cwd` capturing stdout. Returns
 /// stdout on success; returns `Error::Upstream` on timeout or non-zero exit.
 ///
 /// The `--` ends option parsing, so a prompt that starts with `-` is never
 /// read as a flag: self-improvement prompts open with skill frontmatter
-/// (`---`), and codex (clap: "unexpected argument '---'") and agy (pflag:
-/// "bad flag syntax: ---") failed every scheduled run (r3-01-08). clap,
-/// pflag/cobra and commander (claude-style `-p`) all accept `--`.
+/// (`---`), and codex (clap: "unexpected argument '---'") failed every
+/// scheduled run (r3-01-08). See [`run_cli_exec_with`] for CLIs whose print
+/// flag takes the prompt as a value.
 pub async fn run_cli_exec(
     program: &str,
     exec_args: &[&str],
@@ -259,13 +273,36 @@ pub async fn run_cli_exec(
     cwd: &str,
     timeout: Duration,
 ) -> otto_core::Result<String> {
+    run_cli_exec_with(
+        program,
+        exec_args,
+        PromptArg::Positional,
+        prompt,
+        cwd,
+        timeout,
+    )
+    .await
+}
+
+/// [`run_cli_exec`] with an explicit [`PromptArg`] placement.
+pub async fn run_cli_exec_with(
+    program: &str,
+    exec_args: &[&str],
+    prompt_arg: PromptArg<'_>,
+    prompt: &str,
+    cwd: &str,
+    timeout: Duration,
+) -> otto_core::Result<String> {
     use tokio::process::Command;
 
+    let tail: Vec<String> = match prompt_arg {
+        PromptArg::Positional => vec!["--".into(), prompt.into()],
+        PromptArg::Flag(flag) => vec![format!("{flag}={prompt}")],
+    };
     let child_fut = async {
         let output = Command::new(program)
             .args(exec_args)
-            .arg("--")
-            .arg(prompt)
+            .args(&tail)
             .current_dir(cwd)
             .kill_on_drop(true)
             .output()
@@ -492,5 +529,26 @@ mod cli_exec_tests {
         .await
         .unwrap();
         assert_eq!(out, "[exec][--][---\nname: x\n---\nbody]");
+    }
+
+    /// agy's `--print` takes the prompt as its VALUE: it must be inlined so a
+    /// following flag or a leading `---` is never consumed as the prompt.
+    #[tokio::test]
+    async fn flag_prompt_is_inlined_after_the_options() {
+        let script = r#"for a; do printf '[%s]' "$a"; done"#;
+        let out = run_cli_exec_with(
+            "/bin/sh",
+            &["-c", script, "sh", "--dangerously-skip-permissions"],
+            PromptArg::Flag("--print"),
+            "---\nname: x",
+            "/",
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out,
+            "[--dangerously-skip-permissions][--print=---\nname: x]"
+        );
     }
 }
