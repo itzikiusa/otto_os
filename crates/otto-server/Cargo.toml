@@ -6,9 +6,6 @@ license.workspace = true
 
 [features]
 default = []
-# Embed ui/dist into the binary and serve it as the SPA. Off by default so the
-# server builds without the UI artifact; without it `/` serves a placeholder.
-embed-ui = ["dep:rust-embed", "dep:mime_guess"]
 
 [dependencies]
 tokio-util = { version = "0.7", features = ["io"] }
@@ -28,8 +25,7 @@ serde_yaml.workspace = true
 futures-util.workspace = true
 tracing.workspace = true
 dirs.workspace = true
-rust-embed = { workspace = true, optional = true }
-mime_guess = { workspace = true, optional = true }
+mime_guess.workspace = true
 otto-sessions.workspace = true
 otto-sandbox.workspace = true
 otto-connections.workspace = true

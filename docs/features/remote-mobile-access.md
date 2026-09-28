@@ -52,7 +52,7 @@ root.
 | Concern | Location |
 |---|---|
 | Loopback + optional `0.0.0.0` TLS listener | `crates/ottod/src/main.rs` (loopback bind ~L655; `network_listener` block ~L660-714; `load_or_make_tls_config` ~L806) |
-| SPA served same-origin (rust-embed) | `crates/otto-server/src/spa.rs` (`#[folder = "../../ui/dist"]`, `embed-ui` feature) |
+| SPA served same-origin (rust-embed) | `crates/ottod/src/ui_assets.rs` embeds `ui/dist` with the daemon's `embed-ui` feature; `crates/otto-server/src/spa.rs` serves the injected assets |
 | CORS allowlist (loopback / LAN / `*.ts.net`) | `crates/otto-server/src/lib.rs::is_allowed_origin` |
 | Share token mint / list / revoke | `crates/otto-server/src/routes/share.rs` |
 | OTP verify / extend (public) | `crates/otto-server/src/routes/share.rs::{verify_share,extend_share}` |
@@ -82,7 +82,7 @@ tunnel is the recommended default.** Pick exactly one.
 
 The daemon serves its own SPA only when the binary is built with the `embed-ui`
 Cargo feature, which bakes `ui/dist` into the binary via `rust-embed`
-(`crates/otto-server/src/spa.rs`). **Build order matters — `rust-embed` reads
+(`crates/ottod/src/ui_assets.rs`). **Build order matters — `rust-embed` reads
 `ui/dist` at compile time:**
 
 ```bash
