@@ -210,6 +210,26 @@ async fn process_table_async() -> Vec<ProcRow> {
         .unwrap_or_default()
 }
 
+/// The process table, taken on FIRST NEED within one sweep (r3-01-09 /
+/// r3-08-08): the idle sweep used to `ps` the whole box every minute even with
+/// no live session, or none past its grace window.
+#[derive(Default)]
+struct LazyProcTable(Option<Vec<ProcRow>>);
+
+impl LazyProcTable {
+    async fn get(&mut self) -> &[ProcRow] {
+        if self.0.is_none() {
+            self.0 = Some(process_table_async().await);
+        }
+        self.0.as_deref().unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    fn taken(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
 /// Parse `ps` cumulative CPU time (`MM:SS.ss`, `HH:MM:SS`, or `D-HH:MM:SS`)
 /// into milliseconds.
 fn parse_ps_time_ms(s: &str) -> Option<u64> {
@@ -715,6 +735,17 @@ const NESTED_MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
 
 fn nested_misses() -> &'static std::sync::Mutex<NestedMisses> {
     static M: std::sync::OnceLock<std::sync::Mutex<NestedMisses>> = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+/// (session, spawn) → "is an agent-kind `shell`" for the nested-agent sweep.
+/// Kind and provider are fixed for a spawn, so each live session costs one row
+/// read per launch instead of one per 30 s tick, and a box whose live sessions
+/// are all agent CLIs never runs the whole-box `ps` at all (r3-01-09).
+type NestedEligible = std::collections::HashMap<(Id, u64), bool>;
+
+fn nested_eligible() -> &'static std::sync::Mutex<NestedEligible> {
+    static M: std::sync::OnceLock<std::sync::Mutex<NestedEligible>> = std::sync::OnceLock::new();
     M.get_or_init(Default::default)
 }
 
@@ -3291,15 +3322,48 @@ impl SessionManager {
     /// Resilient: a failure on one session is logged and skipped.
     pub async fn capture_nested_agents(&self) -> usize {
         // Snapshot live ids first (no DashMap refs held across awaits).
-        let live: Vec<(Id, Option<u32>)> = self
+        let snapshot: Vec<(Id, Option<u32>, u64)> = self
             .live
             .iter()
-            .map(|e| (e.key().clone(), e.value().pid()))
+            .map(|e| (e.key().clone(), e.value().pid(), e.value().spawn_seq()))
             .collect();
         {
-            // Backoff entries die with their session.
+            // Backoff + eligibility entries die with their session / spawn.
             let mut m = nested_misses().lock().unwrap_or_else(|p| p.into_inner());
-            m.retain(|(sid, _), _| live.iter().any(|(id, _)| id == sid));
+            m.retain(|(sid, _), _| snapshot.iter().any(|(id, ..)| id == sid));
+            let mut e = nested_eligible().lock().unwrap_or_else(|p| p.into_inner());
+            e.retain(|(sid, seq), _| {
+                snapshot
+                    .iter()
+                    .any(|(id, _, s)| id == sid && s == seq)
+            });
+        }
+        // Only agent-kind shells can host a nested agent: learn each spawn's
+        // kind once, and skip the whole-box `ps` when no live shell exists.
+        let mut live: Vec<(Id, Option<u32>)> = Vec::new();
+        for (id, pid, seq) in snapshot {
+            let known = nested_eligible()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(&(id.clone(), seq))
+                .copied();
+            let eligible = match known {
+                Some(v) => v,
+                None => {
+                    let Ok(s) = self.repo.get(&id).await else {
+                        continue; // removed between the snapshot and now
+                    };
+                    let v = s.kind == SessionKind::Agent && s.provider == "shell";
+                    nested_eligible()
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .insert((id.clone(), seq), v);
+                    v
+                }
+            };
+            if eligible {
+                live.push((id, pid));
+            }
         }
         if live.is_empty() {
             return 0;
@@ -4173,7 +4237,8 @@ impl SessionManager {
         // CPU ⇒ active ⇒ skip. Descendants only (not the agent CLI itself, whose
         // idle TUI redraws accrue CPU forever) — long-lived idle helpers (MCP
         // servers) accrue ~none, so genuinely idle sessions still suspend.
-        let proc_table = process_table_async().await;
+        // Taken only when a candidate passed the cheap checks below.
+        let mut proc_table = LazyProcTable::default();
 
         let mut suspended = 0;
         for (id, last_output, pid) in candidates {
@@ -4194,7 +4259,7 @@ impl SessionManager {
             }
             // Working-but-quiet guard (see the sweep comment above).
             if let Some(pid) = pid {
-                let cpu = descendant_cpu_ms(pid, &proc_table);
+                let cpu = descendant_cpu_ms(pid, proc_table.get().await);
                 let prev = self.suspend_cpu.insert(id.clone(), cpu);
                 match prev {
                     // Tree accrued >200ms CPU since the last sweep → in-flight work.
@@ -4293,7 +4358,10 @@ impl SessionManager {
                 Err(e) => tracing::warn!(session = %id, "idle-suspend failed: {e}"),
             }
         }
-        suspended + self.enforce_live_cap(cap, grace.min(CAP_MIN_QUIET), &proc_table).await
+        suspended
+            + self
+                .enforce_live_cap(cap, grace.min(CAP_MIN_QUIET), &mut proc_table)
+                .await
     }
 
     /// The live-session cap (`max_live_agent_sessions`, r3-05-01): while more
@@ -4309,7 +4377,7 @@ impl SessionManager {
         &self,
         cap: usize,
         min_quiet: Duration,
-        proc_table: &[ProcRow],
+        proc_table: &mut LazyProcTable,
     ) -> usize {
         if cap == 0 || self.live.len() <= cap {
             return 0;
@@ -4351,7 +4419,7 @@ impl SessionManager {
             // Same descendant-CPU rule as the idle pass (its sample for this
             // session, when it took one, is the baseline).
             if let Some(pid) = pid {
-                let cpu = descendant_cpu_ms(pid, proc_table);
+                let cpu = descendant_cpu_ms(pid, proc_table.get().await);
                 match self.suspend_cpu.insert(id.clone(), cpu) {
                     Some(prev) if cpu > prev.saturating_add(200) => continue,
                     None if cpu > 0 => continue,
@@ -5196,6 +5264,18 @@ mod tests {
     use super::*;
     use otto_core::domain::{SessionKind, Workspace};
     use otto_state::NewSession;
+
+    /// r3-01-09: the process table is only read when a sweep needs it, and
+    /// then once per sweep however many sessions consult it.
+    #[tokio::test]
+    async fn process_table_is_taken_lazily_and_once() {
+        let mut t = LazyProcTable::default();
+        assert!(!t.taken(), "a sweep with no candidate never runs ps");
+        let first = t.get().await.len();
+        assert!(t.taken());
+        assert!(first > 0, "ps lists at least this test process");
+        assert_eq!(t.get().await.len(), first, "same snapshot reused");
+    }
 
     #[test]
     fn codex_creds_preserve_session_source_for_mcp_policy() {
