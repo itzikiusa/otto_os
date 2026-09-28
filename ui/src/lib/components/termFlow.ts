@@ -319,3 +319,66 @@ export function withInOrderReset(snapshot: Uint8Array): Uint8Array {
   framed.set(snapshot, 2);
   return framed;
 }
+
+/** Agent-TUI ghost clean-up (full viewport repaint): after output has been
+ *  quiet this long… */
+export const TUI_CLEANUP_QUIET_MS = 250;
+/** …or at the latest this long after the first un-cleaned frame, so a TUI
+ *  that never goes quiet (a spinner ticking every 100 ms) still gets cleaned
+ *  ~1×/s — not the 5×/s full repaint the old leading throttle forced. */
+export const TUI_CLEANUP_MAX_WAIT_MS = 1000;
+
+type TimerId = ReturnType<typeof setTimeout>;
+
+/**
+ * Trailing debounce with a max wait. `poke()` on every output frame; `run`
+ * fires once output has been quiet for `quiet` ms, or `maxWait` ms after the
+ * first poke of a burst, whichever comes first. One repaint per burst
+ * instead of one per throttle window.
+ */
+export class QuietRepaint {
+  private timer: TimerId | null = null;
+  private firstAt = 0;
+  private readonly run: () => void;
+  private readonly quiet: number;
+  private readonly maxWait: number;
+  private readonly now: () => number;
+  private readonly setT: (fn: () => void, ms: number) => TimerId;
+  private readonly clearT: (id: TimerId) => void;
+
+  constructor(
+    run: () => void,
+    quiet = TUI_CLEANUP_QUIET_MS,
+    maxWait = TUI_CLEANUP_MAX_WAIT_MS,
+    now: () => number = () => performance.now(),
+    setT: (fn: () => void, ms: number) => TimerId = (fn, ms) => setTimeout(fn, ms),
+    clearT: (id: TimerId) => void = (id) => clearTimeout(id),
+  ) {
+    this.run = run;
+    this.quiet = quiet;
+    this.maxWait = maxWait;
+    this.now = now;
+    this.setT = setT;
+    this.clearT = clearT;
+  }
+
+  get pending(): boolean {
+    return this.timer !== null;
+  }
+
+  poke(): void {
+    const t = this.now();
+    if (this.timer === null) this.firstAt = t;
+    else this.clearT(this.timer);
+    const due = Math.max(0, Math.min(this.quiet, this.firstAt + this.maxWait - t));
+    this.timer = this.setT(() => {
+      this.timer = null;
+      this.run();
+    }, due);
+  }
+
+  cancel(): void {
+    if (this.timer !== null) this.clearT(this.timer);
+    this.timer = null;
+  }
+}

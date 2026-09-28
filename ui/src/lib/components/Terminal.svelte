@@ -1,3 +1,22 @@
+<script module lang="ts">
+  // ── GPU renderer budget (shared by every Terminal in this window) ─────────
+  // WebKit keeps at most 16 live WebGL contexts per page and silently LOSES
+  // the oldest past that. A tiled grid (15 live tiles) plus the primary pane
+  // and a few embeds would cycle contexts forever, so at most this many
+  // terminals render on the GPU; the rest use xterm's DOM renderer.
+  export const MAX_WEBGL_TERMINALS = 10;
+  let liveWebgl = 0;
+  /** Escape hatch: `localStorage['otto.term.renderer'] = 'dom'` forces the
+   *  DOM renderer everywhere (read once per load). */
+  const FORCE_DOM_RENDERER = (() => {
+    try {
+      return globalThis.localStorage?.getItem('otto.term.renderer') === 'dom';
+    } catch {
+      return false;
+    }
+  })();
+</script>
+
 <script lang="ts">
   // xterm.js terminal bound to WS /ws/term/{id} per docs/contracts/ws.md.
   // Binary frames → term.write; JSON control frames for status/exit/scrollback.
@@ -13,7 +32,7 @@
   import '@xterm/xterm/css/xterm.css';
   import { wsUrl, WS_BEARER_SUBPROTOCOL } from '../api/client';
   import type { SessionStatus, TermSearchMatch, WsSearchResultFrame, WsTermResyncFrame } from '../api/types';
-  import { EMBED_SCROLLBACK, TermFlow, WriteQueue, hasCursorOrErase, withInOrderReset } from './termFlow';
+  import { EMBED_SCROLLBACK, QuietRepaint, TermFlow, WriteQueue, hasCursorOrErase, withInOrderReset } from './termFlow';
   import { textToBase64, base64ToBytes, bytesToBase64 } from '../b64';
   import { terminalTheme } from '../termtheme';
   import { ui } from '../stores/ui.svelte';
@@ -52,11 +71,15 @@
      *  of the app's current light/dark scheme. Use for embedded agent CLIs
      *  (claude, codex) that render their own dark TUI canvas. */
     forceDark?: boolean;
-    /** Prefer the DOM renderer over WebGL. Agent CLIs (claude/codex/grok) are
-     *  full-screen TUIs that redraw status bars and the prompt constantly;
-     *  WebGL's partial-cell updates leave solid "ghost" blocks and stacked
-     *  status lines. DOM is slightly slower but paints correctly. Shells keep
-     *  WebGL for high-throughput scroll. Default false. */
+    /** The pane hosts a full-screen agent TUI (claude/codex/grok…) that
+     *  rewrites its status bar and prompt in place. (Historical name: it
+     *  used to force xterm's DOM renderer, which cost ~⅓ of a core per
+     *  working pane in WebKit — r3-12-01.) Now it selects TUI handling on
+     *  whichever renderer is active (WebGL when available): one trailing
+     *  full-viewport clean-up repaint per output burst (≤ 1×/s while a
+     *  spinner never stops) mops up cells a TUI rewrote without dirtying,
+     *  and a confirmed resize compacts from a server snapshot. Default
+     *  false (plain shells: redraw only small cursor/erase frames). */
     preferDom?: boolean;
     /** When provided, the WS is opened with `Authorization` via the
      *  `otto-bearer` Sec-WebSocket-Protocol subprotocol carrying this token
@@ -150,6 +173,14 @@
    *  the glyph atlas on font/theme changes (stale atlas tiles leave "ghost"
    *  cells after TUI redraws). Null when the DOM renderer is in use. */
   let webglAddon: WebglAddon | null = null;
+  /** This terminal should render on the GPU (desktop, no RTL, not forced to
+   *  DOM) — whether it currently does depends on the budget / context. */
+  let webglWanted = false;
+  let webglRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let webglRetries = 0;
+  /** Context-loss recoveries attempted per terminal before settling on DOM. */
+  const WEBGL_MAX_RETRIES = 2;
+  const WEBGL_RETRY_MS = 5000;
   let sock: WebSocket | null = null;
   /** Coalesce interactive-redraw refreshes (up-arrow history, multi-line
    *  composer resize, etc.) into one rAF so rapid TUI frames don't thrash. */
@@ -505,8 +536,9 @@
         // write() only updates the buffer + marks dirty cells; the renderer then
         // paints *those* cells. Agent TUIs rewrite status/prompt rows in place —
         // if a cell is no longer dirty, the previous frame stays (cursor ghosts,
-        // stacked "-- INSERT --" lines). Agent panes get a throttled full
-        // viewport REDRAW; shells only after cursor/erase frames (paintPtyBytes).
+        // stacked "-- INSERT --" lines). Agent panes get ONE trailing full
+        // viewport repaint per output burst; shells only after cursor/erase
+        // frames (paintPtyBytes).
         paintPtyBytes(bytes, false, flow.credit);
         return;
       }
@@ -838,14 +870,15 @@
    *  Only used when we are NOT in full-redraw mode (plain shells on WebGL). */
   const TUI_FRAME_BYTES = 4096;
 
-  /** Agent-pane (DOM renderer) ghost clean-up cadence. xterm already repaints
-   *  the dirty rows of every frame; the forced FULL repaint only mops up rows
-   *  a TUI rewrote without dirtying them. It used to run on every frame — a
-   *  4 ms DOM render of all rows per spinner tick, ×15 in the tiled view
-   *  (SA-03). Throttled (not debounced, so a continuous stream still gets
-   *  cleaned) to at most ~5/s, a ghost lives ≤ this long. */
-  const DOM_CLEANUP_MS = 200;
-  let domCleanupTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Agent-pane ghost clean-up. xterm already repaints the dirty rows of
+   *  every frame; the forced FULL repaint only mops up rows a TUI rewrote
+   *  without dirtying them. It ran on every frame (SA-03), then as a leading
+   *  5 Hz throttle — which, on the DOM renderer, was the pane's steady cost
+   *  (~30 % of a core per working pane, r3-12-01). Now a trailing debounce:
+   *  one repaint once a burst goes quiet (TUI_CLEANUP_QUIET_MS), at the
+   *  latest TUI_CLEANUP_MAX_WAIT_MS after its first frame, so a ghost lives
+   *  ≤ 1 s even under a spinner that never stops. */
+  const tuiCleanup = new QuietRepaint(() => scheduleFullRedraw());
 
   /**
    * Apply PTY bytes, then REDRAW — not just "draw the dirty cells".
@@ -856,7 +889,7 @@
    * previous content should be gone, partial paint leaves ghosts. So after the
    * buffer has absorbed the frame we force every visible row to repaint.
    *
-   * - Agent panes (`preferDom`): throttled full redraw (≤ DOM_CLEANUP_MS late).
+   * - Agent panes (`preferDom`): one trailing full redraw per burst (tuiCleanup).
    * - Shell panes: next-frame full redraw only on small frames that move the
    *   cursor or erase (↑ history etc.).
    * - `alwaysRedraw`: snapshots / forced paths — next-frame full redraw.
@@ -872,7 +905,7 @@
     const redraw: (() => void) | null = alwaysRedraw
       ? scheduleFullRedraw
       : preferDom
-        ? scheduleDomCleanup
+        ? pokeTuiCleanup
         : n < TUI_FRAME_BYTES && hasCursorOrErase(bytes)
           ? scheduleFullRedraw
           : null;
@@ -902,14 +935,65 @@
     });
   }
 
-  /** Throttled agent-pane clean-up repaint: the first frame arms it, frames
-   *  inside the window ride along, the window's end repaints once. */
-  function scheduleDomCleanup(): void {
-    if (domCleanupTimer !== null) return;
-    domCleanupTimer = setTimeout(() => {
-      domCleanupTimer = null;
-      scheduleFullRedraw();
-    }, DOM_CLEANUP_MS);
+  /** Agent-pane clean-up hook (runs when a frame finished parsing). */
+  function pokeTuiCleanup(): void {
+    tuiCleanup.poke();
+  }
+
+  /** Load the WebGL renderer when this terminal wants it and the window's GPU
+   *  budget allows; otherwise xterm keeps its DOM renderer. */
+  function attachWebgl(): void {
+    if (!term || webglAddon || !webglWanted) return;
+    if (liveWebgl >= MAX_WEBGL_TERMINALS) return;
+    try {
+      const webgl = new WebglAddon();
+      // xterm itself waits 3 s for `webglcontextrestored` after a loss and,
+      // when the context comes back, rebuilds its atlas and redraws. Only a
+      // context that stays lost lands here: drop to the DOM renderer (never a
+      // black canvas), repaint, and retry the GPU a couple of times later
+      // (GPU reset / wake from sleep usually recovers).
+      webgl.onContextLoss(() => {
+        dropWebgl(webgl);
+        forceViewportRefresh();
+        scheduleWebglRetry();
+      });
+      term.loadAddon(webgl);
+      webglAddon = webgl;
+      liveWebgl++;
+    } catch {
+      // WebGL2 unavailable (headless, blocked GPU): DOM renderer.
+      webglAddon = null;
+    }
+  }
+
+  /** Dispose the WebGL renderer (xterm falls back to DOM) and release its
+   *  slot in the budget. */
+  function dropWebgl(which: WebglAddon | null = webglAddon): void {
+    if (!which) return;
+    try {
+      which.dispose();
+    } catch {
+      /* already disposed */
+    }
+    if (webglAddon === which) {
+      webglAddon = null;
+      liveWebgl = Math.max(0, liveWebgl - 1);
+    }
+  }
+
+  function scheduleWebglRetry(): void {
+    if (webglRetryTimer !== null || webglRetries >= WEBGL_MAX_RETRIES) return;
+    webglRetries++;
+    webglRetryTimer = setTimeout(() => {
+      webglRetryTimer = null;
+      attachWebgl();
+      if (webglAddon) forceViewportRefresh();
+    }, WEBGL_RETRY_MS);
+  }
+
+  function cancelWebglRetry(): void {
+    if (webglRetryTimer !== null) clearTimeout(webglRetryTimer);
+    webglRetryTimer = null;
   }
 
   /** Drop cached WebGL glyph tiles after metrics/theme change so the next
@@ -1035,13 +1119,13 @@
   // This effect owns the Terminal object, addons, event handlers, ResizeObserver,
   // and the initial WS connection. It does NOT watch `sessionId` — that is handled
   // by Effect 2 below so session switches reconnect without rebuilding the GPU
-  // canvas. Renderer mode (RTL / phone / preferDom) IS tracked so a switch from
-  // shell→agent (or RTL toggle) rebuilds with the right backend.
+  // canvas. Renderer mode (RTL / phone) IS tracked so an RTL toggle or a
+  // phone↔desktop layout flip rebuilds with the right backend.
   $effect(() => {
-    // Tracked reads: toggling RTL / preferDom / phone layout re-runs this effect
-    // so the terminal is rebuilt with the correct renderer (WebGL vs DOM).
+    // Tracked reads: toggling RTL / phone layout re-runs this effect so the
+    // terminal is rebuilt with the correct renderer (WebGL vs DOM).
     const rtl = ui.rtlBidi;
-    const wantDom = preferDom || viewport.isPhone;
+    const wantDom = viewport.isPhone || FORCE_DOM_RENDERER;
     term = new Terminal({
       fontFamily: untrack(() => ui.termFontStack),
       fontSize: untrack(() => effFontSize),
@@ -1098,17 +1182,18 @@
     // Mount-time focus (untracked: autoFocus/readOnly must not re-run this
     // effect — a rebuild here tears down the whole GPU canvas + WS).
     if (untrack(() => autoFocus && !readOnly) && !viewport.isPhone) term.focus();
-    // ── Renderer selection: WebGL (GPU) on desktop shells, DOM for TUI fidelity ──
+    // ── Renderer selection: WebGL (GPU) on desktop, DOM as the fallback ──────
     // xterm draws to a WebGL canvas when WebglAddon is loaded; with no addon it
     // falls back to its DOM renderer (per-cell <span>s in `.xterm-rows`). The DOM
-    // renderer is slower but ROBUST — it can't "go black" the way a WebGL canvas
-    // can when the context is unavailable or silently lost, and it correctly
-    // clears cells when full-screen agent TUIs (claude/codex) redraw status bars.
+    // renderer is ROBUST (no GPU context to lose) but in WebKit every repaint
+    // rebuilds row spans and pays style + layout + paint on the main thread:
+    // measured ~⅓ of a core per WORKING agent pane even at 2–5 KB/s (r3-12-01),
+    // so 3–4 busy panes saturated the webview. Agent panes therefore use WebGL
+    // too; their ghost clean-up (tuiCleanup) is a cheap GPU redraw there.
+    // Context loss falls back to DOM and retries (attachWebgl), and at most
+    // MAX_WEBGL_TERMINALS per window render on the GPU.
     //
     // We skip WebGL when:
-    //   • preferDom — agent sessions: WebGL partial updates leave solid cursor
-    //     ghosts and stacked status lines ("-- INSERT --" repeated) after ↑
-    //     history / mode toggles. DOM paints the whole cell correctly.
     //   • RTL bidi mode is on — the DOM renderer is required for the `.rtl-bidi`
     //     reflow (WebGL draws cells in raw logical order with no bidi).
     //   • on phone — mobile WKWebView/Safari WebGL is the main culprit behind the
@@ -1118,30 +1203,11 @@
     //     left a permanently black canvas with no fallback. The DOM renderer has
     //     no GPU dependency, so output is always visible and typing always works.
     //     (Phone terminals are small + low-throughput, so DOM perf is a non-issue.)
+    //   • `localStorage['otto.term.renderer'] = 'dom'` (FORCE_DOM_RENDERER).
     webglAddon = null;
-    const useWebgl = !rtl && !wantDom;
-    if (useWebgl) {
-      try {
-        const webgl = new WebglAddon();
-        // If the GPU context is lost AFTER load (common on laptops waking from
-        // sleep, GPU resets, and some mobile browsers), dispose the addon so
-        // xterm reverts to its DOM renderer instead of showing a black canvas.
-        // This is xterm's own recommended recovery path for WebGL context loss.
-        webgl.onContextLoss(() => {
-          try {
-            webgl.dispose(); // → xterm falls back to the DOM renderer (stays visible)
-          } catch {
-            /* already disposed */
-          }
-          if (webglAddon === webgl) webglAddon = null;
-        });
-        term.loadAddon(webgl);
-        webglAddon = webgl;
-      } catch {
-        // WebGL unavailable at load time — xterm falls back to its DOM renderer.
-        webglAddon = null;
-      }
-    }
+    webglRetries = 0;
+    webglWanted = !rtl && !wantDom;
+    attachWebgl();
 
     // Clickable links — works identically with WebGL on or off (the link layer
     // is a DOM overlay above the renderer). Disposed on teardown below.
@@ -1473,10 +1539,8 @@
         cancelAnimationFrame(tuiRefreshRaf);
         tuiRefreshRaf = null;
       }
-      if (domCleanupTimer !== null) {
-        clearTimeout(domCleanupTimer);
-        domCleanupTimer = null;
-      }
+      tuiCleanup.cancel();
+      cancelWebglRetry();
       if (localFindTimer !== null) {
         clearTimeout(localFindTimer);
         localFindTimer = null;
@@ -1493,7 +1557,7 @@
       onBlur();
       sock?.close();
       sock = null;
-      webglAddon = null;
+      dropWebgl();
       term?.dispose();
       term = null;
     };
@@ -1607,6 +1671,27 @@
       if (safeFit()) sendResize();
       forceViewportRefresh();
     }
+  });
+
+  // A web font finishing its load AFTER the terminal measured its cell with a
+  // fallback face leaves wrong metrics and fallback glyphs in the WebGL atlas.
+  // Re-measure, drop the atlas, refit and repaint — only on a real font load.
+  $effect(() => {
+    const fonts = typeof document !== 'undefined' ? document.fonts : undefined;
+    if (!fonts?.addEventListener) return;
+    const onLoaded = (): void => {
+      if (!term) return;
+      try {
+        (term as unknown as { _core?: { _charSizeService?: { measure?: () => void } } })._core?._charSizeService?.measure?.();
+      } catch {
+        /* private API moved — the refresh below still helps */
+      }
+      clearWebglAtlas();
+      if (safeFit()) sendResize();
+      forceViewportRefresh();
+    };
+    fonts.addEventListener('loadingdone', onLoaded);
+    return () => fonts.removeEventListener('loadingdone', onLoaded);
   });
 
   // React to a parent restart: the session was respawned/resumed server-side, so
