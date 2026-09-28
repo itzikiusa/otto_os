@@ -1257,6 +1257,34 @@ fn sweep_hold(
     None
 }
 
+/// A session must have printed nothing for this long before a "restart when
+/// idle" caller (the nightly CLI auto-update) may re-exec it.
+pub const RESTART_QUIET: Duration = Duration::from_secs(30);
+
+/// Pure "would a restart NOW interrupt work?" decision (r3-08-01), so the
+/// guards are unit-testable without a PTY. Busy when any of:
+/// - the row says `Working`;
+/// - an engine turn driver still holds the session ([`SessionManager::hold_for_turn`]);
+/// - the PTY printed something inside [`RESTART_QUIET`] (streaming output);
+/// - the provider's transcript has an OPEN turn that moved inside
+///   [`REAP_UNRESUMABLE_GRACE`] (quiet `sleep`-polling is still mid-turn —
+///   same freshness bound as [`sweep_hold`]).
+///
+/// Unknown transcript state is NOT busy on its own: the other three guards
+/// already cover a live turn, and a caller only defers, never skips.
+pub fn restart_would_interrupt(
+    status: SessionStatus,
+    engine_turn_open: bool,
+    quiet_for: Duration,
+    turn_open: Option<bool>,
+    artifact_age: Option<Duration>,
+) -> bool {
+    status == SessionStatus::Working
+        || engine_turn_open
+        || quiet_for < RESTART_QUIET
+        || (turn_open == Some(true) && artifact_age.is_some_and(|a| a < REAP_UNRESUMABLE_GRACE))
+}
+
 /// Hook that inspects live PTY output for a session, used by otto-server's
 /// credential monitor to detect mid-session re-auth prompts (e.g. "run
 /// `claude login`", "session expired").
@@ -2872,6 +2900,47 @@ impl SessionManager {
     /// True while at least one engine turn driver holds `id`.
     pub fn engine_turn_open(&self, id: &Id) -> bool {
         self.engine_turns.get(id).is_some_and(|n| *n > 0)
+    }
+
+    /// OS pid of `id`'s live child process (None when not live / unknown).
+    /// Lets a deferred "restart when idle" tell whether the process it meant
+    /// to replace is still the one running (a user restart already did it).
+    pub fn live_pid(&self, id: &Id) -> Option<u32> {
+        self.live.get(id).and_then(|e| e.value().pid())
+    }
+
+    /// Would restarting `id` right now interrupt an in-flight turn? See
+    /// [`restart_would_interrupt`]. A session that is not live is never busy.
+    /// Reads the provider transcript tail off the runtime (blocking hop).
+    pub async fn busy_for_restart(&self, id: &Id) -> bool {
+        let Some(quiet_for) = self.live.get(id).map(|e| e.value().last_output_at().elapsed()) else {
+            return false;
+        };
+        let engine_open = self.engine_turn_open(id);
+        let Ok(session) = self.repo.get(id).await else {
+            // Unreadable row: say busy — a caller only ever defers on it.
+            return true;
+        };
+        // Cheap guards first; only read the transcript when they all pass.
+        if restart_would_interrupt(session.status, engine_open, quiet_for, None, None) {
+            return true;
+        }
+        let (turn_open, artifact_age) = match self.activity_artifact(id).await {
+            Some(artifact) => {
+                let provider = session.provider.clone();
+                tokio::task::spawn_blocking(move || {
+                    let age = std::fs::metadata(&artifact)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok());
+                    (agent_turn_open(&provider, &artifact), age)
+                })
+                .await
+                .unwrap_or((None, None))
+            }
+            None => (None, None),
+        };
+        restart_would_interrupt(session.status, engine_open, quiet_for, turn_open, artifact_age)
     }
 
     fn release_turn(&self, id: &Id) {
@@ -6438,6 +6507,30 @@ mod tests {
 
         // A directory is not readable as a file → unknown, not "idle".
         assert_eq!(agent_turn_open("claude", dir.path()), None);
+    }
+
+    /// r3-08-01: the nightly CLI reload must never re-exec a session mid-turn.
+    #[test]
+    fn restart_would_interrupt_guards_every_live_turn_signal() {
+        let quiet = RESTART_QUIET + Duration::from_secs(1);
+        let fresh = Some(Duration::from_secs(10));
+        let stale = Some(REAP_UNRESUMABLE_GRACE + Duration::from_secs(1));
+        // Idle, quiet, closed turn → safe to restart.
+        assert!(!restart_would_interrupt(SessionStatus::Idle, false, quiet, Some(false), fresh));
+        assert!(!restart_would_interrupt(SessionStatus::Idle, false, quiet, None, None));
+        // Each guard alone holds it.
+        assert!(restart_would_interrupt(SessionStatus::Working, false, quiet, None, None));
+        assert!(restart_would_interrupt(SessionStatus::Idle, true, quiet, None, None));
+        assert!(restart_would_interrupt(
+            SessionStatus::Idle,
+            false,
+            Duration::from_secs(2),
+            None,
+            None
+        ));
+        assert!(restart_would_interrupt(SessionStatus::Idle, false, quiet, Some(true), fresh));
+        // A stuck (stale) open turn does not pin the session forever.
+        assert!(!restart_would_interrupt(SessionStatus::Idle, false, quiet, Some(true), stale));
     }
 
     /// The sweep's whole per-session hold decision, in one place: delete a

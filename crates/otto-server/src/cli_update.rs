@@ -13,6 +13,19 @@
 //! only way to pick up a new version is to re-exec it. `SessionManager::restart`
 //! does exactly that and is resume-aware (replays `--resume <provider_session_id>`),
 //! so the conversation continues uninterrupted.
+//!
+//! Two guards keep that reload from being a nightly disruption (r3-08-01):
+//! - **Only on a real change.** `claude update` & co. exit 0 when already
+//!   current, so "exit 0" is not "updated". Each provider's `<program>
+//!   --version` is probed before and after its updater; only providers whose
+//!   version string CHANGED (or could not be probed) get their sessions
+//!   reloaded.
+//! - **Never mid-turn.** A session that is working, streaming output, held
+//!   by an engine turn or has a fresh open provider turn
+//!   ([`SessionManager::busy_for_restart`]) is deferred: a background waiter
+//!   re-checks it every [`DEFER_POLL`] and restarts it once idle — unless its
+//!   process was already replaced (a user restart picked the new binary up)
+//!   or it went away. Restarts are staggered by [`RESTART_STAGGER`].
 
 use std::collections::HashSet;
 use std::process::Stdio;
@@ -42,6 +55,15 @@ const NOTICE_KEY: &str = "cli_auto_update";
 const TICK: Duration = Duration::from_secs(60);
 /// Hard cap on a single update run so a hung CLI can't wedge the scheduler.
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Cap on one `<program> --version` probe.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(20);
+/// How often a deferred (busy) session is re-checked for idleness.
+const DEFER_POLL: Duration = Duration::from_secs(30);
+/// Give up on a deferred reload after this long (the next manual restart or
+/// the next nightly run picks the new binary up instead).
+const DEFER_MAX: Duration = Duration::from_secs(12 * 60 * 60);
+/// Gap between two session restarts (each is a CLI cold start + MCP children).
+const RESTART_STAGGER: Duration = Duration::from_secs(3);
 
 fn default_enabled() -> bool {
     true
@@ -254,6 +276,34 @@ struct UpdateOutcome {
     name: String,
     ok: bool,
     detail: String,
+    /// `<program> --version` before / after the updater (None = probe failed).
+    before: Option<String>,
+    after: Option<String>,
+}
+
+impl UpdateOutcome {
+    /// Did this run actually put a different binary in place? Unknown (a
+    /// probe failed) counts as changed — the reload is deferred to idle
+    /// anyway, so the conservative answer costs one quiet restart at most.
+    fn changed(&self) -> bool {
+        self.ok && version_changed(self.before.as_deref(), self.after.as_deref())
+    }
+}
+
+/// Pure version comparison (see [`UpdateOutcome::changed`]).
+fn version_changed(before: Option<&str>, after: Option<&str>) -> bool {
+    match (before, after) {
+        (Some(b), Some(a)) => b != a,
+        _ => true,
+    }
+}
+
+/// Reload tally for the notice: restarted now, failed, deferred until idle.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ReloadTally {
+    reloaded: u32,
+    failed: u32,
+    deferred: u32,
 }
 
 /// Run one update pass. Public so a future "run now" route can reuse it.
@@ -273,23 +323,41 @@ pub async fn run(ctx: &ServerCtx, cfg: &CliAutoUpdateConfig) {
     // compound command only surfaces the LAST command's exit code).
     let mut outcomes: Vec<UpdateOutcome> = Vec::with_capacity(pairs.len());
     for (name, cmd) in &pairs {
+        let program = ctx.manager.provider_program(name);
+        let before = match &program {
+            Some(p) => probe_version(p).await,
+            None => None,
+        };
         let (ok, detail) = run_one_update(cmd).await;
-        info!(provider = %name, ok, "cli_auto_update: update finished");
+        let after = match (&program, ok) {
+            (Some(p), true) => probe_version(p).await,
+            _ => before.clone(),
+        };
+        info!(
+            provider = %name,
+            ok,
+            before = before.as_deref().unwrap_or("?"),
+            after = after.as_deref().unwrap_or("?"),
+            "cli_auto_update: update finished"
+        );
         outcomes.push(UpdateOutcome {
             name: name.clone(),
             ok,
             detail,
+            before,
+            after,
         });
     }
 
     // Reload open agent sessions — only for providers whose update SUCCEEDED
-    // (re-exec onto a binary whose update just failed helps nobody).
+    // and actually CHANGED the binary (re-exec onto the same version, or onto
+    // one whose update just failed, helps nobody and kills live turns).
     let updated_names: HashSet<String> = outcomes
         .iter()
-        .filter(|o| o.ok)
+        .filter(|o| o.changed())
         .map(|o| o.name.clone())
         .collect();
-    let reload = if cfg.reload_sessions {
+    let reload = if cfg.reload_sessions && !updated_names.is_empty() {
         Some(reload_agent_sessions(ctx, &updated_names).await)
     } else {
         None
@@ -299,7 +367,7 @@ pub async fn run(ctx: &ServerCtx, cfg: &CliAutoUpdateConfig) {
 
     // Summary notice (system-wide, de-duped by source key).
     let any_update_failed = outcomes.iter().any(|o| !o.ok);
-    let severity = if !any_update_failed && reload.is_none_or(|(_, failed)| failed == 0) {
+    let severity = if !any_update_failed && reload.is_none_or(|t| t.failed == 0) {
         NoticeSeverity::Info
     } else {
         NoticeSeverity::Warn
@@ -321,10 +389,18 @@ pub async fn run(ctx: &ServerCtx, cfg: &CliAutoUpdateConfig) {
 /// Compose the notice body from per-provider outcomes: only providers that
 /// actually updated are listed as updated, and each failure names its provider
 /// and reason. Pure, so the exact wording is unit-tested.
-fn build_body(outcomes: &[UpdateOutcome], reload: Option<(u32, u32)>) -> String {
-    let updated: Vec<&str> = outcomes
+fn build_body(outcomes: &[UpdateOutcome], reload: Option<ReloadTally>) -> String {
+    let updated: Vec<String> = outcomes
         .iter()
-        .filter(|o| o.ok)
+        .filter(|o| o.changed())
+        .map(|o| match (&o.before, &o.after) {
+            (Some(b), Some(a)) => format!("{} ({b} → {a})", o.name),
+            _ => o.name.clone(),
+        })
+        .collect();
+    let current: Vec<&str> = outcomes
+        .iter()
+        .filter(|o| o.ok && !o.changed())
         .map(|o| o.name.as_str())
         .collect();
     let failed: Vec<String> = outcomes
@@ -338,17 +414,47 @@ fn build_body(outcomes: &[UpdateOutcome], reload: Option<(u32, u32)>) -> String 
     } else {
         format!("Updated CLIs: {}.", updated.join(", "))
     };
+    if !current.is_empty() {
+        body.push_str(&format!(" Already up to date: {}.", current.join(", ")));
+    }
     if !failed.is_empty() {
         body.push_str(&format!(" Failed: {}.", failed.join("; ")));
     }
-    if let Some((reloaded, reload_failed)) = reload {
-        body.push_str(&format!(" Reloaded {reloaded} open session(s)"));
-        if reload_failed > 0 {
-            body.push_str(&format!(" ({reload_failed} failed)"));
+    if let Some(t) = reload {
+        body.push_str(&format!(" Reloaded {} open session(s)", t.reloaded));
+        if t.failed > 0 {
+            body.push_str(&format!(" ({} failed)", t.failed));
+        }
+        if t.deferred > 0 {
+            body.push_str(&format!("; {} busy session(s) reload when idle", t.deferred));
         }
         body.push('.');
     }
     body
+}
+
+/// `'<program>' --version` through the same login shell the updater uses (so
+/// PATH resolves the same binary). First non-empty stdout line, ≤200 chars;
+/// `None` on failure/timeout — callers treat that as "unknown".
+async fn probe_version(program: &str) -> Option<String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let quoted = format!("'{}' --version", program.replace('\'', "'\\''"));
+    let fut = tokio::process::Command::new(&shell)
+        .arg("-l")
+        .arg("-c")
+        .arg(&quoted)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let out = tokio::time::timeout(VERSION_TIMEOUT, fut).await.ok()?.ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+    Some(line.chars().take(200).collect())
 }
 
 /// Run ONE provider's update command via a login shell (so the user's
@@ -383,14 +489,16 @@ async fn run_one_update(cmd: &str) -> (bool, String) {
 }
 
 /// Restart every live AGENT session whose provider was updated. Connection PTYs
-/// (ssh/db) and plain shells are left alone. `restart` auto-resumes.
-async fn reload_agent_sessions(ctx: &ServerCtx, providers: &HashSet<String>) -> (u32, u32) {
-    let (mut ok, mut failed) = (0u32, 0u32);
+/// (ssh/db) and plain shells are left alone. `restart` auto-resumes. Busy
+/// sessions are NOT interrupted: they are handed to [`reload_when_idle`].
+async fn reload_agent_sessions(ctx: &ServerCtx, providers: &HashSet<String>) -> ReloadTally {
+    let mut tally = ReloadTally::default();
+    let mut deferred: Vec<(otto_core::Id, Option<u32>)> = Vec::new();
     let workspaces = match ctx.workspaces.list_all().await {
         Ok(w) => w,
         Err(e) => {
             warn!("cli_auto_update: list workspaces failed: {e}");
-            return (0, 0);
+            return tally;
         }
     };
     for ws in workspaces {
@@ -405,19 +513,68 @@ async fn reload_agent_sessions(ctx: &ServerCtx, providers: &HashSet<String>) -> 
             {
                 continue;
             }
+            if ctx.manager.busy_for_restart(&s.id).await {
+                info!(session = %s.id, provider = %s.provider, "cli_auto_update: session busy, reload deferred until idle");
+                deferred.push((s.id.clone(), ctx.manager.live_pid(&s.id)));
+                continue;
+            }
+            if tally.reloaded + tally.failed > 0 {
+                tokio::time::sleep(RESTART_STAGGER).await;
+            }
             match ctx.manager.restart(&s.id, None).await {
                 Ok(_) => {
-                    ok += 1;
+                    tally.reloaded += 1;
                     info!(session = %s.id, provider = %s.provider, "cli_auto_update: reloaded session");
                 }
                 Err(e) => {
-                    failed += 1;
+                    tally.failed += 1;
                     warn!(session = %s.id, "cli_auto_update: reload failed: {e}");
                 }
             }
         }
     }
-    (ok, failed)
+    tally.deferred = deferred.len() as u32;
+    if !deferred.is_empty() {
+        let manager = ctx.manager.clone();
+        tokio::spawn(reload_when_idle(manager, deferred));
+    }
+    tally
+}
+
+/// Background waiter for sessions that were mid-turn at reload time: every
+/// [`DEFER_POLL`] restart the ones that went idle; drop the ones that died or
+/// whose process was already replaced (pid changed ⇒ the new binary is
+/// running); give up after [`DEFER_MAX`].
+async fn reload_when_idle(
+    manager: Arc<otto_sessions::SessionManager>,
+    mut pending: Vec<(otto_core::Id, Option<u32>)>,
+) {
+    let started = std::time::Instant::now();
+    while !pending.is_empty() && started.elapsed() < DEFER_MAX {
+        tokio::time::sleep(DEFER_POLL).await;
+        let mut still = Vec::with_capacity(pending.len());
+        for (id, pid) in pending {
+            if !manager.is_live(&id) || manager.live_pid(&id) != pid {
+                continue; // gone, or already re-exec'd by someone else
+            }
+            if manager.busy_for_restart(&id).await {
+                still.push((id, pid));
+                continue;
+            }
+            match manager.restart(&id, None).await {
+                Ok(_) => info!(session = %id, "cli_auto_update: reloaded deferred session"),
+                Err(e) => warn!(session = %id, "cli_auto_update: deferred reload failed: {e}"),
+            }
+            tokio::time::sleep(RESTART_STAGGER).await;
+        }
+        pending = still;
+    }
+    if !pending.is_empty() {
+        info!(
+            count = pending.len(),
+            "cli_auto_update: gave up waiting for busy sessions; they keep the old binary until restarted"
+        );
+    }
 }
 
 fn json_now() -> serde_json::Value {
@@ -503,19 +660,79 @@ mod tests {
         assert!(c.reload_sessions); // defaulted
     }
 
+    /// An outcome whose probe could not read a version (counts as changed).
     fn outcome(name: &str, ok: bool, detail: &str) -> UpdateOutcome {
         UpdateOutcome {
             name: name.to_string(),
             ok,
             detail: detail.to_string(),
+            before: None,
+            after: None,
         }
+    }
+
+    fn versioned(name: &str, before: &str, after: &str) -> UpdateOutcome {
+        UpdateOutcome {
+            name: name.to_string(),
+            ok: true,
+            detail: String::new(),
+            before: Some(before.to_string()),
+            after: Some(after.to_string()),
+        }
+    }
+
+    fn tally(reloaded: u32, failed: u32) -> Option<ReloadTally> {
+        Some(ReloadTally {
+            reloaded,
+            failed,
+            deferred: 0,
+        })
+    }
+
+    #[test]
+    fn exit_zero_without_a_version_change_is_not_an_update() {
+        // r3-08-01: `claude update` exits 0 when already current; that must
+        // not restart every live session.
+        assert!(!versioned("claude", "2.1.0", "2.1.0").changed());
+        assert!(versioned("claude", "2.1.0", "2.1.3").changed());
+        // Unknown (probe failed) is treated as changed — the reload is still
+        // deferred to idle, so this costs at most one quiet restart.
+        assert!(version_changed(None, Some("1")));
+        assert!(version_changed(Some("1"), None));
+        // A failed updater never counts, whatever the probes say.
+        assert!(!outcome("codex", false, "exit 1").changed());
+    }
+
+    #[test]
+    fn body_separates_updated_from_already_current_and_counts_deferred() {
+        let o = [
+            versioned("claude", "2.1.0", "2.1.3"),
+            versioned("codex", "0.9", "0.9"),
+        ];
+        assert_eq!(
+            build_body(
+                &o,
+                Some(ReloadTally {
+                    reloaded: 1,
+                    failed: 0,
+                    deferred: 2
+                })
+            ),
+            "Updated CLIs: claude (2.1.0 → 2.1.3). Already up to date: codex. \
+             Reloaded 1 open session(s); 2 busy session(s) reload when idle."
+        );
+        let same = [versioned("claude", "2.1.0", "2.1.0")];
+        assert_eq!(
+            build_body(&same, None),
+            "No CLIs updated. Already up to date: claude."
+        );
     }
 
     #[test]
     fn body_all_ok_lists_every_provider_as_updated() {
         let o = [outcome("agy", true, ""), outcome("claude", true, "")];
         assert_eq!(
-            build_body(&o, Some((2, 0))),
+            build_body(&o, tally(2, 0)),
             "Updated CLIs: agy, claude. Reloaded 2 open session(s)."
         );
     }
@@ -534,7 +751,7 @@ mod tests {
             ),
         ];
         assert_eq!(
-            build_body(&o, Some((1, 0))),
+            build_body(&o, tally(1, 0)),
             "Updated CLIs: agy, claude. Failed: codex — exit 1: Error loading configuration: \
              unknown variant `xhigh`. Reloaded 1 open session(s)."
         );
@@ -556,7 +773,7 @@ mod tests {
     fn body_reload_failures_are_counted() {
         let o = [outcome("claude", true, "")];
         assert_eq!(
-            build_body(&o, Some((3, 2))),
+            build_body(&o, tally(3, 2)),
             "Updated CLIs: claude. Reloaded 3 open session(s) (2 failed)."
         );
     }

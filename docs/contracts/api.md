@@ -194,7 +194,11 @@ Notes:
   auto-update of the agent CLIs; default `{true,"03:00",true,true}` = 03:00 UTC) and
   the daemon-written cursor `cli_auto_update_last_run` (RFC3339). The scheduler
   catches up a missed window on next boot and, when `reload_sessions`, restarts open
-  agent sessions onto the new binary (resume-aware).
+  agent sessions onto the new binary (resume-aware) — only for providers whose
+  `<program> --version` actually changed (or could not be probed), and never mid-turn:
+  a working / streaming / engine-held / open-turn session is reloaded once it goes
+  idle (re-checked every 30 s for up to 12 h; skipped if its process was already
+  replaced). Restarts are staggered.
 - `process_sandbox` `{enabled:bool, network:"full"|"loopback"|"none", providers:str[]}`
   — opt-in **OS-level confinement** for spawned agent/shell sessions (macOS Apple
   Seatbelt / `sandbox-exec`; no-op elsewhere). Default **off**. When enabled, each
