@@ -13,7 +13,7 @@
   // the diagram three ways, all writing the SAME `canvas.d2` file: (1) the agent
   // via "Ask AI", (2) directly in the Code panel, (3) — nothing is converted to
   // Mermaid/Excalidraw; this stays D2. Pan/zoom the preview.
-  import { onMount, onDestroy, tick } from 'svelte';
+  import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { canvasDocBus } from '../../lib/events.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
@@ -291,14 +291,13 @@
 
   // Live edits: translate the canvas_updated push into the store (+ pick up a
   // sketch-flag change made by the agent, e.g. a follow-up "sketchier" request).
+  // Tracks ONLY the bus tick; the store consumes each push once (r3-02-01).
   $effect(() => {
-    const _t = canvasDocBus.tick;
-    if (!_t || canvasDocBus.sceneId !== canvas.currentId) return;
-    const doc = canvasDocBus.doc as CanvasDoc | null;
-    if (doc && typeof doc.source === 'string') {
-      canvas.ingestDoc(doc);
-      if (typeof doc.sketch === 'boolean') sketch = doc.sketch;
-    }
+    const t = canvasDocBus.tick;
+    untrack(() => {
+      const doc = canvasDocBus.doc as CanvasDoc | null;
+      if (canvas.ingestPush(t, canvasDocBus.sceneId, doc) && typeof doc?.sketch === 'boolean') sketch = doc.sketch;
+    });
   });
 
   // Render whenever the source, sketch toggle, or app theme changes.

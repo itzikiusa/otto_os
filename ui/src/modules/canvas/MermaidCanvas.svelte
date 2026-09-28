@@ -11,7 +11,7 @@
   // source, with live preview), (3) — nothing is converted to Excalidraw; this stays
   // Mermaid. Mermaid's own renderer draws the full rich spectrum (subgraphs, classDef
   // colours, every shape). Pan/zoom the preview.
-  import { onMount, onDestroy, tick } from 'svelte';
+  import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { canvasDocBus } from '../../lib/events.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -293,11 +293,11 @@
   }
 
   // Live edits: translate the canvas_updated push into the store.
+  // Tracks ONLY the bus tick; the store consumes each push once, so a save
+  // (dirty → false) can no longer re-apply a stale push (r3-02-01).
   $effect(() => {
-    const _t = canvasDocBus.tick;
-    if (!_t || canvasDocBus.sceneId !== canvas.currentId) return;
-    const doc = canvasDocBus.doc as CanvasDoc | null;
-    if (doc && typeof doc.source === 'string') canvas.ingestDoc(doc);
+    const t = canvasDocBus.tick;
+    untrack(() => canvas.ingestPush(t, canvasDocBus.sceneId, canvasDocBus.doc));
   });
 
   // Render whenever the source changes (open / generate / live / code edit).

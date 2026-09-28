@@ -19,7 +19,7 @@
   //                    straight back to `canvas.json` (the same file the agent
   //                    edits) — so the user's hand edits update the json too.
   // Agent edits arrive live over `canvas_updated` and reload in place.
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { canvasDocBus } from '../../lib/events.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
@@ -221,11 +221,11 @@
   });
 
   // live agent edits → store (the source effect above does the reload).
+  // Tracks ONLY the bus tick; the store consumes each push once, so a save
+  // (dirty → false) can no longer re-apply a stale push (r3-02-01).
   $effect(() => {
-    const _t = canvasDocBus.tick;
-    if (!_t || canvasDocBus.sceneId !== canvas.currentId) return;
-    const doc = canvasDocBus.doc as CanvasDoc | null;
-    if (doc && typeof doc.source === 'string') canvas.ingestDoc(doc);
+    const t = canvasDocBus.tick;
+    untrack(() => canvas.ingestPush(t, canvasDocBus.sceneId, canvasDocBus.doc));
   });
 
   function snapshotDoc(): CanvasDoc | null {
