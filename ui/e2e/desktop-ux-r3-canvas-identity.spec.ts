@@ -55,7 +55,9 @@ test('Canvas logout invalidates a mounted editor debounce without flushing as th
   await page.locator('.scene-list .row', { hasText: 'Private pending editor' }).getByRole('button').first().click();
   await page.getByTitle('Edit the Mermaid source', { exact: true }).click();
   let writes = 0;
-  await page.route(`**/canvas/scenes/${scene.id}`, route => {
+  // Path match: saves carry `?summary=true`, which a `**/…/<id>` glob misses —
+  // `writes` would stay 0 whatever the editor sent.
+  await page.route(url => url.pathname.endsWith(`/canvas/scenes/${scene.id}`), route => {
     if (route.request().method() !== 'PUT') return route.continue();
     writes++;
     return route.fulfill({ json: {} });

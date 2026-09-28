@@ -1016,8 +1016,10 @@
     width: min(720px, 100%);
     border: 1px solid var(--border);
     box-shadow: var(--shadow);
-    backdrop-filter: blur(24px) saturate(1.6);
-    -webkit-backdrop-filter: blur(24px) saturate(1.6);
+    /* The raised-glass token, so Settings → Reduce transparency (not only
+       the OS media query) drops the re-blur over live content (r3-03-18). */
+    backdrop-filter: var(--glass-blur-raised);
+    -webkit-backdrop-filter: var(--glass-blur-raised);
   }
   .app .surface.compact {
     width: min(260px, 100%);

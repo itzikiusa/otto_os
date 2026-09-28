@@ -36,7 +36,7 @@ use otto_server::feature_guard::feature_guard;
 use otto_server::routes::share::{
     extend_otp_share, mint_otp_share, resolve_verified_sender, OtpMailer,
 };
-use otto_state::{EmailSendersRepo, GrantsRepo, SqlitePool};
+use otto_state::{DbPool, EmailSendersRepo, GrantsRepo};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::collections::HashMap;
 use std::future::Future;
@@ -48,7 +48,7 @@ use tower::ServiceExt; // for `oneshot`
 // Fixtures
 // ---------------------------------------------------------------------------
 
-async fn mem_pool() -> SqlitePool {
+async fn mem_pool() -> DbPool {
     let opts = SqliteConnectOptions::new()
         .in_memory(true)
         .foreign_keys(true);
@@ -61,10 +61,10 @@ async fn mem_pool() -> SqlitePool {
         .run(&pool)
         .await
         .expect("run migrations");
-    pool
+    pool.into()
 }
 
-async fn seed_user(pool: &SqlitePool, username: &str) -> Id {
+async fn seed_user(pool: &DbPool, username: &str) -> Id {
     let id = new_id();
     let now = Utc::now().to_rfc3339();
     sqlx::query(
@@ -159,7 +159,7 @@ impl otto_server::feature_guard::HasGrants for TestState {
     }
 }
 
-fn app(pool: SqlitePool, ctx: AuthContext) -> Router {
+fn app(pool: DbPool, ctx: AuthContext) -> Router {
     let state = TestState {
         grants: GrantsRepo::new(pool),
     };

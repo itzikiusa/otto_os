@@ -13,7 +13,7 @@ use std::time::Duration;
 use chrono::Utc;
 use otto_core::domain::ImprovementTrigger;
 use otto_state::WorkspacesRepo;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
@@ -24,16 +24,20 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(60);
 
 pub struct SchedulerHandle {
     cancel: Arc<AtomicBool>,
+    /// Wakes the sleeping supervisor on shutdown (`notify_one` keeps a permit,
+    /// so a shutdown racing the flag check is never lost).
+    wake: Arc<Notify>,
     _supervisor: JoinHandle<()>,
 }
 impl SchedulerHandle {
     pub fn shutdown(&self) {
         self.cancel.store(true, Ordering::Relaxed);
+        self.wake.notify_one();
     }
 }
 impl Drop for SchedulerHandle {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.shutdown();
     }
 }
 
@@ -49,14 +53,16 @@ impl Scheduler {
 
     pub async fn start(self) -> SchedulerHandle {
         let cancel = Arc::new(AtomicBool::new(false));
-        let supervisor = tokio::spawn(self.supervise(Arc::clone(&cancel)));
+        let wake = Arc::new(Notify::new());
+        let supervisor = tokio::spawn(self.supervise(Arc::clone(&cancel), Arc::clone(&wake)));
         SchedulerHandle {
             cancel,
+            wake,
             _supervisor: supervisor,
         }
     }
 
-    async fn supervise(self, cancel: Arc<AtomicBool>) {
+    async fn supervise(self, cancel: Arc<AtomicBool>, wake: Arc<Notify>) {
         let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
         loop {
             if cancel.load(Ordering::Relaxed) {
@@ -110,14 +116,13 @@ impl Scheduler {
                 Err(e) => warn!("self-improvement scheduler: list workspaces: {e}"),
             }
 
-            // Sleep in short slices for responsive shutdown.
-            let mut waited = Duration::ZERO;
-            while waited < SCAN_INTERVAL {
-                if cancel.load(Ordering::Relaxed) {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                waited += Duration::from_millis(500);
+            // One timer per scan; shutdown wakes it (was 500 ms slices).
+            tokio::select! {
+                _ = tokio::time::sleep(SCAN_INTERVAL) => {}
+                _ = wake.notified() => {}
+            }
+            if cancel.load(Ordering::Relaxed) {
+                return;
             }
         }
     }

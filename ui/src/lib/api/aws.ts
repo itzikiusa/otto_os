@@ -2,7 +2,7 @@
 // Mirrors docs/design/aws-k8s-consoles.md §2 (`/aws/*`, crates/otto-aws). Every
 // service call takes an account id; `region` overrides the account's default.
 
-import { api, baseUrl, getToken, ApiError } from './client';
+import { api, getToken, ApiError, laneFetch } from './client';
 import type {
   AthenaExecution,
   AthenaQueryReq,
@@ -225,7 +225,8 @@ export async function awsDownloadBlob(
 ): Promise<{ blob: Blob; filename: string | null; contentType: string }> {
   const token = getToken();
   const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  const resp = await fetch(`${baseUrl()}/api/v1${path}`, { headers, signal });
+  // Large objects stream for a long time: the long lane (alias host).
+  const resp = await laneFetch('long', path, { headers, signal });
   if (!resp.ok) {
     let problem: Problem = { code: 'internal', message: resp.statusText };
     try {

@@ -8,7 +8,8 @@
 // `liveQuery` consumes. Reconnects with backoff; a reconnect (or a changed
 // daemon `boot_id`, or a lag `resync` frame) resyncs the registry.
 
-import { wsConnect } from './api/client';
+import { api, resumeAltLoopback, setAltLoopbackBase, suspendAltLoopback, wsConnect } from './api/client';
+import type { MetaResp } from './api/types';
 import { LiveRegistry, type LiveEvent } from './live';
 
 export class TopicSocket {
@@ -61,7 +62,11 @@ export class TopicSocket {
       const reconnected = this.everConnected;
       this.everConnected = true;
       this.registry.setConnected(true);
-      if (reconnected) this.registry.resync();
+      if (reconnected) {
+        // The daemon answers again: probe the (suspended) alias host now.
+        resumeAltLoopback();
+        this.registry.resync();
+      }
     };
     s.onmessage = (ev: MessageEvent) => {
       if (typeof ev.data !== 'string') return;
@@ -76,7 +81,15 @@ export class TopicSocket {
       } else if (data?.type === 'subscribe_ack') {
         const boot = typeof data.boot_id === 'string' ? data.boot_id : null;
         // Same socket generation, different daemon: everything cached is stale.
-        if (boot && this.bootId && boot !== this.bootId) this.registry.resync();
+        if (boot && this.bootId && boot !== this.bootId) {
+          this.registry.resync();
+          // A restarted daemon may not hold the alias any more: re-arm from
+          // its /meta (the main window's EventsClient does the same).
+          void api
+            .get<MetaResp>('/meta')
+            .then((m) => setAltLoopbackBase(m.alt_loopback_base))
+            .catch(() => {});
+        }
         if (boot) this.bootId = boot;
       } else if (typeof data?.type === 'string') {
         this.registry.dispatch(data);
@@ -85,6 +98,7 @@ export class TopicSocket {
     s.onclose = () => {
       if (this.sock === s) this.sock = null;
       this.registry.setConnected(false);
+      suspendAltLoopback();
       this.scheduleReconnect();
     };
     s.onerror = () => s.close();

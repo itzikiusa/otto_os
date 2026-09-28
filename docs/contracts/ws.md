@@ -25,6 +25,19 @@ Auth: prefer `Sec-WebSocket-Protocol: otto-bearer, <token>` (server echoes
 `?token=<bearer token>` query parameter is accepted as a backward-compatible
 fallback. An IP that fails token validation too many times is locked out (429).
 
+**Attach intent — `?view=1` (optional).** By default an attach that may type
+resumes an exited-but-resumable agent session (`ensure_live`: the provider CLI
+is respawned with `--resume` so the terminal comes back live). A client that
+only *shows* the session — a grid tile, an embedded agent-output viewer, an
+automatic reconnect after a dropped socket — adds `view=1`: the attach never
+spawns the CLI. The initial `status` frame then reports the dormant value
+(`reconnectable`) and the `scrollback` reply is empty (`epoch` 0). The first
+`input` frame with `user: true` on such a socket is the resume: the server
+resumes the session, moves the socket onto the new process (`status` + an
+unsolicited `scrollback`, as on revival) and **does not deliver that
+keystroke** (the CLI is still starting). Emulator replies (`user: false`)
+never wake it. Read-only viewers never resume either way.
+
 Role: workspace **viewer** may attach (read-only); **editor**+ may send input/resize.
 Input frames from viewers are silently dropped server-side (and a single JSON
 `{"type":"error","code":"forbidden"}` is sent once).
@@ -83,9 +96,12 @@ read-only safe, never affects the PTY or other viewers.
   interrupt is not queued behind a window of stale output.
 - Any snapshot the server sends (`scrollback` reply, `resync`, lag, revival)
   supersedes held output; it is never sent after it.
-- No ack progress for **2 s** while output waits → the server treats all
-  sent bytes as consumed (same guarantee as the pause auto-resume: a lost ack
-  can never freeze a pane).
+- No ack progress for **2 s** while output waits → the server drops the
+  held output and owes ONE snapshot, sent once the client has drained to
+  `≤ W/4` (as for an overflow). The window is never reopened without acks,
+  so a stalled renderer (blocked main thread, napped window) holds at most
+  `W` unacknowledged bytes however long it stalls; a client that acks what
+  it parses and drops always reaches the snapshot.
 - Stale, duplicate or too-large acks are clamped/ignored. A new connection
   starts without credit. `pause`/`resume` are still honored on a credit socket.
 - **Compatibility.** An older server ignores `credit`/`ack` (unknown frames)

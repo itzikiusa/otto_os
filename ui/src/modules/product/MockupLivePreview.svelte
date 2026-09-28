@@ -7,7 +7,7 @@
   //   • excalidraw → the read-only DesignBoard island.
   //   • scene3d → the read-only Scene3DViewport (validated JSON only; a doc that
   //     doesn't parse shows the raw source so you can see what the agent wrote).
-  import mermaid from 'mermaid';
+  import { renderMermaid } from '../canvas/mermaid';
   import type { DesignFormat } from './types';
   import { svgDoc } from './design/format';
   import DesignBoard from './design/DesignBoard.svelte';
@@ -19,8 +19,6 @@
     content: string;
   }
   const { format, content }: Props = $props();
-
-  mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
 
   let mermaidSvg = $state<string | null>(null);
   let mermaidErr = $state<string | null>(null);
@@ -42,17 +40,18 @@
       return;
     }
     const token = ++seq;
-    void mermaid
-      .render(`otto-mockup-live-${Date.now()}-${token}`, text)
-      .then(({ svg }) => {
-        if (token === seq) {
+    // Lazy + serialized (canvas/mermaid.ts); a superseded render is skipped.
+    void renderMermaid(`otto-mockup-live-${Date.now()}-${token}`, text, { isStale: () => token !== seq }).then(
+      ({ svg, error, stale }) => {
+        if (stale || token !== seq) return;
+        if (svg !== undefined) {
           mermaidSvg = svg;
           mermaidErr = null;
+        } else {
+          mermaidErr = error ?? 'Diagram error';
         }
-      })
-      .catch((e: unknown) => {
-        if (token === seq) mermaidErr = e instanceof Error ? e.message : String(e);
-      });
+      },
+    );
   });
 
   /** The VALIDATED scene3d doc, or null while the agent's JSON is still

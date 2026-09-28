@@ -1,13 +1,14 @@
 <script lang="ts">
   // Collapsible JSON tree for the response viewer. Objects/arrays fold; the
-  // first two levels start open. A search query highlights matching keys and
+  // root and, within a row budget, its child containers start open
+  // (`autoOpenPaths` — a wide root array no longer mounts every row). A search query highlights matching keys and
   // values and opens their ancestors. Right-click (or the row's menu key) a
   // node to copy its JSONPath or value. Large containers render in pages.
   import Icon from '../../lib/components/Icon.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { toasts } from '../../lib/toast.svelte';
-  import { childPath, preview, searchTree } from '../../lib/api/jsonTree';
+  import { autoOpenPaths, childPath, preview, searchTree } from '../../lib/api/jsonTree';
 
   interface Props {
     value: unknown;
@@ -17,13 +18,14 @@
 
   const PAGE = 200;
   const found = $derived(searchTree(value, query));
+  const autoOpen = $derived(autoOpenPaths(value, PAGE));
   let toggled = $state<Record<string, boolean>>({});
   let shown = $state<Record<string, number>>({});
 
   function isOpen(path: string, depth: number): boolean {
     if (path in toggled) return toggled[path];
     if (query.trim()) return found.open.has(path);
-    return depth < 2;
+    return depth < 2 && autoOpen.has(path);
   }
   function toggle(path: string, depth: number): void {
     toggled[path] = !isOpen(path, depth);

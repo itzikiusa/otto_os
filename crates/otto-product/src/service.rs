@@ -1822,8 +1822,8 @@ mod tests {
     use otto_core::domain::{IssueAccount, IssueProviderKind};
     use otto_core::secrets::SecretStore;
     use otto_core::{new_id, Id, Result};
+    use otto_state::DbPool;
     use otto_state::{IssuesRepo, ProductRepo};
-    use sqlx::SqlitePool;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1888,7 +1888,7 @@ mod tests {
     // In-memory pool + schema
     // -----------------------------------------------------------------------
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -1901,11 +1901,11 @@ mod tests {
             .run(&pool)
             .await
             .unwrap();
-        pool
+        pool.into()
     }
 
     // Seed a user row so FK constraints are satisfied.
-    async fn seed_user(pool: &SqlitePool) -> Id {
+    async fn seed_user(pool: &DbPool) -> Id {
         let uid = new_id();
         let now = Utc::now().to_rfc3339();
         sqlx::query(
@@ -1924,7 +1924,7 @@ mod tests {
     }
 
     // Seed a workspace row.
-    async fn seed_workspace(pool: &SqlitePool) -> Id {
+    async fn seed_workspace(pool: &DbPool) -> Id {
         let wid = new_id();
         let now = Utc::now().to_rfc3339();
         sqlx::query(
@@ -1961,7 +1961,7 @@ mod tests {
 
     /// Seed a real issue account that JiraClient will use.
     /// The account's base_url is set to the wiremock server URL.
-    async fn seed_issue_account(pool: &SqlitePool, user_id: &Id, base_url: &str) -> IssueAccount {
+    async fn seed_issue_account(pool: &DbPool, user_id: &Id, base_url: &str) -> IssueAccount {
         let repo = IssuesRepo::new(pool.clone());
         repo.create_account(otto_state::NewIssueAccount {
             user_id: user_id.clone(),
@@ -3003,7 +3003,7 @@ mod tests {
 
     /// Seed a second user with a distinct username (avoids the UNIQUE collision
     /// that `seed_user` would hit when called twice).
-    async fn seed_named_user(pool: &SqlitePool, username: &str) -> Id {
+    async fn seed_named_user(pool: &DbPool, username: &str) -> Id {
         let uid = new_id();
         let now = Utc::now().to_rfc3339();
         sqlx::query(
@@ -3032,7 +3032,7 @@ mod tests {
         }
     }
 
-    fn svc_for(pool: &SqlitePool) -> ProductService {
+    fn svc_for(pool: &DbPool) -> ProductService {
         let repo = ProductRepo::new(pool.clone());
         let issues = IssuesRepo::new(pool.clone());
         let secrets: Arc<dyn SecretStore> = Arc::new(FixedSecret("tok".into()));

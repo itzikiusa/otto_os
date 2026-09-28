@@ -19,9 +19,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use otto_state::{
-    DiscoveredTool, McpAllowlistRepo, McpApprovalRepo, McpCallLogRepo, McpPolicyRepo,
+    DbPool, DiscoveredTool, McpAllowlistRepo, McpApprovalRepo, McpCallLogRepo, McpPolicyRepo,
     McpRegistryRepo, McpServerDetail, McpTool, McpToolsRepo, NewApproval, NewCallLog, SettingsRepo,
-    SqlitePool,
 };
 
 use crate::client::{McpClient, Transport};
@@ -56,6 +55,12 @@ pub enum InvokeOutcome {
 /// stdio child — on the next checkout or health sweep.
 const CLIENT_IDLE_TTL: Duration = Duration::from_secs(5 * 60);
 const CLIENT_POOL_CAP: usize = 32;
+/// The background sweep re-probes a STDIO server only if something used it
+/// this recently (r3-08-05: probing = spawning the server, e.g. an `npx`
+/// package, for every enabled server every 5 min whether or not anything uses
+/// MCP). HTTP servers are always probed (a request, no process). Unused stdio
+/// servers keep their last health until used or probed from the UI.
+const STDIO_SWEEP_RECENT: Duration = Duration::from_secs(6 * 3600);
 
 struct PooledClient {
     config_hash: String,
@@ -65,17 +70,55 @@ struct PooledClient {
 
 #[derive(Clone)]
 pub struct McpService {
-    pool: SqlitePool,
+    pool: DbPool,
     secrets: Arc<dyn SecretStore>,
     clients: Arc<Mutex<HashMap<String, PooledClient>>>,
+    /// server id → last time a governed op checked out its client. Outlives
+    /// the pool entry (reaped after 5 min idle); decides which stdio servers
+    /// the sweep still probes.
+    last_use: Arc<Mutex<HashMap<String, Instant>>>,
+}
+
+/// What the background sweep does for one enabled server.
+#[derive(Debug, PartialEq, Eq)]
+enum SweepAction {
+    /// A request (HTTP) or a server in recent use with no live session.
+    Probe,
+    /// A stdio server with a parked, initialized session: a `tools/list` on it
+    /// (no spawn) — the live connection is reused.
+    PingLive,
+    /// A stdio server nothing used recently: no process is started.
+    Skip,
+}
+
+fn sweep_action(
+    transport: &str,
+    has_live_session: bool,
+    used_ago: Option<Duration>,
+) -> SweepAction {
+    if transport == "http" {
+        return SweepAction::Probe;
+    }
+    match used_ago {
+        Some(ago) if ago < STDIO_SWEEP_RECENT => {
+            if has_live_session {
+                SweepAction::PingLive
+            } else {
+                SweepAction::Probe
+            }
+        }
+        _ => SweepAction::Skip,
+    }
 }
 
 impl McpService {
-    pub fn new(pool: SqlitePool, secrets: Arc<dyn SecretStore>) -> Self {
+    pub fn new(pool: impl Into<DbPool>, secrets: Arc<dyn SecretStore>) -> Self {
+        let pool: DbPool = pool.into();
         Self {
             pool,
             secrets,
             clients: Arc::new(Mutex::new(HashMap::new())),
+            last_use: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -227,6 +270,9 @@ impl McpService {
     /// spawn + `initialize` each (1–3 s for an `npx` server). A config or
     /// secret change hashes differently and replaces the entry.
     async fn client_for(&self, server: &McpServerDetail) -> Arc<McpClient> {
+        if let Ok(mut m) = self.last_use.lock() {
+            m.insert(server.id.clone(), Instant::now());
+        }
         let (secret_env, secret_headers) = self.resolve_secrets(server).await;
         let hash = client_config_hash(server, &secret_env, &secret_headers);
         if let Ok(mut m) = self.clients.lock() {
@@ -366,6 +412,12 @@ impl McpService {
     }
 
     /// Best-effort health sweep across all managed servers (background tick).
+    ///
+    /// Lazy for stdio servers (r3-08-05): only servers used in the last
+    /// [`STDIO_SWEEP_RECENT`] are checked, over their parked session when one is
+    /// live. HTTP servers are probed every sweep. An explicit
+    /// [`health_check`](Self::health_check) (the UI's Health button) always
+    /// probes. Governed calls also record health as they succeed or fail.
     pub async fn health_sweep(&self) {
         self.reap_idle_clients();
         let servers = match self.registry().list_all_managed().await {
@@ -373,11 +425,64 @@ impl McpService {
             Err(_) => return,
         };
         for s in servers {
-            if s.enabled {
-                let _ = self.health_check(&s.id).await;
+            if !s.enabled {
+                continue;
+            }
+            let used_ago = self
+                .last_use
+                .lock()
+                .ok()
+                .and_then(|m| m.get(&s.id).map(|t| t.elapsed()));
+            let live = self.live_client(&s.id);
+            let action = sweep_action(
+                &s.transport,
+                live.as_ref().is_some_and(|c| c.has_live_session()),
+                used_ago,
+            );
+            match (action, live) {
+                (SweepAction::Skip, _) => {}
+                (SweepAction::PingLive, Some(client)) => {
+                    let start = Instant::now();
+                    let res = client.list_tools().await.map(|_| ());
+                    let latency = start.elapsed().as_millis() as i64;
+                    let _ = self.record_health(&s, res, Some(latency)).await;
+                }
+                _ => {
+                    let _ = self.health_check(&s.id).await;
+                }
             }
         }
         let _ = self.approvals().expire_stale().await;
+    }
+
+    /// The pooled client for `server_id` when one is parked and not idle-expired
+    /// (no checkout: the sweep must not keep an idle session alive).
+    fn live_client(&self, server_id: &str) -> Option<Arc<McpClient>> {
+        let m = self.clients.lock().ok()?;
+        m.get(server_id)
+            .filter(|c| c.last_used.elapsed() < CLIENT_IDLE_TTL)
+            .map(|c| c.client.clone())
+    }
+
+    /// Write a health outcome. `latency` = `None` (a governed call's outcome)
+    /// writes only when the status flips, so busy servers don't rewrite their
+    /// row per call.
+    async fn record_health(
+        &self,
+        server: &McpServerDetail,
+        res: std::result::Result<(), String>,
+        latency: Option<i64>,
+    ) -> Result<()> {
+        let (status, err) = match &res {
+            Ok(()) => ("healthy", None),
+            Err(e) => ("unhealthy", Some(redact_text(e).value)),
+        };
+        if latency.is_none() && server.health_status == status {
+            return Ok(());
+        }
+        self.registry()
+            .set_health(&server.id, status, latency, err.as_deref())
+            .await
     }
 
     // ---- the governance pipeline -----------------------------------------
@@ -721,6 +826,10 @@ impl McpService {
         self.registry().get(&server.id).await?;
         let res = client.call_tool(tool_name, args).await;
         let latency = start.elapsed().as_millis() as i64;
+        // Health on use: a transport failure marks the server unhealthy, any
+        // answer (even a tool-level error) healthy — written on change only.
+        let outcome = res.as_ref().map(|_| ()).map_err(Clone::clone);
+        let _ = self.record_health(&server, outcome, None).await;
         match res {
             Ok(call) => {
                 let mut rows = 0usize;
@@ -980,6 +1089,22 @@ fn client_config_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sweep_probes_http_and_only_recently_used_stdio() {
+        let min = Duration::from_secs(60);
+        assert_eq!(sweep_action("http", false, None), SweepAction::Probe);
+        assert_eq!(sweep_action("stdio", false, None), SweepAction::Skip);
+        assert_eq!(
+            sweep_action("stdio", false, Some(STDIO_SWEEP_RECENT + min)),
+            SweepAction::Skip
+        );
+        assert_eq!(sweep_action("stdio", false, Some(min)), SweepAction::Probe);
+        assert_eq!(
+            sweep_action("stdio", true, Some(min)),
+            SweepAction::PingLive
+        );
+    }
 
     #[test]
     fn canonical_hash_is_key_order_independent() {

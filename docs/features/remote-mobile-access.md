@@ -93,7 +93,11 @@ cargo build --release -p ottod --features embed-ui      # bakes ui/dist into ott
 Then `https://<host>/` returns the app, and `/api` + `/ws` work **same-origin**
 — the UI auto-uses `location.origin` and `wss://`, so no base-URL override is
 needed. Because the app is a hash router, deep links / refresh / back all resolve
-to `index.html` (the SPA history-API fallback in `serve_spa`). The packaged
+to `index.html` (the SPA history-API fallback in `serve_spa`). Build output is
+not a route: a missing `/assets/*` file is a plain 404. Hashed `assets/*`
+files are sent with `Cache-Control: public, max-age=31536000, immutable`, and
+`index.html` with `no-cache`, so a deploy is picked up on the next load while
+unchanged chunks stay cached across windows. The packaged
 desktop `.app` already bundles this build; only a manual `cargo run` needs the
 explicit feature flag.
 

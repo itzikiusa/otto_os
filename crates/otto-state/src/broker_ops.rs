@@ -5,9 +5,10 @@
 //! GET response. `broker_replays` — append-only evidence rows written after each
 //! DLQ/replay run.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::{new_id, Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 
 use crate::convert::{dberr, dberr_unique, fmt, ts};
 use chrono::DateTime;
@@ -85,11 +86,12 @@ fn row_to_replay(r: &sqlx::sqlite::SqliteRow) -> Result<ReplayRow> {
 
 #[derive(Clone)]
 pub struct BrokerOpsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl BrokerOpsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -227,7 +229,7 @@ impl BrokerOpsRepo {
 mod tests {
     use super::*;
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(false); // no users table needed for this repo
@@ -237,7 +239,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     #[tokio::test]

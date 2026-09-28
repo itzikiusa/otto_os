@@ -493,7 +493,7 @@
           {#if it.impl_summary}<p class="impl-summary">{it.impl_summary}</p>{/if}
           {#if it.worktree_path}<p class="worktree mono">{it.worktree_path}</p>{/if}
           {#if it.impl_session_id && openTerminals.has(it.impl_session_id)}
-            <div class="term">{#key it.impl_session_id}<Terminal sessionId={it.impl_session_id} preferDom />{/key}</div>
+            <div class="term">{#key it.impl_session_id}<Terminal sessionId={it.impl_session_id} preferDom resumeOnOpen={false} />{/key}</div>
           {/if}
           {#if openImplDiffs.has(it.id)}
             {#if implDiffLoading.has(it.id)}
@@ -545,7 +545,7 @@
                 <p class="val-waiting"><Icon name="warning" size={12} /> Looks blocked on input — <strong>Open session</strong> to respond.</p>
               {/if}
               {#if a.session_id && openTerminals.has(a.session_id)}
-                <div class="term">{#key a.session_id}<Terminal sessionId={a.session_id} preferDom />{/key}</div>
+                <div class="term">{#key a.session_id}<Terminal sessionId={a.session_id} preferDom resumeOnOpen={false} />{/key}</div>
               {/if}
               {#if openFindings.has(key)}
                 <ul class="findings">

@@ -24,7 +24,7 @@ use std::sync::Mutex;
 use chrono::Utc;
 use otto_core::secrets::SecretStore;
 use otto_core::{new_id, Result};
-use otto_state::{EmailSendersRepo, SqlitePool};
+use otto_state::{DbPool, EmailSendersRepo};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::Row;
 
@@ -59,7 +59,7 @@ fn secret_ref_for(user_id: &str) -> String {
     format!("email-sender-{user_id}")
 }
 
-async fn mk_pool() -> SqlitePool {
+async fn mk_pool() -> DbPool {
     let opts = SqliteConnectOptions::new()
         .in_memory(true)
         .foreign_keys(true);
@@ -72,10 +72,10 @@ async fn mk_pool() -> SqlitePool {
         .run(&pool)
         .await
         .expect("migrations");
-    pool
+    pool.into()
 }
 
-async fn seed_user(pool: &SqlitePool, username: &str) -> String {
+async fn seed_user(pool: &DbPool, username: &str) -> String {
     let id = new_id();
     let now = Utc::now().to_rfc3339();
     sqlx::query(

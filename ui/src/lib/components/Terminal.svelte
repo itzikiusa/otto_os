@@ -1,3 +1,132 @@
+<script module lang="ts">
+  // ── GPU renderer budget (shared by every Terminal in this window) ─────────
+  // WebKit keeps at most 16 live WebGL contexts per page and silently LOSES
+  // the oldest past that. A tiled grid (15 live tiles) plus the primary pane
+  // and a few embeds would cycle contexts forever, so at most this many
+  // terminals render on the GPU; the rest use xterm's DOM renderer.
+  export const MAX_WEBGL_TERMINALS = 10;
+  let liveWebgl = 0;
+  /** Escape hatch: `localStorage['otto.term.renderer'] = 'dom'` forces the
+   *  DOM renderer everywhere (read once per load). */
+  const FORCE_DOM_RENDERER = (() => {
+    try {
+      return globalThis.localStorage?.getItem('otto.term.renderer') === 'dom';
+    } catch {
+      return false;
+    }
+  })();
+
+  // ── Parked terminals (r3-09-05, see termPark.ts for the bounds) ───────────
+  import type { Terminal as XTerm } from '@xterm/xterm';
+  import type { FitAddon as XFit } from '@xterm/addon-fit';
+  import type { SearchAddon as XSearch } from '@xterm/addon-search';
+  import type { SessionStatus as ParkedStatus } from '../api/types';
+  import { base64ToBytes as parkedB64 } from '../b64';
+  import { snapshotApplies, withInOrderReset as parkedRis, type TermFlow as FlowT, type WriteQueue as QueueT } from './termFlow';
+  import { PARK_SCROLLBACK, TermPark } from './termPark';
+
+  /** Everything a live Terminal hands over when it parks: the emulator, its
+   *  socket and the socket's flow/snapshot state, so the adopter continues
+   *  the SAME stream (same credit tag, same epoch) with no snapshot. */
+  interface ParkedEngine {
+    term: XTerm;
+    fit: XFit;
+    search: XSearch;
+    sock: WebSocket;
+    flow: FlowT;
+    writes: QueueT;
+    compactPending: boolean;
+    resyncPending: boolean;
+    snapshotEpoch: number | null;
+    /** A `status` pushed while parked (revival): replayed to the adopter. */
+    status: ParkedStatus | null;
+    exitCode: number | null;
+    lastCols: number;
+    lastRows: number;
+  }
+
+  function disposeParked(e: ParkedEngine): void {
+    const s = e.sock;
+    s.onopen = null;
+    s.onmessage = null;
+    s.onerror = null;
+    s.onclose = null;
+    try {
+      s.close();
+    } catch {
+      /* already closing */
+    }
+    e.writes.dropQueued();
+    try {
+      e.term.dispose();
+    } catch {
+      /* already disposed */
+    }
+  }
+
+  const termPark = new TermPark<ParkedEngine>(disposeParked);
+
+  /** While parked the engine keeps up with its session on its own: bytes
+   *  parse (the renderer is paused while detached), credit acks flow, snapshots
+   *  rebuild by the same rule as a live Terminal, and a close evicts it. */
+  function wireParked(key: string, e: ParkedEngine): void {
+    e.flow.setSink((frame) => {
+      if (e.sock.readyState === WebSocket.OPEN) e.sock.send(JSON.stringify(frame));
+    });
+    e.writes.rebind(
+      (bytes, done) => e.term.write(bytes, done),
+      () => e.sock.readyState === WebSocket.OPEN,
+    );
+    e.sock.onopen = null;
+    e.sock.onerror = null;
+    e.sock.onclose = () => termPark.evict(key, e);
+    e.sock.onmessage = (ev: MessageEvent) => {
+      if (ev.data instanceof ArrayBuffer) {
+        e.writes.push(new Uint8Array(ev.data), undefined, e.flow.credit);
+        return;
+      }
+      if (typeof ev.data !== 'string') return;
+      let msg: { type?: string; window?: unknown; epoch?: number; data?: string; status?: ParkedStatus; code?: number; message?: string };
+      try {
+        msg = JSON.parse(ev.data);
+      } catch {
+        return;
+      }
+      switch (msg.type) {
+        case 'credit':
+          e.flow.granted(typeof msg.window === 'number' ? msg.window : undefined);
+          break;
+        case 'scrollback': {
+          const buffer = e.term.buffer.active;
+          const holds = () => e.term.hasSelection() || buffer.baseY - buffer.viewportY > 3;
+          if (!snapshotApplies(e, msg.epoch ?? null, holds) || !msg.data) break;
+          const snap = parkedB64(msg.data);
+          e.writes.dropQueued();
+          e.resyncPending = false;
+          if (e.writes.inflight === 0) {
+            e.term.reset();
+            e.writes.push(snap);
+          } else {
+            e.writes.push(parkedRis(snap));
+          }
+          break;
+        }
+        case 'status':
+          if (!msg.status) break;
+          e.status = msg.status;
+          if (msg.status !== 'exited' && msg.status !== 'reconnectable') e.exitCode = null;
+          break;
+        case 'exit':
+          e.exitCode = msg.code ?? 0;
+          break;
+        case 'error':
+          e.term.write(`\r\n\x1b[31m[otto] ${msg.code}: ${msg.message ?? ''}\x1b[0m\r\n`);
+          break;
+      }
+    };
+  }
+</script>
+
 <script lang="ts">
   // xterm.js terminal bound to WS /ws/term/{id} per docs/contracts/ws.md.
   // Binary frames → term.write; JSON control frames for status/exit/scrollback.
@@ -12,8 +141,8 @@
   import { WebglAddon } from '@xterm/addon-webgl';
   import '@xterm/xterm/css/xterm.css';
   import { wsUrl, WS_BEARER_SUBPROTOCOL } from '../api/client';
-  import type { SessionStatus, TermSearchMatch, WsSearchResultFrame, WsTermResyncFrame } from '../api/types';
-  import { EMBED_SCROLLBACK, TermFlow, WriteQueue, hasCursorOrErase, withInOrderReset } from './termFlow';
+  import type { SessionStatus, TermSearchMatch, WsSearchResultFrame, WsTermFlowFrame, WsTermResyncFrame } from '../api/types';
+  import { EMBED_SCROLLBACK, QuietRepaint, TermFlow, WriteQueue, hasCursorOrErase, withInOrderReset } from './termFlow';
   import { textToBase64, base64ToBytes, bytesToBase64 } from '../b64';
   import { terminalTheme } from '../termtheme';
   import { ui } from '../stores/ui.svelte';
@@ -52,11 +181,15 @@
      *  of the app's current light/dark scheme. Use for embedded agent CLIs
      *  (claude, codex) that render their own dark TUI canvas. */
     forceDark?: boolean;
-    /** Prefer the DOM renderer over WebGL. Agent CLIs (claude/codex/grok) are
-     *  full-screen TUIs that redraw status bars and the prompt constantly;
-     *  WebGL's partial-cell updates leave solid "ghost" blocks and stacked
-     *  status lines. DOM is slightly slower but paints correctly. Shells keep
-     *  WebGL for high-throughput scroll. Default false. */
+    /** The pane hosts a full-screen agent TUI (claude/codex/grok…) that
+     *  rewrites its status bar and prompt in place. (Historical name: it
+     *  used to force xterm's DOM renderer, which cost ~⅓ of a core per
+     *  working pane in WebKit — r3-12-01.) Now it selects TUI handling on
+     *  whichever renderer is active (WebGL when available): one trailing
+     *  full-viewport clean-up repaint per output burst (≤ 1×/s while a
+     *  spinner never stops) mops up cells a TUI rewrote without dirtying,
+     *  and a confirmed resize compacts from a server snapshot. Default
+     *  false (plain shells: redraw only small cursor/erase frames). */
     preferDom?: boolean;
     /** When provided, the WS is opened with `Authorization` via the
      *  `otto-bearer` Sec-WebSocket-Protocol subprotocol carrying this token
@@ -103,8 +236,23 @@
      *  reconnecting still restores depth. Also the `lines` requested in every
      *  `scrollback` snapshot. */
     scrollback?: number;
+    /** Park instead of dispose on unmount / session switch (termPark.ts):
+     *  the xterm and its socket stay live off-screen and the next Terminal
+     *  mounted for the same session adopts them — no 4000-row snapshot
+     *  replay when coming back to Agents or switching tabs. Owner sockets
+     *  only (ignored with shareToken/socketFactory). Default false. */
+    keepAlive?: boolean;
+    /** Opening this terminal resumes a suspended agent session (the daemon's
+     *  `ensure_live` on attach). False = a VIEW-ONLY attach (`?view=1`, see
+     *  docs/contracts/ws.md §1): looking at the pane never spawns the CLI —
+     *  the first real keystroke or the Resume button does (r3-05-01). Set it
+     *  on panes that show a session rather than work in it (grid tiles,
+     *  embedded agent-output viewers). Automatic reconnects (dropped socket,
+     *  daemon restart, window refocus) are view-only on EVERY terminal: a
+     *  dropped socket is not the user asking for the CLI back. Default true. */
+    resumeOnOpen?: boolean;
   }
-  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, socketFactory, transformFrame, readOnlyReason, onstatus, onfontfit, onsearchresult, showToolbar = true, autoFocus = false, claimOnAttach = false, scrollback = EMBED_SCROLLBACK }: Props = $props();
+  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, socketFactory, transformFrame, readOnlyReason, onstatus, onfontfit, onsearchresult, showToolbar = true, autoFocus = false, claimOnAttach = false, keepAlive = false, scrollback = EMBED_SCROLLBACK, resumeOnOpen = true }: Props = $props();
 
   const effScheme = $derived(forceDark ? 'dark' : ui.resolvedScheme);
 
@@ -150,6 +298,14 @@
    *  the glyph atlas on font/theme changes (stale atlas tiles leave "ghost"
    *  cells after TUI redraws). Null when the DOM renderer is in use. */
   let webglAddon: WebglAddon | null = null;
+  /** This terminal should render on the GPU (desktop, no RTL, not forced to
+   *  DOM) — whether it currently does depends on the budget / context. */
+  let webglWanted = false;
+  let webglRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let webglRetries = 0;
+  /** Context-loss recoveries attempted per terminal before settling on DOM. */
+  const WEBGL_MAX_RETRIES = 2;
+  const WEBGL_RETRY_MS = 5000;
   let sock: WebSocket | null = null;
   /** Coalesce interactive-redraw refreshes (up-arrow history, multi-line
    *  composer resize, etc.) into one rAF so rapid TUI frames don't thrash. */
@@ -166,6 +322,12 @@
 
   let connected = $state(false);
   let exitCode: number | null = $state(null);
+  /** The current socket attached view-only (`?view=1`): the daemon did not
+   *  resume the session for it. */
+  let viewAttach = false;
+  /** A view-only attach found the session suspended — the exited overlay then
+   *  says how to wake it (typing or Resume) instead of "resumes on open". */
+  let dormantView = $state(false);
   let disconnected = $state(false);
   let reconnecting = $state(false);
 
@@ -199,7 +361,7 @@
     reconnectAttempts++;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
-      connect();
+      connect({ view: true });
     }, delay);
   }
 
@@ -314,20 +476,22 @@
   // keep landing, so a fast producer overshot it (3–14 MB). A daemon that
   // grants `credit` (offered on open) sends at most CREDIT_WINDOW (1 MB)
   // unacknowledged bytes instead; `writes` acks as xterm consumes.
-  const flow = new TermFlow((frame) => sendJson(frame));
+  // Flow + queue belong to the ENGINE (xterm + socket), not the component:
+  // a parked engine takes them along and an adopter re-points their sinks
+  // at itself (setSink / rebind), so the credit stream never restarts.
+  const flowSink = (frame: WsTermFlowFrame): void => sendJson(frame);
+  const writeSink = (bytes: Uint8Array, done: () => void): void => {
+    if (!term) return done();
+    term.write(bytes, done);
+  };
+  const canSendNow = (): boolean => sock?.readyState === WebSocket.OPEN;
+  let flow = new TermFlow(flowSink);
   // A3: received bytes wait in `writes` and reach xterm ≤ 64 KB at a time
   // with ≤ 128 KB inside it, so the undroppable part of a backlog is tiny.
   // A keystroke over a big queue (^C mid-flood) drops the queue and asks for
   // ONE `resync` snapshot: the interrupt shows up after ≤ 128 KB of parsing
   // plus one snapshot, not after the whole ≤ 2 MB backlog scrolled past.
-  const writes = new WriteQueue(
-    (bytes, done) => {
-      if (!term) return done();
-      term.write(bytes, done);
-    },
-    flow,
-    () => sock?.readyState === WebSocket.OPEN,
-  );
+  let writes = new WriteQueue(writeSink, flow, canSendNow);
   /** A `resync` is in flight: don't ask again until its snapshot lands. */
   let resyncPending = false;
   function resyncOnInput(): void {
@@ -428,7 +592,9 @@
     return new Uint8Array(await blob.arrayBuffer());
   }
 
-  function connect(): void {
+  /** `view`: attach view-only (never resumes a suspended session). Default:
+   *  view-only unless `resumeOnOpen`. Explicit user actions pass false. */
+  function connect(opts: { view?: boolean } = {}): void {
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
@@ -462,6 +628,8 @@
     flow.resetStream();
     writes.dropQueued();
     resyncPending = false;
+    viewAttach = opts.view ?? !resumeOnOpen;
+    dormantView = false;
     // When a shareToken is supplied (guest share view) use the otto-bearer
     // subprotocol so the token travels in Sec-WebSocket-Protocol instead of
     // the URL query string (keeps it out of access logs). The stored owner
@@ -472,11 +640,16 @@
       const wsBase = wsUrl(`/ws/term/${sessionId}`).replace(/\?token=.*$/, '');
       sock = new WebSocket(wsBase, [WS_BEARER_SUBPROTOCOL, shareToken]);
     } else {
-      sock = new WebSocket(wsUrl(`/ws/term/${sessionId}`));
+      sock = new WebSocket(wsUrl(`/ws/term/${sessionId}`) + (viewAttach ? '&view=1' : ''));
     }
     sock.binaryType = 'arraybuffer';
+    wireSocket(sock);
+  }
 
-    sock.onopen = () => {
+  /** This component's handlers on `s` — a socket it just opened, or one it
+   *  adopted from the parking lot (already open: onopen never fires). */
+  function wireSocket(s: WebSocket): void {
+    s.onopen = () => {
       connected = true;
       reconnecting = false;
       reconnectAttempts = 0;
@@ -499,14 +672,15 @@
       verifyFitSoon();
     };
 
-    sock.onmessage = (ev: MessageEvent) => {
+    s.onmessage = (ev: MessageEvent) => {
       if (ev.data instanceof ArrayBuffer) {
         const bytes = new Uint8Array(ev.data);
         // write() only updates the buffer + marks dirty cells; the renderer then
         // paints *those* cells. Agent TUIs rewrite status/prompt rows in place —
         // if a cell is no longer dirty, the previous frame stays (cursor ghosts,
-        // stacked "-- INSERT --" lines). Agent panes get a throttled full
-        // viewport REDRAW; shells only after cursor/erase frames (paintPtyBytes).
+        // stacked "-- INSERT --" lines). Agent panes get ONE trailing full
+        // viewport repaint per output burst; shells only after cursor/erase
+        // frames (paintPtyBytes).
         paintPtyBytes(bytes, false, flow.credit);
         return;
       }
@@ -523,11 +697,13 @@
             // epoch differs (or was cleared on connect).
             // A `resync` reply always rebuilds: its request already dropped
             // the queued bytes this snapshot replaces.
-            const compact = compactPending && !resyncPending && snapshotEpoch === msg.epoch;
-            compactPending = false;
-            snapshotEpoch = msg.epoch;
             const buffer = term?.buffer.active;
-            if (compact && (term?.hasSelection() || (buffer && buffer.baseY - buffer.viewportY > 3))) break;
+            const st = { compactPending, resyncPending, snapshotEpoch };
+            const applies = snapshotApplies(st, msg.epoch ?? null, () =>
+              !!term?.hasSelection() || (!!buffer && buffer.baseY - buffer.viewportY > 3));
+            compactPending = st.compactPending;
+            snapshotEpoch = st.snapshotEpoch;
+            if (!applies) break;
             // A snapshot fully reconstructs terminal state: history rows +
             // coherent current-screen frame + input modes (bracketed paste,
             // keypad). ALWAYS reset and rebuild from it — appending under the
@@ -564,7 +740,15 @@
             // socket onto a respawned process (chat send, channel follow-up,
             // restart from elsewhere) — drop the exited overlay; the
             // accompanying snapshot rebuilds the screen.
-            if (msg.status !== 'exited' && msg.status !== 'reconnectable') exitCode = null;
+            if (msg.status !== 'exited' && msg.status !== 'reconnectable') {
+              exitCode = null;
+              dormantView = false;
+            } else if ((msg.status === 'reconnectable' || resumable) && viewAttach && exitCode === null && !socketFactory) {
+              // View-only attach to a suspended session: nothing was spawned,
+              // so show the exited overlay (Resume) — typing wakes it too.
+              exitCode = 0;
+              dormantView = true;
+            }
             onstatus?.(msg.status as SessionStatus);
             break;
           case 'exit':
@@ -595,7 +779,7 @@
       }
     };
 
-    sock.onclose = () => {
+    s.onclose = () => {
       connected = false;
       if (exitCode === null && !closedByUs) {
         disconnected = true;
@@ -838,14 +1022,15 @@
    *  Only used when we are NOT in full-redraw mode (plain shells on WebGL). */
   const TUI_FRAME_BYTES = 4096;
 
-  /** Agent-pane (DOM renderer) ghost clean-up cadence. xterm already repaints
-   *  the dirty rows of every frame; the forced FULL repaint only mops up rows
-   *  a TUI rewrote without dirtying them. It used to run on every frame — a
-   *  4 ms DOM render of all rows per spinner tick, ×15 in the tiled view
-   *  (SA-03). Throttled (not debounced, so a continuous stream still gets
-   *  cleaned) to at most ~5/s, a ghost lives ≤ this long. */
-  const DOM_CLEANUP_MS = 200;
-  let domCleanupTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Agent-pane ghost clean-up. xterm already repaints the dirty rows of
+   *  every frame; the forced FULL repaint only mops up rows a TUI rewrote
+   *  without dirtying them. It ran on every frame (SA-03), then as a leading
+   *  5 Hz throttle — which, on the DOM renderer, was the pane's steady cost
+   *  (~30 % of a core per working pane, r3-12-01). Now a trailing debounce:
+   *  one repaint once a burst goes quiet (TUI_CLEANUP_QUIET_MS), at the
+   *  latest TUI_CLEANUP_MAX_WAIT_MS after its first frame, so a ghost lives
+   *  ≤ 1 s even under a spinner that never stops. */
+  const tuiCleanup = new QuietRepaint(() => scheduleFullRedraw());
 
   /**
    * Apply PTY bytes, then REDRAW — not just "draw the dirty cells".
@@ -856,7 +1041,7 @@
    * previous content should be gone, partial paint leaves ghosts. So after the
    * buffer has absorbed the frame we force every visible row to repaint.
    *
-   * - Agent panes (`preferDom`): throttled full redraw (≤ DOM_CLEANUP_MS late).
+   * - Agent panes (`preferDom`): one trailing full redraw per burst (tuiCleanup).
    * - Shell panes: next-frame full redraw only on small frames that move the
    *   cursor or erase (↑ history etc.).
    * - `alwaysRedraw`: snapshots / forced paths — next-frame full redraw.
@@ -872,7 +1057,7 @@
     const redraw: (() => void) | null = alwaysRedraw
       ? scheduleFullRedraw
       : preferDom
-        ? scheduleDomCleanup
+        ? pokeTuiCleanup
         : n < TUI_FRAME_BYTES && hasCursorOrErase(bytes)
           ? scheduleFullRedraw
           : null;
@@ -902,14 +1087,65 @@
     });
   }
 
-  /** Throttled agent-pane clean-up repaint: the first frame arms it, frames
-   *  inside the window ride along, the window's end repaints once. */
-  function scheduleDomCleanup(): void {
-    if (domCleanupTimer !== null) return;
-    domCleanupTimer = setTimeout(() => {
-      domCleanupTimer = null;
-      scheduleFullRedraw();
-    }, DOM_CLEANUP_MS);
+  /** Agent-pane clean-up hook (runs when a frame finished parsing). */
+  function pokeTuiCleanup(): void {
+    tuiCleanup.poke();
+  }
+
+  /** Load the WebGL renderer when this terminal wants it and the window's GPU
+   *  budget allows; otherwise xterm keeps its DOM renderer. */
+  function attachWebgl(): void {
+    if (!term || webglAddon || !webglWanted) return;
+    if (liveWebgl >= MAX_WEBGL_TERMINALS) return;
+    try {
+      const webgl = new WebglAddon();
+      // xterm itself waits 3 s for `webglcontextrestored` after a loss and,
+      // when the context comes back, rebuilds its atlas and redraws. Only a
+      // context that stays lost lands here: drop to the DOM renderer (never a
+      // black canvas), repaint, and retry the GPU a couple of times later
+      // (GPU reset / wake from sleep usually recovers).
+      webgl.onContextLoss(() => {
+        dropWebgl(webgl);
+        forceViewportRefresh();
+        scheduleWebglRetry();
+      });
+      term.loadAddon(webgl);
+      webglAddon = webgl;
+      liveWebgl++;
+    } catch {
+      // WebGL2 unavailable (headless, blocked GPU): DOM renderer.
+      webglAddon = null;
+    }
+  }
+
+  /** Dispose the WebGL renderer (xterm falls back to DOM) and release its
+   *  slot in the budget. */
+  function dropWebgl(which: WebglAddon | null = webglAddon): void {
+    if (!which) return;
+    try {
+      which.dispose();
+    } catch {
+      /* already disposed */
+    }
+    if (webglAddon === which) {
+      webglAddon = null;
+      liveWebgl = Math.max(0, liveWebgl - 1);
+    }
+  }
+
+  function scheduleWebglRetry(): void {
+    if (webglRetryTimer !== null || webglRetries >= WEBGL_MAX_RETRIES) return;
+    webglRetries++;
+    webglRetryTimer = setTimeout(() => {
+      webglRetryTimer = null;
+      attachWebgl();
+      if (webglAddon) forceViewportRefresh();
+    }, WEBGL_RETRY_MS);
+  }
+
+  function cancelWebglRetry(): void {
+    if (webglRetryTimer !== null) clearTimeout(webglRetryTimer);
+    webglRetryTimer = null;
   }
 
   /** Drop cached WebGL glyph tiles after metrics/theme change so the next
@@ -1031,18 +1267,20 @@
     };
   }
 
-  // ── Effect 1: one-time xterm + WebGL init (re-runs when renderer mode flips)
-  // This effect owns the Terminal object, addons, event handlers, ResizeObserver,
-  // and the initial WS connection. It does NOT watch `sessionId` — that is handled
-  // by Effect 2 below so session switches reconnect without rebuilding the GPU
-  // canvas. Renderer mode (RTL / phone / preferDom) IS tracked so a switch from
-  // shell→agent (or RTL toggle) rebuilds with the right backend.
-  $effect(() => {
-    // Tracked reads: toggling RTL / preferDom / phone layout re-runs this effect
-    // so the terminal is rebuilt with the correct renderer (WebGL vs DOM).
-    const rtl = ui.rtlBidi;
-    const wantDom = preferDom || viewport.isPhone;
-    term = new Terminal({
+  // ── Engine lifecycle: build / bind / park / adopt ─────────────────────────
+  // The ENGINE is the xterm (+ fit/search addons), its socket and that
+  // socket's flow state. A component instance binds its own handlers to the
+  // engine it currently shows (bindTerm); a keepAlive Terminal parks the
+  // engine on unmount / session switch (termPark.ts) instead of disposing
+  // it, and adopts a parked engine for its session instead of building one.
+
+  /** Undo for bindTerm(): its handlers close over THIS component instance,
+   *  so they must not travel with a parked engine. */
+  let termBindings: (() => void) | null = null;
+
+  /** Build a fresh xterm into the container. */
+  function buildTerm(): void {
+    const t = new Terminal({
       fontFamily: untrack(() => ui.termFontStack),
       fontSize: untrack(() => effFontSize),
       // Bar cursor (not block): agent TUIs (claude/codex/grok) redraw the prompt
@@ -1085,9 +1323,441 @@
     });
     fit = new FitAddon();
     search = new SearchAddon();
-    term.loadAddon(fit);
-    term.loadAddon(search);
-    term.open(container);
+    t.loadAddon(fit);
+    t.loadAddon(search);
+    t.open(container);
+    term = t;
+  }
+
+  // Shift+Enter must insert a newline in the agent's composer, not submit.
+  // xterm emits plain `\r` for Enter regardless of Shift, and `\r` is what
+  // claude/codex read as "submit". Intercept Shift+Enter and send `\x1b\r`
+  // (ESC+CR) instead — the same sequence Option/Meta+Enter produces (this
+  // terminal sets macOptionIsMeta), which these TUIs treat as a newline.
+  // Plain Enter is left untouched, so it still submits.
+  function termKeyHandler(e: KeyboardEvent): boolean {
+    if (
+      e.type === 'keydown' &&
+      e.key === 'Enter' &&
+      e.shiftKey &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.altKey
+    ) {
+      // preventDefault is essential: returning false alone stops xterm's
+      // `\r`, but the browser's default Enter-in-textarea would still insert
+      // a `\n` that xterm forwards — and claude reads that `\n` as submit.
+      // Prevent the default so ONLY our newline sequence is sent.
+      e.preventDefault();
+      e.stopPropagation();
+      if (!readOnly) sendJson({ type: 'input', data: textToBase64('\x1b\r') });
+      return false; // suppress xterm's default `\r` (which would submit)
+    }
+
+    // ── Copy (⌘C / Ctrl+Shift+C) ──────────────────────────────────────────
+    // xterm does NOT make ⌘C work on its own. It syncs the selection into its
+    // hidden textarea in exactly one place — `rightClickHandler`, on
+    // `contextmenu` — so a right-click → Copy works while a plain drag-select
+    // + ⌘C does nothing: the renderer paints the selection, but the document
+    // never gets a real DOM selection, so the browser's copy command stays
+    // disabled and the `copy` listener xterm registers never fires. Handle
+    // the chord ourselves against `getSelection()`, which is always correct.
+    //
+    // Ctrl+Shift+C is the terminal convention on Linux/Windows (bare Ctrl+C
+    // must stay SIGINT). Both are only claimed when there IS a selection —
+    // otherwise ⌘C/Ctrl+Shift+C fall through untouched.
+    if (e.type === 'keydown' && !e.altKey && (e.key === 'c' || e.key === 'C')) {
+      const chord = (e.metaKey && !e.ctrlKey) || (e.ctrlKey && e.shiftKey && !e.metaKey);
+      if (chord && term?.hasSelection()) {
+        const sel = term.getSelection();
+        if (sel) {
+          // Suppress xterm (never send ^C to the PTY) but do NOT
+          // preventDefault: let the browser run its OWN copy command. The
+          // selection mirror above has given the document a real selection,
+          // so the native path works — and the `copy` listener below fills
+          // the clipboard with the exact terminal text.
+          //
+          // This ordering is the whole point. Calling preventDefault here and
+          // routing through `navigator.clipboard` REPLACES a permission-free
+          // native copy with a permissioned one, which is strictly worse:
+          // on an origin the browser de-privileges (the self-signed
+          // `0.0.0.0` listener) the async API is refused and the copy dies,
+          // even though the native command would have succeeded.
+          // Re-mirror RIGHT HERE, synchronously, before the browser runs its
+          // copy command. `onSelectionChange` normally does this, but if it
+          // was missed for any reason the textarea would be empty and the
+          // native copy would have nothing to take — which is precisely the
+          // greyed-out Edit ▸ Copy symptom.
+          const ta = term.textarea;
+          if (ta && !composing && ta.value !== sel) {
+            ta.value = sel;
+            ta.select();
+          }
+          // Do NOT preventDefault: the browser's own copy command needs no
+          // permission, and the mirrored textarea gives it something to copy.
+          // (Deliberately NOT gated on `document.getSelection()` — Chromium
+          // does not surface a textarea's internal selection there, so that
+          // check reads empty exactly when the mirror is working and would
+          // send us down the permissioned path the browser is refusing.)
+          copySawEvent = false;
+          e.stopPropagation();
+          // If the browser never fires `copy`, nothing was copied and the
+          // async API is the only route left. Say so when that is refused
+          // too — a silent failure is indistinguishable from a working copy
+          // until you paste and get the PREVIOUS clipboard entry.
+          setTimeout(() => {
+            if (copySawEvent) return;
+            void copyText(sel).then((ok) => {
+              if (!ok) {
+                toasts.error(
+                  'Copy blocked',
+                  'The browser refused the clipboard write. Right-click → Copy still works.',
+                );
+              }
+            });
+          }, 80);
+          return false; // suppress xterm only — never ^C to the PTY
+        }
+      }
+    }
+
+    // ── Paste (Ctrl+Shift+V) ──────────────────────────────────────────────
+    // ⌘V / Ctrl+V need nothing from us: the browser fires a `paste` event and
+    // xterm's own handler reads `clipboardData` — which works on ANY origin,
+    // secure or not. Ctrl+Shift+V has no native paste behind it, so it is the
+    // one chord that must read the clipboard programmatically, and
+    // `readText()` is the single clipboard call with no legacy fallback (it
+    // needs a secure context AND a permission grant). Best-effort: on refusal
+    // we stay silent rather than claim a paste that never happened, and ⌘V
+    // still works.
+    if (
+      e.type === 'keydown' &&
+      e.key.toLowerCase() === 'v' &&
+      e.ctrlKey &&
+      e.shiftKey &&
+      !e.metaKey &&
+      !e.altKey
+    ) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!readOnly) {
+        navigator.clipboard
+          ?.readText?.()
+          .then((t) => {
+            if (t) term?.paste(t); // xterm brackets it when the app asked for it
+          })
+          .catch(() => {/* no permission — ⌘V still works */});
+      }
+      return false;
+    }
+    return true;
+  }
+
+  function onTermData(data: string): void {
+    if (readOnly) return;
+    const user = !terminalReply(data);
+    sendJson({ type: 'input', data: textToBase64(data), user });
+    if (user) resyncOnInput();
+  }
+
+  function onTermSelection(): void {
+    if (!term) return;
+    const text = term.hasSelection() ? term.getSelection() : '';
+
+    // Mirror the selection into xterm's hidden textarea and select it there.
+    //
+    // This is what actually makes ⌘C work, and it is not optional. xterm
+    // paints its selection with the renderer; the DOCUMENT has no selection,
+    // so every "copy" path that asks the document what to copy comes up
+    // empty. In a plain browser that means the copy command stays disabled
+    // and no `copy` event ever fires. In the Tauri app it is worse: the
+    // native Edit ▸ Copy item (`apps/desktop/src-tauri/src/main.rs`,
+    // `PredefinedMenuItem::copy`) owns the ⌘C key equivalent at the AppKit
+    // level, so the keydown never reaches the page at all — WebKit runs
+    // `copy:` against an empty DOM selection and the clipboard silently keeps
+    // whatever it held before. Giving the textarea a real selection fixes
+    // both: the command becomes enabled and operates on the right text.
+    //
+    // Safe to stuff the textarea: xterm's `_inputEvent` sends `e.data` (the
+    // inserted text), never `textarea.value`, which is why xterm's own
+    // `rightClickHandler` already does exactly this on contextmenu. Skipped
+    // mid-IME-composition, where the textarea belongs to the input method.
+    const ta = term.textarea;
+    if (ta && !composing) {
+      ta.value = text;
+      if (text) ta.select();
+    }
+
+    // Copy-on-select: when enabled, any new selection goes straight to the
+    // clipboard so the user never has to press ⌘C. Goes through `copyText`
+    // (never throws, falls back to execCommand): the old
+    // `navigator.clipboard.writeText(...).catch(...)` threw a SYNCHRONOUS
+    // TypeError on any origin without the async API — the `.catch()` never
+    // ran, and the throw landed inside xterm's selection-change emitter.
+    if (ui.termCopyOnSelect && text) void copyText(text);
+  
+  }
+
+  function onTermBinary(data: string): void {
+    if (readOnly) return;
+    // raw binary path (e.g. some IME flows) — bytes are latin1 in a string
+    const bytes = new Uint8Array(data.length);
+    for (let i = 0; i < data.length; i++) bytes[i] = data.charCodeAt(i) & 0xff;
+    sendJson({ type: 'input', data: bytesToBase64(bytes) });
+  }
+
+  // The textarea is the IME's scratch space during composition; the
+  // selection mirror above must not touch it while a composition is open.
+  function onCompStart(): void {
+    composing = true;
+  }
+  function onCompEnd(): void {
+    composing = false;
+  }
+
+  function onTermFocus(): void {
+    keyContext.terminalFocused = true;
+    keyContext.openFind = openFind;
+    // Claim PTY size authority: multiple viewers share one PTY (pane +
+    // tiled-overview tile + phone tab) and last-resize-wins let a passive
+    // small viewer pin the size (sessions stuck at 80 cols in a 150-col
+    // pane). The server only honors resizes from the typing/focused owner;
+    // clicking into a pane reclaims it, then re-push our grid.
+    sendJson({ type: 'claim' });
+    sendResize(true);
+  }
+  function onTermBlur(): void {
+    keyContext.terminalFocused = false;
+    if (keyContext.openFind === openFind) keyContext.openFind = null;
+  }
+
+  /** Attach this instance's handlers to the current xterm. */
+  function bindTerm(): void {
+    const t = term;
+    if (!t) return;
+    // Clickable links — works identically with WebGL on or off (the link layer
+    // is a DOM overlay above the renderer).
+    const linkProvider = t.registerLinkProvider(makeLinkProvider());
+    t.attachCustomKeyEventHandler(termKeyHandler);
+    const subs = [t.onData(onTermData), t.onSelectionChange(onTermSelection), t.onBinary(onTermBinary)];
+    const textarea = t.textarea;
+    textarea?.addEventListener('compositionstart', onCompStart);
+    textarea?.addEventListener('compositionend', onCompEnd);
+    textarea?.addEventListener('focus', onTermFocus);
+    textarea?.addEventListener('blur', onTermBlur);
+    // Focused before these listeners existed (auto-focus on mount): record it
+    // now, or ⌃-keys, ⌘F find and terminal zoom miss the focused terminal.
+    if (textarea && document.activeElement === textarea) {
+      keyContext.terminalFocused = true;
+      keyContext.openFind = openFind;
+    }
+    termBindings = () => {
+      linkProvider.dispose();
+      t.attachCustomKeyEventHandler(() => true);
+      for (const sub of subs) sub.dispose();
+      textarea?.removeEventListener('compositionstart', onCompStart);
+      textarea?.removeEventListener('compositionend', onCompEnd);
+      textarea?.removeEventListener('focus', onTermFocus);
+      textarea?.removeEventListener('blur', onTermBlur);
+    };
+  }
+
+  function unbindTerm(): void {
+    termBindings?.();
+    termBindings = null;
+  }
+
+  /** Close the socket and dispose the xterm (the non-parking teardown). */
+  function disposeEngine(): void {
+    writes.dropQueued();
+    closedByUs = true;
+    sock?.close();
+    sock = null;
+    dropWebgl();
+    term?.dispose();
+    term = null;
+    fit = null;
+    search = null;
+  }
+
+  /** Worth parking: a settled, live, attached stream (its first snapshot
+   *  applied). Anything else simply reconnects next time. */
+  function canPark(): boolean {
+    return !!term?.element && !!fit && !!search && !!sock && sock.readyState === WebSocket.OPEN
+      && connectedSid !== null && snapshotEpoch !== null && exitCode === null;
+  }
+
+  /** Hand the engine to the parking lot (caller checked canPark and already
+   *  ran unbindTerm). The xterm keeps parsing, detached, with no GPU
+   *  context and at most the daemon's history depth. */
+  function parkEngine(): void {
+    const t = term!;
+    const key = connectedSid!;
+    dropWebgl();
+    if ((t.options.scrollback ?? 0) > PARK_SCROLLBACK) t.options.scrollback = PARK_SCROLLBACK;
+    onTermBlur();
+    // Out of the document entirely: xterm's IntersectionObserver pauses the
+    // renderer, nothing lays it out, and no page query (or e2e locator) can
+    // find a second `.xterm` for the same pane.
+    t.element?.remove();
+    const e: ParkedEngine = {
+      term: t,
+      fit: fit!,
+      search: search!,
+      sock: sock!,
+      flow,
+      writes,
+      compactPending,
+      resyncPending,
+      snapshotEpoch,
+      status: null,
+      exitCode,
+      lastCols,
+      lastRows,
+    };
+    wireParked(key, e);
+    termPark.put(key, e);
+    term = null;
+    fit = null;
+    search = null;
+    sock = null;
+    connected = false;
+    connectedSid = null;
+    flow = new TermFlow(flowSink);
+    writes = new WriteQueue(writeSink, flow, canSendNow);
+  }
+
+  /** Take over the engine parked for `sid`, if any: same socket, same flow
+   *  stream, same buffer — nothing to replay. */
+  function adoptEngine(sid: string): boolean {
+    const e = termPark.take(sid);
+    if (!e) return false;
+    if (e.sock.readyState !== WebSocket.OPEN || !e.term.element) {
+      disposeParked(e);
+      return false;
+    }
+    term = e.term;
+    fit = e.fit;
+    search = e.search;
+    sock = e.sock;
+    flow = e.flow;
+    writes = e.writes;
+    flow.setSink(flowSink);
+    writes.rebind(writeSink, canSendNow);
+    wireSocket(e.sock);
+    compactPending = e.compactPending;
+    resyncPending = e.resyncPending;
+    snapshotEpoch = e.snapshotEpoch;
+    exitCode = e.exitCode;
+    lastCols = e.lastCols;
+    lastRows = e.lastRows;
+    connectedSid = sid;
+    closedByUs = false;
+    connected = true;
+    disconnected = false;
+    reconnecting = false;
+    reconnectAttempts = 0;
+    container.appendChild(e.term.element);
+    // Host options may differ from the parker's (tile ↔ pane depth, theme
+    // or font changed while parked).
+    e.term.options.scrollback = scrollback;
+    e.term.options.theme = terminalTheme(ui.theme, effScheme);
+    if (e.term.options.fontFamily !== ui.termFontStack) e.term.options.fontFamily = ui.termFontStack;
+    if (e.status) onstatus?.(e.status);
+    return true;
+  }
+
+  /** After adopting: take size authority like an attach would and sync the
+   *  PTY to THIS host's box once it has laid out. No snapshot request. */
+  function afterAdopt(): void {
+    if (claimOnAttach && !readOnly) sendJson({ type: 'claim' });
+    requestAnimationFrame(() => {
+      if (!term || !connected) return;
+      // The DOM renderer xterm fell back to when the WebGL addon was dropped
+      // for parking may have painted a frame while detached, caching glyph
+      // widths measured as 0 (offsetWidth of a detached node). When DOM is
+      // still the renderer here, make it re-measure (clears its width cache).
+      if (!webglAddon) {
+        try {
+          (term as unknown as { _core?: { _renderService?: { handleCharSizeChanged?: () => void } } })
+            ._core?._renderService?.handleCharSizeChanged?.();
+        } catch {
+          /* private API moved — worst case is uneven glyph spacing until a font change */
+        }
+      }
+      safeFit();
+      sendResize(true);
+      verifyFitSoon();
+      forceViewportRefresh();
+    });
+  }
+
+  /** Session switch in a keepAlive Terminal: park the old session's engine
+   *  (or close it) and adopt / build one for `sid`. The new session never
+   *  replays into the old one's buffer, and switching back is instant. */
+  function switchEngine(sid: string): void {
+    const hadFocus = !!term?.textarea && document.activeElement === term.textarea;
+    unbindTerm();
+    tuiCleanup.cancel();
+    if (tuiRefreshRaf !== null) {
+      cancelAnimationFrame(tuiRefreshRaf);
+      tuiRefreshRaf = null;
+    }
+    if (canPark()) parkEngine();
+    else disposeEngine();
+    connected = false;
+    disconnected = false;
+    reconnecting = false;
+    exitCode = null;
+    dormantView = false;
+    reconnectAttempts = 0;
+    lastInjN = 0;
+    const adopted = adoptEngine(sid);
+    // An adopted socket is already OPEN: without this the injection effect
+    // below would re-send an injection that was consumed before the park.
+    if (adopted) lastInjN = ws.injections[sid]?.n ?? 0;
+    if (!adopted) buildTerm();
+    bindTerm();
+    attachWebgl();
+    if (adopted) afterAdopt();
+    else connect();
+    if (hadFocus) term?.focus();
+  }
+
+  // ── Effect 1: xterm init (re-runs when renderer mode flips)
+  // This effect owns the engine for the component's lifetime: it builds (or,
+  // with keepAlive, adopts a parked) xterm, binds handlers, the
+  // ResizeObserver and the initial WS connection. It does NOT watch
+  // `sessionId` — Effect 2 below handles switches. Renderer mode (RTL /
+  // phone) IS tracked so an RTL toggle or a phone↔desktop layout flip
+  // rebuilds with the right backend (a keepAlive terminal parks and
+  // re-adopts itself, keeping its buffer).
+  $effect(() => {
+    // Tracked reads — the ONLY ones: toggling RTL / phone layout re-runs this
+    // effect so the terminal is rebuilt with the correct renderer (WebGL vs DOM).
+    const rtl = ui.rtlBidi;
+    const wantDom = viewport.isPhone || FORCE_DOM_RENDERER;
+    // Everything else is untracked. Loading the WebGL addon (and the xterm
+    // callbacks it fires synchronously) reads component state such as
+    // `connected`; tracked, the socket opening re-ran this effect, whose
+    // cleanup parks the engine (connected = false) and whose re-run adopts it
+    // back (connected = true) — an endless park/adopt loop minting a WebGL
+    // context per turn until Svelte aborted it (effect_update_depth_exceeded,
+    // then a fatal reload; only where WebGL loads, e.g. WebKit).
+    return untrack(() => mountEngine(rtl, wantDom));
+  });
+
+  /** Effect 1's body, run untracked (see above). Returns its teardown. */
+  function mountEngine(rtl: boolean, wantDom: boolean): () => void {
+    // Decided once per mount: the host's intent and transport are fixed for
+    // a Terminal's lifetime (props may already read as torn down in cleanup).
+    const parkable = untrack(() => keepAlive && !shareToken && !socketFactory);
+    const adopted = parkable && untrack(() => adoptEngine(sessionId));
+    // Same for a mount-time adopt (see switchEngine): injections issued
+    // before this mount were never meant for it.
+    if (adopted) lastInjN = untrack(() => ws.injections[sessionId]?.n ?? 0);
+    if (!adopted) untrack(buildTerm);
+    untrack(bindTerm);
     // Edit ▸ Select All (⌘A) while this terminal has focus selects the whole
     // BUFFER. xterm renders only the visible rows, so a DOM-level select-all
     // would grab just what is on screen.
@@ -1097,18 +1767,19 @@
     });
     // Mount-time focus (untracked: autoFocus/readOnly must not re-run this
     // effect — a rebuild here tears down the whole GPU canvas + WS).
-    if (untrack(() => autoFocus && !readOnly) && !viewport.isPhone) term.focus();
-    // ── Renderer selection: WebGL (GPU) on desktop shells, DOM for TUI fidelity ──
+    if (untrack(() => autoFocus && !readOnly) && !viewport.isPhone) term?.focus();
+    // ── Renderer selection: WebGL (GPU) on desktop, DOM as the fallback ──────
     // xterm draws to a WebGL canvas when WebglAddon is loaded; with no addon it
     // falls back to its DOM renderer (per-cell <span>s in `.xterm-rows`). The DOM
-    // renderer is slower but ROBUST — it can't "go black" the way a WebGL canvas
-    // can when the context is unavailable or silently lost, and it correctly
-    // clears cells when full-screen agent TUIs (claude/codex) redraw status bars.
+    // renderer is ROBUST (no GPU context to lose) but in WebKit every repaint
+    // rebuilds row spans and pays style + layout + paint on the main thread:
+    // measured ~⅓ of a core per WORKING agent pane even at 2–5 KB/s (r3-12-01),
+    // so 3–4 busy panes saturated the webview. Agent panes therefore use WebGL
+    // too; their ghost clean-up (tuiCleanup) is a cheap GPU redraw there.
+    // Context loss falls back to DOM and retries (attachWebgl), and at most
+    // MAX_WEBGL_TERMINALS per window render on the GPU.
     //
     // We skip WebGL when:
-    //   • preferDom — agent sessions: WebGL partial updates leave solid cursor
-    //     ghosts and stacked status lines ("-- INSERT --" repeated) after ↑
-    //     history / mode toggles. DOM paints the whole cell correctly.
     //   • RTL bidi mode is on — the DOM renderer is required for the `.rtl-bidi`
     //     reflow (WebGL draws cells in raw logical order with no bidi).
     //   • on phone — mobile WKWebView/Safari WebGL is the main culprit behind the
@@ -1118,226 +1789,14 @@
     //     left a permanently black canvas with no fallback. The DOM renderer has
     //     no GPU dependency, so output is always visible and typing always works.
     //     (Phone terminals are small + low-throughput, so DOM perf is a non-issue.)
-    webglAddon = null;
-    const useWebgl = !rtl && !wantDom;
-    if (useWebgl) {
-      try {
-        const webgl = new WebglAddon();
-        // If the GPU context is lost AFTER load (common on laptops waking from
-        // sleep, GPU resets, and some mobile browsers), dispose the addon so
-        // xterm reverts to its DOM renderer instead of showing a black canvas.
-        // This is xterm's own recommended recovery path for WebGL context loss.
-        webgl.onContextLoss(() => {
-          try {
-            webgl.dispose(); // → xterm falls back to the DOM renderer (stays visible)
-          } catch {
-            /* already disposed */
-          }
-          if (webglAddon === webgl) webglAddon = null;
-        });
-        term.loadAddon(webgl);
-        webglAddon = webgl;
-      } catch {
-        // WebGL unavailable at load time — xterm falls back to its DOM renderer.
-        webglAddon = null;
-      }
-    }
-
-    // Clickable links — works identically with WebGL on or off (the link layer
-    // is a DOM overlay above the renderer). Disposed on teardown below.
-    const linkProvider = term.registerLinkProvider(makeLinkProvider());
+    //   • `localStorage['otto.term.renderer'] = 'dom'` (FORCE_DOM_RENDERER).
+    webglRetries = 0;
+    webglWanted = !rtl && !wantDom;
+    attachWebgl();
     // NOTE: do NOT fit() here. The container has no real size yet on first open
     // (grid/flex layout isn't resolved this tick). The ResizeObserver below
     // fires once the pane gets its real box and performs the first valid fit,
     // and connect() is deferred until then so the PTY is sized correctly.
-
-    // Shift+Enter must insert a newline in the agent's composer, not submit.
-    // xterm emits plain `\r` for Enter regardless of Shift, and `\r` is what
-    // claude/codex read as "submit". Intercept Shift+Enter and send `\x1b\r`
-    // (ESC+CR) instead — the same sequence Option/Meta+Enter produces (this
-    // terminal sets macOptionIsMeta), which these TUIs treat as a newline.
-    // Plain Enter is left untouched, so it still submits.
-    term.attachCustomKeyEventHandler((e) => {
-      if (
-        e.type === 'keydown' &&
-        e.key === 'Enter' &&
-        e.shiftKey &&
-        !e.ctrlKey &&
-        !e.metaKey &&
-        !e.altKey
-      ) {
-        // preventDefault is essential: returning false alone stops xterm's
-        // `\r`, but the browser's default Enter-in-textarea would still insert
-        // a `\n` that xterm forwards — and claude reads that `\n` as submit.
-        // Prevent the default so ONLY our newline sequence is sent.
-        e.preventDefault();
-        e.stopPropagation();
-        if (!readOnly) sendJson({ type: 'input', data: textToBase64('\x1b\r') });
-        return false; // suppress xterm's default `\r` (which would submit)
-      }
-
-      // ── Copy (⌘C / Ctrl+Shift+C) ──────────────────────────────────────────
-      // xterm does NOT make ⌘C work on its own. It syncs the selection into its
-      // hidden textarea in exactly one place — `rightClickHandler`, on
-      // `contextmenu` — so a right-click → Copy works while a plain drag-select
-      // + ⌘C does nothing: the renderer paints the selection, but the document
-      // never gets a real DOM selection, so the browser's copy command stays
-      // disabled and the `copy` listener xterm registers never fires. Handle
-      // the chord ourselves against `getSelection()`, which is always correct.
-      //
-      // Ctrl+Shift+C is the terminal convention on Linux/Windows (bare Ctrl+C
-      // must stay SIGINT). Both are only claimed when there IS a selection —
-      // otherwise ⌘C/Ctrl+Shift+C fall through untouched.
-      if (e.type === 'keydown' && !e.altKey && (e.key === 'c' || e.key === 'C')) {
-        const chord = (e.metaKey && !e.ctrlKey) || (e.ctrlKey && e.shiftKey && !e.metaKey);
-        if (chord && term?.hasSelection()) {
-          const sel = term.getSelection();
-          if (sel) {
-            // Suppress xterm (never send ^C to the PTY) but do NOT
-            // preventDefault: let the browser run its OWN copy command. The
-            // selection mirror above has given the document a real selection,
-            // so the native path works — and the `copy` listener below fills
-            // the clipboard with the exact terminal text.
-            //
-            // This ordering is the whole point. Calling preventDefault here and
-            // routing through `navigator.clipboard` REPLACES a permission-free
-            // native copy with a permissioned one, which is strictly worse:
-            // on an origin the browser de-privileges (the self-signed
-            // `0.0.0.0` listener) the async API is refused and the copy dies,
-            // even though the native command would have succeeded.
-            // Re-mirror RIGHT HERE, synchronously, before the browser runs its
-            // copy command. `onSelectionChange` normally does this, but if it
-            // was missed for any reason the textarea would be empty and the
-            // native copy would have nothing to take — which is precisely the
-            // greyed-out Edit ▸ Copy symptom.
-            const ta = term.textarea;
-            if (ta && !composing && ta.value !== sel) {
-              ta.value = sel;
-              ta.select();
-            }
-            // Do NOT preventDefault: the browser's own copy command needs no
-            // permission, and the mirrored textarea gives it something to copy.
-            // (Deliberately NOT gated on `document.getSelection()` — Chromium
-            // does not surface a textarea's internal selection there, so that
-            // check reads empty exactly when the mirror is working and would
-            // send us down the permissioned path the browser is refusing.)
-            copySawEvent = false;
-            e.stopPropagation();
-            // If the browser never fires `copy`, nothing was copied and the
-            // async API is the only route left. Say so when that is refused
-            // too — a silent failure is indistinguishable from a working copy
-            // until you paste and get the PREVIOUS clipboard entry.
-            setTimeout(() => {
-              if (copySawEvent) return;
-              void copyText(sel).then((ok) => {
-                if (!ok) {
-                  toasts.error(
-                    'Copy blocked',
-                    'The browser refused the clipboard write. Right-click → Copy still works.',
-                  );
-                }
-              });
-            }, 80);
-            return false; // suppress xterm only — never ^C to the PTY
-          }
-        }
-      }
-
-      // ── Paste (Ctrl+Shift+V) ──────────────────────────────────────────────
-      // ⌘V / Ctrl+V need nothing from us: the browser fires a `paste` event and
-      // xterm's own handler reads `clipboardData` — which works on ANY origin,
-      // secure or not. Ctrl+Shift+V has no native paste behind it, so it is the
-      // one chord that must read the clipboard programmatically, and
-      // `readText()` is the single clipboard call with no legacy fallback (it
-      // needs a secure context AND a permission grant). Best-effort: on refusal
-      // we stay silent rather than claim a paste that never happened, and ⌘V
-      // still works.
-      if (
-        e.type === 'keydown' &&
-        e.key.toLowerCase() === 'v' &&
-        e.ctrlKey &&
-        e.shiftKey &&
-        !e.metaKey &&
-        !e.altKey
-      ) {
-        e.preventDefault();
-        e.stopPropagation();
-        if (!readOnly) {
-          navigator.clipboard
-            ?.readText?.()
-            .then((t) => {
-              if (t) term?.paste(t); // xterm brackets it when the app asked for it
-            })
-            .catch(() => {/* no permission — ⌘V still works */});
-        }
-        return false;
-      }
-      return true;
-    });
-
-    term.onData((data) => {
-      if (readOnly) return;
-      const user = !terminalReply(data);
-      sendJson({ type: 'input', data: textToBase64(data), user });
-      if (user) resyncOnInput();
-    });
-
-    term.onSelectionChange(() => {
-      if (!term) return;
-      const text = term.hasSelection() ? term.getSelection() : '';
-
-      // Mirror the selection into xterm's hidden textarea and select it there.
-      //
-      // This is what actually makes ⌘C work, and it is not optional. xterm
-      // paints its selection with the renderer; the DOCUMENT has no selection,
-      // so every "copy" path that asks the document what to copy comes up
-      // empty. In a plain browser that means the copy command stays disabled
-      // and no `copy` event ever fires. In the Tauri app it is worse: the
-      // native Edit ▸ Copy item (`apps/desktop/src-tauri/src/main.rs`,
-      // `PredefinedMenuItem::copy`) owns the ⌘C key equivalent at the AppKit
-      // level, so the keydown never reaches the page at all — WebKit runs
-      // `copy:` against an empty DOM selection and the clipboard silently keeps
-      // whatever it held before. Giving the textarea a real selection fixes
-      // both: the command becomes enabled and operates on the right text.
-      //
-      // Safe to stuff the textarea: xterm's `_inputEvent` sends `e.data` (the
-      // inserted text), never `textarea.value`, which is why xterm's own
-      // `rightClickHandler` already does exactly this on contextmenu. Skipped
-      // mid-IME-composition, where the textarea belongs to the input method.
-      const ta = term.textarea;
-      if (ta && !composing) {
-        ta.value = text;
-        if (text) ta.select();
-      }
-
-      // Copy-on-select: when enabled, any new selection goes straight to the
-      // clipboard so the user never has to press ⌘C. Goes through `copyText`
-      // (never throws, falls back to execCommand): the old
-      // `navigator.clipboard.writeText(...).catch(...)` threw a SYNCHRONOUS
-      // TypeError on any origin without the async API — the `.catch()` never
-      // ran, and the throw landed inside xterm's selection-change emitter.
-      if (ui.termCopyOnSelect && text) void copyText(text);
-    });
-    term.onBinary((data) => {
-      if (readOnly) return;
-      // raw binary path (e.g. some IME flows) — bytes are latin1 in a string
-      const bytes = new Uint8Array(data.length);
-      for (let i = 0; i < data.length; i++) bytes[i] = data.charCodeAt(i) & 0xff;
-      sendJson({ type: 'input', data: bytesToBase64(bytes) });
-    });
-
-    const textarea = term.textarea;
-
-    // The textarea is the IME's scratch space during composition; the
-    // selection mirror above must not touch it while a composition is open.
-    const onCompStart = () => {
-      composing = true;
-    };
-    const onCompEnd = () => {
-      composing = false;
-    };
-    textarea?.addEventListener('compositionstart', onCompStart);
-    textarea?.addEventListener('compositionend', onCompEnd);
 
     // Whatever triggers the copy — the page's own ⌘C, the browser's
     // right-click ▸ Copy, or the Tauri app's native Edit ▸ Copy — the bytes
@@ -1354,30 +1813,6 @@
       e.preventDefault();
     };
     container.addEventListener('copy', onCopy, true);
-
-    const onFocus = () => {
-      keyContext.terminalFocused = true;
-      keyContext.openFind = openFind;
-      // Claim PTY size authority: multiple viewers share one PTY (pane +
-      // tiled-overview tile + phone tab) and last-resize-wins let a passive
-      // small viewer pin the size (sessions stuck at 80 cols in a 150-col
-      // pane). The server only honors resizes from the typing/focused owner;
-      // clicking into a pane reclaims it, then re-push our grid.
-      sendJson({ type: 'claim' });
-      sendResize(true);
-    };
-    const onBlur = () => {
-      keyContext.terminalFocused = false;
-      if (keyContext.openFind === openFind) keyContext.openFind = null;
-    };
-    textarea?.addEventListener('focus', onFocus);
-    textarea?.addEventListener('blur', onBlur);
-    // Focused before these listeners existed (auto-focus on mount): record it
-    // now, or ⌃-keys, ⌘F find and terminal zoom miss the focused terminal.
-    if (textarea && document.activeElement === textarea) {
-      keyContext.terminalFocused = true;
-      keyContext.openFind = openFind;
-    }
 
     // ── Image paste ───────────────────────────────────────────────────────────
     // Agent CLIs take an image as a FILE PATH, and the path has to exist on the
@@ -1406,7 +1841,8 @@
 
     // The WS is connected lazily on the first *valid* fit so the very first
     // sendResize(true) in sock.onopen ships a correct grid (covers first open).
-    let didFirstFit = false;
+    // An adopted engine is already connected and sized once.
+    let didFirstFit = adopted;
     let refitTimer: ReturnType<typeof setTimeout> | null = null;
     const refit = () => {
       const ok = safeFit();
@@ -1435,11 +1871,18 @@
     // Belt-and-suspenders for environments where the box is already sized at
     // mount (e.g. workspace switch back): try a fit after layout settles. If
     // the container still has no size, safeFit() no-ops and the RO handles it.
-    requestAnimationFrame(() => requestAnimationFrame(refit));
+    if (adopted) {
+      termDidInit = true;
+      untrack(afterAdopt);
+    } else {
+      requestAnimationFrame(() => requestAnimationFrame(refit));
+    }
 
     // Perf-spec probe (e2e/desktop-terminal-flood-perf.spec.ts): opt-in by a
     // `window.__ottoTermProbe` array the spec installs — one property check
-    // per mount otherwise. Exposes the flow backlog + scrollback depth only.
+    // per mount otherwise. Exposes the flow backlog, scrollback depth, and a
+    // renderer-agnostic view of the screen: on WebGL (3027df89) the text is
+    // drawn on a canvas and there is no `.xterm-rows` DOM to read.
     const probeList = (window as unknown as { __ottoTermProbe?: unknown[] }).__ottoTermProbe;
     const probe = Array.isArray(probeList)
       ? {
@@ -1447,6 +1890,17 @@
           pending: () => flow.pending,
           queued: () => writes.queued,
           scrollback: () => term?.options.scrollback ?? 0,
+          renderer: () => (webglAddon ? 'webgl' : 'dom'),
+          /** The rows currently in the viewport (parsed buffer), as text. */
+          text: () => {
+            const b = term?.buffer.active;
+            if (!term || !b) return '';
+            const rows: string[] = [];
+            for (let y = b.viewportY; y < b.viewportY + term.rows; y++) rows.push(b.getLine(y)?.translateToString(true) ?? '');
+            return rows.join('\n');
+          },
+          /** Called after each renderer pass (DOM or WebGL) — "painted". */
+          onRender: (cb: () => void) => term?.onRender(cb),
           disposed: false,
         }
       : null;
@@ -1454,9 +1908,7 @@
 
     return () => {
       if (probe) probe.disposed = true;
-      writes.dropQueued();
       ro.disconnect();
-      linkProvider.dispose();
       for (const t of verifyTimers) clearTimeout(t);
       if (refitTimer) clearTimeout(refitTimer);
       cancelResizeTimer();
@@ -1473,31 +1925,26 @@
         cancelAnimationFrame(tuiRefreshRaf);
         tuiRefreshRaf = null;
       }
-      if (domCleanupTimer !== null) {
-        clearTimeout(domCleanupTimer);
-        domCleanupTimer = null;
-      }
+      tuiCleanup.cancel();
+      cancelWebglRetry();
       if (localFindTimer !== null) {
         clearTimeout(localFindTimer);
         localFindTimer = null;
       }
-      closedByUs = true;
       termDidInit = false;
       unregisterSelectAll();
-      textarea?.removeEventListener('focus', onFocus);
-      textarea?.removeEventListener('blur', onBlur);
-      textarea?.removeEventListener('compositionstart', onCompStart);
-      textarea?.removeEventListener('compositionend', onCompEnd);
       container.removeEventListener('paste', onPaste, true);
       container.removeEventListener('copy', onCopy, true);
-      onBlur();
-      sock?.close();
-      sock = null;
-      webglAddon = null;
-      term?.dispose();
-      term = null;
+      unbindTerm();
+      onTermBlur();
+      if (parkable && canPark()) {
+        closedByUs = true;
+        parkEngine();
+      } else {
+        disposeEngine();
+      }
     };
-  });
+  }
 
   // ── Effect 2: reactive session-switch — retarget the WS when sessionId changes
   // Runs after Effect 1 (Svelte 5 effects run in declaration order). On the very
@@ -1521,6 +1968,9 @@
     // guard each such re-run did a full close+reconnect, storming the WS. A real
     // session switch still falls through (connectedSid differs).
     if (sessionId === connectedSid) return;
+    // The new session's restart nonce is not a restart of THIS view: the
+    // switch below attaches to its live process anyway.
+    seenRestartNonce = untrack(() => restartNonce);
     // 1. Cancel timers that belong to the old session (reconnect + pending
     //    trailing resize — a stale send would push the old pane's grid at the
     //    new session's PTY).
@@ -1533,6 +1983,13 @@
     if (resizeCompactTimer !== null) {
       clearTimeout(resizeCompactTimer);
       resizeCompactTimer = null;
+    }
+    // keepAlive: park the old session's engine and adopt/build the new one's
+    // (untracked — only `sessionId` drives this effect).
+    if (untrack(() => keepAlive && !shareToken && !socketFactory)) {
+      const sid = sessionId;
+      untrack(() => switchEngine(sid));
+      return;
     }
     // 2. Close the old socket cleanly. Mark closedByUs BEFORE calling close() so
     //    the synchronous onclose callback (which scheduleReconnect reads) does not
@@ -1567,7 +2024,7 @@
         reconnectTimer = null;
       }
       reconnectAttempts = 0;
-      connect();
+      connect({ view: true });
     };
     const onVis = (): void => {
       if (document.visibilityState === 'visible') retryNow();
@@ -1609,13 +2066,39 @@
     }
   });
 
+  // A web font finishing its load AFTER the terminal measured its cell with a
+  // fallback face leaves wrong metrics and fallback glyphs in the WebGL atlas.
+  // Re-measure, drop the atlas, refit and repaint — only on a real font load.
+  $effect(() => {
+    const fonts = typeof document !== 'undefined' ? document.fonts : undefined;
+    if (!fonts?.addEventListener) return;
+    const onLoaded = (): void => {
+      if (!term) return;
+      try {
+        (term as unknown as { _core?: { _charSizeService?: { measure?: () => void } } })._core?._charSizeService?.measure?.();
+      } catch {
+        /* private API moved — the refresh below still helps */
+      }
+      clearWebglAtlas();
+      if (safeFit()) sendResize();
+      forceViewportRefresh();
+    };
+    fonts.addEventListener('loadingdone', onLoaded);
+    return () => fonts.removeEventListener('loadingdone', onLoaded);
+  });
+
   // React to a parent restart: the session was respawned/resumed server-side, so
-  // drop the exited overlay and reconnect to the now-live PTY. Guarded on nonce>0
-  // so it never fires on initial mount; the connect() is untracked so this effect
-  // only re-runs on a real restart, not when sessionId churns (Effect 2 owns that).
+  // drop the exited overlay and reconnect to the now-live PTY. Only a nonce that
+  // CHANGES after mount counts: a session restarted at some earlier point keeps
+  // a non-zero nonce, and reconnecting on every mount would re-snapshot (and
+  // throw away an adopted, already-live engine). The connect() is untracked so
+  // this effect only re-runs on a real restart, not when sessionId churns
+  // (Effect 2 owns that).
+  let seenRestartNonce = untrack(() => restartNonce);
   $effect(() => {
     const n = restartNonce;
-    if (!n || !term) return;
+    if (!n || n === seenRestartNonce || !term) return;
+    seenRestartNonce = n;
     untrack(() => {
       exitCode = null;
       disconnected = false;
@@ -1771,14 +2254,15 @@
       <!-- Shared exit vocabulary (lib/status.ts): "Ended", "Suspended —
            resumes on open", or "Failed (exit N)" — never a bare "exited (0)". -->
       {@const ex = exitState(exitCode, resumable)}
+      {@const hint = dormantView && ex.key === 'suspended' ? (readOnly ? 'Suspended' : 'Suspended — type or Resume to continue') : ex.hint}
       <div class="term-overlay">
-        <span class="badge {ex.tone}" data-exit={ex.key} title={ex.hint}>{ex.key === 'suspended' ? ex.hint : ex.label}</span>
+        <span class="badge {ex.tone}" data-exit={ex.key} data-dormant={dormantView || undefined} title={hint}>{ex.key === 'suspended' ? hint : ex.label}</span>
         {#if (restartable || resumable) && !readOnly}
           <button
             class="btn"
             onclick={() => {
               if (onrestart) onrestart();
-              else { exitCode = null; connect(); }
+              else { exitCode = null; connect({ view: false }); }
             }}
             title={resumable ? 'Resume the session where it left off' : onrestart ? 'Start the session again in this pane' : 'Reconnect to the session'}
           >{resumable ? 'Resume' : onrestart ? 'Restart session' : 'Reconnect'}</button>
@@ -1787,12 +2271,12 @@
     {:else if reconnecting}
       <div class="term-overlay dim">
         <span class="badge">Reconnecting…</span>
-        <button class="btn" onclick={() => { reconnectAttempts = 0; connect(); }}>Reconnect now</button>
+        <button class="btn" onclick={() => { reconnectAttempts = 0; connect({ view: false }); }}>Reconnect now</button>
       </div>
     {:else if disconnected}
       <div class="term-overlay">
         <span class="badge bad">Disconnected</span>
-        <button class="btn" onclick={connect}>Reconnect</button>
+        <button class="btn" onclick={() => connect({ view: false })}>Reconnect</button>
       </div>
     {:else if !connected}
       <div class="term-overlay dim"><span class="badge">Connecting…</span></div>
@@ -1876,24 +2360,40 @@
     min-height: 0; /* allow flex child to shrink below its content height */
   }
 
+  /* Containment (r3-01-01 / r3-12-01): a terminal repaint used to dirty
+     layout all the way up to the page root, and every frame re-ran the
+     ancestor grids' track sizing. `content` (layout + paint + style) makes
+     this box a layout/paint boundary without size containment — its size
+     still comes from the parent (100 %), so nothing collapses. It already
+     clipped (overflow: hidden), and nothing inside is position: fixed, so
+     layout containment changes no geometry. */
   .term-wrap {
     position: relative;
     width: 100%;
     height: 100%;
     background: var(--term-bg);
     overflow: hidden;
+    contain: content;
   }
   /* Force dark: override the host wrapper and xterm host bg so the entire
      embedded terminal reads as one dark widget regardless of app scheme. */
   .term-wrap.force-dark-wrap {
     background: #131318;
   }
+  /* The xterm host gets full `strict` containment: its box is fixed by the
+     insets (absolutely positioned), never by its content, so size
+     containment is free — xterm's row rebuilds and canvas resizes stay
+     inside it and never reach the page. No contain-intrinsic-size needed:
+     an inset-sized abspos box has no content-based size to replace. The
+     find bar, overlays and toolbar are siblings, not children, so the
+     paint clip can't cut them off. */
   .term-host {
     position: absolute;
     inset: 6px 0 4px 8px;
     overflow-x: auto;
     overflow-y: hidden;
     direction: ltr;
+    contain: strict;
   }
   .term-host.force-dark {
     background: #131318;

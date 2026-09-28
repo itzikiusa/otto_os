@@ -1,15 +1,16 @@
 //! Connection sections repository (user-defined groupings of connections).
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::domain::ConnectionSection;
 use otto_core::{new_id, Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 
 use crate::convert::{dberr, fmt, ts};
 
 #[derive(Clone)]
 pub struct ConnectionSectionsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 fn row_to_section(r: &sqlx::sqlite::SqliteRow) -> Result<ConnectionSection> {
@@ -26,7 +27,8 @@ fn row_to_section(r: &sqlx::sqlite::SqliteRow) -> Result<ConnectionSection> {
 }
 
 impl ConnectionSectionsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -162,7 +164,7 @@ impl ConnectionSectionsRepo {
 mod tests {
     use super::*;
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         // A single connection so the in-memory DB (private per connection) is
         // shared across migrate + queries.
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
@@ -174,11 +176,11 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     /// Insert a user + workspace so section FKs are satisfied; returns (ws, user).
-    async fn seed_ws(pool: &SqlitePool) -> (Id, Id) {
+    async fn seed_ws(pool: &DbPool) -> (Id, Id) {
         let user = new_id();
         let ws = new_id();
         let now = fmt(Utc::now());

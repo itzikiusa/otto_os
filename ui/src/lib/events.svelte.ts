@@ -1,9 +1,11 @@
 // Events WS client (/ws/events) with auto-reconnect + exponential backoff.
 // Feeds the workspace store (session statuses) and the toast store (notices).
 
-import { wsConnect } from './api/client';
+import { resumeAltLoopback, suspendAltLoopback, wsConnect } from './api/client';
+import { inLane } from './api/lane';
+import { auth } from './stores/auth.svelte';
 import { appLive, type LiveEvent } from './live';
-import type { EventsResyncFrame, NodeRunState, OttoEvent } from './api/types';
+import type { EventsResyncFrame, NodeRunState, OttoEvent, UiHelloAckFrame } from './api/types';
 import { ws } from './stores/workspace.svelte';
 import { notifications } from './stores/notifications.svelte';
 import { activity } from './stores/activity.svelte';
@@ -491,7 +493,15 @@ class EventsClient {
    *  badges and unread counts, until a full reload. Page-scoped stores reload
    *  on mount; swarm + open transcripts resync themselves. */
   private resyncAfterReconnect(): void {
-    // Every liveQuery refetches (coalesced) — registered views resync for free.
+    // Background work by definition (TRANSPORT_PLAN §4): every fetch issued
+    // here goes to the bg lane — capped, and on the alias host — instead of
+    // a dozen-request burst per document on the six interactive sockets.
+    inLane('bg', () => this.resyncStores());
+  }
+
+  private resyncStores(): void {
+    // Every liveQuery refetches (coalesced, staggered) — registered views
+    // resync for free.
     liveEvents.resync();
     void swarm.resync();
     transcript.resyncVisible();
@@ -510,6 +520,17 @@ class EventsClient {
     });
     void notifications.load();
     assistant.resync();
+  }
+
+  /** The daemon's boot id from `hello_ack`: a different one than before
+   *  means it restarted — re-read /meta so the alias host (and the rest of
+   *  `auth.meta`) reflects the NEW daemon (r3-04-01 / r3-10-09). */
+  private bootId: string | null = null;
+  private noteBoot(boot: string | undefined): void {
+    if (!boot) return;
+    const changed = this.bootId !== null && this.bootId !== boot;
+    this.bootId = boot;
+    if (changed) void auth.refreshMeta();
   }
 
   private scheduleLagResync(): void {
@@ -542,6 +563,9 @@ class EventsClient {
       this.backoff = 1000;
       liveEvents.setConnected(true);
       this.sendHello();
+      // The daemon answers again: probe the alias host now (it was suspended
+      // on close). A RESTARTED daemon is re-read from /meta on `hello_ack`.
+      if (reconnected) resumeAltLoopback();
       if (reconnected) this.resyncAfterReconnect();
       // The Assistant's needs-you badge lives in the sidebar, so it loads on
       // first connect too (quietly: an older daemon without the route → no badge).
@@ -556,6 +580,9 @@ class EventsClient {
         if ((data as Partial<EventsResyncFrame> | null)?.type === 'resync') {
           this.scheduleLagResync();
           return;
+        }
+        if ((data as Partial<UiHelloAckFrame> | null)?.type === 'hello_ack') {
+          this.noteBoot((data as UiHelloAckFrame).boot_id);
         }
         // Per-connection UI-control frames (hello_ack / ui_command /
         // ui_command_cancel) never reach the event stores.
@@ -777,6 +804,9 @@ class EventsClient {
     this.sock.onclose = () => {
       this.state = 'offline';
       liveEvents.setConnected(false);
+      // The daemon may be restarting, and the next one may not hold the
+      // alias: stop using it until the socket is back (resume / re-arm).
+      suspendAltLoopback();
       uiSocketClosed();
       this.scheduleReconnect();
     };

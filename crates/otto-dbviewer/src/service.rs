@@ -241,6 +241,29 @@ pub struct CancelOutcome {
 const FINISHED_TTL: Duration = Duration::from_secs(10 * 60);
 /// Cap on parked outcomes; the oldest is evicted first when full.
 const FINISHED_MAX: usize = 50;
+/// Cap on the parked outcomes' estimated size together. One result may reach
+/// `RESULT_BYTE_BUDGET` (32 MB), so the count cap alone allowed 50 × 32 MB =
+/// 1.6 GB resident (r3-05-04); the oldest are evicted past this budget.
+const FINISHED_MAX_BYTES: usize = 128 * 1024 * 1024;
+/// How often the janitor expires parked outcomes nobody came back for.
+const FINISHED_SWEEP_EVERY: Duration = Duration::from_secs(60);
+
+/// Estimated resident size of a parked outcome (JSON-size estimate of every
+/// cell, across `more_results` too).
+fn outcome_bytes(outcome: &std::result::Result<QueryResult, String>) -> usize {
+    fn result_bytes(r: &QueryResult) -> usize {
+        let rows: usize = r
+            .rows
+            .iter()
+            .map(|row| 16 + row.iter().map(crate::types::approx_json_len).sum::<usize>())
+            .sum();
+        256 + r.columns.len() * 64 + rows + r.more_results.iter().map(result_bytes).sum::<usize>()
+    }
+    match outcome {
+        Ok(r) => result_bytes(r),
+        Err(e) => 64 + e.len(),
+    }
+}
 
 /// Outcome of a detached query whose HTTP waiter was gone when it finished
 /// (the user navigated away and the browser dropped the request). Parked so the
@@ -249,6 +272,7 @@ struct FinishedQuery {
     conn_id: Id,
     outcome: std::result::Result<QueryResult, String>,
     at: Instant,
+    bytes: usize,
 }
 
 /// Bounded TTL store for [`FinishedQuery`]: expired entries are pruned on every
@@ -258,6 +282,10 @@ struct FinishedQuery {
 #[derive(Default)]
 struct FinishedStore {
     map: HashMap<String, FinishedQuery>,
+    /// Sum of the parked outcomes' `bytes`.
+    total: usize,
+    /// The periodic sweep was started (see `ensure_finished_janitor`).
+    janitor: bool,
 }
 
 impl FinishedStore {
@@ -269,29 +297,52 @@ impl FinishedStore {
         now: Instant,
     ) {
         self.prune(now);
-        if self.map.len() >= FINISHED_MAX {
-            if let Some(oldest) = self
+        let bytes = outcome_bytes(&outcome);
+        if let Some(old) = self.map.remove(&query_id) {
+            self.total -= old.bytes;
+        }
+        // Oldest out past the count cap or the byte budget; the new outcome
+        // itself is always kept (it is what the client comes back for).
+        while !self.map.is_empty()
+            && (self.map.len() >= FINISHED_MAX || self.total + bytes > FINISHED_MAX_BYTES)
+        {
+            let Some(oldest) = self
                 .map
                 .iter()
                 .min_by_key(|(_, f)| f.at)
                 .map(|(k, _)| k.clone())
-            {
-                self.map.remove(&oldest);
+            else {
+                break;
+            };
+            if let Some(f) = self.map.remove(&oldest) {
+                self.total -= f.bytes;
             }
         }
+        self.total += bytes;
         self.map.insert(
             query_id,
             FinishedQuery {
                 conn_id,
                 outcome,
                 at: now,
+                bytes,
             },
         );
     }
 
     fn prune(&mut self, now: Instant) {
-        self.map
-            .retain(|_, f| now.duration_since(f.at) < FINISHED_TTL);
+        let mut freed = 0;
+        self.map.retain(|_, f| {
+            let keep = now.duration_since(f.at) < FINISHED_TTL;
+            if !keep {
+                freed += f.bytes;
+            }
+            keep
+        });
+        self.total -= freed;
+        if self.map.is_empty() {
+            self.map.shrink_to_fit();
+        }
     }
 
     /// The parked outcome for `(query_id, conn_id)`, if present and unexpired.
@@ -301,6 +352,33 @@ impl FinishedStore {
         self.prune(now);
         self.map.get(query_id).filter(|f| &f.conn_id == conn_id)
     }
+}
+
+/// Start (once per store) the sweep that expires parked outcomes every
+/// minute. The TTL used to run only on the next park / status probe, so an
+/// unclaimed 32 MB result stayed resident until the next detached query —
+/// possibly days (r3-05-04). The task holds a weak handle and ends with the
+/// service.
+fn ensure_finished_janitor(store: &Arc<std::sync::Mutex<FinishedStore>>) {
+    {
+        let Ok(mut s) = store.lock() else { return };
+        if s.janitor {
+            return;
+        }
+        s.janitor = true;
+    }
+    let weak = Arc::downgrade(store);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(FINISHED_SWEEP_EVERY);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            let Some(store) = weak.upgrade() else { break };
+            let mut s = store.lock().unwrap_or_else(|p| p.into_inner());
+            s.prune(Instant::now());
+        }
+    });
 }
 
 #[derive(Clone)]
@@ -1758,6 +1836,7 @@ impl DbViewerService {
                 if let Ok(mut store) = svc.finished.lock() {
                     store.park(qid, cid, outcome, Instant::now());
                 }
+                ensure_finished_janitor(&svc.finished);
             }
             // `_guard` drops here — AFTER parking — so `query_status` never
             // reports "unknown" in the gap between running and parked.
@@ -3188,6 +3267,37 @@ mod tests {
         assert!(store.get("q0", &"conn-A".to_string(), now).is_none());
         assert!(store.get("q1", &"conn-A".to_string(), now).is_some());
         assert!(store.get("q-new", &"conn-A".to_string(), now).is_some());
+    }
+
+    #[test]
+    fn finished_store_is_bounded_by_bytes_and_prune_frees_them() {
+        let big = |cells: usize| {
+            let mut r = QueryResult::empty();
+            r.rows = vec![vec![
+                serde_json::Value::String("x".repeat(1024 * 1024));
+                cells
+            ]];
+            r
+        };
+        let mut store = FinishedStore::default();
+        let base = Instant::now();
+        // 3 × ~60 MB > 128 MB: the oldest goes even though the count cap is far.
+        for i in 0..3u64 {
+            store.park(
+                format!("q{i}"),
+                "c".into(),
+                Ok(big(60)),
+                base + Duration::from_millis(i),
+            );
+        }
+        let now = base + Duration::from_secs(1);
+        assert!(store.get("q0", &"c".to_string(), now).is_none());
+        assert!(store.get("q2", &"c".to_string(), now).is_some());
+        assert!(store.total <= FINISHED_MAX_BYTES);
+        // A sweep past the TTL frees everything without a status probe.
+        store.prune(base + FINISHED_TTL + Duration::from_secs(1));
+        assert!(store.map.is_empty());
+        assert_eq!(store.total, 0);
     }
 
     // ---- RC2: node → schema derivation -----------------------------------

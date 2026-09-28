@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { openPage } from './helpers';
+import { isDesktopProject } from './perf';
 
 // Mounted production components; only history transport is mocked. No requests
 // are sent to an upstream server and no provider/session is launched.
@@ -59,7 +60,7 @@ async function historyFixture(page: Page, deferred = false) {
 }
 
 test.beforeEach(async ({}, info) => {
-  test.skip(info.project.name !== 'desktop-browser', 'desktop browser only');
+  test.skip(!isDesktopProject(info.project.name), 'desktop projects only');
 });
 
 test('sidebar uses summaries and selects one exact detail before restoring replay fields', async ({ page }) => {

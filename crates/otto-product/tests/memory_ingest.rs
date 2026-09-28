@@ -6,7 +6,7 @@ use otto_memory::{MemoryQuery, MemoryService, RecallOpts, SearchMode};
 use otto_product::extract;
 use otto_state::{ProductAnalysis, ProductQuestion};
 
-async fn seeded_pool() -> sqlx::SqlitePool {
+async fn seeded_pool() -> otto_state::DbPool {
     let pool = otto_state::db::test_pool().await;
     sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES ('ws1','WS','/tmp/ws','2026-06-19T00:00:00+00:00')")
         .execute(&pool)

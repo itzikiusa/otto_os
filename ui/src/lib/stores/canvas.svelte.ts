@@ -280,6 +280,27 @@ class CanvasStore {
     this.savedAt = Date.now();
   }
 
+  /** Highest `canvasDocBus.tick` already consumed. Plain field (NOT `$state`):
+   *  it is bookkeeping, and reading it must not subscribe the live effect. */
+  #consumedPushTick = 0;
+
+  /** Consume a live `canvas_updated` push exactly ONCE (r3-02-01). The live
+   *  effect re-ran on every `dirty` flip (ingestDoc reads it), so after the
+   *  user's second save the same, now-stale push was re-applied and the board
+   *  reverted to the agent's old drawing. A push is spent the first time it
+   *  is seen — even when skipped because the user had unsaved edits or it is
+   *  for another scene (that scene reloads from the server when opened).
+   *  Returns true when the doc was applied. */
+  ingestPush(tick: number, sceneId: string, doc: unknown): boolean {
+    if (!tick || tick <= this.#consumedPushTick) return false;
+    this.#consumedPushTick = tick;
+    if (sceneId !== this.currentId) return false;
+    const d = doc as CanvasDoc | null;
+    if (!d || typeof d.source !== 'string' || this.dirty) return false;
+    this.ingestDoc(d);
+    return true;
+  }
+
   /** Append a turn to the inline conversation (of `sceneId` when given — a
    *  late reply for another scene is dropped, not appended to this one). */
   pushConvo(role: 'user' | 'assistant', text: string, sceneId?: string | null): void {

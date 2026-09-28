@@ -16,7 +16,6 @@
   import { activity } from '../lib/stores/activity.svelte';
   import { proof } from '../lib/stores/proof.svelte';
   import ProofStatusChip from '../lib/components/ProofStatusChip.svelte';
-  import ShareModal from '../modules/agents/ShareModal.svelte';
   import { ctxMenu, type MenuItem } from '../lib/contextmenu.svelte';
   import { sidePane, splitMenuItems, navClick, SPLIT_HINT } from '../lib/stores/sidePane.svelte';
   import { popoutItems } from '../lib/popoutMenu';
@@ -910,7 +909,9 @@
 </nav>
 
 {#if shareSessionId}
-  <ShareModal sessionId={shareSessionId} onclose={() => (shareSessionId = null)} />
+  <!-- Loaded on first use: it bundles the QR encoder. -->
+  {@const id = shareSessionId}
+  {#await import('../modules/agents/ShareModal.svelte') then m}<m.default sessionId={id} onclose={() => (shareSessionId = null)} />{/await}
 {/if}
 
 <!-- The module the side-by-side pane shows: a quiet trailing glyph. -->

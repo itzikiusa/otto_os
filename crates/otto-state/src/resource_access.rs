@@ -4,23 +4,25 @@
 //! stores an immutable snapshot and appends the security audit row in the same
 //! SQLite transaction.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::access::{
     validate_operation, validate_policy, AccessActor, AccessGroup, AccessMode, AccessPolicy,
     AccessRole, AccessRule, ResourceKind, RuleEffect, SubjectKind,
 };
 use otto_core::{new_id, Error, Id, Result};
-use sqlx::{Row, Sqlite, SqlitePool, Transaction};
+use sqlx::{Row, Sqlite, Transaction};
 
 use crate::convert::{dberr, dberr_unique, fmt, ts};
 
 #[derive(Clone)]
 pub struct ResourceAccessRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl ResourceAccessRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -777,7 +779,7 @@ async fn ensure_exists(
     }
 }
 
-async fn ensure_exists_pool(pool: &SqlitePool, table: &str, id: &Id, context: &str) -> Result<()> {
+async fn ensure_exists_pool(pool: &DbPool, table: &str, id: &Id, context: &str) -> Result<()> {
     let sql = format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id = ?)");
     let exists: bool = sqlx::query_scalar(&sql)
         .bind(id)

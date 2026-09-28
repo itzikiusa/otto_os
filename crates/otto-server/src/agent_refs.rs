@@ -38,7 +38,6 @@ use axum::Json;
 use otto_core::auth::AuthContext;
 use otto_core::domain::User;
 use otto_core::Error;
-use otto_rbac::AuthRepo;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -664,27 +663,27 @@ pub fn looks_like_id(s: &str) -> bool {
 
 /// A short-lived token for the effective user, used to call list routes so
 /// their native RBAC decides visibility. Always [`SelfCaller::close`] it.
+/// Token and HTTP client come from [`crate::self_call`] (reused, not minted
+/// and built per call — r3-06-04).
 pub(crate) struct SelfCaller {
-    client: reqwest::Client,
+    client: &'static reqwest::Client,
     base: String,
-    token: String,
-    pool: sqlx::SqlitePool,
+    lease: crate::self_call::Lease,
 }
 
 impl SelfCaller {
     pub(crate) async fn open(ctx: &ServerCtx, user: &User) -> Result<Self, Error> {
-        let (token, _) = AuthRepo::new(ctx.pool.clone())
-            .issue_api_token(&user.id, Some("mcp-otto-refs"))
-            .await?;
-        let client = reqwest::Client::builder()
-            .timeout(SELF_CALL_TIMEOUT)
-            .build()
-            .map_err(|e| Error::Internal(format!("http client: {e}")))?;
+        let lease = crate::self_call::lease(
+            &ctx.pool,
+            &ctx.base_url,
+            &user.id,
+            crate::self_call::LABEL_REFS,
+        )
+        .await?;
         Ok(Self {
-            client,
+            client: crate::self_call::client(),
             base: ctx.base_url.trim_end_matches('/').to_string(),
-            token,
-            pool: ctx.pool.clone(),
+            lease,
         })
     }
 
@@ -693,7 +692,8 @@ impl SelfCaller {
         let resp = self
             .client
             .get(format!("{}{path}", self.base))
-            .bearer_auth(&self.token)
+            .timeout(SELF_CALL_TIMEOUT)
+            .bearer_auth(self.lease.token())
             .header("X-Otto-Agent", "mcp-outward")
             .send()
             .await
@@ -706,9 +706,9 @@ impl SelfCaller {
         Ok(crate::mcp_outward::parse_self_ok(&text))
     }
 
-    /// Revoke the token.
+    /// Release the token (revoked once aged out and no call holds it).
     pub(crate) async fn close(self) {
-        let _ = AuthRepo::new(self.pool).revoke(&self.token).await;
+        drop(self.lease);
     }
 }
 

@@ -10,6 +10,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { lsGet, lsSet } from '../../lib/storage';
+  import { startMouseDrag } from '../../lib/dragCursor';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
   import DocsAgentsView from './DocsAgentsView.svelte';
@@ -47,33 +48,27 @@
   }
   let resizing = $state(false);
 
+  // lib/dragCursor (r3-03-08): overlay cursor instead of an inherited
+  // body.style write, one width write per frame, one persist on release
+  // (was a localStorage write on every mousemove).
   function startResize(e: MouseEvent, side: 'left' | 'right'): void {
-    e.preventDefault();
     resizing = true;
     const startX = e.clientX;
     const startW = side === 'left' ? leftW : rightW;
-    const onMove = (ev: MouseEvent) => {
-      const d = ev.clientX - startX;
-      const w = Math.max(180, Math.min(520, Math.round(side === 'left' ? startW + d : startW - d)));
-      if (side === 'left') {
-        leftW = w;
-        lsSet(LEFT_W_KEY, String(w));
-      } else {
-        rightW = w;
-        lsSet(RIGHT_W_KEY, String(w));
-      }
-    };
-    const onUp = () => {
-      resizing = false;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
+    startMouseDrag(e, {
+      cursor: 'col-resize',
+      onMove: (ev) => {
+        const d = ev.clientX - startX;
+        const w = Math.max(180, Math.min(520, Math.round(side === 'left' ? startW + d : startW - d)));
+        if (side === 'left') leftW = w;
+        else rightW = w;
+      },
+      onEnd: () => {
+        resizing = false;
+        if (side === 'left') lsSet(LEFT_W_KEY, String(leftW));
+        else lsSet(RIGHT_W_KEY, String(rightW));
+      },
+    });
   }
 
   // -- create-vault dialog -------------------------------------------------------

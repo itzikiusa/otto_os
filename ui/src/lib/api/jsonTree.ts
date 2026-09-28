@@ -52,3 +52,26 @@ export function preview(value: unknown): string {
   }
   return typeof value === 'string' ? JSON.stringify(value) : String(value);
 }
+
+/** Paths the response tree opens by default (no search): the root, then the
+ *  root's first `page` children that are containers, in order, while the rows
+ *  they would mount fit `budget`. "Everything at depth < 2" used to mount
+ *  min(200, n) × min(200, fields) rows for a root array of objects — ~25k,
+ *  up to ~300k nodes (r3-03-05). Small responses still open two levels. */
+export function autoOpenPaths(root: unknown, page = 200, budget = 400): Set<string> {
+  const out = new Set<string>(['$']);
+  if (root === null || typeof root !== 'object') return out;
+  const top: [string | number, unknown][] = Array.isArray(root)
+    ? root.slice(0, page).map((x, i) => [i, x])
+    : Object.entries(root as Record<string, unknown>).slice(0, page);
+  let left = budget - top.length;
+  for (const [k, child] of top) {
+    if (child === null || typeof child !== 'object') continue;
+    const n = Array.isArray(child) ? child.length : Object.keys(child as object).length;
+    const rows = Math.min(n, page);
+    if (rows > left) continue;
+    left -= rows;
+    out.add(childPath('$', k));
+  }
+  return out;
+}

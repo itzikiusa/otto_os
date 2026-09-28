@@ -34,7 +34,7 @@ pub trait DbViewerCtx: Clone + Send + Sync + 'static {
     /// used only by this crate's check-only unit tests, which have no live
     /// state DB — makes that branch root-only, as it was before grants answered
     /// for it. `ServerCtx` overrides it with the real pool.
-    fn pool(&self) -> Option<otto_state::SqlitePool> {
+    fn pool(&self) -> Option<otto_state::DbPool> {
         None
     }
 
@@ -1576,7 +1576,7 @@ mod tests {
     #[derive(Clone)]
     struct TestCtx {
         roles: Arc<dyn RoleChecker>,
-        pool: Option<otto_state::SqlitePool>,
+        pool: Option<otto_state::DbPool>,
     }
 
     impl TestCtx {
@@ -1592,14 +1592,14 @@ mod tests {
         fn roles(&self) -> &Arc<dyn RoleChecker> {
             &self.roles
         }
-        fn pool(&self) -> Option<otto_state::SqlitePool> {
+        fn pool(&self) -> Option<otto_state::DbPool> {
             self.pool.clone()
         }
     }
 
     /// Migrated in-memory state DB, for the tests that exercise the global
     /// branch's feature-grant lookup.
-    async fn mem_pool() -> otto_state::SqlitePool {
+    async fn mem_pool() -> otto_state::DbPool {
         use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
@@ -1614,11 +1614,11 @@ mod tests {
             .run(&pool)
             .await
             .expect("migrations");
-        pool
+        pool.into()
     }
 
     /// Insert `user` and grant them `cap` on the Database feature.
-    async fn seed_grant(pool: &otto_state::SqlitePool, u: &User, cap: &str) {
+    async fn seed_grant(pool: &otto_state::DbPool, u: &User, cap: &str) {
         let now = chrono::Utc::now()
             .format("%Y-%m-%dT%H:%M:%S%.6fZ")
             .to_string();

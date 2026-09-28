@@ -8,6 +8,7 @@
   import { router } from './lib/router.svelte';
   import { ui } from './lib/stores/ui.svelte';
   import { isEmbedded } from './lib/desktop';
+  import { preloadRoute } from './shell/pages.svelte';
 
   ui.applyTheme();
 
@@ -22,7 +23,12 @@
   let roomChunk: Promise<typeof import('./modules/rooms/RoomGuest.svelte')> | null = null;
   let hostRoomChunk: Promise<typeof import('./modules/rooms/RoomHost.svelte')> | null = null;
   let shareChunk: Promise<typeof import('./modules/share/SharePage.svelte')> | null = null;
-  const shell = () => (shellChunk ??= import('./shell/App.svelte'));
+  // The shell resolves together with the page its route shows (each page is
+  // its own chunk, shell/pages.svelte.ts), so the first shell paint has its
+  // page. `untrack`: the template's `{#await shell()}` must not depend on the
+  // route — a sidebar switch re-running it is how the shell used to remount.
+  const shell = () =>
+    (shellChunk ??= Promise.all([import('./shell/App.svelte'), preloadRoute(untrack(() => router.parts))]).then(([m]) => m));
   const onboarding = () => (onboardingChunk ??= import('./modules/settings/Onboarding.svelte'));
   const login = () => (loginChunk ??= import('./modules/settings/Login.svelte'));
   const room = () => (roomChunk ??= import('./modules/rooms/RoomGuest.svelte'));

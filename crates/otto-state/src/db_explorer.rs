@@ -1,10 +1,11 @@
 //! DB Explorer repository: saved queries, query history, dashboards, widgets.
 
+use crate::DbPool;
 use chrono::{DateTime, Utc};
 use otto_core::{new_id, Id, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 
 use crate::convert::{dberr, fmt, json, ts};
 
@@ -110,7 +111,7 @@ pub struct NewWidget {
 
 #[derive(Clone)]
 pub struct DbExplorerRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 fn row_to_saved(r: &sqlx::sqlite::SqliteRow) -> Result<SavedQuery> {
@@ -175,7 +176,8 @@ fn row_to_widget(r: &sqlx::sqlite::SqliteRow) -> Result<Widget> {
 }
 
 impl DbExplorerRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -582,10 +584,10 @@ impl DbExplorerRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::SqlitePool;
+    use crate::DbPool;
 
     /// Spin up an in-memory SQLite pool with all migrations applied.
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -595,11 +597,11 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     /// Seed a user row and return their id.
-    async fn seed_user(pool: &SqlitePool, username: &str, is_root: bool) -> Id {
+    async fn seed_user(pool: &DbPool, username: &str, is_root: bool) -> Id {
         let id = otto_core::new_id();
         let now = crate::convert::fmt(Utc::now());
         sqlx::query(
@@ -619,7 +621,7 @@ mod tests {
     }
 
     /// Seed a workspace and return its id.
-    async fn seed_workspace(pool: &SqlitePool) -> Id {
+    async fn seed_workspace(pool: &DbPool) -> Id {
         let ws_id = otto_core::new_id();
         let now = crate::convert::fmt(Utc::now());
         sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)")
@@ -634,7 +636,7 @@ mod tests {
     }
 
     /// Seed a connection and return its id. Needed so add_history can reference it.
-    async fn seed_connection(pool: &SqlitePool, ws_id: &Id, created_by: &Id) -> Id {
+    async fn seed_connection(pool: &DbPool, ws_id: &Id, created_by: &Id) -> Id {
         let conn_id = otto_core::new_id();
         let now = crate::convert::fmt(Utc::now());
         sqlx::query(

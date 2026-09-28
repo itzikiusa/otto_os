@@ -6,9 +6,7 @@ use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id, Result};
 use otto_dbviewer::{DbViewerService, QueryRequest};
 use otto_state::resource_access::ResourceAccessRepo;
-use otto_state::{
-    ConnectionsRepo, DbExplorerRepo, GrantsRepo, NewConnection, SqlitePool, UsersRepo,
-};
+use otto_state::{ConnectionsRepo, DbExplorerRepo, DbPool, GrantsRepo, NewConnection, UsersRepo};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::sync::Arc;
 
@@ -26,7 +24,7 @@ impl SecretStore for FixtureSecrets {
 }
 
 struct Fixture {
-    pool: SqlitePool,
+    pool: DbPool,
     service: DbViewerService,
     root: User,
     reader: User,
@@ -36,15 +34,17 @@ struct Fixture {
 }
 impl Fixture {
     async fn new(kind: ConnectionKind, port: u16) -> Self {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(
-                SqliteConnectOptions::new()
-                    .in_memory(true)
-                    .foreign_keys(true),
-            )
-            .await
-            .unwrap();
+        let pool = otto_state::DbPool::from(
+            SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(
+                    SqliteConnectOptions::new()
+                        .in_memory(true)
+                        .foreign_keys(true),
+                )
+                .await
+                .unwrap(),
+        );
         sqlx::migrate!("../otto-state/migrations")
             .run(&pool)
             .await

@@ -234,7 +234,7 @@
             {#if expanded[sid]}
               <div class="term">
                 {#key sid}
-                  <Terminal sessionId={sid} resumable preferDom />
+                  <Terminal sessionId={sid} resumable preferDom resumeOnOpen={false} />
                 {/key}
               </div>
             {/if}

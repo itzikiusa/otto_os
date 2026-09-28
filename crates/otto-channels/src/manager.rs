@@ -18,7 +18,7 @@ use otto_core::event::Event;
 use otto_core::secrets::SecretStore;
 use otto_sessions::SessionManager;
 use otto_state::{IntegrationsRepo, SettingsRepo, WorkspacesRepo};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
@@ -48,6 +48,9 @@ fn generation_signature(integrations: &[otto_core::domain::Integration]) -> Gene
 /// lifetime; dropping it sets the cancel flag and stops the supervisor.
 pub struct ChannelHandle {
     cancel: Arc<AtomicBool>,
+    /// Wakes the sleeping supervisor on shutdown (`notify_one` keeps a permit,
+    /// so a shutdown racing the flag check is never lost).
+    wake: Arc<Notify>,
     _supervisor: JoinHandle<()>,
 }
 
@@ -55,12 +58,13 @@ impl ChannelHandle {
     /// Signal the supervisor + all listener tasks to stop (best-effort).
     pub fn shutdown(&self) {
         self.cancel.store(true, Ordering::Relaxed);
+        self.wake.notify_one();
     }
 }
 
 impl Drop for ChannelHandle {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.shutdown();
     }
 }
 
@@ -165,15 +169,17 @@ impl ChannelManager {
             info!("channel manager: self-improvement notifier started (opt-in)");
         }
 
-        let supervisor = tokio::spawn(self.supervise(Arc::clone(&cancel)));
+        let wake = Arc::new(Notify::new());
+        let supervisor = tokio::spawn(self.supervise(Arc::clone(&cancel), Arc::clone(&wake)));
         ChannelHandle {
             cancel,
+            wake,
             _supervisor: supervisor,
         }
     }
 
     /// Re-scan loop: (re)spawn adapters whenever the enabled set changes.
-    async fn supervise(self, cancel: Arc<AtomicBool>) {
+    async fn supervise(self, cancel: Arc<AtomicBool>, wake: Arc<Notify>) {
         // Shared mirror + bridge survive across generations so an in-flight
         // session keeps its channel mapping when adapters are respawned.
         let mirror = Mirror::new_with_improver(Arc::clone(&self.manager), self.improver.clone());
@@ -224,17 +230,11 @@ impl ChannelManager {
                 last_sig = Some(sig);
             }
 
-            // Sleep in short slices so shutdown is responsive.
-            let mut waited = Duration::ZERO;
-            while waited < RESCAN_INTERVAL {
-                if cancel.load(Ordering::Relaxed) {
-                    if let Some(g) = &gen_cancel {
-                        g.store(true, Ordering::Relaxed);
-                    }
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                waited += Duration::from_millis(500);
+            // One timer per rescan; shutdown wakes it (was 500 ms slices).
+            // The loop head then stops the adapters and returns.
+            tokio::select! {
+                _ = tokio::time::sleep(RESCAN_INTERVAL) => {}
+                _ = wake.notified() => {}
             }
         }
     }

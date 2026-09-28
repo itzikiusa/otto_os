@@ -307,12 +307,12 @@ pub async fn delete(
 /// longer does. That residual is documented in the connections feature guide.
 #[derive(Clone)]
 pub struct DbMcpServerProvider {
-    pool: otto_state::SqlitePool,
+    pool: otto_state::DbPool,
     secrets: Arc<dyn SecretStore>,
 }
 
 impl DbMcpServerProvider {
-    pub fn new(pool: otto_state::SqlitePool, secrets: Arc<dyn SecretStore>) -> Self {
+    pub fn new(pool: otto_state::DbPool, secrets: Arc<dyn SecretStore>) -> Self {
         Self { pool, secrets }
     }
 }
@@ -402,15 +402,17 @@ mod tests {
         }
     }
 
-    async fn mk_repo() -> (otto_state::SqlitePool, McpServersRepo, Id, Id) {
+    async fn mk_repo() -> (otto_state::DbPool, McpServersRepo, Id, Id) {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(opts)
-            .await
-            .unwrap();
+        let pool = otto_state::DbPool::from(
+            sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(opts)
+                .await
+                .unwrap(),
+        );
         sqlx::migrate!("../otto-state/migrations")
             .run(&pool)
             .await

@@ -6,12 +6,17 @@
 //! disabled/deleted one is cancelled, and a cluster whose config `updated_at`
 //! changed is restarted so the new probes / interval take effect immediately.
 //! A `k8s_cluster_updated { deleted: true }` event cancels without waiting for
-//! the next scan. Loops observe their own cancel flag every second.
+//! the next scan. A stopped loop is aborted (and its cancel flag set).
+//!
+//! Between scans the supervisor parks on ONE deadline timer + the event bus +
+//! its [`CancelSignal`] (it used to wake every 500 ms to re-check a flag).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+
+use tokio::sync::broadcast::error::RecvError;
 
 use otto_core::event::Event;
 use otto_core::Id;
@@ -19,10 +24,10 @@ use otto_state::K8sMonitorRepo;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+use crate::cancel_signal::CancelSignal;
 use crate::state::ServerCtx;
 
 const SCAN: Duration = Duration::from_secs(15);
-const SLICE: Duration = Duration::from_millis(500);
 
 struct Running {
     handle: JoinHandle<()>,
@@ -64,18 +69,18 @@ pub fn reconcile(running: &HashMap<String, String>, enabled: &[(String, String)]
     r
 }
 
-pub fn start(ctx: ServerCtx) -> Arc<AtomicBool> {
-    let cancel = Arc::new(AtomicBool::new(false));
+pub fn start(ctx: ServerCtx) -> CancelSignal {
+    let cancel = CancelSignal::new();
     tokio::spawn(supervise(ctx, cancel.clone()));
     cancel
 }
 
-async fn supervise(ctx: ServerCtx, cancel: Arc<AtomicBool>) {
+async fn supervise(ctx: ServerCtx, cancel: CancelSignal) {
     let repo = K8sMonitorRepo::new(ctx.pool.clone());
     let mut running: HashMap<String, Running> = HashMap::new();
-    let mut events = ctx.events.subscribe();
-    loop {
-        if cancel.load(Ordering::Relaxed) {
+    let mut events = Some(ctx.events.subscribe());
+    'scan: loop {
+        if cancel.is_cancelled() {
             break;
         }
         // Reap finished loops (config disabled from inside, cluster gone).
@@ -127,23 +132,39 @@ async fn supervise(ctx: ServerCtx, cancel: Arc<AtomicBool>) {
             Err(e) => warn!("k8s monitor scheduler: {e}"),
         }
 
-        // Sleep in slices; react early to cluster deletions.
-        let mut waited = Duration::ZERO;
-        while waited < SCAN {
-            if cancel.load(Ordering::Relaxed) {
+        // Wait for the next scan; react early to cluster deletions.
+        let deadline = tokio::time::Instant::now() + SCAN;
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
                 break;
             }
+            let Some(rx) = events.as_mut() else {
+                if cancel.sleep(left).await {
+                    break 'scan;
+                }
+                break;
+            };
             tokio::select! {
-                _ = tokio::time::sleep(SLICE) => { waited += SLICE; }
-                ev = events.recv() => {
-                    if let Ok(Event::K8sClusterUpdated { cluster_id, deleted: true }) = ev {
+                stop = cancel.sleep(left) => {
+                    if stop {
+                        break 'scan;
+                    }
+                    break;
+                }
+                ev = rx.recv() => match ev {
+                    Ok(Event::K8sClusterUpdated { cluster_id, deleted: true }) => {
                         if let Some(r) = running.remove(cluster_id.as_str()) {
                             info!(cluster = %cluster_id, "k8s monitor: cluster deleted; stopping loop");
                             r.cancel.store(true, Ordering::Relaxed);
                             r.handle.abort();
                         }
                     }
-                }
+                    Ok(_) | Err(RecvError::Lagged(_)) => {}
+                    // The bus is gone: keep scanning on the timer alone
+                    // (a closed receiver would otherwise spin this select).
+                    Err(RecvError::Closed) => events = None,
+                },
             }
         }
     }

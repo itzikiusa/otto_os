@@ -244,8 +244,14 @@ fn build_plan_prompt(text: &str, ctx: &OrchestratorContext) -> String {
 // Headless CLI exec helper (for codex / agy and other non-claude providers)
 // ---------------------------------------------------------------------------
 
-/// Run `program exec_args… prompt` in `cwd` capturing stdout. Returns stdout
-/// on success; returns `Error::Upstream` on timeout or non-zero exit.
+/// Run `program exec_args… -- prompt` in `cwd` capturing stdout. Returns
+/// stdout on success; returns `Error::Upstream` on timeout or non-zero exit.
+///
+/// The `--` ends option parsing, so a prompt that starts with `-` is never
+/// read as a flag: self-improvement prompts open with skill frontmatter
+/// (`---`), and codex (clap: "unexpected argument '---'") and agy (pflag:
+/// "bad flag syntax: ---") failed every scheduled run (r3-01-08). clap,
+/// pflag/cobra and commander (claude-style `-p`) all accept `--`.
 pub async fn run_cli_exec(
     program: &str,
     exec_args: &[&str],
@@ -258,6 +264,7 @@ pub async fn run_cli_exec(
     let child_fut = async {
         let output = Command::new(program)
             .args(exec_args)
+            .arg("--")
             .arg(prompt)
             .current_dir(cwd)
             .kill_on_drop(true)
@@ -463,5 +470,27 @@ mod plan_prompt_tests {
             ctx_with(&[]).allowed_providers(),
             vec!["claude", "codex", "agy", "shell"]
         );
+    }
+}
+
+#[cfg(test)]
+mod cli_exec_tests {
+    use super::*;
+
+    /// r3-01-08: a prompt that starts with `---` must reach the CLI as a
+    /// positional argument after `--`, never as a flag.
+    #[tokio::test]
+    async fn prompt_follows_an_end_of_options_marker() {
+        let script = r#"for a; do printf '[%s]' "$a"; done"#;
+        let out = run_cli_exec(
+            "/bin/sh",
+            &["-c", script, "sh", "exec"],
+            "---\nname: x\n---\nbody",
+            "/",
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "[exec][--][---\nname: x\n---\nbody]");
     }
 }

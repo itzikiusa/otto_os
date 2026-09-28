@@ -33,7 +33,7 @@ use otto_core::domain::{Capability, Feature, SessionKind, SessionStatus, User, W
 use otto_server::feature_guard::feature_guard;
 use otto_server::routes::admin_sessions::{list_sessions, terminate, AdminSessionsCtx};
 use otto_sessions::{ProviderRegistry, SessionManager};
-use otto_state::{GrantsRepo, NewAuditEntry, NewSession, SessionsRepo, SqlitePool, UsersRepo};
+use otto_state::{DbPool, GrantsRepo, NewAuditEntry, NewSession, SessionsRepo, UsersRepo};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::sync::broadcast;
 use tower::ServiceExt; // for `oneshot`
@@ -44,7 +44,7 @@ use tower::ServiceExt; // for `oneshot`
 
 #[derive(Clone)]
 struct TestCtx {
-    pool: SqlitePool,
+    pool: DbPool,
     manager: Arc<SessionManager>,
 }
 
@@ -79,7 +79,7 @@ impl AdminSessionsCtx for TestCtx {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-async fn mk_pool() -> SqlitePool {
+async fn mk_pool() -> DbPool {
     let opts = SqliteConnectOptions::new()
         .in_memory(true)
         .foreign_keys(true);
@@ -97,10 +97,10 @@ async fn mk_pool() -> SqlitePool {
         .run(&pool)
         .await
         .expect("migrations");
-    pool
+    pool.into()
 }
 
-async fn seed_user(pool: &SqlitePool, username: &str, is_root: bool) -> User {
+async fn seed_user(pool: &DbPool, username: &str, is_root: bool) -> User {
     let id = otto_core::new_id();
     let now = Utc::now().to_rfc3339();
     sqlx::query(
@@ -126,7 +126,7 @@ async fn seed_user(pool: &SqlitePool, username: &str, is_root: bool) -> User {
     }
 }
 
-async fn seed_workspace(pool: &SqlitePool) -> Workspace {
+async fn seed_workspace(pool: &DbPool) -> Workspace {
     let id = otto_core::new_id();
     let now = Utc::now().to_rfc3339();
     sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)")
@@ -167,7 +167,7 @@ async fn seed_session(repo: &SessionsRepo, ws: &Workspace, owner: &User, title: 
     s.id
 }
 
-fn make_manager(pool: SqlitePool) -> Arc<SessionManager> {
+fn make_manager(pool: DbPool) -> Arc<SessionManager> {
     let (events, _rx) = broadcast::channel(16);
     Arc::new(SessionManager::new(
         SessionsRepo::new(pool),

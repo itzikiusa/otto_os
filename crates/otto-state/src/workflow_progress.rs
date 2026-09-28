@@ -1,10 +1,11 @@
 //! Lightweight workflow projections. Recovery JSON is never rewritten by repair.
 use crate::convert::dberr;
+use crate::DbPool;
 use otto_core::workflows::{NodeRunState, WorkflowCheckpoint};
 use otto_core::{Error, Id, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use sqlx::{Row, SqliteConnection, SqlitePool};
+use sqlx::{Row, SqliteConnection};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
@@ -224,7 +225,7 @@ fn repair_gate(id: &str) -> Arc<AsyncMutex<()>> {
     gates.insert(id.into(), Arc::downgrade(&gate));
     gate
 }
-async fn repair(pool: &SqlitePool, id: &str) -> Result<()> {
+async fn repair(pool: &DbPool, id: &str) -> Result<()> {
     static WORKERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
     let gate = repair_gate(id).try_lock_owned().map_err(|_| busy())?;
     let permit = WORKERS
@@ -270,7 +271,7 @@ async fn repair(pool: &SqlitePool, id: &str) -> Result<()> {
 }
 
 const RUN_COLUMNS: &str="id,workflow_id,workspace_id,status,error,started_at,finished_at,rev,waiting_approval,approval_node_id,approved_by,created_by,approval_note,approved_at,workflow_version,proof_pack_id,resume_attempts,progress_json,checkpoint_rev,checkpoint_generation";
-pub async fn progress(pool: &SqlitePool, id: &Id, after_rev: Option<i64>) -> Result<Value> {
+pub async fn progress(pool: &DbPool, id: &Id, after_rev: Option<i64>) -> Result<Value> {
     for attempt in 0..2 {
         let mut tx = pool
             .begin()
@@ -362,7 +363,7 @@ pub async fn progress(pool: &SqlitePool, id: &Id, after_rev: Option<i64>) -> Res
 /// and preserved by checkpoint UPSERT DO UPDATE. Deletion/retry change the
 /// generation. Otto never VACUUMs or rewrites this table during pagination.
 pub async fn checkpoint_page(
-    pool: &SqlitePool,
+    pool: &DbPool,
     id: &str,
     generation: Option<i64>,
     after: i64,
@@ -403,7 +404,7 @@ pub async fn checkpoint_page(
     )
 }
 
-pub async fn detail(pool: &SqlitePool, id: &str, node: &str, checkpoint: bool) -> Result<Value> {
+pub async fn detail(pool: &DbPool, id: &str, node: &str, checkpoint: bool) -> Result<Value> {
     let mut tx = pool.begin().await.map_err(dberr("begin workflow detail"))?;
     let rev: i64 = sqlx::query_scalar("SELECT rev FROM workflow_runs WHERE id=?")
         .bind(id)
@@ -449,7 +450,7 @@ pub async fn detail(pool: &SqlitePool, id: &str, node: &str, checkpoint: bool) -
 }
 
 /// Run menu rows intentionally omit node/input/checkpoint bodies.
-pub async fn run_summaries(pool: &SqlitePool, workflow: &str) -> Result<Vec<Value>> {
+pub async fn run_summaries(pool: &DbPool, workflow: &str) -> Result<Vec<Value>> {
     let rows=sqlx::query("SELECT id,workflow_id,status,started_at,rev FROM workflow_runs WHERE workflow_id=? ORDER BY started_at DESC,id LIMIT 50").bind(workflow).fetch_all(pool).await.map_err(dberr("workflow run summaries"))?;
     Ok(rows.iter().map(|row|json!({"id":row.get::<String,_>("id"),"workflow_id":row.get::<String,_>("workflow_id"),"status":row.get::<String,_>("status"),"started_at":row.get::<String,_>("started_at"),"rev":row.get::<i64,_>("rev")})).collect())
 }
@@ -459,7 +460,7 @@ mod tests {
     use super::*;
     use crate::WorkflowsRepo;
     use otto_core::workflows::{NodeStatus, WorkflowCheckpoint, WorkflowGraph};
-    async fn fixture() -> (SqlitePool, Id) {
+    async fn fixture() -> (DbPool, Id) {
         let options = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(false);
@@ -490,7 +491,106 @@ mod tests {
             )
             .await
             .unwrap();
-        (pool, run.id)
+        (pool.into(), run.id)
+    }
+    /// r3-07-03: a progress write rewrites the run row ONCE (it was three
+    /// times: the UPDATE, the 0130 trigger NULLing the projection, and the
+    /// republish), keeps a valid projection, and a raw write that does not
+    /// bump `rev` is still invalidated by the trigger.
+    #[tokio::test]
+    async fn progress_write_rewrites_the_row_once() {
+        let (pool, id) = fixture().await;
+        let repo = WorkflowsRepo::new(pool.clone());
+        sqlx::query("CREATE TABLE run_writes (n INTEGER NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO run_writes VALUES (0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER count_run_writes AFTER UPDATE ON workflow_runs BEGIN \
+             UPDATE run_writes SET n = n + 1; END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let writes = || async {
+            sqlx::query_scalar::<_, i64>("SELECT n FROM run_writes")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+        let rev0: i64 = sqlx::query_scalar("SELECT rev FROM workflow_runs WHERE id=?")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let nodes: Vec<NodeRunState> = serde_json::from_value(json!([
+            {"node_id":"a","status":"running","logs":["⏳ working"]}
+        ]))
+        .unwrap();
+        let rev = repo.update_run_progress(&id, &nodes).await.unwrap();
+        assert_eq!(writes().await, 1, "one row rewrite per progress write");
+        assert_eq!(rev, rev0 + 1);
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT progress_json FROM workflow_runs WHERE id=?")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, Some(nodes_projection(&nodes).unwrap()));
+        // The terminal write path is a single statement too.
+        repo.update_run(
+            &id,
+            otto_core::workflows::RunStatus::Success,
+            &nodes,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(writes().await, 2);
+        // A raw restore-style write (rev untouched) is still invalidated.
+        sqlx::query("UPDATE workflow_runs SET nodes_json='[]' WHERE id=?")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (p, r): (Option<String>, i64) =
+            sqlx::query_as("SELECT progress_json, rev FROM workflow_runs WHERE id=?")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(p.is_none(), "raw body write drops the projection");
+        assert_eq!(r, rev0 + 3);
+    }
+
+    /// r3-07-02: the projector's narrow read agrees with the full run.
+    #[tokio::test]
+    async fn run_head_matches_the_full_run_without_parsing_bodies() {
+        let (pool, id) = fixture().await;
+        let repo = WorkflowsRepo::new(pool.clone());
+        let full = repo.get_run(&id).await.unwrap();
+        let head = repo.run_head(&id, true).await.unwrap().unwrap();
+        assert_eq!(head.id, full.id);
+        assert_eq!(head.workflow_id, full.workflow_id);
+        assert_eq!(head.workspace_id, full.workspace_id);
+        assert_eq!(head.status, full.status.as_str());
+        assert_eq!(head.error, full.error);
+        assert_eq!(head.node_count, Some(full.nodes.len() as u32));
+        assert_eq!(head.workflow_name.as_deref(), Some("test"));
+        assert_eq!(
+            repo.run_head(&id, false).await.unwrap().unwrap().node_count,
+            None
+        );
+        assert!(repo.run_head(&"nope".into(), true).await.unwrap().is_none());
+        assert_eq!(
+            repo.recent_run_ids(&full.workflow_id, 5).await.unwrap(),
+            vec![id]
+        );
     }
     #[tokio::test]
     async fn large_checkpoint_bodies_are_absent_from_progress_and_unchanged_poll() {

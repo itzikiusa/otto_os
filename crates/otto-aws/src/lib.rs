@@ -28,12 +28,12 @@ use axum::Router;
 use otto_connections::Spawner;
 use otto_core::event::Event;
 use otto_core::secrets::SecretStore;
-use otto_state::SqlitePool;
+use otto_state::DbPool;
 use tokio::sync::broadcast;
 
 /// Server-side context required by the AWS routes.
 pub trait AwsCtx: Clone + Send + Sync + 'static {
-    fn pool(&self) -> SqlitePool;
+    fn pool(&self) -> DbPool;
     fn secrets(&self) -> &Arc<dyn SecretStore>;
     fn events(&self) -> &broadcast::Sender<Event>;
     /// Daemon data dir (`~/Library/Application Support/Otto`); auto-installed

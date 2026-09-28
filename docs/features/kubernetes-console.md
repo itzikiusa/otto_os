@@ -108,6 +108,15 @@ access-key variables read from the Keychain, plus `AWS_REGION`) so the
 kubeconfig's `aws eks get-token` exec plugin can mint a token — see
 [`./aws-console.md`](./aws-console.md).
 
+**Exec-plugin tokens are cached.** For any cluster whose context authenticates
+through an exec plugin (EKS rows, and `aws eks get-token` /
+`gke-gcloud-auth-plugin` / `kubelogin` users in your own kubeconfig) Otto runs
+the plugin once and hands short-lived kubectl calls an Otto-owned `0600` copy
+of the minified kubeconfig with the bearer token, until shortly before it
+expires. Your kubeconfig is only read; editing it re-derives the copy.
+Contexts without an exec plugin, or whose plugin returns a client certificate,
+keep using the kubeconfig unchanged.
+
 Cluster cards carry an **environment** pill (`dev` / `staging` / `prod` — prod
 gets the red treatment connections use), a colour dot, the server version and
 capability chips. **Test** (`POST /k8s/clusters/{id}/test`) runs

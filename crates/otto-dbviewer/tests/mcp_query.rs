@@ -17,7 +17,7 @@ use otto_core::{Error, Id, Result};
 use otto_dbviewer::service::{MCP_READ_ONLY_PREFIX, READ_ONLY_PREFIX};
 use otto_dbviewer::types::QueryRequest;
 use otto_dbviewer::DbViewerService;
-use otto_state::{ConnectionsRepo, DbExplorerRepo, NewConnection, SqlitePool};
+use otto_state::{ConnectionsRepo, DbExplorerRepo, DbPool, NewConnection};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
 struct NullSecrets;
@@ -33,7 +33,7 @@ impl SecretStore for NullSecrets {
     }
 }
 
-async fn mem_pool() -> SqlitePool {
+async fn mem_pool() -> DbPool {
     let opts = SqliteConnectOptions::new()
         .in_memory(true)
         .foreign_keys(true);
@@ -46,10 +46,10 @@ async fn mem_pool() -> SqlitePool {
         .run(&pool)
         .await
         .expect("migrations");
-    pool
+    pool.into()
 }
 
-async fn seed_user(pool: &SqlitePool) -> Id {
+async fn seed_user(pool: &DbPool) -> Id {
     let id = otto_core::new_id();
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
     sqlx::query(
@@ -67,7 +67,7 @@ async fn seed_user(pool: &SqlitePool) -> Id {
     id
 }
 
-async fn seed_ws(pool: &SqlitePool) -> Id {
+async fn seed_ws(pool: &DbPool) -> Id {
     let id = otto_core::new_id();
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
     sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)")
@@ -81,7 +81,7 @@ async fn seed_ws(pool: &SqlitePool) -> Id {
     id
 }
 
-async fn seed_conn(pool: &SqlitePool, ws: Option<Id>, user: &Id, kind: ConnectionKind) -> Id {
+async fn seed_conn(pool: &DbPool, ws: Option<Id>, user: &Id, kind: ConnectionKind) -> Id {
     let conn = ConnectionsRepo::new(pool.clone())
         .create(NewConnection {
             workspace_id: ws,
@@ -119,7 +119,7 @@ async fn seed_conn(pool: &SqlitePool, ws: Option<Id>, user: &Id, kind: Connectio
     conn.id
 }
 
-fn service(pool: &SqlitePool) -> DbViewerService {
+fn service(pool: &DbPool) -> DbViewerService {
     DbViewerService::new(
         ConnectionsRepo::new(pool.clone()),
         Arc::new(NullSecrets),

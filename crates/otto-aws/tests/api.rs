@@ -24,7 +24,7 @@ use otto_core::domain::{Connection, Session, User};
 use otto_core::event::Event;
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id, Result};
-use otto_state::SqlitePool;
+use otto_state::DbPool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tower::ServiceExt;
 
@@ -98,7 +98,7 @@ fn calls_log() -> String {
 // Harness
 // ---------------------------------------------------------------------------
 
-async fn mem_pool() -> SqlitePool {
+async fn mem_pool() -> DbPool {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(
@@ -112,10 +112,10 @@ async fn mem_pool() -> SqlitePool {
         .run(&pool)
         .await
         .expect("migrations");
-    pool
+    pool.into()
 }
 
-async fn seed_user(pool: &SqlitePool, name: &str, is_root: bool) -> User {
+async fn seed_user(pool: &DbPool, name: &str, is_root: bool) -> User {
     let id = otto_core::new_id();
     let now_ts = Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
     sqlx::query(
@@ -140,7 +140,7 @@ async fn seed_user(pool: &SqlitePool, name: &str, is_root: bool) -> User {
     }
 }
 
-async fn grant(pool: &SqlitePool, user: &User, feature: &str, cap: &str) {
+async fn grant(pool: &DbPool, user: &User, feature: &str, cap: &str) {
     sqlx::query("INSERT INTO user_feature_grants (user_id, feature, capability) VALUES (?, ?, ?)")
         .bind(&user.id)
         .bind(feature)
@@ -209,7 +209,7 @@ impl Spawner for NullSpawner {
 
 #[derive(Clone)]
 struct TestCtx {
-    pool: SqlitePool,
+    pool: DbPool,
     secrets: Arc<dyn SecretStore>,
     mem: Arc<MemSecrets>,
     events: tokio::sync::broadcast::Sender<Event>,
@@ -236,7 +236,7 @@ impl TestCtx {
 }
 
 impl AwsCtx for TestCtx {
-    fn pool(&self) -> SqlitePool {
+    fn pool(&self) -> DbPool {
         self.pool.clone()
     }
     fn secrets(&self) -> &Arc<dyn SecretStore> {

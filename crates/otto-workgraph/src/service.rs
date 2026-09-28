@@ -286,7 +286,7 @@ mod tests {
     use super::*;
     use otto_state::{MissionFilter, WorkKind, WorkStatus};
 
-    async fn pool() -> otto_state::SqlitePool {
+    async fn pool() -> otto_state::DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(false);
@@ -299,7 +299,7 @@ mod tests {
             .run(&pool)
             .await
             .unwrap();
-        pool
+        pool.into()
     }
 
     fn up(status: WorkStatus) -> WorkItemUpsert {

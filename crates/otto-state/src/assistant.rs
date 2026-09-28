@@ -7,11 +7,12 @@
 //! `otto_server::assistant`. Lists order and page on `rowid` (insert order):
 //! ULIDs are random within one millisecond, so `id` order is not.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::{new_id, Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 
 use crate::convert::{dberr, fmt};
 
@@ -256,11 +257,12 @@ fn check_slot(slot: Option<i64>) -> Result<()> {
 
 #[derive(Clone)]
 pub struct AssistantRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl AssistantRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 

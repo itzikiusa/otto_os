@@ -3,13 +3,14 @@
 use chrono::Utc;
 use otto_core::domain::{Session, SessionKind, SessionStatus};
 use otto_core::{new_id, Error, Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json, ts};
 
 #[derive(Clone)]
 pub struct SessionsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 /// Minimal read-only projection used by the usage tailer to attribute on-disk
@@ -128,11 +129,12 @@ fn injected_delay() -> Option<std::time::Duration> {
 }
 
 impl SessionsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
-    pub fn pool(&self) -> SqlitePool { self.pool.clone() }
+    pub fn pool(&self) -> DbPool { self.pool.clone() }
 
     pub async fn network_profile(&self, workspace: &Id, meta: &serde_json::Value) -> Result<Option<otto_core::network_profiles::NetworkProfile>> {
         crate::network_profiles::NetworkProfilesRepo::new(self.pool.clone()).selected(workspace, meta).await
@@ -681,7 +683,7 @@ mod tests {
     use super::*;
     use chrono::Duration as ChronoDuration;
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -691,10 +693,10 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
-    async fn seed_user_ws(pool: &SqlitePool) -> (String, String) {
+    async fn seed_user_ws(pool: &DbPool) -> (String, String) {
         let user = new_id();
         let ws = new_id();
         let now = fmt(Utc::now());
@@ -713,7 +715,7 @@ mod tests {
     }
 
     async fn insert_session(
-        pool: &SqlitePool,
+        pool: &DbPool,
         ws: &str,
         user: &str,
         last_active: &str,
@@ -742,7 +744,7 @@ mod tests {
 
     #[allow(clippy::too_many_arguments)]
     async fn insert_session_full(
-        pool: &SqlitePool,
+        pool: &DbPool,
         ws: &str,
         user: &str,
         provider: &str,
@@ -920,7 +922,7 @@ mod tests {
     }
 
     /// Seed an extra user into an existing pool and return its id.
-    async fn seed_extra_user(pool: &SqlitePool, username: &str) -> String {
+    async fn seed_extra_user(pool: &DbPool, username: &str) -> String {
         let id = new_id();
         let now = fmt(Utc::now());
         sqlx::query("INSERT INTO users (id, username, password_hash, display_name, is_root, created_at) VALUES (?, ?, ?, ?, 0, ?)")
@@ -1059,7 +1061,7 @@ mod tests {
     /// Insert a row with every filterable column chosen by the caller.
     #[allow(clippy::too_many_arguments)]
     async fn insert_row(
-        pool: &SqlitePool,
+        pool: &DbPool,
         ws: &str,
         user: &str,
         kind: &str,

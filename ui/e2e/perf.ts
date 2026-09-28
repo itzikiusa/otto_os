@@ -2,11 +2,54 @@
 // every perf spec needs, so budgets read the same way everywhere.
 //
 // Rules for a perf spec (see desktop-db-editor-perf.spec.ts):
-// - `test.skip(isMobile || project !== 'desktop-browser')`.
-// - WebKit for keystroke/frame budgets (`frameDeltas`); Chromium for long-task
-//   and heap budgets (`watchLongTasks`, `heapAfterGC` — both assert support,
-//   so a check is never vacuous on the wrong engine).
+// - `test.skip(!isDesktopProject(project))`: it runs in `desktop-browser`
+//   (Chromium) AND `desktop-webkit` (WebKit, closest to WKWebView).
+// - A WebKit-only budget (keystroke/frame/scroll timings calibrated on WebKit)
+//   uses `test.skip(!isWebkitProject(project))`; a Chromium-only probe
+//   (`watchLongTasks`, `heapAfterGC`) `test.skip(browserName !== 'chromium')`
+//   — both assert support, so a check is never vacuous on the wrong engine.
+// - Timings end AFTER the frame's paint (`keyFrameCosts`, `frameWork`), not at
+//   a microtask: WKWebView's cost is mostly style/layout/paint (r3-10-02).
 // - Budget DOM/request COUNTS first, timings second: counts don't flake.
+
+/** The desktop projects every perf spec runs in. */
+export const DESKTOP_PROJECTS = ['desktop-browser', 'desktop-webkit'] as const;
+
+export function isDesktopProject(name: string): boolean {
+  return (DESKTOP_PROJECTS as readonly string[]).includes(name);
+}
+
+/** The WebKit desktop project (frame/keystroke budgets are WebKit budgets). */
+export function isWebkitProject(name: string): boolean {
+  return name === 'desktop-webkit';
+}
+
+/** Undo the suite-wide DOM-renderer pin (global-setup.ts) for this page, so
+ *  terminals render as in the app (WebGL where available). Call before the
+ *  first navigation; read terminal text through `__ottoTermProbe`, not DOM. */
+export async function useDefaultTerminalRenderer(page: Page): Promise<void> {
+  await page.addInitScript(() => localStorage.removeItem('otto.term.renderer'));
+}
+
+/** Collect the app's fatal UI errors (main.ts: an effect loop or crash that
+ *  reloads the page). A perf number measured across such a reload is noise,
+ *  so gates assert the returned list stays empty. */
+export function watchFatalUiErrors(page: Page): string[] {
+  const fatal: string[] = [];
+  page.on('console', (m) => {
+    const t = m.text();
+    if (t.includes('fatal UI error')) fatal.push(t.slice(0, 200));
+  });
+  return fatal;
+}
+
+/** A timing budget scaled by `OTTO_PERF_BUDGET_SCALE` (default 1): a shared
+ *  CI runner is slower than a dev Mac, so CI widens TIMINGS only — DOM and
+ *  request counts are never scaled. */
+export function budgetMs(ms: number): number {
+  const k = Number(process.env.OTTO_PERF_BUDGET_SCALE ?? '1');
+  return ms * (Number.isFinite(k) && k > 0 ? k : 1);
+}
 
 import { expect, type Page, type Request } from '@playwright/test';
 
@@ -82,6 +125,89 @@ export async function frameDeltas(page: Page, action: () => Promise<unknown>, se
     return w.__perfFd;
   }, settleFrames);
   return dist(deltas);
+}
+
+// ── work up to the end of the painted frame (any engine) ─────────────────────
+//
+// A sample that ends at a microtask (or right after a forced layout) misses
+// the paint, and on WebKit style/layout/PAINT are most of the cost. These end
+// on a MessageChannel task posted from a requestAnimationFrame callback: it
+// runs after that frame's style, layout and paint. The idle wait for vsync is
+// NOT counted — the sample is script + the frame's rendering work, so it is
+// comparable across refresh rates.
+
+/** Record, per keystroke from now on: script from keydown (capture) to the
+ *  microtask after its handlers, PLUS the rendering work of the next frame
+ *  (rAF callback → post-paint task). Read with `keyFrameCosts`. */
+export async function watchKeyFrameCosts(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const w = window as unknown as { __kf: number[]; __kfOn?: boolean };
+    w.__kf = [];
+    if (w.__kfOn) return;
+    w.__kfOn = true;
+    let t0 = 0;
+    let script = 0;
+    // keydown → input run in ONE task; a microtask queued by the bubble-phase
+    // `input` listener (or bubble keydown, for a key an editor consumes) runs
+    // after every handler and the reactive flush they queued.
+    const scriptEnd = () => queueMicrotask(() => (script = performance.now() - t0));
+    window.addEventListener(
+      'keydown',
+      () => {
+        t0 = performance.now();
+        script = 0;
+        requestAnimationFrame(() => {
+          const r0 = performance.now();
+          const ch = new MessageChannel();
+          ch.port1.onmessage = () => {
+            w.__kf.push(script + (performance.now() - r0));
+            ch.port1.close();
+          };
+          ch.port2.postMessage(null);
+        });
+      },
+      true,
+    );
+    window.addEventListener('input', scriptEnd);
+    window.addEventListener('keydown', (e) => {
+      if (e.defaultPrevented) scriptEnd();
+    });
+  });
+}
+
+export async function keyFrameCosts(page: Page): Promise<number[]> {
+  return page.evaluate(() => (window as unknown as { __kf?: number[] }).__kf ?? []);
+}
+
+/** Scroll `selector` by `dy` inside a rAF callback, `steps` times, timing
+ *  each step to the end of that frame's paint: the scroll handler, its
+ *  reactive flush, style, layout and paint — no vsync wait. */
+export async function scrollFrameWork(page: Page, selector: string, dy: number, steps: number): Promise<number[]> {
+  return page.evaluate(
+    async ({ selector, dy, steps }) => {
+      const el = document.querySelector(selector) as HTMLElement;
+      const out: number[] = [];
+      for (let i = 0; i < steps; i++) {
+        out.push(
+          await new Promise<number>((resolve) =>
+            requestAnimationFrame(() => {
+              const t0 = performance.now();
+              el.scrollTop += dy;
+              el.dispatchEvent(new Event('scroll'));
+              const ch = new MessageChannel();
+              ch.port1.onmessage = () => {
+                ch.port1.close();
+                resolve(performance.now() - t0);
+              };
+              ch.port2.postMessage(null);
+            }),
+          ),
+        );
+      }
+      return out;
+    },
+    { selector, dy, steps },
+  );
 }
 
 // ── DOM ───────────────────────────────────────────────────────────────────────

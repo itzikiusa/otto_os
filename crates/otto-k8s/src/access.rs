@@ -6,7 +6,7 @@ use otto_core::access::{AccessActor, AccessPolicy, ResourceKind, ResourceRef};
 use otto_core::domain::{Capability, Feature, User};
 use otto_core::{Error, Id, Result};
 use otto_rbac::resource_access::ResourceAccess;
-use otto_state::{GrantsRepo, SqlitePool};
+use otto_state::{DbPool, GrantsRepo};
 
 pub fn namespace(ns: Option<&str>) -> Result<Option<String>> {
     let Some(ns) = ns.map(str::trim).filter(|ns| !ns.is_empty()) else {
@@ -90,7 +90,7 @@ pub fn action_operation(action: &str) -> Result<&'static str> {
 }
 
 pub async fn allowed(
-    pool: &SqlitePool,
+    pool: &DbPool,
     user: &User,
     id: &Id,
     operation: &str,
@@ -117,7 +117,7 @@ pub async fn allowed(
 }
 
 pub async fn check(
-    pool: &SqlitePool,
+    pool: &DbPool,
     user: &User,
     id: &Id,
     operation: &str,
@@ -137,7 +137,7 @@ pub async fn check(
 
 /// k9s may change namespace and invoke every supported action. Its dedicated
 /// grant therefore does not override a narrower denial of logs/exec/mutation.
-pub async fn check_k9s(pool: &SqlitePool, user: &User, id: &Id) -> Result<()> {
+pub async fn check_k9s(pool: &DbPool, user: &User, id: &Id) -> Result<()> {
     for op in [
         "k9s",
         "workloads_view",
@@ -156,7 +156,7 @@ pub async fn check_k9s(pool: &SqlitePool, user: &User, id: &Id) -> Result<()> {
     Ok(())
 }
 
-pub async fn initialize(pool: &SqlitePool, user: &User, id: &Id) -> Result<()> {
+pub async fn initialize(pool: &DbPool, user: &User, id: &Id) -> Result<()> {
     let capability = GrantsRepo::new(pool.clone())
         .capability_of(user, Feature::Kubernetes)
         .await?;
@@ -190,7 +190,7 @@ pub async fn initialize(pool: &SqlitePool, user: &User, id: &Id) -> Result<()> {
 }
 
 /// Recheck the grant while following logs, including when no data arrives.
-pub fn guard_body(body: Body, pool: SqlitePool, user: User, id: Id, ns: String) -> Body {
+pub fn guard_body(body: Body, pool: DbPool, user: User, id: Id, ns: String) -> Body {
     let stream = futures_util::stream::unfold(
         (body.into_data_stream(), pool, user, id, ns),
         |(mut stream, pool, user, id, ns)| async move {
@@ -231,7 +231,7 @@ pub fn require_setup_authority(user: &User) -> Result<()> {
 }
 
 /// Legacy resources still require the original Admin feature tier to expose configuration.
-pub async fn can_configure(pool: &SqlitePool, user: &User, id: &Id) -> Result<bool> {
+pub async fn can_configure(pool: &DbPool, user: &User, id: &Id) -> Result<bool> {
     if !allowed(pool, user, id, "configure", None).await? {
         return Ok(false);
     }

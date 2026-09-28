@@ -3,7 +3,7 @@
 //! `ui/dist`, so a frontend edit does not recompile the entire server.
 //! Without an asset loader, non-API paths serve a development placeholder.
 
-use axum::http::{header, StatusCode, Uri};
+use axum::http::{header, HeaderValue, StatusCode, Uri};
 use axum::response::Html;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -39,6 +39,14 @@ pub async fn spa_fallback_with_assets(uri: Uri, assets: Option<AssetLoader>) -> 
     }
 }
 
+/// Hashed build output: the name changes whenever the bytes do, so a client
+/// may keep it forever. Documents (pop-outs, side panes, remote clients)
+/// then reuse chunks instead of refetching them per window.
+const IMMUTABLE: &str = "public, max-age=31536000, immutable";
+/// The document names the current chunk hashes; it must be revalidated so a
+/// deploy is picked up on the next load rather than after a stale cache hit.
+const REVALIDATE: &str = "no-cache";
+
 fn serve_spa(path: &str, load: AssetLoader) -> Response {
     let trimmed = path.trim_start_matches('/');
     let candidate = if trimmed.is_empty() {
@@ -49,21 +57,70 @@ fn serve_spa(path: &str, load: AssetLoader) -> Response {
 
     if let Some(data) = load(candidate) {
         let mime = mime_guess::from_path(candidate).first_or_octet_stream();
-        return (
+        let mut response = (
             [(header::CONTENT_TYPE, mime.as_ref().to_string())],
             data.into_owned(),
         )
             .into_response();
+        let cache = if candidate == "index.html" {
+            Some(REVALIDATE)
+        } else if is_hashed_asset(candidate) {
+            Some(IMMUTABLE)
+        } else {
+            None
+        };
+        if let Some(cache) = cache {
+            response
+                .headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+        }
+        return response;
+    }
+    // Build output is never a client route. A chunk missing after a deploy
+    // must fail as a 404, not as index.html served under a script's URL
+    // (a MIME error that hides the real cause).
+    if candidate.starts_with("assets/") {
+        return (StatusCode::NOT_FOUND, "asset not found").into_response();
     }
     // History-API fallback: unknown non-asset paths get index.html.
     match load("index.html") {
         Some(index) => (
-            [(header::CONTENT_TYPE, "text/html; charset=utf-8".to_string())],
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (header::CACHE_CONTROL, REVALIDATE),
+            ],
             index.into_owned(),
         )
             .into_response(),
         None => (StatusCode::NOT_FOUND, "UI not built").into_response(),
     }
+}
+
+/// Vite emits build output as `assets/<name>-<hash>.<ext>`, the hash being
+/// 8 base64url chars (which may themselves contain `-`/`_`). Anything else
+/// under `assets/` keeps default caching, so an unhashed file is never
+/// pinned for a year.
+fn is_hashed_asset(path: &str) -> bool {
+    const HASH_LEN: usize = 8;
+    let Some(file) = path.strip_prefix("assets/") else {
+        return false;
+    };
+    if file.contains('/') {
+        return false;
+    }
+    let Some((stem, _ext)) = file.rsplit_once('.') else {
+        return false;
+    };
+    let bytes = stem.as_bytes();
+    // `<at least one name char>-<HASH_LEN hash chars>`
+    if bytes.len() < HASH_LEN + 2 {
+        return false;
+    }
+    let (head, hash) = bytes.split_at(bytes.len() - HASH_LEN);
+    head.ends_with(b"-")
+        && hash
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
 }
 
 const PLACEHOLDER: &str = r#"<!doctype html>
@@ -99,6 +156,10 @@ mod tests {
             "index.html" => Some(Cow::Borrowed(b"<main>Otto fixture</main>")),
             "assets/main.js" => Some(Cow::Borrowed(b"console.log('fixture')")),
             "assets/icon.png" => Some(Cow::Borrowed(b"\x89PNG")),
+            "assets/App-Dx-3l_Gc.js" | "assets/mermaid.core-B7Hx2kzQ.js" => {
+                Some(Cow::Borrowed(b"export {}"))
+            }
+            "sw.js" => Some(Cow::Borrowed(b"self")),
             _ => None,
         }
     }
@@ -157,6 +218,82 @@ mod tests {
             let problem: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(problem["code"], "not_found");
             assert_eq!(problem["message"], format!("no such route: {path}"));
+        }
+    }
+
+    async fn cache_control(path: &str) -> (StatusCode, Option<String>) {
+        let app =
+            Router::new().fallback(move |uri: Uri| spa_fallback_with_assets(uri, Some(fixture)));
+        let response = app
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let cache = response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .map(|v| v.to_str().unwrap().to_owned());
+        (response.status(), cache)
+    }
+
+    #[tokio::test]
+    async fn missing_build_assets_are_404_not_the_spa_document() {
+        for path in [
+            "/assets/App-Zz9_x-Q1.js",
+            "/assets/gone.css",
+            "/assets/nested/chunk-AbCdEfGh.js",
+        ] {
+            let (status, content_type, body) = request(path, Some(fixture)).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+            assert!(!content_type.starts_with("text/html"), "{path}");
+            assert_ne!(body, b"<main>Otto fixture</main>", "{path}");
+        }
+        // A client route that merely contains "assets" still gets the SPA.
+        let (status, content_type, _) = request("/vault/assets/x", Some(fixture)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(content_type.starts_with("text/html"));
+    }
+
+    #[tokio::test]
+    async fn hashed_assets_are_immutable_and_the_document_revalidates() {
+        let (status, cache) = cache_control("/assets/App-Dx-3l_Gc.js").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cache.as_deref(), Some(IMMUTABLE));
+        let (_, cache) = cache_control("/assets/mermaid.core-B7Hx2kzQ.js").await;
+        assert_eq!(cache.as_deref(), Some(IMMUTABLE));
+        // The document names the current hashes, directly or via fallback.
+        for path in ["/", "/index.html", "/git/repo?x=1"] {
+            let (status, cache) = cache_control(path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(cache.as_deref(), Some(REVALIDATE), "{path}");
+        }
+        // Unhashed files keep default caching, never a year-long pin.
+        for path in ["/assets/main.js", "/sw.js"] {
+            let (_, cache) = cache_control(path).await;
+            assert_eq!(cache, None, "{path}");
+        }
+    }
+
+    #[test]
+    fn hashed_asset_names_follow_vites_pattern() {
+        for yes in [
+            "assets/index-B7Hx2kzQ.js",
+            "assets/index-DT-3lsGc.css",
+            "assets/d2-a_b-c_d-.wasm",
+            "assets/mermaid.core-AbCdEfGh.js",
+        ] {
+            assert!(is_hashed_asset(yes), "{yes}");
+        }
+        for no in [
+            "index.html",
+            "sw.js",
+            "assets/main.js",
+            "assets/-AbCdEfGh.js",
+            "assets/app-short.js",
+            "assets/app-AbCdEfG!.js",
+            "assets/sub/app-AbCdEfGh.js",
+            "assets/app-AbCdEfGh",
+        ] {
+            assert!(!is_hashed_asset(no), "{no}");
         }
     }
 

@@ -1,9 +1,10 @@
 //! Durable API automation reports. Callers must redact before saving.
+use crate::DbPool;
 use otto_core::api::ApiAutomationRun;
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 
 #[derive(Clone)]
-pub struct ApiRunsRepo(pub SqlitePool);
+pub struct ApiRunsRepo(pub DbPool);
 impl ApiRunsRepo {
     pub async fn save(&self, run: &ApiAutomationRun) -> Result<(), sqlx::Error> {
         let json = serde_json::to_string(run).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
@@ -57,7 +58,7 @@ mod tests {
     use otto_core::api::ApiRunResult;
     #[tokio::test]
     async fn reports_are_workspace_scoped_and_restart_retains_completed_steps() {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let pool = DbPool::connect("sqlite::memory:").await.unwrap();
         sqlx::query("CREATE TABLE workspaces(id TEXT PRIMARY KEY)")
             .execute(&pool)
             .await

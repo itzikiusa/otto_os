@@ -4,9 +4,9 @@ use otto_core::domain::Connection;
 use otto_core::domain::{Capability, Feature};
 use otto_core::{Error, Id, Result};
 use otto_rbac::resource_access::ResourceAccess;
-use otto_state::{GrantsRepo, SqlitePool, UsersRepo, WorkspacesRepo};
+use otto_state::{DbPool, GrantsRepo, UsersRepo, WorkspacesRepo};
 
-pub(crate) async fn enforced(pool: &SqlitePool, id: &Id) -> Result<bool> {
+pub(crate) async fn enforced(pool: &DbPool, id: &Id) -> Result<bool> {
     Ok(
         otto_state::resource_access::ResourceAccessRepo::new(pool.clone())
             .get_policy(ResourceKind::Connection, id)
@@ -17,7 +17,7 @@ pub(crate) async fn enforced(pool: &SqlitePool, id: &Id) -> Result<bool> {
 }
 
 pub(crate) async fn check(
-    pool: &SqlitePool,
+    pool: &DbPool,
     conn: &Connection,
     user_id: &Id,
     operation: &str,

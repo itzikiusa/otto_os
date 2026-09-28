@@ -1,18 +1,33 @@
 //! Workflows repository: workflow definitions + their run history.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::workflows::{
     ActiveWorkflowRun, NodeRunState, NodeStatus, RunStatus, Workflow, WorkflowCheckpoint,
     WorkflowGraph, WorkflowRun, WorkflowVersion,
 };
 use otto_core::{new_id, Error, Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 
 use crate::convert::{dberr, fmt, ts};
 
+/// Narrow view of a run for projections ([`WorkflowsRepo::run_head`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunHead {
+    pub id: Id,
+    pub workflow_id: Id,
+    pub workspace_id: Id,
+    pub status: String,
+    pub error: Option<String>,
+    /// Entries in `nodes_json`, when asked for.
+    pub node_count: Option<u32>,
+    /// `None` when the workflow row is gone.
+    pub workflow_name: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct WorkflowsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 fn parse_graph(s: &str) -> Result<WorkflowGraph> {
@@ -250,7 +265,8 @@ impl WorkflowsRepo {
         Ok(())
     }
 
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -465,6 +481,53 @@ impl WorkflowsRepo {
         rows.iter().map(row_to_run).collect()
     }
 
+    /// The few fields the work-graph projector needs about a run, WITHOUT
+    /// parsing its `nodes_json` / `input_json` in Rust (r3-07-02: a running
+    /// node's progress write fired a full `get_run` + `get` of the graph up to
+    /// ~4×/s, O(run JSON) each). `node_count` uses SQLite's `json_array_length`
+    /// only when `with_node_count` is set — the live path already knows it
+    /// from the event. `None` when the run is gone.
+    pub async fn run_head(&self, run_id: &Id, with_node_count: bool) -> Result<Option<RunHead>> {
+        let sql = if with_node_count {
+            "SELECT r.id, r.workflow_id, r.workspace_id, r.status, r.error, \
+                    json_array_length(r.nodes_json) AS node_count, w.name AS workflow_name \
+             FROM workflow_runs r LEFT JOIN workflows w ON w.id = r.workflow_id WHERE r.id = ?"
+        } else {
+            "SELECT r.id, r.workflow_id, r.workspace_id, r.status, r.error, \
+                    NULL AS node_count, w.name AS workflow_name \
+             FROM workflow_runs r LEFT JOIN workflows w ON w.id = r.workflow_id WHERE r.id = ?"
+        };
+        let row = sqlx::query(sql)
+            .bind(run_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("run head"))?;
+        Ok(row.map(|r| RunHead {
+            id: r.get("id"),
+            workflow_id: r.get("workflow_id"),
+            workspace_id: r.get("workspace_id"),
+            status: r.get("status"),
+            error: r.get("error"),
+            node_count: r
+                .get::<Option<i64>, _>("node_count")
+                .map(|n| n.max(0) as u32),
+            workflow_name: r.get("workflow_name"),
+        }))
+    }
+
+    /// Ids of a workflow's newest `limit` runs (reconcile sweeps) — no row
+    /// bodies, unlike [`Self::list_runs`].
+    pub async fn recent_run_ids(&self, workflow_id: &Id, limit: i64) -> Result<Vec<Id>> {
+        sqlx::query_scalar(
+            "SELECT id FROM workflow_runs WHERE workflow_id = ? ORDER BY started_at DESC LIMIT ?",
+        )
+        .bind(workflow_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("recent run ids"))
+    }
+
     /// True when the workflow already has a pending/running run. The trigger
     /// schedulers use this as an overlap guard: a schedule tick or event storm
     /// must not stack concurrent runs of the same workflow (each provisioning
@@ -573,7 +636,8 @@ impl WorkflowsRepo {
             serde_json::to_string(nodes).map_err(|e| Error::Internal(e.to_string()))?;
         let rev: i64 = sqlx::query_scalar(
             "UPDATE workflow_runs
-             SET status = 'pending', nodes_json = ?, resume_scope_json = ?,
+             SET status = 'pending', nodes_json = ?, progress_json = NULL,
+                 resume_scope_json = ?,
                  interrupted_at = ?, resume_attempts = resume_attempts + 1,
                  error = NULL, finished_at = NULL,
                  waiting_approval = 0, approval_node_id = NULL,
@@ -911,9 +975,14 @@ impl WorkflowsRepo {
         // approval" banner whose Approve button "resumes" a dead run, nor a
         // stale `approval_node_id` that a later retry's restart-resume would
         // mistake for its re-entry point.
+        // The body AND its read projection in ONE statement (r3-07-03): the
+        // 0130 trigger used to NULL the projection right after, and the
+        // republish rewrote the row a third time — 3 full-row rewrites (the
+        // overflow chain included) per write. Migration 0145 limits that
+        // trigger to raw writes that don't bump `rev`.
         let sql = format!(
             "UPDATE workflow_runs
-             SET status = ?, nodes_json = ?, error = ?,
+             SET status = ?, nodes_json = ?, progress_json = ?, error = ?,
                  finished_at = COALESCE(?, finished_at),
                  resume_scope_json = CASE WHEN ? IS NULL
                                           THEN resume_scope_json ELSE NULL END,
@@ -926,33 +995,21 @@ impl WorkflowsRepo {
              RETURNING rev"
         );
         let projection = crate::workflow_progress::nodes_projection(nodes)?;
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(dberr("begin workflow progress write"))?;
         let rev: Option<i64> = sqlx::query_scalar(&sql)
             .bind(status.as_str())
             .bind(&nodes_json)
+            .bind(&projection)
             .bind(error)
             .bind(&finished_at)
             .bind(&finished_at)
             .bind(&finished_at)
             .bind(&finished_at)
             .bind(id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&self.pool)
             .await
             .map_err(dberr("update run"))?;
-        let Some(rev) = rev else {
-            // Guard not met (or no such row): nothing written; the dropped
-            // transaction rolls back.
-            return Ok(None);
-        };
-        crate::workflow_progress::publish_nodes(&mut tx, id, &projection).await?;
-        tx.commit()
-            .await
-            .map_err(dberr("commit workflow progress write"))?;
-        Ok(Some(rev))
+        // `None`: guard not met (or no such row) — nothing was written.
+        Ok(rev)
     }
 
     /// Request a cancel: flip an in-flight (`pending`/`running`) run to
@@ -1021,26 +1078,20 @@ impl WorkflowsRepo {
         })
         .await
         .map_err(|e| Error::Internal(format!("workflow progress write: {e}")))??;
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(dberr("begin workflow progress write"))?;
+        // One statement, one row rewrite: body + projection + rev together
+        // (r3-07-03 — it was three rewrites; see `write_run`).
         let rev: i64 = sqlx::query_scalar(
             "UPDATE workflow_runs
-             SET nodes_json = ?, rev = rev + 1
+             SET nodes_json = ?, progress_json = ?, rev = rev + 1
              WHERE id = ?
              RETURNING rev",
         )
         .bind(&nodes_json)
+        .bind(&projection)
         .bind(id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&self.pool)
         .await
         .map_err(dberr("update run progress"))?;
-        crate::workflow_progress::publish_nodes(&mut tx, id, &projection).await?;
-        tx.commit()
-            .await
-            .map_err(dberr("commit workflow progress write"))?;
         Ok(rev)
     }
 }
@@ -1049,7 +1100,7 @@ impl WorkflowsRepo {
 mod tests {
     use super::*;
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(false);
@@ -1059,7 +1110,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     #[tokio::test]

@@ -24,7 +24,7 @@ use otto_server::ServerCtx;
 use otto_sessions::{ProviderRegistry, SessionManager};
 use otto_state::{
     ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, GitStore, IntegrationsRepo,
-    IssuesRepo, NewSession, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, SqlitePool,
+    IssuesRepo, NewSession, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, DbPool,
     SwarmRepo, WorkspacesRepo,
 };
 use serde_json::{json, Value};
@@ -68,7 +68,7 @@ impl otto_connections::Spawner for NoopSpawner {
     }
 }
 
-async fn file_pool(dir: &std::path::Path) -> SqlitePool {
+async fn file_pool(dir: &std::path::Path) -> DbPool {
     let opts = SqliteConnectOptions::new()
         .filename(dir.join("otto.db"))
         .create_if_missing(true)
@@ -82,10 +82,10 @@ async fn file_pool(dir: &std::path::Path) -> SqlitePool {
         .run(&pool)
         .await
         .expect("run migrations");
-    pool
+    pool.into()
 }
 
-async fn seed_user(pool: &SqlitePool, id: &str, is_root: bool) {
+async fn seed_user(pool: &DbPool, id: &str, is_root: bool) {
     sqlx::query(
         "INSERT INTO users (id, username, password_hash, display_name, is_root, created_at)
          VALUES (?, ?, 'x', ?, ?, ?)",
@@ -100,7 +100,7 @@ async fn seed_user(pool: &SqlitePool, id: &str, is_root: bool) {
     .expect("seed user");
 }
 
-async fn seed_workspace(pool: &SqlitePool, ws_id: &str, admin: &str) {
+async fn seed_workspace(pool: &DbPool, ws_id: &str, admin: &str) {
     sqlx::query(
         "INSERT INTO workspaces (id, name, root_path, settings_json, archived, created_at)
          VALUES (?, 'ws', '/tmp', '{}', 0, ?)",
@@ -118,7 +118,7 @@ async fn seed_workspace(pool: &SqlitePool, ws_id: &str, admin: &str) {
         .expect("member");
 }
 
-async fn test_ctx(pool: &SqlitePool, base_url: String, tmp: &std::path::Path) -> ServerCtx {
+async fn test_ctx(pool: &DbPool, base_url: String, tmp: &std::path::Path) -> ServerCtx {
     let (events, _rx) = broadcast::channel(256);
     let secrets: Arc<dyn SecretStore> = Arc::new(NoopSecrets);
     let roles = Arc::new(RbacRoleChecker::new(pool.clone()));

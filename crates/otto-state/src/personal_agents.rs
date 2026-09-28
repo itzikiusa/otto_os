@@ -14,7 +14,8 @@ use chrono::Utc;
 use otto_core::{new_id, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json};
 
@@ -296,11 +297,12 @@ fn row_to_message(r: &sqlx::sqlite::SqliteRow) -> Result<AgentRoomMessage> {
 
 #[derive(Clone)]
 pub struct PersonalAgentsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl PersonalAgentsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -699,11 +701,12 @@ impl PersonalAgentsRepo {
 
 #[derive(Clone)]
 pub struct AgentRoomsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl AgentRoomsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -906,11 +909,11 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    async fn pool() -> SqlitePool {
+    async fn pool() -> DbPool {
         crate::db::test_pool().await
     }
 
-    async fn seed_ws(pool: &SqlitePool, id: &str) {
+    async fn seed_ws(pool: &DbPool, id: &str) {
         let now = fmt(Utc::now());
         sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)")
             .bind(id)

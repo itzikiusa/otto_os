@@ -6,6 +6,9 @@
   // <SvelteFlow> itself). This file is just plumbing: it forwards props down and
   // re-exposes CanvasFlow's `fit()` (zoom-to-fit) up to the Toolbar.
   import { SvelteFlowProvider } from '@xyflow/svelte';
+  // Svelte Flow base styles: with the Canvas chunk, not in every window's
+  // global CSS (they were imported by main.ts).
+  import '@xyflow/svelte/dist/style.css';
   import CanvasFlow from './CanvasFlow.svelte';
   import type { Tool } from './tools';
 

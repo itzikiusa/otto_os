@@ -38,7 +38,7 @@ function fakeTimers() {
 const flush = () => new Promise((r) => setImmediate(r));
 
 function load(doc?: ReturnType<typeof fakeDocument>, timers?: ReturnType<typeof fakeTimers>) {
-  return loadSource(new URL('../src/lib/poll.ts', import.meta.url), {}, {
+  return loadSource(new URL('../src/lib/poll.ts', import.meta.url), { './api/lane': loadSource(new URL('../src/lib/api/lane.ts', import.meta.url), {}) }, {
     ...(doc ? { document: doc } : {}),
     ...(timers ? { setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout } : {}),
   });

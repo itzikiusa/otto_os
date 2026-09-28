@@ -3,10 +3,11 @@
 //! Mirrors the pattern used by [`crate::workflows::WorkflowsRepo`]: thin data
 //! layer, all SQL inline, types re-exported from `otto_core`.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::{new_id, Error, Id, Result};
 use serde_json::Value;
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 
 use crate::convert::{dberr, ts};
 
@@ -54,11 +55,12 @@ fn row_to_trigger(r: &sqlx::sqlite::SqliteRow) -> Result<WorkflowTrigger> {
 
 #[derive(Clone)]
 pub struct TriggersRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl TriggersRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -248,7 +250,7 @@ mod tests {
         assert!(parsed.as_object().is_some());
     }
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(false);
@@ -258,7 +260,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     /// Regression for the `chat` trigger kind: it was added to route

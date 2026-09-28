@@ -9,7 +9,9 @@ import * as secretShapes from '../src/lib/api/apiSecretShapes.ts';
 
 function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: any[]) => Promise<any>) {
   const ws = {currentId: 'A'};
-  const api = {get: async () => [], patch: async () => ({}), post: async () => ({}), ...overrides};
+  const api: Record<string, any> = {get: async () => [], patch: async () => ({}), post: async () => ({}), ...overrides};
+  // The API client's "Send" rides the long lane (`api.long.post`).
+  api.long = {post: (...args: unknown[]) => api.post(...args), get: (...args: unknown[]) => api.get(...args)};
   const context = {exports: {} as Record<string, any>,
     $state: Object.assign((v: unknown) => v, {snapshot: (v: unknown) => v, raw: (v: unknown) => v}), $derived: (v: unknown) => v,
     crypto: {randomUUID}, URL, URLSearchParams, AbortController, DOMException, setTimeout, clearTimeout,

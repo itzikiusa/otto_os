@@ -1,15 +1,16 @@
 //! Git accounts + repos repositories.
 
+use crate::DbPool;
 use chrono::{DateTime, Utc};
 use otto_core::domain::{GitAccount, GitProviderKind, Repo};
 use otto_core::{new_id, Error, Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 
 use crate::convert::{dberr, fmt, ts};
 
 #[derive(Clone)]
 pub struct GitStore {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 pub struct NewGitAccount {
@@ -85,7 +86,8 @@ fn row_to_repo(r: &sqlx::sqlite::SqliteRow) -> Result<Repo> {
 }
 
 impl GitStore {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -371,7 +373,7 @@ mod tests {
     use super::*;
     use chrono::{Duration, SubsecRound};
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -381,10 +383,10 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
-    async fn seed_user(pool: &SqlitePool) -> Id {
+    async fn seed_user(pool: &DbPool) -> Id {
         let user = new_id();
         let now = fmt(Utc::now());
         sqlx::query(

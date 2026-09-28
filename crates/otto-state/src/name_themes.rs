@@ -5,10 +5,11 @@
 //!   * `name_themes`       — a user's CUSTOM ordered name lists (family names, …).
 //!   * `name_theme_active` — which theme each user picked for auto-naming.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::{new_id, Error, Id, Result};
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 
 use crate::convert::{dberr, fmt, ts};
 
@@ -25,7 +26,7 @@ pub struct CustomTheme {
 
 #[derive(Clone)]
 pub struct NameThemesRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 fn row_to_theme(r: &sqlx::sqlite::SqliteRow) -> Result<CustomTheme> {
@@ -41,7 +42,8 @@ fn row_to_theme(r: &sqlx::sqlite::SqliteRow) -> Result<CustomTheme> {
 }
 
 impl NameThemesRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -161,7 +163,7 @@ impl NameThemesRepo {
 mod tests {
     use super::*;
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(false);
@@ -171,7 +173,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     #[tokio::test]

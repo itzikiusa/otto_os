@@ -39,6 +39,8 @@ struct Slot<V> {
     size: usize,
     used: u64,
     at: Instant,
+    /// Last `get`/`put` — what [`ByteLru::sweep`]'s idle bound reads.
+    last: Instant,
 }
 
 impl<V: Clone> ByteLru<V> {
@@ -73,7 +75,31 @@ impl<V: Clone> ByteLru<V> {
         }
         let slot = self.entries.get_mut(key)?;
         slot.used = tick;
+        slot.last = Instant::now();
         Some(slot.value.clone())
+    }
+
+    /// Drop every entry past its TTL or unused for `idle`, WITHOUT waiting for
+    /// a read of that key. The TTL used to run only inside `get` of the same
+    /// key, so after a busy hour the cache sat at its byte cap (96 MB of PR
+    /// diffs, 64 MB of diff bodies) for days (r3-05-04). Returns bytes freed.
+    pub(crate) fn sweep(&mut self, idle: Duration) -> usize {
+        let before = self.total;
+        let ttl = self.ttl;
+        let stale: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|(_, s)| ttl.is_some_and(|t| s.at.elapsed() > t) || s.last.elapsed() > idle)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in stale {
+            self.remove(&k);
+        }
+        if self.entries.is_empty() {
+            // Give the table's capacity back too.
+            self.entries.shrink_to_fit();
+        }
+        before - self.total
     }
 
     /// Insert `value` weighing `size` bytes; a value above the per-entry
@@ -105,6 +131,7 @@ impl<V: Clone> ByteLru<V> {
                 size,
                 used: self.tick,
                 at: Instant::now(),
+                last: Instant::now(),
             },
         );
     }
@@ -121,10 +148,59 @@ impl<V: Clone> ByteLru<V> {
     }
 }
 
-/// Serialized immutable `/diff` responses: 64 MB total, ≤ 16 MB each.
-fn diff_bodies() -> &'static Mutex<ByteLru<Bytes>> {
+/// Entries of either memo unused this long are released by the janitor.
+const IDLE: Duration = Duration::from_secs(10 * 60);
+/// How often the janitor sweeps.
+const SWEEP_EVERY: Duration = Duration::from_secs(60);
+
+/// Start (once per process, from inside a runtime) the task that sweeps both
+/// memos every [`SWEEP_EVERY`]. Called from the accessors, so the first diff
+/// served arms it; outside a runtime (sync unit tests) it is simply not armed.
+fn ensure_janitor() {
+    static JANITOR: OnceLock<()> = OnceLock::new();
+    if JANITOR.get().is_some() {
+        return;
+    }
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    JANITOR.get_or_init(|| {
+        handle.spawn(async {
+            let mut tick = tokio::time::interval(SWEEP_EVERY);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                sweep_all();
+            }
+        });
+    });
+}
+
+/// One janitor pass over both memos (exposed for tests).
+pub(crate) fn sweep_all() -> usize {
+    let a = diff_bodies_raw()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .sweep(IDLE);
+    let b = pr_diffs_raw()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .sweep(IDLE);
+    a + b
+}
+
+fn diff_bodies_raw() -> &'static Mutex<ByteLru<Bytes>> {
     static C: OnceLock<Mutex<ByteLru<Bytes>>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(ByteLru::new(64 << 20, 16 << 20, 512, None)))
+}
+
+/// Serialized immutable `/diff` responses: 64 MB total, ≤ 16 MB each, and
+/// released after [`IDLE`] unused (they are content-addressed, so a later
+/// request just recomputes).
+fn diff_bodies() -> &'static Mutex<ByteLru<Bytes>> {
+    ensure_janitor();
+    diff_bodies_raw()
 }
 
 pub(crate) fn get_body(key: &str) -> Option<Bytes> {
@@ -147,9 +223,14 @@ pub(crate) fn put_body(key: String, body: Bytes) {
 /// Short TTL — a PR's head moves and the provider is the source of truth.
 pub(crate) const PR_DIFF_TTL: Duration = Duration::from_secs(60);
 
-pub(crate) fn pr_diffs() -> &'static Mutex<ByteLru<Arc<DiffResp>>> {
+fn pr_diffs_raw() -> &'static Mutex<ByteLru<Arc<DiffResp>>> {
     static C: OnceLock<Mutex<ByteLru<Arc<DiffResp>>>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(ByteLru::new(96 << 20, 64 << 20, 32, Some(PR_DIFF_TTL))))
+}
+
+pub(crate) fn pr_diffs() -> &'static Mutex<ByteLru<Arc<DiffResp>>> {
+    ensure_janitor();
+    pr_diffs_raw()
 }
 
 /// Rough resident size of a parsed diff (content + per-line overhead).
@@ -287,6 +368,28 @@ mod tests {
         assert_eq!(c.get("huge"), None);
         c.put("a".into(), 5, 10); // replace re-weighs
         assert_eq!(c.total_bytes(), 50);
+    }
+
+    #[test]
+    fn sweep_drops_expired_and_idle_entries_without_a_read() {
+        let mut ttl = ByteLru::<u32>::new(1000, 1000, 10, Some(Duration::from_millis(1)));
+        ttl.put("a".into(), 1, 100);
+        std::thread::sleep(Duration::from_millis(5));
+        // Nobody reads "a" again: the sweep alone frees it.
+        assert_eq!(ttl.sweep(Duration::from_secs(3600)), 100);
+        assert_eq!(ttl.total_bytes(), 0);
+
+        let mut idle = ByteLru::<u32>::new(1000, 1000, 10, None);
+        idle.put("old".into(), 1, 10);
+        std::thread::sleep(Duration::from_millis(20));
+        idle.put("new".into(), 2, 20);
+        assert_eq!(
+            idle.sweep(Duration::from_millis(10)),
+            10,
+            "only the idle entry goes"
+        );
+        assert_eq!(idle.get("new"), Some(2));
+        assert_eq!(idle.get("old"), None);
     }
 
     #[test]

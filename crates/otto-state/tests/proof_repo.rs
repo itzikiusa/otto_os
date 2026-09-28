@@ -1,12 +1,12 @@
 //! Roundtrip tests for `ProofRepo` + migration `0077_proof_packs.sql`.
 
 use otto_core::proof::{ProofArtifactKind, ProofArtifactStatus, ProofStatus, WorkItemKind};
+use otto_state::DbPool;
 use otto_state::ProofRepo;
 use serde_json::json;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::SqlitePool;
 
-async fn mem_pool() -> SqlitePool {
+async fn mem_pool() -> DbPool {
     let opts = SqliteConnectOptions::new()
         .in_memory(true)
         .foreign_keys(true);
@@ -19,7 +19,7 @@ async fn mem_pool() -> SqlitePool {
         .run(&pool)
         .await
         .expect("migrations");
-    pool
+    pool.into()
 }
 
 #[tokio::test]
@@ -318,4 +318,80 @@ async fn blob_roundtrip_and_cascade() {
     // cascade: deleting the artifact removes the blob
     repo.delete_artifact(&art.id).await.unwrap();
     assert!(repo.blob_for_artifact(&art.id).await.unwrap().is_none());
+}
+
+/// r3-07-01: the workspace-wide badge read returns every pack's artifacts —
+/// same rows, same order, same kind/status/title/metadata as
+/// `list_artifacts` — without the inline content, and nothing from another
+/// workspace.
+#[tokio::test]
+async fn badge_artifacts_match_list_artifacts_without_content() {
+    let repo = ProofRepo::new(mem_pool().await);
+    let a = repo
+        .create_pack("w1", WorkItemKind::Session, "s-a", "a", "u1", None)
+        .await
+        .unwrap();
+    let b = repo
+        .create_pack("w1", WorkItemKind::Session, "s-b", "b", "u1", None)
+        .await
+        .unwrap();
+    let other = repo
+        .create_pack("w2", WorkItemKind::Session, "s-c", "c", "u1", None)
+        .await
+        .unwrap();
+    let big = "x".repeat(512 * 1024);
+    for (pack, ws, kind, title, status, meta) in [
+        (
+            &a.id,
+            "w1",
+            ProofArtifactKind::Diff,
+            "diff",
+            ProofArtifactStatus::Info,
+            json!({"risky_files":["m.sql"]}),
+        ),
+        (
+            &a.id,
+            "w1",
+            ProofArtifactKind::Command,
+            "cargo test",
+            ProofArtifactStatus::Passed,
+            json!({}),
+        ),
+        (
+            &b.id,
+            "w1",
+            ProofArtifactKind::Ci,
+            "ci",
+            ProofArtifactStatus::Failed,
+            json!({}),
+        ),
+        (
+            &other.id,
+            "w2",
+            ProofArtifactKind::Command,
+            "npm test",
+            ProofArtifactStatus::Failed,
+            json!({}),
+        ),
+    ] {
+        repo.add_artifact(pack, ws, kind, title, Some(&big), status, &meta, "u1")
+            .await
+            .unwrap();
+    }
+    let map = repo.badge_artifacts("w1").await.unwrap();
+    assert_eq!(map.len(), 2, "only w1's packs");
+    for pack in [&a.id, &b.id] {
+        let full = repo.list_artifacts(pack).await.unwrap();
+        let narrow = &map[pack];
+        assert_eq!(narrow.len(), full.len());
+        for (n, f) in narrow.iter().zip(&full) {
+            assert_eq!(
+                (&n.id, n.kind, n.status, &n.title, &n.metadata),
+                (&f.id, f.kind, f.status, &f.title, &f.metadata)
+            );
+            assert!(n.content_ref.is_none(), "content is not read");
+            assert!(f.content_ref.is_some());
+        }
+    }
+    assert!(repo.badge_artifacts("w-none").await.unwrap().is_empty());
 }

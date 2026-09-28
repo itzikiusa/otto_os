@@ -17,6 +17,8 @@ tracing.workspace = true
 # Chunked prune yields the SQLite writer between batches (tokio::time::sleep);
 # sqlx already runs on the tokio runtime here.
 tokio.workspace = true
+# DbPool's Executor impl returns sqlx's boxed stream/future types.
+futures-util.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }

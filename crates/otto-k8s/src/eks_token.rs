@@ -16,6 +16,16 @@
 //! would show in `ps`); the file lives under `<data_dir>/kube/tokens` (0700),
 //! is replaced atomically, and is removed by [`forget`] when the cluster is
 //! deleted. k9s PTY sessions keep the exec plugin (they outlive a token).
+//!
+//! Scope (perf r3-08-15): not only `eks` rows — any cluster whose kubeconfig
+//! context authenticates through an exec plugin (`aws eks get-token` in a
+//! user's `~/.kube/config`, `gke-gcloud-auth-plugin`, `kubelogin` …) paid a
+//! plugin process per kubectl call. Every source now gets the overlay. The
+//! user's kubeconfig is only READ (`config view`); the fingerprint carries the
+//! kubeconfig files' mtimes, so an edit re-derives the overlay. A context
+//! without an exec plugin (or one whose credential isn't a bearer token) is
+//! remembered as such — no `config view` per call — until its kubeconfig
+//! changes; other failures back off for [`RETRY_AFTER`].
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -32,13 +42,43 @@ const REFRESH_MARGIN: Duration = Duration::from_secs(60);
 /// Used when the plugin states no expiry (EKS tokens live 15 min).
 const DEFAULT_LIFETIME: Duration = Duration::from_secs(10 * 60);
 const MINT_TIMEOUT: Duration = Duration::from_secs(30);
+/// A mint that failed for a transient reason is retried after this long
+/// (kubectl runs the plugin itself meanwhile).
+const RETRY_AFTER: Duration = Duration::from_secs(120);
+/// "Not applicable" (no exec plugin, cluster-info plugin, non-token credential)
+/// holds until the kubeconfig changes; this only bounds a missed mtime change.
+const NOT_APPLICABLE_FOR: Duration = Duration::from_secs(6 * 3600);
 
 #[derive(Clone)]
 struct Entry {
-    path: PathBuf,
+    /// `None` = negative entry: don't mint (or `config view`) until
+    /// `fresh_until` or a fingerprint change.
+    path: Option<PathBuf>,
     fresh_until: SystemTime,
     /// The cluster fields the overlay was derived from; an edit invalidates it.
     fingerprint: String,
+}
+
+/// Why minting did not produce an overlay.
+enum MintError {
+    /// Permanent for this kubeconfig (no exec plugin, …): remember it.
+    NotApplicable(String),
+    /// Anything else: retry after [`RETRY_AFTER`].
+    Failed(String),
+}
+
+impl std::fmt::Display for MintError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MintError::NotApplicable(w) | MintError::Failed(w) => f.write_str(w),
+        }
+    }
+}
+
+impl From<String> for MintError {
+    fn from(s: String) -> Self {
+        MintError::Failed(s)
+    }
 }
 
 static CACHE: LazyLock<Mutex<HashMap<String, Entry>>> = LazyLock::new(Default::default);
@@ -47,12 +87,55 @@ static MINT: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(Default::default);
 
 fn fingerprint(c: &K8sCluster) -> String {
-    format!(
+    let mut fp = format!(
         "{}\u{1}{}\u{1}{}",
         c.kubeconfig_path.as_deref().unwrap_or(""),
         c.context_name,
         c.aws_account_id.as_deref().unwrap_or("")
-    )
+    );
+    for p in kubeconfig_files(c) {
+        let m = std::fs::metadata(&p)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        fp.push_str(&format!("\u{2}{m}"));
+    }
+    fp
+}
+
+/// The kubeconfig files kubectl reads for `c`: its own path, else
+/// `$KUBECONFIG` (colon list), else `~/.kube/config`.
+fn kubeconfig_files(c: &K8sCluster) -> Vec<PathBuf> {
+    if let Some(p) = c
+        .kubeconfig_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        return vec![crate::clusters::expand_tilde(p)];
+    }
+    match std::env::var("KUBECONFIG")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    {
+        Some(v) => std::env::split_paths(&v).collect(),
+        None => dirs::home_dir()
+            .map(|h| vec![h.join(".kube").join("config")])
+            .unwrap_or_default(),
+    }
+}
+
+/// The fresh cache entry for `cluster` (positive or negative), if any.
+fn fresh_entry(cluster: &K8sCluster) -> Option<Entry> {
+    let fp = fingerprint(cluster);
+    let map = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    let e = map.get(cluster.id.as_str())?;
+    (e.fingerprint == fp
+        && SystemTime::now() < e.fresh_until
+        && e.path.as_ref().is_none_or(|p| p.is_file()))
+    .then(|| e.clone())
 }
 
 /// The token dir: `<data_dir>/kube/tokens`.
@@ -77,30 +160,21 @@ fn overlay_path(data_dir: &Path, cluster_id: &str) -> PathBuf {
 
 /// A still-fresh cached overlay for `cluster` (no process, no Keychain read).
 pub fn cached(cluster: &K8sCluster) -> Option<PathBuf> {
-    if cluster.source != K8sClusterSource::Eks {
-        return None;
-    }
-    let fp = fingerprint(cluster);
-    let map = CACHE.lock().unwrap_or_else(|p| p.into_inner());
-    let e = map.get(cluster.id.as_str())?;
-    (e.fingerprint == fp && SystemTime::now() < e.fresh_until && e.path.is_file())
-        .then(|| e.path.clone())
+    fresh_entry(cluster)?.path
 }
 
-/// The token overlay for an `eks` cluster: cached, or minted now by running
-/// the kubeconfig's exec plugin with `env` (the linked AWS account's
-/// credentials). `None` ⇒ use the original kubeconfig.
+/// The token overlay for a cluster whose context authenticates with an exec
+/// plugin: cached, or minted now by running the plugin with `env` (for `eks`
+/// rows the linked AWS account's credentials; empty otherwise). `None` ⇒ use
+/// the original kubeconfig (no exec plugin, or minting failed recently).
 pub async fn overlay_for(
     program: &str,
     cluster: &K8sCluster,
     env: &[(String, String)],
     data_dir: &Path,
 ) -> Option<PathBuf> {
-    if cluster.source != K8sClusterSource::Eks {
-        return None;
-    }
-    if let Some(p) = cached(cluster) {
-        return Some(p);
+    if let Some(e) = fresh_entry(cluster) {
+        return e.path;
     }
     let gate = MINT
         .lock()
@@ -109,24 +183,35 @@ pub async fn overlay_for(
         .or_default()
         .clone();
     let _g = gate.lock().await;
-    if let Some(p) = cached(cluster) {
-        return Some(p);
+    if let Some(e) = fresh_entry(cluster) {
+        return e.path;
     }
-    match mint(program, cluster, env, data_dir).await {
-        Ok(entry) => {
-            let path = entry.path.clone();
-            CACHE
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(cluster.id.as_str().to_string(), entry);
-            Some(path)
-        }
+    let entry = match mint(program, cluster, env, data_dir).await {
+        Ok(entry) => entry,
         Err(why) => {
             // `why` never carries the token (see `mint`).
-            tracing::debug!(cluster = %cluster.id, "eks token cache skipped: {why}");
-            None
+            let hold = match &why {
+                MintError::NotApplicable(_) => NOT_APPLICABLE_FOR,
+                MintError::Failed(_) => RETRY_AFTER,
+            };
+            // An eks row always has a plugin; for the rest "no exec plugin" is
+            // the common, expected case — not worth a debug line per cluster.
+            if cluster.source == K8sClusterSource::Eks || matches!(why, MintError::Failed(_)) {
+                tracing::debug!(cluster = %cluster.id, "exec token cache skipped: {why}");
+            }
+            Entry {
+                path: None,
+                fresh_until: SystemTime::now() + hold,
+                fingerprint: fingerprint(cluster),
+            }
         }
-    }
+    };
+    let path = entry.path.clone();
+    CACHE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(cluster.id.as_str().to_string(), entry);
+    path
 }
 
 /// Drop the cache entry and delete the overlay file (cluster deleted).
@@ -151,7 +236,10 @@ async fn mint(
     cluster: &K8sCluster,
     env: &[(String, String)],
     data_dir: &Path,
-) -> Result<Entry, String> {
+) -> Result<Entry, MintError> {
+    // Fingerprint BEFORE reading the kubeconfig: an edit racing the mint then
+    // invalidates the entry instead of being masked by it.
+    let fp = fingerprint(cluster);
     // 1. The cluster's minified, flattened kubeconfig (inline CA data; the
     //    exec plugin is NOT run by `config view`).
     let mut args: Vec<String> = Vec::new();
@@ -189,9 +277,11 @@ async fn mint(
     let exec = cfg
         .pointer("/users/0/user/exec")
         .cloned()
-        .ok_or_else(|| "user has no exec plugin".to_string())?;
+        .ok_or_else(|| MintError::NotApplicable("user has no exec plugin".into()))?;
     if exec.get("provideClusterInfo").and_then(Value::as_bool) == Some(true) {
-        return Err("exec plugin wants cluster info".into());
+        return Err(MintError::NotApplicable(
+            "exec plugin wants cluster info".into(),
+        ));
     }
     let (plugin, plugin_args, mut plugin_env) = exec_invocation(&exec)?;
     plugin_env.splice(0..0, env.iter().cloned());
@@ -211,9 +301,16 @@ async fn mint(
         .await
         .map_err(|_| "exec plugin could not run".to_string())?;
     if cred.status != 0 {
-        return Err(format!("exec plugin exited {}", cred.status));
+        return Err(format!("exec plugin exited {}", cred.status).into());
     }
-    let (token, expires) = parse_exec_credential(&cred.stdout)?;
+    let (token, expires) = parse_exec_credential(&cred.stdout).map_err(|why| {
+        if why.contains("has no token") {
+            // A client-certificate credential: kubectl keeps running the plugin.
+            MintError::NotApplicable(why)
+        } else {
+            MintError::Failed(why)
+        }
+    })?;
 
     // 4. Swap every exec user for the static token and persist 0600.
     if let Some(users) = cfg.get_mut("users").and_then(Value::as_array_mut) {
@@ -236,12 +333,12 @@ async fn mint(
     let expires = expires.unwrap_or(now + DEFAULT_LIFETIME);
     let fresh_until = expires.checked_sub(REFRESH_MARGIN).unwrap_or(now);
     if fresh_until <= now {
-        return Err("token already expiring".into());
+        return Err("token already expiring".to_string().into());
     }
     Ok(Entry {
-        path,
+        path: Some(path),
         fresh_until,
-        fingerprint: fingerprint(cluster),
+        fingerprint: fp,
     })
 }
 
@@ -357,6 +454,61 @@ mod tests {
         assert_eq!(args[3], "get-token");
         assert_eq!(env, vec![("AWS_PROFILE".to_string(), "dev".to_string())]);
         assert!(exec_invocation(&json!({"args": []})).is_err());
+    }
+
+    fn kubeconfig_cluster(id: &str, path: &Path) -> K8sCluster {
+        K8sCluster {
+            id: id.into(),
+            name: "c".into(),
+            source: K8sClusterSource::Kubeconfig,
+            kubeconfig_path: Some(path.to_string_lossy().into_owned()),
+            context_name: "ctx".into(),
+            default_namespace: None,
+            aws_account_id: None,
+            environment: otto_core::domain::Environment::Dev,
+            color: None,
+            known_namespaces: Vec::new(),
+            params: json!({}),
+            capabilities: None,
+            created_by: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            last_used_at: None,
+        }
+    }
+
+    /// A non-exec kubeconfig context is remembered as such (no `config view`
+    /// per kubectl call) until the kubeconfig file changes.
+    #[tokio::test]
+    async fn negative_entry_holds_until_the_kubeconfig_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let kc = dir.path().join("config");
+        std::fs::write(&kc, "apiVersion: v1\nkind: Config\n").unwrap();
+        let c = kubeconfig_cluster("neg-1", &kc);
+        CACHE.lock().unwrap().insert(
+            "neg-1".into(),
+            Entry {
+                path: None,
+                fresh_until: SystemTime::now() + NOT_APPLICABLE_FOR,
+                fingerprint: fingerprint(&c),
+            },
+        );
+        assert!(cached(&c).is_none());
+        // Fresh negative ⇒ `overlay_for` returns without running anything
+        // (the program would fail to spawn if it were run).
+        assert!(overlay_for("/nonexistent/kubectl", &c, &[], dir.path())
+            .await
+            .is_none());
+        assert!(fresh_entry(&c).is_some(), "still remembered");
+        // Editing the kubeconfig invalidates the entry.
+        std::fs::File::options()
+            .write(true)
+            .open(&kc)
+            .unwrap()
+            .set_modified(SystemTime::now() + Duration::from_secs(10))
+            .unwrap();
+        assert!(fresh_entry(&c).is_none());
+        forget("neg-1", dir.path());
     }
 
     #[cfg(unix)]

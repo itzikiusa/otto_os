@@ -1,7 +1,8 @@
 //! Settings key/value repository (JSON values).
 
+use crate::DbPool;
 use otto_core::Result;
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 
 use crate::convert::{dberr, json};
 
@@ -67,11 +68,12 @@ pub fn pr_draft_model_from(value: Option<&serde_json::Value>) -> String {
 
 #[derive(Clone)]
 pub struct SettingsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl SettingsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 

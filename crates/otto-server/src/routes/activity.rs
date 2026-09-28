@@ -102,7 +102,7 @@ pub async fn append_trail(
             kind,
             level,
             summary: req.summary,
-            detail: req.detail,
+            detail: cap_trail_detail(req.detail),
         })
         .await
         .map_err(ApiError)?;
@@ -349,7 +349,7 @@ pub async fn claude_ingest(
                 kind: d.kind,
                 level: d.level,
                 summary: d.summary,
-                detail: d.detail,
+                detail: cap_trail_detail(d.detail),
             })
             .await;
     }
@@ -408,7 +408,7 @@ pub async fn codex_ingest(
                 kind: d.kind,
                 level: d.level,
                 summary: d.summary,
-                detail: d.detail,
+                detail: cap_trail_detail(d.detail),
             })
             .await;
     }
@@ -573,6 +573,72 @@ struct Normalized {
     trail: Option<TrailDraft>,
     tasks: Option<Vec<NewTask>>,
     task_op: Option<TaskOp>,
+}
+
+/// Serialized ceiling for a trail entry's `detail` (r3-05-03). The hook
+/// normalizer used to store a tool's WHOLE input — a Write's file `content`,
+/// an Edit's `old_string`/`new_string`, any MCP payload — so a row could be
+/// MBs: persisted in `agent_trail` (1,000 rows × every session), broadcast on
+/// every event socket as `trail_appended`, and kept for 500 rows per session
+/// in each UI document. The schema (migration 0016) says `detail_json` is
+/// "capped by the writer"; this is that cap, applied to every writer in this
+/// module (hook ingest, Codex notify, the manual POST).
+pub(crate) const TRAIL_DETAIL_CAP: usize = 4 * 1024;
+/// A string field longer than this keeps its head plus a length + digest.
+const TRAIL_STR_KEEP: usize = 1024;
+
+/// `s` cut to at most `max` BYTES on a char boundary.
+fn head_bytes(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+fn clip_strings(v: &mut Value) {
+    match v {
+        Value::String(s) if s.len() > TRAIL_STR_KEEP => {
+            use sha2::{Digest, Sha256};
+            let digest = Sha256::digest(s.as_bytes());
+            let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+            *s = format!(
+                "{}… [{} bytes elided, sha256:{hex}]",
+                head_bytes(s, TRAIL_STR_KEEP),
+                s.len()
+            );
+        }
+        Value::Array(a) => a.iter_mut().for_each(clip_strings),
+        Value::Object(o) => o.values_mut().for_each(clip_strings),
+        _ => {}
+    }
+}
+
+/// Bound a trail `detail` to [`TRAIL_DETAIL_CAP`] serialized bytes: long
+/// strings keep a head (+ length + digest); a value still over the cap (many
+/// fields, a huge array) becomes `{"elided":true,"bytes":N,"head":"…"}` with
+/// the head of its JSON. Small details pass through untouched.
+pub(crate) fn cap_trail_detail(detail: Option<Value>) -> Option<Value> {
+    let mut v = detail?;
+    let size = |v: &Value| serde_json::to_vec(v).map(|b| b.len()).unwrap_or(usize::MAX);
+    if size(&v) <= TRAIL_DETAIL_CAP {
+        return Some(v);
+    }
+    clip_strings(&mut v);
+    let n = size(&v);
+    if n <= TRAIL_DETAIL_CAP {
+        return Some(v);
+    }
+    let json = serde_json::to_string(&v).unwrap_or_default();
+    Some(serde_json::json!({
+        "elided": true,
+        "bytes": n,
+        // Half the cap less the stub: JSON-escaping the head can double it.
+        "head": head_bytes(&json, TRAIL_DETAIL_CAP / 2 - 64),
+    }))
 }
 
 /// Truncate `s` to at most `max` chars (char-boundary safe), appending `…`.
@@ -887,6 +953,34 @@ mod tests {
             nudge_pending: false,
             nudged_at: None,
         }
+    }
+
+    #[test]
+    fn trail_detail_is_capped_at_write() {
+        // Small details pass through untouched.
+        let small = json!({"command": "cargo build"});
+        assert_eq!(cap_trail_detail(Some(small.clone())), Some(small));
+        assert_eq!(cap_trail_detail(None), None);
+        // A Write's whole file content keeps a head + length + digest.
+        let big = "é".repeat(50_000); // multi-byte: the cut must stay on a boundary
+        let w = cap_trail_detail(Some(json!({"file_path": "/a.rs", "content": big}))).unwrap();
+        assert!(serde_json::to_vec(&w).unwrap().len() <= TRAIL_DETAIL_CAP);
+        assert_eq!(w["file_path"], "/a.rs");
+        let c = w["content"].as_str().unwrap();
+        assert!(
+            c.contains("100000 bytes elided, sha256:"),
+            "{}",
+            &c[c.len() - 60..]
+        );
+        // Many medium fields: still over the cap after string clipping → one
+        // elided stub carrying the head of the JSON.
+        let many: serde_json::Map<String, Value> = (0..50)
+            .map(|i| (format!("k{i}"), json!("x".repeat(900))))
+            .collect();
+        let m = cap_trail_detail(Some(Value::Object(many))).unwrap();
+        assert_eq!(m["elided"], true);
+        assert!(m["bytes"].as_u64().unwrap() > TRAIL_DETAIL_CAP as u64);
+        assert!(serde_json::to_vec(&m).unwrap().len() <= TRAIL_DETAIL_CAP);
     }
 
     #[test]

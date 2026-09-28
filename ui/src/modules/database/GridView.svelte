@@ -20,7 +20,8 @@
   import { bsonScalar } from './bson';
   import type { QueryResult } from '../../lib/api/types';
   import type { EditFlow } from './EditFlow.svelte';
-  import { cellStr, copyText, isComplex } from './results-format';
+  import { CELL_MAX, cellDisplay, cellStr, clip, copyText, isComplex, previewJson } from './results-format';
+  import { registerFindProvider } from '../../lib/findProviders';
   import { columnKind, moveColumn, rowNumberWidthCh, type ColumnKind } from './grid-format';
   import { buildCell, widthStyle } from './grid-cells';
 
@@ -170,6 +171,38 @@
   function onScroll(): void {
     if (scrollEl) scrollTop = scrollEl.scrollTop;
   }
+
+  // ⌘F over every row (lib/findProviders.ts): the body mounts ~40 of 100k
+  // rows, so find-in-page used to see ~0.05 % of a result. The provider
+  // searches each row's DISPLAYED cell text (the same clip/preview the cells
+  // render, NULL glyphs included) in column display order; the row-number
+  // cell is `data-find-skip`. Mini grids mount every row — the DOM walk is
+  // exact there, so the provider sits out.
+  function findCellText(v: unknown): string {
+    if (v === null || v === undefined) return 'NULL';
+    return isComplex(v) ? clip(previewJson(v, CELL_MAX, expandJson)) : cellDisplay(v);
+  }
+  $effect(() =>
+    registerFindProvider({
+      root: () => scrollEl,
+      active: () => virtualize,
+      count: () => viewRows.length,
+      text: (i) => {
+        const r = viewRows[i];
+        return r ? cols.map((ci) => findCellText(r.row[ci])).join('\t') : '';
+      },
+      reveal: async (i) => {
+        if (!scrollEl) return;
+        scrollEl.scrollTop = Math.max(0, i * ROW_H - (viewportH - HEAD_H) / 2);
+        scrollTop = scrollEl.scrollTop;
+        await tick();
+      },
+      rowElement: (i) => {
+        const r = viewRows[i];
+        return r ? (scrollEl?.querySelector(`tbody td[data-r="${r.idx}"]`)?.parentElement ?? null) : null;
+      },
+    }),
+  );
 
   // ── Column widths ────────────────────────────────────────────────────────────
   // Auto-size each column from header (name OR type — they sit on two lines) +
@@ -659,7 +692,7 @@
           {@attach rowCells(row, idx)}
           {@attach rowWidths}
         >
-          <td class="rownum">
+          <td class="rownum" data-find-skip>
             <span class="sel-slot">
               {#if flow.editable}
                 <input

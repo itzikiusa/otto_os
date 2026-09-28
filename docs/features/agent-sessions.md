@@ -545,12 +545,37 @@ when **all** of these hold:
    to 15 minutes, three times this grace, and suspending it there made the
    engine re-run the whole step in a fresh session.
 4. **Not pinned** — `meta.keep_alive` is not `true`.
-5. **Engine-owned** — the session was started by a background origin: a
-   `meta.work.origin` of `workflow` / `review` / `swarm` / `delegation` /
-   `product` / `personal_agent` / …, **or** a background `meta.source` such as
-   `channel` (the `BACKGROUND_SESSION_SOURCES` list). **Sessions you started
-   yourself from the Agents page are never auto-suspended** — `work.origin` is
-   `manual`, or the row pre-dates that stamp and carries no work ref at all.
+5. **Engine-owned, or past the manual grace** — the session was started by a
+   background origin: a `meta.work.origin` of `workflow` / `review` / `swarm` /
+   `delegation` / `product` / `personal_agent` / …, **or** a background
+   `meta.source` such as `channel` (the `BACKGROUND_SESSION_SOURCES` list).
+   **Sessions you started yourself from the Agents page** (`work.origin` is
+   `manual`, or the row pre-dates that stamp and carries no work ref at all)
+   get a much longer grace instead: they are suspended only after **30
+   minutes** with no PTY output (`MANUAL_IDLE_SUSPEND`, setting
+   `manual_idle_suspend_secs`; `0` = never, the pre-2026-09-28 rule) — and
+   still only when every other guard here passes (no viewer, not pinned, no
+   open turn, no descendant CPU).
+
+   **Opening a session only to look at it does not pin its CLI.** Reopening a
+   suspended session (a terminal attach or a chat view) resumes it with
+   `--resume` so its history repaints. Until somebody actually types into it
+   (or an engine sends it a turn) that process is a *passive resume*: it gets
+   **no** manual grace, only the engine one above, so it is suspended again a
+   few minutes after you leave. Emulator replies an attach produces on its own
+   (cursor/device-attribute answers) do not count as typing. Before this, every
+   session opened since the daemon started kept its agent CLI (150–400 MB of
+   Node plus an MCP sidecar) alive for good.
+
+   **Panes that only show a session never resume it.** Tiles in the tiled
+   grid, the embedded agent-output viewers (code-review, docs, skill-review,
+   skill-eval, product-analysis and workflow agents) and *every* automatic
+   reconnect (a dropped socket, a daemon restart, the window regaining focus)
+   attach view-only (`/ws/term/{id}?view=1`, docs/contracts/ws.md §1). A
+   suspended session shows **Suspended — type or Resume to continue**; the
+   first keystroke (it is not delivered — the CLI is still starting) or the
+   Resume button brings the CLI back. Opening a session in an Agents pane, a
+   loop or a swarm still resumes it as before.
 6. **No open agent turn** — the provider's own on-disk record says the last
    turn finished. For `claude` the tail of the transcript JSONL must end in an
    assistant message with `stop_reason: "end_turn"` and carry no later
@@ -570,6 +595,25 @@ when **all** of these hold:
    the bound, one un-answered notification tail would pin an engine session's
    PTY, agent process and MCP sidecar forever, re-opening the exact fd leak
    that grace exists to close.
+
+**Live-session cap.** After the idle pass the same sweep enforces a soft cap on
+live agent CLIs (every agent provider except the plain `shell`; connection
+terminals don't count): **12** by default, setting `max_live_agent_sessions`
+(`0` = no cap). While more are live it suspends the **least-recently-used**
+ones first — ordered by the later of their last PTY output and their last use
+(typing, a terminal attach or detach, a chat ping). The cap overrides the
+manual grace, but never takes a session that is watched (terminal viewer,
+chat view, engine turn driver), pinned, `working`, printed anything in the
+last 2 minutes (or the idle grace, if set lower), has a busy process tree, has
+a fresh open turn, or cannot be resumed. If everything over the cap is in use
+the cap stays exceeded until the next sweep and the daemon logs
+`live-session cap exceeded`; it never kills work to get under it.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `idle_suspend_grace_secs` | `300` | quiet time before an engine-owned (or passively resumed) session is suspended |
+| `manual_idle_suspend_secs` | `1800` | quiet time before a session you started is suspended; `0` = never |
+| `max_live_agent_sessions` | `12` | soft cap on live agent CLIs; `0` = no cap |
 
 > **Why 5 and 6 exist.** "Idle" here means *no PTY output*, which is not the
 > same as *done*. An agent that hands work to background watchers and
@@ -595,7 +639,7 @@ keeping it resumable."*
 
 **Pin to keep alive:** the ⋯ menu offers *"Pin (keep alive)"* / *"Unpin (allow
 auto-suspend)"* (agent sessions only), toggling `meta.keep_alive`. A pinned
-session is never auto-suspended.
+session is never auto-suspended, by the idle sweep or by the live-session cap.
 
 **Opt-in auto-archive:** set the `session_auto_archive_days` setting to N > 0
 and an hourly sweep archives any non-archived agent session whose

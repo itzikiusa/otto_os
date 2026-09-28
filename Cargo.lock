@@ -3696,6 +3696,8 @@ dependencies = [
  "dirs",
  "futures-util",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "otto-connections",
  "otto-core",
  "otto-pty",
@@ -3985,6 +3987,7 @@ name = "otto-state"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "futures-util",
  "hex",
  "otto-core",
  "serde",

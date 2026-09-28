@@ -100,6 +100,7 @@ pub use connections::{ConnectionsRepo, NewConnection};
 pub use db::open;
 // Re-exported so daemon-side background tasks can name the pool type without
 // taking a direct sqlx dependency.
+pub use pool::DbPool;
 pub use db_explorer::{
     Dashboard, DbExplorerRepo, HistoryEntry, NewSavedQuery, NewWidget, SavedQuery, Widget,
 };
@@ -110,6 +111,8 @@ pub use grants::{capability_for_role, GrantCache, GrantsRepo, GRANT_CACHE_TTL};
 pub use name_themes::{CustomTheme, NameThemesRepo};
 pub use proof::{ProofBlob, ProofRepo, ProofSnapshotRow};
 pub use provider_models::{ProviderModel, ProviderModelsRepo};
+// The raw sqlx pool type, for callers that build their own (tests, tools);
+// daemon code holds a `DbPool`.
 pub use sqlx::SqlitePool;
 // NewRun/RunPatch/NewRunEvent are referenced via the `runs::` path downstream to
 // avoid colliding with swarm's `RunPatch`/`RunFilter` re-exports.
@@ -186,7 +189,7 @@ pub use swarm::{
 };
 pub use users::{UserRecord, UsersRepo};
 pub use workflow_triggers::{NewWorkflowTrigger, TriggersRepo, WorkflowTrigger};
-pub use workflows::WorkflowsRepo;
+pub use workflows::{RunHead, WorkflowsRepo};
 pub use workgraph::{
     ApprovalStatus, ArtifactKind, CountBucket, EdgeRelation, EdgeView, GraphEdge, GraphNode,
     GraphView, MissionFilter, MissionSummary, NewArtifact, NewWorkEvent, RiskLevel, UpsertResult,
@@ -202,3 +205,4 @@ pub mod history_page;
 pub mod workflow_progress;
 
 pub mod network_profiles;
+pub mod pool;

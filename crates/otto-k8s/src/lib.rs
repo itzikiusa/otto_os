@@ -24,7 +24,7 @@ use axum::Router;
 use otto_connections::Spawner;
 use otto_core::event::Event;
 use otto_core::secrets::SecretStore;
-use otto_state::SqlitePool;
+use otto_state::DbPool;
 use tokio::sync::broadcast;
 
 pub mod access;
@@ -46,7 +46,7 @@ pub use resources::{Health, K8sRow, Kind, NodeRow};
 
 /// Server-side context required by the Kubernetes routes.
 pub trait K8sCtx: Clone + Send + Sync + 'static {
-    fn pool(&self) -> SqlitePool;
+    fn pool(&self) -> DbPool;
     fn secrets(&self) -> &Arc<dyn SecretStore>;
     fn events(&self) -> &broadcast::Sender<Event>;
     /// Daemon data dir (`~/Library/Application Support/Otto`); auto-installed

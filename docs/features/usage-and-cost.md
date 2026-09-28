@@ -79,7 +79,7 @@ sessions, and daemon restarts.
 
 | Provider | Transcript glob | Per-turn signal |
 |---|---|---|
-| **Claude Code** | `~/.claude/projects/<enc_cwd>/<session-uuid>.jsonl` | `type=="assistant"` lines carry `message.usage.*`; model at `message.model`. |
+| **Claude Code** | `~/.claude/projects/<enc_cwd>/<session-uuid>.jsonl`, plus subagent transcripts `<session-uuid>/subagents/*.jsonl` (billed to the parent session) | `type=="assistant"` lines carry `message.usage.*`; model at `message.model`. Each API response is counted once by its `message.id:requestId` key, so a subagent response that also appears in the parent file is not double counted. |
 | **Codex** | `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` | `type=="event_msg"` + `payload.type=="token_count"` lines; counts from `payload.info.last_token_usage`. Model from the first `session_meta` line (else `"codex"`). |
 | **agy** | — | **Unsupported** — token usage is encrypted on disk; logged once. |
 

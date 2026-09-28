@@ -3,8 +3,9 @@
 //! `feat/proof-packs` branch's generic ProofPack. The live pack is assembled on
 //! demand by the server; export persists a snapshot here (for audit/share).
 
+use crate::DbPool;
 use chrono::Utc;
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 
 use crate::convert::{dberr, fmt};
 use otto_core::finding::ReviewProofPackExport;
@@ -12,11 +13,12 @@ use otto_core::{new_id, Result};
 
 #[derive(Clone)]
 pub struct ReviewProofPacksRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl ReviewProofPacksRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -86,7 +88,7 @@ impl ReviewProofPacksRepo {
 mod tests {
     use super::*;
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(false);
@@ -96,7 +98,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     #[tokio::test]

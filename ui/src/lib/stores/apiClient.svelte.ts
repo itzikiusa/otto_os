@@ -1121,7 +1121,7 @@ class ApiClientStore {
       };
       let resp: ApiResponse;
       try {
-        resp = await api.post<ApiResponse>(`${base}/execute`, body, signal);
+        resp = await api.long.post<ApiResponse>(`${base}/execute`, body, signal);
       } catch (e) {
         // A stored secret would leave the host it is bound to (e.g. the URL of
         // a saved request was edited before saving): the daemon refuses until
@@ -1136,7 +1136,7 @@ class ApiClientStore {
         const ok = await confirmNewHost(host, { method: reqCtx.method, url: shownUrl, secrets: draftSecrets(draft, env) });
         checkCurrent();
         if (!ok) throw new DOMException('Request canceled', 'AbortError');
-        resp = await api.post<ApiResponse>(`${base}/execute`, { ...body, confirm_new_host: true }, signal);
+        resp = await api.long.post<ApiResponse>(`${base}/execute`, { ...body, confirm_new_host: true }, signal);
       }
       checkCurrent();
       if (ownsView()) this.lastResponse = resp;
@@ -1184,7 +1184,7 @@ class ApiClientStore {
     const q = `query{__schema{queryType{name}mutationType{name}types{name kind fields{name}}}}`;
     this.graphqlIntrospecting = true;
     try {
-      const resp = await api.post<ApiResponse>(`${base}/execute`, {
+      const resp = await api.long.post<ApiResponse>(`${base}/execute`, {
         method: 'POST', url: this.draft.url,
         headers: [{ key: 'Content-Type', value: 'application/json', enabled: true }],
         query: [], body_mode: 'json', body: JSON.stringify({ query: q }),

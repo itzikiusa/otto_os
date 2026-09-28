@@ -7,17 +7,18 @@
 //! through [`RunsRepo::set_status_cas`] (compare-and-set) so a late boot reaper or
 //! a double-approve can never double-advance a run.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::run::{OttoRun, RunEvent, RunMode, RunOrigin, RunStatus, SourceKind};
 use otto_core::{new_id, Error, Id, Result};
 use serde_json::Value;
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 
 use crate::convert::{dberr, fmt, json, ts};
 
 #[derive(Clone)]
 pub struct RunsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 /// Fields for creating a run (status starts `queued`).
@@ -163,7 +164,8 @@ const RESUMABLE_STATUSES: &[&str] = &[
 const INTERRUPTED_STATUSES: &[&str] = &["executing", "reviewing"];
 
 impl RunsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -434,7 +436,7 @@ impl RunsRepo {
 mod tests {
     use super::*;
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -444,10 +446,10 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
-    async fn seed_ws(pool: &SqlitePool) -> Id {
+    async fn seed_ws(pool: &DbPool) -> Id {
         let ws = new_id();
         let now = fmt(Utc::now());
         sqlx::query(

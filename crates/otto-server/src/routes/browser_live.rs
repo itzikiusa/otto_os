@@ -82,7 +82,7 @@ pub fn ws_router(ctx: ServerCtx) -> Router {
 /// What the live runtime needs from the daemon. Holds only the pieces it
 /// uses (no `ServerCtx`, which owns the runtime — no reference cycle).
 pub struct ServerLiveHooks {
-    pub pool: sqlx::SqlitePool,
+    pub pool: otto_state::DbPool,
     pub events: broadcast::Sender<Event>,
     pub mcp: Arc<otto_mcp::McpService>,
 }

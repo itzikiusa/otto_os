@@ -293,12 +293,14 @@ async fn build_view(ctx: &ServerCtx, ws_id: &Id) -> MissionView {
     {
         // One query for the workspace's 20 most recent failed runs (it was
         // `list_runs` — 50 full rows with their node/state JSON — per
-        // workflow, SA-09).
+        // workflow, SA-09). Filtered on the RUN's workspace so it walks
+        // `idx_workflow_runs_ws_status` (0145) instead of every run of every
+        // workflow in the workspace (r3-07-05).
         let rows = sqlx::query(
             "SELECT r.id, r.started_at, w.name
                FROM workflow_runs r
                JOIN workflows w ON w.id = r.workflow_id
-              WHERE w.workspace_id = ? AND r.status = 'error'
+              WHERE r.workspace_id = ? AND r.status = 'error'
               ORDER BY r.started_at DESC
               LIMIT 20",
         )

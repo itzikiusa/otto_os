@@ -3,7 +3,7 @@ use super::*;
 fn row(value: Value) -> ArchiveRow {
     serde_json::from_value(value).unwrap()
 }
-async fn snapshot(pool: &sqlx::SqlitePool) -> StateArchive {
+async fn snapshot(pool: &otto_state::DbPool) -> StateArchive {
     let mut conn = pool.acquire().await.unwrap();
     let tables = schema::schema(&mut conn).await.unwrap();
     let mut records = BTreeMap::new();
@@ -29,7 +29,7 @@ async fn snapshot(pool: &sqlx::SqlitePool) -> StateArchive {
         reconnect: reconnect.into_iter().collect(),
     }
 }
-async fn fixture(pool: &sqlx::SqlitePool) {
+async fn fixture(pool: &otto_state::DbPool) {
     for statement in [
         "INSERT INTO users(id,username,password_hash,is_root,created_at) VALUES('old-user','same-name','do-not-export',1,'now')",
         "INSERT INTO workspaces(id,name,root_path,created_at) VALUES('ws','Test','/external/repo','now')",
@@ -138,7 +138,7 @@ async fn preview_binding_ignores_unrelated_rows_but_changes_on_import_conflict()
     let target = otto_state::db::test_pool().await;
     let dir = tempfile::tempdir().unwrap();
     async fn signature(
-        pool: &sqlx::SqlitePool,
+        pool: &otto_state::DbPool,
         dir: &std::path::Path,
         archive: &StateArchive,
     ) -> String {

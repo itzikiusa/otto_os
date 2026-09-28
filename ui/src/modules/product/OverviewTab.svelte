@@ -3,6 +3,7 @@
   // badge, issue_type, a version dropdown (with body_md rendering), Refresh
   // button, watch toggle, and (for Jira stories) a rich section with status,
   // assignee, details, linked issues, comments, history, and attachments.
+  import { untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -22,6 +23,7 @@
   import { guardUnsaved } from '../../lib/leaveGuard';
   import { ctxMenu, type MenuItem, type MenuOptions } from '../../lib/contextmenu.svelte';
   import PublishDialog from './PublishDialog.svelte';
+  import { reseedDraft, type DraftSeed } from './draftSeed';
   import SwarmLinkCard from './SwarmLinkCard.svelte';
   import type { ProductTranscript } from './types';
   import AttachmentsPanel from './AttachmentsPanel.svelte';
@@ -285,17 +287,35 @@
     };
   });
 
+  // Seed the draft form ONCE per story, then only per UNEDITED field
+  // (r3-02-07). `product.detail` is replaced by updateStory / patchStory /
+  // loadDetail / ActionCard; re-seeding on every replacement overwrote the
+  // user's unsaved draft and collapsed the transcripts. Plain (non-reactive)
+  // bookkeeping: the story id + the values last seeded into each field.
+  let seeded: DraftSeed = { id: null, title: '', body: '' };
   $effect(() => {
-    // Seed draft edit fields from the live source version.
-    if (isDraft && story && source) {
-      draftTitle = story.title;
-      draftBody = source.body_md ?? '';
-    }
-    // Reset transcript state.
-    transcriptsLoaded = false;
-    newTranscriptTitle = '';
-    newTranscriptBody = '';
-    expandedTranscripts = {};
+    const s = story;
+    const src = source;
+    const draft = isDraft;
+    untrack(() => {
+      const id = s?.id ?? null;
+      if (id !== seeded.id) {
+        // A different story: reset transcript state too.
+        transcriptsLoaded = false;
+        newTranscriptTitle = '';
+        newTranscriptBody = '';
+        expandedTranscripts = {};
+      }
+      if (!draft || !s || !src) {
+        seeded = { ...seeded, id };
+        return;
+      }
+      const next: DraftSeed = { id, title: s.title, body: src.body_md ?? '' };
+      const form = reseedDraft(seeded, { title: draftTitle, body: draftBody }, next);
+      draftTitle = form.title;
+      draftBody = form.body;
+      seeded = next;
+    });
   });
 
   $effect(() => {

@@ -488,6 +488,7 @@
             showZoom={true}
             showGrip={ordered.length > 1}
             scrollback={TILE_SCROLLBACK}
+            resumeOnOpen={false}
             dragKey={s.id}
             ondragpane={(phase) => (tileDragId = phase === 'start' ? s.id : null)}
             onfocus={() => {

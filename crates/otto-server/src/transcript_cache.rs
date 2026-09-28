@@ -165,7 +165,12 @@ enum Entry {
 struct Inner {
     entries: Mutex<HashMap<Identity, Entry>>,
     permits: Arc<Semaphore>,
+    /// Armed on the first `get` (inside the runtime); see [`TranscriptCache::sweep`].
+    janitor: std::sync::OnceLock<()>,
 }
+
+/// How often the janitor releases idle folds.
+const SWEEP_EVERY: Duration = Duration::from_secs(60);
 #[derive(Clone)]
 pub struct TranscriptCache {
     inner: Arc<Inner>,
@@ -176,16 +181,55 @@ impl Default for TranscriptCache {
             inner: Arc::new(Inner {
                 entries: Mutex::new(HashMap::new()),
                 permits: Arc::new(Semaphore::new(2)),
+                janitor: std::sync::OnceLock::new(),
             }),
         }
     }
 }
 impl TranscriptCache {
+    /// Release folds idle for [`IDLE`]. The idle rule used to run only inside
+    /// `get`, so after a burst of big transcripts up to 128 MiB of folds stayed
+    /// resident until the NEXT transcript read — possibly days (r3-05-04).
+    /// Returns how many entries were dropped.
+    pub fn sweep(&self) -> usize {
+        let mut entries = self.inner.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let before = entries.len();
+        entries.retain(
+            |_, entry| !matches!(entry, Entry::Ready{touched,..} if touched.elapsed() >= IDLE),
+        );
+        if entries.is_empty() {
+            entries.shrink_to_fit();
+        }
+        before - entries.len()
+    }
+
+    /// Start the periodic sweep once, holding only a weak handle: the task
+    /// ends when the cache is dropped.
+    fn ensure_janitor(&self) {
+        if self.inner.janitor.get().is_some() {
+            return;
+        }
+        let weak = Arc::downgrade(&self.inner);
+        self.inner.janitor.get_or_init(|| {
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(SWEEP_EVERY);
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                tick.tick().await;
+                loop {
+                    tick.tick().await;
+                    let Some(inner) = weak.upgrade() else { break };
+                    TranscriptCache { inner }.sweep();
+                }
+            });
+        });
+    }
+
     pub async fn get(
         &self,
         key: CacheKey,
         build: impl FnOnce() -> Result<Snapshot> + Send + 'static,
     ) -> Result<Arc<Snapshot>> {
+        self.ensure_janitor();
         let key2 = key.clone();
         let stamp = tokio::task::spawn_blocking(move || key2.stamp())
             .await
@@ -350,6 +394,36 @@ mod tests {
             })
         }
     }
+    #[tokio::test]
+    async fn sweep_releases_idle_folds_without_another_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key(&dir, "a.jsonl");
+        let cache = TranscriptCache::default();
+        cache
+            .get(key.clone(), build(&key, Arc::new(AtomicUsize::new(0))))
+            .await
+            .unwrap();
+        assert_eq!(cache.sweep(), 0, "a fresh fold stays");
+        {
+            let mut entries = cache.inner.entries.lock().unwrap();
+            for entry in entries.values_mut() {
+                if let Entry::Ready { touched, .. } = entry {
+                    *touched = Instant::now() - IDLE - Duration::from_secs(1);
+                }
+            }
+        }
+        assert_eq!(
+            cache.sweep(),
+            1,
+            "an idle fold is released by the sweep alone"
+        );
+        assert!(cache.inner.entries.lock().unwrap().is_empty());
+        assert!(
+            cache.inner.janitor.get().is_some(),
+            "the first get armed the janitor"
+        );
+    }
+
     #[tokio::test]
     async fn unchanged_pages_reuse_one_real_file_fold() {
         let dir = tempfile::tempdir().unwrap();

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { dialogFocus } from '../../lib/dialogFocus';
   import { branchTracking } from './refTracking';
+  import { planSection } from './ref-budget';
   // Two-pane: LEFT = refs tree (local/remote/tags), MIDDLE = commit graph, RIGHT = commit detail/diff.
   import { untrack } from 'svelte';
   import { api, isDirtyGitRefusal } from '../../lib/api/client';
@@ -22,6 +23,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { confirmOutward } from '../../lib/confirmOutward';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { startMouseDrag } from '../../lib/dragCursor';
   import { git } from '../../lib/stores/git.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -231,7 +233,10 @@
   });
 
   // A repo with thousands of `origin/*` branches must not mount thousands of
-  // rows: each list / folder shows LEAF_PAGE rows, then a "Show more" row.
+  // rows. The budget is per SECTION (LOCAL / REMOTE / TAGS), shared by loose
+  // leaves, folder headers and expanded folders' leaves — a per-folder cap
+  // bounded nothing when the branches sit under many prefix folders
+  // (r3-03-02). Past the budget one "Show more" row grows it.
   const LEAF_PAGE = 150;
   let leafLimits = $state<Record<string, number>>({});
   function leafLimit(key: string): number {
@@ -240,6 +245,16 @@
   function showMoreLeaves(key: string): void {
     leafLimits = { ...leafLimits, [key]: leafLimit(key) + LEAF_PAGE * 4 };
   }
+  const localPlan = $derived(
+    planSection(groupedLocal.loose, groupedLocal.folders, leafLimit('local:'), (n) =>
+      collapsedFolders.has(folderKey('local', n)),
+    ),
+  );
+  const remotePlan = $derived(
+    planSection(groupedRemote.loose, groupedRemote.folders, leafLimit('remote:'), (n) =>
+      collapsedFolders.has(folderKey('remote', n)),
+    ),
+  );
 
   let checkoutBusy = $state('');
   /** Path of the worktree currently being opened as a git tab (busy guard). */
@@ -2570,25 +2585,21 @@
   // right edge lets the user widen it to read them. Mirrors startListResize.
   let sideResizing = $state(false);
   function startSideResize(e: MouseEvent): void {
-    e.preventDefault();
     sideResizing = true;
     const startX = e.clientX;
     const startW = ui.gitGraphSideWidth;
     // Under RTL the sidebar sits on the right, so dragging left widens it.
     const dir = document.dir === 'rtl' ? -1 : 1;
-    const onMove = (ev: MouseEvent) =>
-      ui.setGitGraphSideWidth(startW + dir * (ev.clientX - startX));
-    const onUp = () => {
-      sideResizing = false;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
+    // lib/dragCursor (r3-03-08): overlay cursor instead of an inherited
+    // body.style write, one width write per frame, one persist on release.
+    startMouseDrag(e, {
+      cursor: 'col-resize',
+      onMove: (ev) => ui.setGitGraphSideWidth(startW + dir * (ev.clientX - startX), false),
+      onEnd: () => {
+        sideResizing = false;
+        ui.setGitGraphSideWidth(ui.gitGraphSideWidth);
+      },
+    });
   }
 
   // Middle-ellipsize a long branch leaf so the DISTINGUISHING SUFFIX stays visible
@@ -2665,22 +2676,17 @@
   }
 
   function startListResize(e: MouseEvent): void {
-    e.preventDefault();
     listResizing = true;
     const startX = e.clientX;
     const startW = ui.gitGraphListWidth;
-    const onMove = (ev: MouseEvent) => ui.setGitGraphListWidth(startW + (ev.clientX - startX));
-    const onUp = () => {
-      listResizing = false;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
+    startMouseDrag(e, {
+      cursor: 'col-resize',
+      onMove: (ev) => ui.setGitGraphListWidth(startW + (ev.clientX - startX), false),
+      onEnd: () => {
+        listResizing = false;
+        ui.setGitGraphListWidth(ui.gitGraphListWidth);
+      },
+    });
   }
 
   // Single-click a popover row → select the commit (this lights up the branch's
@@ -2955,11 +2961,11 @@
         </button>
       {/snippet}
 
-      <!-- "Show more" for a list/folder capped at LEAF_PAGE rows. -->
-      {#snippet moreLeaves(key: string, total: number)}
-        {#if total > leafLimit(key)}
+      <!-- "Show more" for a section past its row budget. -->
+      {#snippet moreLeaves(key: string, hidden: number)}
+        {#if hidden > 0}
           <button class="ref-more-leaves" onclick={() => showMoreLeaves(key)}>
-            <span class="dim">Show {Math.min(total - leafLimit(key), LEAF_PAGE * 4)} more ({total - leafLimit(key)} hidden)</span>
+            <span class="dim">Show {Math.min(hidden, LEAF_PAGE * 4)} more ({hidden} hidden)</span>
           </button>
         {/if}
       {/snippet}
@@ -2976,22 +2982,21 @@
           {#if refs.local.length === 0}
             <div class="dim ref-empty">No local branches</div>
           {/if}
-          {#each groupedLocal.loose.slice(0, leafLimit('local:')) as leaf (leaf.b.name)}
+          {#each groupedLocal.loose.slice(0, localPlan.loose) as leaf (leaf.b.name)}
             {@render localRow(leaf, false)}
           {/each}
-          {@render moreLeaves('local:', groupedLocal.loose.length)}
-          {#each groupedLocal.folders as folder (folder.name)}
+          {#each localPlan.folders as { folder, shown } (folder.name)}
             {@const fk = folderKey('local', folder.name)}
             {@render folderHeader('local', folder)}
-            {#if !collapsedFolders.has(fk)}
+            {#if !collapsedFolders.has(fk) && shown > 0}
               <div class="folder-children">
-                {#each folder.leaves.slice(0, leafLimit(fk)) as leaf (leaf.b.name)}
+                {#each folder.leaves.slice(0, shown) as leaf (leaf.b.name)}
                   {@render localRow(leaf, true)}
                 {/each}
-                {@render moreLeaves(fk, folder.leaves.length)}
               </div>
             {/if}
           {/each}
+          {@render moreLeaves('local:', localPlan.hidden)}
         {/if}
       </div>
 
@@ -3007,22 +3012,21 @@
           {#if refs.remote.length === 0}
             <div class="dim ref-empty">No remote branches</div>
           {/if}
-          {#each groupedRemote.loose.slice(0, leafLimit('remote:')) as leaf (leaf.b.name)}
+          {#each groupedRemote.loose.slice(0, remotePlan.loose) as leaf (leaf.b.name)}
             {@render remoteRow(leaf, false)}
           {/each}
-          {@render moreLeaves('remote:', groupedRemote.loose.length)}
-          {#each groupedRemote.folders as folder (folder.name)}
+          {#each remotePlan.folders as { folder, shown } (folder.name)}
             {@const fk = folderKey('remote', folder.name)}
             {@render folderHeader('remote', folder)}
-            {#if !collapsedFolders.has(fk)}
+            {#if !collapsedFolders.has(fk) && shown > 0}
               <div class="folder-children">
-                {#each folder.leaves.slice(0, leafLimit(fk)) as leaf (leaf.b.name)}
+                {#each folder.leaves.slice(0, shown) as leaf (leaf.b.name)}
                   {@render remoteRow(leaf, true)}
                 {/each}
-                {@render moreLeaves(fk, folder.leaves.length)}
               </div>
             {/if}
           {/each}
+          {@render moreLeaves('remote:', remotePlan.hidden)}
         {/if}
       </div>
 
@@ -3035,7 +3039,7 @@
           <span class="ref-count">{refs.tags.length}</span>
         </button>
         {#if tagsOpen}
-          {#each refs.tags as t (t.name)}
+          {#each refs.tags.slice(0, leafLimit('tags:')) as t (t.name)}
             <div
               class="ref-row tag"
               class:ref-row-busy={revealBusy === t.name}
@@ -3072,6 +3076,7 @@
           {:else}
             <div class="dim ref-empty">No tags</div>
           {/each}
+          {@render moreLeaves('tags:', refs.tags.length - Math.min(refs.tags.length, leafLimit('tags:')))}
         {/if}
       </div>
 

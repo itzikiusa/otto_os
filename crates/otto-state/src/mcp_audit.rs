@@ -6,27 +6,48 @@
 //! best-effort: a failed audit insert must never fail the tool call, so callers
 //! log and swallow the error. `args_json` is redacted (`otto_core::redact`)
 //! before it reaches here, so no raw secret is persisted. It is also SHAPED
-//! here ([`cap_args_json`]): any string value over [`ARG_STRING_CAP`] chars is
-//! cut to a [`ARG_STRING_KEEP`]-char prefix plus a `…[N chars truncated]`
-//! marker. The ledger records *that* a tool was called and with what shape —
-//! not full note/file bodies (`otto_vault_write*` alone stored 120 MB).
+//! here ([`cap_args_json`]) so the ledger stays bounded WITHOUT hiding what
+//! was called (r3-10-04 — a 200-char prefix let a destructive statement
+//! padded past 1 KB vanish from the audit):
+//! - any string value over [`ARG_STRING_CAP`] chars keeps its first AND last
+//!   [`ARG_STRING_EDGE`] chars around a `…[truncated: N chars, sha256 H]…`
+//!   marker (N = the original length, H = the sha256 of the full value), so
+//!   a padded tail stays visible and the full value stays verifiable;
+//! - the whole document is capped at [`ARGS_JSON_MAX_BYTES`]: past it the
+//!   row stores `{"_otto_truncated":true,"bytes":N,"sha256":H,"head":…,
+//!   "tail":…}` (head/tail of the shaped JSON text).
+//!
+//! The ledger records *that* a tool was called and with what shape — not full
+//! note/file bodies (`otto_vault_write*` alone stored 120 MB).
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::{new_id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 
 use crate::convert::{dberr, fmt};
 
 /// String values longer than this (in chars) are truncated before insert.
 pub const ARG_STRING_CAP: usize = 1024;
-/// Chars kept from a truncated string value.
-pub const ARG_STRING_KEEP: usize = 200;
+/// Chars kept from EACH end (head and tail) of a truncated string value.
+pub const ARG_STRING_EDGE: usize = 512;
+/// Hard cap on the stored `args_json` (bytes) after per-string shaping —
+/// 10k short strings would otherwise still store megabytes.
+pub const ARGS_JSON_MAX_BYTES: usize = 16 * 1024;
+/// Bytes of the shaped document kept at the head / tail (on char
+/// boundaries) when the whole document is over [`ARGS_JSON_MAX_BYTES`]. The
+/// stored marker is ≈ these + JSON escaping of the kept text.
+const DOC_HEAD_BYTES: usize = 8 * 1024;
+const DOC_TAIL_BYTES: usize = 4 * 1024;
 
-/// Shape `args_json` for storage: every JSON string value (at any depth; object
-/// keys are left alone) longer than [`ARG_STRING_CAP`] chars becomes its first
-/// [`ARG_STRING_KEEP`] chars + `"…[N chars truncated]"`. The result is always
-/// valid JSON: input that doesn't parse and is itself over the cap is stored as
-/// a truncated JSON string.
+fn sha256_hex(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(s.as_bytes()))
+}
+
+/// Shape `args_json` for storage (see the module doc). The result is always
+/// valid JSON: input that doesn't parse and is itself over the cap is stored
+/// as a truncated JSON string. Also used for `mcp_call_log.args_redacted_json`.
 pub fn cap_args_json(args_json: &str) -> String {
     fn shape(v: &mut serde_json::Value) -> bool {
         match v {
@@ -46,7 +67,7 @@ pub fn cap_args_json(args_json: &str) -> String {
     if args_json.len() <= ARG_STRING_CAP {
         return args_json.to_string();
     }
-    match serde_json::from_str::<serde_json::Value>(args_json) {
+    let shaped = match serde_json::from_str::<serde_json::Value>(args_json) {
         Ok(mut v) => {
             if shape(&mut v) {
                 serde_json::to_string(&v).unwrap_or_else(|_| args_json.to_string())
@@ -58,19 +79,47 @@ pub fn cap_args_json(args_json: &str) -> String {
             let t = truncate_str(args_json).unwrap_or_else(|| args_json.to_string());
             serde_json::Value::String(t).to_string()
         }
-    }
+    };
+    cap_doc(shaped, args_json)
 }
 
-/// `Some(prefix + marker)` when `s` is over the cap, else `None`.
+/// Whole-document bound: over [`ARGS_JSON_MAX_BYTES`] → a marker object with
+/// the byte length and sha256 of the ORIGINAL input plus head/tail of the
+/// shaped text (so both ends of a huge argument list stay readable).
+fn cap_doc(shaped: String, original: &str) -> String {
+    if shaped.len() <= ARGS_JSON_MAX_BYTES {
+        return shaped;
+    }
+    let mut h = DOC_HEAD_BYTES.min(shaped.len());
+    while !shaped.is_char_boundary(h) {
+        h -= 1;
+    }
+    let mut t = shaped.len().saturating_sub(DOC_TAIL_BYTES);
+    while !shaped.is_char_boundary(t) {
+        t += 1;
+    }
+    let (head, tail) = (&shaped[..h], &shaped[t..]);
+    serde_json::json!({
+        "_otto_truncated": true,
+        "bytes": original.len(),
+        "sha256": sha256_hex(original),
+        "head": head,
+        "tail": tail,
+    })
+    .to_string()
+}
+
+/// `Some(head + marker + tail)` when `s` is over the cap, else `None`.
 fn truncate_str(s: &str) -> Option<String> {
     let total = s.chars().count();
     if total <= ARG_STRING_CAP {
         return None;
     }
-    let prefix: String = s.chars().take(ARG_STRING_KEEP).collect();
+    let head: String = s.chars().take(ARG_STRING_EDGE).collect();
+    let tail: String = s.chars().skip(total - ARG_STRING_EDGE).collect();
     Some(format!(
-        "{prefix}…[{} chars truncated]",
-        total - ARG_STRING_KEEP
+        "{head}…[truncated: {total} chars, sha256 {}]…{tail}",
+        sha256_hex(s)
     ))
 }
 
@@ -119,11 +168,12 @@ fn row_to_call(r: &sqlx::sqlite::SqliteRow) -> McpToolCallRow {
 
 #[derive(Clone)]
 pub struct McpAuditRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl McpAuditRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -177,7 +227,7 @@ mod tests {
     use super::*;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -187,7 +237,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     #[test]
@@ -200,11 +250,18 @@ mod tests {
         assert_eq!(out["path"], "a.md");
         assert_eq!(out["n"], 3);
         let c = out["content"].as_str().unwrap();
-        assert!(c.starts_with(&"x".repeat(200)));
-        assert!(c.ends_with("…[4800 chars truncated]"), "{c}");
+        assert!(c.starts_with(&"x".repeat(ARG_STRING_EDGE)));
+        assert!(c.ends_with(&"x".repeat(ARG_STRING_EDGE)));
+        assert!(
+            c.contains(&format!(
+                "…[truncated: 5000 chars, sha256 {}]…",
+                sha256_hex(&body)
+            )),
+            "{c}"
+        );
         let k = out["nested"][0]["k"].as_str().unwrap();
         assert!(
-            k.ends_with("…[1300 chars truncated]"),
+            k.contains("…[truncated: 1500 chars,"),
             "multi-byte counted in chars"
         );
         // Short / at-cap values are untouched byte-for-byte.
@@ -215,7 +272,44 @@ mod tests {
         // Non-JSON over the cap is still stored as valid JSON.
         let raw = "z".repeat(3_000);
         let v: serde_json::Value = serde_json::from_str(&cap_args_json(&raw)).unwrap();
-        assert!(v.as_str().unwrap().ends_with("…[2800 chars truncated]"));
+        assert!(v.as_str().unwrap().contains("…[truncated: 3000 chars,"));
+    }
+
+    /// r3-10-04: a destructive statement padded past the cap must stay
+    /// visible in the ledger (the old 200-char prefix dropped it).
+    #[test]
+    fn padded_payload_keeps_its_tail_visible() {
+        let sql = format!("{}\nDROP TABLE users;", "-- padding\n".repeat(200));
+        let arg = serde_json::json!({"connection_id": "c1", "sql": sql}).to_string();
+        let out: serde_json::Value = serde_json::from_str(&cap_args_json(&arg)).unwrap();
+        let stored = out["sql"].as_str().unwrap();
+        assert!(stored.len() < sql.len());
+        assert!(stored.ends_with("DROP TABLE users;"), "{stored}");
+        assert!(stored.contains(&sha256_hex(&sql)));
+    }
+
+    #[test]
+    fn whole_document_is_byte_capped_with_both_ends() {
+        // 10k short strings: no single value is over the cap, but the row is.
+        let many: Vec<String> = (0..10_000)
+            .map(|i| format!("item-{i:05}-{}", "p".repeat(900)))
+            .collect();
+        let arg = serde_json::json!({"items": many, "last": "DROP"}).to_string();
+        let stored = cap_args_json(&arg);
+        assert!(
+            stored.len() <= ARGS_JSON_MAX_BYTES + 1024,
+            "{}",
+            stored.len()
+        );
+        let v: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(v["_otto_truncated"], true);
+        assert_eq!(v["bytes"], arg.len());
+        assert_eq!(v["sha256"], sha256_hex(&arg));
+        assert!(v["head"]
+            .as_str()
+            .unwrap()
+            .starts_with("{\"items\":[\"item-00000"));
+        assert!(v["tail"].as_str().unwrap().contains("\"last\":\"DROP\""));
     }
 
     #[tokio::test]

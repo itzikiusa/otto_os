@@ -54,6 +54,36 @@ impl EventFrame {
     }
 }
 
+/// Bytes of frame text a socket may write back to back before handing its
+/// worker back (see [`Pacer`]): about one big frame. Serializing 64 KB of
+/// event JSON is ~5 ms in a debug build, well under a millisecond in release.
+pub const PACE_BYTES: usize = 64 * 1024;
+
+/// Cooperative pacing for a socket draining a backlog (r3-10-02). A burst of
+/// queued events (a flood of trail/status events) is otherwise serialized and
+/// written in ONE uninterrupted stretch — `recv` on a ready channel and a
+/// writable sink never yield — measured at ~200 ms of blocked worker for
+/// 200 × 64 KB in a debug build. Yield once per [`PACE_BYTES`] written.
+#[derive(Debug, Default)]
+pub struct Pacer {
+    since_yield: usize,
+}
+
+impl Pacer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record `bytes` just written; yields when the stretch reached the pace.
+    pub async fn sent(&mut self, bytes: usize) {
+        self.since_yield = self.since_yield.saturating_add(bytes);
+        if self.since_yield >= PACE_BYTES {
+            self.since_yield = 0;
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
 /// What a socket receives from the fan-out.
 #[derive(Clone)]
 pub enum FanItem {

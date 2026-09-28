@@ -7,6 +7,7 @@
   import { untrack } from 'svelte';
   import { dialogFocus } from '../../lib/dialogFocus';
   import { api } from '../../lib/api/client';
+  import { mapLimit } from '../../lib/poll';
   import type {
     GitAccount,
     IssueAccount,
@@ -52,12 +53,18 @@
       const candidates = git.allRepos.filter(
         (r) => r.forge && r.forge !== 'unrecognized',
       );
-      const settled = await Promise.allSettled(
-        candidates.map(async (repo) => {
-          const page = await api.get<PrListResp>(`/repos/${repo.id}/prs?state=open`);
-          return page.items.map((pr) => ({ repo, pr }));
-        }),
-      );
+      // One provider API call per repo (0.5–3 s each) across every workspace:
+      // at most 2 at a time, on the background lane (r3-04-05). The old
+      // unbounded fan-out filled the alias host's six sockets for ~(R/6) ×
+      // provider latency, stalling every poll, git auto-fetch and DB "Run".
+      const settled = await mapLimit(candidates, 2, async (repo): Promise<PromiseSettledResult<PrRow[]>> => {
+        try {
+          const page = await api.bg.get<PrListResp>(`/repos/${repo.id}/prs?state=open`);
+          return { status: 'fulfilled', value: page.items.map((pr) => ({ repo, pr })) };
+        } catch (reason) {
+          return { status: 'rejected', reason };
+        }
+      });
       const rows: PrRow[] = [];
       for (const s of settled) {
         if (s.status === 'fulfilled') rows.push(...s.value);

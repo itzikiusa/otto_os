@@ -13,13 +13,14 @@ use otto_core::domain::{
     ApiHistorySummary, ApiRequest,
 };
 use otto_core::{new_id, Id, Result};
-use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
+use sqlx::{QueryBuilder, Row, Sqlite};
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json, ts};
 
 #[derive(Clone)]
 pub struct ApiClientRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 // --- inputs -----------------------------------------------------------------
@@ -169,7 +170,8 @@ fn row_to_automation(r: &sqlx::sqlite::SqliteRow) -> Result<ApiAutomation> {
 }
 
 impl ApiClientRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -652,6 +654,37 @@ impl ApiClientRepo {
         rows.iter().map(row_to_history).collect()
     }
 
+    /// The URLs the agent "new host" check needs, and nothing else (r3-07-06:
+    /// it loaded every saved request with bodies, scripts and docs plus 500
+    /// full history rows — request and ≤64 KB response JSON each — to read one
+    /// field): the raw `url` of every saved request NOT stamped as agent
+    /// authored (`extras.agent` is an object), and the distinct urls of the
+    /// newest 500 human / legacy runs (`source_kind`, index
+    /// `api_history_workspace_source_time`). Request urls are returned
+    /// unsubstituted; the caller applies its variables.
+    pub async fn known_host_urls(&self, ws: &Id) -> Result<(Vec<String>, Vec<String>)> {
+        let requests: Vec<String> = sqlx::query_scalar(
+            "SELECT url FROM api_requests WHERE workspace_id = ? \
+               AND (CASE WHEN json_valid(extras_json) \
+                         THEN json_type(extras_json, '$.agent') END) IS NOT 'object'",
+        )
+        .bind(ws)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("api request urls"))?;
+        let history: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT url FROM ( \
+               SELECT url FROM api_history \
+                WHERE workspace_id = ? AND source_kind = 'human' \
+                ORDER BY executed_at DESC, id DESC LIMIT 500)",
+        )
+        .bind(ws)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("api history urls"))?;
+        Ok((requests, history))
+    }
+
     /// Explicit scalar projection: never reads retained request/response bodies.
     pub async fn list_history_summaries(
         &self,
@@ -800,8 +833,8 @@ mod tests {
     use otto_core::new_id;
     use serde_json::json as jval;
 
-    async fn setup() -> (SqlitePool, Id) {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+    async fn setup() -> (DbPool, Id) {
+        let pool = DbPool::connect("sqlite::memory:").await.unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
         // A workspace row is required for the FK.
         let ws = new_id();
@@ -1392,7 +1425,7 @@ mod tests {
 
     #[tokio::test]
     async fn history_summary_backfill_preserves_original_bytes_and_filter_types() {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let pool = DbPool::connect("sqlite::memory:").await.unwrap();
         sqlx::raw_sql("CREATE TABLE api_history(id TEXT PRIMARY KEY,workspace_id TEXT,executed_at TEXT,request_json TEXT,response_json TEXT)").execute(&pool).await.unwrap();
         let samples = [
             (
@@ -1439,4 +1472,69 @@ mod tests {
             assert!(!rows.iter().any(|r| r.get::<String,_>("detail").contains("TEMP B-TREE")));
         }
     }
+
+    /// r3-07-06: the narrow url read returns exactly what the old
+    /// full-row path used — non-agent saved requests, human + legacy runs
+    /// (agent runs excluded), distinct, bounded to the newest 500 runs.
+    #[tokio::test]
+    async fn known_host_urls_selects_human_requests_and_runs() {
+        let (pool, ws) = setup().await;
+        let repo = ApiClientRepo::new(pool.clone());
+        let req = |name: &str, url: &str, extras: Option<serde_json::Value>| NewApiRequest {
+            id: None,
+            workspace_id: ws.clone(),
+            collection_id: None,
+            name: name.into(),
+            method: "GET".into(),
+            url: url.into(),
+            headers: jval!([]),
+            query: jval!([]),
+            body_mode: "none".into(),
+            body: String::new(),
+            auth: jval!({}),
+            ssh_connection_id: None,
+            extras,
+            position: 0,
+        };
+        repo.create_request(req("human", "https://{{host}}/v1", None)).await.unwrap();
+        repo.create_request(req("docs", "https://docs.test/v1", Some(jval!({"docs":"x"}))))
+            .await
+            .unwrap();
+        repo.create_request(req(
+            "agent",
+            "https://agent-only.test/v1",
+            Some(jval!({"agent":{"session_id":"s1"}})),
+        ))
+        .await
+        .unwrap();
+        for (url, source) in [
+            ("https://human-run.test/x", Some("human")),
+            ("https://human-run.test/x", Some("human")),
+            ("https://agent-run.test/x", Some("agent")),
+            ("https://legacy.test/x", None),
+        ] {
+            let request = match source {
+                Some(kind) => jval!({"source":{"kind":kind}}),
+                None => jval!({}),
+            };
+            repo.insert_history(NewApiHistory {
+                workspace_id: ws.clone(),
+                method: "GET".into(),
+                url: url.into(),
+                status: Some(200),
+                duration_ms: Some(1),
+                request,
+                response: jval!({"body":"x".repeat(1000)}),
+            })
+            .await
+            .unwrap();
+        }
+        let (mut requests, mut history) = repo.known_host_urls(&ws).await.unwrap();
+        requests.sort();
+        history.sort();
+        assert_eq!(requests, vec!["https://docs.test/v1", "https://{{host}}/v1"]);
+        assert_eq!(history, vec!["https://human-run.test/x", "https://legacy.test/x"]);
+        assert_eq!(repo.known_host_urls(&new_id()).await.unwrap(), (vec![], vec![]));
+    }
+
 }

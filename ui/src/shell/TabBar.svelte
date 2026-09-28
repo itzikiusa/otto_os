@@ -15,7 +15,6 @@
   import PaneControls from '../lib/components/PaneControls.svelte';
   import { ctxMenu } from '../lib/contextmenu.svelte';
   import { popoutItems } from '../lib/popoutMenu';
-  import ShareModal from '../modules/agents/ShareModal.svelte';
   import { confirmer } from '../lib/confirm.svelte';
   import { toasts } from '../lib/toast.svelte';
   import type { MenuItem } from '../lib/contextmenu.svelte';
@@ -612,5 +611,7 @@
 </style>
 
 {#if shareSessionId}
-  <ShareModal sessionId={shareSessionId} onclose={() => (shareSessionId = null)} />
+  <!-- Loaded on first use: it bundles the QR encoder (not shell code). -->
+  {@const id = shareSessionId}
+  {#await import('../modules/agents/ShareModal.svelte') then m}<m.default sessionId={id} onclose={() => (shareSessionId = null)} />{/await}
 {/if}

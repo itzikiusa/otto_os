@@ -171,6 +171,77 @@ jobs:
       - name: npm run build
         run: npm run build
 
+  # A SMALL, fast subset of the Playwright perf gates on WebKit — the engine
+  # closest to the app's WKWebView — against an isolated debug daemon
+  # (ui/e2e/global-setup.ts: temp data dir, own port, file secret store).
+  # Chosen for stability: bounded-DOM counts (git sidebar, file viewer,
+  # insights, Kafka/K8s lists, a 100k-row grid) plus the grid's scroll/paint
+  # timings, which run with OTTO_PERF_BUDGET_SCALE=3 (budgets were measured on
+  # a Mac; counts are never scaled). The full perf set runs locally with
+  # `npx playwright test --project=desktop-webkit` (docs/testing/ci-performance.md).
+  # Advisory until it has a green history: this is the first job to run the
+  # daemon + Playwright WebKit on the Linux runner.
+  perf-gates:
+    name: Perf gates (WebKit subset, advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: perf-gates
+
+      # Same librdkafka prerequisites as the Rust job (ottod links otto-brokers).
+      - name: Install librdkafka build deps
+        run: |
+          sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
+          sudo apt-get update || echo "::warning::apt-get update failed for some sources; installing from what refreshed"
+          sudo apt-get install -y cmake libcurl4-openssl-dev
+
+      - name: Build the test daemon
+        run: cargo build -p ottod
+
+      - name: Install Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: npm ci
+        working-directory: ui
+        run: npm ci
+
+      - name: Install Playwright WebKit
+        working-directory: ui
+        run: npx playwright install --with-deps webkit
+
+      - name: Perf gates (desktop-webkit)
+        working-directory: ui
+        env:
+          OTTO_E2E_BIN: ${{ github.workspace }}/target/debug/ottod
+          OTTO_PERF_BUDGET_SCALE: '3'
+        run: >-
+          npx playwright test --project=desktop-webkit --workers=1
+          e2e/desktop-git-sidebar-perf.spec.ts
+          e2e/desktop-docs-orch-perf.spec.ts
+          e2e/desktop-infra-perf.spec.ts
+          e2e/desktop-db-results-perf.spec.ts
+
+      - name: Upload the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-gates-report
+          path: ui/e2e/.report-0
+          retention-days: 7
+
   audit:
     name: cargo audit (advisory)
     runs-on: ubuntu-latest

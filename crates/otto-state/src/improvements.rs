@@ -1,18 +1,19 @@
 //! Improvement runs + edits (the self-improvement version log).
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::domain::{
     ImprovementEdit, ImprovementEditKind, ImprovementEditStatus, ImprovementRisk, ImprovementRun,
     ImprovementRunStatus, ImprovementTarget, ImprovementTrigger,
 };
 use otto_core::{new_id, Error, Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 
 use crate::convert::{dberr, fmt, json, ts};
 
 #[derive(Clone)]
 pub struct ImprovementsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 /// A durable source claim. The token fences completion from expired owners.
@@ -99,7 +100,8 @@ fn row_to_edit(r: &sqlx::sqlite::SqliteRow) -> Result<ImprovementEdit> {
 }
 
 impl ImprovementsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 

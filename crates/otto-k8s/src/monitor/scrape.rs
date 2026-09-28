@@ -11,6 +11,11 @@
 //!
 //! `pick_transport` probes the proxy once per cycle when the config says
 //! `auto`. Nothing here talks to anything but the API server / loopback.
+//!
+//! The collector passes a [`KubeProxy`] gateway: then the proxy transport is a
+//! pooled HTTP request to one long-lived `kubectl proxy` instead of a process
+//! per fetch (r3-08-02). Without one (the one-off probe test, or when the
+//! proxy cannot start) it falls back to `kubectl get --raw` per fetch.
 
 use std::collections::BTreeMap;
 use std::process::Stdio;
@@ -21,6 +26,7 @@ use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
+use super::gateway::KubeProxy;
 use super::probes::{Probe, Transport};
 use crate::cli::Kubectl;
 
@@ -85,22 +91,51 @@ pub async fn pick_transport(
     sample: &ScrapeTarget,
     path: &str,
 ) -> TransportUsed {
+    pick_transport_via(k, None, want, sample, path).await
+}
+
+/// [`pick_transport`] through the cluster's gateway when there is one (an HTTP
+/// request, not a process).
+pub async fn pick_transport_via(
+    k: &Kubectl,
+    gw: Option<&KubeProxy>,
+    want: Transport,
+    sample: &ScrapeTarget,
+    path: &str,
+) -> TransportUsed {
     match want {
         Transport::Proxy => TransportUsed::Proxy,
         Transport::PortForward => TransportUsed::PortForward,
         Transport::Auto => {
             let p = proxy_path(sample, path);
-            match k
-                .run_timeout(["get", "--raw", p.as_str()], Duration::from_secs(5))
-                .await
-            {
-                Ok(_) => TransportUsed::Proxy,
+            let res = match gw {
+                Some(gw) => gw
+                    .get(&p, Duration::from_secs(5), MAX_BODY)
+                    .await
+                    .and_then(|r| require_2xx(r.status)),
+                None => k
+                    .run_timeout(["get", "--raw", p.as_str()], Duration::from_secs(5))
+                    .await
+                    .map(|_| ()),
+            };
+            match res {
+                Ok(()) => TransportUsed::Proxy,
                 Err(e) => {
                     tracing::debug!("k8s monitor: proxy unavailable ({e}); using port-forward");
                     TransportUsed::PortForward
                 }
             }
         }
+    }
+}
+
+/// `kubectl get --raw` fails on a non-2xx answer; the gateway path keeps that
+/// meaning so a pod is counted scraped/failed exactly as before.
+fn require_2xx(status: u16) -> Result<()> {
+    if (200..300).contains(&status) {
+        Ok(())
+    } else {
+        Err(Error::Upstream(format!("HTTP {status}")))
     }
 }
 
@@ -111,11 +146,25 @@ pub async fn fetch(
     target: &ScrapeTarget,
     probes: &[Probe],
 ) -> Vec<Result<ProbeResult>> {
+    fetch_via(k, None, t, target, probes).await
+}
+
+/// [`fetch`], with proxy fetches sent through `gw` when given.
+pub async fn fetch_via(
+    k: &Kubectl,
+    gw: Option<&KubeProxy>,
+    t: TransportUsed,
+    target: &ScrapeTarget,
+    probes: &[Probe],
+) -> Vec<Result<ProbeResult>> {
     match t {
         TransportUsed::Proxy => {
             let mut out = Vec::with_capacity(probes.len());
             for p in probes {
-                out.push(fetch_proxy(k, target, p).await);
+                out.push(match gw {
+                    Some(gw) => fetch_gateway(gw, target, p).await,
+                    None => fetch_proxy(k, target, p).await,
+                });
             }
             out
         }
@@ -146,6 +195,25 @@ async fn fetch_proxy(k: &Kubectl, target: &ScrapeTarget, p: &Probe) -> Result<Pr
         probe: p.name.clone(),
         status: 200,
         body,
+        ms: started.elapsed().as_millis() as u64,
+    })
+}
+
+async fn fetch_gateway(gw: &KubeProxy, target: &ScrapeTarget, p: &Probe) -> Result<ProbeResult> {
+    let started = Instant::now();
+    let path = proxy_path(target, &p.path);
+    let r = gw
+        .get(
+            &path,
+            Duration::from_millis(p.timeout_ms.max(1000) + 2000),
+            MAX_BODY,
+        )
+        .await?;
+    require_2xx(r.status)?;
+    Ok(ProbeResult {
+        probe: p.name.clone(),
+        status: r.status,
+        body: r.body,
         ms: started.elapsed().as_millis() as u64,
     })
 }

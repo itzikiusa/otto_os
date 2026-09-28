@@ -32,7 +32,7 @@ use otto_core::domain::{Session, SessionKind, User};
 use otto_core::Id;
 use otto_rbac::{tokens::AuthRepo, RbacAuthenticator, RbacRoleChecker};
 use otto_sessions::{api_router, ws_router, ProviderRegistry, SessionManager, SessionsCtx};
-use otto_state::{SessionsRepo, SqlitePool, WorkspacesRepo};
+use otto_state::{DbPool, SessionsRepo, WorkspacesRepo};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::sync::broadcast;
 use tower::ServiceExt; // for `oneshot`
@@ -82,7 +82,7 @@ impl SessionsCtx for Ctx {
 // Harness
 // ---------------------------------------------------------------------------
 
-async fn mem_pool() -> SqlitePool {
+async fn mem_pool() -> DbPool {
     let opts = SqliteConnectOptions::new()
         .in_memory(true)
         .foreign_keys(true);
@@ -95,7 +95,7 @@ async fn mem_pool() -> SqlitePool {
         .run(&pool)
         .await
         .expect("run migrations");
-    pool
+    pool.into()
 }
 
 fn user(id: &str, is_root: bool) -> User {
@@ -109,7 +109,7 @@ fn user(id: &str, is_root: bool) -> User {
     }
 }
 
-async fn seed_user(pool: &SqlitePool, id: &str, is_root: bool) {
+async fn seed_user(pool: &DbPool, id: &str, is_root: bool) {
     let now = Utc::now().to_rfc3339();
     sqlx::query(
         "INSERT INTO users (id, username, password_hash, display_name, is_root, created_at)
@@ -125,7 +125,7 @@ async fn seed_user(pool: &SqlitePool, id: &str, is_root: bool) {
     .expect("seed user");
 }
 
-async fn seed_workspace(pool: &SqlitePool, ws_id: &str) {
+async fn seed_workspace(pool: &DbPool, ws_id: &str) {
     let now = Utc::now().to_rfc3339();
     sqlx::query(
         "INSERT INTO workspaces (id, name, root_path, settings_json, archived, created_at)
@@ -138,7 +138,7 @@ async fn seed_workspace(pool: &SqlitePool, ws_id: &str) {
     .expect("seed workspace");
 }
 
-async fn set_member(pool: &SqlitePool, ws_id: &str, user_id: &str, role: &str) {
+async fn set_member(pool: &DbPool, ws_id: &str, user_id: &str, role: &str) {
     sqlx::query("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)")
         .bind(ws_id)
         .bind(user_id)
@@ -168,7 +168,7 @@ async fn insert_session(repo: &SessionsRepo, ws: &str, created_by: &str) -> Id {
 }
 
 /// Build the router + context over a freshly seeded pool.
-async fn app(pool: &SqlitePool) -> Router {
+async fn app(pool: &DbPool) -> Router {
     let repo = SessionsRepo::new(pool.clone());
     let (events, _rx) = broadcast::channel(64);
     let providers = ProviderRegistry::new(None);
@@ -430,7 +430,7 @@ async fn list_sessions(app: &Router, caller: &User, ws: &str) -> Vec<Session> {
 
 /// Build the WS router (carries its own token authenticator) over the same
 /// pool, sharing the manager+roles+workspaces with the HTTP app.
-async fn ws_app(pool: &SqlitePool) -> Router {
+async fn ws_app(pool: &DbPool) -> Router {
     let repo = SessionsRepo::new(pool.clone());
     let (events, _rx) = broadcast::channel(64);
     let providers = ProviderRegistry::new(None);
@@ -446,7 +446,7 @@ async fn ws_app(pool: &SqlitePool) -> Router {
 
 /// Issue a real bearer token for `user_id` via `AuthRepo` so the WS handler
 /// can validate it via `RbacAuthenticator::authenticate`.
-async fn mint_token(pool: &SqlitePool, user_id: &str) -> String {
+async fn mint_token(pool: &DbPool, user_id: &str) -> String {
     let repo = AuthRepo::new(pool.clone());
     repo.issue(&user_id.into()).await.expect("issue token")
 }
@@ -454,12 +454,7 @@ async fn mint_token(pool: &SqlitePool, user_id: &str) -> String {
 /// Mint a real **share-link** (`kind='share'`) token scoped to `session_id` at
 /// `role`, owned by `owner`. `authenticate` will attach the corresponding
 /// `SessionScope`, exercising the scoped-attach branch of `ws_auth_gate`.
-async fn mint_share(
-    pool: &SqlitePool,
-    owner: &str,
-    session_id: &Id,
-    role: WorkspaceRole,
-) -> String {
+async fn mint_share(pool: &DbPool, owner: &str, session_id: &Id, role: WorkspaceRole) -> String {
     let repo = AuthRepo::new(pool.clone());
     let (raw, _info) = repo
         .issue_share_token(&owner.into(), session_id, role, 3600, None)

@@ -1547,31 +1547,51 @@ pub(crate) fn is_agent_authored(request: &ApiRequest) -> bool {
         .is_some_and(Value::is_object)
 }
 
-/// Hosts established by human-authored saved requests or human/legacy runs.
+/// Hosts established by human-authored saved requests or human/legacy runs,
+/// from full rows — the reference the narrow production path
+/// ([`hosts_from_urls`] over `known_host_urls`) is tested against.
+#[cfg(test)]
 pub(crate) fn known_hosts(
     requests: &[ApiRequest],
     history: &[ApiHistoryEntry],
     vars: &serde_json::Map<String, Value>,
 ) -> BTreeSet<String> {
-    let mut hosts = BTreeSet::new();
-    for request in requests
+    let request_urls: Vec<String> = requests
         .iter()
         .filter(|request| !is_agent_authored(request))
-    {
-        if let Some(host) = host_of(&substitute(&request.url, vars)) {
+        .map(|request| request.url.clone())
+        .collect();
+    let history_urls: Vec<String> = history
+        .iter()
+        .filter(|entry| {
+            entry
+                .request
+                .pointer("/source/kind")
+                .and_then(Value::as_str)
+                != Some("agent")
+        })
+        .map(|entry| entry.url.clone())
+        .collect();
+    hosts_from_urls(&request_urls, &history_urls, vars)
+}
+
+/// [`known_hosts`] over urls already filtered to human-authored requests and
+/// human / legacy runs (see `ApiClientRepo::known_host_urls`). Request urls
+/// get the workspace variables; run urls are already resolved.
+pub(crate) fn hosts_from_urls(
+    request_urls: &[String],
+    history_urls: &[String],
+    vars: &serde_json::Map<String, Value>,
+) -> BTreeSet<String> {
+    let mut hosts = BTreeSet::new();
+    for url in request_urls {
+        if let Some(host) = host_of(&substitute(url, vars)) {
             hosts.insert(host);
         }
     }
-    for entry in history {
-        let agent = entry
-            .request
-            .pointer("/source/kind")
-            .and_then(Value::as_str)
-            == Some("agent");
-        if !agent {
-            if let Some(host) = host_of(&entry.url) {
-                hosts.insert(host);
-            }
+    for url in history_urls {
+        if let Some(host) = host_of(url) {
+            hosts.insert(host);
         }
     }
     hosts
@@ -1708,20 +1728,10 @@ pub async fn run_saved_request(
 
     if is_agent_authored(&request) && !req.confirm_new_host {
         if let Some(host) = host_of(&substitute(&exec.url, &vars)) {
-            let requests = repo.list_requests(&wid, None).await?;
-            let history = repo
-                .list_history_filtered(
-                    &wid,
-                    &ApiHistoryQuery {
-                        limit: 500,
-                        q: None,
-                        status: None,
-                        request_id: None,
-                        source: Some("human".into()),
-                    },
-                )
-                .await?;
-            if !known_hosts(&requests, &history, &vars).contains(&host) {
+            // Only the urls (r3-07-06) — not every request body and 500 full
+            // history rows, ~35 MB of JSON per agent send at worst.
+            let (request_urls, history_urls) = repo.known_host_urls(&wid).await?;
+            if !hosts_from_urls(&request_urls, &history_urls, &vars).contains(&host) {
                 return Err(ApiError(Error::Conflict(format!(
                     "needs_confirm=new_host: host '{host}' is not used by any human-authored request or run in this workspace; re-send with confirm_new_host:true"
                 ))));
@@ -3686,15 +3696,15 @@ mod tests {
         }
     }
 
-    async fn mk_repo() -> (sqlx::SqlitePool, ApiClientRepo, Id) {
+    async fn mk_repo() -> (otto_state::DbPool, ApiClientRepo, Id) {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        let pool = otto_state::DbPool::from(sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect_with(opts)
             .await
-            .unwrap();
+            .unwrap());
         sqlx::migrate!("../otto-state/migrations")
             .run(&pool)
             .await

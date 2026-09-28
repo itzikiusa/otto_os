@@ -3,12 +3,12 @@
 //! after a fresh migrate. Mirrors the `pragma_table_info` shape used elsewhere in
 //! the workspace to assert a migration's effect on the schema.
 
+use otto_state::DbPool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::SqlitePool;
 
 /// An in-memory pool with every migration applied (matches the test harness in
 /// `otto-rbac` / `otto-server`).
-async fn mem_pool() -> SqlitePool {
+async fn mem_pool() -> DbPool {
     let opts = SqliteConnectOptions::new()
         .in_memory(true)
         .foreign_keys(true);
@@ -21,7 +21,7 @@ async fn mem_pool() -> SqlitePool {
         .run(&pool)
         .await
         .expect("migrations");
-    pool
+    pool.into()
 }
 
 /// After migrating, `auth_sessions` carries the share-link scope columns added in

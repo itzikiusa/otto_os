@@ -2,7 +2,7 @@ use otto_core::network_profiles::NetworkProfileInput;
 use otto_state::network_profiles::NetworkProfilesRepo;
 use serde_json::json;
 
-async fn fixture() -> sqlx::SqlitePool {
+async fn fixture() -> otto_state::DbPool {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -14,7 +14,7 @@ async fn fixture() -> sqlx::SqlitePool {
         sqlx::query("INSERT INTO workspaces(id,name,root_path,created_at) VALUES (?,?,'/tmp','2026-01-01T00:00:00Z')").bind(id).bind(id).execute(&pool).await.unwrap();
     }
     sqlx::query("INSERT INTO connections(id,workspace_id,name,kind,params_json,created_by,created_at) VALUES ('ssh','one','Office','ssh','{}','user','2026-01-01T00:00:00Z')").execute(&pool).await.unwrap();
-    pool
+    pool.into()
 }
 fn input() -> NetworkProfileInput {
     serde_json::from_value(

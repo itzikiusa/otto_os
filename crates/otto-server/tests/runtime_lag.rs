@@ -198,3 +198,52 @@ fn events_socket_serialization_of_big_frames_stays_under_budget() {
         "events serialization stalled a worker for {lag:?}"
     );
 }
+
+/// The burst variant (r3-10-02): the paced case above yields after every send
+/// AND every frame, so its consumer never sees a backlog and the budget can
+/// barely fail. Here all 200 frames are queued at once — a flood of trail /
+/// status events from one producer — and the socket loop is modelled like
+/// `ws_events`: `recv` → `text()` → a sink write that completes without
+/// yielding (a fast loopback client), paced by the socket loop's own
+/// `ws_fanout::Pacer`. Without the pacer this measured ~208 ms of blocked
+/// worker (debug build); if a change drops or loosens it, this fails.
+/// Payloads are still built before the ticker starts (test-side copies are
+/// not product cost).
+#[test]
+fn events_fanout_of_a_queued_burst_stays_under_budget() {
+    let events: Vec<Event> = (0..200)
+        .map(|i| Event::Notice {
+            level: "info".into(),
+            title: format!("t{i}"),
+            body: "y".repeat(64 * 1024),
+        })
+        .collect();
+    let (lag_items, lag) = max_lag_while(async move {
+        let (bus, _keep) = broadcast::channel::<Event>(1024);
+        let mut rx = otto_server::ws_fanout::subscribe(&bus);
+        for ev in events {
+            bus.send(ev).unwrap();
+        }
+        let mut bytes = 0usize;
+        let mut pacer = otto_server::ws_fanout::Pacer::new();
+        for _ in 0..200 {
+            match rx.recv().await.expect("frame") {
+                otto_server::ws_fanout::FanItem::Event(f) => {
+                    let text = f.text().expect("text");
+                    // A sink write that is immediately ready (no yield).
+                    std::future::ready(()).await;
+                    bytes += text.len();
+                    pacer.sent(text.len()).await;
+                }
+                otto_server::ws_fanout::FanItem::Lagged(n) => panic!("lagged {n}"),
+            }
+        }
+        bytes
+    });
+    eprintln!("events burst (200 × 64 KB queued): worst worker lag {lag:?}");
+    assert!(lag_items >= 200 * 64 * 1024);
+    assert!(
+        lag < budget(),
+        "an events burst stalled a worker for {lag:?}"
+    );
+}

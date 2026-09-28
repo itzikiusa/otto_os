@@ -2512,22 +2512,37 @@ pub(crate) async fn execute_otto_tool(
     if tool == "ask_human_approval" {
         return ask_human_approval(ctx, user, args).await;
     }
-    // Mint a short-lived ephemeral token so the self-call reuses the target
-    // endpoint's native RBAC; revoke it on the way out.
-    let (token, _) = AuthRepo::new(ctx.pool.clone())
-        .issue_api_token(&user.id, Some("mcp-otto-exec"))
-        .await?;
-    let client = reqwest::Client::builder()
-        .timeout(call_timeout(tool, args))
-        .build()
-        .map_err(|e| Error::Internal(format!("http client: {e}")))?;
+    // A short-lived token of the effective user, so the self-call reuses the
+    // target endpoint's native RBAC. Reused across calls for a minute and
+    // revoked once aged out and released (see `self_call`), and the HTTP
+    // client — with its keep-alive loopback connections — is shared: a call
+    // no longer costs a token INSERT + DELETE, an auth-cache miss, a TLS
+    // config build and a TCP connect (r3-06-04).
+    let lease = crate::self_call::lease(
+        &ctx.pool,
+        &ctx.base_url,
+        &user.id,
+        crate::self_call::LABEL_EXEC,
+    )
+    .await?;
+    let client = crate::self_call::client();
     let base = ctx.base_url.trim_end_matches('/').to_string();
-    let result = if tool == "api_upsert_request" {
-        upsert_request_preserving(&client, &base, &token, args).await
-    } else {
-        run_tool(&client, &base, &token, tool, args).await
+    let budget = call_timeout(tool, args);
+    let call = async {
+        if tool == "api_upsert_request" {
+            upsert_request_preserving(client, &base, lease.token(), args).await
+        } else {
+            run_tool(client, &base, lease.token(), tool, args).await
+        }
     };
-    let _ = AuthRepo::new(ctx.pool.clone()).revoke(&token).await;
+    let result = match tokio::time::timeout(budget, call).await {
+        Ok(r) => r,
+        Err(_) => Err(Error::Upstream(format!(
+            "self-call: timed out after {}s",
+            budget.as_secs()
+        ))),
+    };
+    drop(lease);
     result
 }
 

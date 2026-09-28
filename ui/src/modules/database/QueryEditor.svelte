@@ -795,7 +795,7 @@
     if (cmd && e.shiftKey && !e.altKey && e.code === 'KeyF') {
       e.preventDefault();
       if (database.queryLanguage !== 'redis' && !isScriptNow() && hasStatement && !tab.running) {
-        database.formatStatement();
+        void database.formatStatement();
         editorSel = { text: '', cursor: 0 };
       }
       return;
@@ -1057,7 +1057,7 @@
       <button
         class="btn small ghost"
         onclick={() => {
-          database.formatStatement();
+          void database.formatStatement();
           editorSel = { text: '', cursor: 0 };
         }}
         disabled={!hasStatement || tab.running || isMongoshScript}

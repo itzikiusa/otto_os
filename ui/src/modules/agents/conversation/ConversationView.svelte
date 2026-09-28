@@ -25,7 +25,8 @@
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
   import { activity } from '../../../lib/stores/activity.svelte';
   import { toasts } from '../../../lib/toast.svelte';
-  import { stableGroupTurns, activeQueued, fmtCost, fmtDuration, fmtTokens } from './format';
+  import { groupTurns, stableGroupTurns, activeQueued, fmtCost, fmtDuration, fmtTokens } from './format';
+  import { registerFindProvider } from '../../../lib/findProviders';
   import type { SessionStatus, TranscriptUnavailableReason, Turn } from '../../../lib/api/types';
   import type { RenderItem } from './format';
   import { CONV_CTX, type ConvContext } from './context';
@@ -226,6 +227,40 @@
       atBottom = false;
     });
   }
+  // ⌘F over the whole loaded chat (lib/findProviders.ts). Only MAX_MOUNTED
+  // turns are in the DOM, so a long chat's older turns were invisible to
+  // find-in-page. Past that size the provider searches every loaded turn
+  // (grouped as rendered: one row per TurnItem) and reveals a hit by moving
+  // the mounted window, like the chat's own search does. Below it every turn
+  // is mounted and the plain DOM walk is exact.
+  let findGroups: { turns: Turn[]; items: RenderItem[] } = { turns: [], items: [] };
+  function allGroups(): RenderItem[] {
+    const turns = conv.turns;
+    if (findGroups.turns !== turns) findGroups = { turns, items: groupTurns(turns) };
+    return findGroups.items;
+  }
+  $effect(() =>
+    registerFindProvider({
+      root: () => listEl,
+      active: () => conv.turns.length > MAX_MOUNTED,
+      count: () => allGroups().length,
+      text: (i) => allGroups()[i]?.turns.map(turnText).join('\n') ?? '',
+      reveal: async (i) => {
+        const head = allGroups()[i]?.turns[0];
+        const at = head ? conv.turns.indexOf(head) : -1;
+        if (at >= 0 && (at < winStart || at >= winEnd)) {
+          followTail = false;
+          manualStart = Math.max(0, at - Math.floor(MAX_MOUNTED / 2));
+        }
+        await tick();
+        atBottom = false;
+      },
+      rowElement: (i) => {
+        const id = allGroups()[i]?.id;
+        return id ? (listEl?.querySelector(`[data-turn-id="${CSS.escape(id)}"]`) ?? null) : null;
+      },
+    }),
+  );
   function openSearch(): void {
     searchOpen = true;
     void tick().then(() => searchEl?.select());

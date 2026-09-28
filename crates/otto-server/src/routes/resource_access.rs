@@ -108,7 +108,7 @@ use otto_core::domain::{Capability, Feature, WorkspaceRole};
 use otto_rbac::resource_access::ResourceAccess;
 use otto_state::resource_access::ResourceAccessRepo;
 use otto_state::{
-    AwsAccountsRepo, ConnectionsRepo, GrantsRepo, K8sClustersRepo, McpRegistryRepo, SqlitePool,
+    AwsAccountsRepo, ConnectionsRepo, GrantsRepo, K8sClustersRepo, McpRegistryRepo, DbPool,
     UsersRepo, WorkspacesRepo,
 };
 use serde::{Deserialize, Serialize};
@@ -117,7 +117,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub trait AccessCtx: Clone + Send + Sync + 'static {
-    fn access_pool(&self) -> SqlitePool;
+    fn access_pool(&self) -> DbPool;
     fn access_db(&self) -> Option<std::sync::Arc<otto_dbviewer::DbViewerService>> {
         None
     }
@@ -130,7 +130,7 @@ pub trait AccessCtx: Clone + Send + Sync + 'static {
     }
 }
 impl AccessCtx for ServerCtx {
-    fn access_pool(&self) -> SqlitePool {
+    fn access_pool(&self) -> DbPool {
         self.pool.clone()
     }
     fn access_db(&self) -> Option<std::sync::Arc<otto_dbviewer::DbViewerService>> {
@@ -214,7 +214,7 @@ pub fn api_router<S: AccessCtx>() -> Router<S> {
 }
 
 /// Resolve the resource before authorizing so IDs cannot cross resource families.
-async fn workspace(pool: &SqlitePool, kind: ResourceKind, id: &Id) -> Result<Option<Id>> {
+async fn workspace(pool: &DbPool, kind: ResourceKind, id: &Id) -> Result<Option<Id>> {
     match kind {
         ResourceKind::Connection => Ok(ConnectionsRepo::new(pool.clone())
             .get(id)
@@ -260,7 +260,7 @@ fn feature_for(kind: ResourceKind, operation: &str) -> Feature {
 }
 
 async fn page_access(
-    pool: &SqlitePool,
+    pool: &DbPool,
     user: &User,
     kind: ResourceKind,
     id: &Id,
@@ -302,7 +302,7 @@ async fn page_access(
 }
 
 async fn management(
-    pool: &SqlitePool,
+    pool: &DbPool,
     user: &User,
     kind: ResourceKind,
     id: &Id,
@@ -440,7 +440,7 @@ pub struct EffectiveAccess {
 }
 
 async fn decisions(
-    pool: &SqlitePool,
+    pool: &DbPool,
     user: &User,
     policy: &AccessPolicy,
     child: Option<String>,

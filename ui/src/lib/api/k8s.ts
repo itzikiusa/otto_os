@@ -3,7 +3,7 @@
 // a streaming helper for `kubectl logs -f` (a chunked `text/plain` body the
 // JSON-parsing `request()` cannot read).
 
-import { api, ApiError, baseUrl, getToken } from './client';
+import { api, ApiError, getToken, laneFetch } from './client';
 import type {
   ImportK8sClusterReq,
   K8sActionReq,
@@ -191,7 +191,9 @@ export async function followLogs(
   if (token) headers['Authorization'] = `Bearer ${token}`;
   let resp: Response;
   try {
-    resp = await fetch(`${baseUrl()}/api/v1${k8sApi.logsPath(clusterId, ns, target, opts)}`, {
+    // `kubectl logs -f` holds its socket for as long as the view is open: the
+    // long lane (alias host), so it never pins an interactive socket.
+    resp = await laneFetch('long', k8sApi.logsPath(clusterId, ns, target, opts), {
       headers,
       signal,
     });

@@ -402,7 +402,7 @@ pub fn parse_assumed(v: &serde_json::Value) -> Option<StaticCreds> {
 /// Cheap to construct per request (holds only handles).
 #[derive(Clone)]
 pub struct AwsService {
-    pool: otto_state::SqlitePool,
+    pool: otto_state::DbPool,
     pub repo: AwsAccountsRepo,
     secrets: Arc<dyn SecretStore>,
     events: broadcast::Sender<Event>,

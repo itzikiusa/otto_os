@@ -1,10 +1,11 @@
 //! Product story analysis repository: stories, versions, analyses, questions,
 //! notes, events, testcases, learnings.
 
+use crate::DbPool;
 use chrono::{DateTime, Utc};
 use otto_core::{new_id, Id, Result};
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 
 use crate::convert::{dberr, fmt, ts};
 
@@ -543,11 +544,12 @@ fn row_to_transcript(r: &sqlx::sqlite::SqliteRow) -> Result<ProductTranscript> {
 
 #[derive(Clone)]
 pub struct ProductRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl ProductRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -1782,7 +1784,7 @@ impl ProductRepo {
 mod tests {
     use super::*;
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -1792,11 +1794,11 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     /// Seed a minimal user record so FK constraints are satisfied.
-    async fn seed_user(pool: &SqlitePool) -> Id {
+    async fn seed_user(pool: &DbPool) -> Id {
         let uid = new_id();
         let now = fmt(Utc::now());
         sqlx::query(
@@ -1815,7 +1817,7 @@ mod tests {
     }
 
     /// Seed a minimal workspace.
-    async fn seed_workspace(pool: &SqlitePool, _user_id: &Id) -> Id {
+    async fn seed_workspace(pool: &DbPool, _user_id: &Id) -> Id {
         let wid = new_id();
         let now = fmt(Utc::now());
         sqlx::query(

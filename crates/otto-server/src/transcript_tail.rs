@@ -63,9 +63,18 @@ struct TailState {
     tailer: Tailer,
     subagents: SubagentScanner,
     /// Full snapshot for `GET …/transcript`, built on demand and dropped
-    /// whenever the fold moves.
+    /// whenever the fold moves — or [`SNAP_KEEP`] after it was last served.
     snap: Option<Arc<Folded>>,
+    /// When `snap` was last served.
+    snap_at: Option<std::time::Instant>,
 }
+
+/// A snapshot is a full clone of the fold. It used to live until the fold
+/// next moved, so a chat open on an IDLE agent held the fold twice for as
+/// long as it stayed open (tens of MB per big transcript, × up to MAX_TAILS;
+/// r3-05-05). It now serves a burst of page reads (open, "Load earlier", a
+/// resync) and is released at the next poll step past this age.
+const SNAP_KEEP: Duration = Duration::from_secs(10);
 
 /// What a running tail shares with the read route: the file it folds and its
 /// state (`None` until the initial fold lands).
@@ -198,6 +207,7 @@ pub async fn live_page(
             .snap
             .get_or_insert_with(|| Arc::new(st.folder.snapshot()))
             .clone();
+        st.snap_at = Some(std::time::Instant::now());
         Some((snap, st.subagents.tree().to_vec()))
     })
     .await
@@ -243,6 +253,7 @@ fn refold_with(
         tailer,
         subagents,
         snap: None,
+        snap_at: None,
     })
 }
 
@@ -343,6 +354,10 @@ fn step(
     st: &mut TailState,
     known_artifacts: &mut HashSet<String>,
 ) -> Option<Step> {
+    if st.snap_at.is_some_and(|t| t.elapsed() >= SNAP_KEEP) {
+        st.snap = None;
+        st.snap_at = None;
+    }
     let delta = match st.tailer.poll() {
         Ok(d) => d,
         Err(e) => {
@@ -797,6 +812,37 @@ mod tests {
     /// a one-shot fold of the finished file does — every record once, the
     /// partial line carried, the delta cursor contiguous, sub-agent sidecars
     /// attached — without re-reading the file.
+    #[test]
+    fn an_idle_tail_releases_its_served_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"user\",\"message\":{\"content\":\"hello\"}}\n",
+        )
+        .unwrap();
+        let live = Live {
+            provider: Provider::Claude,
+            path: path.clone(),
+            state: Mutex::new(None),
+        };
+        let mut st = refold_with(Provider::Claude, &path, Default::default()).unwrap();
+        let mut known = HashSet::new();
+        let opts = || otto_transcript::FoldOpts::default();
+        // Served just now: an idle poll keeps it (a burst of page reads).
+        st.snap = Some(Arc::new(st.folder.snapshot()));
+        st.snap_at = Some(Instant::now());
+        assert!(step(&opts, &"t".into(), &live, &mut st, &mut known).is_none());
+        assert!(st.snap.is_some());
+        // Past SNAP_KEEP with nothing new on disk: the clone is released.
+        st.snap_at = Instant::now().checked_sub(SNAP_KEEP + Duration::from_secs(1));
+        assert!(step(&opts, &"t".into(), &live, &mut st, &mut known).is_none());
+        assert!(
+            st.snap.is_none(),
+            "an idle agent's chat no longer holds the fold twice"
+        );
+    }
+
     #[test]
     fn stepping_a_growing_file_matches_a_whole_file_fold() {
         use std::io::Write;

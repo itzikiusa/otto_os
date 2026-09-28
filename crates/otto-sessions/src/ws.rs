@@ -14,7 +14,7 @@
 //! capped role (`Editor` may input/resize; a `Viewer` share is read-only).
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -33,7 +33,7 @@ use otto_core::domain::WorkspaceRole;
 use otto_core::{Error, Id};
 use otto_pty::PtyHandle;
 use serde::Deserialize;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, watch, Semaphore};
 
 use crate::share_throttle;
 
@@ -82,6 +82,40 @@ struct TokenQuery {
 }
 
 fn user_input_default() -> bool { true }
+
+/// Attach intent, from the upgrade URL (`/ws/term/{id}?view=1`).
+///
+/// A VIEW-ONLY attach (a grid tile, an embedded agent-output viewer, a pane
+/// reconnecting on its own after a dropped socket) must not spawn the
+/// session's CLI: `ensure_live` on every attach brought back `claude --resume`
+/// for each session merely looked at (r3-05-01; 150–400 MB each). Such a
+/// socket resumes a dormant session only on the user's first real keystroke
+/// (see [`wakes_on_input`]); an explicit Resume (the restart route, or a
+/// non-view re-attach) is unchanged. Unknown/absent → the classic attach.
+#[derive(Deserialize, Default)]
+struct AttachQuery {
+    #[serde(default)]
+    view: Option<String>,
+}
+
+impl AttachQuery {
+    fn view_only(&self) -> bool {
+        matches!(self.view.as_deref(), Some("1" | "true"))
+    }
+}
+
+/// Does this attach resume an exited-but-resumable session? Read-only viewers
+/// (shares) never do; view-only attaches wait for real input.
+fn resume_on_attach(can_input: bool, view_only: bool) -> bool {
+    can_input && !view_only
+}
+
+/// Should an `input` frame wake the session first? Only on a view-only socket,
+/// only for a real keystroke (`user`: emulator DA/CPR replies never wake a
+/// CLI), and only while no process is live behind this viewer.
+fn wakes_on_input(view_only: bool, user: bool, live: bool) -> bool {
+    view_only && user && !live
+}
 
 /// Client → server control frames.
 #[derive(Deserialize)]
@@ -221,44 +255,103 @@ fn scrollback_frame(data: &[u8], epoch: u64) -> String {
     )
 }
 
-/// Replace this viewer's backlog with a fresh full snapshot: discard the
-/// queued chunks (their effects are already absorbed by the emulator), take
-/// the snapshot, then discard what raced in while snapshotting. Chunks that
-/// raced in were parsed before the snapshot took the emulator lock, so they
-/// are already reflected in it — discarding them avoids double-applying. (A
-/// chunk parsed in the microseconds after the snapshot released the lock can
-/// be lost here; the next output burst's repaint corrects it, unlike the
-/// unbounded silent loss the lag path replaces.)
-fn resync_frame(
+/// Snapshot builds allowed at once (r3-06-02). Each copies the emulator
+/// state (up to ~25 MB for 4000 × 200 cells) and formats + base64-encodes it
+/// on the blocking pool; a tiled overview attaching 15 terminals at once must
+/// not turn that into 15 concurrent copies.
+const SNAPSHOT_CONCURRENCY: usize = 4;
+static SNAPSHOT_PERMITS: LazyLock<Semaphore> =
+    LazyLock::new(|| Semaphore::new(SNAPSHOT_CONCURRENCY));
+
+/// Run snapshot work on the blocking pool, bounded by [`SNAPSHOT_PERMITS`].
+/// Formatting walks every retained cell (4000 rows × cols) and the frame is
+/// base64 of 1–2 MB: tens of ms of CPU that used to run on the socket's async
+/// worker — and with the emulator lock held, stalling that session's PTY
+/// reader too. `None` only if the job panicked.
+async fn off_worker<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    let _permit = SNAPSHOT_PERMITS.acquire().await.ok();
+    tokio::task::spawn_blocking(job).await.ok()
+}
+
+/// A `(snapshot bytes, epoch, subscription)` source for [`resync_frame`]: the
+/// subscription must start exactly where the snapshot ends.
+type Capture = (Vec<u8>, u64, broadcast::Receiver<Bytes>);
+
+/// [`resync_frame`]'s capture for a live PTY: emulator copy + new
+/// subscription under one lock hold, formatted after it is released.
+fn pty_capture(h: &Arc<PtyHandle>, lines: usize) -> impl FnOnce() -> Capture + Send + 'static {
+    let h = Arc::clone(h);
+    move || {
+        let (screen, output) = h.capture_and_subscribe();
+        (screen.format(lines), h.spawn_seq(), output)
+    }
+}
+
+/// A `scrollback` reply built off the async worker. The live stream is left
+/// untouched (the client may skip an optional compact and keep streaming).
+async fn snapshot_frame(h: &Arc<PtyHandle>, lines: usize) -> String {
+    let h = Arc::clone(h);
+    let epoch = h.spawn_seq();
+    off_worker(move || scrollback_frame(&h.snapshot_with_history(lines), epoch))
+        .await
+        .unwrap_or_else(|| scrollback_frame(&[], epoch))
+}
+
+/// Replace this viewer's backlog with a fresh full snapshot. The capture
+/// takes the snapshot and a NEW subscription under one emulator lock
+/// (`PtyHandle::capture_and_subscribe`), and the old receiver — with every
+/// chunk still queued in it, all already absorbed by the emulator — is
+/// dropped. So each chunk is either in the snapshot or on the new receiver:
+/// never double-applied, and (unlike the old drain → snapshot → drain) never
+/// lost when parsed just after the snapshot released the lock. Copying,
+/// formatting and encoding run on the blocking pool ([`off_worker`]).
+async fn resync_frame(
     rx: &mut broadcast::Receiver<Bytes>,
-    snapshot: impl FnOnce() -> (Vec<u8>, u64),
+    capture: impl FnOnce() -> Capture + Send + 'static,
 ) -> String {
-    drain_backlog(rx);
-    let (data, epoch) = snapshot();
-    drain_backlog(rx);
-    scrollback_frame(&data, epoch)
+    let built = off_worker(move || {
+        let (data, epoch, output) = capture();
+        (scrollback_frame(&data, epoch), output)
+    })
+    .await;
+    match built {
+        Some((frame, output)) => {
+            *rx = output;
+            frame
+        }
+        // The formatter panicked: drop the backlog anyway; an empty snapshot
+        // is ignored by the client, which keeps its screen.
+        None => {
+            drain_backlog(rx);
+            scrollback_frame(&[], 0)
+        }
+    }
 }
 
 /// Flow-control resume: when output was held back while paused, the
 /// resync snapshot to send; `None` when nothing was skipped (the stream just
 /// continues — no rebuild, no flicker).
-fn resume_frame(
+async fn resume_frame(
     rx: &mut broadcast::Receiver<Bytes>,
-    snapshot: impl FnOnce() -> (Vec<u8>, u64),
+    capture: impl FnOnce() -> Capture + Send + 'static,
 ) -> Option<String> {
-    drain_backlog(rx).then(|| resync_frame(rx, snapshot))
+    if drain_backlog(rx) {
+        Some(resync_frame(rx, capture).await)
+    } else {
+        None
+    }
 }
 
 /// Client `resync`: open the flow gate (the backlog it guarded was dropped
 /// client-side) and replace this viewer's queued output with one snapshot.
 /// Always answers — the client already discarded bytes and relies on it.
-fn client_resync_frame(
+async fn client_resync_frame(
     flow: &mut FlowGate,
     rx: &mut broadcast::Receiver<Bytes>,
-    snapshot: impl FnOnce() -> (Vec<u8>, u64),
+    capture: impl FnOnce() -> Capture + Send + 'static,
 ) -> String {
     flow.resume();
-    resync_frame(rx, snapshot)
+    resync_frame(rx, capture).await
 }
 
 /// Default / bounds for a client-proposed credit window (`credit` frame).
@@ -282,8 +375,11 @@ const CREDIT_WINDOW_MAX: u64 = 8 * 1024 * 1024;
 /// held bytes are dropped (`skipped`) and, once the client has drained to a
 /// quarter window, replaced by ONE snapshot: the lagging-viewer resync. The
 /// broadcast receiver keeps being read throughout, so the ring never lags.
+///
+/// Public so other terminal transports (the room terminal socket in
+/// otto-server) enforce the same window with the same rules.
 #[derive(Debug)]
-struct CreditGate {
+pub struct CreditGate {
     window: u64,
     /// Binary bytes sent since the grant.
     sent: u64,
@@ -295,11 +391,14 @@ struct CreditGate {
     skipped: bool,
     /// Since when this gate has waited on the client without progress.
     stalled_since: Option<tokio::time::Instant>,
+    /// The stall deadline fired and nothing moved since: don't re-arm it
+    /// until the client acks again (see [`CreditGate::forgive`]).
+    forgiven: bool,
 }
 
 /// What the socket loop must do after a [`CreditGate`] step.
 #[derive(Debug, PartialEq)]
-enum CreditStep {
+pub enum CreditStep {
     Idle,
     /// Send these bytes as one binary frame (already counted as sent).
     Send(Bytes),
@@ -308,7 +407,8 @@ enum CreditStep {
 }
 
 impl CreditGate {
-    fn new(requested: u64) -> Self {
+    /// A gate for the client's `credit` offer (clamped; 0 = default).
+    pub fn new(requested: u64) -> Self {
         let window = if requested == 0 {
             CREDIT_WINDOW_DEFAULT
         } else {
@@ -321,12 +421,13 @@ impl CreditGate {
             held: bytes::BytesMut::new(),
             skipped: false,
             stalled_since: None,
+            forgiven: false,
         }
     }
 
     /// The `{"type":"credit","window":W}` grant; binary frames sent after it
     /// are counted (WS frames are ordered, so both sides agree where).
-    fn grant_frame(&self) -> String {
+    pub fn grant_frame(&self) -> String {
         format!(r#"{{"type":"credit","window":{}}}"#, self.window)
     }
 
@@ -347,7 +448,7 @@ impl CreditGate {
     fn track_stall(&mut self, now: tokio::time::Instant) {
         if !self.waiting() {
             self.stalled_since = None;
-        } else if self.stalled_since.is_none() {
+        } else if self.stalled_since.is_none() && !self.forgiven {
             self.stalled_since = Some(now);
         }
     }
@@ -363,7 +464,7 @@ impl CreditGate {
     }
 
     /// New live output for this viewer (one coalesced chunk).
-    fn push(&mut self, chunk: Vec<u8>, now: tokio::time::Instant) -> CreditStep {
+    pub fn push(&mut self, chunk: Vec<u8>, now: tokio::time::Instant) -> CreditStep {
         let step = if self.skipped {
             CreditStep::Idle
         } else if self.held.is_empty() && chunk.len() <= self.available() {
@@ -400,10 +501,11 @@ impl CreditGate {
     }
 
     /// Client `ack` (cumulative). Stale or out-of-range values are clamped.
-    fn ack(&mut self, cumulative: u64, now: tokio::time::Instant) -> CreditStep {
+    pub fn ack(&mut self, cumulative: u64, now: tokio::time::Instant) -> CreditStep {
         let c = cumulative.min(self.sent);
         if c > self.acked {
             self.acked = c;
+            self.forgiven = false;
             if self.waiting() {
                 // Progress: the client is draining, restart the stall clock.
                 self.stalled_since = Some(now);
@@ -417,7 +519,7 @@ impl CreditGate {
     /// The user typed while this viewer is more than a window behind: they
     /// want the present, not the held backlog (the server-side twin of the
     /// client's `resync` on input). The held output becomes a snapshot.
-    fn skip_on_input(&mut self, user: bool, now: tokio::time::Instant) {
+    pub fn skip_on_input(&mut self, user: bool, now: tokio::time::Instant) {
         // Emulator replies (for example cursor reports) are not a request to
         // interrupt a backlog; only explicit typing may discard held output.
         if user && !self.held.is_empty() {
@@ -430,26 +532,36 @@ impl CreditGate {
     /// A snapshot just went out (lag / client resync / revive / request): it
     /// already reflects everything held here — sending that after it would
     /// double-apply it.
-    fn superseded(&mut self) {
+    pub fn superseded(&mut self) {
         self.held = bytes::BytesMut::new();
         self.skipped = false;
         self.stalled_since = None;
+        self.forgiven = false;
     }
 
-    /// No `ack` progress for [`FLOW_AUTO_RESUME`] while waiting: the client
-    /// is wedged or buggy. Mirrors the pause gate's auto-resume so a lost ack
-    /// can at worst reproduce the pre-flow-control flood, never freeze a pane.
-    fn stall_deadline(&self) -> Option<tokio::time::Instant> {
+    /// No `ack` progress for [`FLOW_AUTO_RESUME`] while output waits.
+    pub fn stall_deadline(&self) -> Option<tokio::time::Instant> {
         self.stalled_since.map(|t| t + FLOW_AUTO_RESUME)
     }
 
-    /// The stall deadline passed: treat everything sent as consumed.
-    fn forgive(&mut self, now: tokio::time::Instant) -> CreditStep {
-        self.acked = self.sent;
+    /// The stall deadline passed: the client's renderer is wedged (a blocked
+    /// main thread, a napped or hidden window) and whatever is held is going
+    /// stale. Drop it and owe the client ONE snapshot once it has drained to a
+    /// quarter window — exactly the overflow path. The window is NOT reopened:
+    /// `acked` stays truthful, so however long or often the client stalls it
+    /// never has more than `window` unacknowledged bytes (r3-10-07: this used
+    /// to set `acked = sent` and send up to another window per 2 s stall,
+    /// piling megabytes into a renderer that could not parse them).
+    ///
+    /// No deadlock: a live client acks everything it parses AND everything it
+    /// drops (termFlow.ts), and the unreported remainder is < an ack step ≤
+    /// `window / 4`, so its acks always bring the gate to the snapshot. Only a
+    /// client that stops executing waits — and it is sent nothing meanwhile.
+    pub fn forgive(&mut self) {
+        self.held = bytes::BytesMut::new();
+        self.skipped = true;
         self.stalled_since = None;
-        let step = self.reopen();
-        self.track_stall(now);
-        step
+        self.forgiven = true;
     }
 }
 
@@ -467,12 +579,7 @@ async fn apply_credit_step(
             let (Some(rx), Some(h)) = (out_rx.as_mut(), handle) else {
                 return Ok(());
             };
-            let frame = resync_frame(rx, || {
-                (
-                    h.snapshot_with_history(DEFAULT_ATTACH_HISTORY_LINES),
-                    h.spawn_seq(),
-                )
-            });
+            let frame = resync_frame(rx, pty_capture(h, DEFAULT_ATTACH_HISTORY_LINES)).await;
             Message::Text(frame.into())
         }
     };
@@ -778,7 +885,9 @@ async fn term_ws<S: SessionsCtx>(
     axum::Extension(live_auth): axum::Extension<LiveTerminalAuth>,
     axum::Extension(CanInput(can_input)): axum::Extension<CanInput>,
     axum::Extension(UsedSubprotocol(used_subprotocol)): axum::Extension<UsedSubprotocol>,
+    Query(attach): Query<AttachQuery>,
 ) -> Response {
+    let view_only = attach.view_only();
     // Auth and owner-gate already enforced by ws_auth_gate middleware.
     let session = match st.ctx.manager().get(&session_id).await {
         Ok(s) => s,
@@ -797,6 +906,7 @@ async fn term_ws<S: SessionsCtx>(
                     session_id,
                     initial_status,
                     can_input,
+                    view_only,
                     live_auth,
                 )
                 .await;
@@ -809,6 +919,7 @@ async fn term_ws<S: SessionsCtx>(
                 session_id,
                 initial_status,
                 can_input,
+                view_only,
                 live_auth,
             )
             .await;
@@ -861,16 +972,26 @@ async fn revive_viewer<S: SessionsCtx>(
     if handle.as_ref().is_some_and(|old| Arc::ptr_eq(old, &fresh)) {
         return Ok(false);
     }
-    *out_rx = Some(fresh.subscribe());
+    // Snapshot + subscription in one emulator lock (exact hand-over, see
+    // `resync_frame`), built off the async worker. `epoch` = PTY spawn
+    // counter: the client resets its local buffer when it changes (see the
+    // Scrollback arm).
+    let capture = pty_capture(&fresh, DEFAULT_ATTACH_HISTORY_LINES);
+    let (frame, output) = match off_worker(move || {
+        let (data, epoch, output) = capture();
+        (scrollback_frame(&data, epoch), output)
+    })
+    .await
+    {
+        Some(built) => built,
+        None => (scrollback_frame(&[], fresh.spawn_seq()), fresh.subscribe()),
+    };
+    *out_rx = Some(output);
     *exit_rx = Some(fresh.on_exit());
     let status = r#"{"type":"status","status":"running"}"#;
     if socket.send(Message::Text(status.into())).await.is_err() {
         return Err(());
     }
-    let data = fresh.snapshot_with_history(DEFAULT_ATTACH_HISTORY_LINES);
-    // `epoch` = PTY spawn counter: the client resets its local buffer when it
-    // changes (see the Scrollback arm).
-    let frame = scrollback_frame(&data, fresh.spawn_seq());
     if socket.send(Message::Text(frame.into())).await.is_err() {
         return Err(());
     }
@@ -977,6 +1098,7 @@ async fn serve_terminal<S: SessionsCtx>(
     session_id: Id,
     initial_status: otto_core::domain::SessionStatus,
     mut can_input: bool,
+    view_only: bool,
     live_auth: LiveTerminalAuth,
 ) {
     // Track this viewer for the whole connection. The guard decrements the
@@ -995,6 +1117,8 @@ async fn serve_terminal<S: SessionsCtx>(
     // Read-only viewers (shares) never trigger a resume: watching must not
     // spawn a process on the host. (`ensure_live` itself also refuses archived
     // sessions, so an archived row can no longer come back live via attach.)
+    // Neither do view-only attaches (`?view=1`, see [`AttachQuery`]): looking
+    // at a session must not spawn its CLI; the first real keystroke does.
     let Ok(current) = ctx.manager().get(&session_id).await else {
         return;
     };
@@ -1002,7 +1126,7 @@ async fn serve_terminal<S: SessionsCtx>(
         Ok(allowed) => can_input &= allowed,
         Err(_) => return,
     }
-    if can_input {
+    if resume_on_attach(can_input, view_only) {
         if let Err(e) = ctx.manager().ensure_live(&session_id).await {
             tracing::warn!(session = %session_id, "ensure_live on ws attach: {e}");
         }
@@ -1094,9 +1218,7 @@ async fn serve_terminal<S: SessionsCtx>(
                 flow.resume();
                 tracing::debug!(session = %session_id, "terminal ws flow auto-resume (no resume within {FLOW_AUTO_RESUME:?})");
                 if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
-                    if let Some(frame) = resume_frame(rx, || {
-                        (h.snapshot_with_history(DEFAULT_ATTACH_HISTORY_LINES), h.spawn_seq())
-                    }) {
+                    if let Some(frame) = resume_frame(rx, pty_capture(h, DEFAULT_ATTACH_HISTORY_LINES)).await {
                         if socket.send(Message::Text(frame.into())).await.is_err() {
                             return;
                         }
@@ -1113,11 +1235,8 @@ async fn serve_terminal<S: SessionsCtx>(
                 if credit.as_ref().is_some_and(|c| c.stalled_since.is_some()) =>
             {
                 let Some(c) = credit.as_mut() else { continue };
-                tracing::debug!(session = %session_id, "terminal ws credit stalled {FLOW_AUTO_RESUME:?} without an ack; reopening");
-                let step = c.forgive(tokio::time::Instant::now());
-                if apply_credit_step(step, &mut socket, &mut out_rx, handle.as_ref()).await.is_err() {
-                    return;
-                }
+                tracing::debug!(session = %session_id, "terminal ws credit stalled {FLOW_AUTO_RESUME:?} without an ack; dropping held output for one snapshot on recovery");
+                c.forgive();
             }
 
             // Live PTY output → binary frames. Coalesce rapid bursts into one
@@ -1160,9 +1279,7 @@ async fn serve_terminal<S: SessionsCtx>(
                         // fresh full snapshot; the client rebuilds from it.
                         tracing::debug!(session = %session_id, "terminal ws lagged by {n} chunks; resyncing from snapshot");
                         if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
-                            let frame = resync_frame(rx, || {
-                                (h.snapshot_with_history(DEFAULT_ATTACH_HISTORY_LINES), h.spawn_seq())
-                            });
+                            let frame = resync_frame(rx, pty_capture(h, DEFAULT_ATTACH_HISTORY_LINES)).await;
                             if socket.send(Message::Text(frame.into())).await.is_err() {
                                 return;
                             }
@@ -1257,6 +1374,30 @@ async fn serve_terminal<S: SessionsCtx>(
                                     Ok(false) => {}
                                 }
                             }
+                            // A view-only viewer typed into a dormant session:
+                            // this keystroke is the explicit "resume". Wake it
+                            // and move onto the new process; the keystroke
+                            // itself is NOT delivered (the CLI is still
+                            // starting — a stray key or Enter would land in
+                            // its startup, not in the prompt the user saw).
+                            if wakes_on_input(view_only, user, exit_rx.is_some()) {
+                                match ctx.manager().ensure_live(&session_id).await {
+                                    Ok(()) => match revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx).await {
+                                        Err(()) => return,
+                                        Ok(true) => {
+                                            warned_input = false;
+                                            if let Some(c) = credit.as_mut() {
+                                                c.superseded();
+                                            }
+                                            continue;
+                                        }
+                                        // Not resumable: fall through, `input`
+                                        // fails and the notice says so.
+                                        Ok(false) => {}
+                                    },
+                                    Err(e) => tracing::warn!(session = %session_id, "ensure_live on view-only wake: {e}"),
+                                }
+                            }
                             // Typed while more than a window behind (^C mid-
                             // flood): the held backlog becomes one snapshot.
                             if let Some(c) = credit.as_mut() {
@@ -1319,9 +1460,7 @@ async fn serve_terminal<S: SessionsCtx>(
                     ClientFrame::Resume => {
                         if flow.resume() {
                             if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
-                                if let Some(frame) = resume_frame(rx, || {
-                                    (h.snapshot_with_history(DEFAULT_ATTACH_HISTORY_LINES), h.spawn_seq())
-                                }) {
+                                if let Some(frame) = resume_frame(rx, pty_capture(h, DEFAULT_ATTACH_HISTORY_LINES)).await {
                                     if socket.send(Message::Text(frame.into())).await.is_err() {
                                         return;
                                     }
@@ -1339,9 +1478,7 @@ async fn serve_terminal<S: SessionsCtx>(
                             lines
                         };
                         if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
-                            let frame = client_resync_frame(&mut flow, rx, || {
-                                (h.snapshot_with_history(want), h.spawn_seq())
-                            });
+                            let frame = client_resync_frame(&mut flow, rx, pty_capture(h, want)).await;
                             if socket.send(Message::Text(frame.into())).await.is_err() {
                                 return;
                             }
@@ -1378,10 +1515,6 @@ async fn serve_terminal<S: SessionsCtx>(
                         } else {
                             lines
                         };
-                        let data = handle
-                            .as_ref()
-                            .map(|h| h.snapshot_with_history(want))
-                            .unwrap_or_default();
                         // `epoch` = PTY spawn counter. When the process was
                         // respawned since the client's last attach (suspend →
                         // resume, restart, daemon restart) the client's local
@@ -1389,10 +1522,11 @@ async fn serve_terminal<S: SessionsCtx>(
                         // rebuilds from this snapshot instead of appending the
                         // fresh screen under stale (possibly narrow-painted)
                         // history. Omitted (0) when no live handle exists.
-                        let frame = scrollback_frame(
-                            &data,
-                            handle.as_ref().map(|h| h.spawn_seq()).unwrap_or(0),
-                        );
+                        // Built off the async worker (r3-06-02).
+                        let frame = match handle.as_ref() {
+                            Some(h) => snapshot_frame(h, want).await,
+                            None => scrollback_frame(&[], 0),
+                        };
                         // Sent inline, i.e. before any subsequent live bytes.
                         if socket.send(Message::Text(frame.into())).await.is_err() {
                             return;
@@ -1950,6 +2084,31 @@ mod tests {
     /// SA-11: a matched line with a TAB (make output, Go/Java stack traces)
     /// or any other C0 byte used to produce invalid JSON, so the client's
     /// `JSON.parse` threw and the find bar spun forever.
+    /// r3-05-01 follow-up: a view-only attach (`?view=1`) never resumes the
+    /// CLI; the first REAL keystroke on it does, emulator replies never do, and
+    /// a live process is never "woken" twice. Classic attaches keep resuming.
+    #[test]
+    fn view_only_attach_resumes_only_on_real_input() {
+        let parse = |q: &str| {
+            let uri: axum::http::Uri = format!("/ws/term/s{q}").parse().unwrap();
+            Query::<AttachQuery>::try_from_uri(&uri).unwrap().0.view_only()
+        };
+        assert!(parse("?view=1"));
+        assert!(parse("?token=abc&view=true"));
+        assert!(!parse(""), "absent = classic attach");
+        assert!(!parse("?token=abc"));
+        assert!(!parse("?view=0"));
+
+        assert!(resume_on_attach(true, false), "classic attach resumes");
+        assert!(!resume_on_attach(true, true), "view-only attach never spawns");
+        assert!(!resume_on_attach(false, false), "read-only shares never spawn");
+
+        assert!(wakes_on_input(true, true, false), "typing wakes a dormant view");
+        assert!(!wakes_on_input(true, false, false), "DA/CPR replies never wake");
+        assert!(!wakes_on_input(true, true, true), "already live: plain input");
+        assert!(!wakes_on_input(false, true, false), "classic socket: unchanged");
+    }
+
     #[test]
     fn search_result_frame_is_valid_json_for_tabs_and_control_bytes() {
         let text = "at\tmain.go:12\t\"quoted\" back\\slash \u{7} bell \u{8} bs \u{1b}esc\r\n";
@@ -2017,8 +2176,24 @@ mod tests {
     /// pause → output skipped → resume ⇒ ONE snapshot replaces the backlog,
     /// then live output flows again. Mirrors the socket loop: while paused the
     /// output arm is disabled, so chunks pile up in this viewer's receiver.
-    #[test]
-    fn pause_skip_resume_sends_one_snapshot_then_streams() {
+    /// A test capture: a fixed snapshot plus a fresh subscription on `tx`
+    /// (the real one takes both under the emulator lock), counting calls.
+    fn test_capture(
+        tx: &broadcast::Sender<Bytes>,
+        data: &'static [u8],
+        epoch: u64,
+        calls: &Arc<std::sync::atomic::AtomicUsize>,
+    ) -> impl FnOnce() -> Capture + Send + 'static {
+        let tx = tx.clone();
+        let calls = Arc::clone(calls);
+        move || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (data.to_vec(), epoch, tx.subscribe())
+        }
+    }
+
+    #[tokio::test]
+    async fn pause_skip_resume_sends_one_snapshot_then_streams() {
         let (tx, mut rx) = broadcast::channel::<Bytes>(8);
         let mut gate = FlowGate::default();
         gate.pause(tokio::time::Instant::now());
@@ -2027,13 +2202,11 @@ mod tests {
             tx.send(Bytes::from(format!("y{i}\n"))).unwrap();
         }
         assert!(gate.resume());
-        let mut snapshots = 0;
-        let frame = resume_frame(&mut rx, || {
-            snapshots += 1;
-            (b"\x1b[Hsnapshot".to_vec(), 3)
-        })
-        .expect("skipped output must be replaced by a snapshot");
-        assert_eq!(snapshots, 1);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let frame = resume_frame(&mut rx, test_capture(&tx, b"\x1b[Hsnapshot", 3, &calls))
+            .await
+            .expect("skipped output must be replaced by a snapshot");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
         assert_eq!(v["type"], "scrollback");
         assert_eq!(v["epoch"], 3);
@@ -2055,8 +2228,8 @@ mod tests {
     /// exactly one snapshot — even with nothing queued server-side — opens a
     /// paused gate, and nothing that was queued before it is forwarded after
     /// (it is already in the snapshot). A later `resume` is then a no-op.
-    #[test]
-    fn client_resync_opens_the_gate_and_replaces_the_backlog_with_one_snapshot() {
+    #[tokio::test]
+    async fn client_resync_opens_the_gate_and_replaces_the_backlog_with_one_snapshot() {
         assert!(matches!(
             serde_json::from_str::<ClientFrame>(r#"{"type":"resync","lines":2000}"#),
             Ok(ClientFrame::Resync { lines: 2000 })
@@ -2071,12 +2244,9 @@ mod tests {
         for i in 0..10 {
             tx.send(Bytes::from(format!("flood{i}\n"))).unwrap();
         }
-        let mut snapshots = 0;
-        let frame = client_resync_frame(&mut gate, &mut rx, || {
-            snapshots += 1;
-            (b"screen".to_vec(), 9)
-        });
-        assert_eq!(snapshots, 1);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let frame = client_resync_frame(&mut gate, &mut rx, test_capture(&tx, b"screen", 9, &calls)).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(!gate.is_paused(), "resync leaves the paused state");
         assert!(!gate.resume(), "a trailing resume finds the gate open");
         let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
@@ -2087,7 +2257,7 @@ mod tests {
             Err(broadcast::error::TryRecvError::Empty)
         ));
         // Nothing queued and not paused: still answers with a snapshot.
-        let frame = client_resync_frame(&mut gate, &mut rx, || (b"s2".to_vec(), 9));
+        let frame = client_resync_frame(&mut gate, &mut rx, test_capture(&tx, b"s2", 9, &calls)).await;
         let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
         assert_eq!(B64.decode(v["data"].as_str().unwrap()).unwrap(), b"s2");
         tx.send(Bytes::from_static(b"live")).unwrap();
@@ -2096,16 +2266,32 @@ mod tests {
 
     /// Pausing with nothing produced meanwhile must NOT rebuild the client
     /// (a rebuild resets selection/scroll position for no reason).
-    #[test]
-    fn resume_without_skipped_output_sends_nothing() {
-        let (_tx, mut rx) = broadcast::channel::<Bytes>(8);
-        let mut called = false;
-        assert!(resume_frame(&mut rx, || {
-            called = true;
-            (Vec::new(), 0)
-        })
-        .is_none());
-        assert!(!called, "no snapshot is taken when nothing was skipped");
+    #[tokio::test]
+    async fn resume_without_skipped_output_sends_nothing() {
+        let (tx, mut rx) = broadcast::channel::<Bytes>(8);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        assert!(resume_frame(&mut rx, test_capture(&tx, b"", 0, &calls)).await.is_none());
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no snapshot is taken when nothing was skipped"
+        );
+    }
+
+    /// The resync hand-over is exact: output published after the capture
+    /// arrives on the NEW receiver (never lost), and nothing queued before
+    /// it is forwarded after the snapshot (never double-applied).
+    #[tokio::test]
+    async fn resync_swaps_to_the_capture_subscription() {
+        let (tx, mut rx) = broadcast::channel::<Bytes>(64);
+        tx.send(Bytes::from_static(b"before")).unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let frame = resync_frame(&mut rx, test_capture(&tx, b"snap", 4, &calls)).await;
+        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(v["epoch"], 4);
+        assert!(matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+        tx.send(Bytes::from_static(b"after")).unwrap();
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"after"));
     }
 
     // ── Credit-based flow control ─────────────────────────────────────────
@@ -2327,10 +2513,11 @@ mod tests {
         assert_eq!(g.acked, 64 * KB);
     }
 
-    /// A client that stops acking cannot freeze the pane: the stall deadline
-    /// reopens the window (held output flows, or a skip resyncs).
+    /// A stalled client is never sent more than the window: the stall
+    /// deadline drops the held output and owes ONE snapshot, and the client's
+    /// own acks (it acks what it parses and drops) bring it — no deadlock.
     #[test]
-    fn credit_stall_deadline_reopens_a_wedged_window() {
+    fn credit_stall_deadline_degrades_to_a_snapshot_without_reopening() {
         let t0 = tokio::time::Instant::now();
         let mut g = CreditGate::new(64 * KB);
         g.push(vec![0; 64 * 1024], t0);
@@ -2347,15 +2534,55 @@ mod tests {
         // 1014 bytes of credit left: those go out, the rest waits.
         assert_eq!(sent_len(&g.push(vec![2; 2048], t1)), 1014);
         assert_eq!(g.stall_deadline(), Some(t1 + FLOW_AUTO_RESUME));
-        assert_eq!(sent_len(&g.forgive(t1 + FLOW_AUTO_RESUME)), 1034);
-        assert!(g.stall_deadline().is_none());
-        // A skipped gate resyncs on forgiveness.
-        let mut s = CreditGate::new(64 * KB);
-        s.push(vec![0; 64 * 1024], t0);
-        s.push(vec![0; 64 * 1024], t0);
-        s.push(vec![0; 1], t0);
-        assert!(s.skipped);
-        assert_eq!(s.forgive(t1), CreditStep::Resync);
+        let unacked = g.unacked();
+        g.forgive();
+        assert_eq!(g.unacked(), unacked, "acked stays truthful: the window is not reopened");
+        assert!(g.held.is_empty() && g.skipped, "held output becomes one owed snapshot");
+        assert!(g.stall_deadline().is_none(), "not re-armed while nothing moves");
+        // More output while stalled: nothing is sent or buffered.
+        for _ in 0..50 {
+            assert_eq!(g.push(vec![3; 4096], t1), CreditStep::Idle);
+        }
+        assert!(g.held.is_empty() && g.stall_deadline().is_none());
+        // The client wakes and acks what it parsed: one snapshot at ≤ window/4.
+        assert_eq!(g.ack(g.sent - 32 * 1024, t1), CreditStep::Idle);
+        assert_eq!(g.ack(g.sent - 1000, t1), CreditStep::Resync);
+        assert_eq!(g.ack(g.sent, t1), CreditStep::Idle, "exactly one");
+        assert_eq!(sent_len(&g.push(b"live".to_vec(), t1)), 4, "streams again");
+    }
+
+    /// r3-10-07: repeated ≥ 2 s stalls under a continuous producer used to
+    /// forgive a window each time; the unacked backlog must stay ≤ window.
+    #[test]
+    fn credit_repeated_stalls_never_exceed_the_window() {
+        let mut now = tokio::time::Instant::now();
+        let mut g = CreditGate::new(256 * KB);
+        let mut client_backlog = 0u64;
+        let mut consumed = 0u64;
+        for cycle in 0..20 {
+            // A burst while the client is wedged (acks nothing).
+            for _ in 0..40 {
+                if let CreditStep::Send(b) = g.push(vec![b'x'; 16 * 1024], now) {
+                    client_backlog += b.len() as u64;
+                }
+                assert!(g.unacked() <= g.window, "cycle {cycle}: unacked {} > window", g.unacked());
+            }
+            if let Some(at) = g.stall_deadline() {
+                now = at;
+                g.forgive();
+            }
+            assert!(client_backlog <= g.window, "cycle {cycle}: client holds {client_backlog}");
+            // Every other cycle the client drains everything it holds.
+            if cycle % 2 == 1 {
+                consumed += client_backlog;
+                client_backlog = 0;
+                match g.ack(consumed, now) {
+                    CreditStep::Send(b) => client_backlog += b.len() as u64,
+                    CreditStep::Resync => g.superseded(),
+                    CreditStep::Idle => {}
+                }
+            }
+        }
     }
 
     /// Any snapshot supersedes held output: nothing held is sent after it.

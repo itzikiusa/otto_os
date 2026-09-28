@@ -23,6 +23,7 @@ import type {
   ReviewProofPackExport,
 } from './types';
 import { serviceHealth } from '../stores/serviceHealth.svelte';
+import { inheritedLane, type Lane } from './lane';
 
 export class ApiError extends Error {
   code: string;
@@ -98,10 +99,14 @@ export const UNAUTHORIZED_EVENT = 'otto:unauthorized';
 // sockets made a click wait for seconds ("barely usable while agents work").
 //
 //  - `int`  — what the user just did; always on the interactive base.
-//  - `bg`   — pollers and safety resyncs (`api.bg.*`), ≤ BG_MAX per window.
+//  - `bg`   — poll ticks, live-query refetches and reconnect / lag resyncs:
+//             `api.bg.*`, or ANY call made inside a poll tick (ambient, see
+//             ./lane.ts). ≤ BG_MAX per document and ≤ BG_GLOBAL app-wide.
 //  - `long` — calls known to hold a socket for seconds (remote git, provider
-//             PRs, CLI auth checks, kubectl/Kafka/AWS, DB queries, agent
-//             turns, `/wait`): `api.long.*`, or any path in LONG_PATHS.
+//             PRs, CLI auth checks, kubectl/Kafka/AWS, DB queries, Jira,
+//             usage, the API client's Send, SSH dials, `/wait`):
+//             `api.long.*`, any path in LONG_PATHS, and the raw streams
+//             (`laneFetch('long', …)`: k8s follow, DB export/import, S3).
 //
 // When the daemon advertises `alt_loopback_base` (`/meta`; it binds BOTH
 // loopback addresses) `bg`/`long` go to that second host — a physically
@@ -110,32 +115,76 @@ export const UNAUTHORIZED_EVENT = 'otto:unauthorized';
 // one base, exactly as before.
 // ---------------------------------------------------------------------------
 
-export type Lane = 'int' | 'bg' | 'long';
+export type { Lane } from './lane';
 
 /** Paths that hold a socket for seconds. Matched against the `/api/v1`-relative
  *  path (query included); a caller can still force a lane explicitly. */
 export const LONG_PATHS: readonly RegExp[] = [
   /^\/repos\/[^/]+\/(fetch|pull|push)([/?]|$)/,
   /^\/repos\/[^/]+\/(prs|collaborators)([/?]|$)/,
+  // Local git that walks history / the tree or runs hooks: `log --all`
+  // (10k commits), `/refs` (2k branches with ahead/behind), status, commit
+  // (pre-commit hooks), merge, checkout, stash, blame, rebase. NOT `/diff`:
+  // the diff of a commit the user just clicked is interactive, and the
+  // alt host is a separate origin, so each distinct `/diff?…` URL paid its
+  // own CORS preflight there (the huge-branch file list missed 300 ms).
+  /^\/repos\/[^/]+\/(log|refs|status|commit|merge|checkout|stash|blame|rebase-preview|rebase|bisect|reflog|submodules)([/?]|$)/,
   /^\/auth\/provider-accounts\/[^/]+\/status([/?]|$)/,
   /^\/sessions\/[^/]+\/wait([/?]|$)/,
   /(^|\/)k8s\//,
   /(^|\/)aws\//,
   /^\/brokers\/clusters\/[^/]+\/[^?]/, // every sub-route dials Kafka
-  /^\/connections\/[^/]+\/db\/(query|nl-to-sql|assist|explain)([/?]|$)/,
+  /^\/connections\/[^/]+\/db\/(query|nl-to-sql|assist|explain|test|search-objects|schema\/children|schema-graph|completion|query-status)([/?]|$)/,
+  // SSH / DB dial on open or test.
+  /^\/connections\/[^/]+\/(open|test)([/?]|$)/,
+  // A DB dashboard widget runs its query.
+  /^\/db\/widgets\/[^/]+\/run([/?]|$)/,
+  // The user's remote HTTP call (API client "Send"), up to its own timeout.
+  /^\/workspaces\/[^/]+\/api-client\/execute([/?]|$)/,
+  // Jira / Confluence (remote Atlassian APIs).
+  /^\/issue\//,
+  // Usage reads spawn `clickhouse local`.
+  /^\/usage\//,
+  // Workspace code search and vault full-text search.
+  /^\/workspaces\/[^/]+\/search([/?]|$)/,
+  /^\/workspaces\/[^/]+\/vault\/vaults\/[^/]+\/search([/?]|$)/,
 ];
 
 export function isLongPath(path: string): boolean {
   return LONG_PATHS.some((re) => re.test(path));
 }
 
+// ---- The alias host ---------------------------------------------------------
+// `altBase` is what the daemon advertised (validated). A network-level failure
+// on it SUSPENDS it (every lane falls back to the interactive base) and arms a
+// cheap re-probe (`GET {alt}/api/v1/health`) with backoff (5 s → 60 s); a pass
+// re-enables it. It is never dropped for good on one error: the old
+// `altBase = null` left every `bg`/`long` call of every later hour on the six
+// interactive sockets after a single daemon restart. The events client also
+// suspends it while its socket is down and re-arms it from `/meta` when the
+// daemon's `boot_id` changed (a restarted daemon may no longer hold the alias).
+
+const ALT_RETRY_MIN_MS = 5_000;
+const ALT_RETRY_MAX_MS = 60_000;
 let altBase: string | null = null;
+let altSuspended = false;
+let altRetryMs = ALT_RETRY_MIN_MS;
+let altProbeTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearAltProbe(): void {
+  if (altProbeTimer !== null) clearTimeout(altProbeTimer);
+  altProbeTimer = null;
+}
 
 /** Adopt (or drop) the daemon's advertised second loopback base. Accepted only
  *  when the interactive base is the loopback IP, the alias is a loopback host
- *  on the SAME port and a DIFFERENT host (else it is not a separate pool). */
+ *  on the SAME port and a DIFFERENT host (else it is not a separate pool).
+ *  Re-arming clears any suspension and its backoff. */
 export function setAltLoopbackBase(alt: string | null | undefined): void {
+  clearAltProbe();
   altBase = null;
+  altSuspended = false;
+  altRetryMs = ALT_RETRY_MIN_MS;
   if (!alt) return;
   try {
     const b = new URL(baseUrl());
@@ -155,44 +204,109 @@ export function setAltLoopbackBase(alt: string | null | undefined): void {
   }
 }
 
+/** Stop using the alias until a probe (`probeAfterMs`) or a re-arm restores
+ *  it. The events client calls this when its socket drops: the daemon may be
+ *  restarting, and the next one may not hold the alias. */
+export function suspendAltLoopback(probeAfterMs?: number): void {
+  if (!altBase) return;
+  altSuspended = true;
+  clearAltProbe();
+  if (probeAfterMs !== undefined) scheduleAltProbe(probeAfterMs);
+}
+
+/** Same daemon is back (socket reconnected, unchanged boot id): probe the
+ *  alias now instead of waiting out its backoff. */
+export function resumeAltLoopback(): void {
+  if (altBase && altSuspended) scheduleAltProbe(0);
+}
+
+/** `active` | `suspended` | `none` (diagnostics / tests). */
+export function altLoopbackState(): 'active' | 'suspended' | 'none' {
+  return altBase ? (altSuspended ? 'suspended' : 'active') : 'none';
+}
+
+function scheduleAltProbe(ms: number): void {
+  clearAltProbe();
+  altProbeTimer = setTimeout(() => void probeAlt(), ms);
+}
+
+async function probeAlt(): Promise<void> {
+  altProbeTimer = null;
+  const alt = altBase;
+  if (!alt || !altSuspended) return;
+  let ok = false;
+  try {
+    const resp = await fetch(`${alt}/api/v1/health`, { cache: 'no-store' });
+    ok = resp.ok && ((await resp.json()) as { ok?: unknown } | null)?.ok === true;
+  } catch {
+    ok = false;
+  }
+  // Re-armed / dropped meanwhile: that decision wins.
+  if (alt !== altBase || !altSuspended) return;
+  if (ok) {
+    altSuspended = false;
+  } else {
+    scheduleAltProbe(altRetryMs);
+    altRetryMs = Math.min(altRetryMs * 2, ALT_RETRY_MAX_MS);
+  }
+}
+
+function altNetworkFailure(alt: string): void {
+  if (alt !== altBase || altSuspended) return;
+  altSuspended = true;
+  scheduleAltProbe(altRetryMs);
+  // A flapping alias backs off further each time; a request that succeeds on
+  // it resets this (see laneFetch).
+  altRetryMs = Math.min(altRetryMs * 2, ALT_RETRY_MAX_MS);
+}
+
 /** The base a lane's requests go to (exported for tests / diagnostics). */
 export function laneBase(lane: Lane): string {
-  return lane !== 'int' && altBase ? altBase : baseUrl();
+  return lane !== 'int' && altBase && !altSuspended ? altBase : baseUrl();
+}
+
+/** `fetch(<lane base>/api/v1<path>)` with the alias's fail-soft rule: a
+ *  NETWORK-level failure on the alias (not an HTTP error, not an abort)
+ *  suspends it and — for a GET/HEAD only, since a write may have reached the
+ *  daemon before the connection broke — retries on the interactive base.
+ *  Streams (k8s follow, DB export/import, S3 downloads) use it directly. */
+export async function laneFetch(lane: Lane, path: string, init: RequestInit = {}): Promise<Response> {
+  const base = laneBase(lane);
+  try {
+    const resp = await fetch(`${base}/api/v1${path}`, init);
+    if (base !== baseUrl()) altRetryMs = ALT_RETRY_MIN_MS;
+    return resp;
+  } catch (e) {
+    if (base === baseUrl() || isAbortError(e)) throw e;
+    altNetworkFailure(base);
+    const method = (init.method ?? 'GET').toUpperCase();
+    if (method !== 'GET' && method !== 'HEAD') throw e;
+    return fetch(`${baseUrl()}/api/v1${path}`, init);
+  }
+}
+
+function resolveLane(path: string, signal: AbortSignal | undefined, lane: Lane | undefined): Lane {
+  return lane ?? inheritedLane(signal) ?? (isLongPath(path) ? 'long' : 'int');
 }
 
 async function request<T>(
   method: string,
   path: string,
-  body?: unknown,
-  signal?: AbortSignal,
-  lane?: Lane,
+  body: unknown,
+  signal: AbortSignal | undefined,
+  lane: Lane,
 ): Promise<T> {
   const headers: Record<string, string> = {};
   const token = getToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
 
-  const effLane: Lane = lane ?? (isLongPath(path) ? 'long' : 'int');
-  const init: RequestInit = {
+  const resp = await laneFetch(lane, path, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
     signal,
-  };
-  const base = laneBase(effLane);
-  let resp: Response;
-  try {
-    resp = await fetch(`${base}/api/v1${path}`, init);
-  } catch (e) {
-    // The alias host failed at the NETWORK level (not an HTTP error, not an
-    // abort): drop it, so a broken alias degrades to today's single-host
-    // behaviour instead of an outage. Only a GET is retried — a write may have
-    // reached the daemon before the connection broke.
-    if (base === baseUrl() || isAbortError(e)) throw e;
-    altBase = null;
-    if (method !== 'GET') throw e;
-    resp = await fetch(`${baseUrl()}/api/v1${path}`, init);
-  }
+  });
 
   // Surface git-provider outages (the daemon maps provider failures to a 502)
   // — but ONLY from provider-backed endpoints. A 5xx anywhere else (local git,
@@ -221,18 +335,92 @@ async function request<T>(
   return text.trim() === '' ? undefined as T : JSON.parse(text) as T;
 }
 
-// Background-request lane. Pollers use `api.bg.get`: at most BG_MAX of them
-// are on the wire at once per window, so background work can never take the
-// whole pool — on the alias host that leaves room for `long` calls (three
-// windows × BG_MAX still < 6); without an alias, for interactive ones.
-// Interactive calls (`api.get` & co.) never wait on this lane. The count is
-// per-window JS state; the socket pool itself is shared by every window.
+// Background-request lane. Poll ticks, live-query refetches and reconnect /
+// lag resyncs land here (ambiently — see ./lane.ts — or via `api.bg.*`). Two
+// caps, so background work can never take a whole six-socket pool:
+//  - BG_MAX per document (JS queue below), and
+//  - BG_GLOBAL across EVERY document (main window, side pane, popouts, tray),
+//    via Web Locks (one lock name per slot). The old comment claimed "three
+//    windows × BG_MAX still < 6" — per-document budgets add up (main + pane +
+//    2 popouts + tray = 10 > 6). Now at most 3 bg sockets are open app-wide:
+//    on the alias host that leaves 3 for `long` calls; without an alias, 3
+//    for interactive ones. No Web Locks (or a lock wait over
+//    BG_GLOBAL_WAIT_MS — a frozen document holding a slot) → the per-document
+//    cap alone, as before.
+// Interactive calls (`api.get` & co.) never wait on this lane.
 const BG_MAX = 2;
+const BG_GLOBAL = 3;
+const BG_GLOBAL_WAIT_MS = 5_000;
 let bgActive = 0;
 const bgWaiters: (() => void)[] = [];
 
 function abortError(): DOMException {
   return new DOMException('The operation was aborted.', 'AbortError');
+}
+
+type LockManagerLike = {
+  request(name: string, opts: { ifAvailable?: boolean; signal?: AbortSignal }, cb: (lock: unknown) => unknown): Promise<unknown>;
+};
+
+function webLocks(): LockManagerLike | null {
+  const n = typeof navigator !== 'undefined' ? (navigator as unknown as { locks?: LockManagerLike }) : null;
+  return n?.locks && typeof n.locks.request === 'function' ? n.locks : null;
+}
+
+/** Hold lock `name`; resolves with its release, or `null` when `ifAvailable`
+ *  found it taken. */
+function holdLock(
+  locks: LockManagerLike,
+  name: string,
+  opts: { ifAvailable?: boolean; signal?: AbortSignal },
+): Promise<(() => void) | null> {
+  return new Promise((resolve, reject) => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    locks
+      .request(name, opts, (lock) => {
+        if (!lock) {
+          resolve(null);
+          return undefined;
+        }
+        resolve(release);
+        return held;
+      })
+      .catch(reject);
+  });
+}
+
+const noop = (): void => {};
+
+/** One of the BG_GLOBAL app-wide slots; its release. */
+async function globalBgSlot(signal?: AbortSignal): Promise<() => void> {
+  const locks = webLocks();
+  if (!locks) return noop;
+  const first = Math.floor(Math.random() * BG_GLOBAL);
+  try {
+    for (let k = 0; k < BG_GLOBAL; k++) {
+      const rel = await holdLock(locks, `otto-bg-${(first + k) % BG_GLOBAL}`, { ifAvailable: true });
+      if (rel) return rel;
+    }
+    // All taken: wait for one (bounded — see BG_GLOBAL_WAIT_MS).
+    const ctl = new AbortController();
+    const onAbort = (): void => ctl.abort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const timer = setTimeout(() => ctl.abort(), BG_GLOBAL_WAIT_MS);
+    try {
+      return (await holdLock(locks, `otto-bg-${first}`, { signal: ctl.signal })) ?? noop;
+    } catch (e) {
+      if (signal?.aborted) throw abortError();
+      if (isAbortError(e)) return noop; // waited long enough: per-document cap only
+      throw e;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    }
+  } catch (e) {
+    if (signal?.aborted) throw abortError();
+    return noop; // Web Locks misbehaving: never fail a request over it
+  }
 }
 
 async function withBgSlot<T>(run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -256,37 +444,46 @@ async function withBgSlot<T>(run: () => Promise<T>, signal?: AbortSignal): Promi
       bgWaiters.push(go);
     });
   }
+  let releaseGlobal = noop;
   try {
+    releaseGlobal = await globalBgSlot(signal);
     return await run();
   } finally {
+    releaseGlobal();
     const next = bgWaiters.shift();
     if (next) next();
     else bgActive -= 1;
   }
 }
 
+/** Issue a request on its effective lane (resolved NOW, synchronously, so an
+ *  ambient `inLane` scope applies); `bg` goes through the slot caps. */
+function send<T>(method: string, path: string, body: unknown, signal: AbortSignal | undefined, lane?: Lane): Promise<T> {
+  const eff = resolveLane(path, signal, lane);
+  if (eff === 'bg') return withBgSlot(() => request<T>(method, path, body, signal, 'bg'), signal);
+  return request<T>(method, path, body, signal, eff);
+}
+
 export const api = {
   /** Background (poll) lane — see {@link withBgSlot}. */
   bg: {
-    get: <T>(path: string, signal?: AbortSignal) =>
-      withBgSlot(() => request<T>('GET', path, undefined, signal, 'bg'), signal),
+    get: <T>(path: string, signal?: AbortSignal) => send<T>('GET', path, undefined, signal, 'bg'),
     /** A background WRITE that tolerates delay (a keep-alive ping). */
-    post: <T>(path: string, body?: unknown, signal?: AbortSignal) =>
-      withBgSlot(() => request<T>('POST', path, body, signal, 'bg'), signal),
+    post: <T>(path: string, body?: unknown, signal?: AbortSignal) => send<T>('POST', path, body, signal, 'bg'),
   },
-  /** Known-slow lane (remote git, CLI checks, infra sweeps): the alias host
-   *  when advertised, never queued in JS. Paths in LONG_PATHS get it anyway. */
+  /** Known-slow lane (remote calls, dials, infra sweeps): the alias host
+   *  when advertised, never queued in JS. Paths in LONG_PATHS get it anyway;
+   *  call sites use this where the PATH alone can't tell (the API client's
+   *  "Send", an SSH open). */
   long: {
-    get: <T>(path: string, signal?: AbortSignal) => request<T>('GET', path, undefined, signal, 'long'),
-    post: <T>(path: string, body?: unknown, signal?: AbortSignal) =>
-      request<T>('POST', path, body, signal, 'long'),
+    get: <T>(path: string, signal?: AbortSignal) => send<T>('GET', path, undefined, signal, 'long'),
+    post: <T>(path: string, body?: unknown, signal?: AbortSignal) => send<T>('POST', path, body, signal, 'long'),
   },
-  get: <T>(path: string, signal?: AbortSignal) => request<T>('GET', path, undefined, signal),
-  post: <T>(path: string, body?: unknown, signal?: AbortSignal) =>
-    request<T>('POST', path, body, signal),
-  patch: <T>(path: string, body?: unknown) => request<T>('PATCH', path, body),
-  put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),
-  del: <T>(path: string) => request<T>('DELETE', path),
+  get: <T>(path: string, signal?: AbortSignal) => send<T>('GET', path, undefined, signal),
+  post: <T>(path: string, body?: unknown, signal?: AbortSignal) => send<T>('POST', path, body, signal),
+  patch: <T>(path: string, body?: unknown) => send<T>('PATCH', path, body, undefined),
+  put: <T>(path: string, body?: unknown) => send<T>('PUT', path, body, undefined),
+  del: <T>(path: string) => send<T>('DELETE', path, undefined, undefined),
 };
 
 /** True for the daemon's 409 "the working tree is in the way" git refusals —
@@ -399,7 +596,9 @@ export async function postNdjsonStream(
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   const token = getToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const resp = await fetch(`${baseUrl()}/api/v1${path}`, {
+  // DB export-to-path / import run for minutes: the long lane (alias host),
+  // never one of the six interactive sockets.
+  const resp = await laneFetch('long', path, {
     method: 'POST',
     headers,
     body: JSON.stringify(body),

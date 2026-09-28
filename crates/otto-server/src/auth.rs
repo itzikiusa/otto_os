@@ -177,12 +177,12 @@ mod session_owner_tests {
     use chrono::Utc;
     use otto_core::domain::{Session, SessionKind, SessionStatus, User};
     use otto_rbac::RbacRoleChecker;
+    use otto_state::DbPool;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-    use sqlx::SqlitePool;
 
     // ---- helpers -----------------------------------------------------------
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -195,7 +195,7 @@ mod session_owner_tests {
             .run(&pool)
             .await
             .expect("migrations");
-        pool
+        pool.into()
     }
 
     fn make_user(id: &str, is_root: bool) -> User {
@@ -228,7 +228,7 @@ mod session_owner_tests {
         }
     }
 
-    async fn seed_user(pool: &SqlitePool, id: &str, is_root: bool) {
+    async fn seed_user(pool: &DbPool, id: &str, is_root: bool) {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO users (id, username, password_hash, display_name, is_root, created_at)
@@ -244,7 +244,7 @@ mod session_owner_tests {
         .expect("seed user");
     }
 
-    async fn seed_workspace(pool: &SqlitePool, ws_id: &str) {
+    async fn seed_workspace(pool: &DbPool, ws_id: &str) {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO workspaces (id, name, root_path, settings_json, archived, created_at)
@@ -257,7 +257,7 @@ mod session_owner_tests {
         .expect("seed workspace");
     }
 
-    async fn set_member(pool: &SqlitePool, ws_id: &str, user_id: &str, role: &str) {
+    async fn set_member(pool: &DbPool, ws_id: &str, user_id: &str, role: &str) {
         sqlx::query("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)")
             .bind(ws_id)
             .bind(user_id)

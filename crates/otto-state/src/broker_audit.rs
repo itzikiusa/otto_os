@@ -1,9 +1,10 @@
 //! Audit log for broker write operations (produce, delete-topic, alter-config,
 //! offset-reset). Append-only; never mutated after insert.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::{new_id, Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 
 use crate::convert::{dberr, fmt};
 
@@ -29,11 +30,12 @@ fn row_to_audit(r: &sqlx::sqlite::SqliteRow) -> BrokerAuditRow {
 }
 
 pub struct BrokerAuditRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl BrokerAuditRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 

@@ -5,11 +5,12 @@
 //! place instead of inserting a duplicate. Settings are stored as a single
 //! JSON-encoded row (`NotificationSettings`), defaulting when unset.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::api::NotificationSettings;
 use otto_core::domain::{Notice, NoticeAction, NoticeKind, NoticeSeverity};
 use otto_core::{new_id, Error, Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 
 use crate::convert::{dberr, fmt, ts};
 
@@ -48,7 +49,7 @@ pub enum NoticeAccess {
 
 #[derive(Clone)]
 pub struct NotificationsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 // --- enum <-> column string helpers ----------------------------------------
@@ -112,7 +113,8 @@ fn row_to_notice(r: &sqlx::sqlite::SqliteRow) -> Result<Notice> {
 }
 
 impl NotificationsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 

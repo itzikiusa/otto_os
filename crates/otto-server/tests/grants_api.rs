@@ -22,7 +22,7 @@ use otto_core::auth::AuthUser;
 use otto_core::domain::{Capability, Feature, User};
 use otto_server::feature_guard::feature_guard;
 use otto_server::routes::grants::{capabilities, get_grants, put_grants, GrantsCtx};
-use otto_state::{AuditRepo, GrantsRepo, NewAuditEntry, PluginsRepo, SqlitePool, UsersRepo};
+use otto_state::{AuditRepo, DbPool, GrantsRepo, NewAuditEntry, PluginsRepo, UsersRepo};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::sync::Arc;
 use tower::ServiceExt; // for `oneshot`
@@ -33,7 +33,7 @@ use tower::ServiceExt; // for `oneshot`
 
 #[derive(Clone)]
 struct TestGrantCtx {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl otto_server::feature_guard::HasGrants for TestGrantCtx {
@@ -67,7 +67,7 @@ impl GrantsCtx for TestGrantCtx {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-async fn mk_pool() -> SqlitePool {
+async fn mk_pool() -> DbPool {
     let opts = SqliteConnectOptions::new()
         .in_memory(true)
         .foreign_keys(true);
@@ -80,10 +80,10 @@ async fn mk_pool() -> SqlitePool {
         .run(&pool)
         .await
         .expect("migrations");
-    pool
+    pool.into()
 }
 
-async fn seed_user(pool: &SqlitePool, username: &str, is_root: bool) -> User {
+async fn seed_user(pool: &DbPool, username: &str, is_root: bool) -> User {
     let id = otto_core::new_id();
     let now = Utc::now().to_rfc3339();
     sqlx::query(
@@ -111,7 +111,7 @@ async fn seed_user(pool: &SqlitePool, username: &str, is_root: bool) -> User {
 
 /// Build a minimal router with the actual grant handlers + the feature guard
 /// layered, with a synthetic `AuthUser` injected for `actor`.
-fn build_app(pool: SqlitePool, actor: User) -> Router {
+fn build_app(pool: DbPool, actor: User) -> Router {
     let state = TestGrantCtx { pool };
 
     let protected = Router::new()

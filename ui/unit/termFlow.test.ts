@@ -10,7 +10,10 @@ import {
   FLOW_LOW,
   FLOW_PAUSE_KEEPALIVE_MS,
   PRIMARY_SCROLLBACK,
+  QuietRepaint,
   RESYNC_ON_INPUT,
+  TUI_CLEANUP_MAX_WAIT_MS,
+  TUI_CLEANUP_QUIET_MS,
   TermFlow,
   WRITE_INFLIGHT,
   WRITE_SLICE,
@@ -201,8 +204,9 @@ test('scrollback depths: 2k default for embeds, 10k only where a primary pane as
   assert.equal(EMBED_SCROLLBACK, 2000);
   assert.equal(PRIMARY_SCROLLBACK, 10_000);
   const src = (p: string) => readFileSync(new URL(p, import.meta.url), 'utf8');
-  assert.match(src('../src/lib/components/Terminal.svelte'), /scrollback = EMBED_SCROLLBACK \}: Props = \$props\(\)/);
-  assert.match(src('../src/modules/agents/SessionView.svelte'), /scrollback = PRIMARY_SCROLLBACK \}: Props = \$props\(\)/);
+  // The default in the props destructure (later props may follow it).
+  assert.match(src('../src/lib/components/Terminal.svelte'), /scrollback = EMBED_SCROLLBACK(, \w+ = [^,}]+)* \}: Props = \$props\(\)/);
+  assert.match(src('../src/modules/agents/SessionView.svelte'), /scrollback = PRIMARY_SCROLLBACK(, \w+ = [^,}]+)* \}: Props = \$props\(\)/);
   const tiled = src('../src/modules/agents/TiledView.svelte');
   assert.match(tiled, /const TILE_SCROLLBACK = EMBED_SCROLLBACK;/);
   assert.match(tiled, /scrollback=\{TILE_SCROLLBACK\}/);
@@ -340,4 +344,64 @@ test('credit: client backlog is bounded by the window independent of send rate',
     assert.ok(inOrder, `burst ${burst}: in order`);
     assert.ok(!sent.some((f) => f.type === 'pause'), `burst ${burst}: no pause`);
   }
+});
+
+// ── Agent-TUI ghost clean-up (r3-12-01) ─────────────────────────────────
+
+/** Fake clock + timers: `advance(ms)` fires due timers in order. */
+function fakeTimers() {
+  let now = 0;
+  let seq = 0;
+  const timers = new Map<number, { at: number; fn: () => void }>();
+  const setT = (fn: () => void, ms: number) => {
+    const id = ++seq;
+    timers.set(id, { at: now + ms, fn });
+    return id as unknown as ReturnType<typeof setTimeout>;
+  };
+  const clearT = (id: ReturnType<typeof setTimeout>) => void timers.delete(id as unknown as number);
+  const advance = (ms: number) => {
+    const end = now + ms;
+    for (;;) {
+      let next: [number, { at: number; fn: () => void }] | null = null;
+      for (const e of timers) if (e[1].at <= end && (!next || e[1].at < next[1].at)) next = e;
+      if (!next) break;
+      timers.delete(next[0]);
+      now = next[1].at;
+      next[1].fn();
+    }
+    now = end;
+  };
+  return { setT, clearT, advance, now: () => now, live: () => timers.size };
+}
+
+test('tui clean-up: one repaint after a burst goes quiet, not one per frame', () => {
+  const t = fakeTimers();
+  let runs = 0;
+  const r = new QuietRepaint(() => runs++, TUI_CLEANUP_QUIET_MS, TUI_CLEANUP_MAX_WAIT_MS, t.now, t.setT, t.clearT);
+  // A 10-frame burst 20 ms apart, then silence.
+  for (let i = 0; i < 10; i++) {
+    r.poke();
+    t.advance(20);
+  }
+  assert.equal(runs, 0, 'nothing while the burst is still arriving');
+  t.advance(TUI_CLEANUP_QUIET_MS);
+  assert.equal(runs, 1, 'exactly one repaint once it went quiet');
+  assert.equal(r.pending, false);
+  assert.equal(t.live(), 0, 'no timer left behind');
+  t.advance(5_000);
+  assert.equal(runs, 1, 'idle panes never repaint');
+});
+
+test('tui clean-up: a never-quiet spinner is cleaned ~1×/s (was 5×/s)', () => {
+  const t = fakeTimers();
+  let runs = 0;
+  const r = new QuietRepaint(() => runs++, TUI_CLEANUP_QUIET_MS, TUI_CLEANUP_MAX_WAIT_MS, t.now, t.setT, t.clearT);
+  // A 10 Hz spinner for 10 s.
+  for (let ms = 0; ms < 10_000; ms += 100) {
+    r.poke();
+    t.advance(100);
+  }
+  assert.ok(runs >= 9 && runs <= 11, `≈1 repaint per max-wait window, got ${runs}`);
+  r.cancel();
+  assert.equal(t.live(), 0);
 });

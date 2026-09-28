@@ -166,10 +166,24 @@ async fn list(
         )
         .await
         .map_err(ApiError)?;
-    let mut out = Vec::with_capacity(packs.len());
-    for p in packs {
-        out.push(pack_resp(&ctx, p).await?);
-    }
+    // One narrow query for every pack's badge inputs (r3-07-01), not one
+    // full-content read per pack.
+    let mut arts = ctx
+        .proof_repo
+        .badge_artifacts(&ws)
+        .await
+        .map_err(ApiError)?;
+    let out = packs
+        .into_iter()
+        .map(|pack| {
+            let a = arts.remove(&pack.id).unwrap_or_default();
+            ProofPackResp {
+                badges: engine::badge_strings(&pack, &a),
+                artifact_count: a.len() as u32,
+                pack,
+            }
+        })
+        .collect();
     Ok(Json(out))
 }
 
@@ -184,13 +198,14 @@ async fn summary(
         .list_packs(&ws, None, None, None)
         .await
         .map_err(ApiError)?;
+    let mut by_pack = ctx
+        .proof_repo
+        .badge_artifacts(&ws)
+        .await
+        .map_err(ApiError)?;
     let mut rows = Vec::with_capacity(packs.len());
     for p in packs {
-        let arts = ctx
-            .proof_repo
-            .list_artifacts(&p.id)
-            .await
-            .map_err(ApiError)?;
+        let arts = by_pack.remove(&p.id).unwrap_or_default();
         rows.push(ProofSummaryRow {
             work_item_kind: p.work_item_kind.as_str().to_string(),
             work_item_id: p.work_item_id.clone(),

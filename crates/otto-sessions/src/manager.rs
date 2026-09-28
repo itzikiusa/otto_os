@@ -210,6 +210,26 @@ async fn process_table_async() -> Vec<ProcRow> {
         .unwrap_or_default()
 }
 
+/// The process table, taken on FIRST NEED within one sweep (r3-01-09 /
+/// r3-08-08): the idle sweep used to `ps` the whole box every minute even with
+/// no live session, or none past its grace window.
+#[derive(Default)]
+struct LazyProcTable(Option<Vec<ProcRow>>);
+
+impl LazyProcTable {
+    async fn get(&mut self) -> &[ProcRow] {
+        if self.0.is_none() {
+            self.0 = Some(process_table_async().await);
+        }
+        self.0.as_deref().unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    fn taken(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
 /// Parse `ps` cumulative CPU time (`MM:SS.ss`, `HH:MM:SS`, or `D-HH:MM:SS`)
 /// into milliseconds.
 fn parse_ps_time_ms(s: &str) -> Option<u64> {
@@ -718,6 +738,17 @@ fn nested_misses() -> &'static std::sync::Mutex<NestedMisses> {
     M.get_or_init(Default::default)
 }
 
+/// (session, spawn) → "is an agent-kind `shell`" for the nested-agent sweep.
+/// Kind and provider are fixed for a spawn, so each live session costs one row
+/// read per launch instead of one per 30 s tick, and a box whose live sessions
+/// are all agent CLIs never runs the whole-box `ps` at all (r3-01-09).
+type NestedEligible = std::collections::HashMap<(Id, u64), bool>;
+
+fn nested_eligible() -> &'static std::sync::Mutex<NestedEligible> {
+    static M: std::sync::OnceLock<std::sync::Mutex<NestedEligible>> = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
 fn nested_probe_due(id: &Id, pid: u32) -> bool {
     let m = nested_misses().lock().unwrap_or_else(|p| p.into_inner());
     m.get(&(id.clone(), pid))
@@ -1024,6 +1055,27 @@ pub const VIEW_HOLD: Duration = Duration::from_secs(3 * 60);
 /// owning engine is done with them. Foreground sessions are never touched.
 pub const REAP_UNRESUMABLE_GRACE: Duration = Duration::from_secs(30 * 60);
 
+/// Default for the `manual_idle_suspend_secs` setting: how long a session the
+/// USER started (Agents page, [`is_user_started`]) must be quiet — no PTY
+/// output, no viewer, no open turn, no descendant CPU — before the idle sweep
+/// suspends it too. Engine sessions use the much shorter
+/// `idle_suspend_grace_secs` ([`SUSPEND_GRACE`]); the user's own get a long
+/// grace instead of the infinite one they had (r3-05-01: every manual session
+/// opened since the daemon started kept its CLI — 150–400 MB of Node plus an
+/// MCP sidecar — alive forever). `0` in the setting = never (the old rule).
+pub const MANUAL_IDLE_SUSPEND: Duration = Duration::from_secs(30 * 60);
+
+/// Default for the `max_live_agent_sessions` setting: a soft cap on live
+/// agent-CLI sessions. Past it the sweep suspends the least-recently-used
+/// quiet ones ([`SessionManager::enforce_live_cap`]) — never one that is
+/// mid-turn, watched, pinned or busy. `0` in the setting = no cap.
+pub const MAX_LIVE_AGENT_SESSIONS: usize = 12;
+
+/// The cap never suspends a session that printed something more recently than
+/// this (or than the idle grace, when that is set lower): a CLI that just
+/// streamed is plausibly still working even when its transcript says nothing.
+pub const CAP_MIN_QUIET: Duration = Duration::from_secs(2 * 60);
+
 /// Pure decision for the sweep's kill branch (see [`REAP_UNRESUMABLE_GRACE`]):
 /// only an **agent** session (never a connection terminal), only an
 /// engine-owned **background** one (a foreground session is the user's own
@@ -1039,7 +1091,8 @@ fn should_reap_unresumable(session: &Session, idle_for: Duration) -> bool {
 /// Did the USER start this session by hand — the Agents page — as opposed to
 /// an engine starting it in the background?
 ///
-/// The idle sweep never auto-suspends a user-started session. "No PTY output
+/// A user-started session gets the long `manual_idle_suspend_secs` grace
+/// ([`MANUAL_IDLE_SUSPEND`]) instead of the engine one. "No PTY output
 /// for 5 minutes" is NOT "done": an agent that hands work to background
 /// watchers and `sleep`-polls them is silent, burns no descendant CPU and is
 /// very much mid-turn — and yanking its PTY away mid-turn is exactly the bug
@@ -1234,27 +1287,122 @@ fn sweep_hold(
     session: &Session,
     turn_open: Option<bool>,
     artifact_age: Option<Duration>,
+    manual: ManualIdle,
 ) -> Option<&'static str> {
-    // Per-session keep-alive: never auto-suspend sessions pinned by the user.
-    if session
+    if is_pinned(session) {
+        return Some("keep_alive");
+    }
+    // The user's OWN sessions (Agents page): silence is not doneness, so they
+    // get the long `manual_idle_suspend_secs` grace instead of the engine one.
+    // Past it they fall through to the same open-turn guard as everything
+    // else. A process that a passive open merely RESUMED (nobody typed into
+    // it since) earns no hold at all: it is not doing anything for anyone.
+    if is_user_started(session) && !manual.passive_resume {
+        let within = manual.grace.is_none_or(|g| manual.quiet_for < g);
+        if within {
+            return Some("origin=manual");
+        }
+    }
+    turn_hold(turn_open, artifact_age)
+}
+
+/// What the idle sweep knows about a session's recent use, for the
+/// user-started branch of [`sweep_hold`].
+#[derive(Clone, Copy, Debug)]
+struct ManualIdle {
+    /// How long the PTY has printed nothing.
+    quiet_for: Duration,
+    /// `manual_idle_suspend_secs` ([`MANUAL_IDLE_SUSPEND`]); `None` = never.
+    grace: Option<Duration>,
+    /// The live process was spawned by a resume-on-open (`ensure_live` from a
+    /// terminal attach or a chat ping) and has received no input since — see
+    /// [`SessionManager::passive_resume`].
+    passive_resume: bool,
+}
+
+/// `meta.keep_alive`: the user pinned the session; no sweep ever touches it.
+fn is_pinned(session: &Session) -> bool {
+    session
         .meta
         .get("keep_alive")
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
-    {
-        return Some("keep_alive");
-    }
-    // The user's OWN sessions (Agents page): silence is not doneness, and the
-    // PTY is the thing they are looking at. Engine origins keep the old rules.
-    if is_user_started(session) {
-        return Some("origin=manual");
-    }
-    // An OPEN AGENT TURN is activity even at zero output and zero CPU — as
-    // long as the transcript backing that claim is still fresh.
+}
+
+/// An OPEN AGENT TURN is activity even at zero output and zero CPU — as long
+/// as the transcript backing that claim is still fresh (see [`sweep_hold`]).
+fn turn_hold(turn_open: Option<bool>, artifact_age: Option<Duration>) -> Option<&'static str> {
     if turn_open == Some(true) && artifact_age.is_some_and(|age| age < REAP_UNRESUMABLE_GRACE) {
         return Some("turn open");
     }
     None
+}
+
+/// Does a live session count toward `max_live_agent_sessions`? Agent CLIs
+/// only — the heavy processes the cap exists for. A plain `shell` is cheap
+/// and cannot be resumed losslessly, and connection terminals are not agents.
+fn counts_toward_cap(session: &Session) -> bool {
+    session.kind == SessionKind::Agent && session.provider != "shell"
+}
+
+/// The cap's per-session HOLD, as a pure function (see
+/// [`SessionManager::enforce_live_cap`]): the cap overrides the user-started
+/// grace, but never a pin, a `Working` row, a fresh open turn, or a session
+/// that cannot be resumed (suspending one of those would lose work).
+fn cap_hold(
+    session: &Session,
+    resumable: bool,
+    turn_open: Option<bool>,
+    artifact_age: Option<Duration>,
+) -> Option<&'static str> {
+    if !resumable {
+        return Some("not resumable");
+    }
+    if is_pinned(session) {
+        return Some("keep_alive");
+    }
+    if session.status == SessionStatus::Working {
+        return Some("working");
+    }
+    turn_hold(turn_open, artifact_age)
+}
+
+/// How many sessions the cap must free: live agent CLIs over `cap` (`0` =
+/// no cap).
+fn cap_excess(live_agents: usize, cap: usize) -> usize {
+    if cap == 0 {
+        0
+    } else {
+        live_agents.saturating_sub(cap)
+    }
+}
+
+/// A session must have printed nothing for this long before a "restart when
+/// idle" caller (the nightly CLI auto-update) may re-exec it.
+pub const RESTART_QUIET: Duration = Duration::from_secs(30);
+
+/// Pure "would a restart NOW interrupt work?" decision (r3-08-01), so the
+/// guards are unit-testable without a PTY. Busy when any of:
+/// - the row says `Working`;
+/// - an engine turn driver still holds the session ([`SessionManager::hold_for_turn`]);
+/// - the PTY printed something inside [`RESTART_QUIET`] (streaming output);
+/// - the provider's transcript has an OPEN turn that moved inside
+///   [`REAP_UNRESUMABLE_GRACE`] (quiet `sleep`-polling is still mid-turn —
+///   same freshness bound as [`sweep_hold`]).
+///
+/// Unknown transcript state is NOT busy on its own: the other three guards
+/// already cover a live turn, and a caller only defers, never skips.
+pub fn restart_would_interrupt(
+    status: SessionStatus,
+    engine_turn_open: bool,
+    quiet_for: Duration,
+    turn_open: Option<bool>,
+    artifact_age: Option<Duration>,
+) -> bool {
+    status == SessionStatus::Working
+        || engine_turn_open
+        || quiet_for < RESTART_QUIET
+        || (turn_open == Some(true) && artifact_age.is_some_and(|a| a < REAP_UNRESUMABLE_GRACE))
 }
 
 /// Hook that inspects live PTY output for a session, used by otto-server's
@@ -1395,6 +1543,17 @@ pub struct SessionManager {
     /// [`sweep_hold`]). Purely a log de-duplicator: a held session is re-held
     /// every 60 s forever, so only a CHANGE of guard is worth an `info!` line.
     suspend_hold: Arc<DashMap<Id, &'static str>>,
+    /// Sessions whose CURRENT process was spawned by [`Self::ensure_live`] (a
+    /// terminal attach / chat ping reopening a suspended session) and has had
+    /// no input since. Opening a session to read its history must not pin a
+    /// 150–400 MB agent CLI: such a process gets the short engine grace, not
+    /// the user-started one ([`sweep_hold`]). Cleared by any typed / automated
+    /// input, an explicit restart, and every teardown path.
+    passive_resume: Arc<DashMap<Id, ()>>,
+    /// Last time somebody USED each session — typed into it, attached or
+    /// detached a terminal, pinged a chat. With the PTY's own last-output time
+    /// it orders the live-session cap's least-recently-used eviction.
+    last_touch: Arc<DashMap<Id, std::time::Instant>>,
     repo: SessionsRepo,
     networks: Arc<crate::network::SessionNetworks>,
     events: broadcast::Sender<Event>,
@@ -1497,6 +1656,8 @@ impl SessionManager {
             room_authority: Default::default(),
             suspend_cpu: Arc::new(DashMap::new()),
             suspend_hold: Arc::new(DashMap::new()),
+            passive_resume: Arc::new(DashMap::new()),
+            last_touch: Arc::new(DashMap::new()),
             repo,
             networks,
             events,
@@ -1849,12 +2010,19 @@ impl SessionManager {
     }
 
     /// Prune the activity trail to the newest `keep_per_session` rows per
-    /// session. No-op without an activity store. Returns rows pruned.
-    pub async fn prune_activity_trail(&self, keep_per_session: i64) -> u64 {
+    /// session — every session, or with `since` only those that received rows
+    /// since then (see [`ActivityRepo::prune_trail`]). No-op without an
+    /// activity store. Returns rows pruned.
+    pub async fn prune_activity_trail(
+        &self,
+        keep_per_session: i64,
+        since: Option<std::time::SystemTime>,
+    ) -> u64 {
         let Some(repo) = self.activity.as_ref() else {
             return 0;
         };
-        match repo.prune_trail(keep_per_session).await {
+        let since = since.map(chrono::DateTime::<chrono::Utc>::from);
+        match repo.prune_trail(keep_per_session, since).await {
             Ok(n) => n,
             Err(e) => {
                 tracing::warn!("prune activity trail: {e}");
@@ -2767,6 +2935,7 @@ impl SessionManager {
     pub fn attach(self: &Arc<Self>, id: &Id) -> AttachGuard {
         static CONN_SEQ: AtomicU64 = AtomicU64::new(1);
         let conn_id = CONN_SEQ.fetch_add(1, Ordering::Relaxed);
+        self.touch(id);
         *self.attached.entry(id.clone()).or_insert(0) += 1;
         self.attached_conns
             .entry(id.clone())
@@ -2781,6 +2950,8 @@ impl SessionManager {
 
     /// Decrement the attached-viewer count for `id`, removing the entry at zero.
     fn detach(&self, id: &Id, conn_id: u64) {
+        // Leaving a pane is the last moment it was used (the cap's LRU clock).
+        self.touch(id);
         if let Some(mut e) = self.attached.get_mut(id) {
             *e = e.saturating_sub(1);
             if *e == 0 {
@@ -2852,6 +3023,33 @@ impl SessionManager {
     /// sweep for [`VIEW_HOLD`], exactly like a terminal attachment would.
     pub fn note_view(&self, id: &Id) {
         self.viewed.insert(id.clone(), std::time::Instant::now());
+        self.touch(id);
+    }
+
+    /// Stamp `id` as used now (the live-session cap's LRU clock).
+    fn touch(&self, id: &Id) {
+        self.last_touch.insert(id.clone(), std::time::Instant::now());
+    }
+
+    /// Real input reached `id` (a person typed, or automation sent a turn):
+    /// the process is doing something for someone, so it is no longer a
+    /// passive resume ([`Self::passive_resume`]) and it was just used.
+    fn note_engaged(&self, id: &Id) {
+        self.passive_resume.remove(id);
+        self.touch(id);
+    }
+
+    /// True while `id`'s live process was spawned by a resume-on-open and has
+    /// had no input since (see the field doc).
+    pub fn is_passive_resume(&self, id: &Id) -> bool {
+        self.passive_resume.contains_key(id)
+    }
+
+    /// Drop the sweep's per-session bookkeeping once `id`'s process is gone.
+    fn forget_sweep_state(&self, id: &Id) {
+        self.suspend_cpu.remove(id);
+        self.suspend_hold.remove(id);
+        self.passive_resume.remove(id);
     }
 
     /// Register an engine turn driver as a watcher of `id` for as long as the
@@ -2872,6 +3070,47 @@ impl SessionManager {
     /// True while at least one engine turn driver holds `id`.
     pub fn engine_turn_open(&self, id: &Id) -> bool {
         self.engine_turns.get(id).is_some_and(|n| *n > 0)
+    }
+
+    /// OS pid of `id`'s live child process (None when not live / unknown).
+    /// Lets a deferred "restart when idle" tell whether the process it meant
+    /// to replace is still the one running (a user restart already did it).
+    pub fn live_pid(&self, id: &Id) -> Option<u32> {
+        self.live.get(id).and_then(|e| e.value().pid())
+    }
+
+    /// Would restarting `id` right now interrupt an in-flight turn? See
+    /// [`restart_would_interrupt`]. A session that is not live is never busy.
+    /// Reads the provider transcript tail off the runtime (blocking hop).
+    pub async fn busy_for_restart(&self, id: &Id) -> bool {
+        let Some(quiet_for) = self.live.get(id).map(|e| e.value().last_output_at().elapsed()) else {
+            return false;
+        };
+        let engine_open = self.engine_turn_open(id);
+        let Ok(session) = self.repo.get(id).await else {
+            // Unreadable row: say busy — a caller only ever defers on it.
+            return true;
+        };
+        // Cheap guards first; only read the transcript when they all pass.
+        if restart_would_interrupt(session.status, engine_open, quiet_for, None, None) {
+            return true;
+        }
+        let (turn_open, artifact_age) = match self.activity_artifact(id).await {
+            Some(artifact) => {
+                let provider = session.provider.clone();
+                tokio::task::spawn_blocking(move || {
+                    let age = std::fs::metadata(&artifact)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok());
+                    (agent_turn_open(&provider, &artifact), age)
+                })
+                .await
+                .unwrap_or((None, None))
+            }
+            None => (None, None),
+        };
+        restart_would_interrupt(session.status, engine_open, quiet_for, turn_open, artifact_age)
     }
 
     fn release_turn(&self, id: &Id) {
@@ -3013,6 +3252,12 @@ impl SessionManager {
                 }
             }
             self.restart_locked(id, None).await.map(|_| ())?;
+            // A resume-on-open: until real input arrives this process only
+            // repainted history for whoever opened it, so it must not earn
+            // the user-started idle hold (r3-05-01 — attach-resumed CLIs were
+            // pinned forever). Callers that go on to send a turn (channel
+            // bridge, agent_session, assistant) clear this in `input`.
+            self.passive_resume.insert(id.clone(), ());
         } else if session.kind == SessionKind::Agent && session.provider == "shell" {
             // A plain terminal has no provider-side conversation of its own, so
             // the branch above can never bring it back — reopening one used to
@@ -3077,15 +3322,48 @@ impl SessionManager {
     /// Resilient: a failure on one session is logged and skipped.
     pub async fn capture_nested_agents(&self) -> usize {
         // Snapshot live ids first (no DashMap refs held across awaits).
-        let live: Vec<(Id, Option<u32>)> = self
+        let snapshot: Vec<(Id, Option<u32>, u64)> = self
             .live
             .iter()
-            .map(|e| (e.key().clone(), e.value().pid()))
+            .map(|e| (e.key().clone(), e.value().pid(), e.value().spawn_seq()))
             .collect();
         {
-            // Backoff entries die with their session.
+            // Backoff + eligibility entries die with their session / spawn.
             let mut m = nested_misses().lock().unwrap_or_else(|p| p.into_inner());
-            m.retain(|(sid, _), _| live.iter().any(|(id, _)| id == sid));
+            m.retain(|(sid, _), _| snapshot.iter().any(|(id, ..)| id == sid));
+            let mut e = nested_eligible().lock().unwrap_or_else(|p| p.into_inner());
+            e.retain(|(sid, seq), _| {
+                snapshot
+                    .iter()
+                    .any(|(id, _, s)| id == sid && s == seq)
+            });
+        }
+        // Only agent-kind shells can host a nested agent: learn each spawn's
+        // kind once, and skip the whole-box `ps` when no live shell exists.
+        let mut live: Vec<(Id, Option<u32>)> = Vec::new();
+        for (id, pid, seq) in snapshot {
+            let known = nested_eligible()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(&(id.clone(), seq))
+                .copied();
+            let eligible = match known {
+                Some(v) => v,
+                None => {
+                    let Ok(s) = self.repo.get(&id).await else {
+                        continue; // removed between the snapshot and now
+                    };
+                    let v = s.kind == SessionKind::Agent && s.provider == "shell";
+                    nested_eligible()
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .insert((id.clone(), seq), v);
+                    v
+                }
+            };
+            if eligible {
+                live.push((id, pid));
+            }
         }
         if live.is_empty() {
             return 0;
@@ -3335,6 +3613,7 @@ impl SessionManager {
         permit.check_room(room, member, epoch, handle.spawn_seq())?;
         let authorization = permit.authorization();
         drop(permit);
+        self.note_engaged(id);
         self.write_pty(id, &handle, data, Some(authorization)).await
     }
 
@@ -3375,6 +3654,11 @@ impl SessionManager {
         permit.human(user, scoped, !user_initiated, handle.spawn_seq())?;
         let authorization = permit.authorization();
         drop(permit);
+        // Emulator replies (DA / cursor-position answers an attach produces
+        // on its own) are not the user doing anything.
+        if user_initiated {
+            self.note_engaged(id);
+        }
         self.write_pty(id, &handle, data, Some(authorization)).await
     }
 
@@ -3444,6 +3728,7 @@ impl SessionManager {
         permit.human(user, scoped, false, handle.spawn_seq())?;
         let authorization = permit.authorization();
         drop(permit);
+        self.note_engaged(id);
         let text: String = text
             .chars()
             .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
@@ -3476,6 +3761,7 @@ impl SessionManager {
         permit.automation(handle.spawn_seq())?;
         let authorization = permit.authorization();
         drop(permit);
+        self.note_engaged(id);
         self.write_pty(id, &handle, data, Some(authorization)).await
     }
 
@@ -3584,6 +3870,7 @@ impl SessionManager {
         if let Some(handle) = self.live_handle(id) {
             let _ = handle.kill();
         }
+        self.forget_sweep_state(id);
         self.retire_credentials(&session).await;
         self.repo.update_status(id, SessionStatus::Exited).await?;
         self.record_lifecycle(&session, "Killed");
@@ -3645,6 +3932,7 @@ impl SessionManager {
         if let Some((_, handle)) = self.live.remove(id) {
             let _ = handle.kill();
         }
+        self.forget_sweep_state(id);
         self.retire_credentials(&session).await;
         self.repo
             .update_status(id, SessionStatus::Reconnectable)
@@ -3859,8 +4147,9 @@ impl SessionManager {
     /// never be suspended (not resumable), once it has sat idle past the much
     /// longer [`REAP_UNRESUMABLE_GRACE`] (see [`should_reap_unresumable`]).
     /// Working sessions, attached sessions and the user's own (foreground)
-    /// non-resumable sessions are never touched. Returns the number reclaimed
-    /// (suspended + killed).
+    /// non-resumable sessions are never touched. A second pass then enforces
+    /// the live-session cap ([`Self::enforce_live_cap`]). Returns the number
+    /// reclaimed (suspended + killed + capped).
     ///
     /// **"Idle" means "no PTY output", which is not "done".** An agent that
     /// delegates work and then `sleep`-polls its watchers prints nothing, burns
@@ -3875,8 +4164,11 @@ impl SessionManager {
     ///   suspending it there re-ran the whole step in a fresh session.
     /// - `keep_alive`     — the user pinned it (`meta.keep_alive`).
     /// - `origin=manual`  — the user started it from the Agents page
-    ///   ([`is_user_started`]); only engine-owned sessions are ever
-    ///   auto-suspended.
+    ///   ([`is_user_started`]) and it has been quiet for less than
+    ///   `manual_idle_suspend_secs` ([`MANUAL_IDLE_SUSPEND`]). A process a
+    ///   passive open merely resumed ([`Self::is_passive_resume`]) gets no
+    ///   such hold. Past the grace the remaining guards decide, as for any
+    ///   engine session.
     /// - `turn open`      — the provider's own transcript says a turn is still
     ///   open ([`agent_turn_open`]) **and** that transcript moved inside the
     ///   last [`REAP_UNRESUMABLE_GRACE`], whatever the PTY and the CPU say. An
@@ -3903,17 +4195,32 @@ impl SessionManager {
         }
     }
 
+    /// A `u64` setting, `None` when unset / unreadable / not a number.
+    async fn setting_u64(&self, key: &str) -> Option<u64> {
+        let sr = self.settings.as_ref()?;
+        sr.get(key).await.ok().flatten().and_then(|v| v.as_u64())
+    }
+
     pub async fn suspend_idle_unattached(&self) -> usize {
         // Read the configurable grace period from settings; fall back to the
         // compiled-in default when not set or when the key is absent.
-        let grace = if let Some(ref sr) = self.settings {
-            match sr.get("idle_suspend_grace_secs").await {
-                Ok(Some(v)) => v.as_u64().map(Duration::from_secs).unwrap_or(SUSPEND_GRACE),
-                _ => SUSPEND_GRACE,
-            }
-        } else {
-            SUSPEND_GRACE
+        let grace = self
+            .setting_u64("idle_suspend_grace_secs")
+            .await
+            .map(Duration::from_secs)
+            .unwrap_or(SUSPEND_GRACE);
+        // The user-started grace (`0` = never, the pre-r3 rule).
+        let manual_grace = match self.setting_u64("manual_idle_suspend_secs").await {
+            Some(0) => None,
+            Some(secs) => Some(Duration::from_secs(secs)),
+            None => Some(MANUAL_IDLE_SUSPEND),
         };
+        // Live agent-CLI cap (`0` = none).
+        let cap = self
+            .setting_u64("max_live_agent_sessions")
+            .await
+            .map(|n| n as usize)
+            .unwrap_or(MAX_LIVE_AGENT_SESSIONS);
 
         // Snapshot live ids first (don't hold DashMap refs across awaits).
         let candidates: Vec<(Id, std::time::Instant, Option<u32>)> = self
@@ -3930,7 +4237,8 @@ impl SessionManager {
         // CPU ⇒ active ⇒ skip. Descendants only (not the agent CLI itself, whose
         // idle TUI redraws accrue CPU forever) — long-lived idle helpers (MCP
         // servers) accrue ~none, so genuinely idle sessions still suspend.
-        let proc_table = process_table_async().await;
+        // Taken only when a candidate passed the cheap checks below.
+        let mut proc_table = LazyProcTable::default();
 
         let mut suspended = 0;
         for (id, last_output, pid) in candidates {
@@ -3951,7 +4259,7 @@ impl SessionManager {
             }
             // Working-but-quiet guard (see the sweep comment above).
             if let Some(pid) = pid {
-                let cpu = descendant_cpu_ms(pid, &proc_table);
+                let cpu = descendant_cpu_ms(pid, proc_table.get().await);
                 let prev = self.suspend_cpu.insert(id.clone(), cpu);
                 match prev {
                     // Tree accrued >200ms CPU since the last sweep → in-flight work.
@@ -3983,30 +4291,21 @@ impl SessionManager {
             // Row-derived holds ([`sweep_hold`]). The cheap ones first: a
             // pinned or user-started session needs no transcript I/O, and
             // every idle Agents-page session is one of those.
-            let mut hold = sweep_hold(&session, None, None);
+            let manual = ManualIdle {
+                quiet_for: last_output.elapsed(),
+                grace: manual_grace,
+                passive_resume: self.is_passive_resume(&id),
+            };
+            let mut hold = sweep_hold(&session, None, None, manual);
             if hold.is_none() {
                 // An OPEN AGENT TURN is activity even at zero output and zero
                 // CPU (the agent is `sleep`-polling a background watcher). Ask
                 // the provider's own transcript, and read its mtime in the same
                 // blocking hop so the verdict carries its own freshness.
-                let (turn_open, artifact_age) = match self.activity_artifact(&id).await {
-                    Some(artifact) => {
-                        let provider = session.provider.clone();
-                        tokio::task::spawn_blocking(move || {
-                            let age = std::fs::metadata(&artifact)
-                                .and_then(|m| m.modified())
-                                .ok()
-                                .and_then(|t| t.elapsed().ok());
-                            (agent_turn_open(&provider, &artifact), age)
-                        })
-                        .await
-                        .unwrap_or((None, None))
-                    }
-                    // No artifact (shell, psid not captured yet, file gone) —
-                    // unknown, never "idle". Decide exactly as before.
-                    None => (None, None),
-                };
-                hold = sweep_hold(&session, turn_open, artifact_age);
+                // No artifact (shell, psid not captured yet, file gone) is
+                // unknown, never "idle": decided exactly as before.
+                let (turn_open, artifact_age) = self.turn_state(&session).await;
+                hold = sweep_hold(&session, turn_open, artifact_age, manual);
             }
             if let Some(guard) = hold {
                 self.note_hold(&id, guard, "");
@@ -4030,8 +4329,6 @@ impl SessionManager {
                     match self.kill_session(&id).await {
                         Ok(()) => {
                             suspended += 1;
-                            self.suspend_cpu.remove(&id);
-                            self.suspend_hold.remove(&id);
                             tracing::info!(
                                 session = %id,
                                 provider = %session.provider,
@@ -4050,8 +4347,6 @@ impl SessionManager {
                 }
                 Ok(true) => {
                     suspended += 1;
-                    self.suspend_cpu.remove(&id);
-                    self.suspend_hold.remove(&id);
                     self.viewed.remove(&id);
                     tracing::info!(
                         session = %id,
@@ -4064,6 +4359,130 @@ impl SessionManager {
             }
         }
         suspended
+            + self
+                .enforce_live_cap(cap, grace.min(CAP_MIN_QUIET), &mut proc_table)
+                .await
+    }
+
+    /// The live-session cap (`max_live_agent_sessions`, r3-05-01): while more
+    /// than `cap` agent CLIs are live, suspend the least-recently-used ones —
+    /// oldest of (last PTY output, last attach / detach / input / chat ping)
+    /// first. The cap overrides the user-started idle grace, but NEVER takes
+    /// a session that is watched (terminal viewer, chat ping, engine turn
+    /// driver), pinned, `Working`, printed inside `min_quiet`, whose process
+    /// tree is burning CPU, whose provider transcript shows a fresh open turn,
+    /// or that cannot be resumed. When every session over the cap is held the
+    /// cap simply stays exceeded until the next sweep: it is soft by design.
+    async fn enforce_live_cap(
+        &self,
+        cap: usize,
+        min_quiet: Duration,
+        proc_table: &mut LazyProcTable,
+    ) -> usize {
+        if cap == 0 || self.live.len() <= cap {
+            return 0;
+        }
+        let snapshot: Vec<(Id, std::time::Instant, Option<u32>)> = self
+            .live
+            .iter()
+            .map(|e| (e.key().clone(), e.value().last_output_at(), e.value().pid()))
+            .collect();
+        let mut agents = Vec::with_capacity(snapshot.len());
+        for (id, last_output, pid) in snapshot {
+            let Ok(session) = self.repo.get(&id).await else {
+                continue;
+            };
+            if !counts_toward_cap(&session) {
+                continue;
+            }
+            let last_used = self
+                .last_touch
+                .get(&id)
+                .map(|t| (*t).max(last_output))
+                .unwrap_or(last_output);
+            agents.push((last_used, last_output, pid, session));
+        }
+        let mut excess = cap_excess(agents.len(), cap);
+        if excess == 0 {
+            return 0;
+        }
+        agents.sort_by_key(|(last_used, ..)| *last_used);
+        let mut freed = 0;
+        for (_, last_output, pid, session) in agents {
+            if excess == 0 {
+                break;
+            }
+            let id = session.id.clone();
+            if last_output.elapsed() < min_quiet || self.is_watched(&id) {
+                continue;
+            }
+            // Same descendant-CPU rule as the idle pass (its sample for this
+            // session, when it took one, is the baseline).
+            if let Some(pid) = pid {
+                let cpu = descendant_cpu_ms(pid, proc_table.get().await);
+                match self.suspend_cpu.insert(id.clone(), cpu) {
+                    Some(prev) if cpu > prev.saturating_add(200) => continue,
+                    None if cpu > 0 => continue,
+                    _ => {}
+                }
+            }
+            let resumable = session.provider_session_id.is_some()
+                && self.providers.supports_resume(&session.provider);
+            let mut hold = cap_hold(&session, resumable, None, None);
+            if hold.is_none() {
+                let (turn_open, artifact_age) = self.turn_state(&session).await;
+                hold = cap_hold(&session, resumable, turn_open, artifact_age);
+            }
+            if let Some(guard) = hold {
+                tracing::debug!(session = %id, guard, "live-session cap: keeping session alive");
+                continue;
+            }
+            match self.suspend_if_idle(&id, min_quiet).await {
+                Ok(true) => {
+                    excess -= 1;
+                    freed += 1;
+                    self.viewed.remove(&id);
+                    tracing::info!(
+                        session = %id,
+                        provider = %session.provider,
+                        title = %session.title,
+                        cap,
+                        "live-session cap: suspended least-recently-used session (stays resumable)"
+                    );
+                }
+                Ok(false) => {}
+                Err(e) => tracing::warn!(session = %id, "live-session cap: suspend failed: {e}"),
+            }
+        }
+        if excess > 0 {
+            tracing::info!(
+                cap,
+                over = excess,
+                "live-session cap exceeded; every remaining session is in use"
+            );
+        }
+        freed
+    }
+
+    /// The provider transcript's open-turn verdict and the transcript's age,
+    /// read in one blocking hop (see [`agent_turn_open`]). `(None, None)` when
+    /// the session has no readable artifact.
+    async fn turn_state(&self, session: &Session) -> (Option<bool>, Option<Duration>) {
+        match self.activity_artifact(&session.id).await {
+            Some(artifact) => {
+                let provider = session.provider.clone();
+                tokio::task::spawn_blocking(move || {
+                    let age = std::fs::metadata(&artifact)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok());
+                    (agent_turn_open(&provider, &artifact), age)
+                })
+                .await
+                .unwrap_or((None, None))
+            }
+            None => (None, None),
+        }
     }
 
     /// Opt-in auto-archive: archive every non-archived agent session whose
@@ -4336,6 +4755,12 @@ impl SessionManager {
         self.room_authority.prune_idle(id);
         self.ingest_tokens.remove(id);
         self.title_probe.remove(id);
+        // Per-session sweep / viewer bookkeeping (r3-05-08: these outlived
+        // the row forever).
+        self.forget_sweep_state(id);
+        self.last_touch.remove(id);
+        self.viewed.remove(id);
+        self.size_owner.remove(id);
         // Also ends a pending provider-id capture task (it exits on the missing
         // probe entry at its next poll).
         self.capture_probes.remove(id);
@@ -4367,6 +4792,9 @@ impl SessionManager {
         // `restart_locked` under its own guard) — see `resume_locks`.
         let lock = self.resume_lock(id);
         let _guard = lock.lock().await;
+        // An explicit restart is deliberate use, never a passive resume.
+        self.passive_resume.remove(id);
+        self.touch(id);
         self.restart_locked(id, spec_override).await
     }
 
@@ -4595,6 +5023,7 @@ impl SessionManager {
         let locks = Arc::clone(&self.resume_locks);
         let suspend_cpu = Arc::clone(&self.suspend_cpu);
         let suspend_hold = Arc::clone(&self.suspend_hold);
+        let passive_resume = Arc::clone(&self.passive_resume);
         let auth = self.auth.clone();
         let mcp_tokens = Arc::clone(&self.mcp_tokens);
         tokio::spawn(async move {
@@ -4648,6 +5077,7 @@ impl SessionManager {
                             // crashed, or `kill_session` killed it in place).
                             suspend_cpu.remove(&id);
                             suspend_hold.remove(&id);
+                            passive_resume.remove(&id);
                             // Its MCP credential has no live holder any more
                             // (a resume mints a fresh one).
                             if let Ok(s) = repo.get(&id).await {
@@ -4834,6 +5264,18 @@ mod tests {
     use super::*;
     use otto_core::domain::{SessionKind, Workspace};
     use otto_state::NewSession;
+
+    /// r3-01-09: the process table is only read when a sweep needs it, and
+    /// then once per sweep however many sessions consult it.
+    #[tokio::test]
+    async fn process_table_is_taken_lazily_and_once() {
+        let mut t = LazyProcTable::default();
+        assert!(!t.taken(), "a sweep with no candidate never runs ps");
+        let first = t.get().await.len();
+        assert!(t.taken());
+        assert!(first > 0, "ps lists at least this test process");
+        assert_eq!(t.get().await.len(), first, "same snapshot reused");
+    }
 
     #[test]
     fn codex_creds_preserve_session_source_for_mcp_policy() {
@@ -6256,9 +6698,10 @@ mod tests {
     /// THE BUG: the sweep suspended the user's own interactive claude session
     /// three times in one afternoon while it was mid-turn, waiting on quiet
     /// background watchers. A session the user started from the Agents page is
-    /// now off limits to the sweep no matter how quiet it looks.
+    /// recognised as such and gets the long manual grace (see
+    /// `manual_sessions_are_suspended_after_the_manual_grace`).
     #[test]
-    fn manual_origin_sessions_are_never_auto_suspended() {
+    fn manual_origin_sessions_are_recognised() {
         // The plain-create path stamps `work.origin = "manual"`.
         assert!(is_user_started(&guard_session(
             serde_json::json!({ "work": { "origin": "manual" } })
@@ -6273,6 +6716,203 @@ mod tests {
         assert!(is_user_started(&guard_session(
             serde_json::json!({ "keep_alive": true, "work": { "origin": "manual" } })
         )));
+    }
+
+    /// A user-started session that printed something a minute ago, inside the
+    /// default manual grace, and that somebody typed into.
+    const RECENT: ManualIdle = ManualIdle {
+        quiet_for: Duration::from_secs(60),
+        grace: Some(MANUAL_IDLE_SUSPEND),
+        passive_resume: false,
+    };
+
+    /// r3-05-01: the manual hold is a long GRACE now, not forever. Inside it
+    /// the session is held whatever the transcript says; past it only the
+    /// open-turn guard (fresh transcript) can keep it; `0` in the setting
+    /// (`grace: None`) restores the old never-suspend rule.
+    #[test]
+    fn manual_sessions_are_suspended_after_the_manual_grace() {
+        let manual = guard_session(serde_json::json!({ "work": { "origin": "manual" } }));
+        let fresh = Some(Duration::from_secs(30));
+        let past = ManualIdle {
+            quiet_for: MANUAL_IDLE_SUSPEND,
+            ..RECENT
+        };
+        // Inside the grace: held, even with a closed turn.
+        assert_eq!(sweep_hold(&manual, Some(false), fresh, RECENT), Some("origin=manual"));
+        // Just inside the boundary still holds.
+        let edge = ManualIdle {
+            quiet_for: MANUAL_IDLE_SUSPEND - Duration::from_secs(1),
+            ..RECENT
+        };
+        assert_eq!(sweep_hold(&manual, None, None, edge), Some("origin=manual"));
+        // Past it: reclaimable once the turn is closed / unknown…
+        assert_eq!(sweep_hold(&manual, None, None, past), None);
+        assert_eq!(sweep_hold(&manual, Some(false), fresh, past), None);
+        // …but never mid-turn (a quiet agent `sleep`-polling a watcher).
+        assert_eq!(sweep_hold(&manual, Some(true), fresh, past), Some("turn open"));
+        // A stuck "open" tail does not pin it forever.
+        assert_eq!(
+            sweep_hold(&manual, Some(true), Some(REAP_UNRESUMABLE_GRACE), past),
+            None
+        );
+        // Pinned beats everything.
+        let pinned = guard_session(serde_json::json!({
+            "keep_alive": true, "work": { "origin": "manual" }
+        }));
+        assert_eq!(sweep_hold(&pinned, None, None, past), Some("keep_alive"));
+        // Setting = 0 → never auto-suspend a manual session (the old rule).
+        let never = ManualIdle {
+            quiet_for: Duration::from_secs(365 * 24 * 3600),
+            grace: None,
+            passive_resume: false,
+        };
+        assert_eq!(sweep_hold(&manual, None, None, never), Some("origin=manual"));
+    }
+
+    /// r3-05-01 root cause: opening a suspended session (terminal attach or
+    /// chat ping → `ensure_live`) spawned `claude --resume` and the manual
+    /// hold then kept that process forever. A process nobody has typed into
+    /// since the resume gets NO manual hold — the engine grace applies.
+    #[test]
+    fn passive_resume_earns_no_manual_hold() {
+        let manual = guard_session(serde_json::json!({ "work": { "origin": "manual" } }));
+        let passive = ManualIdle {
+            passive_resume: true,
+            ..RECENT
+        };
+        assert_eq!(sweep_hold(&manual, None, None, passive), None);
+        assert_eq!(sweep_hold(&manual, Some(false), Some(Duration::from_secs(5)), passive), None);
+        // Even the "never" setting does not pin a passive resume.
+        let never = ManualIdle { grace: None, ..passive };
+        assert_eq!(sweep_hold(&manual, None, None, never), None);
+        // Pins and open turns still hold it.
+        let pinned = guard_session(serde_json::json!({
+            "keep_alive": true, "work": { "origin": "manual" }
+        }));
+        assert_eq!(sweep_hold(&pinned, None, None, passive), Some("keep_alive"));
+        assert_eq!(
+            sweep_hold(&manual, Some(true), Some(Duration::from_secs(5)), passive),
+            Some("turn open")
+        );
+    }
+
+    #[test]
+    fn live_cap_holds_and_excess() {
+        let s = |meta: serde_json::Value, status: SessionStatus| {
+            let mut s = guard_session(meta);
+            s.status = status;
+            s
+        };
+        let idle = s(serde_json::json!({ "work": { "origin": "manual" } }), SessionStatus::Idle);
+        let fresh = Some(Duration::from_secs(5));
+        // The cap overrides the manual grace: an idle manual session is fair game.
+        assert_eq!(cap_hold(&idle, true, Some(false), fresh), None);
+        assert_eq!(cap_hold(&idle, true, None, None), None);
+        // Never mid-turn, working, pinned, or unresumable.
+        assert_eq!(cap_hold(&idle, true, Some(true), fresh), Some("turn open"));
+        let working = s(serde_json::json!({}), SessionStatus::Working);
+        assert_eq!(cap_hold(&working, true, None, None), Some("working"));
+        let pinned = s(serde_json::json!({ "keep_alive": true }), SessionStatus::Idle);
+        assert_eq!(cap_hold(&pinned, true, None, None), Some("keep_alive"));
+        assert_eq!(cap_hold(&idle, false, None, None), Some("not resumable"));
+        // Only agent CLIs count toward the cap.
+        assert!(counts_toward_cap(&idle));
+        let mut shell = idle.clone();
+        shell.provider = "shell".into();
+        assert!(!counts_toward_cap(&shell));
+        let mut conn = idle.clone();
+        conn.kind = SessionKind::Connection;
+        assert!(!counts_toward_cap(&conn));
+        // Excess arithmetic; 0 = no cap.
+        assert_eq!(cap_excess(14, 12), 2);
+        assert_eq!(cap_excess(12, 12), 0);
+        assert_eq!(cap_excess(3, 12), 0);
+        assert_eq!(cap_excess(500, 0), 0);
+    }
+
+    /// End to end over real (sleeping) PTYs: with the cap at 2 and four live
+    /// user-started sessions, the sweep suspends the two LEAST-recently-used
+    /// ones — never the attached one, even though it is the oldest — and the
+    /// manual grace (disabled here) does not protect them from the cap.
+    #[tokio::test]
+    async fn live_cap_suspends_least_recently_used_unwatched_sessions() {
+        let (mgr0, repo, ws, user) = test_manager().await;
+        let settings = otto_state::SettingsRepo::new(repo.pool());
+        settings.put("idle_suspend_grace_secs", &serde_json::json!(0)).await.unwrap();
+        settings.put("manual_idle_suspend_secs", &serde_json::json!(0)).await.unwrap();
+        settings.put("max_live_agent_sessions", &serde_json::json!(2)).await.unwrap();
+        let mgr = Arc::new(
+            Arc::try_unwrap(mgr0)
+                .ok()
+                .expect("sole owner")
+                .with_settings_repo(settings),
+        );
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exec sleep 30".into()],
+            cwd: None,
+            env: vec![],
+        };
+        let mut ids = Vec::new();
+        for n in 0..4 {
+            let id = seed_session(&repo, &ws, &user, Some(&format!("psid-cap-{n}"))).await;
+            mgr.live.insert(id.clone(), Arc::new(PtyHandle::spawn(&spec).unwrap()));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            ids.push(id);
+        }
+        // Use order, oldest first: ids[3] (never touched since spawn),
+        // ids[0] (attached — a viewer is on it right now), ids[1], ids[2].
+        let _viewer = mgr.attach(&ids[0]);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        mgr.touch(&ids[1]);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        mgr.touch(&ids[2]);
+
+        let n = mgr.suspend_idle_unattached().await;
+        assert_eq!(n, 2, "exactly the excess is freed");
+        assert!(!mgr.is_live(&ids[3]), "least recently used goes first");
+        assert!(mgr.is_live(&ids[0]), "an attached session is never capped");
+        assert!(!mgr.is_live(&ids[1]), "next LRU after the skipped viewer");
+        assert!(mgr.is_live(&ids[2]), "most recently used survives");
+        for id in [&ids[1], &ids[3]] {
+            assert_eq!(repo.get(id).await.unwrap().status, SessionStatus::Reconnectable);
+        }
+        // At the cap now: a second sweep frees nothing.
+        assert_eq!(mgr.suspend_idle_unattached().await, 0);
+        for id in [&ids[0], &ids[2]] {
+            if let Some((_, h)) = mgr.live.remove(id) {
+                let _ = h.kill();
+            }
+        }
+    }
+
+    /// The passive-resume mark is cleared by real input only: an emulator
+    /// reply from a freshly attached terminal is not the user typing.
+    #[tokio::test]
+    async fn passive_resume_is_cleared_by_input_not_by_emulator_replies() {
+        let (mgr, repo, ws, user) = test_manager().await;
+        let id = seed_session(&repo, &ws, &user, Some("psid-passive")).await;
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exec cat >/dev/null".into()],
+            cwd: None,
+            env: vec![],
+        };
+        mgr.live.insert(id.clone(), Arc::new(PtyHandle::spawn(&spec).unwrap()));
+        mgr.passive_resume.insert(id.clone(), ());
+        // A DA reply the attach's emulator produced on its own.
+        mgr.human_input(&id, &user, false, false, b"\x1b[?1;2c").await.unwrap();
+        assert!(mgr.is_passive_resume(&id), "emulator reply is not engagement");
+        mgr.human_input(&id, &user, false, true, b"hi").await.unwrap();
+        assert!(!mgr.is_passive_resume(&id), "typing engages the session");
+        // Automation input engages too; teardown forgets the mark.
+        mgr.passive_resume.insert(id.clone(), ());
+        mgr.input(&id, b"x").await.unwrap();
+        assert!(!mgr.is_passive_resume(&id));
+        mgr.passive_resume.insert(id.clone(), ());
+        mgr.kill_session(&id).await.unwrap();
+        assert!(!mgr.is_passive_resume(&id));
     }
 
     /// …while engine-owned sessions keep the old behaviour: their owner has
@@ -6440,6 +7080,30 @@ mod tests {
         assert_eq!(agent_turn_open("claude", dir.path()), None);
     }
 
+    /// r3-08-01: the nightly CLI reload must never re-exec a session mid-turn.
+    #[test]
+    fn restart_would_interrupt_guards_every_live_turn_signal() {
+        let quiet = RESTART_QUIET + Duration::from_secs(1);
+        let fresh = Some(Duration::from_secs(10));
+        let stale = Some(REAP_UNRESUMABLE_GRACE + Duration::from_secs(1));
+        // Idle, quiet, closed turn → safe to restart.
+        assert!(!restart_would_interrupt(SessionStatus::Idle, false, quiet, Some(false), fresh));
+        assert!(!restart_would_interrupt(SessionStatus::Idle, false, quiet, None, None));
+        // Each guard alone holds it.
+        assert!(restart_would_interrupt(SessionStatus::Working, false, quiet, None, None));
+        assert!(restart_would_interrupt(SessionStatus::Idle, true, quiet, None, None));
+        assert!(restart_would_interrupt(
+            SessionStatus::Idle,
+            false,
+            Duration::from_secs(2),
+            None,
+            None
+        ));
+        assert!(restart_would_interrupt(SessionStatus::Idle, false, quiet, Some(true), fresh));
+        // A stuck (stale) open turn does not pin the session forever.
+        assert!(!restart_would_interrupt(SessionStatus::Idle, false, quiet, Some(true), stale));
+    }
+
     /// The sweep's whole per-session hold decision, in one place: delete a
     /// guard from `sweep_hold` and this fails. (The sweep loop itself walks
     /// `self.live`, which needs real child processes, so it cannot be driven
@@ -6450,37 +7114,37 @@ mod tests {
         let bg = || guard_session(serde_json::json!({ "source": "review" }));
 
         // No guard applies → the sweep reclaims it.
-        assert_eq!(sweep_hold(&bg(), Some(false), fresh), None);
-        assert_eq!(sweep_hold(&bg(), None, None), None);
+        assert_eq!(sweep_hold(&bg(), Some(false), fresh, RECENT), None);
+        assert_eq!(sweep_hold(&bg(), None, None, RECENT), None);
 
         // Pinned by the user — checked before everything, and without any
         // transcript I/O (the sweep passes `None, None` on the first pass).
         let pinned = guard_session(serde_json::json!({
             "source": "review", "keep_alive": true
         }));
-        assert_eq!(sweep_hold(&pinned, None, None), Some("keep_alive"));
-        assert_eq!(sweep_hold(&pinned, Some(false), fresh), Some("keep_alive"));
+        assert_eq!(sweep_hold(&pinned, None, None, RECENT), Some("keep_alive"));
+        assert_eq!(sweep_hold(&pinned, Some(false), fresh, RECENT), Some("keep_alive"));
 
         // Started from the Agents page — never auto-suspended, whatever the
         // transcript says.
         let manual = guard_session(serde_json::json!({ "work": { "origin": "manual" } }));
-        assert_eq!(sweep_hold(&manual, None, None), Some("origin=manual"));
+        assert_eq!(sweep_hold(&manual, None, None, RECENT), Some("origin=manual"));
         assert_eq!(
-            sweep_hold(&manual, Some(false), fresh),
+            sweep_hold(&manual, Some(false), fresh, RECENT),
             Some("origin=manual")
         );
 
         // An engine session mid-turn, on a transcript that is still moving.
-        assert_eq!(sweep_hold(&bg(), Some(true), fresh), Some("turn open"));
+        assert_eq!(sweep_hold(&bg(), Some(true), fresh, RECENT), Some("turn open"));
 
         // …but an "open" turn on a transcript that has not moved for the full
         // reap grace is STUCK, not live: it must not hold the session, or a
         // single un-answered notification tail leaks the PTY + agent process +
         // MCP sidecar forever.
         let stale = Some(REAP_UNRESUMABLE_GRACE);
-        assert_eq!(sweep_hold(&bg(), Some(true), stale), None);
+        assert_eq!(sweep_hold(&bg(), Some(true), stale, RECENT), None);
         assert_eq!(
-            sweep_hold(&bg(), Some(true), Some(REAP_UNRESUMABLE_GRACE * 4)),
+            sweep_hold(&bg(), Some(true), Some(REAP_UNRESUMABLE_GRACE * 4), RECENT),
             None
         );
         // Just inside the bound still holds.
@@ -6488,12 +7152,13 @@ mod tests {
             sweep_hold(
                 &bg(),
                 Some(true),
-                Some(REAP_UNRESUMABLE_GRACE - Duration::from_secs(1))
+                Some(REAP_UNRESUMABLE_GRACE - Duration::from_secs(1)),
+                RECENT
             ),
             Some("turn open")
         );
         // Unknown age (unreadable artifact) never holds on the turn guard.
-        assert_eq!(sweep_hold(&bg(), Some(true), None), None);
+        assert_eq!(sweep_hold(&bg(), Some(true), None, RECENT), None);
     }
 
     /// End to end over a real file, the way the sweep reads it: a claude tail
@@ -6522,7 +7187,7 @@ mod tests {
 
         // Fresh → held.
         assert_eq!(
-            sweep_hold(&session, agent_turn_open("claude", &path), age(&path)),
+            sweep_hold(&session, agent_turn_open("claude", &path), age(&path), RECENT),
             Some("turn open")
         );
 
@@ -6536,7 +7201,7 @@ mod tests {
             .unwrap();
         assert!(age(&path).unwrap() >= REAP_UNRESUMABLE_GRACE);
         assert_eq!(
-            sweep_hold(&session, agent_turn_open("claude", &path), age(&path)),
+            sweep_hold(&session, agent_turn_open("claude", &path), age(&path), RECENT),
             None,
             "a 31-minute-old 'open turn' tail must not hold the session"
         );

@@ -6,12 +6,13 @@
 
 use std::collections::BTreeMap;
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::domain::{
     AgentTask, SessionActivitySummary, TaskStatus, TrailEvent, TrailKind, TrailLevel, TrailSource,
 };
 use otto_core::{new_id, Error, Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 
 use crate::convert::{dberr, fmt, ts};
 
@@ -36,7 +37,7 @@ pub struct NewTask {
 
 #[derive(Clone)]
 pub struct ActivityRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 fn row_to_trail(r: &sqlx::sqlite::SqliteRow) -> Result<TrailEvent> {
@@ -106,7 +107,8 @@ pub struct PendingNudge {
 }
 
 impl ActivityRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -156,39 +158,86 @@ impl ActivityRepo {
     /// the rest. Returns the number of rows pruned. Run periodically so
     /// long-lived sessions don't grow the trail unbounded.
     ///
-    /// Deletes in small chunks: SQLite has ONE writer at a time, and a bulk
-    /// DELETE over a large backlog held the write lock for seconds — every
-    /// interactive write (create-session, trail ingest) queued behind it
-    /// (observed as 3-6s "slow statement" warnings). Chunking yields the
-    /// writer between batches so interactive statements interleave.
-    pub async fn prune_trail(&self, keep_per_session: i64) -> Result<u64> {
+    /// `since`: only sessions that received a row at or after it are
+    /// considered — every other session was already at or under the cap after
+    /// the previous pass, so nothing about it can have changed. `None` (the
+    /// first pass after a start) checks every session.
+    ///
+    /// Index-driven (r3-06-05 / r3-07-08): the old statement recomputed a
+    /// `ROW_NUMBER()` window over the WHOLE table for every 500-row chunk,
+    /// under the write lock — 110 ms a chunk at 412k rows, O(rows × chunks)
+    /// a pass. Now the candidate sessions come from a read (the reader pool,
+    /// no write lock) over `idx_agent_trail_ts` (or one GROUP BY on the first
+    /// pass); each session's boundary is one `OFFSET` walk of
+    /// `idx_agent_trail_session`; and every DELETE chunk is a bounded range
+    /// on that same index. Chunks still sleep between them so queued
+    /// interactive writers get the lock.
+    pub async fn prune_trail(
+        &self,
+        keep_per_session: i64,
+        since: Option<chrono::DateTime<Utc>>,
+    ) -> Result<u64> {
         const CHUNK: i64 = 500;
-        let mut total: u64 = 0;
-        loop {
-            let res = sqlx::query(
-                "DELETE FROM agent_trail WHERE id IN (
-                     SELECT id FROM (
-                         SELECT id, ROW_NUMBER() OVER (
-                             PARTITION BY session_id ORDER BY ts DESC, id DESC
-                         ) AS rn
-                         FROM agent_trail
-                     ) WHERE rn > ? LIMIT ?
-                 )",
-            )
-            .bind(keep_per_session)
-            .bind(CHUNK)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("prune trail"))?;
-            let n = res.rows_affected();
-            total += n;
-            if n < CHUNK as u64 {
-                return Ok(total);
+        let keep = keep_per_session.max(0);
+        let sessions: Vec<String> =
+            match since {
+                Some(t) => sqlx::query_scalar(
+                    "SELECT DISTINCT session_id FROM agent_trail INDEXED BY idx_agent_trail_ts \
+                 WHERE ts >= ?",
+                )
+                .bind(fmt(t))
+                .fetch_all(&self.pool)
+                .await,
+                None => sqlx::query_scalar(
+                    "SELECT session_id FROM agent_trail GROUP BY session_id HAVING COUNT(*) > ?",
+                )
+                .bind(keep)
+                .fetch_all(&self.pool)
+                .await,
             }
-            // Brief yield so queued interactive writers acquire the lock
-            // before the next batch.
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            .map_err(dberr("prune trail: sessions"))?;
+        let mut total: u64 = 0;
+        for session in sessions {
+            // The newest row that must GO: everything at or below it (in the
+            // trail's own (ts, id) order) is outside the newest `keep`.
+            let boundary: Option<(String, String)> = sqlx::query_as(
+                "SELECT ts, id FROM agent_trail WHERE session_id = ? \
+                 ORDER BY ts DESC, id DESC LIMIT 1 OFFSET ?",
+            )
+            .bind(&session)
+            .bind(keep)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("prune trail: boundary"))?;
+            let Some((ts, id)) = boundary else {
+                continue; // at or under the cap
+            };
+            loop {
+                let n = sqlx::query(
+                    "DELETE FROM agent_trail WHERE rowid IN (
+                         SELECT rowid FROM agent_trail
+                         WHERE session_id = ? AND (ts, id) <= (?, ?)
+                         LIMIT ?
+                     )",
+                )
+                .bind(&session)
+                .bind(&ts)
+                .bind(&id)
+                .bind(CHUNK)
+                .execute(&self.pool)
+                .await
+                .map_err(dberr("prune trail"))?
+                .rows_affected();
+                total += n;
+                if n < CHUNK as u64 {
+                    break;
+                }
+                // Brief yield so queued interactive writers acquire the lock
+                // before the next batch.
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
         }
+        Ok(total)
     }
 
     /// Per-session roll-up for every session in `workspace_id` that has any
@@ -239,11 +288,14 @@ impl ActivityRepo {
             .await
             .map_err(dberr("summary tasks (user)"))?;
 
+            // Per session, the newest trail row via the min/max optimisation
+            // on `idx_agent_trail_session` — O(sessions · log n) instead of a
+            // GROUP BY over every trail row in the workspace (r3-07-04).
             let trail_rows = sqlx::query(
-                "SELECT tr.session_id, MAX(tr.ts) AS last_ts FROM agent_trail tr
-                 JOIN sessions s ON s.id = tr.session_id
-                 WHERE tr.workspace_id = ? AND s.created_by = ?
-                 GROUP BY tr.session_id",
+                "SELECT s.id AS session_id,
+                        (SELECT MAX(tr.ts) FROM agent_trail tr WHERE tr.session_id = s.id)
+                            AS last_ts
+                 FROM sessions s WHERE s.workspace_id = ? AND s.created_by = ?",
             )
             .bind(workspace_id)
             .bind(uid)
@@ -263,8 +315,10 @@ impl ActivityRepo {
             .map_err(dberr("summary tasks"))?;
 
             let trail_rows = sqlx::query(
-                "SELECT session_id, MAX(ts) AS last_ts FROM agent_trail
-                 WHERE workspace_id = ? GROUP BY session_id",
+                "SELECT s.id AS session_id,
+                        (SELECT MAX(tr.ts) FROM agent_trail tr WHERE tr.session_id = s.id)
+                            AS last_ts
+                 FROM sessions s WHERE s.workspace_id = ?",
             )
             .bind(workspace_id)
             .fetch_all(&self.pool)
@@ -299,10 +353,12 @@ impl ActivityRepo {
         for r in &trail_rows {
             let sid: String = r.get("session_id");
             let last: Option<String> = r.get("last_ts");
-            let last_ts = match last {
-                Some(s) => Some(ts(&s)?),
-                None => None,
+            // A session with no trail row is not part of the trail roll-up
+            // (the per-session subquery returns NULL for it).
+            let Some(last) = last else {
+                continue;
             };
+            let last_ts = Some(ts(&last)?);
             let e = map
                 .entry(sid.clone())
                 .or_insert_with(|| SessionActivitySummary {
@@ -667,7 +723,7 @@ mod tests {
     use super::*;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
-    async fn mk_pool() -> SqlitePool {
+    async fn mk_pool() -> DbPool {
         let opts = SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -680,11 +736,11 @@ mod tests {
             .run(&pool)
             .await
             .expect("migrations");
-        pool
+        pool.into()
     }
 
     /// Seed a minimal user row.
-    async fn seed_user(pool: &SqlitePool, user_id: &str) {
+    async fn seed_user(pool: &DbPool, user_id: &str) {
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO users (id, username, password_hash, display_name, is_root, created_at)
@@ -700,7 +756,7 @@ mod tests {
     }
 
     /// Seed a workspace row.
-    async fn seed_workspace(pool: &SqlitePool, ws_id: &str) {
+    async fn seed_workspace(pool: &DbPool, ws_id: &str) {
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO workspaces (id, name, root_path, settings_json, archived, created_at)
@@ -714,7 +770,7 @@ mod tests {
     }
 
     /// Seed a session row owned by `created_by` and return its id.
-    async fn seed_session(pool: &SqlitePool, ws_id: &str, created_by: &str) -> Id {
+    async fn seed_session(pool: &DbPool, ws_id: &str, created_by: &str) -> Id {
         let id = otto_core::new_id();
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
@@ -736,7 +792,7 @@ mod tests {
     }
 
     /// Seed a single task for the given session.
-    async fn seed_task(pool: &SqlitePool, ws_id: &str, session_id: &str) {
+    async fn seed_task(pool: &DbPool, ws_id: &str, session_id: &str) {
         let task_id = otto_core::new_id();
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
@@ -755,7 +811,7 @@ mod tests {
     }
 
     /// Seed a trail entry for the given session.
-    async fn seed_trail(pool: &SqlitePool, ws_id: &str, session_id: &str) {
+    async fn seed_trail(pool: &DbPool, ws_id: &str, session_id: &str) {
         let trail_id = otto_core::new_id();
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
@@ -831,6 +887,45 @@ mod tests {
             .await
             .expect("all summary");
         assert_eq!(all.len(), 2, "admin path must return both sessions");
+    }
+
+    /// r3-07-04: the per-session trail roll-up reports each session's NEWEST
+    /// trail timestamp, includes trail-only sessions, and leaves out sessions
+    /// with neither trail nor tasks.
+    #[tokio::test]
+    async fn workspace_summary_reports_latest_trail_per_session() {
+        let pool = mk_pool().await;
+        seed_user(&pool, "u").await;
+        seed_workspace(&pool, "ws1").await;
+        let a = seed_session(&pool, "ws1", "u").await;
+        let quiet = seed_session(&pool, "ws1", "u").await;
+        let base = chrono::Utc::now() - chrono::Duration::hours(1);
+        for i in 0..5 {
+            trail_row(
+                &pool,
+                "ws1",
+                &a,
+                &format!("x{i}"),
+                &fmt(base + chrono::Duration::minutes(i)),
+            )
+            .await;
+        }
+        let repo = ActivityRepo::new(pool.clone());
+        let all = repo.workspace_summary(&"ws1".into()).await.unwrap();
+        assert_eq!(
+            all.len(),
+            1,
+            "a session with no trail and no tasks is absent"
+        );
+        assert_eq!(all[0].session_id, a);
+        let want = ts(&fmt(base + chrono::Duration::minutes(4))).unwrap();
+        assert_eq!(all[0].last_ts, Some(want));
+        assert!(all.iter().all(|s| s.session_id != quiet));
+        let mine = repo
+            .workspace_summary_for_user(&"ws1".into(), &"u".into())
+            .await
+            .unwrap();
+        assert_eq!(mine.len(), 1);
     }
 
     /// workspace_summary_for_user with no sessions for the caller returns empty.
@@ -994,5 +1089,85 @@ mod tests {
         assert_eq!(l.len(), 2);
         assert_eq!(l[1].source, "agent");
         assert_eq!(l[1].position, 1);
+    }
+
+    /// Insert a trail row with an explicit timestamp and id.
+    async fn trail_row(pool: &DbPool, ws: &str, session: &str, id: &str, ts: &str) {
+        sqlx::query(
+            "INSERT INTO agent_trail (id, session_id, workspace_id, ts, source, kind, summary)
+             VALUES (?, ?, ?, ?, 'agent', 'tool', 's')",
+        )
+        .bind(id)
+        .bind(session)
+        .bind(ws)
+        .bind(ts)
+        .execute(pool)
+        .await
+        .expect("trail row");
+    }
+
+    /// r3-07-08: the per-session prune keeps exactly the newest `keep` rows
+    /// in (ts DESC, id DESC) order — ties on `ts` broken by id — touches no
+    /// session at or under the cap, and with `since` only looks at sessions
+    /// that received rows since then.
+    #[tokio::test]
+    async fn prune_trail_keeps_newest_per_session_index_driven() {
+        let pool = mk_pool().await;
+        seed_user(&pool, "u").await;
+        seed_workspace(&pool, "w").await;
+        let big = seed_session(&pool, "w", "u").await;
+        let small = seed_session(&pool, "w", "u").await;
+        let stale = seed_session(&pool, "w", "u").await;
+        let base = chrono::Utc::now() - chrono::Duration::hours(5);
+        // 1 200 rows on `big`, several sharing a timestamp (tie-break by id).
+        for i in 0..1200 {
+            let ts = fmt(base + chrono::Duration::seconds(i / 3));
+            trail_row(&pool, "w", &big, &format!("b{i:05}"), &ts).await;
+        }
+        for i in 0..20 {
+            let ts = fmt(base + chrono::Duration::seconds(i));
+            trail_row(&pool, "w", &small, &format!("s{i:05}"), &ts).await;
+        }
+        // `stale` is over the cap, but its rows are all older than `since`.
+        for i in 0..30 {
+            let ts = fmt(base - chrono::Duration::hours(10) + chrono::Duration::seconds(i));
+            trail_row(&pool, "w", &stale, &format!("t{i:05}"), &ts).await;
+        }
+        let repo = ActivityRepo::new(pool.clone());
+        let count = |sid: Id| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM agent_trail WHERE session_id = ?",
+                )
+                .bind(sid)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        // Incremental pass: only sessions with rows since 6 h ago qualify →
+        // `big` is pruned to 25, `stale` (older rows only) is not looked at.
+        let since = Some(base - chrono::Duration::hours(1));
+        let n = repo.prune_trail(25, since).await.unwrap();
+        assert_eq!(n, 1175);
+        assert_eq!(count(big.clone()).await, 25);
+        assert_eq!(count(small.clone()).await, 20);
+        assert_eq!(count(stale.clone()).await, 30);
+        // Exactly the newest 25 survive: ids b01175..b01199.
+        let kept: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM agent_trail WHERE session_id = ? ORDER BY id")
+                .bind(&big)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let want: Vec<String> = (1175..1200).map(|i| format!("b{i:05}")).collect();
+        assert_eq!(kept, want);
+        // A full pass (startup) finds `stale` too; `small` stays whole.
+        assert_eq!(repo.prune_trail(25, None).await.unwrap(), 5);
+        assert_eq!(count(stale).await, 25);
+        assert_eq!(count(small).await, 20);
+        // Idempotent.
+        assert_eq!(repo.prune_trail(25, None).await.unwrap(), 0);
     }
 }

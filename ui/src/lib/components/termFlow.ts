@@ -67,12 +67,20 @@ export class TermFlow {
   /** Ack step for the granted window (≤ window/4, per the contract). */
   private ackStep = CREDIT_ACK_STEP;
   private lastPauseAt = 0;
-  private readonly send: (frame: WsTermFlowFrame) => void;
+  private send: (frame: WsTermFlowFrame) => void;
   private readonly now: () => number;
 
   constructor(send: (frame: WsTermFlowFrame) => void, now: () => number = () => performance.now()) {
     this.send = send;
     this.now = now;
+  }
+
+  /** Route this stream's flow frames through a new sink. A parked terminal
+   *  (termPark.ts) keeps its socket, xterm and THIS flow state; whoever holds
+   *  it (the parking lot, then the Terminal that adopts it) re-points the
+   *  sink so acks keep flowing on the same credit stream. */
+  setSink(send: (frame: WsTermFlowFrame) => void): void {
+    this.send = send;
   }
 
   /** Ask the daemon for credit flow control (first frame on a new socket). */
@@ -173,9 +181,9 @@ export class WriteQueue {
   queued = 0;
   /** Bytes handed to xterm and not yet parsed. */
   inflight = 0;
-  private readonly write: (bytes: Uint8Array, done: () => void) => void;
+  private write: (bytes: Uint8Array, done: () => void) => void;
   private readonly flow: TermFlow;
-  private readonly canSend: () => boolean;
+  private canSend: () => boolean;
 
   constructor(
     write: (bytes: Uint8Array, done: () => void) => void,
@@ -184,6 +192,14 @@ export class WriteQueue {
   ) {
     this.write = write;
     this.flow = flow;
+    this.canSend = canSend;
+  }
+
+  /** Re-point the emulator/socket callbacks (park → adopt, see
+   *  `TermFlow.setSink`). Queued and in-flight bytes keep their accounting:
+   *  a slice already inside xterm settles through its own `done`. */
+  rebind(write: (bytes: Uint8Array, done: () => void) => void, canSend: () => boolean): void {
+    this.write = write;
     this.canSend = canSend;
   }
 
@@ -318,4 +334,85 @@ export function withInOrderReset(snapshot: Uint8Array): Uint8Array {
   framed[1] = 0x63; // 'c'
   framed.set(snapshot, 2);
   return framed;
+}
+
+/** Should a `scrollback` snapshot rebuild the terminal? Shared by the live
+ *  Terminal and a parked one (termPark.ts) so both apply the SAME rule, and
+ *  records the snapshot's epoch. An optional compact (`compactPending`,
+ *  requested after a confirmed resize) that answers for the same process
+ *  (`epoch`) must not erase a selection or a reading position established
+ *  after it was requested (`userHolds`); a `resync` reply or an attach
+ *  always rebuilds. */
+export function snapshotApplies(
+  st: { compactPending: boolean; resyncPending: boolean; snapshotEpoch: number | null },
+  epoch: number | null,
+  userHolds: () => boolean,
+): boolean {
+  const compact = st.compactPending && !st.resyncPending && st.snapshotEpoch === epoch;
+  st.compactPending = false;
+  st.snapshotEpoch = epoch;
+  return !(compact && userHolds());
+}
+
+/** Agent-TUI ghost clean-up (full viewport repaint): after output has been
+ *  quiet this long… */
+export const TUI_CLEANUP_QUIET_MS = 250;
+/** …or at the latest this long after the first un-cleaned frame, so a TUI
+ *  that never goes quiet (a spinner ticking every 100 ms) still gets cleaned
+ *  ~1×/s — not the 5×/s full repaint the old leading throttle forced. */
+export const TUI_CLEANUP_MAX_WAIT_MS = 1000;
+
+type TimerId = ReturnType<typeof setTimeout>;
+
+/**
+ * Trailing debounce with a max wait. `poke()` on every output frame; `run`
+ * fires once output has been quiet for `quiet` ms, or `maxWait` ms after the
+ * first poke of a burst, whichever comes first. One repaint per burst
+ * instead of one per throttle window.
+ */
+export class QuietRepaint {
+  private timer: TimerId | null = null;
+  private firstAt = 0;
+  private readonly run: () => void;
+  private readonly quiet: number;
+  private readonly maxWait: number;
+  private readonly now: () => number;
+  private readonly setT: (fn: () => void, ms: number) => TimerId;
+  private readonly clearT: (id: TimerId) => void;
+
+  constructor(
+    run: () => void,
+    quiet = TUI_CLEANUP_QUIET_MS,
+    maxWait = TUI_CLEANUP_MAX_WAIT_MS,
+    now: () => number = () => performance.now(),
+    setT: (fn: () => void, ms: number) => TimerId = (fn, ms) => setTimeout(fn, ms),
+    clearT: (id: TimerId) => void = (id) => clearTimeout(id),
+  ) {
+    this.run = run;
+    this.quiet = quiet;
+    this.maxWait = maxWait;
+    this.now = now;
+    this.setT = setT;
+    this.clearT = clearT;
+  }
+
+  get pending(): boolean {
+    return this.timer !== null;
+  }
+
+  poke(): void {
+    const t = this.now();
+    if (this.timer === null) this.firstAt = t;
+    else this.clearT(this.timer);
+    const due = Math.max(0, Math.min(this.quiet, this.firstAt + this.maxWait - t));
+    this.timer = this.setT(() => {
+      this.timer = null;
+      this.run();
+    }, due);
+  }
+
+  cancel(): void {
+    if (this.timer !== null) this.clearT(this.timer);
+    this.timer = null;
+  }
 }

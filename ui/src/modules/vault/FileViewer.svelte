@@ -295,7 +295,7 @@
           <span class="err">Not valid JSON: {bigPrettyError}</span>
         {/if}
       </div>
-      <VirtualList items={bigLines.rows} estimateHeight={BIG_ROW_H} class="big-lines">
+      <VirtualList items={bigLines.rows} estimateHeight={BIG_ROW_H} class="big-lines" findText={(line: string) => line}>
         {#snippet row(line: string)}<div class="big-ln">{line}</div>{/snippet}
       </VirtualList>
       {#if bigLines.truncated}
@@ -337,7 +337,7 @@
         {/if}
       </div>
     {:else if codeLines}
-      <VirtualList items={codeLines} estimateHeight={CODE_ROW_H} class="code-lines hljs">
+      <VirtualList items={codeLines} estimateHeight={CODE_ROW_H} class="code-lines hljs" findText={(line: string) => line}>
         {#snippet row(line: string)}<div class="code-ln">{@html highlightLine(line, codeLang)}</div>{/snippet}
       </VirtualList>
     {:else if codeHtml}

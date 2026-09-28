@@ -194,7 +194,11 @@ Notes:
   auto-update of the agent CLIs; default `{true,"03:00",true,true}` = 03:00 UTC) and
   the daemon-written cursor `cli_auto_update_last_run` (RFC3339). The scheduler
   catches up a missed window on next boot and, when `reload_sessions`, restarts open
-  agent sessions onto the new binary (resume-aware).
+  agent sessions onto the new binary (resume-aware) — only for providers whose
+  `<program> --version` actually changed (or could not be probed), and never mid-turn:
+  a working / streaming / engine-held / open-turn session is reloaded once it goes
+  idle (re-checked every 30 s for up to 12 h; skipped if its process was already
+  replaced). Restarts are staggered.
 - `process_sandbox` `{enabled:bool, network:"full"|"loopback"|"none", providers:str[]}`
   — opt-in **OS-level confinement** for spawned agent/shell sessions (macOS Apple
   Seatbelt / `sandbox-exec`; no-op elsewhere). Default **off**. When enabled, each
@@ -505,6 +509,12 @@ bearer token. `TrailAppended` / `TasksUpdated` events mirror writes over `/ws/ev
 | GET /workspaces/{wid}/sessions/{sid}/tasks | ws viewer | — | `AgentTask[]` (current task list) |
 | PUT /workspaces/{wid}/sessions/{sid}/tasks | ws editor | `AgentTask[]` | 204 (replace the task list) |
 | GET /workspaces/{wid}/activity/summary | ws viewer | — | per-session activity summary for the workspace |
+
+A `TrailEvent.detail` is capped by the writer (hook ingest, Codex notify and the POST
+above) at 4 KiB of serialized JSON: a string field over 1 KiB keeps its first 1 KiB plus
+`… [N bytes elided, sha256:<16 hex>]`, and a detail still over the cap is stored as
+`{"elided": true, "bytes": N, "head": "<start of its JSON>"}`. The same capped value is
+what `trail_appended` carries over `/ws/events`.
 
 ## Sessions (extras beyond #17–#22)
 
@@ -1892,8 +1902,11 @@ runs** (cleared on finish), written at most every 5 s, and bounded (≤ 40
 sub-agent entries, `description` ≤ 80 chars, ids ≤ 64 chars); `phase` carries the
 phase text without its prefix glyph. A node's `logs` are capped at **200**
 entries; the phase lines (`⏳ ✉ ⚙ 🧩 ⏸ 📄`) are kept after a successful step and
-are the only lines the cap evicts (oldest first), so a long step's other output
-survives.
+are the lines the cap evicts first (oldest first), so a long step's other output
+survives. When a node is still over the cap with no phase line left (a loop
+node logging per iteration), the middle collapses into one
+`… N lines elided (log cap) …` entry: the first quarter and the newest lines
+are kept, and `N` counts every line it replaced.
 
 **Run queue.** At most **2** workflow runs execute at once, daemon-wide
 (override: `OTTO_WF_MAX_PARALLEL_RUNS`, ≥ 1) — a single run can fan out dozens
@@ -2531,7 +2544,7 @@ These self-authenticate via the `?token=` query parameter and are merged at the 
 |---|---|---|
 | GET /ws/term/{session_id} | `?token=`; ws viewer attach, editor input | terminal stream (see ws.md) |
 | GET /ws/events | `Sec-WebSocket-Protocol: otto-bearer, <token>` (preferred — keeps the token out of the URL) or `?token=` fallback; member | daemon event stream (see ws.md) |
-| GET /ws/lsp?lang=&root=&token= | `?token=`; ws editor | LSP WebSocket bridge. Sockets share ONE server process per `(lang, canonical root)` (ref-counted; reaped 60 s after the last socket leaves): request ids are rewritten per socket, `initialize` is answered from the first result, `didOpen`/`didClose` are ref-counted per URI, `publishDiagnostics` goes to sockets holding the URI |
+| GET /ws/lsp?lang=&root=&token= | `?token=`; ws editor | LSP WebSocket bridge. Share-link (scoped) and MCP-restricted tokens → 403 (same as `/fs/*`). A non-root caller's canonical `root` must be inside a workspace they are a member of (or exactly the scratch workspace root) → else 403. Sockets share ONE server process per `(user, lang, canonical root)` — never across users (ref-counted; reaped 60 s after the last socket leaves): request ids are rewritten per socket, `initialize` is answered from the first result, `didOpen`/`didClose` are ref-counted per URI, `publishDiagnostics` goes to sockets holding the URI. The server's stdin backlog is bounded (8 MiB); past it client messages are back-pressured (the socket stops being read) instead of queued. |
 | GET /ws/api-client/stream?token= | `?token=`; ws editor | API-client streaming-response bridge |
 | GET /browser/proxy?url=&token= | `?token=` | in-app browser HTTP proxy |
 
@@ -3590,7 +3603,7 @@ enforce the entity's workspace role.
 | CP26 | POST /api/v1/mcp/otto-tools/invoke | mcp:edit (or the restricted mcp token) | `{tool, arguments, dry_run?, wait_seconds?}` | governed result |
 | CP27 | GET /api/v1/mcp/gateway/tools | mcp:view | `?workspace_id=` | `{tools}` (namespaced `mcp__server__tool`) |
 | CP28 | POST /api/v1/mcp/gateway/invoke | mcp:edit | `{server_id, tool, arguments, dry_run?, workspace_id, session_id?}` | InvokeResp (governed) |
-| CP29 | GET /api/v1/workspaces/{wid}/mcp/code-search | mcp:view + ws viewer | `?q=&path=&max=` | `{query, root, matches, truncated}` |
+| CP29 | GET /api/v1/workspaces/{wid}/mcp/code-search | mcp:view + ws viewer | `?q=&path=&max=` | `{query, root, matches, truncated, stopped}` — runs off the async workers; stops early at 20 000 entries, 64 MiB read or 10 s (`truncated: true`, `stopped: "walk_limit"\|"byte_budget"\|"time_budget"`) and when the request is dropped; `stopped: null` when it covered the tree or hit `max` |
 | CP30 | POST /api/v1/workspaces/{wid}/mcp/context-packet | mcp:edit + ws viewer | `{query?, story_id?, max_excerpts?}` | context packet |
 | CP31 | GET /api/v1/workspaces/{wid}/mcp/proof-pack | mcp:view + ws viewer | `?repo_id=&branch=&goal_loop_id=` | evidence bundle — `repo_id` must be registered in `{wid}` (else 404) and a `goal_loop_id` from another workspace is ignored |
 | CP32 | POST /api/v1/mcp/http | the scoped mcp token (or mcp:edit) | JSON-RPC 2.0 message/batch (`initialize`/`tools/list`/`tools/call`/`ping`) | JSON-RPC result; notifications → `202` |
@@ -4541,9 +4554,9 @@ sso_start_url?, sso_session?, role_arn?, source: "config"|"credentials" }`.
 | GET /aws/accounts/{id}/s3/buckets/{bucket}/object | `?key=&region=` | `{ key, size, content_type, last_modified, etag, metadata, storage_class }` (`head-object`) |
 | GET /aws/accounts/{id}/s3/buckets/{bucket}/preview | `?key=&max_bytes=&region=` (default 64 KiB, cap 1 MiB) | `{ text?, truncated, content_type, binary? }` — ranged `get-object`; non-text types (anything but `text/*`, JSON/NDJSON/XML/YAML/CSV/JS/SQL, or an `octet-stream` with a text-looking extension) and NUL-bearing bodies return `{ binary: true }` without text |
 | GET /aws/accounts/{id}/s3/buckets/{bucket}/download | `?key=&region=` | streamed body (`aws s3 cp s3://… -` stdout), `Content-Disposition: attachment; filename="<basename>"`, `Content-Length` from the head; objects over **2 GiB** are refused with 413. The child is killed when the client disconnects. |
-| POST /aws/accounts/{id}/s3/buckets/{bucket}/download-to | `{key, local_dir, region?}` | `S3DownloadJob {id, bucket, key, local_path, state (running\|completed\|failed\|cancelled), bytes, total, error?}`. The daemon pipes `aws s3 cp s3://… -` into `<local_dir>/<basename>.otto-part` and renames it on success — never overwriting (` (n)` suffix). `local_dir` must be an existing absolute directory on the daemon host (`~/` expanded) → else 400. No 2 GiB cap (disk-bound). The UI uses it for objects over 100 MB instead of buffering them in the webview. AwsS3:View on the bucket. |
+| POST /aws/accounts/{id}/s3/buckets/{bucket}/download-to | `{key, local_dir, region?}` | `S3DownloadJob {id, bucket, key, local_path, state (running\|completed\|failed\|cancelled), bytes, total, error?}`. The daemon pipes `aws s3 cp s3://… -` into `<local_dir>/<basename>.otto-part` and renames it on success — never overwriting (` (n)` suffix). `local_dir` must be an existing absolute directory on the daemon host (`~/` expanded) → else 400; after canonicalizing, it must be inside the daemon user's home (not `~/Library`, not any dot-directory) or on an external volume (`/Volumes/<name>/…`) → else 403. The file name is the key's basename with leading dots replaced by `_` (a `.zshenv` key lands as `_zshenv`); the part file is created exclusively and moved into place with a no-overwrite link, so an existing file is never replaced. No 2 GiB cap (disk-bound). The UI uses it for objects over 100 MB instead of buffering them in the webview. **AwsS3:Edit** (it writes to the daemon host) plus `s3_read` on the bucket. |
 | GET /aws/accounts/{id}/s3/download-jobs/{job} | — | `S3DownloadJob` (live `bytes`). Jobs are in memory; finished ones are kept 15 min. 404 for another account's job. |
-| POST /aws/accounts/{id}/s3/download-jobs/{job}/cancel | — | `S3DownloadJob` (`cancelled`; the part file is removed). A finished job is returned unchanged. |
+| POST /aws/accounts/{id}/s3/download-jobs/{job}/cancel | — | `S3DownloadJob` (`cancelled`; the part file is removed). A finished job is returned unchanged. AwsS3:Edit. |
 
 ### SQS
 

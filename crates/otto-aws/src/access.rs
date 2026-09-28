@@ -6,7 +6,7 @@ use otto_core::access::{AccessActor, AccessPolicy, ResourceKind, ResourceRef};
 use otto_core::domain::{Capability, Feature, User};
 use otto_core::{Error, Id, Result};
 use otto_rbac::resource_access::ResourceAccess;
-use otto_state::{GrantsRepo, SqlitePool};
+use otto_state::{DbPool, GrantsRepo};
 
 pub fn validate_policy(policy: &AccessPolicy) -> Result<()> {
     otto_core::access::validate_policy(policy)?;
@@ -46,7 +46,7 @@ pub fn validate_policy(policy: &AccessPolicy) -> Result<()> {
 }
 
 pub async fn allowed(
-    pool: &SqlitePool,
+    pool: &DbPool,
     user: &User,
     id: &Id,
     operation: &str,
@@ -75,7 +75,7 @@ pub async fn allowed(
 }
 
 pub async fn check(
-    pool: &SqlitePool,
+    pool: &DbPool,
     user: &User,
     id: &Id,
     operation: &str,
@@ -94,7 +94,7 @@ pub async fn check(
 }
 
 /// Creator rules cannot exceed that creator's current feature authority.
-pub async fn initialize(pool: &SqlitePool, user: &User, id: &Id) -> Result<()> {
+pub async fn initialize(pool: &DbPool, user: &User, id: &Id) -> Result<()> {
     let grants = GrantsRepo::new(pool.clone());
     let mut operations = Vec::new();
     for op in otto_core::access::operations_for(ResourceKind::AwsAccount) {
@@ -144,7 +144,7 @@ pub async fn initialize(pool: &SqlitePool, user: &User, id: &Id) -> Result<()> {
 /// Dropping the inner body also drops the AWS child process guard.
 pub fn guard_body(
     body: Body,
-    pool: SqlitePool,
+    pool: DbPool,
     user: User,
     id: Id,
     bucket: Option<String>,
@@ -190,7 +190,7 @@ pub fn require_setup_authority(user: &User) -> Result<()> {
 }
 
 /// Legacy resources still require the original Admin feature tier to expose configuration.
-pub async fn can_configure(pool: &SqlitePool, user: &User, id: &Id) -> Result<bool> {
+pub async fn can_configure(pool: &DbPool, user: &User, id: &Id) -> Result<bool> {
     if !allowed(pool, user, id, "configure", None).await? {
         return Ok(false);
     }

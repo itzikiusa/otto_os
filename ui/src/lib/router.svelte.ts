@@ -102,6 +102,13 @@ export interface RouteDelegate {
  */
 export type LeaveGuard = (to: string) => boolean | Promise<boolean>;
 
+/**
+ * The shell's "is this route's page ready?" hook (see {@link Router.setPrepare}):
+ * null when the route can render now, else a promise (never rejecting) the
+ * router waits on before `parts` moves to it.
+ */
+export type RoutePrepare = (parts: readonly string[]) => Promise<void> | null;
+
 class Router {
   /** path segments after '#/', e.g. ['git', '01H...', 'pr', '7'] */
   parts: string[] = $state([]);
@@ -119,6 +126,11 @@ class Router {
   private approved: string | null = null;
   /** Bumped per guarded navigation: an older one resolving late is dropped. */
   private guardSeq = 0;
+  /** See {@link setPrepare}. Plain fields — not reactive. */
+  private prepare: RoutePrepare | null = null;
+  /** Bumped per route commit: a slower page load finishing after a newer
+   *  navigation must not switch back to its (stale) route. */
+  private commitSeq = 0;
 
   canBack = $derived(this.index > 0);
   canForward = $derived(this.index < this.stack.length - 1);
@@ -134,36 +146,64 @@ class Router {
     }
   }
 
-  private parse(): void {
-    const raw = window.location.hash.replace(/^#\/?/, '');
-    this.parts = raw === '' ? [] : raw.split('/').map(safeDecode);
+  /**
+   * Install (or clear) the shell's page-readiness hook. Each page is its own
+   * chunk (shell/pages.svelte.ts); while the next page's chunk loads, `parts` — and so
+   * every reader: the shell's page switch, the tab bar, the old page's own
+   * effects — stays on the CURRENT route, so the current page keeps painting
+   * (no blank frame, no spinner) and never sees a route that isn't its own.
+   * The hash, the history stack and the persisted last route move at once.
+   */
+  setPrepare(fn: RoutePrepare | null): void {
+    this.prepare = fn;
+  }
 
-    if (this.parts[0] === 'room' && this.parts.length === 3) {
-      const [, roomId, invite] = this.parts;
+  /** Read the hash and make it the current route (once its page is ready). */
+  private parse(): void {
+    const next = this.read();
+    const seq = ++this.commitSeq;
+    const wait = this.prepare?.(next) ?? null;
+    if (!wait) {
+      this.parts = next;
+      return;
+    }
+    void wait.then(() => {
+      if (seq === this.commitSeq) this.parts = next;
+    });
+  }
+
+  /** The hash as route segments (and the share/room-invite token capture). */
+  private read(): string[] {
+    const raw = window.location.hash.replace(/^#\/?/, '');
+    let parts = raw === '' ? [] : raw.split('/').map(safeDecode);
+
+    if (parts[0] === 'room' && parts.length === 3) {
+      const [, roomId, invite] = parts;
       if (/^[A-Za-z0-9_-]+$/.test(roomId) && /^[A-Za-z0-9_-]+$/.test(invite)) {
         captureRoomInvite(roomId, invite);
         history.replaceState(null, '', `#/room/${encodeURIComponent(roomId)}`);
-        this.parts = ['room', roomId];
+        parts = ['room', roomId];
       }
     }
 
     // Task 3.1: share route `#/s/<sessionId>/<token>` — capture the token
     // into _shareTokens then strip it from the visible URL + history so it
     // never lingers in the address bar, referrer headers, or browser history.
-    if (this.parts[0] === 's' && this.parts.length >= 3) {
-      const sessionId = this.parts[1];
-      const token = this.parts[2];
+    if (parts[0] === 's' && parts.length >= 3) {
+      const sessionId = parts[1];
+      const token = parts[2];
       if (sessionId && token) {
         _shareTokens.set(sessionId, token);
         // Remove the token segment from the URL immediately (replaceState so
         // it doesn't create a new history entry — the token is one-time-view).
         const cleanHash = `#/s/${encodeURIComponent(sessionId)}`;
         history.replaceState(null, '', cleanHash);
-        // Re-parse the now-clean URL so this.parts reflects the stripped form.
+        // Re-parse the now-clean URL so parts reflects the stripped form.
         const cleanRaw = cleanHash.replace(/^#\/?/, '');
-        this.parts = cleanRaw.split('/').map(safeDecode);
+        parts = cleanRaw.split('/').map(safeDecode);
       }
     }
+    return parts;
   }
 
   private currentHash(): string {

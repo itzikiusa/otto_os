@@ -5,10 +5,11 @@
 //! the document as opaque text and only owns the metadata (title, workspace,
 //! optional story link, timestamps) needed for listing and access control.
 
+use crate::DbPool;
 use chrono::{DateTime, Utc};
 use otto_core::{new_id, Error, Id, Result};
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 
 use crate::convert::{dberr, fmt, ts};
 
@@ -130,11 +131,12 @@ fn row_to_summary(r: &sqlx::sqlite::SqliteRow) -> Result<CanvasSceneSummary> {
 
 #[derive(Clone)]
 pub struct CanvasRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl CanvasRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -405,7 +407,7 @@ impl CanvasRepo {
 mod tests {
     use super::*;
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -415,7 +417,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     #[tokio::test]
@@ -558,7 +560,7 @@ mod tests {
     // Session ↔ scene refs
     // -----------------------------------------------------------------------
 
-    async fn seed_user(pool: &SqlitePool, user_id: &str) {
+    async fn seed_user(pool: &DbPool, user_id: &str) {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO users (id, username, password_hash, display_name, is_root, created_at)
@@ -573,7 +575,7 @@ mod tests {
         .expect("seed user");
     }
 
-    async fn seed_workspace(pool: &SqlitePool, ws_id: &str) {
+    async fn seed_workspace(pool: &DbPool, ws_id: &str) {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO workspaces (id, name, root_path, settings_json, archived, created_at)
@@ -586,7 +588,7 @@ mod tests {
         .expect("seed workspace");
     }
 
-    async fn seed_session(pool: &SqlitePool, ws_id: &str, created_by: &str) -> Id {
+    async fn seed_session(pool: &DbPool, ws_id: &str, created_by: &str) -> Id {
         let id = new_id();
         let now = Utc::now().to_rfc3339();
         sqlx::query(

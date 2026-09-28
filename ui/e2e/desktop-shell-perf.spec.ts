@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
+import { isDesktopProject } from './perf';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shell main-thread multipliers (perf backlog B3), behaviour kept identical:
@@ -20,7 +21,7 @@ test.beforeAll(async () => {
 });
 
 test.beforeEach(async ({ page }, info) => {
-  test.skip(info.project.name !== 'desktop-browser', 'desktop-browser project only');
+  test.skip(!isDesktopProject(info.project.name), 'desktop projects only');
   await page.addInitScript((id) => {
     localStorage.setItem('otto_workspace', id as string);
     localStorage.setItem('otto_firstrun_dismissed', '1');

@@ -29,7 +29,6 @@
 //! where `<start>`/`<end>` are `YYYYMMDD`.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,6 +40,8 @@ use chrono::{DateTime, Datelike, Days, Months, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+
+use crate::cancel_signal::CancelSignal;
 use tracing::{info, warn};
 
 use otto_core::event::Event;
@@ -733,19 +734,19 @@ const HOURLY_GATE: Duration = Duration::from_secs(60 * 60);
 
 /// Handle that cancels the supervisor on drop.
 pub struct InsightsSchedulerHandle {
-    cancel: Arc<AtomicBool>,
+    cancel: CancelSignal,
     _supervisor: JoinHandle<()>,
 }
 
 impl InsightsSchedulerHandle {
     pub fn shutdown(&self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.cancel.cancel();
     }
 }
 
 impl Drop for InsightsSchedulerHandle {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.cancel.cancel();
     }
 }
 
@@ -763,15 +764,15 @@ impl InsightsScheduler {
 
     /// Spawn the supervisor task. Returns a handle that cancels on drop.
     pub fn start(self) -> InsightsSchedulerHandle {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let supervisor = tokio::spawn(self.supervise(Arc::clone(&cancel)));
+        let cancel = CancelSignal::new();
+        let supervisor = tokio::spawn(self.supervise(cancel.clone()));
         InsightsSchedulerHandle {
             cancel,
             _supervisor: supervisor,
         }
     }
 
-    async fn supervise(self, cancel: Arc<AtomicBool>) {
+    async fn supervise(self, cancel: CancelSignal) {
         // In-flight set: cadences currently running (one run at a time overall,
         // but keyed by cadence so e.g. a slow weekly doesn't block a daily next
         // hour). `Mutex<HashSet>` mirrors otto-improve.
@@ -782,7 +783,7 @@ impl InsightsScheduler {
         // closed), then once per hourly gate.
         let mut last_check: Option<std::time::Instant> = None;
         loop {
-            if cancel.load(Ordering::Relaxed) {
+            if cancel.is_cancelled() {
                 return;
             }
 
@@ -794,14 +795,9 @@ impl InsightsScheduler {
                 self.tick(&in_flight).await;
             }
 
-            // Sleep in short slices for responsive shutdown.
-            let mut waited = Duration::ZERO;
-            while waited < SCAN_INTERVAL {
-                if cancel.load(Ordering::Relaxed) {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                waited += Duration::from_millis(500);
+            // One timer per scan; cancel() wakes it (was 500 ms slices).
+            if cancel.sleep(SCAN_INTERVAL).await {
+                return;
             }
         }
     }

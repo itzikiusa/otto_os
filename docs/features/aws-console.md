@@ -165,7 +165,12 @@ the `prefix` "directory marker" object is hidden) → per-object **head**,
   `Cache-Control: no-store`). The child process is killed the moment the
   client disconnects. Objects over **2 GiB** are refused (413) — use the CLI.
 
-There is no upload, delete, or presign. Everything here is `aws_s3:View`.
+There is no upload, delete, or presign. Everything here is `aws_s3:View`,
+except **Download to folder** (`download-to` and its cancel), which writes a
+file onto the daemon host and therefore needs `aws_s3:Edit`. Its destination
+must be a folder in your home directory (not `~/Library` or a hidden folder) or
+on an external volume; the file never starts with a dot and never overwrites
+an existing file.
 
 ### 3.2 SQS
 
@@ -283,7 +288,7 @@ Root always passes. Grant them in **Settings → Users → Feature grants**.
 | Feature | View | Edit | Admin |
 |---|---|---|---|
 | `aws` | list accounts, `/status`, `/discover`, `/regions`, `/test`, `/permissions` | `/login` (spawn `aws sso login` PTY) | create / update / delete accounts, `/install` |
-| `aws_s3` | everything (buckets, objects, preview, download) | — | — |
+| `aws_s3` | buckets, objects, preview, download (streamed to the browser), download-job status | `download-to` a folder on the daemon host + cancel | — |
 | `aws_sqs` | list, attributes, peek | send, delete-message, purge, redrive | — |
 | `aws_ec2` | list / describe | start / stop / reboot | — |
 | `aws_athena` | workgroups / databases / tables / history / results / cancel | execute query | — |

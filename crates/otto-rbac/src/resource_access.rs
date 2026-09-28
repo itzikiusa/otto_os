@@ -10,8 +10,8 @@ use otto_core::access::{
 };
 use otto_core::domain::User;
 use otto_core::{Error, Id, Result};
+use otto_state::DbPool;
 use otto_state::ResourceAccessRepo;
-use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct ResourceAccess {
@@ -19,7 +19,8 @@ pub struct ResourceAccess {
 }
 
 impl ResourceAccess {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self {
             repo: ResourceAccessRepo::new(pool),
         }

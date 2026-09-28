@@ -520,7 +520,7 @@ pub async fn startup(svc: DesignService) {
 mod tests {
     use super::*;
 
-    async fn seed_story(pool: &sqlx::SqlitePool, id: &str, ws: &str) {
+    async fn seed_story(pool: &otto_state::DbPool, id: &str, ws: &str) {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO product_stories
@@ -539,7 +539,7 @@ mod tests {
 
     #[allow(clippy::too_many_arguments)]
     async fn seed_attachment(
-        pool: &sqlx::SqlitePool,
+        pool: &otto_state::DbPool,
         data_dir: &Path,
         id: &str,
         story: &str,
@@ -574,7 +574,7 @@ mod tests {
         .unwrap();
     }
 
-    async fn seed_scene(pool: &sqlx::SqlitePool, id: &str, story: Option<&str>, doc: &str) {
+    async fn seed_scene(pool: &otto_state::DbPool, id: &str, story: Option<&str>, doc: &str) {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO canvas_scenes

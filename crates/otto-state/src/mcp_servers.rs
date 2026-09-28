@@ -6,10 +6,11 @@
 
 use std::collections::BTreeMap;
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::domain::McpServer;
 use otto_core::{new_id, Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 
 use crate::convert::{dberr, dberr_unique, fmt, json, ts};
 
@@ -27,7 +28,7 @@ pub struct NewMcpServer {
 
 #[derive(Clone)]
 pub struct McpServersRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 fn row_to_server(r: &sqlx::sqlite::SqliteRow) -> Result<McpServer> {
@@ -56,7 +57,8 @@ fn row_to_server(r: &sqlx::sqlite::SqliteRow) -> Result<McpServer> {
 }
 
 impl McpServersRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -223,7 +225,7 @@ impl McpServersRepo {
 mod tests {
     use super::*;
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -233,10 +235,10 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
-    async fn seed_ws(pool: &SqlitePool) -> (Id, Id) {
+    async fn seed_ws(pool: &DbPool) -> (Id, Id) {
         let user = new_id();
         let ws = new_id();
         let now = fmt(Utc::now());

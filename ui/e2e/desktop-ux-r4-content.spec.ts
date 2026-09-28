@@ -229,7 +229,9 @@ test('Canvas same-scene reopen keeps the newer draft when an older save resolves
     } }); scenes.push(await r.json());
   }
   let release!: () => void; const held = new Promise<void>(r => release = r); let puts = 0;
-  await page.context().route(`**/canvas/scenes/${scenes[0].id}`, async route => {
+  // Match on the PATH: scene saves carry `?summary=true` (SD-22, e4a49ecf), which
+  // a `**/canvas/scenes/<id>` glob never matches — the hold silently stopped holding.
+  await page.context().route(url => url.pathname.endsWith(`/canvas/scenes/${scenes[0].id}`), async route => {
     if (route.request().method() !== 'PUT') return route.continue();
     if (++puts === 1) await held;
     return route.continue();

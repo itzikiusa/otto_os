@@ -349,7 +349,7 @@ mod tests {
 
     #[derive(Clone)]
     struct TestCtx {
-        pool: sqlx::SqlitePool,
+        pool: otto_state::DbPool,
         dir: Arc<tempfile::TempDir>,
         roles: Arc<dyn RoleChecker>,
     }

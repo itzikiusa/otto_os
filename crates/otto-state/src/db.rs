@@ -9,8 +9,19 @@ use sqlx::SqlitePool;
 
 use otto_core::{Error, Result};
 
-/// Open (creating if needed) the Otto database at `path` and run migrations.
-pub async fn open(path: &Path) -> Result<SqlitePool> {
+use crate::DbPool;
+
+/// Writer connections. Two, not one: a deferred read-only transaction or a
+/// long statement on one never stalls every other write in-process, while at
+/// most one connection at a time sits in SQLite's busy handler (see
+/// [`crate::DbPool`]).
+const WRITE_CONNECTIONS: u32 = 2;
+/// Read-only connections: WAL lets all of them run beside the writer.
+const READ_CONNECTIONS: u32 = 8;
+
+/// Open (creating if needed) the Otto database at `path`, run migrations, and
+/// return the split writer/reader handle ([`DbPool`]).
+pub async fn open(path: &Path) -> Result<DbPool> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| Error::Internal(format!("create data dir: {e}")))?;
@@ -29,9 +40,16 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         .synchronous(SqliteSynchronous::Normal)
         .foreign_keys(true)
         .busy_timeout(Duration::from_secs(5));
+    // Readers share the file but never write: `read_only` makes a mis-routed
+    // write fail loudly. Journal mode is the file's (WAL, set by the writer).
+    let read_opts = opts
+        .clone()
+        .create_if_missing(false)
+        .journal_mode(SqliteJournalMode::Wal)
+        .read_only(true);
 
     let pool = SqlitePoolOptions::new()
-        .max_connections(8)
+        .max_connections(WRITE_CONNECTIONS)
         .connect_with(opts)
         .await
         .map_err(|e| Error::Internal(format!("sqlite connect: {e}")))?;
@@ -46,7 +64,11 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         .await
         .map_err(|e| Error::Internal(format!("migrate: {e}")))?;
 
-    Ok(pool)
+    // Lazily connected: the file (and its WAL) exist by now.
+    let read = SqlitePoolOptions::new()
+        .max_connections(READ_CONNECTIONS)
+        .connect_lazy_with(read_opts);
+    Ok(DbPool::split(read, pool))
 }
 
 /// One-time data repair for DBs bricked by the vault-docs migration **renumber**
@@ -173,7 +195,7 @@ async fn repair_renumbered_migrations(pool: &SqlitePool, table: &[(i64, &str, i6
 
 /// In-memory pool with all migrations applied — for tests only. A single
 /// connection keeps the `sqlite::memory:` schema alive for the pool's lifetime.
-pub async fn test_pool() -> SqlitePool {
+pub async fn test_pool() -> DbPool {
     let opts = SqliteConnectOptions::from_str("sqlite::memory:")
         .expect("sqlite memory options")
         .foreign_keys(true);
@@ -183,7 +205,7 @@ pub async fn test_pool() -> SqlitePool {
         .await
         .expect("open in-memory sqlite");
     sqlx::migrate!().run(&pool).await.expect("run migrations");
-    pool
+    DbPool::from(pool)
 }
 
 #[cfg(test)]

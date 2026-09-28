@@ -44,13 +44,13 @@ use crate::state::ServerCtx;
 pub trait HasGrants {
     fn grants(&self) -> GrantsRepo;
     /// Optional resource-policy storage; minimal legacy test states omit it.
-    fn resource_pool(&self) -> Option<otto_state::SqlitePool> {
+    fn resource_pool(&self) -> Option<otto_state::DbPool> {
         None
     }
 }
 
 impl HasGrants for ServerCtx {
-    fn resource_pool(&self) -> Option<otto_state::SqlitePool> {
+    fn resource_pool(&self) -> Option<otto_state::DbPool> {
         Some(self.pool.clone())
     }
     fn grants(&self) -> GrantsRepo {
@@ -514,7 +514,7 @@ mod scope_tests {
 }
 
 async fn bound_session_feature(
-    pool: &otto_state::SqlitePool,
+    pool: &otto_state::DbPool,
     template: &str,
     path: &str,
 ) -> otto_core::Result<Option<otto_core::domain::Feature>> {
@@ -554,7 +554,7 @@ async fn bound_session_feature(
 }
 
 async fn indirect_resource_route(
-    pool: &otto_state::SqlitePool,
+    pool: &otto_state::DbPool,
     template: &str,
     path: &str,
 ) -> otto_core::Result<Option<(otto_core::access::ResourceKind, String)>> {
