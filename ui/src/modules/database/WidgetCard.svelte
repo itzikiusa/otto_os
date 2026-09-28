@@ -7,7 +7,9 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import { api } from '../../lib/api/client';
+  import { api, isAbortError } from '../../lib/api/client';
+  import { pollWhileVisible } from '../../lib/poll';
+  import { widgetGate } from './widgetGate';
   import type { DbWidget, QueryResult } from '../../lib/api/types';
 
   interface Props {
@@ -24,68 +26,57 @@
   // Failure message rendered IN the card — a banner over the last good chart
   // when one exists (the chart is never wiped by a failed refresh).
   let error = $state<string | null>(null);
-  // Consecutive failure count — stretches the auto-refresh cadence (read at
-  // schedule time only, so plain, not $state).
-  let failures = 0;
-
-  async function run(manual = false): Promise<void> {
+  async function run(manual = false, signal?: AbortSignal): Promise<boolean> {
     loading = true;
     try {
       // The store's runWidget toasts on failure — right for an explicit click,
       // wrong for a background tick (20 tiles on a broken connection would storm
       // the toaster every refresh), so auto-refresh posts directly and surfaces
-      // the failure inline instead.
+      // the failure inline instead. Auto runs share one dashboard-wide gate
+      // (widgetGate: ≤ 2 queries at once across every tile) and ride the
+      // background lane; unmount aborts the in-flight one.
       const r = manual
         ? await database.runWidget(widget.id)
-        : await api.post<QueryResult>(`/db/widgets/${widget.id}/run`, {});
+        : await widgetGate(() => api.bg.post<QueryResult>(`/db/widgets/${widget.id}/run`, {}, signal), signal);
       if (r) {
         result = r; // only a SUCCESS replaces the data
         error = null;
-        failures = 0;
-      } else {
-        error = 'Query failed';
-        failures += 1;
+        return true;
       }
+      error = 'Query failed';
+      return false;
     } catch (e) {
+      if (isAbortError(e) || signal?.aborted) return true;
       error = e instanceof Error ? e.message : String(e);
-      failures += 1;
+      return false;
     } finally {
-      loading = false;
+      if (!signal?.aborted) loading = false;
     }
   }
 
-  // Initial run + auto-refresh. The schedule is recreated whenever the widget id
-  // or refresh cadence changes, and cleared on unmount (Svelte $effect cleanup).
-  //
-  // Each tick is jittered by up to ±15 % of the refresh period so that a
-  // dashboard with 20 tiles doesn't issue 20 parallel queries in the same
-  // scheduler tick. A setTimeout CHAIN (not setInterval) lets consecutive
-  // failures back the cadence off — ×2 per failure, capped at ×16 — so a dead
-  // connection isn't hammered at full rate; the next success restores it.
+  // Initial run + auto-refresh, recreated whenever the widget id or cadence
+  // changes and stopped on unmount. `pollWhileVisible` supplies the rules the
+  // old hand-rolled setTimeout chain lacked (r3-04-03): no ticks while the
+  // window is hidden (one catch-up run on return), the in-flight query is
+  // ABORTED on unmount, ±15 % jitter so 20 tiles don't fire together, and a
+  // ×2-per-failure backoff (capped ×16) so a dead connection isn't hammered.
   $effect(() => {
     const id = widget.id;
     const secs = refreshSecs ?? 0;
     void id; // track id so a swapped widget re-runs
-    failures = 0;
-    void run();
-    if (secs <= 0) return;
-    let stopped = false;
-    let handle = 0;
-    const schedule = (): void => {
-      const jitterMs = (Math.random() * 0.3 - 0.15) * secs * 1000; // ±15%
-      const baseMs = Math.max(secs * 1000 + jitterMs, 5000); // floor 5s
-      const backoff = Math.min(2 ** failures, 16);
-      handle = window.setTimeout(() => {
-        void run().finally(() => {
-          if (!stopped) schedule();
-        });
-      }, baseMs * backoff);
-    };
-    schedule();
-    return () => {
-      stopped = true;
-      clearTimeout(handle);
-    };
+    if (secs <= 0) {
+      const ctl = new AbortController();
+      void run(false, ctl.signal);
+      return () => ctl.abort();
+    }
+    const poller = pollWhileVisible((signal) => run(false, signal), {
+      ms: secs * 1000,
+      floorMs: 5000,
+      jitter: 0.15,
+      maxBackoff: 16,
+      lane: 'bg',
+    });
+    return () => poller.stop();
   });
 
   const canEdit = $derived(ws.myRole !== 'viewer');

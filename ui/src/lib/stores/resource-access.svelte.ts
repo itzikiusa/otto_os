@@ -4,7 +4,7 @@ import { untrack } from 'svelte';
 import { accessApi } from '../api/access';
 import { getToken } from '../api/client';
 import { auth } from './auth.svelte';
-import { mapLimit } from '../poll';
+import { createLimiter, mapLimit } from '../poll';
 import { appLive, liveQuery, LIVE_SAFETY_MS } from '../live';
 import type { Capability, EffectiveAccess, Feature, ResourceKind } from '../api/types';
 
@@ -15,6 +15,12 @@ const OFFLINE_TTL_MS = 30_000;
 function ttl(): number {
   return appLive.connected() ? LIVE_SAFETY_MS + 60_000 : OFFLINE_TTL_MS;
 }
+
+/** Every capability check of this document shares this gate (r3-04-04): a
+ *  DB page with N connections or a k8s view with 300 namespaces used to fire
+ *  one unbounded request per resource — each a distinct URL, so each also a
+ *  CORS preflight — queued ahead of the user's first click. */
+const checkGate = createLimiter(3);
 
 type Entry = {
   value: EffectiveAccess | null;
@@ -61,7 +67,7 @@ class ResourceAccessStore {
   private key(kind: ResourceKind, id: string, child?: string) {
     return JSON.stringify([auth.me?.id, this.identityKey(), kind, id, child ?? null]);
   }
-  async load(kind: ResourceKind, id: string, child?: string, force = false): Promise<void> {
+  async load(kind: ResourceKind, id: string, child?: string, force = false, background = false): Promise<void> {
     const key = this.key(kind, id, child);
     const pending = this.loading.get(key);
     if (pending) return pending;
@@ -70,7 +76,7 @@ class ResourceAccessStore {
     let task!: Promise<void>;
     task = (async () => {
       try {
-        const value = await accessApi.capabilities(kind, id, child);
+        const value = await checkGate(() => accessApi.capabilities(kind, id, child, background));
         if (generation !== this.generation || key !== this.key(kind, id, child)) return;
         const before = this.entries[key]?.value ?? null;
         this.entries[key] = { value, expires: Date.now() + ttl(), kind, id, child };
@@ -117,7 +123,16 @@ class ResourceAccessStore {
     const entries = Object.values(this.entries).filter(
       (e) => !match?.kind || (e.kind === match.kind && (!match.resource_id || e.id === match.resource_id)),
     );
-    await mapLimit(entries, 2, (e) => this.load(e.kind, e.id, e.child, true).catch(() => {}));
+    await mapLimit(entries, 2, (e) => this.load(e.kind, e.id, e.child, true, true).catch(() => {}));
+  }
+  /** Re-check only the decisions whose TTL ran out (window focus). While the
+   *  event socket is up that is ~none — `resource_access_changed` keeps them
+   *  honest — so a Cmd-Tab back no longer re-checks every connection and
+   *  namespace seen this session. */
+  async refreshStale() {
+    const now = Date.now();
+    const stale = Object.values(this.entries).filter((e) => e.expires <= now);
+    await mapLimit(stale, 2, (e) => this.load(e.kind, e.id, e.child, true, true).catch(() => {}));
   }
 }
 export const resourceAccess = new ResourceAccessStore();
@@ -128,13 +143,13 @@ if (typeof window !== 'undefined') {
   // cached resource now runs only while the event socket is down; otherwise a
   // 5-min safety net + a refresh after reconnects. Same chain rules as before
   // (no overlap, paused while hidden, jittered).
-  const refresher = liveQuery({ run: () => resourceAccess.refresh(), on: [], fallbackMs: 15_000, immediate: false });
+  liveQuery({ run: () => resourceAccess.refresh(), on: [], fallbackMs: 15_000, immediate: false });
   appLive.on(['resource_access_changed'], (ev) => {
     const kind = typeof ev.kind === 'string' ? ev.kind : undefined;
     const resource_id = typeof ev.resource_id === 'string' ? ev.resource_id : undefined;
     void resourceAccess.refresh(kind ? { kind, resource_id } : undefined);
   });
-  window.addEventListener('focus', () => refresher.now());
+  window.addEventListener('focus', () => void resourceAccess.refreshStale());
   window.addEventListener('otto:auth-changed', () => resourceAccess.invalidate(true));
   window.addEventListener('storage', (event) => {
     if (event.key === 'otto_token') resourceAccess.invalidate(true);

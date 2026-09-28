@@ -52,9 +52,17 @@
   }
   const canEdit = $derived(['exec', 'apply', 'scale', 'restart', 'delete'].some(op => can(op)));
   const canK9s = $derived(resourceAccess.can('k8s_cluster', cluster.id, 'k9s', 'kubernetes', 'edit'));
+  // The distinct namespaces on screen, as one string: the 10 s list refresh
+  // replaces `k8s.rows`, but the load effect below re-runs only when the SET
+  // of namespaces changed, not on every refresh of 5k rows.
+  const rowNamespaces = $derived.by(() => {
+    const set = new Set<string>();
+    for (const row of k8s.rows) if (row.namespace) set.add(row.namespace);
+    return [...set].sort().join('\n');
+  });
   $effect(() => {
     void resourceAccess.load('k8s_cluster', cluster.id);
-    const namespaces = new Set([k8s.namespace, k8s.selected?.ns, ...k8s.rows.map(row => row.namespace)]);
+    const namespaces = new Set([k8s.namespace, k8s.selected?.ns, ...(rowNamespaces ? rowNamespaces.split('\n') : [])]);
     for (const ns of namespaces) if (ns) void resourceAccess.load('k8s_cluster', cluster.id, `namespace:${ns}`);
   });
   $effect(() => {

@@ -6,7 +6,8 @@ export const accessApi = {
   policy: (kind: ResourceKind, id: Id) => api.get<AccessPolicy>(resourcePath(kind, id)),
   save: (policy: AccessPolicy, preview_token?: string) => api.put<AccessPolicy>(resourcePath(policy.kind, policy.resource_id), {policy, preview_token}),
   preview: (policy: AccessPolicy) => api.post<AccessPreview>(`${resourcePath(policy.kind, policy.resource_id)}/preview`, {policy}),
-  capabilities: (kind: ResourceKind, id: Id, child?: string) => api.get<EffectiveAccess>(`${resourcePath(kind, id)}/capabilities${childQuery(child)}`),
+  /** `background`: a re-check (refresh / safety net), on the bg lane. */
+  capabilities: (kind: ResourceKind, id: Id, child?: string, background = false) => (background ? api.bg.get : api.get)<EffectiveAccess>(`${resourcePath(kind, id)}/capabilities${childQuery(child)}`),
   effective: (kind: ResourceKind, id: Id, userId: Id, child?: string) => api.get<EffectiveAccess>(`${resourcePath(kind, id)}/effective?user_id=${encodeURIComponent(userId)}${child === undefined ? '' : `&child=${encodeURIComponent(child)}`}`),
   subjects: (kind: ResourceKind, id: Id) => api.get<AccessSubjects>(`${resourcePath(kind, id)}/subjects`),
   groups: () => api.get<AccessGroup[]>('/access/groups'),
