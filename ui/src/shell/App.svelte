@@ -95,6 +95,8 @@
   import { sidePane } from '../lib/stores/sidePane.svelte';
   import { startGuest, postToHost } from '../lib/embedGuest';
   import { embeddedKeyTarget, paneKey, routeOf, clampShare } from '../lib/sidePane';
+  import { nativePane } from '../lib/nativePane';
+  import { paneWindowAction, showPaneDisplays } from '../lib/nativePaneMenu';
   import { ctxMenu } from '../lib/contextmenu.svelte';
   import { viewport } from '../lib/stores/viewport.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
@@ -396,7 +398,7 @@
         shortcutsOpen = true;
         break;
       case 'toggleSidePane':
-        if (sidePane.route !== null && sidePane.showing) sidePane.close();
+        if (sidePane.route !== null && sidePane.active) sidePane.close();
         else openSidePicker();
         break;
       case 'palette':
@@ -793,7 +795,7 @@
   function openSidePicker(): void {
     if (!sidePane.supported) return;
     const primary = sidePane.primaryKey;
-    const current = sidePane.showing ? sidePane.key : null;
+    const current = sidePane.active ? sidePane.key : null;
     const items = splitModules
       .filter((m) => m.id !== primary)
       .map((m) => ({
@@ -819,7 +821,11 @@
   // Host: the pane's messages, focus tracking and the router delegate.
   $effect(() =>
     sidePane.listen({
-      runKey: (action, index) => runKeyAction(action as KeyAction | 'shortcuts', index),
+      runKey: (action, index) => {
+        const run = () => runKeyAction(action as KeyAction | 'shortcuts', index);
+        if (sidePane.nativeState) void nativePane.focus('primary').then(run).catch(() => {});
+        else run();
+      },
       openInMain: (route) => void openInMain(route),
       selectWorkspace: (id) => {
         if (ws.currentId !== id && ws.workspaces.some((w) => w.id === id)) void ws.select(id);
@@ -832,9 +838,10 @@
   $effect(() => {
     void sidePane.primaryKey;
     void sidePane.placement;
+    void sidePane.nativeState?.mode;
     void ui.railExpanded;
     const wsId = ws.currentId;
-    if (!sidePane.showing || sidePane.status !== 'ready') return;
+    if (!sidePane.active || sidePane.status !== 'ready') return;
     sidePane.postHost();
     if (wsId) sidePane.post({ type: 'workspace', id: wsId });
   });
@@ -852,7 +859,7 @@
     const cmds: Command[] = [
       { id: 'split.pick', title: 'Open side pane…', group: 'View', shortcut: '⌘\\', keywords: 'split side by side two panes pane module picker compare', run: () => openSidePicker() },
       ...splitModules
-        .filter((m) => m.id !== sidePane.primaryKey && m.id !== (sidePane.showing ? sidePane.key : null))
+        .filter((m) => m.id !== sidePane.primaryKey && m.id !== (sidePane.active ? sidePane.key : null))
         .map((m) => ({
           id: `split.open-${m.id}`,
           title: `Open ${m.label} side by side`,
@@ -862,8 +869,21 @@
           run: () => sidePane.open(m.id, { label: m.label }),
         })),
     ];
-    if (sidePane.showing && sideMeta) {
+    if (sidePane.active && sideMeta) {
       const side = sideMeta.label;
+      if (isTauri) {
+        if (sidePane.detached) cmds.push(
+          { id: 'split.return', title: 'Return to split', group: 'View', keywords: 'pane window attach restore', run: () => sidePane.returnToSplit() },
+          { id: 'split.top', title: 'Toggle pane keep on top', group: 'View', keywords: 'pane window float', run: () => paneWindowAction('toggle-top') },
+          { id: 'split.fill', title: 'Fill display with pane', group: 'View', keywords: 'pane window maximize', run: () => paneWindowAction('maximize') },
+          { id: 'split.fullscreen', title: 'Toggle pane fullscreen', group: 'View', keywords: 'pane window fullscreen', run: () => paneWindowAction('toggle-fullscreen') },
+          { id: 'split.display', title: 'Move pane to display…', group: 'View', keywords: 'pane window monitor', run: () => showPaneDisplays() },
+        );
+        else cmds.push(
+          { id: 'split.detach-primary', title: 'Detach main pane', group: 'View', keywords: 'pane window float display', run: () => sidePane.detachPane('primary') },
+          { id: 'split.detach-side', title: 'Detach side pane', group: 'View', keywords: 'pane window float display', run: () => sidePane.detachPane('side') },
+        );
+      }
       cmds.push(
         { id: 'split.close', title: 'Close side pane', group: 'View', shortcut: '⌘\\', keywords: `split side by side ${side}`, run: () => sidePane.close() },
         { id: 'split.swap', title: 'Swap panes', group: 'View', keywords: `split side by side flip ${side}`, run: () => sidePane.swap() },
@@ -881,7 +901,7 @@
   // window already has — the shell registers the same set in both documents —
   // stay the window's.
   $effect(() => {
-    const remote = sidePane.showing ? sidePane.commands : [];
+    const remote = sidePane.active ? sidePane.commands : [];
     const label = sideMeta?.label ?? 'Side pane';
     const own = new Set(untrack(() => registry.all).filter((c) => !c.id.startsWith('side:')).map((c) => c.id));
     return registry.register(
@@ -923,7 +943,6 @@
       },
       runCommand: (id) => void registry.all.find((c) => c.id === id)?.run(),
     });
-    postToHost({ type: 'ready', route: currentRoute() });
     return stop;
   });
   $effect(() => {
@@ -1222,6 +1241,8 @@
       </div>
       {#if sidePane.showing && sideMeta}
         <SplitDivider label={`${mainMeta.label} and ${sideMeta.label}`} />
+      {/if}
+      {#if sideMeta && (sidePane.showing || sidePane.retained)}
         <SidePane label={sideMeta.label} />
       {/if}
     </div>

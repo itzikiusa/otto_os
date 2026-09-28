@@ -99,6 +99,7 @@
   // Inside the side-by-side pane the page's top row also carries the pane's
   // controls (Swap / Open in main pane / Close — lib/stores/embedChrome).
   $effect(() => (rootEl ? embedChrome.claim(rootEl) : undefined));
+  const hostsPrimaryPane = $derived(!isEmbedded && isTauri && sidePane.active && !!rootEl && embedChrome.owner === rootEl);
   const hostsPane = $derived(isEmbedded && !!rootEl && embedChrome.owner === rootEl);
   // Agent UI control: the page's top header hosts the "‹agent› is driving…"
   // strip under its row (lib/components/AgentDrivingBar.svelte).
@@ -109,6 +110,7 @@
   // pane's header when the side pane trails, the side pane's when it leads.
   const padTraffic = $derived(
     (isTauri &&
+      !isEmbedded &&
       viewport.isDesktop &&
       !ui.railExpanded &&
       !isPopout &&
@@ -385,7 +387,7 @@
         </button>
       {/if}
     </div>
-    {#if hostsPane}<PaneControls />{/if}
+    {#if hostsPane}<PaneControls />{:else if hostsPrimaryPane}<PaneControls pane="primary" />{/if}
   </div>
   {#if tabs && tabsBelow}
     <div class="ph-tabs-below">{@render tabs()}</div>

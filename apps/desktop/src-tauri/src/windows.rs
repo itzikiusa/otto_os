@@ -159,7 +159,10 @@ pub fn is_popout(label: &str) -> bool {
 /// A window a person works in (`main`, `w<N>`, pop-outs): valid target for
 /// menu events and the snip trigger, and counted for last-window-quit.
 pub fn is_app_window(label: &str) -> bool {
-    !label.starts_with("otto-browser-") && !is_aux(label)
+    !label.starts_with("otto-browser-")
+        && !label.starts_with("otto-pane-")
+        && !label.starts_with("room-")
+        && !is_aux(label)
 }
 
 /// Windows whose frames this registry persists and restores.
@@ -169,11 +172,11 @@ fn is_registry_window(label: &str) -> bool {
 
 /// The window "Open Otto" should surface: `main`, else the focused app window,
 /// else any app window.
-pub fn primary_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
-    if let Some(main) = app.get_webview_window("main") {
+pub fn primary_window(app: &tauri::AppHandle) -> Option<tauri::Window> {
+    if let Some(main) = app.get_window("main") {
         return Some(main);
     }
-    let wins = app.webview_windows();
+    let wins = app.windows();
     wins.values()
         .find(|w| is_app_window(w.label()) && w.is_focused().unwrap_or(false))
         .or_else(|| wins.values().find(|w| is_registry_window(w.label())))
@@ -196,7 +199,10 @@ pub(crate) fn monitors_of(app: &tauri::AppHandle) -> Vec<(i32, i32, u32, u32)> {
 }
 
 /// Current physical frame of a live window (None while minimized/gone).
-pub(crate) fn live_frame(win: &tauri::WebviewWindow) -> Option<WinFrame> {
+pub(crate) fn live_frame(win: &tauri::Window) -> Option<WinFrame> {
+    if let Some(frame) = crate::panes::original_frame(win.label()) {
+        return Some(frame);
+    }
     let pos = win.outer_position().ok()?;
     let size = win.outer_size().ok()?;
     Some(WinFrame {
@@ -213,7 +219,7 @@ pub(crate) fn live_frame(win: &tauri::WebviewWindow) -> Option<WinFrame> {
 /// as the debounced Moved/Resized handler.
 pub fn snapshot_all(app: &tauri::AppHandle) {
     let frames: Vec<WinFrame> = app
-        .webview_windows()
+        .windows()
         .values()
         .filter(|w| is_registry_window(w.label()))
         .filter_map(live_frame)
@@ -252,11 +258,7 @@ pub fn on_close_requested(app: &tauri::AppHandle, label: &str) {
     if is_quitting() || !is_app_window(label) {
         return;
     }
-    let real_windows = app
-        .webview_windows()
-        .keys()
-        .filter(|l| is_app_window(l))
-        .count();
+    let real_windows = app.windows().keys().filter(|l| is_app_window(l)).count();
     if real_windows <= 1 {
         mark_quitting();
         snapshot_all(app);
@@ -315,7 +317,7 @@ pub fn restore(app: &tauri::AppHandle) {
     let entries = with_registry(|reg| reg.windows.clone());
     for mut frame in entries {
         if frame.label == "main" {
-            if let Some(main) = app.get_webview_window("main") {
+            if let Some(main) = app.get_window("main") {
                 clamp_frame(&mut frame, &monitors);
                 let _ = main.set_position(PhysicalPosition::new(frame.x, frame.y));
                 let _ = main.set_size(PhysicalSize::new(frame.w, frame.h));
@@ -332,7 +334,7 @@ pub fn restore(app: &tauri::AppHandle) {
         }
     }
     // Make sure the registry knows main (first launch has no file at all).
-    if let Some(main) = app.get_webview_window("main") {
+    if let Some(main) = app.get_window("main") {
         if let Some(f) = live_frame(&main) {
             with_registry(|reg| {
                 if !reg.windows.iter().any(|w| w.label == "main") {
@@ -352,11 +354,11 @@ pub fn restore(app: &tauri::AppHandle) {
 pub fn create_new_window(app: &tauri::AppHandle) {
     let monitors = monitors_of(app);
     let base = app
-        .webview_windows()
+        .windows()
         .values()
         .find(|w| w.is_focused().unwrap_or(false) && is_registry_window(w.label()))
         .and_then(live_frame)
-        .or_else(|| app.get_webview_window("main").as_ref().and_then(live_frame));
+        .or_else(|| app.get_window("main").as_ref().and_then(live_frame));
     let mut frame = base.unwrap_or(WinFrame {
         label: String::new(),
         x: 120,
@@ -391,11 +393,11 @@ pub fn create_new_window(app: &tauri::AppHandle) {
 pub fn create_snip_window(app: &tauri::AppHandle, snip_id: &str) -> Result<(), String> {
     let monitors = monitors_of(app);
     let base = app
-        .webview_windows()
+        .windows()
         .values()
         .find(|w| w.is_focused().unwrap_or(false) && is_registry_window(w.label()))
         .and_then(live_frame)
-        .or_else(|| app.get_webview_window("main").as_ref().and_then(live_frame));
+        .or_else(|| app.get_window("main").as_ref().and_then(live_frame));
     let mut frame = base.unwrap_or(WinFrame {
         label: String::new(),
         x: 120,
@@ -440,6 +442,15 @@ pub fn windows_registry() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ephemeral_and_remote_windows_never_enter_registry() {
+        assert!(is_registry_window("main"));
+        assert!(is_registry_window("w2"));
+        for label in ["otto-pane-window-main", "otto-pane-main", "room-1", "otto-browser-1", "otto-bar", "otto-tray", "popout-1"] {
+            assert!(!is_registry_window(label), "{label} must not be restored as a host");
+        }
+    }
 
     #[test]
     fn save_load_round_trip() {

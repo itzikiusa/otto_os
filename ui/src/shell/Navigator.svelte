@@ -915,7 +915,7 @@
 
 <!-- The module the side-by-side pane shows: a quiet trailing glyph. -->
 {#snippet sideMark(id: string)}
-  {#if sidePane.showing && sidePane.key === id}
+  {#if sidePane.active && sidePane.key === id}
     <span class="side-mark" role="img" title="Open in the side pane" aria-label="Open in the side pane" data-testid={`side-mark-${id}`}>
       <Icon name="columns" size={12} />
     </span>

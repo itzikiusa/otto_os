@@ -8,11 +8,16 @@
 //   #/bar            — the assistant bar panel (`otto-bar`)
 //   #/tray           — the menu-bar popover (`otto-tray`)
 //   ?popout=1#/<r>   — a pop-out window of route <r> (`popout-<N>`)
-//   ?embed=1#/<r>    — the side-by-side pane (an iframe in the main window)
+//   ?embed=1#/<r>    — the side pane (a movable native view, or a browser iframe)
 
 import { isEmbedSearch } from './sidePane';
+import { readNativePaneContext } from './nativePanePolicy';
 
 export const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+
+export const nativePaneContext = readNativePaneContext(isTauri,
+  typeof window === 'undefined' ? null : (window as { __OTTO_NATIVE_PANE__?: unknown }).__OTTO_NATIVE_PANE__);
+export const isNativePane = nativePaneContext !== null;
 
 type PopoutInit = { title?: unknown };
 
@@ -28,9 +33,10 @@ export const isPopout: boolean =
  *  `?embed=1#/<route>` (lib/sidePane.ts). The shell renders chrome-less (no
  *  sidebar, status bar or floating bar) and skips everything that must run
  *  once per WINDOW (native menu bridge, native notifications, route restore,
- *  palette commands…). Never true for a top-level document. */
+ *  palette commands…). Native children carry an injected ownership marker
+ *  because window.parent remains window even while attached. */
 export const isEmbedded: boolean =
-  typeof window !== 'undefined' && window.parent !== window && isEmbedSearch(window.location.search);
+  isNativePane || (typeof window !== 'undefined' && window.parent !== window && isEmbedSearch(window.location.search));
 
 /** Title the shell gave this pop-out (falls back to the document title). */
 export function popoutTitle(): string {

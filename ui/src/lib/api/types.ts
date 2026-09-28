@@ -10558,7 +10558,8 @@ export interface UiAgentRef {
   provider: string;
 }
 
-/** Which half of a window a document is: the main pane or the side-by-side pane (an iframe). */
+/** Logical pane identity: native child webview on desktop, iframe in browsers.
+ * Detachment keeps the same identity and socket. */
 export type UiPane = 'main' | 'side';
 
 /** Client → server on `/ws/events`, once per socket open (and again when the
@@ -10567,10 +10568,10 @@ export interface UiHelloFrame {
   type: 'hello';
   /** Per-device id (`clientId()`, the value stamped as `session.meta.client_id`). */
   client_id: string;
-  /** This window's id (`lib/win.ts`; the side pane reports its host's here too). */
+  /** Logical window id (`lib/win.ts`); a detached side pane still reports its host. */
   window_id: string;
   pane: UiPane;
-  /** Side pane only: the window that hosts the iframe. */
+  /** Side pane only: original host, unchanged by native detachment. */
   host_window_id?: string;
   /** Current route without `#/`. */
   route: string;

@@ -1,5 +1,5 @@
 <script lang="ts">
-  // The side pane of the side-by-side split: a same-origin iframe of the app
+  // The side pane: a movable local native webview on desktop, or an iframe
   // at `?embed=1#/<route>` — its own router and stores (lib/sidePane.ts). It
   // has no bar of its own: its Swap / Open in main pane / Close controls sit
   // at the end of the page's own top row, inside the frame (PaneControls).
@@ -7,6 +7,10 @@
   // changing the pane's module never reloads it. Until it reports ready, a
   // cover shaped like the page (a header row + skeleton) stands in, with a
   // Close button; a pane that never boots says so, with Retry.
+  import { untrack } from 'svelte';
+  import { nativePane, nativePaneAvailable } from '../lib/nativePane';
+  import { paneBounds, LatestPaneLayout, type PaneBounds } from '../lib/nativePanePolicy';
+  import { ctxMenu } from '../lib/contextmenu.svelte';
   import Icon from '../lib/components/Icon.svelte';
   import Skeleton from '../lib/components/Skeleton.svelte';
   import { sidePane } from '../lib/stores/sidePane.svelte';
@@ -16,6 +20,61 @@
     label: string;
   }
   let { label }: Props = $props();
+
+  let surface: HTMLElement | undefined = $state();
+  let scheduleLayout: (() => void) | undefined;
+  $effect(() => {
+    const el = surface;
+    void sidePane.generation;
+    if (!el || !nativePaneAvailable) return;
+    return untrack(() => {
+      let bounds: PaneBounds = paneBounds(el.getBoundingClientRect(), window.innerWidth, window.innerHeight, ui.zoom) ?? { x: 0, y: 0, width: 1, height: 1 };
+      const stop = sidePane.attachNative(bounds);
+      let raf = 0;
+      let restoreFocus = false;
+      let occluded = false;
+      const layouts = new LatestPaneLayout<{ bounds: PaneBounds; visible: boolean; restore: boolean }>(async (next) => {
+        await nativePane.layout(next.bounds, next.visible);
+        if (next.visible && next.restore) {
+          await nativePane.restoreAttachedFocus(() => sidePane.showing && !ui.overlayOpen && !ctxMenu.open && !sidePane.dragging);
+          restoreFocus = false;
+        }
+      });
+      const schedule = (): void => {
+        if (raf) return;
+        raf = requestAnimationFrame(() => {
+          raf = 0;
+          bounds = paneBounds(el.getBoundingClientRect(), window.innerWidth, window.innerHeight, ui.zoom) ?? bounds;
+          const blocked = ui.overlayOpen || ctxMenu.open || sidePane.dragging;
+          if (blocked && !occluded) restoreFocus = sidePane.focused;
+          const visible = sidePane.showing && sidePane.status === 'ready' && !blocked;
+          const restore = visible && restoreFocus;
+          occluded = blocked;
+          layouts.push({ bounds, visible, restore });
+        });
+      };
+      scheduleLayout = schedule;
+      const observer = new ResizeObserver(schedule);
+      observer.observe(el);
+      window.addEventListener('resize', schedule);
+      window.addEventListener('scroll', schedule, true);
+      schedule();
+      return () => {
+        scheduleLayout = undefined;
+        cancelAnimationFrame(raf);
+        observer.disconnect();
+        window.removeEventListener('resize', schedule);
+        window.removeEventListener('scroll', schedule, true);
+        layouts.stop();
+        stop();
+      };
+    });
+  });
+  $effect(() => {
+    void sidePane.showing; void sidePane.status; void sidePane.nativeState;
+    void sidePane.placement; void sidePane.dragging; void ui.zoom; void ui.overlayOpen; void ctxMenu.open;
+    scheduleLayout?.();
+  });
 
   let frame: HTMLIFrameElement | undefined = $state();
   $effect(() => {
@@ -30,7 +89,8 @@
   const padTraffic = $derived(isTauri && sidePane.placement === 'leading' && !ui.railExpanded);
 </script>
 
-<section class="side-pane" aria-label={`${label} (side pane)`} data-testid="side-pane" data-module={sidePane.key}>
+<section bind:this={surface} class="side-pane" class:parked={nativePaneAvailable && !sidePane.showing} aria-label={`${label} (side pane)`} data-testid="side-pane" data-module={sidePane.key}>
+  {#if !nativePaneAvailable}
   {#key sidePane.generation}
     <iframe
       bind:this={frame}
@@ -41,6 +101,7 @@
       data-testid="side-pane-frame"
     ></iframe>
   {/key}
+  {/if}
   {#if sidePane.status !== 'ready'}
     <div class="sp-cover" data-testid="side-pane-cover">
       <div class="sp-head chrome-material" class:tauri-pad={padTraffic}>
@@ -88,6 +149,7 @@
     flex: 0 0 auto;
     width: calc(var(--side-share, 0.5) * 100%);
   }
+  .side-pane.parked { display: none; }
   iframe {
     flex: 1;
     width: 100%;

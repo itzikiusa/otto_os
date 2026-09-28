@@ -334,7 +334,7 @@ sends a ping every 30s).
 
 The socket is otherwise server → client. The exceptions are the **agent UI
 control** frames (`api.md` "Agent UI control"): an Otto document (the main
-window, or the side-pane iframe — each has its own socket) announces itself so
+window, native side webview, or browser side-pane iframe — each has its own socket) announces itself so
 the daemon can address ONE document. These frames are per-connection: they are
 never `Event` variants and never enter the broadcast.
 
@@ -357,6 +357,10 @@ MCP token, a share link — are ignored, so such a socket is never a target):
   this document implements — a command is only ever sent to a document listing
   it (daemon/UI version skew). Ids ≤ 128 chars, `route` ≤ 2048, ≤ 1024
   capabilities; no control characters.
+- Native pane detachment preserves this logical host identity and the same
+  document/socket. The temporary physical window is not a new `window_id`.
+  Native side-pane visibility supplements DOM visibility because a hidden
+  WKWebView can still report `document.visibilityState = "visible"`.
 - `presence` — debounced (250 ms) on a route, focus or visibility change.
 
 Server → that ONE connection:
