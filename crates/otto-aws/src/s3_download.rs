@@ -7,7 +7,16 @@
 //! (never overwriting an existing file — a ` (n)` suffix is added). Jobs live
 //! in memory (a daemon restart forgets them; the part file is then orphaned
 //! and harmless). Same trust model as SFTP downloads: the destination is a
-//! directory on the daemon host chosen by the (authorized) user.
+//! directory on the daemon host chosen by the (authorized) user, so the route
+//! is graded AwsS3:**Edit** (r3-10-01 — at View, any S3 reader could plant a
+//! file on the host). The host write is further fenced here, server-side:
+//! - the directory (canonicalized, symlinks resolved) must sit under the
+//!   daemon user's home — outside `~/Library` and every dot-directory — or on
+//!   an external volume (`/Volumes/<name>/…`); system dirs are refused;
+//! - the file name is the key's basename only, and never starts with `.`
+//!   (a `.zshenv` key lands as `_zshenv`);
+//! - nothing is ever overwritten: the part file is created `O_EXCL` and moved
+//!   into place with a hard link (fails on an existing name), not `rename`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -88,20 +97,72 @@ fn expand_home(p: &str) -> PathBuf {
     PathBuf::from(p)
 }
 
-/// The key's last segment as a safe local file name (no separators, no
-/// control chars, never `.`/`..`).
+/// The key's last segment as a safe local file name: basename only (no
+/// separators, no control chars, never `.`/`..`) and never a dotfile — a
+/// leading `.` would let an S3 key plant `~/.zshenv`-style startup files, so
+/// leading dots become `_`.
 pub fn local_name(key: &str) -> String {
     let base = key.trim_end_matches('/').rsplit('/').next().unwrap_or("");
     let clean: String = base
         .chars()
         .filter(|c| !c.is_control() && !matches!(c, '/' | '\\' | ':'))
         .collect();
-    let clean = clean.trim().to_string();
-    if clean.is_empty() || clean == "." || clean == ".." {
-        "download".into()
-    } else {
-        clean
+    let clean = clean.trim();
+    if clean.is_empty() || clean.chars().all(|c| c == '.') {
+        return "download".into();
     }
+    let dots = clean.len() - clean.trim_start_matches('.').len();
+    format!("{}{}", "_".repeat(dots), &clean[dots..])
+}
+
+/// Is `canon` (an already-canonicalized directory) an acceptable download
+/// destination? Allowed: inside `home` (canonical) but not `~/Library/…` and
+/// not under any dot-directory, or inside an external volume
+/// (`/Volumes/<name>/…`, again no dot-directories). Everything else — `/etc`,
+/// `/usr`, `/Library`, `/System`, `/private`, another user's home — is refused.
+fn dest_dir_allowed(canon: &Path, home: &Path) -> bool {
+    use std::path::Component;
+    let no_hidden = |rest: &Path| {
+        rest.components().all(|c| match c {
+            Component::Normal(n) => !n.to_string_lossy().starts_with('.'),
+            _ => false,
+        })
+    };
+    if let Ok(rest) = canon.strip_prefix(home) {
+        let first = rest.components().next();
+        let in_library = matches!(first, Some(Component::Normal(n)) if n.eq_ignore_ascii_case("Library"));
+        return !in_library && no_hidden(rest);
+    }
+    if let Ok(rest) = canon.strip_prefix("/Volumes") {
+        // `/Volumes` itself (the mount table) is not a destination.
+        return rest.components().next().is_some() && no_hidden(rest);
+    }
+    false
+}
+
+/// Resolve + validate the requested destination directory (see the module
+/// doc). Returns the CANONICAL path, so the write goes where it was checked.
+fn resolve_dest_dir(raw: &str) -> Result<PathBuf> {
+    let dir = expand_home(raw);
+    if !dir.is_absolute() || !dir.is_dir() {
+        return Err(Error::Invalid(format!(
+            "destination is not an existing directory: {}",
+            dir.display()
+        )));
+    }
+    let canon = std::fs::canonicalize(&dir)
+        .map_err(|e| Error::Invalid(format!("destination {}: {e}", dir.display())))?;
+    let home = dirs::home_dir()
+        .and_then(|h| std::fs::canonicalize(h).ok())
+        .ok_or_else(|| Error::Internal("no home directory for the daemon user".into()))?;
+    if !dest_dir_allowed(&canon, &home) {
+        return Err(Error::Forbidden(format!(
+            "downloads may only go to a folder in your home directory (not ~/Library or \
+             a hidden folder) or on an external volume: {}",
+            canon.display()
+        )));
+    }
+    Ok(canon)
 }
 
 /// First free `dir/name`, `dir/name (1).ext`, … (never overwrites).
@@ -125,6 +186,38 @@ fn free_path(dir: &Path, name: &str) -> Result<PathBuf> {
     )))
 }
 
+/// Move the finished part file to `dest` WITHOUT ever overwriting: a hard
+/// link fails with `AlreadyExists` if the name was taken since `free_path`
+/// looked (TOCTOU), in which case the next free ` (n)` name is tried. Falls
+/// back to an existence-checked `rename` only on filesystems without hard
+/// links (e.g. exFAT volumes). Returns the final path.
+fn place_no_overwrite(
+    part: &Path,
+    dest: &Path,
+    dir: &Path,
+    name: &str,
+) -> std::result::Result<PathBuf, String> {
+    let mut target = dest.to_path_buf();
+    for _ in 0..1000 {
+        match std::fs::hard_link(part, &target) {
+            Ok(()) => return Ok(target),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                target = free_path(dir, name).map_err(|e| e.to_string())?;
+            }
+            Err(_) => {
+                if target.symlink_metadata().is_ok() {
+                    target = free_path(dir, name).map_err(|e| e.to_string())?;
+                    continue;
+                }
+                return std::fs::rename(part, &target)
+                    .map(|()| target)
+                    .map_err(|e| format!("could not move the file into place: {e}"));
+            }
+        }
+    }
+    Err(format!("too many copies of {name} in the destination"))
+}
+
 fn prune_finished() {
     jobs().retain(|_, e| e.finished_at.is_none_or(|t| t.elapsed() < KEEP_FINISHED));
 }
@@ -138,20 +231,15 @@ pub async fn start(
 ) -> Result<DownloadJob> {
     validate_bucket(bucket)?;
     validate_key(&req.key)?;
-    let dir = expand_home(&req.local_dir);
-    if !dir.is_absolute() || !dir.is_dir() {
-        return Err(Error::Invalid(format!(
-            "destination is not an existing directory: {}",
-            dir.display()
-        )));
-    }
+    let dir = resolve_dest_dir(&req.local_dir)?;
     let head = head_object(svc, a, bucket, &req.key, req.region.as_deref()).await?;
-    let dest = free_path(&dir, &local_name(&req.key))?;
-    let part = dest.with_file_name(format!(
-        "{}.otto-part",
-        dest.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("download")
+    let name = local_name(&req.key);
+    let dest = free_path(&dir, &name)?;
+    // Unique per job so two downloads of the same key never share (or race
+    // on) a part file; created O_EXCL in `copy_to_file`.
+    let part = dir.join(format!(
+        "{name}.{}.otto-part",
+        &otto_core::new_id().chars().take(8).collect::<String>()
     ));
     let (bin, env) = svc.bin_and_env(a, req.region.as_deref()).await?;
     let uri = format!("s3://{bucket}/{}", req.key);
@@ -199,18 +287,27 @@ pub async fn start(
     );
     let task = {
         let (job, bytes, part, dest) = (job.clone(), bytes.clone(), part.clone(), dest.clone());
+        let (dir, name) = (dir.clone(), name.clone());
         let id = id.clone();
         tokio::spawn(async move {
             let outcome = copy_to_file(child, stdout, stderr, &part, &bytes).await;
             let outcome = match outcome {
-                Ok(()) => tokio::fs::rename(&part, &dest)
-                    .await
-                    .map_err(|e| format!("could not move the file into place: {e}")),
+                Ok(()) => {
+                    let (part, dest, dir, name) =
+                        (part.clone(), dest.clone(), dir.clone(), name.clone());
+                    tokio::task::spawn_blocking(move || place_no_overwrite(&part, &dest, &dir, &name))
+                        .await
+                        .unwrap_or_else(|e| Err(format!("could not move the file into place: {e}")))
+                }
                 Err(e) => Err(e),
             };
-            if outcome.is_err() {
-                let _ = tokio::fs::remove_file(&part).await;
-            }
+            // After a successful hard link the part is a second name for the
+            // file; after a failure it is garbage. Either way it goes.
+            let _ = tokio::fs::remove_file(&part).await;
+            let outcome = outcome.map(|final_path| {
+                job.lock().unwrap_or_else(|p| p.into_inner()).local_path =
+                    final_path.to_string_lossy().into_owned();
+            });
             {
                 let mut j = job.lock().unwrap_or_else(|p| p.into_inner());
                 j.bytes = bytes.load(Ordering::Relaxed);
@@ -263,7 +360,11 @@ async fn copy_to_file(
         }
         s
     });
-    let mut file = tokio::fs::File::create(part)
+    // O_EXCL: never follows / reuses whatever already sits at the part path.
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(part)
         .await
         .map_err(|e| format!("could not create the file: {e}"))?;
     let mut buf = vec![0u8; 256 * 1024];
@@ -356,6 +457,74 @@ mod tests {
         assert_eq!(local_name("../.."), "download");
         assert_eq!(local_name("x/.."), "download");
         assert_eq!(local_name("we\u{7}ird\\na:me"), "weirdname");
+    }
+
+    #[test]
+    fn local_name_never_yields_a_dotfile() {
+        // r3-10-01: a `.zshenv` key must not land as `~/.zshenv`.
+        assert_eq!(local_name(".zshenv"), "_zshenv");
+        assert_eq!(local_name("dotfiles/.zshenv"), "_zshenv");
+        assert_eq!(local_name("..bashrc"), "__bashrc");
+        assert_eq!(local_name("..."), "download");
+        // `../` segments never escape: basename only.
+        assert_eq!(local_name("../"), "download");
+        assert_eq!(local_name("../../.ssh/authorized_keys"), "authorized_keys");
+        assert_eq!(local_name("a/../../.zshrc"), "_zshrc");
+        // Backslashes are dropped, so the leading dots are neutralised too.
+        assert_eq!(local_name("..\\..\\x.plist"), "____x.plist");
+    }
+
+    #[test]
+    fn dest_dir_refuses_system_library_and_hidden_dirs() {
+        let home = Path::new("/Users/me");
+        for ok in [
+            "/Users/me",
+            "/Users/me/Downloads",
+            "/Users/me/work/data",
+            "/Volumes/Backup",
+            "/Volumes/Backup/s3",
+        ] {
+            assert!(dest_dir_allowed(Path::new(ok), home), "{ok} should be allowed");
+        }
+        for bad in [
+            "/",
+            "/etc",
+            "/usr/local/bin",
+            "/Library/LaunchDaemons",
+            "/private/etc",
+            "/System",
+            "/Users/other",
+            "/Users/me/Library/LaunchAgents",
+            "/Users/me/library/LaunchAgents",
+            "/Users/me/.ssh",
+            "/Users/me/.config/fish",
+            "/Users/me/work/.git/hooks",
+            "/Volumes",
+            "/Volumes/Backup/.hidden",
+        ] {
+            assert!(!dest_dir_allowed(Path::new(bad), home), "{bad} should be refused");
+        }
+    }
+
+    #[test]
+    fn resolve_dest_dir_rejects_missing_and_relative() {
+        assert!(resolve_dest_dir("relative/dir").is_err());
+        assert!(resolve_dest_dir("/definitely/not/here/otto").is_err());
+        // A real system directory exists but is refused (Forbidden, not Invalid).
+        assert!(matches!(resolve_dest_dir("/etc"), Err(Error::Forbidden(_))));
+    }
+
+    #[test]
+    fn place_no_overwrite_keeps_an_existing_file() {
+        let d = tempfile::tempdir().unwrap();
+        let part = d.path().join("a.csv.x.otto-part");
+        std::fs::write(&part, b"new").unwrap();
+        // Someone created the destination after `free_path` looked.
+        std::fs::write(d.path().join("a.csv"), b"old").unwrap();
+        let got = place_no_overwrite(&part, &d.path().join("a.csv"), d.path(), "a.csv").unwrap();
+        assert_eq!(got, d.path().join("a (1).csv"));
+        assert_eq!(std::fs::read(d.path().join("a.csv")).unwrap(), b"old");
+        assert_eq!(std::fs::read(&got).unwrap(), b"new");
     }
 
     #[test]

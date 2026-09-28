@@ -6,6 +6,7 @@
   // (`#/aws/<id>/s3/<bucket>?prefix=<encoded>`) so it's deep-linkable.
   import { untrack } from 'svelte';
   import { aws } from '../../lib/stores/aws.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import { awsApi, awsDownloadBlob, isLoginRequired, saveBlob } from '../../lib/api/aws';
   import { router } from '../../lib/router.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -271,7 +272,9 @@
       toasts.warn('A download is already running', leaf(dl.key));
       return;
     }
-    if (o.size > BIG_DOWNLOAD) {
+    // Download-to writes a file on the daemon host, so it needs aws_s3:Edit
+    // (r3-10-01). A View-only user keeps the streamed browser download.
+    if (o.size > BIG_DOWNLOAD && auth.can('aws_s3', 'edit')) {
       pickDirFor = o;
       return;
     }

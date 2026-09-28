@@ -1199,7 +1199,9 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // account (profile) management + the CLI install/status plumbing; each
     // service has its own key so a role can e.g. browse S3 without touching
     // EC2. Per-service posture (product decision, see docs/features/aws-console.md):
-    //   S3     — read-only by design: every S3 route (incl. download) is View.
+    //   S3     — read-only by design: every S3 route (incl. download) is View,
+    //            EXCEPT `download-to` (+ its cancel): it writes a file onto the
+    //            daemon HOST, so it is Edit (same as SFTP download, r3-10-01).
     //   SQS    — list/attributes/peek are View; send/delete/purge/redrive Edit.
     //   EC2    — describe is View; start/stop/reboot Edit.
     //   Athena — catalog/history/results/cancel View; executing a query Edit.
@@ -1215,7 +1217,12 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // account routes so `/aws/accounts/{id}/s3/...` never falls into `Aws`.
     if let Some(rest) = p.strip_prefix("/aws/accounts/{id}/") {
         if rest.starts_with("s3/") {
-            return Require(AwsS3, View);
+            // Host-file writes: a View-only S3 user must not be able to drop a
+            // file on the daemon host (e.g. a LaunchAgent / shell rc).
+            let host_write = !get
+                && (rest.ends_with("/download-to")
+                    || (rest.starts_with("s3/download-jobs/") && rest.ends_with("/cancel")));
+            return Require(AwsS3, if host_write { Edit } else { View });
         }
         if rest.starts_with("sqs/") {
             let read = get || rest.ends_with("/peek");
@@ -1310,6 +1317,38 @@ mod tests {
     // Helper: every test path carries the `/api/v1` nest prefix the guard sees.
     fn pol(m: Method, path: &str) -> PolicyDecision {
         policy_for(&m, path)
+    }
+
+    // ---- AWS S3 --------------------------------------------------------------
+
+    #[test]
+    fn s3_download_to_writes_the_host_so_view_is_not_enough() {
+        // r3-10-01: `download-to` writes a file on the daemon host; a View-only
+        // S3 user must be denied (policy grades it Edit, like SFTP download).
+        assert_eq!(
+            pol(
+                Method::POST,
+                "/api/v1/aws/accounts/{id}/s3/buckets/{bucket}/download-to"
+            ),
+            Require(AwsS3, Edit)
+        );
+        assert_eq!(
+            pol(
+                Method::POST,
+                "/api/v1/aws/accounts/{id}/s3/download-jobs/{job}/cancel"
+            ),
+            Require(AwsS3, Edit)
+        );
+        assert!(Capability::View < Capability::Edit, "a View grant never meets Edit");
+        // Reads stay View: listing, the streamed browser download, job status.
+        for path in [
+            "/api/v1/aws/accounts/{id}/s3/buckets",
+            "/api/v1/aws/accounts/{id}/s3/buckets/{bucket}/objects",
+            "/api/v1/aws/accounts/{id}/s3/buckets/{bucket}/download",
+            "/api/v1/aws/accounts/{id}/s3/download-jobs/{job}",
+        ] {
+            assert_eq!(pol(Method::GET, path), Require(AwsS3, View), "{path}");
+        }
     }
 
     // ---- Design Hall ---------------------------------------------------------
