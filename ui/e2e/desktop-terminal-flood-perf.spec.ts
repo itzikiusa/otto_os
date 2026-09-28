@@ -1,6 +1,6 @@
 import { test, expect, type APIRequestContext, type Page, type WebSocketRoute } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
-import { isWebkitProject, watchFatalUiErrors } from './perf';
+import { isWebkitProject, useDefaultTerminalRenderer, watchFatalUiErrors } from './perf';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Terminal flood regression gates (GAPS_TO_9_5 §4, I3 A3/A4/A8).
@@ -130,6 +130,9 @@ function renderer(page: Page): Promise<string> {
 }
 
 async function installProbe(page: Page): Promise<void> {
+  // Measure the renderer the app uses (WebGL where available), not the DOM
+  // renderer the functional specs pin.
+  await useDefaultTerminalRenderer(page);
   await page.addInitScript(() => {
     const w = window as unknown as { __ottoTermProbe: Probe[]; __ottoMaxPending: number };
     w.__ottoTermProbe = [];

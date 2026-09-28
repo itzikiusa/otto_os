@@ -169,6 +169,14 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
             localStorage: [
               { name: 'otto_token', value: token },
               { name: 'otto_base', value: `http://127.0.0.1:${PORT}` },
+              // Functional specs read terminal text from xterm's DOM rows
+              // (`.xterm-rows`). Since 3027df89 terminals render on WebGL
+              // wherever the engine has it — headless Chromium and WebKit
+              // here included — and a WebGL terminal has no text DOM, so pin
+              // the DOM renderer (Terminal.svelte's escape hatch). The perf
+              // gates that must measure the real renderer clear it
+              // (`useDefaultTerminalRenderer` in perf.ts).
+              { name: 'otto.term.renderer', value: 'dom' },
             ],
           },
         ],

@@ -24,6 +24,13 @@ export function isWebkitProject(name: string): boolean {
   return name === 'desktop-webkit';
 }
 
+/** Undo the suite-wide DOM-renderer pin (global-setup.ts) for this page, so
+ *  terminals render as in the app (WebGL where available). Call before the
+ *  first navigation; read terminal text through `__ottoTermProbe`, not DOM. */
+export async function useDefaultTerminalRenderer(page: Page): Promise<void> {
+  await page.addInitScript(() => localStorage.removeItem('otto.term.renderer'));
+}
+
 /** Collect the app's fatal UI errors (main.ts: an effect loop or crash that
  *  reloads the page). A perf number measured across such a reload is noise,
  *  so gates assert the returned list stays empty. */

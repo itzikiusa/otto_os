@@ -3,7 +3,7 @@ import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx, seedWorkspace } from './seed';
-import { budgetMs, isDesktopProject, isWebkitProject, percentile, watchFatalUiErrors } from './perf';
+import { budgetMs, isDesktopProject, isWebkitProject, percentile, useDefaultTerminalRenderer, watchFatalUiErrors } from './perf';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Conversation live-delta regression gates (GAPS_TO_9_5 §4, I3 A1).
@@ -85,8 +85,9 @@ test.beforeEach(async ({ page }, info) => {
   session = (await created.json()).id as string;
   await expect.poll(async () => (await (await root.get(`${base}/api/v1/sessions/${session}`)).json()).live).toBe(true);
 
-  // The WebKit fixture failure was a WebGL-only effect loop in Terminal.svelte
-  // that reloaded the page: fail loudly if anything reloads it again.
+  // The pane's terminal renders as in the app (WebGL where available): the
+  // WebKit fixture failure was a WebGL-only effect loop in Terminal.svelte.
+  await useDefaultTerminalRenderer(page);
   fatal = watchFatalUiErrors(page);
   await page.addInitScript((id) => {
     localStorage.setItem('otto_workspace', id as string);
