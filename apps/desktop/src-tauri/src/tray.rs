@@ -397,7 +397,11 @@ pub fn on_blur(app: &AppHandle) {
         .unwrap_or(false)
     {
         LAST_BLUR_HIDE_MS.store(now_ms(), Ordering::SeqCst);
-        hide_popover(app);
+        // Hide on the next loop turn, not inside the popover's own
+        // Focused(false) dispatch (re-entrant window events can abort the
+        // app from tao's sendEvent — see panes::destroyed).
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || hide_popover(&handle));
     }
 }
 
