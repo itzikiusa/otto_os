@@ -8,6 +8,20 @@
   /* eslint-disable @typescript-eslint/no-explicit-any */
   let { spec }: { spec: Record<string, any> } = $props();
 
+  // Operation bodies (parameter tables, request/response schema trees up to 5
+  // deep) are built only for the operations the user has OPENED. A 300–500
+  // operation spec used to build and style every body inside its collapsed
+  // `<details>` up front — 20k–100k+ nodes (r3-03-04).
+  let openOps = $state(new Set<string>());
+  function toggleOp(key: string, e: Event): void {
+    const open = (e.currentTarget as HTMLDetailsElement).open;
+    if (open === openOps.has(key)) return;
+    const next = new Set(openOps);
+    if (open) next.add(key);
+    else next.delete(key);
+    openOps = next;
+  }
+
   const METHODS = ['get', 'post', 'put', 'patch', 'delete', 'options', 'head'] as const;
 
   interface Op {
@@ -193,21 +207,24 @@
     <section>
       <h3>{tag}</h3>
       {#each ops as o (o.method + o.path)}
-        <details class="op">
+        {@const key = `${tag}\u0001${o.method} ${o.path}`}
+        <details class="op" ontoggle={(e) => toggleOp(key, e)}>
           <summary>
             <span class="method {o.method}">{o.method.toUpperCase()}</span>
             <code class="path" class:deprecated={o.deprecated}>{o.path}</code>
             <span class="sum">{o.summary}</span>
           </summary>
+          {#if openOps.has(key)}
+          {@const ps = params(o.op, o.item)}
           <div class="op-body">
             {#if o.op.description}<p class="desc">{o.op.description}</p>{/if}
 
-            {#if params(o.op, o.item).length}
+            {#if ps.length}
               <h4>Parameters</h4>
               <table>
                 <thead><tr><th>name</th><th>in</th><th>type</th><th>req</th><th>description</th></tr></thead>
                 <tbody>
-                  {#each params(o.op, o.item) as p, i (i)}
+                  {#each ps as p, i (i)}
                     <tr>
                       <td><code>{p.name}</code></td>
                       <td>{p.in}</td>
@@ -243,6 +260,7 @@
               </div>
             {/each}
           </div>
+          {/if}
         </details>
       {/each}
     </section>

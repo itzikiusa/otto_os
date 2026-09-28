@@ -31,6 +31,17 @@
   const revoke = (u: string | null) => {
     if (u) URL.revokeObjectURL(u);
   };
+
+  // Live previews are full documents (style, layout, paint — at 1280 px — per
+  // card). They render only while the card is on (or near) screen, and at
+  // most LIVE_CAP at once across every view (r3-03-03: the Lobby mounted up to
+  // 32, SpatialView 4 × every project). A card past the cap shows its
+  // placeholder until a slot frees.
+  const LIVE_CAP = 12;
+  class LiveSlots {
+    used = $state(0);
+  }
+  const slots = new LiveSlots();
 </script>
 
 <script lang="ts">
@@ -64,6 +75,45 @@
     | { kind: 'none' };
   let pic = $state<Pic>({ kind: 'none' });
   let boxW = $state(0);
+  let box: HTMLDivElement | undefined = $state();
+  /** On screen (with a margin so a scroll doesn't flash placeholders). */
+  let visible = $state(false);
+  /** This card holds one of the LIVE_CAP iframe slots. */
+  let hasSlot = $state(false);
+
+  $effect(() => {
+    const el = box;
+    if (!el || !live) return;
+    if (typeof IntersectionObserver === 'undefined') {
+      visible = true;
+      return;
+    }
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) visible = e.isIntersecting;
+      },
+      { rootMargin: '200px' },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  });
+
+  // Take a slot while a live document should show; give it back otherwise
+  // (and on destroy). Re-runs when another card frees one.
+  const wantsFrame = $derived(pic.kind === 'doc' && visible);
+  $effect(() => {
+    const used = slots.used;
+    if (wantsFrame && !hasSlot && used < LIVE_CAP) {
+      slots.used = used + 1;
+      hasSlot = true;
+    } else if (!wantsFrame && hasSlot) {
+      slots.used = Math.max(0, used - 1);
+      hasSlot = false;
+    }
+  });
+  $effect(() => () => {
+    if (untrack(() => hasSlot)) slots.used = Math.max(0, untrack(() => slots.used) - 1);
+  });
 
   const version = $derived(versionId ?? artifact.head_version_id ?? 'none');
   const rk = $derived(renderKind(artifact.format));
@@ -99,13 +149,17 @@
     const a = artifact;
     const v = versionId;
     void version;
+    // Live sources are fetched/rendered only once the card is near the
+    // viewport; an off-screen card keeps whatever it already has.
+    const liveNow = live && visible;
+    if (live && !visible && !(a.thumb_blob && !v)) return;
     const myGen = ++gen;
     void (async () => {
       let next: Pic = { kind: 'none' };
       if (a.thumb_blob && !v) {
         const u = await remember(urls, `t:${a.id}:${a.thumb_blob}`, () => thumbnailUrl(a.id).catch(() => null), revoke);
         if (u) next = { kind: 'img', src: u };
-      } else if (live && isImageFormat(a.format)) {
+      } else if (liveNow && isImageFormat(a.format)) {
         const u = await remember(
           urls,
           `c:${a.id}:${v ?? a.head_version_id}`,
@@ -113,7 +167,7 @@
           revoke,
         );
         if (u) next = { kind: 'img', src: u };
-      } else if (live && (rk === 'html' || rk === 'svg' || rk === 'mermaid' || rk === 'd2')) {
+      } else if (liveNow && (rk === 'html' || rk === 'svg' || rk === 'mermaid' || rk === 'd2')) {
         const src = await sourceOf(a, v);
         if (src && src.trim()) {
           if (rk === 'html') next = { kind: 'doc', html: src };
@@ -140,10 +194,10 @@
   const scale = $derived(boxW > 0 ? boxW / 1280 : 0.2);
 </script>
 
-<div class="thumb" bind:clientWidth={boxW} aria-hidden="true">
+<div class="thumb" bind:this={box} bind:clientWidth={boxW} aria-hidden="true">
   {#if pic.kind === 'img'}
     <img src={pic.src} alt="" loading="lazy" />
-  {:else if pic.kind === 'doc'}
+  {:else if pic.kind === 'doc' && hasSlot}
     <iframe
       title=""
       tabindex="-1"

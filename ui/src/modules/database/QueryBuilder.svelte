@@ -32,6 +32,7 @@
   import { databaseAccessChild } from '../../lib/access-options';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import VirtualList from '../../lib/components/VirtualList.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -267,9 +268,25 @@
       paletteLoading = false;
     }
   }
-  const filteredPalette = $derived.by(() => {
+  // A database with 5k tables: the palette is windowed (VirtualList), the
+  // labels are lowercased once per listing, and the filter runs 120 ms after
+  // the last keystroke instead of on every one (r3-03-06).
+  const paletteLower = $derived(paletteTables.map((t) => t.label.toLowerCase()));
+  let paletteQuery = $state('');
+  $effect(() => {
     const q = paletteSearch.trim().toLowerCase();
-    return q ? paletteTables.filter((t) => t.label.toLowerCase().includes(q)) : paletteTables;
+    if (!q) {
+      paletteQuery = '';
+      return;
+    }
+    const t = setTimeout(() => (paletteQuery = q), 120);
+    return () => clearTimeout(t);
+  });
+  const filteredPalette = $derived.by(() => {
+    const q = paletteQuery;
+    if (!q) return paletteTables;
+    const lower = paletteLower;
+    return paletteTables.filter((_, i) => lower[i].includes(q));
   });
   function dbName(path: string): string {
     return databases.find((d) => d.path === path)?.name ?? '';
@@ -808,13 +825,21 @@
         {:else if filteredPalette.length === 0}
           <div class="pal-hint">No tables match “{paletteSearch.trim()}”.</div>
         {:else}
-          {#each filteredPalette as t (t.path)}
-            <button class="pal-item" class:on={onCanvas.has(t.path)} onclick={() => addTable(t)} title="Add {t.label} to the canvas">
-              <Icon name={t.kind === 'view' ? 'eye' : 'grid'} size={12} />
-              <span class="pal-item-label">{t.label}</span>
-              <Icon name="plus" size={12} />
-            </button>
-          {/each}
+          <VirtualList
+            items={filteredPalette}
+            estimateHeight={27}
+            class="pal-vlist"
+            key={(t) => t.path}
+            findText={(t) => t.label}
+          >
+            {#snippet row(t)}
+              <button class="pal-item" class:on={onCanvas.has(t.path)} onclick={() => addTable(t)} title="Add {t.label} to the canvas">
+                <Icon name={t.kind === 'view' ? 'eye' : 'grid'} size={12} />
+                <span class="pal-item-label">{t.label}</span>
+                <Icon name="plus" size={12} />
+              </button>
+            {/snippet}
+          </VirtualList>
         {/if}
       </div>
     </aside>
@@ -1312,12 +1337,19 @@
     flex-direction: column;
     gap: 1px;
   }
+  /* The windowed list fills the palette; rows are a fixed 26 + 1 px (the
+     estimateHeight above), so the old flex gap becomes a bottom margin. */
+  .pal-list :global(.pal-vlist) {
+    flex: 1;
+    min-height: 0;
+  }
   .pal-item {
     display: flex;
     align-items: center;
     gap: 7px;
     width: 100%;
     height: 26px;
+    margin-block-end: 1px;
     padding: 0 8px;
     border: none;
     border-radius: var(--radius-s);
