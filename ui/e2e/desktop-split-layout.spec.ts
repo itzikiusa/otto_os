@@ -185,9 +185,15 @@ test('closing a session whose neighbour is already on screen collapses its split
 
   // The header ✕ closes the TAB (Archive / Delete), and closeTab maps every
   // leaf of that session onto the fallback — which is already on screen, so the
-  // replaced leaf is deduped away and its split node collapses.
+  // replaced leaf is deduped away and its split node collapses. A pane under
+  // 420px folds its ✕ into ⋯ ("Close session"), same action.
   const rui = page.locator('.pane', { hasText: 'Rui Costa' }).first();
-  await rui.locator('button[aria-label^="Close session (⌘W)"]').click();
+  const close = rui.locator('button[aria-label^="Close session (⌘W)"]');
+  if (await close.isVisible()) await close.click();
+  else {
+    await rui.locator('button[title="More…"]').click();
+    await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Close session', exact: true }).click();
+  }
   await page.getByRole('button', { name: 'Delete session' }).click();
 
   await expect(leaves(page)).toHaveCount(2, { timeout: 15_000 });

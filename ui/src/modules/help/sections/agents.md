@@ -37,20 +37,24 @@ Agents is where your coding agents run. Each session is a real terminal on this 
 - **Split panes**: split any pane left/right/up/down, up to 15 panes. Drag any divider (arrow keys, `Home` and `End` also work on a focused divider). Drag a pane by its grip onto another pane's centre to swap, or onto an edge to split beside it. Layout presets: Equal columns, Equal rows, One above two, One beside two, Grid (pane ⋯ menu or ⌘K). The layout is remembered per workspace.
 - **Tiled view**: every session in a grid. Up to 15 tiles are live at once; the rest show a light placeholder and only connect when you click **Click to attach**, so opening the grid doesn't wake every suspended agent. Drag tiles to reorder. **Free layout** turns the grid into split panes.
 - **Work Queue**: the tab bar's gauge button shows your sessions and runs in 6 buckets — Needs You, Working, Review Ready, Waiting, Failed, Budget Warning. Save filtered views by status, provider and repository (or advanced JSON), and push a sub-task to a running agent.
-- Per pane: **Terminal**, **Chat** (the conversation rebuilt from the agent's transcript) or **Split** (chat beside the terminal, on wide windows). Chat works for `claude` and `codex`.
+- Per pane: **Terminal** or **Chat** (the conversation rebuilt from the agent's transcript). Chat works for `claude` and `codex`. For both at once, split the pane (`⌘D`) and put one side in Chat.
 
 **Terminal**
 - Full scrollback survives reconnects (the daemon keeps 10,000 lines per session). Find (`⌘F`) searches the screen and the daemon's full buffer.
 - Click a URL to open it in your browser, or a file reference like `src/App.svelte:42` to open it in the Files panel.
-- `⌥`-drag selects text in agent CLIs (they capture the mouse). Copy-on-select is a toggle in the pane header.
+- `⌥`-drag selects text in agent CLIs (they capture the mouse). Copy-on-select is a toggle in the pane's ⋯ menu.
 - Paste an image and Otto uploads it, then types the saved file's path into the terminal.
 - `⇧↵` inserts a newline in the agent's prompt instead of submitting.
-- Terminal font size: the `−` / `+` buttons in the pane header, or the zoom keys while the terminal is focused.
+- Terminal font size: *Terminal font larger / smaller / Reset* in the pane's ⋯ menu, or the zoom keys while the terminal is focused.
 
 **Chat view**
-- Turns, tool steps (with diff stats), sub-agent cards, task lists, images and artifacts, with cost, token and duration stats in the header.
-- Search the conversation, show or hide system notes, reload the transcript, copy any message.
-- Composer: `↵` sends, `⇧↵` adds a newline, `/` lists the provider's slash commands and your skills, paste or drop images to attach them. Messages sent while the agent is busy show as queued.
+- Your messages on the right; the agent's replies under its name and time, in a readable column. Hover a message to copy it or see its exact time.
+- Tool work folds into one line that says what happened ("Ran 2 commands, edited retry.rs"). Open it for the steps: each shows its status, a command's last output line, and opens to the full output or an inline diff. The agent's plan shows as a checklist.
+- Code blocks show their language and have **Wrap** and **Copy**; long ones fold behind **Show all**.
+- While the agent works, the last line says what it is doing now. If it stops at a permission prompt or a question, a card says what it is asking and opens the terminal to answer.
+- Scrolled up? New replies never move the page; a pill counts them and jumps back (`⌘↓`).
+- Search the conversation (`⌘F`); the ⋯ menu shows or hides system notes and reloads the transcript.
+- Composer: `↵` sends, `⇧↵` adds a newline, `/` lists the provider's slash commands and your skills, attach images with the image button or paste / drop them. **Stop** interrupts the agent (the same as `Esc` in its terminal). Messages sent while the agent is busy are queued and show as "Queued" until it takes them.
 
 **Broadcast**
 - With 2 or more panes open, **↗ broadcast** sends one line to every visible session. `⌘⇧B` opens Ask Otto pre-filled to broadcast to the sessions you name.
@@ -63,8 +67,8 @@ Agents is where your coding agents run. Each session is a real terminal on this 
 **Session lifecycle**
 - Status dots: running, working, idle, exited, suspended (resumable). A **Needs you** badge marks a session waiting for your input or a permission.
 - Sessions resume on open after a daemon restart. `claude`, `codex` and `agy` conversations resume when their conversation id was captured. A `shell` always comes back as a fresh shell, and an agent you started inside it is resumed with its own resume command.
-- Sessions you start here are never auto-suspended. Background sessions (workflows, reviews, swarms, channels…) are suspended after 5 idle minutes to free memory, and the pane header shows the countdown. **Pin (keep alive)** stops that.
-- **Restart session** respawns the process (resuming the conversation when possible). It's in the pane header and, while an agent is running, in the sidebar row menu (for a stuck process). If the agent is mid-turn, Otto asks first.
+- Sessions you start here are never auto-suspended. Background sessions (workflows, reviews, swarms, channels…) are suspended after 5 idle minutes to free memory, and the pane header's details chip shows the countdown (hover it, or click it for the full details). **Pin (keep alive)** stops that.
+- **Restart session** respawns the process (resuming the conversation when possible). It's in the pane's ⋯ menu and, while an agent is running, in the sidebar row menu (for a stuck process). If the agent is mid-turn, Otto asks first.
 - Close a tab to only hide it (the session keeps running), **Archive** to stop it and keep its history, or **Delete** to remove it and its history (always confirmed). Closed tabs reopen with `⌘⇧T`.
 - Select many sessions in the sidebar to archive or delete them together. Archived sessions live in the Archived section, where you can restore them.
 
@@ -92,9 +96,10 @@ Agents is where your coding agents run. Each session is a real terminal on this 
 | `⌘⇧D` | Split horizontally |
 | `⌘⌥←` `⌘⌥→` `⌘⌥↑` `⌘⌥↓` | Move the focused pane left, right, up or down |
 | `⌘⌥S` | Swap the focused pane with the next |
-| `⌘⇧C` | Cycle the pane between Terminal, Chat and Split |
+| `⌘⇧C` | Toggle the pane between Terminal and Chat |
 | `⌘F` | Find in the terminal, or search the conversation in Chat |
 | `↵` / `⇧↵` | In Chat search: next / previous match |
+| `⌘↓` | In Chat: jump to the latest message |
 | `⌘C` / `⌃⇧C` | Copy the terminal selection |
 | `⌃⇧V` | Paste into the terminal from the clipboard |
 | `⇧↵` | New line in the agent's prompt (terminal and composer) |

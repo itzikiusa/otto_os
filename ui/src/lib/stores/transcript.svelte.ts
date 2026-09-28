@@ -4,11 +4,12 @@
 // opaque `before` cursor) and the live tail fed by `transcript_appended`
 // deltas. Subagent bodies are fetched lazily (`?sub=`) and cached per parent.
 // Also owns the two persisted UI preferences: the global "Show system" toggle
-// and the per-session Terminal · Chat · Split view (winKey-namespaced, like
-// the rest of the pane layout state).
+// and the per-session Terminal · Chat view (winKey-namespaced, like the rest of
+// the pane layout state).
 import { api } from '../api/client';
 import { winKey } from '../win';
 import { TranscriptLifecycle } from './transcriptLifecycle';
+import { parseSessionView, type SessionViewMode } from '../paneHeader';
 import type { Transcript, Turn, Artifact, OttoEvent } from '../api/types';
 
 // ---------------------------------------------------------------------------
@@ -392,10 +393,11 @@ export class Conversation {
 // Store
 // ---------------------------------------------------------------------------
 
-export type SessionViewMode = 'terminal' | 'chat' | 'split';
+export type { SessionViewMode };
 
 const LS_SHOW_SYSTEM = 'otto_conv_show_system';
 const LS_VIEW_PREFIX = 'otto_session_view:';
+/** The retired Split view's chat fraction — only ever deleted now. */
 const LS_SPLIT_PREFIX = 'otto_session_split_frac:';
 const LS_DRAFT_PREFIX = 'otto_chat_draft:';
 
@@ -411,6 +413,13 @@ function lsSet(k: string, v: string): void {
     localStorage.setItem(k, v);
   } catch {
     /* private mode / quota — preference just doesn't persist */
+  }
+}
+function lsDel(k: string): void {
+  try {
+    localStorage.removeItem(k);
+  } catch {
+    /* storage unavailable — nothing to clean up */
   }
 }
 
@@ -533,28 +542,25 @@ class TranscriptStore {
     lsSet(LS_SHOW_SYSTEM, on ? '1' : '0');
   }
 
-  /** The saved Terminal · Chat · Split choice for a session, or null (= use the
-   *  transcript-driven default). */
+  /** The saved Terminal · Chat choice for a session, or null (= use the
+   *  default). A choice saved by the retired Split view reads as Chat and is
+   *  rewritten once, with its orphaned split fraction dropped. */
   view(sessionId: string): SessionViewMode | null {
     const cached = this.views[sessionId];
     if (cached) return cached;
-    const raw = lsGet(winKey(LS_VIEW_PREFIX + sessionId));
-    return raw === 'terminal' || raw === 'chat' || raw === 'split' ? raw : null;
+    const key = winKey(LS_VIEW_PREFIX + sessionId);
+    const raw = lsGet(key);
+    const mode = parseSessionView(raw);
+    if (raw === 'split' && mode) {
+      lsSet(key, mode);
+      lsDel(winKey(LS_SPLIT_PREFIX + sessionId));
+    }
+    return mode;
   }
 
   setView(sessionId: string, mode: SessionViewMode): void {
     this.views[sessionId] = mode;
     lsSet(winKey(LS_VIEW_PREFIX + sessionId), mode);
-  }
-
-  /** Chat-pane fraction of the Split view (0.3–0.8), per session. */
-  splitFrac(sessionId: string): number {
-    const n = Number(lsGet(winKey(LS_SPLIT_PREFIX + sessionId)));
-    return Number.isFinite(n) && n >= 0.3 && n <= 0.8 ? n : 0.55;
-  }
-
-  setSplitFrac(sessionId: string, frac: number): void {
-    lsSet(winKey(LS_SPLIT_PREFIX + sessionId), String(Math.min(0.8, Math.max(0.3, frac))));
   }
 
   /** Recover only mounted, document-visible conversations. */

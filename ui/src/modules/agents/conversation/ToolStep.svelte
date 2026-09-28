@@ -1,16 +1,21 @@
 <script lang="ts">
-  // One tool call row inside a "Worked for …" group: kind icon, title, status
-  // dot; expand → capped output <pre> (windowed when long) / diff via
-  // git/DiffViewer / file chip (opens the Files panel) / result images.
-  import { getContext } from 'svelte';
+  // One tool call inside a response's step group, as ONE scannable line —
+  // kind icon · verb · target (command / file / pattern) · dim detail — with a
+  // status mark at the end (spinner while running, ✓, ✕, or "no result") and,
+  // for commands, the output's last line under it (the tail you'd look for
+  // first: "test result: FAILED …"). Expanding shows the detail: the full
+  // command + output (scrolled to its end; windowed past 400 lines), an edit's
+  // inline diff, a written file's content, a read's text, result images.
+  // Elided live-push previews fetch the stored result on first expand.
+  import { getContext, tick } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import VirtualList from '../../../lib/components/VirtualList.svelte';
-  import DiffViewer from '../../git/DiffViewer.svelte';
   import ImageBlock from './ImageBlock.svelte';
+  import InlineDiff from './InlineDiff.svelte';
   import Markdown from './Markdown.svelte';
   import { openFile } from '../../../lib/stores/openfile.svelte';
   import { toasts } from '../../../lib/toast.svelte';
-  import { TOOL_CHROME, fmtBytes, patchToDiff, toolSubtitle } from './format';
+  import { TOOL_CHROME, fmtBytes, lastLine, patchToDiff, toolLine, toolStatus } from './format';
   import { autoLang, ensureHljs, highlightBlock, highlightLine, langFromPath } from '../../../lib/hl';
   import type { Block } from '../../../lib/api/types';
   import { CONV_CTX, type ConvContext } from './context';
@@ -19,8 +24,14 @@
 
   interface Props {
     block: Extract<Block, { kind: 'tool_call' }>;
+    /** The response is still being worked on — a call without a result is
+     *  running, not abandoned. */
+    live?: boolean;
+    /** The agent is stopped on this call waiting for you (permission prompt /
+     *  question on its terminal) — shown as waiting, not spinning. */
+    waiting?: boolean;
   }
-  let { block }: Props = $props();
+  let { block, live = false, waiting = false }: Props = $props();
   const ctx = getContext<ConvContext>(CONV_CTX);
 
   let open = $state(false);
@@ -54,11 +65,12 @@
     if (open && previewOnly && fullState === 'idle') loadFull();
   });
   const chrome = $derived(TOOL_CHROME[block.tool] ?? TOOL_CHROME.other);
-  const subtitle = $derived(toolSubtitle(block));
-  const title = $derived(block.title?.trim() || block.name);
-  const status = $derived<'ok' | 'err' | 'pending'>(
-    result == null ? 'pending' : result.ok ? 'ok' : 'err',
-  );
+  const line = $derived(toolLine(block));
+  const status = $derived(toolStatus(block, live));
+  const isShell = $derived(block.tool === 'shell');
+  const STATUS_LABEL = { ok: 'Succeeded', err: 'Failed', running: 'Running…', none: 'No result recorded' } as const;
+  const blocked = $derived(waiting && status === 'running');
+
   // Edit calls carry `structuredPatch` on the result; older records (and a
   // failed edit) do not — synthesize a −old/+new hunk from the input so the
   // change is still shown as a diff, never as two blobs of text.
@@ -83,6 +95,7 @@
     const synth = editInputPatch();
     return synth ? patchToDiff(synth, result?.file_path ?? null) : null;
   });
+  const hasDiff = $derived(!!diff && diff.files.some((f) => f.hunks.length));
   const diffStats = $derived.by(() => {
     if (!diff) return null;
     let add = 0;
@@ -93,24 +106,42 @@
     }
     return add || del ? { add, del } : null;
   });
+  /** A fresh Write has no patch — its content (from the input) is the change. */
+  const writtenContent = $derived.by(() => {
+    if (block.tool !== 'write' || hasDiff) return '';
+    const c = (block.input as { content?: unknown } | null)?.content;
+    return typeof c === 'string' ? c : '';
+  });
 
-  // Syntax colors: hljs loads lazily (stays out of the main bundle); until it
-  // arrives, and for plain command output, text renders escaped. Language =
-  // the file's extension for read/edit/write, else a bounded auto-detect.
+  const filePath = $derived(
+    result?.file_path ??
+      (block.tool === 'read' || block.tool === 'edit' || block.tool === 'write'
+        ? (line.detail ? `${line.detail}/${line.target}` : line.target) || null
+        : null),
+  );
+  const text = $derived(result?.text ?? '');
+  // The collapsed row's second line: a command's last output line (a preview
+  // cut from the head would lie about the tail, so not for elided results).
+  const tail = $derived(isShell && !previewOnly && status !== 'running' ? lastLine(text) : '');
+  const command = $derived.by(() => {
+    if (!isShell || block.input == null || typeof block.input !== 'object') return '';
+    const c = (block.input as { command?: unknown; cmd?: unknown }).command ?? (block.input as { cmd?: unknown }).cmd;
+    return typeof c === 'string' ? c : Array.isArray(c) ? c.map(String).join(' ') : '';
+  });
+
+  // Syntax colors: hljs loads lazily (stays out of the main bundle). Command
+  // output is never auto-detected — a log coloured as code reads as wrong.
   let hlReady = $state(false);
   $effect(() => {
     if (!open) return;
     void ensureHljs().then(() => (hlReady = true));
   });
   const lang = $derived.by(() => {
-    if (!hlReady) return null;
+    if (!hlReady || isShell) return null;
     const byPath = filePath ? langFromPath(filePath) : null;
     if (byPath) return byPath;
     return autoLang(text);
   });
-
-  const filePath = $derived(result?.file_path ?? (block.tool === 'read' || block.tool === 'edit' || block.tool === 'write' ? subtitle || null : null));
-  const text = $derived(result?.text ?? '');
   const lines = $derived(text ? text.split('\n') : []);
   // Long outputs render through the windowed list (uniform mono rows); short
   // ones as a plain <pre> so selection/copy stays natural.
@@ -126,6 +157,18 @@
   let showInput = $state(false);
   const outHtml = $derived(open && !windowed && text ? highlightBlock(text, lang) : '');
   const inputHtml = $derived(open && showInput && inputJson ? highlightBlock(inputJson, hlReady ? 'json' : null) : '');
+  const writtenHtml = $derived(open && writtenContent ? highlightBlock(writtenContent, hlReady && filePath ? langFromPath(filePath) : null) : '');
+
+  // A command's output opens at its END — the failure summary / final status
+  // is what you look for first.
+  let bodyEl = $state<HTMLDivElement | null>(null);
+  $effect(() => {
+    if (!open || !isShell || !text) return;
+    void tick().then(() => {
+      const el = bodyEl?.querySelector<HTMLElement>('.out, .out-vlist');
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+  });
 
   function openInFiles(): void {
     if (!filePath) return;
@@ -135,15 +178,30 @@
       toasts.info('Path copied', filePath);
     }
   }
+  async function copyCommand(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(command);
+      toasts.info('Copied', 'The command');
+    } catch (e) {
+      toasts.error('Copy failed', e instanceof Error ? e.message : String(e));
+    }
+  }
 </script>
 
-<div class="step" class:open data-tool={block.tool} data-status={status}>
-  <button class="step-row" onclick={() => (open = !open)} aria-expanded={open} title={subtitle || title}>
-    <span class="step-icon"><Icon name={chrome.icon} size={13} /></span>
-    <span class="step-title">
-      <span class="step-label">{chrome.label}</span>
-      <span class="step-name">{title}</span>
-      {#if subtitle && subtitle !== title}<span class="step-sub mono">{subtitle}</span>{/if}
+<div class="step" class:open data-tool={block.tool} data-status={status === 'running' ? 'pending' : status}>
+  <button class="step-row" onclick={() => (open = !open)} aria-expanded={open} title={line.hint || block.title || block.name}>
+    <span class="step-icon" aria-hidden="true"><Icon name={chrome.icon} size={13} /></span>
+    <span class="step-text">
+      <span class="step-main">
+        <span class="step-verb">{blocked ? `Wants to ${line.base}` : status === 'running' ? line.present : line.verb}</span>
+        {#if line.target}<span class="step-target" class:mono={line.mono}>{line.target}</span>{/if}
+        {#if line.detail}<span class="step-detail mono">{line.detail}</span>{/if}
+      </span>
+      {#if tail}
+        <span class="step-tail mono" class:err={status === 'err'}>{tail}</span>
+      {:else if status === 'none'}
+        <span class="step-tail">No result was recorded — the turn was interrupted</span>
+      {/if}
     </span>
     {#if diffStats}
       <span class="step-stats mono" title="Lines added / removed"><span class="add">+{diffStats.add}</span> <span class="del">−{diffStats.del}</span></span>
@@ -151,38 +209,47 @@
     {#if result?.truncated || previewOnly}
       <span class="chip step-trunc" title={previewOnly ? 'Preview — expand to load the full output' : 'Output capped at 64 KB'}>{fmtBytes(result?.bytes ?? 0)}</span>
     {/if}
-    <span class="step-dot {status}" title={status === 'ok' ? 'Succeeded' : status === 'err' ? 'Failed' : 'Running…'}></span>
+    <span class="step-status {status}" class:blocked role="img" aria-label={blocked ? 'Waiting for you' : STATUS_LABEL[status]} title={blocked ? 'Waiting for you' : STATUS_LABEL[status]}>
+      {#if blocked}<Icon name="warning" size={12} />
+      {:else if status === 'running'}<span class="spin"></span>
+      {:else if status === 'ok'}<Icon name="check" size={12} />
+      {:else if status === 'err'}<Icon name="x" size={12} />
+      {:else}<Icon name="minus" size={12} />{/if}
+    </span>
     <span class="step-caret" aria-hidden="true"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} /></span>
   </button>
   {#if open}
-    <div class="step-body">
-      {#if filePath}
-        <button class="file-chip mono" onclick={openInFiles} title={ctx.sessionId && !ctx.readonly ? `Open in Files — ${filePath}` : `Copy path — ${filePath}`}>
-          <Icon name="file" size={12} /> <span class="file-chip-path">{filePath}</span>
-        </button>
-      {/if}
-      {#if inputJson}
-        <button class="link-btn" onclick={() => (showInput = !showInput)}>{showInput ? 'Hide input' : 'Show input'}</button>
-        {#if showInput}
-          <pre class="out mono hljs" dir="ltr">{@html inputHtml}</pre>
-        {/if}
-      {/if}
-      {#if diff && diff.files.some((f) => f.hunks.length)}
-        <div class="diff-wrap">
-          <DiffViewer {diff} />
+    <div class="step-body" bind:this={bodyEl}>
+      {#if isShell && command}
+        <div class="cmd">
+          <span class="cmd-prompt mono" aria-hidden="true">$</span>
+          <code class="cmd-text mono" dir="ltr">{command}</code>
+          <button class="icon-btn cmd-copy" onclick={() => void copyCommand()} aria-label="Copy command" title="Copy command"><Icon name="copy" size={12} /></button>
         </div>
+        {#if line.hint}<div class="cmd-hint">{line.hint}</div>{/if}
+      {:else if filePath}
+        <div class="file-line">
+          <button class="file-chip mono" onclick={openInFiles} title={ctx.sessionId && !ctx.readonly ? `Open in Files — ${filePath}` : `Copy path — ${filePath}`}>
+            <Icon name="file" size={12} /> <span class="file-chip-path">{filePath}</span>
+          </button>
+        </div>
+      {/if}
+      {#if hasDiff && diff}
+        <InlineDiff {diff} />
+      {:else if writtenContent}
+        <pre class="out mono hljs" dir="ltr">{@html writtenHtml}</pre>
       {:else if result == null}
-        <div class="pending">Waiting for the result…</div>
+        <div class="pending">{status === 'running' ? 'Waiting for the result…' : 'No result was recorded for this call.'}</div>
       {:else if block.tool === 'web' || block.tool === 'ask'}
         <Markdown md={text} small />
       {:else if windowed}
-        <VirtualList items={lines} estimateHeight={18} class="out-vlist" findText={(line: string) => line}>
-          {#snippet row(line)}<div class="out-line mono hljs" dir="ltr">{@html highlightLine(line || ' ', lang)}</div>{/snippet}
+        <VirtualList items={lines} estimateHeight={18} class="out-vlist" findText={(l: string) => l}>
+          {#snippet row(l)}<div class="out-line mono hljs" dir="ltr">{@html highlightLine(l || ' ', lang)}</div>{/snippet}
         </VirtualList>
       {:else if text}
-        <pre class="out mono hljs" class:err={status === 'err'} dir="ltr" data-lang={lang}>{@html outHtml}</pre>
+        <pre class="out mono hljs" class:err={status === 'err'} class:shell={isShell} dir="ltr" data-lang={lang}>{@html outHtml}</pre>
       {:else if !result.image_ids.length && !previewOnly}
-        <div class="pending dim">(no output)</div>
+        <div class="pending">(no output)</div>
       {/if}
       {#if previewOnly}
         {#if fullState === 'error'}
@@ -191,10 +258,10 @@
             <button class="link-btn" onclick={loadFull}>Retry</button>
           </div>
         {:else if fullState === 'loading' || !ctx.sessionId}
-          <div class="dim trunc-note" aria-live="polite">{ctx.sessionId ? 'Loading the full output…' : `Preview of ${fmtBytes(result?.bytes ?? 0)}.`}</div>
+          <div class="trunc-note" aria-live="polite">{ctx.sessionId ? 'Loading the full output…' : `Preview of ${fmtBytes(result?.bytes ?? 0)}.`}</div>
         {/if}
       {:else if result?.truncated}
-        <div class="dim trunc-note">Output truncated to 64 KB ({fmtBytes(result.bytes)} total).</div>
+        <div class="trunc-note">Output truncated to 64 KB ({fmtBytes(result.bytes)} total).</div>
       {/if}
       {#if result?.image_ids.length}
         <div class="imgs">
@@ -203,25 +270,29 @@
           {/each}
         </div>
       {/if}
+      {#if inputJson && !isShell}
+        <button class="link-btn" onclick={() => (showInput = !showInput)} aria-expanded={showInput}>{showInput ? 'Hide raw input' : 'Show raw input'}</button>
+        {#if showInput}
+          <pre class="out mono hljs" dir="ltr">{@html inputHtml}</pre>
+        {/if}
+      {/if}
     </div>
   {/if}
 </div>
 
 <style>
   .step {
-    border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-  }
-  .step:first-child {
-    border-top: 0;
+    min-width: 0;
   }
   .step-row {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 8px;
     width: 100%;
-    padding: 5px 10px;
+    padding: 4px 8px;
     background: none;
     border: 0;
+    border-radius: var(--radius-s);
     color: var(--text);
     cursor: pointer;
     text-align: start;
@@ -229,35 +300,52 @@
     min-width: 0;
   }
   .step-row:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
+  }
+  .step-row:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
   .step-icon {
     color: var(--text-dim);
     display: inline-flex;
     flex-shrink: 0;
+    height: 18px;
+    align-items: center;
   }
-  .step-title {
+  .step-text {
     flex: 1;
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .step-main {
     display: flex;
     align-items: baseline;
     gap: 6px;
     font-size: var(--fs-s);
+    line-height: 18px;
     overflow: hidden;
     white-space: nowrap;
+    min-width: 0;
   }
-  .step-label {
+  .step-verb {
     color: var(--text-dim);
     flex-shrink: 0;
   }
-  .step-name {
-    font-weight: 500;
+  .step-target {
     overflow: hidden;
     text-overflow: ellipsis;
-    flex-shrink: 1;
     min-width: 0;
+    flex-shrink: 1;
   }
-  .step-sub {
+  .step-target.mono {
+    font-size: var(--fs-xs);
+    direction: ltr;
+    unicode-bidi: isolate;
+  }
+  .step-detail {
     color: var(--text-dim);
     font-size: var(--fs-xs);
     overflow: hidden;
@@ -267,47 +355,128 @@
     direction: ltr;
     unicode-bidi: isolate;
   }
+  .step-tail {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .step-tail.mono {
+    direction: ltr;
+    unicode-bidi: isolate;
+    text-align: start;
+  }
+  .step-tail.err {
+    color: var(--danger);
+  }
   .step-trunc {
     height: 16px;
     font-size: var(--fs-xs);
-  }
-  .step-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
     flex-shrink: 0;
-    background: var(--text-dim);
   }
-  .step-dot.ok {
-    background: var(--status-working);
+  .step-stats {
+    font-size: var(--fs-xs);
+    flex-shrink: 0;
+    white-space: nowrap;
+    line-height: 18px;
   }
-  .step-dot.err {
-    background: var(--status-exited);
+  .step-stats .add {
+    color: var(--success);
+    font-weight: 600;
   }
-  .step-dot.pending {
-    background: var(--status-warn);
-    animation: pulse 1.2s ease-in-out infinite;
+  .step-stats .del {
+    color: var(--danger);
+    font-weight: 600;
   }
-  @keyframes pulse {
-    50% {
-      opacity: 0.35;
+  .step-status {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 18px;
+    flex-shrink: 0;
+    color: var(--text-dim);
+  }
+  .step-status.ok {
+    color: var(--success);
+  }
+  .step-status.err {
+    color: var(--danger);
+  }
+  .step-status.blocked {
+    color: var(--warning);
+  }
+  .spin {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    border-top-color: var(--accent);
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .spin {
+      animation: spin 0.9s linear infinite;
+    }
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
     }
   }
   .step-caret {
     display: inline-flex;
+    align-items: center;
+    height: 18px;
     color: var(--text-dim);
     flex-shrink: 0;
   }
   .step-body {
-    padding: 0 10px 10px 31px;
+    padding: 2px 8px 10px 29px;
     display: flex;
     flex-direction: column;
     gap: 6px;
     min-width: 0;
   }
+  .cmd {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    padding: 5px 4px 5px 10px;
+    min-width: 0;
+    direction: ltr;
+  }
+  .cmd-prompt {
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
+    line-height: 18px;
+    user-select: none;
+  }
+  .cmd-text {
+    flex: 1;
+    min-width: 0;
+    font-size: var(--fs-xs);
+    line-height: 18px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    text-align: start;
+  }
+  .cmd-copy {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+  }
+  .cmd-hint {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
   .out {
     margin: 0;
-    max-height: 420px;
+    max-height: 320px;
     overflow: auto;
     background: var(--surface-2);
     border: 1px solid var(--border);
@@ -319,11 +488,15 @@
     overflow-wrap: anywhere;
     text-align: start;
   }
+  .out.shell {
+    white-space: pre;
+    overflow-wrap: normal;
+  }
   .out.err {
-    border-color: color-mix(in srgb, var(--status-exited) 45%, transparent);
+    border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
   }
   :global(.out-vlist) {
-    max-height: 420px;
+    max-height: 320px;
     overflow: auto;
     background: var(--surface-2);
     border: 1px solid var(--border);
@@ -343,47 +516,16 @@
     min-width: 100%;
     box-sizing: border-box;
   }
-  .diff-wrap {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    overflow: hidden;
-    max-height: 520px;
-    overflow-y: auto;
-  }
-  /* Added / removed lines must be unmistakable inside a chat: stronger tint
-     than the git diff viewer's default plus a colored edge, theme-mixed. */
-  .diff-wrap :global(tr.dline.add),
-  .diff-wrap :global(.vrow.dline.add),
-  .diff-wrap :global(.code.half.add) {
-    background: color-mix(in srgb, var(--status-working) 22%, transparent);
-    box-shadow: inset 3px 0 0 var(--status-working);
-  }
-  .diff-wrap :global(tr.dline.del),
-  .diff-wrap :global(.vrow.dline.del),
-  .diff-wrap :global(.code.half.del) {
-    background: color-mix(in srgb, var(--status-exited) 20%, transparent);
-    box-shadow: inset 3px 0 0 var(--status-exited);
-  }
-  .step-stats {
-    font-size: var(--fs-xs);
-    flex-shrink: 0;
-    white-space: nowrap;
-  }
-  .step-stats .add {
-    color: var(--success);
-    font-weight: 600;
-  }
-  .step-stats .del {
-    color: var(--danger);
-    font-weight: 600;
-  }
   /* hljs paints tokens only; the block keeps the chat's surface. */
   .out.hljs,
   .out-line.hljs {
     color: var(--text);
   }
+  .file-line {
+    display: flex;
+    min-width: 0;
+  }
   .file-chip {
-    align-self: flex-start;
     display: inline-flex;
     align-items: center;
     gap: 5px;
@@ -396,7 +538,6 @@
     color: var(--text-dim);
     cursor: pointer;
     overflow: hidden;
-    text-overflow: ellipsis;
     white-space: nowrap;
     direction: ltr;
   }
@@ -409,7 +550,7 @@
   }
   .file-chip:hover {
     color: var(--text);
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--border-strong);
   }
   .link-btn {
     align-self: flex-start;
@@ -417,9 +558,13 @@
     border: 0;
     padding: 0;
     color: var(--text-dim);
+    font: inherit;
     font-size: var(--fs-xs);
     cursor: pointer;
     text-decoration: underline dotted;
+  }
+  .link-btn:hover {
+    color: var(--text);
   }
   .pending {
     font-size: var(--fs-s);
@@ -427,6 +572,7 @@
   }
   .trunc-note {
     font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
   .load-err {
     color: var(--danger);

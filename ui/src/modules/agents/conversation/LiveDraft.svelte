@@ -32,57 +32,62 @@
     }
     return draft.trimEnd();
   });
+  // Claude Code prefixes each streamed block with a "⏺" bullet — terminal
+  // chrome, not content.
+  const shown = $derived(visible.replace(/^\s*⏺\s?/gm, ''));
 </script>
 
+<!-- Not a live region: it re-renders ~every 700 ms while text streams; the
+     chat announces the finished response instead (ConversationView). -->
 {#if visible}
-  <article class="turn assistant live-draft" data-live-draft aria-live="polite">
-    <div class="draft-head"><span class="pulse"></span> Streaming from the terminal</div>
-    <pre class="draft mono" dir="ltr">{visible}</pre>
-  </article>
+  <div class="live-draft" data-live-draft>
+    <p class="draft" dir="auto">{shown}<span class="caret" aria-hidden="true"></span></p>
+    <div class="draft-note">Live preview from the terminal</div>
+  </div>
 {/if}
 
 <style>
   .live-draft {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    padding: 4px 16px 8px;
+    gap: 2px;
     min-width: 0;
-  }
-  .draft-head {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .pulse {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--status-working);
-    animation: pulse 1.2s ease-in-out infinite;
-  }
-  @keyframes pulse {
-    50% {
-      opacity: 0.35;
-    }
+    border-inline-start: 2px dashed var(--border-strong);
+    padding-inline-start: 12px;
+    margin-inline-start: 6px;
   }
   .draft {
     margin: 0;
-    max-width: 920px;
-    min-height: 3.5em;
     max-height: 50vh;
     overflow: auto;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    font-size: var(--fs-s);
-    line-height: 1.5;
+    font-size: var(--fs-m);
+    line-height: 1.6;
     color: var(--text);
-    background: color-mix(in srgb, var(--status-working) 6%, var(--surface));
-    border: 1px dashed color-mix(in srgb, var(--status-working) 45%, var(--border));
-    border-radius: var(--radius-m);
-    padding: 8px 12px;
     text-align: start;
+  }
+  .caret {
+    display: inline-block;
+    width: 7px;
+    height: 1em;
+    margin-inline-start: 2px;
+    vertical-align: text-bottom;
+    background: var(--text-dim);
+    border-radius: 1px;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .caret {
+      animation: blink 1s steps(2, start) infinite;
+    }
+  }
+  @keyframes blink {
+    to {
+      visibility: hidden;
+    }
+  }
+  .draft-note {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
 </style>

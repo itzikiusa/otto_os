@@ -24,7 +24,7 @@ files, PRs and images a session produced are listed with previews in an
 
 | You want to… | Otto gives you |
 |---|---|
-| Read what an agent did without scrolling a terminal | **Chat view** — a segmented **Terminal · Chat · Split** toggle in every agent session header (`⌘⇧C` cycles); user bubbles, assistant prose, collapsible "Worked for 21m · 38 steps" work groups, diffs, images, subagent cards |
+| Read what an agent did without scrolling a terminal | **Chat view** — a two-state **Terminal · Chat** toggle in every agent session header (`⌘⇧C` toggles); user bubbles, assistant prose, one-line tool-work summaries that open into a step timeline, inline diffs, code blocks with Copy, a live "working on…" line, images, subagent cards |
 | Find that conversation from last week | **History** (`#/history`) — search + provider / folder / status / date filters, grouped by repo like the Claude/Codex app sidebars; read-only on the right |
 | Continue a conversation the CLI had outside Otto | **Resume in Otto** — imports the on-disk transcript as a reconnectable session, then the normal resume path (`claude --resume` / Codex rollout) continues it |
 | See the agent's plan and push work into it | **Task tracker** in the Activity panel — TodoWrite/TaskCreate tasks merged with **+ Add task** rows (`from board` badge, `queued` until the agent is nudged) |
@@ -51,7 +51,7 @@ files, PRs and images a session produced are listed with previews in an
 | Types | `ui/src/lib/api/types.ts` (`// ── Transcript` section) | Mirror of `otto-transcript/src/model.rs` |
 | Contracts (authoritative) | `docs/contracts/api.md`, `docs/contracts/ws.md` | Routes, RBAC, event scopes |
 
-Entry points in the app: the **Chat / Split** toggle in any agent session
+Entry points in the app: the **Terminal · Chat** toggle in any agent session
 header; **History** in the left nav (Agents group), the **History** button in the
 Agents header and in Mission Control, and ⌘K **"Go to History"**; the
 **Activity** and **Outputs** tabs of the right panel (⌘J) while an agent session
@@ -83,48 +83,67 @@ path the moment its capture scan finds it) and for any transcript already under
 
 ## 4. Full feature walkthrough
 
-### 4.1 The view toggle (Terminal · Chat · Split)
+### 4.1 The view toggle (Terminal · Chat)
 
-Every agent session header has a segmented control. **Terminal** is the default
+Every agent session header has a two-state toggle. **Terminal** is the default
 for every session; **Chat** is opt-in (greyed-out empty state when no transcript
-resolves). **Split** puts the chat
-on the left and the live terminal on the right behind a draggable splitter
-(three columns when the right panel is open; below 1200 px it degrades to Chat
-with a "Terminal" tab). The choice is remembered per session
-(`otto_session_view:<id>` in localStorage — the same key Mission Control and
-History set to `chat` before opening a session). `⌘⇧C` cycles the three.
+resolves). The choice is remembered per session (`otto_session_view:<id>` in
+localStorage — the same key Mission Control and History set to `chat` before
+opening a session). `⌘⇧C` toggles the focused pane; ←/→ move between the tabs.
 
-In a narrow pane (≤ 260 px) the segmented control collapses to a single view
-icon that opens a menu (≤ 200 px: the rows live in the pane's ⋯ menu); `⌘⇧C`
-still cycles.
+The toggle follows the pane width: icon + label on a wide pane (≥ 720 px),
+icon-only below that, a single "Switch to Chat/Terminal view" button below
+420 px, and *Terminal view* / *Chat view* rows in the pane's ⋯ menu below
+200 px. See [agent-sessions.md → pane header](./agent-sessions.md) for the
+whole header.
+
+The former **Split** view (chat and terminal side by side inside one pane) was
+removed on 2026-09-28 — it crowded every header and halved an already-split
+pane. A saved `split` choice opens as Chat. For chat beside the terminal, split
+the pane (`⌘D`) and switch one side to Chat.
 
 ### 4.2 The conversation
 
-- **Turns**: your prompts as right-aligned bubbles, the agent's prose full-width
-  (Markdown through the sanitizing vault renderer). The last 60 turns load
-  first; **Load earlier** pages back by the opaque `cursor`. Scrolling is
-  anchored; when you are at the bottom the view follows live turns, otherwise a
-  **↓ new** pill appears.
-- **Work steps**: consecutive tool calls fold into one "Worked for … · N steps"
-  row. Expand a step for the capped output, a diff (edits), a file chip (opens
-  the Files panel), or a subagent card — subagents load lazily and nest from the
-  sidecar tree, so agents spawned by *other* subagents still show up.
+- **Turns**: your prompts as right-aligned neutral bubbles; the agent's replies
+  under its name and time (provider mark + "Claude"/"Codex"), hanging off a thin
+  rule, in a centred column of readable width (Markdown through the sanitizing
+  vault renderer). Copy, exact time, duration and model appear on hover. The
+  last 60 turns load first; **Load earlier messages** pages back by the opaque
+  `cursor`. At the bottom the view follows live turns; scrolled up, nothing
+  moves and a pill says **N new messages** (or *Jump to latest*); `⌘↓` jumps.
+- **Tool work**: consecutive tool calls fold into one line that says what
+  happened ("Ran a command, edited retry.rs · 2m 7s · 3 steps", with a ✓, a
+  spinner or "N failed"). Open it for a timeline of one-line steps (verb ·
+  command / file · status; a command's last output line under it). Open a step
+  for the full command + output (scrolled to the end), an inline diff (edits),
+  the written file, or a subagent card — subagents load lazily and nest from the
+  sidecar tree, so agents spawned by *other* subagents still show up. The
+  agent's plan is a checklist in the flow ("Plan · 1 of 4 done").
+- **Code blocks**: language label, **Wrap**, **Copy**; blocks over 18 lines fold
+  behind **Show all N lines**.
+- **Live**: while the session works, the last line reads "Claude is working ·
+  Running cargo test …" with the elapsed time, above the streamed text. If the
+  agent stops on a call that never got a result (a permission prompt or a
+  question on its terminal), a **waiting for you** card says what it stopped at
+  and offers **Open terminal** — the chat cannot answer those prompts itself.
 - **Markers, not bodies**: Claude persists `thinking` blocks with an empty body
-  (a signature only), so the chat shows a **"Thought (n)"** marker. Codex
-  reasoning is never recoverable — a footer says **"N reasoning steps (not
-  recorded)"** from `stats.reasoning_steps` (the contract carries no per-turn
-  count, so it renders once per conversation).
+  (a signature only), so thinking is only counted (step-group tooltip). Codex
+  reasoning is never recoverable — the reply's action row says **"N reasoning
+  steps (not recorded)"**.
 - **System notes**: reminders, hook output, attachments and `<task-notification>`
-  payloads collapse into one muted chip per turn; **Show system** reveals them.
-  Queued prompts show as "Queued: …" chips until the CLI dequeues them.
+  payloads collapse into one muted chip per turn; **Show system notes** in the
+  chat's ⋯ menu reveals them all. Queued prompts show as "Queued: …" chips until
+  the CLI dequeues them.
 - **Composer** (live session, editor role): `⏎` sends (via the same submit path
-  the PTY uses, so slash commands pass through), `⇧⏎` newline; paste or drop an
-  image and it is uploaded to the session inbox and referenced as
-  `[Image: <path>]`. The status line shows the session status and how many
-  board tasks are waiting to be nudged in. An exited session shows **Resume**.
-  The chat header and composer shed their secondary chrome by PANE width, not
-  window width: stats and model first, then the search box and *Show system*
-  fold into a ⋯ menu; the send button never hides.
+  the PTY uses, so slash commands pass through), `⇧⏎` newline; attach images
+  with the image button, or paste / drop them — each is uploaded to the session
+  inbox and referenced as `[Image: <path>]`. While the agent works a send is
+  queued by the CLI (the box says so) and **Stop** interrupts it (one `Esc` into
+  the PTY). The status row shows the session status and how many board tasks are
+  waiting to be nudged in. An exited session shows **Resume**. The chat header
+  and composer shed their secondary chrome by PANE width, not window width:
+  stats, key hints and cwd / branch / model go first, search folds into ⋯ in a
+  very narrow pane; the send button never hides.
 
 ### 4.3 History (`#/history`)
 
@@ -237,7 +256,7 @@ All routes are under `/api/v1`. RBAC: `Agents` **View** for every GET,
 | Event | Scope | Payload |
 |---|---|---|
 | `transcript_appended` | Session | `{ workspace_id, session_id, cursor, turns }` — ≤ 64 KB per frame, else the client re-fetches |
-| `transcript_live` | Session | `{ workspace_id, session_id, text, input, status, branch }` — the in-progress response read off the PTY screen (≤ 16 KB), at most one frame per 700 ms poll and only on change; the chat renders it as a "Streaming from the terminal" draft while the session is `working` and hides it once the folded turn covers it |
+| `transcript_live` | Session | `{ workspace_id, session_id, text, input, status, branch }` — the in-progress response read off the PTY screen (≤ 16 KB), at most one frame per 700 ms poll and only on change; the chat renders it as a live preview under the last reply (above the "Claude is working" line) while the session is `working` and hides it once the folded turn covers it |
 | `artifact_added` | Session | `{ workspace_id, session_id, artifact }` |
 | `history_index_progress` | Workspace | `{ workspace_id, scanned, total, done }` |
 | `tasks_updated` | Session | existing — carries the merged list incl. `source` / `nudge_pending` |

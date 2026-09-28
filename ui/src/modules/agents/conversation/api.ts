@@ -58,3 +58,10 @@ function blobToBase64(blob: Blob): Promise<string> {
     r.readAsDataURL(blob);
   });
 }
+
+/** Interrupt the agent's current turn: one Escape keystroke into its PTY —
+ *  exactly what pressing Esc in the terminal does in Claude Code and Codex
+ *  ("esc to interrupt"). `submit: false` writes the byte verbatim. */
+export function interruptAgent(sessionId: string): Promise<void> {
+  return api.post<void>(`/sessions/${encodeURIComponent(sessionId)}/input`, { text: '\u001b', submit: false });
+}

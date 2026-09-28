@@ -728,9 +728,17 @@ pub fn resized(app: &AppHandle, label: &str) {
 pub fn destroyed(app: &AppHandle, label: &str) {
     let pair = pairs().remove(label);
     if let Some(pair) = pair {
-        if let Some(win) = app.get_window(&companion_label(&pair)) {
-            let _ = win.destroy();
-        }
+        // Never destroy a window from inside another window's Destroyed
+        // callback: that re-enters tao's event handler from AppKit's
+        // sendEvent, and a panic there aborts the app (it can't unwind
+        // through the Objective-C frames). Run it on the next loop turn.
+        let companion = companion_label(&pair);
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Some(win) = handle.get_window(&companion) {
+                let _ = win.destroy();
+            }
+        });
     }
 }
 /// Persist original host geometry during a detach, including direct OS Quit.

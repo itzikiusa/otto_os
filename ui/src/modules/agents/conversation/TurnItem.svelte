@@ -1,30 +1,42 @@
 <script lang="ts">
-  // One render item: a right-aligned user bubble, or a full-width assistant
-  // response (prose via sanitized markdown, tool steps grouped, images,
-  // queued/artifact/notice chips), with the per-turn system chip and the
-  // Codex "N reasoning steps (not recorded)" footer.
+  // One render item of the chat.
+  //   • You: a right-aligned, neutral bubble.
+  //   • The agent: an attributed response — provider mark + name + time — then
+  //     prose, tool-activity groups, the plan, images and chips, hanging off a
+  //     2 px inline-start rule (guidelines patterns §2: agent content is
+  //     attributed and distinct, but never louder than yours).
+  // Copy, the exact time, duration and model sit in a quiet action row that
+  // appears on hover / focus (always on touch). Per-turn system notes stay a
+  // chip that expands in place; "Show system" reveals them all.
   import { getContext } from 'svelte';
   import Icon, { type IconName } from '../../../lib/components/Icon.svelte';
+  import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
   import Markdown from './Markdown.svelte';
   import WorkSteps from './WorkSteps.svelte';
+  import TasksBlock from './TasksBlock.svelte';
   import ImageBlock from './ImageBlock.svelte';
   import { transcript } from '../../../lib/stores/transcript.svelte';
   import { toasts } from '../../../lib/toast.svelte';
-  import { fmtClock, fmtDuration, segment, type RenderItem } from './format';
+  import { fmtClock, fmtDuration, providerName, segment, type RenderItem } from './format';
   import type { Artifact, SystemNote } from '../../../lib/api/types';
   import { CONV_CTX, type ConvContext } from './context';
 
   interface Props {
     item: RenderItem;
-    /** True for the newest response of a live session (step groups start open). */
+    /** True for the newest response while the agent works on it (step groups start open). */
     live?: boolean;
-    /** Inside a subagent card — tighter chrome. */
+    /** Newest response of a session that is still alive: calls without a
+     *  result are in progress / waiting on you, not interrupted. */
+    active?: boolean;
+    /** Stopped on its open call, waiting for you (permission / question). */
+    waiting?: boolean;
+    /** Inside a subagent card — no attribution header, tighter chrome. */
     nested?: boolean;
     /** Matches the conversation search (soft highlight) / is the current match. */
     hit?: boolean;
     current?: boolean;
   }
-  let { item, live = false, nested = false, hit = false, current = false }: Props = $props();
+  let { item, live = false, active = live, waiting = false, nested = false, hit = false, current = false }: Props = $props();
 
   // Copy: the turn's prose as markdown; tool steps as one-line summaries so a
   // pasted response still reads. Images/chips are skipped.
@@ -50,8 +62,9 @@
   const segs = $derived(segment(item.blocks));
   const showSystem = $derived(transcript.showSystem);
   // Codex reasoning is dropped by the parser and counted per turn
-  // (`Turn.reasoning_steps`) → one "N reasoning steps (not recorded)" footer per response.
+  // (`Turn.reasoning_steps`) → one "N reasoning steps (not recorded)" note per response.
   const isCodex = $derived(ctx.provider === 'codex');
+  const agentName = $derived(providerName(ctx.provider));
   let sysOpen = $state(false);
   const sysNotes = $derived<SystemNote[]>(item.system);
   const visibleBlocks = $derived(
@@ -64,17 +77,41 @@
     }),
   );
   const firstStepsIdx = $derived(visibleBlocks.findIndex((s) => s.kind === 'steps'));
+  // Only the response's LAST plan snapshot starts open; earlier ones fold.
+  const lastTasksIdx = $derived(visibleBlocks.findLastIndex((s) => s.kind === 'block' && s.block.kind === 'tasks'));
+  const clock = $derived(fmtClock(item.ts));
+  const fullTime = $derived(item.ts ? new Date(item.ts).toLocaleString() : '');
 
-  function artifactHref(a: Artifact): string | null {
-    if (a.url) return a.url;
-    return null;
-  }
   function artifactIcon(a: Artifact): IconName {
     return a.kind === 'pr' ? 'pr' : a.kind === 'image' ? 'image' : a.kind === 'url' ? 'link' : a.kind === 'report' ? 'note' : 'file';
   }
 </script>
 
-<article class="turn {item.role}" class:nested class:hit class:current data-turn-id={item.id} data-role={item.role}>
+{#snippet pendingChip(text: string)}
+  <div class="pending" data-pending title="Sent while the agent was busy — the CLI delivers it when the current turn ends">
+    <Icon name="clock" size={12} />
+    <span class="pending-label">Queued</span>
+    <span class="pending-text">{text}</span>
+  </div>
+{/snippet}
+
+{#snippet sysChip()}
+  {#if sysNotes.length}
+    <button class="sys-chip" class:on={sysOpen} onclick={() => (sysOpen = !sysOpen)} aria-expanded={sysOpen || showSystem} title="System notes attached to this turn (reminders, hooks, attachments)">
+      <Icon name="info" size={11} /> {sysNotes.length} system
+    </button>
+  {/if}
+{/snippet}
+
+<article
+  class="turn {item.role}"
+  class:nested
+  class:hit
+  class:current
+  data-turn-id={item.id}
+  data-role={item.role}
+  aria-label={item.role === 'user' ? `You${clock ? `, ${clock}` : ''}` : `${agentName}${clock ? `, ${clock}` : ''}`}
+>
   {#if item.role === 'user'}
     <div class="bubble" dir="auto">
       {#each item.blocks as b, i (i)}
@@ -83,46 +120,43 @@
         {:else if b.kind === 'image'}
           <ImageBlock id={b.id} alt={b.alt} mediaType={b.media_type} />
         {:else if b.kind === 'queued' && b.op === 'enqueue' && ctx.queuedLive.includes(b.text) && (showSystem || !b.injected)}
-          <div class="pending" data-pending title="Sent while the agent was busy — the CLI delivers it when the current turn ends">
-            <span class="pending-dot"></span>
-            <span class="pending-label">Waiting to send</span>
-            <span class="pending-text">{b.text}</span>
-          </div>
+          {@render pendingChip(b.text)}
         {:else if b.kind === 'notice' && showSystem}
           <span class="chip note" title={b.note.body ?? ''}>{b.note.title}</span>
         {/if}
       {/each}
     </div>
     <div class="meta">
+      {#if clock}<time class="ts" datetime={item.ts ?? undefined} title={fullTime}>{clock}</time>{/if}
       {#if copyText}
-        <button class="copy-btn" onclick={() => void copyTurn()} title="Copy message" aria-label="Copy message"><Icon name="copy" size={11} /></button>
+        <button class="copy-btn" onclick={() => void copyTurn()} title="Copy message" aria-label="Copy message"><Icon name="copy" size={12} /></button>
       {/if}
-      {#if item.ts}<span class="ts">{fmtClock(item.ts)}</span>{/if}
-      {#if sysNotes.length}
-        <button class="sys-chip" class:on={sysOpen} onclick={() => (sysOpen = !sysOpen)} title="System notes attached to this turn">
-          <Icon name="info" size={10} /> {sysNotes.length} system
-        </button>
-      {/if}
+      {@render sysChip()}
     </div>
   {:else}
+    {#if !nested}
+      <header class="agent-head">
+        <ProviderIcon provider={ctx.provider} size={14} />
+        <span class="agent-name">{agentName}</span>
+        {#if clock}<time class="ts" datetime={item.ts ?? undefined} title={fullTime}>{clock}</time>{/if}
+      </header>
+    {/if}
     <div class="resp">
       {#each visibleBlocks as s, i (i)}
         {#if s.kind === 'steps'}
-          <WorkSteps steps={s.steps} durationMs={i === firstStepsIdx ? item.duration_ms : null} {live} />
+          <WorkSteps steps={s.steps} durationMs={i === firstStepsIdx ? item.duration_ms : null} {live} {active} {waiting} />
         {:else if s.block.kind === 'text'}
           <Markdown md={s.block.md} />
+        {:else if s.block.kind === 'tasks'}
+          <TasksBlock tasks={s.block.tasks} folded={i !== lastTasksIdx} />
         {:else if s.block.kind === 'image'}
           <ImageBlock id={s.block.id} alt={s.block.alt} mediaType={s.block.media_type} />
         {:else if s.block.kind === 'queued'}
-          <div class="pending" data-pending title="Sent while the agent was busy — the CLI delivers it when the current turn ends">
-            <span class="pending-dot"></span>
-            <span class="pending-label">Waiting to send</span>
-            <span class="pending-text">{s.block.text}</span>
-          </div>
+          {@render pendingChip(s.block.text)}
         {:else if s.block.kind === 'artifact'}
           {@const a = s.block.artifact}
-          {#if artifactHref(a)}
-            <a class="chip artifact" href={artifactHref(a)} target="_blank" rel="noopener noreferrer" title={a.path ?? a.url ?? ''}>
+          {#if a.url}
+            <a class="chip artifact" href={a.url} target="_blank" rel="noopener noreferrer" title={a.path ?? a.url}>
               <Icon name={artifactIcon(a)} size={11} /> {a.label}
             </a>
           {:else}
@@ -141,19 +175,15 @@
     </div>
     <div class="meta">
       {#if copyText}
-        <button class="copy-btn" onclick={() => void copyTurn()} title="Copy response" aria-label="Copy response"><Icon name="copy" size={11} /></button>
+        <button class="copy-btn" onclick={() => void copyTurn()} title="Copy response" aria-label="Copy response"><Icon name="copy" size={12} /></button>
       {/if}
-      {#if item.ts}<span class="ts">{fmtClock(item.ts)}</span>{/if}
+      {#if nested && clock}<time class="ts" datetime={item.ts ?? undefined} title={fullTime}>{clock}</time>{/if}
+      {#if item.duration_ms != null}<span class="dim" title="How long the agent worked on this response">{fmtDuration(item.duration_ms)}</span>{/if}
       {#if item.model}<span class="dim mono model">{item.model}</span>{/if}
-      {#if item.duration_ms != null && firstStepsIdx < 0}<span class="dim">{fmtDuration(item.duration_ms)}</span>{/if}
       {#if isCodex && item.reasoning_steps > 0}
         <span class="dim" title="Codex does not persist reasoning text">{item.reasoning_steps} reasoning steps (not recorded)</span>
       {/if}
-      {#if sysNotes.length}
-        <button class="sys-chip" class:on={sysOpen} onclick={() => (sysOpen = !sysOpen)} title="System notes attached to this turn">
-          <Icon name="info" size={10} /> {sysNotes.length} system
-        </button>
-      {/if}
+      {@render sysChip()}
     </div>
   {/if}
   {#if sysNotes.length && (sysOpen || showSystem)}
@@ -173,89 +203,124 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    padding: 6px 16px;
+    padding: 8px 0;
     min-width: 0;
+    scroll-margin-block: 16px;
   }
   .turn.nested {
     padding: 4px 6px;
   }
   .turn.user {
     align-items: flex-end;
+    padding-block: 12px 4px;
   }
-  /* User = blue (accent) bubble on the right; assistant = green-tinted card on
-     the left. Both are color-mixed over the theme surface, so they read the
-     same in light and dark schemes. */
+  /* You: a neutral bubble on the trailing side (accent means "selected" in
+     Otto, so it is not used for identity). */
   .bubble {
-    max-width: min(78%, 720px);
-    background: color-mix(in srgb, var(--accent) 18%, var(--surface));
-    border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border));
-    border-radius: 14px 14px 4px 14px;
-    padding: 8px 12px;
+    max-width: min(85%, 640px);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 16px 16px 4px 16px;
+    padding: 8px 14px;
     min-width: 0;
   }
   :global([dir='rtl']) .bubble {
-    border-radius: 14px 14px 14px 4px;
+    border-radius: 16px 16px 16px 4px;
+  }
+  /* The agent: attribution line + a response hanging off a hairline rule. */
+  .agent-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--fs-s);
+    min-width: 0;
+  }
+  .agent-name {
+    font-weight: 600;
+  }
+  .agent-head .ts {
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
   }
   .resp {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 4px;
     min-width: 0;
-    max-width: 920px;
-    background: color-mix(in srgb, var(--status-working) 7%, var(--surface));
-    border: 1px solid color-mix(in srgb, var(--status-working) 28%, var(--border));
-    border-radius: 4px 14px 14px 14px;
-    padding: 8px 12px;
-  }
-  :global([dir='rtl']) .resp {
-    border-radius: 14px 4px 14px 14px;
+    border-inline-start: 2px solid var(--border-strong);
+    padding-inline-start: 12px;
+    margin-inline-start: 6px;
   }
   .turn.nested .resp {
-    background: none;
     border: 0;
     padding: 0;
-  }
-  .copy-btn {
-    display: inline-flex;
-    align-items: center;
-    background: none;
-    border: 0;
-    padding: 0 2px;
-    color: var(--text-dim);
-    cursor: pointer;
-    opacity: 0;
-    transition: opacity 120ms;
-  }
-  .turn:hover .copy-btn,
-  .copy-btn:focus-visible {
-    opacity: 1;
-  }
-  .copy-btn:hover {
-    color: var(--text);
-  }
-  @media (hover: none) {
-    .copy-btn {
-      opacity: 1;
-    }
-  }
-  .turn.hit .bubble,
-  .turn.hit .resp {
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-warn) 45%, transparent);
-  }
-  .turn.current .bubble,
-  .turn.current .resp {
-    box-shadow: 0 0 0 2px var(--status-warn);
+    margin: 0;
   }
   .meta {
     display: flex;
     align-items: center;
     gap: 8px;
+    min-height: 20px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     flex-wrap: wrap;
+    padding-inline-start: 20px;
   }
   .turn.user .meta {
     justify-content: flex-end;
+    padding-inline-start: 0;
+  }
+  /* Quiet until wanted: the action row fades in on hover / keyboard focus
+     (always shown on touch, and while its system notes are open). */
+  .meta > :global(*) {
+    opacity: 0;
+    transition: opacity 120ms;
+  }
+  .turn:hover .meta > :global(*),
+  .turn:focus-within .meta > :global(*),
+  .meta > :global(.sys-chip) {
+    opacity: 1;
+  }
+  @media (hover: none) {
+    .meta > :global(*) {
+      opacity: 1;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .meta > :global(*) {
+      transition: none;
+    }
+  }
+  .copy-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 20px;
+    background: none;
+    border: 0;
+    border-radius: var(--radius-s);
+    padding: 0;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .copy-btn:hover {
+    color: var(--text);
+    background: var(--hover);
+  }
+  .copy-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  .turn.hit .bubble,
+  .turn.hit .resp {
+    box-shadow: 0 0 0 2px var(--warning-soft);
+    border-radius: var(--radius-m);
+  }
+  .turn.current .bubble,
+  .turn.current .resp {
+    box-shadow: 0 0 0 2px var(--status-warn);
+    border-radius: var(--radius-m);
   }
   .model {
     font-size: var(--fs-xs);
@@ -270,24 +335,23 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     padding: 0 7px;
-    height: 16px;
+    height: 18px;
     cursor: pointer;
   }
   .sys-chip:hover,
   .sys-chip.on {
     color: var(--text);
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--border-strong);
   }
   .sys-list {
     display: flex;
     flex-direction: column;
     gap: 3px;
     width: 100%;
-    max-width: 920px;
   }
   .turn.user .sys-list {
     align-self: flex-end;
-    max-width: min(78%, 720px);
+    max-width: min(85%, 640px);
   }
   .sys-note {
     font-size: var(--fs-xs);
@@ -323,24 +387,16 @@
     align-self: stretch;
     padding: 6px 10px;
     border-radius: var(--radius-m);
-    background: color-mix(in srgb, var(--status-warn) 16%, var(--surface));
-    border: 1px dashed color-mix(in srgb, var(--status-warn) 70%, var(--border));
+    background: var(--warning-soft);
+    border: 1px dashed color-mix(in srgb, var(--warning) 55%, var(--border));
+    color: var(--text);
     font-size: var(--fs-s);
     min-width: 0;
   }
-  .pending-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--status-warn);
-    flex-shrink: 0;
+  .pending :global(svg) {
+    color: var(--warning);
     align-self: center;
-    animation: pending-pulse 1.2s ease-in-out infinite;
-  }
-  @keyframes pending-pulse {
-    50% {
-      opacity: 0.3;
-    }
+    flex-shrink: 0;
   }
   .pending-label {
     font-weight: 600;
@@ -363,7 +419,7 @@
     cursor: pointer;
   }
   a.chip.artifact:hover {
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--border-strong);
   }
   .notice {
     display: flex;

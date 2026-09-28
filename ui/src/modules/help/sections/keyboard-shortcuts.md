@@ -71,7 +71,7 @@ You can also press `?` anywhere outside a text field to open the shortcut sheet 
 | `⌘]` / `⌘[` | Next / previous session |
 | `⌃1` – `⌃9` | Jump to session tab 1–9 |
 | `←` / `→` | Move between tabs when a tab has focus (`Home` / `End` for the first / last) |
-| `⌘⇧C` | Cycle the focused agent session between terminal, chat and split views |
+| `⌘⇧C` | Toggle the focused agent session between the terminal and chat views |
 
 **New session dialog**
 

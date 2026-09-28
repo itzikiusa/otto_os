@@ -13,19 +13,23 @@
   // The agent session as a Claude/Codex-app-style conversation, rebuilt from
   // the provider's transcript on disk (docs/design/conversation-view.md §5.2).
   // Newest page first + "Load earlier" (scroll-anchored), auto-follow at the
-  // bottom with a "↓ new" pill otherwise, live tail via `transcript_appended`.
+  // bottom with a "N new messages" jump pill otherwise, live tail via
+  // `transcript_appended`. The column keeps a readable measure
+  // (`--chat-measure`) and every piece sheds chrome by the PANE's width.
   import { setContext, tick, untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../../lib/components/ProviderIcon.svelte';
   import TurnItem from './TurnItem.svelte';
   import Composer from './Composer.svelte';
   import LiveDraft from './LiveDraft.svelte';
+  import LiveStatus from './LiveStatus.svelte';
+  import EmptyState from '../../../lib/components/EmptyState.svelte';
   import { transcript, type TranscriptSource } from '../../../lib/stores/transcript.svelte';
   import { ws } from '../../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
   import { activity } from '../../../lib/stores/activity.svelte';
   import { toasts } from '../../../lib/toast.svelte';
-  import { groupTurns, stableGroupTurns, activeQueued, fmtCost, fmtDuration, fmtTokens } from './format';
+  import { groupTurns, stableGroupTurns, activeQueued, countUnread, fmtCost, fmtDuration, fmtTokens, pendingTool, providerName } from './format';
   import { registerFindProvider } from '../../../lib/findProviders';
   import type { SessionStatus, TranscriptUnavailableReason, Turn } from '../../../lib/api/types';
   import type { RenderItem } from './format';
@@ -120,6 +124,34 @@
       status === 'reconnectable' &&
       ws.sessions.find((s) => s.id === sessionId)?.provider_session_id != null,
   );
+
+  // ---- live state at the foot of the chat -------------------------------------
+  const agentName = $derived(providerName(t?.provider ?? 'claude'));
+  const working = $derived(!!sessionId && status === 'working');
+  const lastItem = $derived(hasLater ? undefined : items[items.length - 1]);
+  /** The newest call still without a result — the current step while working,
+   *  or (session alive but quiet) what the agent is blocked on: a permission
+   *  prompt / question on the terminal screen. */
+  const pendingCall = $derived(pendingTool(lastItem));
+  const waiting = $derived(alive && !working && pendingCall != null);
+  /** Your last message's time — the working line's elapsed clock. */
+  const lastPromptTs = $derived.by(() => {
+    for (let i = items.length - 1; i >= 0; i--) if (items[i].role === 'user') return items[i].ts;
+    return null;
+  });
+  function openTerminal(): void {
+    if (sessionId) transcript.setView(sessionId, 'terminal');
+  }
+  // Screen-reader announcements: only the moments that matter (working,
+  // finished, needs you) — not every streamed frame or tool row.
+  let announce = $state('');
+  let wasWorking = false;
+  $effect(() => {
+    const w = working;
+    if (wasWorking && !w) announce = untrack(() => waiting) ? `${untrack(() => agentName)} is waiting for you` : `${untrack(() => agentName)} finished responding`;
+    else if (!wasWorking && w) announce = `${untrack(() => agentName)} is working`;
+    wasWorking = w;
+  });
 
   // ---- liveness: this VIEW keeps the server tail armed -----------------------
   // The tail stops a few minutes after the last touch, so an open chat pings
@@ -289,18 +321,38 @@
       e.preventDefault();
       e.stopPropagation();
       openSearch();
+    } else if ((e.metaKey || e.ctrlKey) && e.key === 'ArrowDown' && !(e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement)) {
+      // ⌘↓ — jump to the latest message (the pill's shortcut).
+      e.preventDefault();
+      scrollToBottomAll();
     }
   }
   const currentHit = $derived(hits[hitIdx] ?? null);
 
   // ---- scroll: follow the tail unless the reader scrolled up ------------------
   let listEl = $state<HTMLDivElement | null>(null);
+  let colEl = $state<HTMLDivElement | null>(null);
   let atBottom = $state(true);
+  /** Scrolled up by more than a screen — the pill offers the way back even
+   *  with nothing new. */
+  let farUp = $state(false);
   let unseen = $state(0);
+  // Unread = render items that arrived after the last one seen at the bottom.
+  let lastSeenId = $state<string | null>(null);
+  $effect(() => {
+    if (atBottom && !hasLater) lastSeenId = items[items.length - 1]?.id ?? null;
+  });
+  const unread = $derived(atBottom ? 0 : countUnread(items.map((i) => i.id), lastSeenId));
+  const showPill = $derived(hasLater || (!atBottom && (unread > 0 || unseen > 0 || farUp)));
+  const pillText = $derived(
+    hasLater ? 'Jump to latest' : unread > 0 ? `${unread} new ${unread === 1 ? 'message' : 'messages'}` : unseen > 0 ? 'New activity' : 'Jump to latest',
+  );
   function onScroll(): void {
     const el = listEl;
     if (!el) return;
-    atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+    const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+    atBottom = gap < 48;
+    farUp = gap > el.clientHeight;
     if (atBottom) unseen = 0;
     // Infinite "Load earlier" when the reader reaches the top.
     if (el.scrollTop < 40 && t?.has_earlier && !conv.loadingEarlier) void loadEarlier();
@@ -320,10 +372,26 @@
     void tick().then(scrollToBottom);
   });
   // Live appends: follow when at the bottom, else count them for the pill.
+  // (`unseen += 1` would READ `unseen` inside the effect and re-trigger it —
+  // an effect loop the app answers with a reload, exactly when you had
+  // scrolled up to read while the agent streamed.)
   $effect(() => {
     void conv.tailTick;
     if (untrack(() => atBottom)) void tick().then(scrollToBottom);
-    else unseen += 1;
+    else unseen = untrack(() => unseen) + 1;
+  });
+  // Stay pinned while the tail grows for any other reason (a highlighted code
+  // block, an image loading, the live line appearing) — unless the reader just
+  // clicked something (expanding a step at the bottom must not yank the view).
+  let lastPointer = 0;
+  $effect(() => {
+    const col = colEl;
+    if (!col || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      if (untrack(() => atBottom) && performance.now() - lastPointer > 600) scrollToBottom();
+    });
+    ro.observe(col);
+    return () => ro.disconnect();
   });
   async function loadEarlier(): Promise<void> {
     const el = listEl;
@@ -371,51 +439,51 @@
   const unavailable = $derived(t?.unavailable_reason ? UNAVAILABLE[t.unavailable_reason] : null);
 
   // ── Header chrome by PANE width, not window width ────────────────────────
-  // A chat can live in a 200px split pane or a full-window tab; `.conv` is the
-  // sized flex child, so its inline size is the only honest measure. The
-  // `@container` blocks at the bottom use the SAME numbers — CSS hides, this
-  // decides what the folded menu has to carry (same contract as the pane header).
+  // A chat can live in a 200px tile or a full-window tab; `.conv` is the sized
+  // flex child, so its inline size is the only honest measure. The
+  // `@container` blocks at the bottom use the SAME numbers.
   let convW = $state(0);
-  const headTier = $derived(convW <= 0 ? 0 : convW <= 260 ? 3 : convW <= 360 ? 2 : convW <= 420 ? 1 : 0);
+  /** ≤260px: the search button folds into the ⋯ menu, and an open search box
+   *  takes the whole row. */
+  const narrowHead = $derived(convW > 0 && convW <= 260);
 
-  /** ≤260px: search, Show system and reload collapse into one ⋯-style button. */
+  /** ⋯ — the chat's secondary controls: system notes, reload (and search when
+   *  the row is too narrow for its button). */
   function openHeadMenu(e: MouseEvent | KeyboardEvent): void {
     ctxMenu.show(e, [
+      ...(narrowHead ? [{ label: 'Search…', icon: 'search', hint: '⌘F', action: () => openSearch() }] : []),
       {
-        label: 'Search…',
-        icon: 'search',
-        action: () => {
-          openSearch();
-          void tick().then(() => searchEl?.focus());
-        },
-      },
-      {
-        label: `Show system${showSystem ? ' ✓' : ''}`,
+        label: 'Show system notes',
         icon: showSystem ? 'eye' : 'eyeOff',
+        checked: showSystem,
+        title: 'Reveal system reminders, hooks, attachments and injected queue items',
         action: () => transcript.setShowSystem(!showSystem),
       },
       { label: 'Reload transcript', icon: 'refresh', action: () => void conv.load() },
     ]);
   }
+  const statsText = $derived.by(() => {
+    if (!t || t.unavailable_reason) return '';
+    const st = t.stats;
+    const parts = [`${st.turns} turns`, `${st.tool_calls} tools`];
+    if (st.cost_usd != null) parts.push(fmtCost(st.cost_usd));
+    if (st.input_tokens != null || st.output_tokens != null) parts.push(`${fmtTokens(st.input_tokens)}↑ ${fmtTokens(st.output_tokens)}↓`);
+    if (st.duration_ms != null) parts.push(fmtDuration(st.duration_ms));
+    return parts.join(' · ');
+  });
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="conv" bind:clientWidth={convW} data-session={sessionId} data-path={transcriptPath} data-ws={workspaceId} data-readonly={ctx.readonly} data-loaded={t != null} onkeydown={onConvKey}>
-  <header class="conv-head" class:folded={headTier >= 3 && searchOpen}>
+  <header class="conv-head" class:folded={narrowHead && searchOpen}>
     {#if t?.provider && hasProviderIcon(t.provider)}<ProviderIcon provider={t.provider} size={13} />{/if}
-    <span class="conv-title" title={t?.title ?? ''}>{t?.title ?? (conv.loading ? 'Loading…' : 'Conversation')}</span>
-    {#if t?.model}<span class="chip mono">{t.model}</span>{/if}
-    {#if t && !t.unavailable_reason}
-      <span class="stats dim" title="turns · tool calls · cost · tokens in/out · duration">
-        {t.stats.turns} turns · {t.stats.tool_calls} tools
-        {#if t.stats.cost_usd != null} · {fmtCost(t.stats.cost_usd)}{/if}
-        {#if t.stats.input_tokens != null || t.stats.output_tokens != null} · {fmtTokens(t.stats.input_tokens)}↑ {fmtTokens(t.stats.output_tokens)}↓{/if}
-        {#if t.stats.duration_ms != null} · {fmtDuration(t.stats.duration_ms)}{/if}
-      </span>
+    <span class="conv-title" title={[t?.title, t?.model, statsText].filter(Boolean).join(' · ')}>{t?.title ?? (conv.loading ? 'Loading…' : 'Conversation')}</span>
+    {#if statsText}
+      <span class="stats" title="turns · tool calls · cost · tokens in/out · duration">{statsText}</span>
     {/if}
     <span class="grow"></span>
     {#if searchOpen}
-      <div class="search" class:wide={headTier >= 3} role="search">
+      <div class="search" class:wide={narrowHead} role="search">
         <Icon name="search" size={12} />
         <input
           bind:this={searchEl}
@@ -425,81 +493,81 @@
           aria-label="Search this conversation"
           onkeydown={onSearchKey}
         />
-        <span class="search-n dim" data-search-hits={hits.length}>{hits.length ? `${hitIdx + 1}/${hits.length}` : query && searchQ === query ? '0' : ''}</span>
+        <span class="search-n" data-search-hits={hits.length} aria-live="polite">{hits.length ? `${hitIdx + 1}/${hits.length}` : query && searchQ === query ? 'No matches' : ''}</span>
         <button class="icon-btn" title="Previous match (⇧⏎)" aria-label="Previous match" disabled={!hits.length} onclick={() => jumpTo(hitIdx - 1)}><Icon name="chevronUp" size={11} /></button>
         <button class="icon-btn" title="Next match (⏎)" aria-label="Next match" disabled={!hits.length} onclick={() => jumpTo(hitIdx + 1)}><Icon name="chevronDown" size={11} /></button>
         <button class="icon-btn" title="Close (Esc)" aria-label="Close search" onclick={closeSearch}><Icon name="x" size={11} /></button>
       </div>
-    {:else if headTier < 3}
+    {:else if !narrowHead}
       <button class="icon-btn" title="Search this conversation (⌘F)" aria-label="Search this conversation" onclick={openSearch}><Icon name="search" size={12} /></button>
     {/if}
-    {#if headTier >= 3}
-      <!-- Narrowest: search + system + reload behind one clamped menu. -->
-      <button
-        class="icon-btn"
-        aria-label="Conversation actions"
-        title="Conversation actions"
-        onclick={openHeadMenu}
-        onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && openHeadMenu(e)}
-      ><Icon name="more" size={12} /></button>
-    {:else if headTier >= 2}
-      <!-- Narrow: the labelled checkbox becomes an icon toggle. -->
-      <button
-        class="icon-btn"
-        aria-pressed={showSystem}
-        aria-label="Show system"
-        title="Reveal system reminders, hooks, attachments and injected queue items"
-        onclick={() => transcript.setShowSystem(!showSystem)}
-      ><Icon name={showSystem ? 'eye' : 'eyeOff'} size={12} /></button>
-    {:else}
-      <label class="sys-toggle" title="Reveal system reminders, hooks, attachments and injected queue items">
-        <input type="checkbox" checked={showSystem} onchange={(e) => transcript.setShowSystem((e.currentTarget as HTMLInputElement).checked)} />
-        Show system
-      </label>
-    {/if}
-    {#if headTier < 3}
-      <button class="icon-btn" title="Reload transcript" aria-label="Reload transcript" onclick={() => void conv.load()}><Icon name="refresh" size={12} /></button>
-    {/if}
+    <button class="icon-btn" aria-label="Conversation options" title="Conversation options" aria-haspopup="menu" data-conv-menu onclick={openHeadMenu}><Icon name="more" size={12} /></button>
   </header>
 
-  <!-- The scroller's frame: the "↓ new" pill anchors to ITS bottom edge, so it
-       always sits just above the composer whatever the composer's height
-       (attachments, a multi-line draft, the terminal-input strip). -->
+  <!-- The scroller's frame: the jump pill anchors to ITS bottom edge, so it
+       always sits just above the composer whatever the composer's height. -->
   <div class="conv-frame">
-  <div class="conv-list" bind:this={listEl} onscroll={onScroll} dir="auto">
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <div
+    class="conv-list"
+    bind:this={listEl}
+    onscroll={onScroll}
+    onpointerdown={() => (lastPointer = performance.now())}
+    dir="auto"
+    tabindex="0"
+    role="region"
+    aria-label="Conversation with {agentName}"
+  >
+    <div class="conv-col" bind:this={colEl}>
     {#if conv.error && !t}
-      <div class="empty">
-        <div class="empty-title">Could not load the conversation</div>
-        <div class="dim">{conv.error}</div>
-        <button class="btn small" onclick={() => void conv.load()}>Retry</button>
-      </div>
+      <EmptyState icon="warning" title="Couldn't load the conversation" body={conv.error} actionLabel="Retry" actionIcon="refresh" actionKind="secondary" onaction={() => void conv.load()} />
     {:else if conv.loading && !t}
-      <div class="empty dim">Loading conversation…</div>
+      <div class="skeleton" aria-busy="true" aria-label="Loading the conversation">
+        <div class="sk sk-user"></div>
+        <div class="sk sk-line"></div>
+        <div class="sk sk-line short"></div>
+        <div class="sk sk-steps"></div>
+        <div class="sk sk-line"></div>
+      </div>
     {:else if unavailable}
-      <div class="empty" data-unavailable={t?.unavailable_reason}>
-        <div class="empty-title">{unavailable.title}</div>
-        <div class="dim">{unavailable.body}</div>
+      <div data-unavailable={t?.unavailable_reason}>
+        <EmptyState
+          icon="terminal"
+          title={unavailable.title}
+          body={unavailable.body}
+          actionLabel={sessionId ? 'Open terminal' : undefined}
+          actionIcon="terminal"
+          actionKind="secondary"
+          onaction={sessionId ? openTerminal : undefined}
+        />
       </div>
     {:else if t && !items.length}
-      <div class="empty dim">No turns recorded yet.</div>
+      <EmptyState icon="comment" title="No messages yet" body={canCompose ? `Send ${agentName} a message below — the conversation shows up here as it works.` : 'Nothing was recorded in this conversation.'} />
     {:else if t}
       {#if t.has_earlier && winStart === 0}
         <div class="earlier">
           <button class="btn small ghost" disabled={conv.loadingEarlier} onclick={() => void loadEarlier()}>
-            {conv.loadingEarlier ? 'Loading…' : 'Load earlier'}
+            {conv.loadingEarlier ? 'Loading…' : 'Load earlier messages'}
           </button>
         </div>
       {/if}
       {#each items as item, i (item.id)}
         <TurnItem
           {item}
-          live={live && !hasLater && i === items.length - 1 && item.role === 'assistant'}
+          live={working && !hasLater && i === items.length - 1 && item.role === 'assistant'}
+          active={alive && !hasLater && i === items.length - 1 && item.role === 'assistant'}
+          waiting={waiting && i === items.length - 1}
           hit={!!searchQ && hitSet.has(item.id)}
           current={item.id === currentHit}
         />
       {/each}
       {#if draft && !hasLater}
         <LiveDraft text={draft} lastText={lastAssistantText} />
+      {/if}
+      {#if !hasLater && working}
+        <LiveStatus mode="working" {agentName} pending={pendingCall} writing={!!draft} since={lastPromptTs} />
+      {:else if !hasLater && waiting}
+        <LiveStatus mode="waiting" {agentName} pending={pendingCall} onterminal={canCompose ? openTerminal : null} />
       {/if}
       {#if hasLater}
         <div class="earlier">
@@ -519,20 +587,25 @@
           {/each}
         </div>
       {/if}
-      {#if conv.error}<div class="inline-err">{conv.error}</div>{/if}
+      {#if conv.error}<div class="inline-err" role="alert">{conv.error} <button class="btn small ghost" onclick={() => void conv.load()}>Retry</button></div>{/if}
     {/if}
+    </div>
   </div>
 
-  {#if (unseen > 0 && !atBottom) || hasLater}
-    <button class="new-pill" onclick={scrollToBottomAll}>↓ {hasLater ? 'latest' : 'new'}</button>
+  {#if showPill}
+    <button class="jump-pill new-pill" onclick={scrollToBottomAll} data-unread={unread} title="Jump to the latest message (⌘↓)">
+      <Icon name="arrowDown" size={12} /> {pillText}
+    </button>
   {/if}
   </div>
+  <div class="sr-only" aria-live="polite">{announce}</div>
 
   {#if canCompose && sessionId}
     {#key sessionId}
     <Composer
       {sessionId}
       {status}
+      {agentName}
       onresume={() => void resume()}
       cwd={ws.sessions.find((s) => s.id === sessionId)?.cwd ?? ''}
       branch={conv.liveBranch}
@@ -546,6 +619,8 @@
 
 <style>
   .conv {
+    /* The readable measure of the message column (and the composer under it). */
+    --chat-measure: 780px;
     display: flex;
     flex-direction: column;
     height: 100%;
@@ -555,8 +630,8 @@
     background: var(--bg);
     color: var(--text);
     /* The chat sheds chrome by its OWN width — it renders full-window in a tab
-       and 200px wide in a split pane, and the window said nothing about that.
-       Breakpoints mirror the `@container` blocks below + `headTier` above. */
+       and 200px wide in a tiled pane, and the window said nothing about that.
+       Breakpoints mirror the `@container` blocks below + `narrowHead` above. */
     container-type: inline-size;
   }
   .conv-head {
@@ -564,7 +639,7 @@
     align-items: center;
     gap: 8px;
     height: 30px;
-    padding: 0 10px;
+    padding: 0 6px 0 12px;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
     flex-shrink: 0;
@@ -576,14 +651,20 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 40%;
+    min-width: 0;
+    flex: 0 1 auto;
   }
   .stats {
     font-size: var(--fs-xs);
+    color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     min-width: 0;
+    flex: 0 2 auto;
+  }
+  .grow {
+    flex: 1;
   }
   .search {
     display: inline-flex;
@@ -609,17 +690,16 @@
   }
   .search-n {
     font-size: var(--fs-xs);
+    color: var(--text-dim);
     min-width: 28px;
     text-align: center;
     white-space: nowrap;
   }
-  /* ≤360px: the search box gives up half its width (the toggle went icon-only). */
   @container (max-width: 360px) {
     .search-in {
       width: 110px;
     }
   }
-  /* ≤260px: an OPEN search box owns the whole row — the title steps aside. */
   .search.wide {
     flex: 1;
   }
@@ -627,18 +707,8 @@
     width: 100%;
     flex: 1;
   }
-  /* …and the title steps aside only while that box is open. */
   .conv-head.folded .conv-title {
     display: none;
-  }
-  .sys-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    cursor: pointer;
-    white-space: nowrap;
   }
   .conv-frame {
     flex: 1;
@@ -652,34 +722,75 @@
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
-    padding: 8px 0 12px;
     overflow-anchor: none;
+    outline: none;
+  }
+  .conv-list:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--accent);
+  }
+  /* The message column: a readable measure, centred, with pane-sized gutters. */
+  /* Block (not flex) on purpose: a live delta grows only the LAST item, and
+     block layout re-lays that item, where a 300-child flex column re-runs
+     the flex algorithm over every item (measurable per delta in WebKit). */
+  .conv-col {
+    max-width: var(--chat-measure);
+    margin-inline: auto;
+    padding: 12px 20px 20px;
+    display: flow-root;
+    min-width: 0;
+  }
+  @container (max-width: 480px) {
+    .conv-col {
+      padding: 8px 12px 16px;
+    }
   }
   .earlier {
     display: flex;
     justify-content: center;
     padding: 4px 0 8px;
   }
-  .empty {
+  .skeleton {
     display: flex;
     flex-direction: column;
-    align-items: center;
-    gap: 8px;
-    text-align: center;
-    padding: 48px 24px;
-    font-size: var(--fs-m);
-    max-width: 480px;
-    margin: 0 auto;
+    gap: 12px;
+    padding-block: 8px;
   }
-  .empty-title {
-    font-weight: 600;
-    font-size: var(--fs-m);
+  .sk {
+    height: 14px;
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+  }
+  .sk-user {
+    align-self: flex-end;
+    width: 45%;
+    height: 34px;
+    border-radius: 16px;
+  }
+  .sk-line {
+    width: 92%;
+  }
+  .sk-line.short {
+    width: 60%;
+  }
+  .sk-steps {
+    width: 70%;
+    height: 22px;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .sk {
+      animation: sk-pulse 1.4s ease-in-out infinite;
+    }
+  }
+  @keyframes sk-pulse {
+    50% {
+      opacity: 0.55;
+    }
   }
   .live-artifacts {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-    padding: 6px 16px;
+    padding: 6px 0;
   }
   .live-artifacts .chip {
     gap: 5px;
@@ -687,30 +798,45 @@
     color: var(--text);
   }
   .inline-err {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     color: var(--danger);
     font-size: var(--fs-xs);
-    padding: 4px 16px;
+    padding: 4px 0;
   }
-  .new-pill {
+  .jump-pill {
     position: absolute;
     bottom: 12px;
-    inset-inline-end: 50%;
-    transform: translateX(50%);
-    background: var(--accent-solid);
-    color: var(--accent-contrast);
-    border: 0;
+    inset-inline-start: 50%;
+    transform: translateX(-50%);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border-strong);
     border-radius: 99px;
-    padding: 4px 12px;
+    padding: 4px 12px 4px 10px;
     font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
     box-shadow: var(--shadow);
+    white-space: nowrap;
   }
-  /* ≤420px: turn/cost stats and the model chip go first — both are recoverable
-     from the session header and the composer status line. */
-  @container (max-width: 420px) {
-    .stats,
-    .conv-head .chip {
+  :global([dir='rtl']) .jump-pill {
+    transform: translateX(50%);
+  }
+  .jump-pill:hover {
+    background: var(--surface-2);
+  }
+  .jump-pill:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  /* ≤560px: the stats go (they live in the title's tooltip too). */
+  @container (max-width: 560px) {
+    .stats {
       display: none;
     }
   }

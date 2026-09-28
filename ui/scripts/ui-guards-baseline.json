@@ -56,7 +56,7 @@
     "src/modules/agents/NewSession.svelte": 1,
     "src/modules/agents/SessionView.svelte": 1,
     "src/modules/agents/TiledView.svelte": 3,
-    "src/modules/agents/conversation/ConversationView.svelte": 2,
+    "src/modules/agents/conversation/ConversationView.svelte": 1,
     "src/modules/agents/conversation/TurnItem.svelte": 3,
     "src/modules/agents/history/HistoryPage.svelte": 6,
     "src/modules/api/ApiPage.svelte": 1,
