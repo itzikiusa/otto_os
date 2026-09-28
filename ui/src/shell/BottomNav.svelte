@@ -67,7 +67,7 @@
 
 <nav class="bottomnav" aria-label="Primary">
   {#each primary as m (m.id)}
-    <button class="bn-btn" class:active={current === m.id} onclick={() => go(m.id)}>
+    <button class="bn-btn" class:active={current === m.id} data-nav-id={m.id} onclick={() => go(m.id)}>
       <span class="bn-icon">
         <Icon name={m.icon} size={20} />
         {#if m.id === 'agents' && ws.workingCount > 0}
@@ -108,7 +108,7 @@
         <span>Commands</span>
       </button>
       {#each overflow as m (m.id)}
-        <button class="sheet-item" class:active={current === m.id} onclick={() => go(m.id)}>
+        <button class="sheet-item" class:active={current === m.id} data-nav-id={m.id} onclick={() => go(m.id)}>
           <Icon name={m.icon} size={22} />
           <span>{m.label}</span>
         </button>

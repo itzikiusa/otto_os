@@ -139,6 +139,7 @@
           title={`${m.label} · ${sec.group.label}${inSide ? ' · in the side pane' : sidePane.supported ? ` — ${SPLIT_HINT}` : ''}`}
           aria-label={`${m.label}${inSide ? ' (in the side pane)' : ''}${railCount(m.id)}`}
           data-testid={`rail-${m.id}`}
+          data-nav-id={m.id}
         >
           <Icon name={m.icon} />
           <!-- A session waiting on you outranks "working": the expanded sidebar

@@ -15,14 +15,9 @@
   //
   // Special case: `router.module === 's'` is the guest share view — it renders
   // SharePage full-screen and skips all the usual shell chrome entirely.
-  import RoomPage from '../modules/rooms/RoomPage.svelte';
-  import RoomRecapsPage from '../modules/rooms/RoomRecapsPage.svelte';
-  import RoomLobby from '../modules/rooms/RoomLobby.svelte';
-  import SharePage from '../modules/share/SharePage.svelte';
   import Rail from './Rail.svelte';
   import Navigator from './Navigator.svelte';
   import TabBar from './TabBar.svelte';
-  import RightPanel from './RightPanel.svelte';
   import BottomNav from './BottomNav.svelte';
   import Drawer from './Drawer.svelte';
   import NavButtons from './NavButtons.svelte';
@@ -33,52 +28,14 @@
   import FloatingBar from '../lib/components/FloatingBar.svelte';
   import { barStore } from '../lib/stores/bar.svelte';
   import ShortcutsOverlay from './ShortcutsOverlay.svelte';
-  import Handover from '../modules/agents/Handover.svelte';
-  import AttachIssue from '../modules/agents/AttachIssue.svelte';
-  import AttachProductStory from '../modules/agents/AttachProductStory.svelte';
   import { confirmer } from '../lib/confirm.svelte';
-  import BroadcastModal from '../lib/components/BroadcastModal.svelte';
   import NotificationBell from './NotificationBell.svelte';
   import { serviceHealth } from '../lib/stores/serviceHealth.svelte';
-  import AgentsPage from '../modules/agents/AgentsPage.svelte';
-  import HomePage from '../modules/home/HomePage.svelte';
-  import { HistoryPage } from '../modules/agents/history';
-  import NewSession from '../modules/agents/NewSession.svelte';
-  import NewWorkspace from '../modules/settings/NewWorkspace.svelte';
   import ConfirmDialog from '../lib/components/ConfirmDialog.svelte';
   import ContextMenu from '../lib/components/ContextMenu.svelte';
   import FindInPage from '../lib/components/FindInPage.svelte';
   import { findInPage } from '../lib/findinpage.svelte';
-  import GitPage from '../modules/git/GitPage.svelte';
-  import ApiPage from '../modules/api/ApiPage.svelte';
-  import DatabasePage from '../modules/database/DatabasePage.svelte';
-  import BrokersPage from '../modules/brokers/BrokersPage.svelte';
-  import McpPage from '../modules/mcp/McpPage.svelte';
-  import WorkflowsPage from '../modules/workflows/WorkflowsPage.svelte';
-  import SkillsLabPage from '../modules/skills-lab/SkillsLabPage.svelte';
-  import UsagePage from '../modules/usage/UsagePage.svelte';
-  import Settings from '../modules/settings/Settings.svelte';
-  import Walkthroughs from '../modules/help/Walkthroughs.svelte';
-  import { GUIDES } from '../modules/help/sections';
   import { availableSections, groupLabel as settingsGroupLabel } from '../modules/settings/sections';
-  import ProductPage from '../modules/product/ProductPage.svelte';
-  import CanvasPage from '../modules/canvas/CanvasPage.svelte';
-  import DesignHallPage from '../modules/design-hall/DesignHallPage.svelte';
-  import InsightsPage from '../modules/insights/InsightsPage.svelte';
-  import MissionControlPage from '../modules/mission-control/MissionControlPage.svelte';
-  import SwarmPage from '../modules/swarm/SwarmPage.svelte';
-  import LoopsPage from '../modules/loops/LoopsPage.svelte';
-  import ProofPage from '../modules/proof/ProofPage.svelte';
-  import ScheduledTasksPage from '../modules/scheduled-tasks/ScheduledTasksPage.svelte';
-  import PersonalAgentsPage from '../modules/personal-agents/PersonalAgentsPage.svelte';
-  import AssistantPage from '../modules/assistant/AssistantPage.svelte';
-  import AwsPage from '../modules/aws/AwsPage.svelte';
-  import KubernetesPage from '../modules/kubernetes/KubernetesPage.svelte';
-  import RunWithOttoPage from '../modules/run-with-otto/RunWithOttoPage.svelte';
-  import VaultPage from '../modules/vault/VaultPage.svelte';
-  import { BrowserView } from '../modules/browser';
-  import SnipEditor from '../modules/snip/SnipEditor.svelte';
-  import PluginFrame from '../modules/plugins/PluginFrame.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
   import { router } from '../lib/router.svelte';
   import { startSnip } from '../lib/snip';
@@ -86,6 +43,16 @@
   import { startWindowDrag } from '../lib/windowDrag';
   import { isPopout, isEmbedded, popoutTitle, openPopout, currentRoute } from '../lib/desktop';
   import SidePane from './SidePane.svelte';
+  import {
+    pageKeyOf,
+    loadedPage,
+    loadPage,
+    pageError,
+    prepareRoute,
+    prefetchPagesWhenIdle,
+    installNavPrefetch,
+    loadedRightPanel,
+  } from './pages.svelte';
   import AgentDrivingBar from '../lib/components/AgentDrivingBar.svelte';
   import { uiControl } from '../lib/stores/uiControl.svelte';
   // Agent UI control: every module's `ui_*` handlers, registered before the
@@ -118,6 +85,30 @@
   import { now } from '../lib/stores/now.svelte';
 
   const moduleName = $derived(router.module === '' ? 'agents' : router.module);
+
+  // ---- module pages: one lazy chunk each (shell/pages.svelte.ts) ----
+  // The router holds the current route until the next page's chunk is in
+  // (`prepareRoute`), so `pageKey` only ever names a page that can render now:
+  // the old page keeps painting until the new one mounts in the same frame.
+  // A pop-out / side pane loads only what it shows; the main window warms the
+  // rest at idle after first paint and on sidebar hover/focus.
+  const pageKey = $derived(pageKeyOf(router.parts) ?? 'agents');
+  const Page = $derived(loadedPage(pageKey));
+  const pageFailed = $derived(Page ? undefined : pageError(pageKey));
+  $effect(() => {
+    router.setPrepare(prepareRoute);
+    return () => router.setPrepare(null);
+  });
+  $effect(() => {
+    // The first page normally arrives with the shell (the root App preloads
+    // it); a deep link to a page whose load failed retries from here.
+    if (!untrack(() => loadedPage(pageKey))) void loadPage(pageKey).catch(() => {});
+  });
+  $effect(() => installNavPrefetch());
+  $effect(() => {
+    if (isEmbedded || isPopout) return;
+    return prefetchPagesWhenIdle();
+  });
   const compactShell = $derived(!viewport.isDesktop && !isPopout && !isEmbedded);
 
   // Native sidebar vibrancy (desktop shell): the window has an NSVisualEffect
@@ -630,20 +621,31 @@
 
   // ---- palette commands: Help guides ----
   // One "Guide: <title>" per README in modules/help/sections (static, bundled
-  // at build time), so any guide is ⌘K away from anywhere in the app.
-  $effect(() =>
-    registry.register(
-      'guides',
-      GUIDES.map((g) => ({
-        id: `help.guide.${g.id}`,
-        title: `Guide: ${g.title}`,
-        group: 'Help',
-        detail: g.group,
-        keywords: `help guide readme docs ${g.id.replace(/-/g, ' ')} ${g.summary} ${g.shortcuts.join(' ')}`,
-        run: () => router.go(`walkthroughs/${g.id}`),
-      })),
-    ),
-  );
+  // at build time), so any guide is ⌘K away from anywhere in the app. The
+  // guides (~360 KB of markdown, parsed at import) are their own chunk,
+  // fetched right after the shell mounts rather than in its boot closure.
+  $effect(() => {
+    let unreg: (() => void) | null = null;
+    let stopped = false;
+    void import('../modules/help/sections').then(({ GUIDES }) => {
+      if (stopped) return;
+      unreg = registry.register(
+        'guides',
+        GUIDES.map((g) => ({
+          id: `help.guide.${g.id}`,
+          title: `Guide: ${g.title}`,
+          group: 'Help',
+          detail: g.group,
+          keywords: `help guide readme docs ${g.id.replace(/-/g, ' ')} ${g.summary} ${g.shortcuts.join(' ')}`,
+          run: () => router.go(`walkthroughs/${g.id}`),
+        })),
+      );
+    }, () => {});
+    return () => {
+      stopped = true;
+      unreg?.();
+    };
+  });
 
   // ---- palette commands: focused session ----
   // Lifecycle verbs for the currently-active session (mirrors the per-pane ⋯
@@ -963,8 +965,9 @@
 </script>
 
 {#if router.module === 's'}
-  <!-- Guest share view: full-screen terminal, no shell chrome. -->
-  <SharePage sessionId={router.parts[1] ?? ''} />
+  <!-- Guest share view: full-screen terminal, no shell chrome. (The root App
+       normally renders it before the shell ever loads.) -->
+  {#await import('../modules/share/SharePage.svelte') then m}<m.default sessionId={router.parts[1] ?? ''} />{/await}
 {:else if router.module === 'snip'}
   <!-- Snip annotation editor: full-screen canvas, no shell chrome (it gets its
        own Tauri window; in a browser it takes over the current one). Stays
@@ -972,9 +975,11 @@
        id: the image loads on mount, so an unkeyed editor surviving a
        snip→snip route change would keep drawing (and auto-copying!) the OLD
        image onto the new snip. -->
-  {#key router.parts[1]}
-    <SnipEditor />
-  {/key}
+  {#if Page}
+    {#key router.parts[1]}
+      <Page />
+    {/key}
+  {/if}
   <!-- Its "Delete…" asks first — the shell's own dialog host isn't mounted here. -->
   <ConfirmDialog />
 {:else}
@@ -1027,86 +1032,20 @@
     <AgentDrivingBar />
   {/if}
   <div class="content">
-    {#if moduleName === 'agents'}
-      <AgentsPage />
-    {:else if moduleName === 'rooms'}
-      {#if router.parts[1] === 'recaps'}<RoomRecapsPage />{:else if router.parts[1]}{#key router.parts[1]}<RoomPage roomId={router.parts[1]} />{/key}{:else}<RoomLobby />{/if}
-    {:else if moduleName === 'home'}
-      <HomePage />
-    {:else if moduleName === 'assistant'}
-      <!-- Otto Assistant: threads (Spaces 01–04 + Recent) and a chat rendered
-           from the CLI transcript, with Tasks · Memory · Permissions tabs. -->
-      <AssistantPage />
-    {:else if moduleName === 'history'}
-      <!-- Past agent sessions (Otto rows + transcripts found on disk) with a
-           read-only conversation view. `#/history`, not `#/agents/…`, whose
-           second segment is a session id. -->
-      <HistoryPage />
-    {:else if moduleName === 'mission-control'}
-      <MissionControlPage />
-    {:else if moduleName === 'connections' || moduleName === 'database'}
-      <!-- The unified Connections hub IS the DB workbench page: its sidebar tree
-           holds every profile kind + Kafka clusters; `#/database` stays as an
-           alias so existing links/opens keep working. -->
-      <DatabasePage />
-    {:else if moduleName === 'git'}
-      <GitPage />
-    {:else if moduleName === 'api'}
-      <ApiPage />
-    {:else if moduleName === 'brokers'}
-      <BrokersPage />
-    {:else if moduleName === 'mcp'}
-      <McpPage />
-    {:else if moduleName === 'workflows'}
-      <WorkflowsPage />
-    {:else if moduleName === 'scheduled-tasks'}
-      <ScheduledTasksPage />
-    {:else if moduleName === 'personal-agents'}
-      <PersonalAgentsPage />
-    {:else if moduleName === 'aws'}
-      <AwsPage />
-    {:else if moduleName === 'kubernetes'}
-      <KubernetesPage />
-    {:else if moduleName === 'run-with-otto'}
-      <RunWithOttoPage />
-    {:else if moduleName === 'skills-eval'}
-      <SkillsLabPage />
-    {:else if moduleName === 'usage'}
-      <UsagePage />
-    {:else if moduleName === 'settings'}
-      <Settings />
-    {:else if moduleName === 'walkthroughs'}
-      <Walkthroughs />
-    {:else if moduleName === 'product'}
-      <ProductPage />
-    {:else if moduleName === 'design'}
-      <!-- Design Hall: one library for every studio (#/design…). Canvas below
-           stays routable as its Whiteboard studio. -->
-      <DesignHallPage />
-    {:else if moduleName === 'canvas'}
-      <CanvasPage />
-    {:else if moduleName === 'insights'}
-      <InsightsPage />
-    {:else if moduleName === 'swarm'}
-      <SwarmPage />
-    {:else if moduleName === 'loops'}
-      <LoopsPage />
-    {:else if moduleName === 'proof'}
-      <ProofPage />
-    {:else if moduleName === 'vault'}
-      <VaultPage />
-    {:else if moduleName === 'browser'}
-      <BrowserView />
-    {:else if moduleName === 'plugin'}
-      {#if router.parts[1]}
-        {#key router.parts[1]}
-          <PluginFrame slug={router.parts[1]} />
-        {/key}
-      {:else}
-        <AgentsPage />
-      {/if}
-    {:else}
-      <AgentsPage />
+    <!-- The page for the current route (shell/pages.svelte.ts). A component swap is
+         the only remount on navigation: connections ↔ database share one
+         page and stay mounted, and so does any page across its own sub-routes.
+         Rooms and plugins key their inner view by id (RoomsRoute /
+         PluginRoute) because that state belongs to one room / plugin. -->
+    {#if Page}
+      <Page />
+    {:else if pageFailed}
+      <div class="page-load-error" role="alert">
+        <Icon name="warning" size={16} />
+        <span>This page couldn’t load. Otto may have been updated in the background.</span>
+        <button class="btn small" onclick={() => void loadPage(pageKey).catch(() => {})}>Retry</button>
+        <button class="btn small" onclick={() => location.reload()}>Reload Otto</button>
+      </div>
     {/if}
   </div>
 {/snippet}
@@ -1234,7 +1173,9 @@
                belongs to the Agents pane, so a side-by-side split keeps it there. -->
           {#if showRightPanel}
             <Drawer bind:open={ui.rightOpen} inline={!compactShell} side="right" label="Activity" width="min(92vw, 360px)">
-              <RightPanel forceOpen={compactShell} />
+              <!-- Loaded with the Agents page (shell/pages.svelte.ts). -->
+              {@const RightPanel = loadedRightPanel()}
+              {#if RightPanel}<RightPanel forceOpen={compactShell} />{/if}
             </Drawer>
           {/if}
         </div>
@@ -1271,30 +1212,37 @@
 <ShortcutsOverlay open={shortcutsOpen} onclose={() => (shortcutsOpen = false)} />
 
 <!-- Focused-session action modals opened from the palette (mirror SessionView). -->
+<!-- These dialogs load on first open (their chunks are shared with the
+     Agents page, which the main window has already warmed by then). -->
 {#if sessionAction?.kind === 'handover'}
-  <Handover sessionId={sessionAction.sessionId} onclose={() => (sessionAction = null)} />
+  {@const id = sessionAction.sessionId}
+  {#await import('../modules/agents/Handover.svelte') then m}<m.default sessionId={id} onclose={() => (sessionAction = null)} />{/await}
 {:else if sessionAction?.kind === 'attach-issue'}
-  <AttachIssue sessionId={sessionAction.sessionId} onclose={() => (sessionAction = null)} />
+  {@const id = sessionAction.sessionId}
+  {#await import('../modules/agents/AttachIssue.svelte') then m}<m.default sessionId={id} onclose={() => (sessionAction = null)} />{/await}
 {:else if sessionAction?.kind === 'attach-product'}
-  <AttachProductStory sessionId={sessionAction.sessionId} onclose={() => (sessionAction = null)} />
+  {@const id = sessionAction.sessionId}
+  {#await import('../modules/agents/AttachProductStory.svelte') then m}<m.default sessionId={id} onclose={() => (sessionAction = null)} />{/await}
 {/if}
 
 {#if ui.broadcastOpen}
-  <BroadcastModal />
+  {#await import('../lib/components/BroadcastModal.svelte') then m}<m.default />{/await}
 {/if}
 
 {#if ui.newSessionOpen}
-  <NewSession
-    initialScratch={ui.newSessionScratch}
-    onclose={() => {
-      ui.newSessionOpen = false;
-      ui.newSessionScratch = false;
-    }}
-  />
+  {#await import('../modules/agents/NewSession.svelte') then m}
+    <m.default
+      initialScratch={ui.newSessionScratch}
+      onclose={() => {
+        ui.newSessionOpen = false;
+        ui.newSessionScratch = false;
+      }}
+    />
+  {/await}
 {/if}
 
 {#if ui.newWorkspaceOpen}
-  <NewWorkspace onclose={() => (ui.newWorkspaceOpen = false)} />
+  {#await import('../modules/settings/NewWorkspace.svelte') then m}<m.default onclose={() => (ui.newWorkspaceOpen = false)} />{/await}
 {/if}
 
 <ConfirmDialog />
@@ -1561,5 +1509,16 @@
     flex: 1;
     min-height: 0;
     overflow: hidden;
+  }
+  .page-load-error {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    height: 100%;
+    padding: 24px;
+    font-size: var(--fs-m);
+    color: var(--danger);
   }
 </style>
