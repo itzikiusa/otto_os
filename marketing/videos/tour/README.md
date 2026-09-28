@@ -103,9 +103,9 @@ line re-times the whole film automatically.
 node scripts/soundtrack.mjs       # sized to timing.json
 ```
 
-This produces an original ambient pad (Dmaj9 – Bm9 – Gmaj7 – A6sus at 112 BPM)
-plus a soft plucked pulse, with a riser on the intro and a swell and ring-out
-on the outro. It is normalized to −20 LUFS. It also writes the UI accents
+This produces an original 124 BPM instrumental with a punchy kick and clap,
+syncopated bass, bright chord stabs and a light arpeggio. Short phrase breaks
+and a final fade keep the score moving without vocals or commercial samples. It is normalized to −20 LUFS. It also writes the UI accents
 (`sfx-click|whoosh|tick|riser|impact.wav`).
 
 The instrumental composition keeps the score present throughout, with gentle
@@ -156,3 +156,76 @@ gh release upload walkthroughs out/otto-tour-instrumental-20260925.mp4 out/otto-
 stream of an existing tour with the current original score. It retains the
 video bytes, duration and chapter/caption timing. Run `soundtrack.mjs` first.
 The output has a new filename, so the previous narrated asset remains available.
+
+## Rooms edition: genuine collaboration footage
+
+The Rooms edition preserves the released film and inserts a new chapter before
+“Everywhere”. Its original manifest and captions are snapshotted under
+`script/baseline-20260925/`, so rerendering after publication never inserts Rooms
+a second time. It replaces the entire score with the new 124 BPM composition.
+The capture drives two independent browser participants through the production
+UI and an isolated daemon. No room endpoints, WebSocket events, transcripts or
+summary responses are mocked.
+
+The fictional Acme screen content is supplied as live canvas video; its tracks
+pass through the real WebRTC pipeline. Locally synthesized Samantha speech is
+supplied as microphone input; the production recorder sends it to real local
+whisper.cpp. A real shell executes the demonstrated regression test. The
+summary uses the actual signed-in Codex subscription, after the UI confirmation,
+with the production read-only, tool-disabled recap invocation. Only fictional
+demonstration evidence is sent. Existing credentials are neither copied into
+artifacts nor printed. The fake HOME keeps real agent history and projects out
+of the capture.
+
+Prerequisites: the current `ui/dist`, a daemon containing Rooms, `ffmpeg`,
+macOS `say`, the UI's installed Playwright, an existing local whisper.cpp binary
+and multilingual model, and `CODEX_HOME` pointing to subscription sign-in.
+The script validates those prerequisites and fails instead of fabricating output.
+
+```bash
+# Download the existing published movie once (read-only).
+gh release download walkthroughs -R itzikiusa/otto_os \
+  -p otto-tour-instrumental-20260925.mp4 -D out
+
+# One capture at a time. Ports must be free. No real microphone/desktop is read.
+OTTO_E2E_BIN=/path/to/ottod OTTO_E2E_PORT=7831 OTTO_E2E_PW_PORT=5231 \
+OTTO_TOUR_WHISPER=/path/to/whisper-cli \
+OTTO_TOUR_WHISPER_MODEL=/path/to/ggml-small.bin \
+  node scripts/capture-rooms.mjs
+
+# Two encoder threads, one filter thread; creates a candidate, never publishes.
+node scripts/rooms-edition.mjs out/otto-tour-instrumental-20260925.mp4
+node scripts/validate-rooms.mjs
+```
+
+The eleven captured beats cover start/invite, admission and chat, recap consent,
+voice and live screen sharing, granted highlighting/drawing, multiple presenters
+and pinning, requested terminal control, host takeover, the actual transcript,
+saved screen samples, and the actual Codex draft with decisions and action items.
+The caption strip is added in the edit; app content is unaltered. Short shots
+hold their final real frame long enough to read the instructions.
+
+`public/capture/rooms/` contains the clips, inspection frames, real recap evidence,
+shot list and provenance. `out/` contains the review MP4, candidate manifest,
+updated WebVTT captions, poster and timeline. All are ignored generated outputs.
+`film.candidate.json` is deliberately separate from the active application
+manifest: the app must keep its working published movie until the new assets
+are uploaded and verified.
+
+Limits shown honestly: this is browser room footage, not a recording of native
+macOS window chrome; takeover controls the shared session terminal, not arbitrary
+OS apps; the product does not imply webcam video or multiple simultaneous sources
+from one presenter. Screen recap images are periodic samples, not continuous
+video. Recognition failures remain visible coverage gaps in the genuine archive
+and draft. Physical microphone/display acceptance is a separate product check.
+
+Publication is a separate reviewed step: upload the candidate MP4, poster and
+`otto-tour-rooms.vtt` to the existing `walkthroughs` release, verify the assets
+are downloadable, then copy `out/film.candidate.json` to
+`ui/src/lib/walkthroughs/film.json` and copy `out/otto-tour-rooms.vtt` to the
+bundled `ui/src/lib/walkthroughs/otto-tour-rooms.vtt`, matching the candidate
+manifest’s `captions` basename. `TourFilm` resolves the locally globbed caption
+file by that basename because release asset responses lack CORS headers.
+Verify playback, the Rooms chapter jump, and the shifted outro captions before
+shipping the UI. None of the capture/render scripts performs these publication
+or active-manifest changes automatically.

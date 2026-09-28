@@ -52,7 +52,7 @@ export async function record(page, { quality = 88, width = 2560, height = 1440 }
       execFileSync('nice', [
         '-n', '10', FFMPEG, '-y', '-v', 'error', '-f', 'concat', '-safe', '0', '-i', join(dir, 'list.txt'),
         '-vf', `fps=30,scale=${width}:${height}:flags=lanczos,format=yuv420p`,
-        '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-movflags', '+faststart', outFile,
+        '-c:v', 'libx264', '-threads', '2', '-preset', 'medium', '-crf', '18', '-movflags', '+faststart', outFile,
       ]);
       rmSync(dir, { recursive: true, force: true });
       const secs = frames.length ? frames[frames.length - 1].ts - frames[0].ts : 0;

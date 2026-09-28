@@ -8,7 +8,8 @@ import { spawn, execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
 import { copyFileSync, chmodSync, createReadStream, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:http';
+import { createServer, request } from 'node:http';
+import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { extname, join } from 'node:path';
 
@@ -56,6 +57,15 @@ function serveStatic(dist) {
   const files = listFiles(dist);
   const index = join(dist, 'index.html');
   const server = createServer((req, res) => {
+    // Room guests use same-origin HTTP + WebSocket APIs. Forward to the
+    // isolated daemon rather than substituting responses or events.
+    if (/^\/(?:api|ws)\//.test(req.url ?? '')) {
+      const upstream = request({hostname: '127.0.0.1', port: Number(PORT), path: req.url, method: req.method, headers: req.headers}, response => {
+        res.writeHead(response.statusCode ?? 502, response.headers); response.pipe(res);
+      });
+      upstream.on('error', () => { if (!res.headersSent) res.writeHead(502); res.end(); });
+      req.pipe(upstream); return;
+    }
     const url = decodeURIComponent((req.url ?? '/').split('?')[0]);
     const file = files.get(url) ?? index;
     res.writeHead(200, {
@@ -63,6 +73,15 @@ function serveStatic(dist) {
       'Cache-Control': 'no-store',
     });
     createReadStream(file).pipe(res);
+  });
+  server.on('upgrade', (req, socket, head) => {
+    if (!(req.url ?? '').startsWith('/ws/')) { socket.destroy(); return; }
+    const upstream = connect(Number(PORT), '127.0.0.1', () => {
+      upstream.write(`${req.method} ${req.url} HTTP/${req.httpVersion}\r\n${req.rawHeaders.reduce((all, value, i, pairs) => i % 2 ? all : `${all}${value}: ${pairs[i + 1]}\r\n`, '')}\r\n`);
+      if (head.length) upstream.write(head); socket.pipe(upstream); upstream.pipe(socket);
+    });
+    upstream.on('error', () => socket.destroy()); socket.on('error', () => upstream.destroy());
+    socket.on('close', () => upstream.destroy());
   });
   return new Promise((resolve, reject) => {
     server.once('error', reject);
