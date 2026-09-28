@@ -5,6 +5,37 @@ All DTO names refer to types in `crates/otto-core/src/api.rs` (Rust) mirrored in
 Auth: `Authorization: Bearer <token>` unless marked public. Errors: HTTP status per
 `otto_core::Error` variant + body `Problem{code,message}`.
 
+**Session collaboration:** [Session rooms](./rooms.md) defines owner management,
+invitation admission, room-only credentials, chat/media/annotation actions and
+separate room terminal sockets. Ownership for creating a room is mandatory even
+for root. Existing session input routes enforce the room's driver authority.
+
+Room route index (HTTP paths below are relative to `/api/v1`; WebSocket paths
+are absolute). Detailed bodies, permissions and limits are in
+[rooms](./rooms.md) and [room recaps](./room-recaps.md).
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/sessions/{id}/room` | Start a room for an owned live session |
+| GET | `/rooms` | List the owner's rooms |
+| DELETE | `/rooms/{id}` | End a room, leaving its session running |
+| POST | `/rooms/{id}/invites` | Create a single-use invitation |
+| POST | `/room-join` | Redeem an invitation into pending membership |
+| GET, PUT | `/room-settings` | Read/configure public origin and media connectivity |
+| WS | `/ws/rooms/{id}` | Membership, admission, chat, media and recap control |
+| WS | `/ws/rooms/{id}/terminal` | Narrow room-authorized terminal stream |
+| POST | `/rooms/{id}/recaps` | Prepare a consent-gated recap |
+| GET | `/room-recaps` | List owner-local archives |
+| GET | `/room-recaps/{id}` | Read a paginated archive |
+| GET | `/room-recaps/{id}/export` | Export the event timeline |
+| GET | `/room-recaps/{id}/images/{image}` | Read one archived JPEG |
+| POST | `/room-recaps/{id}/audio` | Queue a consent-fenced speech chunk |
+| POST | `/room-recaps/{id}/screen` | Queue a shared-screen sample |
+| POST | `/room-recaps/{id}/gap` | Record a capture coverage gap |
+| POST, DELETE | `/room-recaps/{id}/summary` | Generate/cancel a Codex draft |
+| GET, PUT | `/room-recap-settings` | Read/configure local recognition |
+| GET | `/room-recap-capabilities` | Check recognition and subscription readiness |
+
 Roles: `root` = global; workspace roles `viewer < editor < admin`. Root passes every check.
 "member" below means any authenticated user; workspace-scoped routes require at least the
 listed role IN THAT WORKSPACE. Sessions/connections/repos/PRs inherit their workspace.

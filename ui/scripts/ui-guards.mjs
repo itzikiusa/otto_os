@@ -177,8 +177,8 @@ const RULES = {
   'body-style': 'document-level style write (body cursor/userSelect, documentElement setProperty) — use lib/dragCursor.ts or a scoped custom property',
 };
 
-/** Timers that are clocks / UI animation, not data polls (GAPS §0 G1): they
- *  tick a label or a frame counter and fetch nothing. */
+/** Clocks, UI animation and explicitly bounded protocol/media lifecycles, not
+ *  HTTP data polls (GAPS §0 G1). Protocol clocks must keep running when hidden. */
 const INTERVAL_ALLOW = new Set([
   'src/lib/poll.ts',
   'src/lib/api/mock.ts',
@@ -197,6 +197,10 @@ const INTERVAL_ALLOW = new Set([
   'src/modules/canvas/PresentMode.svelte',
   'src/modules/browser/live/RemoteLiveView.svelte', // fps meter
   'src/modules/database/ResultsGrid.svelte', // running-query elapsed clock
+  'src/modules/rooms/RoomAnnotations.svelte', // local expiry clock; effect cleanup clears it
+  'src/modules/rooms/room-client.ts', // WebSocket heartbeat; detach/close clears it
+  'src/modules/rooms/room-media.ts', // audio acknowledgement + capture geometry; leave/stop/dispose clear timers
+  'src/modules/rooms/recap-capture.ts', // consent-epoch media clock; bounded sample/upload queues, reset/finish stop it
 ]);
 
 /** [{ css, offset }] — the CSS to scan and where it starts in the file. */

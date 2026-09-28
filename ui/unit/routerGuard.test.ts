@@ -4,14 +4,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
+import { captureRoomInvite, roomInvite, forgetRoom } from '../src/modules/rooms/room-access.ts';
 
 const flush = async () => {
   for (let i = 0; i < 20; i++) await Promise.resolve();
 };
 
-function fixture() {
+function fixture(initialHash = '#/home') {
   const listeners: (() => void)[] = [];
-  const location = { hash: '#/home' };
+  const location = { hash: initialHash };
   const fire = () => listeners.forEach((l) => l());
   const window = {
     location: new Proxy(location, {
@@ -41,6 +42,7 @@ function fixture() {
       './win': { winKey: (k: string) => k },
       './storage': { lsGet: () => null, lsSet: () => {} },
       './desktop': { isEmbedded: false },
+      '../modules/rooms/room-access': { captureRoomInvite },
     },
     { window, history },
   );
@@ -108,4 +110,18 @@ test('replace() is never guarded', async () => {
   f.router.guard(() => false);
   f.router.replace('home/overview');
   assert.equal(f.location.hash, '#/home/overview');
+});
+
+
+test('room invitation is captured only in memory and removed before route history is recorded', async () => {
+  const f = fixture('#/room/unit-room/invite_1234567890');
+  assert.equal(f.location.hash, '#/room/unit-room');
+  assert.equal(f.router.module, 'room');
+  assert.equal(roomInvite('unit-room'), 'invite_1234567890');
+  f.router.go('home');
+  await flush();
+  f.router.back();
+  await flush();
+  assert.equal(f.location.hash, '#/room/unit-room', 'back navigation cannot restore the capability in the URL');
+  forgetRoom('unit-room');
 });

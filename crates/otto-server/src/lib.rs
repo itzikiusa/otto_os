@@ -74,6 +74,7 @@ pub mod review_fallback;
 pub mod review_session;
 mod review_summarizer;
 pub mod routes;
+pub mod rooms;
 pub mod run_callback;
 pub mod run_channels;
 pub mod run_context;
@@ -145,7 +146,7 @@ pub fn build_router(
     api_extras: Vec<Router<ServerCtx>>,
     root_extras: Vec<Router>,
 ) -> Router {
-    let mut protected = routes::protected_routes();
+    let mut protected = routes::protected_routes().merge(rooms::protected_routes());
     for extra in api_extras {
         protected = protected.merge(extra);
     }
@@ -172,12 +173,13 @@ pub fn build_router(
             auth::auth_middleware,
         ));
 
-    let api = routes::public_routes().merge(protected);
+    let api = routes::public_routes().merge(rooms::public_routes()).merge(protected);
     let events_tx = ctx.events.clone();
 
     let mut app = Router::new()
         .nest("/api/v1", api)
         .route("/ws/events", get(ws_events::events_ws))
+        .merge(rooms::ws_routes())
         .with_state(ctx)
         .fallback(spa::spa_fallback);
 
@@ -286,6 +288,11 @@ fn is_private_lan_host(host: &str) -> bool {
 }
 
 pub mod state_archive;
+
+/// Private-process entry point used by `ottod room-ocr`; never starts a server.
+pub fn run_room_ocr_helper() -> bool {
+    rooms::recap_engines::run_ocr_stdio()
+}
 
 #[cfg(test)]
 mod cors_tests {

@@ -19,6 +19,8 @@ const V1 = '/api/v1';
 
 const ROUTES = [
   'home',
+  'rooms',
+  'rooms/recaps',
   'assistant',
   'history',
   'run-with-otto',

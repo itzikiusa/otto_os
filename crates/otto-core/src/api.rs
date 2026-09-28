@@ -3,6 +3,11 @@
 //! These types are mirrored by `ui/src/lib/api/types.ts`. Endpoint shapes are
 //! documented in `docs/contracts/api.md`; the WS protocol in `docs/contracts/ws.md`.
 
+pub mod rooms;
+pub mod recap;
+pub use recap::*;
+pub use rooms::*;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

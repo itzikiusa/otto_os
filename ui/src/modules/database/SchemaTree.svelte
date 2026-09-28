@@ -649,7 +649,7 @@
           <div class="node-empty" class:fixed-h={windowed} style="padding-inline-start: {(row.depth + 1) * 13 + 18}px">
             {row.text}
           </div>
-        {:else}
+        {:else if row.t === 'more'}
           <div class="node-more" class:fixed-h={windowed} style="padding-inline-start: {(row.depth + 1) * 13 + 18}px">
             showing {CHILD_CAP.toLocaleString()} of {row.shown.toLocaleString()} — refine filter
           </div>

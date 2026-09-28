@@ -190,6 +190,7 @@ async fn test_ctx(pool: &SqlitePool, base_url: String, tmp: &std::path::Path) ->
         db_explorer,
         db_assist: otto_server::db_assist::new_registry(),
         transcript_cache: Default::default(),
+        rooms: Default::default(),
         brokers,
         mcp,
         spawner: Arc::new(NoopSpawner),

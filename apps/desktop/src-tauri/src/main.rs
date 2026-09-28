@@ -12,6 +12,7 @@ mod bar;
 mod browser;
 mod panel;
 mod popout;
+mod rooms;
 mod shortcuts;
 mod snip;
 mod supervisor;
@@ -104,6 +105,7 @@ fn main() {
             tray::tray_info,
             popout::open_popout,
             popout::open_in_otto,
+            rooms::open_room_window,
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").expect("main window");

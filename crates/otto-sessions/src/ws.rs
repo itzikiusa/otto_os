@@ -81,12 +81,16 @@ struct TokenQuery {
     token: Option<String>,
 }
 
+fn user_input_default() -> bool { true }
+
 /// Client → server control frames.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientFrame {
     Input {
         data: String,
+        #[serde(default = "user_input_default")]
+        user: bool,
     },
     Resize {
         cols: u16,
@@ -413,8 +417,10 @@ impl CreditGate {
     /// The user typed while this viewer is more than a window behind: they
     /// want the present, not the held backlog (the server-side twin of the
     /// client's `resync` on input). The held output becomes a snapshot.
-    fn skip_on_input(&mut self, now: tokio::time::Instant) {
-        if !self.held.is_empty() {
+    fn skip_on_input(&mut self, user: bool, now: tokio::time::Instant) {
+        // Emulator replies (for example cursor reports) are not a request to
+        // interrupt a backlog; only explicit typing may discard held output.
+        if user && !self.held.is_empty() {
             self.held = bytes::BytesMut::new();
             self.skipped = true;
             self.track_stall(now);
@@ -647,6 +653,7 @@ async fn ws_auth_gate<S: SessionsCtx>(
     //
     //  - **Unscoped token** (`scope == None`): unchanged behaviour — the
     //    owner-or-admin gate (#L9) plus the Editor probe for write capability.
+    let scoped = auth.scope.is_some();
     let can_input = match auth.scope {
         Some(scope) => {
             if scope.session_id != session_id {
@@ -699,6 +706,7 @@ async fn ws_auth_gate<S: SessionsCtx>(
     // Propagate auth results to the handler via extensions.
     req.extensions_mut().insert(LiveTerminalAuth {
         user: user.clone(),
+        scoped,
         token,
         auth: st.auth.clone(),
     });
@@ -718,6 +726,7 @@ struct CanInput(bool);
 
 #[derive(Clone)]
 struct LiveTerminalAuth {
+    scoped: bool,
     user: otto_core::domain::User,
     token: String,
     auth: Arc<dyn TokenAuthenticator>,
@@ -1053,6 +1062,8 @@ async fn serve_terminal<S: SessionsCtx>(
     } else {
         REAUTH_INTERVAL
     };
+    let input_user = live_auth.user.id.clone();
+    let input_scoped = live_auth.scoped;
     tokio::spawn(reauth_loop(
         ctx.clone(),
         session_id.clone(),
@@ -1218,7 +1229,7 @@ async fn serve_terminal<S: SessionsCtx>(
                     continue;
                 };
                 match frame {
-                    ClientFrame::Input { data } => {
+                    ClientFrame::Input { data, user } => {
                         if !can_input {
                             if !warned_forbidden {
                                 warned_forbidden = true;
@@ -1249,12 +1260,11 @@ async fn serve_terminal<S: SessionsCtx>(
                             // Typed while more than a window behind (^C mid-
                             // flood): the held backlog becomes one snapshot.
                             if let Some(c) = credit.as_mut() {
-                                c.skip_on_input(tokio::time::Instant::now());
+                                c.skip_on_input(user, tokio::time::Instant::now());
                             }
-                            // Typing claims size authority for this viewer.
-                            ctx.manager().note_input_authority(&session_id, conn_id);
+                            // Successful explicit typing claims size authority.
                             let started = std::time::Instant::now();
-                            let res = ctx.manager().input(&session_id, &bytes).await;
+                            let res = ctx.manager().human_input(&session_id, &input_user, input_scoped, user, &bytes).await;
                             let elapsed = started.elapsed();
                             if elapsed > INPUT_SLOW {
                                 tracing::debug!(
@@ -1264,7 +1274,10 @@ async fn serve_terminal<S: SessionsCtx>(
                                 );
                             }
                             match res {
-                                Ok(()) => warned_input = false,
+                                Ok(()) => {
+                                    warned_input = false;
+                                    if user { ctx.manager().note_input_authority(&session_id, conn_id); }
+                                },
                                 Err(e) if !warned_input => {
                                     warned_input = true;
                                     let frame = serde_json::json!({
@@ -1283,7 +1296,7 @@ async fn serve_terminal<S: SessionsCtx>(
                     }
                     ClientFrame::Resize { cols, rows } => {
                         if can_input && ctx.manager().may_resize(&session_id, conn_id) {
-                            let _ = ctx.manager().resize(&session_id, cols, rows).await;
+                            let _ = ctx.manager().human_resize(&session_id, &input_user, input_scoped, cols, rows).await;
                         } else if can_input {
                             // Forensic trail for the half-width bug class: a
                             // denied resize is a viewer that WOULD have re-pinned
@@ -1297,7 +1310,7 @@ async fn serve_terminal<S: SessionsCtx>(
                     }
                     ClientFrame::Claim => {
                         if can_input {
-                            ctx.manager().note_input_authority(&session_id, conn_id);
+                            let _ = ctx.manager().human_claim_size(&session_id, &input_user, input_scoped, conn_id).await;
                         }
                     }
                     // Flow control is per-viewer and read-only safe: it only
@@ -1892,6 +1905,7 @@ mod tests {
             .expect("share token authenticates")
             .effective_user;
         let live_auth = LiveTerminalAuth {
+            scoped: true,
             user,
             token: token.clone(),
             auth: st.auth.clone(),
@@ -2262,7 +2276,7 @@ mod tests {
         g.push(vec![0; 256 * 1024], now);
         g.push(vec![1; 100 * 1024], now);
         assert_eq!(g.held.len(), 100 * 1024);
-        g.skip_on_input(now);
+        g.skip_on_input(true, now);
         assert!(g.skipped && g.held.is_empty());
         // The client's resync (queue dropped + acked) answers it; the socket
         // loop marks the gate superseded after sending that snapshot.
@@ -2272,8 +2286,29 @@ mod tests {
         // Input while caught up changes nothing.
         let mut h = CreditGate::new(256 * KB);
         h.push(vec![0; 1024], now);
-        h.skip_on_input(now);
+        h.skip_on_input(true, now);
         assert!(!h.skipped);
+    }
+
+    /// Automatic terminal responses preserve pending output; legacy clients
+    /// without the flag still represent explicit input.
+    #[test]
+    fn credit_emulator_reply_preserves_held_output() {
+        let now = tokio::time::Instant::now();
+        let mut gate = CreditGate::new(64 * KB);
+        gate.push(vec![0; 64 * 1024], now);
+        gate.push(b"held output".to_vec(), now);
+        let reply = serde_json::from_str::<ClientFrame>(
+            r#"{"type":"input","data":"G1swOzBS","user":false}"#,
+        ).unwrap();
+        let ClientFrame::Input { user, .. } = reply else { panic!("input expected") };
+        gate.skip_on_input(user, now);
+        assert!(!gate.skipped);
+        assert_eq!(gate.ack(64 * KB, now), CreditStep::Send(Bytes::from_static(b"held output")));
+        assert!(matches!(
+            serde_json::from_str::<ClientFrame>(r#"{"type":"input","data":"Aw=="}"#),
+            Ok(ClientFrame::Input { user: true, .. })
+        ));
     }
 
     /// Stale / duplicate / future acks are harmless.

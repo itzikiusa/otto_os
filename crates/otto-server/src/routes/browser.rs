@@ -876,7 +876,7 @@ async fn send_annotation(
     let nonce = otto_core::new_id();
     let block = build_context_block(&annotation, &title, &nonce);
     ctx.manager
-        .input(&req.session_id, format!("{block}\n").as_bytes())
+        .human_input(&req.session_id, &user.id, false, true, format!("{block}\n").as_bytes())
         .await
         .map_err(ApiError)?;
     Ok(StatusCode::OK)
@@ -957,7 +957,7 @@ async fn ask_session(
     let nonce = otto_core::new_id();
     let block = build_ask_block(&req.url, &title, &marks, text, &nonce);
     ctx.manager
-        .input(&req.session_id, format!("{block}\n").as_bytes())
+        .human_input(&req.session_id, &user.id, false, true, format!("{block}\n").as_bytes())
         .await
         .map_err(ApiError)?;
     Ok(StatusCode::OK)
@@ -1757,6 +1757,7 @@ mod tests {
             db_explorer,
             db_assist: crate::db_assist::new_registry(),
             transcript_cache: Default::default(),
+        rooms: Default::default(),
             brokers,
             mcp,
             spawner: Arc::new(NoopSpawner),

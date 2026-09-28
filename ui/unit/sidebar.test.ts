@@ -44,7 +44,7 @@ test('favorites come first, in the saved order, and leave their own sections', (
   for (const id of favs) assert.equal(sectionOf(secs, id), 'favorites');
   // The rest of each section keeps its order.
   const work = secs.find((s) => s.group.id === 'work')!;
-  assert.deepEqual(ids(work.modules), ['home', 'assistant', 'history', 'run-with-otto', 'mission-control']);
+  assert.deepEqual(ids(work.modules), ['home', 'assistant', 'rooms', 'history', 'run-with-otto', 'mission-control']);
   // Unfavoriting puts a module back in its section, in its saved slot.
   const back = sidebarSections(all(), ['workflows', 'git', 'connections']);
   assert.deepEqual(ids(back.find((s) => s.group.id === 'work')!.modules).slice(0, 3), ['home', 'assistant', 'agents']);
@@ -62,6 +62,7 @@ test('favorites respect RBAC, features and plugins: an unavailable favorite is s
   const secs = sidebarSections(mods, ['agents', 'git', 'plugin/gone', 'vault', 'plugin/demo', 'nope']);
   assert.deepEqual(ids(secs[0].modules), ['git', 'vault', 'plugin/demo']);
   assert.ok(!secs.flatMap((s) => ids(s.modules)).includes('agents'));
+  assert.ok(!secs.flatMap((s) => ids(s.modules)).includes('rooms'), 'Rooms requires agent visibility');
   // A plugin favorite leaves Plugins, which (now empty) is dropped.
   assert.ok(!secs.some((s) => s.group.id === 'plugins'));
 });

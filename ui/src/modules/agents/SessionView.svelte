@@ -20,6 +20,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { activity } from '../../lib/stores/activity.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import StartRoomModal from '../rooms/StartRoomModal.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { popoutItems } from '../../lib/popoutMenu';
   import { now } from '../../lib/stores/now.svelte';
@@ -197,6 +198,7 @@
   let attachProductOpen = $state(false);
   let handoverOpen = $state(false);
   let shareOpen = $state(false);
+  let roomOpen = $state(false);
   /** ⋯ → Network profile…: show the network strip for a session without a
    *  profile (it is hidden then — see the markup). */
   let netOpen = $state(false);
@@ -660,6 +662,7 @@
             ...(isAgent ? [{ label: 'Hand over to…', icon: 'send', action: openHandover } as MenuItem] : []),
             // Parity with the tab's right-click menu — a tiled/split pane has no
             // tab to right-click, so Share was unreachable from here.
+            ...((session?.kind === 'agent') ? [{ label: 'Start room…', icon: 'people', action: () => (roomOpen = true) } as MenuItem] : []),
             { label: 'Share…', icon: 'share', action: () => (shareOpen = true) } as MenuItem,
             { separator: true } as MenuItem,
             {
@@ -1002,6 +1005,7 @@
   <Handover {sessionId} onclose={() => (handoverOpen = false)} />
 {/if}
 
+{#if roomOpen}<StartRoomModal {sessionId} onclose={() => (roomOpen = false)} />{/if}
 {#if shareOpen}
   <ShareModal {sessionId} onclose={() => (shareOpen = false)} />
 {/if}

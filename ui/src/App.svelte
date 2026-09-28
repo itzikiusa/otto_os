@@ -18,28 +18,32 @@
   let shellChunk: Promise<typeof import('./shell/App.svelte')> | null = null;
   let onboardingChunk: Promise<typeof import('./modules/settings/Onboarding.svelte')> | null = null;
   let loginChunk: Promise<typeof import('./modules/settings/Login.svelte')> | null = null;
+  let roomChunk: Promise<typeof import('./modules/rooms/RoomGuest.svelte')> | null = null;
   let shareChunk: Promise<typeof import('./modules/share/SharePage.svelte')> | null = null;
   const shell = () => (shellChunk ??= import('./shell/App.svelte'));
   const onboarding = () => (onboardingChunk ??= import('./modules/settings/Onboarding.svelte'));
   const login = () => (loginChunk ??= import('./modules/settings/Login.svelte'));
+  const room = () => (roomChunk ??= import('./modules/rooms/RoomGuest.svelte'));
   const share = () => (shareChunk ??= import('./modules/share/SharePage.svelte'));
   // The main window fetches the shell chunk while /meta is still in flight.
-  if (router.module !== 'bar' && router.module !== 'tray' && router.module !== 's') void shell().catch(() => {});
+  if (router.module !== 'bar' && router.module !== 'tray' && router.module !== 's' && router.module !== 'room') void shell().catch(() => {});
 
   $effect(() => {
-    void auth.boot();
+    if (router.module !== 'room') void auth.boot();
   });
 
   // First launch installs + starts the daemon in the background; poll until
   // it answers instead of parking on a manual Retry button.
   $effect(() => {
-    if (auth.phase !== 'offline') return;
+    if (router.module === 'room' || auth.phase !== 'offline') return;
     const timer = setInterval(() => void auth.boot(true), 2000);
     return () => clearInterval(timer);
   });
 </script>
 
-{#if router.module === 's'}
+{#if router.module === 'room'}
+  {#await room()}{@render chunkWait()}{:then m}{#key router.parts[1]}<m.default roomId={router.parts[1] ?? ''} />{/key}{:catch}{@render chunkError()}{/await}
+{:else if router.module === 's'}
   <!-- Guest share view: a scoped share-link recipient has no account, so this
        route must bypass the login/onboarding gate entirely and render the
        single-session SharePage using the token captured from the URL fragment. -->

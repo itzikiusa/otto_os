@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Otto uses the microphone only while you hold the talk shortcut or the mic button, to hear what you ask the assistant.</string>
+	<string>Otto uses the microphone for assistant dictation when you use the talk control, and for room calls only when you choose Unmute. Muting or leaving a room call stops microphone capture.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Otto turns what you say to the assistant into text on this Mac.</string>
 </dict>

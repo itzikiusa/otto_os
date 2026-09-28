@@ -44,6 +44,8 @@ pub struct ServerCtx {
     pub plugins: Arc<crate::plugins::PluginManager>,
     // -- module handles (wired by ottod at boot) ---------------------------
     pub manager: Arc<SessionManager>,
+    /// Capability-isolated, ephemeral session rooms (never persisted to AuthRepo).
+    pub rooms: Arc<crate::rooms::RoomRegistry>,
     pub workspaces: WorkspacesRepo,
     pub connections: Arc<ConnectionsService>,
     /// Native data-access layer for the DB Explorer (browse/query/schema).
