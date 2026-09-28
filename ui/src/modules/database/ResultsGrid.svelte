@@ -10,6 +10,7 @@
   // When the result comes from a simple single-table SELECT with a known
   // primary key, cells become double-click editable (issues an UPDATE via the
   // connection's query API after a review).
+  import { onDestroy } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import {
@@ -45,6 +46,18 @@
   import { cellMatchesFilter } from './grid-format';
   import RowDetail from './RowDetail.svelte';
   import type { MenuItem } from '../../lib/contextmenu.svelte';
+
+  // Menu actions capture cell values. Destroying this result (source switch,
+  // closure or access revocation) must release them without closing a newer
+  // menu opened elsewhere in the app.
+  let menuSeq: number | null = null;
+  function showMenu(event: MouseEvent | KeyboardEvent, items: MenuItem[]): void {
+    ctxMenu.show(event, items);
+    menuSeq = ctxMenu.seq;
+  }
+  onDestroy(() => {
+    if (ctxMenu.open && ctxMenu.seq === menuSeq) ctxMenu.close();
+  });
 
   // ── Send-to-agent dialog (B2a: replaces raw injectInput for DB results) ──────
   let sendToAgentOpen = $state(false);
@@ -767,13 +780,13 @@
         items.push({ label: 'Delete this row…', icon: 'trash', danger: true, action: () => flow.deleteRows([rowIdx]) });
       }
     }
-    ctxMenu.show(e, items);
+    showMenu(e, items);
   }
   function headerMenu(e: MouseEvent, ci: number): void {
     if (mini) return;
     const col = result?.columns[ci]?.name;
     if (!col) return;
-    ctxMenu.show(e, [
+    showMenu(e, [
       { label: 'Sort ascending', icon: 'arrowUp', action: () => { sortCol = ci; sortDir = 'asc'; } },
       { label: 'Sort descending', icon: 'arrowDown', action: () => { sortCol = ci; sortDir = 'desc'; } },
       { label: 'Clear sort', disabled: sortCol !== ci, action: () => { sortCol = null; sortDir = null; } },
@@ -904,7 +917,7 @@
         },
       );
     }
-    ctxMenu.show(e, items);
+    showMenu(e, items);
   }
   function exportMenu(e: MouseEvent): void {
     const items: MenuItem[] = [
@@ -925,7 +938,7 @@
     if (connectionId && (database.capabilities?.sql || database.capabilities?.engine === 'mongodb')) {
       items.push({ separator: true }, { label: 'Import file…', icon: 'arrowUp', action: () => database.openImportDialog() });
     }
-    ctxMenu.show(e, items);
+    showMenu(e, items);
   }
   function moreMenu(e: MouseEvent): void {
     const items: MenuItem[] = [];
@@ -960,7 +973,7 @@
     items.push({ label: 'Send to running agent…', icon: 'send', action: sendToRunningAgent });
     // Same gate as the editor's Ask AI buttons: the DB Assistant runs an agent.
     if (connectionId && canAssist) items.push({ label: 'Examine with AI', icon: 'sparkle', action: examineWithAi });
-    ctxMenu.show(e, items);
+    showMenu(e, items);
   }
 
   // ── Large-batch streaming export to a local file ─────────────────────────────
@@ -1224,11 +1237,13 @@
         {#if flow.selected.size === 2}
           <button class="sel-gen" onclick={() => (compare = [...flow.selected] as [number, number])} title="Compare the two selected records side by side"><Icon name="split" size={11} />Compare</button>
         {/if}
+        {#if flow.editable}
         <button class="sel-del" onclick={() => flow.deleteSelected()} title="Delete selected rows (you review before it runs)">
           <Icon name="trash" size={11} />Delete…
         </button>
+        {/if}
         <button class="sel-clear" onclick={() => flow.clearSelection()}>Clear</button>
-        <span class="sel-hint">you'll review the statement before it runs</span>
+        {#if flow.editable}<span class="sel-hint">you'll review the statement before it runs</span>{/if}
       </div>
     {/if}
 

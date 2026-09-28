@@ -11,6 +11,8 @@
 mod bar;
 mod browser;
 mod panel;
+mod panes;
+mod panes_policy;
 mod popout;
 mod rooms;
 mod shortcuts;
@@ -55,24 +57,29 @@ fn main() {
                     // The bar / tray panels never take menu events (their
                     // pages have no menu bridge) — only app windows do.
                     let focused = app
-                        .webview_windows()
+                        .windows()
                         .into_iter()
-                        .find(|(l, w)| windows::is_app_window(l) && w.is_focused().unwrap_or(false))
+                        .find(|(l, w)| (windows::is_app_window(l) || l.starts_with(panes::PREFIX)) && w.is_focused().unwrap_or(false))
                         .map(|(l, _)| l);
                     match focused {
                         // menu.ts listens per-webview-window, so a targeted
                         // emit reaches exactly one window.
                         Some(l) => {
-                            let _ = app.emit_to(l.as_str(), "otto://menu", id.to_string());
+                            let host = panes::menu_host(app, &l);
+                            let _ = app.emit_to(tauri::EventTarget::webview(host), "otto://menu", id.to_string());
                         }
                         None => {
-                            let _ = app.emit("otto://menu", id.to_string());
+                            if let Some(win) = windows::primary_window(app) {
+                                let _ = app.emit_to(tauri::EventTarget::webview(win.label()), "otto://menu", id.to_string());
+                            }
                         }
                     }
                 }
             }
         })
         .invoke_handler(tauri::generate_handler![
+            panes::pane_open, panes::pane_layout, panes::pane_state, panes::pane_to_host, panes::pane_to_guest,
+            panes::pane_detach, panes::pane_return, panes::pane_window_action, panes::pane_monitors, panes::pane_close, panes::pane_focus,
             supervisor::daemon_status,
             supervisor::daemon_start,
             supervisor::daemon_restart,
@@ -157,13 +164,15 @@ fn main() {
                 windows::snapshot_all(app);
             }
             tauri::RunEvent::WindowEvent { label, event, .. } => match event {
-                tauri::WindowEvent::CloseRequested { .. } => {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    if panes::intercept_close(app, &label) { api.prevent_close(); return; }
                     if windows::is_popout(&label) {
                         popout::on_close_requested(app, &label);
                     }
                     windows::on_close_requested(app, &label);
                 }
                 tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+                    if matches!(event, tauri::WindowEvent::Resized(_)) { panes::resized(app, &label); }
                     // Pop-outs remember frames per route; the bar/tray panels
                     // are placed by code and never persisted.
                     if windows::is_popout(&label) {
@@ -172,6 +181,7 @@ fn main() {
                         windows::schedule_snapshot(app);
                     }
                 }
+                tauri::WindowEvent::Destroyed => panes::destroyed(app, &label),
                 tauri::WindowEvent::Focused(false) if label == tray::POPOVER_LABEL => {
                     tray::on_blur(app);
                 }
@@ -185,11 +195,11 @@ fn main() {
 /// The dock badge is app-global, so the MAIN window is its single writer —
 /// otherwise N windows race and the last writer wins with a partial count.
 #[tauri::command]
-fn set_badge_count(window: tauri::WebviewWindow, count: u32) {
-    if window.label() != "main" {
+fn set_badge_count(webview: tauri::Webview, count: u32) {
+    if webview.label() != "main" {
         return;
     }
-    let _ = window.set_badge_count(if count == 0 { None } else { Some(count as i64) });
+    let _ = webview.window().set_badge_count(if count == 0 { None } else { Some(count as i64) });
 }
 
 fn build_menu(app: &tauri::App) -> tauri::Result<()> {

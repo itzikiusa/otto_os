@@ -11,12 +11,14 @@
 // control, so tabs/buttons/inputs keep working and only the empty title-bar
 // surface drags.
 
+import { isNativePane } from './desktop';
+
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
 const INTERACTIVE = 'button, a, input, textarea, select, label, [role="button"], [role="tab"], [contenteditable], [data-no-drag]';
 
 export async function startWindowDrag(e: MouseEvent): Promise<void> {
-  if (!isTauri) return;
+  if (!isTauri || isNativePane) return;
   if (e.button !== 0) return;
   // Don't hijack clicks meant for a control inside the drag surface.
   const target = e.target as HTMLElement | null;

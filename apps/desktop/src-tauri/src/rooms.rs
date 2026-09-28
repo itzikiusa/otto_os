@@ -48,7 +48,7 @@ fn parse_invitation(raw: &str) -> Result<Invitation, String> {
     }
     let parts: Vec<_> = url.fragment().unwrap_or_default().split('/').collect();
     if parts.len() != 4
-        || parts[0] != ""
+        || !parts[0].is_empty()
         || parts[1] != "room"
         || !opaque_segment(parts[2], 128)
         || !opaque_segment(parts[3], 512)

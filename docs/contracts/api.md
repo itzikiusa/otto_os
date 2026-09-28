@@ -3720,6 +3720,17 @@ route opened when no document shows it. Phase 1: `state`, `open`, `focus`,
 `db_run_query`, `db_get_result`, `db_page`, `db_set_view`, `db_open_object`,
 `db_explain`, `db_stop`, `db_export`; later phases add entries per module.
 
+When a UI document answers `db_list_connections`, each connection also carries
+`tabs: [{tab_id, statement, running, has_result, by_agent}]` for its open query
+tabs (`[]` when closed; statement previews capped at 200 characters). This
+allows an agent to retain query references across multiple open connections.
+The headless fallback has no UI tabs. Connections module state adds the same
+metadata grouped as `connection_tabs: [{connection_id, tabs}]`, alongside its
+existing selected-connection `tabs`. Result rows remain available only through
+the capped/redacted result commands. Passing both `tab_id` and `connection_id`
+to `db_run_query` must identify the same owner; a mismatch is `invalid_args`
+before tab changes or query execution.
+
 ---
 
 ## Scheduled Tasks

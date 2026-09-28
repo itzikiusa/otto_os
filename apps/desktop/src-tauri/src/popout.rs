@@ -150,7 +150,7 @@ fn save_frame(app: &AppHandle, label: &str) {
     let Some(route) = with_open(|o| o.get(label).cloned()) else {
         return;
     };
-    if let Some(frame) = app.get_webview_window(label).as_ref().and_then(live_frame) {
+    if let Some(frame) = app.get_window(label).as_ref().and_then(live_frame) {
         if !frame.fullscreen {
             remember(&route, frame);
         }
@@ -184,11 +184,11 @@ fn initial_frame(app: &AppHandle, route: &str) -> WinFrame {
     let mut frame = remembered(route).unwrap_or_else(|| {
         // Cascade from the focused app window (else main), at a pop-out size.
         let base = app
-            .webview_windows()
+            .windows()
             .values()
             .find(|w| crate::windows::is_app_window(w.label()) && w.is_focused().unwrap_or(false))
             .and_then(live_frame)
-            .or_else(|| app.get_webview_window("main").as_ref().and_then(live_frame));
+            .or_else(|| app.get_window("main").as_ref().and_then(live_frame));
         match base {
             Some(b) => WinFrame {
                 label: String::new(),
@@ -317,7 +317,9 @@ pub fn open_in_otto(app: AppHandle, route: Option<String>) -> Result<(), String>
     let _ = win.set_focus();
     if let Some(r) = route {
         // Safe to splice: route_ok admits no quote, backslash or newline.
-        let _ = win.eval(format!("location.hash='#/{r}'"));
+        if let Some(view) = app.get_webview(win.label()) {
+            let _ = view.eval(format!("location.hash='#/{r}'"));
+        }
     }
     Ok(())
 }

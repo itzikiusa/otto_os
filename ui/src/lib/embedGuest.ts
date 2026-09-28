@@ -1,10 +1,11 @@
 // The side pane's half of the side-by-side protocol (lib/sidePane.ts): runs
-// only in the embedded document (`?embed=1`, an iframe in the main window).
+// only in the embedded document (`?embed=1`, a native child or browser iframe).
 // It tells the host where this pane is, hands the host the navigations and
 // keys that belong to the window, and takes the host's navigate / workspace /
 // menu / command requests. The host's half is stores/sidePane.svelte.ts.
 
-import { isEmbedded } from './desktop';
+import { isEmbedded, isNativePane, nativePaneContext } from './desktop';
+import { nativePane, startNativePaneState } from './nativePane';
 import { router } from './router.svelte';
 import { embedChrome } from './stores/embedChrome.svelte';
 import {
@@ -21,6 +22,10 @@ type Payload<T> = T extends unknown ? Omit<T, 'ns'> : never;
 /** Post to the host window (a no-op outside the side pane). */
 export function postToHost(msg: Payload<GuestMsg>): void {
   if (!isEmbedded) return;
+  if (isNativePane) {
+    void nativePane.toHost({ ns: SIDE_NS, ...msg }).catch(() => {});
+    return;
+  }
   try {
     window.parent.postMessage({ ns: SIDE_NS, ...msg }, targetOrigin(window.location.origin));
   } catch {
@@ -35,6 +40,7 @@ let hostPrimary: string | null = null;
 /** Which module the MAIN pane shows right now — read straight from the host's
  *  location (same origin, always current), else its last report. */
 export function hostPrimaryKey(): string | null {
+  if (isNativePane) return hostPrimary;
   try {
     return paneKey(window.parent.location.hash);
   } catch {
@@ -51,6 +57,7 @@ export function hostPrimaryKey(): string | null {
  */
 export function hostWindowId(): string | null {
   if (!isEmbedded) return null;
+  if (nativePaneContext) return nativePaneContext.host;
   try {
     const p = window.parent as Window & { __OTTO_WIN__?: string };
     const fromTauri = typeof p.__OTTO_WIN__ === 'string' ? p.__OTTO_WIN__ : '';
@@ -85,9 +92,8 @@ export function startGuest(hooks: GuestHooks): () => void {
     deliver: (route) => postToHost({ type: 'open-in-main', route }),
   });
 
-  const onMessage = (e: MessageEvent): void => {
-    if (e.source !== window.parent) return;
-    const msg: HostMsg | null = readHostMsg(e.data);
+  const receive = (data: unknown): void => {
+    const msg: HostMsg | null = readHostMsg(data);
     if (!msg) return;
     switch (msg.type) {
       case 'navigate':
@@ -108,13 +114,31 @@ export function startGuest(hooks: GuestHooks): () => void {
         break;
     }
   };
+  const onMessage = (e: MessageEvent): void => {
+    if (!isNativePane && e.source === window.parent) receive(e.data);
+  };
+  let stopped = false;
+  let unlisten: (() => void) | undefined;
+  const ready = (): void => postToHost({ type: 'ready', route: window.location.hash.replace(/^#\/?/, '') });
+  if (isNativePane) {
+    void nativePane.onGuest(receive).then(async (stop) => {
+      if (stopped) { stop(); return; }
+      unlisten = stop;
+      await startNativePaneState();
+      if (!stopped) ready();
+    }).catch(() => {});
+  } else {
+    window.addEventListener('message', onMessage);
+    ready();
+  }
   const onFocus = (): void => postToHost({ type: 'focus' });
-  window.addEventListener('message', onMessage);
   window.addEventListener('focus', onFocus);
   // A click on a non-focusable surface still moves focus into this document;
   // report it on pointerdown too so the active-pane bar follows the click.
   window.addEventListener('pointerdown', onFocus, true);
   return () => {
+    stopped = true;
+    unlisten?.();
     router.setDelegate(null);
     window.removeEventListener('message', onMessage);
     window.removeEventListener('focus', onFocus);

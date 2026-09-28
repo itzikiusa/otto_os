@@ -129,7 +129,7 @@
         <div class="rail-sep" role="separator" aria-label={sec.group.label} data-testid="rail-sep"></div>
       {/if}
       {#each sec.modules as m (m.id)}
-        {@const inSide = sidePane.showing && sidePane.key === m.id}
+        {@const inSide = sidePane.active && sidePane.key === m.id}
         <button
           class="rail-btn"
           class:active={isActive(m.id)}

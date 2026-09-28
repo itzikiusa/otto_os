@@ -6,7 +6,8 @@
 import { auth } from '../stores/auth.svelte';
 import { sidePane } from '../stores/sidePane.svelte';
 import { router } from '../router.svelte';
-import { isEmbedded, isTauri } from '../desktop';
+import { isEmbedded, isTauri, isNativePane } from '../desktop';
+import { nativePane, nativePaneSnapshot } from '../nativePane';
 import { hostPrimaryKey, postToHost } from '../embedGuest';
 import { paneKey, restorableRoute, routeOf } from '../sidePane';
 import { availableModules, moduleLabel } from '../sidebar';
@@ -79,7 +80,7 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 async function paneReady(key: string, signal: AbortSignal): Promise<void> {
   const until = Date.now() + PANE_BOOT_MS;
   while (Date.now() < until) {
-    if (sidePane.showing && sidePane.key === key && sidePane.status === 'ready') return;
+    if (sidePane.active && sidePane.visible && sidePane.key === key && sidePane.status === 'ready') return;
     if (sidePane.status === 'error') throw new UiCommandError('failed', "The side pane couldn't load");
     await sleep(100, signal);
   }
@@ -143,14 +144,14 @@ async function open(args: OpenArgs, ctx: UiCommandCtx): Promise<unknown> {
       `This Otto window can't show a side pane (it needs the desktop layout). Ask the user to open ${label}, or use placement: main.`,
     );
   }
-  if (!sidePane.fits) {
+  if (!sidePane.fits && !sidePane.detached) {
     throw new UiCommandError(
       'failed',
       `The Otto window is too narrow to show ${label} beside your session. Ask the user to widen it, or use placement: main.`,
     );
   }
   ctx.progress(`Opening ${label} beside your session`);
-  const wasShowing = sidePane.showing && sidePane.key === key;
+  const wasShowing = sidePane.visible && sidePane.key === key;
   // Focus stays where the user has it (typically your terminal).
   sidePane.open(route, { focus: false, label });
   await paneReady(key, ctx.signal);
@@ -178,7 +179,15 @@ async function focusWindow(): Promise<void> {
 
 async function focus(args: { pane?: unknown }): Promise<unknown> {
   const want = args.pane === 'main' || args.pane === 'side' ? args.pane : null;
-  await focusWindow();
+  if (isNativePane) {
+    const pane = want ?? 'side';
+    if (pane === 'side' && nativePaneSnapshot()?.visible !== true) {
+      throw new UiCommandError('failed', 'The side pane is hidden. Dismiss the overlay or widen the host window first.');
+    }
+    await nativePane.focus(pane === 'main' ? 'primary' : 'side');
+    return { ui_visible: true, pane };
+  }
+  if (!sidePane.nativeState) await focusWindow();
   if (isEmbedded) {
     if (want === 'main') {
       try {
@@ -191,12 +200,15 @@ async function focus(args: { pane?: unknown }): Promise<unknown> {
     window.focus();
     return { ui_visible: true, pane: 'side' };
   }
-  const pane = want ?? (sidePane.showing ? 'side' : 'main');
+  const pane = want ?? (sidePane.visible ? 'side' : 'main');
   if (pane === 'side') {
-    if (!sidePane.showing) throw new UiCommandError('not_found', 'No side pane is open');
-    sidePane.focusPane();
+    if (!sidePane.active) throw new UiCommandError('not_found', 'No side pane is open');
+    if (!sidePane.visible) throw new UiCommandError('failed', 'The side pane is hidden. Dismiss the overlay or widen the host window first.');
+    if (sidePane.nativeState) await nativePane.focus('side');
+    else sidePane.focusPane();
   } else {
-    sidePane.focusMain();
+    if (sidePane.nativeState) await nativePane.focus('primary');
+    else sidePane.focusMain();
   }
   return { ui_visible: true, pane };
 }
@@ -218,11 +230,11 @@ function state(): unknown {
           route: sidePane.route,
           module: sidePane.key,
           label: labelFor(sidePane.route),
-          showing: sidePane.showing,
+          showing: sidePane.visible,
           status: sidePane.status,
           focused: sidePane.focused,
           placement: sidePane.placement,
-          ...(sidePane.showing ? { state: sidePaneState() } : {}),
+          ...(sidePane.visible ? { state: sidePaneState() } : {}),
         };
   }
   return out;
