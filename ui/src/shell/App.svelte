@@ -110,6 +110,9 @@
     return prefetchPagesWhenIdle();
   });
   const compactShell = $derived(!viewport.isDesktop && !isPopout && !isEmbedded);
+  // The page draws its own PageHeader (the first registered header, in the
+  // centre column — not one inside the right panel's browser tab).
+  const pageTitled = $derived(compactShell && !!uiControl.barOwner?.closest('.mcenter'));
 
   // Native sidebar vibrancy (desktop shell): the window has an NSVisualEffect
   // view behind the page, so the document goes transparent and ONLY chrome
@@ -1059,7 +1062,7 @@
      browser we DON'T CSS-zoom — users scale crisply with the browser's own zoom
      (⌘+/−), which re-rasterizes everything (terminal included) and keeps
      coordinates correct. ui.zoom still drives native zoom inside Tauri. -->
-<div class="shell" class:vibrant class:embedded={isEmbedded} class:mobile={compactShell} class:tablet={compactShell && viewport.isTablet}>
+<div class="shell" class:vibrant class:embedded={isEmbedded} class:mobile={compactShell} class:tablet={compactShell && viewport.isTablet} class:page-titled={pageTitled}>
   {#if compactShell}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <header
@@ -1150,6 +1153,7 @@
          Swap flips their places with CSS order only, so neither reloads. -->
     <div
       class="split"
+      class:has-side={!!sideMeta && (sidePane.showing || sidePane.retained)}
       class:swapped={sidePane.showing && sidePane.placement === 'leading'}
       bind:clientWidth={splitWidth}
       style:--side-share={sideShare}
@@ -1352,8 +1356,10 @@
     min-height: 0;
     display: flex;
   }
-  /* A widened right panel never pushes the Agents pane out of its half. */
-  .split:has(:global(.side-pane)) .primary-row :global(.rpanel) {
+  /* A widened right panel never pushes the Agents pane out of its half.
+     A class, not `.split:has(.side-pane)`: WebKit re-checks a descendant
+     `:has()` on every mutation under `.split` — i.e. every page (r3-03-23). */
+  .split.has-side .primary-row :global(.rpanel) {
     max-width: 60%;
   }
   /* Swap: the side pane moves to the leading edge — CSS order only, so
@@ -1424,8 +1430,10 @@
     white-space: nowrap;
   }
   /* A module page that draws its own PageHeader already titles itself right
-     below the bar — don't show the same name twice. */
-  :global(.shell.mobile:has(.mcenter [data-testid='page-header'])) .mtop-title {
+     below the bar — don't show the same name twice. (`pageTitled`, not a
+     `.shell:has(.mcenter [data-testid=page-header])` rule anchored at the
+     root, which WebKit re-evaluates on every DOM mutation in the app.) */
+  .shell.page-titled .mtop-title {
     display: none;
   }
   .mbody {
