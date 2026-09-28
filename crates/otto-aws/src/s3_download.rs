@@ -240,7 +240,7 @@ pub async fn start(
     // on) a part file; created O_EXCL in `copy_to_file`.
     let part = dir.join(format!(
         "{name}.{}.otto-part",
-        &otto_core::new_id().chars().take(8).collect::<String>()
+        otto_core::new_id().chars().take(8).collect::<String>()
     ));
     let (bin, env) = svc.bin_and_env(a, req.region.as_deref()).await?;
     let uri = format!("s3://{bucket}/{}", req.key);
