@@ -65,6 +65,15 @@ export function repoDiffFileLoader(repoId: string, target: string): DiffFileLoad
 // A shared fetch runs on its own controller: a caller's abort only detaches
 // that caller, and the fetch itself is aborted when nobody is waiting on it.
 const PR_TTL_MS = 60_000;
+// Bounds (r3-05-02): the TTL only decided whether a REVISIT reused an entry —
+// nothing ever deleted one, so every PR opened in a webview's life stayed
+// resident (15–30 MB for a fully browsed 100k-line PR, 50–200 MB after a day
+// of reviews). Entries are now evicted on write: expired ones, then the
+// least-recently used past PR_MAX_ENTRIES or an estimated PR_MAX_BYTES, never
+// one a caller is still waiting on. A revisit after eviction costs one fetch
+// (the daemon's own `pr_diffs` memo absorbs it).
+const PR_MAX_ENTRIES = 8;
+const PR_MAX_BYTES = 48 * 1024 * 1024;
 
 interface Shared<T> {
   promise: Promise<T>;
@@ -80,8 +89,57 @@ interface PrEntry {
   rev: string;
   summary: Shared<DiffResp> | null;
   files: Map<string, Shared<FileDiff | null>>;
+  /** Estimated JS-heap bytes of the settled data (see diffBytes). */
+  bytes: number;
 }
+/** Insertion order = recency (a touch re-inserts), so the first key is the LRU. */
 const prCache = new Map<string, PrEntry>();
+
+/** Rough heap size of a file's hunks: UTF-16 text plus per-object overhead. */
+export function fileDiffBytes(f: FileDiff | null | undefined): number {
+  if (!f) return 64;
+  let n = 256 + (f.path.length + (f.old_path?.length ?? 0)) * 2;
+  for (const h of f.hunks ?? []) {
+    n += 96 + h.header.length * 2;
+    for (const l of h.lines) n += 56 + l.content.length * 2;
+  }
+  return n;
+}
+
+function busy(e: PrEntry): boolean {
+  if (e.summary && e.summary.waiters > 0) return true;
+  for (const sh of e.files.values()) if (sh.waiters > 0) return true;
+  return false;
+}
+
+/** Evict expired entries, then LRU ones past the count / byte budget. The
+ *  entry just touched (`keep`) and entries with waiters stay. */
+function evictPrCache(keep: string): void {
+  const now = Date.now();
+  for (const [k, e] of prCache) {
+    if (k !== keep && now - e.at > PR_TTL_MS && !busy(e)) prCache.delete(k);
+  }
+  let total = 0;
+  for (const e of prCache.values()) total += e.bytes;
+  for (const [k, e] of prCache) {
+    if (prCache.size <= PR_MAX_ENTRIES && total <= PR_MAX_BYTES) break;
+    if (k === keep || busy(e)) continue;
+    prCache.delete(k);
+    total -= e.bytes;
+  }
+}
+
+/** Charge settled data to its entry (only while it is still the live one). */
+function charge(key: string, e: PrEntry, bytes: number): void {
+  if (prCache.get(key) !== e) return;
+  e.bytes += bytes;
+  evictPrCache(key);
+}
+
+/** Test/diagnostic view of the cache: [key, bytes] in LRU → MRU order. */
+export function prCacheSnapshot(): [string, number][] {
+  return [...prCache].map(([k, e]) => [k, e.bytes]);
+}
 
 /** The live entry for a PR. `head` (when the caller knows it) replaces an
  *  entry built for a different head; an entry that didn't know its head yet
@@ -92,11 +150,16 @@ function prEntry(repoId: string, num: number, head?: string | null): PrEntry {
   const expired = !e || Date.now() - e.at > PR_TTL_MS;
   if (!e || expired || (head && e.head && e.head !== head)) {
     const h = head || e?.head || '';
-    e = { at: Date.now(), head: h, rev: h ? `&rev=${encodeURIComponent(h)}` : '', summary: null, files: new Map() };
+    e = { at: Date.now(), head: h, rev: h ? `&rev=${encodeURIComponent(h)}` : '', summary: null, files: new Map(), bytes: 0 };
+    prCache.delete(key);
     prCache.set(key, e);
-  } else if (head && !e.head) {
-    e.head = head;
+  } else {
+    if (head && !e.head) e.head = head;
+    // Touch: move to the most-recently-used end.
+    prCache.delete(key);
+    prCache.set(key, e);
   }
+  evictPrCache(key);
   return e;
 }
 
@@ -158,8 +221,12 @@ export function prDiffSummary(
   if (!e.summary) {
     const sh = share((sig) => api.get<DiffResp>(`/repos/${repoId}/prs/${num}/diff?summary=true${e.rev}`, sig));
     e.summary = sh;
+    const key = `${repoId}#${num}`;
     sh.promise.then(
       (resp) => {
+        let bytes = 0;
+        for (const f of resp.files) bytes += fileDiffBytes(f);
+        charge(key, e, bytes);
         for (const f of resp.files) {
           if (f.hunks_omitted || f.too_large || e.files.has(f.path)) continue;
           const done: Shared<FileDiff | null> = {
@@ -197,9 +264,12 @@ export function prDiffFile(
     const created = share((sig) =>
       api.get<DiffResp>(`/repos/${repoId}/prs/${num}/diff?${fileQuery(file, full)}${e.rev}`, sig).then((r) => pick(r, file)),
     );
-    created.promise.catch(() => {
-      if (e.files.get(key) === created) e.files.delete(key);
-    });
+    created.promise.then(
+      (f) => charge(`${repoId}#${num}`, e, fileDiffBytes(f)),
+      () => {
+        if (e.files.get(key) === created) e.files.delete(key);
+      },
+    );
     e.files.set(key, created);
     sh = created;
   }
