@@ -20,6 +20,7 @@
   import { vault } from './vault.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { startMouseDrag } from '../../lib/dragCursor';
   import type { GraphWorkerIn, GraphWorkerOut } from './graph.worker';
   import { carrySeed } from './graphSeed';
 
@@ -96,7 +97,6 @@
   // (the panel is anchored right), so dragging left widens it.
   let panelResizing = $state(false);
   function startPanelResize(e: MouseEvent): void {
-    e.preventDefault();
     e.stopPropagation();
     panelResizing = true;
     const startX = e.clientX;
@@ -104,19 +104,15 @@
     // Anchored to the right edge, so a leftward drag (negative dx) GROWS it.
     // Mirrored under RTL, where the panel sits on the left instead.
     const dir = document.dir === 'rtl' ? 1 : -1;
-    const onMove = (ev: MouseEvent) =>
-      ui.setVaultGraphPanelWidth(startW + dir * (ev.clientX - startX));
-    const onUp = () => {
-      panelResizing = false;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
+    // lib/dragCursor (r3-03-08): overlay cursor, per-frame moves, one persist.
+    startMouseDrag(e, {
+      cursor: 'col-resize',
+      onMove: (ev) => ui.setVaultGraphPanelWidth(startW + dir * (ev.clientX - startX), false),
+      onEnd: () => {
+        panelResizing = false;
+        ui.setVaultGraphPanelWidth(ui.vaultGraphPanelWidth);
+      },
+    });
   }
   let rawNodeCount = $state(0); // pre-filter totals, for the "312 / 9,179" readout
   let rawEdgeCount = $state(0);

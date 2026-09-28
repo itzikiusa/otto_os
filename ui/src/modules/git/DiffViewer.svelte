@@ -51,6 +51,7 @@
   } from './diff-model';
   import { findScroller, resum, rowAt } from './diff-virtual';
   import { registerFindProvider } from '../../lib/findProviders';
+  import { startMouseDrag } from '../../lib/dragCursor';
   import { ListWindow } from './list-window.svelte';
   import { DeferredHighlighter } from './diff-highlight.svelte';
 
@@ -163,28 +164,37 @@
   const NAV_W_KEY = 'otto_diffnav_w';
   let navW = $state(Number(localStorage.getItem(NAV_W_KEY)) || 240);
   let navResizing = $state(false);
-  function setNavW(w: number): void {
-    navW = Math.max(180, Math.min(520, Math.round(w)));
-    localStorage.setItem(NAV_W_KEY, String(navW));
+  const clampNavW = (w: number): number => Math.max(180, Math.min(520, Math.round(w)));
+  function persistNavW(): void {
+    try {
+      localStorage.setItem(NAV_W_KEY, String(navW));
+    } catch {
+      /* blocked storage: the width just doesn't persist */
+    }
   }
+  function setNavW(w: number): void {
+    navW = clampNavW(w);
+    persistNavW();
+  }
+  // Through lib/dragCursor (r3-03-08): an overlay carries the cursor instead
+  // of an INHERITED `body.style` write (65–690 ms of whole-document restyle
+  // on this very page, at drag start and end), moves are coalesced to one
+  // per frame, and localStorage is written once on release, not per move.
   function startNavResize(e: MouseEvent): void {
-    e.preventDefault();
     navResizing = true;
     const startX = e.clientX;
     const startW = navW;
-    // Physical left-anchored sidebar: dragging right widens it.
-    const onMove = (ev: MouseEvent) => setNavW(startW + (ev.clientX - startX));
-    const onUp = () => {
-      navResizing = false;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
+    startMouseDrag(e, {
+      cursor: 'col-resize',
+      // Physical left-anchored sidebar: dragging right widens it.
+      onMove: (ev) => {
+        navW = clampNavW(startW + (ev.clientX - startX));
+      },
+      onEnd: () => {
+        navResizing = false;
+        persistNavW();
+      },
+    });
   }
 
   // ── Nav tree: group files by directory (GitHub-style), compressing

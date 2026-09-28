@@ -637,17 +637,20 @@ class UiStore {
     this.gitSideWidth = clampGitSide(px);
     lsSet(LS.gitSideWidth, String(this.gitSideWidth));
   }
-  setGitGraphListWidth(px: number): void {
+  /** `persist=false` while dragging (one localStorage write on release). */
+  setGitGraphListWidth(px: number, persist = true): void {
     this.gitGraphListWidth = clampGitGraphList(px);
-    lsSet(LS.gitGraphListWidth, String(this.gitGraphListWidth));
+    if (persist) lsSet(LS.gitGraphListWidth, String(this.gitGraphListWidth));
   }
-  setGitGraphSideWidth(px: number): void {
+  /** `persist=false` while dragging (one localStorage write on release). */
+  setGitGraphSideWidth(px: number, persist = true): void {
     this.gitGraphSideWidth = clampGitGraphSide(px);
-    lsSet(LS.gitGraphSideWidth, String(this.gitGraphSideWidth));
+    if (persist) lsSet(LS.gitGraphSideWidth, String(this.gitGraphSideWidth));
   }
-  setVaultGraphPanelWidth(px: number): void {
+  /** `persist=false` while dragging (one localStorage write on release). */
+  setVaultGraphPanelWidth(px: number, persist = true): void {
     this.vaultGraphPanelWidth = clampVaultGraphPanel(px);
-    lsSet(LS.vaultGraphPanelWidth, String(this.vaultGraphPanelWidth));
+    if (persist) lsSet(LS.vaultGraphPanelWidth, String(this.vaultGraphPanelWidth));
   }
   /** `persist=false` while dragging (one localStorage write on release). */
   setApiSideWidth(px: number, persist = true): void {

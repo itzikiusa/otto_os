@@ -22,6 +22,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { confirmOutward } from '../../lib/confirmOutward';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { startMouseDrag } from '../../lib/dragCursor';
   import { git } from '../../lib/stores/git.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -2570,25 +2571,21 @@
   // right edge lets the user widen it to read them. Mirrors startListResize.
   let sideResizing = $state(false);
   function startSideResize(e: MouseEvent): void {
-    e.preventDefault();
     sideResizing = true;
     const startX = e.clientX;
     const startW = ui.gitGraphSideWidth;
     // Under RTL the sidebar sits on the right, so dragging left widens it.
     const dir = document.dir === 'rtl' ? -1 : 1;
-    const onMove = (ev: MouseEvent) =>
-      ui.setGitGraphSideWidth(startW + dir * (ev.clientX - startX));
-    const onUp = () => {
-      sideResizing = false;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
+    // lib/dragCursor (r3-03-08): overlay cursor instead of an inherited
+    // body.style write, one width write per frame, one persist on release.
+    startMouseDrag(e, {
+      cursor: 'col-resize',
+      onMove: (ev) => ui.setGitGraphSideWidth(startW + dir * (ev.clientX - startX), false),
+      onEnd: () => {
+        sideResizing = false;
+        ui.setGitGraphSideWidth(ui.gitGraphSideWidth);
+      },
+    });
   }
 
   // Middle-ellipsize a long branch leaf so the DISTINGUISHING SUFFIX stays visible
@@ -2665,22 +2662,17 @@
   }
 
   function startListResize(e: MouseEvent): void {
-    e.preventDefault();
     listResizing = true;
     const startX = e.clientX;
     const startW = ui.gitGraphListWidth;
-    const onMove = (ev: MouseEvent) => ui.setGitGraphListWidth(startW + (ev.clientX - startX));
-    const onUp = () => {
-      listResizing = false;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
+    startMouseDrag(e, {
+      cursor: 'col-resize',
+      onMove: (ev) => ui.setGitGraphListWidth(startW + (ev.clientX - startX), false),
+      onEnd: () => {
+        listResizing = false;
+        ui.setGitGraphListWidth(ui.gitGraphListWidth);
+      },
+    });
   }
 
   // Single-click a popover row → select the commit (this lights up the branch's
