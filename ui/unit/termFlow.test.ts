@@ -204,8 +204,9 @@ test('scrollback depths: 2k default for embeds, 10k only where a primary pane as
   assert.equal(EMBED_SCROLLBACK, 2000);
   assert.equal(PRIMARY_SCROLLBACK, 10_000);
   const src = (p: string) => readFileSync(new URL(p, import.meta.url), 'utf8');
-  assert.match(src('../src/lib/components/Terminal.svelte'), /scrollback = EMBED_SCROLLBACK \}: Props = \$props\(\)/);
-  assert.match(src('../src/modules/agents/SessionView.svelte'), /scrollback = PRIMARY_SCROLLBACK \}: Props = \$props\(\)/);
+  // The default in the props destructure (later props may follow it).
+  assert.match(src('../src/lib/components/Terminal.svelte'), /scrollback = EMBED_SCROLLBACK(, \w+ = [^,}]+)* \}: Props = \$props\(\)/);
+  assert.match(src('../src/modules/agents/SessionView.svelte'), /scrollback = PRIMARY_SCROLLBACK(, \w+ = [^,}]+)* \}: Props = \$props\(\)/);
   const tiled = src('../src/modules/agents/TiledView.svelte');
   assert.match(tiled, /const TILE_SCROLLBACK = EMBED_SCROLLBACK;/);
   assert.match(tiled, /scrollback=\{TILE_SCROLLBACK\}/);
