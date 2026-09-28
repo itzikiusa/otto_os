@@ -120,3 +120,25 @@ export function verdictOf(md: string): 'HEALTHY' | 'DEGRADED' | 'INCIDENT' | nul
   if (!m.length) return null;
   return m[m.length - 1][1].toUpperCase() as 'HEALTHY' | 'DEGRADED' | 'INCIDENT';
 }
+
+/** Server page caps (`otto-k8s` monitor `fleet.rs`: table 2000, events 1000). */
+export const FLEET_TABLE_MAX = 2000;
+export const FLEET_EVENTS_MAX = 1000;
+
+/** The `limit` for a fleet table/events load, or `null` to skip it (r3-02-04).
+ *  A LIVE refresh (after every collection cycle) re-reads as many rows as the
+ *  user has paged in — it used to reset "Load more" back to one page every few
+ *  seconds — and is skipped while a "Load more" is in flight (it would abort
+ *  it) or when the loaded rows are past the server cap (a head-only refresh
+ *  would drop the rest). Every other load is one page. */
+export function liveRefreshLimit(
+  liveRefresh: boolean,
+  loaded: number,
+  page: number,
+  serverMax: number,
+  appendInFlight: boolean,
+): number | null {
+  if (!liveRefresh) return page;
+  if (appendInFlight || loaded > serverMax) return null;
+  return Math.max(page, loaded);
+}

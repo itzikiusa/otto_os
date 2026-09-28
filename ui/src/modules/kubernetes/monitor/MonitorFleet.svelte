@@ -32,7 +32,7 @@
   import MetricChart from '../../../lib/components/MetricChart.svelte';
   import { formatBytes } from '../k8s-util';
   import EnvBadge from '../../../lib/components/EnvBadge.svelte';
-  import { WINDOWS, classColor, classLabel, fmtMs, fmtPct, fmtRate, isWindow } from './monitor-util';
+  import { WINDOWS, classColor, classLabel, fmtMs, fmtPct, fmtRate, isWindow, liveRefreshLimit, FLEET_TABLE_MAX, FLEET_EVENTS_MAX } from './monitor-util';
 
   interface Props {
     tab: string;
@@ -176,19 +176,27 @@
   });
 
   // ── Table (also feeds the overview KPIs) ─────────────────────────────────
-  let rows = $state<K8sFleetRow[]>([]);
+  // Raw: replaced wholesale, never mutated in place (up to 2k rows).
+  let rows = $state.raw<K8sFleetRow[]>([]);
   let total = $state(0);
   let tableLoading = $state(true);
   let tableError = $state('');
   let quick = $state('');
   const PAGE = 200;
   let tAbort: AbortController | null = null;
+  let tAppendCtrl: AbortController | null = null;
   async function loadTable(quiet = false, append = false): Promise<void> {
+    // A live (quiet) refresh must not throw away the user's "Load more"
+    // pages or abort one in flight (r3-02-04): it re-reads as many rows as
+    // are loaded, or skips when that is past the server's page cap.
+    const refreshLimit = liveRefreshLimit(quiet && !append, rows.length, PAGE, FLEET_TABLE_MAX, tAppendCtrl !== null);
+    if (refreshLimit === null) return;
     tAbort?.abort();
-    tAbort = new AbortController();
+    const ctrl = (tAbort = new AbortController());
     if (!quiet && !append) tableLoading = true;
+    if (append) tAppendCtrl = ctrl;
     try {
-      const r = await k8sApi.fleetTable({ ...sel, group, sort, dir, limit: PAGE, offset: append ? rows.length : 0 }, tAbort.signal);
+      const r = await k8sApi.fleetTable({ ...sel, group, sort, dir, limit: refreshLimit, offset: append ? rows.length : 0 }, ctrl.signal);
       rows = append ? [...rows, ...r.rows] : r.rows;
       total = r.total;
       tableError = '';
@@ -197,6 +205,7 @@
       tableError = e instanceof Error ? e.message : String(e);
     } finally {
       tableLoading = false;
+      if (tAppendCtrl === ctrl) tAppendCtrl = null;
     }
   }
   function sortBy(k: K8sFleetSortKey): void {
@@ -274,17 +283,22 @@
 
   // ── Events ───────────────────────────────────────────────────────────────
   const CLASS_OPTIONS = ['', 'oom', 'crash', 'probe', 'unknown', 'churn', 'version', 'k8s_event'];
-  let events = $state<K8sFleetEvent[]>([]);
+  let events = $state.raw<K8sFleetEvent[]>([]);
   let evTotal = $state(0);
   let evLoading = $state(true);
   let evError = $state('');
   let eAbort: AbortController | null = null;
+  let eAppendCtrl: AbortController | null = null;
   async function loadEvents(quiet = false, append = false): Promise<void> {
+    // Same rule as the table: a live refresh keeps paged-in events.
+    const refreshLimit = liveRefreshLimit(quiet && !append, events.length, PAGE, FLEET_EVENTS_MAX, eAppendCtrl !== null);
+    if (refreshLimit === null) return;
     eAbort?.abort();
-    eAbort = new AbortController();
+    const ctrl = (eAbort = new AbortController());
     if (!quiet && !append) evLoading = true;
+    if (append) eAppendCtrl = ctrl;
     try {
-      const r = await k8sApi.fleetEvents({ ...sel, class: evClass || undefined, sort: evSort, dir: evDir, limit: PAGE, offset: append ? events.length : 0 }, eAbort.signal);
+      const r = await k8sApi.fleetEvents({ ...sel, class: evClass || undefined, sort: evSort, dir: evDir, limit: refreshLimit, offset: append ? events.length : 0 }, ctrl.signal);
       events = append ? [...events, ...r.rows] : r.rows;
       evTotal = r.total;
       evError = '';
@@ -293,6 +307,7 @@
       evError = e instanceof Error ? e.message : String(e);
     } finally {
       evLoading = false;
+      if (eAppendCtrl === ctrl) eAppendCtrl = null;
     }
   }
   function evSortBy(k: K8sFleetEventSort): void {
