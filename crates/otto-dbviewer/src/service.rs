@@ -340,7 +340,18 @@ pub struct DbViewerService {
     /// can never keep resolving an older cache key than the other operations
     /// and flip-flop the tracked pool. Plain `std::sync::Mutex`: map ops only.
     completion_secrets: Arc<std::sync::Mutex<CompletionSecrets>>,
+    /// Completion snapshots for ACCESS-ENFORCED connections, built from the
+    /// caller's authorized `schema_graph` and keyed by connection id + (user,
+    /// schema). Short-lived ([`ENFORCED_COMPLETION_TTL`]); cleared by the
+    /// refresh action like the drivers' own caches.
+    enforced_completions: Arc<crate::complete::CompletionCache>,
 }
+
+/// How long an enforced connection's completion snapshot is reused. Short: it
+/// reflects one user's grants, which can narrow at any time.
+const ENFORCED_COMPLETION_TTL: Duration = Duration::from_secs(60);
+/// Tables introspected for an enforced connection's completion snapshot.
+const ENFORCED_COMPLETION_MAX_TABLES: usize = 300;
 
 /// `secret_ref` → (secret, read time); see [`DbViewerService::completion_secrets`].
 type CompletionSecrets = HashMap<String, (Option<String>, Instant)>;
@@ -442,6 +453,9 @@ impl DbViewerService {
             finished: Arc::new(std::sync::Mutex::new(FinishedStore::default())),
             active_keys: Arc::new(std::sync::Mutex::new(HashMap::new())),
             completion_secrets: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            enforced_completions: Arc::new(crate::complete::CompletionCache::with_ttl(
+                ENFORCED_COMPLETION_TTL,
+            )),
         }
     }
 
@@ -1623,6 +1637,21 @@ impl DbViewerService {
         req: &QueryRequest,
         read_only: bool,
     ) -> Result<QueryResult> {
+        self.run_with(conn_id, user_id, req, read_only, true).await
+    }
+
+    /// [`Self::run_inner`] with history recording optional — `record: false` is
+    /// for callers that write ONE summary history row for many statements (the
+    /// file import: one row per 500-row INSERT batch filled history with the
+    /// whole file).
+    async fn run_with(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        req: &QueryRequest,
+        read_only: bool,
+        record: bool,
+    ) -> Result<QueryResult> {
         // Normalize the scope ONCE: drivers get the canonical node (`kdb:<n>`
         // for a Redis keyspace, the plain name otherwise); authorization and
         // resolution use the bare access child derived from it below.
@@ -1668,7 +1697,7 @@ impl DbViewerService {
         // request-scoped execution (agents over MCP, widgets) stays inline.
         let Some(qid) = req.query_id.clone().filter(|s| !s.is_empty()) else {
             return self
-                .execute_recorded(r, conn_id, user_id, req, &token)
+                .execute_recorded(r, conn_id, user_id, req, &token, record)
                 .await;
         };
 
@@ -1704,7 +1733,7 @@ impl DbViewerService {
         if governed {
             let _guard = guard;
             return self
-                .execute_recorded(r, conn_id, user_id, req, &token)
+                .execute_recorded(r, conn_id, user_id, req, &token, record)
                 .await;
         }
         // Detached execution: the query runs in its own task, so a dropped HTTP
@@ -1722,7 +1751,7 @@ impl DbViewerService {
         let task = tokio::spawn(async move {
             let _guard = guard;
             let result = svc
-                .execute_recorded(r, &cid, &uid, &req_owned, &token)
+                .execute_recorded(r, &cid, &uid, &req_owned, &token, record)
                 .await;
             if let Err(result) = out_tx.send(result) {
                 let outcome = result.map_err(|e| e.to_string());
@@ -1755,6 +1784,7 @@ impl DbViewerService {
         user_id: &Id,
         req: &QueryRequest,
         token: &CancelToken,
+        record: bool,
     ) -> Result<QueryResult> {
         let started = Instant::now();
         self.execution_access(conn_id, user_id, req).await?;
@@ -1799,6 +1829,7 @@ impl DbViewerService {
         });
 
         match &result {
+            _ if !record => {}
             Ok(res) => {
                 let _ = self
                     .repo
@@ -2190,7 +2221,12 @@ impl DbViewerService {
         let bytes = tokio::fs::read(local_path)
             .await
             .map_err(|e| Error::Invalid(format!("read import file: {e}")))?;
-        let parsed = crate::import::parse_rows(format, &bytes)?;
+        // Parsing up to IMPORT_MAX_BYTES of CSV/JSON is up to a second of CPU:
+        // run it on the blocking pool, and let the raw bytes go with it.
+        let mut parsed =
+            tokio::task::spawn_blocking(move || crate::import::parse_rows(format, &bytes))
+                .await
+                .map_err(|e| Error::Internal(format!("import parse task failed: {e}")))??;
 
         match engine {
             // SQL engines import as batched INSERTs through the guarded `run`
@@ -2202,27 +2238,64 @@ impl DbViewerService {
                     Engine::Clickhouse => crate::import::SqlFlavor::Clickhouse,
                     _ => crate::import::SqlFlavor::Mysql,
                 };
-                let statements = crate::import::build_insert_statements(
-                    table,
-                    &parsed.columns,
-                    &parsed.rows,
-                    batch_size,
-                    flavor,
-                );
+                // One batch statement at a time (never the whole file's SQL at
+                // once), each through the guarded run path — but recorded as
+                // ONE summary history row for the import, not a full INSERT
+                // text per batch.
+                let started = Instant::now();
                 let mut counts = ImportCounts::default();
-                for stmt in statements {
-                    let req = QueryRequest {
-                        statement: stmt,
-                        confirm_write,
-                        ..QueryRequest::default()
-                    };
-                    // Routes through guard_write + history. A guarded connection
-                    // without confirm_write fails here with write_blocked: 409.
-                    let res = self.run(conn_id, user_id, &req).await?;
-                    counts.rows += res.rows_affected.unwrap_or(0);
-                    counts.batches += 1;
+                let mut failure: Option<Error> = None;
+                if !parsed.columns.is_empty() {
+                    for chunk in parsed.rows.chunks(batch_size.max(1)) {
+                        let req = QueryRequest {
+                            statement: crate::import::build_insert_batch(
+                                table,
+                                &parsed.columns,
+                                chunk,
+                                flavor,
+                            ),
+                            confirm_write,
+                            ..QueryRequest::default()
+                        };
+                        // Routes through guard_write. A guarded connection
+                        // without confirm_write fails here with write_blocked: 409.
+                        match self.run_with(conn_id, user_id, &req, false, false).await {
+                            Ok(res) => {
+                                counts.rows += res.rows_affected.unwrap_or(0);
+                                counts.batches += 1;
+                            }
+                            Err(e) => {
+                                failure = Some(e);
+                                break;
+                            }
+                        }
+                    }
                 }
-                Ok(counts)
+                // Best-effort summary row. A batch the write guard refused
+                // never ran, so (like a guarded single statement) it isn't
+                // recorded.
+                let refused = matches!(&failure, Some(e) if e.to_string().contains(WRITE_BLOCKED_PREFIX.trim_end()));
+                if counts.batches > 0 || (failure.is_some() && !refused) {
+                    let _ = self
+                        .repo
+                        .add_history(
+                            conn_id,
+                            user_id,
+                            &format!(
+                                "import {} row(s) in {} batch(es) → {table}",
+                                counts.rows, counts.batches
+                            ),
+                            failure.is_none(),
+                            started.elapsed().as_millis() as i64,
+                            counts.rows as i64,
+                            failure.as_ref().map(|e| e.to_string()).as_deref(),
+                        )
+                        .await;
+                }
+                match failure {
+                    Some(e) => Err(e),
+                    None => Ok(counts),
+                }
             }
             Engine::Mongodb => {
                 // An insertMany is a write — guard once (a `db.<c>.insertMany`
@@ -2245,7 +2318,7 @@ impl DbViewerService {
                         .map(|r| r.iter().map(crate::import::coerce_scalar).collect())
                         .collect()
                 } else {
-                    parsed.rows.clone()
+                    std::mem::take(&mut parsed.rows)
                 };
                 self.authorize(conn_id, user_id, None, "db_data").await?;
                 let child = crate::access::child(None);
@@ -2520,21 +2593,34 @@ impl DbViewerService {
                     "select an authorized database before requesting completion".into(),
                 )
             })?;
-            let graph = self.schema_graph(conn_id, user_id, &schema, 100).await?;
-            let mut items = Vec::new();
-            for table in graph.tables {
-                items.push(crate::types::CompletionItem::new(
-                    table.name,
-                    crate::types::CompletionKind::Table,
-                ));
-                for column in table.columns {
-                    items.push(crate::types::CompletionItem::new(
-                        column.name,
-                        crate::types::CompletionKind::Column,
-                    ));
-                }
-            }
-            return Ok(CompletionResponse { items });
+            // The access-scoped schema graph (only what this user may browse),
+            // cached per (connection, user, schema) with a short TTL — it used
+            // to be rebuilt on EVERY request, one `object_detail` round-trip per
+            // table per word typed. Built in a detached task (see below) and
+            // single-flight, then ranked by the engine's own assembler so an
+            // enforced connection completes like an unrestricted one: tables
+            // after FROM, in-scope columns PK-first after WHERE, keywords.
+            let svc = self.clone();
+            let (cid, uid) = (conn_id.clone(), user_id.clone());
+            let snap = tokio::spawn(async move {
+                let scope = format!("{uid}\u{0}{schema}");
+                svc.enforced_completions
+                    .snapshot_or_build(cid.as_str(), &scope, || async {
+                        svc.schema_graph(&cid, &uid, &schema, ENFORCED_COMPLETION_MAX_TABLES)
+                            .await
+                            .ok()
+                            .map(|g| crate::complete::snapshot_from_graph(&g))
+                    })
+                    .await
+            })
+            .await
+            .map_err(|e| Error::Internal(format!("completion task failed: {e}")))?;
+            let mut resp = CompletionResponse {
+                items: r.driver.assemble_completion(&snap, ctx),
+                ..Default::default()
+            };
+            crate::complete::finalize(&mut resp, &ctx.prefix);
+            return Ok(resp);
         }
         // Detached from the request: the editor aborts a superseded completion
         // fetch on the next keystroke, which drops this handler future. The
@@ -2544,10 +2630,18 @@ impl DbViewerService {
         // so completion stayed empty until the user paused for the whole build.
         // A spawned task finishes (and caches) the build even when nobody waits
         // for the answer; later requests wait on its single-flight gate.
+        let prefix = ctx.prefix.clone();
         let ctx = ctx.clone();
-        tokio::spawn(async move { r.with_lifecycle(r.driver.completion(&r.config, &ctx)).await })
+        let mut resp =
+            tokio::spawn(
+                async move { r.with_lifecycle(r.driver.completion(&r.config, &ctx)).await },
+            )
             .await
-            .map_err(|e| Error::Internal(format!("completion task failed: {e}")))?
+            .map_err(|e| Error::Internal(format!("completion task failed: {e}")))??;
+        // Bound what one keystroke ships: only items that can match the typed
+        // word, at most MAX_COMPLETION_ITEMS of them (`truncated` past that).
+        crate::complete::finalize(&mut resp, &prefix);
+        Ok(resp)
     }
 
     /// Drop the cached completion snapshot for a connection so the next
@@ -2560,6 +2654,7 @@ impl DbViewerService {
             .resolve(conn_id, user_id, child.as_deref(), "discover")
             .await?;
         r.driver.invalidate_completion_cache(&r.config).await;
+        self.enforced_completions.invalidate(conn_id.as_str());
         Ok(())
     }
 
@@ -2610,6 +2705,24 @@ impl DbViewerService {
     /// All history for a connection — root / ws-Admin view.
     pub async fn list_history(&self, conn_id: &Id, limit: i64) -> Result<Vec<HistoryEntry>> {
         self.repo.list_history(conn_id, limit).await
+    }
+    /// One history row with its full statement, scoped like the list: it must
+    /// belong to `conn_id`, and a non-root caller may only read their own rows.
+    pub async fn get_history(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        entry_id: &Id,
+        is_root: bool,
+    ) -> Result<HistoryEntry> {
+        self.authorize(conn_id, user_id, None, "db_query").await?;
+        let entry = self.repo.get_history(entry_id).await?;
+        let visible =
+            &entry.connection_id == conn_id && (is_root || entry.user_id.as_ref() == Some(user_id));
+        if !visible {
+            return Err(Error::NotFound(format!("history entry {entry_id}")));
+        }
+        Ok(entry)
     }
     /// History for a connection scoped to a single user — non-admin view.
     pub async fn list_history_for_user(

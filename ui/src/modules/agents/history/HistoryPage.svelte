@@ -34,7 +34,7 @@
     type ProviderFilter,
     type StatusFilter,
   } from './history.svelte';
-  import type { Artifact, HistoryEntry, HistoryStatus, Transcript } from '../../../lib/api/types';
+  import type { Artifact, HistoryEntry, HistoryStatus } from '../../../lib/api/types';
 
   let scope = $state<'workspace' | 'scratch'>('workspace');
   const wsId = $derived(scope === 'scratch' ? SCRATCH_WORKSPACE_ID : (ws.currentId ?? SCRATCH_WORKSPACE_ID));
@@ -236,20 +236,21 @@
     diskArtifactsFor = null;
   });
 
-  /** on_disk rows have no session → fold artifacts out of the transcript itself. */
+  /** on_disk rows have no session → the server lists the artifacts its fold
+   *  of the transcript collected (`GET …/history/artifacts`). This used to
+   *  pull 500 full turns (up to a 2 MB page) just to pick the chips out of
+   *  their blocks (SA-07). */
   async function loadDiskArtifacts(e: HistoryEntry): Promise<void> {
     if (!wsId || diskArtifactsFor === e.transcript_path) return;
-    diskArtifactsFor = e.transcript_path;
+    const path = e.transcript_path;
+    diskArtifactsFor = path;
     try {
-      const t = await api.get<Transcript>(
-        `/workspaces/${wsId}/history/transcript?path=${encodeURIComponent(e.transcript_path)}&limit=500`,
+      const arts = await api.get<Artifact[]>(
+        `/workspaces/${wsId}/history/artifacts?path=${encodeURIComponent(path)}`,
       );
-      const seen = new Map<string, Artifact>();
-      for (const turn of t.turns)
-        for (const b of turn.blocks) if (b.kind === 'artifact') seen.set(b.artifact.id, b.artifact);
-      diskArtifacts = [...seen.values()];
+      if (diskArtifactsFor === path) diskArtifacts = arts;
     } catch {
-      diskArtifacts = [];
+      if (diskArtifactsFor === path) diskArtifacts = [];
     }
   }
 

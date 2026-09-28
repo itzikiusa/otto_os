@@ -1,5 +1,6 @@
 <script lang="ts">
   import { radioKey } from '../../lib/radioKey';
+  import { pollWhileVisible } from '../../lib/poll';
   import { awsErrorText } from './util';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // CloudWatch metrics for ONE resource (an SQS queue, EC2 instance or RDS
@@ -90,9 +91,9 @@
       resp = null;
       void load();
     });
-    const t = setInterval(() => untrack(() => void load()), AUTO_MS);
+    const t = pollWhileVisible(() => untrack(() => load()), { ms: AUTO_MS, immediate: false });
     return () => {
-      clearInterval(t);
+      t.stop();
       current?.abort();
     };
   });

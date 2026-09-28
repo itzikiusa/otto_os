@@ -16,7 +16,7 @@
   import { apiStream } from '../../lib/stores/apiStream.svelte';
   import { api, newHostConfirmHost } from '../../lib/api/client';
   import { generateCode, CODE_LANGS, type CodeLang } from '../../lib/api/codegen';
-  import { collectionPaths, requestTexts, resolveVar, splitVars, varNames } from '../../lib/api/apiVars';
+  import { collectionPaths, requestVarNames, resolveVar, splitVars, varNames } from '../../lib/api/apiVars';
   import { marked } from 'marked';
   import { sanitizeHtml } from '../../lib/sanitize';
   import type { ApiAuth, ApiBodyMode, ApiKeyVal, ApiResponse, ApiSecretable } from '../../lib/api/types';
@@ -41,6 +41,11 @@
   // The draft lives in the store so the page + panel share one editing target.
   const draft = $derived(apiClient.draft);
   const canEdit = $derived(ws.myRole !== 'viewer');
+
+  /** Body editors stop colouring while a line is longer than this: a pasted
+   *  minified JSON is one wrapped line of tens of thousands of highlight spans
+   *  that every typed character re-laid out (see CodeEditor's prop). */
+  const LONG_LINE_PLAIN = 20_000;
 
   // ── Body types ─────────────────────────────────────────────────────────────
   // One plain-language picker over the backend modes: "Text" covers 'raw' (with
@@ -175,8 +180,20 @@
   // ── {{variables}} ──────────────────────────────────────────────────────────
   const urlSegments = $derived(splitVars(draft.url));
   const envForVars = $derived(apiClient.activeEnv);
+  // The body's `{{vars}}` are scanned per keystroke only while it is small;
+  // above 64 KB the scan (a regex over the whole body) runs 300 ms after the
+  // last edit. URL / query / headers / auth stay live.
+  const BODY_VAR_SCAN_SYNC_MAX = 64 * 1024;
+  let deferredBodyVars = $state.raw<string[]>([]);
+  $effect(() => {
+    const body = draft.body;
+    if (body.length <= BODY_VAR_SCAN_SYNC_MAX) return;
+    const t = setTimeout(() => { deferredBodyVars = varNames(body); }, 300);
+    return () => clearTimeout(t);
+  });
+  const bodyVars = $derived(draft.body.length <= BODY_VAR_SCAN_SYNC_MAX ? varNames(draft.body) : deferredBodyVars);
   const usedVars = $derived(
-    varNames(...requestTexts(draft)).map((n) => resolveVar(n, apiClient.runtimeVars, envForVars)),
+    requestVarNames(draft, bodyVars).map((n) => resolveVar(n, apiClient.runtimeVars, envForVars)),
   );
   const missingVars = $derived(usedVars.filter((v) => v.kind === 'missing').length);
 
@@ -847,7 +864,7 @@
       {#if compact}
         <textarea class="input body-area mono" aria-label="Request message" value={draft.body} oninput={(e) => setField('body', (e.currentTarget as HTMLTextAreaElement).value)} placeholder={'{ }'} spellcheck="false"></textarea>
       {:else}
-        <div class="body-editor"><CodeEditor lsp={false} wrap path="message.json" content={draft.body} root={ws.current?.root_path ?? ''} language="json" readOnly={false} onchange={(v) => setField('body', v)} /></div>
+        <div class="body-editor"><CodeEditor lsp={false} wrap highlightLineLimit={LONG_LINE_PLAIN} path="message.json" content={draft.body} root={ws.current?.root_path ?? ''} language="json" readOnly={false} onchange={(v) => setField('body', v)} /></div>
       {/if}
     {:else if tab === 'body'}
       <div class="bodybar">
@@ -911,7 +928,7 @@
         </div>
         <div class="body-editor gql-query"><CodeEditor lsp={false} path="query.graphql" content={draft.body} root={ws.current?.root_path ?? ''} language="" readOnly={false} onchange={(v) => setField('body', v)} /></div>
         <div class="gql-bar"><span class="sub-label">Variables (JSON)</span></div>
-        <div class="body-editor gql-vars"><CodeEditor lsp={false} wrap path="variables.json" content={draft.graphql_variables ?? ''} root={ws.current?.root_path ?? ''} language="json" readOnly={false} onchange={(v) => setField('graphql_variables', v)} /></div>
+        <div class="body-editor gql-vars"><CodeEditor lsp={false} wrap highlightLineLimit={LONG_LINE_PLAIN} path="variables.json" content={draft.graphql_variables ?? ''} root={ws.current?.root_path ?? ''} language="json" readOnly={false} onchange={(v) => setField('graphql_variables', v)} /></div>
         {#if apiClient.graphqlSchema}
           <div class="gql-schema">
             <div class="sub-label">Schema: {apiClient.graphqlSchema.length} types</div>
@@ -925,7 +942,7 @@
         {/if}
       {:else}
         <div class="body-editor">
-          <CodeEditor lsp={false} wrap path={editorPath} content={draft.body} root={ws.current?.root_path ?? ''} language={editorLang} readOnly={false} onchange={(v) => setField('body', v)} />
+          <CodeEditor lsp={false} wrap highlightLineLimit={LONG_LINE_PLAIN} path={editorPath} content={draft.body} root={ws.current?.root_path ?? ''} language={editorLang} readOnly={false} onchange={(v) => setField('body', v)} />
         </div>
       {/if}
     {:else if tab === 'auth'}

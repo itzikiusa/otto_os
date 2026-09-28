@@ -12,6 +12,7 @@
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus, sentenceCase } from '../../lib/status';
   import { rel } from '../../lib/stores/now.svelte';
+  import { pollWhileVisible } from '../../lib/poll';
   import type { EvalMatrix, MatrixCell, MatrixPrompt, StartMatrixReq } from '../../lib/api/types';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
@@ -108,8 +109,10 @@
   $effect(() => {
     const id = pollKey;
     if (!id) return;
-    const timer = setInterval(() => void refreshSelected(id), 2500);
-    return () => clearInterval(timer);
+    // No event covers matrix cells: a disciplined poll (in-flight guard,
+    // paused while hidden, backoff) instead of a bare interval.
+    const p = pollWhileVisible(() => refreshSelected(id), { ms: 2500, immediate: false });
+    return () => p.stop();
   });
 
   async function refreshSelected(id: string): Promise<void> {

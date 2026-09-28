@@ -22,6 +22,9 @@ export interface Poller {
   stop(): void;
   /** Run immediately (manual refresh / live event) and restart the cadence. */
   now(): void;
+  /** Re-arm the pending tick at the CURRENT cadence without running (the
+   *  cadence inputs changed — e.g. liveQuery's event socket came up). */
+  reschedule?(): void;
 }
 
 export interface PollOptions {
@@ -66,8 +69,11 @@ export function pollWhileVisible(run: PollRun, opts: PollOptions): Poller {
   let owed = false;
 
   const delay = (): number => {
+    // `ms` / a numeric `hidden` are re-read per schedule: liveQuery (lib/live.ts)
+    // passes getters so the cadence follows the event socket's state.
     const base = Math.max(opts.ms, floor);
-    const hiddenBase = typeof hiddenMode === 'number' && docHidden() ? Math.max(hiddenMode, floor) : base;
+    const hiddenNow = opts.hidden ?? 'pause';
+    const hiddenBase = typeof hiddenNow === 'number' && docHidden() ? Math.max(hiddenNow, floor) : base;
     const backoff = Math.min(2 ** failures, maxBackoff);
     const d = hiddenBase * backoff;
     return jitter > 0 ? Math.round(d * (1 - jitter + Math.random() * 2 * jitter)) : d;
@@ -147,6 +153,11 @@ export function pollWhileVisible(run: PollRun, opts: PollOptions): Poller {
       if (handle !== undefined) clearTimeout(handle);
       failures = 0;
       void tick();
+    },
+    reschedule() {
+      // In flight → it reschedules on settle; owed → the visibility return runs it.
+      if (stopped || inFlight || owed) return;
+      schedule();
     },
   };
 }

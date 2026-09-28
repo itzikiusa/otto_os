@@ -54,6 +54,37 @@ const EVENT_REASONS: [&str; 10] = [
     "FailedScheduling",
 ];
 
+/// kubectl lists in flight at once per cycle (pods, then events).
+const SWEEP_CONCURRENCY: usize = 4;
+
+/// Parse kubectl JSON and reduce it with `f` on the blocking pool (a 5k-pod
+/// list is ~120 ms of `serde_json::Value` parsing — never on a runtime worker).
+async fn parse_off_runtime<T: Send + 'static>(
+    stdout: String,
+    f: impl FnOnce(Value) -> T + Send + 'static,
+) -> otto_core::Result<T> {
+    tokio::task::spawn_blocking(move || crate::cli::parse_json(&stdout).map(f))
+        .await
+        .map_err(|e| Error::Internal(format!("k8s monitor parse task: {e}")))?
+}
+
+/// Persist a cycle's status, rewriting the (large) snapshot column only when
+/// the snapshot differs from `baseline` — what this loop last stored. Returns
+/// whether the snapshot was written.
+async fn store_status(
+    repo: &K8sMonitorRepo,
+    status: &K8sMonitorStatusRow,
+    baseline: Option<&Value>,
+) -> otto_core::Result<bool> {
+    if baseline == Some(&status.snapshot) {
+        repo.upsert_status_keep_snapshot(status).await?;
+        Ok(false)
+    } else {
+        repo.upsert_status(status).await?;
+        Ok(true)
+    }
+}
+
 /// Back-off ceiling after consecutive kubectl failures.
 const MAX_BACKOFF: Duration = Duration::from_secs(900);
 /// Sleep slice so cancel is observed promptly.
@@ -399,14 +430,36 @@ pub async fn run_cycle<S: K8sCtx>(
     };
     let namespaces = cfg.effective_namespaces(cluster.default_namespace.as_deref());
 
-    // 1. Sweep.
+    // 1. Sweep. Up to SWEEP_CONCURRENCY namespaces at once (was one at a
+    // time); each pod list — tens of MB of JSON on a big namespace — is parsed
+    // and reduced to its snapshot on the blocking pool, not a runtime worker.
+    let swept: Vec<(String, otto_core::Result<Snapshot>)> =
+        stream::iter(namespaces.iter().cloned())
+            .map(|ns| {
+                let k = &k;
+                async move {
+                    let res = match k
+                        .run(["get", "pods", "-n", ns.as_str(), "-o", "json"])
+                        .await
+                    {
+                        Ok(out) => {
+                            parse_off_runtime(out.stdout, |list| {
+                                classify::snapshot_from_pod_list(&list)
+                            })
+                            .await
+                        }
+                        Err(e) => Err(e),
+                    };
+                    (ns, res)
+                }
+            })
+            .buffered(SWEEP_CONCURRENCY)
+            .collect()
+            .await;
     let mut cur = Snapshot::new();
-    for ns in &namespaces {
-        match k
-            .json(["get", "pods", "-n", ns.as_str(), "-o", "json"])
-            .await
-        {
-            Ok(list) => cur.extend(classify::snapshot_from_pod_list(&list)),
+    for (ns, res) in swept {
+        match res {
+            Ok(snap) => cur.extend(snap),
             Err(e) => {
                 status.last_error = format!("list pods in {ns}: {e}");
                 status.cycle_ms = started.elapsed().as_millis() as i64;
@@ -433,14 +486,34 @@ pub async fn run_cycle<S: K8sCtx>(
         ));
     }
 
-    // 2. Events.
+    // 2. Events (same fan-out; parsed off the runtime).
+    let listed: Vec<(String, otto_core::Result<Vec<EventHint>>)> =
+        stream::iter(namespaces.iter().cloned())
+            .map(|ns| {
+                let k = &k;
+                async move {
+                    let res = match k
+                        .run(["get", "events", "-n", ns.as_str(), "-o", "json"])
+                        .await
+                    {
+                        Ok(out) => {
+                            parse_off_runtime(out.stdout, move |list| {
+                                parse_event_hints(&list, prev_cycle_at)
+                            })
+                            .await
+                        }
+                        Err(e) => Err(e),
+                    };
+                    (ns, res)
+                }
+            })
+            .buffered(SWEEP_CONCURRENCY)
+            .collect()
+            .await;
     let mut events: Vec<EventHint> = Vec::new();
-    for ns in &namespaces {
-        match k
-            .json(["get", "events", "-n", ns.as_str(), "-o", "json"])
-            .await
-        {
-            Ok(list) => events.extend(parse_event_hints(&list, prev_cycle_at)),
+    for (ns, res) in listed {
+        match res {
+            Ok(hints) => events.extend(hints),
             Err(e) => tracing::debug!("k8s monitor: events in {ns}: {e}"),
         }
     }
@@ -629,6 +702,10 @@ pub async fn run_loop<S: K8sCtx>(ctx: S, cluster_id: Id, cancel: Arc<AtomicBool>
     };
     let mut schema_ready = false;
     let mut failures: u32 = 0;
+    // What this loop last stored: the snapshot (the write-on-change baseline
+    // and the next cycle's `prev`, so the row isn't re-read and re-parsed
+    // every cycle) and that cycle's time. `None` = read the row.
+    let mut last: Option<(Value, Option<String>)> = None;
     loop {
         if cancel.load(Ordering::Relaxed) {
             return;
@@ -676,21 +753,38 @@ pub async fn run_loop<S: K8sCtx>(ctx: S, cluster_id: Id, cancel: Arc<AtomicBool>
             }
         }
 
-        let prev_status = repo.get_status(cluster_id.as_str()).await.ok().flatten();
-        let prev: Snapshot = prev_status
+        if last.is_none() {
+            last = repo
+                .get_status(cluster_id.as_str())
+                .await
+                .ok()
+                .flatten()
+                .map(|s| (s.snapshot, s.last_cycle_at));
+        }
+        let prev: Snapshot = last
             .as_ref()
-            .map(|s| serde_json::from_value(s.snapshot.clone()).unwrap_or_default())
+            .map(|(snap, _)| serde_json::from_value(snap.clone()).unwrap_or_default())
             .unwrap_or_default();
-        let prev_at = prev_status
+        let prev_at = last
             .as_ref()
-            .and_then(|s| s.last_cycle_at.as_deref())
+            .and_then(|(_, at)| at.as_deref())
             .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
             .map(|t| t.with_timezone(&Utc));
 
         let out = run_cycle(&ctx, &cluster, &cfg, &prev, prev_at, sink.as_ref()).await;
         let ok = out.status.last_ok_at.is_some();
-        if let Err(e) = repo.upsert_status(&out.status).await {
-            tracing::warn!(cluster = %cluster_id, "k8s monitor: status write failed: {e}");
+        match store_status(&repo, &out.status, last.as_ref().map(|(snap, _)| snap)).await {
+            Ok(_) => {
+                last = Some((
+                    out.status.snapshot.clone(),
+                    out.status.last_cycle_at.clone(),
+                ))
+            }
+            Err(e) => {
+                tracing::warn!(cluster = %cluster_id, "k8s monitor: status write failed: {e}");
+                // Unknown what's stored now: re-read next cycle.
+                last = None;
+            }
         }
         let _ = ctx.events().send(Event::K8sMonitorCycle {
             cluster_id: cluster_id.clone(),
@@ -756,6 +850,36 @@ async fn sleep_slices(total: Duration, cancel: &AtomicBool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn status_rewrites_the_snapshot_only_when_it_changed() {
+        let pool = otto_state::db::test_pool().await;
+        sqlx::query(
+            "INSERT INTO k8s_clusters (id, name, source, context_name, environment, created_at, updated_at)
+             VALUES ('c1', 'C', 'imported', 'ctx', 'dev', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let repo = K8sMonitorRepo::new(pool);
+        let mut st = K8sMonitorStatusRow::empty("c1");
+        st.snapshot = serde_json::json!({"ns/p": {"phase": "Running"}});
+        // First write (no baseline): snapshot stored.
+        assert!(store_status(&repo, &st, None).await.unwrap());
+        // Same snapshot again: the status fields move, the snapshot isn't rewritten.
+        let baseline = st.snapshot.clone();
+        st.cycle_ms = 77;
+        assert!(!store_status(&repo, &st, Some(&baseline)).await.unwrap());
+        assert_eq!(repo.get_status("c1").await.unwrap().unwrap().cycle_ms, 77);
+        // A changed snapshot is written.
+        st.snapshot = serde_json::json!({"ns/p": {"phase": "Failed"}});
+        assert!(store_status(&repo, &st, Some(&baseline)).await.unwrap());
+        assert_eq!(
+            repo.get_status("c1").await.unwrap().unwrap().snapshot["ns/p"]["phase"],
+            "Failed"
+        );
+    }
+
     use crate::monitor::classify::{Class, ContainerSnap};
 
     fn fixture_pod() -> PodSnap {

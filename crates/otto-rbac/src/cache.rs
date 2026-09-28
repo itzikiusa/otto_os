@@ -54,6 +54,10 @@ pub struct AuthCache {
     /// existed. Revocation paths are unaffected (they still call DB + evict,
     /// but the evict is a no-op, which is safe).
     enabled: bool,
+    /// Per-user feature/plugin grant rows for the feature guard (SG-11). Rides
+    /// on this cache so the one `GrantsInvalidator` (`set_grants`,
+    /// `set_plugin_grants`, `revoke_all_for_user`) flushes both at once.
+    grants: otto_state::GrantCache,
 }
 
 impl AuthCache {
@@ -63,6 +67,7 @@ impl AuthCache {
             entries: Arc::default(),
             by_user: Arc::default(),
             enabled: AUTH_CACHE_ENABLED,
+            grants: otto_state::GrantCache::new(),
         }
     }
 
@@ -73,6 +78,7 @@ impl AuthCache {
             entries: Arc::default(),
             by_user: Arc::default(),
             enabled,
+            grants: otto_state::GrantCache::new(),
         }
     }
 
@@ -104,6 +110,12 @@ impl AuthCache {
         self.by_user.entry(user_id).or_default().push(token_hash);
     }
 
+    /// The shared grant-row cache (hand it to `GrantsRepo::with_cache`).
+    /// Disabled with the rest of the cache: then every lookup reads the DB.
+    pub fn grant_cache(&self) -> Option<otto_state::GrantCache> {
+        self.enabled.then(|| self.grants.clone())
+    }
+
     /// Evict a single token entry by `token_hash`. Also cleans the reverse index
     /// to keep `by_user` from accumulating stale pointers over time.
     pub fn evict(&self, token_hash: &str) {
@@ -119,6 +131,7 @@ impl AuthCache {
     /// Evict ALL cached entries belonging to `user_id`. Called on
     /// `revoke_all_for_user` and `set_grants` to flush stale auth/grant state.
     pub fn evict_user(&self, user_id: &str) {
+        self.grants.invalidate_user(user_id);
         if let Some((_, hashes)) = self.by_user.remove(user_id) {
             for h in hashes {
                 self.entries.remove(&h);

@@ -70,3 +70,59 @@ test('podContainers mirrors the daemon (init first, live state + restarts)', () 
   ]);
   assert.deepEqual(plain(podContainers(null)), []);
 });
+
+test('TableWindow.active gates windowing; a 5000-message peek mounts ≤ 150 rows (SC-08/SC-22)', () => {
+  const { TableWindow } = tableWindow();
+  const tw = new TableWindow();
+  assert.equal(tw.active(400), false);
+  assert.equal(tw.active(401), true);
+  tw.rowH = 29;
+  tw.viewH = 900;
+  for (const top of [0, 29 * 2500, 29 * 4990]) {
+    tw.scrollTop = top;
+    const r = tw.range(5000);
+    assert.ok(r.end - r.start <= 150, `mounted ${r.end - r.start} rows at scrollTop ${top}`);
+    assert.equal(r.top + (r.end - r.start) * 29 + r.bottom, 5000 * 29);
+  }
+  // 12k offsets (a 600-partition × 20-topic group) stay bounded too.
+  tw.scrollTop = 29 * 6000;
+  const big = tw.range(12_000);
+  assert.ok(big.end - big.start <= 150);
+});
+
+test('clipLongScalars cuts only >64 KiB strings and keeps untouched subtrees (SC-19)', () => {
+  const { clipLongScalars, MANIFEST_SCALAR_MAX } = loadSource(new URL('../src/modules/kubernetes/k8s-util.ts', import.meta.url), {});
+  const huge = 'x'.repeat(MANIFEST_SCALAR_MAX + 10 * 1024);
+  const meta = { name: 'grafana-dashboards', labels: { app: 'grafana' } };
+  const manifest = { kind: 'ConfigMap', metadata: meta, data: { 'big.json': huge, small: 'ok' }, list: [huge, 1] };
+  const { value, clipped } = clipLongScalars(manifest);
+  assert.equal(clipped, 2);
+  const v = value as { metadata: unknown; data: Record<string, string>; list: unknown[] };
+  assert.equal(v.metadata, meta, 'unchanged subtree keeps identity');
+  assert.equal(v.data.small, 'ok');
+  assert.ok(v.data['big.json'].length < MANIFEST_SCALAR_MAX + 100);
+  assert.ok(v.data['big.json'].startsWith('x'.repeat(100)));
+  assert.match(v.data['big.json'], /10 KiB more — use Copy/);
+  assert.equal(v.list[1], 1);
+  assert.equal(manifest.data['big.json'], huge, 'the input is not mutated');
+  const same = clipLongScalars(meta);
+  assert.equal(same.value, meta);
+  assert.equal(same.clipped, 0);
+});
+
+test('mergeS3Head refreshes the head and keeps the loaded pages (I9)', () => {
+  const { mergeS3Head } = loadSource(new URL('../src/modules/aws/util.ts', import.meta.url), {});
+  const obj = (key: string, size = 1) => ({ key, size, last_modified: '2026-01-01T00:00:00Z' });
+  // Loaded: page 1 (a..c) + a "Load more" page (d..f).
+  const loaded = { prefixes: ['b/', 'e/'], objects: ['a', 'c', 'd', 'f'].map((k) => obj(k)) };
+  // Fresh page 1: `a` changed size, `c` deleted, a new `bb` arrived; the page ends at `c2`.
+  const fresh = { prefixes: ['b/'], objects: [obj('a', 9), obj('bb'), obj('c2')], is_truncated: true, next_token: 't' };
+  const m = plain(mergeS3Head(loaded, fresh)) as { prefixes: string[]; objects: { key: string; size: number }[] };
+  assert.deepEqual(m.objects.map((o) => o.key), ['a', 'bb', 'c2', 'd', 'f']);
+  assert.equal(m.objects[0].size, 9, 'fresh page wins');
+  assert.deepEqual(m.prefixes, ['b/', 'e/'], 'loaded prefixes past the head survive');
+  // A complete fresh listing replaces everything (deletions beyond page 1 drop).
+  const all = plain(mergeS3Head(loaded, { prefixes: [], objects: [obj('a')], is_truncated: false })) as typeof m;
+  assert.deepEqual(all.objects.map((o) => o.key), ['a']);
+  assert.deepEqual(all.prefixes, []);
+});

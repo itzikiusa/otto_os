@@ -5,7 +5,8 @@
 
 import { api } from '../api/client';
 import { loadErrorText } from '../loadError';
-import { pollWhileVisible, type Poller } from '../poll';
+import type { Poller } from '../poll';
+import { liveQuery } from '../live';
 import type {
   CreateGoalLoopReq,
   DefineGoalReq,
@@ -217,16 +218,22 @@ class LoopsStore {
    *  paused/finished loop changes only through events or the user's actions. */
   startPoll(id: string): void {
     this.stopPoll();
-    this.poller = pollWhileVisible(
-      async (signal) => {
+    // `goal_loop_updated` already re-fetches the open detail (applyEvent):
+    // while the event socket is up this is only a 30 s safety net; the 4 s
+    // cadence returns while it is down.
+    this.poller = liveQuery({
+      run: async (signal) => {
         const d = this.detail;
         if (!d || d.loop.id !== id) return;
         if (d.loop.status !== 'running') return;
         if (this.detailInflight) return;
         return this.fetchDetail(id, true, signal);
       },
-      { ms: 4000, immediate: false },
-    );
+      on: [],
+      fallbackMs: 4000,
+      safetyMs: 30_000,
+      immediate: false,
+    });
   }
 
   stopPoll(): void {

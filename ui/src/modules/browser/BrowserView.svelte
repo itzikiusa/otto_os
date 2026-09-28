@@ -501,6 +501,32 @@
       }
     }
     knownLiveIds = current;
+    liveMru = liveMru.filter((id) => current.has(id));
+  });
+
+  // Cap live native webviews (perf SB-14): every live tab kept a hidden
+  // WKWebView — its own WebContent process, JS timers and media — for as long
+  // as the tab existed. Keep the MAX_LIVE_WEBVIEWS most recently shown; close
+  // older hidden ones (only those this view opened). Re-activating one re-opens
+  // it at the tab's current URL (`openedUrl` is cleared, so the show effect
+  // calls `open`) — in-page state (scroll, form input) is lost, like Safari's
+  // tab discarding.
+  const MAX_LIVE_WEBVIEWS = 4;
+  let liveMru: string[] = [];
+  $effect(() => {
+    if (!nativeBrowserAvailable) return;
+    const id = activeLive?.id;
+    if (!id) return;
+    untrack(() => {
+      liveMru = [id, ...liveMru.filter((x) => x !== id)];
+      while (liveMru.length > MAX_LIVE_WEBVIEWS) {
+        const old = liveMru.pop();
+        if (old && old !== id && openedUrl[old] !== undefined) {
+          void nativeBrowser.close(old);
+          delete openedUrl[old];
+        }
+      }
+    });
   });
 
   // Hide (not close — this view doesn't own destroying a tab's session state)

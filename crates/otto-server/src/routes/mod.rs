@@ -561,6 +561,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
             "/sessions/{id}/transcript/images/{img_id}",
             get(transcript::transcript_image),
         )
+        .route(
+            "/sessions/{id}/transcript/tool/{tool_id}",
+            get(transcript::transcript_tool),
+        )
         .route("/sessions/{id}/artifacts", get(transcript::list_artifacts))
         .route(
             "/sessions/{id}/artifacts/{artifact_id}",
@@ -577,6 +581,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route(
             "/workspaces/{wid}/history/transcript/images/{img_id}",
             get(transcript::history_transcript_image),
+        )
+        .route(
+            "/workspaces/{wid}/history/artifacts",
+            get(transcript::history_artifacts),
         )
         .route(
             "/workspaces/{wid}/history/import",

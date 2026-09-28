@@ -388,10 +388,16 @@
     return { from, to };
   }
 
-  // Server-driven completion source. Each query waits COMPLETION_DELAY_MS and
-  // is aborted (timer + fetch) the moment CodeMirror drops it — any doc change
-  // restarts it — so fast typing collapses to one request for the latest text
-  // and superseded requests never reach (or keep running on) the daemon.
+  // Server-driven completion source. Each query waits COMPLETION_DELAY_MS, then
+  // asks the daemon once. It is NOT aborted by ordinary typing (no
+  // `onDocChange`): CodeMirror keeps a pending query alive while the word grows
+  // and then filters its answer through `validFor`, so a word typed during the
+  // request costs ONE request instead of an abort + a fresh request per key.
+  // (The daemon builds a cold schema snapshot in a detached task, so even a
+  // dropped request's build completes and is cached.) CodeMirror still aborts
+  // it — timer + fetch — on a cursor jump, Escape or a non-typing edit. A
+  // `truncated` answer (the daemon capped the list for the typed word) has no
+  // `validFor`, so the next keystroke re-asks with the longer word.
   let inflight: AbortController | null = null;
   function completionSource(ctx: CompletionContext): Promise<CompletionResult | null> | null {
     const before = ctx.matchBefore(TOKEN_RE);
@@ -434,7 +440,7 @@
         // Text after the cursor lets the server resolve the FROM table list even
         // when the cursor sits in the SELECT list before it.
         const suffix = state.sliceDoc(pos, span.to);
-        const items = await database.complete(prefix, suffix, undefined, ac.signal);
+        const { items, truncated } = await database.complete(prefix, suffix, undefined, ac.signal);
         if (inflight === ac) inflight = null;
         if (ac.signal.aborted || items.length === 0) {
           resolve(null);
@@ -449,18 +455,14 @@
           // they sort above plain columns / keywords among matching options.
           boost: it.score ?? undefined,
         }));
-        resolve({ from, options, validFor: TOKEN_RE });
+        resolve(truncated ? { from, options } : { from, options, validFor: TOKEN_RE });
       }, COMPLETION_DELAY_MS);
-      ctx.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          ac.abort();
-          if (inflight === ac) inflight = null;
-          resolve(null);
-        },
-        { onDocChange: true },
-      );
+      ctx.addEventListener('abort', () => {
+        clearTimeout(timer);
+        ac.abort();
+        if (inflight === ac) inflight = null;
+        resolve(null);
+      });
     });
   }
 
@@ -1292,6 +1294,7 @@
       {sqlDialect}
       placeholder={lang === 'redis' ? 'Write a command — ⌘↵ to run' : 'Write a query — ⌘↵ to run'}
       completionSource={database.selectedConnId ? completionSource : null}
+      autoTriggerGate={(s, pos) => !inInertNode(s, pos)}
       onchange={(v) => database.setStatement(v)}
       onsubmit={run}
       onselect={(s) => (editorSel = s)}

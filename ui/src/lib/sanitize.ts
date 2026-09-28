@@ -54,8 +54,11 @@ function urlOk(v: string, tag: string): boolean {
   return false;
 }
 
-/** Sanitize an HTML string for safe `{@html}` injection. */
-export function sanitizeHtml(html: string): string {
+/** Sanitize an HTML string for safe `{@html}` injection. `postProcess` runs on
+ *  the SANITIZED tree before it is serialized, so a caller that adds trusted
+ *  attributes (md.ts: `tabindex` on wide blocks) does it on the same DOM
+ *  instead of re-parsing the output (V10: one parse, one serialize). */
+export function sanitizeHtml(html: string, postProcess?: (body: HTMLElement) => void): string {
   const doc = new DOMParser().parseFromString(`<body>${html}</body>`, 'text/html');
   const body = doc.body;
 
@@ -100,6 +103,7 @@ export function sanitizeHtml(html: string): string {
       else node.setAttribute('disabled', '');
     }
   }
+  postProcess?.(body);
   return body.innerHTML;
 }
 

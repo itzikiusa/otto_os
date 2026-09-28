@@ -6,6 +6,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { pollWhileVisible } from '../../lib/poll';
+  import { TableWindow } from '../../lib/tableWindow.svelte';
   import { copyAsJson, downloadJson, exportCsv } from '../../lib/components/exporters';
   import type {
     BrokerCluster,
@@ -60,6 +61,18 @@
   let selected = $state.raw<KafkaMessage | null>(null);
   let rawView = $state(false);
   const selKey = $derived(selected ? `${selected.partition}-${selected.offset}` : '');
+  // Window the message table (SC-08): a 5000-message peek mounts only the
+  // visible slice between two spacer rows. The partition ranges are indexed
+  // once per result so each visible row's position bar is an O(1) lookup.
+  const messages = $derived(result?.messages ?? []);
+  const rangeByPartition = $derived(new Map((result?.partitions ?? []).map((r) => [r.partition, r])));
+  const tw = new TableWindow();
+  const win = $derived(tw.range(messages.length));
+  let msgListEl = $state<HTMLDivElement>();
+  $effect(() => {
+    void win;
+    tw.measure(msgListEl);
+  });
   /** The request behind `result` (exports re-read it in full when previews were cut). */
   let lastReq: ConsumeReq | null = null;
   /** Full-value fetch for a selected message whose list preview was truncated. */
@@ -369,6 +382,7 @@
     try {
       result = await api.post<ConsumeResp>(consumeUrl(), req);
       lastReq = req;
+      tw.reset(msgListEl);
       // Reset tail cursors: a manual peek replaces the view and reseeds offsets.
       tailOffsets = new Map();
       // An empty range renders inline ("No messages in the selected range.");
@@ -386,7 +400,9 @@
    * range is empty (high === low).
    */
   function offsetPct(msg: KafkaMessage, partitions: PartitionRange[]): number | null {
-    const range = partitions.find((r) => r.partition === msg.partition);
+    return rangePct(msg, partitions.find((r) => r.partition === msg.partition));
+  }
+  function rangePct(msg: KafkaMessage, range: PartitionRange | undefined): number | null {
     if (!range) return null;
     const span = range.high - range.low;
     if (span <= 0) return null;
@@ -641,14 +657,21 @@
     {#if consumeError}<p class="field-err" role="status">{consumeError}</p>{/if}
 
     <div class="msg-layout">
-      <div class="msg-list">
+      <div
+        class="msg-list"
+        class:windowed={tw.active(messages.length)}
+        bind:this={msgListEl}
+        bind:clientHeight={tw.viewH}
+        onscroll={tw.onscroll}
+      >
         <table>
           <thead>
             <tr><th>P</th><th>Offset</th><th>Pos</th><th>Key</th><th>Time</th><th>Size</th></tr>
           </thead>
           <tbody onpointerup={inspectRow}>
-            {#each result?.messages ?? [] as m (m.partition + '-' + m.offset)}
-              {@const pct = result ? offsetPct(m, result.partitions) : null}
+            {#if win.top}<tr class="tw-spacer" aria-hidden="true"><td colspan="6" style="height:{win.top}px"></td></tr>{/if}
+            {#each messages.slice(win.start, win.end) as m (m.partition + '-' + m.offset)}
+              {@const pct = rangePct(m, rangeByPartition.get(m.partition))}
               <tr class:sel={selKey === `${m.partition}-${m.offset}`} data-message-key={`${m.partition}-${m.offset}`}>
                 <td>{m.partition}</td>
                 <td class="mono"><button class="message-open" aria-label={`Inspect partition ${m.partition} offset ${m.offset}`} title={`Inspect partition ${m.partition} offset ${m.offset}`} aria-pressed={selKey === `${m.partition}-${m.offset}`} onclick={() => selectMessage(m)}>{m.offset}</button></td>
@@ -666,6 +689,7 @@
                 <td class="muted">{m.size_bytes}</td>
               </tr>
             {/each}
+            {#if win.bottom}<tr class="tw-spacer" aria-hidden="true"><td colspan="6" style="height:{win.bottom}px"></td></tr>{/if}
           </tbody>
         </table>
         {#if !result && !consuming}
@@ -1052,7 +1076,12 @@
     text-underline-offset: 3px;
   }
   .msg-list tbody tr { cursor: pointer; }
-  .msg-list tbody tr:hover {
+  .msg-list tbody tr.tw-spacer { cursor: default; }
+  .msg-list tbody tr.tw-spacer td {
+    padding: 0;
+    border: 0;
+  }
+  .msg-list tbody tr:not(.tw-spacer):hover {
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .msg-list tbody tr.sel {
@@ -1313,6 +1342,10 @@
       min-height: 200px;
       flex: 1 1 auto;
     }
+    /* A windowed list must be its own scroller (the page scrolls here). */
+    .msg-list.windowed {
+      max-height: 60vh;
+    }
     .msg-detail {
       width: 100%;
       min-width: 0;
@@ -1347,6 +1380,9 @@
     }
     .msg-list {
       min-height: 180px;
+    }
+    .msg-list.windowed {
+      max-height: 70vh;
     }
     .msg-detail {
       min-height: 180px;

@@ -14,6 +14,8 @@
   import { autoLang, ensureHljs, highlightBlock, highlightLine, langFromPath } from '../../../lib/hl';
   import type { Block } from '../../../lib/api/types';
   import { CONV_CTX, type ConvContext } from './context';
+  import { effectiveResult, fetchToolResult, isElided } from './toolDetail';
+  import type { ToolResult } from '../../../lib/api/types';
 
   interface Props {
     block: Extract<Block, { kind: 'tool_call' }>;
@@ -22,11 +24,40 @@
   const ctx = getContext<ConvContext>(CONV_CTX);
 
   let open = $state(false);
+  // An over-cap live delta ships this result as a short preview
+  // (`result.elided`); the full stored output is fetched the first time the
+  // step is expanded (SA-04 — the view used to re-fetch the whole page).
+  let full = $state<ToolResult | null>(null);
+  let fullFor = $state<string | null>(null);
+  let fullState = $state<'idle' | 'loading' | 'error'>('idle');
+  const loaded = $derived(fullFor === block.id);
+  const result = $derived(effectiveResult(block, loaded ? full : null));
+  const previewOnly = $derived(isElided(block) && !loaded);
+  function loadFull(): void {
+    const sid = ctx.sessionId;
+    if (!sid || fullState === 'loading') return;
+    const id = block.id;
+    fullState = 'loading';
+    fetchToolResult(sid, id).then(
+      (r) => {
+        if (block.id !== id) return;
+        fullFor = id;
+        full = r;
+        fullState = 'idle';
+      },
+      () => {
+        if (block.id === id) fullState = 'error';
+      },
+    );
+  }
+  $effect(() => {
+    if (open && previewOnly && fullState === 'idle') loadFull();
+  });
   const chrome = $derived(TOOL_CHROME[block.tool] ?? TOOL_CHROME.other);
   const subtitle = $derived(toolSubtitle(block));
   const title = $derived(block.title?.trim() || block.name);
   const status = $derived<'ok' | 'err' | 'pending'>(
-    block.result == null ? 'pending' : block.result.ok ? 'ok' : 'err',
+    result == null ? 'pending' : result.ok ? 'ok' : 'err',
   );
   // Edit calls carry `structuredPatch` on the result; older records (and a
   // failed edit) do not — synthesize a −old/+new hunk from the input so the
@@ -48,9 +79,9 @@
     ].join('\n');
   }
   const diff = $derived.by(() => {
-    if (block.result?.patch) return patchToDiff(block.result.patch, block.result.file_path);
+    if (result?.patch) return patchToDiff(result.patch, result.file_path);
     const synth = editInputPatch();
-    return synth ? patchToDiff(synth, block.result?.file_path ?? null) : null;
+    return synth ? patchToDiff(synth, result?.file_path ?? null) : null;
   });
   const diffStats = $derived.by(() => {
     if (!diff) return null;
@@ -78,8 +109,8 @@
     return autoLang(text);
   });
 
-  const filePath = $derived(block.result?.file_path ?? (block.tool === 'read' || block.tool === 'edit' || block.tool === 'write' ? subtitle || null : null));
-  const text = $derived(block.result?.text ?? '');
+  const filePath = $derived(result?.file_path ?? (block.tool === 'read' || block.tool === 'edit' || block.tool === 'write' ? subtitle || null : null));
+  const text = $derived(result?.text ?? '');
   const lines = $derived(text ? text.split('\n') : []);
   // Long outputs render through the windowed list (uniform mono rows); short
   // ones as a plain <pre> so selection/copy stays natural.
@@ -117,8 +148,8 @@
     {#if diffStats}
       <span class="step-stats mono" title="Lines added / removed"><span class="add">+{diffStats.add}</span> <span class="del">−{diffStats.del}</span></span>
     {/if}
-    {#if block.result?.truncated}
-      <span class="chip step-trunc" title="Output capped at 64 KB">{fmtBytes(block.result.bytes)}</span>
+    {#if result?.truncated || previewOnly}
+      <span class="chip step-trunc" title={previewOnly ? 'Preview — expand to load the full output' : 'Output capped at 64 KB'}>{fmtBytes(result?.bytes ?? 0)}</span>
     {/if}
     <span class="step-dot {status}" title={status === 'ok' ? 'Succeeded' : status === 'err' ? 'Failed' : 'Running…'}></span>
     <span class="step-caret" aria-hidden="true"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} /></span>
@@ -140,7 +171,7 @@
         <div class="diff-wrap">
           <DiffViewer {diff} />
         </div>
-      {:else if block.result == null}
+      {:else if result == null}
         <div class="pending">Waiting for the result…</div>
       {:else if block.tool === 'web' || block.tool === 'ask'}
         <Markdown md={text} small />
@@ -150,15 +181,24 @@
         </VirtualList>
       {:else if text}
         <pre class="out mono hljs" class:err={status === 'err'} dir="ltr" data-lang={lang}>{@html outHtml}</pre>
-      {:else if !block.result.image_ids.length}
+      {:else if !result.image_ids.length && !previewOnly}
         <div class="pending dim">(no output)</div>
       {/if}
-      {#if block.result?.truncated}
-        <div class="dim trunc-note">Output truncated to 64 KB ({fmtBytes(block.result.bytes)} total).</div>
+      {#if previewOnly}
+        {#if fullState === 'error'}
+          <div class="trunc-note load-err" role="alert">
+            Couldn't load the full output.
+            <button class="link-btn" onclick={loadFull}>Retry</button>
+          </div>
+        {:else if fullState === 'loading' || !ctx.sessionId}
+          <div class="dim trunc-note" aria-live="polite">{ctx.sessionId ? 'Loading the full output…' : `Preview of ${fmtBytes(result?.bytes ?? 0)}.`}</div>
+        {/if}
+      {:else if result?.truncated}
+        <div class="dim trunc-note">Output truncated to 64 KB ({fmtBytes(result.bytes)} total).</div>
       {/if}
-      {#if block.result?.image_ids.length}
+      {#if result?.image_ids.length}
         <div class="imgs">
-          {#each block.result.image_ids as id (id)}
+          {#each result.image_ids as id (id)}
             <ImageBlock {id} alt="Tool result image" small />
           {/each}
         </div>
@@ -387,6 +427,12 @@
   }
   .trunc-note {
     font-size: var(--fs-xs);
+  }
+  .load-err {
+    color: var(--danger);
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
   }
   .imgs {
     display: flex;

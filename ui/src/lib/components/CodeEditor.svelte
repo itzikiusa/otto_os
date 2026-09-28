@@ -3,7 +3,7 @@
   // readOnly=true by default (Files viewer is read-only; LSP still works).
   import { onDestroy, untrack } from 'svelte';
   import { EditorView, lineNumbers, keymap, drawSelection, placeholder as cmPlaceholder } from '@codemirror/view';
-  import { EditorState, Compartment, Prec, type StateEffect } from '@codemirror/state';
+  import { EditorState, Compartment, Prec, Text, type StateEffect } from '@codemirror/state';
   import { defaultKeymap, history, historyKeymap, selectAll } from '@codemirror/commands';
   import { search, searchKeymap, openSearchPanel } from '@codemirror/search';
   import {
@@ -23,7 +23,7 @@
     defaultHighlightStyle,
     syntaxHighlighting,
   } from '@codemirror/language';
-  import { oneDark } from '@codemirror/theme-one-dark';
+  import { oneDark, oneDarkTheme } from '@codemirror/theme-one-dark';
   import type { Extension } from '@codemirror/state';
 
   // Language packages
@@ -39,6 +39,7 @@
   import { sql } from '@codemirror/lang-sql';
   import { sqlDialect as dialectFor, type SqlDialectName } from '../sql-dialects';
   import { redisLang } from './redis-lang';
+  import { createChangeEmitter } from './changeEmitter';
 
   // LSP — use the all-in-one factory that manages the WS transport internally
   import { languageServer } from '@marimo-team/codemirror-languageserver';
@@ -70,7 +71,9 @@
     },
     { dark: false },
   );
-  function themeExt(scheme: 'light' | 'dark'): Extension {
+  function themeExt(scheme: 'light' | 'dark', plain = false): Extension {
+    // `plain` (see `highlightLineLimit`): the same theme without syntax colours.
+    if (plain) return scheme === 'dark' ? oneDarkTheme : lightTheme;
     // Dark: oneDark already bundles a syntax highlight style. Light: pair the
     // light theme with the default (light-oriented) highlight style so SQL — and
     // every language — is actually COLORED in light mode (previously it wasn't).
@@ -85,7 +88,12 @@
     root: string;
     language?: string;
     readOnly?: boolean;
-    /** Fired with the full document text on every edit (only when !readOnly). */
+    /**
+     * Fired with the full document text after edits (only when !readOnly).
+     * Synchronous per edit below 256 K chars; at/above that it is coalesced
+     * (one emit after 150 ms of quiet, flushed on blur, ⌘/Ctrl-chords, submit,
+     * doc switch and unmount) so a multi-MB body doesn't copy itself per key.
+     */
     onchange?: (value: string) => void;
     /**
      * Optional custom autocompletion source. When set, it overrides the default
@@ -94,6 +102,13 @@
      * Compartment so callers can toggle it without remounting the editor.
      */
     completionSource?: CompletionSource | null;
+    /**
+     * With `completionSource`: may the popup open proactively (after `.` or a
+     * clause keyword + space) at `pos`? `startCompletion` is an EXPLICIT query,
+     * which the source can't tell from Ctrl-Space, so a gate the source only
+     * applies to typing (e.g. "not inside a string") must also be passed here.
+     */
+    autoTriggerGate?: ((state: EditorState, pos: number) => boolean) | null;
     /** Hide the gutters (line numbers + fold) for a leaner single-statement editor. */
     minimal?: boolean;
     /** Run handler bound to Cmd/Ctrl+Enter (e.g. execute the query). */
@@ -138,12 +153,13 @@
      */
     keepStates?: boolean;
     /**
-     * Attach a language server for this doc (default true — the Files viewer).
-     * Pass `false` for scratch / virtual-path editors (API request body,
-     * scripts, docs, response viewer): the daemon spawns one server PROCESS per
-     * editor socket with `cwd` = `root`, so a fake `pre.js` would start a
-     * tsserver indexing the whole workspace for a 3-line script, and every
-     * remount (tab switch, new response) would spawn/kill another.
+     * Attach a language server for this doc. OPT-IN (default false): only an
+     * editor showing a REAL file under `root` (the Files viewer) passes it.
+     * Scratch / virtual-path editors (API body/scripts, canvases, vault notes,
+     * skill/context files, Athena SQL, conflict hunks, response viewer) must
+     * not: a server runs with `cwd` = `root` (indexing the whole workspace for
+     * a 3-line `pre.js`) and a partial/fake doc only yields noise diagnostics.
+     * The daemon shares one server per `(lang, root)` across editors.
      */
     lsp?: boolean;
     /**
@@ -154,6 +170,16 @@
      * remount. The DB query editor passes the connection's engine.
      */
     sqlDialect?: SqlDialectName;
+    /**
+     * Drop syntax COLOURING while any line is longer than this many chars
+     * (0 = never; opt-in). The language itself stays — brackets, indentation,
+     * folding, completion behave the same. A 200 KB minified JSON body is one
+     * soft-wrapped line of ~26k highlight spans, and every typed character
+     * re-laid out all of them (11–21 ms/key vs ~4 ms uncoloured). VS Code
+     * skips tokenizing lines past 20k chars for the same reason. Re-checked as
+     * the doc changes (Format brings the colours back).
+     */
+    highlightLineLimit?: number;
   }
 
   let {
@@ -164,6 +190,7 @@
     readOnly = true,
     onchange,
     completionSource = null,
+    autoTriggerGate = null,
     minimal = false,
     onsubmit,
     onselect,
@@ -173,8 +200,9 @@
     placeholder = '',
     wrap = false,
     keepStates = false,
-    lsp = true,
+    lsp = false,
     sqlDialect = 'standard',
+    highlightLineLimit = 0,
   }: Props = $props();
 
   // ── Container ─────────────────────────────────────────────────────────────
@@ -201,6 +229,62 @@
   function placeholderExt(text: string): Extension {
     return text ? cmPlaceholder(text) : [];
   }
+
+  // ── Long-line plain mode (highlightLineLimit) ───────────────────────────────
+  /** Whether the live view is currently uncoloured (plain field — not reactive). */
+  let appliedPlain = false;
+  let plainRecheck: ReturnType<typeof setTimeout> | null = null;
+
+  /** Any line of `doc` longer than `limit`? Walks the line strings the doc
+   *  already holds (no slicing) — O(lines). */
+  function hasLongLine(doc: Text, limit: number): boolean {
+    if (doc.length <= limit) return false;
+    let run = 0;
+    for (const it = doc.iter(); !it.next().done; ) {
+      if (it.lineBreak) run = 0;
+      else if ((run += it.value.length) > limit) return true;
+    }
+    return false;
+  }
+
+  function setPlain(target: EditorView, on: boolean): void {
+    if (on === appliedPlain) return;
+    appliedPlain = on;
+    // Called from an update listener: reconfigure once that update is done.
+    queueMicrotask(() => {
+      if (view !== target) return;
+      const scheme = untrack(() => ui.resolvedScheme);
+      target.dispatch({ effects: themeCompartment.reconfigure(themeExt(scheme, appliedPlain)) });
+    });
+  }
+
+  /** Enter plain mode when an edit leaves a long line behind (only the lines
+   *  the edit touched are measured); leave it once no long line is left
+   *  (a whole-doc scan, debounced — typing inside the long line keeps it). */
+  const plainWatch = EditorView.updateListener.of((u) => {
+    const limit = highlightLineLimit;
+    if (!u.docChanged || limit <= 0) return;
+    if (appliedPlain) {
+      if (plainRecheck) clearTimeout(plainRecheck);
+      const target = u.view;
+      plainRecheck = setTimeout(() => {
+        plainRecheck = null;
+        if (view === target && !hasLongLine(target.state.doc, limit)) setPlain(target, false);
+      }, 300);
+      return;
+    }
+    const doc = u.state.doc;
+    let long = false;
+    u.changes.iterChangedRanges((_fa, _ta, fromB, toB) => {
+      for (let pos = fromB; !long; ) {
+        const line = doc.lineAt(pos);
+        if (line.length > limit) long = true;
+        if (line.to >= toB) break;
+        pos = line.to + 1;
+      }
+    });
+    if (long) setPlain(u.view, true);
+  });
 
   // ── Language extension map ─────────────────────────────────────────────────
 
@@ -311,12 +395,36 @@
   // drop the cursor).
   let lastEmitted: string | null = null;
 
-  /** Emits the full doc text on edits so editable callers stay in sync. */
+  /** Large docs defer the (whole-doc) emit; small ones emit per edit. */
+  const LAZY_CHANGE_MIN = 256 * 1024;
+  const changes = createChangeEmitter({
+    threshold: LAZY_CHANGE_MIN,
+    delayMs: 150,
+    read: () => view?.state.doc.toString() ?? null,
+    emit: (value) => {
+      lastEmitted = value;
+      onchange?.(value);
+    },
+  });
+
+  /** Emits the doc text on edits so editable callers stay in sync. */
   const changeListener = EditorView.updateListener.of((update) => {
     if (!update.docChanged || !onchange) return;
-    const value = update.state.doc.toString();
-    lastEmitted = value;
-    onchange(value);
+    changes.changed(update.state.doc.length);
+  });
+
+  /** Flush a deferred emit before anything that may act on the value: focus
+   *  leaving the editor, or a ⌘/Ctrl chord (Send / Run / Save shortcuts are
+   *  handled by window listeners after the editor sees the key). */
+  const changeFlushHandlers = EditorView.domEventHandlers({
+    blur: () => {
+      changes.flush();
+      return false;
+    },
+    keydown: (e) => {
+      if ((e.metaKey || e.ctrlKey) && changes.pending) changes.flush();
+      return false;
+    },
   });
 
   // ── Send-to-agent handler ─────────────────────────────────────────────────
@@ -383,6 +491,14 @@
   // ── Tear-down helpers ──────────────────────────────────────────────────────
 
   function teardownEditor(): void {
+    // A deferred emit can't be delivered once `path` moved on: `onchange` is
+    // the NEW doc's binding by now (it'd write this text into the wrong tab).
+    // Real switches flush first anyway — the click blurs, ⌘-chords flush — so
+    // this only drops an edit under a programmatic switch mid-debounce.
+    // Unmount (same path) flushes in onDestroy before calling this.
+    changes.cancel();
+    if (plainRecheck) clearTimeout(plainRecheck);
+    plainRecheck = null;
     try { view?.destroy(); } catch { /* ignore */ }
     view = null;
     // Release the global find opener if this editor still holds it (blur may not
@@ -478,6 +594,9 @@
           }
         });
       }
+      // `and ` inside `'O\'Brien and …` must not open (and hold open) an
+      // explicit query that then asks the daemon on every letter.
+      if (fire && autoTriggerGate && !autoTriggerGate(u.state, u.state.selection.main.head)) fire = false;
       if (fire) {
         const view = u.view;
         setTimeout(() => startCompletion(view), 0);
@@ -491,6 +610,7 @@
       key: 'Mod-Enter',
       run: () => {
         if (onsubmit) {
+          changes.flush();
           onsubmit();
           return true;
         }
@@ -509,6 +629,11 @@
    *  the current compartments (so live reconfigures keep reaching it). */
   function createState(filePath: string, fileContent: string): EditorState {
     appliedDialect = sqlDialect;
+    // Long-line plain mode needs the doc's lines up front (to pick the theme);
+    // split them once here instead of letting EditorState.create do it again.
+    const limit = highlightLineLimit;
+    const doc = limit > 0 ? Text.of(fileContent.split(/\r\n?|\n/)) : null;
+    appliedPlain = !!doc && hasLongLine(doc, limit);
     const langExt = cmLangFor(filePath, language);
     const baseExtensions: Extension[] = [
       ...(minimal ? [] : [lineNumbers(), foldGutter()]),
@@ -524,10 +649,12 @@
       wrapCompartment.of(wrapExt((appliedWrap = wrap))),
       placeholderTheme,
       search({ top: false }),
-      themeCompartment.of(themeExt(ui.resolvedScheme)),
+      themeCompartment.of(themeExt(ui.resolvedScheme, appliedPlain)),
       lspCompartment.of([]),
       selectionListener,
       changeListener,
+      ...(limit > 0 ? [plainWatch] : []),
+      changeFlushHandlers,
       submitKeymap,
       // When this editor owns find, claim the global Cmd/Ctrl+F opener while it
       // has focus so the keymap opens THIS editor's search/replace panel (with
@@ -571,7 +698,7 @@
     ];
 
     return EditorState.create({
-      doc: fileContent,
+      doc: doc ?? fileContent,
       extensions: baseExtensions,
     });
   }
@@ -620,6 +747,8 @@
    */
   function swapState(fromPath: string, toPath: string, toContent: string): void {
     if (!view) return;
+    // See teardownEditor: `onchange` already targets `toPath`.
+    changes.cancel();
     keptStates.delete(fromPath);
     keptStates.set(fromPath, {
       state: view.state,
@@ -637,13 +766,16 @@
       view.setState(createState(toPath, toContent));
     } else {
       view.setState(kept.state);
+      if (plainRecheck) clearTimeout(plainRecheck);
+      plainRecheck = null;
+      appliedPlain = highlightLineLimit > 0 && hasLongLine(kept.state.doc, highlightLineLimit);
       // Options may have changed while the state was parked; the text may have
       // been edited from outside (store/agent) — reconcile both, undoably.
       const effects: StateEffect<unknown>[] = [
         completionCompartment.reconfigure(completionExt()),
         placeholderCompartment.reconfigure(placeholderExt((appliedPlaceholder = placeholder))),
         wrapCompartment.reconfigure(wrapExt((appliedWrap = wrap))),
-        themeCompartment.reconfigure(themeExt(ui.resolvedScheme)),
+        themeCompartment.reconfigure(themeExt(ui.resolvedScheme, appliedPlain)),
         kept.scroll,
       ];
       // Re-parse only when the dialect changed while parked (a connection
@@ -786,7 +918,7 @@
   // Re-theme live when the app scheme (light/dark) changes.
   $effect(() => {
     const scheme = ui.resolvedScheme;
-    if (view) view.dispatch({ effects: themeCompartment.reconfigure(themeExt(scheme)) });
+    if (view) view.dispatch({ effects: themeCompartment.reconfigure(themeExt(scheme, appliedPlain)) });
   });
 
   // Re-reveal when the target line/col changes for an already-mounted doc (e.g.
@@ -804,6 +936,8 @@
   });
 
   onDestroy(() => {
+    // Same doc, going away (a tab/view toggle): deliver its last edit.
+    changes.flush();
     teardownEditor();
   });
 </script>

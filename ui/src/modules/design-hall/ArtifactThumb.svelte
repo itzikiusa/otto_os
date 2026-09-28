@@ -6,6 +6,10 @@
   const CAP = 120;
   const urls = new Map<string, Promise<string | null>>();
   const texts = new Map<string, Promise<string | null>>();
+  // Rendered mermaid/D2 thumbnails by kind:artifact:version (SD-16): a lobby
+  // reload hands every card a fresh artifact object, which used to re-run the
+  // diagram render (and swap the iframe srcdoc) for every card on screen.
+  const diagrams = new Map<string, Promise<string | null>>();
 
   function remember<T>(m: Map<string, Promise<T>>, key: string, make: () => Promise<T>, onEvict?: (v: T) => void): Promise<T> {
     const hit = m.get(key);
@@ -34,6 +38,7 @@
   // otherwise, with `live`, a small sandboxed render of the actual design
   // (HTML/SVG/Mermaid/D2 — scripts off, opaque origin) or the image itself;
   // otherwise a quiet placeholder with the studio badge. Never blocks a card.
+  import { untrack } from 'svelte';
   import type { DesignArtifact } from '../../lib/api/types';
   import { fetchContent, getArtifact, thumbnailUrl } from '../../lib/api/design';
   import { renderMermaid } from '../canvas/mermaid';
@@ -82,6 +87,13 @@
     );
   }
 
+  function samePic(a: Pic, b: Pic): boolean {
+    if (a.kind !== b.kind) return false;
+    if (a.kind === 'img' && b.kind === 'img') return a.src === b.src;
+    if (a.kind === 'doc' && b.kind === 'doc') return a.html === b.html;
+    return true;
+  }
+
   let gen = 0;
   $effect(() => {
     const a = artifact;
@@ -107,12 +119,20 @@
           if (rk === 'html') next = { kind: 'doc', html: src };
           else if (rk === 'svg') next = { kind: 'doc', html: svgDoc(src) };
           else {
-            const r = rk === 'mermaid' ? await renderMermaid(`dh-thumb-${a.id}-${v ?? 'h'}-${myGen}`, src) : await renderD2(a.id, src);
-            if (r.svg) next = { kind: 'doc', html: svgDoc(r.svg) };
+            const isStale = () => myGen !== gen;
+            const key = `${rk}:${a.id}:${v ?? a.head_version_id}`;
+            const html = await remember(diagrams, key, async () => {
+              const r = rk === 'mermaid' ? await renderMermaid(`dh-thumb-${a.id}-${v ?? 'h'}`, src, { isStale }) : await renderD2(a.id, src, { isStale });
+              return r.svg ? svgDoc(r.svg) : null;
+            });
+            // A skipped (stale) or failed render must not stick in the cache.
+            if (html == null) diagrams.delete(key);
+            else next = { kind: 'doc', html };
           }
         }
       }
-      if (myGen === gen) pic = next;
+      // Same picture → keep the object, so the iframe srcdoc never reloads.
+      if (myGen === gen && !untrack(() => samePic(pic, next))) pic = next;
     })();
   });
 

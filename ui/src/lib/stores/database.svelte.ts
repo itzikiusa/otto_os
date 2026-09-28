@@ -20,7 +20,7 @@ import type {
   DbAssistMode,
   DbCancelOutcome,
   DbCapabilities,
-  DbCompletionItem,
+  DbCompletionResponse,
   DbDashboard,
   DbExportFormat,
   DbEngine,
@@ -3492,12 +3492,13 @@ class DatabaseStore {
     suffix = '',
     node?: string,
     signal?: AbortSignal,
-  ): Promise<DbCompletionItem[]> {
+  ): Promise<DbCompletionResponse> {
+    const none: DbCompletionResponse = { items: [] };
     const id = this.selectedConnId;
-    if (!id) return [];
-    if ((this.completionBackoff.get(id) ?? 0) > Date.now()) return [];
+    if (!id) return none;
+    if ((this.completionBackoff.get(id) ?? 0) > Date.now()) return none;
     try {
-      const res = await api.post<{ items: DbCompletionItem[] }>(
+      const res = await api.post<DbCompletionResponse>(
         `${this.connBase(id)}/completion`,
         {
           prefix: prefix.length > COMPLETION_CTX_MAX ? prefix.slice(-COMPLETION_CTX_MAX) : prefix,
@@ -3510,14 +3511,14 @@ class DatabaseStore {
         signal,
       );
       this.completionBackoff.delete(id);
-      return res.items ?? [];
+      return { items: res.items ?? [], truncated: res.truncated === true };
     } catch (e) {
       // Completion failures must never break typing — degrade silently, and
       // back off briefly (a superseded, aborted request is not a failure).
       if (!isAbortError(e) && !signal?.aborted) {
         this.completionBackoff.set(id, Date.now() + COMPLETION_BACKOFF_MS);
       }
-      return [];
+      return none;
     }
   }
 
@@ -3714,8 +3715,25 @@ class DatabaseStore {
   }
 
   /** Load a history entry's statement into a fresh tab. */
-  openHistory(h: DbHistoryEntry): void {
-    this.newTab(h.statement);
+  /** Open a history row in a new tab. The history LIST carries a 16 KiB
+   *  preview of big statements (`statement_len` set); fetch the full text by
+   *  id first so a re-run never runs the clipped preview. */
+  async openHistory(h: DbHistoryEntry): Promise<void> {
+    if (h.statement_len === undefined || h.statement_len <= h.statement.length) {
+      this.newTab(h.statement);
+      return;
+    }
+    const id = this.selectedConnId;
+    if (!id) return;
+    try {
+      const full = await api.get<DbHistoryEntry>(
+        `${this.connBase(id)}/history/${encodeURIComponent(h.id)}`,
+      );
+      if (this.selectedConnId !== id) return; // switched connection meanwhile
+      this.newTab(full.statement);
+    } catch (e) {
+      toasts.error('Could not open this history entry', errMsg(e));
+    }
   }
 
   // ── Dashboards ────────────────────────────────────────────────────────────

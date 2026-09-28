@@ -87,8 +87,11 @@
   let sinkEl = $state<HTMLTextAreaElement | null>(null);
 
   let conn = $state<ConnState>(INITIAL);
-  let meter = $state(EMPTY_METER);
+  let meter = $state.raw(EMPTY_METER);
   let now = $state(Date.now());
+  /** Per-frame meter updates land here (plain — not reactive); the 1 s clock
+   *  publishes them to `meter`, so a frame writes no reactive state. */
+  let meterLive = EMPTY_METER;
   let session = $state<BrowserLiveSession | null>(null);
   let cursor = $state('default');
   let kbdFocused = $state(false);
@@ -121,6 +124,9 @@
   let lastDown = { t: 0, x: 0, y: 0, button: -1, count: 0 };
 
   const dispatch = (ev: ConnEvent) => (conn = reduce(conn, ev, Math.random()));
+  /** Effects that only care about the status read this (a derived notifies
+   *  only when the VALUE changes), not the whole `conn` object. */
+  const connStatus = $derived(conn.status);
   const driver = $derived(session ? driverFor(session.controller, session.controller_user_id, auth.me?.id ?? null) : 'me');
   const stale = $derived(isStale(conn));
   const fps = $derived(meterFps(meter, now));
@@ -270,10 +276,13 @@
     void connect(tab);
   }
 
-  // A 1 s clock for the fps readout.
+  // A 1 s clock for the fps / latency readout (publishes the frame meter).
   $effect(() => {
-    if (conn.status !== 'live') return;
-    const tick = setInterval(() => (now = Date.now()), 1000);
+    if (connStatus !== 'live') return;
+    const tick = setInterval(() => {
+      now = Date.now();
+      if (meter !== meterLive) meter = meterLive;
+    }, 1000);
     return () => clearInterval(tick);
   });
 
@@ -357,7 +366,7 @@
   // The address bar (parent) changed the tab's URL → navigate the remote.
   $effect(() => {
     const url = tab.url;
-    if (conn.status !== 'live') return;
+    if (connStatus !== 'live') return;
     untrack(() => {
       if (url && url !== knownUrl) {
         knownUrl = url;
@@ -367,7 +376,7 @@
   });
 
   $effect(() => {
-    onstate?.({ status: conn.status, session });
+    onstate?.({ status: connStatus, session });
   });
 
   // ── approvals ──────────────────────────────────────────────────────────
@@ -456,14 +465,15 @@
         bitmap?.close();
         bitmap = bmp;
         header = f.header;
-        imageSize = { width: bmp.width, height: bmp.height };
+        if (imageSize.width !== bmp.width || imageSize.height !== bmp.height) {
+          imageSize = { width: bmp.width, height: bmp.height };
+        }
         draw();
         const at = Date.now();
         const lag = latencySample(conn, at);
-        if (lag !== null) meter = meterLatency(meter, lag);
+        if (lag !== null) meterLive = meterLatency(meterLive, lag);
         dispatch({ type: 'frame', at });
-        meter = meterFrame(meter, at);
-        now = at;
+        meterLive = meterFrame(meterLive, at);
       } catch {
         /* a corrupt frame: skip it, the next one repaints */
       }

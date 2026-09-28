@@ -185,6 +185,18 @@
   const filtered = $derived(filter === 'all' ? reports : reports.filter((r) => r.kind === filter));
 
   let selectedKey: string | null = $state(null);
+  // SE-17: daily reports grow by 365 a year. Rows vary in height, so instead of
+  // a fixed-row window the list mounts a page and grows on demand; the
+  // selected report is always mounted, and off-screen rows skip layout
+  // (content-visibility).
+  const LIST_PAGE = 200;
+  let listShown = $state(LIST_PAGE);
+  $effect(() => {
+    void filter;
+    listShown = LIST_PAGE;
+  });
+  const selectedIndex = $derived(selectedKey ? filtered.findIndex((r) => keyOf(r) === selectedKey) : -1);
+  const shownRows = $derived(filtered.slice(0, Math.max(listShown, selectedIndex + 1)));
   /** Phone: list/detail is push navigation — the detail replaces the list. */
   let phoneDetail = $state(false);
   $effect(() => { phoneDetail = routeKey !== null; });
@@ -640,7 +652,7 @@
                 {/each}
               </div>
               <div class="list" data-testid="report-list">
-                {#each filtered as r (keyOf(r))}
+                {#each shownRows as r (keyOf(r))}
                   {@const p = parsedByKey.get(keyOf(r))}
                   {@const acts = actionSummary(r)}
                   <button class="rep-row" class:active={keyOf(r) === selectedKey} aria-current={keyOf(r) === selectedKey ? 'true' : undefined} onclick={() => select(r)}>
@@ -677,6 +689,11 @@
                 {:else}
                   <p class="dim list-empty">No {filter === 'adhoc' ? 'ad-hoc' : filter} reports. <button class="btn small ghost" onclick={() => (filter = 'all')}>Show all</button></p>
                 {/each}
+                {#if filtered.length > shownRows.length}
+                  <button class="btn small ghost more-reports" onclick={() => (listShown = shownRows.length + LIST_PAGE)}>
+                    Show {Math.min(LIST_PAGE, filtered.length - shownRows.length)} older reports ({filtered.length - shownRows.length} more)
+                  </button>
+                {/if}
               </div>
             </aside>
           {/if}
@@ -824,6 +841,8 @@
     gap: 2px;
   }
   .rep-row {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 96px;
     display: flex;
     flex-direction: column;
     align-items: stretch;
@@ -915,6 +934,10 @@
   }
   .tag.info {
     color: var(--info);
+  }
+  .more-reports {
+    align-self: center;
+    margin: 6px 0;
   }
   .list-empty {
     padding: 12px;

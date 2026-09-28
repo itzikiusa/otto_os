@@ -85,8 +85,20 @@ pub async fn summary(
     let days = q.days.unwrap_or(30).clamp(1, 3650);
     let otto_only = q.otto_only.unwrap_or(true);
     let mut summary = ctx.usage.summary(days, otto_only).await.map_err(ApiError)?;
-    enrich_sessions(&ctx, &mut summary.sessions).await;
-    summary.by_kind = by_kind_rollup(&ctx, days, otto_only).await;
+    // ONE unfiltered sessions scan feeds both the enrichment and the per-kind
+    // rollup (it used to run twice per summary — perf O6).
+    let all_sessions = match otto_state::SessionsRepo::new(ctx.pool.clone())
+        .list_all()
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("usage: could not list sessions for enrichment: {e}");
+            Vec::new()
+        }
+    };
+    enrich_sessions(&ctx, &mut summary.sessions, &all_sessions).await;
+    summary.by_kind = by_kind_rollup_with(&ctx, days, otto_only, &all_sessions).await;
     Ok(Json(summary))
 }
 
@@ -109,15 +121,25 @@ pub async fn by_kind(
 /// the session-row `kind` badge), and fold into feature buckets. Best-effort —
 /// returns empty on any engine error so the summary still renders.
 async fn by_kind_rollup(ctx: &ServerCtx, days: u32, otto_only: bool) -> Vec<FeatureUsage> {
+    let repo = otto_state::SessionsRepo::new(ctx.pool.clone());
+    let all_sessions = repo.list_all().await.unwrap_or_default();
+    by_kind_rollup_with(ctx, days, otto_only, &all_sessions).await
+}
+
+/// [`by_kind_rollup`] over an already-loaded session list.
+async fn by_kind_rollup_with(
+    ctx: &ServerCtx,
+    days: u32,
+    otto_only: bool,
+    all_sessions: &[otto_core::domain::Session],
+) -> Vec<FeatureUsage> {
     // Resolve feature labels in one SQLite scan (list_all) instead of one GET
     // per session (the original N+1). Sessions absent from the map fall back
     // to "external". `feature_usage` issues its own `session_totals` query
     // internally, so we skip the pre-check and go straight to building the map.
-    let repo = otto_state::SessionsRepo::new(ctx.pool.clone());
-    let all_sessions = repo.list_all().await.unwrap_or_default();
     let labels: std::collections::HashMap<String, String> = all_sessions
-        .into_iter()
-        .map(|s| (s.id.clone(), session_kind_label(&s)))
+        .iter()
+        .map(|s| (s.id.clone(), session_kind_label(s)))
         .collect();
     ctx.usage
         .feature_usage(days, otto_only, |t: &SessionTotals| {
@@ -138,7 +160,13 @@ async fn by_kind_rollup(ctx: &ServerCtx, days: u32, otto_only: bool) -> Vec<Feat
 /// set of ids we need, then walk the result building the same enrichment the
 /// old N-sequential-get path did. For the typical top-50 session leaderboard
 /// this cuts N round-trips to a single SQLite scan.
-async fn enrich_sessions(ctx: &ServerCtx, sessions: &mut [otto_usage::SessionUsage]) {
+async fn enrich_sessions(
+    ctx: &ServerCtx,
+    sessions: &mut [otto_usage::SessionUsage],
+    // `list_all` — the unfiltered cross-workspace read; it's root-only at the
+    // route, so no ownership narrowing is needed here.
+    all_sessions: &[otto_core::domain::Session],
+) {
     if sessions.is_empty() {
         return;
     }
@@ -146,18 +174,8 @@ async fn enrich_sessions(ctx: &ServerCtx, sessions: &mut [otto_usage::SessionUsa
     let needed_ids: std::collections::HashSet<String> =
         sessions.iter().map(|s| s.session_id.clone()).collect();
 
-    let repo = otto_state::SessionsRepo::new(ctx.pool.clone());
-    // list_all is the unfiltered cross-workspace read; it's root-only at the
-    // route, so no ownership narrowing is needed here.
-    let all_sessions = match repo.list_all().await {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!("usage: could not list sessions for enrichment: {e}");
-            return;
-        }
-    };
-    let sess_map: std::collections::HashMap<String, otto_core::domain::Session> = all_sessions
-        .into_iter()
+    let sess_map: std::collections::HashMap<String, &otto_core::domain::Session> = all_sessions
+        .iter()
         .filter(|s| needed_ids.contains(&s.id))
         .map(|s| (s.id.clone(), s))
         .collect();

@@ -274,31 +274,40 @@ pub fn build_insert_statements(
     if rows.is_empty() || columns.is_empty() {
         return Vec::new();
     }
-    let batch_size = batch_size.max(1);
+    rows.chunks(batch_size.max(1))
+        .map(|chunk| build_insert_batch(table, columns, chunk, flavor))
+        .collect()
+}
+
+/// ONE multi-row `INSERT` for `chunk` — the unit [`build_insert_statements`]
+/// repeats. The import builds each batch just before running it, so the SQL for
+/// the whole file never sits in memory at once.
+pub fn build_insert_batch(
+    table: &str,
+    columns: &[String],
+    chunk: &[Vec<Value>],
+    flavor: SqlFlavor,
+) -> String {
     let col_list = columns
         .iter()
         .map(|c| flavor.ident(c))
         .collect::<Vec<_>>()
         .join(", ");
-    let mut out = Vec::new();
-    for chunk in rows.chunks(batch_size) {
-        let values: Vec<String> = chunk
-            .iter()
-            .map(|row| {
-                let cells: Vec<String> = (0..columns.len())
-                    .map(|i| sql_string_literal(row.get(i).unwrap_or(&Value::Null), flavor))
-                    .collect();
-                format!("({})", cells.join(", "))
-            })
-            .collect();
-        out.push(format!(
-            "INSERT INTO {} ({}) VALUES {}",
-            flavor.ident(table),
-            col_list,
-            values.join(", ")
-        ));
-    }
-    out
+    let values: Vec<String> = chunk
+        .iter()
+        .map(|row| {
+            let cells: Vec<String> = (0..columns.len())
+                .map(|i| sql_string_literal(row.get(i).unwrap_or(&Value::Null), flavor))
+                .collect();
+            format!("({})", cells.join(", "))
+        })
+        .collect();
+    format!(
+        "INSERT INTO {} ({}) VALUES {}",
+        flavor.ident(table),
+        col_list,
+        values.join(", ")
+    )
 }
 
 #[cfg(test)]

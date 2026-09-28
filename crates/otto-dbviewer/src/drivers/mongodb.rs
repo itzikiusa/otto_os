@@ -557,6 +557,47 @@ impl Driver for MongoDriver {
         self.completions.invalidate(&cfg.cache_key());
     }
 
+    /// Enforced-path assembly over a service-built snapshot: the same SQL-dialect
+    /// / shell split as [`Self::completion_impl`], with the collection's fields
+    /// taken from the snapshot instead of a live sample.
+    fn assemble_completion(
+        &self,
+        snap: &crate::complete::SchemaSnapshot,
+        ctx: &CompletionContext,
+    ) -> Vec<crate::types::CompletionItem> {
+        use crate::complete::mongo::{analyze, assemble, assemble_sql, MongoExpect};
+        use crate::complete::sql::{self, SqlExpect};
+        let collections: Vec<String> = snap.objects.iter().map(|o| o.name.clone()).collect();
+        let node_coll = ctx
+            .node
+            .as_deref()
+            .and_then(|n| NodePath::parse(n).get("coll").map(str::to_string));
+        let fields_of =
+            |c: Option<String>| c.and_then(|c| snap.object(&c).map(|o| o.fields.as_slice()));
+        if mongo_sql::looks_like_sql(sql::current_statement(&ctx.prefix)) {
+            let sctx = sql::analyze(&ctx.prefix, &ctx.suffix);
+            let fields = if matches!(sctx.expect, SqlExpect::Column { .. }) {
+                fields_of(resolve_sql_collection(&sctx, node_coll.as_deref()))
+            } else {
+                None
+            };
+            return assemble_sql(
+                &sctx,
+                &collections,
+                fields,
+                MONGO_SQL_KEYWORDS,
+                MONGO_SQL_FUNCTIONS,
+            );
+        }
+        let mctx = analyze(&ctx.prefix);
+        let fields = if matches!(mctx.expect, MongoExpect::Field { .. }) {
+            fields_of(mctx.collection.clone().or(node_coll))
+        } else {
+            None
+        };
+        assemble(&mctx, &collections, fields, MONGO_OPERATORS, MONGO_METHODS)
+    }
+
     /// Evict + shut down the cached `Client` for `cache_key` (connection close,
     /// or a config change superseded it). `Client::shutdown` closes the pool and
     /// stops the topology-monitor tasks; also drops the completion snapshot.
@@ -1106,7 +1147,10 @@ impl MongoDriver {
             MONGO_OPERATORS,
             MONGO_METHODS,
         );
-        Ok(CompletionResponse { items })
+        Ok(CompletionResponse {
+            items,
+            ..Default::default()
+        })
     }
 }
 
@@ -1200,7 +1244,10 @@ impl MongoDriver {
             MONGO_SQL_KEYWORDS,
             MONGO_SQL_FUNCTIONS,
         );
-        Ok(CompletionResponse { items })
+        Ok(CompletionResponse {
+            items,
+            ..Default::default()
+        })
     }
 
     /// The (cached) list of collection names for a database, backing collection
@@ -3164,15 +3211,61 @@ async fn collect_docs(
 ) -> Result<QueryResult> {
     let mut docs: Vec<Document> = Vec::new();
     let mut truncated = false;
+    let mut truncated_reason = None;
+    // The same response byte budget as the SQL readers: "All" on a big
+    // collection otherwise materialises (and ships) every document.
+    let mut budget = types::ByteBudget::default();
+    let mut cells = 0usize;
     while let Some(next) = cursor.next().await {
         let doc = next.map_err(types::upstream)?;
         if docs.len() >= max_rows {
             truncated = true;
             break;
         }
+        if !budget.charge(approx_doc_len(&doc)) && !docs.is_empty() {
+            truncated = true;
+            truncated_reason = Some(types::TruncatedReason::Bytes);
+            break;
+        }
+        cells += doc.len();
         docs.push(doc);
     }
-    Ok(docs_to_result(docs, truncated, started))
+    // BSON → JSON for tens of thousands of cells is a long synchronous stretch;
+    // run a big conversion on the blocking pool instead of a runtime worker.
+    let mut result = if cells < OFF_RUNTIME_CELLS {
+        docs_to_result(docs, truncated, started)
+    } else {
+        tokio::task::spawn_blocking(move || docs_to_result(docs, truncated, started))
+            .await
+            .map_err(|e| types::upstream(format!("mongodb: decode task failed: {e}")))?
+    };
+    result.truncated_reason = truncated_reason;
+    Ok(result)
+}
+
+/// Documents with at least this many top-level cells in total are converted to
+/// JSON on the blocking pool (see [`collect_docs`]).
+const OFF_RUNTIME_CELLS: usize = 16 * 1024;
+
+/// Cheap estimate of a document's JSON size for the response byte budget (no
+/// escaping; scalars at a typical width) — never used where exactness matters.
+fn approx_doc_len(doc: &Document) -> usize {
+    2 + doc
+        .iter()
+        .map(|(k, v)| k.len() + 4 + approx_bson_len(v))
+        .sum::<usize>()
+}
+
+fn approx_bson_len(v: &Bson) -> usize {
+    match v {
+        Bson::String(s) => s.len() + 2,
+        Bson::Document(d) => approx_doc_len(d),
+        Bson::Array(a) => 2 + a.iter().map(|x| approx_bson_len(x) + 1).sum::<usize>(),
+        Bson::Binary(b) => b.bytes.len() * 4 / 3 + 40,
+        Bson::Null | Bson::Undefined => 4,
+        Bson::Boolean(_) => 5,
+        _ => 24,
+    }
 }
 
 /// Shape already-materialized documents into a [`QueryResult`]. Split out of

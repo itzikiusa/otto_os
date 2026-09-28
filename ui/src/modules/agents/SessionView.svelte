@@ -2,6 +2,7 @@
   import PathField from '../../lib/components/PathField.svelte';
   // One pane: session header (status, provider, restart/kill) + terminal.
   import Terminal from '../../lib/components/Terminal.svelte';
+  import { PRIMARY_SCROLLBACK } from '../../lib/components/termFlow';
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import { events } from '../../lib/events.svelte';
   import { sessionState } from '../../lib/status';
@@ -59,12 +60,13 @@
     dragKey?: string;
     /** Drag lifecycle, so the host can arm its drop targets while one is in flight. */
     ondragpane?: (phase: 'start' | 'end') => void;
-    /** Local terminal scrollback depth; unset = the Terminal default (10k).
-     *  The tiled grid passes a smaller depth — 15 live tiles × 10k lines was
-     *  150–360 MB of xterm buffers (SA-05). */
+    /** Local terminal scrollback depth; unset = PRIMARY_SCROLLBACK (10k — a
+     *  SessionView is a pane the user works in, while the bare Terminal
+     *  defaults to the 2k embed depth). The tiled grid passes the smaller
+     *  depth — 15 live tiles × 10k lines was 150–360 MB of xterm buffers (SA-05). */
     scrollback?: number;
   }
-  let { sessionId, focused, showClose, onfocus, onclosepane, showZoom = false, showGrip = false, dragKey, ondragpane, closeTitle = 'Close pane (keeps running)', scrollback }: Props = $props();
+  let { sessionId, focused, showClose, onfocus, onclosepane, showZoom = false, showGrip = false, dragKey, ondragpane, closeTitle = 'Close pane (keeps running)', scrollback = PRIMARY_SCROLLBACK }: Props = $props();
 
   const maximized = $derived(ws.maximizedId === sessionId);
 

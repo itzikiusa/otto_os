@@ -188,6 +188,22 @@ pub trait Driver: Send + Sync {
     /// e.g. Redis, keep nothing to clear).
     async fn invalidate_completion_cache(&self, _cfg: &ResolvedConfig) {}
 
+    /// Rank completion items from a snapshot the SERVICE built — the
+    /// access-enforced path, which may only introspect what the caller is
+    /// authorized to browse (`schema_graph`) and so can't use the driver's own
+    /// cached snapshot. Engines override this to reuse their keyword/function
+    /// catalog and dialect-aware assembly so an enforced connection completes
+    /// exactly like an unrestricted one (context-aware, PK columns first). The
+    /// default is the SQL analyzer with no keyword/function catalog.
+    fn assemble_completion(
+        &self,
+        snap: &crate::complete::SchemaSnapshot,
+        ctx: &CompletionContext,
+    ) -> Vec<crate::types::CompletionItem> {
+        let sql_ctx = crate::complete::sql::analyze(&ctx.prefix, &ctx.suffix);
+        crate::complete::sql::assemble(&sql_ctx, snap, &[], &[])
+    }
+
     /// Stream a (potentially huge) **uncapped** read result to an arbitrary
     /// writer `w`, in `format`, with **bounded daemon memory** — pull one
     /// row/chunk at a time from the engine's native cursor/stream and write it

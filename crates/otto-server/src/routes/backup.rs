@@ -516,6 +516,10 @@ async fn archive_restore(
         require_root(&fresh)?;
         let result =
             crate::state_archive::restore_snapshot(&ctx, &req.archive, req.options).await?;
+        // The snapshot may have replaced grant rows behind GrantsRepo's back.
+        if let Some(cache) = ctx.auth_cache.grant_cache() {
+            cache.clear();
+        }
         record_action(&ctx, &fresh.id, "state.archive.restore", None, None).await;
         Ok(Json(result))
     })

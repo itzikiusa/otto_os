@@ -206,9 +206,16 @@ impl SftpSession {
 
     /// List a remote directory via `ls -la`, parsing the longname listing.
     pub async fn list(&self, path: &str) -> Result<Vec<SftpEntry>> {
+        Ok(self.list_capped(path, usize::MAX).await?.0)
+    }
+
+    /// [`Self::list`] keeping at most `max` entries; the flag is `true` when
+    /// the directory held more (a 100k-entry spool/maildir/`/tmp` would
+    /// otherwise ship a multi-MB JSON array the UI can't lay out).
+    pub async fn list_capped(&self, path: &str, max: usize) -> Result<(Vec<SftpEntry>, bool)> {
         let batch = format!("ls -la {}", quote_checked(path)?);
         let out = self.run(&batch).await?;
-        Ok(parse_longname_listing(&out))
+        Ok(parse_longname_listing_capped(&out, max))
     }
 
     /// Best-effort exact-file metadata, bounded independently of transfers and
@@ -514,7 +521,16 @@ fn parse_pwd(out: &str) -> Option<String> {
 /// trailing `/`, `*`, or `@` indicator on the name is stripped; a " -> " splits
 /// a symlink's name from its target. The entry type comes from `perms[0]`.
 /// The "." entry is excluded.
+/// Directory listings are cut at this many entries (`truncated: true`).
+pub const MAX_LIST_ENTRIES: usize = 20_000;
+
+#[cfg(test)]
 fn parse_longname_listing(out: &str) -> Vec<SftpEntry> {
+    parse_longname_listing_capped(out, usize::MAX).0
+}
+
+/// Parse at most `max` entries; the flag reports that a further entry existed.
+fn parse_longname_listing_capped(out: &str, max: usize) -> (Vec<SftpEntry>, bool) {
     let mut entries = Vec::new();
     for raw in out.lines() {
         let line = raw.trim_end();
@@ -553,6 +569,9 @@ fn parse_longname_listing(out: &str) -> Vec<SftpEntry> {
         if name == "." {
             continue;
         }
+        if entries.len() >= max {
+            return (entries, true);
+        }
         entries.push(SftpEntry {
             name,
             kind,
@@ -562,7 +581,7 @@ fn parse_longname_listing(out: &str) -> Vec<SftpEntry> {
             symlink_target,
         });
     }
-    entries
+    (entries, false)
 }
 
 /// Strip a trailing `ls -F`-style type indicator (`/`, `*`, `@`) from a name.
@@ -604,6 +623,22 @@ mod tests {
         // Ordinary names (incl. spaces/quotes/backslashes) still quote fine.
         assert_eq!(quote_checked("normal name").unwrap(), "\"normal name\"");
         assert_eq!(quote_checked(r#"a"b\c"#).unwrap(), r#""a\"b\\c""#);
+    }
+
+    #[test]
+    fn listing_cap_sets_truncated() {
+        let mut out = String::from("total 1\ndrwxr-xr-x 2 me staff 64 Jun 20 12:00 .\n");
+        for i in 0..50 {
+            out.push_str(&format!("-rw-r--r-- 1 me staff {i} Jun 20 12:00 f{i}\n"));
+        }
+        let (e, truncated) = parse_longname_listing_capped(&out, 20);
+        assert!(truncated, "more entries than the cap");
+        assert_eq!(e.len(), 20);
+        assert_eq!(e[0].name, "f0");
+        assert_eq!(e[19].name, "f19");
+        // Exactly at the cap is complete, not truncated ("." never counts).
+        let (e, truncated) = parse_longname_listing_capped(&out, 50);
+        assert_eq!((e.len(), truncated), (50, false));
     }
 
     #[test]

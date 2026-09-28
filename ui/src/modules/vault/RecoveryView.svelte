@@ -11,7 +11,8 @@
 
   let {mode}: {mode: 'trash' | 'history'} = $props();
   let trash = $state<VaultTrashEntry[]>([]);
-  let revisions = $state<VaultRevision[]>([]);
+  // Raw: pages of 200 are replaced/appended wholesale, never mutated in place.
+  let revisions = $state.raw<VaultRevision[]>([]);
   let selected = $state<VaultRevisionDetail | null>(null);
   let currentHash = $state<string | null>(null);
   let busy = $state(false);
@@ -167,6 +168,8 @@
   label { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .history-layout { display: grid; grid-template-columns: minmax(190px, 30%) minmax(0, 1fr); gap: 16px; margin-top: 14px; }
   nav { display: flex; flex-direction: column; gap: 6px; } nav .rev { text-align: start; overflow-wrap: anywhere; }
+  /* Many "Load older" pages: off-screen rows skip layout and paint. */
+  nav .rev { content-visibility: auto; contain-intrinsic-size: auto 52px; }
   nav .rev.active { border-color: var(--accent); background: var(--accent-soft); }
   .error { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0; padding: 8px 12px; border-radius: var(--radius-s); background: var(--danger-soft); color: var(--text); font-size: var(--fs-s); overflow-wrap: anywhere; }
   .revision-detail { min-width: 0; overflow: auto; } .actions { margin-bottom: 12px; }

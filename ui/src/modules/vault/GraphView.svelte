@@ -21,6 +21,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import type { GraphWorkerIn, GraphWorkerOut } from './graph.worker';
+  import { carrySeed } from './graphSeed';
 
   let { local = false }: { local?: boolean } = $props();
 
@@ -496,6 +497,10 @@
     pKeys: string[] = [],
     pWeight: number[] = [],
   ): void {
+    // SD-03: a real change (same vault + query, new generation) carries the
+    // surviving nodes' positions into the new layout and keeps the camera.
+    const carry = carryNext ? carrySeed(paths, pos, pPaths) : null;
+    carryNext = false;
     paths = pPaths;
     titles = pTitles;
     metas = pMetas;
@@ -558,7 +563,7 @@
     buildColors();
     pos = null;
     gridValid = false;
-    didFit = false;
+    didFit = !!carry; // carried layout: keep the user's camera
     ticks = 0;
     setHover(-1);
     stopped = false;
@@ -579,7 +584,8 @@
         wg = groupsArr.slice();
         transfer.push(wg.buffer);
       }
-      wpost({ t: 'init', n, edges: we, groups: wg }, transfer);
+      if (carry) transfer.push(carry.seed.buffer);
+      wpost({ t: 'init', n, edges: we, groups: wg, carry: carry?.seed }, transfer);
       wpost({ t: 'params', center: fCenter, repel: fRepel, link: fLink, dist: fDist });
     }
     dataRev++;
@@ -619,6 +625,9 @@
     return `${p.paths.length}:${p.edges.length}:${h >>> 0}`;
   }
   let lastPayloadSig = '';
+  /** Set right before `ingest` of a refetch of the SAME vault + query. */
+  let carryNext = false;
+  let lastQueryKey = '';
   $effect(() => {
     const v = vault.current;
     void gen; // content/link changes only
@@ -644,6 +653,7 @@
       return;
     }
     const seq = ++reqSeq;
+    const queryKey = JSON.stringify([wsId, v.id, q]);
     loading = true;
     errorMsg = '';
     vaultGraph(wsId, v.id, q)
@@ -651,7 +661,11 @@
         if (seq !== reqSeq) return;
         const sig = payloadSig(p);
         if (sig === lastPayloadSig) return; // same graph: keep layout, pins, camera
+        // Same vault + query, different graph = a real change: carry the
+        // layout (a vault / mode / toggle switch lays out fresh).
+        carryNext = lastPayloadSig !== '' && queryKey === lastQueryKey;
         lastPayloadSig = sig;
+        lastQueryKey = queryKey;
         ingest(p);
       })
       .catch((e: unknown) => {

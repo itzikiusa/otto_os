@@ -1,6 +1,7 @@
 <script lang="ts" module>
   import type { DiffResp, FileDiff, Hunk as H } from '../../lib/api/types';
-  import { WeightedLru } from './graph-diff-cache';
+  import { WeightedLru, diffKey } from './graph-diff-cache';
+  import { api } from '../../lib/api/client';
 
   // The diff contract's summary-mode fields (`hunks_omitted`, `too_large`,
   // `total_*`) are all optional, so an older daemon's full response fits too.
@@ -22,6 +23,37 @@
     return w;
   });
   const bodyCache = new WeightedLru<Body>(60_000, (b) => (b.kind === 'ready' ? b.rows : 0) + 1);
+
+  /** Summary requests started by `prefetchCommitSummary`, joined by the pane
+   *  when it mounts for the same commit. */
+  const summaryFlights = new Map<string, Promise<SumResp>>();
+
+  function summaryUrl(repoId: string, sha: string): string {
+    return `/repos/${repoId}/diff?target=${encodeURIComponent(`commit:${sha}`)}&summary=true`;
+  }
+
+  /** Warm the file list of `sha` while the pane is still held back (the
+   *  graph's branch click waits out the double-click window before mounting
+   *  the diff): the summary is one small `--numstat` read, so by the time the
+   *  window closes it has usually landed and the list paints from cache in
+   *  the same frame. Returns an abort for the double-click (= checkout) case. */
+  export function prefetchCommitSummary(repoId: string, sha: string): () => void {
+    const key = diffKey(repoId, sha);
+    if (summaryCache.get(key) || summaryFlights.has(key)) return () => {};
+    const ctl = new AbortController();
+    const p = api
+      .get<SumResp>(summaryUrl(repoId, sha), ctl.signal)
+      .then((r) => {
+        summaryCache.set(key, r);
+        return r;
+      })
+      .finally(() => {
+        if (summaryFlights.get(key) === p) summaryFlights.delete(key);
+      });
+    summaryFlights.set(key, p);
+    p.catch(() => {}); // a joiner handles failures; an unjoined abort is expected
+    return () => ctl.abort();
+  }
 </script>
 
 <script lang="ts">
@@ -48,12 +80,11 @@
   // collapsed and capped — instead of being fetched again.
   import { untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
-  import { api, isAbortError } from '../../lib/api/client';
+  import { isAbortError } from '../../lib/api/client';
   import type { Hunk, DiffLine } from '../../lib/api/types';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import { diffKey } from './graph-diff-cache';
   import { fileFor } from './diff-load';
 
   interface Props {
@@ -141,8 +172,11 @@
     }
     loading = true;
     try {
-      const target = encodeURIComponent(`commit:${s}`);
-      const resp = await api.get<SumResp>(`/repos/${id}/diff?target=${target}&summary=true`, ctl.signal);
+      // Join a prefetch in flight (see `prefetchCommitSummary`); if it was
+      // aborted or failed, fetch on our own.
+      const flight = summaryFlights.get(key);
+      const joined = flight ? await flight.catch(() => null) : null;
+      const resp = joined ?? (await api.get<SumResp>(summaryUrl(id, s), ctl.signal));
       if (my !== gen) return;
       summaryCache.set(key, resp);
       summary = resp;

@@ -174,25 +174,30 @@ async fn drive(
     //    redraws / "thinking…" — keeps cold-start and long reasoning from being
     //    mistaken for a stall). If neither advances for `no_progress`, the turn
     //    is stuck → the caller respawns it. `HARD_CAP` is the only absolute cap.
+    //    The transcript is read INCREMENTALLY ([`ReplyTail`]): each tick reads
+    //    only the bytes appended since the last one, off the runtime — a long
+    //    planning turn's JSONL reaches tens of MB, and re-reading + re-parsing
+    //    all of it every 250 ms on a runtime worker was the old cost (A5).
     let path = session_jsonl_path(cwd, sid);
-    let mut last_len: usize = 0;
+    let mut tail = ReplyTail::default();
     let mut last_pty = handle.last_output_at();
     let mut last_progress = tokio::time::Instant::now();
     loop {
         let mut progressed = false;
-        if let Ok(content) = tokio::fs::read_to_string(&path).await {
-            if let Some(text) = completed_turn_text(&content) {
+        let (t, read) = poll_reply_tail(tail, path.clone()).await?;
+        tail = t;
+        if let Ok(read) = read {
+            if let Some(text) = tail.reply() {
                 return Ok(text);
             }
             // FAIL FAST on a claude API error (wrong model, auth, rate-limit): it
             // carries stop_reason "stop_sequence", so completed_turn_text never
             // accepts it — without this we'd wait out the whole no-progress window
             // on an instant, terminal error and surface a misleading "stuck".
-            if let Some(apierr) = transcript_api_error(&content) {
+            if let Some(apierr) = tail.api_error() {
                 return Err(Error::Upstream(format!("agent error: {apierr}")));
             }
-            if content.len() > last_len {
-                last_len = content.len();
+            if read > 0 {
                 progressed = true;
             }
         }
@@ -209,8 +214,10 @@ async fn drive(
         }
         if exit_rx.borrow().is_some() {
             // Final lines may have landed right at exit — one last read.
-            if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                if let Some(text) = completed_turn_text(&content) {
+            let (t, read) = poll_reply_tail(tail, path.clone()).await?;
+            tail = t;
+            if read.is_ok() {
+                if let Some(text) = tail.reply() {
                     return Ok(text);
                 }
             }
@@ -231,6 +238,104 @@ async fn drive(
             )));
         }
         tokio::time::sleep(POLL).await;
+    }
+}
+
+/// One [`ReplyTail::poll`] on the blocking pool (the tail moves in and out).
+async fn poll_reply_tail(
+    mut tail: ReplyTail,
+    path: PathBuf,
+) -> Result<(ReplyTail, std::io::Result<u64>)> {
+    tokio::task::spawn_blocking(move || {
+        let read = tail.poll(&path);
+        (tail, read)
+    })
+    .await
+    .map_err(|e| Error::Internal(format!("transcript poll task failed: {e}")))
+}
+
+/// Incremental [`completed_turn_text`] + [`transcript_api_error`] over a
+/// growing session JSONL. [`ReplyTail::poll`] reads only the bytes appended
+/// since the previous poll and folds the complete lines; an unterminated last
+/// line is kept and — exactly like `str::lines` on the whole file — still
+/// counts once it parses. A file that shrank (replaced/truncated) restarts
+/// from byte 0. Invalid UTF-8 is decoded lossily per line (the whole-file
+/// `read_to_string` gave no answer at all for such a file).
+#[derive(Debug, Default)]
+pub struct ReplyTail {
+    offset: u64,
+    partial: Vec<u8>,
+    reply: Option<String>,
+    api_error: Option<String>,
+}
+
+impl ReplyTail {
+    /// Fold newly appended bytes.
+    pub fn feed(&mut self, bytes: &[u8]) {
+        self.offset += bytes.len() as u64;
+        self.partial.extend_from_slice(bytes);
+        let Some(nl) = self.partial.iter().rposition(|b| *b == b'\n') else {
+            return;
+        };
+        let rest = self.partial.split_off(nl + 1);
+        let done = std::mem::replace(&mut self.partial, rest);
+        for line in String::from_utf8_lossy(&done).lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if self.api_error.is_none() {
+                self.api_error = line_api_error(&v);
+            }
+            if let Some(t) = line_end_turn_text(&v) {
+                self.reply = Some(t);
+            }
+        }
+    }
+
+    /// The unterminated last line, when it already parses.
+    fn partial_value(&self) -> Option<serde_json::Value> {
+        let t = std::str::from_utf8(&self.partial).ok()?.trim();
+        if t.is_empty() {
+            return None;
+        }
+        serde_json::from_str(t).ok()
+    }
+
+    /// [`completed_turn_text`] of everything read so far.
+    pub fn reply(&self) -> Option<String> {
+        self.partial_value()
+            .and_then(|v| line_end_turn_text(&v))
+            .or_else(|| self.reply.clone())
+    }
+
+    /// [`transcript_api_error`] of everything read so far (first one wins).
+    pub fn api_error(&self) -> Option<String> {
+        self.api_error
+            .clone()
+            .or_else(|| self.partial_value().and_then(|v| line_api_error(&v)))
+    }
+
+    /// Read what was appended to `path` since the last poll (blocking IO).
+    /// `Ok(bytes read)`; `Err` when the file is missing/unreadable.
+    pub fn poll(&mut self, path: &std::path::Path) -> std::io::Result<u64> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = std::fs::File::open(path)?;
+        let len = f.metadata()?.len();
+        if len < self.offset {
+            *self = Self::default();
+        }
+        if len == self.offset {
+            return Ok(0);
+        }
+        f.seek(SeekFrom::Start(self.offset))?;
+        let mut buf = Vec::with_capacity((len - self.offset) as usize);
+        f.take(len - self.offset).read_to_end(&mut buf)?;
+        self.feed(&buf);
+        Ok(buf.len() as u64)
     }
 }
 
@@ -276,44 +381,49 @@ pub fn completed_turn_text(jsonl: &str) -> Option<String> {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue; // metadata lines with differing shapes — skip
         };
-        let Some(msg) = v.get("message") else {
-            continue;
-        };
-        // Legacy in-file sub-agent lines (older Claude Code wrote them into the
-        // MAIN transcript with a top-level `isSidechain:true`). Their end_turns
-        // are the CHILD's, never the parent's — counting them completes a step
-        // the moment its first sub-agent finishes.
-        if v.get("isSidechain").and_then(|b| b.as_bool()) == Some(true) {
-            continue;
-        }
-        if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
-            continue;
-        }
-        if msg.get("stop_reason").and_then(|r| r.as_str()) != Some("end_turn") {
-            continue;
-        }
-        let mut text = String::new();
-        if let Some(blocks) = msg.get("content").and_then(|c| c.as_array()) {
-            for block in blocks {
-                if block.get("type").and_then(|t| t.as_str()) != Some("text") {
-                    continue;
-                }
-                if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
-                    if !t.is_empty() {
-                        if !text.is_empty() {
-                            text.push('\n');
-                        }
-                        text.push_str(t);
-                    }
-                }
-            }
-        }
-        let text = text.trim();
-        if !text.is_empty() {
-            result = Some(text.to_string());
+        if let Some(t) = line_end_turn_text(&v) {
+            result = Some(t);
         }
     }
     result
+}
+
+/// One parsed JSONL line's contribution to [`completed_turn_text`]: the
+/// trimmed text of a non-sidechain assistant `end_turn` message, `None` for
+/// anything else (or an end_turn with no text).
+fn line_end_turn_text(v: &serde_json::Value) -> Option<String> {
+    let msg = v.get("message")?;
+    // Legacy in-file sub-agent lines (older Claude Code wrote them into the
+    // MAIN transcript with a top-level `isSidechain:true`). Their end_turns
+    // are the CHILD's, never the parent's — counting them completes a step
+    // the moment its first sub-agent finishes.
+    if v.get("isSidechain").and_then(|b| b.as_bool()) == Some(true) {
+        return None;
+    }
+    if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+        return None;
+    }
+    if msg.get("stop_reason").and_then(|r| r.as_str()) != Some("end_turn") {
+        return None;
+    }
+    let mut text = String::new();
+    if let Some(blocks) = msg.get("content").and_then(|c| c.as_array()) {
+        for block in blocks {
+            if block.get("type").and_then(|t| t.as_str()) != Some("text") {
+                continue;
+            }
+            if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                if !t.is_empty() {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(t);
+                }
+            }
+        }
+    }
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 /// Count assistant messages whose `stop_reason == "end_turn"` AND that carry
@@ -412,32 +522,29 @@ pub fn last_user_text(jsonl: &str) -> Option<String> {
 /// instant, terminal error. Detecting it lets callers FAIL FAST with the real
 /// message instead of a generic "stuck" timeout.
 pub fn transcript_api_error(jsonl: &str) -> Option<String> {
-    for line in jsonl.lines() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
-            continue;
-        };
-        if v.get("isApiErrorMessage").and_then(|b| b.as_bool()) != Some(true) {
-            continue;
-        }
-        let Some(msg) = v.get("message") else {
-            continue;
-        };
-        if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
-            continue;
-        }
-        if let Some(bs) = msg.get("content").and_then(|c| c.as_array()) {
-            for b in bs {
-                if b.get("type").and_then(|t| t.as_str()) == Some("text") {
-                    if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
-                        if !t.trim().is_empty() {
-                            return Some(t.trim().to_string());
-                        }
-                    }
-                }
-            }
-        }
+    jsonl.lines().find_map(|line| {
+        serde_json::from_str::<serde_json::Value>(line.trim())
+            .ok()
+            .and_then(|v| line_api_error(&v))
+    })
+}
+
+/// One parsed JSONL line's [`transcript_api_error`] text, if it is one.
+fn line_api_error(v: &serde_json::Value) -> Option<String> {
+    if v.get("isApiErrorMessage").and_then(|b| b.as_bool()) != Some(true) {
+        return None;
     }
-    None
+    let msg = v.get("message")?;
+    if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+        return None;
+    }
+    msg.get("content")?.as_array()?.iter().find_map(|b| {
+        if b.get("type").and_then(|t| t.as_str()) != Some("text") {
+            return None;
+        }
+        let t = b.get("text")?.as_str()?.trim();
+        (!t.is_empty()).then(|| t.to_string())
+    })
 }
 
 #[cfg(test)]
@@ -450,6 +557,81 @@ mod tests {
         let s = p.to_string_lossy();
         assert!(s.contains("-tmp-otto-ws"), "got: {s}");
         assert!(s.ends_with("abc.jsonl"), "got: {s}");
+    }
+
+    /// A5: the incremental tail equals the whole-file scan after EVERY
+    /// append, for appends split anywhere (mid-line, mid-UTF-8 char), with
+    /// sidechain end_turns, a tool_use turn, an api error and an
+    /// unterminated last line; a shrunk file restarts from byte 0.
+    #[test]
+    fn reply_tail_matches_the_whole_file_scan_at_every_split() {
+        let jsonl = concat!(
+            r#"{"type":"summary","summary":"meta"}"#,
+            "\n\n",
+            r#"{"message":{"role":"user","content":"plan é this"}}"#,
+            "\n",
+            r#"{"isSidechain":true,"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"child"}]}}"#,
+            "\n",
+            r#"{"message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"text","text":"working"}]}}"#,
+            "\n",
+            r#"{"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"first ✓"},{"type":"text","text":"second"}]}}"#,
+            "\n",
+            "not json at all\n",
+            r#"{"isApiErrorMessage":true,"message":{"role":"assistant","stop_reason":"stop_sequence","content":[{"type":"text","text":" model not found "}]}}"#,
+            "\n",
+            r#"{"isApiErrorMessage":true,"message":{"role":"assistant","content":[{"type":"text","text":"later error"}]}}"#,
+            "\n",
+            r#"{"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"final λ"}]}}"#,
+        )
+        .as_bytes();
+        for step in [1usize, 3, 7, 64, 1000] {
+            let dir =
+                std::env::temp_dir().join(format!("otto-reply-tail-{}-{step}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("s.jsonl");
+            std::fs::write(&path, b"").unwrap();
+            let mut tail = ReplyTail::default();
+            let mut at = 0;
+            while at < jsonl.len() {
+                let end = (at + step).min(jsonl.len());
+                let prev = at;
+                use std::io::Write;
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap()
+                    .write_all(&jsonl[at..end])
+                    .unwrap();
+                at = end;
+                assert_eq!(tail.poll(&path).unwrap(), (end - prev) as u64);
+                // Whole-file semantics (lossy only matters mid-char, where
+                // read_to_string would have failed outright — compare on the
+                // valid prefix's lossy view, like the tail sees it).
+                let whole = String::from_utf8_lossy(&jsonl[..end]).into_owned();
+                assert_eq!(
+                    tail.reply(),
+                    completed_turn_text(&whole),
+                    "step {step} at {end}"
+                );
+                assert_eq!(
+                    tail.api_error(),
+                    transcript_api_error(&whole),
+                    "step {step} at {end}"
+                );
+            }
+            assert_eq!(tail.reply().as_deref(), Some("final λ"));
+            assert_eq!(tail.api_error().as_deref(), Some("model not found"));
+            assert_eq!(tail.poll(&path).unwrap(), 0, "idle poll reads nothing");
+            // Replaced by a shorter file: start over.
+            std::fs::write(&path, concat!(r#"{"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"new"}]}}"#, "\n")).unwrap();
+            tail.poll(&path).unwrap();
+            assert_eq!(tail.reply().as_deref(), Some("new"));
+            assert_eq!(tail.api_error(), None);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        assert!(ReplyTail::default()
+            .poll(std::path::Path::new("/nonexistent/otto.jsonl"))
+            .is_err());
     }
 
     #[test]

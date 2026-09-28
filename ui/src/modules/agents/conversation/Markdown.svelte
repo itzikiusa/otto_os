@@ -16,6 +16,12 @@
     maxChars: 4_000_000,
     maxEntryChars: 512 * 1024,
   });
+  // Perf-spec probe (e2e/desktop-conversation-perf.spec.ts): opt-in via a
+  // `window.__ottoMdProbe` object installed before load; nothing otherwise.
+  if (typeof window !== 'undefined') {
+    const probe = (window as unknown as { __ottoMdProbe?: { cache?: unknown } }).__ottoMdProbe;
+    if (probe) probe.cache = cache;
+  }
   // hljs loads lazily; until it lands, fenced code renders escaped. Such
   // output is not cached, and the block re-renders once when hljs arrives
   // (this used to ride on the next live delta re-rendering everything).

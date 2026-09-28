@@ -279,10 +279,18 @@ where
     let (mut br, mut bw) = tokio::io::split(broker);
     let corr: Arc<AsyncMutex<HashMap<i32, (i16, i16)>>> = Arc::new(AsyncMutex::new(HashMap::new()));
 
+    // Requests are never rewritten: only the 8-byte header is read (to note
+    // the correlation ids whose responses get rewritten) and the body streams
+    // through, so a Produce batch is never buffered whole.
     let corr_up = corr.clone();
     let up = async move {
-        while let Ok(Some(frame)) = read_frame(&mut cr).await {
-            if let Some(h) = parse_request_header(&frame) {
+        while let Ok(Some(len)) = read_len(&mut cr).await {
+            let mut head = [0u8; 8];
+            let head = &mut head[..len.min(8)];
+            if cr.read_exact(head).await.is_err() {
+                break;
+            }
+            if let Some(h) = parse_request_header(head) {
                 if matches!(
                     h.api_key,
                     API_METADATA | API_FIND_COORDINATOR | API_VERSIONS
@@ -293,22 +301,40 @@ where
                         .insert(h.correlation_id, (h.api_key, h.api_version));
                 }
             }
-            if write_frame(&mut bw, &frame).await.is_err() {
+            if stream_frame(&mut cr, &mut bw, len, head).await.is_err() {
                 break;
             }
         }
     };
 
+    // Only tracked responses (Metadata / FindCoordinator / ApiVersions, all
+    // small) are read whole and rewritten; everything else — Fetch responses
+    // up to `fetch.max.bytes` — is passed through as it arrives instead of
+    // store-and-forward (SC-20).
     let down = async move {
-        while let Ok(Some(mut frame)) = read_frame(&mut br).await {
-            if frame.len() >= 4 {
-                let cid = i32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]);
-                let entry = corr.lock().await.remove(&cid);
-                if let Some((api_key, api_version)) = entry {
-                    frame = transform_response(&shared, frame, api_key, api_version).await;
-                }
+        while let Ok(Some(len)) = read_len(&mut br).await {
+            let mut head = [0u8; 4];
+            let head = &mut head[..len.min(4)];
+            if br.read_exact(head).await.is_err() {
+                break;
             }
-            if write_frame(&mut cw, &frame).await.is_err() {
+            let entry = match <[u8; 4]>::try_from(&*head) {
+                Ok(cid) => corr.lock().await.remove(&i32::from_be_bytes(cid)),
+                Err(_) => None,
+            };
+            let sent = match entry {
+                Some((api_key, api_version)) => {
+                    let mut frame = vec![0u8; len];
+                    frame[..4].copy_from_slice(head);
+                    if br.read_exact(&mut frame[4..]).await.is_err() {
+                        break;
+                    }
+                    let frame = transform_response(&shared, frame, api_key, api_version).await;
+                    write_frame(&mut cw, &frame).await
+                }
+                None => stream_frame(&mut br, &mut cw, len, head).await,
+            };
+            if sent.is_err() {
                 break;
             }
         }
@@ -385,11 +411,8 @@ async fn rewrite_fc_frame(
     }
 }
 
-/// Read one length-prefixed Kafka frame (the bytes after the 4-byte length).
-/// `Ok(None)` on a clean EOF.
-async fn read_frame<R: tokio::io::AsyncRead + Unpin>(
-    r: &mut R,
-) -> std::io::Result<Option<Vec<u8>>> {
+/// Read a frame's 4-byte length prefix. `Ok(None)` on a clean EOF.
+async fn read_len<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> std::io::Result<Option<usize>> {
     let mut len_buf = [0u8; 4];
     match r.read_exact(&mut len_buf).await {
         Ok(_) => {}
@@ -403,9 +426,41 @@ async fn read_frame<R: tokio::io::AsyncRead + Unpin>(
             "kafka frame length out of range",
         ));
     }
-    let mut body = vec![0u8; len as usize];
+    Ok(Some(len as usize))
+}
+
+/// Read one length-prefixed Kafka frame (the bytes after the 4-byte length).
+/// `Ok(None)` on a clean EOF.
+#[cfg(test)]
+async fn read_frame<R: tokio::io::AsyncRead + Unpin>(
+    r: &mut R,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let Some(len) = read_len(r).await? else {
+        return Ok(None);
+    };
+    let mut body = vec![0u8; len];
     r.read_exact(&mut body).await?;
     Ok(Some(body))
+}
+
+/// Forward one frame unchanged without holding it: the length prefix and the
+/// `head` already read, then the remaining `len - head.len()` bytes copied
+/// straight from `r` to `w` through tokio's bounded copy buffer.
+async fn stream_frame<R, W>(r: &mut R, w: &mut W, len: usize, head: &[u8]) -> std::io::Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let mut prefix = [0u8; 12];
+    prefix[..4].copy_from_slice(&(len as i32).to_be_bytes());
+    prefix[4..4 + head.len()].copy_from_slice(head);
+    w.write_all(&prefix[..4 + head.len()]).await?;
+    let rest = (len - head.len()) as u64;
+    let copied = tokio::io::copy(&mut AsyncReadExt::take(&mut *r, rest), w).await?;
+    if copied != rest {
+        return Err(std::io::ErrorKind::UnexpectedEof.into());
+    }
+    w.flush().await
 }
 
 /// Write a length-prefixed Kafka frame.
@@ -594,6 +649,77 @@ mod tests {
         assert_eq!(eps.len(), 1);
         assert_eq!(eps[0].0, "127.0.0.1");
         assert_ne!(eps[0].1, 9094); // remapped to a local listener port
+    }
+
+    /// Untracked responses (a big Fetch) are passed through as they arrive —
+    /// the client sees the frame's first bytes before the broker has sent the
+    /// rest (store-and-forward would hold everything back until the end) — and
+    /// arrive intact; a tracked response right after still gets rewritten.
+    #[tokio::test]
+    async fn pump_streams_untracked_frames() {
+        let shared = Arc::new(ProxyShared {
+            socks_addr: ([127, 0, 0, 1], 1).into(),
+            uses_tls: false,
+            tls: None,
+            endpoints: AsyncMutex::new(HashMap::new()),
+            reverse: Mutex::new(HashMap::new()),
+            handles: Mutex::new(Vec::new()),
+            sem: Arc::new(Semaphore::new(MAX_INFLIGHT_CONNS)),
+        });
+        let (mut client_app, client_proxy) = tokio::io::duplex(16 * 1024);
+        let (broker_proxy, mut broker_app) = tokio::io::duplex(16 * 1024);
+        tokio::spawn(pump(client_proxy, broker_proxy, shared));
+
+        // A 1 MiB Fetch-style response (corr 7, never tracked). Send the prefix
+        // and the first 1000 body bytes only.
+        let body: Vec<u8> = (0..1024 * 1024u32).map(|i| (i % 251) as u8).collect();
+        let mut frame = 7i32.to_be_bytes().to_vec();
+        frame.extend_from_slice(&body);
+        broker_app
+            .write_all(&(frame.len() as i32).to_be_bytes())
+            .await
+            .unwrap();
+        broker_app.write_all(&frame[..1004]).await.unwrap();
+        broker_app.flush().await.unwrap();
+        let mut first = [0u8; 4 + 1004];
+        tokio::time::timeout(Duration::from_secs(2), client_app.read_exact(&mut first))
+            .await
+            .expect("pass-through: the head arrives before the rest of the frame is sent")
+            .unwrap();
+        assert_eq!(&first[4..8], &7i32.to_be_bytes());
+        // The rest follows (the writer runs concurrently: the duplex is small).
+        let rest = frame[1004..].to_vec();
+        let writer = tokio::spawn(async move {
+            broker_app.write_all(&rest).await.unwrap();
+            broker_app
+        });
+        let mut tail = vec![0u8; frame.len() - 1004];
+        client_app.read_exact(&mut tail).await.unwrap();
+        assert_eq!(&tail[..], &frame[1004..], "bytes forwarded intact");
+        let mut broker_app = writer.await.unwrap();
+
+        // A tracked request/response pair still works after a streamed frame.
+        let mut req = Vec::new();
+        req.extend_from_slice(&3i16.to_be_bytes());
+        req.extend_from_slice(&4i16.to_be_bytes());
+        req.extend_from_slice(&56i32.to_be_bytes());
+        req.extend_from_slice(&(-1i16).to_be_bytes());
+        write_frame(&mut client_app, &req).await.unwrap();
+        assert_eq!(read_frame(&mut broker_app).await.unwrap().unwrap(), req);
+        let mut resp = Vec::new();
+        resp.extend_from_slice(&56i32.to_be_bytes());
+        resp.extend_from_slice(&0i32.to_be_bytes());
+        resp.extend_from_slice(&1i32.to_be_bytes());
+        resp.extend_from_slice(&101i32.to_be_bytes());
+        let host = b"b-2.msk.amazonaws.com";
+        resp.extend_from_slice(&(host.len() as i16).to_be_bytes());
+        resp.extend_from_slice(host);
+        resp.extend_from_slice(&9094i32.to_be_bytes());
+        resp.extend_from_slice(&(-1i16).to_be_bytes());
+        write_frame(&mut broker_app, &resp).await.unwrap();
+        let out = read_frame(&mut client_app).await.unwrap().unwrap();
+        let eps = protocol::metadata_broker_endpoints(&out, 4).unwrap();
+        assert_eq!(eps[0].0, "127.0.0.1");
     }
 
     /// A hung upstream (a "SOCKS" endpoint that accepts but never speaks — like a

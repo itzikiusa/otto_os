@@ -182,3 +182,40 @@ export function podContainers(pod: unknown): K8sContainer[] {
   add(p.spec?.containers, p.status?.containerStatuses, false);
   return out;
 }
+
+/** Longest scalar the manifest view renders (SC-19). A ConfigMap can hold a
+ *  0.5–1 MB single-line value (Grafana dashboards); CodeMirror would lay it
+ *  out as one huge highlighted line. The Copy action still copies it whole. */
+export const MANIFEST_SCALAR_MAX = 64 * 1024;
+
+/** A copy of `value` with every string longer than `max` cut to `max` chars
+ *  plus a marker, and how many were cut. Unchanged subtrees keep identity. */
+export function clipLongScalars(value: unknown, max = MANIFEST_SCALAR_MAX): { value: unknown; clipped: number } {
+  let clipped = 0;
+  const walk = (v: unknown): unknown => {
+    if (typeof v === 'string') {
+      if (v.length <= max) return v;
+      clipped++;
+      return `${v.slice(0, max)}… [${Math.round((v.length - max) / 1024)} KiB more — use Copy for the full value]`;
+    }
+    if (Array.isArray(v)) {
+      let out: unknown[] | null = null;
+      for (let i = 0; i < v.length; i++) {
+        const next = walk(v[i]);
+        if (next !== v[i]) (out ??= v.slice())[i] = next;
+      }
+      return out ?? v;
+    }
+    if (v && typeof v === 'object') {
+      let out: Record<string, unknown> | null = null;
+      for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+        const next = walk(x);
+        if (next !== x) (out ??= { ...(v as Record<string, unknown>) })[k] = next;
+      }
+      return out ?? v;
+    }
+    return v;
+  };
+  const out = walk(value);
+  return { value: out, clipped };
+}

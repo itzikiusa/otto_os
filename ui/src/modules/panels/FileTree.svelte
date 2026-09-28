@@ -416,6 +416,7 @@
                   path={viewerFile.path}
                   content={viewerFile.content}
                   root={effectiveRoot}
+                  lsp
                   gotoLine={viewerGotoLine}
                   gotoCol={viewerGotoCol}
                   readOnly

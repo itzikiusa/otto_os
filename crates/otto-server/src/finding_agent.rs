@@ -85,6 +85,49 @@ pub fn detect_new_test(before: &HashSet<String>, worktree: &Path) -> Option<Stri
     now.difference(before).min().cloned()
 }
 
+// ── async wrappers (perf U4) ─────────────────────────────────────────────────
+// The fix / regression watchers poll these every 5 s for up to 6 min, and
+// `git ls-files` on a large repo is tens of ms of blocking I/O — run them on
+// the blocking pool, never on a runtime worker. The sync functions above stay
+// the pure, unit-tested core.
+
+/// [`head_of`] off the runtime.
+pub async fn head_of_async(dir: std::path::PathBuf) -> Option<String> {
+    tokio::task::spawn_blocking(move || head_of(&dir))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// [`list_test_files`] off the runtime.
+pub async fn list_test_files_async(dir: std::path::PathBuf) -> HashSet<String> {
+    tokio::task::spawn_blocking(move || list_test_files(&dir))
+        .await
+        .unwrap_or_default()
+}
+
+/// [`stamp_fix`] off the runtime.
+pub async fn stamp_fix_async(
+    before_head: Option<String>,
+    worktree: std::path::PathBuf,
+) -> Option<String> {
+    tokio::task::spawn_blocking(move || stamp_fix(before_head.as_deref(), &worktree))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// [`detect_new_test`] off the runtime (`before` is shared, not re-cloned per poll).
+pub async fn detect_new_test_async(
+    before: std::sync::Arc<HashSet<String>>,
+    worktree: std::path::PathBuf,
+) -> Option<String> {
+    tokio::task::spawn_blocking(move || detect_new_test(&before, &worktree))
+        .await
+        .ok()
+        .flatten()
+}
+
 /// Upper bound on a verify run's linked-test execution (compile included).
 const VERIFY_TEST_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 

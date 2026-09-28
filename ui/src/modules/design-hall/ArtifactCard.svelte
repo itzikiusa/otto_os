@@ -65,6 +65,9 @@
 
 <style>
   .acard {
+    /* A 500-artifact library: off-screen cards skip layout/paint (SD-16). */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 260px;
     display: flex;
     flex-direction: column;
     min-width: 0;

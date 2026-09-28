@@ -191,6 +191,14 @@ async function openLive(page: Page): Promise<void> {
 test('engine missing: asks first, names the size, lighter option, then downloads with progress', async ({ page }) => {
   let installBody: any = null;
   let phase: 'missing' | 'installing' | 'ready' = 'missing';
+  // Progress arrives as `browser_engine_install_updated` on /ws/events; the
+  // status re-read is only a 15 s safety net while the socket is up.
+  // Every event socket the page opens gets it (the app and a topic socket).
+  const eventSockets: { send(data: string): void }[] = [];
+  const sendEvent = (data: string) => eventSockets.forEach((s) => s.send(data));
+  await page.routeWebSocket('**/ws/events*', (socket) => {
+    eventSockets.push(socket);
+  });
   await page.route('**/api/v1/browser/live/status', (r) => {
     if (phase === 'missing') return r.fulfill({ json: statusJson(false) });
     if (phase === 'installing') {
@@ -226,6 +234,11 @@ test('engine missing: asks first, names the size, lighter option, then downloads
   await setup.getByLabel(/Use the lighter engine/).check();
   await setup.getByRole('button', { name: 'Download lighter engine (98 MB)' }).click();
   expect(installBody).toEqual({ build: 'chrome-headless-shell' });
+  await expect.poll(() => eventSockets.length).toBeGreaterThan(0);
+  sendEvent(JSON.stringify({
+    type: 'browser_engine_install_updated', build: 'chrome-headless-shell', version: '149.0.7827.55',
+    state: 'downloading', received_bytes: 40 * 1024 * 1024, total_bytes: 98 * 1024 * 1024, error: null,
+  }));
   await expect(setup.getByRole('progressbar', { name: 'Download progress' })).toHaveAttribute('aria-valuenow', '41', { timeout: 10_000 });
   await expect(setup).toContainText('40 MB of 98 MB');
 });

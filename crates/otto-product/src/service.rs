@@ -8,8 +8,7 @@ use otto_core::domain::{IssueAccount, User};
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id, Result};
 use otto_issues::{
-    markdown_to_storage, storage_to_markdown, CommentRef, ConfluenceClient, IssueComment,
-    JiraClient, PageComment,
+    markdown_to_storage, CommentRef, ConfluenceClient, IssueComment, JiraClient, PageComment,
 };
 use otto_state::{
     IssuesRepo, NewEvent, NewStory, NewVersion, ProductQuestion, ProductRepo, QuestionPatch,
@@ -178,7 +177,8 @@ impl ProductService {
             "confluence" => {
                 let client = ConfluenceClient::new(&account.base_url, &account.email, &token);
                 let page = client.get_page(source_key).await?;
-                let body_md = storage_to_markdown(&page.body_storage);
+                let body_md =
+                    otto_issues::storage_to_markdown_async(page.body_storage.clone()).await;
                 let raw_json = serde_json::to_string(&serde_json::json!({
                     "id": page.id,
                     "title": page.title,
@@ -389,24 +389,30 @@ impl ProductService {
         let account = self.issues.get_account(&story.account_id).await?;
         let token = self.account_token(&account)?;
 
+        // SE-13: with a cursor, read only what is at/after its timestamp (Jira
+        // walks newest-first and stops there); the exact tie/seen-id filter
+        // below still decides.
+        let since_ts = since.map(|c| parse_watch_cursor(c).0);
         let mut comments: Vec<CommentInfo> = match story.source_kind.as_str() {
             "jira" => {
                 let client = JiraClient::new(&account.base_url, &account.email, &token);
-                client
-                    .list_comments(&story.source_key)
-                    .await?
-                    .into_iter()
-                    .map(CommentInfo::from_jira)
-                    .collect()
+                match since_ts {
+                    Some(ts) => client.list_comments_since(&story.source_key, ts).await?,
+                    None => client.list_comments(&story.source_key).await?,
+                }
+                .into_iter()
+                .map(CommentInfo::from_jira)
+                .collect()
             }
             "confluence" => {
                 let client = ConfluenceClient::new(&account.base_url, &account.email, &token);
-                client
-                    .list_comments(&story.source_key)
-                    .await?
-                    .into_iter()
-                    .map(CommentInfo::from_confluence)
-                    .collect()
+                match since_ts {
+                    Some(ts) => client.list_comments_since(&story.source_key, ts).await?,
+                    None => client.list_comments(&story.source_key).await?,
+                }
+                .into_iter()
+                .map(CommentInfo::from_confluence)
+                .collect()
             }
             other => {
                 return Err(Error::Invalid(format!(

@@ -131,17 +131,7 @@ impl BrowserEngine for FallbackEngine {
         if html.len() > PAGE_BYTE_CAP {
             return Err(EngineError::TooLarge(PAGE_BYTE_CAP));
         }
-        let title = extract_title(&html);
-        let cleaned = readability(&html);
-        let markdown = html_to_markdown(&cleaned);
-        Ok(Page {
-            url: url.to_string(),
-            title,
-            html,
-            markdown,
-            degraded: true,
-            engine: self.name().to_string(),
-        })
+        build_page(url, html, true, self.name()).await
     }
 
     async fn query(&self, url: &str, selector: &str) -> Result<Vec<MatchedNode>, EngineError> {
@@ -162,6 +152,34 @@ impl BrowserEngine for FallbackEngine {
     fn name(&self) -> &'static str {
         "fallback"
     }
+}
+
+/// Turn fetched HTML into a [`Page`]. The title, readability and markdown
+/// passes are three full html5ever parses of up to [`PAGE_BYTE_CAP`] (2 MB),
+/// tens of ms of CPU — run on the blocking pool, not a tokio worker, so a big
+/// page never stalls the daemon's async tasks (perf SB-15).
+pub(crate) async fn build_page(
+    url: &str,
+    html: String,
+    degraded: bool,
+    engine: &'static str,
+) -> Result<Page, EngineError> {
+    let url = url.to_string();
+    tokio::task::spawn_blocking(move || {
+        let title = extract_title(&html);
+        let cleaned = readability(&html);
+        let markdown = html_to_markdown(&cleaned);
+        Page {
+            url,
+            title,
+            html,
+            markdown,
+            degraded,
+            engine: engine.to_string(),
+        }
+    })
+    .await
+    .map_err(|e| EngineError::Nav(format!("page extraction failed: {e}")))
 }
 
 /// Extract the page `<title>`, collapsing all whitespace (including embedded

@@ -656,11 +656,179 @@ pub enum Event {
         /// The catalog command name (`db_run_query`), no `ui_` prefix.
         command: String,
     },
+    /// An MCP approval row changed: created (`pending`), decided
+    /// (`approved`/`denied`), `consumed`, or `expired`. An invalidation
+    /// signal only — no title/tool/args ride it; clients refetch
+    /// `GET /mcp/approvals`, which applies visibility. `approval_id` is absent
+    /// for a bulk expiry sweep; `workspace_id` is absent for workspace-less
+    /// approvals and for `consumed`/`expired` (the row is not re-read).
+    McpApprovalChanged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approval_id: Option<Id>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<Id>,
+        status: String,
+    },
+    /// Effective access to governed resources may have changed (a resource
+    /// policy, an access group/role, a user's grants, or a workspace role was
+    /// written). `kind` + `resource_id` name the one resource when the change
+    /// was a resource policy; both absent = "anything may have changed".
+    /// Clients re-check their cached `/access/{kind}/{id}/capabilities`.
+    ResourceAccessChanged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource_id: Option<Id>,
+    },
+    /// The caller's notice list changed without a new notice (mark-read,
+    /// read-all, dismiss, clear). Owner-only; clients refetch
+    /// `GET /notifications` (the tray's "needs you" glyph).
+    NotificationsChanged { user_id: Id },
+}
+
+impl Event {
+    /// The wire `type` tag (`session_status`, …) without serializing — used to
+    /// filter per-connection topic subscriptions (`/ws/events` `subscribe`)
+    /// before the authorization check and serialization.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Event::SessionStatus { .. } => "session_status",
+            Event::SessionCreated { .. } => "session_created",
+            Event::SessionMetaUpdated { .. } => "session_meta_updated",
+            Event::SessionRenamed { .. } => "session_renamed",
+            Event::SessionRemoved { .. } => "session_removed",
+            Event::Notice { .. } => "notice",
+            Event::Notification { .. } => "notification",
+            Event::ImprovementRunStarted { .. } => "improvement_run_started",
+            Event::ImprovementRunFinished { .. } => "improvement_run_finished",
+            Event::ImprovementEditApplied { .. } => "improvement_edit_applied",
+            Event::ImprovementApprovalPending { .. } => "improvement_approval_pending",
+            Event::TrailAppended { .. } => "trail_appended",
+            Event::TasksUpdated { .. } => "tasks_updated",
+            Event::ApiHistoryAppended { .. } => "api_history_appended",
+            Event::SwarmRunUpdated { .. } => "swarm_run_updated",
+            Event::SwarmTaskUpdated { .. } => "swarm_task_updated",
+            Event::SwarmProjectCleared { .. } => "swarm_project_cleared",
+            Event::SwarmMessagePosted { .. } => "swarm_message_posted",
+            Event::SwarmStatus { .. } => "swarm_status",
+            Event::SwarmGoalUpdated { .. } => "swarm_goal_updated",
+            Event::UsageMetricsTick { .. } => "usage_metrics_tick",
+            Event::ProductChanged { .. } => "product_changed",
+            Event::PlanRun { .. } => "plan_run",
+            Event::ReviewChanged { .. } => "review_changed",
+            Event::GoalLoopUpdated { .. } => "goal_loop_updated",
+            Event::ImprovementUpdated { .. } => "improvement_updated",
+            Event::WorkflowRunUpdated { .. } => "workflow_run_updated",
+            Event::SkillEvalUpdated { .. } => "skill_eval_updated",
+            Event::SkillReviewUpdated { .. } => "skill_review_updated",
+            Event::InsightReady { .. } => "insight_ready",
+            Event::BudgetExceeded { .. } => "budget_exceeded",
+            Event::CanvasUpdated { .. } => "canvas_updated",
+            Event::CanvasSessionStarted { .. } => "canvas_session_started",
+            Event::MockupUpdated { .. } => "mockup_updated",
+            Event::DesignArtifactUpdated { .. } => "design_artifact_updated",
+            Event::DesignLinkUpdated { .. } => "design_link_updated",
+            Event::DesignLearningUpdate { .. } => "design_learning_update",
+            Event::DesignAssistUpdated { .. } => "design_assist_updated",
+            Event::DesignVariantsReady { .. } => "design_variants_ready",
+            Event::MockupSessionStarted { .. } => "mockup_session_started",
+            Event::DbAssistSessionStarted { .. } => "db_assist_session_started",
+            Event::DbAssistUpdated { .. } => "db_assist_updated",
+            Event::WorkGraphUpdated { .. } => "work_graph_updated",
+            Event::FindingUpdated { .. } => "finding_updated",
+            Event::FindingActionStarted { .. } => "finding_action_started",
+            Event::ProofPackExported { .. } => "proof_pack_exported",
+            Event::ProofPackUpdated { .. } => "proof_pack_updated",
+            Event::ScheduledTaskRunUpdated { .. } => "scheduled_task_run_updated",
+            Event::PersonalAgentRunUpdated { .. } => "personal_agent_run_updated",
+            Event::AgentRoomMessage { .. } => "agent_room_message",
+            Event::OttoRunUpdated { .. } => "otto_run_updated",
+            Event::CanvasRefsChanged { .. } => "canvas_refs_changed",
+            Event::BrowserTabUpdated { .. } => "browser_tab_updated",
+            Event::BrowserAnnotationAdded { .. } => "browser_annotation_added",
+            Event::BrowserLiveSessionUpdated { .. } => "browser_live_session_updated",
+            Event::BrowserEngineInstallUpdated { .. } => "browser_engine_install_updated",
+            Event::AwsAccountUpdated { .. } => "aws_account_updated",
+            Event::AwsInstallUpdated { .. } => "aws_install_updated",
+            Event::K8sClusterUpdated { .. } => "k8s_cluster_updated",
+            Event::K8sInstallUpdated { .. } => "k8s_install_updated",
+            Event::TranscriptAppended { .. } => "transcript_appended",
+            Event::TranscriptLive { .. } => "transcript_live",
+            Event::ArtifactAdded { .. } => "artifact_added",
+            Event::HistoryIndexProgress { .. } => "history_index_progress",
+            Event::K8sMonitorCycle { .. } => "k8s_monitor_cycle",
+            Event::AssistantTurn { .. } => "assistant_turn",
+            Event::AssistantTaskUpdate { .. } => "assistant_task_update",
+            Event::AssistantNeedsYou { .. } => "assistant_needs_you",
+            Event::AssistantLimit { .. } => "assistant_limit",
+            Event::UiControlRequested { .. } => "ui_control_requested",
+            Event::McpApprovalChanged { .. } => "mcp_approval_changed",
+            Event::ResourceAccessChanged { .. } => "resource_access_changed",
+            Event::NotificationsChanged { .. } => "notifications_changed",
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `type_name()` must equal the serde tag for every variant (it is
+    /// generated from the variant names; this pins the snake_case rule incl.
+    /// digits and acronyms, and the two transport events' optional fields).
+    #[test]
+    fn type_name_matches_the_wire_tag() {
+        let events = vec![
+            Event::SessionRemoved {
+                session_id: "s".into(),
+                workspace_id: "w".into(),
+            },
+            Event::Notice {
+                level: "info".into(),
+                title: "t".into(),
+                body: "b".into(),
+            },
+            Event::UsageMetricsTick { ts: "now".into() },
+            Event::K8sClusterUpdated {
+                cluster_id: "c".into(),
+                deleted: false,
+            },
+            Event::AwsInstallUpdated {
+                tool: "aws".into(),
+                state: "done".into(),
+            },
+            Event::CanvasRefsChanged {
+                workspace_id: "w".into(),
+                session_id: "s".into(),
+            },
+            Event::McpApprovalChanged {
+                approval_id: None,
+                workspace_id: None,
+                status: "expired".into(),
+            },
+            Event::ResourceAccessChanged {
+                kind: Some("connection".into()),
+                resource_id: Some("r".into()),
+            },
+            Event::NotificationsChanged {
+                user_id: "u".into(),
+            },
+        ];
+        for e in events {
+            let v = serde_json::to_value(&e).unwrap();
+            assert_eq!(v["type"], e.type_name(), "{v}");
+        }
+        let v = serde_json::to_value(Event::McpApprovalChanged {
+            approval_id: None,
+            workspace_id: None,
+            status: "expired".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"type": "mcp_approval_changed", "status": "expired"})
+        );
+    }
 
     /// The wire shape the workflows UI merges in place: `rev` + the changed
     /// node ride the event; `node` is omitted (not null) when absent so older

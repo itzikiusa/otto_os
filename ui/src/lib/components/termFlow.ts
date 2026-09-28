@@ -3,6 +3,18 @@
 // "Flow control" and the SA-02 / SA-03 notes in Terminal.svelte.
 import type { WsTermFlowFrame } from '../api/types';
 
+/** xterm scrollback depth (lines) for a PRIMARY terminal — the one pane the
+ *  user works in (SessionView: agents main/split panes, the maximized tile,
+ *  swarm/loop session panes; the share page; the DB SSH shell). Each line
+ *  costs ~12 B/cell, so 10k × 200 cols ≈ 24 MB of JS heap. */
+export const PRIMARY_SCROLLBACK = 10_000;
+/** Default depth for every other Terminal: grid tiles and the embedded
+ *  previews that mount several terminals at once (review/docs/analysis/run
+ *  agents, assistant panels, docks, exec views). 10k there was 150–360 MB
+ *  across a busy grid (SA-05); the daemon keeps 4000 rows, so maximizing or
+ *  reconnecting in a primary pane still restores depth. */
+export const EMBED_SCROLLBACK = 2_000;
+
 /** Pending (handed to xterm, not yet parsed) bytes above which the client
  *  asks the server to `pause` this stream. xterm parses 5.5–8 MB/s in WebKit,
  *  so this bounds the on-screen lag after ^C to a few hundred ms. */
@@ -14,16 +26,46 @@ export const FLOW_LOW = 256 * 1024;
  *  `resume` can never freeze a pane); a slow drain keeps it paused. */
 export const FLOW_PAUSE_KEEPALIVE_MS = 1000;
 
+/** Credit window offered to the daemon (`credit` frame): it sends at most this
+ *  many binary bytes we have not acknowledged, so the live-output backlog is
+ *  bounded by the WINDOW, not by how fast the producer outruns a pause round
+ *  trip (pause-mode peaked at 3–14 MB against a 2 MB watermark). 1 MB is
+ *  ~130–190 ms of WebKit parsing — far above the ack round trip, so
+ *  throughput is unchanged; the daemon holds one more window server-side
+ *  before it skips to a snapshot, i.e. 2 MB lossless like pause mode. */
+export const CREDIT_WINDOW = 1024 * 1024;
+/** Acknowledge consumed bytes in steps this big (one write slice; smaller if
+ *  the daemon grants a window under 256 KB — the contract wants ≤ window/4).
+ *  The daemon only stalls at a full window and resyncs at ≤ window/4, so an
+ *  unreported remainder < a step never blocks output — no timer ack needed. */
+export const CREDIT_ACK_STEP = 64 * 1024;
+
 /**
  * xterm's documented watermark pattern: `add(n)` when bytes are handed to
  * term.write(), `done(n)` from its parse callback. Sends `pause` above HIGH
  * and `resume` below LOW through `send`. `pending` is the local xterm backlog
  * itself, so it deliberately survives reconnects; `paused` is per socket
  * (`resetStream()` on every new connection — a fresh stream starts unpaused).
+ *
+ * Credit mode (docs/contracts/ws.md §1): `offer()` asks the daemon for a
+ * credit window; once it answers (`granted()`), binary frames received on
+ * that stream are tagged with `credit` (pass it as `stream` to `done`) and
+ * acknowledged every CREDIT_ACK_STEP consumed (parsed or dropped), and the
+ * pause/resume watermarks switch off. A daemon that never answers (older
+ * build) leaves the client on the pause/resume fallback.
  */
 export class TermFlow {
   pending = 0;
   paused = false;
+  /** Non-zero while the current socket runs credit flow control: the tag of
+   *  its stream (a new id per grant, so bytes from an old socket never ack). */
+  credit = 0;
+  private streams = 0;
+  /** Credited bytes consumed on the current stream / last value acked. */
+  private consumed = 0;
+  private reported = 0;
+  /** Ack step for the granted window (≤ window/4, per the contract). */
+  private ackStep = CREDIT_ACK_STEP;
   private lastPauseAt = 0;
   private readonly send: (frame: WsTermFlowFrame) => void;
   private readonly now: () => number;
@@ -33,9 +75,31 @@ export class TermFlow {
     this.now = now;
   }
 
+  /** Ask the daemon for credit flow control (first frame on a new socket). */
+  offer(): void {
+    this.send({ type: 'credit', window: CREDIT_WINDOW });
+  }
+
+  /** The daemon's `credit` reply (its granted `window`): count this stream's
+   *  binary frames from here on (it counts from the same point — frames are
+   *  ordered). */
+  granted(window = CREDIT_WINDOW): void {
+    this.credit = ++this.streams;
+    this.ackStep = Math.max(1, Math.min(CREDIT_ACK_STEP, Math.floor(window / 4)));
+    this.consumed = 0;
+    this.reported = 0;
+    if (this.paused) {
+      // A legacy pause from before the grant would otherwise sit until the
+      // daemon's 2 s auto-resume.
+      this.paused = false;
+      this.send({ type: 'resume' });
+    }
+  }
+
   /** Count bytes handed to the emulator. `canSend` = the socket is open. */
   add(n: number, canSend: boolean): void {
     this.pending += n;
+    if (this.credit) return; // the daemon bounds the stream itself
     if (this.pending > FLOW_HIGH && !this.paused && canSend) {
       this.paused = true;
       this.lastPauseAt = this.now();
@@ -43,9 +107,19 @@ export class TermFlow {
     }
   }
 
-  /** Un-count bytes the emulator finished parsing (or dropped). */
-  done(n: number): void {
+  /** Un-count bytes the emulator finished parsing (or dropped). `stream` =
+   *  the `credit` tag the bytes arrived under (0 = not credited). */
+  done(n: number, stream = 0): void {
     this.pending = Math.max(0, this.pending - n);
+    if (this.credit) {
+      if (stream !== this.credit) return;
+      this.consumed += n;
+      if (this.consumed - this.reported >= this.ackStep) {
+        this.reported = this.consumed;
+        this.send({ type: 'ack', bytes: this.consumed });
+      }
+      return;
+    }
     if (!this.paused) return;
     if (this.pending < FLOW_LOW) {
       this.paused = false;
@@ -56,9 +130,149 @@ export class TermFlow {
     }
   }
 
-  /** A new socket: its server stream starts unpaused. */
+  /** A new socket: its server stream starts unpaused and uncredited. */
   resetStream(): void {
     this.paused = false;
+    this.credit = 0;
+  }
+}
+
+/** Largest slice handed to xterm in one `write()` (A3). */
+export const WRITE_SLICE = 64 * 1024;
+/** Bytes allowed INSIDE xterm (handed over, not yet parsed). The rest waits in
+ *  [`WriteQueue`], where it can still be dropped: xterm has no API to cancel
+ *  queued writes, so everything handed to it will parse — 2 MB of it after ^C
+ *  was ~0.35 s of scrolling. Two slices keep its parser busy (one parses while
+ *  the next waits), so throughput is unchanged. */
+export const WRITE_INFLIGHT = 2 * WRITE_SLICE;
+/** Queued (not yet handed to xterm) bytes above which a keystroke drops the
+ *  queue and asks the server for a `resync` snapshot instead of making the
+ *  user watch it scroll by. Below this the backlog drains in ≲ 40 ms anyway. */
+export const RESYNC_ON_INPUT = 256 * 1024;
+
+interface Pending {
+  bytes: Uint8Array;
+  /** Runs once this frame's LAST byte has been parsed. */
+  onParsed?: () => void;
+  /** `TermFlow.credit` when the frame arrived (0 = not credited). */
+  stream: number;
+}
+
+/**
+ * A byte queue in front of xterm (A3). Frames are fed to `write` in slices of
+ * at most WRITE_SLICE while at most WRITE_INFLIGHT bytes are inside the
+ * emulator; each parse callback refills. Every byte is counted in `flow`
+ * (TermFlow watermarks) from arrival until parsed or dropped, so pause/resume
+ * see the whole backlog. `dropQueued()` discards what xterm has not been
+ * handed yet — safe only when a snapshot that supersedes it follows (a
+ * `resync` reply, or a snapshot frame already received).
+ */
+export class WriteQueue {
+  private q: Pending[] = [];
+  /** Bytes waiting here (droppable). */
+  queued = 0;
+  /** Bytes handed to xterm and not yet parsed. */
+  inflight = 0;
+  private readonly write: (bytes: Uint8Array, done: () => void) => void;
+  private readonly flow: TermFlow;
+  private readonly canSend: () => boolean;
+
+  constructor(
+    write: (bytes: Uint8Array, done: () => void) => void,
+    flow: TermFlow,
+    canSend: () => boolean = () => true,
+  ) {
+    this.write = write;
+    this.flow = flow;
+    this.canSend = canSend;
+  }
+
+  /** Whole local backlog (queued + inside xterm). */
+  get backlog(): number {
+    return this.queued + this.inflight;
+  }
+
+  /** Enqueue one received frame. `onParsed` fires after its last byte parses.
+   *  `stream` = the credit tag of a live binary frame (`flow.credit`); leave
+   *  0 for snapshots and local writes, which the daemon does not count. */
+  push(bytes: Uint8Array, onParsed?: () => void, stream = 0): void {
+    const n = bytes.byteLength;
+    if (n === 0) {
+      onParsed?.();
+      return;
+    }
+    this.flow.add(n, this.canSend());
+    this.q.push({ bytes, onParsed, stream });
+    this.queued += n;
+    this.pump();
+  }
+
+  /** Hand slices to xterm while there is room inside it. */
+  private pump(): void {
+    while (this.q.length && this.inflight < WRITE_INFLIGHT) {
+      const head = this.q[0];
+      let slice: Uint8Array;
+      let hook: (() => void) | undefined;
+      if (head.bytes.byteLength <= WRITE_SLICE) {
+        this.q.shift();
+        slice = head.bytes;
+        hook = head.onParsed;
+      } else {
+        slice = head.bytes.subarray(0, WRITE_SLICE);
+        head.bytes = head.bytes.subarray(WRITE_SLICE);
+      }
+      const n = slice.byteLength;
+      const stream = head.stream;
+      this.queued -= n;
+      this.inflight += n;
+      let settled = false;
+      const done = (): void => {
+        if (settled) return;
+        settled = true;
+        this.inflight = Math.max(0, this.inflight - n);
+        this.flow.done(n, stream);
+        hook?.();
+        this.pump();
+      };
+      try {
+        this.write(slice, done);
+      } catch {
+        // xterm throws (dropping the data) past its discard watermark; the
+        // callback never fires — un-count it or the gate would stay shut.
+        done();
+      }
+    }
+  }
+
+  /**
+   * User input over a big queue (A3): when more than RESYNC_ON_INPUT bytes
+   * wait here, call `requestResync` (send the `resync` frame) and THEN drop
+   * the queue — dropping can un-pause the stream (`resume`), and the server
+   * must see `resync` (which opens its gate itself) first, or a resume
+   * snapshot and the resync snapshot would both rebuild. `true` = resynced.
+   */
+  resyncOnInput(requestResync: () => void): boolean {
+    if (this.queued <= RESYNC_ON_INPUT) return false;
+    requestResync();
+    this.dropQueued();
+    return true;
+  }
+
+  /** Discard everything not yet handed to xterm. Returns the bytes dropped.
+   *  Dropped credited bytes count as consumed (acked) — the daemon only needs
+   *  to know they no longer occupy the window. */
+  dropQueued(): number {
+    const n = this.queued;
+    if (n === 0) return 0;
+    const dropped = this.q;
+    this.q = [];
+    this.queued = 0;
+    // One `done` per stream (normally one), so a pause-mode drop still sends
+    // a single resume and never an interleaved keep-alive.
+    const byStream = new Map<number, number>();
+    for (const p of dropped) byStream.set(p.stream, (byStream.get(p.stream) ?? 0) + p.bytes.byteLength);
+    for (const [stream, bytes] of byStream) this.flow.done(bytes, stream);
+    return n;
   }
 }
 

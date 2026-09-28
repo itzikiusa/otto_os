@@ -38,6 +38,13 @@ export class TableWindow {
     this.#overscan = overscan;
   }
 
+  /** True when `n` rows are windowed (above `min`). Lets a list give its
+   *  scroller a bounded height only while windowing, e.g. on phones where the
+   *  page (not the list) would otherwise scroll and the slice never moves. */
+  active(n: number): boolean {
+    return n > this.#min;
+  }
+
   range(n: number): WindowRange {
     if (n <= this.#min) return { start: 0, end: n, top: 0, bottom: 0 };
     const h = this.rowH;

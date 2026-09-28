@@ -42,6 +42,7 @@
   // re-fetch when the running review for this PR completes/errors, replacing the
   // fixed-interval visibility-gated poll for the running state.
   import { reviewBus } from '../../lib/events.svelte';
+  import { appLive } from '../../lib/live';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   // --- Installed-skill metadata (library API; category + version are new) ----
@@ -110,6 +111,9 @@
   let findingsLoading = $state(false);
 
   function pollDelay(count: number): number {
+    // While the event socket is up, `review_changed` (reviewBus, below)
+    // drives the refetches; this chain is only a 30 s safety net then.
+    if (appLive.connected()) return 30_000;
     if (count < 5) return 2000;
     if (count < 15) return 5000;
     return 10000;

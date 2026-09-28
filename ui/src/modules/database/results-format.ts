@@ -4,6 +4,9 @@
 // touches the clipboard + the toast store.
 import { toasts } from '../../lib/toast.svelte';
 import { bsonScalar } from './bson';
+import { CELL_MAX, previewJson } from './json-preview';
+
+export { CELL_MAX, previewJson };
 
 /** Non-grid views draw ALT_BATCH records at a time and grow on demand (see
  *  ResultsGrid's `altShown`); the "Show N more" button reads it too. */
@@ -50,17 +53,17 @@ export function cellText(v: unknown): string {
   if (v === null || v === undefined) return '';
   return cellStr(v);
 }
-/** Hard cap on the text ONE grid cell puts in the DOM. Cells are width-clamped
+/** Clip to CELL_MAX (json-preview.ts), the text ONE grid cell puts in the DOM. Cells are width-clamped
  *  anyway and the full value is one click away in the cell viewer, so pushing a
  *  ~90KB blob into a 60ch box buys nothing and costs layout time on every
  *  scroll. Copy / edit / export deliberately keep using the UNCLIPPED value. */
-export const CELL_MAX = 512;
 export function clip(s: string): string {
   return s.length > CELL_MAX ? s.slice(0, CELL_MAX) + '…' : s;
 }
 export function cellDisplay(v: unknown): string {
-  return clip(cellText(v));
+  return isComplex(v) ? clip(previewJson(v)) : clip(cellText(v));
 }
+
 /** Vertical view: render as a collapsible tree rather than raw text when the
  *  value is structured, or a scalar too long to sit inline. */
 export function vvTree(v: unknown): boolean {

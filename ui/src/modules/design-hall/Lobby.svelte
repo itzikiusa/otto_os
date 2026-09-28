@@ -52,7 +52,7 @@
     untrack(() => {
       const evs = designBus.since(seen);
       seen = now;
-      if (evs.some((e) => e.type !== 'design_learning_update')) library.refreshSoon();
+      library.applyEvents(evs); // patch one card, or a debounced full reload
     });
   });
 

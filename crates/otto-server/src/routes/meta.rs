@@ -88,6 +88,7 @@ pub async fn meta(State(ctx): State<ServerCtx>) -> ApiResult<Json<MetaResp>> {
         providers,
         default_provider,
         model_flags,
+        alt_loopback_base: crate::transport::alt_loopback_base(),
     }))
 }
 

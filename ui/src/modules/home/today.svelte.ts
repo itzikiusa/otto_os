@@ -27,7 +27,7 @@ import { auth } from '../../lib/stores/auth.svelte';
 import { assistant } from '../../lib/stores/assistant.svelte';
 import { notifications } from '../../lib/stores/notifications.svelte';
 import { isForeground, ws } from '../../lib/stores/workspace.svelte';
-import { poll, type Poller } from './boxes/poll';
+import { livePoll, type Poller } from './boxes/poll';
 
 /** One glance row. `open` runs on click; `live` pulses its dot. */
 export interface TodayRow {
@@ -293,7 +293,20 @@ class TodayStore {
     this.users += 1;
     if (this.users > 1) return;
     if (!notifications.loaded) void notifications.load();
-    this.poller = poll(() => this.load(), POLL_MS);
+    // Event-fed: approvals, Mission Control, designs and scheduled runs each
+    // announce changes; a burst (an agent editing a design) is coalesced to at
+    // most one reload per ~15 s. POLL_MS only while the event socket is down.
+    this.poller = livePoll(
+      () => this.load(),
+      POLL_MS,
+      ['mcp_approval_changed', 'work_graph_updated', 'design_artifact_updated', 'scheduled_task_run_updated'],
+      {
+        match: (ev) => typeof ev.workspace_id !== 'string' || !ws.currentId || ev.workspace_id === ws.currentId,
+        debounceMs: 3000,
+        maxWaitMs: 15_000,
+        minIntervalMs: 15_000,
+      },
+    );
   }
 
   stop(): void {

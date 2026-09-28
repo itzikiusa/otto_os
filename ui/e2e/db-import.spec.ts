@@ -181,7 +181,7 @@ test('MySQL: import a CSV into a table via the dialog', async ({ page }) => {
   await page.locator('input[placeholder="~/Downloads/data.csv"]').fill(join(importDir, 'people.csv'));
   await page.locator('input[placeholder="target_table"]').fill(MYSQL_TABLE);
   // Format defaults to CSV. Submit.
-  await page.getByRole('button', { name: 'Import', exact: true }).click();
+  await page.getByLabel('Import file into a table').getByRole('button', { name: 'Import', exact: true }).click();
 
   // Streamed {done} line → success toast with the row/batch summary.
   await expect(page.locator('.toast.success', { hasText: 'Imported' })).toBeVisible({
@@ -205,7 +205,7 @@ test('MongoDB: import a CSV into a collection via the dialog', async ({ page }) 
   await expect(page.locator('.imp-form')).toBeVisible({ timeout: 10_000 });
   await page.locator('input[placeholder="~/Downloads/data.csv"]').fill(join(importDir, 'people.csv'));
   await page.locator('input[placeholder="target_table"]').fill(MONGO_COLL);
-  await page.getByRole('button', { name: 'Import', exact: true }).click();
+  await page.getByLabel('Import file into a table').getByRole('button', { name: 'Import', exact: true }).click();
   await expect(page.locator('.toast.success', { hasText: 'Imported' })).toBeVisible({
     timeout: 30_000,
   });

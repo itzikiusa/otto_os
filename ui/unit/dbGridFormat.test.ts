@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   cellMatchesFilter,
   columnKind,
+  highlightParts,
   moveColumn,
   rowNumberWidthCh,
 } from '../src/modules/database/grid-format.ts';
@@ -50,4 +51,15 @@ test('header filter: contains, exact, comparisons, NULL', () => {
   assert.equal(cellMatchesFilter('x', false, '!null'), true);
   assert.equal(cellMatchesFilter('', true, 'x'), false);
   assert.equal(cellMatchesFilter('anything', false, '   '), true);
+});
+
+test('search highlight splits a cell around every case-insensitive hit', () => {
+  assert.deepEqual(highlightParts('Order-42 order', null), [{ t: 'Order-42 order', hit: false }]);
+  assert.deepEqual(highlightParts('Order-42 order', 'order'), [
+    { t: 'Order', hit: true },
+    { t: '-42 ', hit: false },
+    { t: 'order', hit: true },
+  ]);
+  assert.deepEqual(highlightParts('abc', 'zz'), [{ t: 'abc', hit: false }]);
+  assert.deepEqual(highlightParts('', 'a'), [{ t: '', hit: false }]);
 });

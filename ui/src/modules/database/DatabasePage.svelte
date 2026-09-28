@@ -27,6 +27,7 @@
   import ClusterForm from '../brokers/ClusterForm.svelte';
   import ClusterViewer from '../brokers/ClusterViewer.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
+  import { PRIMARY_SCROLLBACK } from '../../lib/components/termFlow';
   import ImportDialog from './ImportDialog.svelte';
   import ExportDialog from './ExportDialog.svelte';
   import { stmtPreview } from './sql-util';
@@ -1174,7 +1175,7 @@
         {#if activeSsh}
           <div class="term-pane">
             {#key activeSsh.sessionId}
-              <Terminal sessionId={activeSsh.sessionId} />
+              <Terminal sessionId={activeSsh.sessionId} scrollback={PRIMARY_SCROLLBACK} />
             {/key}
           </div>
         {:else}
@@ -1624,7 +1625,7 @@
     {:else}
       {#each filteredHistory as h (h.id)}
         <!-- Bounded previews: a history row can hold a whole pasted script. -->
-        <button class="hist-row" class:bad={!h.ok} onclick={() => database.openHistory(h)} title={h.error ? stmtPreview(h.error, 1000) : stmtPreview(h.statement, 1000)}>
+        <button class="hist-row" class:bad={!h.ok} onclick={() => void database.openHistory(h)} title={h.error ? stmtPreview(h.error, 1000) : stmtPreview(h.statement, 1000)}>
           <span class="hist-dot" class:ok={h.ok}></span>
           <span class="hist-stmt ellipsis mono">{stmtPreview(h.statement)}</span>
           <span class="hist-meta">{h.ok ? `${h.row_count}r` : 'err'} · {fmtAgo(h.created_at)}</span>

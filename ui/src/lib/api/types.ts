@@ -52,12 +52,42 @@ export interface WsSearchResultFrame {
   matches: TermSearchMatch[];
 }
 
-/** Client→server flow-control frames (docs/contracts/ws.md §1 "Flow control"):
- *  `pause` above the client's pending-bytes high watermark, `resume` below the
- *  low one. On resume the server sends one `scrollback` snapshot if it held
- *  output back; a paused stream auto-resumes 2 s after the last `pause`. */
-export interface WsTermFlowFrame {
+/** Client→server pause-mode flow-control frames (docs/contracts/ws.md §1
+ *  "Flow control"): `pause` above the client's pending-bytes high watermark,
+ *  `resume` below the low one. On resume the server sends one `scrollback`
+ *  snapshot if it held output back; a paused stream auto-resumes 2 s after the
+ *  last `pause`. The fallback when the daemon does not grant `credit`. */
+export interface WsTermPauseFrame {
   type: 'pause' | 'resume';
+}
+
+/** `/ws/term` credit flow control (docs/contracts/ws.md §1 "Credit"). Client →
+ *  server first thing on a socket: offer a `window` (bytes). Server → client:
+ *  the grant (window clamped to 64 KB–8 MB); binary frames after it count
+ *  against the window. A daemon that never answers stays in pause mode. */
+export interface WsTermCreditFrame {
+  type: 'credit';
+  window: number;
+}
+
+/** Client → server: cumulative credited binary bytes consumed (parsed or
+ *  dropped) since the `credit` grant; sent every ~64 KB. */
+export interface WsTermAckFrame {
+  type: 'ack';
+  bytes: number;
+}
+
+/** Every flow-control frame a terminal client sends (termFlow.ts). */
+export type WsTermFlowFrame = WsTermPauseFrame | WsTermCreditFrame | WsTermAckFrame;
+
+/** Client → server `/ws/term` frame (docs/contracts/ws.md §1): the user typed
+ *  while more than 256 KB was queued in front of the emulator; the client
+ *  dropped that queue and asks for ONE snapshot of up to `lines` rows. The
+ *  server discards this viewer's queued output (already in the snapshot),
+ *  leaves any flow-control pause and always answers with a `scrollback`. */
+export interface WsTermResyncFrame {
+  type: 'resync';
+  lines: number;
 }
 
 export interface Session {
@@ -1070,6 +1100,22 @@ export interface EventsResyncFrame {
   skipped: number;
 }
 
+/** Client → `/ws/events` (any socket, ws.md "Topic subscription"): deliver
+ *  only these event types (an empty list clears the filter). ≤ 64 topics of
+ *  ≤ 64 chars; `resync` frames are always delivered. */
+export interface EventsSubscribeFrame {
+  type: 'subscribe';
+  topics: string[];
+}
+
+/** Server → that socket: the active filter (`null` = everything) and the
+ *  daemon's boot id (a different id than before = the daemon restarted). */
+export interface EventsSubscribeAckFrame {
+  type: 'subscribe_ack';
+  topics: string[] | null;
+  boot_id: string;
+}
+
 export type OttoEvent =
   | { type: 'session_status'; session_id: Id; workspace_id: Id; status: SessionStatus }
   | { type: 'session_created'; session: Session }
@@ -1602,6 +1648,30 @@ export type OttoEvent =
       module: string;
       /** The catalog command name, e.g. `db_run_query` (tool `otto.ui_db_run_query`). */
       command: string;
+    }
+  | {
+      /** An MCP approval was created (`pending`), decided, `consumed` or
+       *  `expired` — an invalidation cue only (no title/tool/args): refetch
+       *  `GET /mcp/approvals`. `approval_id` is absent for a bulk expiry;
+       *  `workspace_id` for workspace-less rows and consume/expire. */
+      type: 'mcp_approval_changed';
+      approval_id?: Id;
+      workspace_id?: Id;
+      status: string;
+    }
+  | {
+      /** Effective resource access may have changed (resource policy, access
+       *  group/role, user grants, workspace membership). With `kind` +
+       *  `resource_id`: that one resource; without: re-check everything. */
+      type: 'resource_access_changed';
+      kind?: string;
+      resource_id?: Id;
+    }
+  | {
+      /** The caller's notice list changed without a new notice (read,
+       *  read-all, dismiss, clear) — owner-only; refetch `/notifications`. */
+      type: 'notifications_changed';
+      user_id: Id;
     };
 
 // ---------------------------------------------------------------------------
@@ -1940,6 +2010,10 @@ export interface MetaResp {
   /** Per-provider: whether the CLI accepts a model flag (its spec carries a
    *  `model_args` template). Pickers hide the model control when false. */
   model_flags: Record<string, boolean>;
+  /** Second LOOPBACK base for the same daemon (`http://localhost:<port>`; the
+   *  daemon holds both 127.0.0.1 and [::1]) — a separate browser socket pool
+   *  for background/slow calls. `null`/absent → single-host transport. */
+  alt_loopback_base?: string | null;
 }
 
 export interface OnboardRootReq {
@@ -2393,6 +2467,9 @@ export interface SftpListResp {
   /** Absolute remote path that was listed (resolved from pwd when omitted). */
   path: string;
   entries: SftpEntry[];
+  /** True when the directory held more than the daemon's 20k-entry cap;
+   *  `entries` is then the first 20k. Omitted when false. */
+  truncated?: boolean;
 }
 
 /** `POST /api/v1/connections/{id}/sftp/download`. */
@@ -2845,6 +2922,8 @@ export interface DiffResp {
   truncated?: boolean | null;
   total_added?: number | null;
   total_deleted?: number | null;
+  /** git skipped rename detection (past `-l1000`): some renames show as delete + add. */
+  renames_incomplete?: boolean | null;
 }
 
 export interface StagePathsReq {
@@ -5939,6 +6018,16 @@ export interface DbHistoryEntry {
   row_count: number;
   error?: string | null;
   created_at: string;
+  /** Present when a history LIST clipped `statement` to a 16 KiB preview: the
+   *  full length (chars). Fetch `GET …/db/history/{id}` for the whole text. */
+  statement_len?: number;
+}
+
+/** `POST …/db/completion` reply. `truncated` (omitted when false) means the
+ *  daemon capped the list for the typed word — re-ask on the next keystroke. */
+export interface DbCompletionResponse {
+  items: DbCompletionItem[];
+  truncated?: boolean;
 }
 
 /** Supported widget visualizations. */
@@ -7321,6 +7410,7 @@ export interface BrowserPage {
   url: string;
   title: string;
   markdown: string;
+  /** Raw markup; `""` when fetched with `include_html=0` (the reader does). */
   html: string;
   /** `"lightpanda"` | `"fallback"` | `"mock"` — which engine produced this page. */
   engine: string;
@@ -8647,6 +8737,11 @@ export interface ToolResult {
   /** Capped at 64 KB (`truncated: true`). */
   text: string | null;
   truncated: boolean;
+  /** Only in a live `transcript_appended` delta that would exceed 64 KB:
+   *  `text` (then `patch`) was shortened for the push; the full result is
+   *  `GET /sessions/{id}/transcript/tool/{tool_id}`. `bytes`/`truncated`
+   *  still describe the stored result. Absent everywhere else. */
+  elided?: boolean;
   bytes: number;
   /** Images extracted from the result — `GET …/transcript/images/{id}`. */
   image_ids: string[];
@@ -10500,6 +10595,8 @@ export interface UiPresenceFrame {
 export interface UiHelloAckFrame {
   type: 'hello_ack';
   conn_id: string;
+  /** This daemon process's boot id (changes on every daemon restart). */
+  boot_id?: string;
 }
 
 /** Server → this connection: run one UI command. */

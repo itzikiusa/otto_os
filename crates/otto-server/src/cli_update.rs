@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+use crate::cancel_signal::CancelSignal;
 use crate::state::ServerCtx;
 
 /// Settings key holding the user config object.
@@ -154,19 +155,19 @@ fn is_due(
 // ---------------------------------------------------------------------------
 
 pub struct CliUpdateSchedulerHandle {
-    cancel: Arc<AtomicBool>,
+    cancel: CancelSignal,
     _supervisor: JoinHandle<()>,
 }
 
 impl CliUpdateSchedulerHandle {
     pub fn shutdown(&self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.cancel.cancel();
     }
 }
 
 impl Drop for CliUpdateSchedulerHandle {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.cancel.cancel();
     }
 }
 
@@ -181,32 +182,28 @@ impl CliUpdateScheduler {
 
     /// Spawn the supervisor; returns a handle that cancels on drop.
     pub fn start(self) -> CliUpdateSchedulerHandle {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let supervisor = tokio::spawn(self.supervise(Arc::clone(&cancel)));
+        let cancel = CancelSignal::new();
+        let supervisor = tokio::spawn(self.supervise(cancel.clone()));
         CliUpdateSchedulerHandle {
             cancel,
             _supervisor: supervisor,
         }
     }
 
-    async fn supervise(self, cancel: Arc<AtomicBool>) {
+    async fn supervise(self, cancel: CancelSignal) {
         // Single in-flight guard: a run takes minutes; never overlap.
         let running = Arc::new(AtomicBool::new(false));
         loop {
-            if cancel.load(Ordering::Relaxed) {
+            if cancel.is_cancelled() {
                 return;
             }
             if !running.load(Ordering::Relaxed) {
                 self.tick(&running).await;
             }
-            // Sleep in short slices for responsive shutdown.
-            let mut waited = Duration::ZERO;
-            while waited < TICK {
-                if cancel.load(Ordering::Relaxed) {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                waited += Duration::from_millis(500);
+            // One timer per tick; shutdown()/drop wakes it (SG-12: no 500 ms
+            // polling slices).
+            if cancel.sleep(TICK).await {
+                return;
             }
         }
     }

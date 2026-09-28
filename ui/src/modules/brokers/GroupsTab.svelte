@@ -1,10 +1,12 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { api, ApiError } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { TableWindow } from '../../lib/tableWindow.svelte';
   import type { BrokerCluster, GroupDetail, GroupOffset, GroupSummary } from '../../lib/api/types';
   import type { DryRunResp } from './types';
 
@@ -15,7 +17,9 @@
 
   const guarded = $derived(cluster.read_only || cluster.environment === 'prod');
 
-  let groups = $state<GroupSummary[]>([]);
+  // Raw: a cluster can hold thousands of groups; the list is replaced
+  // wholesale per load, never mutated in place.
+  let groups = $state.raw<GroupSummary[]>([]);
   let loading = $state(true);
   /** Failed loads — inline with Retry, never "No consumer groups." / a blank detail. */
   let loadError = $state<string | null>(null);
@@ -25,7 +29,7 @@
   let accessDenied = $state(false);
   let accessMsg = $state('');
   let selected = $state<string | null>(null);
-  let detail = $state<GroupDetail | null>(null);
+  let detail = $state.raw<GroupDetail | null>(null);
   let detailLoading = $state(false);
   let detailRequest = 0;
   let listRequest = 0;
@@ -100,6 +104,7 @@
     detailError = null;
     // Another cluster's groups are not "stale data" for this one.
     groups = [];
+    untrack(() => groupsTw.reset(groupsEl));
     loadError = null;
     loadGroups();
   });
@@ -180,8 +185,36 @@
     return offsets;
   });
 
-  // Max lag across all partitions — used to scale the per-row bars.
-  const maxLag = $derived(Math.max(1, ...sortedOffsets.map((o) => o.lag)));
+  // Max lag across all partitions — used to scale the per-row bars. (A loop,
+  // not `Math.max(...spread)`: a 12k-partition group would blow the arg limit.)
+  const maxLag = $derived(sortedOffsets.reduce((m, o) => (o.lag > m ? o.lag : m), 1));
+
+  // Window the group list and the offsets table (SC-22): 1k groups / 12k
+  // offset rows mount only the visible slice between two spacers.
+  const groupsTw = new TableWindow();
+  const groupsWin = $derived(groupsTw.range(groups.length));
+  let groupsEl = $state<HTMLDivElement>();
+  $effect(() => {
+    void groupsWin;
+    // The rows mount one flush AFTER `groups` lands (`loading` clears in the
+    // load's `.finally`); without this the row height stays the 30 px guess,
+    // the spacers are ~40 % short and scrolling to the end lands mid-list.
+    void loading;
+    groupsTw.measure(groupsEl, '.grow-row');
+  });
+  const offsetsTw = new TableWindow();
+  const offsetsWin = $derived(offsetsTw.range(sortedOffsets.length));
+  let offsetsEl = $state<HTMLDivElement>();
+  $effect(() => {
+    void offsetsWin;
+    offsetsTw.measure(offsetsEl);
+  });
+  // A new group (or a re-sort) starts the offsets table at the top.
+  $effect(() => {
+    void detail;
+    void sortByLag;
+    offsetsTw.reset(offsetsEl);
+  });
 
   // Unique topics in the current group (for the topic filter dropdown).
   const groupTopics = $derived(
@@ -277,7 +310,14 @@
 
 <div class="groups-container">
 <div class="groups">
-  <div class="list" style="--groups-list-w:{listW}px">
+  <div
+    class="list"
+    class:windowed={groupsTw.active(groups.length)}
+    style="--groups-list-w:{listW}px"
+    bind:this={groupsEl}
+    bind:clientHeight={groupsTw.viewH}
+    onscroll={groupsTw.onscroll}
+  >
     {#if loadError}
       <LoadState what="consumer groups" variant="compact" {loading} error={loadError} empty={groups.length === 0} onretry={loadGroups} />
     {/if}
@@ -298,7 +338,8 @@
     {:else if groups.length === 0}
       <p class="muted pad">No consumer groups.</p>
     {:else}
-      {#each groups as g (g.group_id)}
+      {#if groupsWin.top}<div class="tw-spacer" aria-hidden="true" style="height:{groupsWin.top}px"></div>{/if}
+      {#each groups.slice(groupsWin.start, groupsWin.end) as g (g.group_id)}
         <button class="grow-row" class:sel={selected === g.group_id} onclick={() => open(g.group_id)}>
           <span class="gid" title={g.group_id}>{g.group_id}</span>
           <span class="badges">
@@ -307,6 +348,7 @@
           </span>
         </button>
       {/each}
+      {#if groupsWin.bottom}<div class="tw-spacer" aria-hidden="true" style="height:{groupsWin.bottom}px"></div>{/if}
     {/if}
   </div>
 
@@ -378,6 +420,13 @@
           Sort by lag
         </label>
       </div>
+      <div
+        class="offsets-wrap"
+        class:windowed={offsetsTw.active(sortedOffsets.length)}
+        bind:this={offsetsEl}
+        bind:clientHeight={offsetsTw.viewH}
+        onscroll={offsetsTw.onscroll}
+      >
       <table>
         <thead>
           <tr>
@@ -386,7 +435,8 @@
           </tr>
         </thead>
         <tbody>
-          {#each sortedOffsets as o (o.topic + '-' + o.partition)}
+          {#if offsetsWin.top}<tr class="tw-spacer" aria-hidden="true"><td colspan="6" style="height:{offsetsWin.top}px"></td></tr>{/if}
+          {#each sortedOffsets.slice(offsetsWin.start, offsetsWin.end) as o (o.topic + '-' + o.partition)}
             <tr>
               <td class="mono">{o.topic}</td>
               <td>{o.partition}</td>
@@ -402,8 +452,10 @@
               </td>
             </tr>
           {/each}
+          {#if offsetsWin.bottom}<tr class="tw-spacer" aria-hidden="true"><td colspan="6" style="height:{offsetsWin.bottom}px"></td></tr>{/if}
         </tbody>
       </table>
+      </div>
       {#if topicSubtotals.size > 1}
         <h5>Per-topic totals</h5>
         <table>
@@ -565,6 +617,27 @@
   .grow-row.sel {
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     border-inline-start-color: var(--accent);
+  }
+  /* Windowed rows must be uniform: one-line ids (full id in the title). */
+  .list.windowed .gid {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* The offsets table scrolls on its own only while windowed (the detail
+     pane holds more above/below it). */
+  .offsets-wrap.windowed {
+    max-height: 60vh;
+    overflow: auto;
+  }
+  .offsets-wrap.windowed th {
+    position: sticky;
+    top: 0;
+    background: var(--surface);
+  }
+  .tw-spacer td {
+    padding: 0;
+    border: 0;
   }
   .gid {
     font-family: var(--font-mono);

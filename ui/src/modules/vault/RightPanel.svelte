@@ -9,6 +9,17 @@
 
   let open = $state({ backlinks: true, outgoing: true, outline: false, props: false, okf: false });
 
+  // V7: a hub note can have thousands of backlinks / outgoing links; mount a
+  // page per list and grow on demand (reset when another note opens).
+  const LIST_PAGE = 100;
+  let shownBacklinks = $state(LIST_PAGE);
+  let shownOutgoing = $state(LIST_PAGE);
+  $effect(() => {
+    void vault.notePath;
+    shownBacklinks = LIST_PAGE;
+    shownOutgoing = LIST_PAGE;
+  });
+
   const props = $derived.by(() => {
     const fm = vault.note?.meta.frontmatter;
     if (!fm || typeof fm !== 'object' || Array.isArray(fm)) return [] as [string, string][];
@@ -40,12 +51,15 @@
       {#if vault.backlinks.length === 0}
         <div class="none">No linked mentions</div>
       {:else}
-        {#each vault.backlinks as bl (bl.path + bl.kind)}
+        {#each vault.backlinks.slice(0, shownBacklinks) as bl (bl.path + bl.kind)}
           <button class="item" title={bl.path} onclick={() => void vault.open(bl.path)}>
             <div class="t">{bl.title}</div>
             {#if bl.context}<div class="ctx">{bl.context}</div>{/if}
           </button>
         {/each}
+        {#if vault.backlinks.length > shownBacklinks}
+          <button class="more" onclick={() => (shownBacklinks += LIST_PAGE * 5)}>Show more ({vault.backlinks.length - shownBacklinks} hidden)</button>
+        {/if}
       {/if}
     {/if}
   </section>
@@ -57,7 +71,7 @@
       <span class="badge">{vault.note?.outgoing.length ?? 0}</span>
     </button>
     {#if open.outgoing}
-      {#each vault.note?.outgoing ?? [] as l, i (i)}
+      {#each (vault.note?.outgoing ?? []).slice(0, shownOutgoing) as l, i (i)}
         <button
           class="item"
           class:unresolved={!l.dst_path}
@@ -71,6 +85,9 @@
           </div>
         </button>
       {/each}
+      {#if (vault.note?.outgoing.length ?? 0) > shownOutgoing}
+        <button class="more" onclick={() => (shownOutgoing += LIST_PAGE * 5)}>Show more ({(vault.note?.outgoing.length ?? 0) - shownOutgoing} hidden)</button>
+      {/if}
     {/if}
   </section>
 
@@ -307,5 +324,21 @@
   }
   .finding.warn .t b {
     color: var(--warning);
+  }
+  .more {
+    display: block;
+    margin: 4px 10px 8px;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: var(--fs-s);
+    cursor: pointer;
+  }
+  .more:hover {
+    background: var(--hover);
+    color: var(--text);
   }
 </style>

@@ -471,7 +471,7 @@ impl Driver for SlowCompletion {
         self.started.add_permits(1);
         self.release.acquire().await.unwrap().forget();
         self.finished.fetch_add(1, Ordering::SeqCst);
-        Ok(CompletionResponse { items: Vec::new() })
+        Ok(CompletionResponse::default())
     }
 }
 

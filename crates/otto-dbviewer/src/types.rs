@@ -1057,6 +1057,11 @@ pub struct CompletionContext {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CompletionResponse {
     pub items: Vec<CompletionItem>,
+    /// Set when the item list was capped (`complete::MAX_COMPLETION_ITEMS`)
+    /// for the word being typed — the editor must re-ask on the next keystroke
+    /// rather than keep filtering this clipped list. Omitted when `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 // --- Test result & capabilities ---------------------------------------------

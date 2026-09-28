@@ -46,7 +46,7 @@
     d2Error = null;
     if (!isD2 || isLarge || text == null) return;
     const id = `vault-d2-file-${++d2Seq}`;
-    void renderD2(id, text, { dark }).then(({ svg, error }) => {
+    void renderD2(id, text, { dark, isStale: () => vault.fileText !== text }).then(({ svg, error }) => {
       if (vault.fileText !== text) return; // switched files meanwhile
       d2Svg = svg ?? null;
       d2Error = error ?? null;
@@ -137,9 +137,24 @@
     return rows.length > 0 ? rows : null;
   });
   const csvTruncated = $derived((csvRows?.length ?? 0) > CSV_MAX_ROWS);
+  // V6: a 5k-row × N-column table used to mount every cell at once. Mount a
+  // page of rows and grow on demand (a real <table> keeps column sizing and
+  // the sticky header, which a fixed-height row window would break).
+  const CSV_PAGE = 200;
+  let csvShown = $state(CSV_PAGE);
+  $effect(() => {
+    void path;
+    csvShown = CSV_PAGE;
+  });
+  const csvBody = $derived(csvRows ? csvRows.slice(1, 1 + csvShown) : []);
+  const csvHidden = $derived(Math.max(0, (csvRows?.length ?? 1) - 1 - csvShown));
 
   // -- highlighted code fallback -------------------------------------------------
   const CODE_MAX_LINES = 10_000;
+  /** Past this many lines the code view is windowed and highlights only the
+   *  rows on screen (V6: 10k lines were highlighted eagerly into one <pre>). */
+  const CODE_VIRTUAL_FROM = 1500;
+  const CODE_ROW_H = 20;
   const codeHtml = $derived.by(() => {
     void hlReady;
     if (isImage || isPdf || isLarge) return null;
@@ -159,13 +174,21 @@
     }
     const lang = ext === 'json' ? 'json' : langFromPath(path);
     const lines = text.split('\n');
+    if (lines.length > CODE_VIRTUAL_FROM) {
+      return { html: null, lines, lang, truncated: false, total: lines.length };
+    }
     const shown = lines.slice(0, CODE_MAX_LINES);
     return {
       html: shown.map((l) => highlightLine(l, lang)).join('\n'),
+      lines: null,
+      lang,
       truncated: lines.length > CODE_MAX_LINES,
       total: lines.length,
     };
   });
+
+  const codeLines = $derived(codeHtml?.lines ?? null);
+  const codeLang = $derived(codeHtml?.lang ?? null);
 
   // -- large files: virtualized plain text ---------------------------------------
   // Long lines (minified JSON is one giant line) are chunked so every row has a
@@ -297,17 +320,26 @@
             </tr>
           </thead>
           <tbody>
-            {#each csvRows.slice(1) as r, ri (ri)}
+            {#each csvBody as r, ri (ri)}
               <tr>
                 {#each r as cell, ci (ci)}<td>{cell}</td>{/each}
               </tr>
             {/each}
           </tbody>
         </table>
+        {#if csvHidden > 0}
+          <button class="mode-btn more-rows" onclick={() => (csvShown += CSV_PAGE * 5)}>
+            Show {Math.min(csvHidden, CSV_PAGE * 5).toLocaleString()} more rows ({csvHidden.toLocaleString()} hidden)
+          </button>
+        {/if}
         {#if csvTruncated}
           <div class="notice">Showing the first {CSV_MAX_ROWS} rows.</div>
         {/if}
       </div>
+    {:else if codeLines}
+      <VirtualList items={codeLines} estimateHeight={CODE_ROW_H} class="code-lines hljs">
+        {#snippet row(line: string)}<div class="code-ln">{@html highlightLine(line, codeLang)}</div>{/snippet}
+      </VirtualList>
     {:else if codeHtml}
       <pre class="code"><code class="hljs">{@html codeHtml.html}</code></pre>
       {#if codeHtml.truncated}
@@ -473,5 +505,24 @@
     white-space: pre;
     height: 18px;
     line-height: 18px;
+  }
+  .file-view :global(.code-lines) {
+    flex: 1;
+    min-height: 0;
+    padding: 14px 18px 40px;
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-size: var(--fs-s);
+  }
+  .file-view :global(.code-lines .vlist-win) {
+    inset-inline-end: auto;
+    min-width: 100%;
+  }
+  .code-ln {
+    white-space: pre;
+    height: 20px;
+    line-height: 20px;
+  }
+  .more-rows {
+    margin-top: 8px;
   }
 </style>

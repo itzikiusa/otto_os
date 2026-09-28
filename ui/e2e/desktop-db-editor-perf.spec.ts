@@ -64,7 +64,14 @@ function wideInserts(n = 200): string {
 interface CompletionReq {
   prefix: number;
   suffix: number;
+  /** The request's text before the cursor (tail only — for word assertions). */
+  tail: string;
 }
+
+/** When set, the mocked daemon flags its answer `truncated` (item cap hit). */
+let answerTruncated = false;
+/** Artificial /completion latency (ms) — a cold schema snapshot build. */
+let completionDelay = 0;
 
 async function openEditor(page: Page, seen: CompletionReq[]): Promise<void> {
   await mockDbRoutes(page, connId);
@@ -76,10 +83,16 @@ async function openEditor(page: Page, seen: CompletionReq[]): Promise<void> {
     detail: null,
     score: i % 7,
   }));
-  await page.route(new RegExp(`/connections/${connId}/db/completion$`), (route) => {
+  await page.route(new RegExp(`/connections/${connId}/db/completion$`), async (route) => {
     const body = (route.request().postDataJSON() ?? {}) as { prefix?: string; suffix?: string };
-    seen.push({ prefix: (body.prefix ?? '').length, suffix: (body.suffix ?? '').length });
-    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items }) });
+    seen.push({
+      prefix: (body.prefix ?? '').length,
+      suffix: (body.suffix ?? '').length,
+      tail: (body.prefix ?? '').slice(-40),
+    });
+    const reply = answerTruncated ? { items, truncated: true } : { items };
+    if (completionDelay) await new Promise((r) => setTimeout(r, completionDelay));
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(reply) });
   });
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
@@ -255,4 +268,78 @@ test('switching query tabs keeps the editor state (text, undo) instead of rebuil
 
   await page.locator('.qe-tab').nth(1).click();
   expect((await cm(page)).text).toBe('SELECT 3');
+});
+
+test('completion: one request per word, re-ask when truncated, smooth popup, dialect-aware strings', async ({ page }) => {
+  test.setTimeout(90_000);
+  answerTruncated = false;
+  const seen: CompletionReq[] = [];
+  await openEditor(page, seen);
+  const content = page.locator('.qe-edit .cm-content');
+  await content.click();
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.press('Delete');
+
+  // (1) A word typed while its (slow — a cold snapshot build) request is in
+  // flight is served by that ONE request: CodeMirror keeps the query alive and
+  // filters its answer via `validFor`. It used to abort + re-request on every
+  // keystroke (one request per ~100 ms pause, each cancelled by the next key).
+  await page.keyboard.insertText('SELECT * FROM ');
+  await page.waitForTimeout(300);
+  completionDelay = 900;
+  const before = seen.length;
+  for (const ch of 'customers') {
+    await page.keyboard.type(ch);
+    await page.waitForTimeout(100);
+  }
+  await expect(page.locator('.cm-tooltip-autocomplete li').first()).toBeVisible({ timeout: 5_000 });
+  completionDelay = 0;
+  const perWord = seen.length - before;
+  expect(perWord, `requests for one typed word: ${perWord}`).toBeLessThanOrEqual(2);
+
+  // (2) The popup's first frames stay smooth: max rAF gap while it is open.
+  const maxGap = await page.evaluate(async () => {
+    let last = performance.now();
+    let worst = 0;
+    const until = last + 500;
+    while (performance.now() < until) {
+      await new Promise((r) => requestAnimationFrame(() => r(null)));
+      const now = performance.now();
+      worst = Math.max(worst, now - last);
+      last = now;
+    }
+    return worst;
+  });
+  expect(maxGap, `max frame gap with the popup open ${maxGap.toFixed(1)} ms`).toBeLessThan(50);
+  expect(await page.locator('.cm-tooltip-autocomplete li').count()).toBeLessThanOrEqual(40);
+  await page.keyboard.press('Escape');
+
+  // (3) A `truncated` answer is NOT reused: the next keystroke asks again with
+  // the longer word (the daemon capped the list for the shorter one).
+  answerTruncated = true;
+  await page.keyboard.insertText(' WHERE ');
+  await page.waitForTimeout(300);
+  await page.keyboard.type('c');
+  await expect.poll(() => seen.at(-1)?.tail.endsWith('WHERE c') ?? false, { timeout: 5_000 }).toBe(true);
+  const afterFirst = seen.length;
+  await page.keyboard.type('o');
+  await expect.poll(() => seen.length, { timeout: 5_000 }).toBeGreaterThan(afterFirst);
+  expect(seen.at(-1)?.tail.endsWith('WHERE co')).toBe(true);
+  answerTruncated = false;
+  await page.keyboard.press('Escape');
+
+  // (4) MySQL dialect: `'O\'Brien …` is still ONE string literal, so typing
+  // inside it never asks for completion (the standard dialect ended the
+  // string at `\'` and completed the "identifiers" after it).
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.press('Delete');
+  await page.keyboard.insertText("SELECT * FROM customers WHERE name = 'O\\'Brien");
+  await page.waitForTimeout(300);
+  const inString = seen.length;
+  for (const ch of ' and friends') {
+    await page.keyboard.type(ch);
+    await page.waitForTimeout(30);
+  }
+  await page.waitForTimeout(400);
+  expect(seen.length - inString, `no completion inside 'O\\'Brien … (asked: ${JSON.stringify(seen.slice(inString).map((r) => r.tail))})`).toBe(0);
 });

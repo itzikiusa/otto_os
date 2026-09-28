@@ -15,7 +15,7 @@
   import { KIND_ICON, STATUS_LABEL, fmtCost, relTime, statusColor } from '../../mission-control/lib';
   import type { HomeBox } from '../home.svelte';
   import { loadErrorText } from '../../../lib/loadError';
-  import { poll, type Poller } from './poll';
+  import { livePoll, type Poller } from './poll';
 
   interface Props {
     box: HomeBox;
@@ -64,7 +64,9 @@
     void limit;
     loading = true;
     poller?.stop();
-    poller = poll(load, 30_000);
+    // Live ticks arrive via missionControlBus (below); the 30 s cadence runs
+    // only while the event socket is down (5-min safety net otherwise).
+    poller = livePoll(load, 30_000, []);
     return () => poller?.stop();
   });
   // Manual refresh (frame button) + live work-graph ticks: rerun immediately.

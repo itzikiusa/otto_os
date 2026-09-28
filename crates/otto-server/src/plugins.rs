@@ -120,7 +120,7 @@ impl PluginManager {
             data_dir,
             host_api_base,
             running: Mutex::new(HashMap::new()),
-            http: reqwest::Client::new(),
+            http: proxy_client(PROXY_CONNECT_TIMEOUT, PROXY_TIMEOUT),
         }
     }
 
@@ -324,7 +324,8 @@ async fn proxy(State(ctx): State<ServerCtx>, req: Request) -> Response {
     let url = format!("http://127.0.0.1:{port}/{rest}{query}");
     let rmethod =
         reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
-    let mut rb = ctx.plugins.http.request(rmethod, &url).body(body.to_vec());
+    // `Bytes` → reqwest body without copying the (≤ 16 MB) buffer again.
+    let mut rb = ctx.plugins.http.request(rmethod, &url).body(body);
     if let Some(ct) = ctype {
         rb = rb.header("content-type", ct);
     }
@@ -333,25 +334,57 @@ async fn proxy(State(ctx): State<ServerCtx>, req: Request) -> Response {
             .header("x-otto-user", u.id.as_str())
             .header("x-otto-user-name", u.display_name);
     }
+    forward(rb).await
+}
 
-    match rb.send().await {
-        Ok(resp) => {
-            let status = resp.status();
-            let ct = resp
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("application/octet-stream")
-                .to_string();
-            let bytes = resp.bytes().await.unwrap_or_default();
-            Response::builder()
-                .status(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY))
-                .header("content-type", ct)
-                .body(Body::from(bytes))
-                .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+/// Sidecar connect deadline: a plugin on loopback either accepts at once or
+/// is not there.
+const PROXY_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+/// Whole-request deadline (send → last body byte). A hung sidecar used to pin
+/// one of the webview's 6 sockets forever (perf SI-08); now it answers 504.
+const PROXY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The proxy's client: bounded connect + total time. The readiness probe sets
+/// its own shorter per-request timeout on top.
+fn proxy_client(connect: Duration, total: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(connect)
+        .timeout(total)
+        .build()
+        .unwrap_or_default()
+}
+
+/// Send a proxied request and relay the sidecar's answer. A deadline hit —
+/// while waiting for headers OR mid-body — is `504`, never a truncated `200`.
+async fn forward(rb: reqwest::RequestBuilder) -> Response {
+    let resp = match rb.send().await {
+        Ok(r) => r,
+        Err(e) if e.is_timeout() => {
+            return (StatusCode::GATEWAY_TIMEOUT, "plugin did not answer in time").into_response()
         }
-        Err(e) => (StatusCode::BAD_GATEWAY, format!("plugin proxy: {e}")).into_response(),
-    }
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("plugin proxy: {e}")).into_response(),
+    };
+    let status = resp.status();
+    let ct = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) if e.is_timeout() => {
+            return (StatusCode::GATEWAY_TIMEOUT, "plugin response timed out").into_response()
+        }
+        Err(e) => {
+            return (StatusCode::BAD_GATEWAY, format!("plugin proxy body: {e}")).into_response()
+        }
+    };
+    Response::builder()
+        .status(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY))
+        .header("content-type", ct)
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
 }
 
 /// Split `…/plugins/<slug>/<rest>` (with or without the `/api/v1` nest prefix).
@@ -589,7 +622,8 @@ async fn asset(State(ctx): State<ServerCtx>, AxPath(p): AxPath<AssetPath>) -> Re
     if !c_target.starts_with(&c_base) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    match std::fs::read(&c_target) {
+    // Off the runtime worker: a plugin bundle can be MBs (perf SI-08).
+    match tokio::fs::read(&c_target).await {
         Ok(bytes) => {
             let ct = mime_for(&c_target);
             Response::builder()
@@ -887,4 +921,58 @@ pub(crate) fn copy_dir(src: &Path, dest: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod proxy_timeout_tests {
+    use super::*;
+
+    /// A sidecar that accepts and then never answers (the SI-08 hang).
+    async fn hung_listener() -> (u16, tokio::task::JoinHandle<()>) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let h = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = l.accept().await {
+                held.push(sock); // keep it open, say nothing
+            }
+        });
+        (port, h)
+    }
+
+    #[tokio::test]
+    async fn a_hung_plugin_gets_504_after_the_deadline() {
+        let (port, h) = hung_listener().await;
+        let client = proxy_client(Duration::from_millis(500), Duration::from_millis(300));
+        let started = std::time::Instant::now();
+        let resp = forward(client.get(format!("http://127.0.0.1:{port}/x"))).await;
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "bounded by the deadline"
+        );
+        h.abort();
+    }
+
+    #[tokio::test]
+    async fn a_live_plugin_is_relayed() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let h = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            if let Ok((mut s, _)) = l.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf).await;
+                let _ = s
+                    .write_all(b"HTTP/1.1 201 Created\r\ncontent-type: text/plain\r\ncontent-length: 2\r\n\r\nok")
+                    .await;
+            }
+        });
+        let client = proxy_client(PROXY_CONNECT_TIMEOUT, PROXY_TIMEOUT);
+        let resp = forward(client.get(format!("http://127.0.0.1:{port}/x"))).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], b"ok");
+        h.abort();
+    }
 }

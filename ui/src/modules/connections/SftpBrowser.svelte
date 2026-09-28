@@ -12,6 +12,8 @@
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import { TableWindow } from '../../lib/tableWindow.svelte';
+  import { pollWhileVisible, type Poller } from '../../lib/poll';
+  import { untrack } from 'svelte';
 
   interface Props {
     conn: Connection;
@@ -63,19 +65,28 @@
 
   // Restore in-flight transfers after reopening the browser. A failed poll is
   // surfaced once; authentication failures never create an automatic retry loop.
+  // Chained (never overlaps), paused while the window is hidden, and fast
+  // (1.5 s) only while a transfer is live — an idle browser checks every 15 s
+  // (was 1.5 s forever, hidden or not).
   $effect(() => {
     const id = conn.id;
     if (!canWrite) return;
-    let stopped = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    async function poll(): Promise<void> {
-      try {
-        await sftp.loadTransfers(id);
-        if (!stopped) timer = setTimeout(() => void poll(), 1500);
-      } catch (error) { if (!stopped) toasts.error('Could not refresh transfers', error instanceof Error ? error.message : String(error)); }
-    }
-    void poll();
-    return () => { stopped = true; if (timer) clearTimeout(timer); };
+    let poller: Poller | undefined;
+    const live = (): boolean => sftp.state(id).transfers.some((t) => t.status === 'running' || t.status === 'finalizing');
+    untrack(() => {
+      poller = pollWhileVisible(
+        async () => {
+          try {
+            await sftp.loadTransfers(id);
+          } catch (error) {
+            poller?.stop();
+            toasts.error('Could not refresh transfers', error instanceof Error ? error.message : String(error));
+          }
+        },
+        { get ms() { return live() ? 1500 : 15_000; }, floorMs: 1000 },
+      );
+    });
+    return () => poller?.stop();
   });
 
   // Reset the filter whenever we navigate to a different directory.
@@ -287,6 +298,10 @@
         <button class="crumb" onclick={() => sftp.navigate(conn.id, c.path)}>{c.label}</button>
       {/each}
     </div>
+
+    {#if view.truncated && !view.loading}
+      <p class="list-trunc" role="status">Showing the first 20,000 entries — this directory has more. The filter searches the loaded entries only.</p>
+    {/if}
 
     <!-- Listing -->
     <div class="list" bind:this={listEl} bind:clientHeight={tw.viewH} onscroll={tw.onscroll}>
@@ -553,6 +568,13 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     white-space: pre;
+  }
+  .list-trunc {
+    margin: 0;
+    padding: 4px 12px;
+    font-size: var(--fs-s);
+    color: var(--warning);
+    border-bottom: 1px solid var(--border);
   }
   .trunc {
     font-size: var(--fs-s);

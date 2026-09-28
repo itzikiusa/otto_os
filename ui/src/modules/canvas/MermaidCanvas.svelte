@@ -121,7 +121,7 @@
     // light theme's dark labels vanished on the dark board).
     const dark = ui.resolvedScheme === 'dark';
     if (text === lastRendered && dark === lastRenderedDark) return; // nothing changed
-    const out = await renderMermaid(`cv-${sceneId ?? 'x'}-${token}`, text, { dark });
+    const out = await renderMermaid(`cv-${sceneId ?? 'x'}-${token}`, text, { dark, isStale: () => token !== renderToken });
     if (token !== renderToken) return; // superseded
     if (out.error || !out.svg) {
       renderError = out.error || 'Could not render the diagram';

@@ -1,6 +1,6 @@
 // Auth / boot state: GET /meta → onboarding | login | ready.
 
-import { api, setToken, getToken, ApiError, UNAUTHORIZED_EVENT } from '../api/client';
+import { api, setToken, getToken, ApiError, UNAUTHORIZED_EVENT, setAltLoopbackBase } from '../api/client';
 import { lsGet, lsSet, lsRemove } from '../storage';
 import type { CapabilitiesResp, LoginResp, MeResp, MetaResp, User } from '../api/types';
 import type { Capability, Feature } from '../api/types';
@@ -66,6 +66,7 @@ class AuthStore {
   async refreshMeta(): Promise<boolean> {
     try {
       this.meta = await api.get<MetaResp>('/meta');
+      setAltLoopbackBase(this.meta.alt_loopback_base);
       return true;
     } catch {
       // non-fatal: keep the stale meta
@@ -112,6 +113,9 @@ class AuthStore {
     if (!retry) this.phase = 'loading';
     try {
       this.meta = await api.get<MetaResp>('/meta');
+      // Background/slow calls move to the daemon's second loopback host
+      // (a separate socket pool) when it advertises one.
+      setAltLoopbackBase(this.meta.alt_loopback_base);
     } catch {
       this.phase = 'offline';
       return;

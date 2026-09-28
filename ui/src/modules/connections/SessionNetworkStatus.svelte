@@ -27,7 +27,8 @@
       if (pending || document.hidden) return;
       pending = true;
       try {
-        const next = await api.get<SessionNetwork>(`/sessions/${id}/network`);
+        // Background lane: a status poll never takes an interactive socket.
+        const next = await api.bg.get<SessionNetwork>(`/sessions/${id}/network`);
         if (alive) { network = next; error = ''; }
       } catch (e) { if (alive) error = e instanceof Error ? e.message : String(e); }
       finally { pending = false; }

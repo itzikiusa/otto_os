@@ -49,6 +49,14 @@ pub struct MetaResp {
     /// a provider without a template hides it (never a silent drop).
     #[serde(default)]
     pub model_flags: std::collections::HashMap<String, bool>,
+    /// A second LOOPBACK base for the same daemon (`http://localhost:<port>`
+    /// — `ottod` holds both `127.0.0.1` and `[::1]` on the port), or `null`
+    /// when it could not bind `[::1]` (IPv6 off / port taken). Browsers pool
+    /// HTTP/1.1 sockets per host, so the UI sends background polls and
+    /// known-slow calls here and keeps `127.0.0.1` free for interactive ones.
+    /// Only ever a loopback address the daemon itself holds.
+    #[serde(default)]
+    pub alt_loopback_base: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -923,6 +931,10 @@ pub struct SftpListResp {
     /// request omitted `path`).
     pub path: String,
     pub entries: Vec<SftpEntry>,
+    /// `true` when the directory held more than the daemon's cap (20k
+    /// entries); `entries` is then the first 20k of the listing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 /// `POST /api/v1/connections/{id}/sftp/download` — pull a remote file to local.
@@ -1517,6 +1529,10 @@ pub struct DiffResp {
     pub total_added: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_deleted: Option<u64>,
+    /// `true` when git skipped rename detection (more files than the
+    /// `-l1000` limit): some renames are reported as a delete + an add.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renames_incomplete: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

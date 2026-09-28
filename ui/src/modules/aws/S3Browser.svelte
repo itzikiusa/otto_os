@@ -20,7 +20,7 @@
   import JsonTree from '../database/JsonTree.svelte';
   import { TableWindow } from '../../lib/tableWindow.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
-  import { fmtAgo, fmtBytes, fmtDate, splitBucketSegment, awsErrorText } from './util';
+  import { fmtAgo, fmtBytes, fmtDate, splitBucketSegment, awsErrorText, mergeS3Head } from './util';
   import type { AwsAccount, S3Object, S3PreviewResp } from '../../lib/api/types';
 
   interface Props {
@@ -71,6 +71,8 @@
   let prefixes = $state.raw<string[]>([]);
   let objects = $state.raw<S3Object[]>([]);
   let nextToken = $state<string | null>(null);
+  /** Pages in `objects`/`prefixes` (1 after a listing, +1 per "Load more"). */
+  let pagesLoaded = 0;
   let objLoading = $state(false);
   let objError = $state('');
   let objectRequest = 0;
@@ -100,7 +102,7 @@
     return trimmed.slice(trimmed.lastIndexOf('/') + 1) || key;
   }
 
-  async function loadObjects(more = false): Promise<void> {
+  async function loadObjects(more = false, keepScroll = false): Promise<void> {
     if (!bucket) return;
     objLoading = true;
     const request = ++objectRequest;
@@ -109,8 +111,37 @@
       if (request !== objectRequest) return;
       prefixes = more ? prefixes.concat(r.prefixes) : r.prefixes;
       objects = more ? objects.concat(r.objects) : r.objects;
-      if (!more) tw.reset(objWrap);
+      pagesLoaded = more ? pagesLoaded + 1 : 1;
+      if (!more && !keepScroll) tw.reset(objWrap);
       nextToken = r.is_truncated ? (r.next_token ?? null) : null;
+      objError = '';
+    } catch (e) {
+      if (request !== objectRequest) return;
+      objError = e instanceof Error ? e.message : String(e);
+    } finally {
+      if (request === objectRequest) objLoading = false;
+    }
+  }
+
+  /** Refresh / auto-refresh: re-read the first page and merge it over what is
+   *  loaded — "Load more" pages and the scroll position survive (was: back to
+   *  page 1 and the top on every 10 s auto-refresh tick). */
+  async function refreshObjects(): Promise<void> {
+    if (!bucket) return;
+    if (pagesLoaded <= 1) return loadObjects(false, true);
+    objLoading = true;
+    const request = ++objectRequest;
+    try {
+      const r = await awsApi.s3Objects(account.id, bucket, prefix);
+      if (request !== objectRequest) return;
+      const merged = mergeS3Head({ prefixes, objects }, r);
+      prefixes = merged.prefixes;
+      objects = merged.objects;
+      // Everything fits one page now: nothing left to page in.
+      if (!r.is_truncated) {
+        nextToken = null;
+        pagesLoaded = 1;
+      }
       objError = '';
     } catch (e) {
       if (request !== objectRequest) return;
@@ -353,7 +384,7 @@
     filterPlaceholder="Filter this folder…"
     loading={objLoading}
     bind:auto
-    onrefresh={() => loadObjects()}
+    onrefresh={() => refreshObjects()}
   >
     <nav class="crumbs" aria-label="Prefix">
       <button class="crumb" onclick={() => goTo('', '')} title="All buckets" aria-label="All buckets"><Icon name="archive" size={12} /></button>

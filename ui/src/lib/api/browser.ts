@@ -46,7 +46,8 @@ export function closeTab(id: string) {
 }
 
 export function getPage(ws: string, url: string) {
-  return api.get<BrowserPage>(`${base(ws)}/page?url=${enc(url)}`);
+  // `include_html=0`: the reader only renders `markdown` (html is up to 2 MB).
+  return api.get<BrowserPage>(`${base(ws)}/page?url=${enc(url)}&include_html=0`);
 }
 
 export function queryPage(ws: string, url: string, selector: string) {

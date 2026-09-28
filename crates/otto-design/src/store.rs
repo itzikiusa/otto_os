@@ -1792,6 +1792,19 @@ impl Store {
         .await;
     }
 
+    /// The body text last indexed for an artifact (`None`: not indexed, or no
+    /// FTS5). Lets a metadata-only change re-index without re-extracting.
+    pub async fn fts_body(&self, artifact_id: &str) -> Option<String> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT body FROM design_search_fts WHERE artifact_id = ? LIMIT 1",
+        )
+        .bind(artifact_id)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+    }
+
     pub async fn fts_remove(&self, artifact_id: &str) {
         let _ = sqlx::query("DELETE FROM design_search_fts WHERE artifact_id = ?")
             .bind(artifact_id)

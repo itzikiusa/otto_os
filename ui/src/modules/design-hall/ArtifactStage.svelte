@@ -145,7 +145,8 @@
     if (k !== 'mermaid' && k !== 'd2') return;
     const my = ++renderSeq;
     const t = setTimeout(async () => {
-      const r = k === 'mermaid' ? await renderMermaid(`dh-stage-${my}`, src) : await renderD2(`dh-${my}`, src);
+      const isStale = () => my !== renderSeq;
+      const r = k === 'mermaid' ? await renderMermaid(`dh-stage-${my}`, src, { isStale }) : await renderD2(`dh-${my}`, src, { isStale });
       if (my !== renderSeq) return;
       diagramSvg = r.svg ?? null;
       diagramError = r.svg ? null : (r.error ?? 'Diagram error');

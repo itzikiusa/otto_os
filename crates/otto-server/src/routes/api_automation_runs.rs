@@ -151,9 +151,13 @@ pub async fn start(
                     request: json!({"source":"automation_run","automation_run_id":run.id,"automation_id":run.automation_id,"request_id":request.id,"dataset_row":row_idx,"step_result_id":step_id}),
                     response: value,
                 }).await;
-                // Same runtime history retention as interactive runs.
-                let (max_rows, max_days) = super::api_client::history_retention(&ctx, &wid).await;
-                let _ = api.prune_history(&wid, max_rows, max_days).await;
+                // Same runtime history retention as interactive runs — applied
+                // every PRUNE_EVERY steps and once at the end instead of per
+                // step (a settings read + DELETE scan per request). Pruning is
+                // housekeeping; the per-step durability below is unchanged.
+                if (run.report.steps.len() + 1).is_multiple_of(PRUNE_EVERY) {
+                    prune_history(&ctx, &api, &wid).await;
+                }
                 run.report.steps.push(result);
                 run.result_rows.push(row_idx);
                 run.result_ids.push(step_id);
@@ -187,9 +191,23 @@ pub async fn start(
         if let Err(e) = reports.save(&run).await {
             tracing::error!(run_id=%run.id,error=%e,"could not finalize API automation run");
         }
+        if !run.report.steps.is_empty() {
+            prune_history(&ctx, &api, &wid).await;
+        }
         live().lock().unwrap().remove(&run.id);
     });
     Ok(Json(initial))
+}
+
+/// Steps between history-retention passes during a run (plus one at the end).
+/// The run record itself is still saved after EVERY step (each completed step
+/// is durable before the next request goes out) — at the 1000-execution cap
+/// that record is ~300 KB, so the per-step save stays cheap next to a request.
+const PRUNE_EVERY: usize = 50;
+
+async fn prune_history(ctx: &ServerCtx, api: &ApiClientRepo, wid: &Id) {
+    let (max_rows, max_days) = super::api_client::history_retention(ctx, wid).await;
+    let _ = api.prune_history(wid, max_rows, max_days).await;
 }
 
 #[derive(Deserialize)]

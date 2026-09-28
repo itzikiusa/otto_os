@@ -18,7 +18,7 @@ use otto_core::proof::{
     ProofArtifactStatus, ProofBadge, ProofPack, ProofStatus, WorkItemKind, STORE_CAP,
 };
 use otto_core::{redact, Error, Id, Result};
-use otto_git::local::{DiffTarget, LocalGit};
+use otto_git::local::{DiffOpts, DiffTarget, LocalGit};
 use serde_json::{json, Value};
 
 use crate::state::ServerCtx;
@@ -273,31 +273,32 @@ pub async fn assemble_diff(
     base: Option<&str>,
 ) -> Result<()> {
     let git = LocalGit::new(cwd);
-    let (text, resp) = match base {
-        Some(b) => {
-            let t = git.diff_text_against(b).await;
-            // Structured metadata must describe the work done since `base`
-            // (the `base..HEAD` range), NOT `git show <base>` (the base commit's
-            // own patch). The latter made files_changed/additions/risky_files —
-            // and therefore the derived risk_score — reflect the wrong commit.
-            let r = git
-                .diff(DiffTarget::Range(b.to_string(), "HEAD".to_string()), None)
-                .await;
-            (t, r)
-        }
-        None => {
-            let t = git.working_diff_text().await;
-            let r = git.diff(DiffTarget::Working, None).await;
-            (t, r)
-        }
+    // Counts come from ONE `--raw --numstat` summary (never the patch): this
+    // runs automatically at every session/run completion, often on a huge
+    // worktree, and the old full parsed diff only fed four numbers. The
+    // summary describes the work since `base` (the `base..HEAD` range), NOT
+    // `git show <base>` (the base commit's own patch) — the latter made
+    // files_changed/additions/risky_files, and so the risk_score, describe
+    // the wrong commit.
+    let target = match base {
+        Some(b) => DiffTarget::Range(b.to_string(), "HEAD".to_string()),
+        None => DiffTarget::Working,
     };
-    let (text, resp) = match (text, resp) {
-        (Ok(t), Ok(r)) => (t, r),
-        _ => return Ok(()), // not a git repo / diff failed — skip silently
+    let summary = DiffOpts {
+        summary: true,
+        ..DiffOpts::default()
+    };
+    let Ok(resp) = git.diff_with(&target, &summary).await else {
+        return Ok(()); // not a git repo / diff failed — skip silently
     };
     if resp.files.is_empty() {
         return Ok(());
     }
+    // The stored text is clipped to STORE_CAP anyway; read at most twice that
+    // (headroom for redaction shrinking it) and let git be killed there.
+    let Ok((text, _)) = git.diff_text_capped(base, 2 * STORE_CAP).await else {
+        return Ok(());
+    };
     let additions: u32 = resp.files.iter().filter_map(|f| f.added).sum();
     let deletions: u32 = resp.files.iter().filter_map(|f| f.deleted).sum();
     let risky_files: Vec<String> = resp
@@ -683,14 +684,17 @@ pub async fn run_pr_check(
         // The PR's changes are `base..HEAD`, NOT the base commit's own patch.
         // `DiffTarget::Commit(b)` is `git show <b>` (the wrong fileset) — the same
         // trap `assemble_diff` documents. Use the range so files_changed/LOC
-        // describe the actual PR.
-        let resp = match base {
-            Some(b) => {
-                git.diff(DiffTarget::Range(b.to_string(), "HEAD".to_string()), None)
-                    .await
-            }
-            None => git.diff(DiffTarget::Working, None).await,
+        // describe the actual PR. Only paths and counts are read, so the
+        // `--numstat` summary is enough — never the full parsed patch.
+        let target = match base {
+            Some(b) => DiffTarget::Range(b.to_string(), "HEAD".to_string()),
+            None => DiffTarget::Working,
         };
+        let summary = DiffOpts {
+            summary: true,
+            ..DiffOpts::default()
+        };
+        let resp = git.diff_with(&target, &summary).await;
         if let Ok(r) = resp {
             files_changed = r.files.iter().map(|f| f.path.clone()).collect();
             additions = r.files.iter().filter_map(|f| f.added).sum();

@@ -4,3 +4,10 @@
 declare module '*/components/Icon.svelte' {
   export type IconName = string;
 }
+// Once a unit file pulls in svelte's own types (runesHarness imports
+// `svelte/compiler`), its global `declare module '*.svelte'` ties with the
+// pattern above and wins, so `IconName` vanishes. Merge the name into that
+// wildcard too; it's type-only and `string`, like the shim above.
+declare module '*.svelte' {
+  export type IconName = string;
+}

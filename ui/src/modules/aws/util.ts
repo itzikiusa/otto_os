@@ -1,6 +1,6 @@
 // Small formatting helpers shared by the AWS console views.
 
-import type { AwsIdentity } from '../../lib/api/types';
+import type { AwsIdentity, S3ListObjectsResp, S3Object } from '../../lib/api/types';
 
 /** 1234567 → "1.2 MB" (binary-ish, 1 decimal above KB). */
 export function fmtBytes(n: number | null | undefined): string {
@@ -119,4 +119,26 @@ export function serviceTabKey(event: KeyboardEvent): void {
   const index = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (tabs.indexOf(current) + step + tabs.length) % tabs.length;
   tabs[index].click();
   tabs[index].focus();
+}
+
+/** Merge a freshly re-read FIRST page of an S3 listing over what is loaded
+ *  (first page plus any "Load more" pages), so an auto-refresh updates the
+ *  head without dropping the pages the user paged in (I9). S3 lists keys and
+ *  common prefixes in one lexicographic order, so the fresh page is
+ *  authoritative up to its last key; loaded entries past that are kept. A
+ *  complete fresh page (not truncated) replaces everything. */
+export function mergeS3Head(
+  loaded: { prefixes: string[]; objects: S3Object[] },
+  fresh: S3ListObjectsResp,
+): { prefixes: string[]; objects: S3Object[] } {
+  if (!fresh.is_truncated) return { prefixes: fresh.prefixes, objects: fresh.objects };
+  let edge = '';
+  for (const p of fresh.prefixes) if (p > edge) edge = p;
+  for (const o of fresh.objects) if (o.key > edge) edge = o.key;
+  const seenP = new Set(fresh.prefixes);
+  const seenO = new Set(fresh.objects.map((o) => o.key));
+  return {
+    prefixes: fresh.prefixes.concat(loaded.prefixes.filter((p) => p > edge && !seenP.has(p))),
+    objects: fresh.objects.concat(loaded.objects.filter((o) => o.key > edge && !seenO.has(o.key))),
+  };
 }

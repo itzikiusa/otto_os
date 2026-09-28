@@ -8,7 +8,8 @@
   // list below. The selected run lives on the vault store; the LIST is
   // refetched from the server on every mount — that is what makes runs
   // reappear after a tab/module switch or a full app restart. This view owns
-  // the 1.5s poll timer and stops it once nothing is active.
+  // an event-fed refresh (1.5 s poll while the event socket is down) and stops
+  // it once nothing is active.
   import { onMount } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
@@ -35,7 +36,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import { DOCS_TEMPLATES } from './docsTemplates';
   import { vault } from './vault.svelte';
-  import { pollWhileVisible, type Poller } from '../../lib/poll';
+  import type { Poller } from '../../lib/poll';
+  import { liveQuery } from '../../lib/live';
 
   interface AgentRow {
     provider: string;
@@ -188,7 +190,19 @@
 
   function startPoll(): void {
     stopPoll();
-    poller = pollWhileVisible(() => poll(), { ms: 1500, immediate: false });
+    // A docs run advances as its agent sessions do: re-read on their status
+    // events (coalesced), with a 10 s safety net for run-level transitions no
+    // event names; the 1.5 s cadence only while the event socket is down.
+    poller = liveQuery({
+      run: () => poll(),
+      on: ['session_status', 'session_created', 'session_removed'],
+      fallbackMs: 1500,
+      safetyMs: 10_000,
+      debounceMs: 1000,
+      maxWaitMs: 5000,
+      minIntervalMs: 3000,
+      immediate: false,
+    });
   }
 
   async function poll(): Promise<void> {

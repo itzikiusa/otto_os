@@ -333,6 +333,18 @@ test('duplicate connect / stray open / frame-while-not-live are no-ops', () => {
   assert.equal(reduce(c, { type: 'input', at: 5 }), c);
 });
 
+test('steady-state frames return the SAME state (no per-frame reactive churn)', () => {
+  let s = reduce(reduce(INITIAL, { type: 'connect' }), { type: 'open' });
+  s = reduce(s, { type: 'frame', at: 1000 });
+  assert.equal(s.hasFrame, true);
+  assert.equal(reduce(s, { type: 'frame', at: 1033 }), s, 'a plain frame is a no-op');
+  const waiting = reduce(s, { type: 'input', at: 1100 });
+  const answered = reduce(waiting, { type: 'frame', at: 1150 });
+  assert.notEqual(answered, waiting, 'a frame answering an input clears the sample');
+  assert.equal(answered.awaitingSince, 0);
+  assert.equal(reduce(answered, { type: 'frame', at: 1180 }), answered);
+});
+
 test('isStale: a quiet live page is never stale; any non-live socket is', () => {
   let s = reduce(reduce(INITIAL, { type: 'connect' }), { type: 'open' });
   assert.equal(isStale(s), false);

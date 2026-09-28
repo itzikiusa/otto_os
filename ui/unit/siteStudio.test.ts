@@ -288,3 +288,45 @@ test('the co-design selection payload names the node and stays under the assist 
   assert.equal(assist.selectionLabel(d, { pageId: 'home', sectionId: 'hero', blockId: null }), 'Section: Hero');
   assert.equal(assist.assistSelection(null, { pageId: null, sectionId: null, blockId: null }), null);
 });
+
+test('SD-17: ops path-copy — untouched pages, sections and blocks keep their identity', () => {
+  const d0 = templates.starterSite('landing', 'Rewards+');
+  const { doc: base } = ops.addPage(d0, 'Tiers');
+  const frozen = JSON.stringify(base);
+  const [home, tiers] = base.pages;
+  const target = home.sections[1];
+  const others = home.sections.filter((s: any) => s.id !== target.id);
+
+  // A keystroke in the Inspector: one prop on one section.
+  const d1 = ops.setSectionProp(base, target.id, 'headline', 'New headline');
+  assert.equal(JSON.stringify(base), frozen, 'input untouched');
+  assert.notEqual(d1, base);
+  assert.notEqual(d1.pages[0], home, 'the edited page is a new object');
+  assert.equal(d1.pages[1], tiers, 'an untouched page is shared');
+  const edited = ops.findSection(d1, target.id)!.section;
+  assert.notEqual(edited, target);
+  assert.equal(edited.props.headline, 'New headline');
+  assert.equal(edited.blocks, target.blocks, 'the edited section still shares its blocks');
+  for (const s of others) assert.equal(ops.findSection(d1, s.id)!.section, s, `section ${s.id} is shared`);
+
+  // A block edit copies only that block's section.
+  const withItem = ops.addItem(d1, 'features');
+  const blockId = withItem.id!;
+  const d2 = ops.setBlockProp(withItem.doc, blockId, 'title', 'X');
+  assert.equal(ops.findSection(d2, target.id)!.section, ops.findSection(withItem.doc, target.id)!.section);
+  assert.equal(ops.findBlock(d2, blockId)!.block.props.title, 'X');
+
+  // Structural edits share too.
+  const moved = ops.moveSection(d1, target.id, 1);
+  assert.equal(moved.pages[1], tiers);
+  for (const s of home.sections.filter((s: any) => s.id !== target.id)) {
+    assert.equal(ops.findSection(moved, s.id)!.section, ops.findSection(d1, s.id)!.section);
+  }
+  const removed = ops.removeSection(d1, target.id);
+  assert.equal(removed.pages[1], tiers);
+  assert.equal(ops.findSection(removed, target.id), null);
+  const dropped = ops.removePage(d1, tiers.id);
+  assert.equal(dropped.pages.length, 1);
+  assert.equal(dropped.pages[0], d1.pages[0]);
+  assert.deepEqual(validate.validateSite(d2), []);
+});

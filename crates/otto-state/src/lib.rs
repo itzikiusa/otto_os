@@ -106,7 +106,7 @@ pub use db_explorer::{
 pub use email_senders::{EmailSender, EmailSendersRepo};
 pub use git::{GitStore, NewGitAccount, NewRepo};
 pub use goal_loops::{GoalLoopsRepo, NewGoalLoop};
-pub use grants::{capability_for_role, GrantsRepo};
+pub use grants::{capability_for_role, GrantCache, GrantsRepo, GRANT_CACHE_TTL};
 pub use name_themes::{CustomTheme, NameThemesRepo};
 pub use proof::{ProofBlob, ProofRepo, ProofSnapshotRow};
 pub use provider_models::{ProviderModel, ProviderModelsRepo};
@@ -125,7 +125,7 @@ pub use k8s_clusters::{
 pub use k8s_monitor::{K8sMonitorConfigRow, K8sMonitorRepo, K8sMonitorStatusRow};
 pub use mcp_audit::{McpAuditRepo, McpToolCallRow, NewMcpToolCall};
 pub use mcp_control::{
-    CallLogQuery, DiscoveredTool, McpAllowlistEntry, McpAllowlistRepo, McpApproval,
+    set_approval_change_hook, ApprovalChange, CallLogQuery, DiscoveredTool, McpAllowlistEntry, McpAllowlistRepo, McpApproval,
     McpApprovalRepo, McpCallLogRepo, McpCallLogRow, McpPolicy, McpPolicyRepo, McpRegistryRepo,
     McpServerDetail, McpTool, McpToolStats, McpToolsRepo, NewAllowlistEntry, NewApproval,
     NewCallLog, NewPolicy, NewServerRow,

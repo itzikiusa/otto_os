@@ -25,6 +25,7 @@ use otto_state::{
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::cancel_signal::CancelSignal;
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 use crate::swarm_run::{self, SwarmTurnResult};
@@ -34,14 +35,14 @@ use crate::swarm_run::{self, SwarmTurnResult};
 /// A running Coordinator's control handles.
 #[derive(Clone)]
 pub struct CoordinatorHandle {
-    pub cancel: Arc<AtomicBool>,
+    pub cancel: CancelSignal,
     pub paused: Arc<AtomicBool>,
 }
 
 impl CoordinatorHandle {
     pub fn new() -> Self {
         Self {
-            cancel: Arc::new(AtomicBool::new(false)),
+            cancel: CancelSignal::new(),
             paused: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -61,7 +62,6 @@ pub fn new_registry() -> CoordinatorRegistry {
 }
 
 const TICK: Duration = Duration::from_secs(5);
-const SLICE: Duration = Duration::from_millis(500);
 /// "Stuck" window for a planner / recruiter turn — NOT a wall-clock cap. The
 /// old 120–150s caps killed perfectly healthy turns: the claude cold-start (MCP
 /// handshake + hook init) alone could eat them before reasoning began. Planning
@@ -81,7 +81,7 @@ pub fn start_coordinator(ctx: ServerCtx, swarm_id: Id) {
     {
         let mut reg = ctx.swarm_coords.lock().unwrap();
         if let Some(old) = reg.insert(swarm_id.clone(), handle.clone()) {
-            old.cancel.store(true, Ordering::Relaxed);
+            old.cancel.cancel();
         }
     }
     // Re-spawn any verification controllers stranded in `verifying` by a restart
@@ -99,7 +99,7 @@ pub fn start_coordinator(ctx: ServerCtx, swarm_id: Id) {
 /// Stop the Coordinator for a swarm (abort/shutdown).
 pub fn stop_coordinator(ctx: &ServerCtx, swarm_id: &str) {
     if let Some(h) = ctx.swarm_coords.lock().unwrap().remove(swarm_id) {
-        h.cancel.store(true, Ordering::Relaxed);
+        h.cancel.cancel();
     }
 }
 
@@ -126,14 +126,14 @@ fn tick_lock(swarm_id: &str) -> Arc<tokio::sync::Mutex<()>> {
 
 async fn coordinator_loop(ctx: ServerCtx, swarm_id: Id, handle: CoordinatorHandle) {
     loop {
-        if handle.cancel.load(Ordering::Relaxed) {
+        if handle.cancel.is_cancelled() {
             return;
         }
         if !handle.paused.load(Ordering::Relaxed) {
             let lock = tick_lock(&swarm_id);
             let _ticking = lock.lock().await;
             // Replaced (or stopped) while waiting for the previous loop's tick.
-            if handle.cancel.load(Ordering::Relaxed) {
+            if handle.cancel.is_cancelled() {
                 return;
             }
             if let Err(e) = tick(&ctx, &swarm_id).await {
@@ -149,7 +149,7 @@ async fn coordinator_loop(ctx: ServerCtx, swarm_id: Id, handle: CoordinatorHandl
                     let mut reg = ctx.swarm_coords.lock().unwrap();
                     if reg
                         .get(&swarm_id)
-                        .is_some_and(|h| Arc::ptr_eq(&h.cancel, &handle.cancel))
+                        .is_some_and(|h| h.cancel.same(&handle.cancel))
                     {
                         reg.remove(&swarm_id);
                     }
@@ -158,13 +158,9 @@ async fn coordinator_loop(ctx: ServerCtx, swarm_id: Id, handle: CoordinatorHandl
                 tracing::warn!(swarm = %swarm_id, "swarm coordinator tick: {e}");
             }
         }
-        let mut waited = Duration::ZERO;
-        while waited < TICK {
-            if handle.cancel.load(Ordering::Relaxed) {
-                return;
-            }
-            tokio::time::sleep(SLICE).await;
-            waited += SLICE;
+        // One timer per tick; stop/restart wakes it (SG-12: no 500 ms slices).
+        if handle.cancel.sleep(TICK).await {
+            return;
         }
     }
 }

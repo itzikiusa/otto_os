@@ -12,6 +12,7 @@
   // re-sending a fresh OTP to the locked original recipient.
   import { onDestroy } from 'svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
+  import { PRIMARY_SCROLLBACK } from '../../lib/components/termFlow';
   import Icon from '../../lib/components/Icon.svelte';
   import { getSharedSession, getShareWhoami, verifyShareOtp, extendShare } from '../../lib/api/share';
   import { getShareToken } from '../../lib/router.svelte';
@@ -386,6 +387,7 @@
           preferDom
           shareToken={token}
           onstatus={onTermStatus}
+          scrollback={PRIMARY_SCROLLBACK}
         />
       {:else}
         <div class="connecting-overlay">

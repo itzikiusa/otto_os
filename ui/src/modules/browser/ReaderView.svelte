@@ -47,6 +47,12 @@
   const html = $derived(
     page ? renderNote(page.markdown, { resolve: () => null, assetUrl: () => null }) : '',
   );
+  // A long article (≥ 300 KB of markdown) skips layout/paint of its
+  // off-screen blocks (`content-visibility: auto`, perf SB-16): the DOM stays
+  // whole — find-in-page, marks and selectors are unaffected — but only what
+  // is near the viewport is laid out.
+  const LONG_ARTICLE = 300 * 1024;
+  const longArticle = $derived((page?.markdown.length ?? 0) >= LONG_ARTICLE);
 
   let markMode = $state(false);
   let articleEl: HTMLElement | null = $state(null);
@@ -160,7 +166,11 @@
       noteText = '';
       markMode = false;
       await tick();
-      markButton?.focus();
+      // Return focus to the trigger only if it was left on the (now removed)
+      // composer: an attached agent's AskBar takes it on the new mark
+      // (`browser.markTick`), and that nudge must win.
+      const at = document.activeElement;
+      if (!at || at === document.body) markButton?.focus();
     } catch (e) {
       toasts.error('Failed to save mark', e instanceof Error ? e.message : undefined);
     } finally {
@@ -238,6 +248,7 @@
     <article
       class="page md-body"
       class:mark-armed={markMode}
+      class:long={longArticle}
       bind:this={articleEl}
       onclick={onArticleClick}
       onkeydown={onArticleKey}
@@ -322,6 +333,10 @@
   .page.mark-armed :global([role="button"]:focus-visible) {
     outline: 1px dashed var(--accent);
     outline-offset: 2px;
+  }
+  .page.long > :global(*) {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 3em;
   }
   .page :global(.marked) {
     background: color-mix(in srgb, var(--warning) 30%, transparent);

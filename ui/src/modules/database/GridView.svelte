@@ -13,14 +13,16 @@
   // row-number column reserves the selection-checkbox slot whether or not the
   // result turns out editable, so the grid never shifts sideways when the
   // probe lands (the "table jumps when I open it" bug).
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
+  import type { Attachment } from 'svelte/attachments';
   import Icon from '../../lib/components/Icon.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { bsonScalar } from './bson';
   import type { QueryResult } from '../../lib/api/types';
-  import { SET_EMPTY, SET_NULL, type EditFlow } from './EditFlow.svelte';
-  import { cellDisplay, cellStr, clip, compactJson, copyText, isComplex, prettyJson } from './results-format';
+  import type { EditFlow } from './EditFlow.svelte';
+  import { cellStr, copyText, isComplex } from './results-format';
   import { columnKind, moveColumn, rowNumberWidthCh, type ColumnKind } from './grid-format';
+  import { buildCell, widthStyle } from './grid-cells';
 
   interface Props {
     result: QueryResult;
@@ -169,23 +171,6 @@
     if (scrollEl) scrollTop = scrollEl.scrollTop;
   }
 
-  // Highlight the matched substring inside a plain cell value. Returns segments.
-  function highlightParts(text: string): { t: string; hit: boolean }[] {
-    if (!filtering) return [{ t: text, hit: false }];
-    const lc = text.toLowerCase();
-    const out: { t: string; hit: boolean }[] = [];
-    let i = 0;
-    let found = lc.indexOf(searchLc);
-    while (found !== -1) {
-      if (found > i) out.push({ t: text.slice(i, found), hit: false });
-      out.push({ t: text.slice(found, found + searchLc.length), hit: true });
-      i = found + searchLc.length;
-      found = lc.indexOf(searchLc, i);
-    }
-    if (i < text.length) out.push({ t: text.slice(i), hit: false });
-    return out.length ? out : [{ t: text, hit: false }];
-  }
-
   // ── Column widths ────────────────────────────────────────────────────────────
   // Auto-size each column from header (name OR type — they sit on two lines) +
   // cell content (sampling up to 200 rows), clamped to [MIN, MAX]. NULLs
@@ -286,6 +271,69 @@
   // a complex / read-only cell), ⌘/Ctrl+C copies the cell, and ContextMenu /
   // Shift+F10 opens the row menu anchored to the cell.
   let focusCell = $state<{ r: number; c: number } | null>(null);
+
+  // ── Delegated cell events ───────────────────────────────────────────────
+  // One click / dblclick / contextmenu listener on <tbody> instead of three
+  // closures (plus an Icon component) per rendered cell: a scroll step that
+  // swaps in 40 rows × 30 columns no longer allocates ~3,600 handlers. Each
+  // cell carries data-r (its liveRows index), data-c (original column index),
+  // data-p (display position) and data-k (kind: d = parked draft, u = nested
+  // change under it, n = NULL, j = JSON, p = plain). The virtual row position
+  // the keyboard cursor uses is resolved from the window on click, so a
+  // scroll step never rewrites the rows that stay mounted.
+  type CellHit = { idx: number; ci: number; pos: number; vpos: number; kind: string; expand: boolean };
+  function cellHit(e: Event): CellHit | null {
+    const target = e.target instanceof Element ? e.target : null;
+    const td = target?.closest<HTMLElement>('td[data-c]');
+    if (!td) return null;
+    return {
+      idx: Number(td.dataset.r),
+      ci: Number(td.dataset.c),
+      pos: Number(td.dataset.p),
+      vpos: rowPos(Number(td.dataset.r)),
+      kind: td.dataset.k ?? 'p',
+      expand: !!target?.closest('.cell-expand'),
+    };
+  }
+  /** viewRows position of the mounted row showing liveRows[idx]. */
+  function rowPos(idx: number): number {
+    const w = windowRows.findIndex((e) => e.idx === idx);
+    return w < 0 ? Number.NaN : startIdx + w;
+  }
+  function cellValue(h: CellHit): unknown {
+    return liveRows[h.idx]?.[h.ci];
+  }
+  function onBodyClick(e: MouseEvent): void {
+    const h = cellHit(e);
+    if (!h) return;
+    if (h.expand) {
+      flow.openCell(cellValue(h), h.idx, h.ci);
+      return;
+    }
+    focusCell = { r: h.vpos, c: h.pos };
+    if (h.kind === 'j') flow.openCell(cellValue(h), h.idx, h.ci);
+  }
+  function onBodyDblClick(e: MouseEvent): void {
+    const h = cellHit(e);
+    if (!h || h.expand) return;
+    if (h.kind === 'u') {
+      flow.openCell(cellValue(h), h.idx, h.ci);
+    } else if (h.kind === 'j') {
+      flow.openCell(cellValue(h), h.idx, h.ci);
+      flow.startViewerEdit();
+    } else {
+      flow.beginEdit(h.idx, h.ci);
+    }
+  }
+  function onBodyContextMenu(e: MouseEvent): void {
+    const h = cellHit(e);
+    if (h) oncellmenu(e, h.ci, cellValue(h), h.idx);
+  }
+  /** Editability per ORIGINAL column index, derived once per result/flow
+   *  change instead of re-asked by every rendered cell. */
+  const editableCols = $derived(result.columns.map((_c, ci) => flow.isEditableCell(ci)));
+  /** Skip the per-cell pending lookups entirely while nothing is parked. */
+  const anyPending = $derived(flow.pending.size > 0);
   /** Sticky-header height the top of a row must clear to be visible. */
   const HEAD_H = $derived(filterRow ? 70 : 40);
 
@@ -298,6 +346,103 @@
   $effect(() => {
     const r = focusCell?.r;
     onfocusrow?.(r === undefined ? null : (viewRows[r]?.idx ?? null));
+  });
+
+  // ── Body cells (imperative, see grid-cells.ts) ─────────────────────────────
+  // The cursor as a liveRows index, so a mounted row's cells never depend on
+  // their window position (`startIdx`) — a scroll step leaves them alone.
+  const focusIdx = $derived(focusCell ? (viewRows[focusCell.r]?.idx ?? null) : null);
+
+  /** Fill a body row's data cells. Runs in the row's attachment effect: it
+   *  re-runs (rebuilding that row) when anything the cells' markup reads
+   *  changes — columns / order / kinds / editability, the open editor's
+   *  position, parked drafts, the search needle, Expand-JSON. Widths and the
+   *  keyboard ring are read untracked here and patched by `rowWidths` /
+   *  the focus effect below, so a column drag or an arrow key rebuilds
+   *  nothing. */
+  function rowCells(row: unknown[], idx: number): Attachment<HTMLTableRowElement> {
+    return (tr) => {
+      const order = cols;
+      const columns = result.columns;
+      const kindsNow = kinds;
+      const editableNow = editableCols;
+      const pendingOn = anyPending;
+      const ed = flow.editing;
+      const editCol = ed && ed.rowIdx === idx ? ed.colIdx : -1;
+      const needle = filtering ? searchLc : null;
+      const expand = expandJson;
+      const pv = order.map((ci) => (pendingOn ? flow.pendingValue(idx, ci) : undefined));
+      const under = order.map((ci, p) =>
+        pendingOn && pv[p] === undefined ? flow.hasPendingUnder(idx, columns[ci].name) : false,
+      );
+      const cells = untrack(() => {
+        const focusPos = focusIdx === idx ? (focusCell?.c ?? -1) : -1;
+        const frag = document.createDocumentFragment();
+        const out: HTMLTableCellElement[] = [];
+        order.forEach((ci, pos) => {
+          const td =
+            ci === editCol
+              ? editorCell(ci)
+              : buildCell(row[ci], idx, ci, pos, {
+                  kind: kindsNow[ci],
+                  editable: editableNow[ci],
+                  widthCh: widthFor(ci),
+                  pv: pv[pos],
+                  pendingUnder: under[pos],
+                  needle,
+                  expandJson: expand,
+                  focused: pos === focusPos,
+                });
+          out.push(td);
+          frag.append(td);
+        });
+        tr.append(frag);
+        return out;
+      });
+      return () => {
+        for (const td of cells) td.remove();
+      };
+    };
+  }
+
+  /** The open inline editor (the old `bind:value` + `use:focusEditor` input). */
+  function editorCell(ci: number): HTMLTableCellElement {
+    const td = document.createElement('td');
+    td.className = 'cell editing';
+    td.setAttribute('style', widthStyle(widthFor(ci)));
+    const input = document.createElement('input');
+    input.className = 'cell-input mono';
+    input.value = flow.editing?.value ?? '';
+    input.addEventListener('input', () => {
+      if (flow.editing) flow.editing.value = input.value;
+    });
+    input.addEventListener('keydown', (e) => flow.onEditKeydown(e));
+    input.addEventListener('blur', () => flow.commitEdit());
+    td.append(input);
+    focusEditor(input);
+    return td;
+  }
+
+  /** Keep a row's cell widths in step with auto widths / drag-resizes. */
+  const rowWidths: Attachment<HTMLTableRowElement> = (tr) => {
+    const styles = cols.map((ci) => widthStyle(widthFor(ci)));
+    const tds = tr.cells;
+    // cells[0] is the row-number column; data cells follow in display order.
+    for (let p = 0; p < styles.length && p + 1 < tds.length; p++) {
+      const td = tds[p + 1];
+      if (td.getAttribute('style') !== styles[p]) td.setAttribute('style', styles[p]);
+    }
+  };
+
+  // Move the keyboard ring. Rows built later pick it up in `rowCells`.
+  $effect(() => {
+    const r = focusIdx;
+    const c = focusCell?.c;
+    const el = scrollEl;
+    if (!el) return;
+    for (const td of el.querySelectorAll('tbody td.kbd-focus')) td.classList.remove('kbd-focus');
+    if (r !== null && c !== undefined)
+      el.querySelector(`tbody td[data-r="${r}"][data-p="${c}"]`)?.classList.add('kbd-focus');
   });
 
   function ensureRowVisible(r: number): void {
@@ -497,13 +642,23 @@
         </tr>
       {/if}
     </thead>
-    <tbody>
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_click_events_have_key_events -->
+    <tbody onclick={onBodyClick} ondblclick={onBodyDblClick} oncontextmenu={onBodyContextMenu}>
       {#if padTop > 0}
         <tr class="spacer" aria-hidden="true"><td colspan={result.columns.length + 1} style="height:{padTop}px"></td></tr>
       {/if}
-      {#each windowRows as { row, idx }, wi (idx)}
-        {@const vpos = startIdx + wi}
-        <tr class:odd={idx % 2 === 1} class:selected={flow.selected.has(idx)} class:cursor={focusCell?.r === vpos}>
+      {#each windowRows as { row, idx } (idx)}
+        <!-- Data cells are appended by `rowCells` (plain DOM, see grid-cells.ts);
+             clicks / double-clicks / context menus on them are delegated to
+             <tbody> (data-r row, data-c column, data-p display position,
+             data-k cell kind). -->
+        <tr
+          class:odd={idx % 2 === 1}
+          class:selected={flow.selected.has(idx)}
+          class:cursor={focusIdx === idx}
+          {@attach rowCells(row, idx)}
+          {@attach rowWidths}
+        >
           <td class="rownum">
             <span class="sel-slot">
               {#if flow.editable}
@@ -530,92 +685,6 @@
               </button>
             {/if}
           </td>
-          {#each cols as ci, pos (ci)}
-            {@const _c = result.columns[ci]}
-            {@const v = row[ci]}
-            {@const w = widthFor(ci)}
-            {@const kind = kinds[ci]}
-            {#if flow.editing && flow.editing.rowIdx === idx && flow.editing.colIdx === ci}
-              <td class="cell editing" style="width:{w}ch; max-width:{w}ch;">
-                <!-- svelte-ignore a11y_autofocus -->
-                <input
-                  class="cell-input mono"
-                  bind:value={flow.editing.value}
-                  use:focusEditor
-                  onkeydown={(e) => flow.onEditKeydown(e)}
-                  onblur={() => flow.commitEdit()}
-                />
-              </td>
-            {:else if flow.pendingValue(idx, ci) !== undefined}
-              {@const pv = flow.pendingValue(idx, ci) ?? ''}
-              <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-              <td
-                class="cell dirty"
-                class:num={kind === 'num'}
-                class:kbd-focus={focusCell?.r === vpos && focusCell?.c === pos}
-                title="Pending change — Review & apply (bar below) writes it; double-click to keep editing"
-                style="width:{w}ch; max-width:{w}ch;"
-                onclick={() => (focusCell = { r: vpos, c: pos })}
-                ondblclick={() => flow.beginEdit(idx, ci)}
-                oncontextmenu={(e) => oncellmenu(e, ci, v, idx)}
-              >{#if pv === '' || pv === SET_NULL}<span class="null-glyph">NULL</span>{:else if pv === SET_EMPTY}<span class="null-glyph">''</span>{:else}{pv}{/if}</td>
-            {:else if flow.hasPendingUnder(idx, _c.name)}
-              <!-- A path-level change (Vertical view: $set/$unset/$rename inside
-                   this document field) — the cell keeps showing the stored value
-                   but wears the dirty marker so it isn't edited over blindly. -->
-              <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-              <td
-                class="cell dirty"
-                class:kbd-focus={focusCell?.r === vpos && focusCell?.c === pos}
-                title="Nested change pending — Review & apply (bar below) writes it; see the Vertical view"
-                style="width:{w}ch; max-width:{w}ch;"
-                onclick={() => (focusCell = { r: vpos, c: pos })}
-                ondblclick={() => flow.openCell(v, idx, ci)}
-                oncontextmenu={(e) => oncellmenu(e, ci, v, idx)}
-              >{v === null || v === undefined ? '' : clip(cellStr(v))}</td>
-            {:else if v === null || v === undefined}
-              <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-              <td
-                class="cell null"
-                class:num={kind === 'num'}
-                class:editable={flow.isEditableCell(ci)}
-                class:kbd-focus={focusCell?.r === vpos && focusCell?.c === pos}
-                title="NULL"
-                style="width:{w}ch; max-width:{w}ch;"
-                onclick={() => (focusCell = { r: vpos, c: pos })}
-                ondblclick={() => flow.beginEdit(idx, ci)}
-                oncontextmenu={(e) => oncellmenu(e, ci, v, idx)}
-              ><span class="null-glyph">NULL</span></td>
-            {:else if isComplex(v)}
-              <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-              <td
-                class="cell json"
-                class:wrap={expandJson}
-                class:kbd-focus={focusCell?.r === vpos && focusCell?.c === pos}
-                title="Click to expand"
-                style="width:{w}ch; max-width:{w}ch;"
-                onclick={() => {
-                  focusCell = { r: vpos, c: pos };
-                  flow.openCell(v, idx, ci);
-                }}
-                ondblclick={() => { flow.openCell(v, idx, ci); flow.startViewerEdit(); }}
-                oncontextmenu={(e) => oncellmenu(e, ci, v, idx)}
-              >{clip(expandJson ? prettyJson(v) : compactJson(v))}<button class="cell-expand" title="Expand value" aria-label="Expand value" onclick={(e) => { e.stopPropagation(); flow.openCell(v, idx, ci); }}><Icon name="maximize" size={9} /></button></td>
-            {:else}
-              <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-              <td
-                class="cell"
-                class:num={kind === 'num'}
-                class:bool={kind === 'bool'}
-                class:editable={flow.isEditableCell(ci)}
-                class:kbd-focus={focusCell?.r === vpos && focusCell?.c === pos}
-                style="width:{w}ch; max-width:{w}ch;"
-                onclick={() => (focusCell = { r: vpos, c: pos })}
-                ondblclick={() => flow.beginEdit(idx, ci)}
-                oncontextmenu={(e) => oncellmenu(e, ci, v, idx)}
-              >{#if filtering}{#each highlightParts(cellDisplay(v)) as part}{#if part.hit}<mark>{part.t}</mark>{:else}{part.t}{/if}{/each}{:else}{cellDisplay(v)}{/if}<button class="cell-expand" title="Expand value" aria-label="Expand value" onclick={(e) => { e.stopPropagation(); flow.openCell(v, idx, ci); }}><Icon name="maximize" size={9} /></button></td>
-            {/if}
-          {/each}
         </tr>
       {/each}
       {#if padBottom > 0}
@@ -640,9 +709,16 @@
     border-radius: var(--radius-s);
     background: var(--surface);
     position: relative;
+    /* A relayout boundary: its box comes from the flex chain, never from the
+       table, so a scroll step's row swap re-lays the table only — not every
+       flex ancestor (and the editor beside it) up to the page root. That walk
+       was ~5 ms of each 300 px step in WebKit. */
+    contain: strict;
   }
   .grid-scroll.mini {
     scrollbar-gutter: auto;
+    /* Mini grids size to their rows. */
+    contain: none;
   }
   .grid-scroll:focus {
     outline: none;
@@ -652,7 +728,7 @@
     outline-offset: -1px;
   }
   /* Roving keyboard cell cursor (see onGridKeydown). */
-  .grid tbody td.kbd-focus {
+  .grid tbody :global(td.kbd-focus) {
     outline: 1.5px solid var(--accent);
     outline-offset: -1.5px;
   }
@@ -840,7 +916,7 @@
     outline: none;
     border-color: var(--accent);
   }
-  .grid td {
+  .grid :global(td) {
     padding: 4px 10px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
     border-inline-end: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
@@ -852,35 +928,35 @@
     color: var(--text);
   }
   /* Fixed row height keeps the virtualization math exact (ROW_H in script). */
-  .grid tbody td {
+  .grid tbody :global(td) {
     box-sizing: border-box;
     height: 26px;
   }
   /* Expand-JSON mode: taller uniform rows (matches ROW_H via --row-h) so the
      virtualization math stays exact; complex cells pretty-print + wrap. */
-  .grid.expanded tbody tr:not(.spacer) td {
+  .grid.expanded tbody tr:not(.spacer) :global(td) {
     height: var(--row-h);
     vertical-align: top;
   }
-  .grid.expanded .cell.json.wrap {
+  .grid.expanded :global(.cell.json.wrap) {
     white-space: pre-wrap;
     overflow: auto;
     line-height: 1.4;
   }
   /* Numbers: right-aligned, tabular figures so digits line up. */
-  .grid td.num {
+  .grid :global(td.num) {
     text-align: end;
     font-variant-numeric: tabular-nums;
   }
   /* Stripe by data-row index (not :nth-child) so the pattern stays stable as
      the virtualized window scrolls. */
-  .grid tbody tr.odd td {
+  .grid tbody tr.odd :global(td) {
     background: color-mix(in srgb, var(--text) 2.5%, var(--surface));
   }
-  .grid tbody tr:not(.spacer):hover td {
+  .grid tbody tr:not(.spacer):hover :global(td) {
     background: var(--hover);
   }
-  .grid tbody tr.cursor td {
+  .grid tbody tr.cursor :global(td) {
     background: color-mix(in srgb, var(--accent) 7%, var(--surface));
   }
   /* Spacer rows reserve scroll height for the off-screen (un-rendered) rows. */
@@ -959,34 +1035,44 @@
     cursor: pointer;
     accent-color: var(--accent);
   }
-  .grid tbody tr.selected td {
+  .grid tbody tr.selected :global(td) {
     background: var(--accent-soft);
   }
-  .grid tbody tr.selected:not(.spacer):hover td {
+  .grid tbody tr.selected:not(.spacer):hover :global(td) {
     background: color-mix(in srgb, var(--accent) 22%, var(--surface));
   }
   /* NULL: a dim italic word, never an empty cell that reads as a bug. */
-  .null-glyph {
+  .grid :global(.null-glyph) {
     color: var(--text-dim);
     font-style: italic;
     font-size: var(--fs-xs);
     letter-spacing: 0.02em;
   }
-  .cell.bool {
+  .grid :global(.cell.bool) {
     color: var(--text);
   }
-  .cell.json {
+  .grid :global(.cell.json) {
     color: var(--accent-text);
     cursor: pointer;
   }
-  .cell.json:hover {
+  .grid :global(.cell.json:hover) {
     text-decoration: underline;
   }
   /* Expand-to-viewer affordance, revealed on cell hover (top-right corner). */
-  .grid td.cell {
+  .grid :global(td.cell) {
     position: relative;
   }
-  .cell-expand {
+  /* The expand glyph is CSS (a masked SVG in currentColor), not an <Icon>
+     component per cell. */
+  .grid :global(.cell-expand::before) {
+    content: '';
+    width: 9px;
+    height: 9px;
+    background: currentColor;
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='currentColor' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 2.5H2.5V6M10 2.5h3.5V6M6 13.5H2.5V10M10 13.5h3.5V10'/%3E%3C/svg%3E") center / contain no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='currentColor' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 2.5H2.5V6M10 2.5h3.5V6M6 13.5H2.5V10M10 13.5h3.5V10'/%3E%3C/svg%3E") center / contain no-repeat;
+  }
+  .grid :global(.cell-expand) {
     position: absolute;
     top: 4px;
     inset-inline-end: 2px;
@@ -1003,32 +1089,32 @@
     cursor: pointer;
     box-shadow: -3px 0 5px var(--surface);
   }
-  .grid td.cell:hover .cell-expand {
+  .grid :global(td.cell:hover .cell-expand) {
     display: inline-flex;
   }
-  .cell-expand:hover {
+  .grid :global(.cell-expand:hover) {
     color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   }
-  .cell.editable {
+  .grid :global(.cell.editable) {
     cursor: text;
   }
-  .cell.editable:hover {
+  .grid :global(.cell.editable:hover) {
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
   }
-  .cell.editing {
+  .grid :global(.cell.editing) {
     padding: 0;
     background: var(--surface) !important;
     box-shadow: inset 0 0 0 1.5px var(--accent);
   }
   /* A parked (pending) cell draft: visibly different until reviewed & applied. */
-  .cell.dirty {
+  .grid :global(.cell.dirty) {
     background: var(--warning-soft) !important;
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warning) 55%, transparent);
     font-style: italic;
     cursor: default;
   }
-  .cell-input {
+  .grid :global(.cell-input) {
     width: 100%;
     height: 100%;
     border: none;
@@ -1038,10 +1124,10 @@
     font-size: var(--fs-s);
     padding: 4px 10px;
   }
-  .cell-input:disabled {
+  .grid :global(.cell-input:disabled) {
     opacity: 0.6;
   }
-  .grid td mark {
+  .grid :global(td mark) {
     background: color-mix(in srgb, var(--accent) 35%, transparent);
     color: var(--text);
     border-radius: 2px;
@@ -1064,7 +1150,7 @@
     .grid thead th {
       font-size: var(--fs-m);
     }
-    .grid td {
+    .grid :global(td) {
       font-size: var(--fs-m);
     }
   }

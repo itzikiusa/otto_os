@@ -7,7 +7,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import type { EditFlow } from './EditFlow.svelte';
-  import { copyText } from './results-format';
+  import { copyText, fmtBytes } from './results-format';
 
   interface Props {
     flow: EditFlow;
@@ -20,6 +20,17 @@
     const name = e ? flow.result?.columns[e.colIdx]?.name : undefined;
     return !!e && !!name && flow.pendingValue(e.rowIdx, e.colIdx) === undefined && flow.hasPendingUnder(e.rowIdx, name);
   });
+
+  // A multi-MB value (a big Mongo document, a blob) laid out in one wrapping
+  // <pre> took seconds to open. Show the head; "Show all" renders the rest on
+  // request. Copy (and the editor) always use the FULL value.
+  const VIEW_MAX = 256 * 1024;
+  /** The viewer object the user asked to see in full (resets per cell). */
+  let expandedFor = $state<object | null>(null);
+  const clipped = $derived(
+    !!flow.viewer && expandedFor !== flow.viewer && flow.viewerText.length > VIEW_MAX,
+  );
+  const shownText = $derived(clipped ? flow.viewerText.slice(0, VIEW_MAX) : flow.viewerText);
 </script>
 
 {#if flow.viewer}
@@ -65,7 +76,13 @@
           <button class="btn small primary" onclick={() => flow.saveViewerEdit()} title="Validate and review the update (⌘⏎)">Save…</button>
         </div>
       {:else}
-        <pre class="cv-body mono">{flow.viewerText}</pre>
+        <pre class="cv-body mono">{shownText}</pre>
+        {#if clipped}
+          <div class="cv-more">
+            <span>Showing the first {fmtBytes(VIEW_MAX)} of {fmtBytes(flow.viewerText.length)} — Copy copies the full value.</span>
+            <button class="btn small ghost" onclick={() => (expandedFor = flow.viewer)}>Show all</button>
+          </div>
+        {/if}
       {/if}
     </div>
   </Modal>
@@ -143,6 +160,13 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .cv-more {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
   .cv-pending {
     padding: 4px 8px;

@@ -4,6 +4,8 @@
 // surfaces as an `error` string, never a thrown exception, so node renderers can
 // show parse errors inline without crashing the canvas.
 
+import { createRenderQueue, isStaleResult } from './renderQueue';
+
 type MermaidApi = {
   initialize: (cfg: Record<string, unknown>) => void;
   render: (id: string, src: string) => Promise<{ svg: string }>;
@@ -15,8 +17,10 @@ let _loading: Promise<MermaidApi> | null = null;
 /** The theme mermaid is currently initialized with (initialize is global). */
 let _dark: boolean | null = null;
 /** Renders run one at a time: a light export must never interleave with a
- *  dark on-screen render between `initialize` and `render`. */
-let _queue: Promise<unknown> = Promise.resolve();
+ *  dark on-screen render between `initialize` and `render`. Latest-wins: a
+ *  job whose caller's `isStale()` is true when it reaches the head is skipped
+ *  (SD-23) instead of rendering a diagram nobody will show. */
+const _queue = createRenderQueue();
 
 // `neutral` on light surfaces, `dark` on dark ones — `neutral` draws dark
 // labels and lines on a transparent background, which vanished on the dark
@@ -69,15 +73,17 @@ async function load(dark: boolean): Promise<MermaidApi> {
  *  renders our message instead). `id` must be unique & DOM-id-safe per node.
  *  `dark: true` draws light-on-transparent for a dark surface (the Canvas
  *  pasteboard); the default suits a light/white figure (vault notes, Design
- *  Hall frames and thumbnails, exports). */
-export function renderMermaid(
+ *  Hall frames and thumbnails, exports).
+ *  `isStale` (optional) is checked when the job reaches the head of the
+ *  queue; a superseded job resolves `{ stale: true }` without rendering —
+ *  callers that pass it already discard results by token. */
+export async function renderMermaid(
   id: string,
   src: string,
-  opts: { dark?: boolean } = {},
-): Promise<{ svg?: string; error?: string }> {
-  const run = _queue.then(() => renderNow(id, src, opts.dark ?? false));
-  _queue = run.catch(() => undefined);
-  return run;
+  opts: { dark?: boolean; isStale?: () => boolean } = {},
+): Promise<{ svg?: string; error?: string; stale?: boolean }> {
+  const out = await _queue.run(() => renderNow(id, src, opts.dark ?? false), opts.isStale);
+  return isStaleResult(out) ? { stale: true } : out;
 }
 
 async function renderNow(id: string, src: string, dark: boolean): Promise<{ svg?: string; error?: string }> {

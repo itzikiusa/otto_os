@@ -5,6 +5,7 @@
   // age, refreshed every 10 s while visible. Each row jumps to that pod's own
   // drawer; Logs / Shell open it straight on those tabs.
   import { untrack } from 'svelte';
+  import { pollWhileVisible } from '../../lib/poll';
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { isAbortError } from '../../lib/api/client';
@@ -53,9 +54,9 @@
     void ns;
     void selector;
     untrack(() => void load());
-    const t = setInterval(() => void load(true), REFRESH_MS);
+    const t = pollWhileVisible(() => load(true), { ms: REFRESH_MS, immediate: false });
     return () => {
-      clearInterval(t);
+      t.stop();
       abort?.abort();
     };
   });

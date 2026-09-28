@@ -51,9 +51,45 @@ below). Clients need no change: keep sending, and treat a dropped socket or a
 {"type":"claim"}                                    // claim size authority (sent on terminal focus)
 {"type":"pause"}                                    // flow control: stop sending me output (see below)
 {"type":"resume"}                                   // flow control: send again (+ one snapshot if anything was held back)
+{"type":"resync","lines":2000}                      // typed over a dropped local backlog: discard my queued output, send ONE snapshot (see below)
+{"type":"credit","window":1048576}                  // credit flow control: send me at most `window` unacknowledged binary bytes (see below)
+{"type":"ack","bytes":4194304}                      // credit: cumulative binary bytes consumed (parsed or dropped) since the grant
 ```
 
-**Flow control (`pause` / `resume`).** A browser WebSocket drains the socket
+**Credit flow control (`credit` / `ack`) — preferred.** `pause`/`resume`
+cannot bound the client's backlog: whatever the server sends during the
+pause frame's round trip still lands, so the overshoot grows with the send
+rate (Otto measured 3–14 MB against a 2 MB watermark). A client that opts in
+sends `credit` first thing on the socket; the server answers
+`{"type":"credit","window":W}` (the offer clamped to 64 KB–8 MB; 0/absent →
+1 MB) and from that frame on (frames are ordered) never has more than `W`
+binary bytes out that the client has not acknowledged. The client acks the
+**cumulative** count of credited binary bytes it consumed — parsed by its
+emulator OR dropped (a queue superseded by a snapshot) — at least every
+`W/4` (Otto: every 64 KB); an unreported remainder below that never stalls
+the stream. Snapshots and other text frames are not counted. Per viewer,
+read-only safe, never affects the PTY or other viewers.
+
+- Output produced while the window is full is held server-side, up to one
+  more window: any burst up to `2 × W` is delivered losslessly, in order.
+- Beyond that the held output is discarded and, once the client has drained
+  to `≤ W/4` unacknowledged, replaced by ONE unsolicited `scrollback`
+  snapshot (the lagging-viewer resync). Normal output never gets there.
+- `input` while output is held (the viewer is more than a window behind,
+  e.g. `^C` mid-flood) turns the held output into that snapshot too, so the
+  interrupt is not queued behind a window of stale output.
+- Any snapshot the server sends (`scrollback` reply, `resync`, lag, revival)
+  supersedes held output; it is never sent after it.
+- No ack progress for **2 s** while output waits → the server treats all
+  sent bytes as consumed (same guarantee as the pause auto-resume: a lost ack
+  can never freeze a pane).
+- Stale, duplicate or too-large acks are clamped/ignored. A new connection
+  starts without credit. `pause`/`resume` are still honored on a credit socket.
+- **Compatibility.** An older server ignores `credit`/`ack` (unknown frames)
+  and never answers — the client stays on `pause`/`resume`. Clients that never
+  send `credit` get exactly the `pause`/`resume` behavior below.
+
+**Flow control (`pause` / `resume`) — fallback.** A browser WebSocket drains the socket
 eagerly, so the daemon never feels TCP backpressure from a slow *renderer*
 (xterm parses ~5.5–8 MB/s in WebKit; `cat`/`yes` produce far more). Clients
 count bytes handed to their emulator until it has parsed them and send
@@ -70,6 +106,17 @@ PTY or other viewers:
   rule), so a lost `resume` can never freeze a pane. A client still draining
   above its low watermark re-sends `pause` about once a second to stay paused.
 - A new connection always starts unpaused.
+
+**`resync`.** Clients may keep received output in a queue in front of their
+emulator (Otto feeds xterm ≤ 64 KB at a time, ≤ 128 KB inside it). When the
+user types while more than 256 KB is queued (typically `^C` mid-flood), the
+client drops that queue — it would only scroll past what the interrupt
+already stopped — and sends `resync`. The server discards this viewer's own
+queued output (already reflected in the emulator), leaves any `pause`, and
+ALWAYS answers with one `scrollback` snapshot of up to `lines` rows (0 → the
+full emulator depth) before live bytes continue. Clients send `resync` before
+any `resume` its drop triggers; a `resume` arriving after it is a no-op.
+Read-only safe (per viewer, never touches the PTY).
 
 A snapshot can therefore arrive while the client still has older output queued
 in its emulator; it must apply the reset IN ORDER after that backlog (Otto
@@ -118,6 +165,7 @@ while the viewport is scrolled up (a rebuild yanks it to the bottom).
 - **JSON text frames**:
 
 ```json
+{"type":"credit","window":1048576}                  // grant for a client `credit` offer; binary frames after it count against `window`
 {"type":"scrollback","data":"<base64 bytes>","epoch":3}  // response to scrollback request; send BEFORE live bytes resume.
                                                     // `data` is a FULL rebuild: formatted history rows + a coherent
                                                     // current-screen frame + input-mode restoration (bracketed paste,
@@ -300,13 +348,15 @@ MCP token, a share link — are ignored, so such a socket is never a target):
 Server → that ONE connection:
 
 ```json
-{"type":"hello_ack","conn_id":"01J…"}
+{"type":"hello_ack","conn_id":"01J…","boot_id":"01J…"}
 {"type":"ui_command","id":"01J…","session_id":"…","agent":{"session_id":"…","title":"Fix the report","provider":"claude"},"command":"db_run_query","args":{"tab_id":"…"},"deadline_ms":45000}
 {"type":"ui_command_cancel","id":"01J…","reason":"timeout"}
 ```
 
 - `hello_ack` — `conn_id` is ephemeral (this socket only); the document sends it
   back as `X-Otto-Ui-Conn` on `POST /ui/commands/{id}/result|progress`.
+  `boot_id` (additive) is minted once per daemon process: a different value than
+  the one seen before means the daemon restarted (every ephemeral id is gone).
 - `ui_command` — `command` is the bare catalog name (no `ui_` prefix); `args`
   are validated against the entry's schema, with `connection_id` already
   resolved to the canonical id; `deadline_ms` is the DURATION (ms) the daemon
@@ -337,6 +387,33 @@ server sends that ONE connection:
   (Otto: `resyncAfterReconnect`, trailing-debounced 500 ms so a burst of lag
   frames costs one refetch). Older clients ignore the unknown `type`.
 
+### Topic subscription (per connection)
+
+Any `/ws/events` socket (not only a human's) may narrow what it receives — the
+menu-bar tray needs a handful of types and should not pay for the rest:
+
+```json
+{"type":"subscribe","topics":["session_status","notification","mcp_approval_changed"]}
+```
+
+- `topics` — `Event` `type` tags; at most 64, each 1–64 chars (a frame over the
+  caps, or malformed, is ignored whole). An **empty list clears** the filter.
+  Unknown tags are allowed (they simply never match).
+- The filter is applied **before** authorization and serialization; delivery
+  scopes are unchanged (a topic never widens what a socket may see).
+- Per-connection frames (`resync`, `hello_ack`, `ui_command`, …) are always
+  delivered.
+- The server answers that connection with the active filter (sorted; `null` =
+  everything) and the daemon's `boot_id`:
+
+```json
+{"type":"subscribe_ack","topics":["mcp_approval_changed","notification","session_status"],"boot_id":"01J…"}
+```
+
+A socket that only subscribes (never sends `hello`) is never an agent
+UI-control target. Older daemons ignore the frame (the client then just sees
+every event it is allowed). Otto: `ui/src/lib/topicSocket.ts` (the tray).
+
 ### Full event catalog
 
 Every variant of `otto_core::event::Event` (`crates/otto-core/src/event.rs`). The tag is
@@ -349,9 +426,10 @@ Delivery scope: **session-family events** (`session_status`, `session_created`,
 `api_history_appended`) reach
 every member with `viewer`+ on the event's `workspace_id` (root receives all);
 **owner-scoped events** (`assistant_turn`, `assistant_task_update`,
-`assistant_needs_you`, `assistant_limit`, `ui_control_requested`) reach only the
-user named by their `user_id` (not root);
-**broadcast events** (`Notice`) reach every authenticated client. There are 70
+`assistant_needs_you`, `assistant_limit`, `ui_control_requested`,
+`notifications_changed`) reach only the user named by their `user_id` (not root);
+**broadcast events** (`Notice`, `resource_access_changed`, a workspace-less
+`mcp_approval_changed`) reach every authenticated client. There are 73
 variants (the sections below cover them; each `## …`/`### …` heading is one
 feature family).
 
@@ -1116,8 +1194,13 @@ Conversation view (`docs/design/conversation-view.md` §4.3). Emitted by
 - `transcript_appended` — the session's transcript grew. `turns` are the turns
   touched by the new records, each sent WHOLE (a turn whose tool results just
   landed is re-sent) — clients replace by `Turn.id`. `cursor` is the index of the
-  LAST folded record (`after_cursor`). A payload over 64 KB is sent with
-  `turns: []`: re-fetch `GET …/transcript`. Session-family scoped
+  LAST folded record (`after_cursor`). A payload over 64 KB is first shrunk:
+  tool results' `text` (then `patch`) are cut to 4 KB (then 1 KB, 256 B, 0)
+  and flagged `result.elided: true` — fetch the whole block with
+  `GET …/transcript/tool/{tool_id}` when the step is expanded (`bytes` /
+  `truncated` still describe the stored result). Only a delta that is still
+  over 64 KB after that (prose/inputs alone) is sent with `turns: []`:
+  re-fetch `GET …/transcript`. Session-family scoped
   (owner / workspace admin / root, viewer-gated) — transcript prose and tool
   output never reach other users.
 - `transcript_live` — the agent's in-progress response as currently drawn on
@@ -1312,3 +1395,42 @@ proceeds on Allow and otherwise answers `pending_grant`.
 
 `module` is the paneKey the command targets (`shell` for navigation), `command`
 the bare catalog name. Emitted by `crates/otto-server/src/ui_bridge.rs`.
+
+### `mcp_approval_changed` / `resource_access_changed` / `notifications_changed`
+
+Invalidation cues (TRANSPORT_PLAN stage 2) that let the UI drop its pollers:
+each says "the list you cached changed — refetch it"; none carries the data.
+
+```json
+{"type":"mcp_approval_changed","approval_id":"01J…","workspace_id":"01J…","status":"pending"}
+{"type":"mcp_approval_changed","status":"expired"}
+{"type":"resource_access_changed","kind":"connection","resource_id":"01J…"}
+{"type":"resource_access_changed"}
+{"type":"notifications_changed","user_id":"01J…"}
+```
+
+- `mcp_approval_changed` — an `mcp_approvals` row was created (`pending`),
+  decided (`approved` / `denied`), `consumed`, or a sweep `expired` some
+  (`approval_id` absent). Emitted from `McpApprovalRepo` itself (a process-wide
+  hook `ottod` points at the bus), so every writer — governance pipeline,
+  outward MCP, assistant, live browser — is covered. **Scope:** with
+  `workspace_id` → that workspace's members (viewer+); without (workspace-less
+  approvals, consume/expiry) → every authenticated client. It carries no
+  title/tool/args; `GET /mcp/approvals` applies visibility on the refetch.
+  Consumers: the tray, the MCP page badge + Approvals tab, Home.
+- `resource_access_changed` — a successful write that can change effective
+  access: `PUT /access/{kind}/{id}` (→ `kind` + `resource_id`), access
+  groups/roles, `/users/{id}/grants|plugin-grants`, `PATCH|DELETE /users/{id}`,
+  `/workspaces/{id}/members…` (→ no fields = "re-check everything"). Emitted by
+  an outer middleware (`crates/otto-server/src/live_events.rs`) after a 2xx.
+  **Scope:** every authenticated client (opaque ids only). Consumer: the UI's
+  access-decision cache (`resource-access.svelte.ts`), which re-checks the
+  named resource (or all) instead of every resource every 15 s.
+- `notifications_changed` — the caller's notice list changed without a new
+  notice (`POST /notifications/{id}/read`, `/notifications/read-all`,
+  `DELETE /notifications/{id}`, `DELETE /notifications`). **Owner-scoped**
+  (`user_id` only). Consumer: the tray's "needs you" glyph.
+
+Clients keep a slow safety poll (Otto: 5 min, `ui/src/lib/live.ts` `liveQuery`)
+and refetch after a reconnect / `resync`; while the socket is down they fall
+back to their old poll cadence.

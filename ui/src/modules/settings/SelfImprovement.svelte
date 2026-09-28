@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { pollWhileVisible } from '../../lib/poll';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
   import { guardUnsaved } from '../../lib/leaveGuard';
@@ -106,9 +107,8 @@
   // Load on workspace change
   // ---------------------------------------------------------------------------
 
-  $effect(() => {
-    if (wsId) void load(wsId);
-  });
+  // (The bus effect below also loads on a workspace change — a second
+  // `wsId` effect here loaded the page twice on every mount; O8.)
 
   // ---------------------------------------------------------------------------
   // Live-refresh driven by improvement_updated WS event (T1).
@@ -119,18 +119,6 @@
   const POLL_INTERVAL_MS = 30_000;
   const POLL_MAX_TICKS = 20; // stop polling after 10 minutes of inactivity
 
-  let pollTimer: ReturnType<typeof setTimeout> | undefined;
-  let pollTicks = 0;
-
-  function schedulePoll(id: string): void {
-    if (pollTicks >= POLL_MAX_TICKS) return;
-    clearTimeout(pollTimer);
-    pollTimer = setTimeout(() => {
-      pollTicks += 1;
-      void load(id);
-      schedulePoll(id);
-    }, POLL_INTERVAL_MS);
-  }
 
   $effect(() => {
     // Subscribe to improvementBus: re-load whenever the bus fires.
@@ -138,12 +126,23 @@
     if (wsId) void load(wsId);
   });
 
+  // The fallback poll pauses while the window is hidden and never stacks
+  // requests (pollWhileVisible), and still gives up after POLL_MAX_TICKS.
   $effect(() => {
-    if (wsId) {
-      pollTicks = 0;
-      schedulePoll(wsId);
-    }
-    return () => clearTimeout(pollTimer);
+    const id = wsId;
+    if (!id) return;
+    let ticks = 0;
+    const poller = pollWhileVisible(
+      async () => {
+        if (++ticks > POLL_MAX_TICKS) {
+          poller.stop();
+          return;
+        }
+        await load(id);
+      },
+      { ms: POLL_INTERVAL_MS, immediate: false },
+    );
+    return () => poller.stop();
   });
 
   function adopt(id: string, fresh: SelfImprovementConfig): void {
