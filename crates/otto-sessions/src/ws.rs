@@ -354,6 +354,9 @@ struct CreditGate {
     skipped: bool,
     /// Since when this gate has waited on the client without progress.
     stalled_since: Option<tokio::time::Instant>,
+    /// The stall deadline fired and nothing moved since: don't re-arm it
+    /// until the client acks again (see [`CreditGate::forgive`]).
+    forgiven: bool,
 }
 
 /// What the socket loop must do after a [`CreditGate`] step.
@@ -380,6 +383,7 @@ impl CreditGate {
             held: bytes::BytesMut::new(),
             skipped: false,
             stalled_since: None,
+            forgiven: false,
         }
     }
 
@@ -406,7 +410,7 @@ impl CreditGate {
     fn track_stall(&mut self, now: tokio::time::Instant) {
         if !self.waiting() {
             self.stalled_since = None;
-        } else if self.stalled_since.is_none() {
+        } else if self.stalled_since.is_none() && !self.forgiven {
             self.stalled_since = Some(now);
         }
     }
@@ -463,6 +467,7 @@ impl CreditGate {
         let c = cumulative.min(self.sent);
         if c > self.acked {
             self.acked = c;
+            self.forgiven = false;
             if self.waiting() {
                 // Progress: the client is draining, restart the stall clock.
                 self.stalled_since = Some(now);
@@ -493,22 +498,32 @@ impl CreditGate {
         self.held = bytes::BytesMut::new();
         self.skipped = false;
         self.stalled_since = None;
+        self.forgiven = false;
     }
 
-    /// No `ack` progress for [`FLOW_AUTO_RESUME`] while waiting: the client
-    /// is wedged or buggy. Mirrors the pause gate's auto-resume so a lost ack
-    /// can at worst reproduce the pre-flow-control flood, never freeze a pane.
+    /// No `ack` progress for [`FLOW_AUTO_RESUME`] while output waits.
     fn stall_deadline(&self) -> Option<tokio::time::Instant> {
         self.stalled_since.map(|t| t + FLOW_AUTO_RESUME)
     }
 
-    /// The stall deadline passed: treat everything sent as consumed.
-    fn forgive(&mut self, now: tokio::time::Instant) -> CreditStep {
-        self.acked = self.sent;
+    /// The stall deadline passed: the client's renderer is wedged (a blocked
+    /// main thread, a napped or hidden window) and whatever is held is going
+    /// stale. Drop it and owe the client ONE snapshot once it has drained to a
+    /// quarter window — exactly the overflow path. The window is NOT reopened:
+    /// `acked` stays truthful, so however long or often the client stalls it
+    /// never has more than `window` unacknowledged bytes (r3-10-07: this used
+    /// to set `acked = sent` and send up to another window per 2 s stall,
+    /// piling megabytes into a renderer that could not parse them).
+    ///
+    /// No deadlock: a live client acks everything it parses AND everything it
+    /// drops (termFlow.ts), and the unreported remainder is < an ack step ≤
+    /// `window / 4`, so its acks always bring the gate to the snapshot. Only a
+    /// client that stops executing waits — and it is sent nothing meanwhile.
+    fn forgive(&mut self) {
+        self.held = bytes::BytesMut::new();
+        self.skipped = true;
         self.stalled_since = None;
-        let step = self.reopen();
-        self.track_stall(now);
-        step
+        self.forgiven = true;
     }
 }
 
@@ -1175,11 +1190,8 @@ async fn serve_terminal<S: SessionsCtx>(
                 if credit.as_ref().is_some_and(|c| c.stalled_since.is_some()) =>
             {
                 let Some(c) = credit.as_mut() else { continue };
-                tracing::debug!(session = %session_id, "terminal ws credit stalled {FLOW_AUTO_RESUME:?} without an ack; reopening");
-                let step = c.forgive(tokio::time::Instant::now());
-                if apply_credit_step(step, &mut socket, &mut out_rx, handle.as_ref()).await.is_err() {
-                    return;
-                }
+                tracing::debug!(session = %session_id, "terminal ws credit stalled {FLOW_AUTO_RESUME:?} without an ack; dropping held output for one snapshot on recovery");
+                c.forgive();
             }
 
             // Live PTY output → binary frames. Coalesce rapid bursts into one
@@ -2407,10 +2419,11 @@ mod tests {
         assert_eq!(g.acked, 64 * KB);
     }
 
-    /// A client that stops acking cannot freeze the pane: the stall deadline
-    /// reopens the window (held output flows, or a skip resyncs).
+    /// A stalled client is never sent more than the window: the stall
+    /// deadline drops the held output and owes ONE snapshot, and the client's
+    /// own acks (it acks what it parses and drops) bring it — no deadlock.
     #[test]
-    fn credit_stall_deadline_reopens_a_wedged_window() {
+    fn credit_stall_deadline_degrades_to_a_snapshot_without_reopening() {
         let t0 = tokio::time::Instant::now();
         let mut g = CreditGate::new(64 * KB);
         g.push(vec![0; 64 * 1024], t0);
@@ -2427,15 +2440,55 @@ mod tests {
         // 1014 bytes of credit left: those go out, the rest waits.
         assert_eq!(sent_len(&g.push(vec![2; 2048], t1)), 1014);
         assert_eq!(g.stall_deadline(), Some(t1 + FLOW_AUTO_RESUME));
-        assert_eq!(sent_len(&g.forgive(t1 + FLOW_AUTO_RESUME)), 1034);
-        assert!(g.stall_deadline().is_none());
-        // A skipped gate resyncs on forgiveness.
-        let mut s = CreditGate::new(64 * KB);
-        s.push(vec![0; 64 * 1024], t0);
-        s.push(vec![0; 64 * 1024], t0);
-        s.push(vec![0; 1], t0);
-        assert!(s.skipped);
-        assert_eq!(s.forgive(t1), CreditStep::Resync);
+        let unacked = g.unacked();
+        g.forgive();
+        assert_eq!(g.unacked(), unacked, "acked stays truthful: the window is not reopened");
+        assert!(g.held.is_empty() && g.skipped, "held output becomes one owed snapshot");
+        assert!(g.stall_deadline().is_none(), "not re-armed while nothing moves");
+        // More output while stalled: nothing is sent or buffered.
+        for _ in 0..50 {
+            assert_eq!(g.push(vec![3; 4096], t1), CreditStep::Idle);
+        }
+        assert!(g.held.is_empty() && g.stall_deadline().is_none());
+        // The client wakes and acks what it parsed: one snapshot at ≤ window/4.
+        assert_eq!(g.ack(g.sent - 32 * 1024, t1), CreditStep::Idle);
+        assert_eq!(g.ack(g.sent - 1000, t1), CreditStep::Resync);
+        assert_eq!(g.ack(g.sent, t1), CreditStep::Idle, "exactly one");
+        assert_eq!(sent_len(&g.push(b"live".to_vec(), t1)), 4, "streams again");
+    }
+
+    /// r3-10-07: repeated ≥ 2 s stalls under a continuous producer used to
+    /// forgive a window each time; the unacked backlog must stay ≤ window.
+    #[test]
+    fn credit_repeated_stalls_never_exceed_the_window() {
+        let mut now = tokio::time::Instant::now();
+        let mut g = CreditGate::new(256 * KB);
+        let mut client_backlog = 0u64;
+        let mut consumed = 0u64;
+        for cycle in 0..20 {
+            // A burst while the client is wedged (acks nothing).
+            for _ in 0..40 {
+                if let CreditStep::Send(b) = g.push(vec![b'x'; 16 * 1024], now) {
+                    client_backlog += b.len() as u64;
+                }
+                assert!(g.unacked() <= g.window, "cycle {cycle}: unacked {} > window", g.unacked());
+            }
+            if let Some(at) = g.stall_deadline() {
+                now = at;
+                g.forgive();
+            }
+            assert!(client_backlog <= g.window, "cycle {cycle}: client holds {client_backlog}");
+            // Every other cycle the client drains everything it holds.
+            if cycle % 2 == 1 {
+                consumed += client_backlog;
+                client_backlog = 0;
+                match g.ack(consumed, now) {
+                    CreditStep::Send(b) => client_backlog += b.len() as u64,
+                    CreditStep::Resync => g.superseded(),
+                    CreditStep::Idle => {}
+                }
+            }
+        }
     }
 
     /// Any snapshot supersedes held output: nothing held is sent after it.

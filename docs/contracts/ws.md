@@ -83,9 +83,12 @@ read-only safe, never affects the PTY or other viewers.
   interrupt is not queued behind a window of stale output.
 - Any snapshot the server sends (`scrollback` reply, `resync`, lag, revival)
   supersedes held output; it is never sent after it.
-- No ack progress for **2 s** while output waits → the server treats all
-  sent bytes as consumed (same guarantee as the pause auto-resume: a lost ack
-  can never freeze a pane).
+- No ack progress for **2 s** while output waits → the server drops the
+  held output and owes ONE snapshot, sent once the client has drained to
+  `≤ W/4` (as for an overflow). The window is never reopened without acks,
+  so a stalled renderer (blocked main thread, napped window) holds at most
+  `W` unacknowledged bytes however long it stalls; a client that acks what
+  it parses and drops always reaches the snapshot.
 - Stale, duplicate or too-large acks are clamped/ignored. A new connection
   starts without credit. `pause`/`resume` are still honored on a credit socket.
 - **Compatibility.** An older server ignores `credit`/`ack` (unknown frames)
