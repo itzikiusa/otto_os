@@ -1035,7 +1035,9 @@ impl McpCallLogRepo {
         )
         .bind(&id).bind(&e.workspace_id).bind(&e.server_id).bind(&e.server_name)
         .bind(&e.tool).bind(&e.direction).bind(&e.caller_user_id).bind(&e.caller_kind)
-        .bind(&e.args_redacted_json).bind(&e.decision).bind(&e.decision_reason)
+        // Same bounded, tail-preserving shaping as `mcp_tool_calls` (r3-10-04):
+        // this column had no cap at all.
+        .bind(crate::mcp_audit::cap_args_json(&e.args_redacted_json)).bind(&e.decision).bind(&e.decision_reason)
         .bind(&e.risk_label).bind(&e.injection_risk).bind(e.dry_run as i64).bind(e.ok as i64)
         .bind(&e.error).bind(e.latency_ms).bind(e.bytes).bind(e.rows).bind(&e.approval_id)
         .bind(&now)

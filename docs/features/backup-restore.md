@@ -144,10 +144,15 @@ re-read every pass; set it with `POST /settings/import`:
 so the SQLite writer is never held for long; freed pages are reused, so the
 file stops growing but only shrinks after a manual `VACUUM`.
 
-Separately, `mcp_tool_calls.args_json` is shaped at insert: any string value
-over 1 024 characters is stored as its first 200 characters plus
-`…[N chars truncated]` (the JSON stays valid). The ledger records that a tool
-was called and with what arguments' shape — not whole note or file bodies.
+Separately, `mcp_tool_calls.args_json` and `mcp_call_log.args_redacted_json`
+are shaped at insert: any string value over 1 024 characters is stored as its
+first and last 512 characters around `…[truncated: N chars, sha256 H]…`, so a
+padded payload's tail (say, a `DROP` after a kilobyte of comments) stays
+visible and the full value stays verifiable by hash. The whole document is
+capped at 16 KiB; past that the row holds
+`{"_otto_truncated":true,"bytes":N,"sha256":H,"head":…,"tail":…}`. The JSON
+always stays valid. The ledger records that a tool was called and with what
+arguments' shape — not whole note or file bodies.
 Migration `0142` also removes duplicate `artifact_added` work events left by an
 older reconcile bug (keeping the earliest per item, actor and payload).
 
