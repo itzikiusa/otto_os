@@ -109,8 +109,10 @@ class AuthStore {
   }
 
   private async performBoot(retry: boolean): Promise<void> {
-    // Quiet retries keep the offline explanation and focused Retry available.
-    if (!retry) this.phase = 'loading';
+    // Quiet retries keep the offline explanation and focused Retry available,
+    // and a re-boot of an already-running app refreshes in place: dropping
+    // back to 'loading' unmounts the whole shell (a visible full reload).
+    if (!retry && this.phase !== 'ready') this.phase = 'loading';
     try {
       this.meta = await api.get<MetaResp>('/meta');
       // Background/slow calls move to the daemon's second loopback host
