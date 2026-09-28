@@ -11,6 +11,7 @@
 mod bar;
 mod browser;
 mod panel;
+mod panic_guard;
 mod panes;
 mod panes_policy;
 mod popout;
@@ -26,6 +27,8 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager};
 
 fn main() {
+    // AppKit-dispatched callbacks can't unwind: log panics, contain them below.
+    panic_guard::install();
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_shell::init())
@@ -38,6 +41,7 @@ fn main() {
         // FOCUSED window only — menu accelerators are app-wide, and a broadcast
         // Cmd+W would close a tab in EVERY window at once.
         .on_menu_event(|app, event| {
+            panic_guard::guard("menu", || {
             let id = event.id().0.as_str();
             match id {
                 "new-window" => windows::create_new_window(app),
@@ -77,6 +81,7 @@ fn main() {
                     }
                 }
             }
+            });
         })
         .invoke_handler(tauri::generate_handler![
             panes::pane_open, panes::pane_layout, panes::pane_state, panes::pane_to_host, panes::pane_to_guest,
@@ -158,7 +163,15 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("error while building Otto")
-        .run(|app, event| match event {
+        .run(|app, event| {
+            panic_guard::guard("run-event", || run_event(app, event));
+        });
+}
+
+/// The app's run-event handler (window lifecycle), called from AppKit's
+/// event dispatch — keep it under `panic_guard::guard`.
+fn run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
+    match event {
             // Cmd+Q (or last-window close) → snapshot the whole window set so
             // the next launch restores it; a lone window close just forgets
             // that window (handled in on_close_requested).
@@ -194,7 +207,7 @@ fn main() {
                 _ => {}
             },
             _ => {}
-        });
+        }
 }
 
 /// Set the macOS dock badge to the number of working agents ("" clears).
