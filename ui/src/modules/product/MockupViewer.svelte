@@ -12,7 +12,7 @@
   // The render box is exposed to a sibling MockupAnnotations overlay so pins sit
   // exactly over the mockup.
   import { onMount } from 'svelte';
-  import mermaid from 'mermaid';
+  import { renderMermaid } from '../canvas/mermaid';
   import { authedBlobUrl, baseUrl, getToken } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -32,9 +32,8 @@
   }
   let { attachment, source = null, hideToolbar = false, allowScripts = $bindable(false) }: Props = $props();
 
-  // Mermaid is initialized once, with auto-rendering off — we drive render()
-  // ourselves and never let it touch the parent document.
-  mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
+  // Mermaid loads on the first diagram (canvas/mermaid.ts: lazy, strict
+  // security, auto-rendering off) — never with the Product page's chunk.
 
   // ── Derived type classification ─────────────────────────────────────────────
   type Kind = 'image' | 'html' | 'mermaid' | 'unknown';
@@ -137,7 +136,9 @@
           mermaidSvg = '';
         } else {
           const id = `otto-mermaid-${Date.now()}-${mermaidSeq++}`;
-          const { svg } = await mermaid.render(id, text);
+          const { svg, error } = await renderMermaid(id, text);
+          if (myGen !== gen) return; // superseded while mermaid loaded/rendered
+          if (svg === undefined) throw new Error(error ?? 'Diagram error');
           mermaidSvg = svg;
         }
       } else {
