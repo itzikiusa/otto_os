@@ -9,6 +9,7 @@ use std::time::Duration;
 use otto_core::auth::BoxFuture;
 use otto_core::{Error, Result};
 use otto_orchestrator::Orchestrator;
+use otto_orchestrator::PromptArg;
 
 use crate::proposal::{parse_proposal, ImprovementProposal};
 
@@ -35,7 +36,7 @@ pub trait ProposalProducer: Send + Sync {
 /// A provider that doesn't support it simply exits non-zero; the engine logs
 /// and skips it, never aborting the others — so a custom provider is offered
 /// consistently and works whenever its CLI has a print mode.
-fn headless_exec(provider: &str) -> (String, Vec<String>) {
+fn headless_exec(provider: &str) -> (String, Vec<String>, PromptArg<'static>) {
     match provider {
         "codex" => (
             "codex".into(),
@@ -44,11 +45,21 @@ fn headless_exec(provider: &str) -> (String, Vec<String>) {
                 "--dangerously-bypass-approvals-and-sandbox".into(),
                 "--skip-git-repo-check".into(),
             ],
+            PromptArg::Positional,
         ),
-        // agy and every other (custom) provider: the claude-style print mode.
+        // agy's `-p`/`--print` is a pflag STRING flag (`agy --help`): it takes
+        // the prompt as its value, so `-p --dangerously-skip-permissions …`
+        // made the permissions flag the prompt. Flags first, prompt inlined.
+        "agy" => (
+            "agy".into(),
+            vec!["--dangerously-skip-permissions".into()],
+            PromptArg::Flag("--print"),
+        ),
+        // Every other (custom) provider: the claude-style print switch.
         other => (
             other.to_string(),
             vec!["-p".into(), "--dangerously-skip-permissions".into()],
+            PromptArg::Positional,
         ),
     }
 }
@@ -79,9 +90,17 @@ impl RealProposalProducer {
         } else {
             // codex/agy/custom → headless CLI exec (best-effort print mode for
             // custom providers; a non-supporting CLI errors and is skipped).
-            let (program, args) = headless_exec(provider);
+            let (program, args, prompt_arg) = headless_exec(provider);
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            otto_orchestrator::run_cli_exec(&program, &arg_refs, prompt, cwd, self.timeout).await
+            otto_orchestrator::run_cli_exec_with(
+                &program,
+                &arg_refs,
+                prompt_arg,
+                prompt,
+                cwd,
+                self.timeout,
+            )
+            .await
         }
     }
 }
