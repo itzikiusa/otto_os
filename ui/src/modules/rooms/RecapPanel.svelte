@@ -1,5 +1,6 @@
 <script lang="ts">
   import {onMount} from 'svelte';
+  import {pollWhileVisible} from '../../lib/poll';
   import type {RecapDetail, RecapDraft, RecapEventData} from '../../lib/api/room-recap-types';
   import {recapRequest, recapBlob} from './recap-client';
   import {confirmer} from '../../lib/confirm.svelte';
@@ -9,8 +10,8 @@
   let detail = $state<RecapDetail | null>(null), error = $state(''), actionError = $state(''), loading = $state(true), busy = $state(false), copied = $state(false);
   let tab = $state<'transcript' | 'activity' | 'summary'>('transcript'), after = $state(0), previous = $state<number[]>([]);
   let live = true, request = 0;
-  onMount(() => { void load(); const timer = setInterval(() => { if (!busy) void load(false); }, 4000); return () => { live = false; request++; clearInterval(timer); }; });
-  async function load(showLoading = true) { if (showLoading) loading = true; const seq = ++request; try { const value = await recapRequest<RecapDetail>(`/room-recaps/${encodeURIComponent(recapId)}?after=${after}&limit=100`); if (live && seq === request) { detail = value; error = ''; } } catch (e) { if (live && seq === request) error = e instanceof Error ? e.message : 'Could not load this recap.'; } finally { if (seq === request) loading = false; } }
+  onMount(() => { const poller = pollWhileVisible(signal => busy ? undefined : load(!detail, signal), {ms: 4000}); return () => { live = false; request++; poller.stop(); }; });
+  async function load(showLoading = true, signal?: AbortSignal) { if (showLoading) loading = true; const seq = ++request; try { const value = await recapRequest<RecapDetail>(`/room-recaps/${encodeURIComponent(recapId)}?after=${after}&limit=100`, undefined, signal); if (live && seq === request) { detail = value; error = ''; } return true; } catch (e) { if (live && seq === request) error = e instanceof Error ? e.message : 'Could not load this recap.'; return false; } finally { if (seq === request) loading = false; } }
   async function generate() { if (!await confirmer.ask('Send captured text and representative shared-screen images to Codex using your ChatGPT subscription to create a draft. This uses your subscription allowance. Not every saved image is included; the draft reports coverage. The local archive remains available if generation fails.', {title: 'Generate recap summary?', confirmLabel: 'Generate summary'})) return; busy = true; actionError = ''; try { await recapRequest(`/room-recaps/${recapId}/summary`, {}); tab = 'summary'; await load(false); } catch (e) { actionError = e instanceof Error ? e.message : 'Summary generation could not start.'; } finally { busy = false; } }
   async function cancel() { try { await recapRequest(`/room-recaps/${recapId}/summary`, undefined, undefined, 'DELETE'); await load(false); } catch { actionError = 'Could not cancel generation. Try again.'; } }
   async function exportArchive() { try { const blob = await recapBlob(`/room-recaps/${recapId}/export`); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `room-recap-${recapId}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 30000); } catch { actionError = 'Could not export the recap. Try again.'; } }

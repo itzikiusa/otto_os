@@ -172,6 +172,141 @@ fn verb_of<'a>(args: &'a [&'a str]) -> &'a str {
     }
 }
 
+/// git's `-l<N>` overflow warning ("exhaustive/inexact rename detection was
+/// skipped due to too many files"): past [`RENAMES`]' limit some renames come
+/// back as a delete + an add. Recorded so the diff can say so
+/// (`DiffResp.renames_incomplete`).
+fn note_renames(stderr: &str, ri: &std::sync::atomic::AtomicBool) {
+    if stderr.contains("rename detection was skipped") {
+        ri.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Ceiling on the stdout ANY single git spawn may buffer. Nothing Otto asks
+/// for legitimately comes close (a full 100k-line commit diff is ~10 MB, a
+/// 100k-commit `log` page ~25 MB); it exists so `log limit=0` on a monorepo, a
+/// blame of a generated file or a runaway `show` fails fast instead of growing
+/// the daemon without bound. A read is killed the moment it crosses; a
+/// write/remote spawn is never killed mid-flight (index.lock) — its surplus is
+/// drained and dropped.
+pub(crate) const GIT_STDOUT_CAP: usize = 128 * 1024 * 1024;
+
+/// stderr retained for error text; anything past it is drained and dropped.
+const GIT_STDERR_CAP: usize = 1024 * 1024;
+
+/// What a spawn does when stdout crosses its limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Overflow {
+    /// `Error::Upstream` (a read is killed first).
+    Error,
+    /// Keep the first `limit` bytes and report success with `cut`.
+    Truncate,
+}
+
+/// Early-stop hook for a streamed read: called after every chunk with the
+/// buffer so far and where the new bytes start; `Some(n)` keeps `buf[..n]`
+/// and kills git (reads only).
+pub(crate) type StopFn = Box<dyn FnMut(&[u8], usize) -> Option<usize> + Send>;
+
+/// How a spawn's stdout is bounded ([`LocalGit::spawn_capture`]).
+pub(crate) struct StdoutLimit {
+    pub(crate) max: usize,
+    pub(crate) overflow: Overflow,
+    pub(crate) stop: Option<StopFn>,
+}
+
+impl StdoutLimit {
+    /// The crate-wide ceiling, failing on overflow.
+    pub(crate) fn ceiling() -> Self {
+        Self {
+            max: GIT_STDOUT_CAP,
+            overflow: Overflow::Error,
+            stop: None,
+        }
+    }
+
+    fn of(c: &GitCmd) -> Self {
+        match c.limit {
+            Some((max, overflow)) => Self {
+                max: max.min(GIT_STDOUT_CAP),
+                overflow,
+                stop: None,
+            },
+            None => Self::ceiling(),
+        }
+    }
+}
+
+/// Why a capped read ended before EOF.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Cut {
+    None,
+    /// The [`StopFn`] asked for it.
+    Stopped,
+    /// stdout crossed [`StdoutLimit::max`].
+    Overflow,
+}
+
+/// Read `stdout` in chunks up to `limit`. On a stop/overflow of a READ the
+/// whole process group is SIGKILLed right here — a read writes nothing, and
+/// killing before returning is what lets the concurrent stderr drain see EOF.
+/// Any other class keeps draining (and dropping) so git finishes normally.
+async fn read_stdout_capped(
+    mut stdout: tokio::process::ChildStdout,
+    limit: &mut StdoutLimit,
+    kill_pid: Option<libc::pid_t>,
+) -> std::io::Result<(Vec<u8>, Cut)> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = vec![0u8; 64 * 1024];
+    let mut cut = Cut::None;
+    loop {
+        let n = stdout.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        if cut != Cut::None {
+            continue; // non-read class: drain to EOF, keep nothing more
+        }
+        let start = buf.len();
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(stop) = limit.stop.as_mut() {
+            if let Some(keep) = stop(&buf, start) {
+                buf.truncate(keep);
+                cut = Cut::Stopped;
+            }
+        }
+        if cut == Cut::None && buf.len() > limit.max {
+            buf.truncate(limit.max);
+            cut = Cut::Overflow;
+        }
+        if cut != Cut::None {
+            if let Some(pid) = kill_pid {
+                // SAFETY: signalling the process group we created with
+                // `process_group(0)`; ESRCH (already gone) is ignored.
+                unsafe {
+                    libc::kill(-pid, libc::SIGKILL);
+                }
+                break;
+            }
+        }
+    }
+    Ok((buf, cut))
+}
+
+/// Drain stderr, keeping the first [`GIT_STDERR_CAP`] bytes.
+async fn read_stderr_capped(mut stderr: tokio::process::ChildStderr) -> std::io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    let mut chunk = vec![0u8; 16 * 1024];
+    loop {
+        let n = stderr.read(&mut chunk).await?;
+        if n == 0 {
+            return Ok(buf);
+        }
+        let room = GIT_STDERR_CAP.saturating_sub(buf.len());
+        buf.extend_from_slice(&chunk[..n.min(room)]);
+    }
+}
+
 /// SIGTERM the whole process group (git plus the `ssh` / `git-remote-https`
 /// children it forked), give it 2 s to unwind — git removes `index.lock` on
 /// SIGTERM — then SIGKILL whatever is left.
@@ -230,6 +365,9 @@ pub(crate) struct GitCmd {
     class: SpawnClass,
     /// Bytes piped to git's stdin ([`GitCmd::paths_stdin`]).
     stdin: Option<Vec<u8>>,
+    /// A tighter stdout ceiling than [`GIT_STDOUT_CAP`] and what happens when
+    /// git crosses it ([`GitCmd::max_stdout`] / [`GitCmd::truncate_stdout`]).
+    limit: Option<(usize, Overflow)>,
 }
 
 impl GitCmd {
@@ -255,7 +393,22 @@ impl GitCmd {
             envs: Vec::new(),
             class,
             stdin: None,
+            limit: None,
         }
+    }
+
+    /// Fail the command (killing a read) once its stdout passes `bytes`,
+    /// instead of buffering up to the crate-wide [`GIT_STDOUT_CAP`].
+    pub(crate) fn max_stdout(mut self, bytes: usize) -> Self {
+        self.limit = Some((bytes, Overflow::Error));
+        self
+    }
+
+    /// Keep only the first `bytes` of stdout: a READ is killed there and the
+    /// call still succeeds, reporting the cut ([`LocalGit::exec_truncated`]).
+    pub(crate) fn truncate_stdout(mut self, bytes: usize) -> Self {
+        self.limit = Some((bytes, Overflow::Truncate));
+        self
     }
 
     pub(crate) fn args<I, S>(mut self, extra: I) -> Self
@@ -728,9 +881,50 @@ impl LocalGit {
             cmd.env(k, v);
         }
         let stdin = stdin.or(c.stdin.as_deref());
-        let out = self.spawn_output(cmd, c.class, verb_of(&argv), stdin).await?;
+        let (out, _) = self
+            .spawn_limited(cmd, c.class, verb_of(&argv), stdin, StdoutLimit::of(c))
+            .await?;
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         Ok((out.status.success(), out.stdout, stderr, out.status.code()))
+    }
+
+    /// [`Self::exec_bytes`] for a command built with
+    /// [`GitCmd::truncate_stdout`] (or a [`StopFn`] via `stop`): stdout up to
+    /// the limit, and whether git was cut off there. A non-zero exit that we
+    /// did not cause is still an error.
+    pub(crate) async fn exec_truncated(
+        &self,
+        c: &GitCmd,
+        stop: Option<StopFn>,
+    ) -> Result<(Vec<u8>, bool)> {
+        self.check_repo().await?;
+        let argv = c.argv();
+        let mut cmd = self.base_cmd();
+        cmd.args(&argv);
+        for (k, v) in &c.envs {
+            cmd.env(k, v);
+        }
+        let mut limit = StdoutLimit::of(c);
+        limit.stop = stop;
+        let (out, cut) = self
+            .spawn_limited(cmd, c.class, verb_of(&argv), c.stdin.as_deref(), limit)
+            .await?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            let err = upstream_err(
+                &stderr,
+                &String::from_utf8_lossy(&out.stdout),
+                out.status.code(),
+            );
+            tracing::warn!(
+                repo = %self.repo_path.display(),
+                args = ?c.args,
+                code = out.status.code(),
+                "git failed: {err}"
+            );
+            return Err(err);
+        }
+        Ok((out.stdout, cut))
     }
 
     /// [`Self::exec`] where a non-zero exit is an error, classified exactly
@@ -754,6 +948,25 @@ impl LocalGit {
     pub(crate) async fn exec_text(&self, c: &GitCmd) -> Result<String> {
         let out = self.exec_bytes(c).await?;
         Ok(String::from_utf8_lossy(&out).into_owned())
+    }
+
+    /// [`Self::exec_bytes`] for a diff/show that carries [`RENAMES`]: also
+    /// notes git's "rename detection was skipped due to too many files"
+    /// warning into `ri`, so the response can say its pairing is partial.
+    async fn exec_diff(&self, c: &GitCmd, ri: &std::sync::atomic::AtomicBool) -> Result<Vec<u8>> {
+        let (ok, stdout, stderr, code) = self.exec(c, None).await?;
+        if !ok {
+            let err = upstream_err(&stderr, &String::from_utf8_lossy(&stdout), code);
+            tracing::warn!(
+                repo = %self.repo_path.display(),
+                args = ?c.args,
+                code = code,
+                "git failed: {err}"
+            );
+            return Err(err);
+        }
+        note_renames(&stderr, ri);
+        Ok(stdout)
     }
 
     /// [`Self::exec_bytes`] for an index-writing command, with the same
@@ -790,11 +1003,71 @@ impl LocalGit {
     /// last-resort guard for runtime shutdown.
     async fn spawn_output(
         &self,
-        mut cmd: Command,
+        cmd: Command,
         class: SpawnClass,
         verb: &str,
         stdin: Option<&[u8]>,
     ) -> Result<std::process::Output> {
+        self.spawn_limited(cmd, class, verb, stdin, StdoutLimit::ceiling())
+            .await
+            .map(|(out, _)| out)
+    }
+
+    /// [`Self::spawn_capture`] with an [`Overflow::Error`] overflow turned
+    /// into `Error::Upstream`; `bool` = a stop/truncate cut the output short.
+    pub(crate) async fn spawn_limited(
+        &self,
+        cmd: Command,
+        class: SpawnClass,
+        verb: &str,
+        stdin: Option<&[u8]>,
+        limit: StdoutLimit,
+    ) -> Result<(std::process::Output, bool)> {
+        let (max, overflow) = (limit.max, limit.overflow);
+        let (out, cut) = self.spawn_capture(cmd, class, verb, stdin, limit).await?;
+        match cut {
+            Cut::None => Ok((out, false)),
+            Cut::Stopped => Ok((out, true)),
+            Cut::Overflow if overflow == Overflow::Truncate => Ok((out, true)),
+            Cut::Overflow if class != SpawnClass::LocalRead => {
+                // Never killed (see `read_stdout_capped`): the write happened,
+                // only its chatter was dropped.
+                tracing::warn!(
+                    repo = %self.repo_path.display(),
+                    verb,
+                    "git {verb} stdout passed {max} bytes; the surplus was dropped"
+                );
+                Ok((out, true))
+            }
+            Cut::Overflow => Err(Error::Upstream(format!(
+                "git {verb} produced more than {} KB of output and was stopped — \
+                 narrow the request (a path, a smaller range or page)",
+                max / 1024
+            ))),
+        }
+    }
+
+    /// The one place a git process is created. Every spawn gets its own process
+    /// GROUP (`setpgid(0,0)`) so a timeout can signal git AND the `ssh` /
+    /// `git-remote-https` helpers it forked with a single `kill(-pid)`.
+    ///
+    /// `LocalWrite`/`Remote` run inside a detached task: dropping the request
+    /// future (client disconnect — the UI passes an `AbortSignal` on every
+    /// call) then stops the WAIT, not the git. `kill_on_drop` stays armed as a
+    /// last-resort guard for runtime shutdown.
+    ///
+    /// stdout is read incrementally against `limit` (never more than
+    /// [`GIT_STDOUT_CAP`]) instead of `wait_with_output`'s unbounded buffer;
+    /// a cut READ is killed on the spot. A cut output reports a zero exit
+    /// status — the caller asked for the prefix, and git died by our signal.
+    pub(crate) async fn spawn_capture(
+        &self,
+        mut cmd: Command,
+        class: SpawnClass,
+        verb: &str,
+        stdin: Option<&[u8]>,
+        mut limit: StdoutLimit,
+    ) -> Result<(std::process::Output, Cut)> {
         cmd.process_group(0).kill_on_drop(true);
         if class == SpawnClass::LocalRead {
             // A read must never take `index.lock`: `git status` otherwise
@@ -818,14 +1091,39 @@ impl LocalGit {
             drop(si); // EOF — git blocks reading otherwise
         }
         let pid = child.id().expect("spawned") as libc::pid_t;
+        limit.max = limit.max.min(GIT_STDOUT_CAP);
+        let kill_pid = (class == SpawnClass::LocalRead).then_some(pid);
+        let collect = async move {
+            let stdout = child.stdout.take().expect("piped stdout");
+            let stderr = child.stderr.take().expect("piped stderr");
+            let (so, se) = tokio::join!(
+                read_stdout_capped(stdout, &mut limit, kill_pid),
+                read_stderr_capped(stderr)
+            );
+            let (stdout, cut) = so?;
+            let stderr = se?;
+            let mut status = child.wait().await?;
+            if cut != Cut::None && kill_pid.is_some() {
+                use std::os::unix::process::ExitStatusExt;
+                status = std::process::ExitStatus::from_raw(0);
+            }
+            Ok::<_, std::io::Error>((
+                std::process::Output {
+                    status,
+                    stdout,
+                    stderr,
+                },
+                cut,
+            ))
+        };
         let budget = self.budget_override.unwrap_or_else(|| budget_for(class));
         let secs = budget.as_secs();
         let waited = match class {
-            SpawnClass::LocalRead => tokio::time::timeout(budget, child.wait_with_output())
+            SpawnClass::LocalRead => tokio::time::timeout(budget, collect)
                 .await
                 .map(|r| r.map_err(io_err)),
             SpawnClass::LocalWrite | SpawnClass::Remote => {
-                let jh = tokio::spawn(async move { child.wait_with_output().await });
+                let jh = tokio::spawn(collect);
                 tokio::time::timeout(budget, async move {
                     jh.await
                         .map_err(|e| Error::Internal(format!("git task: {e}")))?
@@ -1674,16 +1972,27 @@ impl LocalGit {
         if opts.summary {
             return self.diff_summary(target, &paths).await;
         }
-        let out = self.diff_patch_bytes(target, &paths).await?;
+        let ri = std::sync::atomic::AtomicBool::new(false);
+        let out = self.diff_patch_bytes(target, &paths, &ri).await?;
         let caps = opts.caps;
-        off_runtime(out.len(), move || {
+        let mut resp = off_runtime(out.len(), move || {
             crate::parse::parse_diff_bytes_capped(&out, caps.as_ref())
         })
-        .await
+        .await?;
+        if ri.load(std::sync::atomic::Ordering::Relaxed) {
+            resp.renames_incomplete = Some(true);
+        }
+        Ok(resp)
     }
 
     /// git's raw unified diff for `target`, scoped to `paths` (empty = all).
-    async fn diff_patch_bytes(&self, target: &DiffTarget, paths: &[&str]) -> Result<Vec<u8>> {
+    async fn diff_patch_bytes(
+        &self,
+        target: &DiffTarget,
+        paths: &[&str],
+        ri: &std::sync::atomic::AtomicBool,
+    ) -> Result<Vec<u8>> {
+        let run = |c: GitCmd| async move { self.exec_diff(&c, ri).await };
         // Every call is a [`GitCmd::diff`] — fixed output format, raw UTF-8
         // names (`core.quotePath=false`: the default octal-escaping broke
         // feeding `ls-files` names back into `--no-index`) — scoped with a
@@ -1697,23 +2006,23 @@ impl LocalGit {
         };
         let [m, l] = RENAMES;
         let out: Vec<u8> = match target {
-            DiffTarget::Worktree => self.exec_bytes(&diff("diff", &["-U3", m, l])).await?,
+            DiffTarget::Worktree => run(diff("diff", &["-U3", m, l])).await?,
             DiffTarget::Working => {
                 // Staged + unstaged tracked changes vs HEAD (a staged-new file
                 // shows as fully added). Falls back to cached+worktree when HEAD
                 // is unborn (no commits yet).
-                let (head_ok, head_out, _, _) = self
+                let (head_ok, head_out, head_err, _) = self
                     .exec(&diff("diff", &["-U3", m, l, "HEAD"]), None)
                     .await?;
+                note_renames(&head_err, ri);
                 let mut out = if head_ok {
                     head_out
                 } else {
-                    let mut s = self
-                        .exec_bytes(&diff("diff", &["-U3", m, l, "--cached"]))
+                    let mut s = run(diff("diff", &["-U3", m, l, "--cached"]))
                         .await
                         .unwrap_or_default();
                     s.extend(
-                        self.exec_bytes(&diff("diff", &["-U3", m, l]))
+                        run(diff("diff", &["-U3", m, l]))
                             .await
                             .unwrap_or_default(),
                     );
@@ -1736,7 +2045,7 @@ impl LocalGit {
                 out
             }
             DiffTarget::Staged => {
-                self.exec_bytes(&diff("diff", &["-U3", m, l, "--cached"]))
+                run(diff("diff", &["-U3", m, l, "--cached"]))
                     .await?
             }
             DiffTarget::Commit(sha) => {
@@ -1746,7 +2055,7 @@ impl LocalGit {
                 // changes") and its `@@@` hunks don't parse. Diffing against
                 // the first parent yields the reviewable "what this merge
                 // brought in" diff; non-merge commits are unaffected.
-                self.exec_bytes(&diff(
+                run(diff(
                     "show",
                     &[
                         "-m",
@@ -1763,7 +2072,7 @@ impl LocalGit {
             }
             DiffTarget::Range(..) | DiffTarget::MergeBase(..) => {
                 let range = target.range_arg().unwrap_or_default();
-                self.exec_bytes(&diff("diff", &["-U3", m, l, "--end-of-options", &range]))
+                run(diff("diff", &["-U3", m, l, "--end-of-options", &range]))
                     .await?
             }
         };
@@ -1776,6 +2085,11 @@ impl LocalGit {
     /// renders or ships a patch: ~40–100 KB for a 100k-line branch instead of
     /// 15–30 MB. Every file comes back `hunks: []`, `hunks_omitted: true`.
     async fn diff_summary(&self, target: &DiffTarget, paths: &[&str]) -> Result<DiffResp> {
+        let ri = std::sync::atomic::AtomicBool::new(false);
+        let run = |c: GitCmd| {
+            let ri = &ri;
+            async move { self.exec_diff(&c, ri).await }
+        };
         let [m, l] = RENAMES;
         let stat = |sub: &str, extra: &[&str]| -> GitCmd {
             GitCmd::diff(sub)
@@ -1785,24 +2099,24 @@ impl LocalGit {
         };
         let mut untracked = Vec::new();
         let out: Vec<u8> = match target {
-            DiffTarget::Worktree => self.exec_bytes(&stat("diff", &[])).await?,
-            DiffTarget::Staged => self.exec_bytes(&stat("diff", &["--cached"])).await?,
+            DiffTarget::Worktree => run(stat("diff", &[])).await?,
+            DiffTarget::Staged => run(stat("diff", &["--cached"])).await?,
             DiffTarget::Working => {
-                let (head_ok, head_out, _, _) = self.exec(&stat("diff", &["HEAD"]), None).await?;
+                let (head_ok, head_out, head_err, _) = self.exec(&stat("diff", &["HEAD"]), None).await?;
+                note_renames(&head_err, &ri);
                 untracked = self.untracked(paths).await?;
                 if head_ok {
                     head_out
                 } else {
-                    let mut s = self
-                        .exec_bytes(&stat("diff", &["--cached"]))
+                    let mut s = run(stat("diff", &["--cached"]))
                         .await
                         .unwrap_or_default();
-                    s.extend(self.exec_bytes(&stat("diff", &[])).await.unwrap_or_default());
+                    s.extend(run(stat("diff", &[])).await.unwrap_or_default());
                     s
                 }
             }
             DiffTarget::Commit(sha) => {
-                self.exec_bytes(&stat(
+                run(stat(
                     "show",
                     &["-m", "--first-parent", "--format=", "--end-of-options", sha],
                 ))
@@ -1810,11 +2124,14 @@ impl LocalGit {
             }
             DiffTarget::Range(..) | DiffTarget::MergeBase(..) => {
                 let range = target.range_arg().unwrap_or_default();
-                self.exec_bytes(&stat("diff", &["--end-of-options", &range]))
+                run(stat("diff", &["--end-of-options", &range]))
                     .await?
             }
         };
         let mut resp = crate::parse::parse_raw_numstat(&out);
+        if ri.load(std::sync::atomic::Ordering::Relaxed) {
+            resp.renames_incomplete = Some(true);
+        }
         if !untracked.is_empty() {
             let root = self.repo_path.clone();
             let extra = off_runtime(usize::MAX, move || untracked_summary(&root, &untracked)).await?;
@@ -1877,6 +2194,24 @@ impl LocalGit {
     /// fallback when nothing is staged.
     pub async fn working_diff_text(&self) -> Result<String> {
         self.exec_text(&GitCmd::diff("diff").args(["-M"])).await
+    }
+
+    /// [`Self::diff_text_against`] (`base` given) or [`Self::working_diff_text`]
+    /// held to its first `max` bytes: git is killed there instead of the whole
+    /// patch of a huge worktree being buffered only to be clipped by the
+    /// caller (proof packs store at most `STORE_CAP`). `bool` = cut short.
+    pub async fn diff_text_capped(&self, base: Option<&str>, max: usize) -> Result<(String, bool)> {
+        let cmd = match base {
+            Some(b) => {
+                Self::guard_ref(b)?;
+                GitCmd::diff("diff").args(["--end-of-options", b, "--"])
+            }
+            None => GitCmd::diff("diff").args(["-M"]),
+        };
+        let (out, cut) = self
+            .exec_truncated(&cmd.truncate_stdout(max), None)
+            .await?;
+        Ok((String::from_utf8_lossy(&out).into_owned(), cut))
     }
 
     /// `git remote get-url origin`, best-effort.

@@ -879,8 +879,8 @@ mod tests {
     fn fat_fold(n: usize) -> Folded {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../otto-transcript/fixtures/claude/01-basic-tools.jsonl");
-        let mut f = otto_transcript::fold_file(Provider::Claude, &path, Default::default())
-            .unwrap();
+        let mut f =
+            otto_transcript::fold_file(Provider::Claude, &path, Default::default()).unwrap();
         let mut i = 0usize;
         for t in &mut f.turns {
             for b in &mut t.turn.blocks {
@@ -918,7 +918,10 @@ mod tests {
             .map(|t| serde_json::to_value(t).unwrap())
             .collect();
         let before = tool_results(&turns);
-        assert!(json_size(&turns) > EVENT_CAP, "fixture must start over the cap");
+        assert!(
+            json_size(&turns) > EVENT_CAP,
+            "fixture must start over the cap"
+        );
         let size = trim_oversized(&mut turns);
         assert!(size <= EVENT_CAP, "trimmed delta must fit: {size}");
         assert_eq!(size, json_size(&turns));
@@ -926,8 +929,14 @@ mod tests {
         assert_eq!(after.len(), before.len());
         for ((id, full), (_, cut)) in before.iter().zip(&after) {
             assert_eq!(cut["elided"], true, "{id} elided");
-            let (ft, ct) = (full["text"].as_str().unwrap(), cut["text"].as_str().unwrap());
-            assert!(ct.len() <= TRIM_TEXT && ft.starts_with(ct), "{id} text is a prefix");
+            let (ft, ct) = (
+                full["text"].as_str().unwrap(),
+                cut["text"].as_str().unwrap(),
+            );
+            assert!(
+                ct.len() <= TRIM_TEXT && ft.starts_with(ct),
+                "{id} text is a prefix"
+            );
             // The stored-result facts are untouched.
             assert_eq!(cut["bytes"], full["bytes"]);
             assert_eq!(cut["truncated"], full["truncated"]);

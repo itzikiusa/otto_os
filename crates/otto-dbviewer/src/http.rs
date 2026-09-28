@@ -234,7 +234,10 @@ pub fn api_router<S: DbViewerCtx>() -> Router<S> {
         .route("/connections/{id}/db/import", post(import_query::<S>))
         .route("/connections/{id}/db/nl-to-sql", post(nl_to_sql::<S>))
         .route("/connections/{id}/db/history", get(history::<S>))
-        .route("/connections/{id}/db/history/{entry}", get(history_entry::<S>))
+        .route(
+            "/connections/{id}/db/history/{entry}",
+            get(history_entry::<S>),
+        )
         // Daemon-level probe (no `{id}` — the binary is per-machine, not
         // per-connection): is the `mongosh` CLI available for script runs?
         .route("/db/mongosh", get(mongosh_info::<S>))
@@ -543,8 +546,16 @@ async fn result_response(result: crate::types::QueryResult) -> Response {
             axum::body::Bytes::from(body),
         )
             .into_response(),
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, format!("encode result: {e}")).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("encode task failed: {e}")).into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("encode result: {e}"),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("encode task failed: {e}"),
+        )
+            .into_response(),
     }
 }
 

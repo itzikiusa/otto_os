@@ -572,9 +572,8 @@ impl Driver for MongoDriver {
             .node
             .as_deref()
             .and_then(|n| NodePath::parse(n).get("coll").map(str::to_string));
-        let fields_of = |c: Option<String>| {
-            c.and_then(|c| snap.object(&c).map(|o| o.fields.as_slice()))
-        };
+        let fields_of =
+            |c: Option<String>| c.and_then(|c| snap.object(&c).map(|o| o.fields.as_slice()));
         if mongo_sql::looks_like_sql(sql::current_statement(&ctx.prefix)) {
             let sctx = sql::analyze(&ctx.prefix, &ctx.suffix);
             let fields = if matches!(sctx.expect, SqlExpect::Column { .. }) {
@@ -1148,7 +1147,10 @@ impl MongoDriver {
             MONGO_OPERATORS,
             MONGO_METHODS,
         );
-        Ok(CompletionResponse { items, ..Default::default() })
+        Ok(CompletionResponse {
+            items,
+            ..Default::default()
+        })
     }
 }
 
@@ -1242,7 +1244,10 @@ impl MongoDriver {
             MONGO_SQL_KEYWORDS,
             MONGO_SQL_FUNCTIONS,
         );
-        Ok(CompletionResponse { items, ..Default::default() })
+        Ok(CompletionResponse {
+            items,
+            ..Default::default()
+        })
     }
 
     /// The (cached) list of collection names for a database, backing collection

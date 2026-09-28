@@ -106,7 +106,7 @@ pub use db_explorer::{
 pub use email_senders::{EmailSender, EmailSendersRepo};
 pub use git::{GitStore, NewGitAccount, NewRepo};
 pub use goal_loops::{GoalLoopsRepo, NewGoalLoop};
-pub use grants::{capability_for_role, GrantsRepo};
+pub use grants::{capability_for_role, GrantCache, GrantsRepo, GRANT_CACHE_TTL};
 pub use name_themes::{CustomTheme, NameThemesRepo};
 pub use proof::{ProofBlob, ProofRepo, ProofSnapshotRow};
 pub use provider_models::{ProviderModel, ProviderModelsRepo};

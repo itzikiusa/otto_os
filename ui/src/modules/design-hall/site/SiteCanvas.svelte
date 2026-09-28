@@ -95,7 +95,28 @@
       asset,
     };
   });
-  const html = $derived(new Map(page.sections.map((s) => [s.id, renderSection(s, ctx)])));
+  // Section HTML memoized by section OBJECT (SD-17): ops path-copy, so an
+  // untouched section keeps its identity across edits and is not re-rendered;
+  // a new render context (theme, live 3D) invalidates everything.
+  let renderMemo = new WeakMap<object, string>();
+  let memoCtx: unknown = null;
+  const html = $derived.by(() => {
+    const c = ctx;
+    if (c !== memoCtx) {
+      renderMemo = new WeakMap();
+      memoCtx = c;
+    }
+    return new Map(
+      page.sections.map((s) => {
+        let out = renderMemo.get(s);
+        if (out === undefined) {
+          out = renderSection(s, c);
+          renderMemo.set(s, out);
+        }
+        return [s.id, out];
+      }),
+    );
+  });
   const style = $derived(themeStyle(theme));
 
   // While a text is being edited inline, its section's HTML is frozen so a

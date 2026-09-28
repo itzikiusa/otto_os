@@ -236,8 +236,8 @@
       untrack(() => {
         const render =
           kind === 'd2'
-            ? renderD2(id, src, { dark: ui.resolvedScheme === 'dark' })
-            : renderMermaid(id, src);
+            ? renderD2(id, src, { dark: ui.resolvedScheme === 'dark', isStale: () => !el.isConnected })
+            : renderMermaid(id, src, { isStale: () => !el.isConnected });
         void render.then(({ svg, error }) => {
           if (!el.isConnected) return;
           if (svg) {

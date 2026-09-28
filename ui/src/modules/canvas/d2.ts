@@ -10,6 +10,8 @@
 // JSON array of `{range, errmsg}` objects, not a plain "Error: …" string — parsed
 // below into one readable line. Dark themes start at 200 ("Dark Mauve").
 
+import { createRenderQueue, isStaleResult, type Stale } from './renderQueue';
+
 type D2CompileOptions = { sketch?: boolean; themeID?: number };
 export type D2Api = {
   dispose?: () => void;
@@ -60,12 +62,13 @@ async function load(): Promise<D2Api> {
  *  caller B's compile result (an object — rendered as "[object Object]") and
  *  caller B's promise never settles (its diagram stays stuck as raw source).
  *  Notes with 2+ d2 fences hit this every time. Serialize every worker
- *  round-trip pair through one queue; failures must not wedge the chain. */
-let _queue: Promise<unknown> = Promise.resolve();
-function enqueue<T>(job: () => Promise<T>): Promise<T> {
-  const next = _queue.then(job, job);
-  _queue = next.catch(() => undefined);
-  return next;
+ *  round-trip pair through one queue; failures must not wedge the chain.
+ *  Latest-wins (SD-23): a job whose `isStale()` is true at dequeue is skipped
+ *  — the fallback frame runs Go-WASM on the main thread, so a superseded
+ *  compile is pure jank. */
+const _queue = createRenderQueue();
+function enqueue<T>(job: () => Promise<T>, isStale?: () => boolean): Promise<T | Stale> {
+  return _queue.run(job, isStale);
 }
 
 function invalidateTransport(api: D2Api, error: unknown): void {
@@ -94,8 +97,8 @@ function friendlyError(raw: string): string {
 export async function renderD2(
   _id: string,
   src: string,
-  opts: { sketch?: boolean; dark?: boolean } = {},
-): Promise<{ svg?: string; error?: string }> {
+  opts: { sketch?: boolean; dark?: boolean; isStale?: () => boolean } = {},
+): Promise<{ svg?: string; error?: string; stale?: boolean }> {
   const text = src.trim();
   if (!text) return { error: 'Empty diagram' };
   try {
@@ -111,7 +114,8 @@ export async function renderD2(
         invalidateTransport(api, error);
         throw error;
       }
-    });
+    }, opts.isStale);
+    if (isStaleResult(svg)) return { stale: true };
     // Belt-and-braces: never hand a non-SVG payload to innerHTML.
     if (typeof svg !== 'string' || !svg.includes('<svg')) {
       return { error: 'D2 returned an unexpected render payload' };

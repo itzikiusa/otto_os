@@ -10,6 +10,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import { TableWindow } from '../../lib/tableWindow.svelte';
 
   interface Props {
     repoId: string;
@@ -53,6 +54,30 @@
     return () => ctl.abort();
   });
 
+  // Windowed: a generated or long-lived file blames to 20k+ runs, and every
+  // run was a real <tr> (≈670 ms to mount). Past 400 runs only the rows in
+  // view (+ overscan) render between two spacer rows (`TableWindow`).
+  const tw = new TableWindow(400, 15);
+  let bodyEl = $state<HTMLDivElement | undefined>();
+  const lines = $derived(blame?.lines ?? []);
+  const win = $derived(tw.range(lines.length));
+  $effect(() => {
+    void win;
+    tw.measure(bodyEl);
+  });
+  // A new blame starts at the top.
+  $effect(() => {
+    void blame;
+    tw.reset(bodyEl);
+  });
+  /** Widest line range, so the gutter keeps one width while rows window in
+   *  and out (auto table layout sizes columns from the MOUNTED rows only). */
+  const gutterCh = $derived.by(() => {
+    let max = 0;
+    for (const l of lines) max = Math.max(max, l.line_start + l.count - 1);
+    return String(max).length * 2 + 1;
+  });
+
   function day(at: string): string {
     const d = new Date(at);
     return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString();
@@ -75,17 +100,18 @@
     </button>
   </header>
 
-  <div class="bl-body">
+  <div class="bl-body" bind:this={bodyEl} bind:clientHeight={tw.viewH} onscroll={tw.onscroll}>
     {#if loading}
       <div class="bl-pad"><Skeleton rows={6} height={22} /></div>
     {:else if error}
       <div class="bl-pad"><LoadState what="blame" {error} empty onretry={() => retryRev++} variant="compact" /></div>
-    {:else if !blame || blame.lines.length === 0}
+    {:else if !blame || lines.length === 0}
       <p class="bl-msg">Nothing to blame — the file is empty at this revision.</p>
     {:else}
-      <table class="bl-table">
+      <table class="bl-table" style="--bl-gutter:{gutterCh}ch">
         <tbody>
-          {#each blame.lines as l, i (`${l.sha}-${l.line_start}-${i}`)}
+          {#if win.top}<tr class="tw-spacer" aria-hidden="true"><td colspan="3" style="height:{win.top}px"></td></tr>{/if}
+          {#each lines.slice(win.start, win.end) as l, j (`${l.sha}-${l.line_start}-${win.start + j}`)}
             <tr>
               <td class="bl-gutter mono">{range(l.line_start, l.count)}</td>
               <td class="bl-who">
@@ -102,6 +128,7 @@
               <td class="bl-summary" title={l.summary}>{l.summary}</td>
             </tr>
           {/each}
+          {#if win.bottom}<tr class="tw-spacer" aria-hidden="true"><td colspan="3" style="height:{win.bottom}px"></td></tr>{/if}
         </tbody>
       </table>
     {/if}
@@ -155,8 +182,14 @@
   .bl-table tr:hover {
     background: var(--surface-2);
   }
+  .tw-spacer td {
+    padding: 0;
+    border: 0;
+  }
   .bl-gutter {
     width: 1%;
+    min-width: var(--bl-gutter);
+    box-sizing: content-box;
     white-space: nowrap;
     padding: 3px 8px;
     color: var(--text-dim);

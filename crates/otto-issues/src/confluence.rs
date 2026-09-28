@@ -521,6 +521,23 @@ impl ConfluenceClient {
     /// List footer comments on a page.  Each comment's body is converted from
     /// storage XHTML to Markdown via [`storage_to_markdown`].
     pub async fn list_comments(&self, page_id: &str) -> Result<Vec<PageComment>> {
+        self.walk_comments(page_id, None).await
+    }
+
+    /// Footer comments created at or after `since` (the story watcher's cursor
+    /// timestamp). SE-13: the v1 `child/comment` endpoint has no reverse
+    /// order, so the page walk is unchanged, but only the NEW comments' storage
+    /// bodies are converted to Markdown (the old ones were converted, then
+    /// filtered out by the caller, every tick).
+    pub async fn list_comments_since(
+        &self,
+        page_id: &str,
+        since: &str,
+    ) -> Result<Vec<PageComment>> {
+        self.walk_comments(page_id, Some(since)).await
+    }
+
+    async fn walk_comments(&self, page_id: &str, since: Option<&str>) -> Result<Vec<PageComment>> {
         self.ensure_tls()?;
         let url = self.api(&format!(
             "/content/{}/child/comment",
@@ -598,6 +615,9 @@ impl ConfluenceClient {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            if since.is_some_and(|ts| created.as_str() < ts) {
+                continue;
+            }
             let storage_xhtml = c
                 .get("body")
                 .and_then(|b| b.get("storage"))
@@ -735,10 +755,34 @@ fn parse_page(site_base: &str, body: &serde_json::Value) -> Result<ConfluencePag
 /// Unknown/unsupported tags are stripped (their text content is kept).
 /// HTML entities `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&apos;`, `&#39;`,
 /// `&nbsp;` are decoded.  Unknown `ac:*` / `ri:*` tags degrade silently.
+/// Pages at or above this size convert on the blocking pool (SE-18).
+const OFF_RUNTIME_CONVERT_BYTES: usize = 64 * 1024;
+
+/// [`storage_to_markdown`] for async callers: a big page (import, refresh,
+/// watcher tick) is converted on the blocking pool so it never stalls a
+/// runtime worker; small bodies stay inline (a hop costs more than the work).
+pub async fn storage_to_markdown_async(storage_xhtml: String) -> String {
+    if storage_xhtml.len() < OFF_RUNTIME_CONVERT_BYTES {
+        return storage_to_markdown(&storage_xhtml);
+    }
+    tokio::task::spawn_blocking(move || storage_to_markdown(&storage_xhtml))
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "confluence: storage conversion task failed");
+            String::new()
+        })
+}
+
 pub fn storage_to_markdown(storage_xhtml: &str) -> String {
     let mut out = String::new();
     let mut pos = 0;
     let input = storage_xhtml;
+    // SE-18: lowercase the document ONCE. ASCII lowercasing never changes a
+    // byte offset, so every look-ahead below searches a slice of this copy
+    // with the same indices as `input` — they used to lowercase the whole
+    // remainder of the page per table / macro / image (quadratic: 34 ms on a
+    // 741 KB page, on the async runtime).
+    let input_lc = storage_xhtml.to_ascii_lowercase();
 
     // ── List state ─────────────────────────────────────────────────────────
     #[derive(Clone, Copy, PartialEq)]
@@ -780,11 +824,12 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
     // ── Table look-ahead converter ─────────────────────────────────────────
     // Called when we encounter `<table` at position `start_pos`; it finds the
     // matching `</table>` and returns (gfm_string, bytes_consumed).
-    fn convert_table(input: &str, start_pos: usize) -> (String, usize) {
+    fn convert_table(input: &str, input_lc: &str, start_pos: usize) -> (String, usize) {
         let src = &input[start_pos..];
+        let src_lc_all = &input_lc[start_pos..];
         // Locate </table>. A truncated table (no closing tag) runs to the end of
         // the input — `end_offset + "</table>".len()` used to slice past it and panic.
-        let (table_src, consumed) = match src.to_ascii_lowercase().find("</table>") {
+        let (table_src, consumed) = match src_lc_all.find("</table>") {
             Some(end_offset) => {
                 let consumed = end_offset + "</table>".len();
                 (&src[..consumed], consumed)
@@ -794,7 +839,7 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
 
         // Extract rows: split on <tr / </tr> boundaries.
         // Very lightweight: find each <tr...>...</tr> segment.
-        let src_lc = table_src.to_ascii_lowercase();
+        let src_lc = &src_lc_all[..table_src.len()];
         let mut rows: Vec<Vec<String>> = Vec::new();
         let mut search_from = 0usize;
         while let Some(tr_start) = src_lc[search_from..].find("<tr") {
@@ -811,7 +856,7 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
                 .map(|i| after_tr + i)
                 .unwrap_or(src_lc.len());
             let row_src = &table_src[after_tr..tr_end];
-            let row_src_lc = row_src.to_ascii_lowercase();
+            let row_src_lc = &src_lc[after_tr..tr_end];
 
             // Extract cells: <th> or <td>.
             let mut cells: Vec<String> = Vec::new();
@@ -901,9 +946,9 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
     // matching `</ac:structured-macro>`, extracts the `ac:name` attribute and
     // any `<ac:plain-text-body>` / `<ac:rich-text-body>` / `<ac:parameter>`
     // children, and returns (md_string, bytes_consumed).
-    fn convert_ac_macro(input: &str, start_pos: usize) -> (String, usize) {
+    fn convert_ac_macro(input: &str, input_lc: &str, start_pos: usize) -> (String, usize) {
         let src = &input[start_pos..];
-        let src_lc = src.to_ascii_lowercase();
+        let src_lc = &input_lc[start_pos..];
 
         // Find the closing tag.
         let close = "</ac:structured-macro>";
@@ -1004,15 +1049,20 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
     // ── ac:image look-ahead handler ────────────────────────────────────────
     // Handles both self-closing `<ac:image ... />` and
     // `<ac:image ...><ri:attachment .../></ac:image>` patterns.
-    fn convert_ac_image(input: &str, start_pos: usize) -> (String, usize) {
+    fn convert_ac_image(input: &str, input_lc: &str, start_pos: usize) -> (String, usize) {
         let src = &input[start_pos..];
-        let src_lc = src.to_ascii_lowercase();
+        let src_lc = &input_lc[start_pos..];
 
         // Find the end: either `/>` (self-closing) or `</ac:image>`. With
         // neither (truncated input) consume the rest — `usize::MAX + len`
         // overflowed and the slice below panicked.
         let self_close = src_lc.find("/>");
-        let close_tag = src_lc.find("</ac:image>");
+        // Only a `</ac:image>` BEFORE the first `/>` can win, so never scan past
+        // it (a page of self-closing images re-scanned the whole remainder).
+        let close_tag = match self_close {
+            Some(s) => src_lc[..s].find("</ac:image>"),
+            None => src_lc.find("</ac:image>"),
+        };
         let ct_len = "</ac:image>".len();
         let (end_offset, consumed) = match (self_close, close_tag) {
             (Some(s), Some(c)) if c < s => (c + ct_len, c + ct_len),
@@ -1025,7 +1075,7 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
 
         // Try to extract filename from <ri:attachment ri:filename="..."/>.
         let filename = {
-            let m_lc = macro_src.to_ascii_lowercase();
+            let m_lc = &src_lc[..end_offset];
             if let Some(att_start) = m_lc.find("<ri:attachment") {
                 let tag_end = m_lc[att_start..]
                     .find('>')
@@ -1059,7 +1109,7 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
             // `<p>👍`, `<em>—`), taking down page reads and the story watcher.
             if starts_with_ci(input, pos, "<table") {
                 push_block_sep!();
-                let (gfm, consumed) = convert_table(input, pos);
+                let (gfm, consumed) = convert_table(input, &input_lc, pos);
                 out.push_str(&gfm);
                 pos += consumed;
                 pending_newline = true;
@@ -1069,7 +1119,7 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
             // ── ac:structured-macro look-ahead ────────────────────────────
             if starts_with_ci(input, pos, "<ac:structured-macro") {
                 push_block_sep!();
-                let (md, consumed) = convert_ac_macro(input, pos);
+                let (md, consumed) = convert_ac_macro(input, &input_lc, pos);
                 out.push_str(&md);
                 pos += consumed;
                 pending_newline = true;
@@ -1078,7 +1128,7 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
 
             // ── ac:image look-ahead ────────────────────────────────────────
             if starts_with_ci(input, pos, "<ac:image") {
-                let (md, consumed) = convert_ac_image(input, pos);
+                let (md, consumed) = convert_ac_image(input, &input_lc, pos);
                 out.push_str(&md);
                 pos += consumed;
                 continue;
@@ -2570,5 +2620,54 @@ mod tests {
             out.contains("<ul><li>") && !out.contains("ac:task"),
             "{out}"
         );
+    }
+
+    // ── SE-18: linear-time converter, output unchanged ────────────────────
+    /// A ~740 KB page with ~2.4k tables / macros / images interleaved with
+    /// prose and multibyte text — the shape that measured 34 ms quadratic.
+    fn big_storage_fixture() -> String {
+        let mut s = String::with_capacity(800 * 1024);
+        let mut i = 0usize;
+        while s.len() < 740 * 1024 {
+            s.push_str(&format!(
+                "<h2>Section {i} — café ✅</h2><p>Para <strong>{i}</strong> with <a href=\"https://x/{i}\">link</a> &amp; text.</p>"
+            ));
+            match i % 4 {
+                0 => s.push_str(&format!(
+                    "<table><tbody><tr><th>K{i}</th><th>V</th></tr><tr><td>a|{i}</td><td><em>b</em></td></tr><TR><TD>c</TD><td>d</td></TR></tbody></table>"
+                )),
+                1 => s.push_str(&format!(
+                    "<ac:structured-macro ac:name=\"code\"><ac:parameter ac:name=\"language\">rust</ac:parameter><ac:plain-text-body><![CDATA[fn f{i}() {{}}]]></ac:plain-text-body></ac:structured-macro>"
+                )),
+                2 => s.push_str(&format!(
+                    "<ac:image ac:width=\"200\"><ri:attachment ri:filename=\"img{i}.png\" /></ac:image><ac:image ac:alt=\"x\" />"
+                )),
+                _ => s.push_str(&format!(
+                    "<ac:structured-macro ac:name=\"info\"><ac:rich-text-body><p>Note {i} 👍</p><ul><li>one</li><li>two</li></ul></ac:rich-text-body></ac:structured-macro><ac:structured-macro ac:name=\"status\"><ac:parameter ac:name=\"title\">done</ac:parameter></ac:structured-macro>"
+                )),
+            }
+            i += 1;
+        }
+        s
+    }
+
+    fn fnv1a(bytes: &[u8]) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in bytes {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+        h
+    }
+
+    const GOLDEN_LEN: usize = 333_505;
+    const GOLDEN_FNV: u64 = 0xa4a8_c847_bd9f_6fd2;
+
+    #[test]
+    fn storage_to_markdown_big_page_matches_the_pre_se18_output() {
+        let fixture = big_storage_fixture();
+        let md = storage_to_markdown(&fixture);
+        // Golden values recorded from the pre-SE-18 (quadratic) converter.
+        assert_eq!((md.len(), fnv1a(md.as_bytes())), (GOLDEN_LEN, GOLDEN_FNV));
     }
 }

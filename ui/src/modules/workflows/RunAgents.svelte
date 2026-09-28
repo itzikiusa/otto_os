@@ -13,7 +13,7 @@
   import type { WorkflowRun, Review, Session } from '../../lib/api/types';
   import { api } from '../../lib/api/client';
   import { mapLimit } from '../../lib/poll';
-  import { liveQuery } from '../../lib/live';
+  import { liveQuery, type LiveEvent } from '../../lib/live';
   import { untrack } from 'svelte';
   import { runStatus } from '../../lib/status';
   import { reviewIds, reviewSessions, reviewAgentStatus } from './reviewAgents';
@@ -53,7 +53,15 @@
     // Event-fed: `review_changed` for one of these reviews re-reads the due
     // ones (coalesced); 30 s safety net while events flow, the old 2 s
     // cadence only while the event socket is down.
-    const poller = liveQuery({ on: ['review_changed'], match: (ev) => ids.includes(ev.review_id as string), fallbackMs: 2000, safetyMs: 30_000, run: async (signal) => {
+    // An event for a TERMINAL review (a summarizer retry re-opens a done one)
+    // makes it due now instead of after TERMINAL_RECHECK_MS.
+    const onEvent = (ev: LiveEvent): boolean => {
+      const id = ev.review_id as string;
+      if (!ids.includes(id)) return false;
+      fetchedAt.delete(id);
+      return true;
+    };
+    const poller = liveQuery({ on: ['review_changed'], match: onEvent, fallbackMs: 2000, safetyMs: 30_000, run: async (signal) => {
       const now = Date.now();
       const due = ids.filter((id) => {
         const r = untrack(() => reviews[id]);

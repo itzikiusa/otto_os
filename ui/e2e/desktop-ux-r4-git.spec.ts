@@ -164,11 +164,17 @@ test('cancelled active PR review cannot be resurrected by an older poll', async 
   ]};
   await page.route('**/api/v1/repos/*/prs/1/reviews', r => r.fulfill({json: [active]}));
   let poll: Route | undefined;
+  // With the event socket up, `review_changed` drives the refetch (the timed
+  // poll is a 30 s safety net), so a bus event opens the in-flight GET.
+  let sendEvent: ((data: string) => void) | undefined;
+  await page.routeWebSocket('**/ws/events*', socket => {sendEvent = data => socket.send(data);});
   await page.route('**/api/v1/repos/*/prs/1/review', r => {poll = r;});
   await page.route('**/api/v1/reviews/review-4/cancel', r => r.fulfill({json: {...active, status: 'cancelled'}}));
   await page.goto(`/#/git/${repoId}/pr/1`);
   await page.getByRole('tab', {name: 'Review', exact: true}).click();
   await expect(page.locator('.rp-agent').first()).toContainText('Correctness reviewer');
+  await expect.poll(() => !!sendEvent).toBe(true);
+  sendEvent!(JSON.stringify({type: 'review_changed', workspace_id: workspaceId, review_id: 'review-4', status: 'running'}));
   await expect.poll(() => !!poll).toBe(true);
   await page.getByTestId('review-cancel').click();
   await expect(page.getByTestId('review-cancelled')).toBeVisible();

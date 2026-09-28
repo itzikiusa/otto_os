@@ -30,7 +30,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { api } from '../../lib/api/client';
   import { workflowProgress, workflowNodeDetail, listWorkflowVersions, restoreWorkflowVersion } from '../../lib/api/workflows';
-  import { mergeRunProgress, fmtStepMs } from './runProgress';
+  import { mergeRunProgress, fmtStepMs, sharedNodeBodies } from './runProgress';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { workflowRunBus } from '../../lib/events.svelte';
   import { workflowsPagePort } from '../../lib/uiCommands/workflows';
@@ -121,11 +121,18 @@
     }
     if (!id || !node?.detail_version) return;
     const expected = node.detail_version;
+    // The step list may already hold this exact body (one shared fetch path,
+    // so a node that is both expanded and selected is read once per version).
+    const cached = sharedNodeBodies.peek<NodeRunState>(id, node.node_id, expected);
+    if (cached) {
+      inspectorBody = cached;
+      return;
+    }
     const ctl = new AbortController();
     // untrack: reading the body must not re-run this effect when it lands.
     const delay = untrack(() => inspectorBody) && node.status === 'running' ? 1000 : 0;
     const timer = setTimeout(() => {
-      void workflowNodeDetail(id, node.node_id, ctl.signal).then(result => {
+      void sharedNodeBodies.fetch(id, node.node_id, (signal) => workflowNodeDetail(id, node.node_id, signal), ctl.signal).then(result => {
         if (!ctl.signal.aborted && result.detail_version === expected) inspectorBody = result.body;
       }).catch(() => {});
     }, delay);

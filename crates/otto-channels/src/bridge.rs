@@ -31,6 +31,33 @@ use crate::swarm_trigger::SwarmTrigger;
 /// Composite key that identifies a conversation thread.
 type ConvKey = (String, String, Option<String>);
 
+/// Per-conversation serialization (perf SI-09). Message routing used to hold
+/// the ONE conversation map lock across the session lookup (an unfiltered
+/// sessions list on a miss) and `manager.create` (PTY spawn, sandbox, trust),
+/// so every inbound message for ANY chat queued behind one chat's spawn. Now a
+/// conversation serializes only against itself; the map lock is held for a
+/// get / insert / remove and never across an await on the manager.
+#[derive(Default)]
+struct ConvLocks {
+    locks: std::sync::Mutex<HashMap<ConvKey, Arc<Mutex<()>>>>,
+}
+
+impl ConvLocks {
+    /// Idle locks (held by the map alone) are pruned once the map grows.
+    const PRUNE_AT: usize = 256;
+
+    async fn lock(&self, key: &ConvKey) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut m = self.locks.lock().unwrap_or_else(|e| e.into_inner());
+            if m.len() >= Self::PRUNE_AT {
+                m.retain(|_, l| Arc::strong_count(l) > 1);
+            }
+            m.entry(key.clone()).or_default().clone()
+        };
+        lock.lock_owned().await
+    }
+}
+
 /// A session that can still take this conversation's next message: not
 /// archived, not exited (idle / working / running / reconnectable all resume).
 fn session_alive(s: &Session) -> bool {
@@ -280,8 +307,10 @@ pub struct Bridge {
     pub settings: SettingsRepo,
     pub mirror: Arc<Mirror>,
     pub root_user_id: String,
-    /// Map (workspace_id, chat, thread) → session_id
+    /// Map (workspace_id, chat, thread) → session_id. Short critical sections
+    /// only — conversation-level serialization is `conv_locks`.
     sessions: Mutex<HashMap<ConvKey, Id>>,
+    conv_locks: ConvLocks,
     /// Optional hook: if an inbound message matches a configured swarm trigger,
     /// launch that swarm instead of starting a normal session. Injected by
     /// otto-server (which owns the swarm runtime).
@@ -310,6 +339,7 @@ impl Bridge {
             mirror,
             root_user_id,
             sessions: Mutex::new(HashMap::new()),
+            conv_locks: ConvLocks::default(),
             swarm_trigger: None,
             run_trigger: None,
             workflow_trigger: None,
@@ -336,6 +366,7 @@ impl Bridge {
             mirror,
             root_user_id,
             sessions: Mutex::new(HashMap::new()),
+            conv_locks: ConvLocks::default(),
             swarm_trigger,
             run_trigger,
             workflow_trigger,
@@ -351,15 +382,14 @@ impl Bridge {
     /// follow-up into a brand-new agent with no memory of the thread. Shared by
     /// message routing and the `/stop` `/new` `/restart` `/who` commands so
     /// they all agree on which session "this conversation" is.
-    async fn lookup_live_session(
-        &self,
-        map: &mut HashMap<ConvKey, Id>,
-        key: &ConvKey,
-        channel: &str,
-    ) -> Option<Id> {
-        if let Some(sid) = map.get(key) {
-            match self.manager.get(sid).await {
-                Ok(s) if session_alive(&s) => return Some(sid.clone()),
+    ///
+    /// Callers hold the conversation's `conv_locks` guard; the map itself is
+    /// locked only for the get and the re-map, never across the manager calls.
+    async fn lookup_live_session(&self, key: &ConvKey, channel: &str) -> Option<Id> {
+        let mapped = self.sessions.lock().await.get(key).cloned();
+        if let Some(sid) = mapped {
+            match self.manager.get(&sid).await {
+                Ok(s) if session_alive(&s) => return Some(sid),
                 _ => {}
             }
         }
@@ -381,7 +411,7 @@ impl Bridge {
             session = %s.id,
             "bridge: recovered the thread's session from its meta (map miss)"
         );
-        map.insert(key.clone(), s.id.clone());
+        self.sessions.lock().await.insert(key.clone(), s.id.clone());
         Some(s.id)
     }
 
@@ -395,9 +425,9 @@ impl Bridge {
     /// the detached session id, if one was bound.
     async fn detach_conversation(&self, key: &ConvKey, channel: &str) -> Option<Id> {
         let sid = {
-            let mut guard = self.sessions.lock().await;
-            let sid = self.lookup_live_session(&mut guard, key, channel).await;
-            guard.remove(key);
+            let _conv = self.conv_locks.lock(key).await;
+            let sid = self.lookup_live_session(key, channel).await;
+            self.sessions.lock().await.remove(key);
             sid
         }?;
         if let Err(e) = self
@@ -589,10 +619,12 @@ impl Bridge {
             msg.thread.clone(),
         );
         let session_id = {
-            let mut guard = self.sessions.lock().await;
+            // Serialize THIS conversation only (two quick messages must not
+            // both spawn an agent); other chats proceed in parallel.
+            let _conv = self.conv_locks.lock(&key).await;
 
             let existing = self
-                .lookup_live_session(&mut guard, &key, adapter.channel().as_str())
+                .lookup_live_session(&key, adapter.channel().as_str())
                 .await;
 
             if let Some(sid) = existing {
@@ -680,7 +712,10 @@ impl Bridge {
                     session = %session.id,
                     "bridge: created new agent session"
                 );
-                guard.insert(key.clone(), session.id.clone());
+                self.sessions
+                    .lock()
+                    .await
+                    .insert(key.clone(), session.id.clone());
                 session.id
             }
         };
@@ -850,11 +885,11 @@ impl Bridge {
                 // Same map-then-meta lookup as message routing, so /stop
                 // still finds the thread's agent after a daemon restart.
                 let sid = {
-                    let mut guard = self.sessions.lock().await;
+                    let _conv = self.conv_locks.lock(&key).await;
                     let sid = self
-                        .lookup_live_session(&mut guard, &key, adapter.channel().as_str())
+                        .lookup_live_session(&key, adapter.channel().as_str())
                         .await;
-                    guard.remove(&key);
+                    self.sessions.lock().await.remove(&key);
                     sid
                 };
                 match sid {
@@ -903,8 +938,8 @@ impl Bridge {
                     msg.thread.clone(),
                 );
                 let bound_id = {
-                    let mut guard = self.sessions.lock().await;
-                    self.lookup_live_session(&mut guard, &key, adapter.channel().as_str())
+                    let _conv = self.conv_locks.lock(&key).await;
+                    self.lookup_live_session(&key, adapter.channel().as_str())
                         .await
                 };
                 let reply = match bound_id {
@@ -928,6 +963,49 @@ impl Bridge {
             }
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod conv_lock_tests {
+    use super::*;
+
+    fn key(chat: &str) -> ConvKey {
+        ("ws".into(), chat.into(), None)
+    }
+
+    #[tokio::test]
+    async fn a_slow_conversation_does_not_block_another() {
+        let locks = Arc::new(ConvLocks::default());
+        // Conversation A is mid-spawn (holds its lock for a "slow create").
+        let held = locks.lock(&key("a")).await;
+        // B proceeds at once.
+        tokio::time::timeout(Duration::from_millis(200), locks.lock(&key("b")))
+            .await
+            .expect("another conversation is not queued behind A");
+        // A second message on A waits for the first one's spawn…
+        let l2 = locks.clone();
+        let waiter = tokio::spawn(async move {
+            let _g = l2.lock(&key("a")).await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished(), "same conversation stays serialized");
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("released")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn idle_locks_are_pruned() {
+        let locks = ConvLocks::default();
+        for i in 0..ConvLocks::PRUNE_AT {
+            drop(locks.lock(&key(&format!("c{i}"))).await);
+        }
+        let _g = locks.lock(&key("fresh")).await;
+        let n = locks.locks.lock().unwrap().len();
+        assert!(n < ConvLocks::PRUNE_AT, "idle entries dropped (have {n})");
     }
 }
 

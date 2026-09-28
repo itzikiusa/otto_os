@@ -627,12 +627,38 @@ pub fn parse_diff_bytes_capped(bytes: &[u8], caps: Option<&DiffCaps>) -> DiffRes
     let mut resp = DiffResp::default();
     let mut budget = Budget::new(caps);
     let mut cur: Option<(FileState, Sha256)> = None;
+    // A TYPE CHANGE (symlink ⇄ file) prints two consecutive blocks with the
+    // SAME `diff --git` header. `diff_raw(path)` — what a hunk op re-reads and
+    // hashes — returns both, so every block of such a group carries the hash
+    // of the whole group (the UI merges the group into one file and sends
+    // that fingerprint back). A lone block's group hash is its own hash.
+    let mut group: Option<(String, Sha256, usize)> = None; // (header, hash, first file index)
+    let finish = |resp: &mut DiffResp,
+                  budget: &mut Budget,
+                  cur: &mut Option<(FileState, Sha256)>,
+                  group: &Option<(String, Sha256, usize)>| {
+        if let Some((f, h)) = cur.take() {
+            budget.push(resp, f, h.finalize().as_slice());
+            if let Some((_, g, first)) = group {
+                if resp.files.len() - first > 1 {
+                    let fp = hex::encode(g.clone().finalize());
+                    for f in &mut resp.files[*first..] {
+                        f.fingerprint = fp.clone();
+                    }
+                }
+            }
+        }
+    };
     for raw_line in bytes.split_inclusive(|b| *b == b'\n') {
         let text = String::from_utf8_lossy(raw_line);
         let line = text.trim_end_matches('\n').trim_end_matches('\r');
         if line.starts_with("diff --git ") {
-            if let Some((f, h)) = cur.take() {
-                budget.push(&mut resp, f, h.finalize().as_slice());
+            finish(&mut resp, &mut budget, &mut cur, &group);
+            if group.as_ref().is_none_or(|(hdr, _, _)| hdr != line) {
+                group = Some((line.to_string(), Sha256::new(), resp.files.len()));
+            }
+            if let Some((_, g, _)) = group.as_mut() {
+                g.update(raw_line);
             }
             let mut h = Sha256::new();
             h.update(raw_line);
@@ -643,11 +669,12 @@ pub fn parse_diff_bytes_capped(bytes: &[u8], caps: Option<&DiffCaps>) -> DiffRes
             continue;
         };
         h.update(raw_line);
+        if let Some((_, g, _)) = group.as_mut() {
+            g.update(raw_line);
+        }
         state.feed(line);
     }
-    if let Some((f, h)) = cur.take() {
-        budget.push(&mut resp, f, h.finalize().as_slice());
-    }
+    finish(&mut resp, &mut budget, &mut cur, &group);
     fill_totals(&mut resp);
     resp
 }
@@ -789,6 +816,7 @@ pub fn capped_view(
     if budget.exhausted || src.truncated == Some(true) {
         out.truncated = Some(true);
     }
+    out.renames_incomplete = src.renames_incomplete;
     fill_totals(&mut out);
     out
 }

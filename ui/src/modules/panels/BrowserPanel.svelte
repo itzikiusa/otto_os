@@ -169,19 +169,41 @@
     if (!active || !nativeBrowserAvailable || !useNative || !activeTab?.url || !hostEl) return;
     const id = activeId;
     const _z = ui.zoom; // re-align immediately when the page zoom changes
-    const sync = (): void => {
+    // Event-driven (perf P14): the host's own size (panel drag, tab bar), the
+    // app's size (anything reflowing the shell), window resize and the end of
+    // a layout transition — each coalesced to one rect read per frame, and the
+    // bounds IPC only sent when the rect actually moved. This replaced a 400 ms
+    // forever-interval that re-read layout and sent an IPC every tick; a 2 s
+    // visible-only check remains for pure position drift nothing observes.
+    let last = '';
+    let frame = 0;
+    const apply = (): void => {
+      frame = 0;
       const r = hostRect();
-      if (r) void nativeBrowser.bounds(id, r);
+      if (!r) return;
+      const key = `${r.x},${r.y},${r.width},${r.height}`;
+      if (key === last) return;
+      last = key;
+      void nativeBrowser.bounds(id, r);
+    };
+    const sync = (): void => {
+      if (!frame) frame = requestAnimationFrame(apply);
     };
     const ro = new ResizeObserver(sync);
     ro.observe(hostEl);
+    ro.observe(document.body);
     window.addEventListener('resize', sync);
-    const iv = setInterval(sync, 400); // catches position drift (panel drag, layout)
-    sync();
+    window.addEventListener('transitionend', sync, true);
+    const iv = setInterval(() => {
+      if (document.visibilityState === 'visible') apply();
+    }, 2000);
+    apply();
     return () => {
       ro.disconnect();
       window.removeEventListener('resize', sync);
+      window.removeEventListener('transitionend', sync, true);
       clearInterval(iv);
+      if (frame) cancelAnimationFrame(frame);
     };
   });
 

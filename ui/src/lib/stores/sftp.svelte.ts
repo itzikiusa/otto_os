@@ -30,6 +30,8 @@ class SftpState {
   /** Current remote directory (absolute). */
   cwd = $state('');
   entries = $state.raw<SftpEntry[]>([]);
+  /** The daemon cut the listing at its 20k-entry cap. */
+  truncated = $state(false);
   loading = $state(false);
   error = $state('');
   /** True once an initial list has resolved (so the UI can distinguish
@@ -90,6 +92,7 @@ class SftpStore {
       const resp = await api.get<SftpListResp>(`/connections/${connId}/sftp/list${q}`);
       s.cwd = resp.path;
       s.entries = resp.entries;
+      s.truncated = resp.truncated === true;
       s.loaded = true;
     } catch (e) {
       s.error = e instanceof Error ? e.message : String(e);

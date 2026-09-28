@@ -19,7 +19,6 @@
 // Standalone on purpose (no runtime import): lib/uiCommands.ts imports this
 // store and installs the Stop hook, never the other way round.
 
-import { untrack } from 'svelte';
 import { api } from '../api/client';
 import type { Id, OttoEvent, Session, UiAgentRef, UiControlGrant } from '../api/types';
 import { lsGet, lsSet } from '../storage';
@@ -114,13 +113,18 @@ class UiControlStore {
 
   /** Rows that can host the driving bar (every PageHeader registers); the
    *  first in document order shows it, directly under the page's toolbar. */
-  private barHosts: HTMLElement[] = $state([]);
+  private barHosts: HTMLElement[] = $state.raw([]);
+  /** Authoritative plain list — see embedChrome.claim: a teardown read of
+   *  `barHosts` sees the pre-flush value and would drop a same-flush claim. */
+  private barHostList: HTMLElement[] = [];
 
-  /** A PageHeader mounted. Call from an $effect (read is untracked). */
+  /** A PageHeader mounted. Call from an $effect (never reads `barHosts`). */
   claimBar(el: HTMLElement): () => void {
-    this.barHosts = [...untrack(() => this.barHosts), el];
+    this.barHostList = [...this.barHostList, el];
+    this.barHosts = this.barHostList;
     return () => {
-      this.barHosts = untrack(() => this.barHosts).filter((h) => h !== el);
+      this.barHostList = this.barHostList.filter((h) => h !== el);
+      this.barHosts = this.barHostList;
     };
   }
 

@@ -116,7 +116,18 @@ pub struct KafkaClient {
     /// back unassigned — one client per cluster instead of a new
     /// bootstrap/TLS/SASL handshake on every peek or live-tail tick.
     peek_pool: std::sync::Mutex<Option<BaseConsumer<QuietContext>>>,
+    /// Idle consumers carrying a `group.id` (committed-offset reads and
+    /// offset resets need one), most recently used last, at most
+    /// [`GROUP_POOL_MAX`]. Clicking through a group's describe → dry-run →
+    /// reset → re-describe reuses one client instead of a fresh
+    /// bootstrap/TLS/SASL handshake per call (SC-10). Never subscribed, so
+    /// holding one never joins (or rebalances) the real group.
+    group_pool: std::sync::Mutex<Vec<(String, BaseConsumer<QuietContext>)>>,
 }
+
+/// Idle group-scoped consumers kept per cluster (each is a librdkafka client
+/// with its own broker threads, so the pool stays small).
+const GROUP_POOL_MAX: usize = 4;
 
 /// A leased peek consumer; unassigns and returns it to the pool on drop.
 struct PeekLease<'a> {
@@ -164,6 +175,122 @@ fn latest_split(parts: &[(i32, i64)], n: i64) -> HashMap<i32, i64> {
         out.insert(p, take);
     }
     out
+}
+
+/// The two consumer calls the batched watermark path needs — a seam so the
+/// batching/fallback logic runs against a mocked client in unit tests.
+trait WatermarkSource: Sync {
+    /// One `offsets_for_times` pass (ListOffsets, batched per leader).
+    fn offsets_for(
+        &self,
+        tpl: TopicPartitionList,
+    ) -> std::result::Result<TopicPartitionList, KafkaError>;
+    /// One partition's `(low, high)` (the per-partition fallback).
+    fn watermarks(
+        &self,
+        topic: &str,
+        partition: i32,
+    ) -> std::result::Result<(i64, i64), KafkaError>;
+}
+
+impl WatermarkSource for BaseConsumer<QuietContext> {
+    fn offsets_for(
+        &self,
+        tpl: TopicPartitionList,
+    ) -> std::result::Result<TopicPartitionList, KafkaError> {
+        self.offsets_for_times(tpl, WATERMARK_TIMEOUT)
+    }
+    fn watermarks(
+        &self,
+        topic: &str,
+        partition: i32,
+    ) -> std::result::Result<(i64, i64), KafkaError> {
+        self.fetch_watermarks(topic, partition, WATERMARK_TIMEOUT)
+    }
+}
+
+/// See [`KafkaClient::batch_watermarks`].
+fn batch_watermarks_with<S: WatermarkSource>(
+    src: &S,
+    parts: &[(&str, i32)],
+) -> HashMap<(String, i32), (i64, i64)> {
+    let mut out: HashMap<(String, i32), (i64, i64)> = HashMap::with_capacity(parts.len());
+    if parts.is_empty() {
+        return out;
+    }
+    let query = |which: Offset| -> HashMap<(String, i32), i64> {
+        let mut tpl = TopicPartitionList::with_capacity(parts.len());
+        for &(t, p) in parts {
+            if tpl.add_partition_offset(t, p, which).is_err() {
+                return HashMap::new();
+            }
+        }
+        match src.offsets_for(tpl) {
+            Ok(res) => res
+                .elements()
+                .iter()
+                .filter(|e| e.error().is_ok())
+                .filter_map(|e| match e.offset() {
+                    Offset::Offset(o) if o >= 0 => {
+                        Some(((e.topic().to_string(), e.partition()), o))
+                    }
+                    _ => None,
+                })
+                .collect(),
+            Err(_) => HashMap::new(),
+        }
+    };
+    // Both passes in parallel (each is already batched per leader).
+    let (lows, highs) = std::thread::scope(|s| {
+        let lo = s.spawn(|| query(Offset::Beginning));
+        let hi = query(Offset::End);
+        (lo.join().unwrap_or_default(), hi)
+    });
+    let mut missing: Vec<(&str, i32)> = Vec::new();
+    for &(t, p) in parts {
+        let k = (t.to_string(), p);
+        match (lows.get(&k), highs.get(&k)) {
+            (Some(&lo), Some(&hi)) => {
+                out.insert(k, (lo, hi));
+            }
+            _ => missing.push((t, p)),
+        }
+    }
+    if !missing.is_empty() {
+        for (k, v) in fanout_watermarks_with(src, &missing) {
+            out.insert(k, v);
+        }
+    }
+    out
+}
+
+/// Per-partition watermarks fanned across `WATERMARK_WORKERS` threads — the
+/// fallback for partitions the batched pass didn't resolve.
+fn fanout_watermarks_with<S: WatermarkSource>(
+    src: &S,
+    parts: &[(&str, i32)],
+) -> Vec<((String, i32), (i64, i64))> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let results = std::sync::Mutex::new(Vec::with_capacity(parts.len()));
+    let next = AtomicUsize::new(0);
+    let workers = WATERMARK_WORKERS.min(parts.len()).max(1);
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(&(topic, partition)) = parts.get(i) else {
+                    break;
+                };
+                if let Ok(w) = src.watermarks(topic, partition) {
+                    results
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .push(((topic.to_string(), partition), w));
+                }
+            });
+        }
+    });
+    results.into_inner().unwrap_or_else(|p| p.into_inner())
 }
 
 fn build_config(spec: &KafkaConnSpec) -> ClientConfig {
@@ -238,7 +365,46 @@ impl KafkaClient {
             producer,
             base_config: base,
             peek_pool: std::sync::Mutex::new(None),
+            group_pool: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    /// Run `f` with a consumer whose `group.id` is `group`: the pooled one when
+    /// idle, else a fresh one; afterwards it goes back to the pool (LRU, at most
+    /// [`GROUP_POOL_MAX`]; the evicted client is dropped outside the lock).
+    fn with_group_consumer<T>(
+        &self,
+        group: &str,
+        f: impl FnOnce(&BaseConsumer<QuietContext>) -> Result<T>,
+    ) -> Result<T> {
+        let pooled = {
+            let mut pool = self.group_pool.lock().unwrap_or_else(|p| p.into_inner());
+            pool.iter()
+                .position(|(g, _)| g == group)
+                .map(|i| pool.remove(i).1)
+        };
+        let consumer = match pooled {
+            Some(c) => c,
+            None => {
+                let mut cfg = self.base_config.clone();
+                cfg.set("group.id", group);
+                cfg.set("enable.auto.commit", "false");
+                cfg.create_with_context(QuietContext).map_err(kerr)?
+            }
+        };
+        let out = f(&consumer);
+        let evicted = {
+            let mut pool = self.group_pool.lock().unwrap_or_else(|p| p.into_inner());
+            if pool.iter().any(|(g, _)| g == group) {
+                // A concurrent call for the same group returned first.
+                Some(consumer)
+            } else {
+                pool.push((group.to_string(), consumer));
+                (pool.len() > GROUP_POOL_MAX).then(|| pool.remove(0).1)
+            }
+        };
+        drop(evicted);
+        out
     }
 
     /// Lease the pooled peek consumer, or build a fresh one if it's in use.
@@ -397,83 +563,7 @@ impl KafkaClient {
     /// not resolve (leaderless, per-partition error, or the whole batch failing)
     /// fall back to the per-partition fan-out. Missing entries = unreachable.
     pub fn batch_watermarks(&self, parts: &[(&str, i32)]) -> HashMap<(String, i32), (i64, i64)> {
-        let mut out: HashMap<(String, i32), (i64, i64)> = HashMap::with_capacity(parts.len());
-        if parts.is_empty() {
-            return out;
-        }
-        let query = |which: Offset| -> HashMap<(String, i32), i64> {
-            let mut tpl = TopicPartitionList::with_capacity(parts.len());
-            for &(t, p) in parts {
-                if tpl.add_partition_offset(t, p, which).is_err() {
-                    return HashMap::new();
-                }
-            }
-            match self.consumer.offsets_for_times(tpl, WATERMARK_TIMEOUT) {
-                Ok(res) => res
-                    .elements()
-                    .iter()
-                    .filter(|e| e.error().is_ok())
-                    .filter_map(|e| match e.offset() {
-                        Offset::Offset(o) if o >= 0 => {
-                            Some(((e.topic().to_string(), e.partition()), o))
-                        }
-                        _ => None,
-                    })
-                    .collect(),
-                Err(_) => HashMap::new(),
-            }
-        };
-        // Both passes in parallel (each is already batched per leader).
-        let (lows, highs) = std::thread::scope(|s| {
-            let lo = s.spawn(|| query(Offset::Beginning));
-            let hi = query(Offset::End);
-            (lo.join().unwrap_or_default(), hi)
-        });
-        let mut missing: Vec<(&str, i32)> = Vec::new();
-        for &(t, p) in parts {
-            let k = (t.to_string(), p);
-            match (lows.get(&k), highs.get(&k)) {
-                (Some(&lo), Some(&hi)) => {
-                    out.insert(k, (lo, hi));
-                }
-                _ => missing.push((t, p)),
-            }
-        }
-        if !missing.is_empty() {
-            for (k, v) in self.fanout_watermarks(&missing) {
-                out.insert(k, v);
-            }
-        }
-        out
-    }
-
-    /// Per-partition `fetch_watermarks` fanned across `WATERMARK_WORKERS`
-    /// threads — the fallback for partitions the batched pass didn't resolve.
-    fn fanout_watermarks(&self, parts: &[(&str, i32)]) -> Vec<((String, i32), (i64, i64))> {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let results = std::sync::Mutex::new(Vec::with_capacity(parts.len()));
-        let next = AtomicUsize::new(0);
-        let workers = WATERMARK_WORKERS.min(parts.len()).max(1);
-        std::thread::scope(|s| {
-            for _ in 0..workers {
-                s.spawn(|| loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(&(topic, partition)) = parts.get(i) else {
-                        break;
-                    };
-                    if let Ok(w) =
-                        self.consumer
-                            .fetch_watermarks(topic, partition, WATERMARK_TIMEOUT)
-                    {
-                        results
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner())
-                            .push(((topic.to_string(), partition), w));
-                    }
-                });
-            }
-        });
-        results.into_inner().unwrap_or_else(|p| p.into_inner())
+        batch_watermarks_with(&self.consumer, parts)
     }
 
     /// Total message count across all non-internal partitions (drives the
@@ -908,14 +998,9 @@ impl KafkaClient {
             }
         }
 
-        let mut grp_cfg = self.base_config.clone();
-        grp_cfg.set("group.id", group);
-        grp_cfg.set("enable.auto.commit", "false");
-        let grp_consumer: BaseConsumer<QuietContext> =
-            grp_cfg.create_with_context(QuietContext).map_err(kerr)?;
-        let committed = grp_consumer
-            .committed_offsets(tpl, GROUP_TIMEOUT)
-            .map_err(kerr)?;
+        let committed = self.with_group_consumer(group, |c| {
+            c.committed_offsets(tpl, GROUP_TIMEOUT).map_err(kerr)
+        })?;
 
         // High watermarks for every committed partition in one batched pass
         // (was one serial ListOffsets pair per partition — ~60 s for a
@@ -964,7 +1049,7 @@ impl KafkaClient {
     /// Reset (commit) consumer-group offsets. `positions` maps each topic-partition
     /// to the desired offset (already resolved by the caller from
     /// earliest/latest/explicit/timestamp). The group must exist. This commits
-    /// via a fresh consumer client so the existing metadata consumer is untouched.
+    /// via the pooled group-scoped client (never the shared metadata consumer).
     ///
     /// # Safety
     /// This is a destructive write: a consumer group that is actively consuming will
@@ -974,21 +1059,17 @@ impl KafkaClient {
         if positions.is_empty() {
             return Ok(());
         }
-        let mut grp_cfg = self.base_config.clone();
-        grp_cfg.set("group.id", group);
-        grp_cfg.set("enable.auto.commit", "false");
-        let consumer: BaseConsumer<QuietContext> =
-            grp_cfg.create_with_context(QuietContext).map_err(kerr)?;
-
         let mut tpl = TopicPartitionList::new();
         for ((topic, partition), offset) in &positions {
             tpl.add_partition_offset(topic, *partition, Offset::Offset(*offset))
                 .map_err(kerr)?;
         }
-        consumer
-            .commit(&tpl, rdkafka::consumer::CommitMode::Sync)
-            .map_err(kerr)?;
-        Ok(())
+        // The same pooled group client the describe/dry-run just used (a
+        // manual commit never subscribes, so it never joins the group).
+        self.with_group_consumer(group, |c| {
+            c.commit(&tpl, rdkafka::consumer::CommitMode::Sync)
+                .map_err(kerr)
+        })
     }
 
     /// Resolve the target offset for a single topic-partition given a reset mode.
@@ -1295,6 +1376,183 @@ impl<'a> ByteReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    type Key = (String, i32);
+
+    /// A scripted consumer for the batched watermark path: per-pass offsets
+    /// (a partition missing from a map comes back unresolved, as a leaderless
+    /// or errored partition does), an optional whole-batch failure, and the
+    /// per-partition fallback — with call counters.
+    #[derive(Default)]
+    struct MockSource {
+        lows: HashMap<Key, i64>,
+        highs: HashMap<Key, i64>,
+        fail_batch: bool,
+        fallback: HashMap<Key, (i64, i64)>,
+        batch_calls: AtomicUsize,
+        fallback_calls: Mutex<Vec<Key>>,
+    }
+
+    impl WatermarkSource for MockSource {
+        fn offsets_for(
+            &self,
+            tpl: TopicPartitionList,
+        ) -> std::result::Result<TopicPartitionList, KafkaError> {
+            self.batch_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_batch {
+                return Err(KafkaError::MetadataFetch(RDKafkaErrorCode::RequestTimedOut));
+            }
+            let elems = tpl.elements();
+            let src = match elems.first().map(|e| e.offset()) {
+                Some(Offset::Beginning) => &self.lows,
+                Some(Offset::End) => &self.highs,
+                other => panic!("unexpected query offset {other:?}"),
+            };
+            let mut out = TopicPartitionList::new();
+            for e in elems {
+                let off = src
+                    .get(&(e.topic().to_string(), e.partition()))
+                    .map_or(Offset::Invalid, |&o| Offset::from_raw(o));
+                out.add_partition_offset(e.topic(), e.partition(), off)
+                    .unwrap();
+            }
+            Ok(out)
+        }
+
+        fn watermarks(
+            &self,
+            topic: &str,
+            partition: i32,
+        ) -> std::result::Result<(i64, i64), KafkaError> {
+            let k = (topic.to_string(), partition);
+            self.fallback_calls.lock().unwrap().push(k.clone());
+            self.fallback
+                .get(&k)
+                .copied()
+                .ok_or(KafkaError::MetadataFetch(
+                    RDKafkaErrorCode::LeaderNotAvailable,
+                ))
+        }
+    }
+
+    fn k(t: &str, p: i32) -> Key {
+        (t.to_string(), p)
+    }
+
+    #[test]
+    fn batch_watermarks_resolves_everything_in_two_passes() {
+        let mut m = MockSource::default();
+        let parts: Vec<(&str, i32)> = (0..600)
+            .map(|p| (if p % 2 == 0 { "a" } else { "b" }, p))
+            .collect();
+        for &(t, p) in &parts {
+            m.lows.insert(k(t, p), i64::from(p));
+            m.highs.insert(k(t, p), i64::from(p) * 10 + 5);
+        }
+        let wm = batch_watermarks_with(&m, &parts);
+        assert_eq!(wm.len(), 600);
+        assert_eq!(wm[&k("a", 4)], (4, 45));
+        assert_eq!(wm[&k("b", 599)], (599, 5995));
+        // ONE earliest + ONE latest pass for 600 partitions, no per-partition fallback.
+        assert_eq!(m.batch_calls.load(Ordering::SeqCst), 2);
+        assert!(m.fallback_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn batch_watermarks_falls_back_only_for_unresolved_partitions() {
+        let mut m = MockSource::default();
+        for p in 0..4 {
+            m.lows.insert(k("t", p), 0);
+            m.highs.insert(k("t", p), 100);
+        }
+        // P4: latest unresolved in the batch; P5: earliest unresolved; P6: both
+        // unresolved AND unreachable in the fallback (left out = "unreachable").
+        m.lows.insert(k("t", 4), 1);
+        m.highs.insert(k("t", 5), 9);
+        m.fallback.insert(k("t", 4), (1, 44));
+        m.fallback.insert(k("t", 5), (2, 55));
+        let parts: Vec<(&str, i32)> = (0..7).map(|p| ("t", p)).collect();
+        let wm = batch_watermarks_with(&m, &parts);
+        assert_eq!(wm[&k("t", 0)], (0, 100));
+        assert_eq!(
+            wm[&k("t", 4)],
+            (1, 44),
+            "a half-resolved partition takes the fallback pair"
+        );
+        assert_eq!(wm[&k("t", 5)], (2, 55));
+        assert!(
+            !wm.contains_key(&k("t", 6)),
+            "unreachable partitions are left out"
+        );
+        let mut asked = m.fallback_calls.lock().unwrap().clone();
+        asked.sort();
+        assert_eq!(asked, vec![k("t", 4), k("t", 5), k("t", 6)]);
+    }
+
+    #[test]
+    fn batch_watermarks_whole_batch_failure_uses_the_fanout() {
+        let mut m = MockSource {
+            fail_batch: true,
+            ..MockSource::default()
+        };
+        let parts: Vec<(&str, i32)> = (0..40).map(|p| ("t", p)).collect();
+        for p in 0..40 {
+            m.fallback.insert(k("t", p), (0, i64::from(p)));
+        }
+        let wm = batch_watermarks_with(&m, &parts);
+        assert_eq!(wm.len(), 40);
+        assert_eq!(wm[&k("t", 39)], (0, 39));
+        assert_eq!(m.fallback_calls.lock().unwrap().len(), 40);
+        // Negative "offsets" (the -1/-2 sentinels echoed back) never count as resolved.
+        let mut m = MockSource::default();
+        m.lows.insert(k("t", 0), -2);
+        m.highs.insert(k("t", 0), -1);
+        let wm = batch_watermarks_with(&m, &[("t", 0)]);
+        assert!(wm.is_empty());
+        assert_eq!(m.fallback_calls.lock().unwrap().len(), 1);
+        // Nothing asked, nothing sent.
+        let m = MockSource::default();
+        assert!(batch_watermarks_with(&m, &[]).is_empty());
+        assert_eq!(m.batch_calls.load(Ordering::SeqCst), 0);
+    }
+
+    fn offline_client() -> KafkaClient {
+        KafkaClient::connect(&KafkaConnSpec {
+            bootstrap_servers: "127.0.0.1:1".into(),
+            security_protocol: SecurityProtocol::Plaintext,
+            sasl_mechanism: None,
+            sasl_username: None,
+            sasl_password: None,
+            tls_skip_verify: false,
+        })
+        .expect("librdkafka clients are created lazily (no broker needed)")
+    }
+
+    #[test]
+    fn group_describe_reuses_one_consumer_per_group() {
+        let client = offline_client();
+        let ptr = |c: &BaseConsumer<QuietContext>| Ok(c.client().native_ptr() as usize);
+        let first = client.with_group_consumer("orders", ptr).unwrap();
+        let again = client.with_group_consumer("orders", ptr).unwrap();
+        assert_eq!(first, again, "describe → reset → describe reuse one client");
+        // An error inside still returns the client to the pool.
+        let err: Result<()> =
+            client.with_group_consumer("orders", |_| Err(Error::Invalid("boom".into())));
+        assert!(err.is_err());
+        assert_eq!(client.with_group_consumer("orders", ptr).unwrap(), first);
+        // Other groups get their own; the pool stays bounded (LRU).
+        for g in ["a", "b", "c", "d"] {
+            client.with_group_consumer(g, ptr).unwrap();
+        }
+        let pool = client.group_pool.lock().unwrap();
+        assert_eq!(pool.len(), GROUP_POOL_MAX);
+        assert!(
+            !pool.iter().any(|(g, _)| g == "orders"),
+            "least recently used is evicted"
+        );
+    }
 
     #[test]
     fn latest_split_water_fills() {

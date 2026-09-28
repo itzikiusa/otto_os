@@ -26,16 +26,46 @@ export const FLOW_LOW = 256 * 1024;
  *  `resume` can never freeze a pane); a slow drain keeps it paused. */
 export const FLOW_PAUSE_KEEPALIVE_MS = 1000;
 
+/** Credit window offered to the daemon (`credit` frame): it sends at most this
+ *  many binary bytes we have not acknowledged, so the live-output backlog is
+ *  bounded by the WINDOW, not by how fast the producer outruns a pause round
+ *  trip (pause-mode peaked at 3–14 MB against a 2 MB watermark). 1 MB is
+ *  ~130–190 ms of WebKit parsing — far above the ack round trip, so
+ *  throughput is unchanged; the daemon holds one more window server-side
+ *  before it skips to a snapshot, i.e. 2 MB lossless like pause mode. */
+export const CREDIT_WINDOW = 1024 * 1024;
+/** Acknowledge consumed bytes in steps this big (one write slice; smaller if
+ *  the daemon grants a window under 256 KB — the contract wants ≤ window/4).
+ *  The daemon only stalls at a full window and resyncs at ≤ window/4, so an
+ *  unreported remainder < a step never blocks output — no timer ack needed. */
+export const CREDIT_ACK_STEP = 64 * 1024;
+
 /**
  * xterm's documented watermark pattern: `add(n)` when bytes are handed to
  * term.write(), `done(n)` from its parse callback. Sends `pause` above HIGH
  * and `resume` below LOW through `send`. `pending` is the local xterm backlog
  * itself, so it deliberately survives reconnects; `paused` is per socket
  * (`resetStream()` on every new connection — a fresh stream starts unpaused).
+ *
+ * Credit mode (docs/contracts/ws.md §1): `offer()` asks the daemon for a
+ * credit window; once it answers (`granted()`), binary frames received on
+ * that stream are tagged with `credit` (pass it as `stream` to `done`) and
+ * acknowledged every CREDIT_ACK_STEP consumed (parsed or dropped), and the
+ * pause/resume watermarks switch off. A daemon that never answers (older
+ * build) leaves the client on the pause/resume fallback.
  */
 export class TermFlow {
   pending = 0;
   paused = false;
+  /** Non-zero while the current socket runs credit flow control: the tag of
+   *  its stream (a new id per grant, so bytes from an old socket never ack). */
+  credit = 0;
+  private streams = 0;
+  /** Credited bytes consumed on the current stream / last value acked. */
+  private consumed = 0;
+  private reported = 0;
+  /** Ack step for the granted window (≤ window/4, per the contract). */
+  private ackStep = CREDIT_ACK_STEP;
   private lastPauseAt = 0;
   private readonly send: (frame: WsTermFlowFrame) => void;
   private readonly now: () => number;
@@ -45,9 +75,31 @@ export class TermFlow {
     this.now = now;
   }
 
+  /** Ask the daemon for credit flow control (first frame on a new socket). */
+  offer(): void {
+    this.send({ type: 'credit', window: CREDIT_WINDOW });
+  }
+
+  /** The daemon's `credit` reply (its granted `window`): count this stream's
+   *  binary frames from here on (it counts from the same point — frames are
+   *  ordered). */
+  granted(window = CREDIT_WINDOW): void {
+    this.credit = ++this.streams;
+    this.ackStep = Math.max(1, Math.min(CREDIT_ACK_STEP, Math.floor(window / 4)));
+    this.consumed = 0;
+    this.reported = 0;
+    if (this.paused) {
+      // A legacy pause from before the grant would otherwise sit until the
+      // daemon's 2 s auto-resume.
+      this.paused = false;
+      this.send({ type: 'resume' });
+    }
+  }
+
   /** Count bytes handed to the emulator. `canSend` = the socket is open. */
   add(n: number, canSend: boolean): void {
     this.pending += n;
+    if (this.credit) return; // the daemon bounds the stream itself
     if (this.pending > FLOW_HIGH && !this.paused && canSend) {
       this.paused = true;
       this.lastPauseAt = this.now();
@@ -55,9 +107,19 @@ export class TermFlow {
     }
   }
 
-  /** Un-count bytes the emulator finished parsing (or dropped). */
-  done(n: number): void {
+  /** Un-count bytes the emulator finished parsing (or dropped). `stream` =
+   *  the `credit` tag the bytes arrived under (0 = not credited). */
+  done(n: number, stream = 0): void {
     this.pending = Math.max(0, this.pending - n);
+    if (this.credit) {
+      if (stream !== this.credit) return;
+      this.consumed += n;
+      if (this.consumed - this.reported >= this.ackStep) {
+        this.reported = this.consumed;
+        this.send({ type: 'ack', bytes: this.consumed });
+      }
+      return;
+    }
     if (!this.paused) return;
     if (this.pending < FLOW_LOW) {
       this.paused = false;
@@ -68,9 +130,10 @@ export class TermFlow {
     }
   }
 
-  /** A new socket: its server stream starts unpaused. */
+  /** A new socket: its server stream starts unpaused and uncredited. */
   resetStream(): void {
     this.paused = false;
+    this.credit = 0;
   }
 }
 
@@ -91,6 +154,8 @@ interface Pending {
   bytes: Uint8Array;
   /** Runs once this frame's LAST byte has been parsed. */
   onParsed?: () => void;
+  /** `TermFlow.credit` when the frame arrived (0 = not credited). */
+  stream: number;
 }
 
 /**
@@ -127,15 +192,17 @@ export class WriteQueue {
     return this.queued + this.inflight;
   }
 
-  /** Enqueue one received frame. `onParsed` fires after its last byte parses. */
-  push(bytes: Uint8Array, onParsed?: () => void): void {
+  /** Enqueue one received frame. `onParsed` fires after its last byte parses.
+   *  `stream` = the credit tag of a live binary frame (`flow.credit`); leave
+   *  0 for snapshots and local writes, which the daemon does not count. */
+  push(bytes: Uint8Array, onParsed?: () => void, stream = 0): void {
     const n = bytes.byteLength;
     if (n === 0) {
       onParsed?.();
       return;
     }
     this.flow.add(n, this.canSend());
-    this.q.push({ bytes, onParsed });
+    this.q.push({ bytes, onParsed, stream });
     this.queued += n;
     this.pump();
   }
@@ -155,6 +222,7 @@ export class WriteQueue {
         head.bytes = head.bytes.subarray(WRITE_SLICE);
       }
       const n = slice.byteLength;
+      const stream = head.stream;
       this.queued -= n;
       this.inflight += n;
       let settled = false;
@@ -162,7 +230,7 @@ export class WriteQueue {
         if (settled) return;
         settled = true;
         this.inflight = Math.max(0, this.inflight - n);
-        this.flow.done(n);
+        this.flow.done(n, stream);
         hook?.();
         this.pump();
       };
@@ -190,13 +258,20 @@ export class WriteQueue {
     return true;
   }
 
-  /** Discard everything not yet handed to xterm. Returns the bytes dropped. */
+  /** Discard everything not yet handed to xterm. Returns the bytes dropped.
+   *  Dropped credited bytes count as consumed (acked) — the daemon only needs
+   *  to know they no longer occupy the window. */
   dropQueued(): number {
     const n = this.queued;
     if (n === 0) return 0;
+    const dropped = this.q;
     this.q = [];
     this.queued = 0;
-    this.flow.done(n);
+    // One `done` per stream (normally one), so a pause-mode drop still sends
+    // a single resume and never an interleaved keep-alive.
+    const byStream = new Map<number, number>();
+    for (const p of dropped) byStream.set(p.stream, (byStream.get(p.stream) ?? 0) + p.bytes.byteLength);
+    for (const [stream, bytes] of byStream) this.flow.done(bytes, stream);
     return n;
   }
 }

@@ -699,7 +699,11 @@ async fn sftp_list<S: ConnectionsCtx>(
         Some(p) => p.to_string(),
         None => sftp.pwd().await.map_err(ApiErr)?,
     };
-    let entries = sftp.list(&path).await.map_err(ApiErr)?;
+    // Capped daemon-side (SC-04): a 100k-entry directory ships 20k + a flag.
+    let (entries, truncated) = sftp
+        .list_capped(&path, otto_ssh::sftp::MAX_LIST_ENTRIES)
+        .await
+        .map_err(ApiErr)?;
     ctx.connections()
         .authorize(&id, &user.id, "sftp_read")
         .await?;
@@ -716,6 +720,7 @@ async fn sftp_list<S: ConnectionsCtx>(
                 symlink_target: e.symlink_target,
             })
             .collect(),
+        truncated,
     }))
 }
 

@@ -13,7 +13,9 @@
 //! at the call site that wires in the cache; plain [`GrantsRepo::new`] installs
 //! a no-op invalidator and keeps the existing behaviour.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use otto_core::auth::GrantsInvalidator;
 use otto_core::domain::{Capability, Feature, User, WorkspaceRole};
@@ -46,11 +48,122 @@ impl GrantsInvalidator for NoopInvalidator {
     fn invalidate_user(&self, _user_id: &str) {}
 }
 
+/// How long a user's cached grant rows answer the per-request guard (SG-11).
+/// The same window as `otto-rbac`'s `AUTH_CACHE_TTL`: every write path through
+/// [`GrantsRepo`] evicts the user at once, so the TTL only bounds writes made
+/// behind the repo's back (a state restore, a raw SQL edit).
+pub const GRANT_CACHE_TTL: Duration = Duration::from_secs(10);
+
+/// One user's grant rows, as stored (strings parsed on lookup, so a row naming
+/// a feature this build doesn't know never poisons the rest).
+struct CachedGrants {
+    at: Instant,
+    features: HashMap<String, String>,
+    plugins: Option<HashMap<String, String>>,
+}
+
+/// Shared per-user grant cache for the non-root request path (the feature
+/// guard ran 1–2 uncached `user_feature_grants` lookups per request). A user's
+/// features load in ONE query and answer every feature for [`GRANT_CACHE_TTL`].
+/// Cheap to clone (an `Arc`); `otto-rbac`'s `AuthCache` owns the daemon's copy
+/// and clears it from `invalidate_user`, so a grant change is visible at once.
+#[derive(Clone, Default)]
+pub struct GrantCache {
+    inner: Arc<Mutex<HashMap<String, CachedGrants>>>,
+    /// Row loads that hit the DB (tests assert hits don't).
+    loads: Arc<std::sync::atomic::AtomicU64>,
+    /// Bumped by every invalidation: a fill that STARTED before one (it may
+    /// have read the pre-change rows) is not stored.
+    gen: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl GrantCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Drop everything cached for `user_id`.
+    pub fn invalidate_user(&self, user_id: &str) {
+        self.gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut m) = self.inner.lock() {
+            m.remove(user_id);
+        }
+    }
+
+    /// Drop the whole cache (a state restore replaced the table).
+    pub fn clear(&self) {
+        self.gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut m) = self.inner.lock() {
+            m.clear();
+        }
+    }
+
+    /// The invalidation generation a fill starts from (see `store`).
+    fn generation(&self) -> u64 {
+        self.gen.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// DB loads so far (feature + plugin fills).
+    pub fn loads(&self) -> u64 {
+        self.loads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn lookup(&self, user_id: &str, key: &str, plugin: bool) -> Option<Option<String>> {
+        let mut m = self.inner.lock().ok()?;
+        let hit = m.get(user_id)?;
+        if hit.at.elapsed() > GRANT_CACHE_TTL {
+            m.remove(user_id);
+            return None;
+        }
+        let rows = if plugin {
+            hit.plugins.as_ref()?
+        } else {
+            &hit.features
+        };
+        Some(rows.get(key).cloned())
+    }
+
+    /// Replace `user_id`'s entry (a whole fill: both row sets share one age).
+    fn store(
+        &self,
+        user_id: &str,
+        started: u64,
+        features: HashMap<String, String>,
+        plugins: Option<HashMap<String, String>>,
+    ) {
+        self.loads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let Ok(mut m) = self.inner.lock() else { return };
+        // An invalidation landed while this fill was reading: its rows may
+        // predate the change — answer this request with them, cache nothing.
+        if self.generation() != started {
+            return;
+        }
+        // Bound: a daemon has a handful of users; never let a flood of ids grow it.
+        if m.len() >= 1024 && !m.contains_key(user_id) {
+            m.retain(|_, v| v.at.elapsed() <= GRANT_CACHE_TTL);
+            if m.len() >= 1024 {
+                m.clear();
+            }
+        }
+        m.insert(
+            user_id.to_string(),
+            CachedGrants {
+                at: Instant::now(),
+                features,
+                plugins,
+            },
+        );
+    }
+}
+
 #[derive(Clone)]
 pub struct GrantsRepo {
     pool: SqlitePool,
     /// Called in `set_grants` after committing. The default is a no-op.
     invalidator: Arc<dyn GrantsInvalidator>,
+    /// Optional read-through cache for `capability_of[_plugin]` (SG-11).
+    cache: Option<GrantCache>,
 }
 
 impl GrantsRepo {
@@ -61,6 +174,7 @@ impl GrantsRepo {
         Self {
             pool,
             invalidator: Arc::new(NoopInvalidator),
+            cache: None,
         }
     }
 
@@ -71,6 +185,62 @@ impl GrantsRepo {
         Self {
             pool,
             invalidator: inv,
+            cache: None,
+        }
+    }
+
+    /// Answer `capability_of[_plugin]` through `cache` (read-through, TTL
+    /// [`GRANT_CACHE_TTL`]); `set_grants` / `set_plugin_grants` evict it.
+    pub fn with_cache(mut self, cache: GrantCache) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
+    /// Fill the cache with every feature grant row of `user_id` (one query).
+    async fn load_features(&self, user_id: &str) -> Result<HashMap<String, String>> {
+        use sqlx::Row;
+        let rows =
+            sqlx::query("SELECT feature, capability FROM user_feature_grants WHERE user_id = ?")
+                .bind(user_id)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| Error::Internal(format!("capability_of: {e}")))?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (
+                    r.get::<String, _>("feature"),
+                    r.get::<String, _>("capability"),
+                )
+            })
+            .collect())
+    }
+
+    async fn load_plugins(&self, user_id: &str) -> Result<HashMap<String, String>> {
+        use sqlx::Row;
+        let rows = sqlx::query(
+            "SELECT plugin_key, capability FROM plugin_feature_grants WHERE user_id = ?",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("capability_of_plugin: {e}")))?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (
+                    r.get::<String, _>("plugin_key"),
+                    r.get::<String, _>("capability"),
+                )
+            })
+            .collect())
+    }
+
+    fn parse_cap(stored: Option<String>) -> Result<Capability> {
+        match stored {
+            None => Ok(Capability::None),
+            Some(s) => Capability::parse(&s)
+                .ok_or_else(|| Error::Internal(format!("bad capability value '{s}'"))),
         }
     }
 
@@ -81,6 +251,16 @@ impl GrantsRepo {
     pub async fn capability_of(&self, user: &User, feature: Feature) -> Result<Capability> {
         if user.is_root {
             return Ok(Capability::Admin);
+        }
+        if let Some(cache) = &self.cache {
+            if let Some(hit) = cache.lookup(&user.id, feature.as_str(), false) {
+                return Self::parse_cap(hit);
+            }
+            let started = cache.generation();
+            let rows = self.load_features(&user.id).await?;
+            let stored = rows.get(feature.as_str()).cloned();
+            cache.store(&user.id, started, rows, None);
+            return Self::parse_cap(stored);
         }
         let row = sqlx::query(
             "SELECT capability FROM user_feature_grants WHERE user_id = ? AND feature = ?",
@@ -198,6 +378,9 @@ impl GrantsRepo {
         // Evict after commit: the new grants are now durable. Any auth context
         // cached for this user may carry stale capability information; flush it.
         self.invalidator.invalidate_user(user_id);
+        if let Some(cache) = &self.cache {
+            cache.invalidate_user(user_id);
+        }
 
         Ok(())
     }
@@ -214,6 +397,18 @@ impl GrantsRepo {
     pub async fn capability_of_plugin(&self, user: &User, slug: &str) -> Result<Capability> {
         if user.is_root {
             return Ok(Capability::Admin);
+        }
+        if let Some(cache) = &self.cache {
+            if let Some(hit) = cache.lookup(&user.id, slug, true) {
+                return Self::parse_cap(hit);
+            }
+            let started = cache.generation();
+            let plugins = self.load_plugins(&user.id).await?;
+            let stored = plugins.get(slug).cloned();
+            // Plugins ride on a feature fill: load both so the entry is whole.
+            let features = self.load_features(&user.id).await?;
+            cache.store(&user.id, started, features, Some(plugins));
+            return Self::parse_cap(stored);
         }
         let row = sqlx::query(
             "SELECT capability FROM plugin_feature_grants WHERE user_id = ? AND plugin_key = ?",
@@ -296,6 +491,9 @@ impl GrantsRepo {
             .map_err(|e| Error::Internal(format!("commit tx: {e}")))?;
 
         self.invalidator.invalidate_user(user_id);
+        if let Some(cache) = &self.cache {
+            cache.invalidate_user(user_id);
+        }
 
         Ok(())
     }
@@ -451,5 +649,117 @@ mod tests {
         // Sorted by feature text: "connections" < "database"
         assert_eq!(grants[0], (Feature::Connections, Capability::Edit));
         assert_eq!(grants[1], (Feature::Database, Capability::View));
+    }
+
+    // ── SG-11 grant cache ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn cached_repo_answers_every_feature_from_one_load() {
+        let pool = mem_pool().await;
+        let user = seed_user(&pool, "cached", false).await;
+        let cache = GrantCache::new();
+        let repo = GrantsRepo::new(pool.clone()).with_cache(cache.clone());
+        repo.set_grants(&user.id, &[(Feature::Git, Capability::Edit)])
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.capability_of(&user, Feature::Git).await.unwrap(),
+            Capability::Edit
+        );
+        assert_eq!(
+            repo.capability_of(&user, Feature::Agents).await.unwrap(),
+            Capability::None
+        );
+        assert_eq!(
+            repo.capability_of(&user, Feature::Git).await.unwrap(),
+            Capability::Edit
+        );
+        assert_eq!(cache.loads(), 1, "one row load answers every feature");
+    }
+
+    #[tokio::test]
+    async fn set_grants_evicts_so_a_revocation_is_immediate() {
+        let pool = mem_pool().await;
+        let user = seed_user(&pool, "revoked", false).await;
+        let cache = GrantCache::new();
+        let repo = GrantsRepo::new(pool.clone()).with_cache(cache.clone());
+        repo.set_grants(&user.id, &[(Feature::Git, Capability::Admin)])
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.capability_of(&user, Feature::Git).await.unwrap(),
+            Capability::Admin
+        );
+        // A DIFFERENT repo handle sharing the cache (the grants route builds its
+        // own) revokes: the guard's next lookup must see it, not the cache.
+        let admin = GrantsRepo::new(pool.clone()).with_cache(cache.clone());
+        admin.set_grants(&user.id, &[]).await.unwrap();
+        assert_eq!(
+            repo.capability_of(&user, Feature::Git).await.unwrap(),
+            Capability::None
+        );
+        admin
+            .set_plugin_grants(&user.id, &[("deploy".into(), Capability::View)])
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.capability_of_plugin(&user, "deploy").await.unwrap(),
+            Capability::View
+        );
+        admin.set_plugin_grants(&user.id, &[]).await.unwrap();
+        assert_eq!(
+            repo.capability_of_plugin(&user, "deploy").await.unwrap(),
+            Capability::None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fill_racing_an_invalidation_is_not_cached() {
+        let pool = mem_pool().await;
+        let user = seed_user(&pool, "racer", false).await;
+        let cache = GrantCache::new();
+        let started = cache.generation();
+        cache.invalidate_user(&user.id); // a grant change lands mid-fill
+        cache.store(
+            &user.id,
+            started,
+            HashMap::from([("git".to_string(), "admin".to_string())]),
+            None,
+        );
+        assert!(
+            cache.lookup(&user.id, "git", false).is_none(),
+            "stale fill dropped"
+        );
+        cache.store(&user.id, cache.generation(), HashMap::new(), None);
+        assert_eq!(
+            cache.lookup(&user.id, "git", false),
+            Some(None),
+            "a clean fill is kept"
+        );
+        cache.clear();
+        assert!(cache.lookup(&user.id, "git", false).is_none());
+    }
+
+    #[tokio::test]
+    async fn root_never_touches_the_cache_and_uncached_repo_is_unchanged() {
+        let pool = mem_pool().await;
+        let root = seed_user(&pool, "root2", true).await;
+        let cache = GrantCache::new();
+        let repo = GrantsRepo::new(pool.clone()).with_cache(cache.clone());
+        assert_eq!(
+            repo.capability_of(&root, Feature::Git).await.unwrap(),
+            Capability::Admin
+        );
+        assert_eq!(cache.loads(), 0);
+        let plain = GrantsRepo::new(pool.clone());
+        let user = seed_user(&pool, "plain", false).await;
+        plain
+            .set_grants(&user.id, &[(Feature::Git, Capability::View)])
+            .await
+            .unwrap();
+        assert_eq!(
+            plain.capability_of(&user, Feature::Git).await.unwrap(),
+            Capability::View
+        );
     }
 }

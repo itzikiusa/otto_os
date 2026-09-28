@@ -238,7 +238,9 @@
     untrack(() => (selected = rows.length > 0 ? 0 : -1));
   });
   $effect(() => {
-    const n = rows.length;
+    // Closed → don't keep the command ranking alive just to clamp a selection
+    // nobody sees; opening re-runs this and lands on row 0.
+    const n = showPanel ? rows.length : 0;
     untrack(() => {
       if (selected >= n) selected = n - 1;
       else if (selected < 0 && n > 0) selected = 0;
@@ -253,11 +255,13 @@
     if (thread.length > 0) return 'thread';
     return inApp && rows.length > 0 ? 'recent' : null;
   });
-  // NB: short-circuiting this (and the clamp effect above) while the bar is
-  // closed left the ranking serving a stale command list on open (⌘K "go to
-  // vault" lost every Go-to entry, desktop-floating-bar e2e) — the closed-bar
-  // ranking cost is cut at the source instead (registry churn, frecency memo).
-  const showPanel = $derived(view !== null && (inApp ? open : true));
+  // A closed in-app bar short-circuits BEFORE `view` — reading it would rank
+  // every command (plus a frecency lookup) on each registry change while
+  // docked (SF-06). This was once reverted because ⌘K then showed a list
+  // without the Go-to entries; the real cause was the registry rebuilding its
+  // map from a teardown-time `$state` read (commands.svelte.ts,
+  // unit/commandRegistry.test.ts), which this gate merely exposed.
+  const showPanel = $derived(inApp && !open ? false : view !== null);
   const listOpen = $derived(showPanel && (view === 'results' || view === 'recent'));
   const activeId = $derived(listOpen && selected >= 0 ? `fb-opt-${selected}` : undefined);
 

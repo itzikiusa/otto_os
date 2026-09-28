@@ -1,7 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import type { WsTermFlowFrame } from '../src/lib/api/types.ts';
 import {
+  CREDIT_ACK_STEP,
+  CREDIT_WINDOW,
   EMBED_SCROLLBACK,
   FLOW_HIGH,
   FLOW_LOW,
@@ -203,4 +206,138 @@ test('scrollback depths: 2k default for embeds, 10k only where a primary pane as
   const tiled = src('../src/modules/agents/TiledView.svelte');
   assert.match(tiled, /const TILE_SCROLLBACK = EMBED_SCROLLBACK;/);
   assert.match(tiled, /scrollback=\{TILE_SCROLLBACK\}/);
+});
+
+// ── Credit flow control (docs/contracts/ws.md §1 "Credit") ────────────────
+
+function creditHarness() {
+  const sent: WsTermFlowFrame[] = [];
+  const flow = new TermFlow((f) => sent.push(f), () => 0);
+  const inside: { n: number; done: () => void }[] = [];
+  const q = new WriteQueue((bytes, done) => inside.push({ n: bytes.byteLength, done }), flow);
+  const parse = (): number => {
+    const next = inside.shift();
+    next?.done();
+    return next?.n ?? 0;
+  };
+  const acks = () => sent.filter((f) => f.type === 'ack').map((f) => (f as { bytes: number }).bytes);
+  return { flow, q, sent, parse, acks, inside };
+}
+
+test('credit: offer, grant, then no pause frames however big the backlog', () => {
+  const { flow, q, sent } = creditHarness();
+  flow.offer();
+  assert.deepEqual(sent, [{ type: 'credit', window: CREDIT_WINDOW }]);
+  flow.granted();
+  assert.ok(flow.credit > 0);
+  for (let i = 0; i < 64; i++) q.push(new Uint8Array(64 * 1024), undefined, flow.credit);
+  assert.ok(flow.pending > FLOW_HIGH);
+  assert.deepEqual(sent.map((f) => f.type), ['credit'], 'the daemon bounds the stream; no pause/resume');
+});
+
+test('credit: acks are cumulative, every CREDIT_ACK_STEP consumed, credited bytes only', () => {
+  const { flow, q, parse, acks } = creditHarness();
+  flow.granted();
+  // Small echo frames: nothing until a whole step was consumed (the daemon
+  // stalls only at a full window, so an unreported remainder never blocks).
+  for (let i = 0; i < 100; i++) {
+    q.push(new Uint8Array(100), undefined, flow.credit);
+    parse();
+  }
+  assert.deepEqual(acks(), []);
+  // Snapshots / local writes (stream 0) are never acked.
+  q.push(new Uint8Array(3 * CREDIT_ACK_STEP));
+  while (parse());
+  assert.deepEqual(acks(), []);
+  q.push(new Uint8Array(CREDIT_ACK_STEP), undefined, flow.credit);
+  while (parse());
+  assert.deepEqual(acks(), [100 * 100 + CREDIT_ACK_STEP]);
+  q.push(new Uint8Array(2 * CREDIT_ACK_STEP), undefined, flow.credit);
+  while (parse());
+  assert.deepEqual(acks(), [10_000 + CREDIT_ACK_STEP, 10_000 + 2 * CREDIT_ACK_STEP, 10_000 + 3 * CREDIT_ACK_STEP]);
+  assert.equal(flow.pending, 0);
+});
+
+test('credit: a small granted window acks every window/4 (never waits on a remainder)', () => {
+  const { flow, q, parse, acks } = creditHarness();
+  flow.granted(64 * 1024);
+  q.push(new Uint8Array(40 * 1024), undefined, flow.credit);
+  while (parse());
+  assert.deepEqual(acks(), [40 * 1024], 'step is 16 KB for a 64 KB window');
+});
+
+test('credit: dropped bytes are acked (resync on input sends resync first)', () => {
+  const log: string[] = [];
+  const flow = new TermFlow((f) => log.push(f.type === 'ack' ? `ack:${f.bytes}` : f.type), () => 0);
+  const q = new WriteQueue(() => {}, flow); // xterm never finishes: the queue builds
+  flow.granted();
+  for (let i = 0; i < 12; i++) q.push(new Uint8Array(64 * 1024), undefined, flow.credit);
+  const queued = q.queued;
+  assert.ok(queued > RESYNC_ON_INPUT);
+  assert.equal(q.resyncOnInput(() => log.push('resync')), true);
+  assert.deepEqual(log, ['resync', `ack:${queued}`], 'resync first; the whole dropped queue is released at once');
+  assert.equal(flow.pending, q.inflight);
+});
+
+test('credit: a new socket reverts to pause mode and bytes from the old stream never ack', () => {
+  const { flow, q, parse, acks, sent } = creditHarness();
+  flow.granted();
+  const old = flow.credit;
+  q.push(new Uint8Array(2 * WRITE_SLICE), undefined, old);
+  flow.resetStream(); // reconnect: still inside xterm, old tag
+  assert.equal(flow.credit, 0);
+  while (parse());
+  assert.deepEqual(acks(), []);
+  // Uncredited again: the watermark fallback is live (older daemon).
+  flow.add(FLOW_HIGH + 1, true);
+  assert.equal(sent.at(-1)?.type, 'pause');
+  // A grant that lands while pause-mode paused un-pauses the daemon too.
+  flow.granted();
+  assert.notEqual(flow.credit, old, 'every grant is a new stream tag');
+  assert.equal(flow.paused, false);
+  assert.equal(sent.at(-1)?.type, 'resume');
+});
+
+/** The daemon's side, CreditGate-style: never more than `window` bytes
+ *  unacknowledged. Whatever the producer's rate, the client backlog stays
+ *  ≤ window and every byte arrives in order. */
+test('credit: client backlog is bounded by the window independent of send rate', () => {
+  for (const burst of [1, 2, 8, 64]) {
+    const sent: WsTermFlowFrame[] = [];
+    let acked = 0;
+    const flow = new TermFlow((f) => {
+      sent.push(f);
+      if (f.type === 'ack') acked = f.bytes;
+    }, () => 0);
+    const inside: { bytes: Uint8Array; done: () => void }[] = [];
+    const q = new WriteQueue((bytes, done) => inside.push({ bytes, done }), flow);
+    flow.granted();
+    const total = 8 * 1024 * 1024;
+    let produced = 0;
+    let serverSent = 0;
+    let got = 0;
+    let peak = 0;
+    let order = 0;
+    let inOrder = true;
+    while (got < total) {
+      // Producer: `burst` 64 KB frames per parse step, as far as credit allows.
+      for (let i = 0; i < burst && produced < total; i++) produced += 64 * 1024;
+      while (serverSent < produced && serverSent - acked < CREDIT_WINDOW) {
+        const n = Math.min(produced - serverSent, CREDIT_WINDOW - (serverSent - acked));
+        const frame = new Uint8Array(n).map((_, k) => (serverSent + k) % 251);
+        serverSent += n;
+        q.push(frame, undefined, flow.credit);
+      }
+      peak = Math.max(peak, flow.pending);
+      const next = inside.shift();
+      if (next) {
+        for (const b of next.bytes) if (b !== order++ % 251) inOrder = false;
+        got += next.bytes.byteLength;
+        next.done();
+      }
+    }
+    assert.ok(peak <= CREDIT_WINDOW, `burst ${burst}: peak ${peak}`);
+    assert.ok(inOrder, `burst ${burst}: in order`);
+    assert.ok(!sent.some((f) => f.type === 'pause'), `burst ${burst}: no pause`);
+  }
 });

@@ -44,6 +44,29 @@ pub const MAX_DETAIL_CONTENT: usize = 256 * 1024;
 pub const MAX_THUMB_BYTES: usize = 2 * 1024 * 1024;
 /// Render-subgraph bound for cycle / depth checks.
 const ADJACENCY_CAP: usize = 2_000;
+/// Payloads at or above this size are hashed, validated, extracted and diffed
+/// on the blocking pool (D10: sha256 + JSON parse + extraction of a 4 MB blob
+/// stalled a runtime worker for tens of ms per save).
+const OFF_RUNTIME_BYTES: usize = 256 * 1024;
+
+/// Run `f` inline for small payloads, on the blocking pool for big ones.
+async fn cpu<T: Send + 'static>(big: bool, f: impl FnOnce() -> T + Send + 'static) -> Result<T> {
+    if !big {
+        return Ok(f());
+    }
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| Error::Internal(format!("design worker: {e}")))
+}
+
+/// [`extract::extract`], off the runtime when the payload is big.
+async fn extract_async(format: &str, bytes: &[u8]) -> Result<extract::Extraction> {
+    if bytes.len() < OFF_RUNTIME_BYTES {
+        return Ok(extract::extract(format, bytes));
+    }
+    let (format, bytes) = (format.to_string(), bytes.to_vec());
+    cpu(true, move || extract::extract(&format, &bytes)).await
+}
 const MAX_TITLE_CHARS: usize = 300;
 const MAX_TAGS: usize = 32;
 const MAX_TAG_CHARS: usize = 64;
@@ -597,9 +620,19 @@ impl DesignService {
         let spec = format::spec(&artifact.format).ok_or_else(|| {
             Error::Invalid(format!("unknown design format {:?}", artifact.format))
         })?;
-        if opts.validate {
-            format::validate(spec, &bytes)?;
-        }
+        // Validate + hash once, off the runtime for big payloads (D10).
+        let validate = opts.validate;
+        let (bytes, sha) = cpu(
+            bytes.len() >= OFF_RUNTIME_BYTES,
+            move || -> Result<(Vec<u8>, String)> {
+                if validate {
+                    format::validate(spec, &bytes)?;
+                }
+                let sha = blobs::sha256_hex(&bytes);
+                Ok((bytes, sha))
+            },
+        )
+        .await??;
         if !one_of(VERSION_KINDS, &opts.kind) {
             return Err(Error::Invalid(format!(
                 "unknown version kind {:?}",
@@ -619,7 +652,6 @@ impl DesignService {
             Some(h) => self.store.get_version(h).await?,
             None => None,
         };
-        let sha = blobs::sha256_hex(&bytes);
         if !opts.force {
             if let Some(h) = &prev_head {
                 if h.blob_sha256 == sha {
@@ -641,7 +673,7 @@ impl DesignService {
             }
         }
 
-        let stored = self.blobs.put(&bytes).await?;
+        let stored = self.blobs.put_hashed(&bytes, sha).await?;
         let version = self
             .store
             .commit_version(
@@ -686,7 +718,15 @@ impl DesignService {
                 (Utc::now() - prev.created_at).num_seconds() <= EDIT_AFTER_DRAFT_WINDOW_SECS;
             if prev.author_kind == "agent" && opts.author.kind == "user" && fresh {
                 let old = self.blobs.get(&prev.blob_sha256).await.unwrap_or_default();
-                let summary = crate::diff::summarize(spec.encoding, &old, &bytes);
+                let big = old.len().max(bytes.len()) >= OFF_RUNTIME_BYTES;
+                let (enc, new) = (spec.encoding, if big { bytes.clone() } else { Vec::new() });
+                let summary = if big {
+                    cpu(true, move || crate::diff::summarize(enc, &old, &new))
+                        .await
+                        .unwrap_or_else(|_| json!({ "kind": "unavailable" }))
+                } else {
+                    crate::diff::summarize(enc, &old, &bytes)
+                };
                 let _ = self
                     .record_signal_row(NewSignal {
                         workspace_id: artifact.workspace_id.clone(),
@@ -791,7 +831,7 @@ impl DesignService {
         version: &DesignVersion,
         bytes: &[u8],
     ) -> Result<LinkReport> {
-        let ex = extract::extract(&a.format, bytes);
+        let ex = extract_async(&a.format, bytes).await?;
         let mut report = LinkReport::default();
         let mut links: Vec<NewLink> = Vec::new();
 
@@ -1013,10 +1053,24 @@ impl DesignService {
     /// Re-index search after a metadata change (re-extracts the head's text).
     pub async fn refresh_search(&self, a: &DesignArtifact) {
         let text = match self.head_content(a).await {
-            Ok((_, bytes)) => extract::extract(&a.format, &bytes).text,
+            Ok((_, bytes)) => extract_async(&a.format, &bytes)
+                .await
+                .map(|ex| ex.text)
+                .unwrap_or_default(),
             Err(_) => String::new(),
         };
         self.index_search(a, &text).await;
+    }
+
+    /// Re-index after a METADATA change (title, tags, status, project, story
+    /// link): the document did not change, so its already-indexed body is
+    /// reused instead of reading + re-extracting the head blob (D10). Falls
+    /// back to a full refresh when nothing is indexed yet.
+    pub async fn refresh_search_meta(&self, a: &DesignArtifact) {
+        match self.store.fts_body(&a.id).await {
+            Some(body) => self.index_search(a, &body).await,
+            None => self.refresh_search(a).await,
+        }
     }
 
     /// Tell every consumer following `target` (with `policy`, or any policy
@@ -1207,7 +1261,7 @@ impl DesignService {
                 })
                 .await;
         }
-        self.refresh_search(&updated).await;
+        self.refresh_search_meta(&updated).await;
         let change = if updated.status == "archived" && prev_status != "archived" {
             "archived"
         } else {
@@ -1339,7 +1393,7 @@ impl DesignService {
             reason: "created".into(),
         });
         if link.dst_kind == "story" {
-            self.refresh_search(src).await;
+            self.refresh_search_meta(src).await;
         }
         Ok(link)
     }
@@ -1367,7 +1421,7 @@ impl DesignService {
             reason: "deleted".into(),
         });
         if l.dst_kind == "story" {
-            self.refresh_search(src).await;
+            self.refresh_search_meta(src).await;
         }
         Ok(())
     }
@@ -1887,6 +1941,55 @@ mod tests {
             )
             .await;
         assert!(bad.is_err());
+    }
+
+    // D10: a big save hashes/validates/extracts off the runtime and still
+    // indexes; a metadata-only change re-indexes from the stored body, never
+    // re-reading (or re-extracting) the head blob.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn big_saves_index_and_meta_updates_reuse_the_indexed_body() {
+        let (s, _dir, _rx) = svc().await;
+        let body = format!(
+            "<h1>zebracorn</h1>{}",
+            "<p>filler text for a big frame</p>".repeat(12_000)
+        );
+        assert!(body.len() >= OFF_RUNTIME_BYTES);
+        let created = s
+            .create_artifact(input("html", "Big frame", Some(&body)))
+            .await
+            .unwrap();
+        let f = crate::store::ArtifactFilter::default();
+        assert_eq!(s.store().search("zebracorn", &f).await.unwrap().len(), 1);
+        let (_, head) = s.head_content(&created.artifact).await.unwrap();
+        assert_eq!(
+            head,
+            body.as_bytes(),
+            "the blob was stored under its own sha"
+        );
+
+        // Remove the blob store: a meta update that re-read the head would
+        // index an empty body and lose "zebracorn".
+        std::fs::remove_dir_all(s.blobs().root()).unwrap();
+        s.update_meta(
+            &created.artifact.id,
+            UpdateArtifactReq {
+                title: Some("Renamed quokka".into()),
+                ..Default::default()
+            },
+            &Author::user("u1"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            s.store().search("quokka", &f).await.unwrap().len(),
+            1,
+            "title re-indexed"
+        );
+        assert_eq!(
+            s.store().search("zebracorn", &f).await.unwrap().len(),
+            1,
+            "body reused, not re-extracted from the (missing) blob"
+        );
     }
 
     #[tokio::test]

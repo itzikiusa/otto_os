@@ -47,6 +47,7 @@
   import AgentDrivingBar from './AgentDrivingBar.svelte';
   import { uiControl } from '../stores/uiControl.svelte';
   import { ctxMenu, type MenuItem } from '../contextmenu.svelte';
+  import { FitGate, StyleWriter, WidthCache, nodeSig } from './headerFit';
 
   interface Props {
     title: string;
@@ -133,15 +134,51 @@
     return el.matches('button, a, [role="button"]') || !!el.querySelector('button, a, [role="button"]');
   }
 
+  // SF-12: skip a pass whose inputs are unchanged, keep collapsed actions'
+  // widths instead of un-hiding them to re-measure, and drop style writes
+  // that store the same value (lib/components/headerFit.ts).
+  const gate = new FitGate();
+  const widths = new WidthCache<HTMLElement>();
+  const styles = new StyleWriter();
+
   let measuring = false;
   function measure(): void {
     if (!actionsEl || !wrapEl || measuring) return;
+    const kids = Array.from(actionsEl.children) as HTMLElement[];
+    const sigs = kids.map(nodeSig);
+    const row = wrapEl.parentElement;
+    const lineText = titleEl?.parentElement?.textContent ?? '';
+    if (!gate.shouldRun(gate.signature([rootEl, wrapEl, row ?? undefined], `${lineText}\u0003${sigs.join('\u0003')}`))) return;
     measuring = true;
     try {
-      const kids = Array.from(actionsEl.children) as HTMLElement[];
-      for (const k of kids) k.removeAttribute('data-ph-hidden');
-      const visible = kids.filter((k) => k.offsetWidth > 0 || k.getClientRects().length > 0);
-      const widthOf = new Map(visible.map((k) => [k, k.getBoundingClientRect().width]));
+      // Only an action we collapsed whose width we don't know (new, or its
+      // content changed) is un-hidden to be measured; the rest are read as
+      // they are (visible) or from the cache (collapsed, unchanged).
+      const known = new Map<HTMLElement, number>();
+      kids.forEach((k, i) => {
+        if (!k.hasAttribute('data-ph-hidden')) return;
+        const w = widths.get(k, sigs[i]);
+        if (w === undefined) k.removeAttribute('data-ph-hidden');
+        else known.set(k, w);
+      });
+      const widthOf = new Map<HTMLElement, number>();
+      const visible: HTMLElement[] = [];
+      kids.forEach((k, i) => {
+        const cached = known.get(k);
+        if (cached !== undefined) {
+          if (cached > 0) {
+            visible.push(k);
+            widthOf.set(k, cached);
+          }
+          return;
+        }
+        if (k.offsetWidth > 0 || k.getClientRects().length > 0) {
+          const w = k.getBoundingClientRect().width;
+          visible.push(k);
+          widthOf.set(k, w);
+          widths.set(k, sigs[i], w);
+        }
+      });
       // What can never collapse (selects, primaries, data-keep) must always
       // fit: reserve it (+ the ⋯ button) as the wrap's min width, so the
       // title block and inline tabs yield — the subtitle ellipsizes — rather
@@ -150,29 +187,26 @@
       let keepW = keep.reduce((s, k) => s + (widthOf.get(k) ?? 0), 0) + GAP * Math.max(0, keep.length - 1);
       if (keep.length < visible.length) keepW += MORE_W + (keep.length ? GAP : 0);
       // …but the title block never gives up its title line (h1 + badges).
+      // Every layout READ happens before the first style WRITE below.
       let titleMin = 0;
       if (rootEl && titleEl) {
         const iconW = iconEl ? iconEl.offsetWidth + 8 : 0;
         const badgeW = badgeEl ? badgeEl.offsetWidth + 8 : 0;
         titleMin = Math.ceil(titleEl.scrollWidth + iconW + badgeW);
-        rootEl.style.setProperty('--ph-title-min', `${titleMin}px`);
       }
       // When even the kept controls can't fit next to the title (a phone), the
       // reservation is capped and the actions scroll horizontally instead —
       // every control stays reachable, none is clipped away.
-      const row = wrapEl.parentElement;
       const lead = row?.querySelector<HTMLElement>(':scope > .ph-leading');
       const inlineTabs = row?.querySelector<HTMLElement>(':scope > .ph-tabs-inline');
       const pane = row?.querySelector<HTMLElement>(':scope > .pane-controls');
-      const room = row
-        ? row.clientWidth -
-          48 -
-          titleMin -
-          (lead ? lead.offsetWidth + 12 : 0) -
-          (inlineTabs ? inlineTabs.offsetWidth + 12 : 0) -
-          (pane ? pane.offsetWidth + 12 : 0)
-        : Infinity;
-      wrapEl.style.minWidth = `${Math.max(0, Math.min(Math.ceil(keepW) + RING * 2, room))}px`;
+      const rowW = row ? row.clientWidth : 0;
+      const leadW = lead ? lead.offsetWidth + 12 : 0;
+      const tabsW = inlineTabs ? inlineTabs.offsetWidth + 12 : 0;
+      const paneW = pane ? pane.offsetWidth + 12 : 0;
+      const room = row ? rowW - 48 - titleMin - leadW - tabsW - paneW : Infinity;
+      if (rootEl && titleEl) styles.set(rootEl, rootEl.style, '--ph-title-min', `${titleMin}px`);
+      styles.set(wrapEl, wrapEl.style, 'min-width', `${Math.max(0, Math.min(Math.ceil(keepW) + RING * 2, room))}px`);
       let need = visible.reduce((s, k) => s + (widthOf.get(k) ?? 0), 0) + GAP * Math.max(0, visible.length - 1);
       // The inline tabs' cap: never less than half the row (a header with
       // many actions keeps today's split), but when the actions leave room
@@ -180,47 +214,42 @@
       // "bo_co…" next to an empty half-row (the page's toolbar lives on the
       // row below, so its header has no actions at all).
       if (row && rootEl) {
-        const reserved =
-          48 +
-          titleMin +
-          (lead ? lead.offsetWidth + 12 : 0) +
-          (pane ? pane.offsetWidth + 12 : 0) +
-          (visible.length ? need + RING * 2 + 12 : 0);
-        const tabsCap = Math.max(row.clientWidth * 0.5, row.clientWidth - reserved);
-        rootEl.style.setProperty('--ph-tabs-max', `${Math.floor(tabsCap)}px`);
+        const reserved = 48 + titleMin + leadW + paneW + (visible.length ? need + RING * 2 + 12 : 0);
+        const tabsCap = Math.max(rowW * 0.5, rowW - reserved);
+        styles.set(rootEl, rootEl.style, '--ph-tabs-max', `${Math.floor(tabsCap)}px`);
       }
       // The title block's cap: 45% of the row by default, but a header with
       // only one or two actions lets a long title use the room they leave
       // instead of ellipsizing next to an empty stretch of toolbar.
       if (row && rootEl) {
-        const others =
-          48 +
-          (lead ? lead.offsetWidth + 12 : 0) +
-          (inlineTabs ? inlineTabs.offsetWidth + 12 : 0) +
-          (pane ? pane.offsetWidth + 12 : 0) +
-          (visible.length ? need + RING * 2 + 12 : 0);
-        const cap = Math.max(row.clientWidth * 0.45, row.clientWidth - others);
-        rootEl.style.setProperty('--ph-title-max', `${Math.floor(cap)}px`);
+        const others = 48 + leadW + tabsW + paneW + (visible.length ? need + RING * 2 + 12 : 0);
+        const cap = Math.max(rowW * 0.45, rowW - others);
+        styles.set(rootEl, rootEl.style, '--ph-title-max', `${Math.floor(cap)}px`);
       }
-      // clientWidth includes the wrap's focus-ring padding on each side.
+      // clientWidth includes the wrap's focus-ring padding on each side. (A
+      // fresh layout only when a write above actually changed something —
+      // the wrap's width is flex-basis 0, independent of what it contains.)
       let avail = wrapEl.clientWidth - RING * 2;
-      if (need <= avail + 0.5) {
-        if (collapsed.length) collapsed = [];
-        return;
-      }
-      avail -= MORE_W + GAP;
-      const order = visible
-        .map((el, i) => ({ el, i, p: Number(el.dataset.overflow ?? 0) || 0 }))
-        .filter((o) => canCollapse(o.el))
-        .sort((a, b) => a.p - b.p || b.i - a.i);
       const hidden: HTMLElement[] = [];
-      for (const o of order) {
-        if (need <= avail + 0.5) break;
-        o.el.setAttribute('data-ph-hidden', '');
-        need -= (widthOf.get(o.el) ?? 0) + GAP;
-        hidden.push(o.el);
+      if (need > avail + 0.5) {
+        avail -= MORE_W + GAP;
+        const order = visible
+          .map((el, i) => ({ el, i, p: Number(el.dataset.overflow ?? 0) || 0 }))
+          .filter((o) => canCollapse(o.el))
+          .sort((a, b) => a.p - b.p || b.i - a.i);
+        for (const o of order) {
+          if (need <= avail + 0.5) break;
+          need -= (widthOf.get(o.el) ?? 0) + GAP;
+          hidden.push(o.el);
+        }
       }
-      collapsed = kids.filter((k) => hidden.includes(k));
+      // Reconcile the collapsed set: touch only the attributes that change.
+      for (const k of kids) {
+        const hide = hidden.includes(k);
+        if (hide !== k.hasAttribute('data-ph-hidden')) k.toggleAttribute('data-ph-hidden', hide);
+      }
+      const next = kids.filter((k) => hidden.includes(k));
+      if (next.length !== collapsed.length || next.some((k, i) => k !== collapsed[i])) collapsed = next;
     } finally {
       measuring = false;
     }
@@ -237,12 +266,18 @@
 
   onMount(() => {
     measure();
-    const ro = new ResizeObserver(schedule);
+    const ro = new ResizeObserver((entries) => {
+      gate.observe(entries);
+      schedule();
+    });
     if (rootEl) ro.observe(rootEl);
     if (wrapEl) ro.observe(wrapEl);
+    const row = wrapEl?.parentElement;
+    if (row) ro.observe(row);
     // Buttons appear/disappear/relabel with page state — re-fit on any change
     // inside the actions (our own data-ph-hidden writes are attributes, which
-    // this observer ignores, so it can't loop).
+    // this observer ignores, so it can't loop). A mutation that leaves every
+    // action's signature as it was is dropped by the gate in measure().
     const mo = new MutationObserver(schedule);
     if (actionsEl) mo.observe(actionsEl, { childList: true, subtree: true, characterData: true });
     // A retitled page (another item selected) changes the title's minimum.

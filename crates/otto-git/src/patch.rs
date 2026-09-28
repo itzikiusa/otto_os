@@ -93,12 +93,35 @@ pub fn build_hunk_patch_bytes(
         .filter(|(_, l)| l.starts_with(b"diff --git "))
         .map(|(i, _)| i)
         .collect();
-    let (from, to) = starts
+    // Every block for this path, in order. Normally one; a TYPE CHANGE
+    // (symlink ⇄ file) is two — git prints the old side's deletion, then the
+    // new side's creation — and the UI shows them as ONE file whose hunks run
+    // on across both (`diff-load.ts` `fileFor`). `hunk_idx` is that merged
+    // index, so it is resolved across the blocks: past the first block's
+    // hunks it addresses the second (it used to always hit the first).
+    let blocks: Vec<(usize, usize)> = starts
         .iter()
         .enumerate()
         .map(|(n, &s)| (s, starts.get(n + 1).copied().unwrap_or(all.len())))
-        .find(|&(s, _)| diff_git_targets(&String::from_utf8_lossy(all[s]), path))
-        .ok_or_else(|| Error::NotFound(format!("no diff for {path}")))?;
+        .filter(|&(s, _)| diff_git_targets(&String::from_utf8_lossy(all[s]), path))
+        .collect();
+    if blocks.is_empty() {
+        return Err(Error::NotFound(format!("no diff for {path}")));
+    }
+    let hunks_in = |b: &[&[u8]]| b.iter().filter(|l| l.starts_with(b"@@")).count();
+    let mut hunk_idx = hunk_idx;
+    let mut pick = blocks[0];
+    for &(f, t) in &blocks {
+        pick = (f, t);
+        let n = hunks_in(&all[f..t]);
+        if hunk_idx < n {
+            break;
+        }
+        if (f, t) != *blocks.last().expect("non-empty") {
+            hunk_idx -= n;
+        }
+    }
+    let (from, to) = pick;
     let block = &all[from..to];
 
     // A rename carries no hunk for the bytes that moved, and a binary block has
@@ -610,6 +633,46 @@ index 1234567..0000000
 -x2
 -x3
 ";
+
+    /// A symlink → file TYPE CHANGE: two blocks for one path.
+    const TYPECHANGE: &str = "\
+diff --git a/link b/link
+deleted file mode 120000
+index 1111111..0000000
+--- a/link
++++ /dev/null
+@@ -1 +0,0 @@
+-plain.rs
+\\ No newline at end of file
+diff --git a/link b/link
+new file mode 100644
+index 0000000..2222222
+--- /dev/null
++++ b/link
+@@ -0,0 +1 @@
++now a file
+";
+
+    /// The UI shows a type change as ONE file whose hunks run across both
+    /// blocks (`fileFor`): index 0 is the old side's deletion, index 1 the
+    /// new side's creation — which used to resolve to the FIRST block again
+    /// (a stale-hunk error, or the wrong half).
+    #[test]
+    fn typechange_hunk_index_spans_both_blocks() {
+        let first = build_hunk_patch(TYPECHANGE, "link", 0, "@@ -1 +0,0 @@", None).unwrap();
+        assert!(first.contains("deleted file mode 120000"), "{first}");
+        assert!(first.contains("-plain.rs"));
+        assert!(!first.contains("now a file"));
+        let second = build_hunk_patch(TYPECHANGE, "link", 1, "@@ -0,0 +1 @@", None).unwrap();
+        assert!(second.contains("new file mode 100644"), "{second}");
+        assert!(second.contains("+now a file"));
+        assert!(!second.contains("plain.rs"));
+        // Past the last hunk is stale, never a wrap-around.
+        assert!(matches!(
+            build_hunk_patch(TYPECHANGE, "link", 2, "@@ -0,0 +1 @@", None),
+            Err(Error::Conflict(_))
+        ));
+    }
 
     const RENAMED: &str = "\
 diff --git a/old.txt b/new.txt
@@ -1151,6 +1214,36 @@ index 1111111..2222222 100644
         assert!(!worktree.contains("+LINE TWO"), "{worktree}");
         // The response's own diff is the (still dirty) worktree for that path.
         assert_eq!(resp.diff.files.len(), 1);
+    }
+
+    /// A symlink → file type change end to end: both parsed blocks carry the
+    /// fingerprint of the path's WHOLE raw diff (what the hunk op re-hashes),
+    /// so the UI's merged file (`fileFor`) can stage — the deletion half here
+    /// — instead of always failing as stale.
+    #[tokio::test]
+    async fn typechange_stages_with_the_merged_fingerprint() {
+        use sha2::{Digest, Sha256};
+        let (_tmp, dir, git) = repo();
+        write(&dir, "target.txt", "t\n");
+        std::os::unix::fs::symlink("target.txt", dir.join("link")).unwrap();
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "init"]);
+        std::fs::remove_file(dir.join("link")).unwrap();
+        write(&dir, "link", "now a file\n");
+
+        let d = git.diff(DiffTarget::Worktree, Some("link")).await.unwrap();
+        assert_eq!(d.files.len(), 2, "git prints a type change as two blocks");
+        let raw = git.diff_raw(DiffTarget::Worktree, "link").await.unwrap();
+        let whole = hex::encode(Sha256::digest(raw.as_slice()));
+        assert!(d.files.iter().all(|f| f.fingerprint == whole));
+
+        let request = StageHunkReq {
+            fingerprint: d.files[1].fingerprint.clone(), // the merged file's
+            ..req("link", 0, &d.files[0].hunks[0].header, HunkOp::Stage)
+        };
+        run_hunk_op(&git, &request).await.expect("stages the deletion half");
+        let staged = String::from_utf8(git_bytes(&dir, &["diff", "--cached"])).unwrap();
+        assert!(staged.contains("deleted file mode 120000"), "{staged}");
     }
 
     #[tokio::test]

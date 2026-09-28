@@ -2,7 +2,7 @@
   // Reusable run detail: every step of a WorkflowRun with its status, duration,
   // logs, error, and rendered "work product" (agent reply / JSON).
   import {untrack, onDestroy} from 'svelte';
-  import {RunBodyCache, mergeCheckpointPage, fmtStepMs} from './runProgress';
+  import {RunBodyCache, mergeCheckpointPage, fmtStepMs, sharedNodeBodies} from './runProgress';
   import {api} from '../../lib/api/client';
   import Icon from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -217,9 +217,12 @@
     if (!version) return;
     const id=run.id, key=`${checkpoint?'c':'n'}:${summary.node_id}`, attempt=`${id}:${key}:${version}`;
     if (bodies.get(id,key,version) || (!retry && attempted.has(attempt))) return;
+    // The inspector may already hold this exact body (shared fetch path).
+    const shared=checkpoint ? null : sharedNodeBodies.peek(id,summary.node_id,version);
+    if (shared) {bodies.put(id,key,version,shared); bodyTick++; return;}
     attempted.add(attempt); bodyLoading[key]=true; delete bodyErrors[key];
     try {
-      const result=checkpoint ? await workflowCheckpointDetail(id,summary.node_id) : await workflowNodeDetail(id,summary.node_id);
+      const result=checkpoint ? await workflowCheckpointDetail(id,summary.node_id) : await sharedNodeBodies.fetch(id,summary.node_id,(signal)=>workflowNodeDetail(id,summary.node_id,signal));
       if (run.id !== id) return;
       const current=checkpoint ? (run.summary ? loadedCheckpoints : run.checkpoints)?.find(c=>c.node_id===summary.node_id) : run.nodes.find(n=>n.node_id===summary.node_id);
       if (current?.detail_version !== result.detail_version) {onRefresh?.();return;}

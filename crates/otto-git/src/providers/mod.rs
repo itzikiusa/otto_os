@@ -109,6 +109,26 @@ pub trait GitProvider: Send + Sync {
     }
     /// Provider's unified diff, parsed with `crate::parse::parse_diff`.
     async fn get_pr_diff(&self, r: &RemoteRef, number: u64) -> Result<DiffResp>;
+    /// The PR's file list with per-file counts and NO patches, from the
+    /// provider's stat API — what the UI's summary-first load asks for, so a
+    /// 10k-file PR is a few KB per page instead of the whole unified diff.
+    /// `Ok(None)` = no such API; the caller falls back to [`Self::get_pr_diff`].
+    async fn get_pr_diff_summary(&self, _r: &RemoteRef, _number: u64) -> Result<Option<DiffResp>> {
+        Ok(None)
+    }
+    /// One file's patch (`path`, plus a rename's `old_path`) without
+    /// downloading the whole PR diff. `Ok(None)` = unsupported (fallback as
+    /// above). The result may hold other files if the provider ignores the
+    /// filter — the caller still selects by path.
+    async fn get_pr_file_diff(
+        &self,
+        _r: &RemoteRef,
+        _number: u64,
+        _path: &str,
+        _old_path: Option<&str>,
+    ) -> Result<Option<DiffResp>> {
+        Ok(None)
+    }
     async fn create_pr(&self, r: &RemoteRef, req: &CreatePrReq) -> Result<PrSummary>;
     async fn update_pr(&self, r: &RemoteRef, number: u64, req: &UpdatePrReq) -> Result<()>;
     async fn comment(&self, r: &RemoteRef, number: u64, c: &NewPrCommentReq) -> Result<PrComment>;

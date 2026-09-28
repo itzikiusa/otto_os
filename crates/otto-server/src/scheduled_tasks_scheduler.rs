@@ -9,7 +9,6 @@
 //! (the in-flight guard is in-memory and resets empty across restarts).
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,11 +16,11 @@ use chrono::{DateTime, Utc};
 use tracing::{info, warn};
 
 use crate::cadence;
+use crate::cancel_signal::CancelSignal;
 use crate::scheduled_tasks_engine::run_task;
 use crate::state::ServerCtx;
 
 const SCAN: Duration = Duration::from_secs(60);
-const SLICE: Duration = Duration::from_millis(500);
 
 /// Clears a task id from the in-flight set on drop, so the entry is released even
 /// if `run_task` panics — otherwise the task would be wedged "in-flight" until the
@@ -40,15 +39,15 @@ impl Drop for InFlightGuard {
     }
 }
 
-/// Start the supervisor. Returns a cancel flag; set to `true` to stop the loop
+/// Start the supervisor. Returns its cancel signal; `cancel()` stops the loop at once
 /// (mirrors the swarm / workflow-trigger / cli-update schedulers).
-pub fn start(ctx: ServerCtx) -> Arc<AtomicBool> {
-    let cancel = Arc::new(AtomicBool::new(false));
+pub fn start(ctx: ServerCtx) -> CancelSignal {
+    let cancel = CancelSignal::new();
     tokio::spawn(supervise(ctx, cancel.clone()));
     cancel
 }
 
-async fn supervise(ctx: ServerCtx, cancel: Arc<AtomicBool>) {
+async fn supervise(ctx: ServerCtx, cancel: CancelSignal) {
     match ctx.scheduled_tasks.reap_running().await {
         Ok(n) if n > 0 => info!("scheduled tasks: reaped {n} interrupted run(s) on startup"),
         Ok(_) => {}
@@ -56,19 +55,15 @@ async fn supervise(ctx: ServerCtx, cancel: Arc<AtomicBool>) {
     }
     let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     loop {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.is_cancelled() {
             return;
         }
         if let Err(e) = tick(&ctx, &in_flight).await {
             warn!("scheduled tasks scheduler tick: {e}");
         }
-        let mut waited = Duration::ZERO;
-        while waited < SCAN {
-            if cancel.load(Ordering::Relaxed) {
-                return;
-            }
-            tokio::time::sleep(SLICE).await;
-            waited += SLICE;
+        // One timer per scan; cancel() wakes it (no 500 ms polling slices).
+        if cancel.sleep(SCAN).await {
+            return;
         }
     }
 }

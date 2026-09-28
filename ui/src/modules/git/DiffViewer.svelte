@@ -50,6 +50,7 @@
     type Row,
   } from './diff-model';
   import { findScroller, resum, rowAt } from './diff-virtual';
+  import { ListWindow } from './list-window.svelte';
   import { DeferredHighlighter } from './diff-highlight.svelte';
 
   interface Props {
@@ -271,6 +272,34 @@
     walk(navTree);
     return vis;
   });
+  // The nav tree as the flat list of VISIBLE rows (folded dirs and search
+  // misses skipped), windowed against `.nav-files` (`ListWindow`): a 1k-file
+  // PR used to mount 1k nav rows (+ a checkbox each) next to the windowed
+  // body. Dir and file rows share one fixed pitch (CSS) so the math is exact.
+  type NavRow =
+    | { kind: 'dir'; d: NavDir; depth: number; key: string }
+    | { kind: 'file'; f: FileDiff; depth: number; key: string };
+  const navRows = $derived.by(() => {
+    const out: NavRow[] = [];
+    const vis = navVisibleDirs;
+    const m = matchSet;
+    const shut = navDirCollapsed;
+    const walk = (d: NavDir, depth: number): void => {
+      for (const sub of d.dirs) {
+        if (vis !== null && !vis.has(sub.path)) continue;
+        out.push({ kind: 'dir', d: sub, depth, key: `d:${sub.path}` });
+        if (!shut[sub.path]) walk(sub, depth + 1);
+      }
+      for (const f of d.files) {
+        if (m !== null && !m.has(f.path)) continue;
+        out.push({ kind: 'file', f, depth, key: `f:${f.path}` });
+      }
+    };
+    walk(navTree, 0);
+    return out;
+  });
+  const navWin = new ListWindow('.nav-file, .nav-dir-row', { min: 200, overscan: 15 });
+  const navRange = $derived(navWin.range(navRows.length));
   const filteredFiles = $derived(matchSet ? diff.files.filter((f) => matchSet.has(f.path)) : diff.files);
   const matchCount = $derived(filteredFiles.length);
 
@@ -639,8 +668,26 @@
       if (sc) sc.scrollTop += aboveDelta;
       else window.scrollBy(0, aboveDelta);
     }
-    measureVersion++;
+    // The re-render (spacer heights, newly windowed rows) waits for the next
+    // frame: done here, inside the ResizeObserver delivery, it resized the
+    // body and its overflow ancestors mid-loop — shallower observed boxes the
+    // loop then had to skip, which is the "ResizeObserver loop completed with
+    // undelivered notifications" error the huge-diff spec logged hundreds of
+    // times a second (plus an extra layout pass per frame). The DOM already
+    // shows the real heights and the scroll compensation above stays
+    // synchronous, so the one-frame deferral moves nothing on screen.
+    if (!measureFrame) {
+      measureFrame = requestAnimationFrame(() => {
+        measureFrame = 0;
+        measureVersion++;
+      });
+    }
   }
+  let measureFrame = 0;
+  $effect(() => () => {
+    if (measureFrame) cancelAnimationFrame(measureFrame);
+    measureFrame = 0;
+  });
   function measure(node: HTMLElement, p: [string, number]) {
     rowMeta.set(node, { key: p[0], i: p[1] });
     rowRO?.observe(node);
@@ -991,7 +1038,6 @@
     <div
       class="nav-file"
       class:nav-file-viewed={isViewed}
-      class:nav-file-hidden={matchSet !== null && !matchSet.has(file.path)}
       style="padding-inline-start: {8 + depth * 12}px"
       role="button"
       tabindex="0"
@@ -1024,32 +1070,22 @@
     </div>
   {/snippet}
 
-  {#snippet navDirRows(d: NavDir, depth: number)}
-    {#each d.dirs as sub (sub.path)}
-      {#if navVisibleDirs === null || navVisibleDirs.has(sub.path)}
-        <div
-          class="nav-dir-row"
-          style="padding-inline-start: {8 + depth * 12}px"
-          role="button"
-          tabindex="0"
-          onclick={() => toggleNavDir(sub.path)}
-          onkeydown={(e) => e.key === 'Enter' && toggleNavDir(sub.path)}
-          title={sub.path}
-        >
-          <span class="nav-dir-chevron">
-            <Icon name={navDirCollapsed[sub.path] ? 'chevronRight' : 'chevronDown'} size={10} />
-          </span>
-          <Icon name="folder" size={11} />
-          <span class="nav-dir-label">{sub.label}</span>
-        </div>
-        {#if !navDirCollapsed[sub.path]}
-          {@render navDirRows(sub, depth + 1)}
-        {/if}
-      {/if}
-    {/each}
-    {#each d.files as file (file.path)}
-      {@render navFileRow(file, depth)}
-    {/each}
+  {#snippet navDirRow(sub: NavDir, depth: number)}
+    <div
+      class="nav-dir-row"
+      style="padding-inline-start: {8 + depth * 12}px"
+      role="button"
+      tabindex="0"
+      onclick={() => toggleNavDir(sub.path)}
+      onkeydown={(e) => e.key === 'Enter' && toggleNavDir(sub.path)}
+      title={sub.path}
+    >
+      <span class="nav-dir-chevron">
+        <Icon name={navDirCollapsed[sub.path] ? 'chevronRight' : 'chevronDown'} size={10} />
+      </span>
+      <Icon name="folder" size={11} />
+      <span class="nav-dir-label">{sub.label}</span>
+    </div>
   {/snippet}
 
   {#if showNav && prMode}
@@ -1095,7 +1131,17 @@
         </div>
 
         <div class="nav-files">
-          {@render navDirRows(navTree, 0)}
+          <div class="nav-rows" {@attach navWin.attach}>
+            {#if navRange.top > 0}<div style="height:{navRange.top}px" aria-hidden="true"></div>{/if}
+            {#each navRows.slice(navRange.start, navRange.end) as r (r.key)}
+              {#if r.kind === 'dir'}
+                {@render navDirRow(r.d, r.depth)}
+              {:else}
+                {@render navFileRow(r.f, r.depth)}
+              {/if}
+            {/each}
+            {#if navRange.bottom > 0}<div style="height:{navRange.bottom}px" aria-hidden="true"></div>{/if}
+          </div>
         </div>
         <!-- Drag the trailing edge to resize (desktop); double-click resets. -->
         <div
@@ -1475,6 +1521,14 @@
     padding: 2px 0 8px;
   }
   /* Directory group rows (tree). */
+  /* One fixed pitch for dir and file rows: the nav is windowed (ListWindow
+     measures it from a rendered row), so every row must be the same height. */
+  .nav-dir-row,
+  .nav-file {
+    height: 26px;
+    box-sizing: border-box;
+    overflow: hidden;
+  }
   .nav-dir-row {
     display: flex;
     align-items: center;
@@ -1532,9 +1586,6 @@
   }
   .nav-file.nav-file-viewed {
     opacity: 0.45;
-  }
-  .nav-file.nav-file-hidden {
-    display: none;
   }
   .nav-viewed-cb {
     flex-shrink: 0;
@@ -1932,9 +1983,9 @@
       padding-inline-start: 0;
     }
     .nav-title { font-size: var(--fs-m); }
-    .nav-file { font-size: var(--fs-m); padding: 8px; }
+    .nav-file { font-size: var(--fs-m); padding: 8px; height: 38px; }
     .nav-base { font-size: var(--fs-m); }
-    .nav-dir-row { font-size: var(--fs-m); padding: 6px 8px; }
+    .nav-dir-row { font-size: var(--fs-m); padding: 6px 8px; height: 38px; }
     .nav-file-stats { font-size: var(--fs-s); }
     .nav-search { font-size: var(--fs-m); height: 32px; }
     /* No drag-resize on touch layouts — the sidebar is full-width there. */

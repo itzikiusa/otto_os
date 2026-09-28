@@ -12,7 +12,6 @@
 //! **reap** `running` rows left by a previous daemon life.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,11 +21,11 @@ use tracing::{info, warn};
 use otto_state::PersonalAgentsRepo;
 
 use crate::cadence;
+use crate::cancel_signal::CancelSignal;
 use crate::personal_agents_engine::run_agent;
 use crate::state::ServerCtx;
 
 const SCAN: Duration = Duration::from_secs(60);
-const SLICE: Duration = Duration::from_millis(500);
 
 /// Clears a schedule id from the in-flight set on drop, so the entry is
 /// released even if `run_agent` panics. Poison-tolerant.
@@ -44,15 +43,15 @@ impl Drop for InFlightGuard {
     }
 }
 
-/// Start the supervisor. Returns a cancel flag; set to `true` to stop the loop
+/// Start the supervisor. Returns its cancel signal; `cancel()` stops the loop at once
 /// (mirrors the scheduled-tasks / swarm / cli-update schedulers).
-pub fn start(ctx: ServerCtx) -> Arc<AtomicBool> {
-    let cancel = Arc::new(AtomicBool::new(false));
+pub fn start(ctx: ServerCtx) -> CancelSignal {
+    let cancel = CancelSignal::new();
     tokio::spawn(supervise(ctx, cancel.clone()));
     cancel
 }
 
-async fn supervise(ctx: ServerCtx, cancel: Arc<AtomicBool>) {
+async fn supervise(ctx: ServerCtx, cancel: CancelSignal) {
     let repo = PersonalAgentsRepo::new(ctx.pool.clone());
     match repo.reap_running().await {
         Ok(n) if n > 0 => info!("personal agents: reaped {n} interrupted run(s) on startup"),
@@ -61,19 +60,15 @@ async fn supervise(ctx: ServerCtx, cancel: Arc<AtomicBool>) {
     }
     let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     loop {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.is_cancelled() {
             return;
         }
         if let Err(e) = tick(&ctx, &repo, &in_flight).await {
             warn!("personal agents scheduler tick: {e}");
         }
-        let mut waited = Duration::ZERO;
-        while waited < SCAN {
-            if cancel.load(Ordering::Relaxed) {
-                return;
-            }
-            tokio::time::sleep(SLICE).await;
-            waited += SLICE;
+        // One timer per scan; cancel() wakes it (no 500 ms polling slices).
+        if cancel.sleep(SCAN).await {
+            return;
         }
     }
 }

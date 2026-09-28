@@ -397,3 +397,111 @@ async fn resolve_commit_returns_full_ids() {
     assert!(git.resolve_commit("no-such-branch").await.is_err());
     assert!(git.resolve_commit("--output=/tmp/x").await.is_err());
 }
+
+/// The four numbers a proof pack derives (`files_changed`, `additions`,
+/// `deletions`, the path list behind `risky_files`) come from the summary
+/// alone now — and must equal what the full parsed diff used to give, for
+/// both of `assemble_diff`'s targets (a `base..HEAD` range and Working).
+#[tokio::test]
+async fn proof_counts_from_the_summary_equal_the_full_parse() {
+    let (_tmp, dir, _head) = edge_repo();
+    // Uncommitted work on top, so Working has tracked + untracked + binary.
+    write(&dir, "plain.rs", lines("plain", 12).as_bytes());
+    write(&dir, "untracked dir/u.txt", b"x\ny\n");
+    write(&dir, "blob2.bin", b"\x00\x02bin");
+    let git = LocalGit::new(&dir);
+    // Paths deduped: the full patch emits a type change (symlink → file) as
+    // TWO same-path entries (delete + add) — the UI already merges them
+    // (`diff-load.ts` `fileFor`) — while `--raw` reports it once. So a
+    // typechange now counts as one changed file, which is the right number;
+    // the line totals are identical.
+    let counts = |d: &DiffResp| {
+        let mut p: Vec<String> = d.files.iter().map(|f| f.path.clone()).collect();
+        p.sort();
+        p.dedup();
+        let add: u32 = d.files.iter().filter_map(|f| f.added).sum();
+        let del: u32 = d.files.iter().filter_map(|f| f.deleted).sum();
+        (p.len(), add, del, p)
+    };
+    for target in [
+        DiffTarget::Range("HEAD~1".into(), "HEAD".into()),
+        DiffTarget::Working,
+    ] {
+        let s = git.diff_with(&target, &summary()).await.unwrap();
+        let full = git.diff_with(&target, &DiffOpts::default()).await.unwrap();
+        assert_eq!(counts(&s), counts(&full), "{target:?}");
+        assert_eq!(
+            s.files.len(),
+            counts(&s).0,
+            "the summary never repeats a path"
+        );
+        assert!(!s.files.is_empty());
+    }
+}
+
+/// The proof text read is killed at its byte budget instead of buffering
+/// the whole patch, and says so; under the budget it is the whole diff.
+#[tokio::test]
+async fn diff_text_capped_stops_at_the_budget() {
+    let (_tmp, dir) = init();
+    write(&dir, "big.txt", lines("base", 10).as_bytes());
+    sh_git(&dir, &["add", "-A"]);
+    sh_git(&dir, &["commit", "-q", "-m", "base"]);
+    write(&dir, "big.txt", lines("changed", 20_000).as_bytes());
+    let git = LocalGit::new(&dir);
+    let (whole, cut) = git.diff_text_capped(None, 64 * 1024 * 1024).await.unwrap();
+    assert!(!cut);
+    assert_eq!(whole, git.working_diff_text().await.unwrap());
+    let (head, cut) = git.diff_text_capped(None, 4096).await.unwrap();
+    assert!(cut);
+    assert_eq!(head.len(), 4096);
+    assert!(whole.starts_with(&head));
+    let (_, cut) = git.diff_text_capped(Some("HEAD"), 4096).await.unwrap();
+    assert!(cut);
+    assert!(git.diff_text_capped(Some("--x"), 10).await.is_err());
+}
+
+/// Past the `-l1000` rename limit git skips rename detection and says so on
+/// stderr; the response carries `renames_incomplete` (summary and full) so
+/// a delete + add pair isn't mistaken for the whole story. Under the limit
+/// the flag is absent.
+#[tokio::test]
+async fn renames_incomplete_is_set_past_the_rename_limit() {
+    let (_tmp, dir) = init();
+    let n = 1_001;
+    for i in 0..n {
+        write(
+            &dir,
+            &format!("old/{i}.txt"),
+            format!("old body {i}\n").as_bytes(),
+        );
+    }
+    sh_git(&dir, &["add", "-A"]);
+    sh_git(&dir, &["commit", "-q", "-m", "base"]);
+    std::fs::remove_dir_all(dir.join("old")).unwrap();
+    for i in 0..n {
+        write(
+            &dir,
+            &format!("new/{i}.txt"),
+            format!("new text {i}\n").as_bytes(),
+        );
+    }
+    sh_git(&dir, &["add", "-A"]);
+    sh_git(&dir, &["commit", "-q", "-m", "moved"]);
+    let head = sh_git(&dir, &["rev-parse", "HEAD"]);
+    let git = LocalGit::new(&dir);
+    let target = DiffTarget::Commit(head);
+    let s = git.diff_with(&target, &summary()).await.unwrap();
+    assert_eq!(s.renames_incomplete, Some(true));
+    assert_eq!(s.files.len(), 2 * n);
+    let full = git.diff_with(&target, &DiffOpts::default()).await.unwrap();
+    assert_eq!(full.renames_incomplete, Some(true));
+
+    // A small rename stays paired and unflagged.
+    let (_t2, d2, h2) = edge_repo();
+    let small = LocalGit::new(&d2)
+        .diff_with(&DiffTarget::Commit(h2), &summary())
+        .await
+        .unwrap();
+    assert_eq!(small.renames_incomplete, None);
+}

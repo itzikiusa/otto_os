@@ -14,6 +14,7 @@ pub mod assistant;
 pub mod auth;
 pub mod browser_login_throttle;
 pub mod cadence;
+pub mod cancel_signal;
 pub mod canvas_assist;
 pub mod canvas_refs;
 pub mod cli_update;
@@ -112,6 +113,7 @@ pub mod workflow_trigger_scheduler;
 mod workflow_validation;
 pub mod workgraph_projector;
 pub mod ws_events;
+pub mod ws_fanout;
 
 use axum::http::{header, HeaderValue, Method};
 use axum::routing::get;

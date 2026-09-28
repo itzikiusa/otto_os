@@ -141,3 +141,21 @@ origin and native guest IPC confinement. Forced TURN passed with six relay-selec
 peers in a disposable loopback-only coturn fixture. Real two-Mac networking, physical
 capture and sustained combined performance still need hardware acceptance; synthetic
 and local-relay tests do not establish them.
+
+## PR integration with current main
+
+The September 28 integration includes `8e9480c0`, the merged performance PR.
+Room authority and atomic snapshots are retained alongside the new ordinary
+terminal credit protocol. A regression verifies that automatic emulator replies
+(`user:false`) do not discard the credit gate's held output; 27 terminal WebSocket
+tests passed. Room sockets retain their bounded pause/resume fallback.
+
+The latest-main UI gate passed with zero errors/warnings, 599 unit tests, a fresh
+production build, and 19 room/recap browser cases with eight intentional project
+skips. Recap archive HTTP polling now uses visibility-aware, abortable polling;
+room protocol/media clocks retain their explicit lifetime cleanup.
+
+Representative synthetic fixtures: [room light](assets/session-rooms/room-desktop-light.png),
+[room dark](assets/session-rooms/room-desktop-dark.png),
+[screens light](assets/session-rooms/screens-desktop-light.png), and
+[screens dark](assets/session-rooms/screens-desktop-dark.png).

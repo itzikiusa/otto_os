@@ -52,13 +52,33 @@ export interface WsSearchResultFrame {
   matches: TermSearchMatch[];
 }
 
-/** Client→server flow-control frames (docs/contracts/ws.md §1 "Flow control"):
- *  `pause` above the client's pending-bytes high watermark, `resume` below the
- *  low one. On resume the server sends one `scrollback` snapshot if it held
- *  output back; a paused stream auto-resumes 2 s after the last `pause`. */
-export interface WsTermFlowFrame {
+/** Client→server pause-mode flow-control frames (docs/contracts/ws.md §1
+ *  "Flow control"): `pause` above the client's pending-bytes high watermark,
+ *  `resume` below the low one. On resume the server sends one `scrollback`
+ *  snapshot if it held output back; a paused stream auto-resumes 2 s after the
+ *  last `pause`. The fallback when the daemon does not grant `credit`. */
+export interface WsTermPauseFrame {
   type: 'pause' | 'resume';
 }
+
+/** `/ws/term` credit flow control (docs/contracts/ws.md §1 "Credit"). Client →
+ *  server first thing on a socket: offer a `window` (bytes). Server → client:
+ *  the grant (window clamped to 64 KB–8 MB); binary frames after it count
+ *  against the window. A daemon that never answers stays in pause mode. */
+export interface WsTermCreditFrame {
+  type: 'credit';
+  window: number;
+}
+
+/** Client → server: cumulative credited binary bytes consumed (parsed or
+ *  dropped) since the `credit` grant; sent every ~64 KB. */
+export interface WsTermAckFrame {
+  type: 'ack';
+  bytes: number;
+}
+
+/** Every flow-control frame a terminal client sends (termFlow.ts). */
+export type WsTermFlowFrame = WsTermPauseFrame | WsTermCreditFrame | WsTermAckFrame;
 
 /** Client → server `/ws/term` frame (docs/contracts/ws.md §1): the user typed
  *  while more than 256 KB was queued in front of the emulator; the client
@@ -2447,6 +2467,9 @@ export interface SftpListResp {
   /** Absolute remote path that was listed (resolved from pwd when omitted). */
   path: string;
   entries: SftpEntry[];
+  /** True when the directory held more than the daemon's 20k-entry cap;
+   *  `entries` is then the first 20k. Omitted when false. */
+  truncated?: boolean;
 }
 
 /** `POST /api/v1/connections/{id}/sftp/download`. */
@@ -2899,6 +2922,8 @@ export interface DiffResp {
   truncated?: boolean | null;
   total_added?: number | null;
   total_deleted?: number | null;
+  /** git skipped rename detection (past `-l1000`): some renames show as delete + add. */
+  renames_incomplete?: boolean | null;
 }
 
 export interface StagePathsReq {
@@ -7385,6 +7410,7 @@ export interface BrowserPage {
   url: string;
   title: string;
   markdown: string;
+  /** Raw markup; `""` when fetched with `include_html=0` (the reader does). */
   html: string;
   /** `"lightpanda"` | `"fallback"` | `"mock"` — which engine produced this page. */
   engine: string;

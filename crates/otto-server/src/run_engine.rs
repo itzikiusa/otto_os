@@ -29,6 +29,9 @@ const EXEC_NO_PROGRESS: Duration = Duration::from_secs(300);
 /// Poll cadence + caps for the async sub-steps (review, goal loop).
 const POLL_EVERY: Duration = Duration::from_secs(2);
 const REVIEW_POLL_MAX: u32 = 150; // ~5 min
+/// The review wait (O4 / SI-07): wakes on the review's own `ReviewChanged`
+/// event; this slow re-check only covers a missed or lagged event.
+const REVIEW_SAFETY_RECHECK: Duration = Duration::from_secs(30);
 const GOAL_LOOP_POLL_MAX: u32 = 7_200; // ~4 h (matches goal-loop HARD_CAP)
 
 /// Per-run in-flight registry. Stored on `ServerCtx.runs_engine`.
@@ -620,17 +623,68 @@ async fn e2e_commit_note(wt: &str, run: &OttoRun) {
 
 async fn poll_review(ctx: &ServerCtx, review_id: &Id) -> (u64, u64, u64) {
     use otto_core::domain::ReviewStatus;
-    for _ in 0..REVIEW_POLL_MAX {
-        // Status only (SI-07): the full row + every comment per 2 s tick was
-        // steady pool traffic for a single column.
-        if let Ok(status) = ctx.reviews_store.review_status(review_id).await {
-            if matches!(status, ReviewStatus::Done | ReviewStatus::Error) {
-                return crate::modules::review_findings_counts(ctx, review_id).await;
+    // Event-driven (O4 / SI-07): subscribe BEFORE the first status read so a
+    // transition between the read and the wait is never missed, then re-read
+    // the status column only when this review's `ReviewChanged` arrives (or
+    // every 30 s as a safety net) instead of every 2 s for up to 5 min.
+    let mut rx = ctx.events.subscribe();
+    let total = POLL_EVERY * REVIEW_POLL_MAX;
+    let id = review_id.clone();
+    wait_until_event(
+        &mut rx,
+        |ev| matches!(ev, Event::ReviewChanged { review_id, .. } if *review_id == id),
+        || async {
+            matches!(
+                ctx.reviews_store.review_status(review_id).await,
+                Ok(ReviewStatus::Done | ReviewStatus::Error)
+            )
+        },
+        REVIEW_SAFETY_RECHECK,
+        total,
+    )
+    .await;
+    crate::modules::review_findings_counts(ctx, review_id).await
+}
+
+/// Re-run `check` until it is true or `total` elapses, waking on events that
+/// `is_wake` accepts and at least every `safety`. A lagged or closed bus
+/// degrades to the safety cadence. Returns the last `check` result.
+async fn wait_until_event<W, C, F>(
+    rx: &mut tokio::sync::broadcast::Receiver<Event>,
+    is_wake: W,
+    mut check: C,
+    safety: Duration,
+    total: Duration,
+) -> bool
+where
+    W: Fn(&Event) -> bool,
+    C: FnMut() -> F,
+    F: std::future::Future<Output = bool>,
+{
+    use tokio::sync::broadcast::error::RecvError;
+    let deadline = tokio::time::Instant::now() + total;
+    loop {
+        if check().await {
+            return true;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        let wake_at = (now + safety).min(deadline);
+        loop {
+            match tokio::time::timeout_at(wake_at, rx.recv()).await {
+                Err(_) => break,                        // safety / deadline tick
+                Ok(Ok(ev)) if is_wake(&ev) => break,    // our event
+                Ok(Ok(_)) => continue,                  // someone else's
+                Ok(Err(RecvError::Lagged(_))) => break, // may have missed ours
+                Ok(Err(RecvError::Closed)) => {
+                    tokio::time::sleep_until(wake_at).await;
+                    break;
+                }
             }
         }
-        tokio::time::sleep(POLL_EVERY).await;
     }
-    crate::modules::review_findings_counts(ctx, review_id).await
 }
 
 async fn poll_goal_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<otto_core::domain::GoalLoop> {
@@ -815,6 +869,71 @@ fn completion_message(run: &OttoRun) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::wait_until_event;
+    use otto_core::event::Event;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    fn review_changed(id: &str) -> Event {
+        Event::ReviewChanged {
+            workspace_id: "w".into(),
+            session_id: None,
+            review_id: id.into(),
+            status: "done".into(),
+        }
+    }
+
+    // O4: the review wait re-reads status on its own event, not on a 2 s tick.
+    // (Real time, scaled down: the safety tick is far past the test.)
+    #[tokio::test]
+    async fn review_wait_wakes_on_its_event_and_ignores_others() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        let checks = AtomicUsize::new(0);
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let waiter = wait_until_event(
+            &mut rx,
+            |ev| matches!(ev, Event::ReviewChanged { review_id, .. } if review_id == "r1"),
+            || async {
+                checks.fetch_add(1, Ordering::SeqCst);
+                done.load(Ordering::SeqCst)
+            },
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+        );
+        let driver = async {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            let _ = tx.send(review_changed("other")); // not ours: no re-check
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            done.store(true, Ordering::SeqCst);
+            let _ = tx.send(review_changed("r1"));
+        };
+        let (ok, ()) = tokio::join!(waiter, driver);
+        assert!(ok);
+        // Initial check + one wake on our event only.
+        assert_eq!(checks.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn review_wait_falls_back_to_the_safety_recheck_and_the_deadline() {
+        let (_tx, mut rx) = tokio::sync::broadcast::channel::<Event>(4);
+        let checks = AtomicUsize::new(0);
+        let ok = wait_until_event(
+            &mut rx,
+            |_| false,
+            || async {
+                checks.fetch_add(1, Ordering::SeqCst);
+                false
+            },
+            Duration::from_millis(50),
+            Duration::from_millis(250),
+        )
+        .await;
+        assert!(!ok);
+        // t = 0, 50, …, 250: one read per safety window (≈6), then give up.
+        let n = checks.load(Ordering::SeqCst);
+        assert!((4..=7).contains(&n), "{n} checks");
+    }
+
     use super::*;
 
     #[test]

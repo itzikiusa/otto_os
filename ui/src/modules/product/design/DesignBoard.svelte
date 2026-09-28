@@ -4,13 +4,14 @@
   // the same island pattern as Canvas' ExcalidrawCanvas — but bound to PROPS, not
   // the canvas store: the arena owns the source, the debounce and the conflict
   // handling; this component only turns `source` into a board and emits the
-  // full Excalidraw scene on every manual edit (undebounced) via `onchange`.
+  // full Excalidraw scene after manual edits (≤ 1 per 250 ms) via `onchange`.
   //
   //   source → board   parse + normalise. A full saved doc goes through
   //                    restoreElements; the agent's simplified form (no Excalidraw
   //                    internals) is BUILT with the shared canvas builder so labels
   //                    stay centred (the stock converter scatters them to 0,0).
-  //   board → source   `onchange(JSON)` of the FULL scene on ANY manual edit.
+  //   board → source   `onchange(JSON)` of the FULL scene after a manual edit,
+  //                    at most once per 250 ms (trailing; flushed on unmount).
   import { onMount, onDestroy } from 'svelte';
   import { ui } from '../../../lib/stores/ui.svelte';
   import { buildExcalidrawElements, isSimplified } from '../../canvas/excalidraw-build';
@@ -119,8 +120,36 @@
     });
   }
 
-  function handleChange(): void {
-    if (readonly || suppressChange || !excaliApi || !onchange) return;
+  // SE-19 (same fix as Canvas' SD-05): Excalidraw fires onChange on every drag
+  // frame, scroll, zoom and selection. Serializing the whole scene (base64
+  // files included) per call cost 5–10 ms at 2k–5k elements. A cheap
+  // fingerprint (element version sum + file count + background) drops no-op
+  // reports, and the scene is serialized once per 250 ms trailing window (and
+  // flushed on unmount) instead of once per frame.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let sceneVersionOf: ((els: readonly any[]) => number) | null = null;
+  let lastFingerprint: string | null = null;
+  let emitTimer: ReturnType<typeof setTimeout> | null = null;
+  const EMIT_MS = 250;
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function handleChange(elements?: readonly any[], appState?: any, files?: any): void {
+    if (readonly || !excaliApi || !onchange) return;
+    const fp = sceneVersionOf && elements
+      ? `${sceneVersionOf(elements)}:${files ? Object.keys(files).length : 0}:${appState?.viewBackgroundColor ?? ''}`
+      : null;
+    const unchanged = fp !== null && fp === lastFingerprint;
+    lastFingerprint = fp;
+    // A programmatic load only moves the baseline; scroll/zoom/select is no edit.
+    if (suppressChange || unchanged) return;
+    if (emitTimer) return; // trailing emit already scheduled
+    emitTimer = setTimeout(flushChange, EMIT_MS);
+  }
+
+  function flushChange(): void {
+    if (emitTimer) clearTimeout(emitTimer);
+    emitTimer = null;
+    if (readonly || !excaliApi || !onchange) return;
     const str = serialize();
     if (str === lastApplied) return;
     lastApplied = str;
@@ -159,6 +188,8 @@
       await import('@excalidraw/excalidraw/index.css');
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       restore = (Ex as any).restoreElements ?? null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      sceneVersionOf = (Ex as any).getSceneVersion ?? null;
       if (destroyed || !host) return;
       root = createRoot(host);
       root.render(
@@ -182,6 +213,10 @@
   });
 
   onDestroy(() => {
+    // Never drop the last <250 ms of drawing: emit it before the island goes.
+    if (emitTimer) {
+      try { flushChange(); } catch { /* ignore */ }
+    }
     destroyed = true;
     try {
       root?.unmount();

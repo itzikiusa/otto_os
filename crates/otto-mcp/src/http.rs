@@ -414,6 +414,8 @@ async fn update_server<S: McpCtx>(
             .await
             .map_err(ApiErr)?;
     }
+    // Any edit (config, secrets, enabled) retires the pooled session.
+    ctx.mcp().evict_client(&id);
     ctx.mcp()
         .registry()
         .update(
@@ -453,6 +455,7 @@ async fn delete_server<S: McpCtx>(
     if server.has_secret {
         let _ = ctx.mcp_secrets().delete(&McpService::secret_ref(&id));
     }
+    ctx.mcp().evict_client(&id);
     ctx.mcp().registry().delete(&id).await.map_err(ApiErr)?;
     Ok(StatusCode::NO_CONTENT)
 }

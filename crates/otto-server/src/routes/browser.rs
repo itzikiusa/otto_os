@@ -219,6 +219,17 @@ struct PatchTabReq {
 #[derive(Deserialize)]
 struct PageQuery {
     url: String,
+    /// `0`/`false` → `html` comes back empty. The reader UI and the MCP tool
+    /// only use `markdown`; the raw markup is up to 2 MB per navigation
+    /// (perf SB-15). Default: included (API compatibility).
+    #[serde(default)]
+    include_html: Option<String>,
+}
+
+impl PageQuery {
+    fn wants_html(&self) -> bool {
+        !matches!(self.include_html.as_deref(), Some("0" | "false"))
+    }
 }
 
 /// `{url,title,markdown,html,engine,degraded}` — mirrors `otto_browser::Page`
@@ -583,11 +594,12 @@ async fn fetch_page(
         .await
         .map_err(|m| ApiError(Error::Invalid(m)))?;
     let page = ctx.browser.page(&q.url).await.map_err(engine_err)?;
+    let html = if q.wants_html() { page.html } else { String::new() };
     Ok(Json(BrowserPageResp {
         url: page.url,
         title: page.title,
         markdown: page.markdown,
-        html: page.html,
+        html,
         engine: page.engine,
         degraded: page.degraded,
     }))
@@ -2748,6 +2760,18 @@ mod tests {
         );
         // The real marker line for THIS annotation's own URL is untouched.
         assert!(block.starts_with("[Browser mark] https://a.io/page — \""));
+    }
+
+    #[test]
+    fn page_query_include_html_defaults_on_and_zero_or_false_drops_it() {
+        let q = |v: Option<&str>| PageQuery {
+            url: "https://example.com".into(),
+            include_html: v.map(str::to_string),
+        };
+        assert!(q(None).wants_html());
+        assert!(q(Some("1")).wants_html());
+        assert!(!q(Some("0")).wants_html());
+        assert!(!q(Some("false")).wants_html());
     }
 
     #[test]

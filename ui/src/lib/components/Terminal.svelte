@@ -310,6 +310,10 @@
   // flood costs a ~1 MB rebuild instead of 20–50 MB of parsing and ^C lands
   // on screen as soon as the ≤2 MB backlog drains.
   // Thresholds + keep-alive live in termFlow.ts (HIGH 2 MB / LOW 256 KB).
+  // That watermark scheme is now the FALLBACK: pause's round trip let bytes
+  // keep landing, so a fast producer overshot it (3–14 MB). A daemon that
+  // grants `credit` (offered on open) sends at most CREDIT_WINDOW (1 MB)
+  // unacknowledged bytes instead; `writes` acks as xterm consumes.
   const flow = new TermFlow((frame) => sendJson(frame));
   // A3: received bytes wait in `writes` and reach xterm ≤ 64 KB at a time
   // with ≤ 128 KB inside it, so the undroppable part of a backlog is tiny.
@@ -476,6 +480,10 @@
       connected = true;
       reconnecting = false;
       reconnectAttempts = 0;
+      // Credit flow control first: frames sent after the daemon's `credit`
+      // reply count against the window (an older daemon ignores the offer
+      // and this socket stays on pause/resume).
+      flow.offer();
       // Primary pane: take size authority BEFORE pushing our grid, so a
       // passive viewer attaching later can't stomp it (see claimOnAttach doc).
       if (claimOnAttach && !readOnly) sendJson({ type: 'claim' });
@@ -499,13 +507,16 @@
         // if a cell is no longer dirty, the previous frame stays (cursor ghosts,
         // stacked "-- INSERT --" lines). Agent panes get a throttled full
         // viewport REDRAW; shells only after cursor/erase frames (paintPtyBytes).
-        paintPtyBytes(bytes);
+        paintPtyBytes(bytes, false, flow.credit);
         return;
       }
       if (typeof ev.data !== 'string') return;
       try {
         const msg = JSON.parse(ev.data);
         switch (msg.type) {
+          case 'credit':
+            flow.granted(typeof msg.window === 'number' ? msg.window : undefined);
+            break;
           case 'scrollback': {
             // A delayed optional compact must not erase a selection or reading
             // position established after its request. A new process/connection still rebuilds: its
@@ -853,8 +864,10 @@
    * Every write goes through the `writes` queue (≤ 64 KB slices, ≤ 128 KB
    * inside xterm) and is counted for flow control (`flow`, termFlow.ts).
    */
-  function paintPtyBytes(bytes: Uint8Array, alwaysRedraw = false): void {
-    if (!term) return;
+  function paintPtyBytes(bytes: Uint8Array, alwaysRedraw = false, stream = 0): void {
+    // No emulator: the queue still settles (and acks) the bytes, or a
+    // credited stream would leak window.
+    if (!term) return writes.push(bytes, undefined, stream);
     const n = bytes.byteLength;
     const redraw: (() => void) | null = alwaysRedraw
       ? scheduleFullRedraw
@@ -863,7 +876,7 @@
         : n < TUI_FRAME_BYTES && hasCursorOrErase(bytes)
           ? scheduleFullRedraw
           : null;
-    writes.push(bytes, redraw ?? undefined);
+    writes.push(bytes, redraw ?? undefined, stream);
   }
 
   /** Force the emulator to repaint every visible row (a true redraw). Does

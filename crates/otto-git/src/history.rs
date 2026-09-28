@@ -17,7 +17,7 @@ use otto_core::{Error, Id, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::http::{repo_ctx, ApiResult, GitCtx};
-use crate::local::{GitCmd, LocalGit, SpawnClass};
+use crate::local::{GitCmd, LocalGit};
 
 /// Everything `GET /repos/{id}/log` can ask for. `limit == 0` means NO `-n` at
 /// all (the whole reachable history) — same contract as [`LocalGit::log`].
@@ -35,6 +35,53 @@ pub struct LogOpts {
     pub grep: Option<String>,
     /// `--author=<a>`: author substring (case-insensitive, literal).
     pub author: Option<String>,
+    /// A full or abbreviated commit sha to page TO: the walk (from `skip`)
+    /// keeps going past `limit` until that commit has been emitted, then
+    /// stops — ONE spawn that is killed at the target, where the graph's
+    /// jump-to-an-old-ref used to issue a `--skip` page per 10k commits (each
+    /// re-walking every commit before it: O(pages²)). Never more than
+    /// `max(limit, position of the target + 1)` records; a target that is not
+    /// in the walk reads to the end (bounded by the stdout ceiling).
+    pub until: Option<String>,
+}
+
+/// Blame of a file bigger than this is refused rather than buffered: the
+/// porcelain output of a 20k-line file is ~2–4 MB, so 32 MB is a generated
+/// or vendored blob no panel could render anyway.
+pub(crate) const BLAME_STDOUT_CAP: usize = 32 * 1024 * 1024;
+
+/// `Some(bytes kept)` once `buf` holds at least `min_records` complete log
+/// records AND the record for `target` (a sha prefix) — scanning only the
+/// bytes after `from` (each call sees the new chunk; `state` carries the
+/// record count and whether the target was seen across calls).
+fn until_cut(
+    buf: &[u8],
+    from: usize,
+    target: &[u8],
+    min_records: usize,
+    state: &mut (usize, bool, usize),
+) -> Option<usize> {
+    // state = (records completed, target seen, byte offset of the next record)
+    let (done, seen, rec_start) = state;
+    let mut i = from.max(*rec_start);
+    while let Some(off) = buf[i..].iter().position(|&b| b == 0x1e) {
+        let end = i + off;
+        let rec = &buf[*rec_start..end];
+        let rec = match rec.iter().position(|&b| b != b'\n' && b != b'\r') {
+            Some(p) => &rec[p..],
+            None => rec,
+        };
+        *done += 1;
+        if !*seen && rec.len() >= target.len() && &rec[..target.len()] == target {
+            *seen = true;
+        }
+        *rec_start = end + 1;
+        i = end + 1;
+        if *seen && *done >= min_records {
+            return Some(end + 1);
+        }
+    }
+    None
 }
 
 /// One run of consecutive lines attributed to the same commit.
@@ -84,7 +131,7 @@ impl LocalGit {
         if o.all {
             args.push("--all");
         }
-        if o.limit > 0 {
+        if o.limit > 0 && o.until.is_none() {
             args.push("-n");
             args.push(&limit_s);
         }
@@ -107,7 +154,19 @@ impl LocalGit {
         // A LITERAL path (`app/[id]/page.tsx` is a file, not a glob that also
         // pulls `app/d/page.tsx`'s history into the list).
         let cmd = GitCmd::read(&args).maybe_path(o.path.as_deref());
-        let out = self.exec_text(&cmd).await?;
+        let out = match until_target(o)? {
+            // `-n` was left off above: the stop hook ends the walk instead.
+            Some(target) => {
+                let min = o.limit as usize;
+                let mut state = (0usize, false, 0usize);
+                let stop: crate::local::StopFn = Box::new(move |buf, from| {
+                    until_cut(buf, from, target.as_bytes(), min, &mut state)
+                });
+                let (bytes, _) = self.exec_truncated(&cmd, Some(stop)).await?;
+                String::from_utf8_lossy(&bytes).into_owned()
+            }
+            None => self.exec_text(&cmd).await?,
+        };
         crate::parse::parse_log(&out)
     }
 
@@ -123,13 +182,11 @@ impl LocalGit {
     pub async fn blame(&self, path: &str, rev: &str) -> Result<BlameResp> {
         Self::guard_ref(rev)?;
         Self::guard_path(path)?;
-        let (ok, stdout, stderr, code) = self
-            .run_raw_class(
-                &["blame", "--porcelain", rev, "--", path],
-                &[],
-                SpawnClass::LocalRead,
-            )
-            .await?;
+        // Bounded: a read past BLAME_STDOUT_CAP is killed and reported.
+        let cmd =
+            GitCmd::read(&["blame", "--porcelain", rev, "--", path]).max_stdout(BLAME_STDOUT_CAP);
+        let (ok, stdout, stderr, code) = self.exec(&cmd, None).await?;
+        let stdout = String::from_utf8_lossy(&stdout);
         if !ok {
             return Err(crate::local::upstream_err(&stderr, &stdout, code));
         }
@@ -255,6 +312,18 @@ async fn repo_blame<S: GitCtx>(
 /// Routes owned by this module (merged into `crate::http::router`).
 pub fn router<S: GitCtx>() -> Router<S> {
     Router::new().route("/repos/{id}/blame", get(repo_blame::<S>))
+}
+
+/// The validated `until` target: 4–64 hex chars (a sha or a prefix), lower-
+/// cased the way `%H` prints it. Anything else is a 400, never argv.
+fn until_target(o: &LogOpts) -> Result<Option<String>> {
+    let Some(t) = o.until.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
+        return Ok(None);
+    };
+    if !(4..=64).contains(&t.len()) || !t.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(Error::Invalid(format!("until must be a commit sha: {t}")));
+    }
+    Ok(Some(t.to_ascii_lowercase()))
 }
 
 #[cfg(test)]
@@ -390,6 +459,174 @@ mod tests {
         let found = git.log_with(&by_author).await.unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].subject, "docs: from another author");
+    }
+
+    /// A linear history of `n` commits built in one `git fast-import` (a
+    /// 30k-commit fixture in well under a second), with a branch `old` at
+    /// the root so `--all` walks every ref.
+    fn big_history(n: usize) -> (tempfile::TempDir, PathBuf) {
+        use std::io::Write;
+        let (tmp, dir) = repo();
+        let mut stream = String::with_capacity(n * 120);
+        for i in 1..=n {
+            stream.push_str(&format!(
+                "commit refs/heads/main\nmark :{i}\ncommitter T <t@t> {} +0000\ndata {}\nc{i}\n",
+                1_600_000_000 + i,
+                format!("c{i}\n").len()
+            ));
+            if i > 1 {
+                stream.push_str(&format!("from :{}\n", i - 1));
+            }
+            stream.push('\n');
+        }
+        stream.push_str("reset refs/heads/old\nfrom :1\n\n");
+        let mut child = std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["fast-import", "--quiet"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("fast-import");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stream.as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+        (tmp, dir)
+    }
+
+    /// `until` (one spawn, stopped at the target) returns exactly what the
+    /// graph used to assemble from `--skip` pages: the same commits in the
+    /// same order, ending at the first page boundary that reaches the target
+    /// — here `max(limit, position + 1)` records.
+    #[tokio::test]
+    async fn until_matches_skip_paging_on_30k_commits() {
+        let (_tmp, dir) = big_history(30_000);
+        let git = LocalGit::new(&dir);
+        let page = |skip: u32| LogOpts {
+            limit: 10_000,
+            skip,
+            all: true,
+            ..Default::default()
+        };
+        let mut paged = Vec::new();
+        for skip in [0, 10_000, 20_000] {
+            paged.extend(git.log_with(&page(skip)).await.unwrap());
+        }
+        assert_eq!(paged.len(), 30_000);
+
+        // A target deep in the third page.
+        let target = paged[25_000].sha.clone();
+        let jumped = git
+            .log_with(&LogOpts {
+                until: Some(target[..12].to_string()),
+                ..page(0)
+            })
+            .await
+            .unwrap();
+        assert_eq!(jumped.len(), 25_001, "stops right after the target");
+        let shas = |v: &[CommitInfo]| v.iter().map(|c| c.sha.clone()).collect::<Vec<_>>();
+        assert_eq!(shas(&jumped), shas(&paged[..25_001]));
+        assert_eq!(jumped.last().unwrap().sha, target);
+
+        // From a cursor: the rest of the walk up to the target.
+        let from_cursor = git
+            .log_with(&LogOpts {
+                until: Some(target.clone()),
+                ..page(10_000)
+            })
+            .await
+            .unwrap();
+        assert_eq!(shas(&from_cursor), shas(&paged[10_000..25_001]));
+
+        // A target inside the first page still returns a whole page.
+        let near = git
+            .log_with(&LogOpts {
+                until: Some(paged[5].sha.clone()),
+                ..page(0)
+            })
+            .await
+            .unwrap();
+        assert_eq!(shas(&near), shas(&paged[..10_000]));
+
+        // Not in the walk: reads to the end (the caller sees history run out).
+        let missing = git
+            .log_with(&LogOpts {
+                until: Some("deadbeefdeadbeef".into()),
+                ..page(0)
+            })
+            .await
+            .unwrap();
+        assert_eq!(missing.len(), 30_000);
+
+        // Only hex reaches git.
+        let err = git
+            .log_with(&LogOpts {
+                until: Some("--all".into()),
+                ..page(0)
+            })
+            .await
+            .expect_err("not a sha");
+        assert!(matches!(err, Error::Invalid(_)), "got {err:?}");
+    }
+
+    /// The stop hook works on chunk boundaries: a record split across two
+    /// reads is only counted once complete, and the kept prefix ends right
+    /// after the target's separator.
+    #[test]
+    fn until_cut_counts_records_across_chunks() {
+        let buf = b"aaaa\x1fx\x1e\nbbbb\x1fy\x1e\ncccc\x1fz\x1e\ndddd\x1fw\x1e";
+        let mut st = (0usize, false, 0usize);
+        // Feed in 5-byte chunks, as a pipe might.
+        let mut got = None;
+        let mut len = 0;
+        while len < buf.len() && got.is_none() {
+            let from = len;
+            len = (len + 5).min(buf.len());
+            got = until_cut(&buf[..len], from, b"bbbb", 3, &mut st);
+        }
+        let keep = got.expect("stops");
+        assert_eq!(&buf[..keep], b"aaaa\x1fx\x1e\nbbbb\x1fy\x1e\ncccc\x1fz\x1e");
+        assert_eq!(st.0, 3);
+    }
+
+    /// The byte cap: a truncating read keeps exactly N bytes and KILLS the
+    /// child (an endless producer — `yes` stands in for git — would
+    /// otherwise run into the 5 s budget), and a `max_stdout` read fails.
+    #[tokio::test]
+    async fn capped_exec_truncates_and_kills_the_child() {
+        let (_tmp, dir) = repo();
+        let Some(yes) = ["/usr/bin/yes", "/bin/yes"]
+            .into_iter()
+            .find(|p| std::path::Path::new(p).exists())
+        else {
+            return; // no `yes` on this host
+        };
+        let git = LocalGit::new(&dir)
+            .with_git_bin(yes)
+            .with_budget(std::time::Duration::from_secs(5));
+        let started = std::time::Instant::now();
+        let (out, cut) = git
+            .exec_truncated(&GitCmd::read(&["y"]).truncate_stdout(100_000), None)
+            .await
+            .expect("a truncated read succeeds");
+        assert!(cut);
+        assert_eq!(out.len(), 100_000);
+        assert!(out.starts_with(b"y\ny\n"));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(4),
+            "the producer was killed, not waited out"
+        );
+
+        let err = git
+            .exec_bytes(&GitCmd::read(&["y"]).max_stdout(100_000))
+            .await
+            .expect_err("over the cap");
+        assert!(
+            matches!(&err, Error::Upstream(m) if m.contains("output")),
+            "got {err:?}"
+        );
     }
 
     /// `--follow` without a path is git's own 400 ("requires exactly one

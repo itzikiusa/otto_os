@@ -775,7 +775,9 @@ mod tests {
 
         for list in [
             repo.list_history(&conn_id, 100).await.unwrap(),
-            repo.list_history_for_user(&conn_id, &user_a, 100).await.unwrap(),
+            repo.list_history_for_user(&conn_id, &user_a, 100)
+                .await
+                .unwrap(),
         ] {
             let small = list.iter().find(|e| e.statement == "SELECT 1").unwrap();
             assert_eq!(small.statement_len, None, "an unclipped row has no length");

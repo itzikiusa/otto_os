@@ -13,16 +13,19 @@ import { sanitizeHtml } from './sanitize';
  *  the escaped tiny renderer. */
 export function renderMarkdownGfm(md: string): string {
   try {
-    const html = sanitizeHtml(marked.parse(md ?? '', { async: false, gfm: true, breaks: false }) as string);
     // WebKit does not make overflow containers keyboard-focusable by default.
-    // Add trusted attributes after sanitizing, so wide code/tables can be
-    // reached with Tab and scrolled with arrow keys without a pointer.
-    const document = new DOMParser().parseFromString(html, 'text/html');
-    for (const block of document.querySelectorAll('pre, table')) block.setAttribute('tabindex', '0');
-    return document.body.innerHTML;
+    // Add trusted attributes AFTER sanitizing, so wide code/tables can be
+    // reached with Tab and scrolled with arrow keys without a pointer — on the
+    // sanitizer's own tree (V10/SF-14: this used to serialize, re-parse and
+    // re-serialize the whole document a second time).
+    return sanitizeHtml(marked.parse(md ?? '', { async: false, gfm: true, breaks: false }) as string, addBlockFocus);
   } catch {
     return renderMarkdown(md);
   }
+}
+
+function addBlockFocus(body: HTMLElement): void {
+  for (const block of body.querySelectorAll('pre, table')) block.setAttribute('tabindex', '0');
 }
 
 function esc(s: string): string {

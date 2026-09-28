@@ -47,6 +47,19 @@
 //   icon-button-label a <button> whose only content is <Icon …/> without
 //                     BOTH aria-label and title.
 //
+// Two more ratcheted rules scan SCRIPT code (.ts/.js files and the non-style
+// part of .svelte files, comments blanked) — perf patterns (GAPS §0 G):
+//
+//   raw-set-interval  `setInterval(` outside lib/poll.ts and the clock/UI
+//                     allowlist (INTERVAL_ALLOW below: 1 s clocks, fps
+//                     meters, a touch keep-alive) → pollWhileVisible /
+//                     liveQuery (lib/poll.ts, lib/live.ts), which pause while
+//                     hidden, never overlap, and follow the events socket.
+//   body-style        `document.body.style.cursor|userSelect = …` or
+//                     `documentElement.style.setProperty(…)` → a
+//                     full-document style recalc per write (SF-02/SF-03);
+//                     use lib/dragCursor.ts (overlay) / a scoped custom prop.
+//
 // Updating the baseline: `node scripts/ui-guards.mjs --update-baseline`
 // rewrites scripts/ui-guards-baseline.json from the current tree (sorted keys,
 // deterministic). Do it when you PAY DOWN debt (so the lower count sticks) —
@@ -160,7 +173,35 @@ const RULES = {
   'global-class': 'local style on a global app.css class — prefix the class name, or wrap it in :global() on purpose',
   'accent-text': 'color: var(--accent) as text — use var(--accent-text)',
   'icon-button-label': 'icon-only <button> needs both aria-label and title',
+  'raw-set-interval': 'raw setInterval — use pollWhileVisible / liveQuery (lib/poll.ts, lib/live.ts); clocks go on INTERVAL_ALLOW',
+  'body-style': 'document-level style write (body cursor/userSelect, documentElement setProperty) — use lib/dragCursor.ts or a scoped custom property',
 };
+
+/** Clocks, UI animation and explicitly bounded protocol/media lifecycles, not
+ *  HTTP data polls (GAPS §0 G1). Protocol clocks must keep running when hidden. */
+const INTERVAL_ALLOW = new Set([
+  'src/lib/poll.ts',
+  'src/lib/api/mock.ts',
+  'src/lib/stores/now.svelte.ts',
+  'src/App.svelte', // offline boot retry
+  'src/shell/StatusBar.svelte',
+  'src/shell/NotificationBell.svelte',
+  'src/modules/workflows/RunSteps.svelte',
+  'src/modules/workflows/RunAgents.svelte',
+  'src/modules/product/design/DesignArena.svelte',
+  'src/modules/git/CreatePr.svelte',
+  'src/modules/git/WipPanel.svelte',
+  'src/modules/vault/KnowledgeMetadata.svelte',
+  'src/modules/agents/conversation/ConversationView.svelte', // touch keep-alive
+  'src/modules/share/SharePage.svelte', // 60 s token refresh
+  'src/modules/canvas/PresentMode.svelte',
+  'src/modules/browser/live/RemoteLiveView.svelte', // fps meter
+  'src/modules/database/ResultsGrid.svelte', // running-query elapsed clock
+  'src/modules/rooms/RoomAnnotations.svelte', // local expiry clock; effect cleanup clears it
+  'src/modules/rooms/room-client.ts', // WebSocket heartbeat; detach/close clears it
+  'src/modules/rooms/room-media.ts', // audio acknowledgement + capture geometry; leave/stop/dispose clear timers
+  'src/modules/rooms/recap-capture.ts', // consent-epoch media clock; bounded sample/upload queues, reset/finish stop it
+]);
 
 /** [{ css, offset }] — the CSS to scan and where it starts in the file. */
 function styleBlocks(f) {
@@ -272,6 +313,22 @@ for (const f of files) {
     if (hasAria && hasTitle) continue;
     const missing = [!hasAria && 'aria-label', !hasTitle && 'title'].filter(Boolean).join(' + ');
     hit('icon-button-label', f, m.index, `icon-only <button> missing ${missing}`);
+  }
+}
+
+// script-code rules: setInterval / document-level style writes.
+const INTERVAL = /(?<![\w$.])(?:(?:window|globalThis|self)\.)?setInterval\s*\(/g;
+const BODY_STYLE =
+  /\bdocument\.(?:body|documentElement)\.style\.(?:(?:cursor|userSelect|webkitUserSelect)\s*=(?!=)|setProperty\s*\()/g;
+for (const f of files) {
+  if (!/\.(svelte|ts|js)$/.test(f.path)) continue;
+  let code = stripComments(f.text);
+  if (f.path.endsWith('.svelte')) code = code.replace(/<style\b[\s\S]*?<\/style[^>]*>/gi, blank);
+  if (!INTERVAL_ALLOW.has(f.rel)) {
+    for (const m of code.matchAll(INTERVAL)) hit('raw-set-interval', f, m.index, 'setInterval(');
+  }
+  if (f.rel !== 'src/lib/dragCursor.ts') {
+    for (const m of code.matchAll(BODY_STYLE)) hit('body-style', f, m.index, m[0].replace(/\s+/g, ' '));
   }
 }
 

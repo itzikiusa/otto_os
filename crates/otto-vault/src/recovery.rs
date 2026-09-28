@@ -1,7 +1,19 @@
 //! File-backed recovery records. Hidden directories are deliberately excluded
 //! from the derived index. No retention cleanup silently removes user history.
+//!
+//! **Revision path index (SD-15, listing half).** History for one note used to
+//! read `meta.json` of every revision, newest first, until 200 matched — up to
+//! 50k file reads per open in a busy vault. `.otto-history/.path-index.jsonl`
+//! maps revision id → path (append-only, one JSON line per revision) and an
+//! in-process copy is kept per vault root. It is purely a CACHE: the directory
+//! listing stays authoritative, any revision the index doesn't know yet (older
+//! history, a crash between the revision write and the append, another
+//! process) has its meta read once and is appended. Nothing is ever deleted —
+//! coalescing and retention are a separate, approval-gated decision.
+use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use otto_core::{Error, Result};
 use rustix::fs::{AtFlags, RenameFlags};
@@ -22,7 +34,175 @@ fn valid_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+const PATH_INDEX: &str = ".path-index.jsonl";
+
+/// Vault root → (revision id → note path). See the module docs.
+type PathIndex = Arc<HashMap<String, String>>;
+
+fn path_index_cache() -> &'static Mutex<HashMap<String, PathIndex>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, PathIndex>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// `meta.json` reads made to (re)build the path index — a regression counter.
+#[cfg(test)]
+pub(crate) static INDEX_META_READS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PathIndexLine {
+    id: String,
+    path: String,
+}
+
 impl VaultEngine {
+    /// Blocking read of one hidden recovery file through the symlink-refusing
+    /// directory capability (for the index builder on the blocking pool).
+    fn recovery_read_sync(root: &str, rel: &str) -> Result<Option<Vec<u8>>> {
+        let (parent, name) = Self::text_parent(root, rel)?;
+        let fd = match rustix::fs::openat(
+            &parent,
+            name.as_str(),
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::NOENT) => return Ok(None),
+            Err(e) => return Err(Error::Internal(format!("open recovery record: {e}"))),
+        };
+        let mut bytes = Vec::new();
+        std::fs::File::from(fd)
+            .read_to_end(&mut bytes)
+            .map_err(|e| Error::Internal(format!("read recovery record: {e}")))?;
+        Ok(Some(bytes))
+    }
+
+    /// Append learned `(id, path)` pairs to the on-disk index (best-effort: a
+    /// failed append only means they are re-learned next time).
+    fn append_path_index(root: &str, lines: &[PathIndexLine]) {
+        if lines.is_empty() {
+            return;
+        }
+        let Ok((parent, name)) = Self::text_parent(root, &format!(".otto-history/{PATH_INDEX}"))
+        else {
+            return;
+        };
+        let Ok(fd) = rustix::fs::openat(
+            &parent,
+            name.as_str(),
+            rustix::fs::OFlags::WRONLY
+                | rustix::fs::OFlags::APPEND
+                | rustix::fs::OFlags::CREATE
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        ) else {
+            return;
+        };
+        let mut buf = Vec::with_capacity(lines.len() * 64);
+        for line in lines {
+            if serde_json::to_writer(&mut buf, line).is_ok() {
+                buf.push(b'\n');
+            }
+        }
+        // One write: O_APPEND keeps concurrent appenders' lines whole.
+        let _ = std::fs::File::from(fd).write_all(&buf);
+    }
+
+    /// The id → path map for every revision in `names` (blocking). Loads the
+    /// in-process copy, else the on-disk index, then reads `meta.json` only for
+    /// revisions neither knows.
+    fn revision_paths(root: &str, names: &[String]) -> Result<PathIndex> {
+        let cached = path_index_cache()
+            .lock()
+            .ok()
+            .and_then(|m| m.get(root).cloned());
+        if let Some(map) = &cached {
+            if names.iter().all(|n| map.contains_key(n)) {
+                return Ok(map.clone()); // warm: an Arc bump, no copy
+            }
+        }
+        let mut map: HashMap<String, String> = match cached {
+            Some(map) => Arc::unwrap_or_clone(map),
+            None => {
+                let mut map = HashMap::new();
+                if let Some(bytes) =
+                    Self::recovery_read_sync(root, &format!(".otto-history/{PATH_INDEX}"))?
+                {
+                    for line in bytes.split(|b| *b == b'\n') {
+                        if let Ok(entry) = serde_json::from_slice::<PathIndexLine>(line) {
+                            map.insert(entry.id, entry.path);
+                        }
+                    }
+                }
+                map
+            }
+        };
+        let mut learned = Vec::new();
+        for name in names {
+            if map.contains_key(name) {
+                continue;
+            }
+            #[cfg(test)]
+            INDEX_META_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // No meta yet = a revision mid-write: skip it, learn it next time.
+            let Some(bytes) =
+                Self::recovery_read_sync(root, &format!(".otto-history/{name}/meta.json"))?
+            else {
+                continue;
+            };
+            let Ok(revision) = serde_json::from_slice::<VaultRevision>(&bytes) else {
+                continue;
+            };
+            map.insert(name.clone(), revision.path.clone());
+            learned.push(PathIndexLine {
+                id: name.clone(),
+                path: revision.path,
+            });
+        }
+        Self::append_path_index(root, &learned);
+        let map = Arc::new(map);
+        if let Ok(mut m) = path_index_cache().lock() {
+            m.insert(root.to_string(), map.clone());
+        }
+        Ok(map)
+    }
+
+    /// Newest-first revision ids for `path` (all paths when `None`) older than
+    /// `before`, at most `limit` — names + index only, off the runtime.
+    async fn revision_ids(
+        root: &str,
+        path: Option<&str>,
+        before: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let (root, path, before) = (
+            root.to_string(),
+            path.map(str::to_string),
+            before.map(str::to_string),
+        );
+        tokio::task::spawn_blocking(move || {
+            let names = Self::recovery_names(&root, ".otto-history")?;
+            let paths = Self::revision_paths(&root, &names)?;
+            Ok(names
+                .into_iter()
+                .filter(|name| {
+                    before
+                        .as_deref()
+                        .is_none_or(|cursor| name.as_str() < cursor)
+                })
+                .filter(|name| match (&path, paths.get(name)) {
+                    (None, Some(_)) => true,
+                    (Some(want), Some(have)) => want == have,
+                    (_, None) => false,
+                })
+                .take(limit)
+                .collect())
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("list revisions: {e}")))?
+    }
+
     async fn recovery_write(root: &str, path: &str, bytes: &[u8]) -> Result<()> {
         let (parent, name) = Self::text_parent(root, path)?;
         // Recovery copies can contain private notes; only the owner may enter
@@ -134,10 +314,9 @@ impl VaultEngine {
             Self::check_rel(path)?;
         }
         let mut out = Vec::new();
-        for name in Self::recovery_names_off_runtime(&v.root_path, ".otto-history").await? {
-            if before.is_some_and(|cursor| name.as_str() >= cursor) {
-                continue;
-            }
+        // The index narrows the walk to this path's newest 200 ids; only their
+        // metas are read (SD-15 listing half).
+        for name in Self::revision_ids(&v.root_path, path, before, 200).await? {
             let bytes =
                 match Self::recovery_read(&v.root_path, &format!(".otto-history/{name}/meta.json"))
                     .await

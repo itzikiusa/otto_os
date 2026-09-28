@@ -2,8 +2,6 @@
 // owner key so re-registration replaces the old set) and the palette reads
 // `registry.all`.
 
-import { untrack } from 'svelte';
-
 export interface Command {
   id: string;
   title: string;
@@ -19,6 +17,16 @@ export interface Command {
 }
 
 class CommandRegistry {
+  // The authoritative map is PLAIN (non-reactive); `sources` only publishes
+  // it. Callers register from $effects and unregister from their teardowns,
+  // and Svelte deliberately answers a signal read inside a teardown with the
+  // value from BEFORE the current flush (`old_values`). Rebuilding the map
+  // from `this.sources` there resurrected a stale snapshot: when two
+  // registration effects re-ran in one flush ('nav' + 'side-pane-commands'),
+  // the second teardown dropped the first one's fresh set — ⌘K "go to vault"
+  // lost every Go-to entry (unit/commandRegistry.test.ts). Never read
+  // `sources` from register/unregister.
+  private map: Record<string, Command[]> = {};
   // Raw: command sets are replaced wholesale (never mutated), so deep-proxying
   // every Command (closures included) bought nothing.
   private sources: Record<string, Command[]> = $state.raw({});
@@ -30,11 +38,14 @@ class CommandRegistry {
    * Calling again with the same owner replaces the previous set.
    */
   register(owner: string, commands: Command[]): () => void {
-    // untrack: callers register from $effects — reading `sources` there must
-    // not make the effect depend on it (read+write loop).
-    this.sources = { ...untrack(() => this.sources), [owner]: commands };
+    this.map = { ...this.map, [owner]: commands };
+    this.sources = this.map;
     return () => {
-      const { [owner]: _gone, ...rest } = untrack(() => this.sources);
+      // A later register() under the same owner already replaced this set —
+      // its own unregister owns the slot now.
+      if (this.map[owner] !== commands) return;
+      const { [owner]: _gone, ...rest } = this.map;
+      this.map = rest;
       this.sources = rest;
     };
   }

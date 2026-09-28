@@ -649,13 +649,14 @@ class UiStore {
     this.vaultGraphPanelWidth = clampVaultGraphPanel(px);
     lsSet(LS.vaultGraphPanelWidth, String(this.vaultGraphPanelWidth));
   }
-  setApiSideWidth(px: number): void {
+  /** `persist=false` while dragging (one localStorage write on release). */
+  setApiSideWidth(px: number, persist = true): void {
     this.apiSideWidth = clampApiSide(px);
-    lsSet(LS.apiSideWidth, String(this.apiSideWidth));
+    if (persist) lsSet(LS.apiSideWidth, String(this.apiSideWidth));
   }
-  setApiBuilderHeight(px: number): void {
+  setApiBuilderHeight(px: number, persist = true): void {
     this.apiBuilderHeight = clampApiBuilder(px);
-    lsSet(LS.apiBuilderH, String(this.apiBuilderHeight));
+    if (persist) lsSet(LS.apiBuilderH, String(this.apiBuilderHeight));
   }
   /** Back to the CSS default (max-height: 60%). */
   resetApiBuilderHeight(): void {

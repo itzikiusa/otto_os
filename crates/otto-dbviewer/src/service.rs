@@ -2223,9 +2223,10 @@ impl DbViewerService {
             .map_err(|e| Error::Invalid(format!("read import file: {e}")))?;
         // Parsing up to IMPORT_MAX_BYTES of CSV/JSON is up to a second of CPU:
         // run it on the blocking pool, and let the raw bytes go with it.
-        let mut parsed = tokio::task::spawn_blocking(move || crate::import::parse_rows(format, &bytes))
-            .await
-            .map_err(|e| Error::Internal(format!("import parse task failed: {e}")))??;
+        let mut parsed =
+            tokio::task::spawn_blocking(move || crate::import::parse_rows(format, &bytes))
+                .await
+                .map_err(|e| Error::Internal(format!("import parse task failed: {e}")))??;
 
         match engine {
             // SQL engines import as batched INSERTs through the guarded `run`
@@ -2631,11 +2632,12 @@ impl DbViewerService {
         // for the answer; later requests wait on its single-flight gate.
         let prefix = ctx.prefix.clone();
         let ctx = ctx.clone();
-        let mut resp = tokio::spawn(async move {
-            r.with_lifecycle(r.driver.completion(&r.config, &ctx)).await
-        })
-        .await
-        .map_err(|e| Error::Internal(format!("completion task failed: {e}")))??;
+        let mut resp =
+            tokio::spawn(
+                async move { r.with_lifecycle(r.driver.completion(&r.config, &ctx)).await },
+            )
+            .await
+            .map_err(|e| Error::Internal(format!("completion task failed: {e}")))??;
         // Bound what one keystroke ships: only items that can match the typed
         // word, at most MAX_COMPLETION_ITEMS of them (`truncated` past that).
         crate::complete::finalize(&mut resp, &prefix);
@@ -2715,8 +2717,8 @@ impl DbViewerService {
     ) -> Result<HistoryEntry> {
         self.authorize(conn_id, user_id, None, "db_query").await?;
         let entry = self.repo.get_history(entry_id).await?;
-        let visible = &entry.connection_id == conn_id
-            && (is_root || entry.user_id.as_ref() == Some(user_id));
+        let visible =
+            &entry.connection_id == conn_id && (is_root || entry.user_id.as_ref() == Some(user_id));
         if !visible {
             return Err(Error::NotFound(format!("history entry {entry_id}")));
         }

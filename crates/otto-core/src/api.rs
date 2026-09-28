@@ -936,6 +936,10 @@ pub struct SftpListResp {
     /// request omitted `path`).
     pub path: String,
     pub entries: Vec<SftpEntry>,
+    /// `true` when the directory held more than the daemon's cap (20k
+    /// entries); `entries` is then the first 20k of the listing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 /// `POST /api/v1/connections/{id}/sftp/download` — pull a remote file to local.
@@ -1530,6 +1534,10 @@ pub struct DiffResp {
     pub total_added: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_deleted: Option<u64>,
+    /// `true` when git skipped rename detection (more files than the
+    /// `-l1000` limit): some renames are reported as a delete + an add.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renames_incomplete: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

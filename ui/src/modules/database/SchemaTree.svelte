@@ -232,8 +232,13 @@
   // Every row is ROW_H tall in that mode (`.node` already is). A Redis
   // keyspace's inline key filter isn't fixed-height, so a tree showing one
   // renders unwindowed (Redis key lists are capped server-side anyway).
+  // One member per node-bearing tag: a shared `t: 'node' | 'failed' | 'redis'`
+  // member never narrows away in the template's {:else} chain.
+  type NodeRow<T extends string> = { t: T; node: SchemaNode; depth: number; key: string };
   type FlatRow =
-    | { t: 'node' | 'failed' | 'redis'; node: SchemaNode; depth: number; key: string }
+    | NodeRow<'node'>
+    | NodeRow<'failed'>
+    | NodeRow<'redis'>
     | { t: 'empty'; depth: number; text: string; key: string }
     | { t: 'more'; depth: number; shown: number; key: string };
   const flat = $derived.by<FlatRow[]>(() => {

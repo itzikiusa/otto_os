@@ -120,6 +120,18 @@
     return base;
   });
 
+  // The text editor exists whenever the body is showable as text; it is only
+  // VISIBLE on the Body tab in Pretty/Raw (see the template).
+  const bodyEmpty = $derived(!resp || resp.body.trim() === '');
+  const editorEligible = $derived(!!resp && !resp.too_large && !bodyEmpty);
+  const showEditor = $derived.by(
+    () =>
+      editorEligible &&
+      tab === 'body' &&
+      !(bodyView === 'preview' && ((isImage && !!previewUrl) || isHtml)) &&
+      !(bodyView === 'tree' && parsed !== undefined),
+  );
+
   // Soft-wrap whenever the shown text may be one huge line (raw / minified /
   // over the pretty limit / not JSON): an unwrapped multi-hundred-KB line makes
   // every layout pass measure it. Pretty-printed JSON reads better unwrapped.
@@ -400,7 +412,7 @@
         {:else if bodyView === 'preview' && isHtml}
           <!-- sandbox="" : no scripts, forms, or same-origin access -->
           <iframe class="html-preview" title="HTML preview of the response" sandbox="" srcdoc={resp.body}></iframe>
-        {:else if resp.body.trim() === ''}
+        {:else if bodyEmpty}
           <p class="empty-line">The response has no body.</p>
         {:else}
           {#if resp.truncated}
@@ -424,10 +436,6 @@
           {/if}
           {#if bodyView === 'tree' && parsed !== undefined}
             <div class="tree-wrap"><JsonTree value={parsed} query={filterDebounced} /></div>
-          {:else}
-            <div class="resp-editor">
-              <CodeEditor lsp={false} wrap={respWrap} path={respPath} content={displayBody} root={ws.current?.root_path ?? ''} language={respLang} readOnly={true} />
-            </div>
           {/if}
         {/if}
       {:else if tab === 'headers'}
@@ -479,6 +487,15 @@
             <div class="section-title">Console</div>
             <pre class="console-log mono">{scriptLogs.join('\n')}</pre>
           {/if}
+        </div>
+      {/if}
+      <!-- The text editor stays MOUNTED across Body↔Headers/Cookies/Trace/Tests
+           and Pretty/Raw↔Tree/Preview (perf SB-20): hiding it keeps the parsed,
+           highlighted doc (up to 512 KB) instead of rebuilding it per toggle.
+           It sits after the body tab's notices/filter, so the order is kept. -->
+      {#if editorEligible}
+        <div class="resp-editor" style:display={showEditor ? null : 'none'}>
+          <CodeEditor lsp={false} wrap={respWrap} path={respPath} content={displayBody} root={ws.current?.root_path ?? ''} language={respLang} readOnly={true} />
         </div>
       {/if}
     </div>

@@ -7,11 +7,15 @@ test.beforeAll(async()=>{const {ctx,base}=await apiCtx();workspaceId=await seedW
 test.beforeEach(async({page})=>{await page.addInitScript(({w,v})=>{localStorage.setItem('otto_workspace',w);localStorage.setItem('otto_vault_last',String(v));},{w:workspaceId,v:vaultId});});
 async function scenes(){const {ctx,base}=await apiCtx();const rows=[];const suffix=`${Date.now()}-${Math.random().toString(36).slice(2,7)}`;for(const title of [`R3 Alpha ${suffix}`,`R3 Beta ${suffix}`]) {const r=await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/canvas/scenes`,{data:{title,doc:{type:'otto-canvas',version:1,format:'mermaid',source:`flowchart LR\n A[${title}] --> B[Finish]`}}});expect(r.ok()).toBeTruthy();rows.push(await r.json());}await ctx.dispose();return rows;}
 async function selectScene(page:Page,title:string){await page.locator('.scene-list .row',{hasText:title}).getByRole('button').first().click();await expect(page.locator('.board')).toContainText(title);}
+// Scene saves are `PUT …/scenes/{id}?summary=true` (SD-22): a glob without the
+// query would never match them, so route on the pathname.
+const sceneUrl = (id: string) => (u: URL) => u.pathname.endsWith(`/canvas/scenes/${id}`);
+
 test('Canvas preserves a failed pending draft across scene switches',async({page})=>{
  const [a,b]=await scenes();await openPage(page,'canvas');await selectScene(page,a.title);
  await page.getByTitle('Edit the Mermaid source',{exact:true}).click();
  let fail=true;const writes:string[]=[];
- await page.context().route(`**/canvas/scenes/${a.id}`,async route=>{if(route.request().method()!=='PUT')return route.continue();writes.push(route.request().postDataJSON().doc.source);if(fail)return route.fulfill({status:503,json:{code:'upstream',message:'Synthetic save unavailable'}});return route.continue();});
+ await page.context().route(sceneUrl(a.id),async route=>{if(route.request().method()!=='PUT')return route.continue();writes.push(route.request().postDataJSON().doc.source);if(fail)return route.fulfill({status:503,json:{code:'upstream',message:'Synthetic save unavailable'}});return route.continue();});
  await page.locator('.cm-content').fill('flowchart LR\n A[Retain pending draft] --> B[Recover]');
  await selectScene(page,b.title);await expect.poll(()=>writes.length).toBeGreaterThan(0);
  await page.locator('.scene-list .row',{hasText:a.title}).getByRole('button').first().click();
@@ -72,7 +76,7 @@ for(const [theme,scheme,width,rtl] of [['native','light',1440,false],['native','
 test('Canvas queues in-flight saves and keeps both scene drafts',async({page})=>{
  const [a,b]=await scenes();await openPage(page,'canvas');await selectScene(page,a.title);await page.getByTitle('Edit the Mermaid source',{exact:true}).click();
  let release!:()=>void,started!:()=>void;const held=new Promise<void>(r=>release=r),requested=new Promise<void>(r=>started=r);let calls=0;
- await page.context().route(`**/canvas/scenes/${a.id}`,async route=>{if(route.request().method()!=='PUT')return route.continue();calls++;if(calls===1){started();await held;}return route.continue();});
+ await page.context().route(sceneUrl(a.id),async route=>{if(route.request().method()!=='PUT')return route.continue();calls++;if(calls===1){started();await held;}return route.continue();});
  await page.locator('.cm-content').fill('flowchart LR\n A[First queued snapshot] --> B[Save]');await requested;
  await page.locator('.cm-content').fill('flowchart LR\n A[Newest Alpha draft] --> B[Save]');await selectScene(page,b.title);
  await page.getByTitle('Edit the Mermaid source',{exact:true}).click();await page.locator('.cm-content').fill('flowchart LR\n A[Newest Beta draft] --> B[Save]');
@@ -106,7 +110,7 @@ test('Product dashboard template has readable labels and pin annotations',async(
 test('Canvas Excalidraw preserves failed hand edits across scene switching',async({page})=>{
  const {ctx,base}=await apiCtx();const response=await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/canvas/scenes`,{data:{title:`R3 editable Excalidraw ${workspaceId}`,doc:{type:'otto-canvas',version:1,format:'excalidraw',source:JSON.stringify({type:'excalidraw',elements:[]})}}});expect(response.ok()).toBeTruthy();const id=(await response.json()).id;await ctx.dispose();const [,b]=await scenes();
  await openPage(page,'canvas');await page.locator('.scene-list .row',{hasText:`R3 editable Excalidraw ${workspaceId}`}).getByRole('button').first().click();const drawing=page.locator('.excalidraw canvas').first();await expect(drawing).toBeVisible({timeout:30000});
- let writes=0;await page.context().route(`**/canvas/scenes/${id}`,route=>{if(route.request().method()!=='PUT')return route.continue();writes++;return route.fulfill({status:503,json:{code:'upstream',message:'Drawing save unavailable'}});});
+ let writes=0;await page.context().route(sceneUrl(id),route=>{if(route.request().method()!=='PUT')return route.continue();writes++;return route.fulfill({status:503,json:{code:'upstream',message:'Drawing save unavailable'}});});
  const box=(await drawing.boundingBox())!;await page.mouse.click(box.x+box.width*.5,box.y+box.height*.5);await page.keyboard.press('r');await page.mouse.move(box.x+box.width*.4,box.y+box.height*.4);await page.mouse.down();await page.mouse.move(box.x+box.width*.6,box.y+box.height*.6,{steps:8});await page.mouse.up();
  await selectScene(page,b.title);await expect.poll(()=>writes).toBeGreaterThan(0);await page.locator('.scene-list .row',{hasText:`R3 editable Excalidraw ${workspaceId}`}).getByRole('button').first().click();await expect(drawing).toBeVisible();
  await expect(page.locator('.save-error')).toContainText('Drawing save unavailable');

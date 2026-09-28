@@ -1606,7 +1606,10 @@ mod tests {
         let a = repo.create(mk(None)).await.unwrap();
         repo.decide(&a.id, true, "approver", None).await.unwrap();
         assert!(repo.consume(&a.id).await.unwrap());
-        assert!(!repo.consume(&a.id).await.unwrap(), "a replay is not a change");
+        assert!(
+            !repo.consume(&a.id).await.unwrap(),
+            "a replay is not a change"
+        );
         let old = fmt(Utc::now() - chrono::Duration::seconds(5));
         let b = repo.create(mk(Some(old))).await.unwrap();
         assert_eq!(repo.expire_stale().await.unwrap(), 1);
@@ -1635,7 +1638,10 @@ mod tests {
                 ch(Some(&b.id), Some(&ws), "pending"),
             ]
         );
-        assert!(all.contains(&ch(None, None, "expired")), "bulk expiry signalled");
+        assert!(
+            all.contains(&ch(None, None, "expired")),
+            "bulk expiry signalled"
+        );
     }
 
     #[tokio::test]

@@ -8,22 +8,27 @@
 // The host also says whether this pane sits under the window's traffic
 // lights (it is the leading pane and the sidebar is collapsed).
 
-import { untrack } from 'svelte';
 import { isEmbedded } from '../desktop';
 
 class EmbedChrome {
   /** Pad the top row past the traffic lights (host-reported). */
   padTraffic = $state(false);
-  private headers: HTMLElement[] = $state([]);
+  // Authoritative list is plain; `headers` only publishes it. Callers claim
+  // from an $effect and release from its teardown, where Svelte answers a
+  // `$state` read with the PRE-flush value — so rebuilding from `headers`
+  // there dropped a header claimed in the same flush (a page swap). Never
+  // read `headers` from claim/release (commands.svelte.ts has the repro).
+  private list: HTMLElement[] = [];
+  private headers: HTMLElement[] = $state.raw([]);
 
-  /** A top-row candidate mounted (no-op outside the side pane). Callers
-   *  claim from an $effect: the read of `headers` must not become that
-   *  effect's dependency (read + write = an update loop). */
+  /** A top-row candidate mounted (no-op outside the side pane). */
   claim(el: HTMLElement): () => void {
     if (!isEmbedded) return () => {};
-    this.headers = [...untrack(() => this.headers), el];
+    this.list = [...this.list, el];
+    this.headers = this.list;
     return () => {
-      this.headers = untrack(() => this.headers).filter((h) => h !== el);
+      this.list = this.list.filter((h) => h !== el);
+      this.headers = this.list;
     };
   }
 

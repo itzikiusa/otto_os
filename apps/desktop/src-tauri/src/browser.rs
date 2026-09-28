@@ -140,7 +140,24 @@ pub async fn browser_eval(app: tauri::AppHandle, id: String, js: String) -> Resu
         Ok(Err(e)) => return Err(e.to_string()),
         Err(_) => return Err("browser webview panicked while evaluating".into()),
     }
-    rx.await.map_err(|_| "eval callback never fired".to_string())
+    await_eval_result(rx, EVAL_TIMEOUT).await
+}
+
+/// How long an eval may take before the call gives up. WebKit only fires the
+/// completion handler when the page's JS turn finishes — a hung or busy page
+/// (or a discarded web process) never fires it, and the SPA's overlay/login
+/// polls would otherwise stack one never-resolving IPC call per tick.
+const EVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn await_eval_result(
+    rx: tokio::sync::oneshot::Receiver<String>,
+    limit: std::time::Duration,
+) -> Result<String, String> {
+    match tokio::time::timeout(limit, rx).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(_)) => Err("eval callback never fired".to_string()),
+        Err(_) => Err(format!("eval timed out after {} ms", limit.as_millis())),
+    }
 }
 
 /// Navigate tab `id`'s webview to a new URL.
@@ -260,4 +277,36 @@ pub fn browser_close_all(app: tauri::AppHandle, window: tauri::Window) {
             }
         }
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn eval_resolves_with_the_page_result() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        tx.send("\"ok\"".into()).unwrap();
+        assert_eq!(
+            await_eval_result(rx, EVAL_TIMEOUT).await.as_deref(),
+            Ok("\"ok\"")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_eval_times_out_instead_of_hanging() {
+        let (_tx, rx) = tokio::sync::oneshot::channel::<String>();
+        let err = await_eval_result(rx, std::time::Duration::from_millis(30))
+            .await
+            .unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        assert_eq!(EVAL_TIMEOUT.as_secs(), 5);
+    }
+
+    #[tokio::test]
+    async fn a_dropped_callback_is_an_error() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        drop(tx);
+        assert!(await_eval_result(rx, EVAL_TIMEOUT).await.is_err());
+    }
 }

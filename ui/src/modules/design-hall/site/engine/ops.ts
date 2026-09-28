@@ -1,6 +1,14 @@
 // Site Studio — pure document operations. Every function returns a NEW
 // document (the input is never mutated), so the editor's undo stack is just a
 // list of documents and Svelte sees a fresh object on every change.
+//
+// Path copying (SD-17): an edit copies only the spine from the root to what it
+// changes (doc → pages array → that page → sections array → that section);
+// every untouched page, section and block is SHARED with the previous version.
+// A keystroke on a 394 KB site no longer deep-clones it (6.9 ms per key), the
+// 100-deep undo stack stops holding 100 full copies, and the canvas can reuse
+// the rendered HTML of every section whose object identity did not change.
+// Consequence: documents are immutable values — never mutate one in place.
 
 import { itemDef, sectionDef } from './catalog';
 import { validateSite } from './validate';
@@ -139,16 +147,23 @@ export function makeSection(block: string, taken: Set<string>): SiteSection {
   return s;
 }
 
+/** `f` gets a fresh shallow copy of the page with its own `sections` array
+ *  (safe to splice / reassign); every other page is shared. */
 function mapPage(doc: SiteDoc, pageId: string, f: (p: SitePage) => SitePage): SiteDoc {
-  const next = clone(doc);
-  next.pages = next.pages.map((p) => (p.id === pageId ? f(p) : p));
-  return next;
+  return { ...doc, pages: doc.pages.map((p) => (p.id === pageId ? f({ ...p, sections: [...p.sections] }) : p)) };
 }
 
+/** `f` gets a fresh shallow copy of the section (reassign its fields, never
+ *  mutate nested values); every other page and section is shared. */
 function mapSection(doc: SiteDoc, sectionId: string, f: (s: SiteSection) => SiteSection): SiteDoc {
-  const next = clone(doc);
-  for (const p of next.pages) p.sections = p.sections.map((s) => (s.id === sectionId ? f(s) : s));
-  return next;
+  return {
+    ...doc,
+    pages: doc.pages.map((p) =>
+      p.sections.some((s) => s.id === sectionId)
+        ? { ...p, sections: p.sections.map((s) => (s.id === sectionId ? f({ ...s }) : s)) }
+        : p,
+    ),
+  };
 }
 
 /** Insert `section` into page `pageId` at `index` (clamped; -1 / past the end = append). */
@@ -161,9 +176,12 @@ export function insertSection(doc: SiteDoc, pageId: string, section: SiteSection
 }
 
 export function removeSection(doc: SiteDoc, sectionId: string): SiteDoc {
-  const next = clone(doc);
-  for (const p of next.pages) p.sections = p.sections.filter((s) => s.id !== sectionId);
-  return next;
+  return {
+    ...doc,
+    pages: doc.pages.map((p) =>
+      p.sections.some((s) => s.id === sectionId) ? { ...p, sections: p.sections.filter((s) => s.id !== sectionId) } : p,
+    ),
+  };
 }
 
 /** Move a section within its page to `to` (0-based, clamped). */
@@ -333,9 +351,8 @@ export function addPage(doc: SiteDoc, title: string): { doc: SiteDoc; id: string
   let slug = slugify(title) || 'page';
   if (slug === 'index') slug = 'index-page';
   for (let n = 2; slugs.has(slug); n++) slug = `${slugify(title) || 'page'}-${n}`;
-  const next = clone(doc);
-  next.pages.push({ id, title: title.trim() || 'Untitled page', slug: next.pages.length === 0 ? '' : slug, sections: [] });
-  return { doc: next, id };
+  const page: SitePage = { id, title: title.trim() || 'Untitled page', slug: doc.pages.length === 0 ? '' : slug, sections: [] };
+  return { doc: { ...doc, pages: [...doc.pages, page] }, id };
 }
 
 export function renamePage(doc: SiteDoc, pageId: string, title: string): SiteDoc {
@@ -343,10 +360,9 @@ export function renamePage(doc: SiteDoc, pageId: string, title: string): SiteDoc
 }
 
 export function removePage(doc: SiteDoc, pageId: string): SiteDoc {
-  const next = clone(doc);
-  next.pages = next.pages.filter((p) => p.id !== pageId);
-  if (next.pages[0]) next.pages[0].slug = next.pages[0].slug === 'index' ? '' : next.pages[0].slug;
-  return next;
+  const pages = doc.pages.filter((p) => p.id !== pageId);
+  if (pages[0]?.slug === 'index') pages[0] = { ...pages[0], slug: '' };
+  return { ...doc, pages };
 }
 
 // ── From your library ────────────────────────────────────────────────────────

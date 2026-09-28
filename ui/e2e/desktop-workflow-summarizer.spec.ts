@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import type { Review } from '../src/lib/api/types';
 
 test('completed async run discovers, expands and reloads summarizer retries and fallback', async ({ page }) => {
+  test.setTimeout(90_000);
   let review: Review = { id: 'r', repo_id: 'repo', pr_number: 0, status: 'running', error: null,
     comments: [], created_at: new Date().toISOString(), agents: [
       { name: 'Summarizer', provider: 'codex', model: 'configured', status: 'running',
@@ -43,7 +44,9 @@ test('completed async run discovers, expands and reloads summarizer retries and 
   await page.reload();
   await expect(page.locator('[data-sess="summary-first"]')).toContainText('fallback');
   review = { ...review, status: 'running', agents: [{ ...review.agents[0], status: 'running', fallback: false, session_id: 'summary-retry' }] };
-  await expect(page.locator('[data-sess="summary-retry"]')).toContainText(/running \d+s/);
+  // No event socket in this fixture: a TERMINAL review is re-read every
+  // TERMINAL_RECHECK_MS (30 s, RunAgents.svelte), so the retry shows by then.
+  await expect(page.locator('[data-sess="summary-retry"]')).toContainText(/running \d+s/, { timeout: 35_000 });
   await expect(page.locator('[data-sess="historic"]')).toContainText('Earlier attempt');
   review = { ...review, status: 'cancelled' };
   await expect(page.locator('[data-sess="summary-retry"]')).toContainText('cancelled');

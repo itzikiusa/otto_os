@@ -118,11 +118,38 @@ async fn login(
         model: None,
         meta: Some(serde_json::json!({"source":"provider-login", "login_account_id":id})),
     };
+    // A sign-in is starting: forget the cached answer so the next status poll
+    // runs the CLI (the terminal finishes later; the 15 s TTL covers the rest).
+    *status_slot(&user.id, id.as_str()).lock().await = None;
     Ok(Json(
         ctx.manager
             .create(&workspace, &user.id, request, Some(spec))
             .await?,
     ))
+}
+
+/// How long a sign-in answer is reused (perf O5): the settings list asks for
+/// every account at once and each check spawns the provider CLI (a Node boot,
+/// up to 10 s). Concurrent asks for one account share ONE check (single
+/// flight); a login through this module forgets the answer at once.
+const STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(15);
+
+type StatusSlot = std::sync::Arc<tokio::sync::Mutex<Option<(std::time::Instant, bool)>>>;
+
+fn status_slot(user_id: &str, account_id: &str) -> StatusSlot {
+    static SLOTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<(String, String), StatusSlot>>,
+    > = std::sync::OnceLock::new();
+    let mut m = SLOTS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if m.len() > 256 {
+        m.retain(|_, slot| std::sync::Arc::strong_count(slot) > 1);
+    }
+    m.entry((user_id.to_string(), account_id.to_string()))
+        .or_default()
+        .clone()
 }
 
 async fn status(
@@ -133,6 +160,15 @@ async fn status(
     let account = ProviderAccountsRepo::new(ctx.pool.clone())
         .get(&user.id, &id)
         .await?;
+    // Single flight: a second caller waits for the first one's check and then
+    // reads its answer; only a stale/absent answer runs the CLI again.
+    let slot = status_slot(&user.id, id.as_str());
+    let mut cached = slot.lock().await;
+    if let Some((at, signed_in)) = *cached {
+        if at.elapsed() < STATUS_TTL {
+            return Ok(Json(serde_json::json!({"signed_in": signed_in})));
+        }
+    }
     let args = if account.provider == "claude" {
         vec!["auth", "status"]
     } else {
@@ -168,5 +204,6 @@ async fn status(
                 .ok()
                 .and_then(|v| v.get("loggedIn").and_then(|v| v.as_bool()))
                 .unwrap_or(false));
+    *cached = Some((std::time::Instant::now(), signed_in));
     Ok(Json(serde_json::json!({"signed_in": signed_in})))
 }

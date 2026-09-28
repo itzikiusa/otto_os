@@ -736,7 +736,11 @@ mod tests {
         };
         let snap = snapshot_from_graph(&graph);
         assert_eq!(snap.databases, vec!["shop".to_string()]);
-        let names: Vec<&str> = snap.objects[0].fields.iter().map(|f| f.name.as_str()).collect();
+        let names: Vec<&str> = snap.objects[0]
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
         assert_eq!(names, ["id", "country", "name"]);
 
         // Context-aware like the driver path: in a WHERE over `customers`, the
@@ -754,7 +758,9 @@ mod tests {
         let ctx = sql::analyze("SELECT * FROM cu", "");
         let items = sql::assemble(&ctx, &snap, &[], &[]);
         assert!(items.iter().any(|i| i.label == "customers"));
-        assert!(items.iter().all(|i| i.kind != crate::types::CompletionKind::Column));
+        assert!(items
+            .iter()
+            .all(|i| i.kind != crate::types::CompletionKind::Column));
     }
 
     #[test]
