@@ -189,7 +189,7 @@ pub use swarm::{
 };
 pub use users::{UserRecord, UsersRepo};
 pub use workflow_triggers::{NewWorkflowTrigger, TriggersRepo, WorkflowTrigger};
-pub use workflows::WorkflowsRepo;
+pub use workflows::{RunHead, WorkflowsRepo};
 pub use workgraph::{
     ApprovalStatus, ArtifactKind, CountBucket, EdgeRelation, EdgeView, GraphEdge, GraphNode,
     GraphView, MissionFilter, MissionSummary, NewArtifact, NewWorkEvent, RiskLevel, UpsertResult,

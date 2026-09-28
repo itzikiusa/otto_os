@@ -287,11 +287,14 @@ impl ActivityRepo {
             .await
             .map_err(dberr("summary tasks (user)"))?;
 
+            // Per session, the newest trail row via the min/max optimisation
+            // on `idx_agent_trail_session` — O(sessions · log n) instead of a
+            // GROUP BY over every trail row in the workspace (r3-07-04).
             let trail_rows = sqlx::query(
-                "SELECT tr.session_id, MAX(tr.ts) AS last_ts FROM agent_trail tr
-                 JOIN sessions s ON s.id = tr.session_id
-                 WHERE tr.workspace_id = ? AND s.created_by = ?
-                 GROUP BY tr.session_id",
+                "SELECT s.id AS session_id,
+                        (SELECT MAX(tr.ts) FROM agent_trail tr WHERE tr.session_id = s.id)
+                            AS last_ts
+                 FROM sessions s WHERE s.workspace_id = ? AND s.created_by = ?",
             )
             .bind(workspace_id)
             .bind(uid)
@@ -311,8 +314,10 @@ impl ActivityRepo {
             .map_err(dberr("summary tasks"))?;
 
             let trail_rows = sqlx::query(
-                "SELECT session_id, MAX(ts) AS last_ts FROM agent_trail
-                 WHERE workspace_id = ? GROUP BY session_id",
+                "SELECT s.id AS session_id,
+                        (SELECT MAX(tr.ts) FROM agent_trail tr WHERE tr.session_id = s.id)
+                            AS last_ts
+                 FROM sessions s WHERE s.workspace_id = ?",
             )
             .bind(workspace_id)
             .fetch_all(&self.pool)
@@ -347,10 +352,12 @@ impl ActivityRepo {
         for r in &trail_rows {
             let sid: String = r.get("session_id");
             let last: Option<String> = r.get("last_ts");
-            let last_ts = match last {
-                Some(s) => Some(ts(&s)?),
-                None => None,
+            // A session with no trail row is not part of the trail roll-up
+            // (the per-session subquery returns NULL for it).
+            let Some(last) = last else {
+                continue;
             };
+            let last_ts = Some(ts(&last)?);
             let e = map
                 .entry(sid.clone())
                 .or_insert_with(|| SessionActivitySummary {
@@ -879,6 +886,34 @@ mod tests {
             .await
             .expect("all summary");
         assert_eq!(all.len(), 2, "admin path must return both sessions");
+    }
+
+    /// r3-07-04: the per-session trail roll-up reports each session's NEWEST
+    /// trail timestamp, includes trail-only sessions, and leaves out sessions
+    /// with neither trail nor tasks.
+    #[tokio::test]
+    async fn workspace_summary_reports_latest_trail_per_session() {
+        let pool = mk_pool().await;
+        seed_user(&pool, "u").await;
+        seed_workspace(&pool, "ws1").await;
+        let a = seed_session(&pool, "ws1", "u").await;
+        let quiet = seed_session(&pool, "ws1", "u").await;
+        let base = chrono::Utc::now() - chrono::Duration::hours(1);
+        for i in 0..5 {
+            trail_row(&pool, "ws1", &a, &format!("x{i}"), &fmt(base + chrono::Duration::minutes(i))).await;
+        }
+        let repo = ActivityRepo::new(pool.clone());
+        let all = repo.workspace_summary(&"ws1".into()).await.unwrap();
+        assert_eq!(all.len(), 1, "a session with no trail and no tasks is absent");
+        assert_eq!(all[0].session_id, a);
+        let want = ts(&fmt(base + chrono::Duration::minutes(4))).unwrap();
+        assert_eq!(all[0].last_ts, Some(want));
+        assert!(all.iter().all(|s| s.session_id != quiet));
+        let mine = repo
+            .workspace_summary_for_user(&"ws1".into(), &"u".into())
+            .await
+            .unwrap();
+        assert_eq!(mine.len(), 1);
     }
 
     /// workspace_summary_for_user with no sessions for the caller returns empty.

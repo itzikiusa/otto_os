@@ -16,6 +16,7 @@
 //!     the usage engine, off the hot path. The boot backfill is `tokio::spawn`ed
 //!     so it never delays startup.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use otto_core::domain::{Session, SessionKind};
@@ -132,9 +133,10 @@ pub fn spawn(ctx: ServerCtx) -> tokio::task::JoinHandle<()> {
     // Live event loop.
     tokio::spawn(async move {
         let mut rx = ctx.events.subscribe();
+        let mut live = LiveState::default();
         loop {
             match rx.recv().await {
-                Ok(ev) => handle_event(&ctx, ev).await,
+                Ok(ev) => handle_event(&ctx, &mut live, ev).await,
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!("workgraph projector lagged {n} events; reconcile will heal");
                 }
@@ -168,7 +170,39 @@ async fn add_artifact_if_absent(ctx: &ServerCtx, a: NewArtifact) {
 // Live event handling (cheap; SQLite only — NO usage/ClickHouse calls)
 // ---------------------------------------------------------------------------
 
-async fn handle_event(ctx: &ServerCtx, ev: Event) {
+/// What the live loop remembers between events.
+#[derive(Default)]
+struct LiveState {
+    /// Last status projected per workflow run. A running node emits
+    /// `WorkflowRunUpdated` on every progress write (node start, session
+    /// link, each coalesced log flush — up to ~4/s per node), but the
+    /// projection only changes with the run's STATUS, which the event
+    /// carries: an unchanged status is skipped without touching SQLite
+    /// (r3-07-02). Entries are dropped once a run settles.
+    run_status: HashMap<Id, String>,
+}
+
+/// Soft cap on [`LiveState::run_status`] (runs that never settle in this
+/// process — a daemon restart mid-run — would otherwise linger).
+const LIVE_RUNS_MAX: usize = 4096;
+
+/// Should a `WorkflowRunUpdated` with `status` be projected? Records it.
+fn run_status_changed(live: &mut LiveState, run_id: &Id, status: &str) -> bool {
+    if live.run_status.get(run_id).map(String::as_str) == Some(status) {
+        return false;
+    }
+    if matches!(status, "success" | "error" | "canceled") {
+        live.run_status.remove(run_id);
+    } else {
+        if live.run_status.len() >= LIVE_RUNS_MAX {
+            live.run_status.clear();
+        }
+        live.run_status.insert(run_id.clone(), status.to_string());
+    }
+    true
+}
+
+async fn handle_event(ctx: &ServerCtx, live: &mut LiveState, ev: Event) {
     match ev {
         Event::SessionCreated { session } => upsert_session(ctx, &session).await,
         Event::SessionStatus {
@@ -211,7 +245,16 @@ async fn handle_event(ctx: &ServerCtx, ev: Event) {
             }
         }
         Event::GoalLoopUpdated { loop_id, .. } => upsert_goal_loop(ctx, &loop_id).await,
-        Event::WorkflowRunUpdated { run_id, .. } => upsert_workflow_run(ctx, &run_id).await,
+        Event::WorkflowRunUpdated {
+            run_id,
+            status,
+            nodes_total,
+            ..
+        } => {
+            if run_status_changed(live, &run_id, &status) {
+                upsert_workflow_run(ctx, &run_id, Some(nodes_total)).await;
+            }
+        }
         Event::ReviewChanged {
             workspace_id,
             review_id,
@@ -410,17 +453,17 @@ async fn upsert_goal_loop(ctx: &ServerCtx, loop_id: &Id) {
     }
 }
 
-async fn upsert_workflow_run(ctx: &ServerCtx, run_id: &Id) {
+/// Project one workflow run. Reads only the run's head (status, error,
+/// workspace, workflow name) — never the node/input JSON; `nodes_total` comes
+/// from the live event, or from SQLite's `json_array_length` on a sweep.
+async fn upsert_workflow_run(ctx: &ServerCtx, run_id: &Id, nodes_total: Option<u32>) {
     let repo = WorkflowsRepo::new(ctx.pool.clone());
-    let run = match repo.get_run(run_id).await {
-        Ok(r) => r,
-        Err(_) => return,
+    let run = match repo.run_head(run_id, nodes_total.is_none()).await {
+        Ok(Some(r)) => r,
+        _ => return,
     };
-    let wf_name = repo
-        .get(&run.workflow_id)
-        .await
-        .map(|w| w.name)
-        .unwrap_or_else(|_| "Workflow".into());
+    let node_count = nodes_total.or(run.node_count).unwrap_or(0);
+    let wf_name = run.workflow_name.clone().unwrap_or_else(|| "Workflow".into());
     let status = WorkStatus::from_source(WorkKind::Workflow, run.status.as_str());
     let title = format!("{wf_name} run");
     let up = WorkItemUpsert {
@@ -438,7 +481,7 @@ async fn upsert_workflow_run(ctx: &ServerCtx, run_id: &Id) {
         cost_so_far: Some(0.0),
         risk_level: risk(WorkKind::Workflow, &title),
         result_summary: run.error.clone(),
-        context_summary: Some(format!("Workflow run · {} nodes", run.nodes.len())),
+        context_summary: Some(format!("Workflow run · {node_count} nodes")),
         started_by_id: None,
     };
     if let Err(e) = ctx.workgraph.record(up).await {
@@ -702,9 +745,10 @@ async fn backfill_workspace(ctx: &ServerCtx, ws_id: &Id, all_stories: &[otto_sta
     let wf_repo = WorkflowsRepo::new(ctx.pool.clone());
     if let Ok(workflows) = wf_repo.list(ws_id).await {
         for wf in &workflows {
-            if let Ok(runs) = wf_repo.list_runs(&wf.id).await {
-                for run in runs.iter().take(RUNS_PER_WORKFLOW) {
-                    upsert_workflow_run(ctx, &run.id).await;
+            // Ids only: `list_runs` parsed 50 full runs to use 5 (r3-07-02).
+            if let Ok(ids) = wf_repo.recent_run_ids(&wf.id, RUNS_PER_WORKFLOW as i64).await {
+                for id in &ids {
+                    upsert_workflow_run(ctx, id, None).await;
                 }
             }
         }
@@ -751,6 +795,26 @@ pub async fn refresh_session_costs(ctx: &ServerCtx, workspace_id: &Id) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// r3-07-02: progress events with an unchanged run status are skipped;
+    /// a status change is projected; a settled run is forgotten (so a later
+    /// replay re-projects rather than being swallowed).
+    #[test]
+    fn workflow_events_project_only_status_changes() {
+        let mut live = LiveState::default();
+        let run: Id = "r1".into();
+        assert!(run_status_changed(&mut live, &run, "running"));
+        for _ in 0..100 {
+            assert!(!run_status_changed(&mut live, &run, "running"), "log flush skipped");
+        }
+        assert!(run_status_changed(&mut live, &run, "success"));
+        assert!(live.run_status.is_empty(), "settled runs are dropped");
+        assert!(run_status_changed(&mut live, &run, "success"));
+        // Distinct runs are tracked independently.
+        assert!(run_status_changed(&mut live, &"r2".into(), "pending"));
+        assert!(run_status_changed(&mut live, &"r3".into(), "pending"));
+        assert!(!run_status_changed(&mut live, &"r2".into(), "pending"));
+    }
 
     /// The reconcile cadence knob (`spawn`): default 5 min, an operator override
     /// in seconds, `0` to switch the periodic sweep off entirely.

@@ -423,6 +423,39 @@ impl ProofRepo {
         rows.iter().map(row_to_artifact).collect()
     }
 
+    /// Every artifact of every pack in `workspace_id`, grouped by pack, for
+    /// BADGES and counts only: `content_ref` is not read (it comes back
+    /// `None`). One query instead of one per pack — the proof summary/list
+    /// used to issue N queries and read each artifact's inline content (up to
+    /// 2 MiB, typically a whole diff) just to compute badges from kind,
+    /// status, title and metadata (r3-07-01). Walks `idx_proof_packs_ws` then
+    /// `idx_proof_artifacts_pack`; order within a pack matches
+    /// [`Self::list_artifacts`].
+    pub async fn badge_artifacts(
+        &self,
+        workspace_id: &str,
+    ) -> Result<std::collections::HashMap<String, Vec<ProofArtifact>>> {
+        let rows = sqlx::query(
+            "SELECT a.id, a.proof_pack_id, a.workspace_id, a.kind, a.title, \
+                    NULL AS content_ref, a.status, a.metadata_json, a.content_sha256, \
+                    a.created_by, a.created_at, a.updated_at \
+             FROM proof_packs p JOIN proof_artifacts a ON a.proof_pack_id = p.id \
+             WHERE p.workspace_id = ? \
+             ORDER BY a.proof_pack_id, a.created_at ASC",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("proof badge artifacts"))?;
+        let mut out: std::collections::HashMap<String, Vec<ProofArtifact>> =
+            std::collections::HashMap::new();
+        for r in &rows {
+            let a = row_to_artifact(r)?;
+            out.entry(a.proof_pack_id.clone()).or_default().push(a);
+        }
+        Ok(out)
+    }
+
     pub async fn get_artifact(&self, id: &str) -> Result<ProofArtifact> {
         let row = sqlx::query("SELECT * FROM proof_artifacts WHERE id = ?")
             .bind(id)

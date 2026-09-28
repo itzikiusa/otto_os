@@ -493,6 +493,90 @@ mod tests {
             .unwrap();
         (pool.into(), run.id)
     }
+    /// r3-07-03: a progress write rewrites the run row ONCE (it was three
+    /// times: the UPDATE, the 0130 trigger NULLing the projection, and the
+    /// republish), keeps a valid projection, and a raw write that does not
+    /// bump `rev` is still invalidated by the trigger.
+    #[tokio::test]
+    async fn progress_write_rewrites_the_row_once() {
+        let (pool, id) = fixture().await;
+        let repo = WorkflowsRepo::new(pool.clone());
+        sqlx::query("CREATE TABLE run_writes (n INTEGER NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO run_writes VALUES (0)").execute(&pool).await.unwrap();
+        sqlx::query(
+            "CREATE TRIGGER count_run_writes AFTER UPDATE ON workflow_runs BEGIN \
+             UPDATE run_writes SET n = n + 1; END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let writes = || async {
+            sqlx::query_scalar::<_, i64>("SELECT n FROM run_writes")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+        let rev0: i64 = sqlx::query_scalar("SELECT rev FROM workflow_runs WHERE id=?")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let nodes: Vec<NodeRunState> = serde_json::from_value(json!([
+            {"node_id":"a","status":"running","logs":["⏳ working"]}
+        ]))
+        .unwrap();
+        let rev = repo.update_run_progress(&id, &nodes).await.unwrap();
+        assert_eq!(writes().await, 1, "one row rewrite per progress write");
+        assert_eq!(rev, rev0 + 1);
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT progress_json FROM workflow_runs WHERE id=?")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, Some(nodes_projection(&nodes).unwrap()));
+        // The terminal write path is a single statement too.
+        repo.update_run(&id, otto_core::workflows::RunStatus::Success, &nodes, None, true)
+            .await
+            .unwrap();
+        assert_eq!(writes().await, 2);
+        // A raw restore-style write (rev untouched) is still invalidated.
+        sqlx::query("UPDATE workflow_runs SET nodes_json='[]' WHERE id=?")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (p, r): (Option<String>, i64) =
+            sqlx::query_as("SELECT progress_json, rev FROM workflow_runs WHERE id=?")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(p.is_none(), "raw body write drops the projection");
+        assert_eq!(r, rev0 + 3);
+    }
+
+    /// r3-07-02: the projector's narrow read agrees with the full run.
+    #[tokio::test]
+    async fn run_head_matches_the_full_run_without_parsing_bodies() {
+        let (pool, id) = fixture().await;
+        let repo = WorkflowsRepo::new(pool.clone());
+        let full = repo.get_run(&id).await.unwrap();
+        let head = repo.run_head(&id, true).await.unwrap().unwrap();
+        assert_eq!(head.id, full.id);
+        assert_eq!(head.workflow_id, full.workflow_id);
+        assert_eq!(head.workspace_id, full.workspace_id);
+        assert_eq!(head.status, full.status.as_str());
+        assert_eq!(head.error, full.error);
+        assert_eq!(head.node_count, Some(full.nodes.len() as u32));
+        assert_eq!(head.workflow_name.as_deref(), Some("test"));
+        assert_eq!(repo.run_head(&id, false).await.unwrap().unwrap().node_count, None);
+        assert!(repo.run_head(&"nope".into(), true).await.unwrap().is_none());
+        assert_eq!(repo.recent_run_ids(&full.workflow_id, 5).await.unwrap(), vec![id]);
+    }
     #[tokio::test]
     async fn large_checkpoint_bodies_are_absent_from_progress_and_unchanged_poll() {
         let (pool, id) = fixture().await;
