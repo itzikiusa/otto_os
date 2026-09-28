@@ -198,9 +198,8 @@ async fn install_servers(
 #[derive(Clone)]
 struct LspWsState {
     auth: Arc<dyn TokenAuthenticator>,
-    #[allow(dead_code)]
     ctx: ServerCtx,
-    /// Shared servers, one per `(lang, root)`.
+    /// Shared servers, one per `(user, lang, root)`.
     pool: Arc<pool::LspPool>,
 }
 
@@ -232,9 +231,22 @@ async fn lsp_ws(
             return ws_problem(StatusCode::UNAUTHORIZED, "unauthorized", "missing token");
         }
     };
-    if st.auth.authenticate(&token).await.is_err() {
-        return ws_problem(StatusCode::UNAUTHORIZED, "unauthorized", "invalid token");
+    let auth = match st.auth.authenticate(&token).await {
+        Ok(a) => a,
+        Err(_) => {
+            return ws_problem(StatusCode::UNAUTHORIZED, "unauthorized", "invalid token");
+        }
+    };
+    // Same credential rules as the Files routes (`/fs/read`, `/fs/browse`):
+    // share-link (scoped) and MCP-restricted tokens never reach host files.
+    if auth.scope.is_some() || auth.mcp_only {
+        return ws_problem(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "this credential cannot open a language server",
+        );
     }
+    let user = auth.effective_user.clone();
 
     // 2. Validate lang parameter.
     let lang = match q.lang {
@@ -290,11 +302,39 @@ async fn lsp_ws(
         );
     }
 
-    // One pooled server per (lang, canonical root): `/a/../a` and `/a` share.
+    // One pooled server per (user, lang, canonical root): `/a/../a` and `/a`
+    // share; two users never do (r3-10-08).
     let root = std::fs::canonicalize(root_path)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or(root);
-    let key = pool::PoolKey { lang, root };
+    // 5. The caller must be able to see a workspace containing `root` (the
+    //    server indexes — and answers queries about — everything under it).
+    //    Root users own the host, like the Files routes.
+    if !user.is_root {
+        match root_visible_to(&st.ctx, &user, std::path::Path::new(&root)).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return ws_problem(
+                    StatusCode::FORBIDDEN,
+                    "forbidden",
+                    "root is not inside a workspace you can access",
+                );
+            }
+            Err(e) => {
+                tracing::warn!("lsp: workspace lookup failed: {e}");
+                return ws_problem(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    "workspace lookup failed",
+                );
+            }
+        }
+    }
+    let key = pool::PoolKey {
+        owner: user.id.to_string(),
+        lang,
+        root,
+    };
     let cmd = resolved.command.clone();
     let args = resolved.args.clone();
     let pool = Arc::clone(&st.pool);
@@ -302,6 +342,58 @@ async fn lsp_ws(
     ws.on_upgrade(move |socket| async move {
         serve_lsp(socket, pool, key, cmd, args).await;
     })
+}
+
+/// Is canonical `root` equal to — or inside — the canonical root of a
+/// workspace `user` is a member of? The scratch workspace (every user is an
+/// implicit Editor; its root is the daemon user's HOME) matches only EXACTLY,
+/// so it cannot turn into "anything under ~".
+async fn root_visible_to(
+    ctx: &ServerCtx,
+    user: &otto_core::domain::User,
+    root: &std::path::Path,
+) -> otto_core::Result<bool> {
+    let member_roots: Vec<String> = ctx
+        .workspaces
+        .list_for_user(&user.id)
+        .await?
+        .into_iter()
+        .map(|(w, _)| w.root_path)
+        .collect();
+    let scratch_root = ctx
+        .workspaces
+        .get(&otto_core::domain::SCRATCH_WORKSPACE_ID.to_string())
+        .await
+        .ok()
+        .map(|w| w.root_path);
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        root_under_any(&root, &member_roots)
+            || scratch_root.is_some_and(|s| canonical_eq(&root, &s))
+    })
+    .await
+    .map_err(|e| otto_core::Error::Internal(format!("lsp root check: {e}")))
+}
+
+fn canonical_of(p: &str) -> Option<std::path::PathBuf> {
+    if p.trim().is_empty() {
+        return None;
+    }
+    let p = std::path::Path::new(p);
+    Some(std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+}
+
+fn canonical_eq(root: &std::path::Path, other: &str) -> bool {
+    canonical_of(other).is_some_and(|c| root == c)
+}
+
+/// Containment check: canonicalizes each workspace root (a symlinked
+/// workspace path still matches). Empty roots never match.
+fn root_under_any(root: &std::path::Path, workspace_roots: &[String]) -> bool {
+    workspace_roots
+        .iter()
+        .filter_map(|w| canonical_of(w))
+        .any(|c| root.starts_with(&c))
 }
 
 /// Relay one socket to its pooled server until either side goes away.
@@ -381,4 +473,32 @@ pub fn ws_router(authenticator: Arc<dyn TokenAuthenticator>, ctx: ServerCtx) -> 
             ctx,
             pool: pool::LspPool::new(pool::process_spawner(), pool::IDLE_TIMEOUT),
         })
+}
+
+#[cfg(test)]
+mod root_tests {
+    use super::*;
+
+    #[test]
+    fn lsp_root_must_sit_inside_a_member_workspace() {
+        let d = tempfile::tempdir().unwrap();
+        let ws = d.path().join("repo");
+        let other = d.path().join("elsewhere");
+        std::fs::create_dir_all(ws.join("sub")).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap();
+        let roots = vec![ws.to_string_lossy().into_owned(), String::new()];
+        assert!(root_under_any(&canon(&ws), &roots));
+        assert!(root_under_any(&canon(&ws.join("sub")), &roots));
+        assert!(!root_under_any(&canon(&other), &roots));
+        assert!(!root_under_any(&canon(d.path()), &roots), "a parent is not inside");
+        // `repo-evil` shares a string prefix with `repo` but is not inside it.
+        let evil = d.path().join("repo-evil");
+        std::fs::create_dir_all(&evil).unwrap();
+        assert!(!root_under_any(&canon(&evil), &roots));
+        // Scratch (HOME) matches exactly, never its subtree.
+        let home = d.path().to_string_lossy().into_owned();
+        assert!(canonical_eq(&canon(d.path()), &home));
+        assert!(!canonical_eq(&canon(&other), &home));
+    }
 }

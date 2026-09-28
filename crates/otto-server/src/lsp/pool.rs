@@ -1,5 +1,8 @@
-//! Shared language-server pool: ONE server process per `(lang, root)`,
-//! multiplexed across every `/ws/lsp` socket that asks for it.
+//! Shared language-server pool: ONE server process per `(owner, lang, root)`,
+//! multiplexed across every `/ws/lsp` socket of that owner that asks for it.
+//! The owner (the authenticated user) is part of the key (r3-10-08): server
+//! requests (`workspace/applyEdit`, …) and broadcast notifications must never
+//! reach another user's editor.
 //!
 //! Before this, every editor socket spawned its own server (`cwd` = the
 //! workspace root) and killed it on close, so each file opened in the Files
@@ -30,10 +33,14 @@
 //! cancel-safe, so they never sit in a `select!`), stdin is written by its own
 //! task (so a server that is busy writing can never dead-lock the actor), and
 //! a slow socket whose outbound queue fills is dropped instead of stalling the
-//! other editors.
+//! other editors. The stdin queue is BOUNDED by bytes ([`WRITE_QUEUE_MAX_BYTES`]):
+//! while a busy server is not reading, the actor stops taking client messages,
+//! the per-server client queue ([`DATA_CAPACITY`]) fills, and each socket's
+//! `send().await` — so its WebSocket read loop — waits. (Server-originated
+//! writes, e.g. neutral answers, are never dropped; they are tiny.)
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -48,6 +55,9 @@ use super::framing;
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Queued client → server messages per pooled server (backpressure).
 const DATA_CAPACITY: usize = 1024;
+/// Bytes queued for a server's stdin before the actor stops accepting client
+/// messages (every `didOpen` carries a whole file; unbounded before r3-10-08).
+pub const WRITE_QUEUE_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// Queued server → client messages per socket before the socket is dropped.
 const CLIENT_CAPACITY: usize = 1024;
 /// Parsed server messages buffered between the stdout reader and the actor.
@@ -56,6 +66,9 @@ const SERVER_CAPACITY: usize = 256;
 /// Identity of a pooled server.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PoolKey {
+    /// The authenticated user the server belongs to — never shared across
+    /// users (a server request goes to one of the owner's own sockets).
+    pub owner: String,
     pub lang: String,
     /// Canonicalized workspace root (the server's `cwd`).
     pub root: String,
@@ -132,6 +145,8 @@ pub struct LspPool {
     entries: Mutex<HashMap<PoolKey, Entry>>,
     spawner: Spawner,
     idle: Duration,
+    /// Per-server stdin backlog bound (bytes), [`WRITE_QUEUE_MAX_BYTES`].
+    write_cap: usize,
     next_client: AtomicU64,
     next_gen: AtomicU64,
 }
@@ -169,10 +184,16 @@ impl Drop for Attached {
 
 impl LspPool {
     pub fn new(spawner: Spawner, idle: Duration) -> Arc<Self> {
+        Self::with_write_cap(spawner, idle, WRITE_QUEUE_MAX_BYTES)
+    }
+
+    /// [`Self::new`] with an explicit stdin backlog bound (tests).
+    pub fn with_write_cap(spawner: Spawner, idle: Duration, write_cap: usize) -> Arc<Self> {
         Arc::new(Self {
             entries: Mutex::new(HashMap::new()),
             spawner,
             idle,
+            write_cap,
             next_client: AtomicU64::new(1),
             next_gen: AtomicU64::new(1),
         })
@@ -264,16 +285,27 @@ async fn run_actor(
         child,
     } = io;
 
+    // The channel itself is unbounded so the (sync) Mux never blocks or drops
+    // a write; `backlog` counts its queued bytes and the actor stops taking
+    // CLIENT messages while it is over `pool.write_cap` (see module doc).
     let (w_tx, mut w_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let writer_task = tokio::spawn(async move {
-        let mut writer = writer;
-        while let Some(body) = w_rx.recv().await {
-            if let Err(e) = framing::write_message(&mut writer, &body).await {
-                tracing::warn!("lsp: stdin write error: {e}");
-                break;
+    let backlog = Arc::new(AtomicUsize::new(0));
+    let drained = Arc::new(tokio::sync::Notify::new());
+    let writer_task = {
+        let (backlog, drained) = (Arc::clone(&backlog), Arc::clone(&drained));
+        tokio::spawn(async move {
+            let mut writer = writer;
+            while let Some(body) = w_rx.recv().await {
+                let res = framing::write_message(&mut writer, &body).await;
+                backlog.fetch_sub(body.len(), Ordering::AcqRel);
+                drained.notify_one();
+                if let Err(e) = res {
+                    tracing::warn!("lsp: stdin write error: {e}");
+                    break;
+                }
             }
-        }
-    });
+        })
+    };
     let (r_tx, mut r_rx) = mpsc::channel::<Vec<u8>>(SERVER_CAPACITY);
     let reader_task = tokio::spawn(async move {
         let mut reader = reader;
@@ -296,9 +328,11 @@ async fn run_actor(
         }
     });
 
-    let mut mux = Mux::new(w_tx);
+    let mut mux = Mux::new(w_tx, Arc::clone(&backlog));
+    let write_cap = pool.write_cap;
     let mut idle_at: Option<Instant> = None;
     loop {
+        let has_room = backlog.load(Ordering::Acquire) < write_cap;
         tokio::select! {
             biased;
             c = ctl_rx.recv() => match c {
@@ -306,10 +340,12 @@ async fn run_actor(
                 Some(Ctl::Detach { client }) => mux.detach(client),
                 None => break,
             },
-            d = data_rx.recv() => match d {
+            d = data_rx.recv(), if has_room => match d {
                 Some(Data { client, text }) => mux.on_client(client, &text),
                 None => break,
             },
+            // Gated: wake when the writer drains so `has_room` is re-checked.
+            _ = drained.notified(), if !has_room => {}
             s = r_rx.recv() => match s {
                 Some(body) => {
                     if !mux.on_server(&body) {
@@ -373,6 +409,9 @@ enum Init {
 /// Pure routing state for one pooled server (no I/O besides the queues).
 struct Mux {
     to_server_tx: mpsc::UnboundedSender<Vec<u8>>,
+    /// Bytes queued on `to_server_tx` and not yet written (shared with the
+    /// writer task, which subtracts).
+    backlog: Arc<AtomicUsize>,
     /// BTreeMap: the first key is the oldest socket (server-request target).
     clients: BTreeMap<u64, Client>,
     /// pool id → (socket, the socket's own request id).
@@ -395,9 +434,10 @@ fn str_at<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
 }
 
 impl Mux {
-    fn new(to_server_tx: mpsc::UnboundedSender<Vec<u8>>) -> Self {
+    fn new(to_server_tx: mpsc::UnboundedSender<Vec<u8>>, backlog: Arc<AtomicUsize>) -> Self {
         Self {
             to_server_tx,
+            backlog,
             clients: BTreeMap::new(),
             pending: HashMap::new(),
             server_reqs: HashMap::new(),
@@ -416,12 +456,21 @@ impl Mux {
 
     fn to_server(&self, v: &Value) {
         if let Ok(bytes) = serde_json::to_vec(v) {
-            let _ = self.to_server_tx.send(bytes);
+            self.queue_write(bytes);
         }
     }
 
     fn to_server_raw(&self, text: &str) {
-        let _ = self.to_server_tx.send(text.as_bytes().to_vec());
+        self.queue_write(text.as_bytes().to_vec());
+    }
+
+    fn queue_write(&self, bytes: Vec<u8>) {
+        let n = bytes.len();
+        self.backlog.fetch_add(n, Ordering::AcqRel);
+        if self.to_server_tx.send(bytes).is_err() {
+            // Writer gone: nothing will ever subtract these bytes.
+            self.backlog.fetch_sub(n, Ordering::AcqRel);
+        }
     }
 
     /// Queue `text` for socket `client`; a socket whose queue is full is
@@ -708,7 +757,6 @@ impl Mux {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
 
     /// An in-process fake language server over duplex pipes.
     struct Fake {
@@ -781,7 +829,12 @@ mod tests {
     }
 
     fn key(root: &str) -> PoolKey {
+        key_for("u1", root)
+    }
+
+    fn key_for(owner: &str, root: &str) -> PoolKey {
         PoolKey {
+            owner: owner.into(),
             lang: "typescript".into(),
             root: root.into(),
         }
@@ -912,5 +965,58 @@ mod tests {
         let mut c = pool.attach(key("/r"), "tsls", &[]).unwrap();
         init(&mut c, 1).await;
         assert_eq!(fake.spawns.load(Ordering::SeqCst), 2);
+    }
+
+    /// r3-10-08: two users on the same (lang, root) get separate servers, so
+    /// a server request / broadcast never reaches the other user's editor.
+    #[tokio::test]
+    async fn different_owners_never_share_a_server() {
+        let (pool, fake) = fake_pool(IDLE_TIMEOUT);
+        let _a = pool.attach(key_for("alice", "/r"), "tsls", &[]).unwrap();
+        let _b = pool.attach(key_for("bob", "/r"), "tsls", &[]).unwrap();
+        let _a2 = pool.attach(key_for("alice", "/r"), "tsls", &[]).unwrap();
+        assert_eq!(fake.spawns.load(Ordering::SeqCst), 2);
+        assert_eq!(pool.live_servers(), 2);
+    }
+
+    /// r3-10-08: a server that stops reading stdin must push back on the
+    /// sockets instead of queueing their messages without limit.
+    #[tokio::test]
+    async fn a_stalled_server_backpressures_client_sends() {
+        let spawner: Spawner = Arc::new(|_key: &PoolKey, _cmd: &str, _args: &[String]| {
+            // The "server" never reads its stdin: the pipe fills at 4 KiB.
+            let (pool_side_w, server_r) = tokio::io::duplex(4 * 1024);
+            let (_server_w, pool_side_r) = tokio::io::duplex(1024);
+            tokio::spawn(async move {
+                let _hold = (server_r, _server_w);
+                std::future::pending::<()>().await;
+            });
+            Ok(ServerIo {
+                reader: Box::new(BufReader::new(pool_side_r)),
+                writer: Box::new(pool_side_w),
+                child: None,
+            })
+        });
+        let pool = LspPool::with_write_cap(spawner, IDLE_TIMEOUT, 16 * 1024);
+        let a = pool.attach(key("/r"), "tsls", &[]).unwrap();
+        let body = "x".repeat(1024);
+        let mut accepted = 0usize;
+        let mut blocked = false;
+        for i in 0..(DATA_CAPACITY * 3) {
+            let msg = json!({"jsonrpc":"2.0","method":"textDocument/didChange",
+                "params":{"n": i, "text": body}})
+            .to_string();
+            match tokio::time::timeout(Duration::from_millis(200), a.send(msg)).await {
+                Ok(true) => accepted += 1,
+                Ok(false) => panic!("server went away"),
+                Err(_) => {
+                    blocked = true;
+                    break;
+                }
+            }
+        }
+        assert!(blocked, "sends never blocked: {accepted} accepted");
+        // Bound: pipe (4 KiB) + stdin backlog cap (16 KiB) + the client queue.
+        assert!(accepted <= DATA_CAPACITY + 64, "{accepted} accepted");
     }
 }

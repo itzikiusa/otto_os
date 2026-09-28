@@ -2535,7 +2535,7 @@ These self-authenticate via the `?token=` query parameter and are merged at the 
 |---|---|---|
 | GET /ws/term/{session_id} | `?token=`; ws viewer attach, editor input | terminal stream (see ws.md) |
 | GET /ws/events | `Sec-WebSocket-Protocol: otto-bearer, <token>` (preferred — keeps the token out of the URL) or `?token=` fallback; member | daemon event stream (see ws.md) |
-| GET /ws/lsp?lang=&root=&token= | `?token=`; ws editor | LSP WebSocket bridge. Sockets share ONE server process per `(lang, canonical root)` (ref-counted; reaped 60 s after the last socket leaves): request ids are rewritten per socket, `initialize` is answered from the first result, `didOpen`/`didClose` are ref-counted per URI, `publishDiagnostics` goes to sockets holding the URI |
+| GET /ws/lsp?lang=&root=&token= | `?token=`; ws editor | LSP WebSocket bridge. Share-link (scoped) and MCP-restricted tokens → 403 (same as `/fs/*`). A non-root caller's canonical `root` must be inside a workspace they are a member of (or exactly the scratch workspace root) → else 403. Sockets share ONE server process per `(user, lang, canonical root)` — never across users (ref-counted; reaped 60 s after the last socket leaves): request ids are rewritten per socket, `initialize` is answered from the first result, `didOpen`/`didClose` are ref-counted per URI, `publishDiagnostics` goes to sockets holding the URI. The server's stdin backlog is bounded (8 MiB); past it client messages are back-pressured (the socket stops being read) instead of queued. |
 | GET /ws/api-client/stream?token= | `?token=`; ws editor | API-client streaming-response bridge |
 | GET /browser/proxy?url=&token= | `?token=` | in-app browser HTTP proxy |
 
