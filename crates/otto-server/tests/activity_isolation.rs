@@ -35,7 +35,7 @@ use otto_server::ServerCtx;
 use otto_sessions::{ProviderRegistry, SessionManager};
 use otto_state::{
     ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, GitStore, IntegrationsRepo,
-    IssuesRepo, NewSession, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, SqlitePool,
+    IssuesRepo, NewSession, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, DbPool,
     SwarmRepo, WorkspacesRepo,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -80,7 +80,7 @@ impl otto_connections::Spawner for NoopSpawner {
 // Database pool + fixtures
 // ---------------------------------------------------------------------------
 
-async fn mem_pool() -> SqlitePool {
+async fn mem_pool() -> DbPool {
     let opts = SqliteConnectOptions::new()
         .in_memory(true)
         .foreign_keys(true);
@@ -93,7 +93,7 @@ async fn mem_pool() -> SqlitePool {
         .run(&pool)
         .await
         .expect("run migrations");
-    pool
+    pool.into()
 }
 
 fn user(id: &str, is_root: bool) -> User {
@@ -107,7 +107,7 @@ fn user(id: &str, is_root: bool) -> User {
     }
 }
 
-async fn seed_user(pool: &SqlitePool, id: &str, is_root: bool) {
+async fn seed_user(pool: &DbPool, id: &str, is_root: bool) {
     let now = Utc::now().to_rfc3339();
     sqlx::query(
         "INSERT INTO users (id, username, password_hash, display_name, is_root, created_at)
@@ -123,7 +123,7 @@ async fn seed_user(pool: &SqlitePool, id: &str, is_root: bool) {
     .expect("seed user");
 }
 
-async fn seed_workspace(pool: &SqlitePool, ws_id: &str) {
+async fn seed_workspace(pool: &DbPool, ws_id: &str) {
     let now = Utc::now().to_rfc3339();
     sqlx::query(
         "INSERT INTO workspaces (id, name, root_path, settings_json, archived, created_at)
@@ -136,7 +136,7 @@ async fn seed_workspace(pool: &SqlitePool, ws_id: &str) {
     .expect("seed workspace");
 }
 
-async fn set_member(pool: &SqlitePool, ws_id: &str, user_id: &str, role: &str) {
+async fn set_member(pool: &DbPool, ws_id: &str, user_id: &str, role: &str) {
     sqlx::query("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)")
         .bind(ws_id)
         .bind(user_id)
@@ -166,7 +166,7 @@ async fn insert_session(repo: &SessionsRepo, ws: &str, created_by: &str) -> Id {
 }
 
 /// Seed one task row for a session to make it appear in summary.
-async fn seed_task(pool: &SqlitePool, ws_id: &str, session_id: &str) {
+async fn seed_task(pool: &DbPool, ws_id: &str, session_id: &str) {
     let task_id = otto_core::new_id();
     let now = Utc::now().to_rfc3339();
     sqlx::query(
@@ -188,7 +188,7 @@ async fn seed_task(pool: &SqlitePool, ws_id: &str, session_id: &str) {
 // Minimal ServerCtx construction for activity-handler tests
 // ---------------------------------------------------------------------------
 
-async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
+async fn test_ctx(pool: &DbPool) -> ServerCtx {
     let (events, _rx) = broadcast::channel(64);
     let secrets: Arc<dyn SecretStore> = Arc::new(NoopSecrets);
     let roles = Arc::new(RbacRoleChecker::new(pool.clone()));

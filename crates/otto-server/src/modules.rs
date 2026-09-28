@@ -37,7 +37,7 @@ use crate::state::ServerCtx;
 /// Reload identity and workspace authority at the actual input boundary. A
 /// session owner still needs Editor membership to type into that workspace.
 async fn input_user(
-    pool: &otto_state::SqlitePool,
+    pool: &otto_state::DbPool,
     user_id: &Id,
     session: &Session,
 ) -> Result<User> {
@@ -201,7 +201,7 @@ impl PtySpawner {
 }
 
 impl otto_aws::AwsCtx for ServerCtx {
-    fn pool(&self) -> otto_state::SqlitePool {
+    fn pool(&self) -> otto_state::DbPool {
         self.pool.clone()
     }
     fn secrets(&self) -> &Arc<dyn otto_core::secrets::SecretStore> {
@@ -219,7 +219,7 @@ impl otto_aws::AwsCtx for ServerCtx {
 }
 
 impl otto_k8s::K8sCtx for ServerCtx {
-    fn pool(&self) -> otto_state::SqlitePool {
+    fn pool(&self) -> otto_state::DbPool {
         self.pool.clone()
     }
     fn secrets(&self) -> &Arc<dyn otto_core::secrets::SecretStore> {
@@ -274,7 +274,7 @@ impl otto_connections::ConnectionsCtx for ServerCtx {
     fn spawner(&self) -> &Arc<dyn Spawner> {
         &self.spawner
     }
-    fn pool(&self) -> otto_state::SqlitePool {
+    fn pool(&self) -> otto_state::DbPool {
         self.pool.clone()
     }
     fn db_tester(&self) -> Option<Arc<dyn otto_connections::DbTester>> {
@@ -334,7 +334,7 @@ impl otto_dbviewer::DbViewerCtx for ServerCtx {
     fn roles(&self) -> &Arc<dyn RoleChecker> {
         &self.roles
     }
-    fn pool(&self) -> Option<otto_state::SqlitePool> {
+    fn pool(&self) -> Option<otto_state::DbPool> {
         // Lets the global-connection branch of the route gates consult the
         // caller's `Database` grant instead of falling back to root-only.
         Some(self.pool.clone())
@@ -386,7 +386,7 @@ impl otto_brokers::BrokersCtx for ServerCtx {
     fn roles(&self) -> &Arc<dyn RoleChecker> {
         &self.roles
     }
-    fn pool(&self) -> Option<otto_state::SqlitePool> {
+    fn pool(&self) -> Option<otto_state::DbPool> {
         // Lets the global-cluster branch consult the caller's `Database` grant
         // instead of falling back to root-only.
         Some(self.pool.clone())
@@ -397,7 +397,7 @@ impl otto_mcp::McpCtx for ServerCtx {
     fn mcp(&self) -> &Arc<otto_mcp::McpService> {
         &self.mcp
     }
-    fn mcp_pool(&self) -> &otto_state::SqlitePool {
+    fn mcp_pool(&self) -> &otto_state::DbPool {
         &self.pool
     }
     fn mcp_secrets(&self) -> &Arc<dyn otto_core::secrets::SecretStore> {
@@ -655,7 +655,7 @@ impl otto_swarm::SwarmCtx for ServerCtx {
 pub struct PtySpawner {
     pub manager: Arc<SessionManager>,
     pub workspaces: WorkspacesRepo,
-    pub pool: otto_state::SqlitePool,
+    pub pool: otto_state::DbPool,
 }
 
 impl Spawner for PtySpawner {
@@ -8035,11 +8035,11 @@ mod terminal_input_access_tests {
 
     #[tokio::test]
     async fn alternate_input_checks_current_resource_page_owner_and_workspace() {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        let pool = otto_state::DbPool::from(sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await
-            .unwrap();
+            .unwrap());
         sqlx::migrate!("../otto-state/migrations")
             .run(&pool)
             .await

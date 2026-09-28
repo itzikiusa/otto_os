@@ -4,11 +4,11 @@
 //! columns. Mirrors the `pragma_table_info` shape used in `share_tokens.rs`.
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::SqlitePool;
+use otto_state::DbPool;
 
 /// An in-memory pool with every migration applied (matches the harness used in
 /// `share_tokens.rs` / `otto-rbac` / `otto-server`).
-async fn mem_pool() -> SqlitePool {
+async fn mem_pool() -> DbPool {
     let opts = SqliteConnectOptions::new()
         .in_memory(true)
         .foreign_keys(true);
@@ -21,7 +21,7 @@ async fn mem_pool() -> SqlitePool {
         .run(&pool)
         .await
         .expect("migrations");
-    pool
+    pool.into()
 }
 
 /// After migrating, `email_senders` carries the columns the sender record needs:

@@ -84,18 +84,18 @@ fn delegated_admin_cannot_disable_enforcement() {
 }
 
 #[derive(Clone)]
-struct TestAccess(sqlx::SqlitePool);
+struct TestAccess(otto_state::DbPool);
 impl AccessCtx for TestAccess {
-    fn access_pool(&self) -> SqlitePool {
+    fn access_pool(&self) -> DbPool {
         self.0.clone()
     }
 }
 async fn setup() -> (TestAccess, User, User, Id) {
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+    let pool = otto_state::DbPool::from(sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
         .await
-        .unwrap();
+        .unwrap());
     sqlx::migrate!("../otto-state/migrations")
         .run(&pool)
         .await
@@ -264,9 +264,9 @@ async fn activation_requires_current_preview_and_stale_saves_conflict() {
 }
 
 #[derive(Clone)]
-struct FailedRetirement(SqlitePool);
+struct FailedRetirement(DbPool);
 impl AccessCtx for FailedRetirement {
-    fn access_pool(&self) -> SqlitePool {
+    fn access_pool(&self) -> DbPool {
         self.0.clone()
     }
     fn retire_mcp<'a>(

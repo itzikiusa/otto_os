@@ -23,7 +23,7 @@ use otto_core::domain::{User, WorkspaceRole};
 use otto_core::{new_id, Id};
 use otto_rbac::AuthRepo;
 use otto_server::feature_guard::feature_guard;
-use otto_state::{GrantsRepo, SqlitePool};
+use otto_state::{GrantsRepo, DbPool};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::sync::Arc;
 use tower::ServiceExt; // for `oneshot`
@@ -32,7 +32,7 @@ use tower::ServiceExt; // for `oneshot`
 // Pool + user fixtures
 // ---------------------------------------------------------------------------
 
-async fn mk_pool() -> SqlitePool {
+async fn mk_pool() -> DbPool {
     let opts = SqliteConnectOptions::new()
         .in_memory(true)
         .foreign_keys(true);
@@ -45,10 +45,10 @@ async fn mk_pool() -> SqlitePool {
         .run(&pool)
         .await
         .expect("migrations");
-    pool
+    pool.into()
 }
 
-async fn seed_user(pool: &SqlitePool, username: &str, is_root: bool) -> User {
+async fn seed_user(pool: &DbPool, username: &str, is_root: bool) -> User {
     let id = new_id();
     let now = Utc::now().to_rfc3339();
     sqlx::query(
@@ -341,7 +341,7 @@ async fn list_shares_returns_live_shares_for_session() {
 
 /// Build a minimal router with the share mint/list handlers + feature guard,
 /// injecting the given AuthContext (mirrors what auth_middleware does).
-fn build_scope_check_app(pool: SqlitePool, auth_ctx: AuthContext) -> Router {
+fn build_scope_check_app(pool: DbPool, auth_ctx: AuthContext) -> Router {
     #[derive(Clone)]
     struct MinState {
         grants: GrantsRepo,

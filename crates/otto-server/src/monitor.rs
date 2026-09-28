@@ -760,7 +760,7 @@ pub struct AuthScanner {
 
 impl AuthScanner {
     /// Build from a DB pool + event bus (available before `ServerCtx`).
-    pub fn new(pool: sqlx::SqlitePool, events: tokio::sync::broadcast::Sender<Event>) -> Arc<Self> {
+    pub fn new(pool: otto_state::DbPool, events: tokio::sync::broadcast::Sender<Event>) -> Arc<Self> {
         Arc::new(Self {
             notifications: crate::state::NotificationService::new(pool, events),
             flagged: Mutex::new(std::collections::HashSet::new()),

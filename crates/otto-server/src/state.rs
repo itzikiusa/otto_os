@@ -16,14 +16,14 @@ use otto_state::{
     NewTask, NewTrail, NotificationsRepo, ReviewFindingsRepo, ReviewsRepo, SkillEvalsRepo,
     SkillReviewsRepo, WorkspacesRepo,
 };
-use sqlx::SqlitePool;
+use otto_state::DbPool;
 use tokio::sync::broadcast;
 
 /// Composition-root context cloned into every handler. Implements the ctx
 /// traits of the sessions/connections/git routers (see `modules.rs`).
 #[derive(Clone)]
 pub struct ServerCtx {
-    pub pool: SqlitePool,
+    pub pool: DbPool,
     pub secrets: Arc<dyn SecretStore>,
     pub events: broadcast::Sender<Event>,
     pub authenticator: Arc<dyn TokenAuthenticator>,
@@ -286,7 +286,8 @@ impl NotificationService {
     /// Build a service from a DB pool + event bus directly. Lets producers that
     /// exist *before* the full [`ServerCtx`] is assembled (e.g. the session
     /// output scanner attached to the `SessionManager`) emit notices.
-    pub fn new(pool: SqlitePool, events: broadcast::Sender<Event>) -> Self {
+    pub fn new(pool: impl Into<DbPool>, events: broadcast::Sender<Event>) -> Self {
+        let pool: DbPool = pool.into();
         Self {
             repo: NotificationsRepo::new(pool),
             events,

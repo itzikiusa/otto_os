@@ -8,7 +8,8 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, SecondsFormat, Utc};
 use otto_core::{new_id, Error, Id, Result};
 use serde_json::Value;
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use otto_state::DbPool;
 
 use crate::graph::Adjacency;
 use crate::retention::VersionInfo;
@@ -515,15 +516,16 @@ pub fn parse_cursor(s: &str) -> Result<(String, Id)> {
 
 #[derive(Clone)]
 pub struct Store {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl Store {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
-    pub fn pool(&self) -> &SqlitePool {
+    pub fn pool(&self) -> &DbPool {
         &self.pool
     }
 

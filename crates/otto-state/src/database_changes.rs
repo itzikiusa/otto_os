@@ -4,7 +4,8 @@ use otto_core::{Error, Id, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangeTarget {
@@ -72,7 +73,7 @@ pub struct ChangeEvent {
 }
 #[derive(Clone)]
 pub struct DatabaseChangesRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 fn db(e: sqlx::Error) -> Error {
     Error::Internal(format!("database changes: {e}"))
@@ -138,7 +139,8 @@ pub fn artifact_hash(
     ))
 }
 impl DatabaseChangesRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
     pub async fn get(&self, id: &str) -> Result<DatabaseChange> {

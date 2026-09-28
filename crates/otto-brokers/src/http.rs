@@ -30,7 +30,7 @@ pub trait BrokersCtx: Clone + Send + Sync + 'static {
     /// SQLite pool used to resolve per-user feature grants for **global**
     /// (workspace-less) clusters. `None` — the default, for check-only test
     /// contexts with no state DB — keeps that branch root-only.
-    fn pool(&self) -> Option<otto_state::SqlitePool> {
+    fn pool(&self) -> Option<otto_state::DbPool> {
         None
     }
 }

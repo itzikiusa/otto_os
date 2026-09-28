@@ -7,7 +7,7 @@ use otto_core::{Error, Id};
 use otto_rbac::ResourceAccess;
 use otto_state::{ResourceAccessRepo, UsersRepo};
 
-async fn user(pool: &sqlx::SqlitePool, name: &str, root: bool) -> User {
+async fn user(pool: &otto_state::DbPool, name: &str, root: bool) -> User {
     UsersRepo::new(pool.clone())
         .create(name, "hash", name, root)
         .await
@@ -16,7 +16,7 @@ async fn user(pool: &sqlx::SqlitePool, name: &str, root: bool) -> User {
 
 /// Insert a real connection, then remove the trigger-created policy to model an
 /// existing pre-0115 resource that must retain rollout-compatible Legacy mode.
-async fn legacy_connection(pool: &sqlx::SqlitePool, id: &str, owner: &User) {
+async fn legacy_connection(pool: &otto_state::DbPool, id: &str, owner: &User) {
     sqlx::query(
         "INSERT INTO connections
          (id, name, kind, params_json, created_by, created_at)

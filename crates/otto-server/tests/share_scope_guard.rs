@@ -36,7 +36,7 @@ use otto_core::domain::WorkspaceRole;
 use otto_core::{new_id, Id};
 use otto_rbac::AuthRepo;
 use otto_server::feature_guard::feature_guard;
-use otto_state::{GrantsRepo, SqlitePool};
+use otto_state::{GrantsRepo, DbPool};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::sync::Arc;
 use tower::ServiceExt; // for `oneshot`
@@ -60,7 +60,7 @@ impl otto_server::feature_guard::HasGrants for TestState {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-async fn mem_pool() -> SqlitePool {
+async fn mem_pool() -> DbPool {
     let opts = SqliteConnectOptions::new()
         .in_memory(true)
         .foreign_keys(true);
@@ -73,11 +73,11 @@ async fn mem_pool() -> SqlitePool {
         .run(&pool)
         .await
         .expect("run migrations");
-    pool
+    pool.into()
 }
 
 /// Seed a user row (with an explicit `is_root`) and return its id.
-async fn seed_user(pool: &SqlitePool, username: &str, is_root: bool) -> Id {
+async fn seed_user(pool: &DbPool, username: &str, is_root: bool) -> Id {
     let id = new_id();
     let now = Utc::now().to_rfc3339();
     sqlx::query(
@@ -102,7 +102,7 @@ async fn seed_user(pool: &SqlitePool, username: &str, is_root: bool) -> Id {
 /// way `auth_middleware` does (both `AuthUser` = effective user and the full
 /// `AuthContext`). The whole thing is nested under `/api/v1` so `MatchedPath`
 /// carries the prefix the guard reads.
-fn app(pool: SqlitePool, ctx: AuthContext) -> Router {
+fn app(pool: DbPool, ctx: AuthContext) -> Router {
     let state = TestState {
         grants: GrantsRepo::new(pool),
     };
@@ -164,7 +164,7 @@ async fn status(app: &Router, method: Method, path: &str) -> StatusCode {
 /// resolved `AuthContext` (the same one `auth_middleware` would insert). Asserts
 /// the principal is non-root and carries the expected scope.
 async fn root_owned_share_ctx(
-    pool: &SqlitePool,
+    pool: &DbPool,
     session_id: &str,
     role: WorkspaceRole,
 ) -> AuthContext {

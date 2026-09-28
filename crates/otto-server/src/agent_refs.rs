@@ -668,7 +668,7 @@ pub(crate) struct SelfCaller {
     client: reqwest::Client,
     base: String,
     token: String,
-    pool: sqlx::SqlitePool,
+    pool: otto_state::DbPool,
 }
 
 impl SelfCaller {

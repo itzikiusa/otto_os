@@ -11,7 +11,8 @@ use otto_core::domain::{
     EvalIteration, EvalScore, EvalValidationState, SkillEval, SkillEvalStatus,
 };
 use otto_core::{new_id, Error, Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 
@@ -54,7 +55,7 @@ pub struct SkillEvalSummaryPage {
 
 #[derive(Clone)]
 pub struct SkillEvalsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 // ---------------------------------------------------------------------------
@@ -144,7 +145,8 @@ fn row_to_eval(r: &sqlx::sqlite::SqliteRow, iterations: Vec<EvalIteration>) -> R
 // ---------------------------------------------------------------------------
 
 impl SkillEvalsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -676,7 +678,7 @@ mod tests {
     use super::*;
     use otto_core::domain::EvalFinding;
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(false);
@@ -686,7 +688,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     fn agent(validation: &str, status: &str) -> EvalValidationState {

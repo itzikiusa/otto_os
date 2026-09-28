@@ -10,14 +10,15 @@ use otto_core::proof::{
 };
 use otto_core::{new_id, Error, Result};
 use serde_json::Value;
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json};
 use chrono::Utc;
 
 #[derive(Clone)]
 pub struct ProofRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 // --- Row mapping -----------------------------------------------------------
@@ -136,7 +137,8 @@ pub struct ProofBlob {
 }
 
 impl ProofRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 

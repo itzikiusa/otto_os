@@ -417,7 +417,7 @@ mod transport_tests {
         domain::{Connection, Session, User},
         Result,
     };
-    use otto_state::{ConnectionSectionsRepo, ConnectionsRepo, SqlitePool};
+    use otto_state::{ConnectionSectionsRepo, ConnectionsRepo, DbPool};
     use std::sync::Arc;
     struct Secrets;
     impl otto_core::secrets::SecretStore for Secrets {
@@ -459,7 +459,7 @@ mod transport_tests {
     #[derive(Clone)]
     struct Ctx {
         svc: Arc<ConnectionsService>,
-        pool: SqlitePool,
+        pool: DbPool,
         roles: Arc<dyn RoleChecker>,
         spawner: Arc<dyn Spawner>,
     }
@@ -473,7 +473,7 @@ mod transport_tests {
         fn spawner(&self) -> &Arc<dyn Spawner> {
             &self.spawner
         }
-        fn pool(&self) -> SqlitePool {
+        fn pool(&self) -> DbPool {
             self.pool.clone()
         }
     }
@@ -525,7 +525,7 @@ for line in sys.stdin:
     elif cmd == 'pwd': print('Remote working directory: /fixture')
 "#).unwrap();
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            let pool = otto_state::DbPool::from(sqlx::sqlite::SqlitePoolOptions::new()
                 .max_connections(1)
                 .connect_with(
                     sqlx::sqlite::SqliteConnectOptions::new()
@@ -534,7 +534,7 @@ for line in sys.stdin:
                         .foreign_keys(true),
                 )
                 .await
-                .unwrap();
+                .unwrap());
             sqlx::migrate!("../otto-state/migrations")
                 .run(&pool)
                 .await

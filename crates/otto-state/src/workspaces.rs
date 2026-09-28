@@ -3,13 +3,14 @@
 use chrono::Utc;
 use otto_core::domain::{User, Workspace, WorkspaceRole, SCRATCH_WORKSPACE_ID};
 use otto_core::{new_id, Error, Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json, ts};
 
 #[derive(Clone)]
 pub struct WorkspacesRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 /// Membership row joined with user info.
@@ -39,7 +40,8 @@ fn row_to_workspace_with_role(r: &sqlx::sqlite::SqliteRow) -> Result<(Workspace,
 }
 
 impl WorkspacesRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -403,7 +405,7 @@ fn validate_workspace_context(context: &serde_json::Value) -> Result<()> {
 mod tests {
     use super::*;
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -413,10 +415,10 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
-    async fn seed_user(pool: &SqlitePool, is_root: bool) -> User {
+    async fn seed_user(pool: &DbPool, is_root: bool) -> User {
         let id = new_id();
         let now = Utc::now();
         sqlx::query("INSERT INTO users (id, username, password_hash, display_name, is_root, created_at) VALUES (?, ?, ?, ?, ?, ?)")
@@ -432,7 +434,7 @@ mod tests {
         }
     }
 
-    async fn count_scratch_rows(pool: &SqlitePool) -> i64 {
+    async fn count_scratch_rows(pool: &DbPool) -> i64 {
         sqlx::query("SELECT COUNT(*) AS n FROM workspaces WHERE id = ?")
             .bind(SCRATCH_WORKSPACE_ID)
             .fetch_one(pool)

@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use otto_core::auth::GrantsInvalidator;
 use otto_core::domain::{Capability, Feature, User, WorkspaceRole};
 use otto_core::{Error, Result};
-use sqlx::SqlitePool;
+use crate::DbPool;
 
 /// The feature capability that answers for a **global** (workspace-less) row
 /// when a gate would otherwise demand the workspace role `min`.
@@ -159,7 +159,7 @@ impl GrantCache {
 
 #[derive(Clone)]
 pub struct GrantsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
     /// Called in `set_grants` after committing. The default is a no-op.
     invalidator: Arc<dyn GrantsInvalidator>,
     /// Optional read-through cache for `capability_of[_plugin]` (SG-11).
@@ -170,7 +170,8 @@ impl GrantsRepo {
     /// Construct with a no-op invalidator (no auth cache). All callers that do
     /// not opt in to caching should use this constructor; behaviour is identical
     /// to the previous single-constructor API.
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self {
             pool,
             invalidator: Arc::new(NoopInvalidator),
@@ -181,7 +182,7 @@ impl GrantsRepo {
     /// Construct with an explicit [`GrantsInvalidator`]. Pass the `AuthCache`
     /// from `otto-rbac` here so grant changes immediately flush the affected
     /// user's cached auth context.
-    pub fn new_with_invalidator(pool: SqlitePool, inv: Arc<dyn GrantsInvalidator>) -> Self {
+    pub fn new_with_invalidator(pool: DbPool, inv: Arc<dyn GrantsInvalidator>) -> Self {
         Self {
             pool,
             invalidator: inv,
@@ -507,7 +508,7 @@ mod tests {
 
     use crate::convert::fmt;
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -517,11 +518,11 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     /// Insert a user row and return a `User` (mirroring the pattern in connections.rs).
-    async fn seed_user(pool: &SqlitePool, username: &str, is_root: bool) -> User {
+    async fn seed_user(pool: &DbPool, username: &str, is_root: bool) -> User {
         let id = new_id();
         let now = fmt(Utc::now());
         sqlx::query(

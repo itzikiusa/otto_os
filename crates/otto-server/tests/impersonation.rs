@@ -36,7 +36,7 @@ use otto_server::error::ApiError;
 use otto_server::feature_guard::feature_guard;
 use otto_server::routes::grants::GrantsCtx;
 use otto_server::routes::impersonate::{start, stop, ImpersonateCtx};
-use otto_state::{AuditRepo, GrantsRepo, NewAuditEntry, SqlitePool, UsersRepo};
+use otto_state::{AuditRepo, GrantsRepo, NewAuditEntry, DbPool, UsersRepo};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tower::ServiceExt; // for `oneshot`
 
@@ -46,7 +46,7 @@ use tower::ServiceExt; // for `oneshot`
 
 #[derive(Clone)]
 struct TestCtx {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl otto_server::feature_guard::HasGrants for TestCtx {
@@ -98,7 +98,7 @@ impl GrantsCtx for TestCtx {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-async fn mk_pool() -> SqlitePool {
+async fn mk_pool() -> DbPool {
     let opts = SqliteConnectOptions::new()
         .in_memory(true)
         .foreign_keys(true);
@@ -111,10 +111,10 @@ async fn mk_pool() -> SqlitePool {
         .run(&pool)
         .await
         .expect("migrations");
-    pool
+    pool.into()
 }
 
-async fn seed_user(pool: &SqlitePool, username: &str, is_root: bool) -> User {
+async fn seed_user(pool: &DbPool, username: &str, is_root: bool) -> User {
     let id = otto_core::new_id();
     let now = Utc::now().to_rfc3339();
     sqlx::query(
@@ -189,7 +189,7 @@ async fn auth_layer(State(ctx): State<TestCtx>, mut req: Request, next: Next) ->
 /// Build the production-shaped router: auth layer → feature guard → real
 /// handlers, nested under `/api/v1` so `MatchedPath` carries the prefix the
 /// policy table keys on.
-fn build_app(pool: SqlitePool) -> axum::Router {
+fn build_app(pool: DbPool) -> axum::Router {
     let state = TestCtx { pool };
 
     let protected = axum::Router::new()
@@ -256,7 +256,7 @@ async fn req(
 }
 
 /// Mint a normal session token for `user` (so a request carries that identity).
-async fn login_token(pool: &SqlitePool, user: &User) -> String {
+async fn login_token(pool: &DbPool, user: &User) -> String {
     AuthRepo::new(pool.clone()).issue(&user.id).await.unwrap()
 }
 

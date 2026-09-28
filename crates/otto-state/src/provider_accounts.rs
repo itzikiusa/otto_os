@@ -3,15 +3,17 @@ use crate::convert::{dberr, ts};
 use chrono::Utc;
 use otto_core::provider_accounts::ProviderAccount;
 use otto_core::{new_id, Error, Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 #[derive(Clone)]
 pub struct ProviderAccountsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl ProviderAccountsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 

@@ -6,13 +6,14 @@ use otto_core::workflows::{
     WorkflowGraph, WorkflowRun, WorkflowVersion,
 };
 use otto_core::{new_id, Error, Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 
 #[derive(Clone)]
 pub struct WorkflowsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 fn parse_graph(s: &str) -> Result<WorkflowGraph> {
@@ -250,7 +251,8 @@ impl WorkflowsRepo {
         Ok(())
     }
 
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -1049,7 +1051,7 @@ impl WorkflowsRepo {
 mod tests {
     use super::*;
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(false);
@@ -1059,7 +1061,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     #[tokio::test]

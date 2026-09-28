@@ -4,9 +4,9 @@ use otto_core::proof::{ProofArtifactKind, ProofArtifactStatus, ProofStatus, Work
 use otto_state::ProofRepo;
 use serde_json::json;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::SqlitePool;
+use otto_state::DbPool;
 
-async fn mem_pool() -> SqlitePool {
+async fn mem_pool() -> DbPool {
     let opts = SqliteConnectOptions::new()
         .in_memory(true)
         .foreign_keys(true);
@@ -19,7 +19,7 @@ async fn mem_pool() -> SqlitePool {
         .run(&pool)
         .await
         .expect("migrations");
-    pool
+    pool.into()
 }
 
 #[tokio::test]

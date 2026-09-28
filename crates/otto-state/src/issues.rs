@@ -3,13 +3,14 @@
 use chrono::{DateTime, Utc};
 use otto_core::domain::{IssueAccount, IssueProviderKind};
 use otto_core::{new_id, Error, Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 
 #[derive(Clone)]
 pub struct IssuesRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 pub struct NewIssueAccount {
@@ -45,7 +46,8 @@ fn row_to_account(r: &sqlx::sqlite::SqliteRow) -> Result<IssueAccount> {
 }
 
 impl IssuesRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -144,7 +146,7 @@ mod tests {
     use super::*;
     use chrono::{Duration, SubsecRound};
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -154,10 +156,10 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
-    async fn seed_user(pool: &SqlitePool) -> Id {
+    async fn seed_user(pool: &DbPool) -> Id {
         let user = new_id();
         let now = fmt(Utc::now());
         sqlx::query(

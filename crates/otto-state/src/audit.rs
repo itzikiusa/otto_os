@@ -10,7 +10,8 @@ use chrono::Utc;
 use otto_core::api::AuditLogQuery;
 use otto_core::domain::AuditEntry;
 use otto_core::{new_id, Error, Id, Result};
-use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
+use sqlx::{QueryBuilder, Row, Sqlite};
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 
@@ -30,7 +31,7 @@ pub struct NewAuditEntry {
 
 #[derive(Clone)]
 pub struct AuditRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 fn row_to_entry(r: &sqlx::sqlite::SqliteRow) -> Result<AuditEntry> {
@@ -53,7 +54,8 @@ fn row_to_entry(r: &sqlx::sqlite::SqliteRow) -> Result<AuditEntry> {
 }
 
 impl AuditRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 

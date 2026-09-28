@@ -3,13 +3,14 @@
 use chrono::Utc;
 use otto_core::domain::{Channel, Integration};
 use otto_core::{Error, Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 
 #[derive(Clone)]
 pub struct IntegrationsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 /// Internal row that also carries the keychain references (for delete / lookup).
@@ -63,7 +64,8 @@ fn row_to_integration(row: &IntegrationRow) -> Integration {
 }
 
 impl IntegrationsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 

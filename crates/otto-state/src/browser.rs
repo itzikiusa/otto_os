@@ -7,7 +7,7 @@
 use chrono::Utc;
 use otto_core::{new_id, Id, Result};
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt};
 
@@ -53,11 +53,12 @@ pub struct NewBrowserAnnotation {
 
 #[derive(Clone)]
 pub struct BrowserTabsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl BrowserTabsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -141,11 +142,12 @@ impl BrowserTabsRepo {
 
 #[derive(Clone)]
 pub struct BrowserAnnotationsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl BrowserAnnotationsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -237,7 +239,7 @@ impl BrowserAnnotationsRepo {
 mod tests {
     use super::*;
 
-    async fn test_pool() -> SqlitePool {
+    async fn test_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -247,7 +249,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     #[tokio::test]

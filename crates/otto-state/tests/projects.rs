@@ -5,9 +5,9 @@ use otto_state::{
     swarm::{NewProject, SwarmRepo},
 };
 use serde_json::json;
-use sqlx::SqlitePool;
+use otto_state::DbPool;
 
-async fn fixture() -> SqlitePool {
+async fn fixture() -> DbPool {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -18,7 +18,7 @@ async fn fixture() -> SqlitePool {
     for ws in ["one", "two"] {
         sqlx::query("INSERT INTO workspaces(id,name,root_path,created_at) VALUES (?,?,'/tmp','2026-01-01T00:00:00Z')").bind(ws).bind(ws).execute(&pool).await.unwrap();
     }
-    pool
+    pool.into()
 }
 fn input() -> ProjectInput {
     ProjectInput {

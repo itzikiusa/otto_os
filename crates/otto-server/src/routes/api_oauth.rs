@@ -227,7 +227,7 @@ pub async fn callback(
         Html("<!doctype html><title>Authorization failed</title><p>Authorization could not be completed. Return to Otto for details.</p>")
     }
 }
-async fn fresh_actor(pool: &sqlx::SqlitePool, id: &Id) -> Result<User, String> {
+async fn fresh_actor(pool: &otto_state::DbPool, id: &Id) -> Result<User, String> {
     let actor = UsersRepo::new(pool.clone())
         .get(id)
         .await
@@ -476,7 +476,7 @@ mod tests {
 
     #[tokio::test]
     async fn actor_is_reloaded_so_disabled_or_demoted_root_cannot_retain_privileges() {
-        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let pool = otto_state::DbPool::connect("sqlite::memory:").await.unwrap();
         sqlx::query("CREATE TABLE users(id TEXT,username TEXT,display_name TEXT,is_root INTEGER,disabled INTEGER,created_at TEXT)").execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO users VALUES ('u','u','u',1,0,?)")
             .bind(chrono::Utc::now().to_rfc3339())

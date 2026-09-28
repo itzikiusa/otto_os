@@ -17,7 +17,7 @@
 use chrono::Utc;
 use otto_core::{Id, Result};
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use crate::DbPool;
 
 use crate::convert::{dberr, dberr_unique, fmt};
 
@@ -67,11 +67,12 @@ const COLUMNS: &str = "id, workspace_id, domain, username, keychain_ref, allow_a
 
 #[derive(Clone)]
 pub struct BrowserCredentialsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl BrowserCredentialsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -214,7 +215,7 @@ pub fn match_domain(host: &str, domain: &str) -> bool {
 mod tests {
     use super::*;
 
-    async fn test_pool() -> SqlitePool {
+    async fn test_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -224,7 +225,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     fn new_cred(ws: &str, domain: &str, user: &str, keychain_ref: &str) -> NewBrowserCredential {

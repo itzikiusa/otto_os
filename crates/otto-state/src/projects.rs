@@ -4,7 +4,8 @@ use crate::convert::{dberr, fmt, ts};
 use chrono::{DateTime, Utc};
 use otto_core::{domain::Session, new_id, Error, Id, Result};
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
@@ -185,10 +186,11 @@ pub struct ProjectSessionPage {
 
 #[derive(Clone)]
 pub struct ProjectsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 impl ProjectsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
     pub async fn list(&self, workspace_id: &Id) -> Result<Vec<Project>> {

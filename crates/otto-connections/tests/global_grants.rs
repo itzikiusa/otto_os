@@ -27,7 +27,7 @@ use otto_core::auth::{AuthUser, BoxFuture, RoleChecker};
 use otto_core::domain::{Connection, ConnectionKind, Session, User, WorkspaceRole};
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id, Result};
-use otto_state::{ConnectionSectionsRepo, ConnectionsRepo, SqlitePool};
+use otto_state::{ConnectionSectionsRepo, ConnectionsRepo, DbPool};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tower::ServiceExt;
 
@@ -35,7 +35,7 @@ use tower::ServiceExt;
 // Harness
 // ---------------------------------------------------------------------------
 
-async fn mem_pool() -> SqlitePool {
+async fn mem_pool() -> DbPool {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(
@@ -49,11 +49,11 @@ async fn mem_pool() -> SqlitePool {
         .run(&pool)
         .await
         .expect("migrations");
-    pool
+    pool.into()
 }
 
 /// Seed a user and, unless `cap` is `"none"`, their `connections` grant.
-async fn seed_user(pool: &SqlitePool, name: &str, is_root: bool, cap: &str) -> User {
+async fn seed_user(pool: &DbPool, name: &str, is_root: bool, cap: &str) -> User {
     let id = otto_core::new_id();
     let now_ts = Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
     sqlx::query(
@@ -134,14 +134,15 @@ impl RoleChecker for AllowAll {
 
 #[derive(Clone)]
 struct TestCtx {
-    pool: SqlitePool,
+    pool: DbPool,
     svc: Arc<ConnectionsService>,
     roles: Arc<dyn RoleChecker>,
     spawner: Arc<dyn Spawner>,
 }
 
 impl TestCtx {
-    fn new(pool: SqlitePool) -> Self {
+    fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         let svc = ConnectionsService::new(
             ConnectionsRepo::new(pool.clone()),
             ConnectionSectionsRepo::new(pool.clone()),
@@ -166,7 +167,7 @@ impl ConnectionsCtx for TestCtx {
     fn spawner(&self) -> &Arc<dyn Spawner> {
         &self.spawner
     }
-    fn pool(&self) -> SqlitePool {
+    fn pool(&self) -> DbPool {
         self.pool.clone()
     }
 }

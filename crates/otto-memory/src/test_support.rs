@@ -2,13 +2,13 @@
 //! `#[cfg(test)]`) so integration tests under `tests/` can use it.
 
 use otto_core::new_id;
-use sqlx::SqlitePool;
+use otto_state::DbPool;
 
 const TS: &str = "2026-06-19T00:00:00+00:00";
 
 /// In-memory SQLite with all migrations applied, plus one workspace + user.
 /// Returns (pool, workspace_id, user_id).
-pub async fn mem_pool() -> (SqlitePool, String, String) {
+pub async fn mem_pool() -> (DbPool, String, String) {
     let pool = otto_state::db::test_pool().await;
     let user = new_id();
     let ws = new_id();

@@ -23,7 +23,7 @@ use otto_core::event::Event;
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id, Result};
 use otto_k8s::K8sCtx;
-use otto_state::SqlitePool;
+use otto_state::DbPool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::sync::broadcast;
 use tower::ServiceExt;
@@ -106,7 +106,7 @@ fn argv_log() -> Vec<String> {
 // Harness
 // ---------------------------------------------------------------------------
 
-async fn mem_pool() -> SqlitePool {
+async fn mem_pool() -> DbPool {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(
@@ -120,10 +120,10 @@ async fn mem_pool() -> SqlitePool {
         .run(&pool)
         .await
         .expect("migrations");
-    pool
+    pool.into()
 }
 
-async fn seed_root(pool: &SqlitePool) -> User {
+async fn seed_root(pool: &DbPool) -> User {
     let id = otto_core::new_id();
     let now_ts = Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
     sqlx::query(
@@ -264,7 +264,7 @@ impl otto_k8s::MonitorSink for FakeSink {
 
 #[derive(Clone)]
 struct TestCtx {
-    pool: SqlitePool,
+    pool: DbPool,
     secrets: Arc<dyn SecretStore>,
     events: broadcast::Sender<Event>,
     data_dir: Arc<tempfile::TempDir>,
@@ -303,7 +303,7 @@ impl TestCtx {
 }
 
 impl K8sCtx for TestCtx {
-    fn pool(&self) -> SqlitePool {
+    fn pool(&self) -> DbPool {
         self.pool.clone()
     }
     fn secrets(&self) -> &Arc<dyn SecretStore> {

@@ -16,7 +16,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use otto_rbac::AuthRepo;
 use otto_server::login_throttle::{self, AttemptStore, FAILURE_THRESHOLD};
-use otto_state::SqlitePool;
+use otto_state::DbPool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
 // ---------------------------------------------------------------------------
@@ -26,7 +26,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 /// Temp in-memory SQLite pool with the full otto-state schema applied. The
 /// migrations live in otto-state, so the `sqlx::migrate!` macro is pointed at
 /// them by relative path (resolved at compile time from this test crate).
-async fn mem_pool() -> SqlitePool {
+async fn mem_pool() -> DbPool {
     let opts = SqliteConnectOptions::new()
         .in_memory(true)
         .foreign_keys(true);
@@ -39,11 +39,11 @@ async fn mem_pool() -> SqlitePool {
         .run(&pool)
         .await
         .expect("run migrations");
-    pool
+    pool.into()
 }
 
 /// Seed a minimal (non-root, enabled) user row and return its id.
-async fn seed_user(pool: &SqlitePool, username: &str) -> String {
+async fn seed_user(pool: &DbPool, username: &str) -> String {
     let id = otto_core::new_id();
     let now = chrono::Utc::now().to_rfc3339();
     sqlx::query(

@@ -11,7 +11,8 @@
 
 use chrono::{DateTime, Utc};
 use otto_core::{Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::dberr;
 
@@ -30,7 +31,7 @@ pub struct EmailSender {
 
 #[derive(Clone)]
 pub struct EmailSendersRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 fn row_to_sender(r: &sqlx::sqlite::SqliteRow) -> Result<EmailSender> {
@@ -48,7 +49,8 @@ fn row_to_sender(r: &sqlx::sqlite::SqliteRow) -> Result<EmailSender> {
 }
 
 impl EmailSendersRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -111,7 +113,7 @@ mod tests {
     use crate::convert::fmt;
     use otto_core::new_id;
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -121,11 +123,11 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     /// Insert a user row and return its id (FK target for `email_senders`).
-    async fn seed_user(pool: &SqlitePool, username: &str) -> Id {
+    async fn seed_user(pool: &DbPool, username: &str) -> Id {
         let id = new_id();
         let now = fmt(Utc::now());
         sqlx::query(

@@ -6,7 +6,8 @@
 
 use chrono::Utc;
 use serde::Serialize;
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use otto_core::{Error, Result};
 
@@ -44,7 +45,7 @@ pub struct NewPlugin {
 
 #[derive(Clone)]
 pub struct PluginsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 fn row_to_record(r: &sqlx::sqlite::SqliteRow) -> Result<PluginRecord> {
@@ -71,7 +72,8 @@ const COLS: &str =
     "slug, name, icon, version, description, source, exec_json, ui_dir, health, enabled, token, installed_at";
 
 impl PluginsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 

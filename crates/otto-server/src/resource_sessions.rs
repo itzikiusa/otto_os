@@ -74,7 +74,7 @@ pub async fn check(ctx: &ServerCtx, user: &User, session: &Session) -> Result<()
 }
 
 pub(crate) async fn check_with_pool(
-    pool: &otto_state::SqlitePool,
+    pool: &otto_state::DbPool,
     user: &User,
     session: &Session,
 ) -> Result<()> {
@@ -160,7 +160,7 @@ pub(crate) async fn check_with_pool(
 }
 
 async fn check_page(
-    pool: &otto_state::SqlitePool,
+    pool: &otto_state::DbPool,
     user: &User,
     resource: &ResourceRef,
     op: &str,
@@ -197,11 +197,11 @@ mod tests {
     use otto_core::access::{AccessActor, AccessMode};
     #[tokio::test]
     async fn resource_terminal_rechecks_page_revocation_and_legacy_execution_tier() {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        let pool = otto_state::DbPool::from(sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await
-            .unwrap();
+            .unwrap());
         sqlx::migrate!("../otto-state/migrations")
             .run(&pool)
             .await

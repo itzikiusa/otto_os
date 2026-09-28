@@ -885,10 +885,10 @@ mod tests {
     use otto_core::auth::McpScope;
     use otto_state::NewRepo;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-    use sqlx::SqlitePool;
+    use otto_state::DbPool;
 
     struct World {
-        pool: SqlitePool,
+        pool: DbPool,
         git: GitStore,
         roles: otto_rbac::RbacRoleChecker,
         workspaces: WorkspacesRepo,
@@ -946,11 +946,11 @@ mod tests {
         let opts = SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
-        let pool = SqlitePoolOptions::new()
+        let pool = otto_state::DbPool::from(SqlitePoolOptions::new()
             .max_connections(1)
             .connect_with(opts)
             .await
-            .expect("in-memory sqlite");
+            .expect("in-memory sqlite"));
         sqlx::migrate!("../otto-state/migrations")
             .run(&pool)
             .await

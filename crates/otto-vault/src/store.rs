@@ -3,7 +3,8 @@
 //! copy of anything.
 
 use chrono::Utc;
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use otto_state::DbPool;
 
 use otto_core::{Error, Result};
 
@@ -39,7 +40,7 @@ pub struct NoteRow {
 
 #[derive(Clone)]
 pub struct Store {
-    pool: SqlitePool,
+    pool: DbPool,
     #[cfg(test)]
     pub(crate) all_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
@@ -47,7 +48,8 @@ pub struct Store {
 }
 
 impl Store {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self {
             pool,
             #[cfg(test)]
@@ -57,7 +59,7 @@ impl Store {
         }
     }
 
-    pub fn pool(&self) -> &SqlitePool {
+    pub fn pool(&self) -> &DbPool {
         &self.pool
     }
 

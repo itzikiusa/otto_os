@@ -38,7 +38,7 @@ use otto_server::ServerCtx;
 use otto_sessions::{ProviderRegistry, SessionManager};
 use otto_state::{
     ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, GitStore, IntegrationsRepo,
-    IssuesRepo, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, SqlitePool, SwarmRepo,
+    IssuesRepo, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, DbPool, SwarmRepo,
     WorkspacesRepo,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -98,7 +98,7 @@ impl otto_connections::Spawner for NoopSpawner {
     }
 }
 
-async fn mem_pool() -> SqlitePool {
+async fn mem_pool() -> DbPool {
     let opts = SqliteConnectOptions::new()
         .in_memory(true)
         .foreign_keys(true);
@@ -111,7 +111,7 @@ async fn mem_pool() -> SqlitePool {
         .run(&pool)
         .await
         .expect("run migrations");
-    pool
+    pool.into()
 }
 
 fn user(id: &str) -> User {
@@ -125,7 +125,7 @@ fn user(id: &str) -> User {
     }
 }
 
-async fn test_ctx(pool: &SqlitePool, data_dir: PathBuf) -> ServerCtx {
+async fn test_ctx(pool: &DbPool, data_dir: PathBuf) -> ServerCtx {
     let (events, _rx) = broadcast::channel(64);
     let secrets: Arc<dyn SecretStore> = Arc::new(NoopSecrets);
     let roles = Arc::new(RbacRoleChecker::new(pool.clone()));

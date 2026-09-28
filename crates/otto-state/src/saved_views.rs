@@ -9,7 +9,8 @@ use chrono::Utc;
 use otto_core::{new_id, Error, Id, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 
@@ -47,7 +48,7 @@ pub struct NewSavedView {
 
 #[derive(Clone)]
 pub struct SavedViewsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 fn row_to_view(r: &sqlx::sqlite::SqliteRow) -> Result<SavedView> {
@@ -64,7 +65,8 @@ fn row_to_view(r: &sqlx::sqlite::SqliteRow) -> Result<SavedView> {
 }
 
 impl SavedViewsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -147,7 +149,7 @@ impl SavedViewsRepo {
 mod tests {
     use super::*;
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(false);
@@ -157,7 +159,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     #[tokio::test]

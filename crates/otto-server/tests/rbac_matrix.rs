@@ -37,7 +37,7 @@ use http_body_util::BodyExt;
 use otto_core::auth::AuthUser;
 use otto_core::domain::{Capability, Feature, User};
 use otto_server::feature_guard::feature_guard;
-use otto_state::{GrantsRepo, SqlitePool};
+use otto_state::{GrantsRepo, DbPool};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::sync::Arc;
 use tower::ServiceExt; // for `oneshot`
@@ -64,7 +64,7 @@ impl otto_server::feature_guard::HasGrants for TestState {
 // ---------------------------------------------------------------------------
 
 /// In-memory SQLite pool with the full otto-state schema applied.
-async fn mem_pool() -> SqlitePool {
+async fn mem_pool() -> DbPool {
     let opts = SqliteConnectOptions::new()
         .in_memory(true)
         .foreign_keys(true);
@@ -77,11 +77,11 @@ async fn mem_pool() -> SqlitePool {
         .run(&pool)
         .await
         .expect("run migrations");
-    pool
+    pool.into()
 }
 
 /// Seed a user row and return the `User` (mirrors `grants.rs` test helper).
-async fn seed_user(pool: &SqlitePool, username: &str, is_root: bool) -> User {
+async fn seed_user(pool: &DbPool, username: &str, is_root: bool) -> User {
     let id = otto_core::new_id();
     let now = Utc::now().to_rfc3339();
     sqlx::query(
@@ -112,7 +112,7 @@ async fn seed_user(pool: &SqlitePool, username: &str, is_root: bool) -> User {
 /// injection layer) applied exactly as `build_router` layers it: the guard is a
 /// `route_layer` immediately after auth, and the whole thing is nested under
 /// `/api/v1` so `MatchedPath` carries the prefix the policy table expects.
-fn app(pool: SqlitePool, user: User) -> Router {
+fn app(pool: DbPool, user: User) -> Router {
     let state = TestState {
         grants: GrantsRepo::new(pool),
     };

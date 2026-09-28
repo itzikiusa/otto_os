@@ -1294,7 +1294,7 @@ mod tests {
     use otto_core::secrets::SecretStore;
     use otto_core::{Id, Result};
     use otto_state::{IssuesRepo, NewStory, ProductRepo};
-    use sqlx::SqlitePool;
+    use otto_state::DbPool;
     use tower::ServiceExt;
 
     use crate::service::ProductService;
@@ -1305,7 +1305,7 @@ mod tests {
     // In-memory pool helper — mirrors otto-state's test setup
     // -----------------------------------------------------------------------
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -1318,11 +1318,11 @@ mod tests {
             .run(&pool)
             .await
             .unwrap();
-        pool
+        pool.into()
     }
 
     // Seed a minimal user row
-    async fn seed_user(pool: &SqlitePool) -> Id {
+    async fn seed_user(pool: &DbPool) -> Id {
         use chrono::Utc;
         let uid = otto_core::new_id();
         let now = Utc::now().to_rfc3339();
@@ -1342,7 +1342,7 @@ mod tests {
     }
 
     // Seed a minimal workspace row
-    async fn seed_workspace(pool: &SqlitePool) -> Id {
+    async fn seed_workspace(pool: &DbPool) -> Id {
         use chrono::Utc;
         let wid = otto_core::new_id();
         let now = Utc::now().to_rfc3339();
@@ -1420,7 +1420,8 @@ mod tests {
     }
 
     impl TestCtx {
-        fn new(pool: SqlitePool) -> Self {
+        fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
             let repo = ProductRepo::new(pool.clone());
             let issues = IssuesRepo::new(pool.clone());
             let secrets: Arc<dyn SecretStore> = Arc::new(NoopSecrets);
@@ -1477,7 +1478,7 @@ mod tests {
 
     /// Seed a user row with a specific id + username (distinct usernames avoid the
     /// UNIQUE collision `seed_user` hits when called twice).
-    async fn seed_named_user(pool: &SqlitePool, username: &str) -> Id {
+    async fn seed_named_user(pool: &DbPool, username: &str) -> Id {
         use chrono::Utc;
         let uid = otto_core::new_id();
         let now = Utc::now().to_rfc3339();
@@ -1497,7 +1498,7 @@ mod tests {
     }
 
     /// Seed an issue account owned by `user_id`.
-    async fn seed_issue_account(pool: &SqlitePool, user_id: &Id) -> Id {
+    async fn seed_issue_account(pool: &DbPool, user_id: &Id) -> Id {
         use otto_core::domain::IssueProviderKind;
         let repo = IssuesRepo::new(pool.clone());
         repo.create_account(otto_state::NewIssueAccount {

@@ -137,7 +137,7 @@ pub async fn build_snapshot(ctx: &ServerCtx, options: SnapshotOptions) -> ApiRes
 }
 
 pub(crate) async fn build_snapshot_parts(
-    pool: &sqlx::SqlitePool,
+    pool: &otto_state::DbPool,
     data_dir: &std::path::Path,
     daemon_version: &str,
     options: SnapshotOptions,

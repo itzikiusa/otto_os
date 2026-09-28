@@ -6,13 +6,14 @@
 
 use chrono::{DateTime, Utc};
 use otto_core::{new_id, Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 
 #[derive(Clone)]
 pub struct BrokerClustersRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 /// A persisted cluster row (string-typed enums; the service parses them).
@@ -115,7 +116,8 @@ fn row_to_cluster(r: &sqlx::sqlite::SqliteRow) -> Result<BrokerClusterRow> {
 }
 
 impl BrokerClustersRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -268,7 +270,7 @@ impl BrokerClustersRepo {
 mod tests {
     use super::*;
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -278,10 +280,10 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
-    async fn seed_user(pool: &SqlitePool) -> Id {
+    async fn seed_user(pool: &DbPool) -> Id {
         let user = new_id();
         let now = fmt(Utc::now());
         sqlx::query(

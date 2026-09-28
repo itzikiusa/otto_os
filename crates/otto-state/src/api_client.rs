@@ -13,13 +13,14 @@ use otto_core::domain::{
     ApiHistorySummary, ApiRequest,
 };
 use otto_core::{new_id, Id, Result};
-use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
+use sqlx::{QueryBuilder, Row, Sqlite};
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json, ts};
 
 #[derive(Clone)]
 pub struct ApiClientRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 // --- inputs -----------------------------------------------------------------
@@ -169,7 +170,8 @@ fn row_to_automation(r: &sqlx::sqlite::SqliteRow) -> Result<ApiAutomation> {
 }
 
 impl ApiClientRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -800,8 +802,8 @@ mod tests {
     use otto_core::new_id;
     use serde_json::json as jval;
 
-    async fn setup() -> (SqlitePool, Id) {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+    async fn setup() -> (DbPool, Id) {
+        let pool = DbPool::connect("sqlite::memory:").await.unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
         // A workspace row is required for the FK.
         let ws = new_id();
@@ -1392,7 +1394,7 @@ mod tests {
 
     #[tokio::test]
     async fn history_summary_backfill_preserves_original_bytes_and_filter_types() {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let pool = DbPool::connect("sqlite::memory:").await.unwrap();
         sqlx::raw_sql("CREATE TABLE api_history(id TEXT PRIMARY KEY,workspace_id TEXT,executed_at TEXT,request_json TEXT,response_json TEXT)").execute(&pool).await.unwrap();
         let samples = [
             (

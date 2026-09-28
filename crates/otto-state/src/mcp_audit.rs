@@ -22,7 +22,8 @@
 
 use chrono::Utc;
 use otto_core::{new_id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt};
 
@@ -167,11 +168,12 @@ fn row_to_call(r: &sqlx::sqlite::SqliteRow) -> McpToolCallRow {
 
 #[derive(Clone)]
 pub struct McpAuditRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl McpAuditRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -225,7 +227,7 @@ mod tests {
     use super::*;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -235,7 +237,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     #[test]

@@ -30,7 +30,8 @@ use otto_core::domain::{User, WorkspaceRole};
 use otto_core::{new_id, Error, Id, Result};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use otto_state::DbPool;
 
 use crate::cache::AuthCache;
 
@@ -112,7 +113,7 @@ fn legacy_session_label(label: &str) -> Option<&str> {
 /// the cache layer.
 #[derive(Clone)]
 pub struct AuthRepo {
-    pool: SqlitePool,
+    pool: DbPool,
     /// `None` = caching disabled for this instance (all paths hit the DB).
     cache: Option<AuthCache>,
 }
@@ -120,14 +121,15 @@ pub struct AuthRepo {
 impl AuthRepo {
     /// Construct without a cache (every authenticate call hits the DB). Used in
     /// unit tests and any context where caching is not desired.
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool, cache: None }
     }
 
     /// Construct with an attached [`AuthCache`]. The cache is shared via
     /// `Arc`-interior cloning, so `AuthRepo::clone()` and the `GrantsInvalidator`
     /// impl point at the same backing map.
-    pub fn with_cache(pool: SqlitePool, cache: AuthCache) -> Self {
+    pub fn with_cache(pool: DbPool, cache: AuthCache) -> Self {
         Self {
             pool,
             cache: Some(cache),
@@ -1517,7 +1519,7 @@ mod tests {
     // In-memory pool helper — mirrors otto-state's test setup. The migrations
     // live in otto-state, so reference them by relative path (the `sqlx::migrate!`
     // macro embeds them at compile time).
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -1530,11 +1532,11 @@ mod tests {
             .run(&pool)
             .await
             .unwrap();
-        pool
+        pool.into()
     }
 
     /// Seed a minimal (non-root, enabled) user and return its id.
-    async fn seed_user(pool: &SqlitePool, username: &str) -> Id {
+    async fn seed_user(pool: &DbPool, username: &str) -> Id {
         let id = new_id();
         let now = Utc::now().to_rfc3339();
         sqlx::query(
@@ -1552,7 +1554,7 @@ mod tests {
         id
     }
 
-    async fn seed_managed_session(pool: &SqlitePool, owner: &Id) -> Id {
+    async fn seed_managed_session(pool: &DbPool, owner: &Id) -> Id {
         let ws = new_id();
         let sid = new_id();
         let now = Utc::now().to_rfc3339();
@@ -2105,7 +2107,7 @@ mod tests {
     }
 
     /// Seed a user with an explicit `disabled` flag; returns its id.
-    async fn seed_user_disabled(pool: &SqlitePool, username: &str, disabled: bool) -> Id {
+    async fn seed_user_disabled(pool: &DbPool, username: &str, disabled: bool) -> Id {
         let id = new_id();
         let now = Utc::now().to_rfc3339();
         sqlx::query(
@@ -2233,7 +2235,7 @@ mod tests {
 
     /// Read the raw stored `expires_at` for the row matching `token`, so tests
     /// can prove the value is (or is not) advanced by `authenticate`.
-    async fn stored_expires_at(pool: &SqlitePool, token: &str) -> String {
+    async fn stored_expires_at(pool: &DbPool, token: &str) -> String {
         let row = sqlx::query("SELECT expires_at FROM auth_sessions WHERE token_hash = ?")
             .bind(token_hash(token))
             .fetch_one(pool)
@@ -2272,7 +2274,7 @@ mod tests {
     }
 
     /// Seed a ROOT user (the common primary-account shape) and return its id.
-    async fn seed_root_user(pool: &SqlitePool, username: &str) -> Id {
+    async fn seed_root_user(pool: &DbPool, username: &str) -> Id {
         let id = new_id();
         let now = Utc::now().to_rfc3339();
         sqlx::query(
@@ -2803,7 +2805,7 @@ mod tests {
     use crate::cache::AuthCache;
 
     /// Helper: cached repo + shared cache for inspection.
-    fn cached_repo(pool: SqlitePool) -> (AuthRepo, AuthCache) {
+    fn cached_repo(pool: DbPool) -> (AuthRepo, AuthCache) {
         let cache = AuthCache::new();
         let repo = AuthRepo::with_cache(pool, cache.clone());
         (repo, cache)

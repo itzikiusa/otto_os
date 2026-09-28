@@ -16,7 +16,7 @@ use otto_core::auth::{AuthUser, RoleChecker};
 use otto_core::domain::{User, WorkspaceRole};
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id};
-use otto_state::{McpServerDetail, NewAllowlistEntry, NewPolicy, NewServerRow, SqlitePool};
+use otto_state::{McpServerDetail, NewAllowlistEntry, NewPolicy, NewServerRow, DbPool};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -26,7 +26,7 @@ use crate::types::*;
 /// Server-side context required by the control-plane routes.
 pub trait McpCtx: Clone + Send + Sync + 'static {
     fn mcp(&self) -> &Arc<McpService>;
-    fn mcp_pool(&self) -> &SqlitePool;
+    fn mcp_pool(&self) -> &DbPool;
     fn mcp_secrets(&self) -> &Arc<dyn SecretStore>;
     fn roles(&self) -> &Arc<dyn RoleChecker>;
 }

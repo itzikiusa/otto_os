@@ -1,6 +1,6 @@
 //! Saved workspace TCP-forward profiles. Credentials remain on SSH connections.
 use crate::convert::{dberr, fmt, ts};
-use crate::{ConnectionsRepo, SqlitePool};
+use crate::{ConnectionsRepo, DbPool};
 use chrono::Utc;
 use otto_core::domain::ConnectionKind;
 use otto_core::network_profiles::{NetworkProfile, NetworkProfileInput};
@@ -9,7 +9,7 @@ use sqlx::Row;
 
 #[derive(Clone)]
 pub struct NetworkProfilesRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 fn row(row: &sqlx::sqlite::SqliteRow) -> Result<NetworkProfile> {
     Ok(NetworkProfile {
@@ -29,7 +29,8 @@ fn row(row: &sqlx::sqlite::SqliteRow) -> Result<NetworkProfile> {
     })
 }
 impl NetworkProfilesRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
     pub async fn get(&self, id: &str) -> Result<NetworkProfile> {

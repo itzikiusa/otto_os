@@ -3,13 +3,14 @@
 use chrono::Utc;
 use otto_core::domain::User;
 use otto_core::{new_id, Error, Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 
 #[derive(Clone)]
 pub struct UsersRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 /// A user row including the password hash (kept out of `domain::User`).
@@ -30,7 +31,8 @@ fn row_to_user(r: &sqlx::sqlite::SqliteRow) -> Result<User> {
 }
 
 impl UsersRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 

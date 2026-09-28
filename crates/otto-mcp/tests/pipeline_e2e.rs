@@ -12,7 +12,7 @@ use otto_core::secrets::SecretStore;
 use otto_core::{new_id, Result};
 use otto_mcp::{InvokeCtx, InvokeOutcome, McpService};
 use otto_state::{
-    McpAllowlistRepo, NewAllowlistEntry, NewPolicy, NewServerRow, SettingsRepo, SqlitePool,
+    McpAllowlistRepo, NewAllowlistEntry, NewPolicy, NewServerRow, SettingsRepo, DbPool,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
@@ -34,7 +34,7 @@ impl SecretStore for MemSecrets {
     }
 }
 
-async fn pool() -> SqlitePool {
+async fn pool() -> DbPool {
     let opts = SqliteConnectOptions::new()
         .in_memory(true)
         .foreign_keys(true);
@@ -47,10 +47,10 @@ async fn pool() -> SqlitePool {
         .run(&p)
         .await
         .unwrap();
-    p
+    p.into()
 }
 
-async fn seed_ws(pool: &SqlitePool) -> (String, String) {
+async fn seed_ws(pool: &DbPool) -> (String, String) {
     let user = new_id();
     let ws = new_id();
     let now = chrono::Utc::now().to_rfc3339();
@@ -100,7 +100,7 @@ done
 
 async fn register_mock(
     svc: &McpService,
-    pool: &SqlitePool,
+    pool: &DbPool,
     ws: &str,
     user: &str,
 ) -> otto_state::McpServerDetail {
@@ -436,7 +436,7 @@ async fn resource_denial_blocks_even_readonly_tool_and_dry_run() {
 #[derive(Clone)]
 struct HttpCtx {
     service: Arc<McpService>,
-    pool: SqlitePool,
+    pool: DbPool,
     secrets: Arc<dyn SecretStore>,
     roles: Arc<dyn otto_core::auth::RoleChecker>,
 }
@@ -444,7 +444,7 @@ impl otto_mcp::McpCtx for HttpCtx {
     fn mcp(&self) -> &Arc<McpService> {
         &self.service
     }
-    fn mcp_pool(&self) -> &SqlitePool {
+    fn mcp_pool(&self) -> &DbPool {
         &self.pool
     }
     fn mcp_secrets(&self) -> &Arc<dyn SecretStore> {

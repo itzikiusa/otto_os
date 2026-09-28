@@ -9,13 +9,14 @@
 use chrono::Utc;
 use otto_core::domain::{SkillReview, SkillReviewAgent, SkillReviewSummary, SkillStaticReport};
 use otto_core::{new_id, Error, Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 
 #[derive(Clone)]
 pub struct SkillReviewsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 fn row_to_review(r: &sqlx::sqlite::SqliteRow) -> Result<SkillReview> {
@@ -55,7 +56,8 @@ fn row_to_review(r: &sqlx::sqlite::SqliteRow) -> Result<SkillReview> {
 }
 
 impl SkillReviewsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -218,8 +220,8 @@ mod tests {
     use super::*;
     use otto_core::domain::{SkillFinding, SkillScoreRow};
 
-    async fn pool() -> SqlitePool {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+    async fn pool() -> DbPool {
+        let pool = DbPool::connect("sqlite::memory:").await.unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         pool
     }

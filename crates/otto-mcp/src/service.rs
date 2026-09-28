@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use otto_state::{
     DiscoveredTool, McpAllowlistRepo, McpApprovalRepo, McpCallLogRepo, McpPolicyRepo,
     McpRegistryRepo, McpServerDetail, McpTool, McpToolsRepo, NewApproval, NewCallLog, SettingsRepo,
-    SqlitePool,
+    DbPool,
 };
 
 use crate::client::{McpClient, Transport};
@@ -65,13 +65,14 @@ struct PooledClient {
 
 #[derive(Clone)]
 pub struct McpService {
-    pool: SqlitePool,
+    pool: DbPool,
     secrets: Arc<dyn SecretStore>,
     clients: Arc<Mutex<HashMap<String, PooledClient>>>,
 }
 
 impl McpService {
-    pub fn new(pool: SqlitePool, secrets: Arc<dyn SecretStore>) -> Self {
+    pub fn new(pool: impl Into<DbPool>, secrets: Arc<dyn SecretStore>) -> Self {
+        let pool: DbPool = pool.into();
         Self {
             pool,
             secrets,

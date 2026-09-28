@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use otto_core::event::Event;
 use otto_core::{new_id, Error, Id, Result};
 use serde_json::{json, Value};
-use sqlx::SqlitePool;
+use otto_state::DbPool;
 use tokio::sync::broadcast;
 
 use crate::blobs::{self, BlobStore};
@@ -278,7 +278,7 @@ pub fn decode_content(
 
 impl DesignService {
     pub fn new(
-        pool: SqlitePool,
+        pool: DbPool,
         data_dir: impl Into<PathBuf>,
         events: Option<broadcast::Sender<Event>>,
     ) -> Self {

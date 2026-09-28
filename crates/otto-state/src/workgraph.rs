@@ -12,7 +12,8 @@
 use chrono::{DateTime, Utc};
 use otto_core::{new_id, Error, Id, Result};
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json, ts};
 
@@ -441,7 +442,7 @@ pub struct GraphView {
 
 #[derive(Clone)]
 pub struct WorkGraphRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 const ITEM_COLS: &str =
@@ -537,7 +538,8 @@ fn row_to_approval(r: &sqlx::sqlite::SqliteRow) -> Result<WorkApproval> {
 }
 
 impl WorkGraphRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -1230,7 +1232,7 @@ impl WorkGraphRepo {
 mod tests {
     use super::*;
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(false);
@@ -1240,7 +1242,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     fn upsert(

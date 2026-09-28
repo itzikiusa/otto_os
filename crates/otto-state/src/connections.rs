@@ -3,13 +3,14 @@
 use chrono::Utc;
 use otto_core::domain::{Connection, ConnectionKind, Environment};
 use otto_core::{new_id, Error, Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json, ts};
 
 #[derive(Clone)]
 pub struct ConnectionsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 pub struct NewConnection {
@@ -78,11 +79,12 @@ fn row_to_connection(r: &sqlx::sqlite::SqliteRow) -> Result<Connection> {
 
 impl ConnectionsRepo {
     /// Shared state pool for resource authorization at the execution boundary.
-    pub fn pool(&self) -> SqlitePool {
+    pub fn pool(&self) -> DbPool {
         self.pool.clone()
     }
 
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -263,7 +265,7 @@ impl ConnectionsRepo {
 mod tests {
     use super::*;
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -273,14 +275,14 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
-    async fn seed_user(pool: &SqlitePool) -> Id {
+    async fn seed_user(pool: &DbPool) -> Id {
         seed_named_user(pool, "u").await
     }
 
-    async fn seed_named_user(pool: &SqlitePool, name: &str) -> Id {
+    async fn seed_named_user(pool: &DbPool, name: &str) -> Id {
         let user = new_id();
         let now = fmt(Utc::now());
         sqlx::query(
@@ -298,7 +300,7 @@ mod tests {
         user
     }
 
-    async fn seed_ws(pool: &SqlitePool) -> Id {
+    async fn seed_ws(pool: &DbPool) -> Id {
         let ws = new_id();
         let now = fmt(Utc::now());
         sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)")

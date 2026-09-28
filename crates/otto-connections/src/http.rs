@@ -19,7 +19,7 @@ use otto_core::domain::{
 };
 use otto_core::{Error, Id};
 use otto_ssh::{SftpParams, SftpSession};
-use otto_state::{capability_for_role, GrantsRepo, SqlitePool};
+use otto_state::{capability_for_role, GrantsRepo, DbPool};
 use serde::Deserialize;
 
 use crate::conn_import::{
@@ -34,7 +34,7 @@ pub trait ConnectionsCtx: Clone + Send + Sync + 'static {
     fn roles(&self) -> &Arc<dyn RoleChecker>;
     fn spawner(&self) -> &Arc<dyn Spawner>;
     /// SQLite pool used to read daemon settings (e.g. `connections.owner_private`).
-    fn pool(&self) -> SqlitePool;
+    fn pool(&self) -> DbPool;
     /// Optional hook to route DB-kind test probes through the DB Explorer's
     /// warm-tunnel pool (reuses a cached `ssh -L` forward). Returns `None` in
     /// unit-test contexts or any setup that doesn't have a `DbViewerService`

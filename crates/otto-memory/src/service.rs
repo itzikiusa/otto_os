@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use otto_core::Result;
 use otto_state::memory::{ListFilter, SearchFilter};
 use otto_state::MemoriesRepo;
-use sqlx::SqlitePool;
+use otto_state::DbPool;
 
 use crate::remote::RemoteClient;
 use crate::retrieve::{rerank_score, RerankSignals};
@@ -34,7 +34,7 @@ pub struct MemoryService {
 impl MemoryService {
     /// Internal: assemble a service from its parts (all constructors funnel here
     /// so new fields are set in exactly one place).
-    fn build(pool: SqlitePool, remote: Option<RemoteClient>) -> Self {
+    fn build(pool: DbPool, remote: Option<RemoteClient>) -> Self {
         Self {
             repo: MemoriesRepo::new(pool),
             remote,
@@ -44,19 +44,19 @@ impl MemoryService {
     }
 
     /// Keyword-only service (there is no other kind anymore).
-    pub fn new_keyword_only(pool: SqlitePool) -> Self {
+    pub fn new_keyword_only(pool: DbPool) -> Self {
         Self::build(pool, None)
     }
 
     /// Default production service: local SQLite, FTS5 keyword recall.
-    pub fn with_defaults(pool: SqlitePool) -> Self {
+    pub fn with_defaults(pool: DbPool) -> Self {
         Self::build(pool, None)
     }
 
     /// Shared-backend service: forward all operations to a host Otto's memory API
     /// (one shared memory for the whole team). `pool` is kept only to satisfy the
     /// local repo handle (used by the graph endpoint); reads/writes go remote.
-    pub fn remote(pool: SqlitePool, base_url: String, token: String) -> Self {
+    pub fn remote(pool: DbPool, base_url: String, token: String) -> Self {
         Self::build(pool, Some(RemoteClient::new(base_url, token)))
     }
 
@@ -83,7 +83,7 @@ impl MemoryService {
     /// Raw pool access — used by governance operations that need to run SQL
     /// statements not yet exposed on `MemoriesRepo` (e.g. updating
     /// `provenance_json` for in-flight imports).
-    pub fn pool(&self) -> &sqlx::SqlitePool {
+    pub fn pool(&self) -> &otto_state::DbPool {
         self.repo.pool()
     }
 

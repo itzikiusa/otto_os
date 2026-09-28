@@ -3686,15 +3686,15 @@ mod tests {
         }
     }
 
-    async fn mk_repo() -> (sqlx::SqlitePool, ApiClientRepo, Id) {
+    async fn mk_repo() -> (otto_state::DbPool, ApiClientRepo, Id) {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        let pool = otto_state::DbPool::from(sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect_with(opts)
             .await
-            .unwrap();
+            .unwrap());
         sqlx::migrate!("../otto-state/migrations")
             .run(&pool)
             .await

@@ -3,7 +3,8 @@
 use chrono::{DateTime, Utc};
 use otto_core::{new_id, Error, Id, Result};
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 
@@ -72,11 +73,12 @@ fn row_to_annotation(r: &sqlx::sqlite::SqliteRow) -> Result<MockupAnnotation> {
 
 #[derive(Clone)]
 pub struct ProductMockupRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl ProductMockupRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -169,7 +171,7 @@ impl ProductMockupRepo {
 mod tests {
     use super::*;
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -179,7 +181,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     #[tokio::test]

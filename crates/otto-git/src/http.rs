@@ -2561,7 +2561,7 @@ mod tests {
     use otto_core::domain::{GitProviderKind, User};
     use otto_core::secrets::SecretStore;
     use otto_state::{GitStore, NewGitAccount, NewRepo, WorkspacesRepo};
-    use sqlx::SqlitePool;
+    use otto_state::DbPool;
 
     use super::*;
 
@@ -2620,7 +2620,7 @@ mod tests {
         }
     }
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -2633,10 +2633,10 @@ mod tests {
             .run(&pool)
             .await
             .unwrap();
-        pool
+        pool.into()
     }
 
-    async fn seed_user(pool: &SqlitePool, username: &str) -> Id {
+    async fn seed_user(pool: &DbPool, username: &str) -> Id {
         let uid = new_id();
         let now = Utc::now().to_rfc3339();
         sqlx::query(
@@ -2654,7 +2654,7 @@ mod tests {
         uid
     }
 
-    async fn seed_workspace(pool: &SqlitePool) -> Id {
+    async fn seed_workspace(pool: &DbPool) -> Id {
         let wid = new_id();
         let now = Utc::now().to_rfc3339();
         sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)")
@@ -2940,7 +2940,7 @@ mod tests {
     }
 
     /// Build a ctx over a fresh in-memory pool, plus a user and a workspace.
-    async fn fixture() -> (SqlitePool, TestCtx, Id, Id) {
+    async fn fixture() -> (DbPool, TestCtx, Id, Id) {
         let pool = mem_pool().await;
         let user = seed_user(&pool, "u").await;
         let ws = seed_workspace(&pool).await;

@@ -17,7 +17,8 @@ use std::collections::BTreeMap;
 use chrono::Utc;
 use otto_core::{new_id, Id, Result};
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, dberr_unique, fmt, json};
 
@@ -340,11 +341,12 @@ fn row_to_detail(r: &sqlx::sqlite::SqliteRow) -> McpServerDetail {
 
 #[derive(Clone)]
 pub struct McpRegistryRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl McpRegistryRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -583,11 +585,12 @@ fn row_to_tool(r: &sqlx::sqlite::SqliteRow) -> Result<McpTool> {
 
 #[derive(Clone)]
 pub struct McpToolsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl McpToolsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -736,11 +739,12 @@ impl McpToolsRepo {
 
 #[derive(Clone)]
 pub struct McpAllowlistRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl McpAllowlistRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -845,11 +849,12 @@ fn row_to_policy(r: &sqlx::sqlite::SqliteRow) -> Result<McpPolicy> {
 
 #[derive(Clone)]
 pub struct McpPolicyRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl McpPolicyRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -1018,11 +1023,12 @@ fn row_to_call_log(r: &sqlx::sqlite::SqliteRow) -> McpCallLogRow {
 
 #[derive(Clone)]
 pub struct McpCallLogRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl McpCallLogRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -1242,11 +1248,12 @@ fn approval_changed(approval_id: Option<&str>, workspace_id: Option<&str>, statu
 
 #[derive(Clone)]
 pub struct McpApprovalRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl McpApprovalRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -1421,7 +1428,7 @@ mod tests {
     use super::*;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -1431,10 +1438,10 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
-    async fn seed(pool: &SqlitePool) -> (Id, Id) {
+    async fn seed(pool: &DbPool) -> (Id, Id) {
         let user = new_id();
         let ws = new_id();
         let now = fmt(Utc::now());
@@ -1451,7 +1458,7 @@ mod tests {
         (ws, user)
     }
 
-    async fn mk_server(pool: &SqlitePool, ws: &Id, user: &Id) -> McpServerDetail {
+    async fn mk_server(pool: &DbPool, ws: &Id, user: &Id) -> McpServerDetail {
         let repo = McpRegistryRepo::new(pool.clone());
         repo.create(NewServerRow {
             workspace_id: ws.clone(),

@@ -11,7 +11,8 @@ use otto_core::domain::{
     AgentTask, SessionActivitySummary, TaskStatus, TrailEvent, TrailKind, TrailLevel, TrailSource,
 };
 use otto_core::{new_id, Error, Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 
@@ -36,7 +37,7 @@ pub struct NewTask {
 
 #[derive(Clone)]
 pub struct ActivityRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 fn row_to_trail(r: &sqlx::sqlite::SqliteRow) -> Result<TrailEvent> {
@@ -106,7 +107,8 @@ pub struct PendingNudge {
 }
 
 impl ActivityRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -667,7 +669,7 @@ mod tests {
     use super::*;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
-    async fn mk_pool() -> SqlitePool {
+    async fn mk_pool() -> DbPool {
         let opts = SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -680,11 +682,11 @@ mod tests {
             .run(&pool)
             .await
             .expect("migrations");
-        pool
+        pool.into()
     }
 
     /// Seed a minimal user row.
-    async fn seed_user(pool: &SqlitePool, user_id: &str) {
+    async fn seed_user(pool: &DbPool, user_id: &str) {
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO users (id, username, password_hash, display_name, is_root, created_at)
@@ -700,7 +702,7 @@ mod tests {
     }
 
     /// Seed a workspace row.
-    async fn seed_workspace(pool: &SqlitePool, ws_id: &str) {
+    async fn seed_workspace(pool: &DbPool, ws_id: &str) {
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO workspaces (id, name, root_path, settings_json, archived, created_at)
@@ -714,7 +716,7 @@ mod tests {
     }
 
     /// Seed a session row owned by `created_by` and return its id.
-    async fn seed_session(pool: &SqlitePool, ws_id: &str, created_by: &str) -> Id {
+    async fn seed_session(pool: &DbPool, ws_id: &str, created_by: &str) -> Id {
         let id = otto_core::new_id();
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
@@ -736,7 +738,7 @@ mod tests {
     }
 
     /// Seed a single task for the given session.
-    async fn seed_task(pool: &SqlitePool, ws_id: &str, session_id: &str) {
+    async fn seed_task(pool: &DbPool, ws_id: &str, session_id: &str) {
         let task_id = otto_core::new_id();
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
@@ -755,7 +757,7 @@ mod tests {
     }
 
     /// Seed a trail entry for the given session.
-    async fn seed_trail(pool: &SqlitePool, ws_id: &str, session_id: &str) {
+    async fn seed_trail(pool: &DbPool, ws_id: &str, session_id: &str) {
         let trail_id = otto_core::new_id();
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(

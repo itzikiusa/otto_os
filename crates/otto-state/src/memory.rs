@@ -8,7 +8,8 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use otto_core::{new_id, Error, Result};
 
@@ -294,17 +295,18 @@ fn row_to_memory(r: &sqlx::sqlite::SqliteRow) -> Result<Memory> {
 
 #[derive(Clone)]
 pub struct MemoriesRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl MemoriesRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
     /// Raw pool access — for callers that need to run statements not yet exposed
     /// on the repo (e.g. the governance service updating provenance_json).
-    pub fn pool(&self) -> &SqlitePool {
+    pub fn pool(&self) -> &DbPool {
         &self.pool
     }
 

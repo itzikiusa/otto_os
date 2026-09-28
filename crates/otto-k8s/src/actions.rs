@@ -515,7 +515,7 @@ pub async fn execute(k: &Kubectl, req: &K8sActionReq) -> Result<K8sActionResp> {
 pub async fn execute_authorized(
     k: &Kubectl,
     req: &K8sActionReq,
-    pool: &otto_state::SqlitePool,
+    pool: &otto_state::DbPool,
     user: &otto_core::domain::User,
     cluster_id: &otto_core::Id,
 ) -> Result<K8sActionResp> {
@@ -524,7 +524,7 @@ pub async fn execute_authorized(
 
 async fn authorize_action(
     req: &K8sActionReq,
-    pool: &otto_state::SqlitePool,
+    pool: &otto_state::DbPool,
     user: &otto_core::domain::User,
     cluster_id: &otto_core::Id,
 ) -> Result<()> {
@@ -548,7 +548,7 @@ async fn authorize_action(
 }
 
 type Authorization<'a> = (
-    &'a otto_state::SqlitePool,
+    &'a otto_state::DbPool,
     &'a otto_core::domain::User,
     &'a otto_core::Id,
 );

@@ -6,7 +6,8 @@ use chrono::Utc;
 use otto_core::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt};
 
@@ -133,11 +134,12 @@ fn row_to_status(r: &sqlx::sqlite::SqliteRow) -> K8sMonitorStatusRow {
 
 #[derive(Clone)]
 pub struct K8sMonitorRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl K8sMonitorRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -286,7 +288,7 @@ impl K8sMonitorRepo {
 mod tests {
     use super::*;
 
-    async fn pool_with_cluster() -> SqlitePool {
+    async fn pool_with_cluster() -> DbPool {
         let pool = crate::db::test_pool().await;
         sqlx::query(
             "INSERT INTO k8s_clusters (id, name, source, context_name, environment, created_at, updated_at)

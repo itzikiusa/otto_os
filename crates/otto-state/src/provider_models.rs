@@ -15,7 +15,8 @@
 use chrono::Utc;
 use otto_core::{Error, Result};
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt};
 
@@ -34,7 +35,7 @@ pub struct ProviderModel {
 
 #[derive(Clone)]
 pub struct ProviderModelsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 fn row_to_model(r: &sqlx::sqlite::SqliteRow) -> ProviderModel {
@@ -49,7 +50,8 @@ fn row_to_model(r: &sqlx::sqlite::SqliteRow) -> ProviderModel {
 }
 
 impl ProviderModelsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -168,7 +170,7 @@ impl ProviderModelsRepo {
 mod tests {
     use super::*;
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(false);
@@ -178,7 +180,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     fn pairs(ids: &[&str]) -> Vec<(String, String)> {

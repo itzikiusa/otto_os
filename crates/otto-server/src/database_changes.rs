@@ -76,7 +76,7 @@ pub async fn authorize(
     authorize_targets(&ctx.pool, user, targets, op).await
 }
 async fn authorize_targets(
-    pool: &otto_state::SqlitePool,
+    pool: &otto_state::DbPool,
     user: &User,
     targets: &[ChangeTarget],
     op: &str,

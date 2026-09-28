@@ -56,7 +56,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use otto_state::{SessionsRepo, SqlitePool};
+use otto_state::{SessionsRepo, DbPool};
 use otto_usage::{
     estimate_cost, parse_claude_line, parse_codex_line, parse_codex_session_meta,
     CodexCounterStore, CursorStore, SeenKeys, UsageEngine, UsageEvent, EXTERNAL_WORKSPACE,
@@ -112,7 +112,7 @@ impl Drop for UsageTailerHandle {
 
 pub struct UsageTailer {
     usage: Arc<UsageEngine>,
-    pool: SqlitePool,
+    pool: DbPool,
     /// Home directory — the root of `~/.claude` and `~/.codex`.
     home: PathBuf,
     /// Daemon data dir — holds the cursor/seen files and the rebuild marker.
@@ -157,7 +157,7 @@ impl UsageTailer {
     /// the root for the `~/.claude` and `~/.codex` transcript trees.
     pub fn new(
         usage: Arc<UsageEngine>,
-        pool: SqlitePool,
+        pool: DbPool,
         data_dir: PathBuf,
         home: PathBuf,
     ) -> Self {

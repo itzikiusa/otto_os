@@ -12,13 +12,14 @@ use chrono::Utc;
 use otto_core::domain::{ScheduledTask, ScheduledTaskRun};
 use otto_core::{new_id, Result};
 use serde_json::Value;
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json};
 
 #[derive(Clone)]
 pub struct ScheduledTasksRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 /// Fields for creating a task. `schedule`/`destination` default to `{}`.
@@ -178,7 +179,8 @@ fn row_to_run(r: &sqlx::sqlite::SqliteRow) -> Result<ScheduledTaskRun> {
 }
 
 impl ScheduledTasksRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -478,11 +480,11 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    async fn pool() -> SqlitePool {
+    async fn pool() -> DbPool {
         crate::db::test_pool().await
     }
 
-    async fn seed_ws(pool: &SqlitePool, id: &str) {
+    async fn seed_ws(pool: &DbPool, id: &str) {
         let now = fmt(Utc::now());
         sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)")
             .bind(id)

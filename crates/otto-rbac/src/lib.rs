@@ -12,7 +12,7 @@ use otto_core::auth::{AuthContext, BoxFuture, RoleChecker, TokenAuthenticator};
 use otto_core::domain::{User, WorkspaceRole};
 use otto_core::{Error, Id, Result};
 use otto_state::WorkspacesRepo;
-use sqlx::SqlitePool;
+use otto_state::DbPool;
 
 pub use cache::{AuthCache, NoopGrantsInvalidator};
 pub use passwords::{hash_password, validate_password, verify_password, MIN_PASSWORD_LEN};
@@ -33,7 +33,8 @@ pub struct RbacAuthenticator {
 impl RbacAuthenticator {
     /// Construct without a cache (every authenticate hits the DB). Suitable for
     /// contexts where caching is not desired (standalone components, some tests).
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self {
             repo: AuthRepo::new(pool),
         }
@@ -42,7 +43,7 @@ impl RbacAuthenticator {
     /// Construct with a shared [`AuthCache`]. The caller retains a clone of
     /// `cache` to pass to [`otto_state::GrantsRepo::new_with_invalidator`] so
     /// grant changes flush the user's cached auth entries.
-    pub fn new_with_cache(pool: SqlitePool, cache: AuthCache) -> Self {
+    pub fn new_with_cache(pool: DbPool, cache: AuthCache) -> Self {
         Self {
             repo: AuthRepo::with_cache(pool, cache),
         }
@@ -63,7 +64,8 @@ pub struct RbacRoleChecker {
 }
 
 impl RbacRoleChecker {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self {
             workspaces: WorkspacesRepo::new(pool),
         }

@@ -19,7 +19,7 @@
 use chrono::{Duration, Utc};
 use otto_core::Result;
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt};
 
@@ -102,11 +102,12 @@ impl RetentionReport {
 
 #[derive(Clone)]
 pub struct RetentionRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl RetentionRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -221,7 +222,7 @@ mod tests {
     use super::*;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(false);
@@ -231,14 +232,14 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     fn ago(days: i64) -> String {
         fmt(Utc::now() - Duration::days(days))
     }
 
-    async fn work_event(pool: &SqlitePool, id: &str, item: &str, ts: &str) {
+    async fn work_event(pool: &DbPool, id: &str, item: &str, ts: &str) {
         sqlx::query(
             "INSERT INTO work_events (id, work_item_id, workspace_id, ts, actor, event_type, \
              payload_json, created_at) VALUES (?, ?, 'w', ?, 'system', 'progress', '{}', ?)",
@@ -252,7 +253,7 @@ mod tests {
         .unwrap();
     }
 
-    async fn count(pool: &SqlitePool, sql: &str) -> i64 {
+    async fn count(pool: &DbPool, sql: &str) -> i64 {
         sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
     }
 

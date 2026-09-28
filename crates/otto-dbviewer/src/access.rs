@@ -4,7 +4,7 @@ use otto_core::domain::{Capability, Feature};
 use otto_core::domain::{Connection, User};
 use otto_core::{Error, Id, Result};
 use otto_rbac::resource_access::ResourceAccess;
-use otto_state::{GrantsRepo, SqlitePool, UsersRepo, WorkspacesRepo};
+use otto_state::{GrantsRepo, DbPool, UsersRepo, WorkspacesRepo};
 use sqlparser::ast::{Expr, ObjectName, Statement, Visit, Visitor};
 use sqlparser::dialect::{MySqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
@@ -36,7 +36,7 @@ pub(crate) fn canonical_node(node: Option<&str>) -> Option<String> {
     Scope::parse(node).map(|s| s.to_node())
 }
 
-pub(crate) async fn policy(pool: &SqlitePool, id: &Id) -> Result<AccessPolicy> {
+pub(crate) async fn policy(pool: &DbPool, id: &Id) -> Result<AccessPolicy> {
     otto_state::resource_access::ResourceAccessRepo::new(pool.clone())
         .get_policy(ResourceKind::Connection, id)
         .await
@@ -44,7 +44,7 @@ pub(crate) async fn policy(pool: &SqlitePool, id: &Id) -> Result<AccessPolicy> {
 
 /// Reload the effective user and membership for every action. The passed id is
 /// supplied by authenticated adapters, never accepted from a request body.
-pub(crate) async fn current_user(pool: &SqlitePool, conn: &Connection, id: &Id) -> Result<User> {
+pub(crate) async fn current_user(pool: &DbPool, conn: &Connection, id: &Id) -> Result<User> {
     let user = UsersRepo::new(pool.clone()).get(id).await?;
     if user.disabled {
         return Err(Error::Forbidden("account disabled".into()));
@@ -70,7 +70,7 @@ pub(crate) async fn current_user(pool: &SqlitePool, conn: &Connection, id: &Id) 
 }
 
 pub(crate) async fn check(
-    pool: &SqlitePool,
+    pool: &DbPool,
     conn: &Connection,
     user_id: &Id,
     child: Option<&str>,
@@ -96,7 +96,7 @@ pub(crate) async fn check(
 /// Choose only credentials attached to matching Allow rules. Ambiguous profiles
 /// (including an explicit primary profile plus an alternate) are rejected.
 pub(crate) async fn credential_profile(
-    pool: &SqlitePool,
+    pool: &DbPool,
     conn: &Connection,
     user_id: &Id,
     child: Option<&str>,

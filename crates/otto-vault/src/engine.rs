@@ -12,7 +12,7 @@ use rustix::fd::OwnedFd;
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};
-use sqlx::SqlitePool;
+use otto_state::DbPool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::parse;
@@ -87,7 +87,8 @@ pub struct VaultEngine {
 }
 
 impl VaultEngine {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self {
             store: Store::new(pool),
             preparation: Default::default(),

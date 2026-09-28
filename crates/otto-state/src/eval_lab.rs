@@ -8,7 +8,8 @@
 use chrono::Utc;
 use otto_core::domain::{EvalMatrix, GoldenTask, MatrixPrompt};
 use otto_core::{new_id, Error, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt};
 
@@ -18,7 +19,7 @@ use crate::convert::{dberr, fmt};
 
 #[derive(Clone)]
 pub struct GoldenTasksRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 fn row_to_golden(r: &sqlx::sqlite::SqliteRow) -> Result<GoldenTask> {
@@ -61,7 +62,8 @@ pub struct GoldenTaskInput {
 }
 
 impl GoldenTasksRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -198,7 +200,7 @@ impl GoldenTasksRepo {
 
 #[derive(Clone)]
 pub struct EvalMatricesRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 fn row_to_matrix(r: &sqlx::sqlite::SqliteRow) -> Result<EvalMatrix> {
@@ -233,7 +235,8 @@ fn row_to_matrix(r: &sqlx::sqlite::SqliteRow) -> Result<EvalMatrix> {
 }
 
 impl EvalMatricesRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -313,7 +316,7 @@ mod tests {
     use super::*;
     use otto_core::Id as CoreId;
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(false);
@@ -323,7 +326,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     fn input(name: &str) -> GoldenTaskInput {

@@ -13,7 +13,8 @@ use otto_core::domain::Environment;
 use otto_core::{Error, Id, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json, ts};
 
@@ -186,11 +187,12 @@ fn params_with_color(mut params: Value, color: Option<&str>) -> Value {
 
 #[derive(Clone)]
 pub struct K8sClustersRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl K8sClustersRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -326,7 +328,7 @@ mod tests {
     use super::*;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
-    async fn pool() -> SqlitePool {
+    async fn pool() -> DbPool {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect_with(
@@ -337,7 +339,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     fn new(id: &str, source: K8sClusterSource) -> NewK8sCluster {

@@ -10,7 +10,7 @@ use std::os::unix::fs::PermissionsExt;
 use chrono::{DateTime, Utc};
 use otto_core::domain::Environment;
 use otto_core::{new_id, Error, Id, Result};
-use otto_state::{AwsAccountRow, SqlitePool};
+use otto_state::{AwsAccountRow, DbPool};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -253,7 +253,7 @@ pub async fn describe_cluster(
 // (it is being built in parallel by the Kubernetes console work).
 pub async fn import_kubeconfig(
     svc: &AwsService,
-    pool: &SqlitePool,
+    pool: &DbPool,
     a: &AwsAccountRow,
     name: &str,
     req: &ImportReq,

@@ -16,14 +16,14 @@ use otto_core::auth::RoleChecker;
 use otto_core::domain::{Connection, ConnectionKind, Environment, Session, User, WorkspaceRole};
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id, Result};
-use otto_state::{ConnectionSectionsRepo, ConnectionsRepo, SettingsRepo, SqlitePool};
+use otto_state::{ConnectionSectionsRepo, ConnectionsRepo, SettingsRepo, DbPool};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-async fn mem_pool() -> SqlitePool {
+async fn mem_pool() -> DbPool {
     let opts = SqliteConnectOptions::new()
         .in_memory(true)
         .foreign_keys(true);
@@ -36,10 +36,10 @@ async fn mem_pool() -> SqlitePool {
         .run(&pool)
         .await
         .expect("migrations");
-    pool
+    pool.into()
 }
 
-async fn seed_user(pool: &SqlitePool, name: &str, is_root: bool) -> User {
+async fn seed_user(pool: &DbPool, name: &str, is_root: bool) -> User {
     let id = otto_core::new_id();
     let now_ts = Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
     sqlx::query(
@@ -66,7 +66,7 @@ async fn seed_user(pool: &SqlitePool, name: &str, is_root: bool) -> User {
     }
 }
 
-async fn seed_ws(pool: &SqlitePool) -> Id {
+async fn seed_ws(pool: &DbPool) -> Id {
     let ws = otto_core::new_id();
     let now_ts = Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
     sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)")
@@ -155,14 +155,15 @@ impl RoleChecker for AllowAll {
 
 #[derive(Clone)]
 struct TestCtx {
-    pool: SqlitePool,
+    pool: DbPool,
     svc: Arc<ConnectionsService>,
     roles: Arc<dyn RoleChecker>,
     spawner: Arc<dyn Spawner>,
 }
 
 impl TestCtx {
-    fn new(pool: SqlitePool) -> Self {
+    fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         let repo = ConnectionsRepo::new(pool.clone());
         let secs_repo = ConnectionSectionsRepo::new(pool.clone());
         let svc = ConnectionsService::new(repo, secs_repo, Arc::new(NullSecrets));
@@ -185,7 +186,7 @@ impl ConnectionsCtx for TestCtx {
     fn spawner(&self) -> &Arc<dyn Spawner> {
         &self.spawner
     }
-    fn pool(&self) -> SqlitePool {
+    fn pool(&self) -> DbPool {
         self.pool.clone()
     }
 }
@@ -404,7 +405,7 @@ async fn setting_false_explicit_is_false() {
 }
 
 // These owner-private compatibility tests intentionally create legacy profiles.
-async fn set_all_legacy(pool: &SqlitePool) {
+async fn set_all_legacy(pool: &DbPool) {
     let rows: Vec<(String, String)> = sqlx::query_as("SELECT id, created_by FROM connections")
         .fetch_all(pool)
         .await

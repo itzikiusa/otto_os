@@ -13,7 +13,8 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt};
 use otto_core::finding::{Finding, FindingSeverity, FindingStatus};
@@ -268,11 +269,12 @@ pub fn fallback_dedupe_key(path: Option<&str>, line: Option<u32>, body: &str) ->
 
 #[derive(Clone)]
 pub struct ReviewFindingsRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl ReviewFindingsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -784,7 +786,7 @@ mod tests {
         assert!(FindingState::parse("garbage").is_none());
     }
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(false);
@@ -794,7 +796,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     fn sample<'a>(fp: &'a str, severity: &'a str) -> NewFinding<'a> {

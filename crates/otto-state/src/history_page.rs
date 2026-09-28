@@ -2,7 +2,8 @@
 use crate::convert::dberr;
 use crate::TranscriptIndexRow;
 use otto_core::{domain::Session, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 #[derive(Clone, Debug)]
 pub struct Candidate {
@@ -22,7 +23,7 @@ pub struct PageRequest<'a> {
     pub before: Option<(&'a str, &'a str)>,
     pub budget: usize,
 }
-pub async fn candidates(pool: &SqlitePool, req: PageRequest<'_>) -> Result<Vec<Candidate>> {
+pub async fn candidates(pool: &DbPool, req: PageRequest<'_>) -> Result<Vec<Candidate>> {
     let limit = req.budget.clamp(1, 4000) + 1;
     let (before_at, before_key) = req
         .before
@@ -96,7 +97,7 @@ pub async fn candidates(pool: &SqlitePool, req: PageRequest<'_>) -> Result<Vec<C
 
 /// One bounded batch of exact paths after filesystem resolution. At most20
 /// parameter-safe queries for the maximum4000-candidate page, never N queries.
-pub async fn indexed_paths(pool: &SqlitePool, paths: &[String]) -> Result<Vec<TranscriptIndexRow>> {
+pub async fn indexed_paths(pool: &DbPool, paths: &[String]) -> Result<Vec<TranscriptIndexRow>> {
     let mut out = Vec::new();
     for chunk in paths.chunks(200) {
         let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
@@ -121,7 +122,7 @@ pub async fn indexed_paths(pool: &SqlitePool, paths: &[String]) -> Result<Vec<Tr
 mod tests {
     use super::*;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-    async fn pool() -> SqlitePool {
+    async fn pool() -> DbPool {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect_with(SqliteConnectOptions::new().in_memory(true))
@@ -130,9 +131,9 @@ mod tests {
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         sqlx::query("INSERT INTO users(id,username,password_hash,created_at) VALUES ('owner','owner','','2026-01-01T00:00:00Z'),('other','other','','2026-01-01T00:00:00Z')").execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO workspaces(id,name,root_path,created_at) VALUES ('ws','ws','/tmp','2026-01-01T00:00:00Z')").execute(&pool).await.unwrap();
-        pool
+        pool.into()
     }
-    async fn seed(pool: &SqlitePool, count: usize) {
+    async fn seed(pool: &DbPool, count: usize) {
         let mut tx = pool.begin().await.unwrap();
         for n in 0..count {
             sqlx::query("INSERT INTO sessions(id,workspace_id,kind,provider,title,status,cwd,created_by,created_at,last_active_at) VALUES (?,'ws','agent','claude',?,'exited','/repo',?,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')")

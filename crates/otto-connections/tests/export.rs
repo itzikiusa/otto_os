@@ -10,7 +10,7 @@ use std::{path::PathBuf, sync::Arc};
 
 struct Fixture {
     dir: PathBuf,
-    pool: sqlx::SqlitePool,
+    pool: otto_state::DbPool,
     secrets: Arc<otto_keychain::FileStore>,
     service: ConnectionsService,
     id: String,
@@ -23,11 +23,11 @@ impl Drop for Fixture {
 async fn fixture() -> Fixture {
     let dir = std::env::temp_dir().join(format!("otto-export-test-{}", otto_core::new_id()));
     std::fs::create_dir(&dir).unwrap();
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+    let pool = otto_state::DbPool::from(sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
         .await
-        .unwrap();
+        .unwrap());
     sqlx::migrate!("../otto-state/migrations")
         .run(&pool)
         .await

@@ -4,7 +4,8 @@
 
 use chrono::Utc;
 use otto_core::{Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
+use crate::DbPool;
 
 use crate::convert::{dberr, fmt};
 
@@ -46,11 +47,12 @@ pub(crate) fn row(r: &sqlx::sqlite::SqliteRow) -> TranscriptIndexRow {
 
 #[derive(Clone)]
 pub struct TranscriptIndexRepo {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl TranscriptIndexRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: impl Into<DbPool>) -> Self {
+        let pool: DbPool = pool.into();
         Self { pool }
     }
 
@@ -195,14 +197,14 @@ mod tests {
     use super::*;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
-    async fn mk_pool() -> SqlitePool {
+    async fn mk_pool() -> DbPool {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect_with(SqliteConnectOptions::new().in_memory(true))
             .await
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
-        pool
+        pool.into()
     }
 
     #[tokio::test]

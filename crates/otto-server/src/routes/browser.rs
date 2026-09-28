@@ -1626,7 +1626,7 @@ mod tests {
     use otto_sessions::{ProviderRegistry, SessionManager};
     use otto_state::{
         ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, GitStore, IntegrationsRepo,
-        IssuesRepo, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, SqlitePool, SwarmRepo,
+        IssuesRepo, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, DbPool, SwarmRepo,
         WorkspacesRepo,
     };
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -1649,7 +1649,7 @@ mod tests {
         }
     }
 
-    async fn mem_pool() -> SqlitePool {
+    async fn mem_pool() -> DbPool {
         let opts = SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -1662,7 +1662,7 @@ mod tests {
             .run(&pool)
             .await
             .expect("run migrations");
-        pool
+        pool.into()
     }
 
     /// Root so `require_ws_role` passes without seeding `workspace_members`
@@ -1678,7 +1678,7 @@ mod tests {
         }
     }
 
-    async fn test_ctx(pool: &SqlitePool, data_dir: PathBuf) -> ServerCtx {
+    async fn test_ctx(pool: &DbPool, data_dir: PathBuf) -> ServerCtx {
         let (events, _rx) = broadcast::channel(64);
         // Browser-credentials tests need a real (non-erroring) `SecretStore`
         // to round-trip put/get/delete — `otto_keychain::FileStore` is exactly
@@ -1831,7 +1831,7 @@ mod tests {
     /// non-root user / workspace / `workspace_members` row directly (the
     /// authz-failure tests need this — `send` alone always authenticates
     /// as root, which bypasses `require_ws_role` entirely).
-    async fn test_app_with_pool() -> (TempDir, SqlitePool, Router) {
+    async fn test_app_with_pool() -> (TempDir, DbPool, Router) {
         let tmp = TempDir::new().expect("tempdir");
         let pool = mem_pool().await;
         let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
@@ -1847,7 +1847,7 @@ mod tests {
     /// (cheap to `Clone`) — needed by tests that must reach the manager/vault
     /// directly (spawning a real live PTY session; seeding a vault row), which
     /// the HTTP surface alone can't do.
-    async fn test_ctx_and_app() -> (TempDir, SqlitePool, ServerCtx, Router) {
+    async fn test_ctx_and_app() -> (TempDir, DbPool, ServerCtx, Router) {
         let tmp = TempDir::new().expect("tempdir");
         let pool = mem_pool().await;
         let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
@@ -1868,7 +1868,7 @@ mod tests {
         }
     }
 
-    async fn seed_user(pool: &SqlitePool, id: &str) {
+    async fn seed_user(pool: &DbPool, id: &str) {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO users (id, username, password_hash, display_name, is_root, created_at)
@@ -1883,7 +1883,7 @@ mod tests {
         .expect("seed user");
     }
 
-    async fn seed_workspace(pool: &SqlitePool, ws_id: &str) {
+    async fn seed_workspace(pool: &DbPool, ws_id: &str) {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO workspaces (id, name, root_path, settings_json, archived, created_at)
@@ -1897,7 +1897,7 @@ mod tests {
     }
 
     /// `role` is the lowercase `WorkspaceRole` string (`"viewer"` | `"editor"` | `"admin"`).
-    async fn set_member(pool: &SqlitePool, ws_id: &str, user_id: &str, role: &str) {
+    async fn set_member(pool: &DbPool, ws_id: &str, user_id: &str, role: &str) {
         sqlx::query("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)")
             .bind(ws_id)
             .bind(user_id)
