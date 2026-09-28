@@ -94,7 +94,7 @@
         <div class="rp-term">
           <!-- No {#key}: Terminal retargets its own WS when sessionId changes; a
                {#key} under a frequently-refetching parent causes a reconnect storm. -->
-          <Terminal sessionId={agent.session_id} preferDom />
+          <Terminal sessionId={agent.session_id} preferDom resumeOnOpen={false} />
         </div>
       {/if}
       {#if agentExpanded[agent.name] && agent.findings}

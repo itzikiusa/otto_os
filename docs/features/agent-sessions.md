@@ -566,6 +566,16 @@ when **all** of these hold:
    (cursor/device-attribute answers) do not count as typing. Before this, every
    session opened since the daemon started kept its agent CLI (150–400 MB of
    Node plus an MCP sidecar) alive for good.
+
+   **Panes that only show a session never resume it.** Tiles in the tiled
+   grid, the embedded agent-output viewers (code-review, docs, skill-review,
+   skill-eval, product-analysis and workflow agents) and *every* automatic
+   reconnect (a dropped socket, a daemon restart, the window regaining focus)
+   attach view-only (`/ws/term/{id}?view=1`, docs/contracts/ws.md §1). A
+   suspended session shows **Suspended — type or Resume to continue**; the
+   first keystroke (it is not delivered — the CLI is still starting) or the
+   Resume button brings the CLI back. Opening a session in an Agents pane, a
+   loop or a swarm still resumes it as before.
 6. **No open agent turn** — the provider's own on-disk record says the last
    turn finished. For `claude` the tail of the transcript JSONL must end in an
    assistant message with `stop_reason: "end_turn"` and carry no later

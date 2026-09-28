@@ -242,8 +242,17 @@
      *  replay when coming back to Agents or switching tabs. Owner sockets
      *  only (ignored with shareToken/socketFactory). Default false. */
     keepAlive?: boolean;
+    /** Opening this terminal resumes a suspended agent session (the daemon's
+     *  `ensure_live` on attach). False = a VIEW-ONLY attach (`?view=1`, see
+     *  docs/contracts/ws.md §1): looking at the pane never spawns the CLI —
+     *  the first real keystroke or the Resume button does (r3-05-01). Set it
+     *  on panes that show a session rather than work in it (grid tiles,
+     *  embedded agent-output viewers). Automatic reconnects (dropped socket,
+     *  daemon restart, window refocus) are view-only on EVERY terminal: a
+     *  dropped socket is not the user asking for the CLI back. Default true. */
+    resumeOnOpen?: boolean;
   }
-  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, socketFactory, transformFrame, readOnlyReason, onstatus, onfontfit, onsearchresult, showToolbar = true, autoFocus = false, claimOnAttach = false, keepAlive = false, scrollback = EMBED_SCROLLBACK }: Props = $props();
+  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, socketFactory, transformFrame, readOnlyReason, onstatus, onfontfit, onsearchresult, showToolbar = true, autoFocus = false, claimOnAttach = false, keepAlive = false, scrollback = EMBED_SCROLLBACK, resumeOnOpen = true }: Props = $props();
 
   const effScheme = $derived(forceDark ? 'dark' : ui.resolvedScheme);
 
@@ -313,6 +322,12 @@
 
   let connected = $state(false);
   let exitCode: number | null = $state(null);
+  /** The current socket attached view-only (`?view=1`): the daemon did not
+   *  resume the session for it. */
+  let viewAttach = false;
+  /** A view-only attach found the session suspended — the exited overlay then
+   *  says how to wake it (typing or Resume) instead of "resumes on open". */
+  let dormantView = $state(false);
   let disconnected = $state(false);
   let reconnecting = $state(false);
 
@@ -346,7 +361,7 @@
     reconnectAttempts++;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
-      connect();
+      connect({ view: true });
     }, delay);
   }
 
@@ -577,7 +592,9 @@
     return new Uint8Array(await blob.arrayBuffer());
   }
 
-  function connect(): void {
+  /** `view`: attach view-only (never resumes a suspended session). Default:
+   *  view-only unless `resumeOnOpen`. Explicit user actions pass false. */
+  function connect(opts: { view?: boolean } = {}): void {
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
@@ -611,6 +628,8 @@
     flow.resetStream();
     writes.dropQueued();
     resyncPending = false;
+    viewAttach = opts.view ?? !resumeOnOpen;
+    dormantView = false;
     // When a shareToken is supplied (guest share view) use the otto-bearer
     // subprotocol so the token travels in Sec-WebSocket-Protocol instead of
     // the URL query string (keeps it out of access logs). The stored owner
@@ -621,7 +640,7 @@
       const wsBase = wsUrl(`/ws/term/${sessionId}`).replace(/\?token=.*$/, '');
       sock = new WebSocket(wsBase, [WS_BEARER_SUBPROTOCOL, shareToken]);
     } else {
-      sock = new WebSocket(wsUrl(`/ws/term/${sessionId}`));
+      sock = new WebSocket(wsUrl(`/ws/term/${sessionId}`) + (viewAttach ? '&view=1' : ''));
     }
     sock.binaryType = 'arraybuffer';
     wireSocket(sock);
@@ -721,7 +740,15 @@
             // socket onto a respawned process (chat send, channel follow-up,
             // restart from elsewhere) — drop the exited overlay; the
             // accompanying snapshot rebuilds the screen.
-            if (msg.status !== 'exited' && msg.status !== 'reconnectable') exitCode = null;
+            if (msg.status !== 'exited' && msg.status !== 'reconnectable') {
+              exitCode = null;
+              dormantView = false;
+            } else if ((msg.status === 'reconnectable' || resumable) && viewAttach && exitCode === null && !socketFactory) {
+              // View-only attach to a suspended session: nothing was spawned,
+              // so show the exited overlay (Resume) — typing wakes it too.
+              exitCode = 0;
+              dormantView = true;
+            }
             onstatus?.(msg.status as SessionStatus);
             break;
           case 'exit':
@@ -1682,6 +1709,7 @@
     disconnected = false;
     reconnecting = false;
     exitCode = null;
+    dormantView = false;
     reconnectAttempts = 0;
     lastInjN = 0;
     const adopted = adoptEngine(sid);
@@ -1971,7 +1999,7 @@
         reconnectTimer = null;
       }
       reconnectAttempts = 0;
-      connect();
+      connect({ view: true });
     };
     const onVis = (): void => {
       if (document.visibilityState === 'visible') retryNow();
@@ -2201,14 +2229,15 @@
       <!-- Shared exit vocabulary (lib/status.ts): "Ended", "Suspended —
            resumes on open", or "Failed (exit N)" — never a bare "exited (0)". -->
       {@const ex = exitState(exitCode, resumable)}
+      {@const hint = dormantView && ex.key === 'suspended' ? (readOnly ? 'Suspended' : 'Suspended — type or Resume to continue') : ex.hint}
       <div class="term-overlay">
-        <span class="badge {ex.tone}" data-exit={ex.key} title={ex.hint}>{ex.key === 'suspended' ? ex.hint : ex.label}</span>
+        <span class="badge {ex.tone}" data-exit={ex.key} data-dormant={dormantView || undefined} title={hint}>{ex.key === 'suspended' ? hint : ex.label}</span>
         {#if (restartable || resumable) && !readOnly}
           <button
             class="btn"
             onclick={() => {
               if (onrestart) onrestart();
-              else { exitCode = null; connect(); }
+              else { exitCode = null; connect({ view: false }); }
             }}
             title={resumable ? 'Resume the session where it left off' : onrestart ? 'Start the session again in this pane' : 'Reconnect to the session'}
           >{resumable ? 'Resume' : onrestart ? 'Restart session' : 'Reconnect'}</button>
@@ -2217,12 +2246,12 @@
     {:else if reconnecting}
       <div class="term-overlay dim">
         <span class="badge">Reconnecting…</span>
-        <button class="btn" onclick={() => { reconnectAttempts = 0; connect(); }}>Reconnect now</button>
+        <button class="btn" onclick={() => { reconnectAttempts = 0; connect({ view: false }); }}>Reconnect now</button>
       </div>
     {:else if disconnected}
       <div class="term-overlay">
         <span class="badge bad">Disconnected</span>
-        <button class="btn" onclick={connect}>Reconnect</button>
+        <button class="btn" onclick={() => connect({ view: false })}>Reconnect</button>
       </div>
     {:else if !connected}
       <div class="term-overlay dim"><span class="badge">Connecting…</span></div>

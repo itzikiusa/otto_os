@@ -25,6 +25,19 @@ Auth: prefer `Sec-WebSocket-Protocol: otto-bearer, <token>` (server echoes
 `?token=<bearer token>` query parameter is accepted as a backward-compatible
 fallback. An IP that fails token validation too many times is locked out (429).
 
+**Attach intent — `?view=1` (optional).** By default an attach that may type
+resumes an exited-but-resumable agent session (`ensure_live`: the provider CLI
+is respawned with `--resume` so the terminal comes back live). A client that
+only *shows* the session — a grid tile, an embedded agent-output viewer, an
+automatic reconnect after a dropped socket — adds `view=1`: the attach never
+spawns the CLI. The initial `status` frame then reports the dormant value
+(`reconnectable`) and the `scrollback` reply is empty (`epoch` 0). The first
+`input` frame with `user: true` on such a socket is the resume: the server
+resumes the session, moves the socket onto the new process (`status` + an
+unsolicited `scrollback`, as on revival) and **does not deliver that
+keystroke** (the CLI is still starting). Emulator replies (`user: false`)
+never wake it. Read-only viewers never resume either way.
+
 Role: workspace **viewer** may attach (read-only); **editor**+ may send input/resize.
 Input frames from viewers are silently dropped server-side (and a single JSON
 `{"type":"error","code":"forbidden"}` is sent once).

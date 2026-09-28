@@ -738,7 +738,7 @@
             {#if agent.session_id && openTerminals.has(agent.session_id)}
               <div class="term">
                 {#key agent.session_id}
-                  <Terminal sessionId={agent.session_id} preferDom />
+                  <Terminal sessionId={agent.session_id} preferDom resumeOnOpen={false} />
                 {/key}
               </div>
             {/if}
@@ -784,7 +784,7 @@
             {#if run.summarizer.session_id && openTerminals.has(run.summarizer.session_id)}
               <div class="term">
                 {#key run.summarizer.session_id}
-                  <Terminal sessionId={run.summarizer.session_id} preferDom />
+                  <Terminal sessionId={run.summarizer.session_id} preferDom resumeOnOpen={false} />
                 {/key}
               </div>
             {/if}
@@ -905,7 +905,7 @@
                       {#if reviewer.session_id && openTerminals.has(reviewer.session_id)}
                         <div class="term">
                           {#key reviewer.session_id}
-                            <Terminal sessionId={reviewer.session_id} preferDom />
+                            <Terminal sessionId={reviewer.session_id} preferDom resumeOnOpen={false} />
                           {/key}
                         </div>
                       {/if}
@@ -957,7 +957,7 @@
                     {#if round.revision.session_id && openTerminals.has(round.revision.session_id)}
                       <div class="term">
                         {#key round.revision.session_id}
-                          <Terminal sessionId={round.revision.session_id} preferDom />
+                          <Terminal sessionId={round.revision.session_id} preferDom resumeOnOpen={false} />
                         {/key}
                       </div>
                     {/if}

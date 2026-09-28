@@ -83,6 +83,40 @@ struct TokenQuery {
 
 fn user_input_default() -> bool { true }
 
+/// Attach intent, from the upgrade URL (`/ws/term/{id}?view=1`).
+///
+/// A VIEW-ONLY attach (a grid tile, an embedded agent-output viewer, a pane
+/// reconnecting on its own after a dropped socket) must not spawn the
+/// session's CLI: `ensure_live` on every attach brought back `claude --resume`
+/// for each session merely looked at (r3-05-01; 150–400 MB each). Such a
+/// socket resumes a dormant session only on the user's first real keystroke
+/// (see [`wakes_on_input`]); an explicit Resume (the restart route, or a
+/// non-view re-attach) is unchanged. Unknown/absent → the classic attach.
+#[derive(Deserialize, Default)]
+struct AttachQuery {
+    #[serde(default)]
+    view: Option<String>,
+}
+
+impl AttachQuery {
+    fn view_only(&self) -> bool {
+        matches!(self.view.as_deref(), Some("1" | "true"))
+    }
+}
+
+/// Does this attach resume an exited-but-resumable session? Read-only viewers
+/// (shares) never do; view-only attaches wait for real input.
+fn resume_on_attach(can_input: bool, view_only: bool) -> bool {
+    can_input && !view_only
+}
+
+/// Should an `input` frame wake the session first? Only on a view-only socket,
+/// only for a real keystroke (`user`: emulator DA/CPR replies never wake a
+/// CLI), and only while no process is live behind this viewer.
+fn wakes_on_input(view_only: bool, user: bool, live: bool) -> bool {
+    view_only && user && !live
+}
+
 /// Client → server control frames.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -851,7 +885,9 @@ async fn term_ws<S: SessionsCtx>(
     axum::Extension(live_auth): axum::Extension<LiveTerminalAuth>,
     axum::Extension(CanInput(can_input)): axum::Extension<CanInput>,
     axum::Extension(UsedSubprotocol(used_subprotocol)): axum::Extension<UsedSubprotocol>,
+    Query(attach): Query<AttachQuery>,
 ) -> Response {
+    let view_only = attach.view_only();
     // Auth and owner-gate already enforced by ws_auth_gate middleware.
     let session = match st.ctx.manager().get(&session_id).await {
         Ok(s) => s,
@@ -870,6 +906,7 @@ async fn term_ws<S: SessionsCtx>(
                     session_id,
                     initial_status,
                     can_input,
+                    view_only,
                     live_auth,
                 )
                 .await;
@@ -882,6 +919,7 @@ async fn term_ws<S: SessionsCtx>(
                 session_id,
                 initial_status,
                 can_input,
+                view_only,
                 live_auth,
             )
             .await;
@@ -1060,6 +1098,7 @@ async fn serve_terminal<S: SessionsCtx>(
     session_id: Id,
     initial_status: otto_core::domain::SessionStatus,
     mut can_input: bool,
+    view_only: bool,
     live_auth: LiveTerminalAuth,
 ) {
     // Track this viewer for the whole connection. The guard decrements the
@@ -1078,6 +1117,8 @@ async fn serve_terminal<S: SessionsCtx>(
     // Read-only viewers (shares) never trigger a resume: watching must not
     // spawn a process on the host. (`ensure_live` itself also refuses archived
     // sessions, so an archived row can no longer come back live via attach.)
+    // Neither do view-only attaches (`?view=1`, see [`AttachQuery`]): looking
+    // at a session must not spawn its CLI; the first real keystroke does.
     let Ok(current) = ctx.manager().get(&session_id).await else {
         return;
     };
@@ -1085,7 +1126,7 @@ async fn serve_terminal<S: SessionsCtx>(
         Ok(allowed) => can_input &= allowed,
         Err(_) => return,
     }
-    if can_input {
+    if resume_on_attach(can_input, view_only) {
         if let Err(e) = ctx.manager().ensure_live(&session_id).await {
             tracing::warn!(session = %session_id, "ensure_live on ws attach: {e}");
         }
@@ -1331,6 +1372,30 @@ async fn serve_terminal<S: SessionsCtx>(
                                         }
                                     }
                                     Ok(false) => {}
+                                }
+                            }
+                            // A view-only viewer typed into a dormant session:
+                            // this keystroke is the explicit "resume". Wake it
+                            // and move onto the new process; the keystroke
+                            // itself is NOT delivered (the CLI is still
+                            // starting — a stray key or Enter would land in
+                            // its startup, not in the prompt the user saw).
+                            if wakes_on_input(view_only, user, exit_rx.is_some()) {
+                                match ctx.manager().ensure_live(&session_id).await {
+                                    Ok(()) => match revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx).await {
+                                        Err(()) => return,
+                                        Ok(true) => {
+                                            warned_input = false;
+                                            if let Some(c) = credit.as_mut() {
+                                                c.superseded();
+                                            }
+                                            continue;
+                                        }
+                                        // Not resumable: fall through, `input`
+                                        // fails and the notice says so.
+                                        Ok(false) => {}
+                                    },
+                                    Err(e) => tracing::warn!(session = %session_id, "ensure_live on view-only wake: {e}"),
                                 }
                             }
                             // Typed while more than a window behind (^C mid-
@@ -2019,6 +2084,31 @@ mod tests {
     /// SA-11: a matched line with a TAB (make output, Go/Java stack traces)
     /// or any other C0 byte used to produce invalid JSON, so the client's
     /// `JSON.parse` threw and the find bar spun forever.
+    /// r3-05-01 follow-up: a view-only attach (`?view=1`) never resumes the
+    /// CLI; the first REAL keystroke on it does, emulator replies never do, and
+    /// a live process is never "woken" twice. Classic attaches keep resuming.
+    #[test]
+    fn view_only_attach_resumes_only_on_real_input() {
+        let parse = |q: &str| {
+            let uri: axum::http::Uri = format!("/ws/term/s{q}").parse().unwrap();
+            Query::<AttachQuery>::try_from_uri(&uri).unwrap().0.view_only()
+        };
+        assert!(parse("?view=1"));
+        assert!(parse("?token=abc&view=true"));
+        assert!(!parse(""), "absent = classic attach");
+        assert!(!parse("?token=abc"));
+        assert!(!parse("?view=0"));
+
+        assert!(resume_on_attach(true, false), "classic attach resumes");
+        assert!(!resume_on_attach(true, true), "view-only attach never spawns");
+        assert!(!resume_on_attach(false, false), "read-only shares never spawn");
+
+        assert!(wakes_on_input(true, true, false), "typing wakes a dormant view");
+        assert!(!wakes_on_input(true, false, false), "DA/CPR replies never wake");
+        assert!(!wakes_on_input(true, true, true), "already live: plain input");
+        assert!(!wakes_on_input(false, true, false), "classic socket: unchanged");
+    }
+
     #[test]
     fn search_result_frame_is_valid_json_for_tabs_and_control_bytes() {
         let text = "at\tmain.go:12\t\"quoted\" back\\slash \u{7} bell \u{8} bs \u{1b}esc\r\n";
