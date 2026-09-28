@@ -416,20 +416,23 @@ mod tests {
         use std::sync::Arc;
         let hits = Arc::new(AtomicUsize::new(0));
         let h2 = hits.clone();
+        // Paths go through consts: otto-server's route-inventory and
+        // policy-coverage tests treat every string literal passed to `.route` under
+        // crates/ as a daemon route, and this fake API server is not one.
+        const METRICS: &str = "/api/v1/namespaces/ns/pods/p1:9000/proxy/metrics";
+        const BIG: &str = "/api/v1/namespaces/ns/pods/p1:9000/proxy/big";
+        const DOWN: &str = "/api/v1/namespaces/ns/pods/p1:9000/proxy/down";
         let app = axum::Router::new()
             .route(
-                "/api/v1/namespaces/ns/pods/p1:9000/proxy/metrics",
+                METRICS,
                 axum::routing::get(move || {
                     h2.fetch_add(1, Ordering::SeqCst);
                     async { "up 1\n" }
                 }),
             )
+            .route(BIG, axum::routing::get(|| async { "x".repeat(10_000) }))
             .route(
-                "/api/v1/namespaces/ns/pods/p1:9000/proxy/big",
-                axum::routing::get(|| async { "x".repeat(10_000) }),
-            )
-            .route(
-                "/api/v1/namespaces/ns/pods/p1:9000/proxy/down",
+                DOWN,
                 axum::routing::get(|| async {
                     (axum::http::StatusCode::SERVICE_UNAVAILABLE, "no")
                 }),
