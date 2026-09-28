@@ -12,7 +12,10 @@
 // so the selection is made against the real MODEL (CM's document, xterm's
 // buffer) instead of the rendered DOM subset.
 
-import { EditorView } from '@codemirror/view';
+// No static `@codemirror/view` import: this module is in the shell's boot
+// closure (lib/menu.ts), and CodeMirror (~380 KB) belongs to the pages that
+// mount an editor. A `.cm-editor` on screen means it is already loaded, so
+// the dynamic import below resolves from the module cache.
 
 /** Returns true when it handled the select-all for its element. */
 type Handler = () => boolean;
@@ -58,12 +61,16 @@ export function selectAllInFocus(): void {
   // not just the lines the viewport happens to have rendered.
   const cm = el?.closest?.('.cm-editor') as HTMLElement | null;
   if (cm) {
-    const view = EditorView.findFromDOM(cm);
-    if (view) {
-      view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
-      view.focus();
-      return;
-    }
+    void import('@codemirror/view').then(
+      ({ EditorView }) => {
+        const view = EditorView.findFromDOM(cm);
+        if (!view) return void document.execCommand('selectAll');
+        view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+        view.focus();
+      },
+      () => document.execCommand('selectAll'),
+    );
+    return;
   }
 
   // Anything else (read-only panes, plain markup): the native behavior.

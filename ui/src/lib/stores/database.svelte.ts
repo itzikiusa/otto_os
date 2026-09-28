@@ -45,7 +45,6 @@ import { ws } from './workspace.svelte';
 import { toasts } from '../toast.svelte';
 import { router } from '../router.svelte';
 import { downloadText } from '../components/exporters';
-import { format as formatSql } from 'sql-formatter';
 import { formatMongo } from '../../modules/database/mongo-format';
 import {
   defaultVarSpec,
@@ -1466,8 +1465,10 @@ class DatabaseStore {
    *  For SQL we first unwrap Java/MyBatis string-concatenation (paste a
    *  `"SELECT … " + ${x} + "…"` blob and Format turns it into clean SQL) and mask
    *  query placeholders (`${x}`/`#{x}`/`:x`/`{x}`) so the formatter doesn't choke
-   *  on them, restoring them after. Leaves the editor untouched on a parse error. */
-  formatStatement(): void {
+   *  on them, restoring them after. Leaves the editor untouched on a parse error.
+   *  sql-formatter (~370 KB of dialect tables) loads on the first Format: this
+   *  store is in every window's boot closure (lib/events.svelte.ts imports it). */
+  async formatStatement(): Promise<void> {
     const t = this.tab;
     if (!t || !t.statement.trim() || this.queryLanguage === 'redis') return;
     try {
@@ -1475,6 +1476,9 @@ class DatabaseStore {
         this.setStatement(formatMongo(t.statement));
         return;
       }
+      const { format: formatSql } = await import('sql-formatter');
+      // The tab switched while the formatter loaded: leave both untouched.
+      if (this.tab !== t) return;
       const kind = this.selectedConn?.kind;
       const dialect: 'mysql' | 'postgresql' | 'sql' =
         kind === 'mysql' ? 'mysql' : kind === 'postgres' ? 'postgresql' : 'sql';
