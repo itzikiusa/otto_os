@@ -57,6 +57,9 @@ impl Cache {
             let e = self.entries.pop_front().expect("front checked");
             self.total -= e.bytes.len();
         }
+        if self.entries.is_empty() {
+            self.entries.shrink_to_fit();
+        }
     }
 
     fn insert(&mut self, entry: Entry, cap: usize) {
@@ -90,8 +93,44 @@ fn cache() -> &'static Mutex<Cache> {
     CACHE.get_or_init(|| Mutex::new(Cache::default()))
 }
 
+/// Expire bodies past [`TTL`] now. Expiry used to run only on the next
+/// `put`/`get`, so after the last send up to [`MAX_TOTAL_BYTES`] stayed
+/// resident indefinitely (r3-05-04 / r3-10-12). Returns bytes freed.
+pub(crate) fn sweep() -> usize {
+    let mut c = cache().lock().unwrap_or_else(|p| p.into_inner());
+    let before = c.total;
+    c.expire(Instant::now());
+    before - c.total
+}
+
+/// Start (once, from inside the runtime) the task that sweeps every minute.
+fn ensure_janitor() {
+    static JANITOR: OnceLock<()> = OnceLock::new();
+    if JANITOR.get().is_some() {
+        return;
+    }
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    JANITOR.get_or_init(|| {
+        handle.spawn(async {
+            let mut tick = tokio::time::interval(Duration::from_secs(60));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                sweep();
+            }
+        });
+    });
+}
+
 /// Park `bytes` for a later download by `user` in `wid`; returns the body id.
-pub(crate) fn put(wid: &Id, user: &Id, content_type: Option<String>, bytes: Vec<u8>) -> String {
+pub(crate) fn put(wid: &Id, user: &Id, content_type: Option<String>, mut bytes: Vec<u8>) -> String {
+    ensure_janitor();
+    // `Bytes::from(Vec)` keeps the Vec's spare capacity: trim it so the
+    // counted size is what is actually resident.
+    bytes.shrink_to_fit();
     let id = otto_core::new_id();
     let entry = Entry {
         id: id.clone(),
