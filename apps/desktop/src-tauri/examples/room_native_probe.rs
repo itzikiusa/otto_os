@@ -78,8 +78,8 @@ fn main() {
                     let snapshot = collected.lock().unwrap().clone();
                     let local = snapshot.get("main");
                     let guest = snapshot.iter().find(|(key, _)| key.starts_with("room-"));
-                    if local.is_some() && guest.is_some() {
-                        let guest_url = handle.get_webview_window(guest.unwrap().0).and_then(|w| w.url().ok());
+                    if let (Some(_), Some((guest_label, _))) = (local, guest) {
+                        let guest_url = handle.get_webview_window(guest_label).and_then(|w| w.url().ok());
                         let confined = guest_url.as_ref() == Some(&expected);
                         let window_count = handle.webview_windows().len();
                         // Exactly one call must come from the local positive control.
