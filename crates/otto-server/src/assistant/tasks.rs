@@ -14,8 +14,6 @@
 //! their thread, syncs approvals decided in the MCP queue, and deletes
 //! incognito threads 24 h after their last turn.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -35,10 +33,10 @@ use super::types::{
 };
 use super::{emit_needs_you, emit_task, emit_task_change, repo, system_turn};
 use crate::cadence;
+use crate::cancel_signal::CancelSignal;
 use crate::state::ServerCtx;
 
 const TICK: Duration = Duration::from_secs(30);
-const SLICE: Duration = Duration::from_millis(500);
 /// Incognito threads are deleted this long after their last turn.
 const INCOGNITO_TTL_HOURS: i64 = 24;
 /// Max wait an approval tool call may block for a decision.
@@ -884,22 +882,18 @@ pub async fn on_limit(
 /// Start the assistant supervisor (30 s tick). Returns a cancel flag, like the
 /// other schedulers. Never touches anything outside the assistant's own rows
 /// and the sessions it owns.
-pub fn start(ctx: ServerCtx) -> Arc<AtomicBool> {
-    let cancel = Arc::new(AtomicBool::new(false));
-    let flag = cancel.clone();
+pub fn start(ctx: ServerCtx) -> CancelSignal {
+    let cancel = CancelSignal::new();
+    let signal = cancel.clone();
     tokio::spawn(async move {
         loop {
-            if flag.load(Ordering::Relaxed) {
+            if signal.is_cancelled() {
                 return;
             }
             tick(&ctx).await;
-            let mut waited = Duration::ZERO;
-            while waited < TICK {
-                if flag.load(Ordering::Relaxed) {
-                    return;
-                }
-                tokio::time::sleep(SLICE).await;
-                waited += SLICE;
+            // One timer per tick; cancel() wakes it (was 500 ms slices).
+            if signal.sleep(TICK).await {
+                return;
             }
         }
     });

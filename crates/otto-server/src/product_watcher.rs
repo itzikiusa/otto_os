@@ -8,7 +8,6 @@
 //! implementation sets the cancel flag for a clean shutdown.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,6 +20,8 @@ use otto_product::ProductService;
 use otto_state::{NewEvent, NewQuestion, ProductQuestion, ProductRepo, QuestionPatch};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
+
+use crate::cancel_signal::CancelSignal;
 use tokio::time::Instant;
 use tracing::warn;
 
@@ -43,13 +44,13 @@ const RECONCILE_TIMEOUT: Duration = Duration::from_secs(180);
 /// Handle returned by `WatcherManager::start`. Keep it alive for the process
 /// lifetime; dropping it sets the cancel flag and stops the supervisor.
 pub struct WatcherHandle {
-    cancel: Arc<AtomicBool>,
+    cancel: CancelSignal,
     _supervisor: JoinHandle<()>,
 }
 
 impl Drop for WatcherHandle {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.cancel.cancel();
     }
 }
 
@@ -89,8 +90,8 @@ impl WatcherManager {
     /// Spawn the supervisor. Returns immediately; the supervisor runs in the
     /// background and stays alive until the handle is dropped.
     pub fn start(self) -> WatcherHandle {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let supervisor = tokio::spawn(supervise(self, Arc::clone(&cancel)));
+        let cancel = CancelSignal::new();
+        let supervisor = tokio::spawn(supervise(self, cancel.clone()));
         WatcherHandle {
             cancel,
             _supervisor: supervisor,
@@ -110,12 +111,12 @@ type LastPollMap = HashMap<Id, Instant>;
 /// agent) — unbounded, they all fired together (backlog B6 / SE-13).
 const MAX_CONCURRENT_POLLS: usize = 4;
 
-async fn supervise(watcher: WatcherManager, cancel: Arc<AtomicBool>) {
+async fn supervise(watcher: WatcherManager, cancel: CancelSignal) {
     let mut last_poll: LastPollMap = HashMap::new();
     let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_POLLS));
 
     loop {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.is_cancelled() {
             return;
         }
 
@@ -185,14 +186,9 @@ async fn supervise(watcher: WatcherManager, cancel: Arc<AtomicBool>) {
             });
         }
 
-        // Sleep in 500ms slices for responsive shutdown.
-        let mut waited = Duration::ZERO;
-        while waited < SCAN_INTERVAL {
-            if cancel.load(Ordering::Relaxed) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            waited += Duration::from_millis(500);
+        // One timer per scan; cancel() wakes it (was 500 ms slices).
+        if cancel.sleep(SCAN_INTERVAL).await {
+            return;
         }
     }
 }
