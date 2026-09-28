@@ -48,9 +48,13 @@ Agents is where your coding agents run. Each session is a real terminal on this 
 - Terminal font size: *Terminal font larger / smaller / Reset* in the pane's ⋯ menu, or the zoom keys while the terminal is focused.
 
 **Chat view**
-- Turns, tool steps (with diff stats), sub-agent cards, task lists, images and artifacts, with cost, token and duration stats in the header.
-- Search the conversation, show or hide system notes, reload the transcript, copy any message.
-- Composer: `↵` sends, `⇧↵` adds a newline, `/` lists the provider's slash commands and your skills, paste or drop images to attach them. Messages sent while the agent is busy show as queued.
+- Your messages on the right; the agent's replies under its name and time, in a readable column. Hover a message to copy it or see its exact time.
+- Tool work folds into one line that says what happened ("Ran 2 commands, edited retry.rs"). Open it for the steps: each shows its status, a command's last output line, and opens to the full output or an inline diff. The agent's plan shows as a checklist.
+- Code blocks show their language and have **Wrap** and **Copy**; long ones fold behind **Show all**.
+- While the agent works, the last line says what it is doing now. If it stops at a permission prompt or a question, a card says what it is asking and opens the terminal to answer.
+- Scrolled up? New replies never move the page; a pill counts them and jumps back (`⌘↓`).
+- Search the conversation (`⌘F`); the ⋯ menu shows or hides system notes and reloads the transcript.
+- Composer: `↵` sends, `⇧↵` adds a newline, `/` lists the provider's slash commands and your skills, attach images with the image button or paste / drop them. **Stop** interrupts the agent (the same as `Esc` in its terminal). Messages sent while the agent is busy are queued and show as "Queued" until it takes them.
 
 **Broadcast**
 - With 2 or more panes open, **↗ broadcast** sends one line to every visible session. `⌘⇧B` opens Ask Otto pre-filled to broadcast to the sessions you name.
@@ -95,6 +99,7 @@ Agents is where your coding agents run. Each session is a real terminal on this 
 | `⌘⇧C` | Toggle the pane between Terminal and Chat |
 | `⌘F` | Find in the terminal, or search the conversation in Chat |
 | `↵` / `⇧↵` | In Chat search: next / previous match |
+| `⌘↓` | In Chat: jump to the latest message |
 | `⌘C` / `⌃⇧C` | Copy the terminal selection |
 | `⌃⇧V` | Paste into the terminal from the clipboard |
 | `⇧↵` | New line in the agent's prompt (terminal and composer) |

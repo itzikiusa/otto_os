@@ -1,6 +1,6 @@
 # Conversation view, History, Tasks board & Outputs
 
-Status: **design, rev 4 (final)** (2026-09-05; after a corpus census of 1,816 Claude files / 311,757 records and 889 Codex rollouts). Turns every agent session into a
+Status: **design, rev 4 (final)** (2026-09-05; chat UI rev 5 — §5.2 — 2026-09-28; after a corpus census of 1,816 Claude files / 311,757 records and 889 Codex rollouts). Turns every agent session into a
 Claude/Codex-app-style conversation you can toggle with the terminal, adds a
 searchable History of past sessions, a per-session **Tasks** view (the agent's
 plan) that the Mission Control board can push sub-tasks into, and an **Outputs**
@@ -319,26 +319,148 @@ preference reads as `chat` and is rewritten on first read, and the orphaned
 `otto_session_split_frac:<id>` key is deleted. To see the chat and the terminal
 side by side, split the pane (`⌘D`) and put one pane in Chat.
 
-### 5.2 `agents/conversation/ConversationView.svelte`
+### 5.2 `agents/conversation/ConversationView.svelte` (chat rev 5, 2026-09-28)
 Props: `{ sessionId?: string; transcriptPath?: string; workspaceId: string; readonly?: boolean }`
 (exactly one of `sessionId` / `transcriptPath`; the latter uses the history route).
-- **List**: user turns right-aligned bubbles; assistant prose full-width via
-  `vault/mdRender.ts` (sanitized). Windowed with `VirtualList.svelte`, last 60
-  turns first, "Load earlier" via `before`, scroll anchored; auto-follow when at
-  bottom, "↓ new" pill otherwise.
-- **Work steps**: consecutive `tool_call` blocks collapse into "Worked for 21m 17s
-  · 38 steps"; each row: kind icon, title, status dot; expand → capped output
-  `<pre>` / diff (`git/DiffViewer.svelte` fed a `DiffResp` built from `patch`) /
-  file chip (opens Files panel) / subagent card (lazy `?sub=`, nested from
-  `subagents[]`). Images inline + lightbox. `thinking` → "Thought (n)" marker;
-  Codex → "N reasoning steps (not recorded)" footer per turn.
-- **System notes**: one muted chip per turn, global "Show system" toggle.
-  `queued` blocks → chips ("Queued: …") that disappear on `dequeue`/`remove`;
-  injected ones hidden unless "Show system".
-- **Composer** (`sessionId` mode, editor role, session not exited): multi-line,
-  `⏎` send via `submit_text`, `⇧⏎` newline, `/` passthrough, image paste/drop →
-  `POST …/inbox` → inserts `[Image: <path>]`; status line = session status +
-  pending board nudges. Exited → "Resume" (existing flow).
+
+Rev 5 is a redesign after "the chat is hard to use". The audit (screenshots in
+the perf-plan `ui-shots/chat/before-*`) found: every response boxed in a green
+(= "success") card with a card-in-card for tool steps; no agent attribution;
+prose ~900 px wide; tool rows that read "Ran Run the retry tests" with a 7 px
+colour dot as the only status; command logs auto-highlighted as code (green
+strings in a failure log); a one-line edit shown in the full git DiffViewer
+(file list, search, unified/split toolbar); code blocks with no label / copy /
+cap; no "what is it doing now", no way to interrupt; a "↓ new" pill with no
+count; a 3-row composer, a permanent tip line, and a "Show system" checkbox
+eating header space in 200–400 px tiles; system chips, times and models on
+every message; and an effect loop (`unseen += 1` inside an effect) that
+reloaded the app when a live append arrived while you were scrolled up.
+
+**Layout.** One centred column with a readable measure (`--chat-measure`,
+780 px, on `.conv`); the composer box uses the same measure. The column is
+`display: flow-root`, not a flex column: a live delta grows only the last item
+and block layout re-lays that item alone. Everything sheds chrome by the
+PANE's width (`container-type: inline-size` on `.conv` and the composer):
+≤ 560 px header stats go (still in the title tooltip); ≤ 480 px tighter
+gutters, a one-line composer, the status row keeps only the state; ≤ 420 px
+the key hints go; ≤ 360 px step meta goes; ≤ 260 px search folds into ⋯ and an
+open search box owns the header row.
+
+**Messages** (`TurnItem.svelte`).
+- *You*: a right-aligned neutral bubble (`--surface-2`, hairline, 16 px radius
+  with a 4 px tail corner). Accent is not identity (guidelines patterns §2).
+- *The agent*: an attribution line — `ProviderIcon` + "Claude"/"Codex"
+  (`providerName`) + time — then the response hanging off a 2 px
+  `--border-strong` inline-start rule: prose, step groups, the plan, images,
+  artifact / queued / notice chips. No card, no tint.
+- A quiet action row under each message (copy, exact time in the `<time>`
+  title, duration, model, Codex reasoning count, the per-turn "N system" chip)
+  fades in on hover / `:focus-within`, always shown on touch; the system chip
+  is always visible. Prose is 13 px / 1.6.
+
+**Tool activity** (`WorkSteps.svelte`, `ToolStep.svelte`, `format.ts`).
+- A run of calls in one response collapses to ONE line that says what happened
+  (`stepSummary`): "Ran a command, searched the code, read retry.rs · 2m 7s ·
+  3 steps", with a status mark (spinner while running, ✓, or a "N failed" danger
+  pill). A single call renders its row directly. Thinking markers carry no text
+  and are counted in the tooltip only.
+- Expanded, steps hang off a hairline like a timeline. Each row
+  (`toolLine`): kind icon · verb (present tense while running: "Running") ·
+  target (command / file name / pattern, mono) · dim detail (folder / scope)
+  · +/− for edits · status icon (spinner, ✓ `--success`, ✕ `--danger`, or "–"
+  when no result was ever recorded and the session is not on it any more —
+  `toolStatus`). A command's last output line (`lastLine`) sits under its row
+  (danger tone on failure), so "test result: FAILED …" reads without opening.
+- Detail: a command shows `$ command` (copy button) + the agent's description
+  + the output, opened scrolled to its END (never auto-highlighted); > 400
+  lines stay windowed (`VirtualList`, `.out-vlist`). Edits render inline
+  (`InlineDiff.svelte`: line numbers, +/− gutter, syntax colours, `--success-soft`
+  / `--danger-soft` rows, capped at 60 rows with "Show all"). A fresh Write shows
+  the written content. Reads highlight by path. "Show raw input" for the rest.
+  Elided live-push results still fetch `…/transcript/tool/{id}` on first expand.
+- The plan (`tasks` block) is a checklist in the flow — "Plan · 1 of 4 done" —
+  not hidden in a step group; earlier snapshots in the same response start
+  folded to their header; the TodoWrite call that produced a snapshot gets no
+  row of its own (`segment`). Subagent cards use the same status icons.
+
+**Code blocks** (`codeBlocks.ts`, `Markdown.svelte`). `vault/mdRender.ts`
+now tags fenced code `language-x`; the chat wraps each block in its cached
+HTML string (`decorateCodeBlocks`, after the sanitizer, idempotent) with a
+header — language · Wrap (`aria-pressed`) · Copy ("Copied") — and caps blocks
+over 18 lines behind "Show all N lines". One delegated click handler per
+prose block (`runCodeAction`) toggles classes on the live DOM, so the md cache
+stays a string memo and nothing re-renders on click.
+
+**Live state** (`LiveStatus.svelte`, `LiveDraft.svelte`).
+- Working: under the last message one quiet line — spinner · "Claude is
+  working" · the current step from the newest call without a result
+  ("Running cargo test -p otto-net --release"), else "Writing the response" /
+  "Thinking" · elapsed since your last message (hidden past 3 h). The streamed
+  screen text above it reads as the response continuing (dashed rule, caret,
+  "⏺" bullets stripped) and is not a live region.
+- Waiting for you: the session is alive but not working and the last response
+  has a call without a result — in Claude Code / Codex that is a permission
+  prompt or an AskUserQuestion on the terminal screen. A `--warning-soft` card
+  says what it wants ("Claude wants to run `rm -rf target/`", or the question
+  and its options) and offers **Open terminal** (sets the per-session view);
+  the blocked step itself reads "Wants to run …" with a warning mark instead
+  of a spinner. It does not offer
+  Allow / Deny: the transcript carries neither the prompt's options nor a safe
+  way to answer them, and the only PTY input the chat sends is typed text and
+  Esc.
+- Interrupt: **Stop** in the composer while the session is working sends one
+  Esc (`POST …/input {text:"\u001b", submit:false}`), exactly the CLIs' "esc to
+  interrupt".
+- A visually hidden `aria-live` region announces only "Claude is working",
+  "finished responding" and "is waiting for you".
+
+**Scrolling.** Auto-follow at the bottom (tail ticks, draft growth, and a
+`ResizeObserver` on the column for late height changes — skipped for 600 ms
+after a pointer press so expanding a step doesn't yank the view). Scrolled
+up, nothing moves under the reader; a pill anchored above the composer says
+"N new messages" (`countUnread`: render items after the last one seen at the
+bottom), "New activity" (the last response grew) or "Jump to latest" (more
+than a screen up / a pinned window). `⌘↓` jumps. The list is a focusable
+region (arrow keys / PgDn scroll it) labelled "Conversation with Claude".
+
+**Header.** Provider mark · title · stats (turns · tools · cost · tokens ·
+duration) · search (`⌘F`, `N/M`, "No matches", ⏎/⇧⏎) · ⋯ (Show system notes —
+a checkable item —, Reload transcript, and Search when folded).
+
+**States.** Loading → a skeleton (pulse off under reduced motion); load error →
+`EmptyState` + Retry; no transcript → `EmptyState` with the reason +
+**Open terminal**; empty → "No messages yet"; later load errors → inline
+`role="alert"` + Retry. Unchanged: "Load earlier messages" at the top (scroll
+anchored), the ≤ 300-turn mounted window with "Load later", `⌘F` find-in-page
+provider over all loaded turns, subagent cards (lazy `?sub=`), images +
+lightbox, queued chips ("Queued: …", until `dequeue`/`remove`), live artifact
+chips.
+
+**Composer** (`sessionId` mode, editor role, session not exited). One box
+(`--radius-l`, `--shadow-card`) that grows with the text (2 lines at rest, 1 in
+a ≤ 480 px tile, up to 40% of the window) with a tool row inside: attach
+images (file picker; paste / drop still work) · key hints ("⏎ send · ⇧⏎ new
+line", or "Busy — ⏎ queues") · Stop (while working) · Send (the one filled
+control). While the agent works a send is still accepted — the CLIs queue
+typed input until the turn ends — and the placeholder says "Queue a message
+for Claude…". `⏎` sends via `submit_text`, `⇧⏎` newline, `/` completion
+unchanged; images → `POST …/inbox` → `[Image: <path>]`. Under the box: the
+status row (session state, uploads, board nudges, cwd / branch / model, the
+CLI's own status line). Exited → "Resume" (existing flow).
+
+**Motion & a11y.** Every spinner / pulse / caret animation is inside
+`prefers-reduced-motion: no-preference`. Status is never colour alone (icon +
+`aria-label` / title). Icon-only buttons carry `aria-label` + `title`; logical
+properties throughout; checked in light and dark.
+
+**Tests.** `unit/chatPresentation.test.ts` (tool lines, statuses, summaries,
+pending call, output tail, unread count, questions, plan placement, code-block
+decoration); `e2e/desktop-conversation-chat.spec.ts` (messages, step
+collapse/expand + failure tail + inline diff, code-block Wrap/Copy, jump pill
+with unread count and no scroll jump, ⏎ / ⇧⏎ / Stop, the waiting card, a 3×2
+tiled grid) on the realistic transcript in `e2e/chat-fixture.ts`;
+`e2e/desktop-conversation-shots.spec.ts` takes the design screenshots when
+`OTTO_CHAT_SHOTS=<dir>` is set.
 
 ### 5.3 History (`#/history`, `agents/history/HistoryPage.svelte`)
 Route is `#/history` (NOT under `#/agents/…`, whose second segment is a session
