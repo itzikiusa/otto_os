@@ -58,7 +58,6 @@ async function installProbes(page: Page): Promise<void> {
       on: true,
       t0: 0,
       t: -1,
-      ready: '',
     };
     (window as unknown as { __nav: typeof st }).__nav = st;
     const hit = (n: Node, sel: string): boolean => n instanceof Element && (n.matches(sel) || !!n.querySelector(sel));
@@ -80,33 +79,35 @@ async function installProbes(page: Page): Promise<void> {
   });
 }
 
-/** Is `stop`'s page on screen? Each check is a query, never a layout read. */
-function readyScript(stop: Stop): string {
-  const title = (t: string) =>
-    `[...document.querySelectorAll('.shell .content h1.ph-title')].some((h) => h.textContent.trim() === ${JSON.stringify(t)})`;
+/** Is `stop`'s page on screen? Data, not code: the page checks a selector
+ *  or a header title (each a query, never a layout read). */
+type ReadySpec = { sel: string } | { title: string };
+function readySpec(stop: Stop): ReadySpec {
   switch (stop) {
     case 'git':
-      return `!!document.querySelector('.shell .content .git-header')`;
+      return { sel: '.shell .content .git-header' };
     case 'connections':
-      return title('Connections');
+      return { title: 'Connections' };
     case 'home':
-      return title('Home');
+      return { title: 'Home' };
     case 'vault':
-      return `!!document.querySelector('.shell .content .vault-header')`;
+      return { sel: '.shell .content .vault-header' };
     case 'agents':
       // The session tab bar renders only while the Agents page is current.
-      return `!!document.querySelector('[data-testid="agents-history-btn"]')`;
+      return { sel: '[data-testid="agents-history-btn"]' };
   }
 }
 
-/** Click the sidebar row for `stop`; return ms from the click to the end of
- *  the painted frame that first shows its page header. */
 async function navigate(page: Page, stop: Stop): Promise<number> {
   await page.evaluate((ready) => {
-    const st = (window as unknown as { __nav: { t0: number; t: number; ready: string } }).__nav;
+    const st = (window as unknown as { __nav: { t0: number; t: number } }).__nav;
     st.t = -1;
-    st.ready = ready;
-    const isReady = new Function(`return (${ready});`) as () => boolean;
+    const isReady = (): boolean =>
+      'sel' in ready
+        ? !!document.querySelector(ready.sel)
+        : [...document.querySelectorAll('.shell .content h1.ph-title')].some(
+            (h) => h.textContent?.trim() === ready.title,
+          );
     window.addEventListener(
       'click',
       () => {
@@ -125,7 +126,7 @@ async function navigate(page: Page, stop: Stop): Promise<number> {
       },
       { capture: true, once: true },
     );
-  }, readyScript(stop));
+  }, readySpec(stop));
   await page.locator(`.shell .sidebar [data-nav-id="${stop}"]`).first().click();
   const handle = await page.waitForFunction(
     () => {
