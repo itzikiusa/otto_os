@@ -320,10 +320,13 @@
     void tick().then(scrollToBottom);
   });
   // Live appends: follow when at the bottom, else count them for the pill.
+  // (`unseen += 1` would READ `unseen` inside the effect and re-trigger it —
+  // an effect loop the app answers with a reload, exactly when you had
+  // scrolled up to read while the agent streamed.)
   $effect(() => {
     void conv.tailTick;
     if (untrack(() => atBottom)) void tick().then(scrollToBottom);
-    else unseen += 1;
+    else unseen = untrack(() => unseen) + 1;
   });
   async function loadEarlier(): Promise<void> {
     const el = listEl;
