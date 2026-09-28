@@ -1902,8 +1902,11 @@ runs** (cleared on finish), written at most every 5 s, and bounded (≤ 40
 sub-agent entries, `description` ≤ 80 chars, ids ≤ 64 chars); `phase` carries the
 phase text without its prefix glyph. A node's `logs` are capped at **200**
 entries; the phase lines (`⏳ ✉ ⚙ 🧩 ⏸ 📄`) are kept after a successful step and
-are the only lines the cap evicts (oldest first), so a long step's other output
-survives.
+are the lines the cap evicts first (oldest first), so a long step's other output
+survives. When a node is still over the cap with no phase line left (a loop
+node logging per iteration), the middle collapses into one
+`… N lines elided (log cap) …` entry: the first quarter and the newest lines
+are kept, and `N` counts every line it replaced.
 
 **Run queue.** At most **2** workflow runs execute at once, daemon-wide
 (override: `OTTO_WF_MAX_PARALLEL_RUNS`, ≥ 1) — a single run can fan out dozens

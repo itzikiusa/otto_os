@@ -878,11 +878,18 @@ async fn run(cfg: Config) -> Result<(), String> {
         const KEEP_PER_SESSION: i64 = 1_000;
         let interval = std::time::Duration::from_secs(60 * 60); // hourly
         tokio::spawn(async move {
+            // First pass checks every session; later passes only the sessions
+            // that received trail rows since the previous pass started (with
+            // a margin for clock skew between writers), which is all that can
+            // have grown past the cap.
+            let mut since: Option<std::time::SystemTime> = None;
             loop {
-                let n = manager.prune_activity_trail(KEEP_PER_SESSION).await;
+                let started = std::time::SystemTime::now();
+                let n = manager.prune_activity_trail(KEEP_PER_SESSION, since).await;
                 if n > 0 {
                     tracing::info!("pruned {n} old activity-trail row(s)");
                 }
+                since = started.checked_sub(std::time::Duration::from_secs(10 * 60));
                 tokio::time::sleep(interval).await;
             }
         });

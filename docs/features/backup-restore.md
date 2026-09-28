@@ -125,7 +125,7 @@ install (one real `otto.db` reached 514 MB). The daemon prunes them **hourly**
 
 | Table | Kept |
 |---|---|
-| `work_events` (Mission Control item history) | every row younger than **30 days**, AND each item's newest **500** events regardless of age — a row is deleted only when it is both older than the window and outside its item's newest 500 |
+| `work_events` (Mission Control item history) | every row younger than **30 days**, AND each *active* item's newest **500** events regardless of age — a row of an active item is deleted only when it is both older than the window and outside its newest 500. An item with no event for **90 days** (`work_events_idle_days`) is idle: its rows older than the window are deleted like any other table's (the item itself stays) |
 | `mcp_tool_calls` (first-party MCP tool ledger) | **90 days** |
 | `mcp_call_log` (MCP control-plane call log) | **90 days** |
 | `audit_log` (security audit trail) | **90 days** |
@@ -136,13 +136,22 @@ re-read every pass; set it with `POST /settings/import`:
 
 ```json
 {"data_retention": {"enabled": true, "work_events_days": 30, "work_events_keep_per_item": 500,
-                    "mcp_audit_days": 90, "audit_log_days": 90}}
+                    "work_events_idle_days": 90, "mcp_audit_days": 90, "audit_log_days": 90}}
 ```
 
 `enabled: false` turns the job off. Floors a setting can't go below: 7 days
-(30 for `audit_log`) and 50 events per item. Deletes run in 5 000-row batches
-so the SQLite writer is never held for long; freed pages are reused, so the
-file stops growing but only shrinks after a manual `VACUUM`.
+(30 for `audit_log`), 50 events per item, and `work_events_idle_days` never
+below `work_events_days`. Deletes run in 1 000-row batches, each a bounded
+range on an index, with a 25 ms pause between batches so the SQLite writer is
+never held for long; the candidate items are found by reads on the read-only
+pool (index `idx_work_events_ts`, migration `0144`). Freed pages are reused,
+so the file stops growing but only shrinks after a manual `VACUUM`.
+
+The per-session activity trail (`agent_trail`, newest 1 000 rows per session)
+is pruned by a separate hourly pass. After the first pass at startup it only
+looks at sessions that received trail rows since the previous pass
+(`idx_agent_trail_ts`), and it deletes each session's excess in 500-row index
+ranges instead of re-ranking the whole table per chunk.
 
 Separately, `mcp_tool_calls.args_json` and `mcp_call_log.args_redacted_json`
 are shaped at insert: any string value over 1 024 characters is stored as its

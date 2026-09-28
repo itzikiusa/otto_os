@@ -8,12 +8,20 @@
 //!
 //! Safety rules, enforced here rather than trusted to the caller:
 //! - **Never touch a row younger than its window.** Every DELETE is bounded by
-//!   a cutoff timestamp; `work_events` additionally keeps each item's newest
-//!   `work_events_keep_per_item` rows regardless of age.
+//!   a cutoff timestamp; `work_events` additionally keeps each ACTIVE item's
+//!   newest `work_events_keep_per_item` rows regardless of age. An item with
+//!   no event for `work_events_idle_days` is not active: its history ages out
+//!   with the window like any other row (r3-07-07 — before, every item with
+//!   at most N events kept them forever, so the 30-day window bounded
+//!   nothing for the typical item).
 //! - **Floors.** A misconfigured setting can't shrink a window below
 //!   [`MIN_DAYS`] / [`MIN_AUDIT_LOG_DAYS`] / [`MIN_KEEP_PER_ITEM`].
-//! - **Small transactions.** Deletes run in batches of [`BATCH`] rows so the
-//!   single SQLite writer is never held for long.
+//! - **Small, index-driven transactions.** Deletes run in batches of
+//!   [`BATCH`] rows, each a bounded range on an index, with a short sleep
+//!   between batches so queued interactive writers get the lock (r3-07-19:
+//!   5 000-row batches back to back held it 40–130 ms at a time and made
+//!   concurrent writes wait up to 504 ms). Candidate items are found by reads
+//!   on the reader pool, never under the write lock.
 //! - `enabled: false` turns the whole job off.
 
 use chrono::{Duration, Utc};
@@ -34,7 +42,12 @@ pub const MIN_AUDIT_LOG_DAYS: i64 = 30;
 /// Smallest per-item `work_events` history kept regardless of age.
 pub const MIN_KEEP_PER_ITEM: i64 = 50;
 /// Rows deleted per statement (one short write transaction each).
-const BATCH: i64 = 5_000;
+const BATCH: i64 = 1_000;
+/// Pause between batches: lets writers queued in SQLite's busy handler take
+/// the lock before the pruner's next batch.
+const BATCH_PAUSE: std::time::Duration = std::time::Duration::from_millis(25);
+/// Default `work_events_idle_days`.
+pub const DEFAULT_WORK_EVENTS_IDLE_DAYS: i64 = 90;
 
 /// Retention windows. Defaults are conservative; see
 /// `docs/features/backup-restore.md` ("Data retention").
@@ -47,6 +60,10 @@ pub struct RetentionPolicy {
     /// `work_events_keep_per_item` are pruned.
     pub work_events_days: i64,
     pub work_events_keep_per_item: i64,
+    /// `work_events`: an item whose NEWEST event is older than this is idle
+    /// and loses the keep-newest-N protection; its rows then age out with
+    /// `work_events_days`. Never below `work_events_days`.
+    pub work_events_idle_days: i64,
     /// `mcp_tool_calls` + `mcp_call_log` age window.
     pub mcp_audit_days: i64,
     /// `audit_log` age window.
@@ -59,6 +76,7 @@ impl Default for RetentionPolicy {
             enabled: true,
             work_events_days: 30,
             work_events_keep_per_item: 500,
+            work_events_idle_days: DEFAULT_WORK_EVENTS_IDLE_DAYS,
             mcp_audit_days: 90,
             audit_log_days: 90,
         }
@@ -79,6 +97,7 @@ impl RetentionPolicy {
     pub fn clamped(mut self) -> Self {
         self.work_events_days = self.work_events_days.max(MIN_DAYS);
         self.work_events_keep_per_item = self.work_events_keep_per_item.max(MIN_KEEP_PER_ITEM);
+        self.work_events_idle_days = self.work_events_idle_days.max(self.work_events_days);
         self.mcp_audit_days = self.mcp_audit_days.max(MIN_DAYS);
         self.audit_log_days = self.audit_log_days.max(MIN_AUDIT_LOG_DAYS);
         self
@@ -123,7 +142,11 @@ impl RetentionRepo {
         let cutoff = |days: i64| fmt(now - Duration::days(days));
 
         report.work_events = self
-            .prune_work_events(&cutoff(p.work_events_days), p.work_events_keep_per_item)
+            .prune_work_events(
+                &cutoff(p.work_events_days),
+                &cutoff(p.work_events_idle_days),
+                p.work_events_keep_per_item,
+            )
             .await?;
         let mcp_cut = cutoff(p.mcp_audit_days);
         report.mcp_tool_calls = self
@@ -158,41 +181,60 @@ impl RetentionRepo {
             if n < BATCH as u64 {
                 return Ok(total);
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(BATCH_PAUSE).await;
         }
     }
 
-    /// `work_events`: for each item with more than `keep` events, delete the
-    /// rows that are BOTH older than `cutoff` AND older than the item's
-    /// `keep`-th newest event (ties at that boundary are kept). Items at or
-    /// under `keep` events are never touched. Index-driven via
-    /// `idx_work_events_item (work_item_id, ts DESC)`.
-    async fn prune_work_events(&self, cutoff: &str, keep: i64) -> Result<u64> {
-        let heavy: Vec<(String,)> = sqlx::query_as(
-            "SELECT work_item_id FROM work_events GROUP BY work_item_id HAVING COUNT(*) > ?",
+    /// `work_events`, per item that owns any row older than `cutoff` (found
+    /// on `idx_work_events_ts`, a read — the reader pool, no write lock):
+    ///
+    /// - **active** item (newest event at or after `idle_cutoff`): delete the
+    ///   rows that are BOTH older than `cutoff` AND older than the item's
+    ///   `keep`-th newest event (ties at that boundary are kept); an item at
+    ///   or under `keep` events loses nothing;
+    /// - **idle** item (newest event before `idle_cutoff`): delete every row
+    ///   older than `cutoff` — the window applies to it like to any table.
+    ///
+    /// Each DELETE batch is a bounded `(work_item_id, ts)` range on
+    /// `idx_work_events_item`.
+    async fn prune_work_events(&self, cutoff: &str, idle_cutoff: &str, keep: i64) -> Result<u64> {
+        let items: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT work_item_id FROM work_events INDEXED BY idx_work_events_ts \
+             WHERE ts < ?",
         )
-        .bind(keep)
+        .bind(cutoff)
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("retention: work_events scan"))?;
         let mut total = 0u64;
-        for (item,) in heavy {
-            let boundary: Option<(String,)> = sqlx::query_as(
-                "SELECT ts FROM work_events WHERE work_item_id = ? \
-                 ORDER BY ts DESC LIMIT 1 OFFSET ?",
-            )
-            .bind(&item)
-            .bind(keep - 1)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(dberr("retention: work_events boundary"))?;
-            let Some((boundary,)) = boundary else {
-                continue;
-            };
-            let bound = if boundary.as_str() < cutoff {
-                boundary
-            } else {
+        for item in items {
+            let newest: Option<String> =
+                sqlx::query_scalar("SELECT MAX(ts) FROM work_events WHERE work_item_id = ?")
+                    .bind(&item)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(dberr("retention: work_events newest"))?;
+            let idle = newest.as_deref().is_none_or(|n| n < idle_cutoff);
+            let bound = if idle {
                 cutoff.to_string()
+            } else {
+                let boundary: Option<String> = sqlx::query_scalar(
+                    "SELECT ts FROM work_events WHERE work_item_id = ? \
+                     ORDER BY ts DESC LIMIT 1 OFFSET ?",
+                )
+                .bind(&item)
+                .bind(keep - 1)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(dberr("retention: work_events boundary"))?;
+                let Some(boundary) = boundary else {
+                    continue; // at or under `keep` events
+                };
+                if boundary.as_str() < cutoff {
+                    boundary
+                } else {
+                    cutoff.to_string()
+                }
             };
             loop {
                 let n = sqlx::query(&format!(
@@ -210,7 +252,7 @@ impl RetentionRepo {
                 if n < BATCH as u64 {
                     break;
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(BATCH_PAUSE).await;
             }
         }
         Ok(total)
@@ -270,6 +312,12 @@ mod tests {
         assert_eq!(p.audit_log_days, MIN_AUDIT_LOG_DAYS);
         assert_eq!(p.work_events_keep_per_item, MIN_KEEP_PER_ITEM);
         assert_eq!(p.work_events_days, 30, "unspecified keys keep defaults");
+        assert_eq!(p.work_events_idle_days, DEFAULT_WORK_EVENTS_IDLE_DAYS);
+        // The idle window can never be shorter than the age window.
+        let q = RetentionPolicy::from_setting(Some(&serde_json::json!({
+            "work_events_days": 60, "work_events_idle_days": 10
+        })));
+        assert_eq!(q.work_events_idle_days, 60);
         // Malformed → defaults, not "delete everything".
         let bad = RetentionPolicy::from_setting(Some(&serde_json::json!("nope")));
         assert_eq!(bad, RetentionPolicy::default());
@@ -289,9 +337,15 @@ mod tests {
         for i in 0..70 {
             work_event(&pool, &format!("b-{i}"), "B", &ago(2)).await;
         }
-        // Item C: 10 ancient events → at/under keep → untouched.
+        // Item C: 10 ancient events, nothing for 400 days → IDLE: its rows
+        // age out with the window even though it is under `keep` (r3-07-07).
         for i in 0..10 {
             work_event(&pool, &format!("c-{i}"), "C", &ago(400)).await;
+        }
+        // Item D: 10 events 40–49 days old — past the window but active
+        // within the idle window → under `keep`, untouched.
+        for i in 0..10 {
+            work_event(&pool, &format!("d-{i}"), "D", &ago(40 + i)).await;
         }
         let policy = RetentionPolicy {
             work_events_keep_per_item: 50,
@@ -301,7 +355,7 @@ mod tests {
             .prune(&policy)
             .await
             .unwrap();
-        assert_eq!(r.work_events, 15);
+        assert_eq!(r.work_events, 15 + 10);
         let a = count(
             &pool,
             "SELECT COUNT(*) FROM work_events WHERE work_item_id='A'",
@@ -330,7 +384,17 @@ mod tests {
                 "SELECT COUNT(*) FROM work_events WHERE work_item_id='C'"
             )
             .await,
-            10
+            0,
+            "an idle item's history ages out with the window"
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*) FROM work_events WHERE work_item_id='D'"
+            )
+            .await,
+            10,
+            "a recently active item keeps its newest N"
         );
         // Idempotent.
         let again = RetentionRepo::new(pool.clone())

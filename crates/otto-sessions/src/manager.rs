@@ -1979,12 +1979,19 @@ impl SessionManager {
     }
 
     /// Prune the activity trail to the newest `keep_per_session` rows per
-    /// session. No-op without an activity store. Returns rows pruned.
-    pub async fn prune_activity_trail(&self, keep_per_session: i64) -> u64 {
+    /// session — every session, or with `since` only those that received rows
+    /// since then (see [`ActivityRepo::prune_trail`]). No-op without an
+    /// activity store. Returns rows pruned.
+    pub async fn prune_activity_trail(
+        &self,
+        keep_per_session: i64,
+        since: Option<std::time::SystemTime>,
+    ) -> u64 {
         let Some(repo) = self.activity.as_ref() else {
             return 0;
         };
-        match repo.prune_trail(keep_per_session).await {
+        let since = since.map(chrono::DateTime::<chrono::Utc>::from);
+        match repo.prune_trail(keep_per_session, since).await {
             Ok(n) => n,
             Err(e) => {
                 tracing::warn!("prune activity trail: {e}");

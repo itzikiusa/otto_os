@@ -1291,16 +1291,68 @@ pub fn is_phase_line(s: &str) -> bool {
         .any(|g| s.starts_with(g))
 }
 
-/// Cap a node's log vector at `cap`, evicting ONLY phase lines, oldest first.
-/// Stops when none is left, even above the cap — a run's decisions are never
-/// dropped to make room for progress chatter.
+/// Prefix of the marker [`cap_node_logs`] leaves where it elided lines.
+const ELIDED_PREFIX: &str = "… ";
+/// Suffix of that marker; the count sits between the two.
+const ELIDED_SUFFIX: &str = " lines elided (log cap) …";
+
+/// How many lines an elision marker stands for (`None` for any other line).
+fn elided_count(line: &str) -> Option<usize> {
+    line.strip_prefix(ELIDED_PREFIX)?
+        .strip_suffix(ELIDED_SUFFIX)?
+        .parse()
+        .ok()
+}
+
+/// Cap a node's log vector at `cap`, in O(n).
+///
+/// 1. Phase lines go first, oldest first — progress chatter never displaces
+///    a line that records a decision.
+/// 2. If the node is STILL over the cap once no phase line is left (a loop
+///    node logging per iteration, r3-07-10 — the cap used to stop here and
+///    the vector grew without bound, re-serialized on every progress write),
+///    the middle collapses into one `… N lines elided (log cap) …` marker:
+///    the first quarter (the step's start) and the newest lines survive. An
+///    earlier marker that falls inside the elided span is folded into the new
+///    count, so repeated live capping stays exact.
+///
+/// The old version was O(n²) (`position` + `remove` per evicted line).
 pub fn cap_node_logs(logs: &mut Vec<String>, cap: usize) {
-    while logs.len() > cap {
-        let Some(i) = logs.iter().position(|l| is_phase_line(l)) else {
-            return;
-        };
-        logs.remove(i);
+    if logs.len() <= cap {
+        return;
     }
+    let phase = logs.iter().filter(|l| is_phase_line(l)).count();
+    let mut evict = (logs.len() - cap).min(phase);
+    if evict > 0 {
+        logs.retain(|l| {
+            if evict > 0 && is_phase_line(l) {
+                evict -= 1;
+                false
+            } else {
+                true
+            }
+        });
+    }
+    if logs.len() <= cap {
+        return;
+    }
+    if cap < 3 {
+        // No room for head + marker + tail: keep the newest.
+        let drop = logs.len() - cap;
+        logs.drain(..drop);
+        return;
+    }
+    let head = (cap / 4).max(1);
+    let tail = cap - 1 - head;
+    let end = logs.len() - tail;
+    let elided: usize = logs[head..end]
+        .iter()
+        .map(|l| elided_count(l).unwrap_or(1))
+        .sum();
+    logs.splice(
+        head..end,
+        std::iter::once(format!("{ELIDED_PREFIX}{elided}{ELIDED_SUFFIX}")),
+    );
 }
 
 #[cfg(test)]
@@ -2519,11 +2571,61 @@ mod tests {
         assert!(logs
             .iter()
             .any(|l| l == "🧩 sub-agents: 299 running · 0 done"));
-        // Below the cap nothing is evicted; above it with no phase lines left,
-        // the decision lines all survive.
-        let mut only_decisions: Vec<String> = (0..10).map(|i| format!("✓ {i}")).collect();
-        cap_node_logs(&mut only_decisions, 2);
-        assert_eq!(only_decisions.len(), 10);
+        // Below the cap nothing is evicted.
+        let mut short: Vec<String> = (0..10).map(|i| format!("✓ {i}")).collect();
+        cap_node_logs(&mut short, 10);
+        assert_eq!(short.len(), 10);
+    }
+
+    /// r3-07-10: the cap is a cap. With no phase line left, the middle of the
+    /// decision lines collapses into one marker — the start and the newest
+    /// lines survive, the marker counts what it replaced, and capping again
+    /// (live, then at node end) folds earlier markers into the count.
+    #[test]
+    fn cap_enforces_the_cap_when_only_decisions_remain() {
+        let mut logs: Vec<String> = (0..1000).map(|i| format!("✓ iteration {i}")).collect();
+        cap_node_logs(&mut logs, 200);
+        assert_eq!(logs.len(), 200);
+        assert_eq!(logs[0], "✓ iteration 0");
+        assert_eq!(logs[49], "✓ iteration 49");
+        assert_eq!(logs[50], "… 801 lines elided (log cap) …");
+        assert_eq!(logs[51], "✓ iteration 851");
+        assert_eq!(logs.last().unwrap(), "✓ iteration 999");
+        // Keep appending (a live loop node) and re-cap: still bounded, and
+        // the marker's count stays exact.
+        for i in 1000..1500 {
+            logs.push(format!("✓ iteration {i}"));
+            cap_node_logs(&mut logs, 200);
+            assert!(logs.len() <= 200);
+        }
+        let marker = logs.iter().find_map(|l| elided_count(l)).unwrap();
+        let visible = logs.iter().filter(|l| elided_count(l).is_none()).count();
+        assert_eq!(marker + visible, 1500, "every line is either shown or counted");
+        assert_eq!(logs.last().unwrap(), "✓ iteration 1499");
+        // Phase lines still go first when there are any.
+        let mut mixed: Vec<String> = (0..300)
+            .map(|i| if i % 3 == 0 { format!("✓ {i}") } else { format!("⏳ {i}") })
+            .collect();
+        cap_node_logs(&mut mixed, 150);
+        assert_eq!(mixed.len(), 150);
+        assert_eq!(mixed.iter().filter(|l| l.starts_with('✓')).count(), 100);
+        assert!(mixed.iter().all(|l| elided_count(l).is_none()));
+        // Degenerate caps keep the newest.
+        let mut tiny: Vec<String> = (0..10).map(|i| format!("✓ {i}")).collect();
+        cap_node_logs(&mut tiny, 2);
+        assert_eq!(tiny, vec!["✓ 8".to_string(), "✓ 9".to_string()]);
+    }
+
+    /// The old cap was O(n²); a huge vector must cap quickly.
+    #[test]
+    fn cap_is_linear() {
+        let mut logs: Vec<String> = (0..200_000)
+            .map(|i| if i % 2 == 0 { format!("⏳ {i}") } else { format!("✓ {i}") })
+            .collect();
+        let t = std::time::Instant::now();
+        cap_node_logs(&mut logs, 200);
+        assert_eq!(logs.len(), 200);
+        assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
     }
 
     #[test]

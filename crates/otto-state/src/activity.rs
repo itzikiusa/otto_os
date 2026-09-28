@@ -158,39 +158,85 @@ impl ActivityRepo {
     /// the rest. Returns the number of rows pruned. Run periodically so
     /// long-lived sessions don't grow the trail unbounded.
     ///
-    /// Deletes in small chunks: SQLite has ONE writer at a time, and a bulk
-    /// DELETE over a large backlog held the write lock for seconds — every
-    /// interactive write (create-session, trail ingest) queued behind it
-    /// (observed as 3-6s "slow statement" warnings). Chunking yields the
-    /// writer between batches so interactive statements interleave.
-    pub async fn prune_trail(&self, keep_per_session: i64) -> Result<u64> {
+    /// `since`: only sessions that received a row at or after it are
+    /// considered — every other session was already at or under the cap after
+    /// the previous pass, so nothing about it can have changed. `None` (the
+    /// first pass after a start) checks every session.
+    ///
+    /// Index-driven (r3-06-05 / r3-07-08): the old statement recomputed a
+    /// `ROW_NUMBER()` window over the WHOLE table for every 500-row chunk,
+    /// under the write lock — 110 ms a chunk at 412k rows, O(rows × chunks)
+    /// a pass. Now the candidate sessions come from a read (the reader pool,
+    /// no write lock) over `idx_agent_trail_ts` (or one GROUP BY on the first
+    /// pass); each session's boundary is one `OFFSET` walk of
+    /// `idx_agent_trail_session`; and every DELETE chunk is a bounded range
+    /// on that same index. Chunks still sleep between them so queued
+    /// interactive writers get the lock.
+    pub async fn prune_trail(
+        &self,
+        keep_per_session: i64,
+        since: Option<chrono::DateTime<Utc>>,
+    ) -> Result<u64> {
         const CHUNK: i64 = 500;
-        let mut total: u64 = 0;
-        loop {
-            let res = sqlx::query(
-                "DELETE FROM agent_trail WHERE id IN (
-                     SELECT id FROM (
-                         SELECT id, ROW_NUMBER() OVER (
-                             PARTITION BY session_id ORDER BY ts DESC, id DESC
-                         ) AS rn
-                         FROM agent_trail
-                     ) WHERE rn > ? LIMIT ?
-                 )",
+        let keep = keep_per_session.max(0);
+        let sessions: Vec<String> = match since {
+            Some(t) => sqlx::query_scalar(
+                "SELECT DISTINCT session_id FROM agent_trail INDEXED BY idx_agent_trail_ts \
+                 WHERE ts >= ?",
             )
-            .bind(keep_per_session)
-            .bind(CHUNK)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("prune trail"))?;
-            let n = res.rows_affected();
-            total += n;
-            if n < CHUNK as u64 {
-                return Ok(total);
-            }
-            // Brief yield so queued interactive writers acquire the lock
-            // before the next batch.
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            .bind(fmt(t))
+            .fetch_all(&self.pool)
+            .await,
+            None => sqlx::query_scalar(
+                "SELECT session_id FROM agent_trail GROUP BY session_id HAVING COUNT(*) > ?",
+            )
+            .bind(keep)
+            .fetch_all(&self.pool)
+            .await,
         }
+        .map_err(dberr("prune trail: sessions"))?;
+        let mut total: u64 = 0;
+        for session in sessions {
+            // The newest row that must GO: everything at or below it (in the
+            // trail's own (ts, id) order) is outside the newest `keep`.
+            let boundary: Option<(String, String)> = sqlx::query_as(
+                "SELECT ts, id FROM agent_trail WHERE session_id = ? \
+                 ORDER BY ts DESC, id DESC LIMIT 1 OFFSET ?",
+            )
+            .bind(&session)
+            .bind(keep)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("prune trail: boundary"))?;
+            let Some((ts, id)) = boundary else {
+                continue; // at or under the cap
+            };
+            loop {
+                let n = sqlx::query(
+                    "DELETE FROM agent_trail WHERE rowid IN (
+                         SELECT rowid FROM agent_trail
+                         WHERE session_id = ? AND (ts, id) <= (?, ?)
+                         LIMIT ?
+                     )",
+                )
+                .bind(&session)
+                .bind(&ts)
+                .bind(&id)
+                .bind(CHUNK)
+                .execute(&self.pool)
+                .await
+                .map_err(dberr("prune trail"))?
+                .rows_affected();
+                total += n;
+                if n < CHUNK as u64 {
+                    break;
+                }
+                // Brief yield so queued interactive writers acquire the lock
+                // before the next batch.
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }
+        Ok(total)
     }
 
     /// Per-session roll-up for every session in `workspace_id` that has any
@@ -997,4 +1043,84 @@ mod tests {
         assert_eq!(l[1].source, "agent");
         assert_eq!(l[1].position, 1);
     }
+
+    /// Insert a trail row with an explicit timestamp and id.
+    async fn trail_row(pool: &DbPool, ws: &str, session: &str, id: &str, ts: &str) {
+        sqlx::query(
+            "INSERT INTO agent_trail (id, session_id, workspace_id, ts, source, kind, summary)
+             VALUES (?, ?, ?, ?, 'agent', 'tool', 's')",
+        )
+        .bind(id)
+        .bind(session)
+        .bind(ws)
+        .bind(ts)
+        .execute(pool)
+        .await
+        .expect("trail row");
+    }
+
+    /// r3-07-08: the per-session prune keeps exactly the newest `keep` rows
+    /// in (ts DESC, id DESC) order — ties on `ts` broken by id — touches no
+    /// session at or under the cap, and with `since` only looks at sessions
+    /// that received rows since then.
+    #[tokio::test]
+    async fn prune_trail_keeps_newest_per_session_index_driven() {
+        let pool = mk_pool().await;
+        seed_user(&pool, "u").await;
+        seed_workspace(&pool, "w").await;
+        let big = seed_session(&pool, "w", "u").await;
+        let small = seed_session(&pool, "w", "u").await;
+        let stale = seed_session(&pool, "w", "u").await;
+        let base = chrono::Utc::now() - chrono::Duration::hours(5);
+        // 1 200 rows on `big`, several sharing a timestamp (tie-break by id).
+        for i in 0..1200 {
+            let ts = fmt(base + chrono::Duration::seconds(i / 3));
+            trail_row(&pool, "w", &big, &format!("b{i:05}"), &ts).await;
+        }
+        for i in 0..20 {
+            let ts = fmt(base + chrono::Duration::seconds(i));
+            trail_row(&pool, "w", &small, &format!("s{i:05}"), &ts).await;
+        }
+        // `stale` is over the cap, but its rows are all older than `since`.
+        for i in 0..30 {
+            let ts = fmt(base - chrono::Duration::hours(10) + chrono::Duration::seconds(i));
+            trail_row(&pool, "w", &stale, &format!("t{i:05}"), &ts).await;
+        }
+        let repo = ActivityRepo::new(pool.clone());
+        let count = |sid: Id| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM agent_trail WHERE session_id = ?")
+                    .bind(sid)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+            }
+        };
+        // Incremental pass: only sessions with rows since 6 h ago qualify →
+        // `big` is pruned to 25, `stale` (older rows only) is not looked at.
+        let since = Some(base - chrono::Duration::hours(1));
+        let n = repo.prune_trail(25, since).await.unwrap();
+        assert_eq!(n, 1175);
+        assert_eq!(count(big.clone()).await, 25);
+        assert_eq!(count(small.clone()).await, 20);
+        assert_eq!(count(stale.clone()).await, 30);
+        // Exactly the newest 25 survive: ids b01175..b01199.
+        let kept: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM agent_trail WHERE session_id = ? ORDER BY id",
+        )
+        .bind(&big)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let want: Vec<String> = (1175..1200).map(|i| format!("b{i:05}")).collect();
+        assert_eq!(kept, want);
+        // A full pass (startup) finds `stale` too; `small` stays whole.
+        assert_eq!(repo.prune_trail(25, None).await.unwrap(), 5);
+        assert_eq!(count(stale).await, 25);
+        assert_eq!(count(small).await, 20);
+        // Idempotent.
+        assert_eq!(repo.prune_trail(25, None).await.unwrap(), 0);
+    }
+
 }
