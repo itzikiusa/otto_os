@@ -387,6 +387,18 @@ The one broadcast event of the feature is `ui_control_requested` (owner-scoped,
 below); a grant change arrives as the session-family `session_meta_updated`
 (`meta.ui_control = {enabled, granted_at, granted_by}`).
 
+Connections module state returned by the `state` UI command keeps the existing
+selected-connection `tabs` array and adds `connection_tabs`, an array of
+`{connection_id, tabs}` groups for all open database connections in that
+document. Each tab is `{tab_id, statement, running, has_result, by_agent}`;
+`statement` is clipped to 200 characters and state includes no result rows.
+`db_list_connections` also includes each connection's `tabs` (empty when closed).
+These are UI result additions, not new socket frames. The headless connection
+list has no document and does not provide query tabs. A tab ID keeps its owning
+connection when focus moves to another connection. If `db_run_query` supplies
+both `tab_id` and `connection_id`, they must identify the same connection or the
+UI rejects with `invalid_args` before changing the tab or issuing a query.
+
 ### Lag resync frame (per connection)
 
 The bus is bounded (1024 events). A socket that falls that far behind (a

@@ -10551,6 +10551,23 @@ export interface UiCommandsCatalog {
   commands: UiCommandSpec[];
 }
 
+/** Query metadata shared by db_list_connections and Connections module state.
+ * Tabs are scoped to their owning connection in this document; rows are only
+ * returned by the separately capped/redacted db_get_result command. */
+export interface UiDbTabSummary {
+  tab_id: string;
+  statement: string;
+  running: boolean;
+  has_result: boolean;
+  by_agent: string | null;
+}
+
+/** Additive connection_tabs entry in the Connections module's ui_state result. */
+export interface UiDbConnectionTabs {
+  connection_id: Id;
+  tabs: UiDbTabSummary[];
+}
+
 /** The agent a UI command comes from (attribution in the driven document). */
 export interface UiAgentRef {
   session_id: Id;

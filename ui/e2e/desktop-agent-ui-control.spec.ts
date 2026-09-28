@@ -39,6 +39,7 @@ const CLIENT_ID = 'e2e-uictl-device';
 // (or another project's beforeAll) from making the by-name lookup ambiguous.
 const RUN = Math.random().toString(36).slice(2, 8);
 const CONN_NAME = `agent-shop-${RUN}`;
+const SECOND_CONN_NAME = `agent-shop-comparison-${RUN}`;
 const REDIS_NAME = `agent-redis-${RUN}`;
 
 test.describe.configure({ mode: 'serial' });
@@ -46,6 +47,7 @@ test.describe.configure({ mode: 'serial' });
 let ws = '';
 let root = '';
 let connId = '';
+let secondConnId = '';
 let sessionId = '';
 let sessionToken = '';
 
@@ -282,6 +284,7 @@ test.beforeAll(async () => {
   });
   ws = workspace.id;
   connId = await seedMockDbConnection(ctx, base, ws, CONN_NAME, 'mysql');
+  secondConnId = await seedMockDbConnection(ctx, base, ws, SECOND_CONN_NAME, 'mysql');
   // `meta.client_id` = the device the session was started from: the daemon
   // routes the session's UI commands to THAT device's window (Q4).
   const session = await postJson<{ id: string }>(ctx, `${base}/api/v1/workspaces/${ws}/sessions`, {
@@ -336,6 +339,12 @@ test('an agent drives the Database Explorer visibly in the side pane', async ({ 
   test.setTimeout(300_000);
   const seen: SeenQuery[] = [];
   await mockDbRoutes(page, connId);
+  const secondQueries: Record<string, unknown>[] = [];
+  await mockDbRoutes(page, secondConnId);
+  await page.route(new RegExp(`/connections/${secondConnId}/db/query$`), async (route) => {
+    secondQueries.push(route.request().postDataJSON() as Record<string, unknown>);
+    await route.fallback();
+  });
   await engineOverride(page, seen);
 
   // The main pane shows the agent's own session — the side-by-side case.
@@ -440,6 +449,59 @@ test('an agent drives the Database Explorer visibly in the side pane', async ({ 
       // …and back, so the rest of the flow reads the grid.
       await mcp.call('otto_ui_db_set_view', { tab_id: tabId, view: 'grid' });
       await expect(frame(page).locator('.grid')).toBeVisible();
+    });
+
+    await test.step('one agent keeps two connections and addresses the original result by tab', async () => {
+      const second = await mcp.call('otto_ui_db_run_query', {
+        connection_id: SECOND_CONN_NAME,
+        statement: 'SELECT * FROM customers',
+      });
+      expect(second.isError, second.text).toBe(false);
+      const secondResult = dig(second.json, 'rows')!;
+      const secondTabId = String(secondResult.tab_id);
+      expect(secondResult.connection_id).toBe(secondConnId);
+      expect(secondResult.columns.map((c: { name: string }) => c.name)).toContain('email');
+      expect(secondQueries.length).toBeGreaterThan(0);
+      expect(secondQueries.every((q) => q.read_only === true)).toBe(true);
+
+      const list = await mcp.call('otto_ui_db_list_connections');
+      expect(list.isError, list.text).toBe(false);
+      const connections = dig(list.json, 'connections')!.connections as Record<string, any>[];
+      expect(connections.find((c) => c.id === connId)?.tabs).toEqual(expect.arrayContaining([
+        expect.objectContaining({ tab_id: tabId, has_result: true }),
+      ]));
+      expect(connections.find((c) => c.id === secondConnId)?.tabs).toEqual(expect.arrayContaining([
+        expect.objectContaining({ tab_id: secondTabId, has_result: true }),
+      ]));
+      const state = await mcp.call('otto_ui_state');
+      expect(state.isError, state.text).toBe(false);
+      const groups = dig(state.json, 'connection_tabs')!.connection_tabs as Record<string, any>[];
+      expect(groups).toEqual(expect.arrayContaining([
+        expect.objectContaining({ connection_id: connId, tabs: expect.arrayContaining([expect.objectContaining({ tab_id: tabId })]) }),
+        expect.objectContaining({ connection_id: secondConnId, tabs: expect.arrayContaining([expect.objectContaining({ tab_id: secondTabId })]) }),
+      ]));
+      expect(groups.flatMap((group) => group.tabs).every((tab) => !('rows' in tab))).toBe(true);
+      await expect(frame(page).getByRole('tablist', { name: 'Open connections' })).toContainText(CONN_NAME);
+      await expect(frame(page).getByRole('tablist', { name: 'Open connections' })).toContainText(SECOND_CONN_NAME);
+
+      const before = seen.length + secondQueries.length;
+      const mismatch = await mcp.call('otto_ui_db_run_query', {
+        tab_id: tabId, connection_id: secondConnId, statement: 'SELECT wrong_target',
+      });
+      expect(mismatch.isError, mismatch.text).toBe(true);
+      expect(mismatch.text).toContain('invalid_args');
+      expect(seen.length + secondQueries.length).toBe(before);
+      await expect(frame(page).locator('.conn-tab.active .conn-tab-name')).toHaveText(SECOND_CONN_NAME);
+      await expect(frame(page).locator('.qe-edit .cm-content')).toContainText('SELECT * FROM customers');
+
+      const original = await mcp.call('otto_ui_db_get_result', { tab_id: tabId });
+      expect(original.isError, original.text).toBe(false);
+      const originalResult = dig(original.json, 'rows')!;
+      expect(originalResult.connection_id).toBe(connId);
+      expect(originalResult.statement).toBe('SELECT * FROM orders');
+      expect(originalResult.rows[0][0]).toBe(101);
+      expect(seen.length + secondQueries.length).toBe(before);
+      await expect(frame(page).locator('.qe-edit .cm-content')).toContainText('SELECT * FROM orders');
     });
 
     await test.step('a write asks the person first; Cancel → cancelled_by_user', async () => {

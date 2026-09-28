@@ -21,12 +21,12 @@
 
     { "$comment": "── Database Explorer (Agent 1 schema, Agent 4 handlers) ──",
       "name": "db_list_connections", "module": "connections", "route": "database", "risk": "read", "timeout_ms": 10000, "headless": "db_list_connections",
-      "description": "List the database connections the user can open in the Database Explorer (id, name, kind, environment/guarded flag, workspace). Read-only.",
+      "description": "List the database connections the user can open in the Database Explorer (id, name, kind, environment/guarded flag, workspace). In an open UI, each connection includes its open query tabs (tab_id, statement preview, running, has_result, by_agent), including background connections. Keep these tab IDs when comparing multiple databases. Read-only; the headless list has no UI tabs.",
       "input_schema": { "type": "object", "properties": {
         "query": { "type": "string", "description": "Optional case-insensitive filter on name/kind." } },
         "additionalProperties": false } },
     { "name": "db_open_connection", "module": "connections", "route": "database", "risk": "navigate", "timeout_ms": 20000,
-      "description": "Open a connection in the Database Explorer (selecting it in the tree) and optionally make `database` the active database/schema.",
+      "description": "Open or focus a connection in the Database Explorer and optionally make `database` the active database/schema. Other connections stay open with their own query tabs, drafts and results, so one agent can work across multiple databases.",
       "input_schema": { "type": "object", "required": ["connection_id"], "properties": {
         "connection_id": { "type": "string", "description": "Connection id or name (otto.ui_db_list_connections)." },
         "database": { "type": "string", "description": "Database / schema / keyspace to make active." } },
@@ -55,7 +55,7 @@
         "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 105000, "description": "Statement timeout. The tool waits up to this + 15 s (max 120 s)." } },
         "additionalProperties": false } },
     { "name": "db_get_result", "module": "connections", "route": "database", "risk": "read", "timeout_ms": 10000,
-      "description": "Read rows of a tab's current result: `{columns, rows, loaded_rows, auto_limited, has_next, elapsed_ms, affected, masked, statement}`. At most 200 rows per call; values are redacted.",
+      "description": "Read rows of an open tab's current result, focusing its owning connection even when another connection is selected. Does not rerun the query. Returns `{connection_id, columns, rows, loaded_rows, auto_limited, has_next, elapsed_ms, affected, masked, statement}`. At most 200 rows per call; values are redacted.",
       "input_schema": { "type": "object", "required": ["tab_id"], "properties": {
         "tab_id": { "type": "string" },
         "offset": { "type": "integer", "minimum": 0 },

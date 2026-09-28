@@ -28,7 +28,7 @@ import {
 import { ws } from '../stores/workspace.svelte';
 import { ui } from '../stores/ui.svelte';
 import { router } from '../router.svelte';
-import type { Connection, DbExportFormat, QueryResult, SchemaNode } from '../api/types';
+import type { Connection, DbExportFormat, QueryResult, SchemaNode, UiDbTabSummary, UiDbConnectionTabs } from '../api/types';
 
 /** Rows handed back per call (the catalog's documented cap). */
 const ROWS_MAX = 200;
@@ -360,10 +360,34 @@ async function resolvePath(path: string[], ctx: UiCommandCtx): Promise<SchemaNod
 
 // ─── Handlers ───────────────────────────────────────────────────────────────
 
+/** Enumerate live and parked tabs without changing the selected connection or
+ * fetching rows. IDs keep an agent's first query addressable after it opens a
+ * second database; state never copies the potentially large result sets. */
+function connectionTabs(): UiDbConnectionTabs[] {
+  const groups = new Map<string, UiDbTabSummary[]>();
+  for (const { connId, tab } of database.openQueryTabs()) {
+    let tabs = groups.get(connId);
+    if (!tabs) { tabs = []; groups.set(connId, tabs); }
+    tabs.push(tabSummary(tab));
+  }
+  return Array.from(groups, ([connection_id, tabs]) => ({ connection_id, tabs }));
+}
+
+function tabSummary(tab: QueryTab): UiDbTabSummary {
+  return {
+    tab_id: String(tab.id),
+    statement: tab.statement.slice(0, 200),
+    running: tab.running,
+    has_result: !!tab.result,
+    by_agent: tab.agent?.label ?? null,
+  };
+}
+
 registerUiCommands('connections', {
   async db_list_connections(args: Args, ctx) {
     await ensureExplorer(ctx);
     const q = str(args, 'query')?.trim().toLowerCase();
+    const tabs = new Map(connectionTabs().map((group) => [group.connection_id, group.tabs]));
     const list = database.connections
       .filter((c) => !q || c.name.toLowerCase().includes(q) || c.kind.toLowerCase().includes(q))
       .map((c) => ({
@@ -375,6 +399,7 @@ registerUiCommands('connections', {
         guarded: c.environment === 'prod' || c.read_only === true,
         open: database.openConnIds.includes(c.id),
         selected: database.selectedConnId === c.id,
+        tabs: tabs.get(c.id) ?? [],
       }));
     return { connections: list, workspace_id: ws.currentId };
   },
@@ -425,6 +450,14 @@ registerUiCommands('connections', {
     const timeoutMs = int(args, 'timeout_ms');
     let connId: string;
     if (tabId !== undefined) {
+      const requested = str(args, 'connection_id');
+      if (requested !== undefined) {
+        const connection = resolveConn(requested);
+        const owner = database.locateTab(tabId);
+        if (owner && owner.connId !== connection.id) {
+          throw new UiCommandError('invalid_args', `Tab ${tabId} belongs to another connection. Pass its connection_id or omit connection_id to use the tab's owner.`);
+        }
+      }
       await focusTab(tabId, ctx);
       connId = database.selectedConnId!;
       if (dbName) database.setActiveDb(dbName);
@@ -628,16 +661,11 @@ registerUiState('connections', () => {
   return {
     selected_connection: database.selectedConn ? { id: database.selectedConn.id, name: database.selectedConn.name } : null,
     open_connections: database.openConnIds,
+    connection_tabs: connectionTabs(),
     active_database: database.activeDb,
     main_tab: database.mainTab,
     tabs: database.selectedConnId
-      ? database.tabs.map((x) => ({
-          tab_id: String(x.id),
-          statement: x.statement.slice(0, 200),
-          running: x.running,
-          has_result: !!x.result,
-          by_agent: x.agent?.label ?? null,
-        }))
+      ? database.tabs.map(tabSummary)
       : [],
     active_tab: t ? String(t.id) : null,
     result: t?.result ? { rows: t.result.rows.length, columns: t.result.columns.length } : null,

@@ -1345,6 +1345,21 @@ class DatabaseStore {
   // call; these helpers only address a tab by its id across open connections
   // and stamp the agent's attribution on the tabs it opens.
 
+  /** Enumerate the live tabs of actual open connections. The active singleton
+   * wins over its older parked snapshot; returned tabs retain their proxies so
+   * background results/running state update a comparison without row copies. */
+  openQueryTabs(): Array<{ connId: Id; tab: QueryTab }> {
+    void this.accessRevision;
+    const selected = this.selectedConnId;
+    const liveTabs = this.tabs;
+    const known = new Set(this.connections.map((connection) => connection.id));
+    return this.openConnIds.flatMap((connId) => {
+      if (!known.has(connId)) return [];
+      const tabs = connId === selected ? liveTabs : this.snapshots.get(connId)?.tabs ?? [];
+      return tabs.map((tab) => ({ connId, tab }));
+    });
+  }
+
   /** Find a query tab by id on ANY open connection — the active one, or a
    *  parked (snapshotted) background one. */
   locateTab(tabId: number): { connId: Id; index: number; tab: QueryTab } | null {
