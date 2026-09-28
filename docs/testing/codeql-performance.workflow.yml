@@ -1,0 +1,122 @@
+# INACTIVE TEMPLATE: keep outside .github/workflows until an approved switch
+# from default setup. Read codeql-performance.md before activation.
+name: CodeQL advanced
+
+on:
+  workflow_dispatch:
+    inputs:
+      rust_extractor_cache:
+        description: Reuse the Rust extractor's internal Cargo target directory
+        type: boolean
+        default: true
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-advanced-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+          - language: go
+            build-mode: autobuild
+          - language: java-kotlin
+            build-mode: none
+          - language: javascript-typescript
+            build-mode: none
+          - language: python
+            build-mode: none
+          - language: rust
+            build-mode: none
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        id: init
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # Fixed for the before/after experiment; update/remove after measuring.
+          tools: https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.27.1/codeql-bundle-linux64.tar.zst
+          # Omit query customization to retain the default security suite.
+          # No paths, features, cfg, targets or query exclusions.
+
+      - name: Verify Rust extractor option and record environment
+        if: matrix.language == 'rust'
+        id: rust
+        env:
+          CODEQL_PATH: ${{ steps.init.outputs.codeql-path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$CODEQL_PATH" resolve extractor --language=rust --format=betterjson > "$RUNNER_TEMP/rust-extractor.json"
+          python3 - "$RUNNER_TEMP/rust-extractor.json" <<'PY'
+          import json, sys
+          with open(sys.argv[1]) as f:
+              extractor = json.load(f)
+          option = extractor.get('extractor_options', {}).get('cargo_target_dir')
+          if not option or option.get('type') != 'string':
+              raise SystemExit('Rust cargo_target_dir option missing; review this template before enabling caching')
+          print('cargo_target_dir:', option['description'])
+          PY
+          {
+            rustc -Vv
+            cargo -Vv
+            rustup toolchain list -v
+            printf 'ImageOS=%s\nImageVersion=%s\n' "$ImageOS" "$ImageVersion"
+          } | tee "$RUNNER_TEMP/rust-cache-toolchain.txt"
+          fingerprint=$(sha256sum "$RUNNER_TEMP/rust-cache-toolchain.txt" | cut -d ' ' -f 1)
+          printf 'toolchain=%s\n' "$fingerprint" >> "$GITHUB_OUTPUT"
+          df -h /
+
+      - name: Restore Rust extractor Cargo artifacts
+        if: matrix.language == 'rust' && (github.event_name != 'workflow_dispatch' || inputs.rust_extractor_cache)
+        id: rust-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/codeql-rust-cargo-target
+          key: codeql-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.init.outputs.codeql-version }}-${{ steps.rust.outputs.toolchain }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '**/rust-toolchain', '**/rust-toolchain.toml', '**/.cargo/config', '**/.cargo/config.toml', '**/build.rs', 'docs/testing/codeql-performance.workflow.yml', '.github/workflows/codeql.yml') }}-${{ github.sha }}
+          restore-keys: |
+            codeql-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.init.outputs.codeql-version }}-${{ steps.rust.outputs.toolchain }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '**/rust-toolchain', '**/rust-toolchain.toml', '**/.cargo/config', '**/.cargo/config.toml', '**/build.rs', 'docs/testing/codeql-performance.workflow.yml', '.github/workflows/codeql.yml') }}-
+
+      - name: Select persistent Rust extractor target
+        if: matrix.language == 'rust' && (github.event_name != 'workflow_dispatch' || inputs.rust_extractor_cache)
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/codeql-rust-cargo-target"
+          printf 'CODEQL_EXTRACTOR_RUST_OPTION_CARGO_TARGET_DIR=%s/codeql-rust-cargo-target\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      # Init's explicit autobuild mode lets analyze perform Go's autobuild.
+      - name: Analyze and upload
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:${{ matrix.language }}
+
+      - name: Record Rust cache size
+        if: matrix.language == 'rust' && (github.event_name != 'workflow_dispatch' || inputs.rust_extractor_cache)
+        shell: bash
+        run: du -sh "$RUNNER_TEMP/codeql-rust-cargo-target"
+
+      # Untrusted PR runs can restore a base cache but never publish one here.
+      - name: Save Rust extractor Cargo artifacts
+        if: matrix.language == 'rust' && (github.event_name != 'workflow_dispatch' || inputs.rust_extractor_cache) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/codeql-rust-cargo-target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}

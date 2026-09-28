@@ -117,12 +117,41 @@ npm run test:e2e # Playwright mobile/tablet E2E (spins an ISOLATED throwaway dae
                  # parallel per-page runs. Specs: ui/e2e/*.spec.ts.
 ```
 
+For the edit/check loop, select the affected package and test target first:
+
+```bash
+cargo check -p otto-server --lib
+cargo test -p otto-server --lib <test_filter>
+cargo test -p otto-server --test <integration_test_target> <test_filter>
+cargo clippy -p otto-server --all-targets -- -D warnings
+```
+
+Include affected consumers when changing shared APIs. These focused commands
+give early feedback; the full workspace checks above remain the integration
+gates. Do not repeat a passing full suite for each unrelated documentation edit.
+Run the UI with Vite during development instead of rebuilding the packaged app.
+
+Keep Cargo features, profiles and toolchain consistent between comparable runs.
+Use `cargo build --timings` to separate compilation from test execution and
+record cold, unchanged and single-edit timings separately. Coordinate Cargo
+commands within a worktree: concurrent builds share a target lock. Different
+worktrees must not share `CARGO_TARGET_DIR`. Do not run `cargo clean` or delete
+old dependency artifacts as routine preparation; age does not establish that a
+cached artifact is unused.
+
 Run the daemon and the UI separately for hot-reload during development:
 
 ```bash
 cargo run -p ottod          # daemon on http://127.0.0.1:7700
 cd ui && npm run dev        # UI on http://localhost:5173
 ```
+
+For faster full-suite execution, install cargo-nextest 0.9.146 and run
+`cargo nextest run --workspace`, followed by `cargo test --workspace --doc`.
+Nextest uses the resource limits in `.config/nextest.toml`; it does not execute
+doc-tests. CI uses its four-process `ci` profile. Standard `cargo test` remains
+available without installing another tool. See
+[build measurements](docs/testing/build-performance.md) for the comparison.
 
 CI runs the Rust and UI gates above on every push/PR
 (`.github/workflows/ci.yml`). The full desktop-app packaging flow (sidecar copy,

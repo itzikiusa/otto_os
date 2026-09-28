@@ -10,7 +10,7 @@ are the real, chained steps; the full gated checklist lives in
 | `make-cert.sh` | One-time: create the long-lived self-signed code-signing cert **"Otto Dev Signing"** in your login keychain and **trust it for code signing**. |
 | `sign.sh` | Sign `ottod` + `Otto.app` with that cert. **Also re-asserts code-signing trust** (idempotent) so it can't silently drift. |
 | `deploy.sh` | One command: rebuild → bundle → sign → replace `/Applications/Otto.app` → relaunch → verify. |
-| `prune-target.sh` | Delete superseded `<crate>-<hash>` build artifacts under `target/`, keeping the newest generation of each crate. Run by `deploy.sh` step 5; `--dry-run` reports without deleting. |
+| `prune-target.sh` | Preview older hashed dependency artifacts under `target/*/deps/`; `--apply` opts into eviction. Deploy step 5 invokes it only with `PRUNE=1`. |
 | `dmg.sh` | Package a signed `Otto.app` into a `.dmg`. |
 | `publish-walkthroughs.sh` | Re-encode `marketing/videos/out/*.mp4` to 720p and upload them (`--clobber`) to the rolling `walkthroughs` GitHub release the in-app Walkthroughs page streams from. Not part of the DMG. |
 | `com.otto.daemon.plist` | `launchd` user-agent template for the daemon (port `7700`). |
@@ -36,21 +36,23 @@ killed, the phase still completes. Read the outcome with
 `packaging/deploy.sh --status` (exit 0 = deployed and healthy). `DETACH=0`
 runs the phase inline (fine from a plain Terminal).
 
-**Disk:** step 5 prunes the build cache. Cargo never removes the artifacts of a
-previous build — each changed feature set or dependency graph writes another
-`<crate>-<hash>` file beside the old one, and with ~285 MB test binaries in this
-workspace that reached **43 GB of unreachable duplicates against 6.5 GB of live
-ones** before it showed up as a full disk.
+**Disk:** both deploy entrypoints preserve Cargo caches by default (`PRUNE=0`).
+Inspect `du -sh target apps/desktop/src-tauri/target` when disk space is tight.
+Cargo reuses dependencies without updating their modification time, so an old
+artifact can still belong to the current build.
 
-It prunes by *generation*, not by hash: cargo keeps several hashes of the same
-crate live at once (one per feature unification, plus host/build-script builds),
-so "keep the newest hash" would delete live artifacts on every run and make the
-next build recompile them. Instead it keeps every variant of a crate written
-within `PRUNE_WINDOW_SECS` (default 1h) of that crate's newest artifact — the
-co-live variants of one build — and drops the older generations. Running right
-after the last `cargo` step means the generation kept is the one this deploy just
-produced. Anything removed is simply rebuilt if it's ever needed again, and the
-script no-ops if a build is in flight. `PRUNE=0` skips it.
+`packaging/prune-target.sh` (or `--dry-run`) previews optional eviction;
+`--apply` deletes selected older hashed dependency variants. `PRUNE=1` opts into
+this cleanup after a deploy build. It keeps variants within `PRUNE_WINDOW_SECS`
+(default 1h) of the newest dependency artifact, but this is a timestamp
+heuristic, not a determination of which artifacts are unused. Eviction can
+force recompilation on the next build.
+
+Build-script outputs, fingerprints, incremental state, top-level binaries,
+bundles and receipts are preserved. Run explicit cleanup only while builds are
+idle; the helper's process check is best-effort. See
+[build measurements](../docs/testing/build-performance.md) for the cache policy
+and other build-time improvements.
 
 ## The recurring "enter your password" keychain prompt — why, and the fix
 

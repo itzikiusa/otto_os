@@ -12,6 +12,8 @@ mod config;
 mod mcp_server;
 mod mcp_tools;
 mod usage_tailer;
+#[cfg(feature = "embed-ui")]
+mod ui_assets;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -24,7 +26,7 @@ use otto_orchestrator::Orchestrator;
 use otto_rbac::{RbacAuthenticator, RbacRoleChecker};
 use otto_server::modules::{module_routers, PtySpawner};
 use otto_server::{
-    build_router, spawn_budget_sampler, spawn_metrics_sampler, spawn_session_event_listener,
+    build_router_with_assets, spawn_budget_sampler, spawn_metrics_sampler, spawn_session_event_listener,
     spawn_usage_recorder, spawn_workflow_event_trigger_listener, AuthScanner, CredentialMonitor,
     ServerCtx,
 };
@@ -1242,7 +1244,11 @@ async fn run(cfg: Config) -> Result<(), String> {
     // Kept past `build_router` (which takes the ctx) so shutdown can stop the
     // remote live browser's Chromium processes.
     let browser_handle = ctx.browser.clone();
-    let router = build_router(ctx, api_extras, root_extras);
+    #[cfg(feature = "embed-ui")]
+    let assets: Option<otto_server::spa::AssetLoader> = Some(ui_assets::load);
+    #[cfg(not(feature = "embed-ui"))]
+    let assets = None;
+    let router = build_router_with_assets(ctx, api_extras, root_extras, assets);
 
     // Graceful shutdown signal (ctrl_c or SIGTERM) fanned out via watch.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

@@ -141,11 +141,22 @@ pub use workflow_trigger_scheduler::spawn_workflow_event_trigger_listener;
 /// - `root_extras` are merged at the root (terminal WS routers — they
 ///   self-authenticate via `?token=`).
 /// - `/ws/events` is served here; unmatched non-API paths fall back to the
-///   SPA (embedded behind the `embed-ui` feature, placeholder otherwise).
+///   unembedded development placeholder. The daemon uses `build_router_with_assets`
+///   to supply its SPA without making UI files server compilation inputs.
 pub fn build_router(
     ctx: ServerCtx,
     api_extras: Vec<Router<ServerCtx>>,
     root_extras: Vec<Router>,
+) -> Router {
+    build_router_with_assets(ctx, api_extras, root_extras, None)
+}
+
+/// Compose the same router and middleware with optional binary-owned UI assets.
+pub fn build_router_with_assets(
+    ctx: ServerCtx,
+    api_extras: Vec<Router<ServerCtx>>,
+    root_extras: Vec<Router>,
+    assets: Option<spa::AssetLoader>,
 ) -> Router {
     let mut protected = routes::protected_routes().merge(rooms::protected_routes());
     for extra in api_extras {
@@ -182,7 +193,7 @@ pub fn build_router(
         .route("/ws/events", get(ws_events::events_ws))
         .merge(rooms::ws_routes())
         .with_state(ctx)
-        .fallback(spa::spa_fallback);
+        .fallback(move |uri| spa::spa_fallback_with_assets(uri, assets));
 
     for extra in root_extras {
         app = app.merge(extra);

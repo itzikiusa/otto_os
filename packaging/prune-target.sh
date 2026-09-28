@@ -1,59 +1,49 @@
 #!/bin/bash
-# Drop superseded build generations from the cargo target dirs.
+# Optional dependency-cache eviction for disk pressure; preview by default.
 #
-# WHY: cargo never garbage-collects. Every build whose feature set, profile or
-# dependency graph differs writes a NEW <crate>-<hash> artifact beside the old
-# one and leaves the old one forever. In this workspace a single `ottod` test
-# binary is ~285 MB and `libotto_server.rlib` ~490 MB, so a day of agent-driven
-# build/test cycles is measured in tens of gigabytes: when this script was
-# written the tree held 43 GB of unreachable duplicates against 6.5 GB of live
-# artifacts — 87% garbage, and the reason the disk filled.
+# Cargo can reuse an old hash for days while compiling another feature/host
+# variant of the same crate today. Modification times do NOT identify unreachable
+# artifacts. This heuristic offers a disk/rebuild-time tradeoff: it may evict
+# still-usable dependencies and force their recompilation on the next build.
+# Ordinary deploys preserve caches. Inspect disk usage with `du -sh target
+# apps/desktop/src-tauri/target` and preview this helper before opting in.
 #
-# WHAT "SUPERSEDED" MEANS (and why it is not simply "keep the newest hash"):
-# cargo keeps SEVERAL hashes of the same crate live simultaneously — one per
-# feature unification, plus separate host/build-script builds. A real example
-# from this repo, all three reachable from one build:
-#     libfutures_core-6b65906c19f3226d.rlib
-#     libfutures_core-717c7bf216492267.rmeta
-#     libfutures_core-a1d26ce20fab25d6.rlib
-# Keeping only the newest would delete two LIVE artifacts on every run and make
-# the next build recompile them — a treadmill, not a cleanup. So instead this
-# keeps a whole GENERATION: within each <crate> family it finds the newest
-# artifact and keeps every variant written within WINDOW seconds of it (the
-# co-live variants of one build always land within one build's duration), then
-# deletes the older generations. Superseded copies go; live ones stay.
+# Only hashed artifacts in debug/release deps/ are candidates. Keep build/,
+# .fingerprint/ and incremental/ intact: independently deleting build-script
+# OUT_DIRs can leave Cargo's Fresh fingerprints pointing at missing includes.
+# Bundles, receipts, top-level binaries and sources are never candidates.
+# The process check is best-effort; run explicit cleanup while builds are idle.
 #
-# SAFETY: touches only cargo's own regenerable output under target/ — never
-# sources, never target/release/ottod, never target/release/bundle, never
-# anything outside a target/ dir. Worst case a pruned artifact is rebuilt. It
-# also refuses to run while a build is in flight, so it cannot delete an
-# artifact out from under rustc.
-#
-# Usage:  packaging/prune-target.sh              prune (default)
-#         packaging/prune-target.sh --dry-run    report what would go, delete nothing
-# Env:    PRUNE_WINDOW_SECS=3600   how wide one "generation" is (default 1h)
+# Usage:  packaging/prune-target.sh              preview, delete nothing
+#         packaging/prune-target.sh --dry-run    preview, delete nothing
+#         packaging/prune-target.sh --apply      evict older dependency variants
+# Env:    PRUNE_WINDOW_SECS=3600  keep variants within this age of the newest (1h)
+#         PRUNE=1 on either deploy entrypoint invokes --apply after building.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 
-APPLY=1
-[[ "${1:-}" == "--dry-run" ]] && APPLY=0
+APPLY=0
+case "${1:-}" in
+    ""|--dry-run) ;;
+    --apply) APPLY=1 ;;
+    *) echo "usage: $0 [--dry-run|--apply]" >&2; exit 2 ;;
+esac
+[[ $# -le 1 ]] || { echo "usage: $0 [--dry-run|--apply]" >&2; exit 2; }
 
 # Never race a live build. rustc publishes an artifact under its final name only
 # at the very end, but the fingerprint and build dirs are live throughout.
-# Skipping is the safe outcome — the next deploy prunes instead.
+# Skipping is the safe outcome — retry explicit cleanup once builds are idle.
 if pgrep -x rustc >/dev/null 2>&1 || pgrep -f 'cargo (build|test|check|run|clippy)' >/dev/null 2>&1; then
-    echo "    a cargo build is running — skipping the prune (it will run on the next deploy)"
+    echo "    a cargo build is running — skipping cache eviction"
     exit 0
 fi
 
 ROOTS=()
 for ws in "$ROOT/target" "$ROOT/apps/desktop/src-tauri/target"; do
     for profile in debug release; do
-        for sub in deps build .fingerprint incremental; do
-            [[ -d "$ws/$profile/$sub" ]] && ROOTS+=("$ws/$profile/$sub")
-        done
+        [[ -d "$ws/$profile/deps" ]] && ROOTS+=("$ws/$profile/deps")
     done
 done
 [[ ${#ROOTS[@]} -gt 0 ]] || { echo "    no target dirs to prune"; exit 0; }
@@ -106,9 +96,8 @@ for root in sys.argv[1:]:
         if len(by_hash) < 2:
             kept += sum(s for e in by_hash.values() for _, s, _, _ in e)
             continue
-        # The current generation: every variant last written within WINDOW of the
-        # newest one. Co-live variants of a single build fall inside it; earlier
-        # builds' leftovers do not.
+        # Keep variants within WINDOW of the newest. Older hashes may still be
+        # live: this is explicit cache eviction, not reachability analysis.
         newest = max(max(m for _, _, m, _ in e) for e in by_hash.values())
         for digest, entries in by_hash.items():
             current = max(m for _, _, m, _ in entries) >= newest - WINDOW
@@ -123,6 +112,7 @@ for root in sys.argv[1:]:
                     except OSError as exc:
                         print("    ! could not remove %s: %s" % (path, exc))
 
-verb = "reclaimed" if APPLY else "reclaimable (dry run)"
-print("    %.2f GB %s; %.2f GB of current artifacts kept" % (freed / 2**30, verb, kept / 2**30))
+verb = "evicted" if APPLY else "selected for eviction (dry run)"
+print("    %.2f GB %s; %.2f GB retained" % (freed / 2**30, verb, kept / 2**30))
+print("    older variants may still be usable; eviction can force recompilation")
 PY
