@@ -633,7 +633,7 @@
     }
     opening[c.id] = true;
     try {
-      const session = await api.post<Session>(`/connections/${c.id}/open`, {
+      const session = await api.long.post<Session>(`/connections/${c.id}/open`, {
         workspace_id: wsId,
       });
       // Open it in place as a workbench tab (like the DB kinds). Deliberately NOT

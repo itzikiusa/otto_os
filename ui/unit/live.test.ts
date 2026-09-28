@@ -44,7 +44,7 @@ const flush = () => new Promise((r) => setImmediate(r));
 
 function load(clock: ReturnType<typeof fakeClock>) {
   const globals = { setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, Date: clock.Date };
-  const poll = loadSource(new URL('../src/lib/poll.ts', import.meta.url), {}, globals);
+  const poll = loadSource(new URL('../src/lib/poll.ts', import.meta.url), { './api/lane': loadSource(new URL('../src/lib/api/lane.ts', import.meta.url), {}) }, globals);
   return loadSource(new URL('../src/lib/live.ts', import.meta.url), { './poll': poll }, globals);
 }
 
@@ -99,9 +99,9 @@ test('socket down → catch-up run, then the fallback cadence; resync refetches'
   assert.equal(runs(), 3);
   reg.setConnected(true);
   reg.resync();
-  clock.advance(250);
+  clock.advance(1750);
   await flush();
-  assert.equal(runs(), 4, 'reconnect resync refetches');
+  assert.equal(runs(), 4, 'reconnect resync refetches (staggered ≤ 1.5 s)');
   assert.deepEqual(clock.delays(), [300_000], 'and restores the safety net');
   q.stop();
 });
@@ -167,7 +167,7 @@ test('numeric hidden cadence relaxes while connected', async () => {
     removeEventListener() {},
   };
   const globals = { setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, Date: clock.Date, document: doc };
-  const poll = loadSource(new URL('../src/lib/poll.ts', import.meta.url), {}, globals);
+  const poll = loadSource(new URL('../src/lib/poll.ts', import.meta.url), { './api/lane': loadSource(new URL('../src/lib/api/lane.ts', import.meta.url), {}) }, globals);
   const live = loadSource(new URL('../src/lib/live.ts', import.meta.url), { './poll': poll }, globals);
   const reg = new live.LiveRegistry();
   reg.setConnected(true);

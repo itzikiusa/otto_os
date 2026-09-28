@@ -5,6 +5,7 @@ import { loadSource } from './sourceHarness.ts';
 function client(response: Response) {
   return loadSource(new URL('../src/lib/api/client.ts', import.meta.url), {
     '../stores/serviceHealth.svelte': { serviceHealth: { report() {} } },
+    './lane': loadSource(new URL('../src/lib/api/lane.ts', import.meta.url), {}),
   }, { location: { port: '7700', origin: 'http://localhost:7700' }, fetch: async () => response }).api;
 }
 

@@ -17,6 +17,7 @@
 // (lib/topicSocket.ts); tests pass their own registry.
 
 import { pollWhileVisible, type Poller, type PollRun } from './poll';
+import type { Lane } from './api/lane';
 
 export interface LiveEvent {
   type: string;
@@ -146,6 +147,12 @@ export interface LiveQueryOptions {
   jitter?: number;
   immediate?: boolean;
   signal?: AbortSignal;
+  /** Force a request lane for every run (default: event / resync / cadence
+   *  refetches on `bg`, the first load and a manual `now()` interactive). */
+  lane?: Lane;
+  /** Spread a reconnect / lag resync over this window (default 1500 ms), so
+   *  every mounted query of every document doesn't refetch in one burst. */
+  resyncSpreadMs?: number;
 }
 
 export const LIVE_SAFETY_MS = 300_000;
@@ -180,13 +187,15 @@ export function liveQuery(opts: LiveQueryOptions, source: LiveSource | null = ap
     jitter: opts.jitter,
     immediate: opts.immediate,
     signal: opts.signal,
+    lane: opts.lane,
   });
 
   const fire = (): void => {
     timer = undefined;
     firstPendingAt = 0;
     lastFireAt = Date.now();
-    if (!stopped) poller.now();
+    // An event / resync refetch is background work (lane "bg").
+    if (!stopped) poller.now({ background: true });
   };
   const bump = (): void => {
     if (stopped) return;
@@ -207,7 +216,22 @@ export function liveQuery(opts: LiveQueryOptions, source: LiveSource | null = ap
         if (!opts.match || opts.match(ev)) bump();
       }),
     );
-    offs.push(source.onResync(bump));
+    // A reconnect / lag resync reaches every query in every document at the
+    // same instant: stagger each one by a random share of the spread window.
+    const spread = Math.max(0, opts.resyncSpreadMs ?? 1500);
+    let resyncTimer: ReturnType<typeof setTimeout> | undefined;
+    offs.push(
+      source.onResync(() => {
+        if (stopped || resyncTimer !== undefined) return;
+        resyncTimer = setTimeout(() => {
+          resyncTimer = undefined;
+          bump();
+        }, Math.round(Math.random() * spread));
+      }),
+    );
+    offs.push(() => {
+      if (resyncTimer !== undefined) clearTimeout(resyncTimer);
+    });
     // Socket lost → catch up now and continue at the fallback cadence; the
     // reconnect's resync then refreshes once more. Socket up → the pending
     // fallback tick is pushed out to the safety net (no fetch).
