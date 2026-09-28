@@ -1961,24 +1961,40 @@
     min-height: 0; /* allow flex child to shrink below its content height */
   }
 
+  /* Containment (r3-01-01 / r3-12-01): a terminal repaint used to dirty
+     layout all the way up to the page root, and every frame re-ran the
+     ancestor grids' track sizing. `content` (layout + paint + style) makes
+     this box a layout/paint boundary without size containment — its size
+     still comes from the parent (100 %), so nothing collapses. It already
+     clipped (overflow: hidden), and nothing inside is position: fixed, so
+     layout containment changes no geometry. */
   .term-wrap {
     position: relative;
     width: 100%;
     height: 100%;
     background: var(--term-bg);
     overflow: hidden;
+    contain: content;
   }
   /* Force dark: override the host wrapper and xterm host bg so the entire
      embedded terminal reads as one dark widget regardless of app scheme. */
   .term-wrap.force-dark-wrap {
     background: #131318;
   }
+  /* The xterm host gets full `strict` containment: its box is fixed by the
+     insets (absolutely positioned), never by its content, so size
+     containment is free — xterm's row rebuilds and canvas resizes stay
+     inside it and never reach the page. No contain-intrinsic-size needed:
+     an inset-sized abspos box has no content-based size to replace. The
+     find bar, overlays and toolbar are siblings, not children, so the
+     paint clip can't cut them off. */
   .term-host {
     position: absolute;
     inset: 6px 0 4px 8px;
     overflow-x: auto;
     overflow-y: hidden;
     direction: ltr;
+    contain: strict;
   }
   .term-host.force-dark {
     background: #131318;

@@ -25,7 +25,11 @@
   //
   // Tracks are `fr`, never `%`: `f% 8px (100−f)%` sums to 100 % + 8 px and would
   // overflow 8 px per nesting level (the flat grid this replaced kept the gutter
-  // outside the tracks via `gap`, which a tree cannot do).
+  // outside the tracks via `gap`, which a tree cannot do). Each is
+  // `minmax(0, Nfr)`: a bare `Nfr` has an `auto` minimum, so sizing the tracks
+  // measured the panes' content — with a live terminal inside, every output
+  // frame re-ran the grid's flex-fraction search (r3-12-01). A 0 minimum
+  // makes the split purely proportional; panes clip/scroll their own content.
   import Self from './SplitNode.svelte';
   import SessionView from './SessionView.svelte';
   import DatabasePage from '../database/DatabasePage.svelte';
@@ -152,8 +156,8 @@
     data-key={node.key}
     data-depth={depth}
     style={node.axis === 'col'
-      ? `grid-template-columns: ${node.frac}fr 8px ${1 - node.frac}fr; grid-template-rows: 1fr;`
-      : `grid-template-rows: ${node.frac}fr 8px ${1 - node.frac}fr; grid-template-columns: 1fr;`}
+      ? `grid-template-columns: minmax(0, ${node.frac}fr) 8px minmax(0, ${1 - node.frac}fr); grid-template-rows: minmax(0, 1fr);`
+      : `grid-template-rows: minmax(0, ${node.frac}fr) 8px minmax(0, ${1 - node.frac}fr); grid-template-columns: minmax(0, 1fr);`}
   >
     <Self node={node.a} depth={depth + 1} />
     <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
