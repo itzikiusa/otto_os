@@ -32,7 +32,7 @@ use otto_core::domain::{Session, SessionKind, User};
 use otto_core::Id;
 use otto_rbac::{tokens::AuthRepo, RbacAuthenticator, RbacRoleChecker};
 use otto_sessions::{api_router, ws_router, ProviderRegistry, SessionManager, SessionsCtx};
-use otto_state::{SessionsRepo, DbPool, WorkspacesRepo};
+use otto_state::{DbPool, SessionsRepo, WorkspacesRepo};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::sync::broadcast;
 use tower::ServiceExt; // for `oneshot`
@@ -454,12 +454,7 @@ async fn mint_token(pool: &DbPool, user_id: &str) -> String {
 /// Mint a real **share-link** (`kind='share'`) token scoped to `session_id` at
 /// `role`, owned by `owner`. `authenticate` will attach the corresponding
 /// `SessionScope`, exercising the scoped-attach branch of `ws_auth_gate`.
-async fn mint_share(
-    pool: &DbPool,
-    owner: &str,
-    session_id: &Id,
-    role: WorkspaceRole,
-) -> String {
+async fn mint_share(pool: &DbPool, owner: &str, session_id: &Id, role: WorkspaceRole) -> String {
     let repo = AuthRepo::new(pool.clone());
     let (raw, _info) = repo
         .issue_share_token(&owner.into(), session_id, role, 3600, None)

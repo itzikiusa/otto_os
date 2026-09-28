@@ -24,7 +24,7 @@ use std::sync::Mutex;
 use chrono::Utc;
 use otto_core::secrets::SecretStore;
 use otto_core::{new_id, Result};
-use otto_state::{EmailSendersRepo, DbPool};
+use otto_state::{DbPool, EmailSendersRepo};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::Row;
 

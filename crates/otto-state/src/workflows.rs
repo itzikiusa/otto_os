@@ -1,5 +1,6 @@
 //! Workflows repository: workflow definitions + their run history.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::workflows::{
     ActiveWorkflowRun, NodeRunState, NodeStatus, RunStatus, Workflow, WorkflowCheckpoint,
@@ -7,7 +8,6 @@ use otto_core::workflows::{
 };
 use otto_core::{new_id, Error, Id, Result};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 
@@ -508,7 +508,9 @@ impl WorkflowsRepo {
             workspace_id: r.get("workspace_id"),
             status: r.get("status"),
             error: r.get("error"),
-            node_count: r.get::<Option<i64>, _>("node_count").map(|n| n.max(0) as u32),
+            node_count: r
+                .get::<Option<i64>, _>("node_count")
+                .map(|n| n.max(0) as u32),
             workflow_name: r.get("workflow_name"),
         }))
     }

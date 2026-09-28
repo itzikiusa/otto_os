@@ -1822,8 +1822,8 @@ mod tests {
     use otto_core::domain::{IssueAccount, IssueProviderKind};
     use otto_core::secrets::SecretStore;
     use otto_core::{new_id, Id, Result};
-    use otto_state::{IssuesRepo, ProductRepo};
     use otto_state::DbPool;
+    use otto_state::{IssuesRepo, ProductRepo};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 

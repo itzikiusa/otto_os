@@ -1,11 +1,11 @@
 //! Product story analysis repository: stories, versions, analyses, questions,
 //! notes, events, testcases, learnings.
 
+use crate::DbPool;
 use chrono::{DateTime, Utc};
 use otto_core::{new_id, Id, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 

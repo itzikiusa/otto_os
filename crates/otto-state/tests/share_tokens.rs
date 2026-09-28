@@ -3,8 +3,8 @@
 //! after a fresh migrate. Mirrors the `pragma_table_info` shape used elsewhere in
 //! the workspace to assert a migration's effect on the schema.
 
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use otto_state::DbPool;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
 /// An in-memory pool with every migration applied (matches the test harness in
 /// `otto-rbac` / `otto-server`).

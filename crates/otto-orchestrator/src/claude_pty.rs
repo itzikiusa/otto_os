@@ -597,7 +597,9 @@ mod tests {
                 t.fetch_add(1, Ordering::Relaxed);
             }
         });
-        let prompt: String = (0..800).map(|i| format!("line {i:05} of the prompt\n")).collect();
+        let prompt: String = (0..800)
+            .map(|i| format!("line {i:05} of the prompt\n"))
+            .collect();
         handle
             .write_async(prompt.as_bytes(), PROMPT_WRITE_TIMEOUT)
             .await

@@ -20,10 +20,10 @@
 //! The ledger records *that* a tool was called and with what shape — not full
 //! note/file bodies (`otto_vault_write*` alone stored 120 MB).
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::{new_id, Result};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt};
 
@@ -253,7 +253,10 @@ mod tests {
         assert!(c.starts_with(&"x".repeat(ARG_STRING_EDGE)));
         assert!(c.ends_with(&"x".repeat(ARG_STRING_EDGE)));
         assert!(
-            c.contains(&format!("…[truncated: 5000 chars, sha256 {}]…", sha256_hex(&body))),
+            c.contains(&format!(
+                "…[truncated: 5000 chars, sha256 {}]…",
+                sha256_hex(&body)
+            )),
             "{c}"
         );
         let k = out["nested"][0]["k"].as_str().unwrap();
@@ -288,15 +291,24 @@ mod tests {
     #[test]
     fn whole_document_is_byte_capped_with_both_ends() {
         // 10k short strings: no single value is over the cap, but the row is.
-        let many: Vec<String> = (0..10_000).map(|i| format!("item-{i:05}-{}", "p".repeat(900))).collect();
+        let many: Vec<String> = (0..10_000)
+            .map(|i| format!("item-{i:05}-{}", "p".repeat(900)))
+            .collect();
         let arg = serde_json::json!({"items": many, "last": "DROP"}).to_string();
         let stored = cap_args_json(&arg);
-        assert!(stored.len() <= ARGS_JSON_MAX_BYTES + 1024, "{}", stored.len());
+        assert!(
+            stored.len() <= ARGS_JSON_MAX_BYTES + 1024,
+            "{}",
+            stored.len()
+        );
         let v: serde_json::Value = serde_json::from_str(&stored).unwrap();
         assert_eq!(v["_otto_truncated"], true);
         assert_eq!(v["bytes"], arg.len());
         assert_eq!(v["sha256"], sha256_hex(&arg));
-        assert!(v["head"].as_str().unwrap().starts_with("{\"items\":[\"item-00000"));
+        assert!(v["head"]
+            .as_str()
+            .unwrap()
+            .starts_with("{\"items\":[\"item-00000"));
         assert!(v["tail"].as_str().unwrap().contains("\"last\":\"DROP\""));
     }
 

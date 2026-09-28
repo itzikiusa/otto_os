@@ -476,7 +476,9 @@ mod tests {
 
     #[tokio::test]
     async fn actor_is_reloaded_so_disabled_or_demoted_root_cannot_retain_privileges() {
-        let pool = otto_state::DbPool::connect("sqlite::memory:").await.unwrap();
+        let pool = otto_state::DbPool::connect("sqlite::memory:")
+            .await
+            .unwrap();
         sqlx::query("CREATE TABLE users(id TEXT,username TEXT,display_name TEXT,is_root INTEGER,disabled INTEGER,created_at TEXT)").execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO users VALUES ('u','u','u',1,0,?)")
             .bind(chrono::Utc::now().to_rfc3339())

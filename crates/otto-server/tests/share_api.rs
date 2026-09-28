@@ -23,7 +23,7 @@ use otto_core::domain::{User, WorkspaceRole};
 use otto_core::{new_id, Id};
 use otto_rbac::AuthRepo;
 use otto_server::feature_guard::feature_guard;
-use otto_state::{GrantsRepo, DbPool};
+use otto_state::{DbPool, GrantsRepo};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::sync::Arc;
 use tower::ServiceExt; // for `oneshot`

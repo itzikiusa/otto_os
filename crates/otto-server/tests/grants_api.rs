@@ -22,7 +22,7 @@ use otto_core::auth::AuthUser;
 use otto_core::domain::{Capability, Feature, User};
 use otto_server::feature_guard::feature_guard;
 use otto_server::routes::grants::{capabilities, get_grants, put_grants, GrantsCtx};
-use otto_state::{AuditRepo, GrantsRepo, NewAuditEntry, PluginsRepo, DbPool, UsersRepo};
+use otto_state::{AuditRepo, DbPool, GrantsRepo, NewAuditEntry, PluginsRepo, UsersRepo};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::sync::Arc;
 use tower::ServiceExt; // for `oneshot`

@@ -3,11 +3,11 @@
 //! Mirrors the pattern used by [`crate::workflows::WorkflowsRepo`]: thin data
 //! layer, all SQL inline, types re-exported from `otto_core`.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::{new_id, Error, Id, Result};
 use serde_json::Value;
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, ts};
 

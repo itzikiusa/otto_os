@@ -177,8 +177,8 @@ mod session_owner_tests {
     use chrono::Utc;
     use otto_core::domain::{Session, SessionKind, SessionStatus, User};
     use otto_rbac::RbacRoleChecker;
-    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use otto_state::DbPool;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
     // ---- helpers -----------------------------------------------------------
 

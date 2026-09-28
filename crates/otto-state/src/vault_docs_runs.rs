@@ -8,9 +8,9 @@
 //! non-terminal at daemon startup was interrupted by a restart — that is the
 //! whole recovery predicate (`list_unfinished`).
 
+use crate::DbPool;
 use otto_core::Result;
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::dberr;
 

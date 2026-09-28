@@ -1,7 +1,7 @@
 //! Durable API automation reports. Callers must redact before saving.
+use crate::DbPool;
 use otto_core::api::ApiAutomationRun;
 use sqlx::Row;
-use crate::DbPool;
 
 #[derive(Clone)]
 pub struct ApiRunsRepo(pub DbPool);

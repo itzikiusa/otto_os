@@ -2,10 +2,10 @@
 //! background scan found under `~/.claude/projects` / `~/.codex/sessions`.
 //! Metadata only — the conversation itself is always re-read from disk.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::{Id, Result};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt};
 

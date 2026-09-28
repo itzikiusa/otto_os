@@ -1,10 +1,10 @@
 //! Connection sections repository (user-defined groupings of connections).
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::domain::ConnectionSection;
 use otto_core::{new_id, Id, Result};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 

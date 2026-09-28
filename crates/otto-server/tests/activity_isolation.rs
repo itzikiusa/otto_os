@@ -34,9 +34,9 @@ use otto_rbac::RbacRoleChecker;
 use otto_server::ServerCtx;
 use otto_sessions::{ProviderRegistry, SessionManager};
 use otto_state::{
-    ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, GitStore, IntegrationsRepo,
-    IssuesRepo, NewSession, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, DbPool,
-    SwarmRepo, WorkspacesRepo,
+    ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, DbPool, GitStore, IntegrationsRepo,
+    IssuesRepo, NewSession, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, SwarmRepo,
+    WorkspacesRepo,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::sync::broadcast;

@@ -5,11 +5,11 @@
 //! Matrix *cells* are `skill_evals` rows (see [`crate::SkillEvalsRepo`]); this
 //! module owns only the matrix header row.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::domain::{EvalMatrix, GoldenTask, MatrixPrompt};
 use otto_core::{new_id, Error, Result};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt};
 

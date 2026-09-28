@@ -7,12 +7,12 @@
 //! `otto_server::assistant`. Lists order and page on `rowid` (insert order):
 //! ULIDs are random within one millisecond, so `id` order is not.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::{new_id, Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt};
 

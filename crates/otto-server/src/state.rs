@@ -11,12 +11,12 @@ use otto_dbviewer::DbViewerService;
 use otto_improve::ImprovementEngine;
 use otto_orchestrator::Orchestrator;
 use otto_sessions::SessionManager;
+use otto_state::DbPool;
 use otto_state::{
     ActivityRepo, AuditRepo, GitStore, IntegrationsRepo, IssuesRepo, NewAuditEntry, NewNotice,
     NewTask, NewTrail, NotificationsRepo, ReviewFindingsRepo, ReviewsRepo, SkillEvalsRepo,
     SkillReviewsRepo, WorkspacesRepo,
 };
-use otto_state::DbPool;
 use tokio::sync::broadcast;
 
 /// Composition-root context cloned into every handler. Implements the ctx

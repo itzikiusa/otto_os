@@ -17,10 +17,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::DbPool;
 use otto_core::auth::GrantsInvalidator;
 use otto_core::domain::{Capability, Feature, User, WorkspaceRole};
 use otto_core::{Error, Result};
-use crate::DbPool;
 
 /// The feature capability that answers for a **global** (workspace-less) row
 /// when a gate would otherwise demand the workspace role `min`.

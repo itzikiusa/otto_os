@@ -7,7 +7,7 @@ use otto_core::network_profiles::{
 use otto_core::{Error, Id, Result};
 use otto_ssh::{SshTunnel, SshTunnelConfig};
 use otto_state::{
-    ConnectionsRepo, GrantsRepo, ResourceAccessRepo, DbPool, UsersRepo, WorkspacesRepo,
+    ConnectionsRepo, DbPool, GrantsRepo, ResourceAccessRepo, UsersRepo, WorkspacesRepo,
 };
 use std::{
     collections::HashMap,
@@ -182,11 +182,7 @@ impl SessionNetworks {
 
 /// Execution authorization is rechecked at every launch, independent of who
 /// created the profile. The connection's shell permission covers SSH forwards.
-pub async fn authorize(
-    pool: &DbPool,
-    user: &User,
-    profile: &NetworkProfile,
-) -> Result<Connection> {
+pub async fn authorize(pool: &DbPool, user: &User, profile: &NetworkProfile) -> Result<Connection> {
     if user.disabled {
         return Err(Error::Forbidden("account disabled".into()));
     }
@@ -397,11 +393,13 @@ mod tests {
     #[tokio::test]
     async fn network_authorization_rechecks_membership_feature_and_shell_permission() {
         use otto_core::access::{AccessActor, AccessMode, AccessRule, RuleEffect, SubjectKind};
-        let pool = otto_state::DbPool::from(sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap());
+        let pool = otto_state::DbPool::from(
+            sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
         sqlx::migrate!("../otto-state/migrations")
             .run(&pool)
             .await
@@ -482,9 +480,11 @@ mod tests {
     #[tokio::test]
     async fn network_pty_exit_releases_forwards_and_marks_stopped() {
         let (profile, cfg, opener) = fixture();
-        let pool = otto_state::DbPool::from(sqlx::sqlite::SqlitePoolOptions::new()
-            .connect_lazy("sqlite::memory:")
-            .unwrap());
+        let pool = otto_state::DbPool::from(
+            sqlx::sqlite::SqlitePoolOptions::new()
+                .connect_lazy("sqlite::memory:")
+                .unwrap(),
+        );
         let runtime = SessionNetworks::new(pool);
         let (exit, rx) = tokio::sync::watch::channel(None);
         runtime.activate(
@@ -501,9 +501,11 @@ mod tests {
     #[tokio::test]
     async fn network_old_monitor_cannot_clear_replacement_and_death_keeps_error() {
         let (profile, cfg, opener) = fixture();
-        let pool = otto_state::DbPool::from(sqlx::sqlite::SqlitePoolOptions::new()
-            .connect_lazy("sqlite::memory:")
-            .unwrap());
+        let pool = otto_state::DbPool::from(
+            sqlx::sqlite::SqlitePoolOptions::new()
+                .connect_lazy("sqlite::memory:")
+                .unwrap(),
+        );
         let runtime = SessionNetworks::new(pool);
         let (old_tx, old_rx) = tokio::sync::watch::channel(None);
         runtime.activate(

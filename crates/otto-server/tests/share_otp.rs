@@ -36,7 +36,7 @@ use otto_server::feature_guard::feature_guard;
 use otto_server::routes::share::{
     extend_otp_share, mint_otp_share, resolve_verified_sender, OtpMailer,
 };
-use otto_state::{EmailSendersRepo, GrantsRepo, DbPool};
+use otto_state::{DbPool, EmailSendersRepo, GrantsRepo};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::collections::HashMap;
 use std::future::Future;

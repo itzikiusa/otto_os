@@ -1,10 +1,10 @@
 //! Owner-scoped subscription profile metadata; no secrets or arbitrary paths.
 use crate::convert::{dberr, ts};
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::provider_accounts::ProviderAccount;
 use otto_core::{new_id, Error, Id, Result};
 use sqlx::Row;
-use crate::DbPool;
 
 #[derive(Clone)]
 pub struct ProviderAccountsRepo {

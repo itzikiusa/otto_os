@@ -7,11 +7,11 @@
 //! `0023_global_connections`. Cached JSON blobs (`identity_json`,
 //! `permissions_json`) are opaque here; `otto-aws` owns their shape.
 
+use crate::DbPool;
 use chrono::{DateTime, Utc};
 use otto_core::domain::Environment;
 use otto_core::{new_id, Error, Id, Result};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json, ts};
 

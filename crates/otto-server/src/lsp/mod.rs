@@ -491,7 +491,10 @@ mod root_tests {
         assert!(root_under_any(&canon(&ws), &roots));
         assert!(root_under_any(&canon(&ws.join("sub")), &roots));
         assert!(!root_under_any(&canon(&other), &roots));
-        assert!(!root_under_any(&canon(d.path()), &roots), "a parent is not inside");
+        assert!(
+            !root_under_any(&canon(d.path()), &roots),
+            "a parent is not inside"
+        );
         // `repo-evil` shares a string prefix with `repo` but is not inside it.
         let evil = d.path().join("repo-evil");
         std::fs::create_dir_all(&evil).unwrap();

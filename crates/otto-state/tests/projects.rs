@@ -1,11 +1,11 @@
 use otto_core::{domain::SessionKind, Error};
+use otto_state::DbPool;
 use otto_state::{
     projects::{ProjectInput, ProjectsRepo},
     sessions::{NewSession, SessionsRepo},
     swarm::{NewProject, SwarmRepo},
 };
 use serde_json::json;
-use otto_state::DbPool;
 
 async fn fixture() -> DbPool {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()

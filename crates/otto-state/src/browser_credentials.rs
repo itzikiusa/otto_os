@@ -14,10 +14,10 @@
 //! does a browsed host match a stored credential's domain — for the later
 //! autofill feature (task 12).
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::{Id, Result};
 use serde::{Deserialize, Serialize};
-use crate::DbPool;
 
 use crate::convert::{dberr, dberr_unique, fmt};
 

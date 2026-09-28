@@ -5,6 +5,7 @@
 //! live-state updates, and a `fail_running` orphan sweep on boot (but ours
 //! RETURNs the rows so the daemon can also remove the loops' worktrees/sessions).
 
+use crate::DbPool;
 use chrono::{DateTime, Utc};
 use otto_core::domain::{
     GoalLoop, GoalLoopAgentCfg, GoalLoopConfig, GoalLoopDefinition, GoalLoopDetail,
@@ -13,7 +14,6 @@ use otto_core::domain::{
 };
 use otto_core::{new_id, Error, Id, Result};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 

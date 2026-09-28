@@ -12,11 +12,11 @@
 //!   * Order of appearance is meaningful (docs pages list the newest models
 //!     first), so all reads ORDER BY the implicit rowid.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt};
 

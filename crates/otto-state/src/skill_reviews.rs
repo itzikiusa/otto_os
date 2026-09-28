@@ -6,11 +6,11 @@
 //! agents never clobber each other's rows. The deterministic static report and
 //! the summarizer's aggregate ride in `static_json` / `summary_json`.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::domain::{SkillReview, SkillReviewAgent, SkillReviewSummary, SkillStaticReport};
 use otto_core::{new_id, Error, Id, Result};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 

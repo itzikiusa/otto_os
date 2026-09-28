@@ -6,7 +6,7 @@ use otto_core::access::{AccessActor, AccessPolicy, ResourceKind, ResourceRef};
 use otto_core::domain::{Capability, Feature, User};
 use otto_core::{Error, Id, Result};
 use otto_rbac::resource_access::ResourceAccess;
-use otto_state::{GrantsRepo, DbPool};
+use otto_state::{DbPool, GrantsRepo};
 
 pub fn validate_policy(policy: &AccessPolicy) -> Result<()> {
     otto_core::access::validate_policy(policy)?;

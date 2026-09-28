@@ -1,11 +1,11 @@
 //! Durable reviewed-change state machine. Every transition is compare-and-swap;
 //! claims and target locks commit before an adapter may send SQL.
+use crate::DbPool;
 use otto_core::{Error, Id, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
-use crate::DbPool;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangeTarget {

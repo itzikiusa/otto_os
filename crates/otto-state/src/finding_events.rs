@@ -3,9 +3,9 @@
 //! (fix/verify/jira/false-positive/approval/repo-rule/regression-test/…) appends
 //! a timestamped, attributed event with its concrete artifact in `detail`.
 
+use crate::DbPool;
 use chrono::Utc;
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt};
 use otto_core::finding::FindingEvent;

@@ -23,11 +23,13 @@ impl Drop for Fixture {
 async fn fixture() -> Fixture {
     let dir = std::env::temp_dir().join(format!("otto-export-test-{}", otto_core::new_id()));
     std::fs::create_dir(&dir).unwrap();
-    let pool = otto_state::DbPool::from(sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap());
+    let pool = otto_state::DbPool::from(
+        sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap(),
+    );
     sqlx::migrate!("../otto-state/migrations")
         .run(&pool)
         .await

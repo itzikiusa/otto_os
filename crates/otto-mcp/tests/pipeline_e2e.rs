@@ -12,7 +12,7 @@ use otto_core::secrets::SecretStore;
 use otto_core::{new_id, Result};
 use otto_mcp::{InvokeCtx, InvokeOutcome, McpService};
 use otto_state::{
-    McpAllowlistRepo, NewAllowlistEntry, NewPolicy, NewServerRow, SettingsRepo, DbPool,
+    DbPool, McpAllowlistRepo, NewAllowlistEntry, NewPolicy, NewServerRow, SettingsRepo,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 

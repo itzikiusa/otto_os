@@ -1293,8 +1293,8 @@ mod tests {
     use otto_core::domain::{User, WorkspaceRole};
     use otto_core::secrets::SecretStore;
     use otto_core::{Id, Result};
-    use otto_state::{IssuesRepo, NewStory, ProductRepo};
     use otto_state::DbPool;
+    use otto_state::{IssuesRepo, NewStory, ProductRepo};
     use tower::ServiceExt;
 
     use crate::service::ProductService;
@@ -1421,7 +1421,7 @@ mod tests {
 
     impl TestCtx {
         fn new(pool: impl Into<DbPool>) -> Self {
-        let pool: DbPool = pool.into();
+            let pool: DbPool = pool.into();
             let repo = ProductRepo::new(pool.clone());
             let issues = IssuesRepo::new(pool.clone());
             let secrets: Arc<dyn SecretStore> = Arc::new(NoopSecrets);

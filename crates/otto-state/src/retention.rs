@@ -24,10 +24,10 @@
 //!   on the reader pool, never under the write lock.
 //! - `enabled: false` turns the whole job off.
 
+use crate::DbPool;
 use chrono::{Duration, Utc};
 use otto_core::Result;
 use serde::{Deserialize, Serialize};
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt};
 

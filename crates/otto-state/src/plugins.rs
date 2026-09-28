@@ -4,10 +4,10 @@
 //! at boot/refresh to spawn sidecars; the reverse proxy + management API read/write
 //! here; the host API authenticates a sidecar via [`PluginsRepo::find_enabled_by_token`].
 
+use crate::DbPool;
 use chrono::Utc;
 use serde::Serialize;
 use sqlx::Row;
-use crate::DbPool;
 
 use otto_core::{Error, Result};
 

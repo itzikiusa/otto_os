@@ -1,10 +1,10 @@
 //! Issue-tracking accounts repository. Mirrors git.rs but for issue accounts.
 
+use crate::DbPool;
 use chrono::{DateTime, Utc};
 use otto_core::domain::{IssueAccount, IssueProviderKind};
 use otto_core::{new_id, Error, Id, Result};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 

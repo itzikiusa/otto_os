@@ -36,7 +36,7 @@ use otto_server::error::ApiError;
 use otto_server::feature_guard::feature_guard;
 use otto_server::routes::grants::GrantsCtx;
 use otto_server::routes::impersonate::{start, stop, ImpersonateCtx};
-use otto_state::{AuditRepo, GrantsRepo, NewAuditEntry, DbPool, UsersRepo};
+use otto_state::{AuditRepo, DbPool, GrantsRepo, NewAuditEntry, UsersRepo};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tower::ServiceExt; // for `oneshot`
 

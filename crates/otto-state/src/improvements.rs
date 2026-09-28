@@ -1,5 +1,6 @@
 //! Improvement runs + edits (the self-improvement version log).
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::domain::{
     ImprovementEdit, ImprovementEditKind, ImprovementEditStatus, ImprovementRisk, ImprovementRun,
@@ -7,7 +8,6 @@ use otto_core::domain::{
 };
 use otto_core::{new_id, Error, Id, Result};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json, ts};
 

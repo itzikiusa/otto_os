@@ -5,13 +5,13 @@
 //! this repo is pure storage. `ProofArtifact.metadata` is the `metadata_json`
 //! TEXT column; timestamps are RFC3339 strings.
 
+use crate::DbPool;
 use otto_core::proof::{
     ProofArtifact, ProofArtifactKind, ProofArtifactStatus, ProofPack, ProofStatus, WorkItemKind,
 };
 use otto_core::{new_id, Error, Result};
 use serde_json::Value;
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json};
 use chrono::Utc;

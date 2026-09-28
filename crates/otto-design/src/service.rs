@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use otto_core::event::Event;
 use otto_core::{new_id, Error, Id, Result};
-use serde_json::{json, Value};
 use otto_state::DbPool;
+use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
 use crate::blobs::{self, BlobStore};

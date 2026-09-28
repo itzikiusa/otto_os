@@ -3,8 +3,8 @@
 //! the `secret_ref` (Keychain reference, NOT the password) and `verified_at`
 //! columns. Mirrors the `pragma_table_info` shape used in `share_tokens.rs`.
 
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use otto_state::DbPool;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
 /// An in-memory pool with every migration applied (matches the harness used in
 /// `share_tokens.rs` / `otto-rbac` / `otto-server`).

@@ -1,10 +1,10 @@
 //! Roundtrip tests for `ProofRepo` + migration `0077_proof_packs.sql`.
 
 use otto_core::proof::{ProofArtifactKind, ProofArtifactStatus, ProofStatus, WorkItemKind};
+use otto_state::DbPool;
 use otto_state::ProofRepo;
 use serde_json::json;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use otto_state::DbPool;
 
 async fn mem_pool() -> DbPool {
     let opts = SqliteConnectOptions::new()
@@ -341,10 +341,38 @@ async fn badge_artifacts_match_list_artifacts_without_content() {
         .unwrap();
     let big = "x".repeat(512 * 1024);
     for (pack, ws, kind, title, status, meta) in [
-        (&a.id, "w1", ProofArtifactKind::Diff, "diff", ProofArtifactStatus::Info, json!({"risky_files":["m.sql"]})),
-        (&a.id, "w1", ProofArtifactKind::Command, "cargo test", ProofArtifactStatus::Passed, json!({})),
-        (&b.id, "w1", ProofArtifactKind::Ci, "ci", ProofArtifactStatus::Failed, json!({})),
-        (&other.id, "w2", ProofArtifactKind::Command, "npm test", ProofArtifactStatus::Failed, json!({})),
+        (
+            &a.id,
+            "w1",
+            ProofArtifactKind::Diff,
+            "diff",
+            ProofArtifactStatus::Info,
+            json!({"risky_files":["m.sql"]}),
+        ),
+        (
+            &a.id,
+            "w1",
+            ProofArtifactKind::Command,
+            "cargo test",
+            ProofArtifactStatus::Passed,
+            json!({}),
+        ),
+        (
+            &b.id,
+            "w1",
+            ProofArtifactKind::Ci,
+            "ci",
+            ProofArtifactStatus::Failed,
+            json!({}),
+        ),
+        (
+            &other.id,
+            "w2",
+            ProofArtifactKind::Command,
+            "npm test",
+            ProofArtifactStatus::Failed,
+            json!({}),
+        ),
     ] {
         repo.add_artifact(pack, ws, kind, title, Some(&big), status, &meta, "u1")
             .await
@@ -357,7 +385,10 @@ async fn badge_artifacts_match_list_artifacts_without_content() {
         let narrow = &map[pack];
         assert_eq!(narrow.len(), full.len());
         for (n, f) in narrow.iter().zip(&full) {
-            assert_eq!((&n.id, n.kind, n.status, &n.title, &n.metadata), (&f.id, f.kind, f.status, &f.title, &f.metadata));
+            assert_eq!(
+                (&n.id, n.kind, n.status, &n.title, &n.metadata),
+                (&f.id, f.kind, f.status, &f.title, &f.metadata)
+            );
             assert!(n.content_ref.is_none(), "content is not read");
             assert!(f.content_ref.is_some());
         }

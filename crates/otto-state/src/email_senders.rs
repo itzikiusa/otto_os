@@ -9,10 +9,10 @@
 //! The route layer (`PUT /api/v1/email-sender`) owns the Keychain write and the
 //! SMTP verify; this repo only persists the metadata + the ref.
 
+use crate::DbPool;
 use chrono::{DateTime, Utc};
 use otto_core::{Id, Result};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::dberr;
 

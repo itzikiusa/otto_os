@@ -2560,8 +2560,8 @@ mod tests {
     use otto_core::auth::{BoxFuture, RoleChecker};
     use otto_core::domain::{GitProviderKind, User};
     use otto_core::secrets::SecretStore;
-    use otto_state::{GitStore, NewGitAccount, NewRepo, WorkspacesRepo};
     use otto_state::DbPool;
+    use otto_state::{GitStore, NewGitAccount, NewRepo, WorkspacesRepo};
 
     use super::*;
 

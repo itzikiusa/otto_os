@@ -1,10 +1,10 @@
 //! Product story discovery run repository.
 
+use crate::DbPool;
 use chrono::{DateTime, Utc};
 use otto_core::{new_id, Error, Id, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 

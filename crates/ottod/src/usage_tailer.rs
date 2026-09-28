@@ -56,7 +56,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use otto_state::{SessionsRepo, DbPool};
+use otto_state::{DbPool, SessionsRepo};
 use otto_usage::{
     estimate_cost, parse_claude_line, parse_codex_line, parse_codex_session_meta,
     CodexCounterStore, CursorStore, SeenKeys, UsageEngine, UsageEvent, EXTERNAL_WORKSPACE,
@@ -155,12 +155,7 @@ struct Attribution {
 impl UsageTailer {
     /// Build the tailer. `data_dir` holds the persisted cursor file; `home` is
     /// the root for the `~/.claude` and `~/.codex` transcript trees.
-    pub fn new(
-        usage: Arc<UsageEngine>,
-        pool: DbPool,
-        data_dir: PathBuf,
-        home: PathBuf,
-    ) -> Self {
+    pub fn new(usage: Arc<UsageEngine>, pool: DbPool, data_dir: PathBuf, home: PathBuf) -> Self {
         let cursors = CursorStore::load(data_dir.join("usage_tailer.json"));
         let seen = SeenKeys::load(data_dir.join("usage_tailer_seen.json"), SEEN_KEYS_CAP);
         let codex_counters = CodexCounterStore::load(
@@ -857,10 +852,7 @@ fn list_claude_files(home: &Path) -> Vec<(PathBuf, u64)> {
 fn claude_session_stem(file: &Path) -> String {
     let parent = file.parent();
     if parent.and_then(|p| p.file_name()).and_then(|n| n.to_str()) == Some("subagents") {
-        if let Some(sid) = parent
-            .and_then(|p| p.parent())
-            .and_then(|p| p.file_name())
-        {
+        if let Some(sid) = parent.and_then(|p| p.parent()).and_then(|p| p.file_name()) {
             return sid.to_string_lossy().into_owned();
         }
     }

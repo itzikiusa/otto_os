@@ -130,7 +130,8 @@ fn dest_dir_allowed(canon: &Path, home: &Path) -> bool {
     };
     if let Ok(rest) = canon.strip_prefix(home) {
         let first = rest.components().next();
-        let in_library = matches!(first, Some(Component::Normal(n)) if n.eq_ignore_ascii_case("Library"));
+        let in_library =
+            matches!(first, Some(Component::Normal(n)) if n.eq_ignore_ascii_case("Library"));
         return !in_library && no_hidden(rest);
     }
     if let Ok(rest) = canon.strip_prefix("/Volumes") {
@@ -295,9 +296,11 @@ pub async fn start(
                 Ok(()) => {
                     let (part, dest, dir, name) =
                         (part.clone(), dest.clone(), dir.clone(), name.clone());
-                    tokio::task::spawn_blocking(move || place_no_overwrite(&part, &dest, &dir, &name))
-                        .await
-                        .unwrap_or_else(|e| Err(format!("could not move the file into place: {e}")))
+                    tokio::task::spawn_blocking(move || {
+                        place_no_overwrite(&part, &dest, &dir, &name)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(format!("could not move the file into place: {e}")))
                 }
                 Err(e) => Err(e),
             };
@@ -484,7 +487,10 @@ mod tests {
             "/Volumes/Backup",
             "/Volumes/Backup/s3",
         ] {
-            assert!(dest_dir_allowed(Path::new(ok), home), "{ok} should be allowed");
+            assert!(
+                dest_dir_allowed(Path::new(ok), home),
+                "{ok} should be allowed"
+            );
         }
         for bad in [
             "/",
@@ -502,7 +508,10 @@ mod tests {
             "/Volumes",
             "/Volumes/Backup/.hidden",
         ] {
-            assert!(!dest_dir_allowed(Path::new(bad), home), "{bad} should be refused");
+            assert!(
+                !dest_dir_allowed(Path::new(bad), home),
+                "{bad} should be refused"
+            );
         }
     }
 

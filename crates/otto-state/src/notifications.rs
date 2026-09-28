@@ -5,12 +5,12 @@
 //! place instead of inserting a duplicate. Settings are stored as a single
 //! JSON-encoded row (`NotificationSettings`), defaulting when unset.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::api::NotificationSettings;
 use otto_core::domain::{Notice, NoticeAction, NoticeKind, NoticeSeverity};
 use otto_core::{new_id, Error, Id, Result};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 

@@ -2,12 +2,12 @@
 //! last-cycle status (migration 0116). One row of each per cluster, keyed by
 //! `cluster_id`; both cascade with the cluster.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt};
 

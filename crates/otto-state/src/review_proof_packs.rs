@@ -3,9 +3,9 @@
 //! `feat/proof-packs` branch's generic ProofPack. The live pack is assembled on
 //! demand by the server; export persists a snapshot here (for audit/share).
 
+use crate::DbPool;
 use chrono::Utc;
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt};
 use otto_core::finding::ReviewProofPackExport;

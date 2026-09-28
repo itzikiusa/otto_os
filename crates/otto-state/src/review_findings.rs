@@ -10,11 +10,11 @@
 //! The `state` column (added by migration 0054) is the authoritative lifecycle
 //! field; the legacy `status` column from 0049 is no longer written here.
 
+use crate::DbPool;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt};
 use otto_core::finding::{Finding, FindingSeverity, FindingStatus};

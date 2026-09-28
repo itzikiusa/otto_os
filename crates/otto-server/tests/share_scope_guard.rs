@@ -36,7 +36,7 @@ use otto_core::domain::WorkspaceRole;
 use otto_core::{new_id, Id};
 use otto_rbac::AuthRepo;
 use otto_server::feature_guard::feature_guard;
-use otto_state::{GrantsRepo, DbPool};
+use otto_state::{DbPool, GrantsRepo};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::sync::Arc;
 use tower::ServiceExt; // for `oneshot`
@@ -163,11 +163,7 @@ async fn status(app: &Router, method: Method, path: &str) -> StatusCode {
 /// (the real path that drops `is_root` and builds the scope), and return the
 /// resolved `AuthContext` (the same one `auth_middleware` would insert). Asserts
 /// the principal is non-root and carries the expected scope.
-async fn root_owned_share_ctx(
-    pool: &DbPool,
-    session_id: &str,
-    role: WorkspaceRole,
-) -> AuthContext {
+async fn root_owned_share_ctx(pool: &DbPool, session_id: &str, role: WorkspaceRole) -> AuthContext {
     let repo = AuthRepo::new(pool.clone());
     let owner = seed_user(pool, &format!("root-{session_id}-{}", role.as_str()), true).await;
     let (raw, _info) = repo

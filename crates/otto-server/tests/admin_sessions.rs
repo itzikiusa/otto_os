@@ -33,7 +33,7 @@ use otto_core::domain::{Capability, Feature, SessionKind, SessionStatus, User, W
 use otto_server::feature_guard::feature_guard;
 use otto_server::routes::admin_sessions::{list_sessions, terminate, AdminSessionsCtx};
 use otto_sessions::{ProviderRegistry, SessionManager};
-use otto_state::{GrantsRepo, NewAuditEntry, NewSession, SessionsRepo, DbPool, UsersRepo};
+use otto_state::{DbPool, GrantsRepo, NewAuditEntry, NewSession, SessionsRepo, UsersRepo};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::sync::broadcast;
 use tower::ServiceExt; // for `oneshot`

@@ -6,13 +6,13 @@
 
 use std::collections::BTreeMap;
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::domain::{
     AgentTask, SessionActivitySummary, TaskStatus, TrailEvent, TrailKind, TrailLevel, TrailSource,
 };
 use otto_core::{new_id, Error, Id, Result};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 
@@ -179,22 +179,23 @@ impl ActivityRepo {
     ) -> Result<u64> {
         const CHUNK: i64 = 500;
         let keep = keep_per_session.max(0);
-        let sessions: Vec<String> = match since {
-            Some(t) => sqlx::query_scalar(
-                "SELECT DISTINCT session_id FROM agent_trail INDEXED BY idx_agent_trail_ts \
+        let sessions: Vec<String> =
+            match since {
+                Some(t) => sqlx::query_scalar(
+                    "SELECT DISTINCT session_id FROM agent_trail INDEXED BY idx_agent_trail_ts \
                  WHERE ts >= ?",
-            )
-            .bind(fmt(t))
-            .fetch_all(&self.pool)
-            .await,
-            None => sqlx::query_scalar(
-                "SELECT session_id FROM agent_trail GROUP BY session_id HAVING COUNT(*) > ?",
-            )
-            .bind(keep)
-            .fetch_all(&self.pool)
-            .await,
-        }
-        .map_err(dberr("prune trail: sessions"))?;
+                )
+                .bind(fmt(t))
+                .fetch_all(&self.pool)
+                .await,
+                None => sqlx::query_scalar(
+                    "SELECT session_id FROM agent_trail GROUP BY session_id HAVING COUNT(*) > ?",
+                )
+                .bind(keep)
+                .fetch_all(&self.pool)
+                .await,
+            }
+            .map_err(dberr("prune trail: sessions"))?;
         let mut total: u64 = 0;
         for session in sessions {
             // The newest row that must GO: everything at or below it (in the
@@ -900,11 +901,22 @@ mod tests {
         let quiet = seed_session(&pool, "ws1", "u").await;
         let base = chrono::Utc::now() - chrono::Duration::hours(1);
         for i in 0..5 {
-            trail_row(&pool, "ws1", &a, &format!("x{i}"), &fmt(base + chrono::Duration::minutes(i))).await;
+            trail_row(
+                &pool,
+                "ws1",
+                &a,
+                &format!("x{i}"),
+                &fmt(base + chrono::Duration::minutes(i)),
+            )
+            .await;
         }
         let repo = ActivityRepo::new(pool.clone());
         let all = repo.workspace_summary(&"ws1".into()).await.unwrap();
-        assert_eq!(all.len(), 1, "a session with no trail and no tasks is absent");
+        assert_eq!(
+            all.len(),
+            1,
+            "a session with no trail and no tasks is absent"
+        );
         assert_eq!(all[0].session_id, a);
         let want = ts(&fmt(base + chrono::Duration::minutes(4))).unwrap();
         assert_eq!(all[0].last_ts, Some(want));
@@ -1125,11 +1137,13 @@ mod tests {
         let count = |sid: Id| {
             let pool = pool.clone();
             async move {
-                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM agent_trail WHERE session_id = ?")
-                    .bind(sid)
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap()
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM agent_trail WHERE session_id = ?",
+                )
+                .bind(sid)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
             }
         };
         // Incremental pass: only sessions with rows since 6 h ago qualify →
@@ -1141,13 +1155,12 @@ mod tests {
         assert_eq!(count(small.clone()).await, 20);
         assert_eq!(count(stale.clone()).await, 30);
         // Exactly the newest 25 survive: ids b01175..b01199.
-        let kept: Vec<String> = sqlx::query_scalar(
-            "SELECT id FROM agent_trail WHERE session_id = ? ORDER BY id",
-        )
-        .bind(&big)
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+        let kept: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM agent_trail WHERE session_id = ? ORDER BY id")
+                .bind(&big)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
         let want: Vec<String> = (1175..1200).map(|i| format!("b{i:05}")).collect();
         assert_eq!(kept, want);
         // A full pass (startup) finds `stale` too; `small` stays whole.
@@ -1157,5 +1170,4 @@ mod tests {
         // Idempotent.
         assert_eq!(repo.prune_trail(25, None).await.unwrap(), 0);
     }
-
 }

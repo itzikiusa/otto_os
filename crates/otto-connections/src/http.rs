@@ -19,7 +19,7 @@ use otto_core::domain::{
 };
 use otto_core::{Error, Id};
 use otto_ssh::{SftpParams, SftpSession};
-use otto_state::{capability_for_role, GrantsRepo, DbPool};
+use otto_state::{capability_for_role, DbPool, GrantsRepo};
 use serde::Deserialize;
 
 use crate::conn_import::{

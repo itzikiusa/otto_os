@@ -1,11 +1,11 @@
 //! DB Explorer repository: saved queries, query history, dashboards, widgets.
 
+use crate::DbPool;
 use chrono::{DateTime, Utc};
 use otto_core::{new_id, Id, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json, ts};
 

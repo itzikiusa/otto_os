@@ -5,11 +5,11 @@
 //! available, instant at single-user scale); vectors are stored as little-endian
 //! f32 BLOBs and searched in-process by the caller's `VectorIndex`.
 
+use crate::DbPool;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
-use crate::DbPool;
 
 use otto_core::{new_id, Error, Result};
 

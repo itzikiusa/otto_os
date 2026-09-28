@@ -6,12 +6,12 @@
 //! best-effort: an insert failure must never fail the request being audited (see
 //! `ServerCtx::audit`), so errors here are logged and swallowed upstream.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::api::AuditLogQuery;
 use otto_core::domain::AuditEntry;
 use otto_core::{new_id, Error, Id, Result};
 use sqlx::{QueryBuilder, Row, Sqlite};
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 

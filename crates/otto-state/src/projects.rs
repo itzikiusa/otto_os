@@ -1,11 +1,11 @@
 //! Common workspace projects. The existing swarm_projects row is the canonical
 //! identity; nullable swarm_id attaches optional execution machinery to it.
 use crate::convert::{dberr, fmt, ts};
+use crate::DbPool;
 use chrono::{DateTime, Utc};
 use otto_core::{domain::Session, new_id, Error, Id, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
-use crate::DbPool;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {

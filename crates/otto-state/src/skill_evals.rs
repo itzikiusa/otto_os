@@ -6,13 +6,13 @@
 //! (mirrors [`crate::reviews::ReviewsRepo::set_agent_at`]) so concurrent
 //! validators never clobber each other's rows.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::domain::{
     EvalIteration, EvalScore, EvalValidationState, SkillEval, SkillEvalStatus,
 };
 use otto_core::{new_id, Error, Id, Result};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 

@@ -16,7 +16,7 @@ use otto_core::auth::{AuthUser, RoleChecker};
 use otto_core::domain::{User, WorkspaceRole};
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id};
-use otto_state::{McpServerDetail, NewAllowlistEntry, NewPolicy, NewServerRow, DbPool};
+use otto_state::{DbPool, McpServerDetail, NewAllowlistEntry, NewPolicy, NewServerRow};
 use serde::Deserialize;
 use serde_json::{json, Value};
 

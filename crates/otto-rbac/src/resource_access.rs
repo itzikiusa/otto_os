@@ -10,8 +10,8 @@ use otto_core::access::{
 };
 use otto_core::domain::User;
 use otto_core::{Error, Id, Result};
-use otto_state::ResourceAccessRepo;
 use otto_state::DbPool;
+use otto_state::ResourceAccessRepo;
 
 #[derive(Clone)]
 pub struct ResourceAccess {

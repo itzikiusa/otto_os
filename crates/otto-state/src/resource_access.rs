@@ -4,6 +4,7 @@
 //! stores an immutable snapshot and appends the security audit row in the same
 //! SQLite transaction.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::access::{
     validate_operation, validate_policy, AccessActor, AccessGroup, AccessMode, AccessPolicy,
@@ -11,7 +12,6 @@ use otto_core::access::{
 };
 use otto_core::{new_id, Error, Id, Result};
 use sqlx::{Row, Sqlite, Transaction};
-use crate::DbPool;
 
 use crate::convert::{dberr, dberr_unique, fmt, ts};
 

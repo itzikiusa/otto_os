@@ -8,12 +8,12 @@
 //!
 //! [`set_runtime`]: ScheduledTasksRepo::set_runtime
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::domain::{ScheduledTask, ScheduledTaskRun};
 use otto_core::{new_id, Result};
 use serde_json::Value;
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json};
 

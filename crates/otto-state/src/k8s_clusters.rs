@@ -8,13 +8,13 @@
 //! a 0600 file under `<data_dir>/kube/`, and EKS token refresh goes through the
 //! linked `aws_accounts` row.
 
+use crate::DbPool;
 use chrono::{DateTime, Utc};
 use otto_core::domain::Environment;
 use otto_core::{Error, Id, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json, ts};
 

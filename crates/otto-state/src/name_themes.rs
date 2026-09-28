@@ -5,11 +5,11 @@
 //!   * `name_themes`       — a user's CUSTOM ordered name lists (family names, …).
 //!   * `name_theme_active` — which theme each user picked for auto-naming.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::{new_id, Error, Id, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 

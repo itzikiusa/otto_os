@@ -9,11 +9,11 @@
 //! gate. The projection is driven by the daemon event bus + a backfill sweep
 //! (see `otto-server`); this module is purely storage + queries.
 
+use crate::DbPool;
 use chrono::{DateTime, Utc};
 use otto_core::{new_id, Error, Id, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json, ts};
 

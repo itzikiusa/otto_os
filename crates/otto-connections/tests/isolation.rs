@@ -16,7 +16,7 @@ use otto_core::auth::RoleChecker;
 use otto_core::domain::{Connection, ConnectionKind, Environment, Session, User, WorkspaceRole};
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id, Result};
-use otto_state::{ConnectionSectionsRepo, ConnectionsRepo, SettingsRepo, DbPool};
+use otto_state::{ConnectionSectionsRepo, ConnectionsRepo, DbPool, SettingsRepo};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
 // ---------------------------------------------------------------------------

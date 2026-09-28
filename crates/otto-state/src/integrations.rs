@@ -1,10 +1,10 @@
 //! Workspace integrations repository (Slack / Telegram config, no tokens).
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::domain::{Channel, Integration};
 use otto_core::{Error, Id, Result};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 

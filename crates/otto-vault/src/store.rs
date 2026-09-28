@@ -3,8 +3,8 @@
 //! copy of anything.
 
 use chrono::Utc;
-use sqlx::Row;
 use otto_state::DbPool;
+use sqlx::Row;
 
 use otto_core::{Error, Result};
 

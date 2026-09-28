@@ -463,7 +463,10 @@ async fn upsert_workflow_run(ctx: &ServerCtx, run_id: &Id, nodes_total: Option<u
         _ => return,
     };
     let node_count = nodes_total.or(run.node_count).unwrap_or(0);
-    let wf_name = run.workflow_name.clone().unwrap_or_else(|| "Workflow".into());
+    let wf_name = run
+        .workflow_name
+        .clone()
+        .unwrap_or_else(|| "Workflow".into());
     let status = WorkStatus::from_source(WorkKind::Workflow, run.status.as_str());
     let title = format!("{wf_name} run");
     let up = WorkItemUpsert {
@@ -746,7 +749,10 @@ async fn backfill_workspace(ctx: &ServerCtx, ws_id: &Id, all_stories: &[otto_sta
     if let Ok(workflows) = wf_repo.list(ws_id).await {
         for wf in &workflows {
             // Ids only: `list_runs` parsed 50 full runs to use 5 (r3-07-02).
-            if let Ok(ids) = wf_repo.recent_run_ids(&wf.id, RUNS_PER_WORKFLOW as i64).await {
+            if let Ok(ids) = wf_repo
+                .recent_run_ids(&wf.id, RUNS_PER_WORKFLOW as i64)
+                .await
+            {
                 for id in &ids {
                     upsert_workflow_run(ctx, id, None).await;
                 }
@@ -805,7 +811,10 @@ mod tests {
         let run: Id = "r1".into();
         assert!(run_status_changed(&mut live, &run, "running"));
         for _ in 0..100 {
-            assert!(!run_status_changed(&mut live, &run, "running"), "log flush skipped");
+            assert!(
+                !run_status_changed(&mut live, &run, "running"),
+                "log flush skipped"
+            );
         }
         assert!(run_status_changed(&mut live, &run, "success"));
         assert!(live.run_status.is_empty(), "settled runs are dropped");

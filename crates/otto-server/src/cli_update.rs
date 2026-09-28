@@ -426,7 +426,10 @@ fn build_body(outcomes: &[UpdateOutcome], reload: Option<ReloadTally>) -> String
             body.push_str(&format!(" ({} failed)", t.failed));
         }
         if t.deferred > 0 {
-            body.push_str(&format!("; {} busy session(s) reload when idle", t.deferred));
+            body.push_str(&format!(
+                "; {} busy session(s) reload when idle",
+                t.deferred
+            ));
         }
         body.push('.');
     }
@@ -448,7 +451,10 @@ async fn probe_version(program: &str) -> Option<String> {
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .output();
-    let out = tokio::time::timeout(VERSION_TIMEOUT, fut).await.ok()?.ok()?;
+    let out = tokio::time::timeout(VERSION_TIMEOUT, fut)
+        .await
+        .ok()?
+        .ok()?;
     if !out.status.success() {
         return None;
     }

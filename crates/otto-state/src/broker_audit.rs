@@ -1,10 +1,10 @@
 //! Audit log for broker write operations (produce, delete-topic, alter-config,
 //! offset-reset). Append-only; never mutated after insert.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::{new_id, Id, Result};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt};
 

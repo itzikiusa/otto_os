@@ -406,11 +406,13 @@ mod tests {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
-        let pool = otto_state::DbPool::from(sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(opts)
-            .await
-            .unwrap());
+        let pool = otto_state::DbPool::from(
+            sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(opts)
+                .await
+                .unwrap(),
+        );
         sqlx::migrate!("../otto-state/migrations")
             .run(&pool)
             .await

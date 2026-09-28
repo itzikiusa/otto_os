@@ -19,9 +19,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use otto_state::{
-    DiscoveredTool, McpAllowlistRepo, McpApprovalRepo, McpCallLogRepo, McpPolicyRepo,
+    DbPool, DiscoveredTool, McpAllowlistRepo, McpApprovalRepo, McpCallLogRepo, McpPolicyRepo,
     McpRegistryRepo, McpServerDetail, McpTool, McpToolsRepo, NewApproval, NewCallLog, SettingsRepo,
-    DbPool,
 };
 
 use crate::client::{McpClient, Transport};

@@ -7,12 +7,12 @@
 //! through [`RunsRepo::set_status_cas`] (compare-and-set) so a late boot reaper or
 //! a double-approve can never double-advance a run.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::run::{OttoRun, RunEvent, RunMode, RunOrigin, RunStatus, SourceKind};
 use otto_core::{new_id, Error, Id, Result};
 use serde_json::Value;
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json, ts};
 

@@ -20,7 +20,7 @@ use otto_k8s::monitor::classify::Snapshot;
 use otto_k8s::monitor::collector::run_cycle;
 use otto_k8s::monitor::probes::{MonitorConfig, Probe, ProbeFormat};
 use otto_k8s::{BoxFut, K8sCtx, MonitorSink};
-use otto_state::{K8sClustersRepo, NewK8sCluster, DbPool};
+use otto_state::{DbPool, K8sClustersRepo, NewK8sCluster};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::sync::broadcast;
 
@@ -135,15 +135,17 @@ async fn one_cycle_against_the_current_context() {
     assert!(!context.is_empty(), "no current kubeconfig context");
     let ns = std::env::var("OTTO_K8S_E2E_NS").unwrap_or_else(|_| "default".into());
 
-    let pool = otto_state::DbPool::from(SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(
-            SqliteConnectOptions::new()
-                .in_memory(true)
-                .foreign_keys(true),
-        )
-        .await
-        .unwrap());
+    let pool = otto_state::DbPool::from(
+        SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .in_memory(true)
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap(),
+    );
     sqlx::migrate!("../otto-state/migrations")
         .run(&pool)
         .await

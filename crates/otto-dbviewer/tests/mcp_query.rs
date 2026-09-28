@@ -17,7 +17,7 @@ use otto_core::{Error, Id, Result};
 use otto_dbviewer::service::{MCP_READ_ONLY_PREFIX, READ_ONLY_PREFIX};
 use otto_dbviewer::types::QueryRequest;
 use otto_dbviewer::DbViewerService;
-use otto_state::{ConnectionsRepo, DbExplorerRepo, NewConnection, DbPool};
+use otto_state::{ConnectionsRepo, DbExplorerRepo, DbPool, NewConnection};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
 struct NullSecrets;

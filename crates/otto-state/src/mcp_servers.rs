@@ -6,11 +6,11 @@
 
 use std::collections::BTreeMap;
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::domain::McpServer;
 use otto_core::{new_id, Id, Result};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, dberr_unique, fmt, json, ts};
 

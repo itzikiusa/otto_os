@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use otto_core::Result;
 use otto_state::memory::{ListFilter, SearchFilter};
-use otto_state::MemoriesRepo;
 use otto_state::DbPool;
+use otto_state::MemoriesRepo;
 
 use crate::remote::RemoteClient;
 use crate::retrieve::{rerank_score, RerankSignals};

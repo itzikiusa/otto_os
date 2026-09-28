@@ -1,8 +1,8 @@
 //! Settings key/value repository (JSON values).
 
+use crate::DbPool;
 use otto_core::Result;
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, json};
 

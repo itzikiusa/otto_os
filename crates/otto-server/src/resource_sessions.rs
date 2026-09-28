@@ -197,11 +197,13 @@ mod tests {
     use otto_core::access::{AccessActor, AccessMode};
     #[tokio::test]
     async fn resource_terminal_rechecks_page_revocation_and_legacy_execution_tier() {
-        let pool = otto_state::DbPool::from(sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap());
+        let pool = otto_state::DbPool::from(
+            sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
         sqlx::migrate!("../otto-state/migrations")
             .run(&pool)
             .await

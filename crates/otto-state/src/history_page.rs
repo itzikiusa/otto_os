@@ -1,9 +1,9 @@
 //! Bounded metadata candidates for the additive history page API.
 use crate::convert::dberr;
+use crate::DbPool;
 use crate::TranscriptIndexRow;
 use otto_core::{domain::Session, Result};
 use sqlx::Row;
-use crate::DbPool;
 
 #[derive(Clone, Debug)]
 pub struct Candidate {

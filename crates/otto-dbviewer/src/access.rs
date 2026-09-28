@@ -4,7 +4,7 @@ use otto_core::domain::{Capability, Feature};
 use otto_core::domain::{Connection, User};
 use otto_core::{Error, Id, Result};
 use otto_rbac::resource_access::ResourceAccess;
-use otto_state::{GrantsRepo, DbPool, UsersRepo, WorkspacesRepo};
+use otto_state::{DbPool, GrantsRepo, UsersRepo, WorkspacesRepo};
 use sqlparser::ast::{Expr, ObjectName, Statement, Visit, Visitor};
 use sqlparser::dialect::{MySqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;

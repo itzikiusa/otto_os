@@ -83,7 +83,13 @@ pub async fn code_search(
             max_bytes: MAX_TOTAL_BYTES,
             deadline: Instant::now() + SEARCH_BUDGET,
         };
-        Ok(search_tree(&root, &search_root, &needle_lower, &limits, &cancel))
+        Ok(search_tree(
+            &root,
+            &search_root,
+            &needle_lower,
+            &limits,
+            &cancel,
+        ))
     })
     .await
     .map_err(ApiError)?;
@@ -181,7 +187,10 @@ fn search_tree(
             break;
         }
         if let Some(why) = stop(walked, bytes) {
-            return SearchOutcome { matches, stopped: Some(why) };
+            return SearchOutcome {
+                matches,
+                stopped: Some(why),
+            };
         }
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
@@ -192,7 +201,10 @@ fn search_tree(
                 break;
             }
             if let Some(why) = stop(walked, bytes) {
-                return SearchOutcome { matches, stopped: Some(why) };
+                return SearchOutcome {
+                    matches,
+                    stopped: Some(why),
+                };
             }
             let p = entry.path();
             let Ok(ft) = entry.file_type() else { continue };
@@ -247,7 +259,10 @@ fn search_tree(
             }
         }
     }
-    SearchOutcome { matches, stopped: None }
+    SearchOutcome {
+        matches,
+        stopped: None,
+    }
 }
 
 #[derive(Deserialize)]
@@ -423,7 +438,11 @@ mod search_tests {
         let root = dir.path();
         std::fs::create_dir_all(root.join("src/deep")).unwrap();
         std::fs::create_dir_all(root.join("node_modules/x")).unwrap();
-        std::fs::write(root.join("src/a.rs"), "fn Alpha() {}\nlet beta = 1;\nALPHA again\n").unwrap();
+        std::fs::write(
+            root.join("src/a.rs"),
+            "fn Alpha() {}\nlet beta = 1;\nALPHA again\n",
+        )
+        .unwrap();
         std::fs::write(root.join("src/deep/b.rs"), "nothing here\nalpha\r\n").unwrap();
         std::fs::write(root.join("node_modules/x/c.js"), "alpha in a skipped dir").unwrap();
         std::fs::write(root.join("bin.dat"), b"alpha\0binary").unwrap();
@@ -467,15 +486,24 @@ mod search_tests {
         assert_eq!(out.stopped, Some("cancelled"));
         assert!(out.matches.is_empty());
         // Byte budget.
-        let tight = SearchLimits { max_bytes: 1, ..limits(100) };
+        let tight = SearchLimits {
+            max_bytes: 1,
+            ..limits(100)
+        };
         let out = search_tree(&root, &root, "alpha", &tight, &AtomicBool::new(false));
         assert_eq!(out.stopped, Some("byte_budget"));
         // Time budget.
-        let late = SearchLimits { deadline: Instant::now(), ..limits(100) };
+        let late = SearchLimits {
+            deadline: Instant::now(),
+            ..limits(100)
+        };
         let out = search_tree(&root, &root, "alpha", &late, &AtomicBool::new(false));
         assert_eq!(out.stopped, Some("time_budget"));
         // Walk limit.
-        let short = SearchLimits { max_walk: 1, ..limits(100) };
+        let short = SearchLimits {
+            max_walk: 1,
+            ..limits(100)
+        };
         let out = search_tree(&root, &root, "alpha", &short, &AtomicBool::new(false));
         assert_eq!(out.stopped, Some("walk_limit"));
         // `max` matches is a normal finish, not a budget stop.
@@ -490,7 +518,10 @@ mod search_tests {
         let root = dir.path().to_str().unwrap();
         assert!(confine(root, Some("../etc")).is_err());
         assert!(confine(root, Some("/etc")).is_err());
-        assert!(matches!(confine(root, Some("nope")), Err(Error::NotFound(_))));
+        assert!(matches!(
+            confine(root, Some("nope")),
+            Err(Error::NotFound(_))
+        ));
         let (r, s) = confine(root, Some("src")).unwrap();
         assert!(s.starts_with(&r) && s.ends_with("src"));
     }

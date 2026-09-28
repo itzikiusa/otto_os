@@ -3,9 +3,9 @@
 //! enabled rules for a workspace into `WorkspaceContextConfig.repo_rules_md`,
 //! which the Provisioner injects into future agent sessions' instruction files.
 
+use crate::DbPool;
 use chrono::Utc;
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt};
 use otto_core::finding::RepoRule;

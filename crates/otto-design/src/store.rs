@@ -7,9 +7,9 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use otto_core::{new_id, Error, Id, Result};
+use otto_state::DbPool;
 use serde_json::Value;
 use sqlx::Row;
-use otto_state::DbPool;
 
 use crate::graph::Adjacency;
 use crate::retention::VersionInfo;
@@ -1831,12 +1831,11 @@ impl Store {
     ) {
         let put = async {
             let mut tx = self.pool.begin().await?;
-            let rid: Option<i64> = sqlx::query_scalar(
-                "SELECT rid FROM design_search_fts_ids WHERE artifact_id = ?",
-            )
-            .bind(artifact_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+            let rid: Option<i64> =
+                sqlx::query_scalar("SELECT rid FROM design_search_fts_ids WHERE artifact_id = ?")
+                    .bind(artifact_id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
             let mut done = false;
             if let Some(rid) = rid {
                 done = sqlx::query(
@@ -1931,12 +1930,11 @@ impl Store {
     pub async fn fts_remove(&self, artifact_id: &str) {
         let del = async {
             let mut tx = self.pool.begin().await?;
-            let rid: Option<i64> = sqlx::query_scalar(
-                "SELECT rid FROM design_search_fts_ids WHERE artifact_id = ?",
-            )
-            .bind(artifact_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+            let rid: Option<i64> =
+                sqlx::query_scalar("SELECT rid FROM design_search_fts_ids WHERE artifact_id = ?")
+                    .bind(artifact_id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
             if let Some(rid) = rid {
                 sqlx::query("DELETE FROM design_search_fts WHERE rowid = ? AND artifact_id = ?")
                     .bind(rid)
@@ -2235,10 +2233,12 @@ mod tests {
     }
 
     async fn fts_rows(s: &Store) -> Vec<(String, String)> {
-        sqlx::query_as("SELECT artifact_id, body FROM design_search_fts ORDER BY artifact_id, rowid")
-            .fetch_all(&s.pool)
-            .await
-            .unwrap()
+        sqlx::query_as(
+            "SELECT artifact_id, body FROM design_search_fts ORDER BY artifact_id, rowid",
+        )
+        .fetch_all(&s.pool)
+        .await
+        .unwrap()
     }
 
     /// r3-01-04 (as e261ac77 for vault/memory): a re-index replaces the
@@ -2261,11 +2261,12 @@ mod tests {
         s.fts_remove("A").await;
         assert_eq!(fts_rows(&s).await, vec![("B".into(), "other".into())]);
         assert_eq!(s.fts_body("A").await, None);
-        let mapped: Vec<String> =
-            sqlx::query_scalar("SELECT artifact_id FROM design_search_fts_ids ORDER BY artifact_id")
-                .fetch_all(&s.pool)
-                .await
-                .unwrap();
+        let mapped: Vec<String> = sqlx::query_scalar(
+            "SELECT artifact_id FROM design_search_fts_ids ORDER BY artifact_id",
+        )
+        .fetch_all(&s.pool)
+        .await
+        .unwrap();
         assert_eq!(mapped, vec!["B".to_string()]);
         let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
             "EXPLAIN QUERY PLAN SELECT rid FROM design_search_fts_ids WHERE artifact_id = 'B'",
@@ -2274,7 +2275,8 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            plan.iter().any(|(.., d)| d.contains("INDEX") || d.contains("PRIMARY KEY")),
+            plan.iter()
+                .any(|(.., d)| d.contains("INDEX") || d.contains("PRIMARY KEY")),
             "indexed lookup, got {plan:?}"
         );
         // Still searchable after in-place updates.
@@ -2322,10 +2324,11 @@ mod tests {
         let s = store().await;
         assert!(s.ensure_fts().await);
         s.fts_index("B", "", "", "bee", "", "").await;
-        let b_rid: i64 = sqlx::query_scalar("SELECT rid FROM design_search_fts_ids WHERE artifact_id = 'B'")
-            .fetch_one(&s.pool)
-            .await
-            .unwrap();
+        let b_rid: i64 =
+            sqlx::query_scalar("SELECT rid FROM design_search_fts_ids WHERE artifact_id = 'B'")
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
         sqlx::query("INSERT INTO design_search_fts_ids (artifact_id, rid) VALUES ('X', ?)")
             .bind(b_rid)
             .execute(&s.pool)
@@ -2347,23 +2350,34 @@ mod tests {
         assert!(s.ensure_fts().await);
         let body = "lorem ipsum dolor sit amet ".repeat(40);
         for i in 0..10_000 {
-            s.fts_index(&format!("a{i}"), "title", "tag", &body, "", "").await;
+            s.fts_index(&format!("a{i}"), "title", "tag", &body, "", "")
+                .await;
         }
         let n = 200;
         let t = std::time::Instant::now();
         for i in 0..n {
-            s.fts_index(&format!("a{}", i * 37), "title2", "tag", &body, "", "").await;
+            s.fts_index(&format!("a{}", i * 37), "title2", "tag", &body, "", "")
+                .await;
             let _ = s.fts_body(&format!("a{}", i * 41)).await;
         }
         let mapped = t.elapsed() / n;
         let t = std::time::Instant::now();
         for i in 0..n {
             let id = format!("a{}", i * 37);
-            sqlx::query("DELETE FROM design_search_fts WHERE artifact_id = ?").bind(&id).execute(&s.pool).await.unwrap();
+            sqlx::query("DELETE FROM design_search_fts WHERE artifact_id = ?")
+                .bind(&id)
+                .execute(&s.pool)
+                .await
+                .unwrap();
             sqlx::query("INSERT INTO design_search_fts (artifact_id, title, tags, body, story, project) VALUES (?, 't', '', ?, '', '')")
                 .bind(&id).bind(&body).execute(&s.pool).await.unwrap();
-            let _: Option<String> = sqlx::query_scalar("SELECT body FROM design_search_fts WHERE artifact_id = ? LIMIT 1")
-                .bind(format!("a{}", i * 41)).fetch_optional(&s.pool).await.unwrap();
+            let _: Option<String> = sqlx::query_scalar(
+                "SELECT body FROM design_search_fts WHERE artifact_id = ? LIMIT 1",
+            )
+            .bind(format!("a{}", i * 41))
+            .fetch_optional(&s.pool)
+            .await
+            .unwrap();
         }
         let scan = t.elapsed() / n;
         println!("design FTS replace+body at 10k: map {mapped:?} vs scan {scan:?}");

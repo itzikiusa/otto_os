@@ -2600,11 +2600,21 @@ mod tests {
         }
         let marker = logs.iter().find_map(|l| elided_count(l)).unwrap();
         let visible = logs.iter().filter(|l| elided_count(l).is_none()).count();
-        assert_eq!(marker + visible, 1500, "every line is either shown or counted");
+        assert_eq!(
+            marker + visible,
+            1500,
+            "every line is either shown or counted"
+        );
         assert_eq!(logs.last().unwrap(), "✓ iteration 1499");
         // Phase lines still go first when there are any.
         let mut mixed: Vec<String> = (0..300)
-            .map(|i| if i % 3 == 0 { format!("✓ {i}") } else { format!("⏳ {i}") })
+            .map(|i| {
+                if i % 3 == 0 {
+                    format!("✓ {i}")
+                } else {
+                    format!("⏳ {i}")
+                }
+            })
             .collect();
         cap_node_logs(&mut mixed, 150);
         assert_eq!(mixed.len(), 150);
@@ -2620,12 +2630,22 @@ mod tests {
     #[test]
     fn cap_is_linear() {
         let mut logs: Vec<String> = (0..200_000)
-            .map(|i| if i % 2 == 0 { format!("⏳ {i}") } else { format!("✓ {i}") })
+            .map(|i| {
+                if i % 2 == 0 {
+                    format!("⏳ {i}")
+                } else {
+                    format!("✓ {i}")
+                }
+            })
             .collect();
         let t = std::time::Instant::now();
         cap_node_logs(&mut logs, 200);
         assert_eq!(logs.len(), 200);
-        assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            t.elapsed()
+        );
     }
 
     #[test]

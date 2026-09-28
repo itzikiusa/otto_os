@@ -28,9 +28,9 @@ use otto_rbac::RbacRoleChecker;
 use otto_server::ServerCtx;
 use otto_sessions::{ProviderRegistry, SessionManager};
 use otto_state::{
-    CanvasRepo, ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, GitStore,
+    CanvasRepo, ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, DbPool, GitStore,
     IntegrationsRepo, IssuesRepo, NewScene, NewSession, ProductRepo, ReviewsRepo, SessionsRepo,
-    SkillEvalsRepo, DbPool, SwarmRepo, WorkspacesRepo,
+    SkillEvalsRepo, SwarmRepo, WorkspacesRepo,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::sync::broadcast;

@@ -1,11 +1,11 @@
 //! Lightweight workflow projections. Recovery JSON is never rewritten by repair.
 use crate::convert::dberr;
+use crate::DbPool;
 use otto_core::workflows::{NodeRunState, WorkflowCheckpoint};
 use otto_core::{Error, Id, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqliteConnection};
-use crate::DbPool;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
@@ -505,7 +505,10 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO run_writes VALUES (0)").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO run_writes VALUES (0)")
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query(
             "CREATE TRIGGER count_run_writes AFTER UPDATE ON workflow_runs BEGIN \
              UPDATE run_writes SET n = n + 1; END",
@@ -539,9 +542,15 @@ mod tests {
                 .unwrap();
         assert_eq!(stored, Some(nodes_projection(&nodes).unwrap()));
         // The terminal write path is a single statement too.
-        repo.update_run(&id, otto_core::workflows::RunStatus::Success, &nodes, None, true)
-            .await
-            .unwrap();
+        repo.update_run(
+            &id,
+            otto_core::workflows::RunStatus::Success,
+            &nodes,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
         assert_eq!(writes().await, 2);
         // A raw restore-style write (rev untouched) is still invalidated.
         sqlx::query("UPDATE workflow_runs SET nodes_json='[]' WHERE id=?")
@@ -573,9 +582,15 @@ mod tests {
         assert_eq!(head.error, full.error);
         assert_eq!(head.node_count, Some(full.nodes.len() as u32));
         assert_eq!(head.workflow_name.as_deref(), Some("test"));
-        assert_eq!(repo.run_head(&id, false).await.unwrap().unwrap().node_count, None);
+        assert_eq!(
+            repo.run_head(&id, false).await.unwrap().unwrap().node_count,
+            None
+        );
         assert!(repo.run_head(&"nope".into(), true).await.unwrap().is_none());
-        assert_eq!(repo.recent_run_ids(&full.workflow_id, 5).await.unwrap(), vec![id]);
+        assert_eq!(
+            repo.recent_run_ids(&full.workflow_id, 5).await.unwrap(),
+            vec![id]
+        );
     }
     #[tokio::test]
     async fn large_checkpoint_bodies_are_absent_from_progress_and_unchanged_poll() {

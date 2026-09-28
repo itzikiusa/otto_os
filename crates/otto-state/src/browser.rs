@@ -4,10 +4,10 @@
 //! made it being closed — it reattaches to any tab that later opens the same
 //! URL. `tab_id` is kept as a best-effort origin hint only.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::{new_id, Id, Result};
 use serde::{Deserialize, Serialize};
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt};
 

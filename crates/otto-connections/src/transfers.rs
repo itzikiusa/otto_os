@@ -525,16 +525,18 @@ for line in sys.stdin:
     elif cmd == 'pwd': print('Remote working directory: /fixture')
 "#).unwrap();
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let pool = otto_state::DbPool::from(sqlx::sqlite::SqlitePoolOptions::new()
-                .max_connections(1)
-                .connect_with(
-                    sqlx::sqlite::SqliteConnectOptions::new()
-                        .filename(root.join("fixture.db"))
-                        .create_if_missing(true)
-                        .foreign_keys(true),
-                )
-                .await
-                .unwrap());
+            let pool = otto_state::DbPool::from(
+                sqlx::sqlite::SqlitePoolOptions::new()
+                    .max_connections(1)
+                    .connect_with(
+                        sqlx::sqlite::SqliteConnectOptions::new()
+                            .filename(root.join("fixture.db"))
+                            .create_if_missing(true)
+                            .foreign_keys(true),
+                    )
+                    .await
+                    .unwrap(),
+            );
             sqlx::migrate!("../otto-state/migrations")
                 .run(&pool)
                 .await
