@@ -163,17 +163,22 @@ fn transcript_fold_of_a_20mb_file_never_blocks_a_worker() {
 
 #[test]
 fn events_socket_serialization_of_big_frames_stays_under_budget() {
-    let (lag_items, lag) = max_lag_while(async {
+    // Built before the ticker starts: the gate measures the fan-out
+    // serialization path, not this test's own 12.8 MB of payload copying.
+    let events: Vec<Event> = (0..200)
+        .map(|i| Event::Notice {
+            level: "info".into(),
+            title: format!("t{i}"),
+            body: "y".repeat(64 * 1024),
+        })
+        .collect();
+    let (lag_items, lag) = max_lag_while(async move {
         let (bus, _keep) = broadcast::channel::<Event>(1024);
         let mut rx = otto_server::ws_fanout::subscribe(&bus);
-        let body = "y".repeat(64 * 1024);
-        for i in 0..200 {
-            bus.send(Event::Notice {
-                level: "info".into(),
-                title: format!("t{i}"),
-                body: body.clone(),
-            })
-            .unwrap();
+        for ev in events {
+            bus.send(ev).unwrap();
+            // Producers emit one event at a time and yield in between.
+            tokio::task::yield_now().await;
         }
         let mut bytes = 0usize;
         for _ in 0..200 {
