@@ -1749,14 +1749,59 @@ impl Store {
     /// search falls back to LIKE. Idempotent. Created at runtime (not in the
     /// migration) so a build without FTS5 degrades instead of failing boot.
     pub async fn ensure_fts(&self) -> bool {
-        sqlx::query(
+        let created = sqlx::query(
             "CREATE VIRTUAL TABLE IF NOT EXISTS design_search_fts USING fts5(\
              artifact_id UNINDEXED, title, tags, body, story, project, \
              tokenize='porter unicode61')",
         )
         .execute(&self.pool)
         .await
-        .is_ok()
+        .is_ok();
+        if created {
+            // Without the map, writes take the (correct, slow) scan path.
+            if let Err(e) = self.ensure_fts_map().await {
+                tracing::warn!("design: FTS rowid map unavailable, index writes scan: {e}");
+            }
+        }
+        created
+    }
+
+    /// The `artifact_id → FTS rowid` map every index write goes through (perf
+    /// r3-01-04, the vault/memory fix e261ac77 applied here): `artifact_id` is
+    /// an UNINDEXED FTS column, so `… WHERE artifact_id = ?` scanned the whole
+    /// index on every re-index, metadata edit (`fts_body`) and delete — inside
+    /// the write, holding the writer. Derived data, created at runtime next to
+    /// the index. An index built before the map gets it in one scan, keeping
+    /// the newest row per artifact and dropping duplicates.
+    async fn ensure_fts_map(&self) -> std::result::Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+             WHERE name = 'design_search_fts_ids' AND type = 'table')",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if !exists {
+            sqlx::query(
+                "CREATE TABLE design_search_fts_ids \
+                 (artifact_id TEXT PRIMARY KEY, rid INTEGER NOT NULL)",
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "INSERT OR REPLACE INTO design_search_fts_ids (artifact_id, rid) \
+                 SELECT artifact_id, rowid FROM design_search_fts ORDER BY rowid",
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "DELETE FROM design_search_fts \
+                 WHERE rowid NOT IN (SELECT rid FROM design_search_fts_ids)",
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await
     }
 
     async fn has_fts(&self) -> bool {
@@ -1770,6 +1815,11 @@ impl Store {
     }
 
     /// (Re)index one artifact. Best-effort: a missing FTS table is a no-op.
+    ///
+    /// An UPDATE by rowid through the map when indexed, else INSERT + map row,
+    /// in one transaction. The `artifact_id = ?` next to `rowid = ?` is a
+    /// guard, not a scan (the row is fetched by rowid first): a map row that
+    /// outlived its index can never overwrite another artifact's row.
     pub async fn fts_index(
         &self,
         artifact_id: &str,
@@ -1779,39 +1829,134 @@ impl Store {
         story: &str,
         project: &str,
     ) {
-        self.fts_remove(artifact_id).await;
-        let _ = sqlx::query(
-            "INSERT INTO design_search_fts (artifact_id, title, tags, body, story, project)
-             VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(artifact_id)
-        .bind(title)
-        .bind(tags)
-        .bind(body)
-        .bind(story)
-        .bind(project)
-        .execute(&self.pool)
-        .await;
+        let put = async {
+            let mut tx = self.pool.begin().await?;
+            let rid: Option<i64> = sqlx::query_scalar(
+                "SELECT rid FROM design_search_fts_ids WHERE artifact_id = ?",
+            )
+            .bind(artifact_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let mut done = false;
+            if let Some(rid) = rid {
+                done = sqlx::query(
+                    "UPDATE design_search_fts \
+                     SET title = ?, tags = ?, body = ?, story = ?, project = ? \
+                     WHERE rowid = ? AND artifact_id = ?",
+                )
+                .bind(title)
+                .bind(tags)
+                .bind(body)
+                .bind(story)
+                .bind(project)
+                .bind(rid)
+                .bind(artifact_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                    > 0;
+            }
+            if !done {
+                let ins = sqlx::query(
+                    "INSERT INTO design_search_fts (artifact_id, title, tags, body, story, project)
+                     VALUES (?, ?, ?, ?, ?, ?)",
+                )
+                .bind(artifact_id)
+                .bind(title)
+                .bind(tags)
+                .bind(body)
+                .bind(story)
+                .bind(project)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    "INSERT OR REPLACE INTO design_search_fts_ids (artifact_id, rid) VALUES (?, ?)",
+                )
+                .bind(artifact_id)
+                .bind(ins.last_insert_rowid())
+                .execute(&mut *tx)
+                .await?;
+            }
+            tx.commit().await
+        };
+        let res: std::result::Result<(), sqlx::Error> = put.await;
+        if res.is_err() && self.has_fts().await {
+            // No map on this DB (it failed to build): the old scan path.
+            let _ = sqlx::query("DELETE FROM design_search_fts WHERE artifact_id = ?")
+                .bind(artifact_id)
+                .execute(&self.pool)
+                .await;
+            let _ = sqlx::query(
+                "INSERT INTO design_search_fts (artifact_id, title, tags, body, story, project)
+                 VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(artifact_id)
+            .bind(title)
+            .bind(tags)
+            .bind(body)
+            .bind(story)
+            .bind(project)
+            .execute(&self.pool)
+            .await;
+        }
     }
 
     /// The body text last indexed for an artifact (`None`: not indexed, or no
     /// FTS5). Lets a metadata-only change re-index without re-extracting.
+    /// A map lookup + a rowid fetch (the scan only when the map is missing).
     pub async fn fts_body(&self, artifact_id: &str) -> Option<String> {
-        sqlx::query_scalar::<_, String>(
-            "SELECT body FROM design_search_fts WHERE artifact_id = ? LIMIT 1",
+        let mapped = sqlx::query_scalar::<_, String>(
+            "SELECT f.body FROM design_search_fts_ids m \
+             JOIN design_search_fts f ON f.rowid = m.rid \
+             WHERE m.artifact_id = ? AND f.artifact_id = m.artifact_id",
         )
         .bind(artifact_id)
         .fetch_optional(&self.pool)
-        .await
-        .ok()
-        .flatten()
+        .await;
+        match mapped {
+            Ok(body) => body,
+            Err(_) => sqlx::query_scalar::<_, String>(
+                "SELECT body FROM design_search_fts WHERE artifact_id = ? LIMIT 1",
+            )
+            .bind(artifact_id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten(),
+        }
     }
 
+    /// Remove an artifact from the index (by rowid through the map; the old
+    /// scan only when the map was never built on this DB).
     pub async fn fts_remove(&self, artifact_id: &str) {
-        let _ = sqlx::query("DELETE FROM design_search_fts WHERE artifact_id = ?")
+        let del = async {
+            let mut tx = self.pool.begin().await?;
+            let rid: Option<i64> = sqlx::query_scalar(
+                "SELECT rid FROM design_search_fts_ids WHERE artifact_id = ?",
+            )
             .bind(artifact_id)
-            .execute(&self.pool)
-            .await;
+            .fetch_optional(&mut *tx)
+            .await?;
+            if let Some(rid) = rid {
+                sqlx::query("DELETE FROM design_search_fts WHERE rowid = ? AND artifact_id = ?")
+                    .bind(rid)
+                    .bind(artifact_id)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("DELETE FROM design_search_fts_ids WHERE artifact_id = ?")
+                    .bind(artifact_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            tx.commit().await
+        };
+        let res: std::result::Result<(), sqlx::Error> = del.await;
+        if res.is_err() {
+            let _ = sqlx::query("DELETE FROM design_search_fts WHERE artifact_id = ?")
+                .bind(artifact_id)
+                .execute(&self.pool)
+                .await;
+        }
     }
 
     /// Search: FTS5 (bm25-ranked, snippets) when available, else a LIKE scan
@@ -2087,6 +2232,141 @@ mod tests {
         s.delete_artifact("C").await.unwrap();
         let back = s.links_out("B").await.unwrap();
         assert!(back[0].broken, "incoming link flagged broken, not deleted");
+    }
+
+    async fn fts_rows(s: &Store) -> Vec<(String, String)> {
+        sqlx::query_as("SELECT artifact_id, body FROM design_search_fts ORDER BY artifact_id, rowid")
+            .fetch_all(&s.pool)
+            .await
+            .unwrap()
+    }
+
+    /// r3-01-04 (as e261ac77 for vault/memory): a re-index replaces the
+    /// artifact's FTS row in place through the indexed `artifact_id → rowid`
+    /// map, `fts_body` reads through it, and removal deletes by rowid.
+    #[tokio::test]
+    async fn fts_writes_go_through_the_rowid_map() {
+        let s = store().await;
+        assert!(s.ensure_fts().await);
+        s.fts_index("A", "T", "", "first", "", "").await;
+        s.fts_index("B", "T", "", "other", "", "").await;
+        s.fts_index("A", "T", "", "second", "", "").await;
+        assert_eq!(
+            fts_rows(&s).await,
+            vec![("A".into(), "second".into()), ("B".into(), "other".into())],
+            "one row per artifact, replaced in place"
+        );
+        assert_eq!(s.fts_body("A").await.as_deref(), Some("second"));
+        assert_eq!(s.fts_body("nope").await, None);
+        s.fts_remove("A").await;
+        assert_eq!(fts_rows(&s).await, vec![("B".into(), "other".into())]);
+        assert_eq!(s.fts_body("A").await, None);
+        let mapped: Vec<String> =
+            sqlx::query_scalar("SELECT artifact_id FROM design_search_fts_ids ORDER BY artifact_id")
+                .fetch_all(&s.pool)
+                .await
+                .unwrap();
+        assert_eq!(mapped, vec!["B".to_string()]);
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN SELECT rid FROM design_search_fts_ids WHERE artifact_id = 'B'",
+        )
+        .fetch_all(&s.pool)
+        .await
+        .unwrap();
+        assert!(
+            plan.iter().any(|(.., d)| d.contains("INDEX") || d.contains("PRIMARY KEY")),
+            "indexed lookup, got {plan:?}"
+        );
+        // Still searchable after in-place updates.
+        let f = ArtifactFilter::default();
+        s.insert_artifact(&art("B", "w1")).await.unwrap();
+        assert_eq!(s.search("other", &f).await.unwrap().len(), 1);
+    }
+
+    /// An index built before the map (older daemon): `ensure_fts` builds the
+    /// map once, keeping the newest row per artifact and dropping duplicates.
+    #[tokio::test]
+    async fn legacy_design_index_gets_its_map_built_and_deduplicated() {
+        let s = store().await;
+        sqlx::query(
+            "CREATE VIRTUAL TABLE design_search_fts USING fts5(\
+             artifact_id UNINDEXED, title, tags, body, story, project, \
+             tokenize='porter unicode61')",
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        for (id, body) in [("A", "old"), ("B", "b"), ("A", "new")] {
+            sqlx::query("INSERT INTO design_search_fts (artifact_id, title, tags, body, story, project) VALUES (?, '', '', ?, '', '')")
+                .bind(id)
+                .bind(body)
+                .execute(&s.pool)
+                .await
+                .unwrap();
+        }
+        assert!(s.ensure_fts().await);
+        assert_eq!(
+            fts_rows(&s).await,
+            vec![("A".into(), "new".into()), ("B".into(), "b".into())]
+        );
+        assert!(s.ensure_fts().await, "idempotent");
+        s.fts_index("A", "", "", "newest", "", "").await;
+        assert_eq!(s.fts_body("A").await.as_deref(), Some("newest"));
+        assert_eq!(fts_rows(&s).await.len(), 2);
+    }
+
+    /// A map row that outlived its index row (e.g. the FTS table was rebuilt)
+    /// must never overwrite or delete ANOTHER artifact's row.
+    #[tokio::test]
+    async fn stale_map_row_never_touches_another_artifact() {
+        let s = store().await;
+        assert!(s.ensure_fts().await);
+        s.fts_index("B", "", "", "bee", "", "").await;
+        let b_rid: i64 = sqlx::query_scalar("SELECT rid FROM design_search_fts_ids WHERE artifact_id = 'B'")
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO design_search_fts_ids (artifact_id, rid) VALUES ('X', ?)")
+            .bind(b_rid)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        assert_eq!(s.fts_body("X").await, None);
+        s.fts_index("X", "", "", "ex", "", "").await;
+        s.fts_remove("X").await;
+        assert_eq!(fts_rows(&s).await, vec![("B".into(), "bee".into())]);
+        assert_eq!(s.fts_body("B").await.as_deref(), Some("bee"));
+    }
+
+    /// Replace cost at 10k indexed artifacts, map vs the old scan. Numbers for
+    /// the perf report: `cargo test -p otto-design --lib fts_replace_bench -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore]
+    async fn fts_replace_bench() {
+        let s = store().await;
+        assert!(s.ensure_fts().await);
+        let body = "lorem ipsum dolor sit amet ".repeat(40);
+        for i in 0..10_000 {
+            s.fts_index(&format!("a{i}"), "title", "tag", &body, "", "").await;
+        }
+        let n = 200;
+        let t = std::time::Instant::now();
+        for i in 0..n {
+            s.fts_index(&format!("a{}", i * 37), "title2", "tag", &body, "", "").await;
+            let _ = s.fts_body(&format!("a{}", i * 41)).await;
+        }
+        let mapped = t.elapsed() / n;
+        let t = std::time::Instant::now();
+        for i in 0..n {
+            let id = format!("a{}", i * 37);
+            sqlx::query("DELETE FROM design_search_fts WHERE artifact_id = ?").bind(&id).execute(&s.pool).await.unwrap();
+            sqlx::query("INSERT INTO design_search_fts (artifact_id, title, tags, body, story, project) VALUES (?, 't', '', ?, '', '')")
+                .bind(&id).bind(&body).execute(&s.pool).await.unwrap();
+            let _: Option<String> = sqlx::query_scalar("SELECT body FROM design_search_fts WHERE artifact_id = ? LIMIT 1")
+                .bind(format!("a{}", i * 41)).fetch_optional(&s.pool).await.unwrap();
+        }
+        let scan = t.elapsed() / n;
+        println!("design FTS replace+body at 10k: map {mapped:?} vs scan {scan:?}");
     }
 
     #[tokio::test]
