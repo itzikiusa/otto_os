@@ -232,6 +232,31 @@ pub struct PtyHandle {
     child_pid: Option<u32>,
 }
 
+/// Emulator state copied under the parser lock, to be formatted AFTER the
+/// lock is released (r3-06-02). Formatting a snapshot walks every retained
+/// cell and emits escape codes; doing that under the lock stalled the PTY
+/// reader thread — i.e. that session's live output — for the whole walk, and
+/// callers did it on async workers. The copy is a flat memcpy of the grid
+/// (32-byte cells), a fraction of the formatting cost.
+pub struct ScreenCapture {
+    screen: vt100::Screen,
+}
+
+impl ScreenCapture {
+    /// Emulator grid at capture time as `(cols, rows)`.
+    pub fn size(&self) -> (u16, u16) {
+        let (rows, cols) = self.screen.size();
+        (cols, rows)
+    }
+
+    /// The snapshot bytes [`PtyHandle::snapshot_with_history`] would return
+    /// for this state. CPU-heavy for deep histories: call it off the async
+    /// workers (`spawn_blocking`).
+    pub fn format(&self, lines: usize) -> Vec<u8> {
+        PtyHandle::format_snapshot(&self.screen, lines)
+    }
+}
+
 /// A coherent replay followed by only the output produced after that replay.
 pub struct OutputSnapshot {
     pub data: Vec<u8>,
@@ -500,12 +525,26 @@ impl PtyHandle {
     /// TIOCSWINSZ — so clients can re-push their grid unconditionally on
     /// focus/reconnect without triggering a TUI repaint (codex re-emits its
     /// transcript on every SIGWINCH; each spurious one pollutes scrollback).
+    ///
+    /// A real resize REFLOWS the emulator's whole retained history (up to
+    /// [`EMULATOR_SCROLLBACK_LINES`] rows) under the parser lock — it must be
+    /// atomic with the reader thread's `process`, or output parsed at the old
+    /// width would land in a half-reflowed grid. That reflow is synchronous
+    /// CPU work, so on a multi-threaded tokio runtime it runs inside
+    /// `block_in_place`: the calling worker hands its other tasks to the pool
+    /// instead of stalling them (r3-06-02).
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         let mut parser = lock_unpoisoned(&self.parser);
         if parser.screen().size() == (rows, cols) {
             return Ok(());
         }
-        parser.screen_mut().set_size(rows, cols);
+        let multi_thread = tokio::runtime::Handle::try_current()
+            .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
+        if multi_thread {
+            tokio::task::block_in_place(|| parser.screen_mut().set_size(rows, cols));
+        } else {
+            parser.screen_mut().set_size(rows, cols);
+        }
         drop(parser);
         lock_unpoisoned(&self.master)
             .resize(PtySize {
@@ -613,22 +652,46 @@ impl PtyHandle {
         self.spawn_seq
     }
 
+    ///
+    /// The parser lock is held only to copy the emulator state; formatting
+    /// runs after it is released (see [`ScreenCapture`]).
     pub fn snapshot_with_history(&self, lines: usize) -> Vec<u8> {
+        self.capture().format(lines)
+    }
+
+    /// Copy the emulator state (brief lock). Format it with
+    /// [`ScreenCapture::format`], ideally off the async workers.
+    pub fn capture(&self) -> ScreenCapture {
         let parser = lock_unpoisoned(&self.parser);
-        Self::format_snapshot(parser.screen(), lines)
+        ScreenCapture {
+            screen: parser.screen().clone(),
+        }
+    }
+
+    /// Copy the emulator state and open a new output subscription under ONE
+    /// lock hold. The reader thread parses and publishes under that same
+    /// lock, so every chunk is either reflected in the capture or delivered
+    /// to the receiver — never both, never neither.
+    pub fn capture_and_subscribe(&self) -> (ScreenCapture, broadcast::Receiver<Bytes>) {
+        let parser = lock_unpoisoned(&self.parser);
+        let capture = ScreenCapture {
+            screen: parser.screen().clone(),
+        };
+        (capture, self.tx.subscribe())
     }
 
     /// Atomically replace a viewer's backlog with emulator state and a new
     /// output subscription. Nothing is drained after unlocking: subsequent
     /// chunks are absent from the replay and must reach this receiver.
+    /// Formats after releasing the lock ([`Self::capture_and_subscribe`]).
     pub fn snapshot_and_subscribe(&self, lines: usize) -> OutputSnapshot {
-        let parser = lock_unpoisoned(&self.parser);
-        let (rows, cols) = parser.screen().size();
+        let (capture, output) = self.capture_and_subscribe();
+        let (cols, rows) = capture.size();
         OutputSnapshot {
-            data: Self::format_snapshot(parser.screen(), lines),
+            data: capture.format(lines),
             cols,
             rows,
-            output: self.tx.subscribe(),
+            output,
         }
     }
 
@@ -731,6 +794,27 @@ mod tests {
     /// SIGWINCH sees NOTHING for repeats of the current grid and exactly one
     /// signal for a real change. (codex reprints its transcript per SIGWINCH —
     /// spurious ones from focus/reconnect re-pushes polluted scrollback.)
+    /// On the daemon's multi-threaded runtime the reflow runs inside
+    /// `block_in_place` (r3-06-02); the grid and PTY still change together.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resize_on_multi_thread_runtime_reflows_in_place() {
+        let spec = CommandSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            cwd: None,
+            env: vec![],
+        };
+        let handle = Arc::new(PtyHandle::spawn_sized(&spec, 120, 40).expect("spawn"));
+        let h = Arc::clone(&handle);
+        tokio::spawn(async move { h.resize(90, 30).expect("resize") })
+            .await
+            .expect("resize task");
+        assert_eq!(handle.size(), (90, 30));
+        // Same size again: a no-op on every runtime flavour.
+        handle.resize(90, 30).expect("same-size resize");
+        assert_eq!(handle.size(), (90, 30));
+    }
+
     #[tokio::test]
     async fn same_size_resize_sends_no_sigwinch() {
         let spec = CommandSpec {
@@ -1166,6 +1250,36 @@ mod tests {
         assert!(
             snap.contains("TSCPT_0040"),
             "latest transcript tail missing"
+        );
+    }
+
+    /// A capture formats to exactly what the old under-lock snapshot produced,
+    /// and the lock is held only for the copy (r3-06-02).
+    #[test]
+    fn capture_formats_like_the_locked_snapshot_and_holds_the_lock_briefly() {
+        let mut parser = vt100::Parser::new(50, 160, EMULATOR_SCROLLBACK_LINES);
+        // TUI-like rows: a colour/attribute change every 8 cells.
+        let row: String = (0..19)
+            .map(|k| format!("\x1b[{};{}m{:<8}", 1 + (k % 2) * 21, 31 + (k % 7), format!("seg{k:02}")))
+            .collect();
+        for i in 0..(EMULATOR_SCROLLBACK_LINES + 200) {
+            parser.process(format!("{i:05} {row}\x1b[0m\r\n").as_bytes());
+        }
+        let screen = parser.screen();
+        let t0 = Instant::now();
+        let direct = PtyHandle::format_snapshot(screen, EMULATOR_SCROLLBACK_LINES);
+        let format_cost = t0.elapsed();
+        let t1 = Instant::now();
+        let capture = ScreenCapture { screen: screen.clone() };
+        let copy_cost = t1.elapsed();
+        assert_eq!(capture.format(EMULATOR_SCROLLBACK_LINES), direct);
+        assert_eq!(capture.size(), (160, 50));
+        eprintln!(
+            "snapshot of {} rows x 160: format {:?} (was under the lock), copy {:?} (now under the lock), {} bytes",
+            EMULATOR_SCROLLBACK_LINES,
+            format_cost,
+            copy_cost,
+            direct.len()
         );
     }
 

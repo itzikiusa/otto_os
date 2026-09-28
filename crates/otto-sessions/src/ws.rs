@@ -14,7 +14,7 @@
 //! capped role (`Editor` may input/resize; a `Viewer` share is read-only).
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -33,7 +33,7 @@ use otto_core::domain::WorkspaceRole;
 use otto_core::{Error, Id};
 use otto_pty::PtyHandle;
 use serde::Deserialize;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, watch, Semaphore};
 
 use crate::share_throttle;
 
@@ -221,44 +221,103 @@ fn scrollback_frame(data: &[u8], epoch: u64) -> String {
     )
 }
 
-/// Replace this viewer's backlog with a fresh full snapshot: discard the
-/// queued chunks (their effects are already absorbed by the emulator), take
-/// the snapshot, then discard what raced in while snapshotting. Chunks that
-/// raced in were parsed before the snapshot took the emulator lock, so they
-/// are already reflected in it — discarding them avoids double-applying. (A
-/// chunk parsed in the microseconds after the snapshot released the lock can
-/// be lost here; the next output burst's repaint corrects it, unlike the
-/// unbounded silent loss the lag path replaces.)
-fn resync_frame(
+/// Snapshot builds allowed at once (r3-06-02). Each copies the emulator
+/// state (up to ~25 MB for 4000 × 200 cells) and formats + base64-encodes it
+/// on the blocking pool; a tiled overview attaching 15 terminals at once must
+/// not turn that into 15 concurrent copies.
+const SNAPSHOT_CONCURRENCY: usize = 4;
+static SNAPSHOT_PERMITS: LazyLock<Semaphore> =
+    LazyLock::new(|| Semaphore::new(SNAPSHOT_CONCURRENCY));
+
+/// Run snapshot work on the blocking pool, bounded by [`SNAPSHOT_PERMITS`].
+/// Formatting walks every retained cell (4000 rows × cols) and the frame is
+/// base64 of 1–2 MB: tens of ms of CPU that used to run on the socket's async
+/// worker — and with the emulator lock held, stalling that session's PTY
+/// reader too. `None` only if the job panicked.
+async fn off_worker<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    let _permit = SNAPSHOT_PERMITS.acquire().await.ok();
+    tokio::task::spawn_blocking(job).await.ok()
+}
+
+/// A `(snapshot bytes, epoch, subscription)` source for [`resync_frame`]: the
+/// subscription must start exactly where the snapshot ends.
+type Capture = (Vec<u8>, u64, broadcast::Receiver<Bytes>);
+
+/// [`resync_frame`]'s capture for a live PTY: emulator copy + new
+/// subscription under one lock hold, formatted after it is released.
+fn pty_capture(h: &Arc<PtyHandle>, lines: usize) -> impl FnOnce() -> Capture + Send + 'static {
+    let h = Arc::clone(h);
+    move || {
+        let (screen, output) = h.capture_and_subscribe();
+        (screen.format(lines), h.spawn_seq(), output)
+    }
+}
+
+/// A `scrollback` reply built off the async worker. The live stream is left
+/// untouched (the client may skip an optional compact and keep streaming).
+async fn snapshot_frame(h: &Arc<PtyHandle>, lines: usize) -> String {
+    let h = Arc::clone(h);
+    let epoch = h.spawn_seq();
+    off_worker(move || scrollback_frame(&h.snapshot_with_history(lines), epoch))
+        .await
+        .unwrap_or_else(|| scrollback_frame(&[], epoch))
+}
+
+/// Replace this viewer's backlog with a fresh full snapshot. The capture
+/// takes the snapshot and a NEW subscription under one emulator lock
+/// (`PtyHandle::capture_and_subscribe`), and the old receiver — with every
+/// chunk still queued in it, all already absorbed by the emulator — is
+/// dropped. So each chunk is either in the snapshot or on the new receiver:
+/// never double-applied, and (unlike the old drain → snapshot → drain) never
+/// lost when parsed just after the snapshot released the lock. Copying,
+/// formatting and encoding run on the blocking pool ([`off_worker`]).
+async fn resync_frame(
     rx: &mut broadcast::Receiver<Bytes>,
-    snapshot: impl FnOnce() -> (Vec<u8>, u64),
+    capture: impl FnOnce() -> Capture + Send + 'static,
 ) -> String {
-    drain_backlog(rx);
-    let (data, epoch) = snapshot();
-    drain_backlog(rx);
-    scrollback_frame(&data, epoch)
+    let built = off_worker(move || {
+        let (data, epoch, output) = capture();
+        (scrollback_frame(&data, epoch), output)
+    })
+    .await;
+    match built {
+        Some((frame, output)) => {
+            *rx = output;
+            frame
+        }
+        // The formatter panicked: drop the backlog anyway; an empty snapshot
+        // is ignored by the client, which keeps its screen.
+        None => {
+            drain_backlog(rx);
+            scrollback_frame(&[], 0)
+        }
+    }
 }
 
 /// Flow-control resume: when output was held back while paused, the
 /// resync snapshot to send; `None` when nothing was skipped (the stream just
 /// continues — no rebuild, no flicker).
-fn resume_frame(
+async fn resume_frame(
     rx: &mut broadcast::Receiver<Bytes>,
-    snapshot: impl FnOnce() -> (Vec<u8>, u64),
+    capture: impl FnOnce() -> Capture + Send + 'static,
 ) -> Option<String> {
-    drain_backlog(rx).then(|| resync_frame(rx, snapshot))
+    if drain_backlog(rx) {
+        Some(resync_frame(rx, capture).await)
+    } else {
+        None
+    }
 }
 
 /// Client `resync`: open the flow gate (the backlog it guarded was dropped
 /// client-side) and replace this viewer's queued output with one snapshot.
 /// Always answers — the client already discarded bytes and relies on it.
-fn client_resync_frame(
+async fn client_resync_frame(
     flow: &mut FlowGate,
     rx: &mut broadcast::Receiver<Bytes>,
-    snapshot: impl FnOnce() -> (Vec<u8>, u64),
+    capture: impl FnOnce() -> Capture + Send + 'static,
 ) -> String {
     flow.resume();
-    resync_frame(rx, snapshot)
+    resync_frame(rx, capture).await
 }
 
 /// Default / bounds for a client-proposed credit window (`credit` frame).
@@ -467,12 +526,7 @@ async fn apply_credit_step(
             let (Some(rx), Some(h)) = (out_rx.as_mut(), handle) else {
                 return Ok(());
             };
-            let frame = resync_frame(rx, || {
-                (
-                    h.snapshot_with_history(DEFAULT_ATTACH_HISTORY_LINES),
-                    h.spawn_seq(),
-                )
-            });
+            let frame = resync_frame(rx, pty_capture(h, DEFAULT_ATTACH_HISTORY_LINES)).await;
             Message::Text(frame.into())
         }
     };
@@ -861,16 +915,26 @@ async fn revive_viewer<S: SessionsCtx>(
     if handle.as_ref().is_some_and(|old| Arc::ptr_eq(old, &fresh)) {
         return Ok(false);
     }
-    *out_rx = Some(fresh.subscribe());
+    // Snapshot + subscription in one emulator lock (exact hand-over, see
+    // `resync_frame`), built off the async worker. `epoch` = PTY spawn
+    // counter: the client resets its local buffer when it changes (see the
+    // Scrollback arm).
+    let capture = pty_capture(&fresh, DEFAULT_ATTACH_HISTORY_LINES);
+    let (frame, output) = match off_worker(move || {
+        let (data, epoch, output) = capture();
+        (scrollback_frame(&data, epoch), output)
+    })
+    .await
+    {
+        Some(built) => built,
+        None => (scrollback_frame(&[], fresh.spawn_seq()), fresh.subscribe()),
+    };
+    *out_rx = Some(output);
     *exit_rx = Some(fresh.on_exit());
     let status = r#"{"type":"status","status":"running"}"#;
     if socket.send(Message::Text(status.into())).await.is_err() {
         return Err(());
     }
-    let data = fresh.snapshot_with_history(DEFAULT_ATTACH_HISTORY_LINES);
-    // `epoch` = PTY spawn counter: the client resets its local buffer when it
-    // changes (see the Scrollback arm).
-    let frame = scrollback_frame(&data, fresh.spawn_seq());
     if socket.send(Message::Text(frame.into())).await.is_err() {
         return Err(());
     }
@@ -1094,9 +1158,7 @@ async fn serve_terminal<S: SessionsCtx>(
                 flow.resume();
                 tracing::debug!(session = %session_id, "terminal ws flow auto-resume (no resume within {FLOW_AUTO_RESUME:?})");
                 if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
-                    if let Some(frame) = resume_frame(rx, || {
-                        (h.snapshot_with_history(DEFAULT_ATTACH_HISTORY_LINES), h.spawn_seq())
-                    }) {
+                    if let Some(frame) = resume_frame(rx, pty_capture(h, DEFAULT_ATTACH_HISTORY_LINES)).await {
                         if socket.send(Message::Text(frame.into())).await.is_err() {
                             return;
                         }
@@ -1160,9 +1222,7 @@ async fn serve_terminal<S: SessionsCtx>(
                         // fresh full snapshot; the client rebuilds from it.
                         tracing::debug!(session = %session_id, "terminal ws lagged by {n} chunks; resyncing from snapshot");
                         if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
-                            let frame = resync_frame(rx, || {
-                                (h.snapshot_with_history(DEFAULT_ATTACH_HISTORY_LINES), h.spawn_seq())
-                            });
+                            let frame = resync_frame(rx, pty_capture(h, DEFAULT_ATTACH_HISTORY_LINES)).await;
                             if socket.send(Message::Text(frame.into())).await.is_err() {
                                 return;
                             }
@@ -1319,9 +1379,7 @@ async fn serve_terminal<S: SessionsCtx>(
                     ClientFrame::Resume => {
                         if flow.resume() {
                             if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
-                                if let Some(frame) = resume_frame(rx, || {
-                                    (h.snapshot_with_history(DEFAULT_ATTACH_HISTORY_LINES), h.spawn_seq())
-                                }) {
+                                if let Some(frame) = resume_frame(rx, pty_capture(h, DEFAULT_ATTACH_HISTORY_LINES)).await {
                                     if socket.send(Message::Text(frame.into())).await.is_err() {
                                         return;
                                     }
@@ -1339,9 +1397,7 @@ async fn serve_terminal<S: SessionsCtx>(
                             lines
                         };
                         if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
-                            let frame = client_resync_frame(&mut flow, rx, || {
-                                (h.snapshot_with_history(want), h.spawn_seq())
-                            });
+                            let frame = client_resync_frame(&mut flow, rx, pty_capture(h, want)).await;
                             if socket.send(Message::Text(frame.into())).await.is_err() {
                                 return;
                             }
@@ -1378,10 +1434,6 @@ async fn serve_terminal<S: SessionsCtx>(
                         } else {
                             lines
                         };
-                        let data = handle
-                            .as_ref()
-                            .map(|h| h.snapshot_with_history(want))
-                            .unwrap_or_default();
                         // `epoch` = PTY spawn counter. When the process was
                         // respawned since the client's last attach (suspend →
                         // resume, restart, daemon restart) the client's local
@@ -1389,10 +1441,11 @@ async fn serve_terminal<S: SessionsCtx>(
                         // rebuilds from this snapshot instead of appending the
                         // fresh screen under stale (possibly narrow-painted)
                         // history. Omitted (0) when no live handle exists.
-                        let frame = scrollback_frame(
-                            &data,
-                            handle.as_ref().map(|h| h.spawn_seq()).unwrap_or(0),
-                        );
+                        // Built off the async worker (r3-06-02).
+                        let frame = match handle.as_ref() {
+                            Some(h) => snapshot_frame(h, want).await,
+                            None => scrollback_frame(&[], 0),
+                        };
                         // Sent inline, i.e. before any subsequent live bytes.
                         if socket.send(Message::Text(frame.into())).await.is_err() {
                             return;
@@ -2017,8 +2070,24 @@ mod tests {
     /// pause → output skipped → resume ⇒ ONE snapshot replaces the backlog,
     /// then live output flows again. Mirrors the socket loop: while paused the
     /// output arm is disabled, so chunks pile up in this viewer's receiver.
-    #[test]
-    fn pause_skip_resume_sends_one_snapshot_then_streams() {
+    /// A test capture: a fixed snapshot plus a fresh subscription on `tx`
+    /// (the real one takes both under the emulator lock), counting calls.
+    fn test_capture(
+        tx: &broadcast::Sender<Bytes>,
+        data: &'static [u8],
+        epoch: u64,
+        calls: &Arc<std::sync::atomic::AtomicUsize>,
+    ) -> impl FnOnce() -> Capture + Send + 'static {
+        let tx = tx.clone();
+        let calls = Arc::clone(calls);
+        move || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (data.to_vec(), epoch, tx.subscribe())
+        }
+    }
+
+    #[tokio::test]
+    async fn pause_skip_resume_sends_one_snapshot_then_streams() {
         let (tx, mut rx) = broadcast::channel::<Bytes>(8);
         let mut gate = FlowGate::default();
         gate.pause(tokio::time::Instant::now());
@@ -2027,13 +2096,11 @@ mod tests {
             tx.send(Bytes::from(format!("y{i}\n"))).unwrap();
         }
         assert!(gate.resume());
-        let mut snapshots = 0;
-        let frame = resume_frame(&mut rx, || {
-            snapshots += 1;
-            (b"\x1b[Hsnapshot".to_vec(), 3)
-        })
-        .expect("skipped output must be replaced by a snapshot");
-        assert_eq!(snapshots, 1);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let frame = resume_frame(&mut rx, test_capture(&tx, b"\x1b[Hsnapshot", 3, &calls))
+            .await
+            .expect("skipped output must be replaced by a snapshot");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
         assert_eq!(v["type"], "scrollback");
         assert_eq!(v["epoch"], 3);
@@ -2055,8 +2122,8 @@ mod tests {
     /// exactly one snapshot — even with nothing queued server-side — opens a
     /// paused gate, and nothing that was queued before it is forwarded after
     /// (it is already in the snapshot). A later `resume` is then a no-op.
-    #[test]
-    fn client_resync_opens_the_gate_and_replaces_the_backlog_with_one_snapshot() {
+    #[tokio::test]
+    async fn client_resync_opens_the_gate_and_replaces_the_backlog_with_one_snapshot() {
         assert!(matches!(
             serde_json::from_str::<ClientFrame>(r#"{"type":"resync","lines":2000}"#),
             Ok(ClientFrame::Resync { lines: 2000 })
@@ -2071,12 +2138,9 @@ mod tests {
         for i in 0..10 {
             tx.send(Bytes::from(format!("flood{i}\n"))).unwrap();
         }
-        let mut snapshots = 0;
-        let frame = client_resync_frame(&mut gate, &mut rx, || {
-            snapshots += 1;
-            (b"screen".to_vec(), 9)
-        });
-        assert_eq!(snapshots, 1);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let frame = client_resync_frame(&mut gate, &mut rx, test_capture(&tx, b"screen", 9, &calls)).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(!gate.is_paused(), "resync leaves the paused state");
         assert!(!gate.resume(), "a trailing resume finds the gate open");
         let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
@@ -2087,7 +2151,7 @@ mod tests {
             Err(broadcast::error::TryRecvError::Empty)
         ));
         // Nothing queued and not paused: still answers with a snapshot.
-        let frame = client_resync_frame(&mut gate, &mut rx, || (b"s2".to_vec(), 9));
+        let frame = client_resync_frame(&mut gate, &mut rx, test_capture(&tx, b"s2", 9, &calls)).await;
         let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
         assert_eq!(B64.decode(v["data"].as_str().unwrap()).unwrap(), b"s2");
         tx.send(Bytes::from_static(b"live")).unwrap();
@@ -2096,16 +2160,32 @@ mod tests {
 
     /// Pausing with nothing produced meanwhile must NOT rebuild the client
     /// (a rebuild resets selection/scroll position for no reason).
-    #[test]
-    fn resume_without_skipped_output_sends_nothing() {
-        let (_tx, mut rx) = broadcast::channel::<Bytes>(8);
-        let mut called = false;
-        assert!(resume_frame(&mut rx, || {
-            called = true;
-            (Vec::new(), 0)
-        })
-        .is_none());
-        assert!(!called, "no snapshot is taken when nothing was skipped");
+    #[tokio::test]
+    async fn resume_without_skipped_output_sends_nothing() {
+        let (tx, mut rx) = broadcast::channel::<Bytes>(8);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        assert!(resume_frame(&mut rx, test_capture(&tx, b"", 0, &calls)).await.is_none());
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no snapshot is taken when nothing was skipped"
+        );
+    }
+
+    /// The resync hand-over is exact: output published after the capture
+    /// arrives on the NEW receiver (never lost), and nothing queued before
+    /// it is forwarded after the snapshot (never double-applied).
+    #[tokio::test]
+    async fn resync_swaps_to_the_capture_subscription() {
+        let (tx, mut rx) = broadcast::channel::<Bytes>(64);
+        tx.send(Bytes::from_static(b"before")).unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let frame = resync_frame(&mut rx, test_capture(&tx, b"snap", 4, &calls)).await;
+        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(v["epoch"], 4);
+        assert!(matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+        tx.send(Bytes::from_static(b"after")).unwrap();
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"after"));
     }
 
     // ── Credit-based flow control ─────────────────────────────────────────
