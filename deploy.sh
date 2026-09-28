@@ -48,6 +48,8 @@
 #   ./deploy.sh --force-ci      # force `npm ci` even if node_modules looks fresh
 #   ./deploy.sh --status        # last deploy outcome + live progress, then exit
 #   ./deploy.sh -h | --help
+# Env: PRUNE=0 (default) keeps Cargo caches; PRUNE=1 opts into dependency
+#      cache eviction to recover disk space, potentially forcing recompilation.
 #
 set -uo pipefail
 
@@ -84,7 +86,7 @@ for arg in "$@"; do
             [[ -f "$STATUS_FILE" ]] && { echo "last deploy:"; cat "$STATUS_FILE"; }
             exit 0 ;;
         -h|--help)
-            sed -n '2,51p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,/^set -uo pipefail/{ /^set -uo pipefail/d; p; }' "$0" | sed 's/^# \{0,1\}//'
             exit 0 ;;
         *) echo "unknown flag: $arg (try --help)" >&2; exit 2 ;;
     esac
@@ -494,34 +496,14 @@ BUILT_SHA="$(shasum -a 256 "$BUILT_APP/Contents/MacOS/otto-desktop" | awk '{prin
 # for rollback safety (only exists if an old app was swapped out)
 [[ -d "$OLD" ]] && rm -rf "$OLD" && ok "removed rollback copy of previous app"
 
-# sweep stale build artifacts: cargo never deletes superseded per-hash outputs
-# (each dep bump leaves another ~600MB libotto_server rlib in target/…/deps
-# forever — target has hit 79GB+). Runs only after a fully verified deploy.
-# 2 days ≈ several deploys back at the current cadence (a 7-day window was
-# measured to keep ~60GB of dead rlibs alive).
-#
-# NEVER touch build/ or .fingerprint/: build-script OUT_DIRs (libsqlite3-sys
-# bindgen.rs, tree-sitter stdlib-symbols.txt, …) keep their ORIGINAL mtime
-# forever while staying live — cargo trusts the fingerprint and hard-errors
-# on the missing include instead of regenerating. Sweeping them by mtime
-# corrupted the cache and broke the NEXT deploy's build, repeatedly (the
-# recurring "couldn't read OUT_DIR/bindgen.rs" failures). deps/ rlibs are
-# safe: cargo stats those artifacts and rebuilds when missing.
-SWEEP_DAYS=2
-swept_kb=0
-for tdir in "$ROOT/target" "$ROOT/apps/desktop/src-tauri/target"; do
-    [[ -d "$tdir" ]] || continue
-    before_kb=$(du -sk "$tdir" 2>/dev/null | awk '{print $1}')
-    find "$tdir" \
-        \( -path '*/build/*' -o -path '*/.fingerprint/*' \) -prune \
-        -o -type f -mtime +"$SWEEP_DAYS" -delete 2>/dev/null
-    find "$tdir" \
-        \( -path '*/build' -o -path '*/.fingerprint' \) -prune \
-        -o -type d -empty -delete 2>/dev/null
-    after_kb=$(du -sk "$tdir" 2>/dev/null | awk '{print $1}')
-    swept_kb=$(( swept_kb + before_kb - after_kb ))
-done
-[[ $swept_kb -gt 0 ]] && ok "swept $(( swept_kb / 1024 ))MB of stale build artifacts (>${SWEEP_DAYS}d old)"
+# sweep stale build artifacts: opt-in only. Cargo reuses old dependencies without
+# touching their mtimes, so neither age nor a newer hash proves an artifact dead.
+# Preserve caches for ordinary deploys; PRUNE=1 trades rebuild time for disk space.
+if [[ "${PRUNE:-0}" == "1" ]]; then
+    bash "$ROOT/packaging/prune-target.sh" --apply || warn "cache cleanup failed — not fatal"
+else
+    ok "Cargo caches preserved (PRUNE=1 opts into eviction; may force recompilation)"
+fi
 
 DEPLOY_DONE=1
 ELAPSED=$(( $(date +%s) - START_TS ))

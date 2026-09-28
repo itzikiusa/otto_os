@@ -16,7 +16,8 @@
 # Env:    SKIP_UI=1    rejected: a source receipt requires a fresh UI build
 #         EMBED_UI=0   build ottod WITHOUT the SPA baked in (see step 2)
 #         DETACH=0     run steps 6–7 inline instead of under launchd (see below)
-#         PRUNE=0      keep every stale build artifact (skip step 5)
+#         PRUNE=0      default: preserve Cargo caches (skip step 5)
+#         PRUNE=1      evict older dependency variants; may force recompilation
 #         BUILD_ONLY=1 build/sign and write a receipt without installing
 #         OTTO_DEPLOY_PHASE=queue-finish queue a previously receipted build
 #         FINISH_DELAY_SECONDS=15 delay detached install (integer 0–60)
@@ -330,17 +331,13 @@ echo "==> 3/7  Desktop app (Tauri bundle)"
 echo "==> 4/7  Sign (+ ensure 'Otto Dev Signing' is trusted for code signing)"
 bash "$HERE/sign.sh" "$APP" "$ROOT/target/release/ottod"
 
-# Cargo never garbage-collects the artifacts of previous builds: each changed
-# feature set / dependency graph writes a NEW <crate>-<hash> file next to the old
-# one. With ~285 MB test binaries in this workspace that silently reached 43 GB
-# of unreachable duplicates (vs 6.5 GB of live ones) before it was noticed as a
-# full disk. Prune here — right after the last cargo invocation of this deploy,
-# so the generation just built is the one the pruner keeps.
-echo "==> 5/7  Prune superseded build artifacts (keep the newest generation)"
-if [[ "${PRUNE:-1}" == "0" ]]; then
-    echo "    (PRUNE=0 — leaving stale artifacts in place)"
+# Cargo does not touch Fresh artifacts, so a dependency's age or a newer hash
+# cannot prove it is unused. Preserve caches unless disk cleanup is requested.
+echo "==> 5/7  Cargo cache policy"
+if [[ "${PRUNE:-0}" == "1" ]]; then
+    bash "$HERE/prune-target.sh" --apply || echo "    WARN: prune failed — not fatal, the deploy continues."
 else
-    bash "$HERE/prune-target.sh" || echo "    WARN: prune failed — not fatal, the deploy continues."
+    echo "    Cargo caches preserved (PRUNE=1 opts into eviction; may force recompilation)"
 fi
 
 [[ "$(git rev-parse HEAD)" == "$BUILD_SOURCE_COMMIT" ]] || { fail_verify "source commit changed during build"; exit 1; }
