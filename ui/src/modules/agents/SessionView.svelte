@@ -24,6 +24,8 @@
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { popoutItems } from '../../lib/popoutMenu';
   import { now } from '../../lib/stores/now.svelte';
+  import { idleSuspend } from '../../lib/stores/idleSuspend.svelte';
+  import { suspendHint } from '../../lib/idleSuspend';
   import { ui } from '../../lib/stores/ui.svelte';
   import { startMouseDrag } from '../../lib/dragCursor';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -36,12 +38,6 @@
   import { uiControl } from '../../lib/stores/uiControl.svelte';
   import { commandLabel, providerName } from '../../lib/uiCommands/frames';
   import { moduleLabel } from '../../lib/sidebar';
-
-  // Default idle-suspend grace period (5 minutes) used for the "suspends in N"
-  // countdown hint. Reflects the backend's SUSPEND_GRACE constant; the backend
-  // may override it via the `idle_suspend_grace_secs` setting, but a frontend
-  // approximation is fine here — the hint is informational, not authoritative.
-  const SUSPEND_GRACE_MS = 5 * 60 * 1000;
 
   interface Props {
     sessionId: string;
@@ -77,31 +73,26 @@
   // "X min idle / suspends in N" countdown hint for idle agent sessions.
   // `session.last_active_at` is updated whenever the status changes — so when
   // the session transitions to `idle` it stamps the moment. We use this as a
-  // proxy for last-output time and count down to the backend's suspend window.
+  // proxy for last-output time and count down to the daemon's suspend window:
+  // `manual_idle_suspend_secs` (30 min) for sessions the user started,
+  // `idle_suspend_grace_secs` (5 min) for engine-owned ones, read from the
+  // daemon's settings (lib/idleSuspend.ts; defaults when not readable).
   const idleHint = $derived.by(() => {
     if (status !== 'idle') return null;
     if (!session?.kind || session.kind !== 'agent') return null;
     if (session.meta?.keep_alive === true) return null; // pinned — won't be suspended
-    // Sessions the user started from the Agents page are exempt from the
-    // daemon's idle sweep — no countdown to show. This MUST mirror
-    // `is_user_started` in crates/otto-sessions/src/manager.rs: a background
-    // `meta.source` (`isForeground`, the store's BACKGROUND_SOURCES mirror of
+    // User-started vs engine-owned MUST mirror `is_user_started` in
+    // crates/otto-sessions/src/manager.rs: a background `meta.source`
+    // (`isForeground`, the store's BACKGROUND_SOURCES mirror of
     // `BACKGROUND_SESSION_SOURCES`) OR a non-`manual` `meta.work.origin` makes
     // it engine-owned. Testing `!meta.source` instead would diverge for any
-    // source outside that list (e.g. `personal_agent`) and count down to a
-    // suspend that never comes.
+    // source outside that list (e.g. `personal_agent`) and count down on the
+    // wrong grace.
     const origin = (session.meta?.work as { origin?: string } | undefined)?.origin;
-    if ((origin === undefined || origin === 'manual') && isForeground(session)) return null;
+    const userStarted = (origin === undefined || origin === 'manual') && isForeground(session);
+    idleSuspend.ensure();
     const _tick = now(); // reactive dependency: re-computes every second
-    const idleMs = Date.now() - Date.parse(session.last_active_at);
-    if (idleMs < 0) return null;
-    const resumesInMs = SUSPEND_GRACE_MS - idleMs;
-    const idleMin = Math.floor(idleMs / 60_000);
-    const idleSec = Math.floor((idleMs % 60_000) / 1000);
-    const idleLabel = idleMin > 0 ? `${idleMin}m idle` : `${idleSec}s idle`;
-    if (resumesInMs <= 0) return `${idleLabel} · suspending…`;
-    const inMin = Math.ceil(resumesInMs / 60_000);
-    return `${idleLabel} · suspends in ${inMin}m`;
+    return suspendHint(Date.now() - Date.parse(session.last_active_at), userStarted, idleSuspend.policy);
   });
   const readOnly = $derived(ws.myRole === 'viewer');
 
@@ -300,7 +291,7 @@
       summary?.total ?? 0,
       summary?.in_progress ?? '',
       needsYou,
-      idleHint ?? '',
+      idleHint?.label ?? '',
       handoverFromId ?? '',
       handoverPending,
       showZoom,
@@ -613,7 +604,7 @@
       ...(tier >= 4 && summary?.in_progress
         ? [{ label: `Now: ${summary.in_progress}`, disabled: true } as MenuItem]
         : []),
-      ...(tier >= 4 && idleHint ? [{ label: idleHint, disabled: true } as MenuItem] : []),
+      ...(tier >= 4 && idleHint ? [{ label: idleHint.label, disabled: true } as MenuItem] : []),
       ...(tier >= 4 && handoverFromId
         ? [
             {
@@ -842,7 +833,7 @@
       <span class="handover-pending" title="Preparing the handover brief…"><Icon name="clock" size={11} /> Preparing handover…</span>
     {/if}
     {#if idleHint}
-      <span class="idle-hint" title="Session is idle. Auto-suspend frees its RAM while keeping it resumable.">{idleHint}</span>
+      <span class="idle-hint" title={idleHint.title}>{idleHint.label}</span>
     {/if}
     {#if session?.cwd}<span class="pane-cwd mono" title={session.cwd}>{session.cwd}</span>{/if}
     <span class="grow"></span>
