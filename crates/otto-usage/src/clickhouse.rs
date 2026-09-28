@@ -445,12 +445,14 @@ fn write_server_config(data_dir: &Path, port: u16) -> Result<PathBuf> {
         .map_err(|e| Error::Internal(format!("create tmp dir: {e}")))?;
     let path = xml_escape(&format!("{}/", data_dir.to_string_lossy()));
     let tmp = xml_escape(&format!("{}/tmp/", data_dir.to_string_lossy()));
-    let log = xml_escape(&server_dir.join("ch.log").to_string_lossy());
-    let errlog = xml_escape(&server_dir.join("ch.err.log").to_string_lossy());
+    // Console-only logging (stdout/stderr are /dev/null at spawn): Poco's
+    // FileChannel never recovers from ENOSPC — once the disk filled, every log
+    // call threw from RotateBySizeStrategy::mustRotate and the two AsyncLogger
+    // threads spun at ~2 cores until restart, even after space was freed.
+    // Server failures still surface to the daemon as query errors.
     let xml = format!(
         "<clickhouse>\n\
-         <logger><level>warning</level><log>{log}</log><errorlog>{errlog}</errorlog>\
-         <size>10M</size><count>1</count></logger>\n\
+         <logger><level>error</level><console>1</console></logger>\n\
          <http_port>{port}</http_port>\n\
          <listen_host>127.0.0.1</listen_host>\n\
          <path>{path}</path>\n\
@@ -589,6 +591,20 @@ fn parse_status_pid(text: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_config_logs_to_console_not_files() {
+        // A file log wedges the server after ENOSPC (Poco rotation throws per
+        // log call and the logger threads spin), so no <log>/<errorlog> file.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = write_server_config(dir.path(), 18123).unwrap();
+        let xml = std::fs::read_to_string(cfg).unwrap();
+        assert!(xml.contains("<console>1</console>"), "{xml}");
+        assert!(
+            !xml.contains("<log>") && !xml.contains("<errorlog>"),
+            "{xml}"
+        );
+    }
 
     #[test]
     fn split_statements_basic() {
