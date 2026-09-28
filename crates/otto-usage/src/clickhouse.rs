@@ -116,6 +116,10 @@ impl ClickHouse {
             let child = Command::new(&bin)
                 .arg("server")
                 .arg(format!("--config-file={}", cfg.display()))
+                // No watchdog parent (a second 32 MB process whose only job is
+                // restarting a crashed server): the engine's self-heal already
+                // restarts a dead child, and the child we hold IS the server.
+                .env("CLICKHOUSE_WATCHDOG_ENABLE", "0")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -413,6 +417,26 @@ fn free_loopback_port() -> std::io::Result<u16> {
 /// validates its `number_of_free_entries_in_pool_*` settings against them and
 /// refuses to attach tables when the pool is smaller; and `max_thread_pool_size`
 /// (a hard cap makes queries fail with "no free thread" instead of waiting).
+///
+/// Round 3 (r3-08-04 / r3-12-03; measured on a scratch data dir with the
+/// bundled 26.7 build: attach, lightweight DELETE, mutation, OPTIMIZE FINAL and
+/// a restart re-attach all pass):
+/// - pools Otto has no use for are cut to the minimum: the schedule pool
+///   16 → 4, `Common` 8 → 2, `Move` (multi-disk TTL moves) 8 → 1, `Fetch`
+///   (replication) 16 → 1, and at most 4 idle global-pool threads parked;
+/// - the jemalloc `MemoryWorker` refreshes once a second instead of the
+///   build's default cadence, and the expression-JIT cache is 16 MB;
+/// - `max_server_memory_usage` is a hard 1 GiB (the 0.3 ratio alone allowed
+///   ~15 GB on this machine for ~20 MB of data);
+/// - NO system log section (`query_log`, `trace_log`, `metric_log`,
+///   `asynchronous_metric_log`, `part_log`, `text_log`, …) is declared, and with
+///   a standalone config the server creates none (verified: `system.tables`
+///   has no `*_log`). Never add one, not even `<x remove="1"/>`: without a base
+///   config to merge into, an empty section would ENABLE that log.
+///
+/// Net (idle, scratch dir): threads 125 + a 3-thread watchdog → 80, the 32 MB
+/// watchdog process gone (see `CLICKHOUSE_WATCHDOG_ENABLE` at spawn), CPU
+/// 0.7–0.8 % → 0.5–0.6 %.
 fn write_server_config(data_dir: &Path, port: u16) -> Result<PathBuf> {
     let server_dir = data_dir.join("server");
     std::fs::create_dir_all(&server_dir)
@@ -434,8 +458,14 @@ fn write_server_config(data_dir: &Path, port: u16) -> Result<PathBuf> {
          <mark_cache_size>67108864</mark_cache_size>\n\
          <uncompressed_cache_size>0</uncompressed_cache_size>\n\
          <max_server_memory_usage_to_ram_ratio>0.3</max_server_memory_usage_to_ram_ratio>\n\
-         <max_thread_pool_free_size>16</max_thread_pool_free_size>\n\
-         <background_schedule_pool_size>16</background_schedule_pool_size>\n\
+         <max_server_memory_usage>1073741824</max_server_memory_usage>\n\
+         <max_thread_pool_free_size>4</max_thread_pool_free_size>\n\
+         <background_schedule_pool_size>4</background_schedule_pool_size>\n\
+         <background_common_pool_size>2</background_common_pool_size>\n\
+         <background_move_pool_size>1</background_move_pool_size>\n\
+         <background_fetches_pool_size>1</background_fetches_pool_size>\n\
+         <memory_worker_period_ms>1000</memory_worker_period_ms>\n\
+         <compiled_expression_cache_size>16777216</compiled_expression_cache_size>\n\
          <background_message_broker_schedule_pool_size>2</background_message_broker_schedule_pool_size>\n\
          <background_distributed_schedule_pool_size>2</background_distributed_schedule_pool_size>\n\
          <background_buffer_flush_schedule_pool_size>2</background_buffer_flush_schedule_pool_size>\n\
@@ -617,6 +647,22 @@ mod tests {
         assert!(xml.contains("<http_port>18999</http_port>"));
         assert!(xml.contains("<listen_host>127.0.0.1</listen_host>"));
         assert!(xml.contains("max_server_memory_usage_to_ram_ratio"));
+        assert!(xml.contains("<max_server_memory_usage>1073741824</max_server_memory_usage>"));
+        assert!(xml.contains("<background_schedule_pool_size>4</background_schedule_pool_size>"));
+        // Merge pools stay at their defaults (tables refuse to attach below
+        // MergeTree's free-entry thresholds).
+        assert!(!xml.contains("<background_pool_size>"));
+        // No system log section at all: in a standalone config even an empty
+        // (or `remove="1"`) one would enable that log.
+        for tag in xml
+            .split('<')
+            .filter_map(|t| t.split(['>', ' ', '/']).next())
+        {
+            assert!(
+                !tag.ends_with("_log"),
+                "system log section <{tag}> must not be declared"
+            );
+        }
         // path is present + the server/tmp dirs were created
         assert!(dir.path().join("server").is_dir());
         assert!(dir.path().join("tmp").is_dir());
