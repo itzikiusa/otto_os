@@ -148,6 +148,13 @@ without a driver grant. Pause stops output to that terminal socket only; it
 does not stop the PTY or change driver authority. Resume sends one full
 scrollback snapshot if output was skipped, otherwise streaming simply continues.
 A repeated pause renews the two-second auto-resume deadline.
+Viewers may also opt into credit flow control exactly as on `/ws/term`
+(docs/contracts/ws.md): `{type:"credit",window?:number}` is answered with
+`{type:"credit",window}`, after which the server sends at most `window`
+unacknowledged binary bytes and the viewer reports consumption with
+`{type:"ack",bytes}` (cumulative). Neither needs a driver grant. Acks have
+their own rate budget (400/s, burst 800) instead of the general frame limit.
+A viewer that never sends `credit` keeps the pause/resume behavior.
 After discarding local renderer backlog, a viewer sends
 `{type:"resync",lines?:number}` to request a full recovery snapshot even when
 the server has no pending output. Resync clears the viewer's pause without

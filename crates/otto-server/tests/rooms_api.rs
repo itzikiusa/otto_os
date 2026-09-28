@@ -494,6 +494,38 @@ async fn room_http_auth_admission_driver_and_terminal_process_are_isolated() {
         }
     }).await.unwrap();
     assert_eq!(ctx.manager.room_authority_snapshot(&session.id).await.unwrap(), authority);
+    // Credit flow control (r3-10-06): a viewer opts in without a driver grant,
+    // gets the clamped window back, and live output keeps flowing under it;
+    // acks are accepted (they have their own rate budget).
+    send(&mut terminal, json!({"type":"credit","window":65536})).await;
+    let grant = until(&mut terminal, |v| v["type"] == "credit" || v["type"] == "error").await;
+    assert_eq!(grant["type"], "credit", "viewer credit frames must be accepted");
+    assert_eq!(grant["window"], 65536);
+    ctx.manager.human_input(&session.id, &owner.id, false, true, b"CREDITED-ROOM-OUTPUT\n").await.unwrap();
+    let credited = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut bytes = vec![];
+        loop {
+            match terminal.next().await.unwrap().unwrap() {
+                Message::Binary(chunk) => {
+                    bytes.extend_from_slice(&chunk);
+                    if String::from_utf8_lossy(&bytes).contains("CREDITED-ROOM-OUTPUT") { break bytes.len(); }
+                }
+                other => panic!("expected credited live output, got {other:?}"),
+            }
+        }
+    }).await.unwrap();
+    for _ in 0..200 {
+        send(&mut terminal, json!({"type":"ack","bytes":credited})).await;
+    }
+    // Beyond the general 60/s frame limit, yet the socket stays up and
+    // answers no ack with an error (trailing live output may still arrive).
+    while let Ok(next) = tokio::time::timeout(std::time::Duration::from_millis(150), terminal.next()).await {
+        match next.unwrap().unwrap() {
+            Message::Binary(_) => {}
+            other => panic!("an ack burst must be neither rejected nor answered, got {other:?}"),
+        }
+    }
+    assert_eq!(ctx.manager.room_authority_snapshot(&session.id).await.unwrap(), authority);
     send(&mut terminal,json!({"type":"input","data":STANDARD.encode(b"VIEWER-MUST-NOT-WRITE\n"),"grant_epoch":admitted["room"]["grant_epoch"]})).await;
     until(&mut terminal, |v| v["type"] == "error").await;
     send(

@@ -341,8 +341,11 @@ const CREDIT_WINDOW_MAX: u64 = 8 * 1024 * 1024;
 /// held bytes are dropped (`skipped`) and, once the client has drained to a
 /// quarter window, replaced by ONE snapshot: the lagging-viewer resync. The
 /// broadcast receiver keeps being read throughout, so the ring never lags.
+///
+/// Public so other terminal transports (the room terminal socket in
+/// otto-server) enforce the same window with the same rules.
 #[derive(Debug)]
-struct CreditGate {
+pub struct CreditGate {
     window: u64,
     /// Binary bytes sent since the grant.
     sent: u64,
@@ -361,7 +364,7 @@ struct CreditGate {
 
 /// What the socket loop must do after a [`CreditGate`] step.
 #[derive(Debug, PartialEq)]
-enum CreditStep {
+pub enum CreditStep {
     Idle,
     /// Send these bytes as one binary frame (already counted as sent).
     Send(Bytes),
@@ -370,7 +373,8 @@ enum CreditStep {
 }
 
 impl CreditGate {
-    fn new(requested: u64) -> Self {
+    /// A gate for the client's `credit` offer (clamped; 0 = default).
+    pub fn new(requested: u64) -> Self {
         let window = if requested == 0 {
             CREDIT_WINDOW_DEFAULT
         } else {
@@ -389,7 +393,7 @@ impl CreditGate {
 
     /// The `{"type":"credit","window":W}` grant; binary frames sent after it
     /// are counted (WS frames are ordered, so both sides agree where).
-    fn grant_frame(&self) -> String {
+    pub fn grant_frame(&self) -> String {
         format!(r#"{{"type":"credit","window":{}}}"#, self.window)
     }
 
@@ -426,7 +430,7 @@ impl CreditGate {
     }
 
     /// New live output for this viewer (one coalesced chunk).
-    fn push(&mut self, chunk: Vec<u8>, now: tokio::time::Instant) -> CreditStep {
+    pub fn push(&mut self, chunk: Vec<u8>, now: tokio::time::Instant) -> CreditStep {
         let step = if self.skipped {
             CreditStep::Idle
         } else if self.held.is_empty() && chunk.len() <= self.available() {
@@ -463,7 +467,7 @@ impl CreditGate {
     }
 
     /// Client `ack` (cumulative). Stale or out-of-range values are clamped.
-    fn ack(&mut self, cumulative: u64, now: tokio::time::Instant) -> CreditStep {
+    pub fn ack(&mut self, cumulative: u64, now: tokio::time::Instant) -> CreditStep {
         let c = cumulative.min(self.sent);
         if c > self.acked {
             self.acked = c;
@@ -481,7 +485,7 @@ impl CreditGate {
     /// The user typed while this viewer is more than a window behind: they
     /// want the present, not the held backlog (the server-side twin of the
     /// client's `resync` on input). The held output becomes a snapshot.
-    fn skip_on_input(&mut self, user: bool, now: tokio::time::Instant) {
+    pub fn skip_on_input(&mut self, user: bool, now: tokio::time::Instant) {
         // Emulator replies (for example cursor reports) are not a request to
         // interrupt a backlog; only explicit typing may discard held output.
         if user && !self.held.is_empty() {
@@ -494,7 +498,7 @@ impl CreditGate {
     /// A snapshot just went out (lag / client resync / revive / request): it
     /// already reflects everything held here — sending that after it would
     /// double-apply it.
-    fn superseded(&mut self) {
+    pub fn superseded(&mut self) {
         self.held = bytes::BytesMut::new();
         self.skipped = false;
         self.stalled_since = None;
@@ -502,7 +506,7 @@ impl CreditGate {
     }
 
     /// No `ack` progress for [`FLOW_AUTO_RESUME`] while output waits.
-    fn stall_deadline(&self) -> Option<tokio::time::Instant> {
+    pub fn stall_deadline(&self) -> Option<tokio::time::Instant> {
         self.stalled_since.map(|t| t + FLOW_AUTO_RESUME)
     }
 
@@ -519,7 +523,7 @@ impl CreditGate {
     /// drops (termFlow.ts), and the unreported remainder is < an ack step ≤
     /// `window / 4`, so its acks always bring the gate to the snapshot. Only a
     /// client that stops executing waits — and it is sent nothing meanwhile.
-    fn forgive(&mut self) {
+    pub fn forgive(&mut self) {
         self.held = bytes::BytesMut::new();
         self.skipped = true;
         self.stalled_since = None;
