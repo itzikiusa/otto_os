@@ -21,8 +21,9 @@ use otto_state::{AuditRepo, K8sCluster, K8sMonitorRepo, K8sMonitorStatusRow};
 use serde_json::{json, Value};
 
 use super::classify::{self, ActionHint, Classified, EventHint, PodSnap, Snapshot};
+use super::gateway::{self, KubeProxy};
 use super::parse::{self, Parsed, Sample};
-use super::probes::{self, is_excluded, MonitorConfig, PodRef, ProbeFormat};
+use super::probes::{self, is_excluded, MonitorConfig, PodRef, ProbeFormat, Transport};
 use super::schema;
 use super::scrape::{self, ScrapeTarget, TransportUsed};
 use crate::cli::Kubectl;
@@ -87,8 +88,10 @@ async fn store_status(
 
 /// Back-off ceiling after consecutive kubectl failures.
 const MAX_BACKOFF: Duration = Duration::from_secs(900);
-/// Sleep slice so cancel is observed promptly.
-const SLICE: Duration = Duration::from_secs(1);
+/// How often a cluster whose retention is shorter than the table TTL trims its
+/// old rows (a lightweight DELETE is a ClickHouse mutation; per cycle it was
+/// 2 × 1,440 mutations a day per cluster — r3-08-03).
+const PURGE_EVERY: Duration = Duration::from_secs(24 * 3600);
 
 pub struct CycleOutcome {
     pub status: K8sMonitorStatusRow,
@@ -308,6 +311,7 @@ async fn action_hints<S: K8sCtx>(ctx: &S, cluster_id: &Id, now: DateTime<Utc>) -
 /// Scrape one pod: every probe on every port, parsed into NDJSON.
 async fn scrape_pod(
     k: &Kubectl,
+    gw: Option<&KubeProxy>,
     cluster_id: &str,
     transport: TransportUsed,
     cfg: &MonitorConfig,
@@ -327,7 +331,7 @@ async fn scrape_pod(
             pod: pod.name.clone(),
             port,
         };
-        let results = scrape::fetch(k, transport, &target, &probes).await;
+        let results = scrape::fetch_via(k, gw, transport, &target, &probes).await;
         for (probe, res) in probes.iter().zip(results) {
             match res {
                 Ok(r) => {
@@ -400,6 +404,9 @@ async fn scrape_pod(
 
 /// Run one full cycle (spec steps 1–10). Never panics on cluster errors: an
 /// unreachable cluster yields `unreachable = true` + `last_error`.
+///
+/// A one-off cycle: the `kubectl proxy` gateway it may start dies with it.
+/// The per-cluster loop uses [`run_cycle_with`] to keep one across cycles.
 pub async fn run_cycle<S: K8sCtx>(
     ctx: &S,
     cluster: &K8sCluster,
@@ -407,6 +414,22 @@ pub async fn run_cycle<S: K8sCtx>(
     prev: &Snapshot,
     prev_cycle_at: Option<DateTime<Utc>>,
     sink: &dyn MonitorSink,
+) -> CycleOutcome {
+    let mut gw = None;
+    run_cycle_with(ctx, cluster, cfg, prev, prev_cycle_at, sink, &mut gw).await
+}
+
+/// [`run_cycle`] reusing (or (re)starting) the cluster's `kubectl proxy`
+/// gateway in `gw`, so probe scrapes are pooled HTTP requests instead of one
+/// kubectl process per pod per probe (r3-08-02).
+pub async fn run_cycle_with<S: K8sCtx>(
+    ctx: &S,
+    cluster: &K8sCluster,
+    cfg: &MonitorConfig,
+    prev: &Snapshot,
+    prev_cycle_at: Option<DateTime<Utc>>,
+    sink: &dyn MonitorSink,
+    gw_slot: &mut Option<KubeProxy>,
 ) -> CycleOutcome {
     let started = Instant::now();
     let now = Utc::now();
@@ -597,7 +620,16 @@ pub async fn run_cycle<S: K8sCtx>(
                 pod: first.name.clone(),
                 port: probe0.port.or(first.first_port).unwrap_or(80),
             };
-            let transport = scrape::pick_transport(&k, cfg.transport, &sample, &probe0.path).await;
+            // The gateway only serves the proxy transport; a pinned
+            // port-forward config never starts (or keeps) one.
+            let gw: Option<&KubeProxy> = if cfg.transport == Transport::PortForward {
+                *gw_slot = None;
+                None
+            } else {
+                gateway::ensure(gw_slot, &k).await
+            };
+            let transport =
+                scrape::pick_transport_via(&k, gw, cfg.transport, &sample, &probe0.path).await;
             status.transport_used = transport.as_str().into();
 
             // 5. Scrape with bounded concurrency. The futures are built up
@@ -609,7 +641,7 @@ pub async fn run_cycle<S: K8sCtx>(
                 .map(|p| {
                     let pod: PodSnap = (*p).clone();
                     let (k, cid, cfg) = (&k, cid.as_str(), cfg);
-                    async move { scrape_pod(k, cid, transport, cfg, &pod, now).await }
+                    async move { scrape_pod(k, gw, cid, transport, cfg, &pod, now).await }
                 })
                 .collect();
             let keys: Vec<String> = targets
@@ -702,6 +734,12 @@ pub async fn run_loop<S: K8sCtx>(ctx: S, cluster_id: Id, cancel: Arc<AtomicBool>
     };
     let mut schema_ready = false;
     let mut failures: u32 = 0;
+    // The cluster's long-lived `kubectl proxy` (probe scrapes), reused across
+    // cycles; dropped (child killed, socket dir removed) when the loop ends or
+    // is aborted by the supervisor.
+    let mut gateway: Option<KubeProxy> = None;
+    // When this loop last considered trimming rows past the retention.
+    let mut last_purge: Option<Instant> = None;
     // What this loop last stored: the snapshot (the write-on-change baseline
     // and the next cycle's `prev`, so the row isn't re-read and re-parsed
     // every cycle) and that cycle's time. `None` = read the row.
@@ -733,7 +771,7 @@ pub async fn run_loop<S: K8sCtx>(ctx: S, cluster_id: Id, cancel: Arc<AtomicBool>
                     .unwrap_or_else(|| K8sMonitorStatusRow::empty(cluster_id.as_str()));
                 st.last_error = "usage engine (ClickHouse) is not available".into();
                 let _ = repo.upsert_status(&st).await;
-                sleep_slices(interval, &cancel).await;
+                sleep_or_cancel(interval, &cancel).await;
                 continue;
             }
             match sink.exec(&schema::schema_sql(cfg.retention_days)).await {
@@ -747,7 +785,7 @@ pub async fn run_loop<S: K8sCtx>(ctx: S, cluster_id: Id, cancel: Arc<AtomicBool>
                 }
                 Err(e) => {
                     tracing::warn!(cluster = %cluster_id, "k8s monitor: schema init failed: {e}");
-                    sleep_slices(interval, &cancel).await;
+                    sleep_or_cancel(interval, &cancel).await;
                     continue;
                 }
             }
@@ -771,7 +809,16 @@ pub async fn run_loop<S: K8sCtx>(ctx: S, cluster_id: Id, cancel: Arc<AtomicBool>
             .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
             .map(|t| t.with_timezone(&Utc));
 
-        let out = run_cycle(&ctx, &cluster, &cfg, &prev, prev_at, sink.as_ref()).await;
+        let out = run_cycle_with(
+            &ctx,
+            &cluster,
+            &cfg,
+            &prev,
+            prev_at,
+            sink.as_ref(),
+            &mut gateway,
+        )
+        .await;
         let ok = out.status.last_ok_at.is_some();
         match store_status(&repo, &out.status, last.as_ref().map(|(snap, _)| snap)).await {
             Ok(_) => {
@@ -798,14 +845,19 @@ pub async fn run_loop<S: K8sCtx>(ctx: S, cluster_id: Id, cancel: Arc<AtomicBool>
             ms = out.status.cycle_ms, "k8s monitor cycle"
         );
 
-        // Trim clusters that keep less than the table TTL.
-        if ok {
-            let cutoff = (Utc::now() - chrono::Duration::days(i64::from(cfg.retention_days)))
-                .format("%Y-%m-%d")
-                .to_string();
-            for q in schema::purge_cluster_sql(cluster_id.as_str(), Some(&cutoff)) {
-                if let Err(e) = sink.exec(&q).await {
-                    tracing::debug!("k8s monitor purge: {e}");
+        // Trim clusters that keep less than the table TTL — at most daily,
+        // and only when the TTL (the largest enabled retention) is longer than
+        // this cluster's retention; otherwise the TTL already drops the rows.
+        if ok && last_purge.is_none_or(|t| t.elapsed() >= PURGE_EVERY) {
+            last_purge = Some(Instant::now());
+            if needs_purge(cfg.retention_days, largest_retention(&repo).await) {
+                let cutoff = (Utc::now() - chrono::Duration::days(i64::from(cfg.retention_days)))
+                    .format("%Y-%m-%d")
+                    .to_string();
+                for q in schema::purge_cluster_sql(cluster_id.as_str(), Some(&cutoff)) {
+                    if let Err(e) = sink.exec(&q).await {
+                        tracing::debug!("k8s monitor purge: {e}");
+                    }
                 }
             }
         }
@@ -819,8 +871,14 @@ pub async fn run_loop<S: K8sCtx>(ctx: S, cluster_id: Id, cancel: Arc<AtomicBool>
             let elapsed = Duration::from_millis(out.status.cycle_ms.max(0) as u64);
             interval.saturating_sub(elapsed)
         };
-        sleep_slices(wait, &cancel).await;
+        sleep_or_cancel(wait, &cancel).await;
     }
+}
+
+/// A per-cluster purge is only needed when the cluster keeps fewer days than
+/// the shared table TTL.
+fn needs_purge(retention_days: u32, table_ttl_days: u32) -> bool {
+    retention_days.clamp(1, 90) < table_ttl_days
 }
 
 async fn largest_retention(repo: &K8sMonitorRepo) -> u32 {
@@ -835,15 +893,13 @@ async fn largest_retention(repo: &K8sMonitorRepo) -> u32 {
         .unwrap_or(14)
 }
 
-async fn sleep_slices(total: Duration, cancel: &AtomicBool) {
-    let mut waited = Duration::ZERO;
-    while waited < total {
-        if cancel.load(Ordering::Relaxed) {
-            return;
-        }
-        let step = SLICE.min(total - waited);
-        tokio::time::sleep(step).await;
-        waited += step;
+/// One timer for the whole wait (was 1 s slices: a wake-up a second per
+/// monitored cluster, r3-08-07). The supervisor both sets `cancel` and aborts
+/// the task, so an abort ends the wait at once; the flag is re-checked at the
+/// top of the loop for any other canceller.
+async fn sleep_or_cancel(total: Duration, cancel: &AtomicBool) {
+    if !cancel.load(Ordering::Relaxed) {
+        tokio::time::sleep(total).await;
     }
 }
 
@@ -904,6 +960,14 @@ mod tests {
             created: "2026-09-01T00:00:00Z".into(),
             ..PodSnap::default()
         }
+    }
+
+    #[test]
+    fn purge_only_when_retention_is_below_the_table_ttl() {
+        assert!(!needs_purge(14, 14), "TTL already trims");
+        assert!(!needs_purge(30, 14), "longer than the TTL: nothing to trim");
+        assert!(needs_purge(7, 14));
+        assert!(needs_purge(0, 14), "floor of one day");
     }
 
     #[test]

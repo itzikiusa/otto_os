@@ -3696,6 +3696,8 @@ dependencies = [
  "dirs",
  "futures-util",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "otto-connections",
  "otto-core",
  "otto-pty",

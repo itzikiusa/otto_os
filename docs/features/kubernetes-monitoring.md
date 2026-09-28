@@ -50,6 +50,10 @@ classify restarts + churn vs previous snapshot  → k8s_events rows
 write ClickHouse → status row → WS k8s_monitor_cycle
 ```
 
+Rows older than the cluster's retention are dropped by the tables' TTL (the
+largest retention among enabled clusters). A cluster that keeps fewer days
+than that TTL is trimmed with a `DELETE` at most once a day, not per cycle.
+
 Status series written from the sweep alone: `restarts_total`, `ready`,
 `phase_running`, `mem_limit_bytes`, `cpu_request_millis`, `pod_age_seconds`.
 
@@ -76,8 +80,13 @@ status shows `series_capped` when a probe overflows — tighten the globs).
 ## Transport
 
 `auto` tries `GET /api/v1/namespaces/…/pods/<pod>:<port>/proxy<path>` once per
-cycle. If the API server answers, every probe goes through the proxy (one
-short `kubectl` call each). If it is denied — Rancher-managed clusters
+cycle. If the API server answers, every probe goes through the proxy. The
+collector keeps ONE long-lived `kubectl proxy` per monitored cluster (on a
+Unix socket in a private `0700` temp directory, accepting only pod-proxy GETs)
+and sends each probe to it as a pooled HTTP request — no process per pod. The
+proxy is restarted when it exits or its credentials change (kubeconfig or
+token overlay rewritten), and stops with the loop; if it cannot start, each
+probe falls back to a short `kubectl get --raw`. If the proxy is denied — Rancher-managed clusters
 typically deny `pods/proxy` — the collector falls back to
 `kubectl port-forward pod/<pod> 0:<port>` with `concurrency` parallel
 forwards (default 8, max 32) and a plain HTTP GET on loopback. 230 pods at
