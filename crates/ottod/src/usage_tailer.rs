@@ -10,6 +10,11 @@
 //! Supported providers:
 //!   * **Claude Code** — `~/.claude/projects/<enc_cwd>/<uuid>.jsonl`. Attributed
 //!     by transcript filename stem (= `provider_session_id` in `sessions`).
+//!     Subagent transcripts — `<enc_cwd>/<uuid>/subagents/agent-*.jsonl`, most
+//!     of the claude files on a busy machine — are tailed too and attributed to
+//!     their PARENT session `<uuid>` (r3-08-14). The global response-key seen
+//!     set is what keeps them from double counting: a legacy in-file
+//!     `isSidechain` copy of the same response carries the same key.
 //!   * **Codex** — `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`.
 //!     Attributed by `cwd` (from the file's `session_meta` line) → the unique
 //!     codex session with that cwd, if exactly one.
@@ -294,10 +299,7 @@ impl UsageTailer {
                 continue;
             };
             let text = String::from_utf8_lossy(&bytes[..=last_nl]);
-            let stem = file
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
+            let stem = claude_session_stem(&file);
             let sref = attr.by_provider_session.get(&stem);
 
             for line in text.lines() {
@@ -637,11 +639,9 @@ impl UsageTailer {
             None => return Ok(()),
         };
 
-        // Filename stem is the CLI's session uuid (= provider_session_id).
-        let stem = file
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        // Filename stem is the CLI's session uuid (= provider_session_id); a
+        // subagent transcript bills to its parent session.
+        let stem = claude_session_stem(file);
         let sref = attr.by_provider_session.get(&stem);
 
         for line in chunk.lines() {
@@ -833,14 +833,40 @@ fn blocking_io<R>(f: impl FnOnce() -> R) -> R {
 }
 
 /// All claude transcript files with their sizes:
-/// `<home>/.claude/projects/*/*.jsonl`. Blocking — call off the runtime.
+/// `<home>/.claude/projects/*/*.jsonl` plus subagent transcripts
+/// `<home>/.claude/projects/*/*/subagents/*.jsonl`. Blocking — call off the
+/// runtime.
 fn list_claude_files(home: &Path) -> Vec<(PathBuf, u64)> {
     let root = home.join(".claude").join("projects");
     let mut out = Vec::new();
     for project in read_subdirs(&root) {
         out.extend(read_files_with_ext(&project, "jsonl", |_| true));
+        for session in read_subdirs(&project) {
+            out.extend(read_files_with_ext(
+                &session.join("subagents"),
+                "jsonl",
+                |_| true,
+            ));
+        }
     }
     out
+}
+
+/// The claude session a transcript bills to: the file stem for a top-level
+/// `<sid>.jsonl`, the parent `<sid>` for `<sid>/subagents/<agent>.jsonl`.
+fn claude_session_stem(file: &Path) -> String {
+    let parent = file.parent();
+    if parent.and_then(|p| p.file_name()).and_then(|n| n.to_str()) == Some("subagents") {
+        if let Some(sid) = parent
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name())
+        {
+            return sid.to_string_lossy().into_owned();
+        }
+    }
+    file.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// All codex rollout files with their sizes:
@@ -1033,14 +1059,41 @@ mod tests {
         std::fs::create_dir_all(&proj).unwrap();
         std::fs::write(proj.join("s.jsonl"), b"abc").unwrap();
         std::fs::write(proj.join("s.meta.json"), b"{}").unwrap();
+        // r3-08-14: subagent transcripts live one level down; tool-results
+        // and other session subdirs are not transcripts.
+        let subs = proj.join("s/subagents");
+        std::fs::create_dir_all(&subs).unwrap();
+        std::fs::write(subs.join("agent-x.jsonl"), b"abcd").unwrap();
+        std::fs::write(subs.join("agent-x.meta.json"), b"{}").unwrap();
+        std::fs::create_dir_all(proj.join("s/tool-results")).unwrap();
+        std::fs::write(proj.join("s/tool-results/t.jsonl"), b"z").unwrap();
 
         let codex = list_codex_files(home);
         assert_eq!(codex, vec![(day.join("rollout-a.jsonl"), 5)]);
-        let claude = list_claude_files(home);
-        assert_eq!(claude, vec![(proj.join("s.jsonl"), 3)]);
+        let mut claude = list_claude_files(home);
+        claude.sort();
+        assert_eq!(
+            claude,
+            // (Path order compares components: `s` sorts before `s.jsonl`.)
+            vec![(subs.join("agent-x.jsonl"), 4), (proj.join("s.jsonl"), 3)]
+        );
         // Missing trees are empty, not errors.
         assert!(list_codex_files(&home.join("nope")).is_empty());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn subagent_transcripts_bill_to_their_parent_session() {
+        assert_eq!(
+            claude_session_stem(Path::new("/h/.claude/projects/-p/abc-123.jsonl")),
+            "abc-123"
+        );
+        assert_eq!(
+            claude_session_stem(Path::new(
+                "/h/.claude/projects/-p/abc-123/subagents/agent-a1b2.jsonl"
+            )),
+            "abc-123"
+        );
     }
 
     #[tokio::test]
