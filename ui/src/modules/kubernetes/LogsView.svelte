@@ -317,10 +317,10 @@
     {#if !lines.length && !error}
       <div class="dim pad">{streaming ? 'Waiting for output…' : 'No log lines.'}</div>
     {:else}
-      <VirtualList items={shown} estimateHeight={LINE_H} class="logs-vlist">
+      <VirtualList items={shown} estimateHeight={LINE_H} class="logs-vlist" findText={(line) => parse(line).text}>
         {#snippet row(line, i)}
           {@const pl = parse(line)}
-          <div class="ln" style="height:{LINE_H}px" data-i={i}>{#if pl.pod}<button class="podtag" style="--h:{hue(pl.pod)}" title={`${pl.pod} · ${pl.ctr}\nClick: only this pod · ⌥-click: open pod`} onclick={(e) => { if (e.altKey) onopenpod?.(pl.pod); else podFilter = podFilter === pl.pod ? '' : pl.pod; }}>{pl.pod.length > 22 ? '…' + pl.pod.slice(-21) : pl.pod}{#if !container}<span class="ctr">/{pl.ctr}</span>{/if}</button>{/if}{#each segments(pl.text) as s, k (k)}{#if s.m}<mark>{s.t}</mark>{:else}{s.t}{/if}{/each}</div>
+          <div class="ln" style="height:{LINE_H}px" data-i={i}>{#if pl.pod}<button class="podtag" data-find-skip style="--h:{hue(pl.pod)}" title={`${pl.pod} · ${pl.ctr}\nClick: only this pod · ⌥-click: open pod`} onclick={(e) => { if (e.altKey) onopenpod?.(pl.pod); else podFilter = podFilter === pl.pod ? '' : pl.pod; }}>{pl.pod.length > 22 ? '…' + pl.pod.slice(-21) : pl.pod}{#if !container}<span class="ctr">/{pl.ctr}</span>{/if}</button>{/if}{#each segments(pl.text) as s, k (k)}{#if s.m}<mark>{s.t}</mark>{:else}{s.t}{/if}{/each}</div>
         {/snippet}
       </VirtualList>
     {/if}

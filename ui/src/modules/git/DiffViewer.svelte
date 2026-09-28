@@ -50,6 +50,7 @@
     type Row,
   } from './diff-model';
   import { findScroller, resum, rowAt } from './diff-virtual';
+  import { registerFindProvider } from '../../lib/findProviders';
   import { ListWindow } from './list-window.svelte';
   import { DeferredHighlighter } from './diff-highlight.svelte';
 
@@ -947,6 +948,56 @@
     return path.split('/').pop() ?? path;
   }
 
+  // ── ⌘F over the whole diff (lib/findProviders.ts) ──────────────────────
+  // The body mounts only the window (+800 px), so find-in-page searched one
+  // screen of a 100k-line diff. It now searches the row model — every file,
+  // hunk header and line of the expanded files — and reveals a match by an
+  // index jump (as scrollToFile does), then highlights it in the mounted row
+  // (gutters and stats are `data-find-skip`).
+  function findTextOf(r: Row): string {
+    switch (r.kind) {
+      case 'file':
+        return r.file.old_path ? `${r.file.old_path} → ${r.file.path}` : r.file.path;
+      case 'hunk':
+        return r.hunk.header;
+      case 'line':
+        return r.line.content;
+      case 'split':
+        return `${r.sr.left?.content ?? ''}\n${r.sr.right?.content ?? ''}`;
+      case 'note':
+        return r.text;
+      case 'error':
+        return r.message;
+      case 'comment':
+      case 'fcomments':
+        return r.comments.map((c) => c.body).join('\n');
+      default:
+        return '';
+    }
+  }
+  $effect(() =>
+    registerFindProvider({
+      root: () => bodyEl ?? null,
+      count: () => rows.length,
+      text: (i) => (rows[i] ? findTextOf(rows[i]) : ''),
+      reveal: async (i) => {
+        const b = bodyEl;
+        if (!b || i >= layout.n) return;
+        const y = layout.offsets[i] + layout.heights[i] / 2;
+        const sc = activeScroller();
+        const br = b.getBoundingClientRect();
+        if (sc) sc.scrollTop += br.top - sc.getBoundingClientRect().top + y - sc.clientHeight / 2;
+        else window.scrollBy(0, br.top + y - window.innerHeight / 2);
+        readView();
+        await tick();
+      },
+      rowElement: (i) => {
+        const r = rows[i];
+        return r ? (bodyEl?.querySelector(`[data-rk="${CSS.escape(r.key)}"]`) ?? null) : null;
+      },
+    }),
+  );
+
   /** Jump to a file: expand it, then an index jump (instant — a smooth scroll
    *  across 100k rows would mount every row on the way), then snap to the
    *  real header once it is mounted and measured. */
@@ -1204,12 +1255,12 @@
             </span>
             <span class="grow"></span>
             {#if prMode && cCount > 0}
-              <span class="file-comment-badge" title="{cCount} comment{cCount === 1 ? '' : 's'}">
+              <span class="file-comment-badge" data-find-skip title="{cCount} comment{cCount === 1 ? '' : 's'}">
                 💬 {cCount}
               </span>
             {/if}
-            <span class="add">+{stats.add}</span>
-            <span class="del">−{stats.del}</span>
+            <span class="add" data-find-skip>+{stats.add}</span>
+            <span class="del" data-find-skip>−{stats.del}</span>
           </button>
           {#if repoId}
             <button
@@ -1255,6 +1306,7 @@
       >
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
         <span
+          data-find-skip
           class="gut old"
           class:commentable={prMode}
           class:selectable={pick}
@@ -1262,12 +1314,13 @@
         >{r.line.old_line ?? ''}</span>
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
         <span
+          data-find-skip
           class="gut new"
           class:commentable={prMode}
           class:selectable={pick}
           onclick={(e) => (wip ? selectLine(e, r.file.path, r.hi, r.li, r.line) : gutterClick(r.file.path, r.line))}
         >{r.line.new_line ?? ''}</span>
-        <span class="sign">{sign(r.line)}</span>
+        <span class="sign" data-find-skip>{sign(r.line)}</span>
         <span class="code mono">{@html hl.html(r.line.content, lang)}</span>
       </div>
     {:else if r.kind === 'split'}
@@ -1276,12 +1329,12 @@
       {@const R = r.sr.right}
       <div class="vrow split-vrow" data-rk={r.key} use:measure={[r.key, i]}>
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <span class="gut old" class:commentable={prMode} onclick={() => gutterClick(r.file.path, L)}
+        <span class="gut old" data-find-skip class:commentable={prMode} onclick={() => gutterClick(r.file.path, L)}
           >{L?.old_line ?? ''}</span>
         <span class="code mono half {L ? (L.origin === 'del' ? 'del' : '') : 'void'}"
           >{#if L}{@html hl.html(L.content, lang)}{/if}</span>
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <span class="gut new" class:commentable={prMode} onclick={() => gutterClick(r.file.path, R)}
+        <span class="gut new" data-find-skip class:commentable={prMode} onclick={() => gutterClick(r.file.path, R)}
           >{R?.new_line ?? ''}</span>
         <span class="code mono half {R ? (R.origin === 'add' ? 'add' : '') : 'void'}"
           >{#if R}{@html hl.html(R.content, lang)}{/if}</span>

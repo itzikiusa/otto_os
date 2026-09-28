@@ -10,7 +10,8 @@
   //
   // Rows are assumed ~uniform `estimateHeight` px; mild variance is tolerated via
   // overscan. For wildly variable heights, wrap rows to a fixed height.
-  import type { Snippet } from 'svelte';
+  import { tick, type Snippet } from 'svelte';
+  import { registerFindProvider } from '../findProviders';
 
   interface Props {
     items: T[];
@@ -24,8 +25,11 @@
     scrollIndex?: number;
     scrollVersion?: number;
     key?: (item: T, index: number) => string | number;
+    /** Opt into ⌘F over the WHOLE list (lib/findProviders.ts): the text a row
+     *  shows. Without it find-in-page only sees the mounted window. */
+    findText?: (item: T, index: number) => string;
   }
-  let { items, estimateHeight, overscan = 6, row, class: cls = '', pinnedIndex = -1, scrollIndex = -1, scrollVersion = 0, key, tabindex }: Props = $props();
+  let { items, estimateHeight, overscan = 6, row, class: cls = '', pinnedIndex = -1, scrollIndex = -1, scrollVersion = 0, key, tabindex, findText }: Props = $props();
   let viewport: HTMLDivElement | undefined = $state();
 
   let scrollTop = $state(0);
@@ -49,6 +53,25 @@
     scrollTop = viewport.scrollTop;
   });
 
+  let winEl: HTMLDivElement | undefined = $state();
+  $effect(() => {
+    const text = findText;
+    if (!text) return;
+    return registerFindProvider({
+      root: () => viewport ?? null,
+      count: () => items.length,
+      text: (i) => text(items[i], i),
+      reveal: async (i) => {
+        if (!viewport) return;
+        viewport.scrollTop = Math.max(0, i * estimateHeight - (clientH || 600) / 2);
+        scrollTop = viewport.scrollTop;
+        await tick();
+      },
+      // One element per row (the row snippet's root), in window order.
+      rowElement: (i) => (i >= start && i < start + count ? (winEl?.children[i - start] ?? null) : null),
+    });
+  });
+
   function onScroll(e: Event): void {
     scrollTop = (e.currentTarget as HTMLElement).scrollTop;
   }
@@ -57,7 +80,7 @@
 <!-- svelte-ignore a11y_no_noninteractive_tabindex (Only -1 is accepted to opt out of the browser scroll-container tab stop.) -->
 <div class="vlist {cls}" {tabindex} bind:this={viewport} bind:clientHeight={clientH} onscroll={onScroll}>
   <div class="vlist-sizer" style="height:{total}px">
-    <div class="vlist-win" style="transform:translateY({start * estimateHeight}px)">
+    <div class="vlist-win" bind:this={winEl} style="transform:translateY({start * estimateHeight}px)">
       {#each slice as item, i (key ? key(item, start + i) : start + i)}
         {@render row(item, start + i)}
       {/each}

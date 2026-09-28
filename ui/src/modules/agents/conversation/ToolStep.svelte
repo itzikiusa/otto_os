@@ -176,7 +176,7 @@
       {:else if block.tool === 'web' || block.tool === 'ask'}
         <Markdown md={text} small />
       {:else if windowed}
-        <VirtualList items={lines} estimateHeight={18} class="out-vlist">
+        <VirtualList items={lines} estimateHeight={18} class="out-vlist" findText={(line: string) => line}>
           {#snippet row(line)}<div class="out-line mono hljs" dir="ltr">{@html highlightLine(line || ' ', lang)}</div>{/snippet}
         </VirtualList>
       {:else if text}

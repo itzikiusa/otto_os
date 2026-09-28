@@ -1,5 +1,7 @@
 <script lang="ts">
-  // Global find-in-page overlay.
+  // Global find-in-page overlay. Windowed views (diff, DB grid, logs, long
+  // chats, VirtualList users that opt in) register a row-model provider
+  // (lib/findProviders.ts) so matches outside their mounted window count too.
   // Uses the CSS Custom Highlight API when available; falls back to a
   // scroll-to-first-match approach on older WebViews.
   //
@@ -9,6 +11,7 @@
   import { untrack } from 'svelte';
   import { findInPage } from '../findinpage.svelte';
   import Icon from './Icon.svelte';
+  import { activeFindProviders, countOccurrences, locateInElement, type FindProvider } from '../findProviders';
 
   // ---- state ----
   let query = $state('');
@@ -29,15 +32,26 @@
     typeof Highlight !== 'undefined';
   const supportsStatic = typeof StaticRange !== 'undefined';
 
-  // All matched ranges in document order. StaticRange, not Range: the document
+  // DOM matches in document order. StaticRange, not Range: the document
   // tracks every live Range and walks them all on EACH DOM mutation anywhere
   // in the app (5.7 ms per mutation at 30k matches). A static range goes stale
   // if its text re-renders — next()/prev() re-search when that happens.
   let ranges: AbstractRange[] = [];
+  // Matches inside WINDOWED views (lib/findProviders.ts), found in their row
+  // models — mounted or not. They come first in the match order; index
+  // `rowMatches.length + k` is DOM match `k`.
+  type RowMatch = { p: FindProvider; row: number; nth: number };
+  let rowMatches: RowMatch[] = [];
+  /** The lower-cased query the current matches were collected for. */
+  let searched = '';
+  /** The range painted as "current" (a DOM match, or a located row match). */
+  let currentRange: AbstractRange | null = null;
 
   function dropRanges(): void {
     clearHighlights();
     ranges = [];
+    rowMatches = [];
+    currentRange = null;
   }
 
   // ---- open / close reactions ----
@@ -50,11 +64,27 @@
       untrack(() => {
         if (query) runSearch();
       });
+      // A windowed view mounts other rows as it scrolls: repaint the visible
+      // provider matches (one walk of the mounted rows per frame, at most).
+      const onScroll = (): void => {
+        if (rowMatches.length > 0 && !paintFrame) paintFrame = requestAnimationFrame(repaint);
+      };
+      document.addEventListener('scroll', onScroll, { capture: true, passive: true });
+      return () => {
+        document.removeEventListener('scroll', onScroll, { capture: true });
+        if (paintFrame) cancelAnimationFrame(paintFrame);
+        paintFrame = 0;
+      };
     } else {
       // Hidden by any path: release the matches, not just their paint.
       dropRanges();
     }
   });
+  let paintFrame = 0;
+  function repaint(): void {
+    paintFrame = 0;
+    applyHighlights();
+  }
 
   // ---- debounced search on query change ----
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -86,84 +116,131 @@
     return r;
   }
 
+  /** Hidden text: `display:none` / `visibility:hidden` on the text's element
+   *  OR ANY ANCESTOR (the old check read only the direct parent's style, so
+   *  text inside a hidden ancestor still matched). `offsetParent === null` is
+   *  the cheap pre-filter: it is non-null for anything laid out normally. */
+  function hiddenText(parent: Element): boolean {
+    if ((parent as HTMLElement).offsetParent !== null || parent.tagName === 'BODY') return false;
+    const check = (parent as Element & { checkVisibility?: (o?: object) => boolean }).checkVisibility;
+    if (typeof check === 'function') return !check.call(parent, { visibilityProperty: true });
+    for (let el: Element | null = parent; el && el !== document.body; el = el.parentElement) {
+      const style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') return true;
+      if (style.position === 'fixed') return false;
+    }
+    return false;
+  }
+
+  /** Walk `root`'s text, collecting ranges; `reject` subtrees are skipped. */
+  function walkText(root: Element, lower: string, into: AbstractRange[], cap: number, reject: Set<Element>, checkHidden: boolean): boolean {
+    const bar = document.querySelector('.otto-find-bar');
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          // Whole subtrees skipped once at their root (was a closest() walk
+          // up from every text node).
+          const el = node as Element;
+          const tag = el.localName;
+          if (el === bar || tag === 'script' || tag === 'style' || reject.has(el)) return NodeFilter.FILTER_REJECT;
+          return NodeFilter.FILTER_SKIP;
+        }
+        const parent = node.parentElement;
+        if (!parent) return NodeFilter.FILTER_REJECT;
+        if (checkHidden && hiddenText(parent)) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    let textNode: Text | null;
+    while ((textNode = walker.nextNode() as Text | null)) {
+      const content = textNode.data;
+      // Cheap pre-check before lowercasing the node (most nodes don't match).
+      if (content.length < lower.length) continue;
+      const contentLower = content.toLowerCase();
+      let pos = 0;
+      while ((pos = contentLower.indexOf(lower, pos)) !== -1) {
+        into.push(makeRange(textNode, pos, pos + lower.length));
+        if (into.length >= cap) return true;
+        pos += lower.length;
+      }
+    }
+    return false;
+  }
+
   // ---- core search ----
   function runSearch(): void {
     clearHighlights();
     truncated = false;
+    currentRange = null;
     if (!query) {
       totalCount = 0;
       currentIdx = 0;
       ranges = [];
+      rowMatches = [];
+      searched = '';
       return;
     }
 
     const lower = query.toLowerCase();
-    const found: AbstractRange[] = [];
-    const bar = document.querySelector('.otto-find-bar');
+    searched = lower;
 
-    outer: for (const root of getContentRoots()) {
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
-        acceptNode(node) {
-          if (node.nodeType === Node.ELEMENT_NODE) {
-            // Whole subtrees skipped once at their root (was a closest() walk
-            // up from every text node).
-            const tag = (node as Element).localName;
-            if (node === bar || tag === 'script' || tag === 'style') return NodeFilter.FILTER_REJECT;
-            return NodeFilter.FILTER_SKIP;
-          }
-          const parent = node.parentElement;
-          if (!parent) return NodeFilter.FILTER_REJECT;
-          if ((parent as HTMLElement).offsetParent === null && parent.tagName !== 'BODY') {
-            // hidden via display:none or visibility:hidden — skip
-            const style = getComputedStyle(parent);
-            if (style.display === 'none' || style.visibility === 'hidden') {
-              return NodeFilter.FILTER_REJECT;
-            }
-          }
-          return NodeFilter.FILTER_ACCEPT;
-        },
-      });
-
-      let textNode: Text | null;
-      while ((textNode = walker.nextNode() as Text | null)) {
-        const content = textNode.data;
-        // Cheap pre-check before lowercasing the node (most nodes don't match).
-        if (content.length < lower.length) continue;
-        const contentLower = content.toLowerCase();
-        let pos = 0;
-        while ((pos = contentLower.indexOf(lower, pos)) !== -1) {
-          found.push(makeRange(textNode, pos, pos + lower.length));
-          if (found.length >= MAX_MATCHES) {
-            truncated = true;
-            break outer;
-          }
-          pos += lower.length;
+    // 1) Windowed views: search their whole row models.
+    const active = activeFindProviders();
+    const rows: RowMatch[] = [];
+    outer: for (const { provider } of active) {
+      const n = provider.count();
+      for (let i = 0; i < n; i++) {
+        const hits = countOccurrences(provider.text(i), lower, MAX_MATCHES - rows.length);
+        for (let k = 0; k < hits; k++) rows.push({ p: provider, row: i, nth: k });
+        if (rows.length >= MAX_MATCHES) {
+          truncated = true;
+          break outer;
         }
       }
     }
 
+    // 2) The rest of the DOM, minus the provider roots (already counted).
+    const found: AbstractRange[] = [];
+    const reject = new Set(active.map((a) => a.root));
+    if (!truncated) {
+      for (const root of getContentRoots()) {
+        if (walkText(root, lower, found, MAX_MATCHES - rows.length, reject, true)) {
+          truncated = true;
+          break;
+        }
+      }
+    }
+
+    rowMatches = rows;
     ranges = found;
-    totalCount = found.length;
-    currentIdx = found.length > 0 ? 0 : -1;
+    totalCount = rows.length + found.length;
+    currentIdx = totalCount > 0 ? 0 : -1;
     applyHighlights();
-    scrollToCurrent();
+    if (totalCount > 0) void goTo(0);
   }
 
   // ---- highlight helpers ----
   type HighlightRegistry = { set: (k: string, v: unknown) => void; delete: (k: string) => void };
   const registry = (): HighlightRegistry => (CSS as unknown as { highlights: HighlightRegistry }).highlights;
 
-  /** Paint every match (once per search). */
+  /** Paint every DOM match plus the provider matches that are MOUNTED now. */
   function applyHighlights(): void {
     if (!supportsHighlight) return;
     const hl = registry();
-    if (ranges.length === 0) {
+    if (ranges.length === 0 && rowMatches.length === 0) {
       hl.delete('otto-find');
       hl.delete('otto-find-current');
       return;
     }
     const all = new Highlight();
     for (const r of ranges) all.add(r);
+    if (rowMatches.length > 0 && searched) {
+      const mounted: AbstractRange[] = [];
+      for (const { root } of activeFindProviders()) {
+        if (walkText(root, searched, mounted, MAX_MATCHES, new Set(), false)) break;
+      }
+      for (const r of mounted) all.add(r);
+    }
     hl.set('otto-find', all);
     applyCurrent();
   }
@@ -172,7 +249,7 @@
   function applyCurrent(): void {
     if (!supportsHighlight) return;
     const hl = registry();
-    if (currentIdx >= 0 && currentIdx < ranges.length) hl.set('otto-find-current', new Highlight(ranges[currentIdx]));
+    if (currentRange) hl.set('otto-find-current', new Highlight(currentRange));
     else hl.delete('otto-find-current');
   }
 
@@ -183,41 +260,67 @@
     hl.delete('otto-find-current');
   }
 
-  // ---- scroll to current match ----
-  function scrollToCurrent(): void {
-    if (currentIdx < 0 || currentIdx >= ranges.length) return;
-    const range = ranges[currentIdx];
-    const el = range.startContainer.parentElement;
-    el?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  }
+  const nextFrame = (): Promise<void> => new Promise((r) => requestAnimationFrame(() => r()));
 
   // ---- navigation ----
-  /** Move to match `idx`; when its text node was re-rendered away (static
-   *  ranges don't follow DOM edits), re-search and land as close as possible. */
-  function goTo(idx: number): void {
-    if (!ranges[idx]?.startContainer.isConnected) {
-      runSearch();
-      if (totalCount === 0) return;
-      idx = Math.min(idx, totalCount - 1);
+  let navSeq = 0;
+  /** Move to match `idx`. A windowed-row match is revealed first (its view
+   *  scrolls the row into its window), then located among the row's mounted
+   *  text. A DOM match whose text node was re-rendered away (static ranges
+   *  don't follow DOM edits) re-searches and lands as close as possible. */
+  async function goTo(idx: number): Promise<void> {
+    const seq = ++navSeq;
+    if (idx < rowMatches.length) {
+      const m = rowMatches[idx];
+      if (m.row >= m.p.count()) {
+        runSearch(); // the model shrank under the match list
+        return;
+      }
+      currentIdx = idx;
+      let el = m.p.rowElement(m.row);
+      if (!el) {
+        await m.p.reveal(m.row);
+        await nextFrame();
+        if (seq !== navSeq) return;
+        el = m.p.rowElement(m.row);
+      }
+      const loc = el ? locateInElement(el, searched, m.nth) : null;
+      currentRange = loc ? makeRange(loc.node, loc.offset, loc.offset + searched.length) : null;
+      // The window moved: repaint what is mounted now, then the current one.
+      applyHighlights();
+      applyCurrent();
+      // Instant, not smooth: a smooth scroll across a windowed view mounts
+      // every row on the way.
+      (loc?.node.parentElement ?? el)?.scrollIntoView({ block: 'center' });
+      return;
     }
-    currentIdx = idx;
+    let k = idx - rowMatches.length;
+    if (!ranges[k]?.startContainer.isConnected) {
+      runSearch();
+      if (totalCount === 0 || ranges.length === 0) return;
+      k = Math.min(Math.max(0, k), ranges.length - 1);
+    }
+    currentIdx = rowMatches.length + k;
+    currentRange = ranges[k];
     applyCurrent();
-    scrollToCurrent();
+    ranges[k].startContainer.parentElement?.scrollIntoView({ block: 'center', behavior: 'smooth' });
   }
 
   function next(): void {
     if (totalCount === 0) return;
-    goTo((currentIdx + 1) % totalCount);
+    void goTo((currentIdx + 1) % totalCount);
   }
 
   function prev(): void {
     if (totalCount === 0) return;
-    goTo((currentIdx - 1 + totalCount) % totalCount);
+    void goTo((currentIdx - 1 + totalCount) % totalCount);
   }
 
   function close(): void {
     clearHighlights();
     ranges = [];
+    rowMatches = [];
+    currentRange = null;
     totalCount = 0;
     currentIdx = 0;
     query = '';
