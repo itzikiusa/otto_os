@@ -1868,7 +1868,9 @@
 
     // Perf-spec probe (e2e/desktop-terminal-flood-perf.spec.ts): opt-in by a
     // `window.__ottoTermProbe` array the spec installs — one property check
-    // per mount otherwise. Exposes the flow backlog + scrollback depth only.
+    // per mount otherwise. Exposes the flow backlog, scrollback depth, and a
+    // renderer-agnostic view of the screen: on WebGL (3027df89) the text is
+    // drawn on a canvas and there is no `.xterm-rows` DOM to read.
     const probeList = (window as unknown as { __ottoTermProbe?: unknown[] }).__ottoTermProbe;
     const probe = Array.isArray(probeList)
       ? {
@@ -1876,6 +1878,17 @@
           pending: () => flow.pending,
           queued: () => writes.queued,
           scrollback: () => term?.options.scrollback ?? 0,
+          renderer: () => (webglAddon ? 'webgl' : 'dom'),
+          /** The rows currently in the viewport (parsed buffer), as text. */
+          text: () => {
+            const b = term?.buffer.active;
+            if (!term || !b) return '';
+            const rows: string[] = [];
+            for (let y = b.viewportY; y < b.viewportY + term.rows; y++) rows.push(b.getLine(y)?.translateToString(true) ?? '');
+            return rows.join('\n');
+          },
+          /** Called after each renderer pass (DOM or WebGL) — "painted". */
+          onRender: (cb: () => void) => term?.onRender(cb),
           disposed: false,
         }
       : null;

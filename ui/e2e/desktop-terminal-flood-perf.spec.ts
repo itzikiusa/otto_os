@@ -21,7 +21,11 @@ import { isWebkitProject } from './perf';
 //   • a 15-tile TiledView keeps ≤ 2k scrollback per tile, the maximized tile
 //     10k (A4).
 // Numbers come from an in-page probe (`window.__ottoTermProbe`, installed
-// before load; Terminal.svelte registers into it only when present).
+// before load; Terminal.svelte registers into it only when present). The
+// screen is read through the probe too (the parsed buffer, `onRender` for
+// "painted"): terminals render on WebGL where available (3027df89), so there
+// is no `.xterm-rows` DOM to read — the old DOM reads timed out on WebKit
+// although the flood rendered fine.
 // ─────────────────────────────────────────────────────────────────────────────
 
 test.setTimeout(120_000);
@@ -99,7 +103,31 @@ class MockCredit {
   }
 }
 
-type Probe = { sessionId: () => string; pending: () => number; queued: () => number; scrollback: () => number; disposed: boolean };
+type Probe = {
+  sessionId: () => string;
+  pending: () => number;
+  queued: () => number;
+  scrollback: () => number;
+  renderer: () => 'webgl' | 'dom';
+  text: () => string;
+  onRender: (cb: () => void) => void;
+  disposed: boolean;
+};
+
+/** The live terminal's viewport text (renderer-agnostic). */
+function screen(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const live = (window as unknown as { __ottoTermProbe?: Probe[] }).__ottoTermProbe?.filter((p) => !p.disposed) ?? [];
+    return live.length ? live[live.length - 1].text() : '';
+  });
+}
+
+function renderer(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const live = (window as unknown as { __ottoTermProbe?: Probe[] }).__ottoTermProbe?.filter((p) => !p.disposed) ?? [];
+    return live.length ? live[live.length - 1].renderer() : 'none';
+  });
+}
 
 async function installProbe(page: Page): Promise<void> {
   await page.addInitScript(() => {
@@ -126,7 +154,7 @@ async function fixturePage(page: Page): Promise<void> {
   });
   await page.route('**/api/v1/**', (route) => route.fulfill({ json: [] }));
   await page.goto('/e2e/fixtures/terminal-links.html');
-  await expect(page.locator('.xterm-rows')).toContainText('READY$', { timeout: 20_000 });
+  await expect.poll(() => screen(page), { timeout: 20_000 }).toContain('READY$');
 }
 
 /** The daemon's side of `/ws/term` for one flood. `credit: false` plays an
@@ -252,12 +280,12 @@ for (const burst of [2, 8]) {
     const daemon = mockDaemon(page, { totalBytes: 20 * MB, burst });
     await daemon.install();
     await fixturePage(page);
-    await expect(page.locator('.xterm-rows')).toContainText('FLOOD-END$', { timeout: 60_000 });
+    await expect.poll(() => screen(page), { timeout: 60_000 }).toContain('FLOOD-END$');
     const f = daemon.stats.clientFrames;
     const peak = await page.evaluate(() => (window as unknown as { __ottoMaxPending: number }).__ottoMaxPending);
     const acks = f.filter((t) => t === 'ack').length;
     console.log(
-      `[flood] credit burst=${burst} 20MB: peak backlog ${(peak / MB).toFixed(2)} MB, acks ${acks}, ` +
+      `[flood] credit burst=${burst} 20MB (${await renderer(page)}): peak backlog ${(peak / MB).toFixed(2)} MB, acks ${acks}, ` +
         `skip-resyncs ${daemon.stats.creditResyncs}, snapshots ${daemon.stats.snapshots}, ` +
         `frames ${JSON.stringify(f.filter((t) => t !== 'ack'))}`,
     );
@@ -280,10 +308,10 @@ test('an older daemon (no credit grant): the pause/resume fallback still pauses 
   const daemon = mockDaemon(page, { totalBytes: 20 * MB, credit: false });
   await daemon.install();
   await fixturePage(page);
-  await expect(page.locator('.xterm-rows')).toContainText('FLOOD-END$', { timeout: 60_000 });
+  await expect.poll(() => screen(page), { timeout: 60_000 }).toContain('FLOOD-END$');
   const f = daemon.stats.clientFrames;
   const peak = await page.evaluate(() => (window as unknown as { __ottoMaxPending: number }).__ottoMaxPending);
-  console.log(`[flood] legacy 20MB: peak backlog ${(peak / MB).toFixed(2)} MB, frames ${JSON.stringify(f)}, snapshots ${daemon.stats.snapshots}`);
+  console.log(`[flood] legacy 20MB (${await renderer(page)}): peak backlog ${(peak / MB).toFixed(2)} MB, frames ${JSON.stringify(f)}, snapshots ${daemon.stats.snapshots}`);
   expect(f.filter((t) => t === 'ack'), 'no grant → no acks').toHaveLength(0);
   expect(f.filter((t) => t === 'pause').length, 'the client asked the daemon to pause').toBeGreaterThan(0);
   expect(f.slice(daemon.stats.floodFrom).filter((t) => t === 'scrollback'), 'the flood requests no rebuild').toHaveLength(0);
@@ -301,25 +329,27 @@ test('^C mid-flood shows up in under 150 ms (queue dropped, one resync)', async 
     .poll(() => page.evaluate(() => (window as unknown as { __ottoMaxPending: number }).__ottoMaxPending), { timeout: 20_000 })
     .toBeGreaterThan(512 * 1024);
   await page.locator('.xterm-helper-textarea').focus();
-  // Measure in the page: keydown → marker painted into the rows.
+  // Measure in the page: keydown → the first renderer pass (DOM or WebGL)
+  // after which the marker is on screen.
   await page.evaluate(() => {
-    const w = window as unknown as { __ctrlC?: { down: number; seen: number } };
+    const w = window as unknown as { __ctrlC?: { down: number; seen: number }; __ottoTermProbe: Probe[] };
     w.__ctrlC = { down: 0, seen: 0 };
     document.addEventListener('keydown', (e) => {
       if (e.ctrlKey && e.key === 'c' && !w.__ctrlC!.down) w.__ctrlC!.down = performance.now();
     }, true);
-    const rows = document.querySelector('.xterm-rows')!;
-    new MutationObserver(() => {
-      if (!w.__ctrlC!.seen && rows.textContent?.includes('INTERRUPTED$')) w.__ctrlC!.seen = performance.now();
-    }).observe(rows, { childList: true, subtree: true, characterData: true });
+    const probe = w.__ottoTermProbe.filter((p) => !p.disposed).at(-1)!;
+    probe.onRender(() => {
+      if (w.__ctrlC!.down && !w.__ctrlC!.seen && probe.text().includes('INTERRUPTED$')) w.__ctrlC!.seen = performance.now();
+    });
   });
   await page.keyboard.press('Control+c');
-  await expect(page.locator('.xterm-rows')).toContainText('INTERRUPTED$', { timeout: 10_000 });
+  await expect.poll(() => screen(page), { timeout: 10_000 }).toContain('INTERRUPTED$');
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __ctrlC: { seen: number } }).__ctrlC.seen)).toBeGreaterThan(0);
   const t = await page.evaluate(() => (window as unknown as { __ctrlC: { down: number; seen: number } }).__ctrlC);
   const peak = await page.evaluate(() => (window as unknown as { __ottoMaxPending: number }).__ottoMaxPending);
   const ms = t.seen - t.down;
   console.log(
-    `[flood] ^C: ${ms.toFixed(0)} ms, peak backlog ${(peak / MB).toFixed(2)} MB, ` +
+    `[flood] ^C (${await renderer(page)}): ${ms.toFixed(0)} ms, peak backlog ${(peak / MB).toFixed(2)} MB, ` +
       `frames ${JSON.stringify(daemon.stats.clientFrames.filter((x) => x !== 'ack'))}, snapshots ${daemon.stats.snapshots}`,
   );
   expect(ms, `^C visible after ${ms.toFixed(0)} ms`).toBeLessThan(150);
