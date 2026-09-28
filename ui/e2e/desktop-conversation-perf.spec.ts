@@ -3,6 +3,7 @@ import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx, seedWorkspace } from './seed';
+import { isDesktopProject } from './perf';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Conversation live-delta regression gates (GAPS_TO_9_5 §4, I3 A1).
@@ -68,7 +69,11 @@ let dir = '';
 let transcript = '';
 
 test.beforeEach(async ({ page }, info) => {
-  test.skip(info.project.name !== 'desktop-browser', 'desktop-browser project only');
+  test.skip(!isDesktopProject(info.project.name), 'desktop projects only');
+  // Under Playwright WebKit the seeded session never reaches the session list
+  // ("No sessions"), so the gate can't start there yet — Chromium only until
+  // the fixture is fixed (see perf-plan round3 fix-w2c).
+  test.skip(info.project.name === 'desktop-webkit', 'fixture does not load under WebKit yet');
   ({ ctx: root, base } = await apiCtx());
   wsId = await seedWorkspace(root, base);
   dir = mkdtempSync(join(tmpdir(), 'otto-conv-perf-'));

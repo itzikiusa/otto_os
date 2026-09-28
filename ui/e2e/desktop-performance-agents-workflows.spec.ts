@@ -1,5 +1,6 @@
 import {test, expect, type APIRequestContext} from '@playwright/test';
 import {apiCtx, seedWorkspace} from './seed';
+import { isDesktopProject } from './perf';
 
 // Route-boundary fixtures drive the production mounted components and stores.
 // No provider or workflow is launched. Root runs this on the isolated E2E slot.
@@ -8,7 +9,7 @@ const now='2026-09-13T10:00:00Z';
 function entry(id:string) {return {session_id:id,provider:'claude',title:`Fixture ${id}`,first_prompt:null,cwd:'/tmp/otto-fixture',repo_name:null,started_at:now,last_active_at:now,turns:1,status:'exited',transcript_path:`/tmp/${id}.jsonl`,resumable:false};}
 function transcript(id:string) {return {session_id:id,provider:'claude',title:id,cwd:'/tmp',model:null,cursor:'0',has_earlier:false,turns:[{id,role:'assistant',ts:now,blocks:[{kind:'text',md:`Body ${id}`}],duration_ms:null,model:null,system:[],reasoning_steps:0}],stats:{turns:1,input_tokens:0,output_tokens:0,cache_read_tokens:0,cache_creation_tokens:0,cost_usd:null},subagents:[],unavailable_reason:null};}
 test.beforeEach(async({page},info)=>{
-  test.skip(info.project.name!=='desktop-browser','desktop fixture');
+  test.skip(!isDesktopProject(info.project.name),'desktop fixture');
   ({ctx,base}=await apiCtx());workspace=await seedWorkspace(ctx,base);
   await page.addInitScript(id=>{localStorage.setItem('otto_workspace',id);localStorage.setItem('otto_firstrun_dismissed','1');},workspace);
 });

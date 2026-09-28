@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { mockDbRoutes, seedMockDbConnection } from './db-mock';
+import { budgetMs, isWebkitProject, scrollFrameWork } from './perf';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DB Explorer — results grid at scale (perf regression gate, GAPS §3 / I1).
@@ -22,7 +23,8 @@ import { mockDbRoutes, seedMockDbConnection } from './db-mock';
 // style + layout per step, comparable across refresh rates.
 // ─────────────────────────────────────────────────────────────────────────────
 
-test.use({ browserName: 'webkit', serviceWorkers: 'block' });
+// WebKit budgets: runs in the `desktop-webkit` project (engine from the project).
+test.use({ serviceWorkers: 'block' });
 
 let workspaceId = '';
 let connId = '';
@@ -41,7 +43,7 @@ test.beforeAll(async () => {
 });
 
 test.beforeEach(async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== 'desktop-browser', 'desktop-browser only');
+  test.skip(!isWebkitProject(testInfo.project.name), 'WebKit perf gate: --project=desktop-webkit');
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.addInitScript((wsId) => {
     localStorage.setItem('otto_workspace', wsId as string);
@@ -168,6 +170,10 @@ test('100k × 30 result: bounded DOM, fast scroll / jump / sort / search', async
   await scrollSteps(page, 300, 5); // warm-up
   const steps = await scrollSteps(page, 300, 40);
   const stepP95 = pct(steps, 0.95);
+  // The same steps timed to the end of the frame's PAINT (r3-10-02): the
+  // microtask sample above stops before paint, most of WebKit's cost.
+  const painted = await scrollFrameWork(page, '.grid-scroll', 300, 40);
+  const paintedP95 = pct(painted, 0.95);
 
   // 3) Jump to the middle.
   const jump = await page.evaluate(async () => {
@@ -217,15 +223,17 @@ test('100k × 30 result: bounded DOM, fast scroll / jump / sort / search', async
 
   const perfLine =
       `100k×30: DOM ${nodes} nodes; scroll step p50 ${pct(steps, 0.5).toFixed(1)} / p95 ${stepP95.toFixed(1)} ms; ` +
-      `jump ${jump.toFixed(1)} ms; sort ${sortMs.toFixed(0)} ms; search key→frame ${searchMs.keyFrame.toFixed(1)} ms, ` +
+      `painted step p95 ${paintedP95.toFixed(1)} ms; jump ${jump.toFixed(1)} ms; sort ${sortMs.toFixed(0)} ms; search key→frame ${searchMs.keyFrame.toFixed(1)} ms, ` +
       `key→filtered ${searchMs.applied.toFixed(0)} ms`;
   console.log(`[perf] ${perfLine}`);
   test.info().annotations.push({ type: 'perf', description: perfLine });
-  expect(stepP95, `scroll step p50 ${pct(steps, 0.5).toFixed(1)} / p95 ${stepP95.toFixed(1)} ms`).toBeLessThan(12);
-  expect(jump, `jump ${jump.toFixed(1)} ms`).toBeLessThan(35);
-  expect(sortMs, `sort ${sortMs.toFixed(0)} ms`).toBeLessThan(250);
-  expect(searchMs.keyFrame, `search key→frame ${searchMs.keyFrame.toFixed(1)} ms`).toBeLessThan(50);
-  expect(searchMs.applied, `search key→filtered ${searchMs.applied.toFixed(0)} ms`).toBeLessThan(600);
+  expect(stepP95, `scroll step p50 ${pct(steps, 0.5).toFixed(1)} / p95 ${stepP95.toFixed(1)} ms`).toBeLessThan(budgetMs(12));
+  // Measured p95 18–19 ms (WebKit, M-series Mac).
+  expect(paintedP95, `scroll step to painted frame p95 ${paintedP95.toFixed(1)} ms`).toBeLessThan(budgetMs(40));
+  expect(jump, `jump ${jump.toFixed(1)} ms`).toBeLessThan(budgetMs(35));
+  expect(sortMs, `sort ${sortMs.toFixed(0)} ms`).toBeLessThan(budgetMs(250));
+  expect(searchMs.keyFrame, `search key→frame ${searchMs.keyFrame.toFixed(1)} ms`).toBeLessThan(budgetMs(50));
+  expect(searchMs.applied, `search key→filtered ${searchMs.applied.toFixed(0)} ms`).toBeLessThan(budgetMs(600));
 });
 
 test('40 × 50 KB documents: complex cells preview without serializing whole docs', async ({ page }) => {

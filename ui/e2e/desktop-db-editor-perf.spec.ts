@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { mockDbRoutes, seedMockDbConnection } from './db-mock';
+import { isWebkitProject } from './perf';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DB Explorer — large pasted script stays responsive (perf regression guard).
@@ -22,7 +23,8 @@ import { mockDbRoutes, seedMockDbConnection } from './db-mock';
 // through the worker and `page.route` never sees them — the DB mock (and the
 // completion recorder below) silently miss and the real daemon dials the fake
 // host instead.
-test.use({ browserName: 'webkit', serviceWorkers: 'block' });
+// WebKit budgets: runs in the `desktop-webkit` project (engine from the project).
+test.use({ serviceWorkers: 'block' });
 
 let workspaceId = '';
 let connId = '';
@@ -37,7 +39,7 @@ test.beforeAll(async () => {
 });
 
 test.beforeEach(async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== 'desktop-browser', 'desktop-browser only');
+  test.skip(!isWebkitProject(testInfo.project.name), 'WebKit perf gate: --project=desktop-webkit');
   await page.addInitScript((wsId) => {
     localStorage.setItem('otto_workspace', wsId as string);
     localStorage.setItem('otto_rail_expanded', '0');

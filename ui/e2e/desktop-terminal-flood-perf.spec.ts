@@ -1,5 +1,6 @@
 import { test, expect, type APIRequestContext, type Page, type WebSocketRoute } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
+import { isWebkitProject } from './perf';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Terminal flood regression gates (GAPS_TO_9_5 §4, I3 A3/A4/A8).
@@ -25,7 +26,7 @@ import { apiCtx, seedWorkspace } from './seed';
 
 test.setTimeout(120_000);
 // WebKit: the app's engine (xterm parses ~5.5–8 MB/s there, termFlow.ts).
-test.use({ browserName: 'webkit' });
+// WebKit budgets: runs in the `desktop-webkit` project (engine from the project).
 
 const MB = 1024 * 1024;
 const FRAME = 64 * 1024;
@@ -242,7 +243,7 @@ function mockDaemon(page: Page, opts: { totalBytes: number; onCtrlC?: string; bu
 }
 
 test.beforeEach(async ({}, info) => {
-  test.skip(info.project.name !== 'desktop-browser', 'desktop-browser project only');
+  test.skip(!isWebkitProject(info.project.name), 'WebKit perf gate: --project=desktop-webkit');
 });
 
 for (const burst of [2, 8]) {

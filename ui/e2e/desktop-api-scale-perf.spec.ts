@@ -1,7 +1,16 @@
 import { expect, test, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { openApiEditor, openPage } from './helpers';
-import { dist, domCount, frameDeltas } from './perf';
+import {
+  budgetMs,
+  dist,
+  domCount,
+  frameDeltas,
+  isDesktopProject,
+  isWebkitProject,
+  keyFrameCosts,
+  watchKeyFrameCosts,
+} from './perf';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // API client at scale (perf sweep B: SB-01, SB-02, SB-05). Budgets are DOM /
@@ -35,7 +44,7 @@ test.beforeAll(async () => {
 });
 
 test.beforeEach(async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== 'desktop-browser', 'desktop-browser only');
+  test.skip(!isDesktopProject(testInfo.project.name), 'desktop projects only');
   await page.addInitScript((wsId) => {
     localStorage.setItem('otto_workspace', wsId as string);
     localStorage.setItem('otto_rail_expanded', '0');
@@ -159,6 +168,12 @@ async function watchKeyCosts(page: Page): Promise<void> {
     });
   });
 }
+/** WebKit budgets for a keystroke INCLUDING its frame's style/layout/paint
+ *  (`watchKeyFrameCosts`; no vsync wait). Measured on desktop-webkit (M-series
+ *  Mac): URL p95 2–4 ms, body (200 KB JSON) p95 6–7 ms. */
+const KEY_FRAME_P95_MS = budgetMs(12);
+const BODY_KEY_FRAME_P95_MS = budgetMs(24);
+
 async function keyCosts(page: Page): Promise<number[]> {
   return page.evaluate(() => (window as unknown as { __kc?: number[] }).__kc ?? []);
 }
@@ -180,11 +195,18 @@ test('URL keystrokes cost < 4 ms (p95) at 3,000 requests', async ({ page }) => {
   await url.fill('');
   await url.focus();
   await watchKeyCosts(page);
+  await watchKeyFrameCosts(page);
   await url.pressSequentially('https://api.example.com/v1/{{tenant}}/orders?page=2', { delay: 15 });
   const d = dist(await keyCosts(page));
-  console.log(`[perf] URL keystroke cost ${JSON.stringify(d)}`);
+  const f = dist(await keyFrameCosts(page));
+  console.log(`[perf] URL keystroke cost ${JSON.stringify(d)}; with its frame ${JSON.stringify(f)}`);
   expect(d.n).toBeGreaterThan(30);
   expect(d.p95, `URL keystroke cost ${JSON.stringify(d)}`).toBeLessThan(4);
+  // Script + the frame's style/layout/paint (WebKit ≈ WKWebView), r3-10-02.
+  if (isWebkitProject(test.info().project.name)) {
+    expect(f.n).toBeGreaterThan(30);
+    expect(f.p95, `URL keystroke + frame ${JSON.stringify(f)}`).toBeLessThan(KEY_FRAME_P95_MS);
+  }
 });
 
 test('body keystrokes cost < 16 ms (p95) on 200 KB of minified JSON', async ({ page }) => {
@@ -200,12 +222,18 @@ test('body keystrokes cost < 16 ms (p95) on 200 KB of minified JSON', async ({ p
   await page.keyboard.insertText(big);
   await page.keyboard.press('End');
   await watchKeyCosts(page);
+  await watchKeyFrameCosts(page);
   await page.keyboard.type('"typed"', { delay: 20 });
   for (let i = 0; i < 20; i++) await page.keyboard.press('Backspace', { delay: 20 });
   const d = dist(await keyCosts(page));
-  console.log(`[perf] body keystroke cost ${JSON.stringify(d)}`);
+  const f = dist(await keyFrameCosts(page));
+  console.log(`[perf] body keystroke cost ${JSON.stringify(d)}; with its frame ${JSON.stringify(f)}`);
   expect(d.n).toBeGreaterThan(20);
   expect(d.p95, `body keystroke cost ${JSON.stringify(d)}`).toBeLessThan(16);
+  if (isWebkitProject(test.info().project.name)) {
+    expect(f.n).toBeGreaterThan(20);
+    expect(f.p95, `body keystroke + frame ${JSON.stringify(f)}`).toBeLessThan(BODY_KEY_FRAME_P95_MS);
+  }
 });
 
 test('automation editor: 20 steps over 3,000 requests stays under 3k DOM nodes', async ({ page }) => {

@@ -1,6 +1,6 @@
 import { expect, test, type Page, type Route } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
-import { domCount, longTasks, requestLog, watchLongTasks } from './perf';
+import { domCount, isDesktopProject, longTasks, requestLog, watchLongTasks } from './perf';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Infra viewers — perf regression gates (I7, GAPS_TO_9_5 §6). Budgets are DOM /
@@ -74,7 +74,7 @@ test.beforeAll(async () => {
 });
 
 test.beforeEach(async ({ page, isMobile }, testInfo) => {
-  test.skip(isMobile || testInfo.project.name !== 'desktop-browser', 'desktop-browser only');
+  test.skip(isMobile || !isDesktopProject(testInfo.project.name), 'desktop projects only');
   await page.addInitScript((ws) => {
     localStorage.setItem('otto_workspace', ws);
     localStorage.setItem('otto_rail_expanded', '0');
@@ -414,7 +414,8 @@ async function mockK8s(page: Page): Promise<void> {
   await page.addInitScript(() => localStorage.setItem('otto_k8s_autorefresh', '0'));
 }
 
-test('K8s: typing a filter over 5k pods makes no long task and mounts ≤ 150 rows', async ({ page }) => {
+test('K8s: typing a filter over 5k pods makes no long task and mounts ≤ 150 rows', async ({ page, browserName }) => {
+  test.skip(browserName !== 'chromium', 'long tasks are a Chromium probe');
   await mockK8s(page);
   await page.goto(`/#/kubernetes/${K8S_ID}/pods`);
   const row = page.getByTestId('k8s-row');

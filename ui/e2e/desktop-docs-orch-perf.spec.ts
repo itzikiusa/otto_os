@@ -3,7 +3,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { apiCtx, seedVaultDir, seedWorkspace } from './seed';
 import { openPage } from './helpers';
-import { domCount, requestLog } from './perf';
+import { domCount, isDesktopProject, requestLog } from './perf';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Docs, visual editors and orchestration — perf regression gates (I6,
@@ -52,7 +52,7 @@ test.beforeAll(async () => {
 });
 
 test.beforeEach(async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== 'desktop-browser', 'desktop-browser only');
+  test.skip(!isDesktopProject(testInfo.project.name), 'desktop projects only');
   await page.addInitScript(({ ws, id }) => {
     localStorage.setItem('otto_workspace', ws);
     localStorage.setItem(`otto_vault_last:${ws}`, String(id));
