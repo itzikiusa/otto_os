@@ -130,9 +130,14 @@ actions include **Discover**, **Health**, and **Delete**. Open **Rules** for the
 allowlists and policy-as-code controls.
 
 On create/enable Otto **discovers** the server's tools (`initialize` + `tools/list`),
-labels each (§6), and upserts the catalog. A background **health sweep** re-probes
-every managed, enabled server every `mcp_health_interval_secs` (default **300 s**;
-`0` disables it).
+labels each (§6), and upserts the catalog. A background **health sweep** runs
+every `mcp_health_interval_secs` (default **300 s**; `0` disables it). It probes
+every managed, enabled **HTTP** server. A **stdio** server (probing one means
+starting its process) is only checked when a governed call used it in the last
+6 hours, over its parked session when one is live; unused stdio servers keep
+their last health until used or until you press **Health**. Governed calls
+also record health as they go: a transport failure marks the server unhealthy,
+any answer marks it healthy (written only when the status changes).
 
 ### 3.2 Enable the outward Otto MCP server
 

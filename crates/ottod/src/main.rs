@@ -1213,6 +1213,8 @@ async fn run(cfg: Config) -> Result<(), String> {
     // MCP Control Plane: periodic health sweep of managed servers (ping/initialize
     // → status+latency). Interval from `mcp_health_interval_secs` (default 300;
     // 0 disables). Best-effort; failures only update a server's health row.
+    // Lazy for stdio servers: only those used in the last 6 h are checked (see
+    // `McpService::health_sweep`), so an idle daemon spawns no MCP processes.
     {
         let mcp = Arc::clone(&ctx.mcp);
         let settings = otto_state::SettingsRepo::new(pool.clone());

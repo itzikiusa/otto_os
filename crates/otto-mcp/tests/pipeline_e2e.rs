@@ -688,3 +688,28 @@ async fn governed_calls_reuse_one_pooled_client() {
     svc.evict_client(&server.id);
     assert_eq!(svc.pooled_clients(), 0);
 }
+
+/// r3-08-05: the background sweep never spawns a stdio server nothing uses;
+/// once a governed op used it, the sweep checks it over the parked session.
+#[tokio::test]
+async fn sweep_is_lazy_for_unused_stdio_servers() {
+    let pool = pool().await;
+    let (ws, user) = seed_ws(&pool).await;
+    let svc = McpService::new(pool.clone(), Arc::new(MemSecrets::default()));
+    let server = register_mock(&svc, &pool, &ws, &user).await;
+    assert!(server.managed, "the sweep only covers managed servers");
+
+    svc.health_sweep().await;
+    let after = svc.registry().get(&server.id).await.unwrap();
+    assert_eq!(after.health_status, "unknown", "unused: not probed");
+    assert!(after.health_checked_at.is_none());
+
+    // Used (discovery checks out the pooled client and parks a session) →
+    // the next sweep checks it over that live session.
+    svc.discover(&server.id).await.unwrap();
+    assert_eq!(svc.pooled_clients(), 1);
+    svc.health_sweep().await;
+    let after = svc.registry().get(&server.id).await.unwrap();
+    assert_eq!(after.health_status, "healthy");
+    assert!(after.health_latency_ms.is_some());
+}
