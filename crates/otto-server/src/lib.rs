@@ -83,6 +83,7 @@ pub mod run_scheduler;
 pub mod run_service;
 pub mod run_sources;
 pub mod run_workspace;
+mod self_call;
 pub mod scheduled_tasks_engine;
 pub mod scheduled_tasks_scheduler;
 pub mod skill_eval;

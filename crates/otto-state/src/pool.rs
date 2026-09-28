@@ -38,6 +38,13 @@ pub struct DbPool {
     write: SqlitePool,
     /// Distinct reader and writer pools ([`DbPool::split`]).
     split: bool,
+    /// Process-unique identity shared by every clone (see [`DbPool::id`]).
+    id: u64,
+}
+
+fn next_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl fmt::Debug for DbPool {
@@ -57,6 +64,7 @@ impl From<SqlitePool> for DbPool {
             read: pool.clone(),
             write: pool,
             split: false,
+            id: next_id(),
         }
     }
 }
@@ -69,6 +77,7 @@ impl DbPool {
             read,
             write,
             split: true,
+            id: next_id(),
         }
     }
 
@@ -76,6 +85,13 @@ impl DbPool {
     /// `sqlite::memory:`.
     pub async fn connect(url: &str) -> sqlx::Result<Self> {
         SqlitePool::connect(url).await.map(Self::from)
+    }
+
+    /// Process-unique identity of this database handle, shared by its
+    /// clones — a key for caches that must never mix two databases (tests run
+    /// many daemons' worth of state in one process).
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// True when one pool serves both roles ([`From<SqlitePool>`]).
