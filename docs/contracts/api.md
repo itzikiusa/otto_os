@@ -3603,7 +3603,7 @@ enforce the entity's workspace role.
 | CP26 | POST /api/v1/mcp/otto-tools/invoke | mcp:edit (or the restricted mcp token) | `{tool, arguments, dry_run?, wait_seconds?}` | governed result |
 | CP27 | GET /api/v1/mcp/gateway/tools | mcp:view | `?workspace_id=` | `{tools}` (namespaced `mcp__server__tool`) |
 | CP28 | POST /api/v1/mcp/gateway/invoke | mcp:edit | `{server_id, tool, arguments, dry_run?, workspace_id, session_id?}` | InvokeResp (governed) |
-| CP29 | GET /api/v1/workspaces/{wid}/mcp/code-search | mcp:view + ws viewer | `?q=&path=&max=` | `{query, root, matches, truncated}` |
+| CP29 | GET /api/v1/workspaces/{wid}/mcp/code-search | mcp:view + ws viewer | `?q=&path=&max=` | `{query, root, matches, truncated, stopped}` — runs off the async workers; stops early at 20 000 entries, 64 MiB read or 10 s (`truncated: true`, `stopped: "walk_limit"\|"byte_budget"\|"time_budget"`) and when the request is dropped; `stopped: null` when it covered the tree or hit `max` |
 | CP30 | POST /api/v1/workspaces/{wid}/mcp/context-packet | mcp:edit + ws viewer | `{query?, story_id?, max_excerpts?}` | context packet |
 | CP31 | GET /api/v1/workspaces/{wid}/mcp/proof-pack | mcp:view + ws viewer | `?repo_id=&branch=&goal_loop_id=` | evidence bundle — `repo_id` must be registered in `{wid}` (else 404) and a `goal_loop_id` from another workspace is ignored |
 | CP32 | POST /api/v1/mcp/http | the scoped mcp token (or mcp:edit) | JSON-RPC 2.0 message/batch (`initialize`/`tools/list`/`tools/call`/`ping`) | JSON-RPC result; notifications → `202` |
