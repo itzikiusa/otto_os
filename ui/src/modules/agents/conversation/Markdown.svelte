@@ -6,11 +6,14 @@
   import { renderNote } from '../../vault/mdRender';
   import { ensureHljs } from '../../../lib/hl';
   import { createMdCache } from './mdCache';
+  import { decorateCodeBlocks, runCodeAction } from './codeBlocks';
 
   const ctx = { resolve: () => null, assetUrl: () => null };
   // Shared across every mounted block: a re-derived block with an unchanged
   // string is a Map lookup, not marked + hljs + DOMParser (mdCache.ts).
-  const cache = createMdCache((md) => renderNote(md, ctx), {
+  // Code blocks get their toolbar (label · Wrap · Copy · Show all) here, so it
+  // is part of the cached string (codeBlocks.ts).
+  const cache = createMdCache((md) => decorateCodeBlocks(renderNote(md, ctx)), {
     // Room for the whole mounted window (≤300 turns, a few prose blocks each).
     maxEntries: 1000,
     maxChars: 4_000_000,
@@ -51,12 +54,15 @@
   });
 </script>
 
-<div class="md" class:small dir="auto">{@html html}</div>
+<!-- Code-block buttons are real <button>s inside the html; one delegated
+     handler drives them (keyboard activation bubbles as a click too). -->
+<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+<div class="md" class:small dir="auto" onclick={(e) => runCodeAction(e.target)}>{@html html}</div>
 
 <style>
   .md {
     font-size: var(--fs-m);
-    line-height: 1.55;
+    line-height: 1.6;
     color: var(--text);
     overflow-wrap: anywhere;
     min-width: 0;
@@ -78,9 +84,89 @@
     overflow-x: auto;
     font-family: var(--font-mono);
     font-size: var(--fs-s);
-    line-height: 1.45;
+    line-height: 1.5;
     direction: ltr;
     text-align: start;
+    margin: 0 0 0.6em;
+  }
+  /* ── Code block chrome (codeBlocks.ts): a quiet header strip, capped height
+     for long blocks, Wrap toggle. The header is part of the block's frame. */
+  .md :global(.code-block) {
+    position: relative;
+    margin: 0.4em 0 0.8em;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    background: var(--surface-2);
+    overflow: hidden;
+    direction: ltr;
+  }
+  .md :global(.code-block pre) {
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    padding: 8px 12px 10px;
+  }
+  .md :global(.code-head) {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    min-height: 26px;
+    padding-inline: 10px 4px;
+    border-bottom: 1px solid var(--border);
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
+  .md :global(.code-lang) {
+    flex: 1;
+    min-width: 0;
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .md :global(.code-btn),
+  .md :global(.code-more) {
+    background: none;
+    border: 0;
+    border-radius: var(--radius-s);
+    color: var(--text-dim);
+    font: inherit;
+    font-size: var(--fs-xs);
+    padding: 2px 7px;
+    cursor: pointer;
+  }
+  .md :global(.code-btn:hover),
+  .md :global(.code-more:hover) {
+    color: var(--text);
+    background: var(--hover);
+  }
+  .md :global(.code-btn[aria-pressed='true']) {
+    color: var(--accent-text);
+  }
+  .md :global(.code-btn:focus-visible),
+  .md :global(.code-more:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+  .md :global(.code-block.wrap pre) {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  /* ~18 lines (1.5 × fs-s) + padding; the rest behind "Show all N lines". */
+  .md :global(.code-block.capped:not(.expanded) pre) {
+    max-height: calc(18 * 1.5em + 18px);
+    overflow-y: hidden;
+    -webkit-mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 1) 80%, rgba(0, 0, 0, 0));
+    mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 1) 80%, rgba(0, 0, 0, 0));
+  }
+  .md :global(.code-more) {
+    display: block;
+    width: 100%;
+    border-top: 1px solid var(--border);
+    border-radius: 0;
+    padding: 5px 10px;
+    text-align: center;
   }
   .md :global(code) {
     font-family: var(--font-mono);

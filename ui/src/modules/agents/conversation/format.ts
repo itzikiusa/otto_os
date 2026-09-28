@@ -280,8 +280,13 @@ export type Segment =
 
 export function segment(blocks: Block[]): Segment[] {
   const segs: Segment[] = [];
-  for (const b of blocks) {
-    if (isToolish(b)) {
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i];
+    // The plan is shown as its own checklist, in the flow (not hidden inside a
+    // collapsed step group); the plan-writing call that produced it is that
+    // checklist, so it doesn't get a row of its own too.
+    if (b.kind === 'tool_call' && b.tool === 'task' && blocks[i + 1]?.kind === 'tasks' && (b.result == null || b.result.ok)) continue;
+    if (isToolish(b) && b.kind !== 'tasks') {
       const last = segs[segs.length - 1];
       if (last && last.kind === 'steps') last.steps.push(b as Extract<Block, { kind: 'tool_call' }>);
       else segs.push({ kind: 'steps', steps: [b as Extract<Block, { kind: 'tool_call' }>] });
@@ -307,4 +312,255 @@ export function activeQueued(turns: Turn[]): Extract<Block, { kind: 'queued' }>[
     }
   }
   return live;
+}
+
+// ---------------------------------------------------------------------------
+// Chat presentation (rev 5): agent names, one-line tool summaries, the live
+// "what is it doing now" line, the jump-to-latest unread count.
+// ---------------------------------------------------------------------------
+
+export type ToolCallBlock = Extract<Block, { kind: 'tool_call' }>;
+export type StepBlock = Extract<Block, { kind: 'tool_call' | 'subagent' | 'thinking' | 'tasks' }>;
+
+/** Display name of the CLI behind a transcript ("Claude", "Codex", …). */
+export function providerName(provider: string | null | undefined): string {
+  const p = (provider ?? '').trim();
+  switch (p.toLowerCase()) {
+    case 'claude':
+      return 'Claude';
+    case 'codex':
+      return 'Codex';
+    case 'agy':
+      return 'Antigravity';
+    case '':
+      return 'Agent';
+    default:
+      return p[0].toUpperCase() + p.slice(1);
+  }
+}
+
+/** Past / present verb per tool kind: rows read "Edited retry.rs", the live
+ *  line reads "Editing retry.rs". */
+const VERBS: Record<ToolKind, [past: string, present: string, base: string]> = {
+  shell: ['Ran', 'Running', 'run'],
+  read: ['Read', 'Reading', 'read'],
+  edit: ['Edited', 'Editing', 'edit'],
+  write: ['Wrote', 'Writing', 'write'],
+  search: ['Searched', 'Searching', 'search'],
+  agent: ['Delegated', 'Delegating', 'delegate'],
+  mcp: ['Called', 'Calling', 'call'],
+  skill: ['Used skill', 'Using skill', 'use skill'],
+  web: ['Fetched', 'Fetching', 'fetch'],
+  ask: ['Asked', 'Asking', 'ask'],
+  task: ['Updated the plan', 'Updating the plan', 'update the plan'],
+  other: ['Used', 'Using', 'use'],
+};
+
+/** One tool call as a scannable line: a verb, the thing it acted on (`mono`
+ *  when it is a command / pattern / path fragment), and a dim detail (the
+ *  file's folder, a search scope). `hint` is the human description the agent
+ *  gave the call (Bash `description`), for the tooltip / detail header. */
+export interface ToolLine {
+  verb: string;
+  present: string;
+  /** "wants to <base> …" — the waiting-for-you card. */
+  base: string;
+  target: string;
+  mono: boolean;
+  detail: string;
+  hint: string;
+}
+
+function str(input: unknown, ...keys: string[]): string {
+  if (input == null || typeof input !== 'object') return '';
+  const o = input as Record<string, unknown>;
+  for (const k of keys) {
+    const v = o[k];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+    if (Array.isArray(v) && v.length && v.every((x) => typeof x === 'string')) return (v as string[]).join(' ');
+  }
+  return '';
+}
+
+function splitPath(p: string): { base: string; dir: string } {
+  const clean = p.replace(/\/+$/, '');
+  const at = clean.lastIndexOf('/');
+  return at < 0 ? { base: clean, dir: '' } : { base: clean.slice(at + 1), dir: clean.slice(0, at) };
+}
+
+const firstLine = (s: string): string => {
+  const at = s.indexOf('\n');
+  return at < 0 ? s : `${s.slice(0, at)} …`;
+};
+
+export function toolLine(b: ToolCallBlock): ToolLine {
+  const [verb, present, base] = VERBS[b.tool] ?? VERBS.other;
+  const title = (b.title ?? '').trim() || b.name;
+  const line = (target: string, mono: boolean, detail = '', hint = ''): ToolLine => ({ verb, present, base, target, mono, detail, hint });
+  switch (b.tool) {
+    case 'shell': {
+      const cmd = str(b.input, 'command', 'cmd');
+      const desc = str(b.input, 'description');
+      return cmd ? line(firstLine(cmd), true, '', desc) : line(title, false);
+    }
+    case 'read':
+    case 'edit':
+    case 'write': {
+      const p = str(b.input, 'file_path', 'path', 'notebook_path') || b.result?.file_path || '';
+      if (!p) return line(title, false);
+      const { base, dir } = splitPath(p);
+      return line(base, true, dir);
+    }
+    case 'search': {
+      const pat = str(b.input, 'pattern', 'query');
+      const scope = str(b.input, 'path', 'glob');
+      if (pat) return line(pat, true, scope);
+      return scope ? line(scope, true) : line(title, false);
+    }
+    case 'web':
+      return line(str(b.input, 'url', 'query') || title, true);
+    case 'agent':
+      return line(str(b.input, 'description', 'subagent_type') || title, false);
+    case 'skill':
+      return line(str(b.input, 'skill', 'command', 'name') || title.replace(/^Skill\s+/, ''), true);
+    case 'task':
+      return line('', false);
+    case 'ask':
+      return line('a question', false);
+    case 'mcp':
+      return line(title, false);
+    default:
+      return line(title, false);
+  }
+}
+
+/** Status of one tool call. `none` = no result was ever recorded and the
+ *  agent is not working on it any more (interrupted / crashed turn). */
+export type StepStatus = 'running' | 'ok' | 'err' | 'none';
+
+export function toolStatus(b: ToolCallBlock, live: boolean): StepStatus {
+  if (b.result == null) return live ? 'running' : 'none';
+  return b.result.ok ? 'ok' : 'err';
+}
+
+const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
+
+/** "Ran 2 commands, edited retry.rs, read 3 files" — what a step group did,
+ *  in first-seen order, at most `max` phrases (then "and N more"). */
+export function stepSummary(steps: StepBlock[], max = 4): string {
+  type Acc = { n: number; names: Set<string> };
+  const order: string[] = [];
+  const acc = new Map<string, Acc>();
+  const bump = (key: string, name = ''): void => {
+    let a = acc.get(key);
+    if (!a) {
+      a = { n: 0, names: new Set() };
+      acc.set(key, a);
+      order.push(key);
+    }
+    a.n++;
+    if (name) a.names.add(name);
+  };
+  for (const s of steps) {
+    if (s.kind === 'subagent') bump('agent', s.description);
+    else if (s.kind === 'tool_call') {
+      const l = toolLine(s);
+      bump(s.tool, s.tool === 'read' || s.tool === 'edit' || s.tool === 'write' ? l.target : '');
+    }
+  }
+  const files = (a: Acc, verb: string): string =>
+    a.names.size === 1 ? `${verb} ${[...a.names][0]}` : `${verb} ${plural(a.names.size || a.n, 'file')}`;
+  // One reads as words ("ran a command"), more as counts ("ran 3 commands").
+  const count = (n: number, one: string, many: string): string => (n === 1 ? one : many.replace('#', String(n)));
+  const phrase = (key: string, a: Acc): string => {
+    switch (key) {
+      case 'shell':
+        return count(a.n, 'ran a command', 'ran # commands');
+      case 'read':
+        return files(a, 'read');
+      case 'edit':
+        return files(a, 'edited');
+      case 'write':
+        return files(a, 'wrote');
+      case 'search':
+        return count(a.n, 'searched the code', 'ran # searches');
+      case 'web':
+        return count(a.n, 'fetched a page', 'fetched # pages');
+      case 'agent':
+        return count(a.n, 'delegated to an agent', 'delegated to # agents');
+      case 'mcp':
+        return count(a.n, 'called a tool', 'called # tools');
+      case 'skill':
+        return count(a.n, 'used a skill', 'used # skills');
+      case 'task':
+        return 'updated the plan';
+      case 'ask':
+        return 'asked you a question';
+      default:
+        return count(a.n, 'used a tool', 'used # tools');
+    }
+  };
+  const parts = order.map((k) => phrase(k, acc.get(k)!));
+  if (!parts.length) return steps.some((s) => s.kind === 'thinking') ? 'Thought' : 'Worked';
+  const shown = parts.length > max ? [...parts.slice(0, max - 1), `and ${parts.length - (max - 1)} more`] : parts;
+  const text = shown.join(', ');
+  return text[0].toUpperCase() + text.slice(1);
+}
+
+/** The newest tool call still waiting for its result in a response — what the
+ *  agent is doing right now (or blocked on). */
+export function pendingTool(item: RenderItem | undefined): ToolCallBlock | null {
+  if (!item || item.role !== 'assistant') return null;
+  for (let i = item.blocks.length - 1; i >= 0; i--) {
+    const b = item.blocks[i];
+    if (b.kind === 'tool_call' && b.result == null) return b;
+  }
+  return null;
+}
+
+/** Last non-blank line of a command's output (the "tail" a collapsed row
+ *  shows), clipped. Scans from the end — outputs are up to 64 KB. */
+export function lastLine(text: string | null | undefined, max = 160): string {
+  if (!text) return '';
+  let end = text.length;
+  while (end > 0) {
+    const start = text.lastIndexOf('\n', end - 1) + 1;
+    const l = text.slice(start, end).trim();
+    if (l) return l.length > max ? `${l.slice(0, max - 1)}…` : l;
+    end = start - 1;
+  }
+  return '';
+}
+
+/** Items that arrived after the one the reader last saw at the bottom. A
+ *  missing anchor (paged out, or the reader never saw one) counts nothing. */
+export function countUnread(ids: string[], lastSeenId: string | null): number {
+  if (!lastSeenId) return 0;
+  const at = ids.lastIndexOf(lastSeenId);
+  return at < 0 ? 0 : ids.length - 1 - at;
+}
+
+/** The questions of an AskUserQuestion call, if its input has the shape. */
+export interface AgentQuestion {
+  question: string;
+  options: string[];
+}
+export function askQuestions(input: unknown): AgentQuestion[] {
+  if (input == null || typeof input !== 'object') return [];
+  const qs = (input as { questions?: unknown }).questions;
+  if (!Array.isArray(qs)) return [];
+  const out: AgentQuestion[] = [];
+  for (const q of qs) {
+    if (q == null || typeof q !== 'object') continue;
+    const text = (q as { question?: unknown }).question;
+    if (typeof text !== 'string' || !text.trim()) continue;
+    const opts = (q as { options?: unknown }).options;
+    const options = Array.isArray(opts)
+      ? opts
+          .map((o) => (typeof o === 'string' ? o : o && typeof o === 'object' ? (o as { label?: unknown }).label : null))
+          .filter((l): l is string => typeof l === 'string' && !!l.trim())
+      : [];
+    out.push({ question: text.trim(), options });
+  }
+  return out;
 }

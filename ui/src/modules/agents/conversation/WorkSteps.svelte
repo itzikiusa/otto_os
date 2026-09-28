@@ -1,64 +1,74 @@
 <script lang="ts">
-  // Consecutive tool-ish blocks of one response collapse into one row —
-  // "Worked for 21m 17s · 38 steps" — that expands to the per-step list
-  // (tool rows, subagent cards, the thinking marker, task-list snapshots).
+  // A run of tool activity inside one response, collapsed to ONE quiet line
+  // that says what happened — "Ran 2 commands, edited retry.rs, read 3 files ·
+  // 2m 7s" — with a status mark (spinner while the agent is still on it, ✓, or
+  // "N failed"). Expanding lists the steps as a timeline of one-line rows
+  // (ToolStep), subagent cards and plan snapshots. A group of exactly one call
+  // renders that row directly. Thinking markers carry no text (the transcript
+  // keeps only that it happened), so they are counted in the tooltip only.
   import { untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import ToolStep from './ToolStep.svelte';
   import SubagentCard from './SubagentCard.svelte';
   import TasksBlock from './TasksBlock.svelte';
-  import { fmtDuration } from './format';
+  import { fmtDuration, stepSummary, type StepBlock } from './format';
   import type { Block } from '../../../lib/api/types';
 
-  type Step = Extract<Block, { kind: 'tool_call' | 'subagent' | 'thinking' | 'tasks' }>;
-
   interface Props {
-    steps: Step[];
+    steps: StepBlock[];
     /** Response duration (only shown on the response's first group). */
     durationMs?: number | null;
-    /** Start expanded (a live response that is still working). */
+    /** The agent is working on this response right now: starts expanded. */
     live?: boolean;
+    /** The session is alive and this is its newest response: a call without a
+     *  result is in progress (or waiting on you), not abandoned. */
+    active?: boolean;
+    /** The agent is stopped waiting for you on this response's open call. */
+    waiting?: boolean;
   }
-  let { steps, durationMs = null, live = false }: Props = $props();
+  let { steps, durationMs = null, live = false, active = live, waiting = false }: Props = $props();
 
+  const visible = $derived(steps.filter((s) => s.kind !== 'thinking'));
   const calls = $derived(steps.filter((s) => s.kind === 'tool_call' || s.kind === 'subagent').length);
   const thinking = $derived(steps.reduce((n, s) => (s.kind === 'thinking' ? n + s.count : n), 0));
-  const failed = $derived(steps.some((s) => s.kind === 'tool_call' && s.result != null && !s.result.ok));
-  const pending = $derived(steps.some((s) => s.kind === 'tool_call' && s.result == null));
+  const failed = $derived(steps.filter((s) => s.kind === 'tool_call' && s.result != null && !s.result.ok).length);
+  const running = $derived(active && steps.some((s) => (s.kind === 'tool_call' && s.result == null) || (s.kind === 'subagent' && s.status === 'running')));
+  const summary = $derived(stepSummary(steps));
   // One-liners (a single tool call) don't need the group header.
-  const single = $derived(calls === 1 && steps.length === 1 && steps[0].kind === 'tool_call');
+  const single = $derived(visible.length === 1 && visible[0].kind === 'tool_call');
   // Initial-open only: a live response starts expanded, the reader owns it after.
   let open = $state(untrack(() => live));
   const dur = $derived(fmtDuration(durationMs));
+  const tip = $derived(
+    [`${calls} ${calls === 1 ? 'step' : 'steps'}`, dur && `took ${dur}`, thinking && `thought ${thinking}×`].filter(Boolean).join(' · '),
+  );
 </script>
 
 {#if single}
   <div class="steps single" data-steps={calls}>
-    <ToolStep block={steps[0] as Extract<Block, { kind: 'tool_call' }>} />
+    <ToolStep block={visible[0] as Extract<Block, { kind: 'tool_call' }>} live={active} {waiting} />
   </div>
-{:else}
-  <div class="steps" class:open data-steps={calls}>
-    <button class="steps-head" onclick={() => (open = !open)} aria-expanded={open}>
-      <span class="steps-icon" class:pending><Icon name="zap" size={12} /></span>
-      <span class="steps-title">
-        {#if pending}Working{dur ? ` for ${dur}` : ''}…{:else}Worked{dur ? ` for ${dur}` : ''}{/if}
-        <span class="dim"> · {calls} {calls === 1 ? 'step' : 'steps'}</span>
-        {#if thinking}<span class="dim"> · Thought ({thinking})</span>{/if}
+{:else if visible.length}
+  <div class="steps" class:open data-steps={calls} data-failed={failed || undefined}>
+    <button class="steps-head" onclick={() => (open = !open)} aria-expanded={open} title={tip}>
+      <span class="steps-mark" class:running class:wait={running && waiting} class:bad={!running && failed > 0} aria-hidden="true">
+        {#if running && waiting}<Icon name="warning" size={12} />
+        {:else if running}<span class="spin"></span>
+        {:else if failed}<Icon name="warning" size={12} />
+        {:else}<Icon name="check" size={12} />{/if}
       </span>
-      {#if failed}<span class="chip bad steps-fail">has failures</span>{/if}
+      <span class="steps-title">{summary}</span>
+      {#if failed}<span class="steps-fail">{failed} failed</span>{/if}
+      <span class="steps-meta">{dur ? `${dur} · ` : ''}{calls} {calls === 1 ? 'step' : 'steps'}</span>
       <span class="steps-caret" aria-hidden="true"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} /></span>
     </button>
     {#if open}
       <div class="steps-list">
-        {#each steps as s, i (s.kind === 'tool_call' ? s.id : s.kind === 'subagent' ? s.agent_id : `${s.kind}-${i}`)}
+        {#each visible as s, i (s.kind === 'tool_call' ? s.id : s.kind === 'subagent' ? s.agent_id : `${s.kind}-${i}`)}
           {#if s.kind === 'tool_call'}
-            <ToolStep block={s} />
+            <ToolStep block={s} live={active} {waiting} />
           {:else if s.kind === 'subagent'}
             <SubagentCard agentId={s.agent_id} description={s.description} agentType={s.agent_type} status={s.status} />
-          {:else if s.kind === 'thinking'}
-            <div class="thought dim" title="Thinking is not persisted in the transcript — only that it happened">
-              Thought ({s.count})
-            </div>
           {:else if s.kind === 'tasks'}
             <TasksBlock tasks={s.tasks} />
           {/if}
@@ -70,41 +80,46 @@
 
 <style>
   .steps {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface);
-    margin: 6px 0;
-    overflow: hidden;
+    margin: 2px 0;
+    min-width: 0;
   }
   .steps-head {
     display: flex;
     align-items: center;
     gap: 8px;
     width: 100%;
-    padding: 6px 10px;
+    padding: 4px 8px;
     background: none;
     border: 0;
-    color: var(--text);
+    border-radius: var(--radius-s);
+    color: var(--text-dim);
     font: inherit;
     font-size: var(--fs-s);
     cursor: pointer;
     text-align: start;
+    min-width: 0;
   }
   .steps-head:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
+    color: var(--text);
   }
-  .steps-icon {
+  .steps-head:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+  .steps-mark {
     display: inline-flex;
-    color: var(--text-dim);
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    flex-shrink: 0;
+    color: var(--success);
   }
-  .steps-icon.pending {
-    color: var(--status-warn);
-    animation: pulse 1.2s ease-in-out infinite;
+  .steps-mark.bad {
+    color: var(--danger);
   }
-  @keyframes pulse {
-    50% {
-      opacity: 0.35;
-    }
+  .steps-mark.wait {
+    color: var(--warning);
   }
   .steps-title {
     flex: 1;
@@ -112,23 +127,56 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    color: var(--text);
   }
   .steps-fail {
-    height: 16px;
+    flex-shrink: 0;
     font-size: var(--fs-xs);
+    font-weight: 600;
+    color: var(--danger);
+    background: var(--danger-soft);
+    border-radius: 99px;
+    padding: 1px 7px;
+  }
+  .steps-meta {
+    flex-shrink: 0;
+    font-size: var(--fs-xs);
+    white-space: nowrap;
   }
   .steps-caret {
     display: inline-flex;
-    color: var(--text-dim);
+    flex-shrink: 0;
   }
+  /* The expanded steps hang off a hairline, like a timeline. */
   .steps-list {
-    border-top: 1px solid var(--border);
     display: flex;
     flex-direction: column;
+    margin-inline-start: 14px;
+    padding-inline-start: 6px;
+    border-inline-start: 1px solid var(--border);
+    min-width: 0;
   }
-  .thought {
-    font-size: var(--fs-s);
-    padding: 5px 10px 5px 31px;
-    font-style: italic;
+  .spin {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    border-top-color: var(--accent);
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .spin {
+      animation: spin 0.9s linear infinite;
+    }
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  /* ≤360px: the step count / duration yield to the summary. */
+  @container (max-width: 360px) {
+    .steps-meta {
+      display: none;
+    }
   }
 </style>

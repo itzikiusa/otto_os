@@ -22,6 +22,7 @@
   const ctx = getContext<ConvContext>(CONV_CTX);
 
   let open = $state(false);
+  const STATUS_LABEL = { running: 'Running…', done: 'Done', error: 'Failed', unknown: 'Status not recorded' } as const;
   const meta = $derived<SubagentMeta | null>(
     ctx.conv.transcript?.subagents.find((s) => s.agent_id === agentId) ?? null,
   );
@@ -46,7 +47,12 @@
     </span>
     {#if meta?.model}<span class="chip sub-model">{meta.model}</span>{/if}
     {#if children.length}<span class="chip sub-kids" title="{children.length} nested agents">{children.length} ⤵</span>{/if}
-    <span class="sub-dot {status ?? 'unknown'}"></span>
+    <span class="sub-status {status ?? 'unknown'}" role="img" aria-label={STATUS_LABEL[status ?? 'unknown']} title={STATUS_LABEL[status ?? 'unknown']}>
+      {#if status === 'running'}<span class="spin"></span>
+      {:else if status === 'done'}<Icon name="check" size={12} />
+      {:else if status === 'error'}<Icon name="x" size={12} />
+      {:else}<Icon name="minus" size={12} />{/if}
+    </span>
     <span class="sub-caret" aria-hidden="true"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} /></span>
   </button>
   {#if open}
@@ -64,7 +70,7 @@
           </button>
         {/if}
         {#each items as item (item.id)}
-          <TurnItem {item} nested />
+          <TurnItem {item} nested active={status === 'running'} />
         {/each}
       {/if}
       {#if children.length}
@@ -82,8 +88,8 @@
   .sub {
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
-    background: color-mix(in srgb, var(--accent) 4%, var(--surface));
-    margin: 4px 10px;
+    background: var(--surface);
+    margin: 4px 0;
     overflow: hidden;
   }
   .sub-head {
@@ -101,7 +107,11 @@
     min-width: 0;
   }
   .sub-head:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
+  }
+  .sub-head:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
   .sub-icon {
     display: inline-flex;
@@ -132,21 +142,36 @@
     height: 16px;
     font-size: var(--fs-xs);
   }
-  .sub-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--text-dim);
+  .sub-status {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
     flex-shrink: 0;
+    color: var(--text-dim);
   }
-  .sub-dot.done {
-    background: var(--status-working);
+  .sub-status.done {
+    color: var(--success);
   }
-  .sub-dot.error {
-    background: var(--status-exited);
+  .sub-status.error {
+    color: var(--danger);
   }
-  .sub-dot.running {
-    background: var(--status-warn);
+  .spin {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    border-top-color: var(--accent);
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .spin {
+      animation: spin 0.9s linear infinite;
+    }
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   .sub-caret {
     display: inline-flex;

@@ -1,5 +1,12 @@
 <script lang="ts">
-  // Chat composer (sessionId mode, editor role, session not exited): ⏎ submits
+  // Chat composer (sessionId mode, editor role, session not exited). One box
+  // that grows with the text (2 lines at rest, up to ~40% of the window) with
+  // its tools on a row inside it: attach image · the key hints · Stop (while
+  // the agent works: one Esc into its terminal, what "esc to interrupt" does)
+  // · Send. While the agent is busy a send is still accepted — Claude Code /
+  // Codex queue typed input and deliver it when the turn ends (the chat shows
+  // it as a "Queued" chip until then), so the box says so instead of blocking.
+  // ⏎ submits
   // exactly the typed text as ONE prompt into the agent's PTY, ⇧⏎ inserts a
   // newline, `/` passes through untouched (slash commands are the CLI's) — with
   // a completion popup listing the provider's built-ins plus the user's own
@@ -13,7 +20,8 @@
   import { toasts } from '../../../lib/toast.svelte';
   import { activity } from '../../../lib/stores/activity.svelte';
   import type { SessionStatus, SlashCommand } from '../../../lib/api/types';
-  import { fetchSlashCommands, submitPrompt, uploadInboxImage } from './api';
+  import { fetchSlashCommands, interruptAgent, submitPrompt, uploadInboxImage } from './api';
+  import { tick } from 'svelte';
 
   import { transcript } from '../../../lib/stores/transcript.svelte';
   import { ws } from '../../../lib/stores/workspace.svelte';
@@ -36,8 +44,10 @@
     /** Unsent text sitting in the terminal's input box — a chat send is
      *  appended to it by the CLI, so it is shown as the message's prefix. */
     termInput?: string;
+    /** "Claude" / "Codex" — the placeholder and hints name the agent. */
+    agentName?: string;
   }
-  let { sessionId, status, onresume, cwd = '', branch = null, model = null, termStatus = '', termInput = '' }: Props = $props();
+  let { sessionId, status, onresume, cwd = '', branch = null, model = null, termStatus = '', termInput = '', agentName = 'the agent' }: Props = $props();
 
   // The keyed parent creates one instance per session. Capture ownership once
   // so an upload or submit that finishes after navigation still updates A.
@@ -72,14 +82,43 @@
   const pendingNudges = $derived(activity.tasks(sessionId).filter((t) => t.nudge_pending).length);
   const statusLabel = $derived(st.key === 'working' ? 'Working…' : st.label);
 
-  // Three lines by default (rows=3 + line-height), growing with the text up
-  // to ~40% of the window; the textarea itself never scrolls sideways (wrap +
+  // Two lines at rest (CSS min-height; one in a narrow tile), growing with the
+  // text up to ~40% of the window; the textarea itself never scrolls sideways (wrap +
   // overflow-x hidden), so nothing overlays the placeholder.
   function autosize(): void {
     if (!ta) return;
     ta.style.height = 'auto';
     const cap = Math.max(160, Math.floor(window.innerHeight * 0.4));
     ta.style.height = `${Math.min(cap, Math.max(ta.scrollHeight, 0))}px`;
+  }
+  // A draft restored on mount / reopened session sizes the box too.
+  $effect(() => {
+    void text;
+    void tick().then(autosize);
+  });
+
+  // ---- busy: queue + interrupt -------------------------------------------------
+  const busy = $derived(status === 'working');
+  let stopping = $state(false);
+  async function interrupt(): Promise<void> {
+    if (stopping) return;
+    stopping = true;
+    try {
+      await interruptAgent(ownerId);
+      toasts.info('Interrupt sent', `${agentName} stops after its current step`);
+    } catch (e) {
+      toasts.error('Interrupt failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      stopping = false;
+      ta?.focus();
+    }
+  }
+  let fileEl = $state<HTMLInputElement | null>(null);
+  function pickImages(e: Event): void {
+    const input = e.currentTarget as HTMLInputElement;
+    const files = Array.from(input.files ?? []);
+    input.value = '';
+    void addImages(files);
   }
 
   // ---- slash-command completion ------------------------------------------------
@@ -190,6 +229,9 @@
       void send();
     }
   }
+  const sendTitle = $derived(
+    busy ? `Send (⏎) — ${agentName} is busy, so it is queued and delivered when the current turn ends` : 'Send (⏎)',
+  );
 
   async function addImages(files: File[]): Promise<void> {
     const imgs = files.filter((f) => f.type.startsWith('image/'));
@@ -261,12 +303,13 @@
           <div class="cmd-hint dim">↑↓ choose · Tab/⏎ complete · Esc dismiss</div>
         </div>
       {/if}
-      <div class="box">
+      <div class="box" class:busy>
         <textarea
           bind:this={ta}
           bind:value={() => text, (value) => transcript.setDraft(ownerId, value)}
-          rows="3"
-          placeholder="Message the agent — ⏎ to send, ⇧⏎ for a newline, / for commands, paste an image to attach"
+          rows="1"
+          placeholder={busy ? `Queue a message for ${agentName}…` : `Message ${agentName} — / for commands`}
+          aria-label="Message {agentName}"
           spellcheck="false"
           {...{ autocorrect: 'off' }}
           autocapitalize="off"
@@ -277,7 +320,16 @@
           onpaste={onPaste}
           aria-autocomplete="list"
         ></textarea>
-        <button class="send icon-btn" onclick={() => void send()} disabled={!canSend} title="Send (⏎)" aria-label="Send"><Icon name="send" size={14} /></button>
+        <div class="tools">
+          <input bind:this={fileEl} type="file" accept="image/*" multiple hidden onchange={pickImages} />
+          <button class="icon-btn tool" onclick={() => fileEl?.click()} aria-label="Attach images" title="Attach images (or paste / drop them)"><Icon name="image" size={14} /></button>
+          <span class="keys" aria-hidden="true">{busy ? 'Busy — ⏎ queues' : '⏎ send'} · ⇧⏎ new line</span>
+          <span class="grow"></span>
+          {#if busy}
+            <button class="btn small stop" onclick={() => void interrupt()} disabled={stopping} title="Interrupt {agentName} — sends Esc to its terminal"><Icon name="stop" size={11} /> Stop</button>
+          {/if}
+          <button class="send" onclick={() => void send()} disabled={!canSend} title={sendTitle} aria-label="Send"><Icon name="send" size={14} /></button>
+        </div>
       </div>
       {#if attachments.length}
         <div class="thumbs" data-attachments={attachments.length}>
@@ -306,8 +358,6 @@
       {#if branch}<span class="sep sep-branch">·</span><span class="mono branch" title="Git branch">⎇ {branch}</span>{/if}
       {#if model}<span class="sep sep-model">·</span><span class="mono model" title="Model">{model}</span>{/if}
       {#if termStatus}<span class="sep">·</span><span class="term-status" title="The agent's own status line">{termStatus}</span>{/if}
-      <span class="grow"></span>
-      <span class="dim hint">Slash commands pass straight to the CLI</span>
     </div>
   {/if}
 </div>
@@ -315,12 +365,12 @@
 <style>
   .composer {
     border-top: 1px solid var(--border);
-    background: var(--surface);
+    background: var(--bg);
     padding: 8px 12px 6px;
     flex-shrink: 0;
-    /* Shed the status line's secondary spans by the COMPOSER's width — it sits
-       in a split pane as readily as a full-window chat. Same numbers as the
-       `@container` blocks below. */
+    /* Shed the tool row's hints and the status line's secondary spans by the
+       COMPOSER's width — it sits in a narrow tiled pane as readily as a
+       full-window chat. Same numbers as the `@container` blocks below. */
     container-type: inline-size;
   }
   .box-wrap {
@@ -328,23 +378,26 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+    max-width: var(--chat-measure, none);
+    margin-inline: auto;
+    width: 100%;
   }
   .box {
     display: flex;
-    align-items: flex-end;
-    gap: 6px;
+    flex-direction: column;
+    gap: 2px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--bg);
-    padding: 8px 6px 8px 12px;
+    border-radius: var(--radius-l);
+    background: var(--surface);
+    padding: 8px 6px 4px 12px;
     overflow: hidden;
     min-width: 0;
+    box-shadow: var(--shadow-card);
   }
   .box:focus-within {
     border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
   }
   textarea {
-    flex: 1;
     min-width: 0;
     resize: none;
     border: 0;
@@ -354,25 +407,67 @@
     font: inherit;
     font-size: var(--fs-m);
     line-height: 1.5;
-    min-height: 62px;
+    min-height: 40px;
     max-height: 40vh;
-    padding: 2px 0;
+    padding: 2px 6px 2px 0;
     overflow-x: hidden;
     overflow-y: auto;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     scrollbar-gutter: stable;
   }
-  textarea::placeholder {
+  .tools {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 28px;
+    min-width: 0;
+  }
+  .tool {
     color: var(--text-dim);
   }
+  .keys {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+  .grow {
+    flex: 1;
+  }
+  .stop {
+    flex-shrink: 0;
+  }
+  /* Send: the composer's one filled control. */
   .send {
     flex-shrink: 0;
-    color: var(--accent-text);
+    display: inline-grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 0;
+    padding: 0;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
+    cursor: pointer;
+  }
+  .send:hover:not(:disabled) {
+    filter: brightness(1.08);
+  }
+  .send:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
   .send:disabled {
-    opacity: 0.4;
+    background: var(--surface-3);
+    color: var(--text-dim);
     cursor: default;
+  }
+  textarea::placeholder {
+    color: var(--text-dim);
   }
   :global([dir='rtl']) .send {
     transform: scaleX(-1);
@@ -464,13 +559,20 @@
     padding: 0;
     cursor: pointer;
   }
+  .status,
+  .term-input {
+    width: 100%;
+    box-sizing: border-box;
+    max-width: var(--chat-measure, none);
+    margin-inline: auto;
+  }
   .status {
     display: flex;
     align-items: center;
     gap: 6px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    padding: 5px 2px 0;
+    padding: 5px 6px 0;
     min-width: 0;
     flex-wrap: wrap;
     row-gap: 2px;
@@ -497,17 +599,12 @@
     max-width: 48%;
   }
   .term-input {
-    margin-top: 6px;
+    margin-block-start: 6px;
     font-size: var(--fs-xs);
     padding: 4px 10px;
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--status-warn) 12%, var(--surface));
-    border: 1px dashed color-mix(in srgb, var(--status-warn) 50%, var(--border));
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .hint {
+    background: var(--warning-soft);
+    border: 1px dashed color-mix(in srgb, var(--warning) 50%, var(--border));
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -520,23 +617,27 @@
     padding: 6px 0;
     font-size: var(--fs-s);
   }
-  /* ≤420px: the slash-command hint is the first thing to go (it is a one-off
-     tip, not state). Replaces the old window media query — a wide window with a
-     narrow pane used to keep it and push the status line into a second row. */
-  @container (max-width: 420px) {
-    .hint {
-      display: none;
+  /* ≤480px (a tile in a 2×2 grid): the box rests at one line and the status
+     row keeps only the state — cwd / branch / model are in the pane header. */
+  @container (max-width: 480px) {
+    .composer {
+      padding: 6px 8px 4px;
     }
-  }
-  /* ≤320px: cwd, branch and model go too — all three are visible in the pane
-     header or the chat header, so nothing becomes unreachable. */
-  @container (max-width: 320px) {
+    textarea {
+      min-height: 22px;
+    }
     .cwd,
     .branch,
     .model,
     .sep-cwd,
     .sep-branch,
     .sep-model {
+      display: none;
+    }
+  }
+  /* ≤420px: the key hints go too (a tip, not state). */
+  @container (max-width: 420px) {
+    .keys {
       display: none;
     }
   }

@@ -211,7 +211,10 @@ function makeMarked(ctx: RenderCtx): Marked {
         }
         const hlLang = l && langFromPath(`x.${l}`) ? l : l;
         const lines = text.split('\n').map((line) => highlightLine(line, hlLang)).join('\n');
-        return `<pre><code class="hljs">${lines}</code></pre>\n`;
+        // `language-x` (the common convention) lets a host label the block —
+        // the chat's code-block toolbar (agents/conversation/codeBlocks.ts).
+        const langCls = l && /^[\w+#.-]+$/.test(l) ? ` language-${l}` : '';
+        return `<pre><code class="hljs${langCls}">${lines}</code></pre>\n`;
       },
       blockquote({ tokens }) {
         const body = this.parser.parse(tokens);
