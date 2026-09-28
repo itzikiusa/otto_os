@@ -327,7 +327,8 @@ on `claude`/`codex` repaints.
   `otto_split_row_frac` as the root fraction. With ≥2 panes and ≥2 session targets
   a **broadcast bar** appears: *"↗ broadcast"* sends one line to all visible
   sessions via `POST /workspaces/{id}/broadcast {text, session_ids}`.
-- **Reordering panes** — drag a pane by the **grip** in its header: drop on
+- **Reordering panes** — drag a pane by its **title** (or the grip that appears
+  at the header's leading edge on hover) in its header: drop on
   another pane's **centre** to swap the two sessions, on an **edge quarter** to
   move the pane into a new split beside it. Without a mouse: `⌘⌥←/→/↑/↓` move the
   focused pane to its geometric neighbour and `⌘⌥S` swaps it with the next (in a
@@ -341,14 +342,32 @@ on `claude`/`codex` repaints.
   newest first, and *Reset to recent* returns to the daemon's order.
   Telegram/Slack lists and other-workspace groups cannot be reordered, nor can a
   filtered list. Persisted as `otto_session_order_<ws>`.
-- **Pane header at narrow widths** — the header sheds chrome by its own width, in
-  this order: cwd → provider text → themed full name → terminal font/copy toolbar
-  → task / handover / idle chips → the view toggle becomes an icon menu and
-  restart + zoom fold into ⋯ → the drag grip → the title and ✕ fold into ⋯. Every
-  control stays reachable through ⋯ — nothing is ever clipped: width picks the
-  starting fold, then the header is MEASURED and folded one tier further until
-  the inline set genuinely fits, so a session carrying extra chrome (a task
-  chip, a handover crumb, a themed name) can never push ✕ past the edge.
+- **Pane header** — one 30 px row whose priority is *status dot + title*: the
+  title is the only item that grows, everything else shrinks or folds before it
+  does. Inline: the Terminal · Chat toggle, the details chip, zoom (tiled) and
+  ⋯ (+ ✕ in a split). The **details chip** is the provider icon (+ name, idle /
+  suspend countdown and folder on a wide pane); its tooltip and its click menu
+  hold the rest — themed full name, subscription account, state, tasks, the
+  full cwd (*Copy folder path*) and the handover source. The **⋯ menu** holds
+  the pane controls that used to be header buttons — *Terminal font larger /
+  smaller / Reset* (`⌘+` `⌘−` `⌘0` in the terminal still work), *Copy on
+  select*, *Restart session*, *Allow UI control* — plus every session action.
+  The UI-control toggle only shows inline while it is ON (or the agent asked
+  again). The active pane reads at full contrast; the others dim their title
+  and controls until hovered.
+- **Pane header at narrow widths** — CSS container queries on the pane
+  (`ui/src/lib/paneHeader.ts` holds the breakpoints and the script twin that
+  adds the hidden controls back into ⋯):
+
+  | Tier | Pane width | Header |
+  |---|---|---|
+  | full | ≥ 720 px | dot · title · task / now / handover chips · details chip with text · labelled toggle · zoom · ⋯ · ✕ |
+  | compact | 420–719 | same, but the toggle and chips are icon-only and "Now: …" is hidden |
+  | minimal | 200–419 | dot · title · one *Switch to …* button · ⋯ — zoom, ✕ and the details move into ⋯ |
+  | micro | < 200 | dot · title · ⋯ — *Terminal view* / *Chat view* are ⋯ rows |
+
+  The header height never changes and nothing is ever clipped: the title
+  ellipsizes (full text in its tooltip) instead.
 - **Tiled view** (`TiledView.svelte`) — see every session at once in a grid (1→2
   →3→4 columns by count). Drag a tile onto another to reorder; the order is
   remembered per workspace (`otto_tile_order_<ws>`). To preserve the idle-suspend
@@ -417,7 +436,7 @@ copy from — xterm only syncs its selection into the hidden textarea on
 | ⌥-drag (mouse-reporting sessions) | Forces a local selection. Without it, agent sessions cannot be selected at all on macOS. |
 | Drag-select + `⌘C` (or `Ctrl+Shift+C`) | Copies the terminal selection. Only claimed when a selection exists, so bare `Ctrl+C` remains SIGINT. |
 | Right-click → Copy | Native browser copy (xterm's own path). |
-| Copy-on-select | Toolbar `copy` toggle — any new selection is copied immediately. Off by default, and stored per-origin in `localStorage`, so enabling it locally does **not** enable it on a remote origin. |
+| Copy-on-select | ⋯ → *Copy on select* in a session pane (the terminal toolbar `copy` toggle elsewhere) — any new selection is copied immediately. Off by default, and stored per-origin in `localStorage`, so enabling it locally does **not** enable it on a remote origin. |
 | `⌘V` / `Ctrl+V` | Native paste, handled by xterm from the `paste` event. |
 | `Ctrl+Shift+V` | Programmatic paste via `navigator.clipboard.readText()` — the one clipboard call that needs a secure context *and* a permission grant; silently declines if refused (`⌘V` still works). |
 | Paste an **image** | Uploaded to the daemon via `POST /snips`, then the stored PNG's absolute path is typed into the PTY as a bracketed paste. |
@@ -662,8 +681,7 @@ already consumed the turn output, so nothing is lost. The user's own
 
 ### Restart
 
-`POST /api/v1/sessions/{id}/restart` (or the pane's refresh button, tooltip
-*"Restart session"*) respawns the session: it kills any live PTY, rebuilds the
+`POST /api/v1/sessions/{id}/restart` (or the pane's ⋯ → *Restart session*) respawns the session: it kills any live PTY, rebuilds the
 spec, **uses the resume args when `provider_session_id` is set** (so a claude
 restart resumes the same conversation; others start fresh), re-applies
 `--add-dir`/`--model` from `meta`, re-trusts the folder, re-wires the ingest env,

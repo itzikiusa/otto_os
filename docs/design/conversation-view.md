@@ -301,14 +301,23 @@ those roots.
 ## 5. UI
 
 ### 5.1 View toggle in `SessionView.svelte`
-Segmented **Terminal · Chat · Split** in the header; persisted per session via a
-`winKey`-style localStorage key (`otto_session_view:<id>`); default *Terminal*
-for every session (Chat was the default when a transcript resolved until
-2026-09-06; it is opt-in per session now).
-*Split* = chat left / terminal right with a splitter copied from
-`RightPanel.svelte:27-44`. With the right panel open, Split shows **three
-columns**; below 1200 px Split degrades to Chat with a "Terminal" tab button.
-`⌘⇧C` cycles.
+A two-state **Terminal · Chat** toggle in the pane header; persisted per session
+via a `winKey`-style localStorage key (`otto_session_view:<id>`); default
+*Terminal* for every session (Chat was the default when a transcript resolved
+until 2026-09-06; it is opt-in per session now). `⌘⇧C` toggles; ←/→ move
+between the two tabs.
+
+The toggle adapts to the pane width with the rest of the header
+(`lib/paneHeader.ts` tiers): icon + label on a wide pane (≥ 720 px), icon-only
+below that, one "switch to the other view" button below 420 px, and two
+checkable rows in the pane's ⋯ menu below 200 px.
+
+*Split* (chat left / terminal right inside one pane, with its own divider) was
+**removed on 2026-09-28**: next to the multi-pane layouts it was not usable (a
+split pane cut in half again) and it crowded every header. A stored `split`
+preference reads as `chat` and is rewritten on first read, and the orphaned
+`otto_session_split_frac:<id>` key is deleted. To see the chat and the terminal
+side by side, split the pane (`⌘D`) and put one pane in Chat.
 
 ### 5.2 `agents/conversation/ConversationView.svelte`
 Props: `{ sessionId?: string; transcriptPath?: string; workspaceId: string; readonly?: boolean }`
