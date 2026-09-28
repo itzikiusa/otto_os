@@ -183,10 +183,25 @@ impl Store {
                 .await
                 .map_err(dberr("vault.delete"))?;
         }
-        let _ = sqlx::query("DELETE FROM vault_fts WHERE vault_id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await;
+        // By rowid through the map (the UNINDEXED `vault_id` would scan the
+        // whole index); a DB whose map was never built falls back to the scan.
+        let by_rowid = sqlx::query(
+            "DELETE FROM vault_fts WHERE rowid IN (SELECT rid FROM vault_fts_ids WHERE vault_id = ?)",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await;
+        if by_rowid.is_ok() {
+            let _ = sqlx::query("DELETE FROM vault_fts_ids WHERE vault_id = ?")
+                .bind(id)
+                .execute(&self.pool)
+                .await;
+        } else {
+            let _ = sqlx::query("DELETE FROM vault_fts WHERE vault_id = ?")
+                .bind(id)
+                .execute(&self.pool)
+                .await;
+        }
         Ok(())
     }
 
@@ -372,18 +387,7 @@ impl Store {
                 .map_err(dberr("vault.index.incoming"))?;
         }
         if fts {
-            sqlx::query("DELETE FROM vault_fts WHERE vault_id=? AND path=?")
-                .bind(vault)
-                .bind(&note.row.path)
-                .execute(&mut *tx)
-                .await
-                .map_err(dberr("vault.index.fts"))?;
-            sqlx::query("INSERT INTO vault_fts(vault_id,path,title,body) VALUES(?,?,?,?)")
-                .bind(vault)
-                .bind(&note.row.path)
-                .bind(&note.row.title)
-                .bind(&note.body)
-                .execute(&mut *tx)
+            fts_put_conn(&mut tx, vault, &note.row.path, &note.row.title, &note.body)
                 .await
                 .map_err(dberr("vault.index.fts"))?;
         }
@@ -432,13 +436,19 @@ impl Store {
                 .await
                 .map_err(dberr("vault.remove_note"))?;
         }
-        let fts: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='vault_fts' AND type='table')",
+        let (fts, map): (bool, bool) = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='vault_fts' AND type='table'), \
+                    EXISTS(SELECT 1 FROM sqlite_master WHERE name='vault_fts_ids' AND type='table')",
         )
         .fetch_one(&mut *tx)
         .await
         .map_err(dberr("vault.remove.fts_check"))?;
-        if fts {
+        if fts && map {
+            fts_del_conn(&mut tx, vault, path)
+                .await
+                .map_err(dberr("vault.remove.fts"))?;
+        } else if fts {
+            // Map not built yet (FTS never ensured by this daemon): the old scan.
             sqlx::query("DELETE FROM vault_fts WHERE vault_id=? AND path=?")
                 .bind(vault)
                 .bind(path)
@@ -820,34 +830,77 @@ impl Store {
 
     // -- FTS -------------------------------------------------------------------
 
-    /// Create the FTS5 index if the linked SQLite supports it.
+    /// Create the FTS5 index if the linked SQLite supports it, plus the
+    /// `(vault_id, path) → rowid` map every write goes through.
+    ///
+    /// Why the map (perf r3-01-04): `vault_id`/`path` are UNINDEXED FTS columns,
+    /// so `DELETE … WHERE vault_id=? AND path=?` scanned the whole index —
+    /// ~20 ms per changed note at 10k notes, inside the write transaction
+    /// (a full rebuild ≈ 200 s of write lock). Through the map a replace is an
+    /// indexed lookup plus a rowid update. The map is derived data like the FTS
+    /// table itself; a DB indexed before it existed gets it built here once
+    /// (one scan), and duplicate FTS rows for one note are dropped.
     pub async fn ensure_fts(&self) -> bool {
-        sqlx::query(
+        let created = sqlx::query(
             "CREATE VIRTUAL TABLE IF NOT EXISTS vault_fts USING fts5(\
              vault_id UNINDEXED, path UNINDEXED, title, body, tokenize='unicode61 remove_diacritics 2')",
         )
         .execute(&self.pool)
         .await
-        .is_ok()
+        .is_ok();
+        if !created {
+            return false;
+        }
+        self.ensure_fts_map().await.is_ok()
+    }
+
+    async fn ensure_fts_map(&self) -> std::result::Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='vault_fts_ids' AND type='table')",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if !exists {
+            sqlx::query(
+                "CREATE TABLE vault_fts_ids (vault_id INTEGER NOT NULL, path TEXT NOT NULL, \
+                 rid INTEGER NOT NULL, PRIMARY KEY (vault_id, path))",
+            )
+            .execute(&mut *tx)
+            .await?;
+            // Later rows win (the newest index of a note), then orphans go.
+            sqlx::query(
+                "INSERT OR REPLACE INTO vault_fts_ids (vault_id, path, rid) \
+                 SELECT vault_id, path, rowid FROM vault_fts ORDER BY rowid",
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("DELETE FROM vault_fts WHERE rowid NOT IN (SELECT rid FROM vault_fts_ids)")
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await
     }
 
     pub async fn fts_index(&self, vault: i64, path: &str, title: &str, body: &str) {
-        self.fts_remove(vault, path).await;
-        let _ = sqlx::query("INSERT INTO vault_fts (vault_id, path, title, body) VALUES (?,?,?,?)")
-            .bind(vault)
-            .bind(path)
-            .bind(title)
-            .bind(body)
-            .execute(&self.pool)
-            .await;
+        let Ok(mut tx) = self.pool.begin().await else {
+            return;
+        };
+        if fts_put_conn(&mut tx, vault, path, title, body)
+            .await
+            .is_ok()
+        {
+            let _ = tx.commit().await;
+        }
     }
 
     pub async fn fts_remove(&self, vault: i64, path: &str) {
-        let _ = sqlx::query("DELETE FROM vault_fts WHERE vault_id = ? AND path = ?")
-            .bind(vault)
-            .bind(path)
-            .execute(&self.pool)
-            .await;
+        let Ok(mut tx) = self.pool.begin().await else {
+            return;
+        };
+        if fts_del_conn(&mut tx, vault, path).await.is_ok() {
+            let _ = tx.commit().await;
+        }
     }
 
     /// bm25-ranked FTS search → `(path, snippet, score)`. `match_expr` must be a
@@ -974,4 +1027,162 @@ pub fn like_escape(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")
+}
+
+/// Replace one note's FTS row through the rowid map (see
+/// [`Store::ensure_fts`]): an UPDATE by rowid when the note is indexed,
+/// else an INSERT + map row. Never scans the index.
+async fn fts_put_conn(
+    conn: &mut sqlx::SqliteConnection,
+    vault: i64,
+    path: &str,
+    title: &str,
+    body: &str,
+) -> std::result::Result<(), sqlx::Error> {
+    let rid: Option<i64> =
+        sqlx::query_scalar("SELECT rid FROM vault_fts_ids WHERE vault_id = ? AND path = ?")
+            .bind(vault)
+            .bind(path)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if let Some(rid) = rid {
+        let done = sqlx::query("UPDATE vault_fts SET title = ?, body = ? WHERE rowid = ?")
+            .bind(title)
+            .bind(body)
+            .bind(rid)
+            .execute(&mut *conn)
+            .await?;
+        if done.rows_affected() > 0 {
+            return Ok(());
+        }
+    }
+    let inserted =
+        sqlx::query("INSERT INTO vault_fts (vault_id, path, title, body) VALUES (?,?,?,?)")
+            .bind(vault)
+            .bind(path)
+            .bind(title)
+            .bind(body)
+            .execute(&mut *conn)
+            .await?;
+    sqlx::query("INSERT OR REPLACE INTO vault_fts_ids (vault_id, path, rid) VALUES (?,?,?)")
+        .bind(vault)
+        .bind(path)
+        .bind(inserted.last_insert_rowid())
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// Drop one note's FTS row by rowid (and its map row).
+async fn fts_del_conn(
+    conn: &mut sqlx::SqliteConnection,
+    vault: i64,
+    path: &str,
+) -> std::result::Result<(), sqlx::Error> {
+    let rid: Option<i64> =
+        sqlx::query_scalar("SELECT rid FROM vault_fts_ids WHERE vault_id = ? AND path = ?")
+            .bind(vault)
+            .bind(path)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if let Some(rid) = rid {
+        sqlx::query("DELETE FROM vault_fts WHERE rowid = ?")
+            .bind(rid)
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("DELETE FROM vault_fts_ids WHERE vault_id = ? AND path = ?")
+            .bind(vault)
+            .bind(path)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod fts_map_tests {
+    use super::*;
+
+    async fn fts_rows(s: &Store, vault: i64) -> Vec<(String, String)> {
+        sqlx::query_as("SELECT path, body FROM vault_fts WHERE vault_id = ? ORDER BY path")
+            .bind(vault)
+            .fetch_all(s.pool())
+            .await
+            .unwrap()
+    }
+
+    /// r3-01-04: a re-index replaces the note's row in place (no whole-index
+    /// scan, no duplicate), removal deletes it, and the lookup is indexed.
+    #[tokio::test]
+    async fn replace_and_remove_go_through_the_rowid_map() {
+        let s = Store::new(otto_state::db::test_pool().await);
+        assert!(s.ensure_fts().await);
+        s.fts_index(1, "a.md", "A", "alpha first").await;
+        s.fts_index(1, "b.md", "B", "beta").await;
+        s.fts_index(1, "a.md", "A", "alpha second").await;
+        s.fts_index(2, "a.md", "A", "other vault").await;
+        assert_eq!(
+            fts_rows(&s, 1).await,
+            vec![
+                ("a.md".to_string(), "alpha second".to_string()),
+                ("b.md".to_string(), "beta".to_string())
+            ]
+        );
+        let hits = s.fts_search(1, "\"first\"", 10).await.unwrap();
+        assert!(hits.is_empty(), "the old body is gone from the index");
+        s.fts_remove(1, "a.md").await;
+        assert_eq!(fts_rows(&s, 1).await.len(), 1);
+        assert_eq!(fts_rows(&s, 2).await.len(), 1, "other vault untouched");
+
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN SELECT rid FROM vault_fts_ids WHERE vault_id = 1 AND path = 'a.md'",
+        )
+        .fetch_all(s.pool())
+        .await
+        .unwrap();
+        assert!(
+            plan.iter()
+                .any(|(.., d)| d.contains("PRIMARY KEY") || d.contains("INDEX")),
+            "indexed lookup, got {plan:?}"
+        );
+    }
+
+    /// A DB indexed before the map existed: `ensure_fts` builds it once and
+    /// drops duplicate rows for one note (the newest wins).
+    #[tokio::test]
+    async fn legacy_index_gets_its_map_built_and_deduplicated() {
+        let s = Store::new(otto_state::db::test_pool().await);
+        sqlx::query(
+            "CREATE VIRTUAL TABLE vault_fts USING fts5(\
+             vault_id UNINDEXED, path UNINDEXED, title, body, tokenize='unicode61 remove_diacritics 2')",
+        )
+        .execute(s.pool())
+        .await
+        .unwrap();
+        for body in ["old", "new"] {
+            sqlx::query(
+                "INSERT INTO vault_fts (vault_id, path, title, body) VALUES (7, 'n.md', 'N', ?)",
+            )
+            .bind(body)
+            .execute(s.pool())
+            .await
+            .unwrap();
+        }
+        assert!(s.ensure_fts().await);
+        assert_eq!(
+            fts_rows(&s, 7).await,
+            vec![("n.md".to_string(), "new".to_string())]
+        );
+        s.fts_index(7, "n.md", "N", "newer").await;
+        assert_eq!(
+            fts_rows(&s, 7).await,
+            vec![("n.md".to_string(), "newer".to_string())]
+        );
+        // Idempotent on the next start.
+        assert!(s.ensure_fts().await);
+        assert_eq!(fts_rows(&s, 7).await.len(), 1);
+        // Unregistering the vault drops its FTS rows through the map.
+        s.delete_vault(7).await.unwrap();
+        assert!(fts_rows(&s, 7).await.is_empty());
+    }
 }

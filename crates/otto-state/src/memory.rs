@@ -986,49 +986,135 @@ impl MemoriesRepo {
         if created.is_err() {
             return Ok(false);
         }
-        // Backfill ONCE, only when the index is empty — a full O(n) INSERT…SELECT.
-        // (The previous per-row `WHERE NOT EXISTS` scanned the UNINDEXED `mid`
-        // column for every memory → O(n²), seconds on a large vault. fts_index
-        // keeps it in sync on writes, so a one-time bulk fill is sufficient.)
-        let empty = sqlx::query("SELECT COUNT(*) AS c FROM memories_fts")
-            .fetch_one(&self.pool)
-            .await
-            .map(|r| r.get::<i64, _>("c") == 0)
-            .unwrap_or(false);
-        if empty {
-            let _ = sqlx::query(
-                "INSERT INTO memories_fts (mid, ws, title, body) \
-                 SELECT id, workspace_id, title, body FROM memories",
-            )
-            .execute(&self.pool)
-            .await;
-        }
-        Ok(true)
+        // Without the map every index write would fail: report FTS as
+        // unavailable (LIKE fallback) and retry on the next daemon start.
+        Ok(self.ensure_fts_map().await.is_ok())
     }
 
-    /// Upsert a memory's text into the FTS index (delete-then-insert; FTS5
-    /// external tables have no UPSERT). Silent no-op when FTS5 is unavailable.
+    /// The `mid → FTS rowid` map every index write goes through (perf
+    /// r3-01-04): `mid` is an UNINDEXED FTS column, so `DELETE … WHERE mid = ?`
+    /// scanned the whole index on every memory upsert (~10 ms at 5k memories,
+    /// holding the writer). Derived data, created at runtime like the index.
+    ///
+    /// Backfill ONCE: an empty index is bulk-filled from `memories` (a full
+    /// O(n) INSERT…SELECT; the old per-row `WHERE NOT EXISTS` was O(n²)); an
+    /// index built before the map existed gets its map in one scan, keeping the
+    /// newest row per memory and dropping duplicates.
+    async fn ensure_fts_map(&self) -> std::result::Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='memories_fts_ids' AND type='table')",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if !exists {
+            sqlx::query(
+                "CREATE TABLE memories_fts_ids (mid TEXT PRIMARY KEY, rid INTEGER NOT NULL)",
+            )
+            .execute(&mut *tx)
+            .await?;
+            let empty: bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM memories_fts)")
+                .fetch_one(&mut *tx)
+                .await?;
+            if empty {
+                sqlx::query(
+                    "INSERT INTO memories_fts (mid, ws, title, body) \
+                     SELECT id, workspace_id, title, body FROM memories",
+                )
+                .execute(&mut *tx)
+                .await?;
+            }
+            sqlx::query(
+                "INSERT OR REPLACE INTO memories_fts_ids (mid, rid) \
+                 SELECT mid, rowid FROM memories_fts ORDER BY rowid",
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "DELETE FROM memories_fts WHERE rowid NOT IN (SELECT rid FROM memories_fts_ids)",
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await
+    }
+
+    /// Upsert a memory's text into the FTS index: an UPDATE by rowid through
+    /// the map when indexed, else INSERT + map row — one transaction (it used
+    /// to be two autocommit writes around a whole-index scan). Silent no-op
+    /// when FTS5 is unavailable.
     pub async fn fts_index(&self, mid: &str, ws: &str, title: &str, body: &str) -> Result<()> {
-        let _ = sqlx::query("DELETE FROM memories_fts WHERE mid = ?")
-            .bind(mid)
-            .execute(&self.pool)
-            .await;
-        let _ = sqlx::query("INSERT INTO memories_fts (mid, ws, title, body) VALUES (?,?,?,?)")
-            .bind(mid)
-            .bind(ws)
-            .bind(title)
-            .bind(body)
-            .execute(&self.pool)
-            .await;
+        let put = async {
+            let mut tx = self.pool.begin().await?;
+            let rid: Option<i64> =
+                sqlx::query_scalar("SELECT rid FROM memories_fts_ids WHERE mid = ?")
+                    .bind(mid)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            let mut done = false;
+            if let Some(rid) = rid {
+                done = sqlx::query(
+                    "UPDATE memories_fts SET ws = ?, title = ?, body = ? WHERE rowid = ?",
+                )
+                .bind(ws)
+                .bind(title)
+                .bind(body)
+                .bind(rid)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                    > 0;
+            }
+            if !done {
+                let ins =
+                    sqlx::query("INSERT INTO memories_fts (mid, ws, title, body) VALUES (?,?,?,?)")
+                        .bind(mid)
+                        .bind(ws)
+                        .bind(title)
+                        .bind(body)
+                        .execute(&mut *tx)
+                        .await?;
+                sqlx::query("INSERT OR REPLACE INTO memories_fts_ids (mid, rid) VALUES (?, ?)")
+                    .bind(mid)
+                    .bind(ins.last_insert_rowid())
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            tx.commit().await
+        };
+        let _: std::result::Result<(), sqlx::Error> = put.await;
         Ok(())
     }
 
-    /// Remove a memory from the FTS index.
+    /// Remove a memory from the FTS index (by rowid through the map; the old
+    /// scan only when the map was never built on this DB).
     pub async fn fts_remove(&self, mid: &str) -> Result<()> {
-        let _ = sqlx::query("DELETE FROM memories_fts WHERE mid = ?")
-            .bind(mid)
-            .execute(&self.pool)
-            .await;
+        let del = async {
+            let mut tx = self.pool.begin().await?;
+            let rid: Option<i64> =
+                sqlx::query_scalar("SELECT rid FROM memories_fts_ids WHERE mid = ?")
+                    .bind(mid)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            if let Some(rid) = rid {
+                sqlx::query("DELETE FROM memories_fts WHERE rowid = ?")
+                    .bind(rid)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("DELETE FROM memories_fts_ids WHERE mid = ?")
+                    .bind(mid)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            tx.commit().await
+        };
+        let res: std::result::Result<(), sqlx::Error> = del.await;
+        if res.is_err() {
+            let _ = sqlx::query("DELETE FROM memories_fts WHERE mid = ?")
+                .bind(mid)
+                .execute(&self.pool)
+                .await;
+        }
         Ok(())
     }
 
@@ -1080,5 +1166,77 @@ impl MemoriesRepo {
             .enumerate()
             .filter_map(|(i, r)| row_to_memory(r).ok().map(|m| (m, (n - i) as f32)))
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod fts_map_tests {
+    use super::*;
+
+    async fn rows(r: &MemoriesRepo) -> Vec<(String, String)> {
+        sqlx::query_as("SELECT mid, body FROM memories_fts ORDER BY mid")
+            .fetch_all(&r.pool)
+            .await
+            .unwrap()
+    }
+
+    /// r3-01-04: an upsert replaces the memory's FTS row in place through the
+    /// indexed `mid → rowid` map (no whole-index scan), removal deletes it.
+    #[tokio::test]
+    async fn upsert_and_remove_go_through_the_rowid_map() {
+        let r = MemoriesRepo::new(crate::db::test_pool().await);
+        assert!(r.ensure_fts().await.unwrap());
+        r.fts_index("m1", "ws", "T", "first").await.unwrap();
+        r.fts_index("m2", "ws", "T", "other").await.unwrap();
+        r.fts_index("m1", "ws", "T", "second").await.unwrap();
+        assert_eq!(
+            rows(&r).await,
+            vec![
+                ("m1".to_string(), "second".to_string()),
+                ("m2".to_string(), "other".to_string())
+            ]
+        );
+        r.fts_remove("m1").await.unwrap();
+        assert_eq!(
+            rows(&r).await,
+            vec![("m2".to_string(), "other".to_string())]
+        );
+        let plan: Vec<(i64, i64, i64, String)> =
+            sqlx::query_as("EXPLAIN QUERY PLAN SELECT rid FROM memories_fts_ids WHERE mid = 'm2'")
+                .fetch_all(&r.pool)
+                .await
+                .unwrap();
+        assert!(
+            plan.iter()
+                .any(|(.., d)| d.contains("INDEX") || d.contains("PRIMARY KEY")),
+            "indexed lookup, got {plan:?}"
+        );
+    }
+
+    /// An index built before the map: `ensure_fts` builds the map once and
+    /// keeps only the newest row per memory.
+    #[tokio::test]
+    async fn legacy_index_gets_its_map_built_and_deduplicated() {
+        let r = MemoriesRepo::new(crate::db::test_pool().await);
+        sqlx::query(
+            "CREATE VIRTUAL TABLE memories_fts USING fts5(\
+             mid UNINDEXED, ws UNINDEXED, title, body, tokenize='porter unicode61')",
+        )
+        .execute(&r.pool)
+        .await
+        .unwrap();
+        for body in ["old", "new"] {
+            sqlx::query(
+                "INSERT INTO memories_fts (mid, ws, title, body) VALUES ('m', 'ws', 'T', ?)",
+            )
+            .bind(body)
+            .execute(&r.pool)
+            .await
+            .unwrap();
+        }
+        assert!(r.ensure_fts().await.unwrap());
+        assert_eq!(rows(&r).await, vec![("m".to_string(), "new".to_string())]);
+        r.fts_index("m", "ws", "T", "newer").await.unwrap();
+        assert_eq!(rows(&r).await, vec![("m".to_string(), "newer".to_string())]);
     }
 }
