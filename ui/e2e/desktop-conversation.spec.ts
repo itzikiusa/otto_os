@@ -225,12 +225,14 @@ test('a tool step expands to its output', async ({ page }) => {
 test('Show system toggles the per-turn system notes and persists', async ({ page }) => {
   const view = conv(page);
   await expect(view).toBeVisible({ timeout: 20_000 });
-  const toggle = view.locator('.sys-toggle input');
-  await expect(toggle).not.toBeChecked();
+  // The toggle lives in the chat's ⋯ menu (a checkable item).
+  const sysItem = () => page.getByRole('menuitemcheckbox', { name: /Show system notes/ });
+  await view.locator('[data-conv-menu]').click();
+  await expect(sysItem()).toHaveAttribute('aria-checked', 'false');
   const notesBefore = await view.locator('.sys-list').count();
   expect(notesBefore).toBe(0);
 
-  await toggle.check();
+  await sysItem().click();
   // Turns that carry system notes reveal them (the chip count tells us how many).
   const chips = view.locator('.sys-chip');
   if ((await chips.count()) > 0) {
@@ -241,8 +243,9 @@ test('Show system toggles the per-turn system notes and persists', async ({ page
   // Global + persisted (localStorage) — survives a reload.
   await page.reload();
   await expect(conv(page)).toBeVisible({ timeout: 20_000 });
-  await expect(conv(page).locator('.sys-toggle input')).toBeChecked();
-  await conv(page).locator('.sys-toggle input').uncheck();
+  await conv(page).locator('[data-conv-menu]').click();
+  await expect(sysItem()).toHaveAttribute('aria-checked', 'true');
+  await sysItem().click();
   await expect(conv(page).locator('.sys-list')).toHaveCount(0);
 });
 
@@ -296,8 +299,9 @@ test('composer is a multi-line box that never scrolls sideways', async ({ page }
   const ta = view.locator('.composer textarea');
   await expect(ta).toBeVisible();
   const box = await ta.boundingBox();
-  expect(box && box.height >= 56, `textarea height ${box?.height}`).toBeTruthy();
-  // The placeholder is long: it must wrap, not hide behind a horizontal bar.
+  // Two lines at rest in a wide pane (one in a narrow tile), then it grows.
+  expect(box && box.height >= 38, `textarea height ${box?.height}`).toBeTruthy();
+  // The placeholder must wrap, not hide behind a horizontal bar.
   const overflow = await ta.evaluate((el) => el.scrollWidth - el.clientWidth);
   expect(overflow).toBeLessThanOrEqual(1);
   await ta.fill('one\ntwo\nthree\nfour\nfive\nsix');
