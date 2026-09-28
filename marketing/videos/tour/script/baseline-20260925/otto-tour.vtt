@@ -1,0 +1,181 @@
+WEBVTT
+
+1
+00:00:01.200 --> 00:00:02.150
+This is Otto.
+
+2
+00:00:02.280 --> 00:00:05.428
+Every coding agent you run, in one native Mac app.
+
+3
+00:00:08.000 --> 00:00:12.558
+Otto feels at home on macOS: a grouped sidebar, one clean header per page,
+
+4
+00:00:12.558 --> 00:00:17.758
+and Home as your desktop, showing what needs you, what's running, and what's next.
+
+5
+00:00:18.800 --> 00:00:20.542
+The floating bar is the front door.
+
+6
+00:00:20.672 --> 00:00:24.217
+Press ⌘K, type or speak, and Otto runs the command,
+
+7
+00:00:24.217 --> 00:00:26.661
+or answers in one of four spaces.
+
+8
+00:00:26.791 --> 00:00:31.895
+It docks into the status bar while you work, and ⌥Space calls it from anywhere on your Mac,
+
+9
+00:00:31.895 --> 00:00:34.682
+with the menu bar and pop-out windows close by.
+
+10
+00:00:35.733 --> 00:00:37.671
+The Assistant is your personal agent.
+
+11
+00:00:37.801 --> 00:00:41.797
+It keeps threads, remembers what matters, tracks tasks and reminders,
+
+12
+00:00:41.797 --> 00:00:44.322
+and asks before anything leaves your Mac.
+
+13
+00:00:45.367 --> 00:00:49.020
+Agents run Claude Code, Codex or a shell as real sessions.
+
+14
+00:00:49.150 --> 00:00:51.472
+Keep them in tabs, tile them side by side,
+
+15
+00:00:51.472 --> 00:00:53.943
+or work through a queue of what needs you.
+
+16
+00:00:54.073 --> 00:00:59.036
+Broadcast one prompt to many agents, and pick up any past conversation from History.
+
+17
+00:01:00.100 --> 00:01:04.330
+Run with Otto turns a ticket or a message into a finished branch with one click,
+
+18
+00:01:04.330 --> 00:01:09.766
+and Mission Control shows the whole work graph: what's running, what's waiting, approvals and spend.
+
+19
+00:01:10.800 --> 00:01:11.680
+Then automate.
+
+20
+00:01:11.810 --> 00:01:15.359
+A swarm gives agents roles, an org chart and a shared board.
+
+21
+00:01:15.489 --> 00:01:19.882
+Goal loops plan, execute and evaluate until every acceptance check passes.
+
+22
+00:01:20.933 --> 00:01:24.674
+Workflows chain agents, approvals and tools into pipelines.
+
+23
+00:01:24.804 --> 00:01:26.720
+Scheduled tasks run on a cadence,
+
+24
+00:01:26.720 --> 00:01:30.413
+and personal agents keep their own soul, schedule and memory.
+
+25
+00:01:31.467 --> 00:01:35.613
+Git is built in: a commit graph with your work in progress, branches,
+
+26
+00:01:35.613 --> 00:01:39.969
+pull requests, and multi-agent AI review with findings you can act on.
+
+27
+00:01:40.099 --> 00:01:42.883
+Proof packs keep the evidence behind every change.
+
+28
+00:01:43.933 --> 00:01:46.411
+Product turns stories into analysis and drafts,
+
+29
+00:01:46.411 --> 00:01:50.621
+and the Vault keeps your docs as linked markdown with a live knowledge graph.
+
+30
+00:01:51.667 --> 00:01:57.580
+Design Hall brings every studio under one roof: frames, templates, Site Studio, brand kits and 3D,
+
+31
+00:01:57.580 --> 00:02:02.437
+with references to earlier work and a log of what Otto learned from your team.
+
+32
+00:02:02.567 --> 00:02:05.717
+Skills Lab evaluates and sharpens your agent skills.
+
+33
+00:02:06.767 --> 00:02:08.791
+Your infrastructure lives here too.
+
+34
+00:02:08.921 --> 00:02:14.854
+The Database Explorer speaks MySQL, Postgres, MongoDB, Redis and ClickHouse.
+
+35
+00:02:14.984 --> 00:02:18.267
+Build a query visually, with GROUP BY, HAVING and ORDER BY,
+
+36
+00:02:18.267 --> 00:02:22.756
+then read the results in a grid, or one record at a time in the vertical view.
+
+37
+00:02:23.800 --> 00:02:27.005
+Connections hold SSH terminals and SFTP.
+
+38
+00:02:27.135 --> 00:02:32.930
+Browse Kafka topics, AWS and Kubernetes, call APIs, read the web in the built-in browser,
+
+39
+00:02:32.930 --> 00:02:37.182
+and govern every agent tool call through the MCP control plane.
+
+40
+00:02:38.233 --> 00:02:41.754
+Insights turns your activity into reports with key findings,
+
+41
+00:02:41.754 --> 00:02:44.662
+and Usage tracks tokens, cost and machine load.
+
+42
+00:02:45.700 --> 00:02:49.344
+Snip anything on screen, bridge your agents to Slack and Telegram,
+
+43
+00:02:49.344 --> 00:02:51.205
+and reach Otto from your phone.
+
+44
+00:02:51.335 --> 00:02:51.910
+Otto.
+
+45
+00:02:52.040 --> 00:02:53.982
+All your agents, one home.

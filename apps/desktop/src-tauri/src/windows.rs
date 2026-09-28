@@ -162,12 +162,19 @@ pub fn is_app_window(label: &str) -> bool {
     !label.starts_with("otto-browser-")
         && !label.starts_with("otto-pane-")
         && !label.starts_with("room-")
+        && !label.starts_with("host-room-")
         && !is_aux(label)
 }
 
 /// Windows whose frames this registry persists and restores.
 fn is_registry_window(label: &str) -> bool {
     is_app_window(label) && !is_popout(label)
+}
+
+/// Local hosted rooms can outlive their originating workspace, but remain
+/// ephemeral and never receive shell menu commands or registry restoration.
+fn keeps_app_alive(label: &str) -> bool {
+    is_app_window(label) || label.starts_with("host-room-")
 }
 
 /// The window "Open Otto" should surface: `main`, else the focused app window,
@@ -255,10 +262,10 @@ pub fn schedule_snapshot(app: &tauri::AppHandle) {
 /// window set non-empty, tauri would no longer exit on its own, so the quit is
 /// requested explicitly (same outcome as before they existed).
 pub fn on_close_requested(app: &tauri::AppHandle, label: &str) {
-    if is_quitting() || !is_app_window(label) {
+    if is_quitting() || !keeps_app_alive(label) {
         return;
     }
-    let real_windows = app.windows().keys().filter(|l| is_app_window(l)).count();
+    let real_windows = app.windows().keys().filter(|l| keeps_app_alive(l)).count();
     if real_windows <= 1 {
         mark_quitting();
         snapshot_all(app);
@@ -447,8 +454,19 @@ mod tests {
     fn ephemeral_and_remote_windows_never_enter_registry() {
         assert!(is_registry_window("main"));
         assert!(is_registry_window("w2"));
-        for label in ["otto-pane-window-main", "otto-pane-main", "room-1", "otto-browser-1", "otto-bar", "otto-tray", "popout-1"] {
+        for label in ["otto-pane-window-main", "otto-pane-main", "room-1", "host-room-1", "otto-browser-1", "otto-bar", "otto-tray", "popout-1"] {
             assert!(!is_registry_window(label), "{label} must not be restored as a host");
+        }
+    }
+
+    #[test]
+    fn hosted_room_keeps_app_alive_without_becoming_a_shell_target() {
+        assert!(keeps_app_alive("main"));
+        assert!(keeps_app_alive("host-room-1"));
+        assert!(!is_app_window("host-room-1"));
+        assert!(!is_registry_window("host-room-1"));
+        for label in ["room-1", "otto-bar", "otto-tray", "otto-pane-main"] {
+            assert!(!keeps_app_alive(label));
         }
     }
 

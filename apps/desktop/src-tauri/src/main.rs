@@ -15,6 +15,7 @@ mod panes;
 mod panes_policy;
 mod popout;
 mod rooms;
+mod host_rooms;
 mod shortcuts;
 mod snip;
 mod supervisor;
@@ -113,6 +114,8 @@ fn main() {
             popout::open_popout,
             popout::open_in_otto,
             rooms::open_room_window,
+            host_rooms::open_host_room_window,
+            host_rooms::get_host_room_context,
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").expect("main window");
@@ -181,7 +184,10 @@ fn main() {
                         windows::schedule_snapshot(app);
                     }
                 }
-                tauri::WindowEvent::Destroyed => panes::destroyed(app, &label),
+                tauri::WindowEvent::Destroyed => {
+                    panes::destroyed(app, &label);
+                    host_rooms::destroyed(&label);
+                }
                 tauri::WindowEvent::Focused(false) if label == tray::POPOVER_LABEL => {
                     tray::on_blur(app);
                 }

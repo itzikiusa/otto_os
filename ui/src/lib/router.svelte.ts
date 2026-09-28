@@ -53,14 +53,14 @@ function restoreLastRoute(): void {
   if (h !== '' && h !== '#/' && h !== '#') return; // explicit route wins
   const saved = lsGet(winKey(LS_LAST_ROUTE));
   // Never restore into a share route (`#/s/…` is one-time-view by design).
-  if (saved && saved.startsWith('#/') && !saved.startsWith('#/s/') && !saved.startsWith('#/room/')) {
+  if (saved && saved.startsWith('#/') && !saved.startsWith('#/s/') && !saved.startsWith('#/room/') && !saved.startsWith('#/room-host/')) {
     history.replaceState(null, '', saved);
   }
 }
 
 function persistLastRoute(hash: string): void {
   if (!IS_TAURI) return;
-  if (hash.startsWith('#/s/') || hash.startsWith('#/room/')) return; // share tokens/views are never sticky
+  if (hash.startsWith('#/s/') || hash.startsWith('#/room/') || hash.startsWith('#/room-host/')) return; // ephemeral room/share views are never sticky
   lsSet(winKey(LS_LAST_ROUTE), hash);
 }
 
