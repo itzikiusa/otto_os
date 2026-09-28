@@ -1,6 +1,7 @@
 <script lang="ts">
   import PathField from '../../lib/components/PathField.svelte';
-  // One pane: session header (status, provider, restart/kill) + terminal.
+  // One pane: a compact, width-adaptive session header (status + title first;
+  // everything secondary in the details chip or the ⋯ menu) + terminal or chat.
   import Terminal from '../../lib/components/Terminal.svelte';
   import { PRIMARY_SCROLLBACK } from '../../lib/components/termFlow';
   import StatusDot from '../../lib/components/StatusDot.svelte';
@@ -20,6 +21,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { activity } from '../../lib/stores/activity.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { copyText } from '../../lib/clipboard';
   import StartRoomModal from '../rooms/StartRoomModal.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { popoutItems } from '../../lib/popoutMenu';
@@ -27,11 +29,20 @@
   import { idleSuspend } from '../../lib/stores/idleSuspend.svelte';
   import { suspendHint } from '../../lib/idleSuspend';
   import { ui } from '../../lib/stores/ui.svelte';
-  import { startMouseDrag } from '../../lib/dragCursor';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { router } from '../../lib/router.svelte';
   import { untrack } from 'svelte';
-  import { transcript, type SessionViewMode } from '../../lib/stores/transcript.svelte';
+  import { transcript } from '../../lib/stores/transcript.svelte';
+  import {
+    cwdLabel,
+    otherSessionView,
+    paneDetails,
+    paneDetailsTitle,
+    paneTier,
+    tierAtMost,
+    type PaneTier,
+    type SessionViewMode,
+  } from '../../lib/paneHeader';
   import { presetItems } from './SplitNode.svelte';
   import ConversationView from './conversation/ConversationView.svelte';
   import type { AttachedIssue, SessionStatus } from '../../lib/api/types';
@@ -119,46 +130,16 @@
     ((session?.meta?.name_full as string | undefined) ?? '').trim(),
   );
 
-  // Live pane-header width + element, so the header can shed controls as the
-  // PANE shrinks (a tiled grid packs 15 of these side by side). ONE source of
-  // truth: `tier` drives both the markup below and the `.t1`–`.t7` style rules
-  // at the bottom of this stylesheet — the CSS used to key off `@container`,
-  // which silently never matched the rules targeting `.pane-head` itself (a
-  // container cannot query itself) and could not see the measured fold below.
+  // Pane-header width tier (lib/paneHeader.ts). The header's CONTENT adapts to
+  // the pane with CSS container queries on `.pane` (see the style block); this
+  // script-side twin of the same breakpoints only decides which of the controls
+  // the CSS hid come back as rows in the ⋯ menu, so nothing is unreachable.
   let headW = $state(0);
-  let headEl: HTMLElement | null = $state(null);
-  /** Fold tier by WIDTH, 0 (roomy) → 7 (status dot + ⋯ only). A starting point
-   *  only: the inline set that fits depends on the session (task chip, handover
-   *  crumb, themed name…), so `tier` below adds whatever the MEASURED header
-   *  still needs. Everything a tier drops is reachable as a MenuItem, never
-   *  clipped (C1). */
-  const widthTier = $derived(
-    headW <= 0
-      ? 0
-      : headW <= 140
-        ? 7
-        : headW <= 200
-          ? 6
-          : headW <= 270
-            ? 5
-            : headW <= 400
-              ? 4
-              : headW <= 520
-                ? 3
-                : headW <= 560
-                  ? 2
-                  : headW <= 620
-                    ? 1
-                    : 0,
-  );
-  /** Extra tiers the measured header asked for — a RATCHET: it only ever grows
-   *  for a given width+content, so the fold converges in at most 7 passes and
-   *  can never oscillate. Reset whenever either changes (see the $effect). */
-  let foldBump = $state(0);
-  /** Effective tier: what the markup and the `.t*` classes below both use. */
-  const tier = $derived(Math.min(7, widthTier + foldBump));
-  // Tier 4 is where `.term-ctl` goes; its actions move into the ⋯ menu.
-  const termCtlFolded = $derived(tier >= 4 && !viewport.isPhone && ui.termToolbar);
+  const tier = $derived<PaneTier>(paneTier(headW));
+  /** Zoom, ✕ and the details chip are hidden inline (CSS `minimal`). */
+  const foldedMinimal = $derived(tierAtMost(tier, 'minimal'));
+  /** The view switch is hidden inline too (CSS `micro`). */
+  const foldedMicro = $derived(tier === 'micro');
   /** The drag grip is a mouse affordance — phones keep keyboard/palette moves. */
   const gripOn = $derived(showGrip && dragKey != null && !viewport.isPhone);
 
@@ -235,11 +216,10 @@
   );
   const uiToggleShown = $derived(uiCanGrant || (uiGranted && !readOnly));
   const uiPrompt = $derived(uiCanGrant ? uiControl.promptFor(sessionId) : null);
-  /** The UI-control toggle rides in the header while there's room — and longer
-   *  while it's ON or the agent is asking (a live permission stays visible). */
-  const uiToggleInline = $derived(
-    uiToggleShown && (uiGranted || uiAskedAgain ? tier < 6 : tier < 4),
-  );
+  /** The UI-control switch lives in ⋯; the header only carries it while it is
+   *  ON or the agent asked again — a live permission stays visible (hidden by
+   *  the `minimal` tier, where the ⋯ row still shows it checked). */
+  const uiToggleInline = $derived(uiToggleShown && (uiGranted || uiAskedAgain));
   const agentWho = $derived(providerName(session?.provider ?? ''));
   const uiToggleTitle = $derived(
     uiGranted
@@ -258,118 +238,42 @@
       : '',
   );
 
-  // --- Terminal · Chat · Split (docs/design/conversation-view.md §5.1) --------
+  // --- Terminal · Chat (docs/design/conversation-view.md §5.1) ---------------
   // The chat is rebuilt from the provider transcript; probing it once per agent
   // session (cheap 200, `unavailable_reason` when nothing resolves) makes the
-  // Chat tab instant when picked. The default view is Terminal for every
+  // Chat view instant when picked. The default view is Terminal for every
   // session — the chat is opt-in per session, and the user's choice is
-  // persisted (`otto_session_view:<id>`, winKey).
+  // persisted (`otto_session_view:<id>`, winKey; a retired `split` reads as
+  // chat — lib/paneHeader.ts `parseSessionView`).
   const defaultView: SessionViewMode = 'terminal';
   const savedView = $derived(isAgent ? transcript.view(sessionId) : null);
   const view = $derived<SessionViewMode>(isAgent ? (savedView ?? defaultView) : 'terminal');
-  // Below 1200px the window can't hold chat + terminal (+ the right panel):
-  // Split degrades to Chat, with Terminal one tab away in the segmented control.
-  let wide = $state(typeof window === 'undefined' ? true : window.matchMedia('(min-width: 1200px)').matches);
-  $effect(() => {
-    const mq = window.matchMedia('(min-width: 1200px)');
-    const sync = () => (wide = mq.matches);
-    sync();
-    mq.addEventListener('change', sync);
-    return () => mq.removeEventListener('change', sync);
-  });
-  const effView = $derived<SessionViewMode>(view === 'split' && !wide ? 'chat' : view);
 
-  /** Everything that changes the header's intrinsic width. A change resets the
-   *  ratchet so a pane that got roomier (or a chip that went away) folds back. */
-  const fitSig = $derived(
-    [
-      headW,
-      session?.title ?? '',
-      nameFull,
-      session?.cwd ?? '',
-      session?.provider ?? '',
-      effView,
-      wide,
-      ui.termToolbar,
-      viewport.isPhone,
-      summary?.total ?? 0,
-      summary?.in_progress ?? '',
-      needsYou,
-      idleHint?.label ?? '',
-      handoverFromId ?? '',
-      handoverPending,
-      showZoom,
-      showClose,
-      gripOn,
-      readOnly,
-      renaming,
-      uiGranted,
-      uiAskedAgain,
-    ].join('|'),
-  );
-  let lastFitSig = '';
-  // C1: no control may EVER be clipped. `.pane-head` is `overflow: clip`, so an
-  // overflowing header silently pushes ✕/⋯ past its edge (they stay clickable
-  // in the pane NEXT to it — the bug this guard exists for). Measure after every
-  // render and fold one more tier until the inline set genuinely fits.
-  $effect(() => {
-    const el = headEl;
-    const sig = fitSig;
-    const t = tier; // track: re-measure once the fold we just asked for is applied
-    if (!el || headW <= 0) return;
-    if (sig !== lastFitSig) {
-      lastFitSig = sig;
-      // Re-runs with the reset tier; the measure below happens on that pass.
-      if (untrack(() => foldBump) !== 0) {
-        foldBump = 0;
-        return;
-      }
-    }
-    if (t < 7 && el.scrollWidth - el.clientWidth > 1) foldBump += 1;
-  });
   function setView(mode: SessionViewMode): void {
     transcript.setView(sessionId, mode);
   }
-  /** ⌘⇧C cycles Terminal → Chat → Split (Split skipped when the window is narrow). */
-  function cycleView(): void {
-    const order: SessionViewMode[] = wide ? ['terminal', 'chat', 'split'] : ['terminal', 'chat'];
-    const i = order.indexOf(effView);
-    setView(order[(i + 1) % order.length]);
+  /** ⌘⇧C and the narrow-pane flip button: Terminal ⇄ Chat. */
+  function toggleView(): void {
+    setView(otherSessionView(view));
   }
   const VIEW_META: [SessionViewMode, string, IconName][] = [
     ['terminal', 'Terminal', 'terminal'],
     ['chat', 'Chat', 'comment'],
-    ['split', 'Split', 'split'],
   ];
-  /** The three view choices as menu rows. `prefixed` is the tier-6 form that
-   *  lives INSIDE the ⋯ menu ("View: Chat"); the bare form is the tier-5 icon
-   *  button's own menu. Split is offered on the same rule as the inline tab. */
-  function viewRows(prefixed: boolean): MenuItem[] {
-    return VIEW_META.filter(([m]) => m !== 'split' || wide).map(([m, label, icon]) => ({
-      label: prefixed ? `View: ${label}` : label,
-      checked: effView === m,
-      icon,
-      action: () => setView(m),
-    }));
-  }
-  /** ←/→ (Home/End) move between the Terminal · Chat · Split tabs, like any
-   *  tablist; focus follows the selection (roving tabindex). */
+  const viewLabel = (m: SessionViewMode): string => (m === 'chat' ? 'Chat' : 'Terminal');
+  /** ←/→ (Home/End) move between the Terminal · Chat tabs, like any tablist;
+   *  focus follows the selection (roving tabindex). */
   function onViewTabKey(e: KeyboardEvent): void {
-    const modes = VIEW_META.map(([m]) => m).filter((m) => m !== 'split' || wide);
-    const i = modes.indexOf(effView);
-    let next = i;
-    if (e.key === 'ArrowRight') next = (i + 1) % modes.length;
-    else if (e.key === 'ArrowLeft') next = (i - 1 + modes.length) % modes.length;
-    else if (e.key === 'Home') next = 0;
-    else if (e.key === 'End') next = modes.length - 1;
-    else return;
+    let next: SessionViewMode | null = null;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') next = otherSessionView(view);
+    else if (e.key === 'Home') next = 'terminal';
+    else if (e.key === 'End') next = 'chat';
+    if (!next) return;
     e.preventDefault();
-    setView(modes[next]);
+    setView(next);
     const list = e.currentTarget as HTMLElement;
-    queueMicrotask(() => list.querySelector<HTMLElement>(`[data-view="${modes[next]}"]`)?.focus());
-  }
-  function openViewMenu(e: MouseEvent | KeyboardEvent): void {
-    ctxMenu.show(e, viewRows(false));
+    const target = next;
+    queueMicrotask(() => list.querySelector<HTMLElement>(`[data-view="${target}"]`)?.focus());
   }
   $effect(() => {
     if (!isAgent) return;
@@ -379,52 +283,11 @@
       // Only the active pane reacts (tiled/split views mount several).
       if (ws.activeSessionId !== sessionId) return;
       e.preventDefault();
-      cycleView();
+      toggleView();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   });
-  // Split: chat left / terminal right, the divider drag copied from the right
-  // panel's resizer (shell/RightPanel.svelte) but as a fraction of this pane.
-  let bodyEl = $state<HTMLDivElement | null>(null);
-  let chatFrac = $state(untrack(() => transcript.splitFrac(sessionId)));
-  let splitResizing = $state(false);
-  /** Keyboard / reset path for the chat|terminal separator: a step of ±5%
-   *  (RTL-aware), or `null` to reset to an even split. */
-  function nudgeSplit(delta: number | null): void {
-    chatFrac = delta === null ? 0.5 : Math.min(0.8, Math.max(0.3, chatFrac + delta));
-    transcript.setSplitFrac(sessionId, chatFrac);
-  }
-  function onSplitKey(e: KeyboardEvent): void {
-    const rtl = getComputedStyle(e.currentTarget as Element).direction === 'rtl';
-    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-      e.preventDefault();
-      const grow = (e.key === 'ArrowRight') !== rtl;
-      nudgeSplit(grow ? 0.05 : -0.05);
-    } else if (e.key === 'Home' || e.key === 'End') {
-      e.preventDefault();
-      nudgeSplit(e.key === 'Home' ? -1 : 1);
-    }
-  }
-  function startSplit(e: MouseEvent): void {
-    e.preventDefault();
-    const el = bodyEl;
-    if (!el) return;
-    splitResizing = true;
-    const rect = el.getBoundingClientRect();
-    const rtl = getComputedStyle(el).direction === 'rtl';
-    // Overlay cursor + one write per frame (lib/dragCursor.ts).
-    startMouseDrag(e, {
-      onMove: (ev) => {
-        const x = rtl ? rect.right - ev.clientX : ev.clientX - rect.left;
-        chatFrac = Math.min(0.8, Math.max(0.3, x / rect.width));
-      },
-      onEnd: () => {
-        splitResizing = false;
-        transcript.setSplitFrac(sessionId, chatFrac);
-      },
-    });
-  }
   let dirsOpen = $state(false);
   let dirsBusy = $state(false);
   let extraDirs = $state<string[]>([]);
@@ -579,21 +442,93 @@
     }
   }
 
+  /** What the header no longer shows inline — the details chip's tooltip and
+   *  menu, and the ⋯ info rows once the chip itself is folded away. */
+  const detailRows = $derived(
+    paneDetails({
+      provider: session?.provider,
+      nameFull: nameFull && nameFull !== session?.title ? nameFull : null,
+      account: typeof session?.meta?.account_label === 'string' ? session.meta.account_label : null,
+      state: paneState.key === 'needs-you' || paneState.key === 'suspended' || paneState.key === 'stale' ? paneState.label : null,
+      idle: idleHint?.label,
+      tasks: summary && summary.total > 0 ? { done: summary.done, total: summary.total } : null,
+      now: summary?.in_progress,
+      handoverFrom: handoverFromId ? (handoverFrom?.title ?? 'another session') : null,
+      handoverPending,
+      cwd: session?.cwd,
+    }),
+  );
+  const detailTitle = $derived(paneDetailsTitle(detailRows));
+
+  /** The details as menu rows: disabled label rows, plus the two things you
+   *  can DO with them (copy the folder, jump to the handover source). */
+  function detailItems(): MenuItem[] {
+    const rows: MenuItem[] = detailRows.map(([k, v]) => ({ label: `${k}: ${v}`, disabled: true, title: v }) as MenuItem);
+    if (session?.cwd) {
+      const cwd = session.cwd;
+      rows.push({
+        label: 'Copy folder path',
+        icon: 'copy',
+        action: () => {
+          void copyText(cwd).then((ok) =>
+            ok ? toasts.info('Folder path copied') : toasts.error('Copy failed', 'The clipboard is not available here.'),
+          );
+        },
+      });
+    }
+    if (handoverFromId) {
+      rows.push({
+        label: `Open handover source: ${handoverFrom?.title ?? 'source'}`,
+        icon: 'link',
+        action: () => ws.navigateToSession(handoverFromId),
+      });
+    }
+    return rows;
+  }
+  function openDetails(e: MouseEvent | KeyboardEvent): void {
+    ctxMenu.show(e, detailItems());
+  }
+
+  /** Terminal font + copy-on-select — they used to be header buttons; the
+   *  shortcuts (⌘− ⌘+ ⌘0 in the terminal) are unchanged. */
+  function terminalItems(): MenuItem[] {
+    if (viewport.isPhone || view !== 'terminal') return [];
+    const size = fontShrunk ? `${ui.termFontSize}px, drawn at ${drawnFont}px` : `${ui.termFontSize}px`;
+    return [
+      { label: 'Terminal font larger', icon: 'plus', hint: '⌘+', disabled: ui.termFontSize >= 28, action: () => ui.termZoomIn() },
+      { label: 'Terminal font smaller', icon: 'minus', hint: '⌘−', disabled: ui.termFontSize <= 8, action: () => ui.termZoomOut() },
+      {
+        label: `Reset terminal font (${size})`,
+        icon: 'text',
+        hint: '⌘0',
+        title: fontShrunk ? 'Drawn smaller so this narrow pane keeps 80 columns' : undefined,
+        action: () => ui.termZoomReset(),
+      },
+      { label: 'Copy on select', checked: ui.termCopyOnSelect, action: () => ui.setTermCopyOnSelect(!ui.termCopyOnSelect) },
+    ];
+  }
+
   /** Single source of truth for the session actions menu — served both by the
    *  header ⋯ button and the title's right-click, through the global clamped
    *  ctxMenu (viewport clamp + max-height come for free).
    *
-   *  It is also the C1 overflow menu: every control a fold TIER removes from the
-   *  header comes back here as a row, so nothing is ever unreachable — a pane
-   *  140 px wide is a status dot and this menu. */
+   *  It is also the overflow menu: the pane controls (font, copy-on-select,
+   *  restart) always live here, and every control a narrow tier hides from the
+   *  header (the view switch, zoom, ✕, the details chip) comes back as a row,
+   *  so nothing is ever unreachable — a 100 px pane is a dot, a title and ⋯. */
   function sessionMenuItems(): MenuItem[] {
-    // Rows the header shed at the current tier (info rows are disabled labels).
-    const folded: MenuItem[] = [
-      ...(tier >= 6 && isAgent ? viewRows(true) : []),
-      ...(tier >= 5 && !readOnly && isAgent
-        ? [{ label: 'Restart session', icon: 'refresh', action: () => void restart() } as MenuItem]
+    // Pane controls first: the rows that used to be header buttons.
+    const controls: MenuItem[] = [
+      ...(foldedMicro && isAgent
+        ? VIEW_META.map(([m, label, icon]) => ({
+            label: `${label} view`,
+            icon,
+            checked: view === m,
+            hint: view === m ? undefined : '⌘⇧C',
+            action: () => setView(m),
+          }) as MenuItem)
         : []),
-      ...(tier >= 5 && showZoom
+      ...(foldedMinimal && showZoom
         ? [
             {
               label: maximized ? 'Restore tiled view' : 'Zoom in on this session',
@@ -602,37 +537,14 @@
             } as MenuItem,
           ]
         : []),
-      ...(tier >= 5 && summary && summary.total > 0
-        ? [{ label: `Tasks ${summary.done}/${summary.total}`, disabled: true } as MenuItem]
-        : []),
-      ...(tier >= 4 && summary?.in_progress
-        ? [{ label: `Now: ${summary.in_progress}`, disabled: true } as MenuItem]
-        : []),
-      ...(tier >= 4 && idleHint ? [{ label: idleHint.label, disabled: true } as MenuItem] : []),
-      ...(tier >= 4 && handoverFromId
+      ...terminalItems(),
+      ...(!readOnly && isAgent
         ? [
             {
-              label: `Open handover source: ${handoverFrom?.title ?? 'source'}`,
-              icon: 'link',
-              action: () => ws.navigateToSession(handoverFromId),
-            } as MenuItem,
-          ]
-        : []),
-      ...(tier >= 4 && handoverPending
-        ? [{ label: 'Preparing handover…', disabled: true } as MenuItem]
-        : []),
-      ...(tier >= 4 && session?.cwd ? [{ label: `cwd: ${session.cwd}`, disabled: true } as MenuItem] : []),
-      // In a narrow pane the inline terminal font/copy toolbar is hidden (the
-      // `.t4 .term-ctl` rule); surface its actions here so nothing is lost when
-      // tiling many sessions.
-      ...(termCtlFolded
-        ? [
-            { label: `Terminal font smaller (${ui.termFontSize}px)`, disabled: ui.termFontSize <= 8, action: () => ui.termZoomOut() } as MenuItem,
-            { label: 'Terminal font larger', icon: 'plus', disabled: ui.termFontSize >= 28, action: () => ui.termZoomIn() } as MenuItem,
-            {
-              label: ui.termCopyOnSelect ? 'Copy-on-select: on' : 'Copy-on-select: off',
-              icon: 'copy',
-              action: () => ui.setTermCopyOnSelect(!ui.termCopyOnSelect),
+              label: 'Restart session',
+              icon: 'refresh',
+              title: status === 'working' ? 'Asks first — the agent is working' : undefined,
+              action: () => void restart(),
             } as MenuItem,
           ]
         : []),
@@ -641,14 +553,12 @@
     // split to re-arrange. The same list the DB pane's ✕ shows, shared so the
     // two can't drift apart.
     const presets: MenuItem[] = showClose ? presetItems() : [];
+    const details: MenuItem[] = foldedMinimal ? detailItems() : [];
     return [
-      // Tier 7 dropped the title from the header — the menu carries it.
-      ...(tier >= 7
-        ? [{ label: session?.title ?? sessionId, disabled: true } as MenuItem, { separator: true } as MenuItem]
-        : []),
+      ...controls,
+      ...(controls.length > 0 ? [{ separator: true } as MenuItem] : []),
       ...popoutItems(`agents/${sessionId}`, session?.title),
-      // Editing rows are hidden from viewers (the ⋯ button itself only appears
-      // for a viewer once a tier has folded something into it).
+      // Editing rows are hidden from viewers.
       ...(readOnly
         ? []
         : [
@@ -693,16 +603,9 @@
                   } as MenuItem,
                 ]
               : []),
-            // In-progress agent only: respawn a stuck PTY (provider resume when
-            // possible). Idle/exited/reconnectable sessions have their own paths.
-            // Same verb as the header ↻ button; skipped once tier 5 folded that
-            // button into this menu (it is already a row below — no duplicate).
-            ...(isAgent && tier < 5 && (status === 'running' || status === 'working')
-              ? [{ label: 'Restart session', icon: 'refresh', action: () => void restart() } as MenuItem]
-              : []),
           ]),
-      ...(folded.length > 0 ? [{ separator: true } as MenuItem, ...folded] : []),
-      ...(showClose && tier >= 7
+      ...(details.length > 0 ? [{ separator: true } as MenuItem, ...details] : []),
+      ...(showClose && foldedMinimal
         ? [
             { separator: true } as MenuItem,
             // Same words as the header ✕ it replaces: in a split that closes the
@@ -729,52 +632,23 @@
 <section
   class="pane"
   class:focused
+  class:current={kbFocused}
   onmousedown={() => {
     // Interacting with the pane attends to it — drop the "needs you" flag.
     ws.clearNeedsYou(sessionId);
     onfocus();
   }}
 >
-  <!-- `t1`–`t7` are CUMULATIVE fold classes (tier ≥ n), the style counterpart of
-       the `tier` the script folds the ⋯ menu by — one source of truth. -->
-  <header
-    class="pane-head"
-    class:t1={tier >= 1}
-    class:t2={tier >= 2}
-    class:t3={tier >= 3}
-    class:t4={tier >= 4}
-    class:t5={tier >= 5}
-    class:t6={tier >= 6}
-    class:t7={tier >= 7}
-    bind:this={headEl}
-    bind:clientWidth={headW}
-  >
-    <StatusDot state={paneState} />
-    {#if renaming}
-      <!-- svelte-ignore a11y_autofocus -->
-      <input
-        class="rename-input"
-        bind:value={draftTitle}
-        autofocus
-        onblur={commitRename}
-        onkeydown={(e) => {
-          if (e.key === 'Enter') commitRename();
-          else if (e.key === 'Escape') renaming = false;
-        }}
-        onmousedown={(e) => e.stopPropagation()}
-      />
-    {:else if tier < 7}
-      <span
-        class="pane-title"
-        role="button"
-        tabindex="0"
-        title="{session?.title ?? sessionId} — double-click to rename, right-click for options"
-        ondblclick={startRename}
-        oncontextmenu={(e) => openPaneMenu(e)}
-      >{session?.title ?? sessionId}</span>
-    {/if}
+  <!-- ONE row, adapted to the PANE width by the `@container pane` rules below
+       (full ≥720 · compact 420–719 · minimal 200–419 · micro <200). Priority:
+       status + title always; then the view switch and ⋯; everything secondary
+       sits in the details chip or the ⋯ menu. `data-tier` mirrors the script's
+       twin of the breakpoints (which rows ⋯ adds back) for tests. -->
+  <header class="pane-head" class:grip-on={gripOn} data-tier={tier} bind:clientWidth={headW}>
     {#if gripOn}
-      <!-- C3a: drag this pane onto another to swap (centre) or move (edge). -->
+      <!-- C3a: drag this pane onto another to swap (centre) or move (edge). It
+           sits in the header's leading padding and only shows on hover/focus;
+           the title is a drag handle too. -->
       <button
         class="icon-btn pane-grip"
         draggable="true"
@@ -790,24 +664,47 @@
         <Icon name="grip" size={12} />
       </button>
     {/if}
-    {#if nameFull && nameFull !== session?.title}
-      <span class="pane-fullname" title="Themed name — address this session by “{session?.meta?.name_handle ?? session?.title}”">({nameFull})</span>
-    {/if}
-    <!-- `has-icon` lets the container query collapse the chip to icon-only in a
-         narrow pane; icon-less providers keep their text label (nothing else to
-         show). -->
-    <span class="chip provider-chip" class:has-icon={hasProviderIcon(session?.provider)} title={session?.provider}>
-      {#if hasProviderIcon(session?.provider)}
-        <ProviderIcon provider={session?.provider ?? ''} size={13} />
-      {/if}
-      <span class="provider-name">{session?.provider ?? '?'}</span>
-    </span>
-    {#if typeof session?.meta?.account_label === 'string'}
-      <span class="chip" title="Subscription account pinned to this session">{session.meta.account_label}</span>
+    <StatusDot state={paneState} />
+    {#if renaming}
+      <!-- svelte-ignore a11y_autofocus -->
+      <input
+        class="rename-input"
+        aria-label="Session name"
+        bind:value={draftTitle}
+        autofocus
+        onblur={commitRename}
+        onkeydown={(e) => {
+          if (e.key === 'Enter') commitRename();
+          else if (e.key === 'Escape') renaming = false;
+        }}
+        onmousedown={(e) => e.stopPropagation()}
+      />
+    {:else}
+      <span
+        class="pane-title"
+        class:draggable={gripOn}
+        role="button"
+        tabindex="0"
+        draggable={gripOn ? 'true' : undefined}
+        title="{session?.title ?? sessionId}{nameFull && nameFull !== session?.title ? ` (${nameFull})` : ''} — double-click to rename, right-click for options"
+        ondragstart={gripOn ? onGripDragStart : undefined}
+        ondragend={gripOn ? onGripDragEnd : undefined}
+        ondblclick={startRename}
+        oncontextmenu={(e) => openPaneMenu(e)}
+        onkeydown={(e) => {
+          if (e.key === 'F2' || e.key === 'Enter') {
+            e.preventDefault();
+            startRename();
+          } else if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
+            e.preventDefault();
+            openPaneMenu(e);
+          }
+        }}
+      >{session?.title ?? sessionId}</span>
     {/if}
     {#if paneState.key === 'needs-you'}
       <span class="needs-you-badge" title="This session is waiting on you (input or a permission)">
-        <Icon name="bell" size={11} /> Needs you
+        <Icon name="bell" size={11} /><span class="head-lbl">Needs you</span>
       </span>
     {:else if paneState.key === 'suspended' || paneState.key === 'stale'}
       <span class="state-note" title={paneState.hint}>{paneState.label}</span>
@@ -821,9 +718,7 @@
       >{summary.done}/{summary.total}</span>
     {/if}
     {#if summary?.in_progress}
-      <span class="now-task" title="Current task: {summary.in_progress}">
-        Now: {summary.in_progress}
-      </span>
+      <span class="now-task" title="Current task: {summary.in_progress}">Now: {summary.in_progress}</span>
     {/if}
     {#if handoverFromId}
       <button
@@ -831,74 +726,59 @@
         title="Handed over from “{handoverFrom?.title ?? 'another session'}” — open it"
         onmousedown={(e) => e.stopPropagation()}
         onclick={() => ws.navigateToSession(handoverFromId)}
-       aria-label="Open handover source: {handoverFrom?.title ?? 'source'}"><Icon name="undo" size={11} /><span class="crumb-text">{handoverFrom?.title ?? 'source'}</span></button>
+        aria-label="Open handover source: {handoverFrom?.title ?? 'source'}"
+      ><Icon name="undo" size={11} /><span class="crumb-text head-lbl">{handoverFrom?.title ?? 'source'}</span></button>
     {/if}
     {#if handoverPending}
-      <span class="handover-pending" title="Preparing the handover brief…"><Icon name="clock" size={11} /> Preparing handover…</span>
+      <span class="handover-pending" title="Preparing the handover brief…"><Icon name="clock" size={11} /><span class="head-lbl">Preparing handover…</span></span>
     {/if}
-    {#if idleHint}
-      <span class="idle-hint" title={idleHint.title}>{idleHint.label}</span>
-    {/if}
-    {#if session?.cwd}<span class="pane-cwd mono" title={session.cwd}>{session.cwd}</span>{/if}
+    <!-- The details chip: provider (+ idle countdown + folder when wide) —
+         the tooltip and its menu carry everything else (themed name, account,
+         state, tasks, full cwd). Icon-less providers keep their text label. -->
+    <button
+      class="meta-chip"
+      class:has-icon={hasProviderIcon(session?.provider)}
+      data-testid="pane-details"
+      title={detailTitle}
+      aria-label="Session details: {detailRows.map(([k, v]) => `${k} ${v}`).join(', ')}"
+      aria-haspopup="menu"
+      onmousedown={(e) => e.stopPropagation()}
+      onclick={openDetails}
+    >
+      {#if hasProviderIcon(session?.provider)}
+        <ProviderIcon provider={session?.provider ?? ''} size={13} />
+      {/if}
+      <span class="meta-text">
+        <span class="provider-name">{session?.provider ?? '?'}</span>
+        {#if idleHint}<span class="meta-extra meta-idle">{idleHint.label}</span>{/if}
+        {#if session?.cwd}<span class="meta-extra meta-cwd mono">{cwdLabel(session.cwd)}</span>{/if}
+      </span>
+    </button>
     <span class="grow"></span>
-    {#if isAgent && tier < 5}
+    {#if isAgent}
       <div class="segmented view-seg" role="tablist" tabindex="-1" aria-label="Session view" onmousedown={(e) => e.stopPropagation()} onkeydown={onViewTabKey}>
-        <button role="tab" class:active={effView === 'terminal'} aria-selected={effView === 'terminal'} tabindex={effView === 'terminal' ? 0 : -1} data-view="terminal" onclick={() => setView('terminal')} title="Terminal (⌘⇧C cycles)">Terminal</button>
-        <button role="tab" class:active={effView === 'chat'} aria-selected={effView === 'chat'} tabindex={effView === 'chat' ? 0 : -1} data-view="chat" onclick={() => setView('chat')} title="Chat — the conversation rebuilt from the transcript">Chat</button>
-        {#if wide}
-          <button role="tab" class:active={effView === 'split'} aria-selected={effView === 'split'} tabindex={effView === 'split' ? 0 : -1} data-view="split" onclick={() => setView('split')} title="Chat beside the terminal">Split</button>
-        {/if}
+        {#each VIEW_META as [m, label, icon] (m)}
+          <button
+            role="tab"
+            class:active={view === m}
+            aria-selected={view === m}
+            aria-label={label}
+            tabindex={view === m ? 0 : -1}
+            data-view={m}
+            onclick={() => setView(m)}
+            title={m === 'chat' ? 'Chat — the conversation rebuilt from the transcript (⌘⇧C)' : 'Terminal (⌘⇧C)'}
+          ><Icon name={icon} size={12} /><span class="head-lbl">{label}</span></button>
+        {/each}
       </div>
-    {:else if isAgent && tier < 6}
-      <!-- Tier 5: the three tabs collapse into one icon that opens the choice. -->
+      <!-- `minimal` tier stand-in: one button that flips to the other view. -->
       <button
-        class="icon-btn view-seg-mini"
-        data-view-mini
-        aria-label="Session view: {VIEW_META.find(([m]) => m === effView)?.[1] ?? 'Terminal'}"
-        title="Session view (⌘⇧C cycles)"
+        class="icon-btn view-flip"
+        data-view-toggle
+        aria-label="Switch to {viewLabel(otherSessionView(view))} view"
+        title="Switch to {viewLabel(otherSessionView(view))} view (⌘⇧C)"
         onmousedown={(e) => e.stopPropagation()}
-        onclick={openViewMenu}
-        onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && openViewMenu(e)}
-      >
-        <Icon name={VIEW_META.find(([m]) => m === effView)?.[2] ?? 'terminal'} size={13} />
-      </button>
-    {/if}
-    {#if !viewport.isPhone && ui.termToolbar && effView !== 'chat'}
-      <!-- Terminal font zoom + copy-on-select, surfaced in the header bar so the
-           controls never float over (and hide) terminal content. The embedded
-           <Terminal> gets showToolbar={false} to drop its overlay counterpart. -->
-      <div class="term-ctl" role="toolbar" tabindex="-1" aria-label="Terminal controls" onmousedown={(e) => e.stopPropagation()}>
-        <button class="icon-btn" onclick={() => ui.termZoomOut()} disabled={ui.termFontSize <= 8} title="Terminal font smaller (⌘− in the terminal)" aria-label="Zoom out"><Icon name="minus" size={13} /></button>
-        <button
-          class="icon-btn term-ctl-size"
-          onclick={() => ui.termZoomReset()}
-          aria-label="Reset terminal zoom"
-          class:shrunk={fontShrunk}
-          title={fontShrunk
-            ? `Terminal font size ${ui.termFontSize}px — drawn at ${drawnFont}px so this narrow pane keeps 80 columns`
-            : 'Reset terminal zoom (⌘0)'}
-        >{fontShrunk ? `${drawnFont}px` : `${ui.termFontSize}px`}</button>
-        <button class="icon-btn" onclick={() => ui.termZoomIn()} disabled={ui.termFontSize >= 28} title="Terminal font larger (⌘+ in the terminal)" aria-label="Zoom in"><Icon name="plus" size={13} /></button>
-        <button
-          class="icon-btn term-ctl-copy"
-          class:on={ui.termCopyOnSelect}
-          onclick={() => ui.setTermCopyOnSelect(!ui.termCopyOnSelect)}
-          title={ui.termCopyOnSelect ? 'Copy-on-select: on — click to disable' : 'Copy-on-select: off — click to enable'}
-          aria-pressed={ui.termCopyOnSelect}
-          aria-label="Copy on select"
-        ><Icon name="copy" size={13} /></button>
-      </div>
-    {/if}
-    {#if showZoom && tier < 5}
-      <button
-        class="icon-btn"
-        onmousedown={(e) => e.stopPropagation()}
-        onclick={() => ws.toggleMaximize(sessionId)}
-        title={maximized ? 'Restore tiled view' : 'Zoom in on this session'}
-        aria-label={maximized ? 'Restore tiled view' : 'Zoom in on this session'}
-      >
-        <Icon name={maximized ? 'minimize' : 'maximize'} size={13} />
-      </button>
+        onclick={toggleView}
+      ><Icon name={otherSessionView(view) === 'chat' ? 'comment' : 'terminal'} size={13} /></button>
     {/if}
     {#if uiToggleInline}
       <button
@@ -914,23 +794,31 @@
         data-testid="ui-control-toggle"
       ><Icon name="cursor" size={13} /></button>
     {/if}
-    {#if !readOnly && isAgent && tier < 5}
-      <button class="icon-btn" onclick={restart} title={status === 'working' ? 'Restart session (asks first — it is working)' : 'Restart session'} aria-label="Restart session"><Icon name="refresh" size={13} /></button>
-    {/if}
-    {#if !readOnly || tier >= 4}
-      <!-- The overflow menu. `title="More…"` is a pinned selector; the title
-           moves into `aria-label` once tier 7 drops it from the header. -->
+    {#if showZoom}
       <button
-        class="icon-btn"
+        class="icon-btn pane-zoom"
         onmousedown={(e) => e.stopPropagation()}
-        onclick={openPaneMenu}
-        onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && openPaneMenu(e)}
-        title="More…"
-        aria-label={tier >= 7 ? `More… — ${session?.title ?? sessionId}` : 'More…'}
-      ><Icon name="more" size={13} /></button>
+        onclick={() => ws.toggleMaximize(sessionId)}
+        title={maximized ? 'Restore tiled view' : 'Zoom in on this session'}
+        aria-label={maximized ? 'Restore tiled view' : 'Zoom in on this session'}
+      >
+        <Icon name={maximized ? 'minimize' : 'maximize'} size={13} />
+      </button>
     {/if}
-    {#if showClose && tier < 7}
-      <button class="icon-btn" onclick={onclosepane} title={closeTitle} aria-label={closeTitle}><Icon name="x" size={12} /></button>
+    <!-- The overflow menu — always present: it holds the pane controls (font,
+         copy-on-select, restart) and whatever a narrow tier hid. `title="More…"`
+         is a pinned selector. -->
+    <button
+      class="icon-btn pane-more"
+      onmousedown={(e) => e.stopPropagation()}
+      onclick={openPaneMenu}
+      onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && openPaneMenu(e)}
+      title="More…"
+      aria-label="More… — {session?.title ?? sessionId}"
+      aria-haspopup="menu"
+    ><Icon name="more" size={13} /></button>
+    {#if showClose}
+      <button class="icon-btn pane-close" onclick={onclosepane} title={closeTitle} aria-label={closeTitle}><Icon name="x" size={12} /></button>
     {/if}
   </header>
   <!-- The network strip only takes a row when the session HAS a profile (or
@@ -955,32 +843,12 @@
     </div>
   {/if}
   {#if session?.meta?.handover}<HandoverDeliveryPanel {session} readonly={readOnly} />{/if}
-  <div class="pane-body" class:split={effView === 'split'} class:resizing={splitResizing} bind:this={bodyEl} data-view={effView}>
-    {#if effView !== 'terminal'}
-      <div class="pane-chat" style={effView === 'split' ? `flex: 0 0 ${(chatFrac * 100).toFixed(2)}%` : ''}>
+  <div class="pane-body" data-view={view}>
+    {#if view === 'chat'}
+      <div class="pane-chat">
         <ConversationView {sessionId} workspaceId={session?.workspace_id ?? ws.currentId ?? ''} readonly={readOnly} />
       </div>
-    {/if}
-    {#if effView === 'split'}
-      <!-- A focusable separator: drag it, or ←/→ when focused (double-click resets). -->
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-      <div
-        class="pane-splitter"
-        class:active={splitResizing}
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize chat and terminal"
-        aria-valuemin={30}
-        aria-valuemax={80}
-        aria-valuenow={Math.round(chatFrac * 100)}
-        tabindex="0"
-        onmousedown={startSplit}
-        ondblclick={() => nudgeSplit(null)}
-        onkeydown={onSplitKey}
-        title="Drag to resize · double-click to reset"
-      ></div>
-    {/if}
-    {#if effView !== 'chat'}
+    {:else}
       <div class="pane-term">
         <Terminal bind:this={termRef} {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} restartNonce={ws.restartNonces[sessionId] ?? 0} onstatus={onTermStatus} onfontfit={(px) => (drawnFont = px)} showToolbar={false} autoFocus={kbFocused} preferDom={isAgent} claimOnAttach={!readOnly} keepAlive={true} {scrollback} {resumeOnOpen} />
       </div>
@@ -1109,49 +977,109 @@
     overflow: hidden;
     background: var(--term-bg);
     transition: border-color 140ms ease-out;
+    /* The header adapts to the PANE's inline size (the `@container pane` rules
+       at the end). The query container is the pane, not the header: a
+       container can't query itself. Inline-size containment means the pane has
+       no intrinsic width — hosts that shrink-wrap it must make it fill
+       (SwarmPage `.session-panel > .pane`). */
+    container: pane / inline-size;
   }
   .pane.focused {
     border-color: color-mix(in srgb, var(--accent) 55%, transparent);
   }
   .pane-head {
+    position: relative;
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
+    /* Constant at every tier — it is chrome; the tiers change WHAT is shown,
+       never the height. */
     height: 30px;
-    padding: 0 8px 0 10px;
+    padding-block: 0;
+    padding-inline: 10px 4px;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
-    /* Belt and braces only: the script MEASURES this header and folds another
-       tier until the inline set genuinely fits (sessions-mobile and the desktop
-       pane specs assert scrollWidth − clientWidth ≤ 2, which `clip` does NOT
-       hide). This just stops a one-frame flash before the tier applies. */
+    /* Belt and braces: the title is the only flexible item and it ellipsizes,
+       so the row always fits (e2e asserts scrollWidth − clientWidth ≤ 2). */
     overflow: clip;
   }
-  /* Provider label beside its brand icon — hidden (icon-only) in a narrow pane. */
-  .provider-name {
-    display: inline-block;
+  /* Room in the leading padding for the hover-only drag grip. */
+  .pane-head.grip-on {
+    padding-inline-start: 16px;
   }
-  .pane-fullname {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 160px;
-    flex-shrink: 1;
-  }
+  /* The title gets the space: it is the one item that grows, and the chips
+     beside it shrink (and fold away by tier) before it does. */
   .pane-title {
+    flex: 0 1 auto;
+    min-width: 0;
     font-size: var(--fs-s);
     font-weight: 600;
+    color: var(--text);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 180px;
+    border-radius: var(--radius-s);
+    padding-inline: 2px;
+    transition: color 140ms ease-out;
   }
-  .provider-chip {
-    height: 16px;
-    font-size: var(--fs-xs);
+  .pane-title[role='button'] {
+    cursor: default;
+  }
+  .pane-title.draggable {
+    cursor: grab;
+  }
+  .pane-title:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  /* The active pane reads at full contrast; the others step back (dim title,
+     quieter controls until hovered) — distinguishable without extra chrome. */
+  .pane:not(.current) .pane-title {
+    color: var(--text-dim);
+    font-weight: 500;
+  }
+  .pane:not(.current) .pane-head > :is(.view-seg, .view-flip, .ui-ctl, .pane-zoom, .pane-more, .pane-close, .meta-chip) {
+    opacity: 0.7;
+    transition: opacity 140ms ease-out;
+  }
+  .pane:not(.current) .pane-head:is(:hover, :focus-within) > :is(.view-seg, .view-flip, .ui-ctl, .pane-zoom, .pane-more, .pane-close, .meta-chip) {
+    opacity: 1;
+  }
+  /* C3a drag handle: in the leading padding, visible on hover/focus only. The
+     `grab` cursor is what reads as "pick this up". */
+  .pane-head > .pane-grip {
+    position: absolute;
+    inset-inline-start: 2px;
+    inset-block-start: 5px;
+    width: 12px;
+    height: 20px;
+    opacity: 0;
+    cursor: grab;
+    transition: opacity 120ms ease-out;
+  }
+  .pane-head:hover > .pane-grip,
+  .pane-head > .pane-grip:focus-visible {
+    opacity: 1;
+  }
+  .pane-head > .pane-grip:active {
+    cursor: grabbing;
+  }
+  .rename-input {
+    flex: 0 1 220px;
+    min-width: 60px;
+    font-size: var(--fs-s);
+    font-weight: 600;
+    background: var(--surface-2);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-s);
+    color: var(--text);
+    padding: 1px 6px;
+    outline: none;
+  }
+  .grow {
+    flex: 1 1 0;
+    min-width: 0;
   }
   /* "Needs you" — session blocked on operator input. Amber, attention-grabbing
      but tasteful; distinct from the (calmer) status dot for idle/working. */
@@ -1198,11 +1126,11 @@
     color: var(--success);
     background: var(--success-soft);
   }
-  /* "now: «task»" — what the agent is doing this moment. Truncates so it never
-     pushes the header controls off-screen in a narrow tile. */
+  /* "Now: «task»" — what the agent is doing this moment. Shrinks first (it
+     never takes space from the title) and only shows on a wide pane. */
   .now-task {
+    flex: 0 1000 auto;
     min-width: 0;
-    flex: 0 1 auto;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
@@ -1210,23 +1138,22 @@
     text-overflow: ellipsis;
   }
   .handover-crumb {
-    flex-shrink: 0;
+    flex: 0 100 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 22px;
     max-width: 130px;
+    height: 18px;
     overflow: hidden;
-    text-overflow: ellipsis;
     white-space: nowrap;
     border: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text-dim);
     font-size: var(--fs-xs);
-    padding: 1px 7px;
+    padding: 0 6px;
     border-radius: 99px;
     cursor: pointer;
-  }
-  .handover-crumb {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
   }
   .crumb-text {
     min-width: 0;
@@ -1242,32 +1169,86 @@
     align-items: center;
     gap: 4px;
     flex-shrink: 0;
+    height: 18px;
     font-size: var(--fs-xs);
     color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-    padding: 1px 7px;
+    padding: 0 7px;
     border-radius: 99px;
     white-space: nowrap;
   }
-  /* "X min idle / suspends in N" — faint countdown for idle agent panes. Sits
-     between the title area and the cwd; truncates rather than wrapping. */
-  .idle-hint {
-    flex-shrink: 1;
-    min-width: 0;
-    font-size: var(--fs-xs);
+  /* The details chip: provider icon (+ name · idle countdown · folder on a
+     wide pane). A quiet pill-shaped button — its tooltip and menu carry the
+     rest. It shrinks (text first) long before the title does. */
+  .meta-chip {
+    flex: 0 100 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 22px;
+    max-width: 320px;
+    height: 20px;
+    padding: 0 7px;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    background: var(--surface-2);
     color: var(--text-dim);
-    white-space: nowrap;
+    font: inherit;
+    font-size: var(--fs-xs);
+    cursor: pointer;
     overflow: hidden;
-    text-overflow: ellipsis;
-    opacity: 0.75;
+    transition: border-color 130ms ease-out, color 130ms ease-out;
   }
-  .pane-cwd {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    white-space: nowrap;
+  .meta-chip:hover,
+  .meta-chip:focus-visible {
+    color: var(--text);
+    border-color: var(--border-strong);
+  }
+  .meta-chip:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  .meta-chip > :global(svg),
+  .meta-chip > :global(img) {
+    flex-shrink: 0;
+  }
+  .meta-text {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 220px;
+    white-space: nowrap;
+  }
+  .meta-extra::before {
+    content: '·';
+    margin-inline: 5px;
+    opacity: 0.6;
+  }
+  .meta-idle {
+    opacity: 0.85;
+  }
+  /* Terminal · Chat: a two-state segmented toggle — icon + label when wide,
+     icon-only when compact, one flip button (`.view-flip`) when minimal. */
+  .view-seg {
+    flex-shrink: 0;
+    padding: 1px;
+  }
+  .view-seg > button {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 20px;
+    padding: 0 8px;
+    font-size: var(--fs-xs);
+  }
+  .view-seg > button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -1px;
+  }
+  .view-flip {
+    display: none;
+  }
+  .pane-head > :is(.view-flip, .ui-ctl, .pane-zoom, .pane-more, .pane-close) {
+    flex-shrink: 0;
   }
   .pane-body {
     flex: 1;
@@ -1286,91 +1267,6 @@
     min-height: 0;
     min-width: 0;
     background: var(--bg);
-  }
-  .pane-splitter {
-    flex: 0 0 5px;
-    cursor: col-resize;
-    background: var(--border);
-    transition: background 120ms ease-out;
-  }
-  .pane-splitter:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: -1px;
-  }
-  .pane-splitter:hover,
-  .pane-splitter:focus-visible,
-  .pane-splitter.active {
-    background: color-mix(in srgb, var(--accent) 60%, var(--border));
-  }
-  .pane-body.resizing {
-    user-select: none;
-  }
-  .view-seg {
-    padding: 1px;
-    flex-shrink: 0;
-  }
-  .view-seg > button {
-    height: 18px;
-    font-size: var(--fs-xs);
-    padding: 0 8px;
-  }
-  /* Tier-5 stand-in for the segmented control: one icon, menu on click. */
-  .view-seg-mini {
-    flex-shrink: 0;
-  }
-  /* C3a drag handle. `grab`/`grabbing` is the only affordance that reads as
-     "pick this up" — the pane itself stays clickable for focus. */
-  .pane-grip {
-    flex-shrink: 0;
-    cursor: grab;
-    color: var(--text-dim);
-  }
-  .pane-grip:active {
-    cursor: grabbing;
-  }
-  .pane-grip:hover {
-    color: var(--text);
-  }
-  .pane-title[role='button'] {
-    cursor: text;
-  }
-  .rename-input {
-    font-size: var(--fs-s);
-    font-weight: 600;
-    background: var(--surface-2);
-    border: 1px solid var(--accent);
-    border-radius: var(--radius-s);
-    color: var(--text);
-    padding: 1px 6px;
-    max-width: 200px;
-    outline: none;
-  }
-  /* Terminal zoom/copy controls, inline in the header bar. */
-  .term-ctl {
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-  }
-  /* Auto-shrunk to keep 80 columns: a dotted underline says "there's more
-     in the tooltip" without borrowing an alert tone. */
-  .term-ctl-size.shrunk {
-    color: var(--text);
-    text-decoration: underline dotted;
-    text-underline-offset: 2px;
-    cursor: pointer;
-  }
-  .term-ctl-size {
-    font-size: var(--fs-xs);
-    font-family: var(--font-mono);
-    color: var(--text-dim);
-    min-width: 30px;
-    text-align: center;
-  }
-  /* Copy-on-select is a toggle: pressed reads as a soft accent fill, like the
-     view-mode toggles in the tab bar. */
-  .term-ctl-copy.on {
-    color: var(--accent-text);
-    background: var(--accent-soft);
   }
   /* Additional directories editor (mirrors New Session). */
   .dir-list {
@@ -1426,89 +1322,71 @@
     min-width: 0;
   }
 
-  /* ── Responsive pane header ──────────────────────────────────────────────
-     Driven by the `t1`–`t7` classes the script puts on `.pane-head` (tier ≥ n),
-     NOT by `@container`: a container cannot query ITSELF, so the rules below
-     that size the header itself silently never applied, and a container query
-     can't see the measured fold the script adds when the inline set still
-     doesn't fit. Degradation order, widest→narrowest: cwd → provider text →
-     themed full-name → font/copy toolbar → segmented control (+ zoom/restart)
-     → grip → title + ✕. The status dot and ⋯ never drop; everything else comes
-     back as a ⋯ row (see the script's `paneMenuItems`). */
-
-  /* 1. The cwd path is the first to go — longest, least critical inline. */
-  .pane-head.t1 .pane-cwd {
-    display: none;
+  /* ── Adaptive pane header ────────────────────────────────────────────────
+     Container queries on the PANE (`container: pane`). Tiers, widest first —
+     keep in step with PANE_TIER_MIN in lib/paneHeader.ts, whose script twin
+     adds the hidden controls back into ⋯:
+       full    ≥720  everything: labelled toggle, provider name · idle · folder
+       compact 420–719  icon-only toggle, details chip = provider icon, no "Now:"
+       minimal 200–419  dot · title · view flip · ⋯   (zoom, ✕, chips → ⋯)
+       micro   <200     dot · title · ⋯              (view switch → ⋯ too)
+     The status dot, the title and ⋯ never go. */
+  @container pane (width < 720px) {
+    .pane-head .head-lbl,
+    .pane-head .now-task,
+    .pane-head .meta-text {
+      display: none;
+    }
+    /* Icon-less providers keep their text label (the chip would be empty). */
+    .pane-head .meta-chip:not(.has-icon) .meta-text {
+      display: inline;
+    }
+    .pane-head .meta-chip:not(.has-icon) .meta-extra {
+      display: none;
+    }
+    .pane-head .meta-chip.has-icon {
+      padding: 0 4px;
+    }
+    .pane-head .needs-you-badge,
+    .pane-head .handover-pending {
+      padding: 0 4px;
+    }
+    .pane-head .handover-crumb {
+      padding: 0 4px;
+    }
+    .pane-head .view-seg > button {
+      padding: 0 6px;
+    }
   }
-
-  /* 2. Provider chip collapses to its brand icon (text-labelled providers with
-        no icon keep their text — the chip would otherwise render empty). */
-  .pane-head.t2 .provider-chip.has-icon .provider-name {
-    display: none;
+  @container pane (width < 420px) {
+    .pane-head .view-seg,
+    .pane-head .meta-chip,
+    .pane-head .task-chip,
+    .pane-head .needs-you-badge,
+    .pane-head .state-note,
+    .pane-head .handover-crumb,
+    .pane-head .handover-pending,
+    .pane-head .ui-ctl,
+    .pane-head .pane-zoom,
+    .pane-head .pane-close {
+      display: none;
+    }
+    .pane-head .view-flip {
+      display: inline-flex;
+    }
+    .pane-head {
+      gap: 4px;
+    }
   }
-  .pane-head.t2 .provider-chip.has-icon {
-    padding: 0 4px;
-  }
-
-  /* 3. Drop the themed full-name in parens; the short handle title carries it. */
-  .pane-head.t3 .pane-fullname {
-    display: none;
-  }
-  /* Tidy the header up: shorter, slightly smaller, tighter gaps. */
-  .pane-head.t3 {
-    height: 26px;
-    gap: 6px;
-  }
-  .pane-head.t3 .pane-title {
-    font-size: var(--fs-xs);
-    max-width: 130px;
-  }
-
-  /* 4. Fold the inline terminal font/copy toolbar away, plus the task/handover/
-        idle chips — all of them come back as ⋯ rows (script, `tier >= 4`). */
-  .pane-head.t4 .term-ctl,
-  .pane-head.t4 .now-task,
-  .pane-head.t4 .idle-hint,
-  .pane-head.t4 .state-note,
-  .pane-head.t4 .handover-crumb,
-  .pane-head.t4 .handover-pending {
-    display: none;
-  }
-  .pane-head.t4 .view-seg > button {
-    padding: 0 5px;
-    font-size: var(--fs-xs);
-  }
-  .pane-head.t4 .pane-title {
-    max-width: 96px;
-  }
-
-  /* 5. The segmented control becomes one view icon (script swaps the markup);
-        zoom + restart and the task/needs-you chips move into ⋯. */
-  .pane-head.t5 .task-chip,
-  .pane-head.t5 .needs-you-badge {
-    display: none;
-  }
-  .pane-head.t5 .pane-title {
-    max-width: 80px;
-  }
-
-  /* 6. The grip goes — dragging is a mouse gesture and ⌘⌥arrows / the palette
-        still move the pane; the view icon folds into ⋯ (script). */
-  .pane-head.t6 .pane-grip {
-    display: none;
-  }
-  .pane-head.t6 .pane-title {
-    max-width: 60px;
-  }
-
-  /* 7. Required by the 15-pane cap (15 columns at 1280px ≈ 85px each): the
-        title and ✕ move into ⋯, which is then the whole header beside the dot.
-        The rename input stays — renaming must not need a wider pane. */
-  .pane-head.t7 .pane-title {
-    display: none;
-  }
-  .pane-head.t7 {
-    padding: 0 4px;
-    gap: 4px;
+  @container pane (width < 200px) {
+    .pane-head .view-flip {
+      display: none;
+    }
+    .pane-head {
+      padding-inline: 6px 2px;
+    }
+    .pane-head.grip-on {
+      padding-inline-start: 14px;
+    }
   }
 </style>

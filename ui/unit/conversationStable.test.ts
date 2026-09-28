@@ -8,6 +8,7 @@ import { createMdCache } from '../src/modules/agents/conversation/mdCache.ts';
 import { indexToRenderItem } from '../src/modules/assistant/chat.ts';
 import { loadSource } from './sourceHarness.ts';
 import { TranscriptLifecycle } from '../src/lib/stores/transcriptLifecycle.ts';
+import * as paneHeader from '../src/lib/paneHeader.ts';
 import type { AssistantTurn, Turn } from '../src/lib/api/types.ts';
 
 const user = (id: string, md = `ask ${id}`): Turn => ({
@@ -93,6 +94,7 @@ test('indexToRenderItem is memoized per index turn object', () => {
 function loadStore() {
   return loadSource(new URL('../src/lib/stores/transcript.svelte.ts', import.meta.url), {
     './transcriptLifecycle': { TranscriptLifecycle },
+    '../paneHeader': paneHeader,
     '../win': { winKey: (key: string) => key },
     '../api/client': { api: {}, isAbortError: () => false },
   });
