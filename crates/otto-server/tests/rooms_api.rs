@@ -210,7 +210,7 @@ async fn connect(
     origin: &str,
     path: &str,
     token: &str,
-) -> std::result::Result<Socket, tokio_tungstenite::tungstenite::Error> {
+) -> std::result::Result<Socket, Box<tokio_tungstenite::tungstenite::Error>> {
     let mut request = format!("{}{path}", origin.replacen("http:", "ws:", 1))
         .into_client_request()
         .unwrap();
@@ -221,6 +221,7 @@ async fn connect(
     tokio_tungstenite::connect_async(request)
         .await
         .map(|(socket, _)| socket)
+        .map_err(Box::new)
 }
 async fn send(socket: &mut Socket, value: Value) {
     socket.send(Message::Text(value.to_string())).await.unwrap();
