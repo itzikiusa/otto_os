@@ -123,9 +123,12 @@ export const LONG_PATHS: readonly RegExp[] = [
   /^\/repos\/[^/]+\/(fetch|pull|push)([/?]|$)/,
   /^\/repos\/[^/]+\/(prs|collaborators)([/?]|$)/,
   // Local git that walks history / the tree or runs hooks: `log --all`
-  // (10k commits), `/refs` (2k branches with ahead/behind), diffs, status,
-  // commit (pre-commit hooks), merge, checkout, stash, blame, rebase.
-  /^\/repos\/[^/]+\/(log|refs|diff|status|commit|merge|checkout|stash|blame|rebase-preview|rebase|bisect|reflog|submodules)([/?]|$)/,
+  // (10k commits), `/refs` (2k branches with ahead/behind), status, commit
+  // (pre-commit hooks), merge, checkout, stash, blame, rebase. NOT `/diff`:
+  // the diff of a commit the user just clicked is interactive, and the
+  // alt host is a separate origin, so each distinct `/diff?…` URL paid its
+  // own CORS preflight there (the huge-branch file list missed 300 ms).
+  /^\/repos\/[^/]+\/(log|refs|status|commit|merge|checkout|stash|blame|rebase-preview|rebase|bisect|reflog|submodules)([/?]|$)/,
   /^\/auth\/provider-accounts\/[^/]+\/status([/?]|$)/,
   /^\/sessions\/[^/]+\/wait([/?]|$)/,
   /(^|\/)k8s\//,
