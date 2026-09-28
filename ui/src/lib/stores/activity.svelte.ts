@@ -3,7 +3,8 @@
 //
 // Fed by REST loads (when a session is focused / workspace selected) and the
 // events WS (trail_appended / tasks_updated). Keyed by session id so switching
-// the focused session is instant and background sessions keep accumulating.
+// the focused session is instant; trail entries accumulate only for sessions
+// whose trail was loaded (the rest just bump their roll-up's recency).
 
 import { api } from '../api/client';
 import { loadErrorText } from '../loadError';
@@ -145,6 +146,15 @@ class ActivityStore {
   applyEvent(ev: OttoEvent): boolean {
     switch (ev.type) {
       case 'trail_appended': {
+        // Only sessions whose trail was fetched (an Activity panel / chat
+        // opened them) keep entries. Every other session used to accumulate
+        // 500 entries with their tool inputs in a deep $state record — for
+        // every session that emitted while the window was open, in every
+        // document (r3-05-03). Opening the panel loads the trail fresh anyway.
+        if (!this.loaded.has(ev.session_id)) {
+          this.bumpSummary(ev.session_id, { last_ts: ev.event.ts });
+          return true;
+        }
         const list = this.trailBySession[ev.session_id] ?? [];
         if (list.some((e) => e.id === ev.event.id)) return true;
         const next = [...list, ev.event];

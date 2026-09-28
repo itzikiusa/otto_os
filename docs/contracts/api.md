@@ -510,6 +510,12 @@ bearer token. `TrailAppended` / `TasksUpdated` events mirror writes over `/ws/ev
 | PUT /workspaces/{wid}/sessions/{sid}/tasks | ws editor | `AgentTask[]` | 204 (replace the task list) |
 | GET /workspaces/{wid}/activity/summary | ws viewer | — | per-session activity summary for the workspace |
 
+A `TrailEvent.detail` is capped by the writer (hook ingest, Codex notify and the POST
+above) at 4 KiB of serialized JSON: a string field over 1 KiB keeps its first 1 KiB plus
+`… [N bytes elided, sha256:<16 hex>]`, and a detail still over the cap is stored as
+`{"elided": true, "bytes": N, "head": "<start of its JSON>"}`. The same capped value is
+what `trail_appended` carries over `/ws/events`.
+
 ## Sessions (extras beyond #17–#22)
 
 Sessions in the scratch workspace behave exactly like any other session
