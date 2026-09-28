@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   // Boot flow: GET /meta → onboarding wizard | login | main shell.
   import Toasts from './lib/components/Toasts.svelte';
   import BarHost from './modules/desktop/BarHost.svelte';
@@ -28,8 +29,12 @@
   // The main window fetches the shell chunk while /meta is still in flight.
   if (router.module !== 'bar' && router.module !== 'tray' && router.module !== 's' && router.module !== 'room') void shell().catch(() => {});
 
+  // Boot once per entry into an authenticated route, not per navigation:
+  // reading `router.module` inside the effect re-ran boot() on every sidebar
+  // switch, which reset the phase to 'loading' and remounted the whole shell.
+  const needsAuth = $derived(router.module !== 'room');
   $effect(() => {
-    if (router.module !== 'room') void auth.boot();
+    if (needsAuth) untrack(() => void auth.boot());
   });
 
   // First launch installs + starts the daemon in the background; poll until
