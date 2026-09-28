@@ -1646,6 +1646,18 @@
     if (claimOnAttach && !readOnly) sendJson({ type: 'claim' });
     requestAnimationFrame(() => {
       if (!term || !connected) return;
+      // The DOM renderer xterm fell back to when the WebGL addon was dropped
+      // for parking may have painted a frame while detached, caching glyph
+      // widths measured as 0 (offsetWidth of a detached node). When DOM is
+      // still the renderer here, make it re-measure (clears its width cache).
+      if (!webglAddon) {
+        try {
+          (term as unknown as { _core?: { _renderService?: { handleCharSizeChanged?: () => void } } })
+            ._core?._renderService?.handleCharSizeChanged?.();
+        } catch {
+          /* private API moved — worst case is uneven glyph spacing until a font change */
+        }
+      }
       safeFit();
       sendResize(true);
       verifyFitSoon();
