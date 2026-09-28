@@ -37,6 +37,10 @@ const SETTLE: Duration = Duration::from_millis(600);
 /// Pause between pasting the prompt and pressing Enter, so the TUI has
 /// processed the paste before the submit keypress arrives.
 const PASTE_TO_ENTER: Duration = Duration::from_millis(200);
+/// How long typing the prompt may wait for claude to drain it from its tty.
+/// Generous (a cold TUI reads late; the old blocking write waited forever);
+/// past it the TUI is wedged and the attempt is retried in a fresh PTY.
+const PROMPT_WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Absolute backstop so a truly wedged session can't run forever. There is
 /// otherwise NO wall-clock limit — a healthy turn may run as long as it keeps
 /// making progress (planning/recruiting are one-time, quality-sensitive turns
@@ -105,7 +109,13 @@ impl ClaudePty {
                 cwd: Some(cwd.to_string()),
                 env: vec![],
             };
-            let handle = PtyHandle::spawn(&spec)?;
+            // fork/exec of the agent CLI is a synchronous syscall path (tens to
+            // hundreds of ms, growing with daemon RSS since portable-pty's
+            // `pre_exec` forces a real fork) — keep it off the async workers,
+            // exactly like `SessionManager::create` does (r3-06-03).
+            let handle = tokio::task::spawn_blocking(move || PtyHandle::spawn(&spec))
+                .await
+                .map_err(|e| Error::Internal(format!("spawn claude: {e}")))??;
             let result = drive(&handle, prompt, cwd, &sid, no_progress).await;
             // Single-shot session: always tear the PTY down, success or not.
             let _ = handle.kill();
@@ -163,9 +173,18 @@ async fn drive(
 
     // 2. "Type" the prompt. Bracketed paste keeps multi-line prompts as a
     //    single message instead of submitting on the first newline.
-    handle.write(format!("\x1b[200~{prompt}\x1b[201~").as_bytes())?;
+    //    Written through the PTY's own writer thread and awaited without
+    //    parking a tokio worker: the blocking `write` waited on a sync channel
+    //    until claude drained the (often tens of KB) prompt — seconds on a
+    //    cold start (r3-06-03).
+    handle
+        .write_async(
+            format!("\x1b[200~{prompt}\x1b[201~").as_bytes(),
+            PROMPT_WRITE_TIMEOUT,
+        )
+        .await?;
     tokio::time::sleep(PASTE_TO_ENTER).await;
-    handle.write(b"\r")?;
+    handle.write_async(b"\r", PROMPT_WRITE_TIMEOUT).await?;
 
     // 3. Poll the session transcript until the turn completes. There is NO
     //    wall-clock deadline: instead we track *progress* and only give up when
@@ -550,6 +569,47 @@ fn line_api_error(v: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// r3-06-03: typing a large prompt into a TUI that is not reading its tty
+    /// yet must not park the runtime. On a single-threaded runtime the old
+    /// blocking `write` froze every other task until the child drained it;
+    /// with the spawn on the blocking pool and `write_async` a ticker keeps
+    /// running through the child's one-second nap.
+    #[tokio::test(flavor = "current_thread")]
+    async fn prompt_write_does_not_park_the_runtime() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "sleep 1; exec cat >/dev/null".into()],
+            cwd: None,
+            env: vec![],
+        };
+        let handle = tokio::task::spawn_blocking(move || PtyHandle::spawn(&spec))
+            .await
+            .unwrap()
+            .unwrap();
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let t = Arc::clone(&ticks);
+        let ticker = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                t.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        let prompt: String = (0..800).map(|i| format!("line {i:05} of the prompt\n")).collect();
+        handle
+            .write_async(prompt.as_bytes(), PROMPT_WRITE_TIMEOUT)
+            .await
+            .unwrap();
+        ticker.abort();
+        let _ = handle.kill();
+        assert!(
+            ticks.load(Ordering::Relaxed) >= 20,
+            "runtime stalled during the prompt write: {} ticks",
+            ticks.load(Ordering::Relaxed)
+        );
+    }
 
     #[test]
     fn encodes_every_non_alphanumeric_as_dash() {
