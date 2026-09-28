@@ -1673,6 +1673,9 @@
     reconnectAttempts = 0;
     lastInjN = 0;
     const adopted = adoptEngine(sid);
+    // An adopted socket is already OPEN: without this the injection effect
+    // below would re-send an injection that was consumed before the park.
+    if (adopted) lastInjN = ws.injections[sid]?.n ?? 0;
     if (!adopted) buildTerm();
     bindTerm();
     attachWebgl();
@@ -1698,6 +1701,9 @@
     // a Terminal's lifetime (props may already read as torn down in cleanup).
     const parkable = untrack(() => keepAlive && !shareToken && !socketFactory);
     const adopted = parkable && untrack(() => adoptEngine(sessionId));
+    // Same for a mount-time adopt (see switchEngine): injections issued
+    // before this mount were never meant for it.
+    if (adopted) lastInjN = untrack(() => ws.injections[sessionId]?.n ?? 0);
     if (!adopted) untrack(buildTerm);
     untrack(bindTerm);
     // Edit ▸ Select All (⌘A) while this terminal has focus selects the whole
@@ -1897,6 +1903,9 @@
     // guard each such re-run did a full close+reconnect, storming the WS. A real
     // session switch still falls through (connectedSid differs).
     if (sessionId === connectedSid) return;
+    // The new session's restart nonce is not a restart of THIS view: the
+    // switch below attaches to its live process anyway.
+    seenRestartNonce = untrack(() => restartNonce);
     // 1. Cancel timers that belong to the old session (reconnect + pending
     //    trailing resize — a stale send would push the old pane's grid at the
     //    new session's PTY).
@@ -2014,12 +2023,17 @@
   });
 
   // React to a parent restart: the session was respawned/resumed server-side, so
-  // drop the exited overlay and reconnect to the now-live PTY. Guarded on nonce>0
-  // so it never fires on initial mount; the connect() is untracked so this effect
-  // only re-runs on a real restart, not when sessionId churns (Effect 2 owns that).
+  // drop the exited overlay and reconnect to the now-live PTY. Only a nonce that
+  // CHANGES after mount counts: a session restarted at some earlier point keeps
+  // a non-zero nonce, and reconnecting on every mount would re-snapshot (and
+  // throw away an adopted, already-live engine). The connect() is untracked so
+  // this effect only re-runs on a real restart, not when sessionId churns
+  // (Effect 2 owns that).
+  let seenRestartNonce = untrack(() => restartNonce);
   $effect(() => {
     const n = restartNonce;
-    if (!n || !term) return;
+    if (!n || n === seenRestartNonce || !term) return;
+    seenRestartNonce = n;
     untrack(() => {
       exitCode = null;
       disconnected = false;
