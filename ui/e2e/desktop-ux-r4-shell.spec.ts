@@ -56,16 +56,24 @@ test('terminal zoom changes the readable narrow grid and reset restores automati
   await boot(page);
   await page.getByRole('button', { name: 'Collapse panel', exact: true }).click();
   await page.goto(`/#/agents/${session.id}`);
-  await page.getByRole('tab', { name: 'Split', exact: true }).click();
-  const host = page.locator('.term-host');
+  // A narrow terminal: two panes side by side (⌘D; the in-pane Split view is
+  // retired). The font controls live in the pane's ⋯ menu now.
+  await expect(page.locator('.pane-body[data-view="terminal"]')).toHaveCount(1);
+  await page.keyboard.press('Meta+d');
+  await expect(page.locator('[data-pane-key]')).toHaveCount(2, { timeout: 15_000 });
+  const host = page.locator('.term-host').first();
   const size = () => host.evaluate(el => parseFloat(getComputedStyle(el.querySelector('.xterm-rows')!).fontSize));
+  const menuRow = async (name: RegExp) => {
+    await page.locator('[data-pane-key]').first().locator('button[title="More…"]').click();
+    await page.locator('.ctx-menu').getByRole('menuitem', { name }).click();
+  };
   await expect.poll(size).toBe(11);
-  await page.getByRole('button', { name: 'Zoom in', exact: true }).click();
+  await menuRow(/^Terminal font larger/);
   await expect.poll(size).toBe(12);
-  await page.getByRole('button', { name: 'Zoom out', exact: true }).click();
+  await menuRow(/^Terminal font smaller/);
   await expect.poll(size).toBe(11);
-  await page.getByRole('button', { name: 'Zoom in', exact: true }).click();
-  await page.getByRole('button', { name: 'Reset terminal zoom', exact: true }).click();
+  await menuRow(/^Terminal font larger/);
+  await menuRow(/^Reset terminal font/);
   await expect.poll(size).toBe(11);
   await expect.poll(() => host.getAttribute('data-cols')).toMatch(/^(8\d|9\d|\d{3,})$/);
   await page.screenshot({ path: info.outputPath('zoom-readable.png') });

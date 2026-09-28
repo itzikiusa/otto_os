@@ -344,8 +344,9 @@ test('opening a claude agent renders a correct pane (best-effort)', async ({ pag
   await expect(page.locator('.term-host').first()).toBeVisible({ timeout: 30_000 });
   const host = await page.locator('.term-host').first().boundingBox();
   expect(host!.height, 'claude terminal height').toBeGreaterThan(120);
-  // Provider chip in the pane header reflects the agent kind.
-  await expect(page.locator('.pane-head .provider-chip').first()).toContainText(/claude/i);
+  // The pane header's details chip reflects the agent kind (a phone-width pane
+  // hides the chip; its accessible name still carries the provider).
+  await expect(page.locator('.pane-head [data-testid="pane-details"]').first()).toHaveAttribute('aria-label', /claude/i);
   await expectNoHorizontalOverflow(page);
 });
 

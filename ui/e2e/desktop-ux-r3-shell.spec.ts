@@ -25,7 +25,11 @@ async function boot(page: Page, outputs = true) {
   await expect(page.locator('.xterm-screen')).toBeVisible();
 }
 for (const scheme of ['light', 'dark']) {
-  test(`split preserves a readable full terminal grid ${scheme}`, async ({ page }, info) => {
+  // The in-pane Split view (chat beside the terminal) is retired; the way a
+  // terminal gets narrow now is two panes side by side (⌘D). Each must keep a
+  // readable ≥80-column grid (the font steps down, never below 11px) without a
+  // transient narrow PTY resize or resize churn once the panes settle.
+  test(`side-by-side panes preserve a readable full terminal grid ${scheme}`, async ({ page }, info) => {
     const resizeColumns: number[] = [];
     page.on('websocket', socket => socket.on('framesent', ({ payload }) => {
       if (typeof payload !== 'string') return;
@@ -40,44 +44,33 @@ for (const scheme of ['light', 'dark']) {
     await page.addInitScript(scheme => localStorage.setItem('otto_scheme', scheme), scheme);
     await boot(page, false);
     await page.goto(`/#/agents/${session.id}`);
-    await page.getByRole('tab', { name: 'Split', exact: true }).click();
-    await expect(page.locator('.conv[data-loaded="true"]')).toBeVisible();
-    const host = page.locator('.term-host');
+    await expect(page.locator('.pane-body[data-view="terminal"]')).toHaveCount(1);
+    await page.keyboard.press('Meta+d');
+    await expect(page.locator('[data-pane-key]')).toHaveCount(2, { timeout: 15_000 });
+    const hosts = page.locator('.term-host');
+    await expect(hosts).toHaveCount(2);
     await page.waitForTimeout(1600);
-    await expect.poll(() => host.evaluate(el => parseFloat(getComputedStyle(el.querySelector('.xterm-rows')!).fontSize))).toBeGreaterThanOrEqual(11);
-    await expect.poll(() => host.getAttribute('data-cols')).toMatch(/^(8\d|9\d|\d{3,})$/);
-    const measure = await host.evaluate(el => {
-      const x = el as HTMLElement;
-      const screen = el.querySelector('.xterm-screen')!.getBoundingClientRect();
-      const before = x.scrollLeft;
-      x.scrollLeft = x.scrollWidth;
-      return { scrollable: x.scrollLeft > before, screenWidth: screen.width, available: x.clientWidth, right: screen.right - x.scrollLeft, hostRight: x.getBoundingClientRect().right };
-    });
-    expect(measure.scrollable).toBe(true);
-    expect(measure.right).toBeLessThanOrEqual(measure.hostRight + 1);
+    for (const host of [hosts.first(), hosts.last()]) {
+      await expect.poll(() => host.evaluate(el => parseFloat(getComputedStyle(el.querySelector('.xterm-rows')!).fontSize))).toBeGreaterThanOrEqual(11);
+      await expect.poll(() => host.getAttribute('data-cols')).toMatch(/^(8\d|9\d|\d{3,})$/);
+      const measure = await host.evaluate(el => {
+        const x = el as HTMLElement;
+        const screen = el.querySelector('.xterm-screen')!.getBoundingClientRect();
+        x.scrollLeft = x.scrollWidth;
+        const right = screen.right - x.scrollLeft;
+        x.scrollLeft = 0;
+        return { right, hostRight: x.getBoundingClientRect().right };
+      });
+      expect(measure.right).toBeLessThanOrEqual(measure.hostRight + 1);
+    }
     await expectNoHorizontalOverflow(page);
     expect(resizeColumns.length).toBeGreaterThan(0);
     expect(Math.min(...resizeColumns), 'no transient narrow PTY grid').toBeGreaterThanOrEqual(80);
-    await host.evaluate(el => { el.scrollLeft = 0; });
-    await host.focus();
-    await expect(host).toBeFocused();
-    await page.keyboard.press('ArrowRight');
-    await expect.poll(() => host.evaluate(el => el.scrollLeft)).toBeGreaterThan(0);
-    await host.evaluate(el => { el.scrollLeft = 0; });
-    await page.screenshot({ path: info.outputPath('readable-split.png'), animations: 'disabled' });
-    await page.getByRole('tab', { name: 'Terminal', exact: true }).click();
-    await expect.poll(() => host.evaluate(el => parseFloat(getComputedStyle(el.querySelector('.xterm-rows')!).fontSize))).toBe(13);
-    await expect.poll(() => host.evaluate(el => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1);
-    for (let pass = 0; pass < 2; pass++) {
-      await page.getByRole('tab', { name: 'Split', exact: true }).click();
-      await expect.poll(() => host.evaluate(el => parseFloat(getComputedStyle(el.querySelector('.xterm-rows')!).fontSize))).toBe(11);
-      await page.getByRole('tab', { name: 'Terminal', exact: true }).click();
-      await expect.poll(() => host.evaluate(el => parseFloat(getComputedStyle(el.querySelector('.xterm-rows')!).fontSize))).toBe(13);
-    }
+    await page.screenshot({ path: info.outputPath('readable-side-by-side.png'), animations: 'disabled' });
     await page.waitForTimeout(1200);
     const settled = resizeColumns.length;
     await page.waitForTimeout(700);
-    expect(resizeColumns.length, 'no resize churn after the pane settles').toBe(settled);
+    expect(resizeColumns.length, 'no resize churn after the panes settle').toBe(settled);
     expect(Math.min(...resizeColumns)).toBeGreaterThanOrEqual(80);
   });
 }

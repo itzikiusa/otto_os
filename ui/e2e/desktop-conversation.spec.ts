@@ -13,7 +13,8 @@ import { apiCtx, seedWorkspace } from './seed';
 //   • a tool step expands to its output,
 //   • the global "Show system" toggle reveals the per-turn system notes and
 //     persists,
-//   • the Terminal · Chat · Split choice persists across a reload.
+//   • the Terminal · Chat choice persists across a reload (a stored choice from
+//     the retired Split view reads as Chat).
 // Only meaningful on the desktop-browser project; self-skips elsewhere, and
 // when no fixture is checked in yet.
 
@@ -245,40 +246,48 @@ test('Show system toggles the per-turn system notes and persists', async ({ page
   await expect(conv(page).locator('.sys-list')).toHaveCount(0);
 });
 
-test('Terminal · Chat · Split persists across reload; Split shows chat beside the terminal', async ({ page }) => {
+/** A tab of the pane header's Terminal · Chat switch. */
+const viewTab = (page: Page, name: string) =>
+  page.getByRole('tablist', { name: 'Session view' }).getByRole('tab', { name, exact: true });
+
+test('Terminal · Chat persists across reload; a stored Split reads as Chat; ⌘⇧C toggles', async ({ page }) => {
   await expect(page.locator('.pane-body[data-view="chat"]')).toBeVisible({ timeout: 20_000 });
 
-  await page.locator('.view-seg button', { hasText: 'Terminal' }).click();
+  await viewTab(page, 'Terminal').click();
   await expect(page.locator('.pane-body[data-view="terminal"]')).toBeVisible();
   await expect(page.locator('.conv')).toHaveCount(0);
   await page.reload();
   await expect(page.locator('.pane-body[data-view="terminal"]')).toBeVisible({ timeout: 20_000 });
 
-  // 1280px ≥ 1200px → Split is offered: chat + splitter + terminal.
-  await page.locator('.view-seg button', { hasText: 'Split' }).click();
-  const body = page.locator('.pane-body[data-view="split"]');
-  await expect(body).toBeVisible();
-  await expect(body.locator('.pane-chat')).toBeVisible();
-  await expect(body.locator('.pane-splitter')).toBeVisible();
-  await expect(body.locator('.pane-term')).toBeVisible();
-  const chat = await body.locator('.pane-chat').boundingBox();
-  const term = await body.locator('.pane-term').boundingBox();
-  expect(chat && term && chat.x + chat.width <= term.x + 1).toBeTruthy();
+  // The Split view is gone: no third tab, no in-pane splitter.
+  await expect(page.getByRole('tablist', { name: 'Session view' }).getByRole('tab')).toHaveText(['Terminal', 'Chat']);
+  await expect(viewTab(page, 'Split')).toHaveCount(0);
+  await expect(page.locator('.pane-splitter')).toHaveCount(0);
 
+  // A preference saved by the old Split view migrates to Chat on read, and the
+  // stored value (plus the orphaned split fraction) is rewritten once.
+  await page.evaluate((id) => {
+    localStorage.setItem(`otto_session_view:${id}`, 'split');
+    localStorage.setItem(`otto_session_split_frac:${id}`, '0.6');
+  }, sessionId);
   await page.reload();
-  await expect(page.locator('.pane-body[data-view="split"]')).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('.pane-body[data-view="chat"]')).toBeVisible({ timeout: 20_000 });
+  await expect(viewTab(page, 'Chat')).toHaveAttribute('aria-selected', 'true');
+  const stored = await page.evaluate((id) => [localStorage.getItem(`otto_session_view:${id}`), localStorage.getItem(`otto_session_split_frac:${id}`)], sessionId);
+  expect(stored).toEqual(['chat', null]);
 
-  // Below 1200px Split degrades to Chat and the Split tab disappears.
-  await page.setViewportSize({ width: 1100, height: 800 });
-  await expect(page.locator('.pane-body[data-view="chat"]')).toBeVisible();
-  await expect(page.locator('.view-seg button', { hasText: 'Split' })).toHaveCount(0);
-  await page.setViewportSize({ width: 1280, height: 800 });
-  await expect(page.locator('.pane-body[data-view="split"]')).toBeVisible();
-
-  // ⌘⇧C cycles (split → terminal at 1280px).
+  // ⌘⇧C toggles Terminal ⇄ Chat.
   await page.locator('.pane-head', { hasText: 'ConvFixture' }).click();
   await page.keyboard.press('Meta+Shift+C');
   await expect(page.locator('.pane-body[data-view="terminal"]')).toBeVisible();
+  await page.keyboard.press('Meta+Shift+C');
+  await expect(page.locator('.pane-body[data-view="chat"]')).toBeVisible();
+
+  // ←/→ on the focused tab moves the selection (roving tabindex).
+  await viewTab(page, 'Chat').focus();
+  await page.keyboard.press('ArrowLeft');
+  await expect(page.locator('.pane-body[data-view="terminal"]')).toBeVisible();
+  await expect(viewTab(page, 'Terminal')).toBeFocused();
 });
 
 test('composer is a multi-line box that never scrolls sideways', async ({ page }) => {
