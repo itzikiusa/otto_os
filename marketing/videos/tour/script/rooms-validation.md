@@ -1,4 +1,4 @@
-# Rooms walkthrough candidate — 2026-09-28
+# Rooms walkthrough — 2026-09-28
 
 Candidate: `out/otto-tour-rooms-20260928.mp4` (ignored generated output).
 SHA-256: `febf5a63901f87a9129f0f2ad698d1a2389a477acd151a838617d973c37f21a1`.
@@ -38,6 +38,14 @@ Rooms chapter at 2:45.20, and replaces the full music bed with the original
   Listening QA was not performed: this tool runtime cannot accept audio input.
   Loudness/peak checks and review of the synthesis do not replace listening.
 - Capture/render scripts pass `node --check`; source diff whitespace check passes.
+- After publication, the rebuilt production UI loaded the released movie and
+  all 56 bundled captions in Chromium light/dark and WebKit dark. The Rooms
+  chapter seeks to 2:45.20, opens its guide, and the guide's Watch this part
+  action returns to that position. All runs reported zero browser runtime
+  errors. WebKit was exercised with an explicit chapter-play gesture; the
+  initial harness incorrectly waited for media before that gesture.
+- The activated manifest passed `npm run check` with zero errors/warnings,
+  `npm run build`, and all eight Help guide unit tests.
 - Serial capture/render, whisper threads limited to two and H.264 encoder
   threads limited to two. Both isolated room browser contexts and the daemon
   were stopped after capture.
@@ -58,9 +66,10 @@ from one presenter. Physical multi-Mac/microphone/display acceptance is separate
 
 ## Publication state
 
-No release assets were uploaded and the app's active film manifest/captions were
-not changed. Review candidates are `out/film.candidate.json`,
-`out/otto-tour-rooms.vtt`, and `out/otto-tour-rooms-poster.jpg`. Follow README's
-upload → verify assets → replace active manifest and bundled captions sequence.
+The MP4, poster and captions were uploaded to the existing `walkthroughs`
+release after review and approval. Each published asset was downloaded again
+and its SHA-256 verified against the values above. The app manifest now selects
+this edition, and `ui/src/lib/walkthroughs/otto-tour-rooms.vtt` supplies its
+bundled caption track. Rooms links to the matching in-app guide.
 Original baseline metadata/captions are preserved under `baseline-20260925/`
 so later rerenders never append Rooms twice.

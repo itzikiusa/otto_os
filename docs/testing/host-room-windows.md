@@ -50,6 +50,13 @@ a full installed-app room/media acceptance test.
   close/reopen with a fresh identity and unchanged source DOM/draft/hash.
 - UI check reported zero errors/warnings; production build passed.
 - Correctness/security review found no confirmed defects.
+- The complete `rooms.playwright.config.ts` suite passed again before
+  publication: 10 tests in 32.5 seconds, one worker and isolated ports.
+
+Review screenshots: [host light](screenshots/host-rooms/host-room-light.png),
+[host dark](screenshots/host-rooms/host-room-dark.png),
+[walkthrough light](screenshots/host-rooms/walkthrough-light.png), and
+[walkthrough dark](screenshots/host-rooms/walkthrough-dark.png).
 
 Closing a hosted room disconnects that view and pauses recap capture. The
 underlying session stays alive; End room remains explicit. A room can keep Otto
