@@ -5,8 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-# Forwarded to otto-server to bake ui/dist into the binary.
-embed-ui = ["otto-server/embed-ui"]
+# Keep changing UI assets in the binary, outside the server crate's build inputs.
+embed-ui = ["dep:rust-embed"]
 
 [dependencies]
 otto-core.workspace = true
@@ -14,6 +14,7 @@ otto-state.workspace = true
 otto-rbac.workspace = true
 otto-keychain.workspace = true
 otto-server.workspace = true
+rust-embed = { workspace = true, optional = true, features = ["deterministic-timestamps"] }
 tokio.workspace = true
 axum.workspace = true
 serde_json.workspace = true
