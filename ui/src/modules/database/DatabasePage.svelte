@@ -11,6 +11,7 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import SchemaTree from './SchemaTree.svelte';
   import QueryEditor from './QueryEditor.svelte';
+  import ConnectionComparison from './ConnectionComparison.svelte';
   import QueryBuilder from './QueryBuilder.svelte';
   import StructureView from './StructureView.svelte';
   import DiagramView from './DiagramView.svelte';
@@ -1252,6 +1253,7 @@
       <div class="main-split" class:assist-open={database.assistOpen}>
         <div class="main-body">
           {#key database.accessRevision}
+          <ConnectionComparison enabled={database.mainTab === 'query'}>
           {#if database.mainTab === 'query'}
             <QueryEditor />
           {:else if database.mainTab === 'builder'}
@@ -1263,6 +1265,7 @@
           {:else}
             <Dashboards />
           {/if}
+          </ConnectionComparison>
           {/key}
         </div>
         {#if database.assistOpen}

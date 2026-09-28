@@ -42,6 +42,33 @@ You can also dock a connection's full explorer *beside an agent* in the Agents
 split ("Open beside agents (split)" from a connection's right-click menu), so an
 agent and a live DB sit side by side.
 
+### Working across connections
+
+Open additional connections from the connection picker; each stays in the
+**Open connections** tab strip with its own query tabs, drafts and loaded
+results. An agent alongside the Explorer can work with all of them. Keep each
+query's returned `tab_id` to address its original connection after switching.
+
+In the Query workspace, **Compare results** pins a live result beside the
+normal editor. Choose an open query tab in **Comparison source**, then select
+another connection to work on. The reference shows its connection, environment
+and submitted statement, so an unfinished editor draft is not mistaken for the
+query that produced the data. **Focus source** brings that query back for
+editing; **Clear comparison** removes the reference without closing its tab.
+Switching to Structure, Builder or another workbench view hides the comparison;
+returning to Query brings back the same pinned source.
+
+The reference is read-only and uses the already loaded result: selecting it
+does not execute a query, fetch another page or duplicate rows in memory. A
+query rerun updates the reference. Closing the source or losing access removes
+its data, including open comparison viewers. On narrow layouts the comparison
+stacks within the workbench. It compares the loaded query results; it does not
+join databases or prove that entire datasets match.
+
+Combine this with [detachable panes](./detachable-panes.md) to float the agent
+while Connections fills the main window or a second display. The ordinary
+production safeguards still apply to each connection separately.
+
 Architecture: the Svelte UI talks to `ottod` (loopback `127.0.0.1:7700`) over
 HTTP; `ottod` owns the native drivers, resolves each connection's Keychain
 secret, establishes any SSH tunnel, dispatches to the per-engine driver, records

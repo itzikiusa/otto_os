@@ -2,7 +2,7 @@
   // SQL / Redis / Mongo editor. Wraps the shared CodeEditor with a server-backed
   // completion source (debounced /db/completion). Cmd/Ctrl+Enter runs; toolbar
   // has Run / Save / Explain-with-agent. Results render in the ResultsGrid below.
-  import { tick, untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import type { Completion, CompletionContext, CompletionResult } from '@codemirror/autocomplete';
   import { syntaxTree } from '@codemirror/language';
   import { isInertAt } from './completion-gate';
@@ -399,7 +399,15 @@
   // `truncated` answer (the daemon capped the list for the typed word) has no
   // `validFor`, so the next keystroke re-asks with the longer word.
   let inflight: AbortController | null = null;
+  // CodeMirror can destroy a pending completion without dispatching its context
+  // abort. Cancel our debounce too, before it reads this editor's derived mode.
+  let completionDisposed = false;
+  onDestroy(() => {
+    completionDisposed = true;
+    inflight?.abort();
+  });
   function completionSource(ctx: CompletionContext): Promise<CompletionResult | null> | null {
+    if (completionDisposed) return null;
     const before = ctx.matchBefore(TOKEN_RE);
     const word = before?.text ?? '';
     // Only auto-open when there's a token or the user explicitly triggered.
@@ -434,6 +442,7 @@
       const ac = new AbortController();
       inflight = ac;
       const timer = setTimeout(async () => {
+        if (completionDisposed || ac.signal.aborted) { resolve(null); return; }
         // Sliced HERE, after the quiet period — not per keystroke.
         const span = completionSpan(state, pos);
         const prefix = state.sliceDoc(span.from, pos);
@@ -457,12 +466,12 @@
         }));
         resolve(truncated ? { from, options } : { from, options, validFor: TOKEN_RE });
       }, COMPLETION_DELAY_MS);
-      ctx.addEventListener('abort', () => {
+      ac.signal.addEventListener('abort', () => {
         clearTimeout(timer);
-        ac.abort();
         if (inflight === ac) inflight = null;
         resolve(null);
-      });
+      }, { once: true });
+      ctx.addEventListener('abort', () => ac.abort());
     });
   }
 

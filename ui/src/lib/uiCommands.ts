@@ -25,7 +25,9 @@
 import { baseUrl, getToken } from './api/client';
 import type { Id, UiAgentRef, UiCommandErrorCode, UiCommandFrame, UiHelloFrame, UiPresenceFrame } from './api/types';
 import { confirmer } from './confirm.svelte';
-import { isEmbedded } from './desktop';
+import { isEmbedded, isNativePane } from './desktop';
+import { nativePaneSnapshot } from './nativePane';
+import { nativePanePresence } from './nativePanePolicy';
 import { hostWindowId } from './embedGuest';
 import { paneKey, routeOf } from './sidePane';
 import { clientId } from './stores/ui.svelte';
@@ -195,6 +197,11 @@ export interface UiDocumentInfo {
 export function describeDocument(): UiDocumentInfo {
   const route = currentRoute();
   const host = isEmbedded ? hostWindowId() : null;
+  const presence = nativePanePresence(
+    typeof document !== 'undefined' && document.visibilityState === 'visible',
+    documentFocused(),
+    !isNativePane || nativePaneSnapshot()?.visible === true,
+  );
   return {
     pane: isEmbedded ? 'side' : 'main',
     // The side pane has no window of its own: it reports its host's id.
@@ -202,8 +209,7 @@ export function describeDocument(): UiDocumentInfo {
     ...(host ? { host_window_id: host } : {}),
     route,
     module: paneKey(route),
-    focused: documentFocused(),
-    visible: typeof document === 'undefined' ? false : document.visibilityState === 'visible',
+    ...presence,
   };
 }
 

@@ -8,6 +8,9 @@ terminal input, presenting permissions and moderation.
 ## Start and join
 
 1. Open a running local session and choose **Start room** from its More menu.
+   On desktop, the room opens in its own native window; your workspace and
+   sidebar stay where they are. **Open room** in the Rooms lobby focuses the
+   existing room window. Browser hosting keeps the inline room view.
    Enter the name that participants should see. The shared terminal includes
    its available history; anyone granted control can execute commands with
    that session's permissions.
@@ -91,6 +94,15 @@ capabilities. They are confined to the invited origin and room. Credentials live
 only in window memory, so reloading or closing the window may require a new
 invitation. Disconnecting withdraws control and capture grants immediately;
 reconnecting does not restart the microphone or screen automatically.
+
+Hosted desktop rooms use a separate authenticated window loading only the room
+UI. Navigating the main sidebar does not remount that window, disconnect audio,
+or stop screen sharing. Closing its view disconnects the host and pauses capture;
+it does not end the underlying session. Reopen it from the originating window's
+Rooms lobby. **End room** remains the explicit action that removes guest access.
+Host room credentials cross native IPC in memory, never a URL, local storage or
+the saved window registry. Closing the room window releases its native context;
+the source window retains the capability for reopening while it stays alive.
 
 ## Performance and current limits
 

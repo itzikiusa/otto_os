@@ -8,7 +8,7 @@
 // The host also says whether this pane sits under the window's traffic
 // lights (it is the leading pane and the sidebar is collapsed).
 
-import { isEmbedded } from '../desktop';
+import { isEmbedded, isTauri } from '../desktop';
 
 class EmbedChrome {
   /** Pad the top row past the traffic lights (host-reported). */
@@ -23,7 +23,7 @@ class EmbedChrome {
 
   /** A top-row candidate mounted (no-op outside the side pane). */
   claim(el: HTMLElement): () => void {
-    if (!isEmbedded) return () => {};
+    if (!isEmbedded && !isTauri) return () => {};
     this.list = [...this.list, el];
     this.headers = this.list;
     return () => {

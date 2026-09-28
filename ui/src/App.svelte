@@ -20,14 +20,16 @@
   let onboardingChunk: Promise<typeof import('./modules/settings/Onboarding.svelte')> | null = null;
   let loginChunk: Promise<typeof import('./modules/settings/Login.svelte')> | null = null;
   let roomChunk: Promise<typeof import('./modules/rooms/RoomGuest.svelte')> | null = null;
+  let hostRoomChunk: Promise<typeof import('./modules/rooms/RoomHost.svelte')> | null = null;
   let shareChunk: Promise<typeof import('./modules/share/SharePage.svelte')> | null = null;
   const shell = () => (shellChunk ??= import('./shell/App.svelte'));
   const onboarding = () => (onboardingChunk ??= import('./modules/settings/Onboarding.svelte'));
   const login = () => (loginChunk ??= import('./modules/settings/Login.svelte'));
   const room = () => (roomChunk ??= import('./modules/rooms/RoomGuest.svelte'));
+  const hostRoom = () => (hostRoomChunk ??= import('./modules/rooms/RoomHost.svelte'));
   const share = () => (shareChunk ??= import('./modules/share/SharePage.svelte'));
   // The main window fetches the shell chunk while /meta is still in flight.
-  if (router.module !== 'bar' && router.module !== 'tray' && router.module !== 's' && router.module !== 'room') void shell().catch(() => {});
+  if (!['bar', 'tray', 's', 'room', 'room-host'].includes(router.module)) void shell().catch(() => {});
 
   // Boot once per entry into an authenticated route, not per navigation:
   // reading `router.module` inside the effect re-ran boot() on every sidebar
@@ -82,6 +84,10 @@
   {#await onboarding()}{@render chunkWait()}{:then m}<m.default />{:catch}{@render chunkError()}{/await}
 {:else if auth.phase === 'login'}
   {#await login()}{@render chunkWait()}{:then m}<m.default />{:catch}{@render chunkError()}{/await}
+{:else if router.module === 'room-host'}
+  <!-- Local authenticated host windows own their room lifecycle independently
+       of the workspace shell. Remote guests still use the unprivileged route. -->
+  {#await hostRoom()}{@render chunkWait()}{:then m}{#key router.parts[1]}<m.default roomId={router.parts[1] ?? ''} />{/key}{:catch}{@render chunkError()}{/await}
 {:else}
   {#await shell()}{@render chunkWait()}{:then m}<m.default />{:catch}{@render chunkError()}{/await}
 {/if}

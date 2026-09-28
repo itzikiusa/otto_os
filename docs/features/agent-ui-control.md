@@ -135,6 +135,16 @@ send = outward), `git_*` (repos, status, diff, stage/commit/pull = local
 write, push = outward) and `browser_*` (tabs, navigate, reader/live, page
 text, annotate, summarize).
 
+One agent can work across multiple open database connections in the same
+Explorer. Opening another connection retains the earlier query tabs, drafts
+and results. `db_list_connections` includes each connection's open `tabs`, and
+Connections module state includes `connection_tabs` grouped by connection ID.
+Keep the returned `tab_id` for each query: `db_get_result` can read the first
+connection's result after another connection has been selected, without rerunning
+it. `db_run_query` rejects conflicting tab and connection IDs before making
+changes. Existing read-only runs, per-target permissions and production write
+confirmations still apply.
+
 ### Kubernetes: `kubernetes` (route `#/kubernetes`)
 
 | Command | Risk | Args | What you see |

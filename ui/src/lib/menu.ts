@@ -7,6 +7,7 @@ import { router } from './router.svelte';
 import { startSnip } from './snip';
 import { selectAllInFocus } from './selectall';
 import { sidePane } from './stores/sidePane.svelte';
+import { nativePane } from './nativePane';
 import { isEmbedded } from './desktop';
 
 export function handleMenu(id: string): void {
@@ -14,6 +15,9 @@ export function handleMenu(id: string): void {
   // session items act on that pane (or ⌘W closes it) — not on the main pane
   // behind it. The pane runs the forwarded id through this same function.
   if (sidePane.handleMenu(id)) return;
+  // Window-owned sheets and palettes must receive keyboard focus when the
+  // menu was invoked from a native side view (attached or detached).
+  if (sidePane.nativeState && sidePane.focused) void nativePane.focus('primary').catch(() => {});
   switch (id) {
     case 'snip':
       // File → Take Snip, and the global shortcut (the Rust handler emits the
@@ -79,8 +83,8 @@ export async function attachMenuBridge(): Promise<() => void> {
   // host instead (a second listener would run every item twice).
   if (isEmbedded || !('__TAURI_INTERNALS__' in window)) return () => {};
   try {
-    const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow');
-    return await getCurrentWebviewWindow().listen<string>('otto://menu', (e) =>
+    const { getCurrentWebview } = await import('@tauri-apps/api/webview');
+    return await getCurrentWebview().listen<string>('otto://menu', (e) =>
       handleMenu(e.payload),
     );
   } catch {

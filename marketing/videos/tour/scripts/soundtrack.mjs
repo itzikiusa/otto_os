@@ -1,8 +1,8 @@
 // Original, royalty-free soundtrack for the tour film — synthesized from
 // scratch (no samples, no network). Writes to public/audio/:
-//   music.wav     ambient pad + soft pulse, sized to the film (reads
-//                 src/generated/timing.json), with an intro rise and an outro
-//                 swell/ring-out. The instrumental edition keeps
+//   music.wav     124 BPM drums + syncopated bass + bright chord stabs, sized to the film (reads
+//                 src/generated/timing.json), with short phrase breaks and a
+//                 clean final fade. The instrumental edition keeps
 //                 the score present throughout; captions carry the instructions.
 //   sfx-*.wav     small UI accents: click, whoosh, tick, riser, impact.
 //
@@ -29,7 +29,6 @@ let seed = 1234567;
 const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296) * 2 - 1;
 const midi = (n) => 440 * 2 ** ((n - 69) / 12);
 const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
-const smooth = (x) => x * x * (3 - 2 * x);
 
 function writeWav(file, L, R) {
   const n = L.length;
@@ -100,158 +99,69 @@ function reverb(L, R, mix = 0.28, size = 1) {
 
 // ── music ──────────────────────────────────────────────────────────────────
 function music() {
-  const n = Math.round(DURATION * SR);
-  const L = new Float32Array(n);
-  const R = new Float32Array(n);
-  const BPM = 112;
-  const beat = 60 / BPM;
-  const bar = beat * 4;
-  // Dmaj9 – Bm9 – Gmaj7(#11) – A6sus : warm, optimistic, unresolved loop.
-  const chords = [
-    [50, 57, 62, 64, 66, 69],
-    [47, 54, 59, 61, 62, 66],
-    [43, 50, 55, 59, 61, 66],
-    [45, 52, 57, 59, 62, 64],
-  ];
-  const chordLen = bar * 2;
-  const INTRO = 6.5;
-  const OUTRO = Math.max(8, DURATION * 0.06);
-
-  // Section energy 0..1 over time: intro rise, body, outro swell + ring-out.
-  const energy = (t) => {
-    if (t < INTRO) return 0.35 + 0.65 * smooth(t / INTRO);
-    if (t > DURATION - OUTRO) return 1 - 0.85 * smooth((t - (DURATION - OUTRO)) / OUTRO);
-    return 1;
-  };
-  const pulseOn = (t) => (t < INTRO - 1.2 ? 0 : t > DURATION - OUTRO + 1 ? 0 : 1);
-
-  // Pad: per chord tone, 3 slightly detuned partial stacks, slow crossfades.
-  for (let c = 0; c * chordLen < DURATION + chordLen; c++) {
-    const notes = chords[c % chords.length];
-    const t0 = c * chordLen - 0.8;
-    const t1 = t0 + chordLen + 1.6;
-    const i0 = Math.max(0, Math.round(t0 * SR));
-    const i1 = Math.min(n, Math.round(t1 * SR));
-    for (const [k, note] of notes.entries()) {
-      const f = midi(note + 12 * (k < 2 ? 0 : 0));
-      const amp = (k === 0 ? 0.09 : 0.055) / Math.sqrt(notes.length);
-      const det = [0.9965, 1, 1.0037];
-      const ph = det.map(() => (rnd() + 1) * Math.PI);
-      for (let i = i0; i < i1; i++) {
-        const t = i / SR;
-        const local = (t - t0) / (t1 - t0);
-        const env = Math.sin(Math.PI * clamp(local, 0, 1)) ** 1.4;
-        const bright = 0.35 + 0.65 * energy(t);
-        let sl = 0;
-        let sr = 0;
-        for (let d = 0; d < 3; d++) {
-          const w = 2 * Math.PI * f * det[d] * t + ph[d];
-          const s = Math.sin(w) + 0.32 * bright * Math.sin(2 * w) + 0.12 * bright * Math.sin(3 * w);
-          if (d === 0) sl += s;
-          else if (d === 2) sr += s;
-          else {
-            sl += 0.6 * s;
-            sr += 0.6 * s;
-          }
-        }
-        const trem = 1 + 0.08 * Math.sin(2 * Math.PI * 0.21 * t + k);
-        const e = env * amp * trem * (0.55 + 0.45 * energy(t));
-        L[i] += sl * e;
-        R[i] += sr * e;
-      }
-    }
-    // Sub bass on the root.
-    const root = midi(notes[0] - 12);
-    for (let i = i0; i < i1; i++) {
-      const t = i / SR;
-      const local = (t - t0) / (t1 - t0);
-      const env = Math.sin(Math.PI * clamp(local, 0, 1)) ** 2;
-      const s = Math.sin(2 * Math.PI * root * t) * 0.07 * env * energy(t);
-      L[i] += s;
-      R[i] += s;
+  const n = Math.round(DURATION * SR), L = new Float32Array(n), R = new Float32Array(n);
+  const beat = 60 / 124, bar = 4 * beat;
+  // Original bright house/pop groove: D major, B minor, G major, A major.
+  // Short chord stabs, a syncopated bass and dry drums replace the ambient pad.
+  const chords = [[50, 62, 66, 69, 73], [47, 59, 62, 66, 69], [43, 55, 59, 62, 66], [45, 57, 61, 64, 69]];
+  const energy = t => Math.min(1, .45 + t / 6) * Math.min(1, (DURATION - t) / 3);
+  function note(at, duration, frequency, amp, pan, kind) {
+    const start = Math.round(at * SR), length = Math.round(duration * SR);
+    for (let j = 0; j < length && start + j < n; j++) {
+      const t = j / SR, phase = 2 * Math.PI * frequency * t;
+      const envelope = (1 - Math.exp(-t * 240)) * Math.exp(-t * (kind === 'bass' ? 7 : 12));
+      const harmonic = Math.sin(phase) + .26 * Math.sin(2 * phase) + (kind === 'bass' ? .10 : .18) * Math.sin(3 * phase);
+      const pump = .45 + .55 * Math.min(1, ((at + t) % beat) / .14);
+      const v = harmonic * envelope * amp * energy(at) * pump;
+      L[start + j] += v * (1 - pan); R[start + j] += v * (1 + pan);
     }
   }
-
-  // Pulse: soft plucked arpeggio on 8ths + a felt kick on 1 and 3 + airy hats.
-  const eighth = beat / 2;
-  for (let s = 0; s * eighth < DURATION; s++) {
-    const t = s * eighth;
-    if (!pulseOn(t)) continue;
-    const notes = chords[Math.floor(t / chordLen) % chords.length];
-    const pattern = [2, 4, 3, 5, 2, 5, 4, 3];
-    const note = notes[pattern[s % 8]] + 12;
-    const f = midi(note);
-    const i0 = Math.round(t * SR);
-    const len = Math.round(0.42 * SR);
-    const amp = (s % 2 ? 0.035 : 0.05) * energy(t);
-    const pan = s % 4 < 2 ? 0.35 : -0.35;
-    for (let j = 0; j < len && i0 + j < n; j++) {
-      const tt = j / SR;
-      const env = Math.exp(-tt * 9) * (1 - Math.exp(-tt * 400));
-      const w = 2 * Math.PI * f * tt;
-      const v = (Math.sin(w) + 0.25 * Math.sin(2 * w) * Math.exp(-tt * 14)) * env * amp;
-      L[i0 + j] += v * (1 - pan);
-      R[i0 + j] += v * (1 + pan);
+  for (let step = 0; step * beat / 4 < DURATION - 1.5; step++) {
+    const at = step * beat / 4, inBar = step % 16;
+    const chord = chords[Math.floor(at / (bar * 2)) % 4];
+    const phrase = Math.floor(at / (bar * 8));
+    // Each eight-bar phrase briefly opens space, then brings the full groove back.
+    const breakdown = Math.floor(at / bar) % 16 === 15;
+    if ([0, 3, 6, 8, 11, 14].includes(inBar)) note(at, .28, midi(chord[0] - 12 + (inBar === 14 ? 12 : 0)), .19, 0, 'bass');
+    if ([2, 6, 10, 14].includes(inBar)) for (const [index, pitch] of chord.slice(1).entries()) note(at, .34, midi(pitch), .040, (index - 1.5) * .17, 'chord');
+    if (at > bar * 2 && !breakdown && step % 2 === 1) {
+      const melody = [1, 3, 2, 4, 3, 2, 4, 2];
+      note(at, .30, midi(chord[melody[(step >> 1) % 8]] + 12), .038, step % 4 === 1 ? -.3 : .3, 'lead');
     }
-    if (s % 4 === 0) {
-      const klen = Math.round(0.28 * SR);
-      for (let j = 0; j < klen && i0 + j < n; j++) {
-        const tt = j / SR;
-        const fk = 48 + 70 * Math.exp(-tt * 28);
-        const v = Math.sin(2 * Math.PI * fk * tt) * Math.exp(-tt * 11) * 0.12 * energy(t);
-        L[i0 + j] += v;
-        R[i0 + j] += v;
+    const start = Math.round(at * SR);
+    if (inBar % 4 === 0 && (!breakdown || inBar === 0)) {
+      for (let j = 0; j < .32 * SR && start + j < n; j++) {
+        const t = j / SR;
+        // Integrated pitch sweep avoids a buzzy discontinuity in the kick tail.
+        const phase = 2 * Math.PI * (48 * t + 95 * (1 - Math.exp(-t * 32)) / 32);
+        const v = (.48 * Math.sin(phase) * Math.exp(-t * 14) + .05 * rnd() * Math.exp(-t * 160)) * energy(at);
+        L[start + j] += v; R[start + j] += v;
       }
     }
-    if (s % 2 === 1) {
-      const hlen = Math.round(0.06 * SR);
-      let hp = 0;
-      let prev = 0;
-      for (let j = 0; j < hlen && i0 + j < n; j++) {
-        const x = rnd();
-        hp = 0.92 * (hp + x - prev);
-        prev = x;
-        const v = hp * Math.exp(-(j / SR) * 60) * 0.012 * energy(t);
-        L[i0 + j] += v * 0.8;
-        R[i0 + j] += v * 1.2;
+    if (inBar === 4 || inBar === 12) {
+      let lp = 0;
+      for (let j = 0; j < .18 * SR && start + j < n; j++) {
+        const t = j / SR, noise = rnd(); lp += .22 * (noise - lp);
+        const clap = (noise - lp) * (.9 * Math.exp(-t * 27) + .5 * Math.exp(-Math.abs(t - .012) * 300));
+        const v = (clap * .105 + Math.sin(2 * Math.PI * 185 * t) * Math.exp(-t * 35) * .06) * energy(at);
+        L[start + j] += v; R[start + j] += v;
+      }
+    }
+    if (step % 2 === 0 || phrase % 2 === 1) {
+      let previous = 0;
+      const open = inBar % 4 === 2, length = open ? .13 : .045;
+      for (let j = 0; j < length * SR && start + j < n; j++) {
+        const noise = rnd(), high = noise - previous; previous = noise;
+        const v = high * Math.exp(-(j / SR) * (open ? 35 : 100)) * (open ? .029 : .019) * energy(at);
+        L[start + j] += v * .85; R[start + j] += v * 1.15;
       }
     }
   }
-
-  // Intro riser (filtered noise swell) and a final chord ring.
-  const riseLen = Math.round(INTRO * SR);
-  let lp = 0;
-  for (let i = 0; i < riseLen && i < n; i++) {
-    const t = i / SR;
-    const k = 0.02 + 0.3 * (t / INTRO) ** 2;
-    lp += k * (rnd() - lp);
-    const v = lp * 0.06 * smooth(t / INTRO) * (t < INTRO - 0.15 ? 1 : 0);
-    L[i] += v;
-    R[i] += v;
-  }
-  const endNotes = [50, 57, 62, 66, 69, 74];
-  const e0 = Math.round((DURATION - OUTRO * 0.8) * SR);
-  for (let i = e0; i < n; i++) {
-    const tt = (i - e0) / SR;
-    const env = (1 - Math.exp(-tt * 2)) * Math.exp(-tt * 0.35);
-    let v = 0;
-    for (const nn of endNotes) v += Math.sin(2 * Math.PI * midi(nn) * tt) / endNotes.length;
-    L[i] += v * 0.08 * env;
-    R[i] += v * 0.08 * env;
-  }
-
-  reverb(L, R, 0.3, 1.15);
-  // Gentle fades at both ends.
-  const fi = Math.round(0.5 * SR);
-  const fo = Math.round(2.5 * SR);
-  for (let i = 0; i < fi; i++) {
-    L[i] *= i / fi;
-    R[i] *= i / fi;
-  }
-  for (let i = 0; i < fo; i++) {
-    const g = i / fo;
-    L[n - 1 - i] *= g;
-    R[n - 1 - i] *= g;
+  // A short room-like tail retains punch; no long calming pad wash.
+  reverb(L, R, .075, .55);
+  for (let i = 0; i < n; i++) {
+    const fade = Math.min(1, i / (SR * .25), (n - i) / (SR * 2));
+    L[i] = Math.tanh(L[i] * 1.15) * fade; R[i] = Math.tanh(R[i] * 1.15) * fade;
   }
   writeWav(join(outDir, 'music.wav'), L, R);
 }

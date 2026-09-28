@@ -17,6 +17,9 @@ import { router } from '../router.svelte';
 import { viewport } from './viewport.svelte';
 import { toasts } from '../toast.svelte';
 import { isEmbedded, isPopout } from '../desktop';
+import { paneSurfaceVisible, nativeSideFocused } from '../nativePanePolicy';
+import { paneWindowMenuItems } from '../nativePaneMenu';
+import { nativePane, nativePaneAvailable, observeNativePane, startNativePaneState, type PaneState, type PaneBounds } from '../nativePane';
 import { winKey } from '../win';
 import { lsGet, lsSet } from '../storage';
 import { moduleLabel } from '../sidebar';
@@ -77,6 +80,10 @@ class SidePaneStore {
   /** The pane's own ⌘K commands, mirrored into the host palette. */
   commands: RemoteCommand[] = $state([]);
 
+  nativeState: PaneState | null = $state(null);
+  nativeBusy = $state(false);
+  private transportReady: Promise<void> = Promise.resolve();
+
   private frame: HTMLIFrameElement | null = null;
   private focusOnReady = false;
   private readyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -92,9 +99,9 @@ class SidePaneStore {
   // Booleans as $derived (not plain getters over `width`): readers — the
   // 'split' / 'side-pane-commands' registry effects in App — then re-run only
   // when the answer flips, not on every px of a window resize.
-  private supportedNow = $derived(!isEmbedded && !isPopout && viewport.isDesktop);
+  private supportedNow = $derived(!isEmbedded && !isPopout && (viewport.isDesktop || (nativePaneAvailable && this.route !== null)));
   private fitsNow = $derived(this.width === 0 || fitsTwoPanes(this.width));
-  private showingNow = $derived(this.supportedNow && this.route !== null && this.fitsNow && this.key !== this.primaryKey);
+  private showingNow = $derived(this.supportedNow && !this.detached && this.route !== null && this.fitsNow && this.key !== this.primaryKey);
 
   /** The window can host a side pane at all (main window, desktop width). */
   get supported(): boolean {
@@ -122,6 +129,12 @@ class SidePaneStore {
     return this.showingNow;
   }
 
+  /** Native documents stay mounted and own their module even while hidden. */
+  get retained(): boolean { return nativePaneAvailable && !isEmbedded && !isPopout && this.route !== null; }
+  get active(): boolean { return this.retained || this.showing; }
+  get visible(): boolean { return paneSurfaceVisible(this.showing, this.detached, this.nativeState?.visible); }
+  get detached(): boolean { return this.nativeState !== null && this.nativeState.mode !== 'attached'; }
+
   /** The leading pane's fraction (divider position, aria-valuenow). */
   get leading(): number {
     return leadingShare(this.share, this.placement);
@@ -148,11 +161,11 @@ class SidePaneStore {
       toasts.info(`${label} is already open`, 'Choose another section to show side by side.');
       return;
     }
-    if (!this.fits) {
+    if (!this.fits && !this.detached) {
       toasts.info('Not enough room for two panes', 'Widen the window or collapse the sidebar (⌘1).');
       return;
     }
-    const live = this.route !== null && this.frame !== null;
+    const live = this.route !== null && (this.frame !== null || this.nativeState !== null);
     this.route = r;
     this.persist();
     if (live && this.status === 'ready') {
@@ -180,7 +193,19 @@ class SidePaneStore {
   /** Close the pane; the main pane keeps everything. The next pane opens on
    *  the trailing side again (the split ratio is kept). */
   close(): void {
-    if (this.route === null) return;
+    if (this.route === null || this.nativeBusy) return;
+    if (this.detached) { this.returnToSplit(); return; }
+    if (this.retained && this.nativeState) {
+      this.nativeBusy = true;
+      void nativePane.close().then(() => this.clearPane()).catch(() => {
+        toasts.error('Couldn’t close the side pane', 'Try again. Your pane is still open.');
+      }).finally(() => { this.nativeBusy = false; });
+      return;
+    }
+    this.clearPane();
+  }
+
+  private clearPane(): void {
     this.route = null;
     this.placement = 'trailing';
     this.commands = [];
@@ -200,10 +225,15 @@ class SidePaneStore {
 
   /** Open the pane's page in the main pane and close the pane. */
   promote(): void {
+    if (this.detached || this.nativeBusy) return;
     const r = this.route;
     if (r === null) return;
-    this.close();
-    router.go(r);
+    if (this.retained && this.nativeState) {
+      this.nativeBusy = true;
+      void nativePane.close().then(() => { this.clearPane(); router.go(r); }).catch(() => {
+        toasts.error('Couldn’t move the page', 'Try again. Your pane is still open.');
+      }).finally(() => { this.nativeBusy = false; });
+    } else { this.clearPane(); router.go(r); }
   }
 
   /** Move the divider: `leading` is the leading pane's fraction. `commit`
@@ -222,6 +252,40 @@ class SidePaneStore {
   retry(): void {
     this.status = 'loading';
     this.generation += 1;
+  }
+
+  detachPane(pane: 'side' | 'primary'): void {
+    if (!this.active || this.status !== 'ready') return;
+    this.transition(() => nativePane.detach(pane));
+  }
+
+  returnToSplit(): void { this.transition(() => nativePane.return()); }
+
+  private transition(action: () => Promise<unknown>): void {
+    if (this.nativeBusy) return;
+    this.nativeBusy = true;
+    void action().catch(() => {
+      toasts.error('Couldn’t change the pane window', 'Try again. Your work remains in its current pane.');
+    }).finally(() => { this.nativeBusy = false; });
+  }
+
+  /** Subscribe before creating the child: ready may arrive during pane_open. */
+  attachNative(bounds: PaneBounds): () => void {
+    let cancelled = false;
+    let opened = false;
+    this.status = 'loading';
+    this.clearTimer();
+    this.readyTimer = setTimeout(() => { if (!cancelled && this.status === 'loading') this.status = 'error'; }, READY_TIMEOUT_MS);
+    void this.transportReady.then(async () => {
+      if (cancelled) return;
+      opened = true;
+      await nativePane.open(this.route ?? 'agents', bounds);
+    }).catch(() => { if (!cancelled) { this.status = 'error'; this.clearTimer(); } });
+    return () => {
+      cancelled = true;
+      this.clearTimer();
+      if (opened) void nativePane.close().catch(() => {});
+    };
   }
 
   /** The iframe src for a freshly built frame (read once per frame). */
@@ -253,6 +317,17 @@ class SidePaneStore {
 
   /** Move keyboard focus into the pane (once it has booted). */
   focusPane(): void {
+    if (this.retained) {
+      if (this.status !== 'ready') { this.focusOnReady = true; return; }
+      if (!this.showing && !this.detached) {
+        toasts.info('The side pane is hidden', 'Widen the window or use Pane window to detach it.');
+        return;
+      }
+      if (this.nativeState?.visible !== true) { this.focusOnReady = true; return; }
+      void nativePane.focus('side').catch(() => {});
+      this.focused = true;
+      return;
+    }
     const f = this.frame;
     if (!f) return;
     if (this.status !== 'ready') {
@@ -275,18 +350,23 @@ class SidePaneStore {
     this.post({
       type: 'host',
       primary: this.primaryKey,
-      padTraffic: isTauri && this.placement === 'leading' && !ui.railExpanded,
+      padTraffic: isTauri && !this.detached && this.placement === 'leading' && !ui.railExpanded,
     });
   }
 
   /** Hand keyboard focus back to the main pane. */
   focusMain(): void {
+    if (this.retained) void nativePane.focus('primary').catch(() => {});
     if (this.frame && document.activeElement === this.frame) this.frame.blur();
     window.focus();
     this.focused = false;
   }
 
   post(msg: Payload<HostMsg>): void {
+    if (this.retained) {
+      void nativePane.toGuest({ ns: SIDE_NS, ...msg }).catch(() => {});
+      return;
+    }
     try {
       this.frame?.contentWindow?.postMessage({ ns: SIDE_NS, ...msg }, targetOrigin(window.location.origin));
     } catch {
@@ -300,8 +380,10 @@ class SidePaneStore {
    * `sideMenuTarget`). True = handled here; false = the main window's.
    */
   handleMenu(id: string): boolean {
-    if (!this.showing) return false;
-    const focused = this.focused || (this.frame !== null && document.activeElement === this.frame);
+    if (!this.active) return false;
+    const focused = this.retained
+      ? nativeSideFocused(this.focused, document.hasFocus())
+      : this.focused || (this.frame !== null && document.activeElement === this.frame);
     const target = sideMenuTarget(id, focused, this.key);
     if (target === 'main') return false;
     if (target === 'close-pane') this.close();
@@ -318,14 +400,13 @@ class SidePaneStore {
     if (isEmbedded || isPopout) return () => {};
 
     router.setDelegate({
-      claims: (route) => this.showing && paneKey(route) === this.key,
+      claims: (route) => this.active && paneKey(route) === this.key,
       deliver: (route) => this.deliver(route),
     });
 
-    const onMessage = (e: MessageEvent): void => {
-      const f = this.frame;
-      if (!f || e.source !== f.contentWindow) return;
-      const msg = readGuestMsg(e.data);
+    const receive = (data: unknown): void => {
+      if (this.route === null) return;
+      const msg = readGuestMsg(data);
       if (!msg) return;
       switch (msg.type) {
         case 'ready': {
@@ -377,6 +458,27 @@ class SidePaneStore {
       }
     };
 
+    const onMessage = (e: MessageEvent): void => {
+      if (!nativePaneAvailable && this.frame && e.source === this.frame.contentWindow) receive(e.data);
+    };
+    let stopped = false;
+    let unlisten: (() => void) | undefined;
+    const stopState = nativePaneAvailable ? observeNativePane((state) => {
+      this.nativeState = state;
+      if (state?.visible && this.focusOnReady && this.status === 'ready') {
+        this.focusOnReady = false;
+        this.focusPane();
+      }
+    }) : () => {};
+    if (nativePaneAvailable) {
+      this.transportReady = nativePane.onHost(receive).then(async (stop) => {
+        if (stopped) { stop(); return; }
+        unlisten = stop;
+        await startNativePaneState();
+      });
+      void this.transportReady.catch(() => { this.status = 'error'; });
+    }
+
     // Focus: the window blurs when focus moves into the iframe; any focus in
     // this document means the main pane is active again.
     const onBlur = (): void => {
@@ -387,6 +489,9 @@ class SidePaneStore {
     const onFocusIn = (): void => {
       this.focused = this.frame !== null && document.activeElement === this.frame;
     };
+    const onNativeFocus = (): void => {
+      if (this.retained && document.hasFocus()) this.focused = false;
+    };
     // A press in the main document makes the main pane active — except on
     // the side pane's own bar (its buttons act on the side pane).
     const onPointerDown = (e: PointerEvent): void => {
@@ -396,12 +501,17 @@ class SidePaneStore {
 
     window.addEventListener('message', onMessage);
     window.addEventListener('blur', onBlur);
+    window.addEventListener('focus', onNativeFocus);
     document.addEventListener('focusin', onFocusIn);
     document.addEventListener('pointerdown', onPointerDown, true);
     return () => {
+      stopped = true;
+      unlisten?.();
+      stopState();
       router.setDelegate(null);
       window.removeEventListener('message', onMessage);
       window.removeEventListener('blur', onBlur);
+      window.removeEventListener('focus', onNativeFocus);
       document.removeEventListener('focusin', onFocusIn);
       document.removeEventListener('pointerdown', onPointerDown, true);
     };
@@ -422,12 +532,14 @@ export const SPLIT_HINT = '⌥-click to open side by side';
 export function splitMenuItems(id: string, label: string): MenuItem[] {
   if (!sidePane.supported) return [];
   if (sidePane.route !== null && sidePane.key === id) {
+    if (sidePane.detached) return paneWindowMenuItems();
     return [
+      ...(nativePaneAvailable ? paneWindowMenuItems() : []),
       { label: 'Open in main pane', icon: 'maximize', action: () => sidePane.promote() },
       { label: 'Close side pane', icon: 'x', hint: '⌘\\', action: () => sidePane.close() },
     ];
   }
-  if (sidePane.primaryKey === id) return [];
+  if (sidePane.primaryKey === id) return sidePane.retained ? paneWindowMenuItems() : [];
   return [
     {
       label: sidePane.route !== null ? 'Show in side pane' : 'Open side by side',
@@ -443,7 +555,7 @@ export function splitMenuItems(id: string, label: string): MenuItem[] {
 export function navClick(e: MouseEvent, id: string, label: string): void {
   if (e.altKey && sidePane.supported) {
     e.preventDefault();
-    if (sidePane.route !== null && sidePane.key === id && sidePane.showing) sidePane.focusPane();
+    if (sidePane.route !== null && sidePane.key === id && sidePane.active) sidePane.focusPane();
     else sidePane.open(id, { label });
     return;
   }

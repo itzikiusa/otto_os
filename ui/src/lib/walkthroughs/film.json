@@ -1,8 +1,8 @@
 {
-  "file": "otto-tour-instrumental-20260925.mp4",
-  "poster": "otto-tour-poster.jpg",
-  "captions": "otto-tour.vtt",
-  "duration": 177.03,
+  "file": "otto-tour-rooms-20260928.mp4",
+  "poster": "otto-tour-rooms-poster.jpg",
+  "captions": "otto-tour-rooms.vtt",
+  "duration": 253.566667,
   "chapters": [
     {
       "id": "intro",
@@ -103,10 +103,17 @@
       "duration": 7.47
     },
     {
+      "id": "rooms",
+      "section": "rooms",
+      "title": "Rooms · collaborate and recap",
+      "start": 165.2,
+      "duration": 76.53333333333333
+    },
+    {
       "id": "outro",
       "section": "phone-and-remote",
       "title": "Everywhere",
-      "start": 165.2,
+      "start": 241.73333333333332,
       "duration": 11.83
     }
   ]

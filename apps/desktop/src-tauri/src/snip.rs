@@ -25,19 +25,20 @@ fn snip_id_ok(id: &str) -> bool {
 /// fires while Otto is NOT focused, so the fallbacks matter. The assistant bar
 /// and the tray popover never qualify: their pages don't run the snip flow.
 pub fn emit_snip(app: &AppHandle) {
-    let wins = app.webview_windows();
+    let wins = app.windows();
     let target = wins
         .iter()
-        .find(|(l, w)| crate::windows::is_app_window(l) && w.is_focused().unwrap_or(false))
+        .find(|(l, w)| (crate::windows::is_app_window(l) || l.starts_with(crate::panes::PREFIX)) && w.is_focused().unwrap_or(false))
         .or_else(|| wins.get_key_value("main"))
         .or_else(|| wins.iter().find(|(l, _)| crate::windows::is_app_window(l)))
         .map(|(l, _)| l.clone());
     match target {
         Some(label) => {
-            let _ = app.emit_to(label.as_str(), "otto://menu", "snip".to_string());
+            let host = crate::panes::menu_host(app, &label);
+            let _ = app.emit_to(tauri::EventTarget::webview(host), "otto://menu", "snip".to_string());
         }
         None => {
-            let _ = app.emit("otto://menu", "snip".to_string());
+            // No local host is available. Never broadcast native actions.
         }
     }
 }

@@ -2,7 +2,11 @@
 // overlaid on the Browser panel. No-ops on the plain web build, where the panel
 // falls back to a single <iframe>.
 
-const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+import { isTauri as desktopAvailable, isEmbedded } from './desktop';
+
+// Embedded panes use the browser renderer: nested native children would remain
+// attached to the old window when the enclosing pane moves.
+const isTauri = desktopAvailable && !isEmbedded;
 
 export const nativeBrowserAvailable = isTauri;
 

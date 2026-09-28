@@ -219,6 +219,7 @@
   // PageHeader does on every other page (lib/stores/embedChrome).
   let barEl: HTMLDivElement | undefined = $state();
   $effect(() => (barEl ? embedChrome.claim(barEl) : undefined));
+  const hostsPrimaryPane = $derived(!isEmbedded && isTauri && sidePane.active && !!barEl && embedChrome.owner === barEl);
   const hostsPane = $derived(isEmbedded && !!barEl && embedChrome.owner === barEl);
 </script>
 
@@ -226,7 +227,7 @@
 <div
   bind:this={barEl}
   class="tabbar chrome-material"
-  class:tauri-pad={(isTauri && !ui.railExpanded && !(sidePane.showing && sidePane.placement === 'leading')) ||
+  class:tauri-pad={(isTauri && !isEmbedded && !ui.railExpanded && !(sidePane.showing && sidePane.placement === 'leading')) ||
     (hostsPane && embedChrome.padTraffic)}
   data-tauri-drag-region
   onmousedown={startWindowDrag}
@@ -407,7 +408,7 @@
   >
     <Icon name="plus" size={13} />
   </button>
-  {#if hostsPane}<PaneControls />{/if}
+  {#if hostsPane}<PaneControls />{:else if hostsPrimaryPane}<PaneControls pane="primary" />{/if}
 </div>
 
 <style>
