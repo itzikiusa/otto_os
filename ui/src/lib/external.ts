@@ -3,7 +3,7 @@
 // In a Tauri WKWebView a plain `<a target="_blank">` does NOT open the OS
 // browser — the webview tries to open a (blocked) in-app window, so the click
 // appears to do nothing. We route external links through the shell plugin's
-// `open` command instead. On the plain web build we fall back to an anchor.
+// `open` command instead. On the plain web build we fall back to window.open.
 
 import { isEmbedded } from './desktop';
 import { postToHost } from './embedGuest';
@@ -43,11 +43,8 @@ export async function openExternal(url: string | null | undefined): Promise<void
     }
   }
 
-  const a = document.createElement('a');
-  a.href = href;
-  a.target = '_blank';
-  a.rel = 'noopener noreferrer';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+  // Not a synthetic `<a target=_blank>` click: App.svelte's capture-phase
+  // link handler routes such clicks back here, and WebKit recursed until the
+  // stack overflowed (the web build's every external link).
+  window.open(href, '_blank', 'noopener,noreferrer');
 }
