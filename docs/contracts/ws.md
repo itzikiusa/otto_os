@@ -1227,7 +1227,9 @@ Canvas scene is attached to or detached from an agent session.
 
 Conversation view (`docs/design/conversation-view.md` §4.3). Emitted by
 `crates/otto-server/src/transcript_tail.rs` (the per-session live tail, armed by
-`GET /sessions/{id}/transcript` on a live session; 700 ms poll) and
+`GET /sessions/{id}/transcript` on a live session — which then pages the
+tail's own fold, so the first delta continues exactly from that page; 700 ms
+poll) and
 `history_index.rs` (rescan progress).
 
 ```json

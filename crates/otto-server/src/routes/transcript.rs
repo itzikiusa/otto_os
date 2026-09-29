@@ -279,13 +279,14 @@ pub(crate) fn fold_opts(ctx: &ServerCtx, provider: Provider, path: &Path) -> Fol
 }
 
 /// Fold a transcript file with the server's knobs: images written to the
-/// store, cost priced exactly like the Usage module, subagent tree attached.
+/// store, cost priced exactly like the Usage module, subagent tree attached
+/// (and returned, so the caller does not read the sidecars a second time).
 pub(crate) fn fold_with(
     ctx: &ServerCtx,
     provider: Provider,
     path: &Path,
     sub: Option<&str>,
-) -> Result<Folded, Error> {
+) -> Result<(Folded, Vec<otto_transcript::SubagentMeta>), Error> {
     let store = image_store(ctx, &store_key(provider, path));
     let subagents = if sub.is_none() && provider == Provider::Claude {
         read_subagents(path)
@@ -304,16 +305,17 @@ pub(crate) fn fold_with(
         }
     };
     let price: otto_transcript::PriceFn<'_> = &otto_usage::estimate_cost;
-    fold_file(
+    let folded = fold_file(
         provider,
         &target,
         FoldOpts {
             images: Some(store),
             price: Some(price),
-            subagents,
+            subagents: subagents.clone(),
         },
     )
-    .map_err(|e| Error::Internal(format!("read transcript: {e}")))
+    .map_err(|e| Error::Internal(format!("read transcript: {e}")))?;
+    Ok((folded, subagents))
 }
 
 /// Authorization/resolution have already completed before entering the cache.
@@ -339,12 +341,7 @@ async fn cached_fold(
     let sub = sub.map(str::to_string);
     ctx.transcript_cache
         .get(key, move || {
-            let folded = fold_with(&cx, provider, &path, sub.as_deref())?;
-            let subagents = if sub.is_none() && provider == Provider::Claude {
-                read_subagents(&path)
-            } else {
-                Vec::new()
-            };
+            let (folded, subagents) = fold_with(&cx, provider, &path, sub.as_deref())?;
             Ok(crate::transcript_cache::Snapshot { folded, subagents })
         })
         .await
@@ -352,7 +349,9 @@ async fn cached_fold(
 }
 
 /// Page a fold into the wire `Transcript`. A subagent view keeps only turns
-/// and `stats.turns/tool_calls` (design §3).
+/// and `stats.turns/tool_calls` (design §3). The subagent tree rides on the
+/// newest page only: an earlier page (`before`) extends a list whose first
+/// page already carried it (283 sidecars ≈ 55 KB per "Load earlier").
 fn page(
     folded: &Folded,
     before: Option<usize>,
@@ -360,6 +359,11 @@ fn page(
     sub: Option<&str>,
     subagents: Vec<otto_transcript::SubagentMeta>,
 ) -> Transcript {
+    let subagents = if before.is_some() {
+        Vec::new()
+    } else {
+        subagents
+    };
     let mut t = folded.page(before, limit.clamp(1, MAX_LIMIT), subagents);
     if sub.is_some() {
         t.title = None;
@@ -459,9 +463,21 @@ pub async fn get_transcript(
     };
     let sub = q.sub.as_deref().filter(|s| !s.is_empty());
     let provider = resolved.provider;
-    // A running tail already holds this file's fold: page from memory (no
-    // disk re-fold, no "busy" while the agent writes). Otherwise the cache.
+    // A live session's page comes from its tail: arm the tail FIRST and page
+    // its fold (waiting for the initial one when it is just starting). That
+    // is ONE fold of the file per open — the read path used to fold it and
+    // then the tail folded it again — and the page is exactly the state the
+    // `transcript_appended` deltas continue from. A file the agent keeps
+    // appending to never makes this read "busy". Falls back to the cache
+    // when no tail runs (not live, the tail cap, a different file).
+    let is_live = sub.is_none() && ctx.manager.is_live(&id);
+    if is_live {
+        crate::transcript_tail::touch(&ctx, &session, provider, &resolved.path);
+    }
     let live = match sub {
+        None if is_live => {
+            crate::transcript_tail::live_page_settled(&id, provider, &resolved.path).await
+        }
         None => crate::transcript_tail::live_page(&id, provider, &resolved.path).await,
         Some(_) => None,
     };
@@ -490,10 +506,6 @@ pub async fn get_transcript(
     };
     if t.session_id.is_none() {
         t.session_id = session.provider_session_id.clone();
-    }
-    // Live session → keep the tail warm for this subscriber (design §4.4).
-    if sub.is_none() && ctx.manager.is_live(&id) {
-        crate::transcript_tail::touch(&ctx, &session, provider, &resolved.path);
     }
     Ok(Json(t))
 }

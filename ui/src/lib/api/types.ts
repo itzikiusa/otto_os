@@ -8695,7 +8695,8 @@ export interface Transcript {
   has_earlier: boolean;
   turns: Turn[];
   stats: TranscriptStats;
-  /** FULL tree; `?sub=` responses return `[]`. */
+  /** FULL tree on the newest page; `?sub=` and earlier (`before`) pages
+   *  return `[]` — keep the first page's. */
   subagents: SubagentMeta[];
   /** Set (with `turns: []`) when no transcript resolves for the session. */
   unavailable_reason: TranscriptUnavailableReason | null;
