@@ -8703,6 +8703,19 @@ export interface Transcript {
 
 export type TurnRole = 'user' | 'assistant';
 
+/** Token usage summed over one assistant turn's API calls (Claude
+ *  `message.usage`, Codex `token_count`). `thinking_tokens` is the part of
+ *  `output_tokens` spent on reasoning (Claude `output_tokens_details`), so the
+ *  visible answer is `output_tokens - thinking_tokens`. Cache fields are
+ *  separate from `input_tokens`, as the providers report them. */
+export interface TurnUsage {
+  input_tokens: number;
+  output_tokens: number;
+  thinking_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+}
+
 export interface Turn {
   /** Claude: assistant → requestId (else uuid); user → uuid. Codex new era →
    *  `turn_id + ":u"|":a"`; old era → `"r<record_index>"`. Stable across re-parses. */
@@ -8716,6 +8729,8 @@ export interface Turn {
   system: SystemNote[];
   /** Codex reasoning items in this turn (never recorded → counted only; 0 for Claude). */
   reasoning_steps: number;
+  /** Assistant turns only; absent/null when the provider recorded no usage. */
+  usage?: TurnUsage | null;
 }
 
 export type ToolKind =
