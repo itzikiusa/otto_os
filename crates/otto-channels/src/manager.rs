@@ -7,6 +7,12 @@
 //! channel toggled / added / removed in the UI) it cancels the current
 //! generation of adapters and respawns — so config edits apply without a
 //! daemon restart. A top-level `cancel` flag stops everything on shutdown.
+//!
+//! An integration whose token can't be read yet (a Keychain read failing
+//! right after login/boot, or a token not saved yet) is kept PENDING and
+//! retried on every rescan, without restarting the listeners that did start.
+//! It used to be skipped for the whole generation — a failed read at daemon
+//! start left that channel dead until the integration was edited.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,6 +48,74 @@ fn generation_signature(integrations: &[otto_core::domain::Integration]) -> Gene
         .collect();
     sig.sort();
     sig
+}
+
+/// Tokens an inbound listener needs, or why it can't start yet.
+#[derive(Debug, PartialEq)]
+enum ListenerTokens {
+    Telegram {
+        token: String,
+    },
+    Slack {
+        bot_token: String,
+        app_token: String,
+    },
+    /// Request-driven channel (webhook): nothing to spawn.
+    None,
+}
+
+/// Read one secret; a read error and "not saved" are both "not ready yet"
+/// (retried on the next rescan), but logged differently.
+fn read_secret(secrets: &dyn SecretStore, key: &str, ws: &str, what: &str) -> Option<String> {
+    match secrets.get(key) {
+        Ok(Some(t)) if !t.is_empty() => Some(t),
+        Ok(_) => {
+            warn!(workspace = %ws, "{what} missing — will retry on the next rescan");
+            None
+        }
+        Err(e) => {
+            warn!(workspace = %ws, "{what} could not be read ({e}) — will retry on the next rescan");
+            None
+        }
+    }
+}
+
+/// Resolve an integration's listener tokens. `None` = not ready yet.
+fn resolve_tokens(
+    secrets: &dyn SecretStore,
+    integ: &otto_core::domain::Integration,
+) -> Option<ListenerTokens> {
+    let ws = integ.workspace_id.as_str();
+    match integ.channel {
+        Channel::Telegram => {
+            let token = read_secret(
+                secrets,
+                &format!("chan-bot-{ws}-telegram"),
+                ws,
+                "telegram: bot token",
+            )?;
+            Some(ListenerTokens::Telegram { token })
+        }
+        Channel::Slack => {
+            let bot_token = read_secret(
+                secrets,
+                &format!("chan-bot-{ws}-slack"),
+                ws,
+                "slack: bot token",
+            )?;
+            let app_token = read_secret(
+                secrets,
+                &format!("chan-app-{ws}-slack"),
+                ws,
+                "slack: app token (needed for Socket Mode)",
+            )?;
+            Some(ListenerTokens::Slack {
+                bot_token,
+                app_token,
+            })
+        }
+        Channel::Webhook => Some(ListenerTokens::None),
+    }
 }
 
 /// Handle returned by `ChannelManager::start`. Keep it alive for the process
@@ -196,6 +270,10 @@ impl ChannelManager {
 
         let mut gen_cancel: Option<Arc<AtomicBool>> = None;
         let mut last_sig: Option<GenerationSignature> = None;
+        // Integrations of the current generation still waiting for a token,
+        // and the tokens already listening in it (see `spawn_generation`).
+        let mut pending: Vec<otto_core::domain::Integration> = Vec::new();
+        let mut listening: HashSet<String> = HashSet::new();
 
         loop {
             if cancel.load(Ordering::Relaxed) {
@@ -224,10 +302,25 @@ impl ChannelManager {
                     g.store(true, Ordering::Relaxed);
                 }
                 let g = Arc::new(AtomicBool::new(false));
-                let count = self.spawn_generation(&integrations, &bridge, &g);
+                listening.clear();
+                let (count, waiting) =
+                    self.spawn_generation(&integrations, &bridge, &g, &mut listening);
                 info!("channel manager: {count} adapter(s) active");
+                pending = waiting;
                 gen_cancel = Some(g);
                 last_sig = Some(sig);
+            } else if !pending.is_empty() {
+                // Same config: start only what was waiting for its token,
+                // under the running generation (no restart of live listeners).
+                if let Some(g) = gen_cancel.clone() {
+                    let retry = std::mem::take(&mut pending);
+                    let (count, waiting) =
+                        self.spawn_generation(&retry, &bridge, &g, &mut listening);
+                    if count > 0 {
+                        info!("channel manager: {count} waiting adapter(s) started");
+                    }
+                    pending = waiting;
+                }
             }
 
             // One timer per rescan; shutdown wakes it (was 500 ms slices).
@@ -240,33 +333,33 @@ impl ChannelManager {
     }
 
     /// Spawn one adapter task per enabled integration under `gen_cancel`.
-    /// Returns how many were started.
+    /// Returns how many were started, and the integrations that could not
+    /// start yet (token not readable) — the supervisor retries those.
+    ///
+    /// `listening` holds the inbound tokens already started in this
+    /// generation. The upsert API refuses to enable a second integration on
+    /// the same token, but state from before that check (or a hand-edited DB)
+    /// can still hold two — running both would split every bot's events
+    /// randomly between the workspaces, so only the first (by workspace id)
+    /// listens.
     fn spawn_generation(
         &self,
         integrations: &[otto_core::domain::Integration],
         bridge: &Arc<Bridge>,
         gen_cancel: &Arc<AtomicBool>,
-    ) -> usize {
+        listening: &mut HashSet<String>,
+    ) -> (usize, Vec<otto_core::domain::Integration>) {
         let mut count = 0;
-        // Inbound listener tokens already started in this generation. The
-        // upsert API refuses to enable a second integration on the same token,
-        // but state from before that check (or a hand-edited DB) can still
-        // hold two — running both would split every bot's events randomly
-        // between the workspaces, so only the first (by workspace id) listens.
-        let mut listening: HashSet<String> = HashSet::new();
+        let mut waiting = Vec::new();
         for integ in integrations {
-            let integ = integ.clone();
             let ws_id = integ.workspace_id.clone();
-            match integ.channel {
-                Channel::Telegram => {
-                    let bot_ref = format!("chan-bot-{}-telegram", ws_id);
-                    let token = match self.secrets.get(&bot_ref) {
-                        Ok(Some(t)) => t,
-                        _ => {
-                            warn!(workspace = %ws_id, "telegram: bot token missing, skipping");
-                            continue;
-                        }
-                    };
+            let Some(tokens) = resolve_tokens(self.secrets.as_ref(), integ) else {
+                waiting.push(integ.clone());
+                continue;
+            };
+            let integ = integ.clone();
+            match tokens {
+                ListenerTokens::Telegram { token } => {
                     if !listening.insert(token.clone()) {
                         warn!(
                             workspace = %ws_id,
@@ -282,21 +375,10 @@ impl ChannelManager {
                         crate::telegram::run(integ, token, b, c).await;
                     });
                 }
-                Channel::Slack => {
-                    let bot_token = match self.secrets.get(&format!("chan-bot-{}-slack", ws_id)) {
-                        Ok(Some(t)) if !t.is_empty() => t,
-                        _ => {
-                            warn!(workspace = %ws_id, "slack: bot token missing, skipping");
-                            continue;
-                        }
-                    };
-                    let app_token = match self.secrets.get(&format!("chan-app-{}-slack", ws_id)) {
-                        Ok(Some(t)) if !t.is_empty() => t,
-                        _ => {
-                            warn!(workspace = %ws_id, "slack: app token missing (needed for Socket Mode), skipping");
-                            continue;
-                        }
-                    };
+                ListenerTokens::Slack {
+                    bot_token,
+                    app_token,
+                } => {
                     if !listening.insert(app_token.clone()) {
                         warn!(
                             workspace = %ws_id,
@@ -314,10 +396,10 @@ impl ChannelManager {
                 }
                 // Webhooks are request-driven (the inbound HTTP route calls the
                 // bridge directly), so the supervisor spawns no listener for them.
-                Channel::Webhook => {}
+                ListenerTokens::None => {}
             }
         }
-        count
+        (count, waiting)
     }
 }
 
@@ -355,5 +437,52 @@ mod tests {
         )];
 
         assert_ne!(generation_signature(&old), generation_signature(&new));
+    }
+
+    /// Fails every read until `ready` is set, then serves the tokens — a
+    /// Keychain that isn't available yet right after login/boot.
+    struct FlakyStore {
+        ready: AtomicBool,
+    }
+    impl SecretStore for FlakyStore {
+        fn get(&self, key: &str) -> otto_core::Result<Option<String>> {
+            if !self.ready.load(Ordering::Relaxed) {
+                return Err(otto_core::Error::Internal("keychain not available".into()));
+            }
+            Ok(Some(format!("tok-{key}")))
+        }
+        fn put(&self, _key: &str, _value: &str) -> otto_core::Result<()> {
+            Ok(())
+        }
+        fn delete(&self, _key: &str) -> otto_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_unreadable_token_is_not_ready_then_resolves_once_readable() {
+        let store = FlakyStore {
+            ready: AtomicBool::new(false),
+        };
+        let slack = integration(
+            Channel::Slack,
+            Utc.with_ymd_and_hms(2026, 9, 29, 8, 0, 0).unwrap(),
+        );
+        // First scan (daemon start, Keychain not ready): not ready → pending.
+        assert_eq!(resolve_tokens(&store, &slack), None);
+        // A later rescan: the same integration now resolves.
+        store.ready.store(true, Ordering::Relaxed);
+        assert_eq!(
+            resolve_tokens(&store, &slack),
+            Some(ListenerTokens::Slack {
+                bot_token: "tok-chan-bot-ws_1-slack".into(),
+                app_token: "tok-chan-app-ws_1-slack".into(),
+            })
+        );
+        let hook = integration(
+            Channel::Webhook,
+            Utc.with_ymd_and_hms(2026, 9, 29, 8, 0, 0).unwrap(),
+        );
+        assert_eq!(resolve_tokens(&store, &hook), Some(ListenerTokens::None));
     }
 }
