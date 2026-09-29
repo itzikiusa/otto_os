@@ -5,6 +5,9 @@
 //! ```text
 //! cargo run --release -p otto-transcript --example fold_bench -- <file.jsonl> [runs]
 //! ```
+//!
+//! `FOLD_BENCH_ONLY=collect|stream` runs just that fold once (whole-file
+//! `Vec<Value>` vs streamed) so `/usr/bin/time -l` shows its peak RSS.
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -19,6 +22,16 @@ fn main() {
     let path = PathBuf::from(args.next().expect("usage: fold_bench <file.jsonl> [runs]"));
     let runs: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(3);
     let provider = otto_transcript::provider_for_path(&path).unwrap_or(Provider::Claude);
+    if let Ok(only) = std::env::var("FOLD_BENCH_ONLY") {
+        let bytes = std::fs::read(&path).unwrap();
+        let t = Instant::now();
+        let folded = match only.as_str() {
+            "collect" => fold(provider, &parse_records(&bytes), FoldOpts::default()),
+            _ => fold_bytes(provider, &bytes, FoldOpts::default()),
+        };
+        println!("{only}: {} turns in {:.1} ms", folded.turns.len(), ms(t));
+        return;
+    }
     for run in 0..runs {
         let t = Instant::now();
         let bytes = std::fs::read(&path).unwrap();
