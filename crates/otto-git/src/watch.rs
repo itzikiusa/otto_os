@@ -187,6 +187,13 @@ impl RepoWatchers {
         let tx = self.tx.clone();
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             let Ok(ev) = res else { return };
+            // Opens/reads never change status (inotify reports them; our own
+            // `git status` reading the tree would otherwise loop, and arming a
+            // recursive watch opens every directory). Writes also arrive as
+            // Create/Modify/Remove, so nothing is lost.
+            if matches!(ev.kind, notify::EventKind::Access(_)) {
+                return;
+            }
             let mut hit = false;
             for p in &ev.paths {
                 if p.file_name().is_some_and(|n| n == ".gitignore") {
@@ -337,8 +344,13 @@ mod tests {
         let w = RepoWatchers::new(tx);
         w.touch(&"r1".to_string(), &"w1".to_string(), &root, None);
         assert_eq!(w.watched(), 1);
-        // Let the OS stream start before producing changes.
+        // Let the OS stream start, then drop anything arming produced (a
+        // backend may report the initial walk) before producing changes.
         tokio::time::sleep(Duration::from_millis(500)).await;
+        while next_change(&mut rx, Duration::from_millis(600))
+            .await
+            .is_some()
+        {}
 
         std::fs::write(root.join("target/out.o"), b"x").unwrap();
         assert_eq!(
