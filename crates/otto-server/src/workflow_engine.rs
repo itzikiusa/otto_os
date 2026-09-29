@@ -7358,10 +7358,12 @@ fn normalize_prompt(input: Value) -> Value {
 ///
 /// SAFETY (load-bearing): this only ever CREATES a new linked worktree + a fresh
 /// `otto-wf/<run_id>` branch under the data dir. It never checks out, resets, or
-/// switches branches in the user's own repo, never deletes, never fetches or
-/// forces. `rev-parse` (read-only) resolves the base — the local branch, else
-/// its remote-tracking `origin/<base>` (a repo that only has `origin/develop`
-/// used to fall through here). No-op when no `base` is set.
+/// switches branches in the user's own repo, and never deletes. `rev-parse`
+/// resolves the base — the local branch, else its remote-tracking
+/// `origin/<base>` (a repo that only has `origin/develop` used to fall through
+/// here), else a single-branch fetch into `refs/remotes/origin/<base>` (a base
+/// created on the remote after the clone last fetched). No-op when no `base`
+/// is set.
 ///
 /// Returns `(primary, isolation_failures)`. A failure is an entry that WOULD
 /// run in the user's own checkout because its base could not be resolved or
@@ -7449,7 +7451,43 @@ async fn resolve_wf_base(git: &otto_git::LocalGit, base: &str) -> Option<String>
     if let Ok(c) = git.rev_parse(base).await {
         return Some(c);
     }
-    git.rev_parse(&format!("origin/{base}")).await.ok()
+    let remote = format!("origin/{base}");
+    if let Ok(c) = git.rev_parse(&remote).await {
+        return Some(c);
+    }
+    // Neither ref exists yet — typically a branch created on the remote after
+    // the clone last fetched (a PR targeting a fresh `hotfix/*`). Fetch THAT
+    // ONE branch into its remote-tracking ref and retry. Safe: it writes only
+    // `refs/remotes/origin/<base>` — never the user's branches, HEAD or tree —
+    // and runs non-interactively (BatchMode SSH), so it can't prompt.
+    if !fetchable_branch_name(base) {
+        return None;
+    }
+    let refspec = format!("+refs/heads/{base}:refs/remotes/origin/{base}");
+    match git
+        .run_automation(&["fetch", "--no-tags", "origin", &refspec], true)
+        .await
+    {
+        Ok(_) => tracing::info!("wf worktree: fetched missing base '{base}' from origin"),
+        Err(err) => {
+            tracing::warn!("wf worktree: fetching base '{base}' from origin failed: {err}");
+            return None;
+        }
+    }
+    git.rev_parse(&remote).await.ok()
+}
+
+/// A base name that is safe to splice into a fetch refspec: no option-like
+/// prefix, no refspec/glob metacharacters, no whitespace or control chars.
+/// `git` itself still validates the full ref name.
+fn fetchable_branch_name(base: &str) -> bool {
+    !base.is_empty()
+        && !base.starts_with('-')
+        && !base.starts_with('/')
+        && !base.contains("..")
+        && !base
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || ":^~?*[\\+".contains(c))
 }
 
 /// Reap the worktrees a run provisioned under
@@ -8928,6 +8966,85 @@ mod tests {
             .expect("worktree resolves to origin");
         let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap();
         assert_eq!(canon(std::path::Path::new(&main)), canon(&repo));
+    }
+
+    #[tokio::test]
+    async fn resolve_wf_base_fetches_a_branch_created_after_the_clone() {
+        let has_git = std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !has_git {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let upstream = root.path().join("upstream");
+        let clone = root.path().join("clone");
+        std::fs::create_dir_all(&upstream).unwrap();
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&upstream, &["init", "-q", "-b", "main"]);
+        git(&upstream, &["config", "user.email", "t@t"]);
+        git(&upstream, &["config", "user.name", "t"]);
+        std::fs::write(upstream.join("f.txt"), "hi").unwrap();
+        git(&upstream, &["add", "-A"]);
+        git(&upstream, &["commit", "-q", "-m", "c"]);
+        git(
+            root.path(),
+            &[
+                "clone",
+                "-q",
+                upstream.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
+        );
+        // The PR's target branch appears on the remote only after the clone.
+        git(&upstream, &["branch", "hotfix/5.02.40-HF1"]);
+        let want = git(&upstream, &["rev-parse", "hotfix/5.02.40-HF1"]);
+
+        let local = otto_git::LocalGit::new(clone.to_str().unwrap());
+        assert_eq!(
+            resolve_wf_base(&local, "hotfix/5.02.40-HF1")
+                .await
+                .as_deref(),
+            Some(want.as_str())
+        );
+        // Only the remote-tracking ref was written — no local branch appeared.
+        assert!(git(&clone, &["branch", "--list", "hotfix/*"]).is_empty());
+        // A base that exists nowhere still resolves to nothing.
+        assert_eq!(resolve_wf_base(&local, "no/such-branch").await, None);
+    }
+
+    #[test]
+    fn fetchable_branch_name_rejects_refspec_injection() {
+        assert!(fetchable_branch_name("hotfix/5.02.40-HF1"));
+        assert!(fetchable_branch_name("develop"));
+        for bad in [
+            "",
+            "-u",
+            "--upload-pack=x",
+            "a:b",
+            "a b",
+            "a..b",
+            "*",
+            "+x",
+            "/x",
+        ] {
+            assert!(!fetchable_branch_name(bad), "{bad:?} must be rejected");
+        }
     }
 
     // --- git_pr multi-target collection (design: PR opens one per changed repo) -
