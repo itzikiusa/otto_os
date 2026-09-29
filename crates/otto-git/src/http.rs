@@ -1157,6 +1157,7 @@ async fn delete_repo<S: GitCtx>(
         .await?;
     // Unregister only — never touch the files on disk.
     s.store().delete_repo(&id).await?;
+    crate::watch::global(s.events()).forget(&id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1169,8 +1170,23 @@ async fn repo_status<S: GitCtx>(
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
 ) -> ApiResult<Json<RepoStatusResp>> {
-    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    watch_repo(&s, &repo, &git).await;
     Ok(Json(git.status().await?))
+}
+
+/// Keep the repo's working-tree watcher armed (see `watch.rs`): the client
+/// asking for status/fetch is what marks a repo as "open". Arming runs off the
+/// request path, so it never delays the response.
+async fn watch_repo<S: GitCtx>(s: &S, repo: &Repo, git: &LocalGit) {
+    let registry = crate::watch::global(s.events());
+    let git_dir = git.git_dir().await;
+    let (id, ws, root) = (
+        repo.id.clone(),
+        repo.workspace_id.clone(),
+        PathBuf::from(&repo.path),
+    );
+    tokio::task::spawn_blocking(move || registry.touch(&id, &ws, &root, git_dir.as_deref()));
 }
 
 async fn repo_branches<S: GitCtx>(
@@ -1238,6 +1254,7 @@ async fn repo_fetch<S: GitCtx>(
     Path(id): Path<Id>,
 ) -> ApiResult<Json<RepoStatusResp>> {
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    watch_repo(&s, &repo, &git).await;
     let token = optional_token(&s, &user, &repo).await?;
     git.fetch(token).await?;
     Ok(Json(git.status().await?))

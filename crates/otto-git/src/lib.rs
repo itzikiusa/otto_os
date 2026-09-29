@@ -15,6 +15,7 @@ pub mod pr_checks;
 pub mod providers;
 pub mod recovery;
 pub mod types;
+pub mod watch;
 mod worktree_probe;
 
 pub use http::{router, GitCtx};

@@ -1540,6 +1540,13 @@ export type OttoEvent =
       session_id: Id;
     }
   | {
+      /** A watched repository's working tree, index or refs changed on disk.
+       *  The Git page re-reads `GET /repos/{id}/status` (local, no fetch). */
+      type: 'repo_status_changed';
+      workspace_id: Id;
+      repo_id: Id;
+    }
+  | {
       /** A browser tab was created or navigated (a reader-mode navigation
        *  adopts the fetched page's title). `tab` is the full `BrowserTab`. */
       type: 'browser_tab_updated';

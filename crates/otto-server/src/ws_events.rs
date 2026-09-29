@@ -398,6 +398,9 @@ fn scope_of(event: &Event) -> Scope<'_> {
         // A session's referenced-scenes set changed — workspace-member scoped like
         // the other canvas events (Canvas is a workspace-shared tool).
         | Event::CanvasRefsChanged { workspace_id, .. }
+        // A watched repo's working tree changed: its workspace's members (the
+        // REST status read applies the per-repo role check).
+        | Event::RepoStatusChanged { workspace_id, .. }
         // Browser tab/annotation updates go to the workspace's members, like
         // the other canvas-family live-edit events.
         | Event::BrowserTabUpdated { workspace_id, .. }

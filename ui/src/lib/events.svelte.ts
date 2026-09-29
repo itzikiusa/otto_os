@@ -25,6 +25,7 @@ import { personalAgents } from './stores/personalAgents.svelte';
 import { k8s } from './stores/k8s.svelte';
 import { aws } from './stores/aws.svelte';
 import { transcript } from './stores/transcript.svelte';
+import { git } from './stores/git.svelte';
 import { apiClient } from './stores/apiClient.svelte';
 import { assistant } from './stores/assistant.svelte';
 import { uiControl } from './stores/uiControl.svelte';
@@ -697,6 +698,9 @@ class EventsClient {
           // A scene was attached/detached to a session — the session's Canvas
           // panel refetches when its session id matches.
           canvasRefsBus.apply(parsed.session_id);
+        } else if (parsed.type === 'repo_status_changed') {
+          // A watched repo changed on disk: the Git page re-reads its status.
+          git.applyRepoChanged(parsed.repo_id);
         } else if (parsed.type === 'mockup_updated') {
           // Live design edits: the arena's Assistant preview + the open artifact
           // reload. `content` is an explicit null for binary / oversized payloads
