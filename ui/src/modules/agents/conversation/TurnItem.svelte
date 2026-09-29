@@ -105,8 +105,14 @@
   );
   // Live / waiting responses stay flat: the reader follows the work as it happens.
   const fold = $derived(nested || live || waiting ? null : foldResponse(visibleBlocks));
-  let foldOpen = $state(false);
-  const foldShown = $derived(!!fold && (foldOpen || !!ctx.expandAll || current || ctx.revealId === item.id));
+  /** Your own open / close of this fold; null follows "Show all work". */
+  let foldPref = $state<boolean | null>(null);
+  const foldShown = $derived(!!fold && (current || ctx.revealId === item.id || (foldPref ?? !!ctx.expandAll)));
+  function toggleFold(): void {
+    const next = !foldShown;
+    if (!next && ctx.revealId === item.id) ctx.revealId = null;
+    foldPref = next;
+  }
   const stats = $derived(fold ? foldStats(fold.body) : null);
   const firstStepsIdx = $derived(visibleBlocks.findIndex((s) => s.kind === 'steps'));
   // Only the response's LAST plan snapshot starts open; earlier ones fold.
@@ -231,7 +237,7 @@
       {#if fold}
         {#each fold.head as s, i (i)}{@render seg(s, i)}{/each}
         <div class="fold" class:open={foldShown}>
-          <button class="fold-row" onclick={() => (foldOpen = !foldShown)} aria-expanded={foldShown} data-fold-toggle title={foldShown ? 'Hide the work' : 'Show the work: tool calls, narration and plan updates'}>
+          <button class="fold-row" onclick={toggleFold} aria-expanded={foldShown} data-fold-toggle title={foldShown ? 'Hide the work' : 'Show the work: tool calls, narration and plan updates'}>
             <span class="fold-label">{workedFor}</span>
             <Icon name={foldShown ? 'chevronDown' : 'chevronRight'} size={12} />
             {#if stats}
