@@ -259,7 +259,13 @@ fn relevant(root: &Path, git_dir: &Path, path: &Path, ignore: &Gitignore) -> boo
     if rel.as_os_str().is_empty() {
         return true;
     }
-    !ignore.matched_path_or_any_parents(path, false).is_ignore()
+    // The path's real kind: inotify also reports an event for an ignored
+    // DIRECTORY itself (`target` when `target/out.o` is written), and a
+    // directory-only rule (`target/`) matches it only as a directory. A path
+    // that is gone stats as "not a dir" — at worst one extra status read.
+    !ignore
+        .matched_path_or_any_parents(path, path.is_dir())
+        .is_ignore()
 }
 
 #[cfg(test)]
@@ -279,6 +285,7 @@ mod tests {
     fn filters_git_internals_ignored_paths_and_node_modules() {
         let (_d, root) = repo_with_ignore("target/\n*.log\n");
         std::fs::create_dir_all(root.join("ui")).unwrap();
+        std::fs::create_dir_all(root.join("target/debug")).unwrap();
         std::fs::write(root.join("ui/.gitignore"), "dist\n").unwrap();
         let git_dir = root.join(".git");
         let ig = build_ignore(&root, &git_dir);
@@ -297,6 +304,9 @@ mod tests {
         assert!(!rel(".git/FETCH_HEAD"));
         assert!(!rel(".git/logs/HEAD"));
         assert!(!rel("target/debug/app"));
+        // The ignored directory itself (inotify reports it on child writes).
+        assert!(!rel("target"));
+        assert!(!rel("target/debug"));
         assert!(!rel("build.log"));
         assert!(!rel("ui/dist/index.html"));
         assert!(!rel("ui/node_modules/x/index.js"));
