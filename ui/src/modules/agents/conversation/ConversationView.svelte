@@ -42,7 +42,7 @@
   import { openExternal } from '../../../lib/external';
   import { browser } from '../../../lib/stores/browser.svelte';
   import { router } from '../../../lib/router.svelte';
-  import { groupTurns, stableGroupTurns, activeQueued, countUnread, dayKey, fmtCost, fmtDay, fmtDuration, fmtTokens, pendingTool, providerName } from './format';
+  import { groupTurns, stableGroupTurns, activeQueued, changedDiff, changedFiles, countUnread, dayKey, fmtCost, fmtDay, fmtDuration, fmtTokens, pendingTool, providerName } from './format';
   import { registerFindProvider } from '../../../lib/findProviders';
   import type { SessionStatus, TranscriptUnavailableReason, Turn } from '../../../lib/api/types';
   import type { RenderItem } from './format';
@@ -494,7 +494,8 @@
       // ⌥↑ / ⌥↓ — your previous / next message.
       e.preventDefault();
       jumpPrompt(e.key === 'ArrowUp' ? -1 : 1);
-    } else if (e.key === 'Escape' && preview && !searchOpen) {
+    } else if (e.key === 'Escape' && preview && !searchOpen && !(e.target instanceof Element && e.target.closest('[role="dialog"]'))) {
+      // (A full-view modal owns its own Esc.)
       e.preventDefault();
       closePreview();
     }
@@ -637,6 +638,7 @@
         title: 'Open every “Worked for …” fold — tool calls, narration and plan updates',
         action: () => (ctx.expandAll = !ctx.expandAll),
       },
+      ...(hasChanges ? [{ label: 'All changes', icon: 'split', action: () => openAllChanges() }] : []),
       { separator: true },
       { label: 'Previous message of yours', icon: 'chevronUp', hint: '⌥↑', action: () => jumpPrompt(-1) },
       { label: 'Next message of yours', icon: 'chevronDown', hint: '⌥↓', action: () => jumpPrompt(1) },
@@ -645,6 +647,23 @@
       { label: 'Reload transcript', icon: 'refresh', action: () => void conv.load() },
     ]);
   }
+  // ── All changes: every file the loaded conversation edited or wrote ────────
+  const editsIn = new WeakMap<Turn, boolean>();
+  function turnEdits(turn: Turn): boolean {
+    let v = editsIn.get(turn);
+    if (v === undefined) {
+      v = turn.blocks.some((b) => b.kind === 'tool_call' && (b.tool === 'edit' || b.tool === 'write'));
+      editsIn.set(turn, v);
+    }
+    return v;
+  }
+  const hasChanges = $derived(conv.turns.some(turnEdits));
+  function openAllChanges(): void {
+    const files = changedFiles(conv.turns.filter(turnEdits).flatMap((t) => t.blocks));
+    if (!files.length) return;
+    openPreview({ kind: 'diff', title: `All changes · ${files.length} ${files.length === 1 ? 'file' : 'files'}`, diff: changedDiff(files) });
+  }
+
   const statsText = $derived.by(() => {
     if (!t || t.unavailable_reason) return '';
     const st = t.stats;
@@ -665,6 +684,9 @@
       <span class="stats" title="turns · tool calls · cost · tokens in/out · duration">{statsText}</span>
     {/if}
     <span class="grow"></span>
+    {#if hasChanges && !(narrowHead && searchOpen)}
+      <button class="icon-btn" title="All changes in this conversation" aria-label="All changes in this conversation" data-all-changes onclick={openAllChanges}><Icon name="split" size={12} /></button>
+    {/if}
     {#if searchOpen}
       <div class="search" class:wide={narrowHead} role="search">
         <Icon name="search" size={12} />

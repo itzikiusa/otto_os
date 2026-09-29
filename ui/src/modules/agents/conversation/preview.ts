@@ -19,6 +19,37 @@ export function previewKind(path: string): PreviewKind {
   return 'code';
 }
 
+/** How a code block previews, by its fence tag (an unnamed ```html block
+ *  still gets a rendered view). */
+export function previewKindForLang(tag: string | null | undefined): PreviewKind {
+  switch ((tag ?? '').toLowerCase()) {
+    case 'html':
+    case 'htm':
+      return 'html';
+    case 'md':
+    case 'markdown':
+      return 'markdown';
+    case 'svg':
+      return 'svg';
+    case 'json':
+    case 'jsonc':
+      return 'json';
+    case 'csv':
+      return 'csv';
+    case 'tsv':
+      return 'tsv';
+    default:
+      return 'code';
+  }
+}
+
+/** What a side-panel request renders as. */
+export function requestKind(req: { kind: string; path?: string; file?: string | null; lang?: string | null }): PreviewKind {
+  if (req.kind === 'file' && req.path) return previewKind(req.path);
+  if (req.kind === 'code') return req.file ? previewKind(req.file) : previewKindForLang(req.lang);
+  return 'code';
+}
+
 /** Rows past this are cut from the table view (the Source tab has them all). */
 export const TABLE_MAX_ROWS = 2000;
 

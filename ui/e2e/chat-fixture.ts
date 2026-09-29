@@ -225,7 +225,24 @@ export function chatTranscript(root = '/repo/otto'): string {
   );
   s += duration(127_000);
   s += userPrompt('Great — add the property test, and tell me which callers assume the overshoot.');
-  s += assistantText('2', 'On it. Two callers use `backoff` directly:\n\n1. `crates/otto-sessions/src/lifecycle.rs` — reconnect loop\n2. `crates/otto-channels/src/slack.rs` — rate-limit retry\n\nNeither depends on the overshoot; both only need a monotone delay.');
+  s += assistantText(
+    '2',
+    [
+      'On it. Two callers use `backoff` directly:',
+      '',
+      '1. `crates/otto-sessions/src/lifecycle.rs` — reconnect loop',
+      '2. `crates/otto-channels/src/slack.rs` — rate-limit retry',
+      '',
+      '```mermaid',
+      'flowchart LR',
+      '  lifecycle[reconnect loop] --> backoff',
+      '  slack[rate-limit retry] --> backoff',
+      '  backoff --> jitter',
+      '```',
+      '',
+      'Neither depends on the overshoot; both only need a monotone delay.',
+    ].join('\n'),
+  );
   s += duration(9_000);
   s += userPrompt('Write it up: a short design note, an HTML report of the jitter distribution and the raw numbers as CSV. Then open the PR.');
   s += thinking('3');

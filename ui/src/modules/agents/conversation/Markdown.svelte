@@ -28,6 +28,7 @@
   // (this used to ride on the next live delta re-rendering everything).
   let hlLoaded = false;
   const FENCE = /```|~~~/;
+  let diagramSeq = 0;
 </script>
 
 <script lang="ts">
@@ -38,6 +39,7 @@
   import { runCodeAction, type CodeActionHost } from './codeBlocks';
   import { splitLocation } from './chatMarkdown';
   import { CONV_CTX, type ConvContext } from './context';
+  import { ui } from '../../../lib/stores/ui.svelte';
 
   interface Props {
     md: string;
@@ -63,6 +65,38 @@
     const fenced = FENCE.test(md);
     // Read hlReady only when it matters, so fence-free blocks never re-render.
     return cache.get(md, !fenced || hlReady);
+  });
+
+  // Mermaid / D2 fences render as diagrams (lazy libs, like the vault's reading
+  // view); a bad diagram keeps its source with the parse error. Only blocks
+  // whose html has one pay for the DOM query.
+  let rootEl = $state<HTMLDivElement | null>(null);
+  $effect(() => {
+    const h = html;
+    const host = rootEl;
+    if (!host || !h.includes('diagram-block')) return;
+    for (const el of Array.from(host.querySelectorAll<HTMLElement>('div.diagram-block:not([data-rendered])'))) {
+      el.setAttribute('data-rendered', '1');
+      const kind = el.dataset.diagram;
+      const src = el.querySelector('pre.diagram-src')?.textContent ?? '';
+      const id = `chat-diag-${++diagramSeq}`;
+      const dark = ui.resolvedScheme === 'dark';
+      void (kind === 'd2'
+        ? import('../../canvas/d2').then((m) => m.renderD2(id, src, { dark, isStale: () => !el.isConnected }))
+        : import('../../canvas/mermaid').then((m) => m.renderMermaid(id, src, { dark, isStale: () => !el.isConnected }))
+      ).then(({ svg, error, stale }: { svg?: string; error?: string; stale?: boolean }) => {
+        if (!el.isConnected || stale) return;
+        if (svg) {
+          el.innerHTML = svg;
+          el.classList.add('diagram-ok');
+        } else {
+          const err = document.createElement('div');
+          err.className = 'diagram-error';
+          err.textContent = `Diagram error: ${error ?? 'unknown'}`;
+          el.prepend(err);
+        }
+      });
+    }
   });
 
   const host: CodeActionHost = {
@@ -147,7 +181,7 @@
      handler drives them (keyboard activation bubbles as a click too). File
      references / issue chips are `a[tabindex][role=link]` (⏎ opens them). -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="md" class:small dir="auto" onclick={onClick} onkeydown={onKey} oncontextmenu={onContext}>{@html html}</div>
+<div class="md" class:small dir="auto" bind:this={rootEl} onclick={onClick} onkeydown={onKey} oncontextmenu={onContext}>{@html html}</div>
 
 <style>
   .md {
@@ -503,11 +537,11 @@
   .md :global(a) {
     color: var(--accent-text);
   }
-  .md :global(a[target='_blank']:not(.ref-chip)) {
+  .md :global(a[href^='http']:not(.ref-chip)) {
     text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent);
     text-underline-offset: 2px;
   }
-  .md :global(a[target='_blank']:not(.ref-chip)::after) {
+  .md :global(a[href^='http']:not(.ref-chip)::after) {
     content: '↗';
     font-size: 0.8em;
     margin-inline-start: 1px;
@@ -526,7 +560,32 @@
     margin-inline-end: 6px;
     vertical-align: middle;
   }
+  .md :global(.diagram-block) {
+    margin: 0.5em 0 0.85em;
+    padding: 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    background: var(--code-bg, var(--surface-2));
+    overflow-x: auto;
+  }
+  .md :global(.diagram-block.diagram-ok) {
+    display: flex;
+    justify-content: center;
+  }
+  .md :global(.diagram-block svg) {
+    max-width: 100%;
+    height: auto;
+  }
   .md :global(.diagram-block pre) {
+    margin: 0;
+    border: 0;
+    padding: 0;
+    background: none;
     white-space: pre;
+  }
+  .md :global(.diagram-error) {
+    color: var(--danger);
+    font-size: var(--fs-s);
+    margin-bottom: 8px;
   }
 </style>

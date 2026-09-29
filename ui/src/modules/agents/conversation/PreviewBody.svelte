@@ -28,7 +28,7 @@
   import Markdown from './Markdown.svelte';
   import CodeView from './CodeView.svelte';
   import InlineDiff from './InlineDiff.svelte';
-  import { htmlDoc, parseDelimited, prettyJson, previewKind } from './preview';
+  import { htmlDoc, parseDelimited, prettyJson, requestKind } from './preview';
   import { resolvePath } from './format';
   import { CONV_CTX, type ConvContext, type PreviewReq } from './context';
 
@@ -44,7 +44,7 @@
   const cwd = $derived(ctx.cwd ?? null);
 
   const absPath = $derived(req.kind === 'file' ? resolvePath(req.path, cwd) : req.kind === 'code' && req.file ? resolvePath(req.file, cwd) : null);
-  const kind = $derived(req.kind === 'file' ? previewKind(req.path) : req.kind === 'code' && req.file ? previewKind(req.file) : 'code');
+  const kind = $derived(requestKind(req));
 
   let content = $state<string | null>(null);
   let truncated = $state(false);

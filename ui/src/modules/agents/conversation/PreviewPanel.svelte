@@ -10,7 +10,7 @@
   import { openFile } from '../../../lib/stores/openfile.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import PreviewBody, { forgetRead, type PreviewMode } from './PreviewBody.svelte';
-  import { previewKind, splitName } from './preview';
+  import { previewKind, previewKindForLang, requestKind, splitName } from './preview';
   import { relPath, resolvePath } from './format';
   import { CONV_CTX, type ConvContext, type PreviewReq } from './context';
 
@@ -23,7 +23,7 @@
   const cwd = $derived(ctx.cwd ?? null);
 
   const path = $derived(req.kind === 'file' ? resolvePath(req.path, cwd) : req.kind === 'code' && req.file ? resolvePath(req.file, cwd) : null);
-  const kind = $derived(path ? previewKind(path) : 'code');
+  const kind = $derived(requestKind(req));
   const modes = $derived.by(() => {
     const m: PreviewMode[] = [];
     if (req.kind === 'diff') return ['diff'] as PreviewMode[];
@@ -35,8 +35,8 @@
   function initialMode(r: PreviewReq): PreviewMode {
     if (r.kind === 'diff') return 'diff';
     if (r.kind === 'file' && r.line) return 'source';
-    const p = r.kind === 'file' ? r.path : r.file;
-    return p && previewKind(p) !== 'code' ? 'preview' : 'source';
+    if (r.kind === 'code') return (r.file ? previewKind(r.file) : previewKindForLang(r.lang)) !== 'code' ? 'preview' : 'source';
+    return previewKind(r.path) !== 'code' ? 'preview' : 'source';
   }
   let mode = $state<PreviewMode>(untrack(() => initialMode(req)));
   let lastReq: PreviewReq | null = null;

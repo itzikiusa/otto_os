@@ -59,6 +59,25 @@
   const promptText = $derived(
     item.role === 'user' ? item.blocks.flatMap((b) => (b.kind === 'text' ? [b.md] : [])).join('\n\n').trim() : '',
   );
+  // The composer sends attached images as `[Image: <path>]` lines after the
+  // text; the bubble shows them as attachment chips, not as raw markers.
+  const IMAGE_LINE = /^\[Image: (.+)\]\s*$/gm;
+  function splitAttachments(md: string): { md: string; images: string[] } {
+    const images: string[] = [];
+    const rest = md.replace(IMAGE_LINE, (_m, p: string) => {
+      images.push(p.trim());
+      return '';
+    });
+    return { md: images.length ? rest.trim() : md, images };
+  }
+  async function copyPath(path: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(path);
+      toasts.info('Path copied', path);
+    } catch (e) {
+      toasts.error('Copy failed', e instanceof Error ? e.message : String(e));
+    }
+  }
   async function copyTurn(): Promise<void> {
     try {
       await navigator.clipboard.writeText(copyText);
@@ -166,7 +185,17 @@
     <div class="bubble" dir="auto">
       {#each item.blocks as b, i (i)}
         {#if b.kind === 'text'}
-          <Markdown md={b.md} />
+          {@const parts = splitAttachments(b.md)}
+          {#if parts.md}<Markdown md={parts.md} />{/if}
+          {#if parts.images.length}
+            <div class="attach" data-attachments={parts.images.length}>
+              {#each parts.images as p (p)}
+                <button class="attach-chip" onclick={() => void copyPath(p)} title="Attached image — {p} (click to copy the path)">
+                  <Icon name="image" size={12} /> <span class="attach-name">{p.split('/').pop()}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
         {:else if b.kind === 'image'}
           <ImageBlock id={b.id} alt={b.alt} mediaType={b.media_type} />
         {:else if b.kind === 'queued' && b.op === 'enqueue' && ctx.queuedLive.includes(b.text) && (showSystem || !b.injected)}
@@ -280,6 +309,34 @@
   }
   .bubble :global(.md) {
     --prose-measure: none;
+  }
+  .attach {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-block: 6px 2px;
+  }
+  .attach-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    max-width: 100%;
+    padding: 3px 9px;
+    border-radius: var(--radius-m);
+    border: 1px solid color-mix(in srgb, var(--you) 30%, var(--border));
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    font-size: var(--fs-xs);
+    cursor: pointer;
+  }
+  .attach-chip:hover {
+    border-color: var(--border-strong);
+  }
+  .attach-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   /* The agent: green disc + name + model + time, then the response. */
   .agent-head {

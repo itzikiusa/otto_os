@@ -142,7 +142,7 @@ export function linkifyOutput(escaped: string): string {
       // An escaped `<…>` / quote ends the URL, as does trailing punctuation.
       const clean = url.split(/&(?:lt|gt|quot|#39);/)[0].replace(/[.,;:!?)\]]+$/, '');
       const rest = url.slice(clean.length);
-      return `<a class="out-link" href="${clean}" target="_blank" rel="noopener noreferrer">${clean}</a>${rest}`;
+      return `<a class="out-link" href="${clean}" rel="noopener noreferrer">${clean}</a>${rest}`;
     }
     if (path) return fileRefHtml(splitLocation(path), path, false);
     return m;
@@ -155,9 +155,13 @@ const ctx: RenderCtx = { resolve: () => null, assetUrl: () => null, codeLines: t
 // get a tab stop and a link role here (after the sanitizer, our own markup —
 // text is escaped, so only real tags match).
 const REF_OPEN = /<a class="(file-ref|ref-chip)/g;
+// External links lose `target=_blank` (the sanitizer adds it): the chat opens
+// them itself — the system browser, or Otto's with ⌥ — and App.svelte's
+// global `_blank` handler would open them a second time.
+const BLANK = / target="_blank"/g;
 
 /** Render one block of chat prose to sanitized, decorated HTML. */
 export function renderChatMarkdown(md: string): string {
   const html = renderNote(md, ctx);
-  return decorateCodeBlocks(html).replace(REF_OPEN, '<a tabindex="0" role="link" class="$1');
+  return decorateCodeBlocks(html).replace(REF_OPEN, '<a tabindex="0" role="link" class="$1').replace(BLANK, '');
 }

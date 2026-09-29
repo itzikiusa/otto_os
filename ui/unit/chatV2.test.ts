@@ -24,7 +24,7 @@ import {
   usageParts,
   type ToolCallBlock,
 } from '../src/modules/agents/conversation/format.ts';
-import { htmlDoc, parseDelimited, prettyJson, previewKind } from '../src/modules/agents/conversation/preview.ts';
+import { htmlDoc, parseDelimited, prettyJson, previewKind, previewKindForLang, requestKind } from '../src/modules/agents/conversation/preview.ts';
 import { ensureHljs, highlightLines, splitHighlighted } from '../src/lib/hl.ts';
 import type { Block, ToolKind, ToolResult, Turn, TurnUsage } from '../src/lib/api/types.ts';
 
@@ -193,6 +193,13 @@ test('preview parsers: kinds, CSV/TSV, JSON, HTML documents', () => {
   assert.equal(previewKind('x.csv'), 'csv');
   assert.equal(previewKind('x.tsv'), 'tsv');
   assert.equal(previewKind('x.rs'), 'code');
+  assert.equal(previewKindForLang('html'), 'html');
+  assert.equal(previewKindForLang('Markdown'), 'markdown');
+  assert.equal(previewKindForLang('rust'), 'code');
+  assert.equal(requestKind({ kind: 'code', lang: 'json', file: null }), 'json');
+  assert.equal(requestKind({ kind: 'code', lang: 'rust', file: 'a/notes.md' }), 'markdown', 'a named fence previews by its file');
+  assert.equal(requestKind({ kind: 'file', path: 'r.csv' }), 'csv');
+  assert.equal(requestKind({ kind: 'diff' }), 'code');
   const t = parseDelimited('a,b,c\n1,"two, 2","say ""hi"""\r\n3,,"multi\nline"\n', ',');
   assert.deepEqual(t.rows, [['a', 'b', 'c'], ['1', 'two, 2', 'say "hi"'], ['3', '', 'multi\nline']]);
   assert.equal(t.cut, false);

@@ -237,6 +237,8 @@ test('code blocks are IDE-like: language, file, numbered lines, Wrap, Copy, Open
   expect(text).not.toMatch(/^\d/m); // line numbers are never copied
   await block.getByRole('button', { name: 'Open' }).click();
   await expect(page.locator('.pv[data-preview="code"] .cv-row')).toHaveCount(5);
+  // A mermaid fence renders as a diagram (lazy library), not as source.
+  await expect(page.locator('.conv .diagram-block.diagram-ok svg').first()).toBeVisible({ timeout: 20_000 });
 });
 
 test('links: file references open the panel at the line; PR and issue chips; external links', async ({ page }) => {
@@ -308,6 +310,12 @@ test('changed files: the card, Show files, Open diff and rendered previews (md, 
   // Full view in a modal.
   await panel.getByRole('button', { name: 'Full view' }).click();
   await expect(page.getByRole('dialog').locator('.pb-table')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  // The header's "All changes": every file the conversation touched.
+  await page.locator('[data-all-changes]').click();
+  await expect(panel.locator('.pv-base')).toHaveText('All changes · 4 files');
+  await expect(panel.locator('.pdiff-file')).toHaveCount(4);
 });
 
 test('a narrow pane shows the panel over the chat', async ({ page }) => {

@@ -84,7 +84,9 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 8px;
+    padding-block: 6px;
+    padding-inline: 8px;
+    margin-inline-start: 11px;
     font-size: var(--fs-s);
     color: var(--text-dim);
     min-width: 0;
@@ -118,8 +120,8 @@
     height: 11px;
     flex-shrink: 0;
     border-radius: 50%;
-    border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent);
-    border-top-color: var(--accent);
+    border: 2px solid color-mix(in srgb, var(--agent, var(--accent)) 25%, transparent);
+    border-top-color: var(--agent, var(--accent));
   }
   @media (prefers-reduced-motion: no-preference) {
     .spin {
@@ -136,6 +138,7 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+    margin-inline-start: 11px;
     padding: 10px 12px;
     border-radius: var(--radius-m);
     background: var(--warning-soft);
