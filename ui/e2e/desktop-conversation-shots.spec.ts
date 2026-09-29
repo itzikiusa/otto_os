@@ -2,13 +2,15 @@ import { test, expect, type APIRequestContext, type Page } from '@playwright/tes
 import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { apiCtx, seedWorkspace } from './seed';
-import { appendRecords, toolUse, writeChatTranscript } from './chat-fixture';
+import { appendRecords, toolUse, withUsage, writeChatTranscript } from './chat-fixture';
 
-// Design screenshots of the chat (docs/design/conversation-view.md §5.2):
-// wide + narrow (6-pane tiled grid), light + dark, working and waiting. Opt-in —
-// runs only with OTTO_CHAT_SHOTS=<dir> (files are named `<prefix>-<shot>.png`,
-// prefix from OTTO_CHAT_SHOTS_PREFIX, default "chat"). Nothing is asserted
-// beyond the chat being on screen; the pictures are the output.
+// Design screenshots of the chat (docs/design/conversation-view.md §5.2, rev 6):
+// wide + narrow (6-pane tiled grid), light + dark, the settled folds, the work
+// expanded, a code block, the side panel (markdown / HTML / diff previews),
+// working and waiting. Opt-in — runs only with OTTO_CHAT_SHOTS=<dir> (files
+// are named `<prefix>-<shot>.png`, prefix from OTTO_CHAT_SHOTS_PREFIX, default
+// "chat"). Nothing is asserted beyond the chat being on screen; the pictures
+// are the output.
 
 const OUT = process.env.OTTO_CHAT_SHOTS ?? '';
 const PREFIX = process.env.OTTO_CHAT_SHOTS_PREFIX ?? 'chat';
@@ -21,10 +23,10 @@ let wsId = '';
 const dirs: string[] = [];
 
 async function seedChat(title: string): Promise<{ id: string; path: string }> {
-  const { dir, path } = writeChatTranscript();
+  const { dir, path, root } = writeChatTranscript();
   dirs.push(dir);
   const r = await ctx.post(`${base}/api/v1/workspaces/${wsId}/sessions`, {
-    data: { kind: 'agent', provider: 'shell', title, cwd: '/tmp', meta: { origin: 'e2e', nested_provider: 'claude', e2e_transcript_path: path } },
+    data: { kind: 'agent', provider: 'shell', title, cwd: root, meta: { origin: 'e2e', nested_provider: 'claude', e2e_transcript_path: path } },
   });
   if (!r.ok()) throw new Error(`seed ${title} → ${r.status()} ${await r.text()}`);
   return { id: (await r.json()).id as string, path };
@@ -32,6 +34,7 @@ async function seedChat(title: string): Promise<{ id: string; path: string }> {
 
 async function open(page: Page, scheme: 'light' | 'dark', ids: string[], first: string): Promise<void> {
   await page.emulateMedia({ colorScheme: scheme });
+  await withUsage(page);
   await page.addInitScript(
     ({ ws, ids, scheme }) => {
       localStorage.setItem('otto_workspace', ws);
@@ -48,8 +51,17 @@ async function open(page: Page, scheme: 'light' | 'dark', ids: string[], first: 
   await expect(page.locator('.conv .turn[data-role="assistant"]').first()).toBeVisible({ timeout: 30_000 });
 }
 
+/** The fresh shell prints its prompt (→ "working") and goes quiet; the last
+ *  response settles (fold + changed-files card) once it does. */
+async function settled(page: Page, id: string): Promise<void> {
+  await expect
+    .poll(async () => ((await (await ctx.get(`${base}/api/v1/sessions/${id}`)).json()) as { status: string }).status, { timeout: 30_000 })
+    .not.toBe('working');
+  await expect(page.locator('.conv').first().locator('[data-changed-files]')).toHaveCount(2, { timeout: 15_000 });
+}
+
 async function shot(page: Page, name: string): Promise<void> {
-  await page.waitForTimeout(600);
+  await page.waitForTimeout(700);
   await page.screenshot({ path: join(OUT, `${PREFIX}-${name}.png`) });
 }
 
@@ -71,22 +83,49 @@ for (const scheme of ['light', 'dark'] as const) {
     await page.setViewportSize({ width: 1440, height: 900 });
     const s = await seedChat('Flaky retry test');
     await open(page, scheme, [s.id], s.id);
+    await settled(page, s.id);
     await shot(page, `wide-${scheme}`);
-    // Scroll to the top of the first response, open its steps and a failing command.
     const conv = page.locator('.conv').first();
-    const groups = conv.locator('.steps:not(.single) .steps-head, [data-steps-toggle]');
+    // The first response: its work unfolded, the failing command and the edit open.
+    await conv.locator('[data-fold-toggle]').first().click();
+    const groups = conv.locator('.turn').nth(1).locator('.steps:not(.single) .steps-head');
     for (let i = 0; i < (await groups.count()); i++) {
       const g = groups.nth(i);
       if ((await g.getAttribute('aria-expanded')) !== 'true') await g.click();
     }
     const failed = conv.locator('.step[data-status="err"] .step-row').first();
     if (await failed.count()) await failed.click();
+    await conv.locator('.step[data-status="err"]').first().scrollIntoViewIfNeeded().catch(() => {});
+    await shot(page, `wide-${scheme}-work`);
     const edit = conv.locator('.step[data-tool="edit"] .step-row').first();
     if (await edit.count()) await edit.click();
-    await conv.locator('.step[data-status="err"]').first().scrollIntoViewIfNeeded().catch(() => {});
-    await shot(page, `wide-${scheme}-steps`);
     await conv.locator('.step[data-tool="edit"]').first().scrollIntoViewIfNeeded().catch(() => {});
     await shot(page, `wide-${scheme}-diff`);
+    // The last response: code block + changed files.
+    await conv.locator('.code-block').last().scrollIntoViewIfNeeded();
+    await shot(page, `wide-${scheme}-code`);
+  });
+
+  test(`side panel previews, ${scheme}`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const s = await seedChat('Previews');
+    await open(page, scheme, [s.id], s.id);
+    await settled(page, s.id);
+    const conv = page.locator('.conv').first();
+    const card = conv.locator('[data-changed-files]').last();
+    await card.locator('.cf-toggle').click();
+    await card.getByRole('button', { name: /Preview retry-jitter\.md/ }).click();
+    await expect(page.locator('.pv[data-preview="file"]')).toBeVisible();
+    await shot(page, `panel-${scheme}-markdown`);
+    await card.getByRole('button', { name: /Preview jitter\.html/ }).click();
+    await expect(page.locator('.pv .pb-frame')).toBeVisible();
+    await shot(page, `panel-${scheme}-html`);
+    await conv.locator('a.file-ref', { hasText: 'crates/otto-net/src/retry.rs:7' }).first().click();
+    await expect(page.locator('.pv .cv-row.target')).toBeVisible();
+    await shot(page, `panel-${scheme}-source`);
+    await conv.locator('[data-changed-files]').first().getByRole('button', { name: 'Open diff' }).click();
+    await expect(page.locator('.pv .pdiff')).toBeVisible();
+    await shot(page, `panel-${scheme}-diff`);
   });
 
   test(`narrow tiled panes, ${scheme}`, async ({ page }) => {
@@ -101,6 +140,19 @@ for (const scheme of ['light', 'dark'] as const) {
       await expect(page.locator('.conv[data-loaded="true"]')).toHaveCount(6, { timeout: 30_000 });
     }
     await shot(page, `narrow-${scheme}`);
+  });
+
+  test(`narrow pane with the panel over the chat, ${scheme}`, async ({ page }) => {
+    await page.setViewportSize({ width: 700, height: 860 });
+    const s = await seedChat('Narrow');
+    await open(page, scheme, [s.id], s.id);
+    await settled(page, s.id);
+    await shot(page, `narrow-single-${scheme}`);
+    const card = page.locator('.conv [data-changed-files]').last();
+    await card.locator('.cf-toggle').click();
+    await card.getByRole('button', { name: /Preview retry-jitter\.md/ }).click();
+    await expect(page.locator('.pv')).toBeVisible();
+    await shot(page, `narrow-panel-${scheme}`);
   });
 
   test(`working state, ${scheme}`, async ({ page }) => {
