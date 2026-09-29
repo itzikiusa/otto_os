@@ -19,7 +19,7 @@ fn log_path() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join("Library/Logs/Otto/desktop-panic.log"))
 }
 
-fn append(line: &str) {
+pub(crate) fn append(line: &str) {
     if cfg!(test) {
         return; // never write the user's real log from unit tests
     }

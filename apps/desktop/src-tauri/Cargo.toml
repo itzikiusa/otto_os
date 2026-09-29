@@ -17,9 +17,10 @@ tauri-plugin-shell = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-global-shortcut = "2"
 window-vibrancy = "0.6"
-# Used only to open the browser's Web Inspector DETACHED (its own window) via the
-# private WKWebView `_inspector` API — same objc2 version wry uses.
-objc2 = "0.6"
+# Opens the browser's Web Inspector DETACHED via the private WKWebView
+# `_inspector` API, and (with `exception`) catches AppKit's Objective-C
+# exceptions in appkit_guard.rs — same objc2 version wry uses.
+objc2 = { version = "0.6", features = ["exception"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

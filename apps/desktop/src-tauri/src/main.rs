@@ -8,6 +8,7 @@
     windows_subsystem = "windows"
 )]
 
+mod appkit_guard;
 mod bar;
 mod browser;
 mod panel;
@@ -29,6 +30,10 @@ use tauri::{Emitter, Manager};
 fn main() {
     // AppKit-dispatched callbacks can't unwind: log panics, contain them below.
     panic_guard::install();
+    // AppKit's own Objective-C exceptions would abort the app the same way:
+    // remove the known trigger and catch the rest below tao's frame.
+    appkit_guard::disable_writing_tools_affordance();
+    appkit_guard::install_exception_guard();
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_shell::init())
