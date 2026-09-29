@@ -8705,10 +8705,12 @@ export interface Transcript {
 export type TurnRole = 'user' | 'assistant';
 
 /** Token usage summed over one assistant turn's API calls (Claude
- *  `message.usage`, Codex `token_count`). `thinking_tokens` is the part of
- *  `output_tokens` spent on reasoning (Claude `output_tokens_details`), so the
- *  visible answer is `output_tokens - thinking_tokens`. Cache fields are
- *  separate from `input_tokens`, as the providers report them. */
+ *  `message.usage`, once per response; Codex the growth of `token_count`
+ *  totals). `thinking_tokens` is the part of `output_tokens` spent on
+ *  reasoning (Claude `output_tokens_details`, Codex `reasoning_output_tokens`),
+ *  so the visible answer is `output_tokens - thinking_tokens`. Cache fields are
+ *  separate from `input_tokens` (Claude reports them so; Codex's cached input
+ *  is split out to match). */
 export interface TurnUsage {
   input_tokens: number;
   output_tokens: number;

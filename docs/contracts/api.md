@@ -550,6 +550,24 @@ the `/sessions/{id}/*` catch-all); every session route additionally applies the
 owner-or-admin gate; history routes require workspace `viewer` (GET) / `editor`
 (POST).
 
+**Per-turn token usage.** Every `Turn` carries `usage: TurnUsage | null` —
+`{input_tokens, output_tokens, thinking_tokens, cache_read_tokens,
+cache_creation_tokens}` summed over that assistant turn's API calls; `null` on
+user turns and when the provider recorded none. Claude: each
+`message.usage` counted ONCE per `(message.id, requestId)` (the streamed records
+of one response repeat it), `thinking_tokens` =
+`usage.output_tokens_details.thinking_tokens` (0 when absent), cache fields from
+`cache_read_input_tokens` / `cache_creation_input_tokens`. Codex: the growth of
+the cumulative `token_count.info.total_token_usage` since the previous event (a
+repeated event adds nothing; the first event or a total that went backwards uses
+that call's `last_token_usage`), `thinking_tokens` = `reasoning_output_tokens`,
+`cache_read_tokens` = `cached_input_tokens` (split OUT of `input_tokens`, like
+Claude), `cache_creation_tokens` = `cache_write_input_tokens`; it lands on the
+current assistant turn, or on the next one when none is open yet.
+`thinking_tokens` is part of `output_tokens`. Claude per-turn sums equal
+`stats.output_tokens`; a resumed Codex rollout's stats include the earlier
+thread's tokens, its turns only this file's calls.
+
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /sessions/{id}/transcript?before=&limit=&sub= | ws viewer + owner-or-admin | `before` = opaque cursor from a prior page (exclusive), `limit` turns (default 60, max 500), `sub` = subagent id (Claude `subagents/agent-<id>.jsonl`) | `Transcript` — the last `limit` turns (or the page before `before`); `cursor` = record index of the oldest returned turn, `has_earlier` drives "Load earlier". No resolvable transcript → **200** with `turns: []` and `unavailable_reason` ∈ `no_provider_session_id \| transcript_missing \| provider_unsupported \| codex_rollout_unresolved` (agy is always `provider_unsupported`). A `sub` view carries only turns + `stats.turns/tool_calls`. `subagents` (the full tree) rides on the newest page only — a `before` page returns `subagents: []` (the client keeps the first page's). For a live session the call first (re)arms the live tail (`transcript_appended` events; ≤ 64 concurrent, stops 60 s after exit / 2 min without a touch — see `POST …/transcript/touch`) and pages the TAIL's fold, waiting up to 15 s for its initial fold when it is just starting: one fold of the file per open, the page is the state the deltas continue from, and an agent appending to the file never makes the read 409. Without a tail (not live, cap reached) the fold cache below serves it |

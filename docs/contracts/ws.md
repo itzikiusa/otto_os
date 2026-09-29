@@ -1241,7 +1241,10 @@ poll) and
 
 - `transcript_appended` — the session's transcript grew. `turns` are the turns
   touched by the new records, each sent WHOLE (a turn whose tool results just
-  landed is re-sent) — clients replace by `Turn.id`. `cursor` is the index of the
+  landed is re-sent) — clients replace by `Turn.id`. A turn's `usage`
+  (`TurnUsage | null`, see api.md "Per-turn token usage") rides along: a Codex
+  `token_count` record touches the assistant turn it lands on, so the turn is
+  re-sent with its grown `usage`. `cursor` is the index of the
   LAST folded record (`after_cursor`). A payload over 64 KB is first shrunk:
   tool results' `text` (then `patch`) are cut to 4 KB (then 1 KB, 256 B, 0)
   and flagged `result.elided: true` — fetch the whole block with

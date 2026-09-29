@@ -57,6 +57,8 @@ struct Census {
     images: u64,
     subagent_blocks: u64,
     artifacts: u64,
+    turn_output_tokens: u64,
+    usage_short: u64,
 }
 
 fn run(provider: Provider, files: &[PathBuf]) -> Census {
@@ -79,6 +81,23 @@ fn run(provider: Provider, files: &[PathBuf]) -> Census {
         c.reasoning += folded.stats.reasoning_steps;
         c.thinking += folded.stats.thinking_steps;
         c.artifacts += folded.artifacts.len() as u64;
+        // Per-turn usage must add up to the transcript total (Claude: the
+        // same `(message.id, requestId)` dedupe feeds both; Codex: turn
+        // usage is the growth of the same cumulative totals, so it can only
+        // fall short when a total reset).
+        let turn_out: u64 = folded
+            .turns
+            .iter()
+            .filter_map(|t| t.turn.usage.map(|u| u.output_tokens))
+            .sum();
+        let total_out = folded.stats.output_tokens.unwrap_or(0);
+        match provider {
+            Provider::Claude => {
+                assert_eq!(turn_out, total_out, "turn usage ≠ total in {}", f.display())
+            }
+            _ => c.usage_short += total_out.saturating_sub(turn_out),
+        }
+        c.turn_output_tokens += turn_out;
         for t in &folded.turns {
             for b in &t.turn.blocks {
                 match b {
@@ -105,6 +124,10 @@ fn report(label: &str, c: &Census) {
     println!(
         "{label}: files={} records={} turns={} tool_calls={} unknown_records={} reasoning={} thinking={} images={} subagent_blocks={} artifacts={}",
         c.files, c.records, c.turns, c.tool_calls, c.unknown, c.reasoning, c.thinking, c.images, c.subagent_blocks, c.artifacts
+    );
+    println!(
+        "{label}: per-turn output tokens={} (short of the totals by {})",
+        c.turn_output_tokens, c.usage_short
     );
     println!(
         "{label}: longest file = {} ({} records); largest = {} ({} bytes)",

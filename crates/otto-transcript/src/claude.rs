@@ -30,6 +30,10 @@ use crate::util::{
     structured_patch_to_unified, u64_of,
 };
 
+/// Stands in for a missing object, so fields are read by reference instead of
+/// cloning each record's (often large) `message` / `source` / `attachment`.
+static NULL: Value = Value::Null;
+
 /// Record types that are pure sidecars: known, carry nothing the conversation
 /// shows, and are re-emitted redundantly (`ai-title` up to 145× per session).
 const SIDECARS: &[&str] = &[
@@ -138,11 +142,11 @@ impl ClaudeState<'_> {
             Some("assistant") => self.assistant(idx, v),
             Some("system") => self.system(idx, v),
             Some("attachment") => {
-                let a = v.get("attachment").cloned().unwrap_or(Value::Null);
-                let kind = str_of(&a, "type").unwrap_or("attachment");
+                let a = v.get("attachment").unwrap_or(&NULL);
+                let kind = str_of(a, "type").unwrap_or("attachment");
                 let body = ["content", "text", "message", "filename", "path"]
                     .iter()
-                    .find_map(|k| str_of(&a, k))
+                    .find_map(|k| str_of(a, k))
                     .map(|s| clip(s, 500));
                 let t = self.f.last_turn();
                 self.f.note(
@@ -210,7 +214,7 @@ impl ClaudeState<'_> {
     // ── user ───────────────────────────────────────────────────────────────
 
     fn user(&mut self, idx: usize, v: &Value) {
-        let msg = v.get("message").cloned().unwrap_or(Value::Null);
+        let msg = v.get("message").unwrap_or(&NULL);
         let ts = string_of(v, "timestamp");
         let uuid = string_of(v, "uuid").unwrap_or_else(|| format!("r{idx}"));
         let tur = v.get("toolUseResult");
@@ -233,11 +237,10 @@ impl ClaudeState<'_> {
                             }
                         }
                         Some("image") => {
-                            let src = b.get("source").cloned().unwrap_or(Value::Null);
-                            let media = str_of(&src, "media_type")
-                                .unwrap_or("image/png")
-                                .to_string();
-                            if let Some(data) = str_of(&src, "data") {
+                            let src = b.get("source").unwrap_or(&NULL);
+                            let media =
+                                str_of(src, "media_type").unwrap_or("image/png").to_string();
+                            if let Some(data) = str_of(src, "data") {
                                 let id = self.f.image(&media, data);
                                 images.push((id, media));
                             }
@@ -345,9 +348,9 @@ impl ClaudeState<'_> {
                             }
                         }
                         Some("image") => {
-                            let src = p.get("source").cloned().unwrap_or(Value::Null);
-                            let media = str_of(&src, "media_type").unwrap_or("image/png");
-                            if let Some(data) = str_of(&src, "data") {
+                            let src = p.get("source").unwrap_or(&NULL);
+                            let media = str_of(src, "media_type").unwrap_or("image/png");
+                            if let Some(data) = str_of(src, "data") {
                                 image_ids.push(self.f.image(media, data));
                             }
                         }
@@ -447,9 +450,9 @@ impl ClaudeState<'_> {
     // ── assistant ──────────────────────────────────────────────────────────
 
     fn assistant(&mut self, idx: usize, v: &Value) {
-        let msg = v.get("message").cloned().unwrap_or(Value::Null);
+        let msg = v.get("message").unwrap_or(&NULL);
         let rid = string_of(v, "requestId");
-        let model = string_of(&msg, "model");
+        let model = string_of(msg, "model");
         if model.is_some() {
             self.f.model = model.clone();
         }
@@ -477,7 +480,7 @@ impl ClaudeState<'_> {
         if let Some(usage) = msg.get("usage").filter(|u| u.is_object()) {
             let key = format!(
                 "{}:{}",
-                str_of(&msg, "id").unwrap_or(""),
+                str_of(msg, "id").unwrap_or(""),
                 str_of(v, "requestId").unwrap_or("")
             );
             let count = if key == ":" {
@@ -486,21 +489,37 @@ impl ClaudeState<'_> {
                 self.usage_seen.insert(key)
             };
             if count {
+                let u = TurnUsage {
+                    input_tokens: u64_of(usage, "input_tokens").unwrap_or(0),
+                    output_tokens: u64_of(usage, "output_tokens").unwrap_or(0),
+                    thinking_tokens: usage
+                        .get("output_tokens_details")
+                        .and_then(|d| u64_of(d, "thinking_tokens"))
+                        .unwrap_or(0),
+                    cache_read_tokens: u64_of(usage, "cache_read_input_tokens").unwrap_or(0),
+                    cache_creation_tokens: u64_of(usage, "cache_creation_input_tokens")
+                        .unwrap_or(0),
+                };
                 self.f.usage(
                     model.as_deref().unwrap_or(""),
-                    u64_of(usage, "input_tokens").unwrap_or(0),
-                    u64_of(usage, "output_tokens").unwrap_or(0),
-                    u64_of(usage, "cache_read_input_tokens").unwrap_or(0),
-                    u64_of(usage, "cache_creation_input_tokens").unwrap_or(0),
+                    u.input_tokens,
+                    u.output_tokens,
+                    u.cache_read_tokens,
+                    u.cache_creation_tokens,
                 );
+                self.f.turn_usage(Some(t), u, idx);
             }
         }
-        let blocks: Vec<Value> = match msg.get("content") {
-            Some(Value::Array(a)) => a.clone(),
-            Some(Value::String(s)) => vec![serde_json::json!({ "type": "text", "text": s })],
-            _ => Vec::new(),
+        let wrapped;
+        let blocks: &[Value] = match msg.get("content") {
+            Some(Value::Array(a)) => a,
+            Some(Value::String(s)) => {
+                wrapped = [serde_json::json!({ "type": "text", "text": s })];
+                &wrapped
+            }
+            _ => &[],
         };
-        for b in &blocks {
+        for b in blocks {
             match str_of(b, "type") {
                 Some("text") => {
                     let text = str_of(b, "text").unwrap_or("");
@@ -523,11 +542,9 @@ impl ClaudeState<'_> {
                 Some("thinking") | Some("redacted_thinking") => self.f.thinking(t, idx),
                 Some("tool_use") => self.tool_use(idx, t, b, &ts),
                 Some("image") => {
-                    let src = b.get("source").cloned().unwrap_or(Value::Null);
-                    let media = str_of(&src, "media_type")
-                        .unwrap_or("image/png")
-                        .to_string();
-                    if let Some(data) = str_of(&src, "data") {
+                    let src = b.get("source").unwrap_or(&NULL);
+                    let media = str_of(src, "media_type").unwrap_or("image/png").to_string();
+                    if let Some(data) = str_of(src, "data") {
                         let id = self.f.image(&media, data);
                         self.f.push_block(
                             t,
@@ -866,6 +883,86 @@ mod tests {
             .artifacts
             .iter()
             .any(|a| a.kind == ArtifactKind::Pr && a.label == "o/r#5"));
+    }
+
+    /// Real-shaped records (Claude Code 2.x): every streamed content block of
+    /// one response repeats the same `message.usage`, incl.
+    /// `output_tokens_details.thinking_tokens` and the `iterations` echo.
+    const USAGE: &str = r#"{"type":"user","uuid":"u1","timestamp":"2026-09-29T08:00:00Z","message":{"role":"user","content":"go"}}
+{"type":"assistant","uuid":"a1","requestId":"req_A","timestamp":"2026-09-29T08:00:01Z","message":{"id":"msg_A","model":"claude-opus-5-5","content":[{"type":"thinking","thinking":"","signature":"s"}],"usage":{"input_tokens":2,"cache_creation_input_tokens":38854,"cache_read_input_tokens":24932,"output_tokens":185,"output_tokens_details":{"thinking_tokens":14},"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":38854,"ephemeral_5m_input_tokens":0},"iterations":[{"input_tokens":2,"output_tokens":185,"type":"message"}],"speed":"standard"}}}
+{"type":"assistant","uuid":"a2","requestId":"req_A","timestamp":"2026-09-29T08:00:02Z","message":{"id":"msg_A","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"toolu_A","name":"Bash","input":{"command":"ls"}}],"usage":{"input_tokens":2,"cache_creation_input_tokens":38854,"cache_read_input_tokens":24932,"output_tokens":185,"output_tokens_details":{"thinking_tokens":14}}}}
+{"type":"user","uuid":"u2","timestamp":"2026-09-29T08:00:03Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_A","content":"a.rs"}]}}
+{"type":"assistant","uuid":"a3","requestId":"req_B","timestamp":"2026-09-29T08:00:04Z","message":{"id":"msg_B","model":"claude-opus-5-5","content":[{"type":"text","text":"Done."}],"usage":{"input_tokens":3,"cache_read_input_tokens":63786,"output_tokens":40}}}
+{"type":"assistant","uuid":"a4","requestId":"req_C","timestamp":"2026-09-29T08:00:05Z","message":{"id":"msg_C","model":"claude-opus-5-5","content":[{"type":"text","text":"no usage recorded"}]}}
+"#;
+
+    #[test]
+    fn per_turn_usage_counts_each_response_once() {
+        let f = fold(USAGE);
+        // u1, req_A (the tool_result record adds no turn), req_B, req_C.
+        assert_eq!(f.turns.len(), 4);
+        assert_eq!(f.turns[0].turn.usage, None, "user turns carry no usage");
+        // req_A: two streamed records, one response → counted once.
+        assert_eq!(
+            f.turns[1].turn.usage,
+            Some(TurnUsage {
+                input_tokens: 2,
+                output_tokens: 185,
+                thinking_tokens: 14,
+                cache_read_tokens: 24932,
+                cache_creation_tokens: 38854,
+            })
+        );
+        // No `output_tokens_details` → thinking 0; absent cache fields → 0.
+        assert_eq!(
+            f.turns[2].turn.usage,
+            Some(TurnUsage {
+                input_tokens: 3,
+                output_tokens: 40,
+                thinking_tokens: 0,
+                cache_read_tokens: 63786,
+                cache_creation_tokens: 0,
+            })
+        );
+        assert_eq!(f.turns[3].turn.usage, None, "no usage recorded → null");
+        // The per-turn numbers add up to the transcript totals.
+        assert_eq!(f.stats.output_tokens, Some(225));
+        assert_eq!(f.stats.input_tokens, Some(2 + 24932 + 38854 + 3 + 63786));
+        // Wire shape: `usage` is always present, `null` when absent.
+        let v = serde_json::to_value(&f.turns[1].turn).unwrap();
+        assert_eq!(v["usage"]["thinking_tokens"], 14);
+        assert_eq!(v["usage"]["cache_creation_tokens"], 38854);
+        assert!(serde_json::to_value(&f.turns[3].turn).unwrap()["usage"].is_null());
+    }
+
+    #[test]
+    fn two_messages_under_one_request_id_sum_into_the_turn() {
+        let jsonl = r#"{"type":"assistant","uuid":"a1","requestId":"r","message":{"id":"m1","model":"m","content":[{"type":"text","text":"x"}],"usage":{"input_tokens":1,"output_tokens":10,"output_tokens_details":{"thinking_tokens":4}}}}
+{"type":"assistant","uuid":"a2","requestId":"r","message":{"id":"m1","model":"m","content":[{"type":"text","text":"y"}],"usage":{"input_tokens":1,"output_tokens":10,"output_tokens_details":{"thinking_tokens":4}}}}
+{"type":"assistant","uuid":"a3","requestId":"r","message":{"id":"m2","model":"m","content":[{"type":"text","text":"z"}],"usage":{"input_tokens":2,"output_tokens":5}}}
+"#;
+        let f = fold(jsonl);
+        assert_eq!(f.turns.len(), 1);
+        let u = f.turns[0].turn.usage.unwrap();
+        assert_eq!(
+            (u.input_tokens, u.output_tokens, u.thinking_tokens),
+            (3, 15, 4)
+        );
+    }
+
+    #[test]
+    fn usage_rides_the_live_delta() {
+        let recs = parse_records(USAGE.as_bytes());
+        let mut c = ClaudeFolder::new(FoldOpts::default());
+        for r in &recs[..4] {
+            c.push(r);
+        }
+        let since = c.record_count();
+        c.push(&recs[4]);
+        let delta = c.turns_since(since);
+        assert_eq!(delta.len(), 1);
+        assert_eq!(delta[0].id, "req_B");
+        assert_eq!(delta[0].usage.map(|u| u.output_tokens), Some(40));
     }
 
     #[test]
