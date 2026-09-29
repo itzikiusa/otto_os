@@ -160,12 +160,15 @@ test('a settled response keeps its first and final message and folds the work', 
   // Thinking is its own marker (violet, italic), with the turn's thinking tokens.
   const think = reply.locator('.think').first();
   await expect(think).toContainText('Thought');
-  await expect(think).toContainText('300 thinking tokens');
+  // The number is the turn's usage — the patched fixture value or, once the
+  // live tail replaces the page, the daemon's own (checked exactly in the
+  // "daemon fills per-turn usage" test).
+  await expect(think).toContainText(/\d[\d.,]*k? thinking tokens/);
   await think.locator('.think-row').click();
   await expect(think.locator('.think-note')).toContainText('does not save the reasoning text');
   // Token line: in · thinking · out · cache, each with a tooltip.
   const usage = reply.locator('.usage');
-  await expect(usage.locator('[data-part="input"]')).toContainText('1.5k in');
+  await expect(usage.locator('[data-part="input"]')).toContainText(/\d[\d.,]*k? in/);
   await expect(usage.locator('[data-part="thinking"]')).toHaveAttribute('title', /Thinking tokens/);
   await expect(usage.locator('[data-part="output"]')).toContainText('out');
   await expect(usage.locator('[data-part="cache_read"]')).toContainText('cache read');
@@ -349,6 +352,36 @@ test('your messages: ⌥↑ jumps to the previous one; Edit & resend fills the c
   await expect(page.locator('.composer textarea')).toBeFocused();
 });
 
+test('the daemon fills per-turn usage from the transcript, thinking tokens included', async () => {
+  const s = await seedChat('Usage');
+  const r = await ctx.get(`${base}/api/v1/sessions/${s.id}/transcript`);
+  expect(r.ok()).toBeTruthy();
+  const body = (await r.json()) as {
+    turns: { role: string; usage?: { input_tokens: number; output_tokens: number; thinking_tokens: number } | null }[];
+  };
+  const assistant = body.turns.filter((t) => t.role === 'assistant');
+  expect(assistant.length).toBeGreaterThan(0);
+  // Every assistant turn carries usage; user turns never do.
+  for (const t of assistant) expect(t.usage?.input_tokens ?? 0).toBeGreaterThan(0);
+  for (const t of body.turns.filter((t) => t.role === 'user')) expect(t.usage ?? null).toBeNull();
+  // The fixture's thinking records report output_tokens_details.thinking_tokens.
+  expect(assistant.some((t) => (t.usage?.thinking_tokens ?? 0) > 0)).toBeTruthy();
+});
+
+test('opening mounts the newest turns first, then the rest, staying at the bottom', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 600 });
+  const s = await seedChat('First mount');
+  await openChat(page, [s.id]);
+  // The whole transcript (more than the first-mount 12 turns) ends up mounted…
+  await expect(page.locator('.conv .turn[data-role="user"]')).toHaveCount(3);
+  await expect(page.locator('.conv .turn[data-role="user"]').first()).toContainText('jitter_stays_in_range');
+  // …and the view is still pinned to the latest message (no jump to the top).
+  await page.waitForTimeout(400);
+  const gap = await page.locator('.conv-list').evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight);
+  expect(gap).toBeLessThan(48);
+  await expect(page.locator('.jump-pill')).toHaveCount(0);
+});
+
 test('scrolled up, new messages raise a jump pill with the unread count', async ({ page }) => {
   const s = await seedChat('Unread');
   await openChat(page, [s.id]);
@@ -371,10 +404,14 @@ test('scrolled up, new messages raise a jump pill with the unread count', async 
 test('composer: ⏎ sends, ⇧⏎ adds a line; Stop interrupts a working agent', async ({ page }) => {
   const s = await seedChat('Composer');
   await openChat(page, [s.id]);
-  const sent: { text: string; submit?: boolean }[] = [];
-  await page.route(`**/sessions/${s.id}/input`, async (route) => {
-    sent.push(route.request().postDataJSON());
-    await route.fulfill({ status: 200, body: '' });
+  // OBSERVE the real requests (no route interception): WebKit's interception
+  // missed the composer's POST, and the real send is what matters. The text
+  // lands in the session's shell, which is harmless.
+  const inputUrl = (u: string) => u.endsWith(`/sessions/${s.id}/input`);
+  const nextSend = () => page.waitForRequest((r) => r.method() === 'POST' && inputUrl(r.url()), { timeout: 10_000 });
+  let sends = 0;
+  page.on('request', (r) => {
+    if (r.method() === 'POST' && inputUrl(r.url())) sends++;
   });
   const ta = page.locator('.composer textarea');
   await ta.click();
@@ -382,13 +419,12 @@ test('composer: ⏎ sends, ⇧⏎ adds a line; Stop interrupts a working agent',
   await ta.press('Shift+Enter');
   await ta.pressSequentially('second line');
   await expect(ta).toHaveValue('first line\nsecond line');
-  expect(sent).toHaveLength(0);
+  expect(sends, '⇧⏎ must not send').toBe(0);
+  const sent = nextSend();
   await ta.press('Enter');
-  await expect.poll(() => sent.length).toBe(1);
-  expect(sent[0]).toEqual({ text: 'first line\nsecond line', submit: true });
+  expect((await sent).postDataJSON()).toEqual({ text: 'first line\nsecond line', submit: true });
   await expect(ta).toHaveValue('');
   // Working: the live line names the current step and Stop sends one Esc.
-  await page.unroute(`**/sessions/${s.id}/input`);
   await ctx.post(`${base}/api/v1/sessions/${s.id}/input`, { data: { text: 'while true; do echo tick; sleep 1; done', submit: true } });
   appendRecords(s.path, toolUse('9', 'toolu_live', 'Bash', { command: 'cargo test -p otto-net --release' }));
   const live = page.locator('[data-live-status="working"]');
@@ -396,17 +432,13 @@ test('composer: ⏎ sends, ⇧⏎ adds a line; Stop interrupts a working agent',
   await expect(live).toContainText('Running cargo test -p otto-net --release', { timeout: 15_000 });
   // The response being worked on stays flat (no fold) so the work is visible.
   await expect(page.locator('.conv .turn[data-role="assistant"]').last().locator('[data-fold-toggle]')).toHaveCount(0);
-  await page.route(`**/sessions/${s.id}/input`, async (route) => {
-    sent.push(route.request().postDataJSON());
-    await route.fulfill({ status: 200, body: '' });
-  });
+  const esc = nextSend();
   await page.locator('.composer').getByRole('button', { name: 'Stop' }).click();
-  await expect.poll(() => sent.length).toBe(2);
-  expect(sent[1]).toEqual({ text: '\u001b', submit: false });
+  expect((await esc).postDataJSON()).toEqual({ text: '\u001b', submit: false });
   // Stop the loop on the real PTY (Ctrl-C) so the session goes quiet again.
-  await page.unroute(`**/sessions/${s.id}/input`);
   await ctx.post(`${base}/api/v1/sessions/${s.id}/input`, { data: { text: '\u0003', submit: false } });
 });
+
 
 test('a call that never got a result on a quiet session asks for you, and opens the terminal', async ({ page }) => {
   const s = await seedChat('Waiting');

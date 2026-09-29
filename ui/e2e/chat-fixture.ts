@@ -63,7 +63,9 @@ function thinking(req: string): string {
   return (
     JSON.stringify({
       type: 'assistant', uuid: uid(), requestId: `req_${req}`, sessionId: SID, timestamp: ts(),
-      message: { id: `msg_${req}`, role: 'assistant', model: 'claude-opus-5', content: [{ type: 'thinking', thinking: '', signature: 'sig' }], stop_reason: 'tool_use', usage },
+      // Claude records reasoning spend under output_tokens_details; the daemon
+      // folds it into Turn.usage.thinking_tokens (checked unpatched in the spec).
+      message: { id: `msg_${req}`, role: 'assistant', model: 'claude-opus-5', content: [{ type: 'thinking', thinking: '', signature: 'sig' }], stop_reason: 'tool_use', usage: { ...usage, output_tokens_details: { thinking_tokens: 140 } } },
     }) + '\n'
   );
 }
@@ -296,9 +298,10 @@ function writeTree(root: string): void {
   }
 }
 
-/** Per-turn token usage the daemon fills in (`Turn.usage`) — patched into the
- *  transcript responses so the specs / screenshots do not depend on the
- *  daemon version. Deterministic per assistant turn. */
+/** Per-turn token usage for the UI specs / screenshots: deterministic, varied
+ *  numbers patched OVER whatever the daemon computed (the daemon now fills
+ *  `Turn.usage` from the fixture's own records — the chat spec checks that
+ *  path unpatched through the API). */
 export async function withUsage(page: Page): Promise<void> {
   await page.route(
     (url) => /\/sessions\/[^/]+\/transcript$/.test(url.pathname),
@@ -307,7 +310,7 @@ export async function withUsage(page: Page): Promise<void> {
       const body = (await resp.json()) as { turns?: { role: string; usage?: unknown }[] };
       let i = 0;
       for (const t of body.turns ?? []) {
-        if (t.role !== 'assistant' || t.usage) continue;
+        if (t.role !== 'assistant') continue;
         i++;
         t.usage = {
           input_tokens: 1200 + i * 310,

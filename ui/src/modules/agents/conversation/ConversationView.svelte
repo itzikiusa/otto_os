@@ -110,11 +110,46 @@
   // later" affordance walks it back toward the tail.
   const MAX_MOUNTED = 300;
   const STEP = 60;
+  /** Opening a chat mounts only the newest FIRST_MOUNT turns; the window
+   *  widens to MAX_MOUNTED two frames later, pinned to the bottom. Mounting a
+   *  whole 60-turn page was the longest frame of opening a big chat (~50 ms
+   *  warm, 125–160 ms cold in WebKit). Re-armed per conversation. */
+  const FIRST_MOUNT = 12;
+  let mountAll = $state(false);
+  let mountedFor = '';
+  let mountRaf = 0;
+  // Depend on "a transcript is here" and the conversation — NOT the
+  // transcript object: a live delta replaces it every append, and re-running
+  // (with a cleanup that cancelled the pending widen) left a working agent's
+  // chat stuck at the newest FIRST_MOUNT turns.
+  const hasTranscript = $derived(!!conv.transcript);
+  $effect(() => {
+    const key = conv.key;
+    if (!hasTranscript || mountedFor === key) return;
+    mountedFor = key;
+    mountAll = false;
+    cancelAnimationFrame(mountRaf); // a previous conversation's pending widen
+    mountRaf = requestAnimationFrame(() => {
+      mountRaf = requestAnimationFrame(() => {
+        mountRaf = 0;
+        const pinned = untrack(() => atBottom);
+        mountAll = true;
+        // The older turns land ABOVE the viewport (WebKit has no scroll
+        // anchoring, and re-lays them over the next frames with scroll events
+        // of its own): stay at the bottom until the reader scrolls.
+        if (pinned) {
+          settleUntil = performance.now() + SETTLE_MS;
+          void tick().then(scrollToBottom);
+        }
+      });
+    });
+  });
+  $effect(() => () => cancelAnimationFrame(mountRaf));
   let followTail = $state(true);
   let manualStart = $state(0);
   const winStart = $derived(
     followTail
-      ? Math.max(0, conv.turns.length - MAX_MOUNTED)
+      ? Math.max(0, conv.turns.length - (mountAll ? MAX_MOUNTED : FIRST_MOUNT))
       : Math.min(manualStart, Math.max(0, conv.turns.length - MAX_MOUNTED)),
   );
   const winEnd = $derived(Math.min(conv.turns.length, winStart + MAX_MOUNTED));
@@ -520,15 +555,29 @@
   const pillText = $derived(
     hasLater ? 'Jump to latest' : unread > 0 ? `${unread} new ${unread === 1 ? 'message' : 'messages'}` : unseen > 0 ? 'New activity' : 'Jump to latest',
   );
+  // After the first-mount widen: layout-made scroll events must not unpin a
+  // reader who never touched the list.
+  const SETTLE_MS = 1000;
+  let settleUntil = 0;
+  let touchedAt = 0;
+  const touched = (): void => {
+    touchedAt = performance.now();
+  };
   function onScroll(): void {
     const el = listEl;
     if (!el) return;
     const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const now = performance.now();
+    if (gap >= 48 && now < settleUntil && touchedAt < settleUntil - SETTLE_MS) {
+      scrollToBottom();
+      return;
+    }
     atBottom = gap < 48;
     farUp = gap > el.clientHeight;
     if (atBottom) unseen = 0;
-    // Infinite "Load earlier" when the reader reaches the top.
-    if (el.scrollTop < 40 && t?.has_earlier && !conv.loadingEarlier) void loadEarlier();
+    // Infinite "Load earlier" when the reader reaches the top (not while the
+    // first mount is still only the newest few turns).
+    if (mountAll && el.scrollTop < 40 && t?.has_earlier && !conv.loadingEarlier) void loadEarlier();
   }
   function scrollToBottom(): void {
     const el = listEl;
@@ -714,12 +763,20 @@
   <!-- The scroller's frame: the jump pill anchors to ITS bottom edge, so it
        always sits just above the composer whatever the composer's height. -->
   <div class="conv-frame">
-  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <!-- The wheel/touch/key listeners only record that the reader scrolled (so
+       the first-mount settle stops re-pinning); they never act on the input. -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
   <div
     class="conv-list"
     bind:this={listEl}
     onscroll={onScroll}
-    onpointerdown={() => (lastPointer = performance.now())}
+    onpointerdown={() => {
+      lastPointer = performance.now();
+      touched();
+    }}
+    onwheel={touched}
+    ontouchstart={touched}
+    onkeydown={touched}
     dir="auto"
     tabindex="0"
     role="region"

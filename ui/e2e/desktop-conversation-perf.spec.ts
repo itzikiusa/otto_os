@@ -142,6 +142,13 @@ test('20 live deltas over 300 turns: p95 < 5 ms main thread (WebKit 12), ≤ 1 m
   }
   const perDelta = (await renders(page)) - before;
   expect(perDelta, `${perDelta} markdown renders for ${DELTAS} deltas`).toBeLessThanOrEqual(DELTAS);
+  // The first-mount window (newest 12 turns) widened to the whole thread even
+  // though the live tail replaced the transcript right after the open — a
+  // cancelled widen once left a working agent's chat stuck at 12 turns.
+  // (The first page is the newest ~60 turns; the bug left 12 mounted.)
+  const mounted = await page.locator('.conv .turn').count();
+  console.log(`[conv] mounted turns after the deltas: ${mounted}`);
+  expect(mounted).toBeGreaterThan(30);
 
   const costs = await page.evaluate(() => {
     const w = window as unknown as { __frames: number[]; __muts: number[] };
