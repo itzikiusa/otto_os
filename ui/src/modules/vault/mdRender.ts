@@ -3,8 +3,8 @@
 // callouts `> [!note]` — resolved against the note's indexed outgoing links,
 // syntax-highlighted via lib/hl, and passed through the allowlist sanitizer.
 
-import { Marked } from 'marked';
-import { ensureHljs, highlightLine, langFromPath } from '../../lib/hl';
+import { Marked, type MarkedExtension } from 'marked';
+import { autoLang, canonicalLang, ensureHljs, highlightLine, highlightLines, langFromPath } from '../../lib/hl';
 import { sanitizeHtml } from '../../lib/sanitize';
 import type { VaultOutgoingLink } from '../../lib/api/types';
 
@@ -17,6 +17,16 @@ export interface RenderCtx {
    *  asking `assetUrl`: the host fills `src` on the live element, so an image
    *  landing never re-renders the note (the vault reading view). */
   lazyAssets?: boolean;
+  /** Chat code blocks (agents/conversation/codeBlocks.ts): the fence is
+   *  highlighted as ONE block and emitted one `<span class="cl">` per line (line
+   *  numbers, wrapping and folding hang off it), an untagged fence is
+   *  auto-detected, and a fence title — ```` ```rust src/retry.rs ```` or
+   *  ```` ```ts title="x.ts" ```` — rides on the code's `title` for the host to
+   *  lift into its header. Off for the vault (its reading view is unchanged). */
+  codeLines?: boolean;
+  /** Extra marked extensions applied after the vault's own (renderer overrides
+   *  may return `false` to fall back to the vault renderer). */
+  use?: MarkedExtension[];
 }
 
 /** An attachment image: a lazy placeholder, a resolved blob, or pending. */
@@ -209,6 +219,7 @@ function makeMarked(ctx: RenderCtx): Marked {
           // post-render pass swaps it for the rendered SVG.
           return `<div class="diagram-block" data-diagram="${diagram}"><pre class="diagram-src">${esc(text)}</pre></div>\n`;
         }
+        if (ctx.codeLines) return chatCode(text, lang ?? '');
         const hlLang = l && langFromPath(`x.${l}`) ? l : l;
         const lines = text.split('\n').map((line) => highlightLine(line, hlLang)).join('\n');
         // `language-x` (the common convention) lets a host label the block —
@@ -255,7 +266,50 @@ function makeMarked(ctx: RenderCtx): Marked {
       },
     },
   });
+  for (const ext of ctx.use ?? []) m.use(ext);
   return m;
+}
+
+// ```` ```rust src/retry.rs ```` / ```` ```ts title="a.ts" ```` / ```` ```py:tool.py ````.
+const FENCE_TITLE = /(?:^|\s)(?:title|file(?:name)?)=(?:"([^"]+)"|'([^']+)'|(\S+))/i;
+const FENCE_FILE = /^[\w@~./-]*[\w@-]\.[A-Za-z0-9]{1,10}$/;
+
+/** Language tag + optional file name from a fence info string. */
+export function parseFenceInfo(info: string): { tag: string | null; file: string | null } {
+  const raw = info.trim();
+  if (!raw) return { tag: null, file: null };
+  const titled = FENCE_TITLE.exec(raw);
+  const [first, ...rest] = raw.split(/\s+/);
+  let tag: string | null = first.includes('=') ? null : first;
+  let file = titled ? (titled[1] ?? titled[2] ?? titled[3] ?? null) : null;
+  if (tag && tag.includes(':')) {
+    const at = tag.indexOf(':');
+    file ??= tag.slice(at + 1) || null;
+    tag = tag.slice(0, at) || null;
+  }
+  if (!file) file = rest.find((t) => FENCE_FILE.test(t)) ?? null;
+  // A bare file name as the whole info string (```` ```retry.rs ````).
+  if (tag && !file && FENCE_FILE.test(tag) && tag.includes('.')) {
+    file = tag;
+    tag = tag.split('.').pop() ?? null;
+  }
+  return { tag: tag && /^[\w+#.-]+$/.test(tag) ? tag.toLowerCase() : null, file };
+}
+
+/** A chat fence: whole-block highlight, one span per line (see `codeLines`). */
+function chatCode(text: string, info: string): string {
+  const { tag, file } = parseFenceInfo(info);
+  const body = text.replace(/\n$/, '');
+  const known = canonicalLang(tag) ?? (file ? langFromPath(file) : null);
+  const lang = known ?? (tag ? null : autoLang(body));
+  const lines = highlightLines(body, lang);
+  // Lines are blocks (no `\n` between them: in a `pre`, a newline between two
+  // block spans would render as an extra blank line); copy re-joins them.
+  const html = lines.map((l) => `<span class="cl">${l}</span>`).join('');
+  const label = tag ?? lang;
+  const langCls = label && /^[\w+#.-]+$/.test(label) ? ` language-${label}` : '';
+  const title = file ? ` title="${esc(file)}"` : '';
+  return `<pre><code class="hljs${langCls}"${title}>${html}</code></pre>\n`;
 }
 
 function splitOnce(s: string, sep: string): [string, string | null] {

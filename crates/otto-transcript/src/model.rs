@@ -143,6 +143,40 @@ pub struct Turn {
     /// equivalent is the `thinking` marker block. Additive to design §3.
     #[serde(default)]
     pub reasoning_steps: u64,
+    /// Tokens this assistant turn's API calls used (`null` when the provider
+    /// recorded none, and on user turns).
+    #[serde(default)]
+    pub usage: Option<TurnUsage>,
+}
+
+/// Token usage summed over one assistant turn's API calls. Claude: each
+/// `message.usage` counted once per `(message.id, requestId)` (the streamed
+/// records of one response repeat it). Codex: the growth of the cumulative
+/// `token_count.info.total_token_usage` between calls. `thinking_tokens` is
+/// the part of `output_tokens` spent reasoning (Claude
+/// `output_tokens_details.thinking_tokens`, Codex `reasoning_output_tokens`).
+/// `input_tokens` excludes the cache fields (Codex's `cached_input_tokens`
+/// is split out to match Claude).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub thinking_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+}
+
+impl TurnUsage {
+    /// Field-wise saturating sum.
+    pub fn add(&mut self, o: &TurnUsage) {
+        self.input_tokens = self.input_tokens.saturating_add(o.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(o.output_tokens);
+        self.thinking_tokens = self.thinking_tokens.saturating_add(o.thinking_tokens);
+        self.cache_read_tokens = self.cache_read_tokens.saturating_add(o.cache_read_tokens);
+        self.cache_creation_tokens = self
+            .cache_creation_tokens
+            .saturating_add(o.cache_creation_tokens);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -293,12 +327,12 @@ impl ToolResult {
     /// Apply the 64 KB caps to `text` and `patch` (idempotent).
     pub fn cap(&mut self) {
         if let Some(t) = self.text.take() {
-            let (c, cut) = crate::util::cap_text(&t);
+            let (c, cut) = crate::util::cap_owned(t);
             self.truncated |= cut;
             self.text = Some(c);
         }
         if let Some(p) = self.patch.take() {
-            let (c, cut) = crate::util::cap_text(&p);
+            let (c, cut) = crate::util::cap_owned(p);
             self.truncated |= cut;
             self.patch = Some(c);
         }

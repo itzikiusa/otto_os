@@ -44,6 +44,19 @@ let sessionId = '';
 
 const conv = (page: Page) => page.locator('.conv[data-loaded="true"]');
 
+/** Open every settled response's "Worked for …" fold (rev 6), then every step
+ *  group inside, so tool rows are on screen. */
+async function openAllWork(view: ReturnType<typeof conv>): Promise<void> {
+  const folds = view.locator('[data-fold-toggle][aria-expanded="false"]');
+  while ((await folds.count()) > 0) await folds.first().click();
+  const groups = view.locator('.steps:not(.single) .steps-head');
+  const n = await groups.count();
+  for (let i = 0; i < n; i++) {
+    const g = groups.nth(i);
+    if ((await g.getAttribute('aria-expanded')) !== 'true') await g.click();
+  }
+}
+
 /** The draft mirrored to sessionStorage for `id`. The store namespaces the key
  *  by identity (`otto_chat_draft:["<base,user>","<session>"]`) so a draft never
  *  leaks across a server/user switch; the spec only needs this session's entry. */
@@ -203,14 +216,9 @@ test('a tool step expands to its output', async ({ page }) => {
   const view = conv(page);
   await expect(view).toBeVisible({ timeout: 20_000 });
 
-  // Steps sit behind a "Worked for … · N steps" header unless the response had
-  // a single call — open every group first, then the first tool row.
-  const groups = view.locator('.steps:not(.single) .steps-head');
-  const n = await groups.count();
-  for (let i = 0; i < n; i++) {
-    const g = groups.nth(i);
-    if ((await g.getAttribute('aria-expanded')) !== 'true') await g.click();
-  }
+  // Settled work sits behind "Worked for …" folds, and steps behind their
+  // group header unless the response had a single call — open them all first.
+  await openAllWork(view);
   const row = view.locator('.step-row').first();
   await expect(row, 'fixture must contain at least one tool_call').toBeVisible();
   await expect(row).toHaveAttribute('aria-expanded', 'false');
@@ -334,12 +342,7 @@ test('search finds turns, walks matches and copy buttons exist per turn', async 
 test('an edit step shows +/− stats and a colored diff; touch keeps the tail armed', async ({ page }) => {
   const view = conv(page);
   await expect(view).toBeVisible({ timeout: 20_000 });
-  const groups = view.locator('.steps:not(.single) .steps-head');
-  const n = await groups.count();
-  for (let i = 0; i < n; i++) {
-    const g = groups.nth(i);
-    if ((await g.getAttribute('aria-expanded')) !== 'true') await g.click();
-  }
+  await openAllWork(view);
   const edit = view.locator('.step[data-tool="edit"]').first();
   await expect(edit, 'fixture must contain an Edit call').toBeVisible();
   await expect(edit.locator('.step-stats .add')).toContainText(/\+\d+/);

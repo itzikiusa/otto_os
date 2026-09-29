@@ -27,6 +27,10 @@ use crate::model::*;
 use crate::records::UNPARSEABLE_TYPE;
 use crate::util::{basename, clip, first_line, pr_urls, str_of, string_of, u64_of};
 
+/// Stands in for a missing field so records are read by reference, never
+/// cloned (a rollout's `payload` / `item` carries whole command outputs).
+static NULL: Value = Value::Null;
+
 /// Fold a whole Codex rollout. The per-file decisions (era, which duplicated
 /// stream to trust) are pre-scanned so no record is ever rendered under the
 /// wrong era.
@@ -64,6 +68,7 @@ impl<'a> CodexFolder<'a> {
                 last_tokens: None,
                 pending_patch_calls: Vec::new(),
                 cli_version: None,
+                prev_totals: None,
             },
             count: 0,
         }
@@ -149,30 +154,82 @@ struct CodexState<'a> {
     /// Old era: `apply_patch` function calls awaiting a `patch_apply_end`.
     pending_patch_calls: Vec<BlockRef>,
     cli_version: Option<String>,
+    /// The previous `token_count` totals (per-turn usage is their growth).
+    prev_totals: Option<CodexTotals>,
+}
+
+/// One `token_count` usage object (`total_token_usage` / `last_token_usage`).
+/// Codex's `input_tokens` INCLUDES `cached_input_tokens` and `output_tokens`
+/// includes `reasoning_output_tokens`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CodexTotals {
+    input: u64,
+    cached: u64,
+    cache_write: u64,
+    output: u64,
+    reasoning: u64,
+}
+
+impl CodexTotals {
+    fn read(v: &Value) -> Option<Self> {
+        if !v.is_object() {
+            return None;
+        }
+        let n = |k| u64_of(v, k).unwrap_or(0);
+        Some(Self {
+            input: n("input_tokens"),
+            cached: n("cached_input_tokens"),
+            cache_write: n("cache_write_input_tokens"),
+            output: n("output_tokens"),
+            reasoning: n("reasoning_output_tokens"),
+        })
+    }
+
+    /// `self - prev`, or `None` when any counter went backwards.
+    fn since(&self, prev: &Self) -> Option<Self> {
+        Some(Self {
+            input: self.input.checked_sub(prev.input)?,
+            cached: self.cached.checked_sub(prev.cached)?,
+            cache_write: self.cache_write.checked_sub(prev.cache_write)?,
+            output: self.output.checked_sub(prev.output)?,
+            reasoning: self.reasoning.checked_sub(prev.reasoning)?,
+        })
+    }
+
+    /// Normalized like Claude: cache reads split out of `input_tokens`.
+    fn usage(&self) -> TurnUsage {
+        TurnUsage {
+            input_tokens: self.input.saturating_sub(self.cached),
+            output_tokens: self.output,
+            thinking_tokens: self.reasoning,
+            cache_read_tokens: self.cached,
+            cache_creation_tokens: self.cache_write,
+        }
+    }
 }
 
 impl CodexState<'_> {
     fn record(&mut self, idx: usize, v: &Value) {
         self.f.saw_ts(str_of(v, "timestamp"));
-        let payload = v.get("payload").cloned().unwrap_or(Value::Null);
+        let payload = v.get("payload").unwrap_or(&NULL);
         match str_of(v, "type") {
             Some("session_meta") => {
-                self.f.session_id = string_of(&payload, "session_id")
-                    .or_else(|| string_of(&payload, "id"))
+                self.f.session_id = string_of(payload, "session_id")
+                    .or_else(|| string_of(payload, "id"))
                     .or_else(|| string_of(v, "id"));
                 if self.f.cwd.is_none() {
-                    self.f.cwd = string_of(&payload, "cwd");
+                    self.f.cwd = string_of(payload, "cwd");
                 }
-                if let Some(m) = model_of(&payload) {
+                if let Some(m) = model_of(payload) {
                     self.f.model = Some(m);
                 }
-                self.cli_version = string_of(&payload, "cli_version");
+                self.cli_version = string_of(payload, "cli_version");
             }
             Some("turn_context") => {
                 if self.f.cwd.is_none() {
-                    self.f.cwd = string_of(&payload, "cwd");
+                    self.f.cwd = string_of(payload, "cwd");
                 }
-                if let Some(m) = model_of(&payload) {
+                if let Some(m) = model_of(payload) {
                     self.f.model = Some(m);
                 }
             }
@@ -193,12 +250,11 @@ impl CodexState<'_> {
                 let u = payload
                     .get("thread_token_usage")
                     .or_else(|| payload.get("usage"))
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                self.tokens(&u);
+                    .unwrap_or(&NULL);
+                self.tokens(u);
             }
-            Some("event_msg") => self.event(idx, v, &payload),
-            Some("response_item") => self.response_item(idx, v, &payload),
+            Some("event_msg") => self.event(idx, v, payload),
+            Some("response_item") => self.response_item(idx, v, payload),
             Some(UNPARSEABLE_TYPE) => self.f.unknown("unparseable line", idx),
             Some(other) => self.f.unknown(other, idx),
             None => self.f.unknown("(untyped)", idx),
@@ -216,6 +272,31 @@ impl CodexState<'_> {
             u64_of(total, "output_tokens").unwrap_or(0),
             u64_of(total, "cached_input_tokens").unwrap_or(0),
         ));
+    }
+
+    /// Per-turn usage from one `token_count`: the growth of the cumulative
+    /// `total` since the previous event (a repeated event adds nothing, so
+    /// duplicates dedupe themselves). The first event, or a total that went
+    /// backwards (a resumed / reset thread), uses the call's own
+    /// `last_token_usage` when present. Lands on the current assistant turn,
+    /// else on the next one.
+    fn turn_tokens(&mut self, idx: usize, total: &Value, last: Option<&Value>) {
+        let Some(cur) = CodexTotals::read(total) else {
+            return;
+        };
+        let call = match self.prev_totals.and_then(|prev| cur.since(&prev)) {
+            Some(delta) => delta,
+            None => last.and_then(CodexTotals::read).unwrap_or(cur),
+        };
+        self.prev_totals = Some(cur);
+        if call == CodexTotals::default() {
+            return;
+        }
+        let t = self
+            .f
+            .last_turn()
+            .filter(|&t| self.f.turns[t].turn.role == Role::Assistant);
+        self.f.turn_usage(t, call.usage(), idx);
     }
 
     // ── turn helpers ───────────────────────────────────────────────────────
@@ -292,12 +373,10 @@ impl CodexState<'_> {
         match str_of(p, "type") {
             Some("item_completed") => self.item(idx, v, p),
             Some("token_count") => {
-                let total = p
-                    .get("info")
-                    .and_then(|i| i.get("total_token_usage"))
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                self.tokens(&total);
+                let info = p.get("info").unwrap_or(&NULL);
+                let total = info.get("total_token_usage").unwrap_or(&NULL);
+                self.tokens(total);
+                self.turn_tokens(idx, total, info.get("last_token_usage"));
             }
             Some("task_started") => {
                 if !self.new_era {
@@ -565,9 +644,9 @@ impl CodexState<'_> {
     fn item(&mut self, idx: usize, v: &Value, p: &Value) {
         let ts = string_of(v, "timestamp");
         let turn_id = str_of(p, "turn_id").unwrap_or("").to_string();
-        let item = p.get("item").cloned().unwrap_or(Value::Null);
-        let item_id = str_of(&item, "id").unwrap_or("").to_string();
-        match str_of(&item, "type") {
+        let item = p.get("item").unwrap_or(&NULL);
+        let item_id = str_of(item, "id").unwrap_or("").to_string();
+        match str_of(item, "type") {
             Some("UserMessage") => {
                 let text = content_text(item.get("content"));
                 let t = self.turn_for(&turn_id, Role::User, ts.clone(), idx);
@@ -607,14 +686,14 @@ impl CodexState<'_> {
             }
             Some("CommandExecution") => {
                 let cmd = command_line(item.get("command"));
-                let ok = match u64_of(&item, "exit_code") {
+                let ok = match u64_of(item, "exit_code") {
                     Some(code) => code == 0,
-                    None => str_of(&item, "status") != Some("failed"),
+                    None => str_of(item, "status") != Some("failed"),
                 };
-                let mut out = str_of(&item, "aggregated_output").unwrap_or("").to_string();
+                let mut out = str_of(item, "aggregated_output").unwrap_or("").to_string();
                 if out.is_empty() {
-                    out.push_str(str_of(&item, "stdout").unwrap_or(""));
-                    if let Some(e) = str_of(&item, "stderr").filter(|e| !e.trim().is_empty()) {
+                    out.push_str(str_of(item, "stdout").unwrap_or(""));
+                    if let Some(e) = str_of(item, "stderr").filter(|e| !e.trim().is_empty()) {
                         if !out.is_empty() {
                             out.push('\n');
                         }
@@ -628,17 +707,17 @@ impl CodexState<'_> {
                     "shell".into(),
                     ToolKind::Shell,
                     first_line(&cmd, 120),
-                    serde_json::json!({ "command": cmd, "cwd": str_of(&item, "cwd"), "exit_code": item.get("exit_code") }),
+                    serde_json::json!({ "command": cmd, "cwd": str_of(item, "cwd"), "exit_code": item.get("exit_code") }),
                     Some(Fold::result_from_text(ok, &out, Vec::new())),
                     idx,
                 );
             }
             Some("FileChange") => {
                 let changes = item.get("changes").cloned().unwrap_or(Value::Null);
-                let ok = str_of(&item, "status").is_none_or(|s| s != "failed");
+                let ok = str_of(item, "status").is_none_or(|s| s != "failed");
                 let t = self.turn_for(&turn_id, Role::Assistant, ts.clone(), idx);
                 let turn_key = self.f.turns[t].turn.id.clone();
-                let stdout = str_of(&item, "stdout").unwrap_or("");
+                let stdout = str_of(item, "stdout").unwrap_or("");
                 let mut any = false;
                 if let Some(obj) = changes.as_object() {
                     for (n, (path, ch)) in obj.iter().enumerate() {
@@ -697,11 +776,11 @@ impl CodexState<'_> {
                 self.file_change_artifacts(&changes, &turn_key, &ts);
             }
             Some("McpToolCall") => {
-                let server = str_of(&item, "server").unwrap_or("mcp");
-                let tool = str_of(&item, "tool").unwrap_or("tool");
+                let server = str_of(item, "server").unwrap_or("mcp");
+                let tool = str_of(item, "tool").unwrap_or("tool");
                 let result = item.get("result").cloned().unwrap_or(Value::Null);
                 let (ok, text) = mcp_result(&result);
-                let ok = ok && str_of(&item, "status") != Some("failed");
+                let ok = ok && str_of(item, "status") != Some("failed");
                 let t = self.turn_for(&turn_id, Role::Assistant, ts, idx);
                 self.f.push_tool_call(
                     t,
@@ -727,8 +806,8 @@ impl CodexState<'_> {
                 );
             }
             Some("Extension") => {
-                let kind = str_of(&item, "kind").unwrap_or("extension");
-                let q = str_of(&item, "query").unwrap_or("").to_string();
+                let kind = str_of(item, "kind").unwrap_or("extension");
+                let q = str_of(item, "query").unwrap_or("").to_string();
                 let n = item
                     .get("results")
                     .and_then(Value::as_array)
@@ -760,7 +839,7 @@ impl CodexState<'_> {
                 );
             }
             Some("ImageView") => {
-                let path = str_of(&item, "path")
+                let path = str_of(item, "path")
                     .unwrap_or("")
                     .trim_start_matches("file://")
                     .to_string();
@@ -1161,6 +1240,81 @@ mod tests {
 {"timestamp":"2026-08-10T13:47:07Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"output_tokens":50}}}}
 {"timestamp":"2026-08-10T13:47:07Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"T1","last_agent_message":"Done.","duration_ms":6000}}
 "##;
+
+    /// Real-shaped `token_count` events (CLI 0.150): `total_token_usage` is
+    /// cumulative, `last_token_usage` the call; the second event of a call
+    /// repeats the totals (rate-limit refresh) and must add nothing.
+    const TOKENS: &str = r##"{"timestamp":"2026-09-25T18:29:00Z","type":"session_meta","payload":{"session_id":"sid-t","cwd":"/repo","cli_version":"0.150.0","model":"gpt-5"}}
+{"timestamp":"2026-09-25T18:29:01Z","type":"event_msg","payload":{"type":"task_started","turn_id":"T1"}}
+{"timestamp":"2026-09-25T18:29:02Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"T1","item":{"type":"UserMessage","id":"um","content":[{"type":"text","text":"go"}]}}}
+{"timestamp":"2026-09-25T18:29:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":27122,"cached_input_tokens":12032,"cache_write_input_tokens":0,"output_tokens":199,"reasoning_output_tokens":64,"total_tokens":27321},"last_token_usage":{"input_tokens":27122,"cached_input_tokens":12032,"cache_write_input_tokens":0,"output_tokens":199,"reasoning_output_tokens":64,"total_tokens":27321},"model_context_window":258400}}}
+{"timestamp":"2026-09-25T18:29:04Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"T1","item":{"type":"AgentMessage","id":"m1","content":[{"type":"Text","text":"Looking."}]}}}
+{"timestamp":"2026-09-25T18:29:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":60541,"cached_input_tokens":38912,"cache_write_input_tokens":0,"output_tokens":505,"reasoning_output_tokens":64,"total_tokens":61046},"last_token_usage":{"input_tokens":33419,"cached_input_tokens":26880,"cache_write_input_tokens":0,"output_tokens":306,"reasoning_output_tokens":0,"total_tokens":33725},"model_context_window":258400}}}
+{"timestamp":"2026-09-25T18:29:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":60541,"cached_input_tokens":38912,"cache_write_input_tokens":0,"output_tokens":505,"reasoning_output_tokens":64,"total_tokens":61046},"last_token_usage":{"input_tokens":33419,"cached_input_tokens":26880,"cache_write_input_tokens":0,"output_tokens":306,"reasoning_output_tokens":0,"total_tokens":33725},"model_context_window":258400}}}
+{"timestamp":"2026-09-25T18:29:06Z","type":"event_msg","payload":{"type":"token_count","info":null}}
+{"timestamp":"2026-09-25T18:29:07Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"T1","duration_ms":6000}}
+"##;
+
+    #[test]
+    fn per_turn_usage_is_the_growth_of_the_totals() {
+        let f = fold(TOKENS);
+        assert_eq!(f.turns.len(), 2);
+        assert_eq!(f.turns[0].turn.usage, None, "user turn");
+        // The first call's tokens arrived before any assistant item: held,
+        // then taken by the assistant turn. Plus the second call; the
+        // repeated event and `info: null` add nothing.
+        assert_eq!(
+            f.turns[1].turn.usage,
+            Some(TurnUsage {
+                input_tokens: 60541 - 38912,
+                output_tokens: 505,
+                thinking_tokens: 64,
+                cache_read_tokens: 38912,
+                cache_creation_tokens: 0,
+            })
+        );
+        // Same totals the transcript stats report.
+        assert_eq!(f.stats.output_tokens, Some(505));
+        assert_eq!(f.stats.input_tokens, Some(60541));
+    }
+
+    #[test]
+    fn a_reset_total_falls_back_to_the_calls_own_usage() {
+        let jsonl = TOKENS.replace(
+            r#""total_token_usage":{"input_tokens":60541,"cached_input_tokens":38912,"cache_write_input_tokens":0,"output_tokens":505,"reasoning_output_tokens":64,"total_tokens":61046}"#,
+            r#""total_token_usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":1}"#,
+        );
+        let f = fold(&jsonl);
+        let u = f.turns[1].turn.usage.unwrap();
+        // call 1 (27122/199) + call 2 from `last_token_usage` (33419/306);
+        // the repeat of the reset total adds nothing.
+        assert_eq!(u.output_tokens, 199 + 306);
+        assert_eq!(u.cache_read_tokens, 12032 + 26880);
+        assert_eq!(u.input_tokens, (27122 - 12032) + (33419 - 26880));
+        assert_eq!(u.thinking_tokens, 64);
+    }
+
+    #[test]
+    fn usage_reaches_the_live_delta_of_the_touched_turn() {
+        let recs = parse_records(TOKENS.as_bytes());
+        let mut c = CodexFolder::new(FoldOpts::default());
+        for r in &recs {
+            c.prescan(r);
+        }
+        for r in &recs[..5] {
+            c.push(r);
+        }
+        let since = c.record_count();
+        c.push(&recs[5]);
+        let delta = c.turns_since(since);
+        assert_eq!(
+            delta.len(),
+            1,
+            "the token_count re-sends the assistant turn"
+        );
+        assert_eq!(delta[0].id, "T1:a");
+        assert_eq!(delta[0].usage.map(|u| u.output_tokens), Some(505));
+    }
 
     #[test]
     fn new_era_renders_items_only() {

@@ -1223,11 +1223,47 @@ Canvas scene is attached to or detached from an agent session.
   the event's `session_id` matches the open session.
 - TypeScript type: `{ type: 'canvas_refs_changed'; workspace_id: Id; session_id: Id }`.
 
+### `repo_status_changed`
+
+Workspace-scoped. Emitted by `crates/otto-git/src/watch.rs` when a watched
+repository's working tree, index or refs change on disk: an editor save, a CLI
+`git add`, commit, checkout or branch update.
+
+```json
+{ "type": "repo_status_changed", "workspace_id": "<Id>", "repo_id": "<Id>" }
+```
+
+- What is watched: a repo becomes watched on `GET /repos/{id}/status` or
+  `POST /repos/{id}/fetch`. It stops after 15 min with neither request, or when
+  it is unregistered. At most 32 repos are watched at once (LRU). The OS
+  watcher is FSEvents on macOS and inotify on Linux.
+- Filtering: these changes are ignored:
+  - `.git` internals other than `index`, `HEAD`, `packed-refs`, `refs/`,
+    `MERGE_HEAD`/`CHERRY_PICK_HEAD`/`REVERT_HEAD`/`REBASE_HEAD` and
+    `rebase-merge`/`rebase-apply`;
+  - `node_modules`;
+  - paths ignored by the top-level and first-level `.gitignore` files, or by
+    `info/exclude`.
+- Timing: one event per burst, 150 ms after the first change, and at most one
+  per 400 ms per repo. The last change of a burst is never dropped.
+- Payload: carries no paths. Clients re-read `GET /repos/{id}/status`, which
+  is local and lock-free (`GIT_OPTIONAL_LOCKS=0`), so it can't retrigger the
+  watcher.
+- Scope: `Workspace`. The status read applies the per-repo role check.
+- UI routing: `events.svelte.ts` → `git.applyRepoChanged()`.
+  - Refresh: the store re-reads status for any repo it shows, one read at a
+    time per repo. A hidden window reads once, when it becomes visible again.
+  - Diff: the store bumps `git.liveRev[repo]`, and the WIP panel re-reads the
+    open file's diff in place.
+- TypeScript type: `{ type: 'repo_status_changed'; workspace_id: Id; repo_id: Id }`.
+
 ### `transcript_appended` / `transcript_live` / `artifact_added` / `history_index_progress`
 
 Conversation view (`docs/design/conversation-view.md` §4.3). Emitted by
 `crates/otto-server/src/transcript_tail.rs` (the per-session live tail, armed by
-`GET /sessions/{id}/transcript` on a live session; 700 ms poll) and
+`GET /sessions/{id}/transcript` on a live session — which then pages the
+tail's own fold, so the first delta continues exactly from that page; 700 ms
+poll) and
 `history_index.rs` (rescan progress).
 
 ```json
@@ -1239,7 +1275,10 @@ Conversation view (`docs/design/conversation-view.md` §4.3). Emitted by
 
 - `transcript_appended` — the session's transcript grew. `turns` are the turns
   touched by the new records, each sent WHOLE (a turn whose tool results just
-  landed is re-sent) — clients replace by `Turn.id`. `cursor` is the index of the
+  landed is re-sent) — clients replace by `Turn.id`. A turn's `usage`
+  (`TurnUsage | null`, see api.md "Per-turn token usage") rides along: a Codex
+  `token_count` record touches the assistant turn it lands on, so the turn is
+  re-sent with its grown `usage`. `cursor` is the index of the
   LAST folded record (`after_cursor`). A payload over 64 KB is first shrunk:
   tool results' `text` (then `patch`) are cut to 4 KB (then 1 KB, 256 B, 0)
   and flagged `result.elided: true` — fetch the whole block with

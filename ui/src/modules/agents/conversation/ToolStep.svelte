@@ -12,10 +12,13 @@
   import VirtualList from '../../../lib/components/VirtualList.svelte';
   import ImageBlock from './ImageBlock.svelte';
   import InlineDiff from './InlineDiff.svelte';
+  import CodeView from './CodeView.svelte';
   import Markdown from './Markdown.svelte';
   import { openFile } from '../../../lib/stores/openfile.svelte';
   import { toasts } from '../../../lib/toast.svelte';
-  import { TOOL_CHROME, fmtBytes, lastLine, patchToDiff, toolLine, toolStatus } from './format';
+  import { linkifyOutput } from './chatMarkdown';
+  import { openExternal } from '../../../lib/external';
+  import { TOOL_CHROME, editInputPatch, relPath, fmtBytes, lastLine, patchToDiff, toolLine, toolStatus } from './format';
   import { autoLang, ensureHljs, highlightBlock, highlightLine, langFromPath } from '../../../lib/hl';
   import type { Block } from '../../../lib/api/types';
   import { CONV_CTX, type ConvContext } from './context';
@@ -66,6 +69,9 @@
   });
   const chrome = $derived(TOOL_CHROME[block.tool] ?? TOOL_CHROME.other);
   const line = $derived(toolLine(block));
+  const cwd = $derived(ctx.cwd ?? null);
+  /** The folder / scope, relative to where the agent ran. */
+  const detail = $derived(line.detail && cwd && line.detail === cwd.replace(/\/$/, '') ? '' : relPath(line.detail, cwd));
   const status = $derived(toolStatus(block, live));
   const isShell = $derived(block.tool === 'shell');
   const STATUS_LABEL = { ok: 'Succeeded', err: 'Failed', running: 'Running…', none: 'No result recorded' } as const;
@@ -74,25 +80,9 @@
   // Edit calls carry `structuredPatch` on the result; older records (and a
   // failed edit) do not — synthesize a −old/+new hunk from the input so the
   // change is still shown as a diff, never as two blobs of text.
-  function editInputPatch(): string | null {
-    const input = block.input;
-    if (block.tool !== 'edit' || input == null || typeof input !== 'object') return null;
-    const o = input as { old_string?: unknown; new_string?: unknown; file_path?: unknown };
-    if (typeof o.old_string !== 'string' || typeof o.new_string !== 'string') return null;
-    const oldL = o.old_string.split('\n');
-    const newL = o.new_string.split('\n');
-    const path = typeof o.file_path === 'string' ? o.file_path : 'file';
-    return [
-      `--- a/${path}`,
-      `+++ b/${path}`,
-      `@@ -1,${oldL.length} +1,${newL.length} @@`,
-      ...oldL.map((l) => `-${l}`),
-      ...newL.map((l) => `+${l}`),
-    ].join('\n');
-  }
   const diff = $derived.by(() => {
     if (result?.patch) return patchToDiff(result.patch, result.file_path);
-    const synth = editInputPatch();
+    const synth = editInputPatch(block);
     return synth ? patchToDiff(synth, result?.file_path ?? null) : null;
   });
   const hasDiff = $derived(!!diff && diff.files.some((f) => f.hunks.length));
@@ -155,9 +145,39 @@
     }
   });
   let showInput = $state(false);
-  const outHtml = $derived(open && !windowed && text ? highlightBlock(text, lang) : '');
+  // Plain output (commands, unhighlighted text) gets its paths and URLs linked.
+  const outHtml = $derived(open && !windowed && text ? (lang ? highlightBlock(text, lang) : linkifyOutput(highlightBlock(text, null))) : '');
+  function onOutClick(e: MouseEvent): void {
+    const a = e.target instanceof Element ? e.target.closest('a') : null;
+    if (!a) return;
+    e.preventDefault();
+    if (a.classList.contains('file-ref') && a.dataset.path) {
+      const line = a.dataset.anchor ? Number(a.dataset.anchor.split(':')[0]) : null;
+      ctx?.openPreview?.({ kind: 'file', path: a.dataset.path, line });
+    } else if (a.getAttribute('href')) {
+      const href = a.getAttribute('href') ?? '';
+      if (ctx.openUrl) ctx.openUrl(href, e.altKey);
+      else void openExternal(href);
+    }
+  }
   const inputHtml = $derived(open && showInput && inputJson ? highlightBlock(inputJson, hlReady ? 'json' : null) : '');
-  const writtenHtml = $derived(open && writtenContent ? highlightBlock(writtenContent, hlReady && filePath ? langFromPath(filePath) : null) : '');
+  // A Read's result is `cat -n` text ("    80\tpub fn …"): shown as source with
+  // the file's own line numbers, like an editor, instead of a numbered blob.
+  const readView = $derived.by(() => {
+    if (!open || block.tool !== 'read' || !text) return null;
+    const m = /^\s*(\d+)\t/.exec(text);
+    if (!m) return null;
+    const body: string[] = [];
+    for (const l of lines) {
+      const hit = /^\s*\d+\t/.exec(l);
+      if (!hit) {
+        if (l.trim() === '') continue;
+        return null;
+      }
+      body.push(l.slice(hit[0].length));
+    }
+    return { start: Number(m[1]), text: body.join('\n') };
+  });
 
   // A command's output opens at its END — the failure summary / final status
   // is what you look for first.
@@ -170,13 +190,18 @@
     });
   });
 
+  const canFiles = $derived(!!ctx.sessionId && !ctx.readonly);
   function openInFiles(): void {
+    if (filePath) openFile.open(filePath);
+  }
+  /** The side panel: a write's content as written, an edit's file with this diff. */
+  function openPreview(): void {
     if (!filePath) return;
-    if (ctx.sessionId && !ctx.readonly) openFile.open(filePath);
-    else {
-      void navigator.clipboard?.writeText(filePath);
-      toasts.info('Path copied', filePath);
-    }
+    ctx?.openPreview?.({ kind: 'file', path: filePath, content: writtenContent || null, diff: hasDiff ? diff : null });
+  }
+  function openDiff(): void {
+    if (!diff) return;
+    ctx?.openPreview?.({ kind: 'diff', title: filePath ? (filePath.split('/').pop() ?? filePath) : 'Diff', diff, focus: null });
   }
   async function copyCommand(): Promise<void> {
     try {
@@ -195,7 +220,7 @@
       <span class="step-main">
         <span class="step-verb">{blocked ? `Wants to ${line.base}` : status === 'running' ? line.present : line.verb}</span>
         {#if line.target}<span class="step-target" class:mono={line.mono}>{line.target}</span>{/if}
-        {#if line.detail}<span class="step-detail mono">{line.detail}</span>{/if}
+        {#if detail}<span class="step-detail mono">{detail}</span>{/if}
       </span>
       {#if tail}
         <span class="step-tail mono" class:err={status === 'err'}>{tail}</span>
@@ -229,25 +254,34 @@
         {#if line.hint}<div class="cmd-hint">{line.hint}</div>{/if}
       {:else if filePath}
         <div class="file-line">
-          <button class="file-chip mono" onclick={openInFiles} title={ctx.sessionId && !ctx.readonly ? `Open in Files — ${filePath}` : `Copy path — ${filePath}`}>
-            <Icon name="file" size={12} /> <span class="file-chip-path">{filePath}</span>
+          <button class="file-chip mono" onclick={openPreview} title="Preview — {filePath}">
+            <Icon name="eye" size={12} /> <span class="file-chip-path">{relPath(filePath, cwd)}</span>
           </button>
+          {#if hasDiff}
+            <button class="link-btn" onclick={openDiff} title="Open this change in the side panel">Open diff</button>
+          {/if}
+          {#if canFiles}
+            <button class="icon-btn file-open" onclick={openInFiles} aria-label="Open in Files" title="Open in Files"><Icon name="folder" size={12} /></button>
+          {/if}
         </div>
       {/if}
       {#if hasDiff && diff}
         <InlineDiff {diff} />
       {:else if writtenContent}
-        <pre class="out mono hljs" dir="ltr">{@html writtenHtml}</pre>
+        <div class="code-frame"><CodeView text={writtenContent} lang={hlReady && filePath ? langFromPath(filePath) : null} /></div>
       {:else if result == null}
         <div class="pending">{status === 'running' ? 'Waiting for the result…' : 'No result was recorded for this call.'}</div>
       {:else if block.tool === 'web' || block.tool === 'ask'}
         <Markdown md={text} small />
+      {:else if readView && !windowed}
+        <div class="code-frame"><CodeView text={readView.text} start={readView.start} lang={lang} /></div>
       {:else if windowed}
         <VirtualList items={lines} estimateHeight={18} class="out-vlist" findText={(l: string) => l}>
           {#snippet row(l)}<div class="out-line mono hljs" dir="ltr">{@html highlightLine(l || ' ', lang)}</div>{/snippet}
         </VirtualList>
       {:else if text}
-        <pre class="out mono hljs" class:err={status === 'err'} class:shell={isShell} dir="ltr" data-lang={lang}>{@html outHtml}</pre>
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
+        <pre class="out mono hljs" class:err={status === 'err'} class:shell={isShell} dir="ltr" data-lang={lang} onclick={onOutClick}>{@html outHtml}</pre>
       {:else if !result.image_ids.length && !previewOnly}
         <div class="pending">(no output)</div>
       {/if}
@@ -474,6 +508,13 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
+  .code-frame {
+    max-height: 360px;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    background: var(--code-bg, var(--surface-2));
+  }
   .out {
     margin: 0;
     max-height: 320px;
@@ -523,7 +564,18 @@
   }
   .file-line {
     display: flex;
+    align-items: center;
+    gap: 8px;
     min-width: 0;
+  }
+  .file-line .link-btn {
+    align-self: center;
+    flex-shrink: 0;
+  }
+  .file-open {
+    flex-shrink: 0;
+    width: 22px;
+    height: 22px;
   }
   .file-chip {
     display: inline-flex;
@@ -543,6 +595,13 @@
   }
   /* The ellipsis lives on the TEXT span — on the inline-flex chip itself it
      never applied and long paths were cut mid-character. */
+  .out :global(a.file-ref),
+  .out :global(a.out-link) {
+    color: var(--accent-text);
+    text-decoration: underline dotted;
+    text-underline-offset: 2px;
+    cursor: pointer;
+  }
   .file-chip-path {
     min-width: 0;
     overflow: hidden;

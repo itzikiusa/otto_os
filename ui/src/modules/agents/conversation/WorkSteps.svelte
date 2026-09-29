@@ -5,7 +5,8 @@
   // "N failed"). Expanding lists the steps as a timeline of one-line rows
   // (ToolStep), subagent cards and plan snapshots. A group of exactly one call
   // renders that row directly. Thinking markers carry no text (the transcript
-  // keeps only that it happened), so they are counted in the tooltip only.
+  // keeps only that it happened): in the timeline they are their own violet,
+  // italic "Thought" rows, never confusable with a step or the answer.
   import { untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import ToolStep from './ToolStep.svelte';
@@ -64,8 +65,13 @@
     </button>
     {#if open}
       <div class="steps-list">
-        {#each visible as s, i (s.kind === 'tool_call' ? s.id : s.kind === 'subagent' ? s.agent_id : `${s.kind}-${i}`)}
-          {#if s.kind === 'tool_call'}
+        {#each steps as s, i (s.kind === 'tool_call' ? s.id : s.kind === 'subagent' ? s.agent_id : `${s.kind}-${i}`)}
+          {#if s.kind === 'thinking'}
+            <div class="think-step" title="Reasoning — the text is not saved to the transcript">
+              <span class="think-icon" aria-hidden="true"><Icon name="sparkle" size={12} /></span>
+              <span>Thought{s.count > 1 ? ` ×${s.count}` : ''}</span>
+            </div>
+          {:else if s.kind === 'tool_call'}
             <ToolStep block={s} live={active} {waiting} />
           {:else if s.kind === 'subagent'}
             <SubagentCard agentId={s.agent_id} description={s.description} agentType={s.agent_type} status={s.status} />
@@ -146,6 +152,18 @@
   .steps-caret {
     display: inline-flex;
     flex-shrink: 0;
+  }
+  .think-step {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 8px;
+    font-size: var(--fs-s);
+    font-style: italic;
+    color: color-mix(in srgb, var(--cat-4) 70%, var(--text));
+  }
+  .think-icon {
+    display: inline-flex;
   }
   /* The expanded steps hang off a hairline, like a timeline. */
   .steps-list {

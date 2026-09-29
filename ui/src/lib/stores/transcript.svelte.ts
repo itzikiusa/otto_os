@@ -73,6 +73,15 @@ const DELTA_CAP_BYTES = 64 * 1024;
 export const TURN_CAP = 600;
 export const TURN_KEEP = 500;
 
+/** One lazily fetched subagent body (`?sub=<agent_id>`). */
+export interface SubagentBody {
+  turns: Turn[];
+  loading: boolean;
+  error: string | null;
+  has_earlier: boolean;
+  cursor: string;
+}
+
 /**
  * Drop the head of a live turn list that outgrew `cap`. The server pages by
  * RECORD index (`before` = exclusive first-record index), which turns don't
@@ -105,7 +114,10 @@ export function trimTurnHead(
 
 export class Conversation {
   readonly src: TranscriptSource;
-  transcript: Transcript | null = $state(null);
+  /** Raw like `turns`: always replaced whole, never mutated. A deep proxy
+   *  wrapped the page's turns and every `subagents` entry on first read (a
+   *  big session's tree is 280+ entries, searched by each SubagentCard). */
+  transcript: Transcript | null = $state.raw(null);
   /** Raw: turns are replaced (never mutated), and identity is what lets the
    *  view reuse render items and the search cache for unchanged turns. */
   turns: Turn[] = $state.raw([]);
@@ -131,9 +143,12 @@ export class Conversation {
   /** Bumped on every `transcript_appended` — the draft is hidden until the
    *  screen text moves past what the folded turn already shows. */
   lastAppendAt = $state(0);
-  /** Lazy subagent bodies keyed by agent id (`?sub=`). */
-  subagents: Record<string, { turns: Turn[]; loading: boolean; error: string | null; has_earlier: boolean; cursor: string }> =
-    $state({});
+  /** Lazy subagent bodies keyed by agent id (`?sub=`). Raw and replaced
+   *  whole on every change (`setSub`), so a body's turns are never proxied. */
+  subagents: Record<string, SubagentBody> = $state.raw({});
+  private setSub(agentId: string, body: SubagentBody): void {
+    this.subagents = { ...this.subagents, [agentId]: body };
+  }
   private inflight: AbortController | null = null;
   /** Index of the last record the client has folded (from the WS delta). */
   private tailCursor: string | null = null;
@@ -337,21 +352,21 @@ export class Conversation {
     if (!this.isActive()) return;
     const epoch = this.readEpoch;
     if (this.subagents[agentId]?.turns.length || this.subagents[agentId]?.loading) return;
-    this.subagents[agentId] = { turns: [], loading: true, error: null, has_earlier: false, cursor: '' };
+    this.setSub(agentId, { turns: [], loading: true, error: null, has_earlier: false, cursor: '' });
     try {
       const t = await fetchTranscript(this.src, { sub: agentId, limit: PAGE_TURNS }, this.reads.signal);
       if (epoch !== this.readEpoch || !this.isActive()) return;
       this.retain(t);
-      this.subagents[agentId] = { turns: t.turns, loading: false, error: null, has_earlier: t.has_earlier, cursor: t.cursor };
+      this.setSub(agentId, { turns: t.turns, loading: false, error: null, has_earlier: t.has_earlier, cursor: t.cursor });
     } catch (e) {
       if (epoch !== this.readEpoch || !this.isActive()) return;
-      this.subagents[agentId] = {
+      this.setSub(agentId, {
         turns: [],
         loading: false,
         error: e instanceof Error ? e.message : String(e),
         has_earlier: false,
         cursor: '',
-      };
+      });
     }
   }
 
@@ -360,21 +375,21 @@ export class Conversation {
     const epoch = this.readEpoch;
     const cur = this.subagents[agentId];
     if (!cur || !cur.has_earlier || cur.loading) return;
-    this.subagents[agentId] = { ...cur, loading: true };
+    this.setSub(agentId, { ...cur, loading: true });
     try {
       const t = await fetchTranscript(this.src, { sub: agentId, before: cur.cursor, limit: PAGE_TURNS }, this.reads.signal);
       if (epoch !== this.readEpoch || !this.isActive()) return;
       this.retain(t);
-      this.subagents[agentId] = {
+      this.setSub(agentId, {
         turns: [...t.turns, ...cur.turns],
         loading: false,
         error: null,
         has_earlier: t.has_earlier,
         cursor: t.cursor,
-      };
+      });
     } catch (e) {
       if (epoch !== this.readEpoch || !this.isActive()) return;
-      this.subagents[agentId] = { ...cur, loading: false, error: e instanceof Error ? e.message : String(e) };
+      this.setSub(agentId, { ...cur, loading: false, error: e instanceof Error ? e.message : String(e) });
     }
   }
 
@@ -383,8 +398,10 @@ export class Conversation {
     this.reads.abort();
     this.inflight?.abort();
     this.loadingEarlier = false;
-    for (const [id, state] of Object.entries(this.subagents)) {
-      if (state.loading) this.subagents[id] = { ...state, loading: false };
+    if (Object.values(this.subagents).some((b) => b.loading)) {
+      this.subagents = Object.fromEntries(
+        Object.entries(this.subagents).map(([id, b]) => [id, b.loading ? { ...b, loading: false } : b]),
+      );
     }
   }
 }

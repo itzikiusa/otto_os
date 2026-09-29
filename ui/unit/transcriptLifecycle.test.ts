@@ -100,3 +100,14 @@ test('parent Reload preserves accounting for retained child bodies',async()=>{
   const close=h.acquire('a');await settle();const c=h.store.peek('a');await c.loadSubagent('child');const before=c.retainedBytes;
   assert.ok(before>=200_000);await c.load();assert.ok(c.retainedBytes>=before,'Reload retains subagents, so their charge must remain');close();
 });
+test('subagent bodies are replaced whole (raw state), never mutated in place',async()=>{
+  const h=setup(url=>Promise.resolve(url.includes('sub=')?{...page(),turns:[{id:url.includes('sub=one')?'one-turn':'two-turn',role:'assistant',blocks:[]}]}:page()));
+  const close=h.acquire('a');await settle();const c=h.store.peek('a');
+  await c.loadSubagent('one');const afterOne=c.subagents;const one=afterOne.one;
+  await c.loadSubagent('two');
+  assert.notEqual(c.subagents,afterOne,'a change swaps the record, so raw state re-renders');
+  assert.equal(c.subagents.one,one,'an untouched body keeps its identity');
+  assert.equal(afterOne.two,undefined,'the previous record was not mutated');
+  assert.deepEqual([c.subagents.one.turns[0].id,c.subagents.two.turns[0].id],['one-turn','two-turn']);
+  close();
+});

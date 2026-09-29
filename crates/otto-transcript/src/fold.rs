@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use crate::images::ImageStore;
 use crate::model::*;
-use crate::util::{basename, cap_text, clip_input, mime_for_path, pr_label};
+use crate::util::{basename, cap_owned, cap_text, clip_input, mime_for_path, pr_label};
 
 /// Prices a deduped usage sample (`model, input, output, cache_read,
 /// cache_write → USD`). The server passes `otto_usage::estimate_cost` so the
@@ -135,11 +135,11 @@ pub(crate) struct BlockRef {
 fn cap_block(block: Block) -> Block {
     match block {
         Block::Text { md } => Block::Text {
-            md: cap_text(&md).0,
+            md: cap_owned(md).0,
         },
         Block::Queued { op, text, injected } => Block::Queued {
             op,
-            text: cap_text(&text).0,
+            text: cap_owned(text).0,
             injected,
         },
         Block::ToolCall {
@@ -201,6 +201,10 @@ pub(crate) struct Fold<'a> {
     pub usage_seen: bool,
     pub cost_usd: f64,
     pub cost_fallback: Option<f64>,
+    /// Usage reported before its assistant turn existed (a Codex call whose
+    /// `token_count` lands ahead of any visible item); the next assistant
+    /// turn takes it.
+    pub pending_usage: Option<TurnUsage>,
 }
 
 impl<'a> Fold<'a> {
@@ -230,6 +234,7 @@ impl<'a> Fold<'a> {
             usage_seen: false,
             cost_usd: 0.0,
             cost_fallback: None,
+            pending_usage: None,
         }
     }
 
@@ -262,6 +267,9 @@ impl<'a> Fold<'a> {
             model,
             system: std::mem::take(&mut self.pending_notes),
             reasoning_steps: 0,
+            usage: (role == Role::Assistant)
+                .then(|| self.pending_usage.take())
+                .flatten(),
         };
         self.turns.push(FoldedTurn {
             turn,
@@ -507,6 +515,26 @@ impl<'a> Fold<'a> {
         self.cache_write = self.cache_write.saturating_add(cache_write);
         if let Some(price) = self.opts.price {
             self.cost_usd += price(model, input, output, cache_read, cache_write);
+        }
+    }
+
+    /// Add one API call's tokens to assistant turn `t` (touching it, so the
+    /// live delta re-sends the turn), or hold them for the next assistant
+    /// turn when `t` is `None`.
+    pub fn turn_usage(&mut self, t: Option<usize>, u: TurnUsage, idx: usize) {
+        match t.filter(|&t| t < self.turns.len()) {
+            Some(t) => {
+                self.turns[t]
+                    .turn
+                    .usage
+                    .get_or_insert_with(TurnUsage::default)
+                    .add(&u);
+                self.touch(t, idx);
+            }
+            None => self
+                .pending_usage
+                .get_or_insert_with(TurnUsage::default)
+                .add(&u),
         }
     }
 

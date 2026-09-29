@@ -17,15 +17,27 @@ pub const UNPARSEABLE_TYPE: &str = "__unparseable__";
 
 /// Parse `bytes` (a whole file or a tail chunk of complete lines) into records.
 pub fn parse_records(bytes: &[u8]) -> Vec<Value> {
+    let mut out = Vec::new();
+    for_each_record(bytes, |v| out.push(v));
+    out
+}
+
+/// [`parse_records`] one record at a time: `f` gets each complete record in
+/// order and owns it, so a whole-file fold never holds the file as a `Vec` of
+/// `Value`s (a 65 MB transcript is several times that in `Value`s, and
+/// dropping them cost more than folding). Returns the number of records.
+pub fn for_each_record(bytes: &[u8], mut f: impl FnMut(Value)) -> usize {
     let complete = match bytes.iter().rposition(|b| *b == b'\n') {
         Some(nl) => &bytes[..=nl],
-        None => return Vec::new(),
+        None => return 0,
     };
     let text = String::from_utf8_lossy(complete);
-    text.lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(parse_line)
-        .collect()
+    let mut n = 0;
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        f(parse_line(line));
+        n += 1;
+    }
+    n
 }
 
 /// Parse one line; malformed JSON → the [`UNPARSEABLE_TYPE`] placeholder.
@@ -82,6 +94,16 @@ mod tests {
         assert_eq!(recs.len(), 2);
         assert_eq!(recs[1]["type"], "b");
         assert!(parse_records(b"{\"type\":\"a\"}").is_empty());
+    }
+
+    #[test]
+    fn streaming_matches_the_collected_parse() {
+        let bytes = b"{\"type\":\"a\"}\r\n\n  \nnot json\n{\"type\":\"c\"}\n{\"type\":\"partial";
+        let mut seen = Vec::new();
+        let n = for_each_record(bytes, |v| seen.push(v));
+        assert_eq!(n, 3);
+        assert_eq!(seen, parse_records(bytes));
+        assert_eq!(seen[1]["type"], UNPARSEABLE_TYPE);
     }
 
     #[test]

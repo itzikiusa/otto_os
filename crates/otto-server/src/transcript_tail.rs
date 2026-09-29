@@ -29,9 +29,7 @@ use std::time::{Duration, Instant};
 use otto_core::domain::Session;
 use otto_core::event::Event;
 use otto_core::Id;
-use otto_transcript::{
-    parse_records, Artifact, Folded, Folder, Provider, SubagentMeta, SubagentScanner, Tailer,
-};
+use otto_transcript::{Artifact, Folded, Folder, Provider, SubagentMeta, SubagentScanner, Tailer};
 
 use crate::offload::blocking;
 use crate::state::ServerCtx;
@@ -82,6 +80,9 @@ struct Live {
     provider: Provider,
     path: PathBuf,
     state: Mutex<Option<TailState>>,
+    /// Flips to `true` once the initial fold settled (landed or failed), so a
+    /// read that just armed the tail can wait for it ([`live_page_settled`]).
+    settled: tokio::sync::watch::Sender<bool>,
 }
 
 impl Live {
@@ -138,6 +139,7 @@ pub fn touch(ctx: &ServerCtx, session: &Session, provider: Provider, path: &Path
         provider,
         path: path.to_path_buf(),
         state: Mutex::new(None),
+        settled: tokio::sync::watch::Sender::new(false),
     });
     reg.insert(
         session.id.clone(),
@@ -191,11 +193,36 @@ pub async fn live_page(
     provider: Provider,
     path: &Path,
 ) -> Option<(Arc<Folded>, Vec<SubagentMeta>)> {
-    let live = {
-        let reg = lock();
-        let e = reg.get(session_id)?;
-        (e.live.provider == provider && e.live.path == path).then(|| e.live.clone())?
-    };
+    page_of(live_of(session_id, provider, path)?).await
+}
+
+/// How long a read waits for a just-armed tail's initial fold before it
+/// folds the file itself (a 65 MB transcript folds in ~0.15 s).
+pub const SETTLE_WAIT: Duration = Duration::from_secs(15);
+
+/// [`live_page`] for a read that has just [`touch`]ed the tail: waits (at most
+/// [`SETTLE_WAIT`]) for the tail's initial fold instead of folding the file a
+/// second time on the read path. `None` when no tail runs for this file or
+/// its initial fold failed — the caller falls back to the fold cache.
+pub async fn live_page_settled(
+    session_id: &Id,
+    provider: Provider,
+    path: &Path,
+) -> Option<(Arc<Folded>, Vec<SubagentMeta>)> {
+    let live = live_of(session_id, provider, path)?;
+    let mut settled = live.settled.subscribe();
+    let _ = tokio::time::timeout(SETTLE_WAIT, settled.wait_for(|s| *s)).await;
+    page_of(live).await
+}
+
+/// The running tail of `session_id` when it folds exactly `path`.
+fn live_of(session_id: &Id, provider: Provider, path: &Path) -> Option<Arc<Live>> {
+    let reg = lock();
+    let e = reg.get(session_id)?;
+    (e.live.provider == provider && e.live.path == path).then(|| e.live.clone())
+}
+
+async fn page_of(live: Arc<Live>) -> Option<(Arc<Folded>, Vec<SubagentMeta>)> {
     blocking(move || {
         let mut guard = live.lock();
         let st = guard.as_mut()?;
@@ -235,14 +262,13 @@ fn refold_with(
 ) -> std::io::Result<TailState> {
     let mut bytes = Vec::new();
     std::fs::File::open(path)?.read_to_end(&mut bytes)?;
-    let records = parse_records(&bytes);
     let mut folder = Folder::new(provider, opts);
     let mut subagents = SubagentScanner::new();
     if provider == Provider::Claude {
         subagents.refresh(path);
         folder.set_subagents(subagents.tree().to_vec());
     }
-    folder.seed(&records);
+    folder.seed_bytes(&bytes);
     let mut tailer = Tailer::at(path, bytes.len() as u64);
     tailer.partial_line = match bytes.iter().rposition(|b| *b == b'\n') {
         Some(nl) => bytes[nl + 1..].to_vec(),
@@ -426,6 +452,9 @@ async fn run(ctx: ServerCtx, session: Session, live: Arc<Live>) {
         Some(known)
     })
     .await;
+    // Landed or failed, the reads waiting on it may go (a failure falls back
+    // to the fold cache).
+    live.settled.send_replace(true);
     let Some(mut known_artifacts) = known else {
         tracing::debug!(session = %sid, "transcript tail: initial fold failed");
         return;
@@ -825,6 +854,7 @@ mod tests {
             provider: Provider::Claude,
             path: path.clone(),
             state: Mutex::new(None),
+            settled: tokio::sync::watch::Sender::new(false),
         };
         let mut st = refold_with(Provider::Claude, &path, Default::default()).unwrap();
         let mut known = HashSet::new();
@@ -869,6 +899,7 @@ mod tests {
                     provider,
                     path: path.clone(),
                     state: Mutex::new(None),
+                    settled: tokio::sync::watch::Sender::new(false),
                 };
                 let mut st = refold_with(provider, &path, Default::default()).unwrap();
                 let mut known: HashSet<String> =
@@ -1043,6 +1074,7 @@ mod tests {
                     provider: Provider::Claude,
                     path: PathBuf::from("/nonexistent.jsonl"),
                     state: Mutex::new(None),
+                    settled: tokio::sync::watch::Sender::new(false),
                 }),
             },
         );
@@ -1056,5 +1088,74 @@ mod tests {
         assert_eq!(EVENT_CAP, 65536);
         assert_eq!(POLL, Duration::from_millis(700));
         assert_eq!(MAX_TAILS, 64);
+    }
+
+    /// Register a tail for `path` whose initial fold has not landed yet.
+    fn pending_tail(id: &Id, path: &Path) -> Arc<Live> {
+        let live = Arc::new(Live {
+            provider: Provider::Claude,
+            path: path.to_path_buf(),
+            state: Mutex::new(None),
+            settled: tokio::sync::watch::Sender::new(false),
+        });
+        lock().insert(
+            id.clone(),
+            Entry {
+                last_touch: Instant::now(),
+                stop: Arc::new(AtomicBool::new(false)),
+                live: live.clone(),
+            },
+        );
+        live
+    }
+
+    #[tokio::test]
+    async fn a_read_waits_for_the_tails_initial_fold_instead_of_folding_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"user\",\"message\":{\"content\":\"hello\"}}\n",
+        )
+        .unwrap();
+        let id: Id = "tail-test-settle".into();
+        let live = pending_tail(&id, &path);
+        // Before the fold lands, a plain `live_page` has nothing to serve.
+        assert!(live_page(&id, Provider::Claude, &path).await.is_none());
+        let (lv, p) = (live.clone(), path.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let st = refold_with(Provider::Claude, &p, Default::default()).unwrap();
+            *lv.lock() = Some(st);
+            lv.settled.send_replace(true);
+        });
+        let (folded, _) = live_page_settled(&id, Provider::Claude, &path)
+            .await
+            .expect("served from the tail once its fold settled");
+        assert_eq!(folded.turns.len(), 1);
+        // Another file of the same session is not this tail's to serve.
+        let other = dir.path().join("other.jsonl");
+        assert!(live_page_settled(&id, Provider::Claude, &other)
+            .await
+            .is_none());
+        lock().remove(&id);
+    }
+
+    #[tokio::test]
+    async fn a_failed_initial_fold_releases_the_waiting_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gone.jsonl");
+        let id: Id = "tail-test-settle-fail".into();
+        let live = pending_tail(&id, &path);
+        live.settled.send_replace(true);
+        let started = Instant::now();
+        assert!(live_page_settled(&id, Provider::Claude, &path)
+            .await
+            .is_none());
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "no wait once settled"
+        );
+        lock().remove(&id);
     }
 }

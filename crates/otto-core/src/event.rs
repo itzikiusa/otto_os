@@ -500,6 +500,12 @@ pub enum Event {
     /// session's Canvas panel re-fetches `GET /sessions/{id}/canvas-refs` on a
     /// matching tick instead of polling.
     CanvasRefsChanged { workspace_id: Id, session_id: Id },
+    /// A watched repository's working tree, index or refs changed on disk (an
+    /// editor save, a CLI `git add`/commit/checkout). The Git page re-reads
+    /// the repo's local status instead of waiting for the next auto-fetch.
+    /// Debounced per repo; only repos a client recently asked about are
+    /// watched (`otto-git` `watch.rs`).
+    RepoStatusChanged { workspace_id: Id, repo_id: Id },
     /// A browser tab was created, navigated, or had its mode changed. The open
     /// Browser page re-fetches (or applies in place) the matching tab. `tab` is
     /// the serialized `otto_state::browser::BrowserTab` (opaque here — otto-core
@@ -744,6 +750,7 @@ impl Event {
             Event::AgentRoomMessage { .. } => "agent_room_message",
             Event::OttoRunUpdated { .. } => "otto_run_updated",
             Event::CanvasRefsChanged { .. } => "canvas_refs_changed",
+            Event::RepoStatusChanged { .. } => "repo_status_changed",
             Event::BrowserTabUpdated { .. } => "browser_tab_updated",
             Event::BrowserAnnotationAdded { .. } => "browser_annotation_added",
             Event::BrowserLiveSessionUpdated { .. } => "browser_live_session_updated",
@@ -800,6 +807,10 @@ mod tests {
             Event::CanvasRefsChanged {
                 workspace_id: "w".into(),
                 session_id: "s".into(),
+            },
+            Event::RepoStatusChanged {
+                workspace_id: "w".into(),
+                repo_id: "r".into(),
             },
             Event::McpApprovalChanged {
                 approval_id: None,

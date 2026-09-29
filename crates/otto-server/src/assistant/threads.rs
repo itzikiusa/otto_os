@@ -1000,6 +1000,7 @@ mod tests {
                 model: Some("claude-sonnet".into()),
                 system: vec![],
                 reasoning_steps: 0,
+                usage: None,
             },
             first: 0,
             last: 0,

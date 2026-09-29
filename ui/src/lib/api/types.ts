@@ -1540,6 +1540,13 @@ export type OttoEvent =
       session_id: Id;
     }
   | {
+      /** A watched repository's working tree, index or refs changed on disk.
+       *  The Git page re-reads `GET /repos/{id}/status` (local, no fetch). */
+      type: 'repo_status_changed';
+      workspace_id: Id;
+      repo_id: Id;
+    }
+  | {
       /** A browser tab was created or navigated (a reader-mode navigation
        *  adopts the fetched page's title). `tab` is the full `BrowserTab`. */
       type: 'browser_tab_updated';
@@ -8695,13 +8702,29 @@ export interface Transcript {
   has_earlier: boolean;
   turns: Turn[];
   stats: TranscriptStats;
-  /** FULL tree; `?sub=` responses return `[]`. */
+  /** FULL tree on the newest page; `?sub=` and earlier (`before`) pages
+   *  return `[]` — keep the first page's. */
   subagents: SubagentMeta[];
   /** Set (with `turns: []`) when no transcript resolves for the session. */
   unavailable_reason: TranscriptUnavailableReason | null;
 }
 
 export type TurnRole = 'user' | 'assistant';
+
+/** Token usage summed over one assistant turn's API calls (Claude
+ *  `message.usage`, once per response; Codex the growth of `token_count`
+ *  totals). `thinking_tokens` is the part of `output_tokens` spent on
+ *  reasoning (Claude `output_tokens_details`, Codex `reasoning_output_tokens`),
+ *  so the visible answer is `output_tokens - thinking_tokens`. Cache fields are
+ *  separate from `input_tokens` (Claude reports them so; Codex's cached input
+ *  is split out to match). */
+export interface TurnUsage {
+  input_tokens: number;
+  output_tokens: number;
+  thinking_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+}
 
 export interface Turn {
   /** Claude: assistant → requestId (else uuid); user → uuid. Codex new era →
@@ -8716,6 +8739,8 @@ export interface Turn {
   system: SystemNote[];
   /** Codex reasoning items in this turn (never recorded → counted only; 0 for Claude). */
   reasoning_steps: number;
+  /** Assistant turns only; absent/null when the provider recorded no usage. */
+  usage?: TurnUsage | null;
 }
 
 export type ToolKind =

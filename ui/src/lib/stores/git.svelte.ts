@@ -450,6 +450,61 @@ class GitStore {
     }
   }
 
+  // ── Live working-tree changes ──────────────────────────────────────────────
+  // The daemon watches every repo whose status/fetch we asked for and sends
+  // `repo_status_changed` ~150–400 ms after an edit, a CLI `git add`, commit or
+  // checkout (otto-git watch.rs). Before, local edits only surfaced with the
+  // next auto-fetch round — up to 30 s, and a network fetch to notice them.
+
+  /** Bumped per applied change, so views showing file CONTENT (the open diff)
+   *  can re-read it even when the change list itself is unchanged. */
+  liveRev: Record<string, number> = $state({});
+  private liveInFlight = new Set<string>();
+  private liveDirty = new Set<string>();
+  private liveHiddenWait = false;
+
+  /** A watched repo changed on disk: re-read its local status if we show it. */
+  applyRepoChanged(repoId: string): void {
+    const shown = this.openRepoIds.includes(repoId) || this.primary?.id === repoId || repoId in this.statusById;
+    if (!shown) return;
+    if (typeof document !== 'undefined' && document.hidden) {
+      // Hidden window: remember it, read once when it's visible again.
+      this.liveDirty.add(repoId);
+      if (!this.liveHiddenWait) {
+        this.liveHiddenWait = true;
+        const onVisible = (): void => {
+          if (document.hidden) return;
+          document.removeEventListener('visibilitychange', onVisible);
+          this.liveHiddenWait = false;
+          for (const id of [...this.liveDirty]) {
+            this.liveDirty.delete(id);
+            void this.liveRefresh(id);
+          }
+        };
+        document.addEventListener('visibilitychange', onVisible);
+      }
+      return;
+    }
+    void this.liveRefresh(repoId);
+  }
+
+  /** One status read per repo at a time; a change landing meanwhile re-reads
+   *  once more afterwards, so a burst never queues N requests. */
+  private async liveRefresh(repoId: string): Promise<void> {
+    if (this.liveInFlight.has(repoId)) {
+      this.liveDirty.add(repoId);
+      return;
+    }
+    this.liveInFlight.add(repoId);
+    try {
+      await this.refreshStatus(repoId);
+      this.liveRev = { ...this.liveRev, [repoId]: (this.liveRev[repoId] ?? 0) + 1 };
+    } finally {
+      this.liveInFlight.delete(repoId);
+      if (this.liveDirty.delete(repoId)) void this.liveRefresh(repoId);
+    }
+  }
+
   /** Lazily load a repo's status once (used by the tab strip). `null` marks an
    *  in-flight / attempted load so we don't refetch on every render. */
   ensureStatus(repoId: string): void {

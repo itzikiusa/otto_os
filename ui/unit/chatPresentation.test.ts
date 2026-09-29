@@ -19,7 +19,7 @@ import {
   type StepBlock,
   type ToolCallBlock,
 } from '../src/modules/agents/conversation/format.ts';
-import { CODE_CAP_LINES, decorateCodeBlocks } from '../src/modules/agents/conversation/codeBlocks.ts';
+import { CODE_CAP_LINES, decorateCodeBlocks, langLabel } from '../src/modules/agents/conversation/codeBlocks.ts';
 import type { Block, ToolKind, ToolResult } from '../src/lib/api/types.ts';
 
 const ok = (text = 'ok', extra: Partial<ToolResult> = {}): ToolResult => ({
@@ -124,21 +124,30 @@ test('segment: the plan is its own block; the call that wrote it gets no row', (
   assert.deepEqual(segment([failed, tasks]).map((s) => s.kind), ['steps', 'block']);
 });
 
-test('decorateCodeBlocks adds label + Wrap/Copy, caps long blocks, leaves prose alone', () => {
+test('decorateCodeBlocks: IDE header (label · file · lines · Wrap/Open/Copy), numbered lines, fold, idempotent', () => {
   assert.equal(decorateCodeBlocks('<p>hi</p>'), '<p>hi</p>');
-  const short = decorateCodeBlocks('<p>a</p><pre><code class="hljs language-rust">let x = 1;\nlet y = 2;</code></pre>');
-  assert.match(short, /<div class="code-block" data-lines="2">/);
-  assert.match(short, /<span class="code-lang">rust<\/span>/);
+  // Chat fences arrive one `<span class="cl">` per line (mdRender `codeLines`).
+  const lines = '<span class="cl">let x = 1;</span><span class="cl">let y = 2;</span>';
+  const short = decorateCodeBlocks(`<p>a</p><pre><code class="hljs language-rust" title="src/retry.rs">${lines}</code></pre>`);
+  assert.match(short, /<div class="code-block numbered" data-lines="2" data-lang="rust" style="--gut:2ch">/);
+  assert.match(short, /<span class="code-lang">Rust<\/span>/, 'fence tag → a human label');
+  assert.match(short, /data-code-act="file" data-file="src\/retry.rs"[^>]*>retry.rs<\/button>/, 'the fence title becomes the file button');
+  assert.match(short, /<span class="code-n">2 lines<\/span>/);
   assert.match(short, /data-code-act="copy"/);
+  assert.match(short, /data-code-act="open"/);
   assert.match(short, /data-code-act="wrap" aria-pressed="false"/);
-  assert.match(short, /<pre><code class="hljs language-rust">let x = 1;\nlet y = 2;<\/code><\/pre>/);
+  assert.match(short, new RegExp(`<pre><code class="hljs language-rust">${lines}</code></pre>`), 'the title moves off the code');
   assert.doesNotMatch(short, /data-code-act="expand"/);
+  // Old-style (newline-separated) and untagged blocks still decorate.
   const body = Array.from({ length: CODE_CAP_LINES + 5 }, (_, i) => `l${i}`).join('\n');
   const long = decorateCodeBlocks(`<pre><code class="hljs">${body}</code></pre><pre><code class="hljs">x</code></pre>`);
   assert.match(long, /class="code-block capped" data-lines="23"/);
   assert.match(long, /Show all 23 lines/);
-  assert.match(long, /<span class="code-lang"><\/span>/, 'no language → empty label');
+  assert.match(long, /<span class="code-lang">Text<\/span>/, 'no language → "Text"');
   assert.equal(long.match(/class="code-block/g)?.length, 2, 'every block is wrapped');
   // Idempotent on its own output (a cache re-decorate can't nest toolbars).
   assert.equal(decorateCodeBlocks(long).match(/class="code-block/g)?.length, 2);
+  assert.equal(decorateCodeBlocks(short).match(/class="code-block/g)?.length, 1);
+  assert.equal(langLabel('ts'), 'TypeScript');
+  assert.equal(langLabel('zig'), 'zig');
 });

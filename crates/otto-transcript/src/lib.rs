@@ -35,7 +35,7 @@ pub use fold::{FoldOpts, Folded, FoldedTurn, PriceFn};
 pub use images::ImageStore;
 pub use model::*;
 pub use peek::{peek, Peek};
-pub use records::{parse_records, read_head_tail, read_records};
+pub use records::{for_each_record, parse_records, read_head_tail, read_records};
 pub use subagents::{read_subagents, subagent_path, subagents_dir, SubagentScanner};
 pub use tailer::{TailDelta, Tailer};
 pub use util::{TOOL_INPUT_CAP, TOOL_TEXT_CAP};
@@ -66,6 +66,18 @@ impl<'a> Folder<'a> {
             Provider::Codex => Folder::Codex(codex::CodexFolder::new(opts)),
             // agy is a stub: fold as Claude-shaped (yields unknown records).
             Provider::Claude | Provider::Agy => Folder::Claude(claude::ClaudeFolder::new(opts)),
+        }
+    }
+
+    /// [`seed`](Self::seed) from raw file bytes. Claude streams them one
+    /// record at a time (no whole-file `Vec<Value>`); Codex needs the
+    /// per-file prescan first, so it parses them all.
+    pub fn seed_bytes(&mut self, bytes: &[u8]) {
+        match self {
+            Folder::Claude(c) => {
+                for_each_record(bytes, |v| c.push(&v));
+            }
+            Folder::Codex(_) => self.seed(&parse_records(bytes)),
         }
     }
 
@@ -130,14 +142,28 @@ impl<'a> Folder<'a> {
     }
 }
 
+/// Fold a transcript from its raw bytes — [`fold`] over
+/// [`parse_records`], but Claude files are streamed (see
+/// [`Folder::seed_bytes`]).
+pub fn fold_bytes(provider: Provider, bytes: &[u8], opts: FoldOpts<'_>) -> Folded {
+    match provider {
+        Provider::Claude => {
+            let mut c = claude::ClaudeFolder::new(opts);
+            for_each_record(bytes, |v| c.push(&v));
+            c.into_folded()
+        }
+        Provider::Codex | Provider::Agy => fold(provider, &parse_records(bytes), opts),
+    }
+}
+
 /// Read + fold a transcript file in one go.
 pub fn fold_file(
     provider: Provider,
     path: &std::path::Path,
     opts: FoldOpts<'_>,
 ) -> std::io::Result<Folded> {
-    let records = read_records(path)?;
-    Ok(fold(provider, &records, opts))
+    let bytes = std::fs::read(path)?;
+    Ok(fold_bytes(provider, &bytes, opts))
 }
 
 /// Guess the provider from a transcript path: Codex rollouts are named

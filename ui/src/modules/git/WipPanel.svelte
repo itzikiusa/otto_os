@@ -173,6 +173,30 @@
       });
     return () => ctl.abort();
   });
+  // A live on-disk change (`repo_status_changed`) re-reads the open file's
+  // diff in place: the change list can stay identical (the file was already
+  // modified) while its content moved on. No blanking — the old diff stays
+  // until the new one lands.
+  $effect(() => {
+    const rev = git.liveRev[repoId] ?? 0;
+    if (rev === 0) return;
+    const path = untrack(() => selectedPath);
+    const target = untrack(() => selTarget);
+    if (path === null) return;
+    const ctl = new AbortController();
+    void api
+      .get<DiffResp>(`/repos/${repoId}/diff?target=${target}&path=${encodeURIComponent(path)}`, ctl.signal)
+      .then((d) => {
+        if (!ctl.signal.aborted && selectedPath === path && selTarget === target) {
+          diff = d;
+          diffError = null;
+        }
+      })
+      .catch(() => {
+        /* keep the diff on screen; the next change or a reselect retries */
+      });
+    return () => ctl.abort();
+  });
   /** Over-cap files ("Load anyway") re-fetch through the same target. */
   const loadWipFile = $derived(repoDiffFileLoader(repoId, selTarget));
 

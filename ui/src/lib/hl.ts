@@ -49,11 +49,62 @@ const extMap: Record<string, string> = {
   toml: 'ini',
   sql: 'sql',
   xml: 'xml',
+  // Chat / preview extras (all inside highlight.js/lib/common).
+  mjs: 'javascript',
+  cjs: 'javascript',
+  mts: 'typescript',
+  cts: 'typescript',
+  jsonc: 'json',
+  json5: 'json',
+  htm: 'xml',
+  svg: 'xml',
+  plist: 'xml',
+  less: 'less',
+  mdx: 'markdown',
+  markdown: 'markdown',
+  pyi: 'python',
+  kts: 'kotlin',
+  cc: 'cpp',
+  cxx: 'cpp',
+  hh: 'cpp',
+  m: 'objectivec',
+  mm: 'objectivec',
+  lua: 'lua',
+  pl: 'perl',
+  pm: 'perl',
+  r: 'r',
+  graphql: 'graphql',
+  gql: 'graphql',
+  ini: 'ini',
+  cfg: 'ini',
+  conf: 'ini',
+  properties: 'ini',
+  mk: 'makefile',
+  diff: 'diff',
+  patch: 'diff',
+  fish: 'bash',
+  env: 'bash',
+  vb: 'vbnet',
+  wat: 'wasm',
+};
+
+/** Files known by NAME rather than extension. */
+const nameMap: Record<string, string> = {
+  makefile: 'makefile',
+  gnumakefile: 'makefile',
+  '.bashrc': 'bash',
+  '.zshrc': 'bash',
+  '.profile': 'bash',
+  '.env': 'bash',
+  'cargo.lock': 'ini',
+  '.gitconfig': 'ini',
+  '.editorconfig': 'ini',
 };
 
 export function langFromPath(path: string): string | null {
-  const ext = path.split('.').pop()?.toLowerCase() ?? '';
-  const lang = extMap[ext];
+  const name = (path.split('/').pop() ?? '').toLowerCase();
+  const ext = name.includes('.') ? (name.split('.').pop() ?? '') : '';
+  const lang = nameMap[name] ?? extMap[ext];
   if (!lang) return null;
   if (hljs && !hljs.getLanguage(lang)) return null;
   return lang;
@@ -154,4 +205,93 @@ export function peekHighlight(content: string, lang: string): string | undefined
  *  actually tokenize rather than escape). */
 export function canHighlight(lang: string | null): lang is string {
   return !!lang && !!hljs && !!hljs.getLanguage(lang);
+}
+
+// ---------------------------------------------------------------------------
+// Whole-block highlighting split into lines (chat code blocks, file previews).
+// Highlighting line by line loses multi-line context (block comments, template
+// strings, heredocs) — an IDE tokenizes the whole file. hljs output is nested
+// `<span class>`s and escaped text only, so the lines are cut at `\n` and every
+// span open at the cut is closed on that line and re-opened on the next: each
+// line is self-contained HTML (line numbers, wrapping and windowing hang off
+// it) and the concatenation reads exactly like the block.
+// ---------------------------------------------------------------------------
+
+const TOKEN = /<span[^>]*>|<\/span>|\n|[^<\n]+/g;
+
+/** Split highlighted HTML into self-contained per-line HTML. */
+export function splitHighlighted(html: string): string[] {
+  const lines: string[] = [];
+  const open: string[] = [];
+  let cur = '';
+  for (const m of html.matchAll(TOKEN)) {
+    const t = m[0];
+    if (t === '\n') {
+      lines.push(cur + '</span>'.repeat(open.length));
+      cur = open.join('');
+    } else if (t.startsWith('<span')) {
+      open.push(t);
+      cur += t;
+    } else if (t === '</span>') {
+      open.pop();
+      cur += t;
+    } else {
+      cur += t;
+    }
+  }
+  lines.push(cur + '</span>'.repeat(open.length));
+  return lines;
+}
+
+// Recently highlighted blocks (a preview reopened, a code block re-rendered
+// after hljs landed). Small: the md cache above it keeps the rendered prose.
+const blockCache = new Map<string, string[]>();
+const BLOCK_CACHE_MAX = 48;
+/** Blocks past this size are escaped, not tokenized (a 400 KB file preview
+ *  would stall the main thread for ~0.5 s). */
+export const HL_BLOCK_MAX = 256 * 1024;
+
+/** Highlight `text` as ONE block and return its lines as trusted HTML
+ *  (escaped when hljs is not loaded, the language is unknown, or the block is
+ *  over `HL_BLOCK_MAX`). */
+export function highlightLines(text: string, lang: string | null): string[] {
+  if (!lang || !hljs || !hljs.getLanguage(lang) || text.length > HL_BLOCK_MAX) return text.split('\n').map(escapeHtml);
+  const key = `${lang}\u0000${text}`;
+  const hit = blockCache.get(key);
+  if (hit) {
+    blockCache.delete(key);
+    blockCache.set(key, hit);
+    return hit;
+  }
+  let out: string[];
+  try {
+    out = splitHighlighted(hljs.highlight(text, { language: lang, ignoreIllegals: true }).value);
+  } catch {
+    out = text.split('\n').map(escapeHtml);
+  }
+  if (text.length <= 64 * 1024) {
+    blockCache.set(key, out);
+    if (blockCache.size > BLOCK_CACHE_MAX) {
+      const oldest = blockCache.keys().next().value;
+      if (oldest !== undefined) blockCache.delete(oldest);
+    }
+  }
+  return out;
+}
+
+/** True once the lazy hljs load has landed. */
+export function hljsLoaded(): boolean {
+  return hljs != null;
+}
+
+/** hljs's registered id for a fence tag / alias ("ts" → "typescript"), or
+ *  null when unknown (or hljs is not loaded yet). */
+export function canonicalLang(tag: string | null | undefined): string | null {
+  if (!tag || !hljs) return null;
+  const t = tag.toLowerCase();
+  const lang = hljs.getLanguage(t);
+  if (!lang) return null;
+  const ids = hljs.listLanguages();
+  if (ids.includes(t)) return t;
+  return ids.find((id) => hljs!.getLanguage(id) === lang) ?? null;
 }

@@ -39,11 +39,29 @@ pub const TOOL_INPUT_CAP: usize = 16 * 1024;
 
 /// Clip an oversized tool input to `{"_truncated": true, "bytes", "preview"}`.
 pub fn clip_input(input: Value) -> Value {
-    let raw = input.to_string();
-    if raw.len() <= TOOL_INPUT_CAP {
+    // Size it without building the string: nearly every input is under the cap.
+    if json_len(&input) <= TOOL_INPUT_CAP {
         return input;
     }
+    let raw = input.to_string();
     serde_json::json!({ "_truncated": true, "bytes": raw.len(), "preview": clip(&raw, 4000) })
+}
+
+/// Serialized length of `v` in bytes, counted without allocating it.
+pub fn json_len(v: &impl serde::Serialize) -> usize {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(b.len());
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut c = Count(0);
+    let _ = serde_json::to_writer(&mut c, v);
+    c.0
 }
 
 /// Truncate `s` to at most `max` chars (char-boundary safe), appending `…`.
@@ -74,6 +92,14 @@ pub fn basename(p: &str) -> &str {
 
 /// Cap `text` at [`TOOL_TEXT_CAP`] bytes (on a char boundary). Returns the
 /// (possibly shortened) text and whether it was cut.
+/// [`cap_text`] for an owned string: no copy when it is under the cap.
+pub fn cap_owned(text: String) -> (String, bool) {
+    if text.len() <= TOOL_TEXT_CAP {
+        return (text, false);
+    }
+    cap_text(&text)
+}
+
 pub fn cap_text(text: &str) -> (String, bool) {
     if text.len() <= TOOL_TEXT_CAP {
         return (text.to_string(), false);

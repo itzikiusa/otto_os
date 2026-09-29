@@ -47,14 +47,19 @@
 {/if}
 
 <style>
+  /* The response continuing: the agent's green rail, dashed while it streams. */
   .live-draft {
     display: flex;
     flex-direction: column;
     gap: 2px;
     min-width: 0;
-    border-inline-start: 2px dashed var(--border-strong);
-    padding-inline-start: 12px;
-    margin-inline-start: 6px;
+    border-inline-start: 2px dashed color-mix(in srgb, var(--agent, var(--border-strong)) 60%, transparent);
+    background: color-mix(in srgb, var(--agent, transparent) 4%, transparent);
+    padding-block: 8px;
+    padding-inline: 18px 16px;
+    margin-inline-start: 11px;
+    border-start-end-radius: var(--radius-l);
+    border-end-end-radius: var(--radius-l);
   }
   .draft {
     margin: 0;
