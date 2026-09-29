@@ -3,7 +3,7 @@
 // the turn → render-item grouping that turns the parser's flat `Turn[]` into
 // the app-style "user bubble / assistant response" rhythm.
 import type { IconName } from '../../../lib/components/Icon.svelte';
-import type { Block, DiffLine, DiffResp, FileDiff, Hunk, ToolKind, Turn, SystemNote } from '../../../lib/api/types';
+import type { Block, DiffLine, DiffResp, FileDiff, Hunk, ToolKind, Turn, TurnUsage, SystemNote } from '../../../lib/api/types';
 
 /** "21m 17s" / "4.2s" / "850ms". */
 export function fmtDuration(ms: number | null | undefined): string {
@@ -205,6 +205,23 @@ export interface RenderItem {
   model: string | null;
   /** Codex reasoning items in the member turns (never recorded → per-response footer). */
   reasoning_steps: number;
+  /** Token usage summed over the member turns that recorded any (null when none
+   *  did). Optional: the assistant's index items do not carry it. */
+  usage?: TurnUsage | null;
+}
+
+/** `a + b` field by field; either side may be missing. */
+export function addUsage(a: TurnUsage | null | undefined, b: TurnUsage | null | undefined): TurnUsage | null {
+  a ??= null;
+  if (!b) return a;
+  if (!a) return { ...b };
+  return {
+    input_tokens: a.input_tokens + b.input_tokens,
+    output_tokens: a.output_tokens + b.output_tokens,
+    thinking_tokens: a.thinking_tokens + b.thinking_tokens,
+    cache_read_tokens: a.cache_read_tokens + b.cache_read_tokens,
+    cache_creation_tokens: a.cache_creation_tokens + b.cache_creation_tokens,
+  };
 }
 
 function isToolish(b: Block): boolean {
@@ -227,6 +244,7 @@ export function groupTurns(turns: Turn[]): RenderItem[] {
       ts: t.ts,
       model: t.model,
       reasoning_steps: t.reasoning_steps ?? 0,
+      usage: t.role === 'assistant' ? addUsage(null, t.usage) : null,
     });
   };
   const extend = (item: RenderItem, t: Turn): void => {
@@ -236,6 +254,7 @@ export function groupTurns(turns: Turn[]): RenderItem[] {
     if (t.duration_ms != null) item.duration_ms = (item.duration_ms ?? 0) + t.duration_ms;
     if (!item.model && t.model) item.model = t.model;
     item.reasoning_steps += t.reasoning_steps ?? 0;
+    if (t.role === 'assistant') item.usage = addUsage(item.usage, t.usage);
   };
   for (const t of turns) {
     const last = out[out.length - 1];
@@ -563,4 +582,223 @@ export function askQuestions(input: unknown): AgentQuestion[] {
     out.push({ question: text.trim(), options });
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Chat v2 (rev 6): the settled-response fold, changed files, tokens, days,
+// paths.
+// ---------------------------------------------------------------------------
+
+/** A settled response split for the "Worked for …" fold (t3code-style): the
+ *  FIRST and the FINAL message stay visible, the work between them — tool
+ *  groups, intermediate narration, plan snapshots — folds into one row. */
+export interface ResponseFold {
+  head: Segment[];
+  body: Segment[];
+  tail: Segment[];
+}
+
+const isText = (s: Segment | undefined): boolean => s?.kind === 'block' && s.block.kind === 'text';
+
+/** Null when there is nothing worth folding (no tool work, or no message to
+ *  keep visible around it). */
+export function foldResponse(segs: Segment[]): ResponseFold | null {
+  if (!segs.some((s) => s.kind === 'steps' && s.steps.some((b) => b.kind !== 'thinking'))) return null;
+  const first = segs.findIndex(isText);
+  if (first < 0) return null;
+  let last = -1;
+  for (let i = segs.length - 1; i >= 0; i--) {
+    if (isText(segs[i])) {
+      last = i;
+      break;
+    }
+  }
+  // The final message counts only when no tool work follows it (a response
+  // that ended on a tool call has no final message yet).
+  const workAfter = segs.slice(last + 1).some((s) => s.kind === 'steps' || (s.kind === 'block' && s.block.kind === 'tasks'));
+  const tailFrom = last > first && !workAfter ? last : -1;
+  const head = [segs[first]];
+  const tail = tailFrom >= 0 ? segs.slice(tailFrom) : [];
+  const body = segs.filter((_, i) => i !== first && (tailFrom < 0 || i < tailFrom));
+  if (!body.some((s) => s.kind === 'steps')) return null;
+  return { head, body, tail };
+}
+
+/** Steps (tool calls + subagents), failures and thinking markers in a fold body. */
+export function foldStats(segs: Segment[]): { steps: number; failed: number; thinking: number } {
+  let steps = 0;
+  let failed = 0;
+  let thinking = 0;
+  for (const s of segs) {
+    if (s.kind !== 'steps') continue;
+    for (const b of s.steps) {
+      if (b.kind === 'tool_call') {
+        steps++;
+        if (b.result != null && !b.result.ok) failed++;
+      } else if (b.kind === 'subagent') steps++;
+      else if (b.kind === 'thinking') thinking += b.count;
+    }
+  }
+  return { steps, failed, thinking };
+}
+
+/** +added / −deleted lines of a unified patch, without building a DiffResp. */
+export function patchStats(patch: string): { add: number; del: number } {
+  let add = 0;
+  let del = 0;
+  let inHunk = false;
+  let at = 0;
+  while (at <= patch.length) {
+    let end = patch.indexOf('\n', at);
+    if (end < 0) end = patch.length;
+    const c = patch.charCodeAt(at);
+    if (c === 64 /* @ */ && patch.startsWith('@@', at)) inHunk = true;
+    // File headers end a hunk (as in `patchToDiff`).
+    else if (patch.startsWith('diff --git', at) || patch.startsWith('--- ', at) || patch.startsWith('+++ ', at)) inHunk = false;
+    else if (inHunk && c === 43 /* + */) add++;
+    else if (inHunk && c === 45 /* - */) del++;
+    at = end + 1;
+  }
+  return { add, del };
+}
+
+/** A synthetic −old/+new patch for an Edit call whose result carries no
+ *  structured patch (older records, a failed edit). */
+export function editInputPatch(b: ToolCallBlock): string | null {
+  const input = b.input;
+  if (b.tool !== 'edit' || input == null || typeof input !== 'object') return null;
+  const o = input as { old_string?: unknown; new_string?: unknown; file_path?: unknown };
+  if (typeof o.old_string !== 'string' || typeof o.new_string !== 'string') return null;
+  const oldL = o.old_string.split('\n');
+  const newL = o.new_string.split('\n');
+  const path = typeof o.file_path === 'string' ? o.file_path : 'file';
+  return [`--- a/${path}`, `+++ b/${path}`, `@@ -1,${oldL.length} +1,${newL.length} @@`, ...oldL.map((l) => `-${l}`), ...newL.map((l) => `+${l}`)].join('\n');
+}
+
+/** The content a Write call put on disk (from its input). */
+export function writtenContent(b: ToolCallBlock): string | null {
+  if (b.tool !== 'write' || b.input == null || typeof b.input !== 'object') return null;
+  const c = (b.input as { content?: unknown }).content;
+  return typeof c === 'string' ? c : null;
+}
+
+/** The file a read / edit / write call acted on. */
+export function toolFilePath(b: ToolCallBlock): string | null {
+  if (b.tool !== 'read' && b.tool !== 'edit' && b.tool !== 'write') return null;
+  return str(b.input, 'file_path', 'path', 'notebook_path') || b.result?.file_path || null;
+}
+
+/** One file a response changed. */
+export interface ChangedFile {
+  path: string;
+  add: number;
+  del: number;
+  /** Written from scratch (no patch; its whole content is new). */
+  created: boolean;
+  /** Unified patches in call order (a Write's content becomes an all-`+` patch). */
+  patches: string[];
+  /** The last full content written, when a Write produced it. */
+  content: string | null;
+}
+
+/** Files changed by a response's successful edit / write calls, in first-touch
+ *  order, with summed line stats. */
+export function changedFiles(blocks: Block[]): ChangedFile[] {
+  const byPath = new Map<string, ChangedFile>();
+  for (const b of blocks) {
+    if (b.kind !== 'tool_call' || (b.tool !== 'edit' && b.tool !== 'write')) continue;
+    if (b.result != null && !b.result.ok) continue;
+    const path = toolFilePath(b);
+    if (!path) continue;
+    let f = byPath.get(path);
+    if (!f) {
+      f = { path, add: 0, del: 0, created: false, patches: [], content: null };
+      byPath.set(path, f);
+    }
+    const patch = b.result?.patch ?? editInputPatch(b);
+    if (patch) {
+      const st = patchStats(patch);
+      f.add += st.add;
+      f.del += st.del;
+      f.patches.push(patch);
+    } else {
+      const content = writtenContent(b);
+      if (content != null) {
+        const lines = content.replace(/\n$/, '').split('\n');
+        f.add += lines.length;
+        f.created = f.patches.length === 0;
+        f.content = content;
+        f.patches.push([`--- /dev/null`, `+++ b/${path}`, `@@ -0,0 +1,${lines.length} @@`, ...lines.map((l) => `+${l}`)].join('\n'));
+      }
+    }
+  }
+  return [...byPath.values()];
+}
+
+/** The diff of a set of changed files (one DiffResp file per patch run). */
+export function changedDiff(files: ChangedFile[]): DiffResp {
+  const out: FileDiff[] = [];
+  for (const f of files) {
+    const merged = patchToDiff(f.patches.join('\n'), f.path);
+    // Every patch of one path folds into ONE file entry (several edits).
+    const hunks = merged.files.flatMap((x) => x.hunks);
+    out.push({ path: f.path, old_path: null, is_binary: false, hunks, added: f.add, deleted: f.del });
+  }
+  return { files: out };
+}
+
+/** Absolute path for a reference printed relative to the session's cwd. */
+export function resolvePath(path: string, cwd: string | null | undefined): string {
+  if (path.startsWith('/') || path.startsWith('~/')) return path;
+  if (!cwd) return path;
+  return `${cwd.replace(/\/$/, '')}/${path.replace(/^\.\//, '')}`;
+}
+
+/** A path shown relative to the session's cwd when it lies inside it. */
+export function relPath(path: string, cwd: string | null | undefined): string {
+  if (!cwd) return path;
+  const root = cwd.replace(/\/$/, '') + '/';
+  return path.startsWith(root) ? path.slice(root.length) : path;
+}
+
+/** Local calendar day key ("2026-09-28"), or '' for no/invalid timestamp. */
+export function dayKey(ts: string | null): string {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** "Today" / "Yesterday" / "Mon, Sep 28" / "Sep 28, 2025" for a day divider. */
+export function fmtDay(ts: string | null, now: Date = new Date()): string {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '';
+  const k = dayKey(ts);
+  if (k === dayKey(now.toISOString())) return 'Today';
+  const y = new Date(now);
+  y.setDate(now.getDate() - 1);
+  if (k === dayKey(y.toISOString())) return 'Yesterday';
+  const sameYear = d.getFullYear() === now.getFullYear();
+  return d.toLocaleDateString(undefined, sameYear ? { weekday: 'short', month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+/** Token line pieces for a response's usage (only the kinds it has). */
+export interface UsagePart {
+  key: 'input' | 'thinking' | 'output' | 'cache_read' | 'cache_write';
+  label: string;
+  value: number;
+  title: string;
+}
+export function usageParts(u: TurnUsage | null | undefined): UsagePart[] {
+  if (!u) return [];
+  const answer = Math.max(0, u.output_tokens - u.thinking_tokens);
+  const parts: UsagePart[] = [
+    { key: 'input', label: 'in', value: u.input_tokens, title: 'Input tokens — your message, tool results and context sent to the model (not counting the cache)' },
+    { key: 'thinking', label: 'thinking', value: u.thinking_tokens, title: 'Thinking tokens — output the model spent reasoning before answering (the text is not saved)' },
+    { key: 'output', label: 'out', value: answer, title: 'Output tokens — the visible answer and tool calls (output minus thinking)' },
+    { key: 'cache_read', label: 'cache read', value: u.cache_read_tokens, title: 'Cache read — context re-used from the prompt cache (billed at a discount)' },
+    { key: 'cache_write', label: 'cache write', value: u.cache_creation_tokens, title: 'Cache write — context added to the prompt cache this turn' },
+  ];
+  return parts.filter((p) => p.value > 0 || p.key === 'input' || p.key === 'output');
 }

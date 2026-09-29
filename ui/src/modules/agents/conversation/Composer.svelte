@@ -366,7 +366,9 @@
   .composer {
     border-top: 1px solid var(--border);
     background: var(--bg);
-    padding: 8px 12px 6px;
+    /* The chat column's gutters, so the box lines up with the messages. */
+    padding-block: 8px 6px;
+    padding-inline: clamp(12px, 3.2cqi, 40px);
     flex-shrink: 0;
     /* Shed the tool row's hints and the status line's secondary spans by the
        COMPOSER's width — it sits in a narrow tiled pane as readily as a
@@ -396,6 +398,7 @@
   }
   .box:focus-within {
     border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+    box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow-card);
   }
   textarea {
     min-width: 0;
@@ -621,7 +624,8 @@
      row keeps only the state — cwd / branch / model are in the pane header. */
   @container (max-width: 480px) {
     .composer {
-      padding: 6px 8px 4px;
+      padding-block: 6px 4px;
+      padding-inline: 8px;
     }
     textarea {
       min-height: 22px;

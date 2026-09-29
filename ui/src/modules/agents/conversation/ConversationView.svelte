@@ -1,4 +1,5 @@
 <script lang="ts" module>
+  import type { Repo } from '../../../lib/api/types';
   /** Exactly one of `sessionId` / `transcriptPath`; the latter reads the
    *  workspace history route (read-only, `on_disk` entries). */
   export interface ConversationViewProps {
@@ -7,6 +8,9 @@
     workspaceId: string;
     readonly?: boolean;
   }
+  // Workspace repos (for `#123` → the GitHub PR / issue URL), fetched once per
+  // workspace per app run — a light GET, never the git store's heavier load.
+  const reposByWs = new Map<string, Promise<Repo[]>>();
 </script>
 
 <script lang="ts">
@@ -14,8 +18,12 @@
   // the provider's transcript on disk (docs/design/conversation-view.md §5.2).
   // Newest page first + "Load earlier" (scroll-anchored), auto-follow at the
   // bottom with a "N new messages" jump pill otherwise, live tail via
-  // `transcript_appended`. The column keeps a readable measure
-  // (`--chat-measure`) and every piece sheds chrome by the PANE's width.
+  // `transcript_appended`. Rev 6 (chat v2): the conversation uses the pane's
+  // width (gutters scale with it; only prose keeps a measure), you and the
+  // agent read as two speakers (blue bubble / green response), settled work
+  // folds, and a side panel previews files, code and diffs next to the chat
+  // (over it when the pane is narrow). Everything sheds chrome by the PANE's
+  // width.
   import { setContext, tick, untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../../lib/components/ProviderIcon.svelte';
@@ -29,11 +37,16 @@
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
   import { activity } from '../../../lib/stores/activity.svelte';
   import { toasts } from '../../../lib/toast.svelte';
-  import { groupTurns, stableGroupTurns, activeQueued, countUnread, fmtCost, fmtDuration, fmtTokens, pendingTool, providerName } from './format';
+  import PreviewPanel from './PreviewPanel.svelte';
+  import { api } from '../../../lib/api/client';
+  import { openExternal } from '../../../lib/external';
+  import { browser } from '../../../lib/stores/browser.svelte';
+  import { router } from '../../../lib/router.svelte';
+  import { groupTurns, stableGroupTurns, activeQueued, countUnread, dayKey, fmtCost, fmtDay, fmtDuration, fmtTokens, pendingTool, providerName } from './format';
   import { registerFindProvider } from '../../../lib/findProviders';
   import type { SessionStatus, TranscriptUnavailableReason, Turn } from '../../../lib/api/types';
   import type { RenderItem } from './format';
-  import { CONV_CTX, type ConvContext } from './context';
+  import { CONV_CTX, type ConvContext, type PreviewReq } from './context';
 
   let { sessionId, transcriptPath, workspaceId, readonly = false }: ConversationViewProps = $props();
 
@@ -45,7 +58,20 @@
   // Context for the tree (images, file opens, lazy subagents). Kept as one
   // reactive object so nested components see prop changes without re-mounting.
   const ctx: ConvContext = $state(
-    untrack(() => ({ conv: transcript.conversation(src), sessionId: null, readonly, provider: 'claude' as const, queuedLive: [] })),
+    untrack(() => ({
+      conv: transcript.conversation(src),
+      sessionId: null,
+      readonly,
+      provider: 'claude' as const,
+      queuedLive: [],
+      cwd: null,
+      expandAll: false,
+      revealId: null,
+      openPreview: (req: PreviewReq) => openPreview(req),
+      openUrl: (url: string, inApp?: boolean) => openUrl(url, inApp),
+      issueUrl: (n: number) => issueUrl(n),
+      reusePrompt: null,
+    })),
   );
   setContext(CONV_CTX, ctx);
   $effect(() => {
@@ -53,6 +79,10 @@
     ctx.sessionId = sessionId ?? null;
     ctx.readonly = readonly || !sessionId;
     ctx.provider = conv.transcript?.provider ?? 'claude';
+    // Where the agent actually ran (the transcript's own cwd) resolves its
+    // relative file references; the session's launch dir is the fallback.
+    ctx.cwd = conv.transcript?.cwd || (sessionId ? ws.sessions.find((s) => s.id === sessionId)?.cwd : null) || null;
+    ctx.reusePrompt = canCompose && sessionId ? reusePrompt : null;
     // "Queued: …" chips survive only until a later dequeue/remove of that text.
     // Compare before assigning: a fresh array on every delta would re-run
     // every mounted TurnItem's `visibleBlocks`.
@@ -115,6 +145,115 @@
   const live = $derived(!!sessionId && (status === 'working' || status === 'running'));
   const canCompose = $derived(!!sessionId && !readonly && ws.myRole !== 'viewer');
   const showSystem = $derived(transcript.showSystem);
+
+  // Width of the whole pane (bound on `.conv`; see "Header chrome" below).
+  let convW = $state(0);
+
+  // ---- side panel: file / code / diff previews --------------------------------
+  let preview = $state<PreviewReq | null>(null);
+  function openPreview(req: PreviewReq): void {
+    preview = req;
+  }
+  function closePreview(): void {
+    preview = null;
+    listEl?.focus({ preventScroll: true });
+  }
+  /** Panel width (px) beside the chat; remembered per app. */
+  const PANEL_KEY = 'otto_chat_panel_w';
+  let panelW = $state(untrack(() => {
+    try {
+      const v = Number(localStorage.getItem(PANEL_KEY));
+      return Number.isFinite(v) && v >= 280 ? v : 0;
+    } catch {
+      return 0;
+    }
+  }));
+  /** Beside the chat only when both fit; below that the panel covers the chat. */
+  const panelBeside = $derived(convW >= 760);
+  const panelPx = $derived(Math.round(Math.min(Math.max(panelW || convW * 0.46, 300), convW - 360)));
+  function startResize(e: PointerEvent): void {
+    const el = e.currentTarget as HTMLElement;
+    el.setPointerCapture(e.pointerId);
+    const x0 = e.clientX;
+    const w0 = panelPx;
+    const rtl = getComputedStyle(el).direction === 'rtl';
+    const move = (ev: PointerEvent): void => {
+      const dx = (ev.clientX - x0) * (rtl ? -1 : 1);
+      panelW = Math.max(300, Math.min(convW - 360, w0 - dx));
+    };
+    const up = (): void => {
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      try {
+        localStorage.setItem(PANEL_KEY, String(Math.round(panelW)));
+      } catch {
+        /* storage unavailable: the width lasts this session */
+      }
+    };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+  }
+  function resizeKey(e: KeyboardEvent): void {
+    const step = e.shiftKey ? 64 : 16;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      const grow = (e.key === 'ArrowLeft') !== (getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl');
+      panelW = Math.max(300, Math.min(convW - 360, panelPx + (grow ? step : -step)));
+    }
+  }
+
+  // ---- links ------------------------------------------------------------------
+  function openUrl(url: string, inApp = false): void {
+    if (!inApp) {
+      void openExternal(url);
+      return;
+    }
+    void (async () => {
+      try {
+        await browser.loadTabs(workspaceId);
+        router.go('browser');
+        await browser.openTab(url);
+      } catch (e) {
+        toasts.error('Couldn’t open it in Otto’s browser', e instanceof Error ? e.message : String(e));
+      }
+    })();
+  }
+  let repos = $state<Repo[]>([]);
+  $effect(() => {
+    const id = workspaceId;
+    if (!id) return;
+    let p = reposByWs.get(id);
+    if (!p) {
+      p = api.get<Repo[]>(`/workspaces/${encodeURIComponent(id)}/repos`).catch(() => [] as Repo[]);
+      reposByWs.set(id, p);
+    }
+    let alive = true;
+    void p.then((r) => {
+      if (alive) repos = r;
+    });
+    return () => {
+      alive = false;
+    };
+  });
+  /** `#123` → `https://github.com/<owner>/<repo>/pull/123` for the repo the
+   *  session runs in (GitHub redirects /pull/ to /issues/ when it is one). */
+  function issueUrl(n: number): string | null {
+    const cwd = ctx.cwd ?? '';
+    const repo = repos
+      .filter((r) => r.remote_url && (cwd === r.path || cwd.startsWith(`${r.path.replace(/\/$/, '')}/`)))
+      .sort((a, b) => b.path.length - a.path.length)[0];
+    const m = repo?.remote_url ? /github\.com[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/i.exec(repo.remote_url) : null;
+    return m ? `https://github.com/${m[1]}/${m[2]}/pull/${n}` : null;
+  }
+  function reusePrompt(text: string): void {
+    if (!sessionId) return;
+    transcript.setDraft(sessionId, text);
+    void tick().then(() => {
+      const ta = document.querySelector<HTMLTextAreaElement>(`.conv[data-session="${CSS.escape(sessionId)}"] .composer textarea`);
+      ta?.focus();
+      ta?.setSelectionRange(text.length, text.length);
+    });
+  }
   // The session is alive (has a PTY) — the tail is worth keeping warm.
   const alive = $derived(!!sessionId && status !== 'exited' && status !== 'reconnectable');
   /** Suspended (PTY freed, still resumable via the provider id) — the state a
@@ -259,6 +398,30 @@
       atBottom = false;
     });
   }
+
+  // ---- jump between your prompts (⌥↑ / ⌥↓) ------------------------------------
+  /** Scroll to the previous (-1) / next (+1) of YOUR messages relative to the
+   *  one nearest the top of the viewport. */
+  function jumpPrompt(dir: -1 | 1): void {
+    const list = listEl;
+    if (!list) return;
+    const mine = Array.from(list.querySelectorAll<HTMLElement>('.turn[data-role="user"]'));
+    if (!mine.length) return;
+    const top = list.getBoundingClientRect().top + 8;
+    let target: HTMLElement | undefined;
+    if (dir < 0) target = [...mine].reverse().find((el) => el.getBoundingClientRect().top < top - 4);
+    else target = mine.find((el) => el.getBoundingClientRect().top > top + 4);
+    if (!target) {
+      if (dir < 0 && t?.has_earlier) void loadEarlier();
+      return;
+    }
+    target.scrollIntoView({ block: 'start' });
+    atBottom = false;
+    (target.querySelector('.bubble') as HTMLElement | null)?.animate?.(
+      [{ boxShadow: '0 0 0 3px var(--accent-soft)' }, { boxShadow: '0 0 0 0 transparent' }],
+      { duration: matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 900 },
+    );
+  }
   // ⌘F over the whole loaded chat (lib/findProviders.ts). Only MAX_MOUNTED
   // turns are in the DOM, so a long chat's older turns were invisible to
   // find-in-page. Past that size the provider searches every loaded turn
@@ -280,6 +443,8 @@
       reveal: async (i) => {
         const head = allGroups()[i]?.turns[0];
         const at = head ? conv.turns.indexOf(head) : -1;
+        // Its work may be folded: open that response's fold so the hit shows.
+        ctx.revealId = allGroups()[i]?.id ?? null;
         if (at >= 0 && (at < winStart || at >= winEnd)) {
           followTail = false;
           manualStart = Math.max(0, at - Math.floor(MAX_MOUNTED / 2));
@@ -325,6 +490,13 @@
       // ⌘↓ — jump to the latest message (the pill's shortcut).
       e.preventDefault();
       scrollToBottomAll();
+    } else if (e.altKey && !e.metaKey && !e.ctrlKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && !(e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement)) {
+      // ⌥↑ / ⌥↓ — your previous / next message.
+      e.preventDefault();
+      jumpPrompt(e.key === 'ArrowUp' ? -1 : 1);
+    } else if (e.key === 'Escape' && preview && !searchOpen) {
+      e.preventDefault();
+      closePreview();
     }
   }
   const currentHit = $derived(hits[hitIdx] ?? null);
@@ -442,7 +614,6 @@
   // A chat can live in a 200px tile or a full-window tab; `.conv` is the sized
   // flex child, so its inline size is the only honest measure. The
   // `@container` blocks at the bottom use the SAME numbers.
-  let convW = $state(0);
   /** ≤260px: the search button folds into the ⋯ menu, and an open search box
    *  takes the whole row. */
   const narrowHead = $derived(convW > 0 && convW <= 260);
@@ -459,6 +630,18 @@
         title: 'Reveal system reminders, hooks, attachments and injected queue items',
         action: () => transcript.setShowSystem(!showSystem),
       },
+      {
+        label: 'Show all work',
+        icon: 'layers',
+        checked: ctx.expandAll,
+        title: 'Open every “Worked for …” fold — tool calls, narration and plan updates',
+        action: () => (ctx.expandAll = !ctx.expandAll),
+      },
+      { separator: true },
+      { label: 'Previous message of yours', icon: 'chevronUp', hint: '⌥↑', action: () => jumpPrompt(-1) },
+      { label: 'Next message of yours', icon: 'chevronDown', hint: '⌥↓', action: () => jumpPrompt(1) },
+      { label: 'Jump to latest', icon: 'arrowDown', hint: '⌘↓', action: () => scrollToBottomAll() },
+      { separator: true },
       { label: 'Reload transcript', icon: 'refresh', action: () => void conv.load() },
     ]);
   }
@@ -504,6 +687,8 @@
     <button class="icon-btn" aria-label="Conversation options" title="Conversation options" aria-haspopup="menu" data-conv-menu onclick={openHeadMenu}><Icon name="more" size={12} /></button>
   </header>
 
+  <div class="conv-main" class:with-panel={!!preview} class:beside={panelBeside}>
+  <div class="conv-chat">
   <!-- The scroller's frame: the jump pill anchors to ITS bottom edge, so it
        always sits just above the composer whatever the composer's height. -->
   <div class="conv-frame">
@@ -524,6 +709,7 @@
     {:else if conv.loading && !t}
       <div class="skeleton" aria-busy="true" aria-label="Loading the conversation">
         <div class="sk sk-user"></div>
+        <div class="sk sk-agent"></div>
         <div class="sk sk-line"></div>
         <div class="sk sk-line short"></div>
         <div class="sk sk-steps"></div>
@@ -552,6 +738,10 @@
         </div>
       {/if}
       {#each items as item, i (item.id)}
+        {@const day = dayKey(item.ts)}
+        {#if day && day !== dayKey(items[i - 1]?.ts ?? null)}
+          <div class="day" role="separator" aria-label={fmtDay(item.ts)} data-day={day}><span>{fmtDay(item.ts)}</span></div>
+        {/if}
         <TurnItem
           {item}
           live={working && !hasLater && i === items.length - 1 && item.role === 'assistant'}
@@ -579,11 +769,11 @@
       {#if conv.liveArtifacts.length}
         <div class="live-artifacts">
           {#each conv.liveArtifacts as a (a.id)}
-            {#if a.url}
-              <a class="chip" href={a.url} target="_blank" rel="noopener noreferrer" title={a.path ?? a.url}><Icon name="link" size={11} /> {a.label}</a>
-            {:else}
-              <span class="chip" title={a.path ?? ''}><Icon name="file" size={11} /> {a.label}</span>
-            {/if}
+            <button
+              class="chip"
+              title={a.url ?? a.path ?? a.label}
+              onclick={() => (a.url ? openUrl(a.url) : a.path ? openPreview({ kind: 'file', path: a.path }) : undefined)}
+            ><Icon name={a.url ? 'link' : 'file'} size={11} /> {a.label}</button>
           {/each}
         </div>
       {/if}
@@ -598,7 +788,6 @@
     </button>
   {/if}
   </div>
-  <div class="sr-only" aria-live="polite">{announce}</div>
 
   {#if canCompose && sessionId}
     {#key sessionId}
@@ -615,12 +804,49 @@
     />
     {/key}
   {/if}
+  </div>
+  {#if preview}
+    {#if panelBeside}
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+      <div
+        class="pv-resize"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize the preview panel"
+        aria-valuenow={panelPx}
+        tabindex="0"
+        onpointerdown={startResize}
+        onkeydown={resizeKey}
+      ></div>
+    {/if}
+    <div class="pv-slot" style:inline-size={panelBeside ? `${panelPx}px` : null}>
+      <PreviewPanel req={preview} onclose={closePreview} />
+    </div>
+  {/if}
+  </div>
+  <div class="sr-only" aria-live="polite">{announce}</div>
 </div>
 
 <style>
   .conv {
-    /* The readable measure of the message column (and the composer under it). */
-    --chat-measure: 780px;
+    /* The column uses the pane: only a very wide window caps it (and centres
+       it); the composer box matches. Prose alone keeps a reading measure. */
+    --chat-measure: 1440px;
+    --prose-measure: 104ch;
+    /* Two speakers: you = blue (accent), the agent = green. */
+    --you: var(--accent);
+    --agent: var(--status-working);
+    /* Code surfaces + an editor-like token palette built from the theme's own
+       tones (text-safe, both schemes; tokens.css has no hex for code). */
+    --code-bg: color-mix(in srgb, var(--surface-2) 70%, var(--bg));
+    --code-kw: color-mix(in srgb, var(--cat-4) 78%, var(--text));
+    --code-str: var(--success);
+    --code-num: color-mix(in srgb, var(--cat-2) 80%, var(--text));
+    --code-fn: var(--info);
+    --code-type: color-mix(in srgb, var(--cat-6) 72%, var(--text));
+    --code-attr: color-mix(in srgb, var(--cat-5) 70%, var(--text));
+    --code-var: color-mix(in srgb, var(--danger) 75%, var(--text));
+    --code-meta: color-mix(in srgb, var(--text-dim) 80%, var(--cat-4));
     display: flex;
     flex-direction: column;
     height: 100%;
@@ -710,6 +936,51 @@
   .conv-head.folded .conv-title {
     display: none;
   }
+  .conv-main {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    position: relative;
+  }
+  .conv-chat {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    /* Turns shed chrome by the CHAT column's width (it narrows beside the
+       panel); the header still answers to the whole pane. */
+    container-type: inline-size;
+  }
+  .pv-slot {
+    flex-shrink: 0;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .pv-slot > :global(*) {
+    flex: 1;
+  }
+  /* Narrow pane: the panel covers the chat (Esc / ✕ returns to it). */
+  .conv-main:not(.beside) .pv-slot {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+  }
+  .pv-resize {
+    flex-shrink: 0;
+    width: 6px;
+    margin-inline: -3px;
+    cursor: col-resize;
+    position: relative;
+    z-index: 2;
+  }
+  .pv-resize:hover,
+  .pv-resize:focus-visible {
+    background: color-mix(in srgb, var(--accent) 40%, transparent);
+    outline: none;
+  }
   .conv-frame {
     flex: 1;
     min-height: 0;
@@ -728,21 +999,102 @@
   .conv-list:focus-visible {
     box-shadow: inset 0 0 0 2px var(--accent);
   }
-  /* The message column: a readable measure, centred, with pane-sized gutters. */
+  /* The message column: the pane's width with gutters that grow with it
+     (12 px in a tile → 40 px full-screen); centred only past --chat-measure. */
   /* Block (not flex) on purpose: a live delta grows only the LAST item, and
      block layout re-lays that item, where a 300-child flex column re-runs
      the flex algorithm over every item (measurable per delta in WebKit). */
   .conv-col {
     max-width: var(--chat-measure);
     margin-inline: auto;
-    padding: 12px 20px 20px;
+    padding-block: 10px 24px;
+    padding-inline: clamp(12px, 3.2cqi, 40px);
     display: flow-root;
     min-width: 0;
   }
   @container (max-width: 480px) {
     .conv-col {
-      padding: 8px 12px 16px;
+      padding-block: 6px 16px;
     }
+  }
+  /* Day dividers ("Today", "Yesterday", "Mon, Sep 28"). */
+  .day {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-block: 10px 2px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  .day::before,
+  .day::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+  /* Editor-like token colours for every code surface in the chat (the app's
+     minimal hljs theme stays for the rest of the app). */
+  .conv :global(.hljs .hljs-keyword),
+  .conv :global(.hljs .hljs-selector-tag),
+  .conv :global(.hljs .hljs-built_in.hljs-keyword),
+  .conv :global(.hljs .hljs-doctag) {
+    color: var(--code-kw);
+  }
+  .conv :global(.hljs .hljs-string),
+  .conv :global(.hljs .hljs-regexp),
+  .conv :global(.hljs .hljs-template-tag),
+  .conv :global(.hljs .hljs-addition) {
+    color: var(--code-str);
+  }
+  .conv :global(.hljs .hljs-number),
+  .conv :global(.hljs .hljs-literal),
+  .conv :global(.hljs .hljs-symbol),
+  .conv :global(.hljs .hljs-bullet) {
+    color: var(--code-num);
+  }
+  .conv :global(.hljs .hljs-title),
+  .conv :global(.hljs .hljs-title.function_),
+  .conv :global(.hljs .hljs-function),
+  .conv :global(.hljs .hljs-section) {
+    color: var(--code-fn);
+  }
+  .conv :global(.hljs .hljs-type),
+  .conv :global(.hljs .hljs-built_in),
+  .conv :global(.hljs .hljs-title.class_),
+  .conv :global(.hljs .hljs-selector-class) {
+    color: var(--code-type);
+  }
+  .conv :global(.hljs .hljs-attr),
+  .conv :global(.hljs .hljs-attribute),
+  .conv :global(.hljs .hljs-name),
+  .conv :global(.hljs .hljs-selector-id),
+  .conv :global(.hljs .hljs-tag) {
+    color: var(--code-attr);
+  }
+  .conv :global(.hljs .hljs-variable),
+  .conv :global(.hljs .hljs-template-variable),
+  .conv :global(.hljs .hljs-params),
+  .conv :global(.hljs .hljs-deletion) {
+    color: var(--code-var);
+  }
+  .conv :global(.hljs .hljs-comment),
+  .conv :global(.hljs .hljs-quote) {
+    color: var(--text-dim);
+    font-style: italic;
+  }
+  .conv :global(.hljs .hljs-meta),
+  .conv :global(.hljs .hljs-subst),
+  .conv :global(.hljs .hljs-punctuation) {
+    color: var(--code-meta);
+  }
+  .conv :global(.hljs .hljs-emphasis) {
+    font-style: italic;
+  }
+  .conv :global(.hljs .hljs-strong) {
+    font-weight: 700;
   }
   .earlier {
     display: flex;
@@ -762,9 +1114,16 @@
   }
   .sk-user {
     align-self: flex-end;
-    width: 45%;
-    height: 34px;
-    border-radius: 16px;
+    width: 42%;
+    height: 38px;
+    border-radius: 18px 18px 5px 18px;
+    background: color-mix(in srgb, var(--you) 14%, var(--surface-2));
+  }
+  .sk-agent {
+    width: 120px;
+    height: 22px;
+    border-radius: 99px;
+    background: color-mix(in srgb, var(--agent) 14%, var(--surface-2));
   }
   .sk-line {
     width: 92%;
@@ -794,8 +1153,10 @@
   }
   .live-artifacts .chip {
     gap: 5px;
-    text-decoration: none;
     color: var(--text);
+    font: inherit;
+    font-size: var(--fs-xs);
+    cursor: pointer;
   }
   .inline-err {
     display: flex;
