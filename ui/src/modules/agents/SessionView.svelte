@@ -139,6 +139,8 @@
   const tier = $derived<PaneTier>(paneTier(headW));
   /** Zoom, ✕ and the details chip are hidden inline (CSS `minimal`). */
   const foldedMinimal = $derived(tierAtMost(tier, 'minimal'));
+  /** Find folds into ⋯ from compact down (⌘F reaches the terminal anyway). */
+  const foldedFind = $derived(tierAtMost(tier, 'compact'));
   /** The view switch is hidden inline too (CSS `micro`). */
   const foldedMicro = $derived(tier === 'micro');
   /** The drag grip is a mouse affordance — phones keep keyboard/palette moves. */
@@ -541,7 +543,7 @@
             action: () => setView(m),
           }) as MenuItem)
         : []),
-      ...(foldedMinimal ? [{ label: findLabel, icon: 'search', hint: '⌘F', action: openSessionFind } as MenuItem] : []),
+      ...(foldedFind ? [{ label: findLabel, icon: 'search', hint: '⌘F', action: openSessionFind } as MenuItem] : []),
       ...(foldedMinimal && showZoom
         ? [
             {
@@ -1349,8 +1351,8 @@
      keep in step with PANE_TIER_MIN in lib/paneHeader.ts, whose script twin
      adds the hidden controls back into ⋯:
        full    ≥720  everything: labelled toggle, provider name · idle · folder
-       compact 420–719  icon-only toggle, details chip = provider icon, no "Now:"
-       minimal 200–419  dot · title · view flip · ⋯   (find, zoom, ✕, chips → ⋯)
+       compact 420–719  icon-only toggle, details chip = provider icon, no "Now:", find → ⋯
+       minimal 200–419  dot · title · view flip · ⋯   (zoom, ✕, chips → ⋯)
        micro   <200     dot · title · ⋯              (view switch → ⋯ too)
      The status dot, the title and ⋯ never go. */
   @container pane (width < 720px) {
@@ -1379,6 +1381,9 @@
     .pane-head .view-seg > button {
       padding: 0 6px;
     }
+    .pane-head .pane-find {
+      display: none;
+    }
   }
   @container pane (width < 420px) {
     .pane-head .view-seg,
@@ -1389,7 +1394,6 @@
     .pane-head .handover-crumb,
     .pane-head .handover-pending,
     .pane-head .ui-ctl,
-    .pane-head .pane-find,
     .pane-head .pane-zoom,
     .pane-head .pane-close {
       display: none;
