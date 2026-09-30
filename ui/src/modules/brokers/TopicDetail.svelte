@@ -73,6 +73,23 @@
     void win;
     tw.measure(msgListEl);
   });
+  // ⌘F over every peeked message ROW (what the table shows — the value lives
+  // in the inspector), not just the mounted slice.
+  $effect(() =>
+    tw.findRows(
+      () => msgListEl,
+      () => messages,
+      (m) =>
+        [
+          m.partition,
+          m.offset,
+          rangePct(m, rangeByPartition.get(m.partition)) === null ? '—' : '',
+          m.key?.text ?? '∅',
+          fmtTs(m.timestamp_ms),
+          m.size_bytes,
+        ].join('\n'),
+    ),
+  );
   /** The request behind `result` (exports re-read it in full when previews were cut). */
   let lastReq: ConsumeReq | null = null;
   /** Full-value fetch for a selected message whose list preview was truncated. */

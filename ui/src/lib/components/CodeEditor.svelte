@@ -22,6 +22,8 @@
     foldKeymap,
     defaultHighlightStyle,
     syntaxHighlighting,
+    foldedRanges,
+    unfoldEffect,
   } from '@codemirror/language';
   import { oneDark, oneDarkTheme } from '@codemirror/theme-one-dark';
   import type { Extension } from '@codemirror/state';
@@ -49,6 +51,7 @@
   import { ws } from '../stores/workspace.svelte';
   import { ui } from '../stores/ui.svelte';
   import { keyContext } from '../keys';
+  import { registerFindProvider } from '../findProviders';
   import { toasts } from '../toast.svelte';
 
   // Editor theme follows the app scheme: oneDark for dark, a light theme keyed to
@@ -127,11 +130,13 @@
     gotoLine?: number | null;
     gotoCol?: number | null;
     /**
-     * When true, this editor OWNS Cmd/Ctrl+F while focused: it registers a global
+     * This editor OWNS Cmd/Ctrl+F while focused (default): it registers a global
      * find opener (like the terminal) so the keymap opens CodeMirror's in-editor
-     * search/replace panel here instead of the page-wide find-in-page overlay
-     * (whose match navigation can't reach the editor's virtualized lines). Used
-     * by the DB query editor.
+     * search/replace panel here instead of the page-wide find-in-page overlay.
+     * `false` for an editor whose host already routes ⌘F to it (the DB document
+     * modals' `claimFind`) — two claimants would drop the host's on blur.
+     * Unfocused, the page-wide overlay still searches the WHOLE document either
+     * way (the find provider below).
      */
     findOwner?: boolean;
     /** Hint shown while the document is EMPTY (e.g. "Write a query — ⌘↵ to
@@ -196,7 +201,7 @@
     onselect,
     gotoLine = null,
     gotoCol = null,
-    findOwner = false,
+    findOwner = true,
     placeholder = '',
     wrap = false,
     keepStates = false,
@@ -623,6 +628,61 @@
   // focus/blur handlers can register/deregister it on `keyContext.openFind`).
   function openEditorSearch(): void {
     if (view) openSearchPanel(view);
+  }
+
+  /** Open this editor's search panel (via `bind:this`) — for a caller's own
+   *  Find button, or a modal that routes ⌘F here without `findOwner`. */
+  export function openSearch(): void {
+    openEditorSearch();
+  }
+
+  // ⌘F over the WHOLE document (lib/findProviders.ts). CodeMirror mounts only
+  // the lines near its viewport, so the page-wide overlay's DOM walk missed
+  // the rest (and matched gutter numbers / search-panel labels). Idle cost is
+  // one Set entry: the model is only read while a find runs.
+  /** The fold hiding line `ln` (1-based), if any — its text isn't mounted. */
+  function foldOver(v: EditorView, ln: number): { from: number; to: number } | null {
+    const line = v.state.doc.line(ln);
+    let hit: { from: number; to: number } | null = null;
+    foldedRanges(v.state).between(line.from, line.to, (from, to) => {
+      if (from < line.to && to > line.from) {
+        hit = { from, to };
+        return false;
+      }
+    });
+    return hit;
+  }
+  $effect(() =>
+    registerFindProvider({
+      root: () => view?.dom ?? null,
+      count: () => view?.state.doc.lines ?? 0,
+      text: (i) => (view && i < view.state.doc.lines ? view.state.doc.line(i + 1).text : ''),
+      reveal: async (i) => {
+        const v = view;
+        if (!v || i >= v.state.doc.lines) return;
+        // Unfold every fold over the line (folds nest; bounded), then centre it.
+        for (let n = 0, fold = foldOver(v, i + 1); fold && n < 32; n++, fold = foldOver(v, i + 1)) {
+          v.dispatch({ effects: unfoldEffect.of(fold) });
+        }
+        v.dispatch({ effects: EditorView.scrollIntoView(v.state.doc.line(i + 1).from, { y: 'center' }) });
+        // CodeMirror renders the new viewport on its next measure frame.
+        await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+      },
+      rowElement: (i) => {
+        const v = view;
+        if (!v || i >= v.state.doc.lines) return null;
+        const from = v.state.doc.line(i + 1).from;
+        if (from < v.viewport.from || from > v.viewport.to || foldOver(v, i + 1)) return null;
+        const { node } = v.domAtPos(from);
+        const el = node.nodeType === Node.ELEMENT_NODE ? (node as Element) : node.parentElement;
+        return el?.closest('.cm-line') ?? null;
+      },
+    }),
+  );
+
+  /** Move keyboard focus into the editor (via `bind:this`). */
+  export function focus(): void {
+    view?.focus();
   }
 
   /** A fresh EditorState for `filePath` with the full extension set, wired to

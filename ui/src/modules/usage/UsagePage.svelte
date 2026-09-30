@@ -1098,8 +1098,22 @@
                   <span class="num">Cost</span>
                   <span>Last active</span>
                 </div>
-                <!-- Virtualized body: each row is ~46px. -->
-                <VirtualList items={usage.summary.sessions} estimateHeight={46} class="sess-vlist">
+                <!-- Virtualized body: each row is ~46px. findText = the row's text
+                     cells in DOM order, so ⌘F reaches rows outside the window. -->
+                <VirtualList
+                  items={usage.summary.sessions}
+                  estimateHeight={46}
+                  class="sess-vlist"
+                  findText={(s) =>
+                    [
+                      s.title ?? (s.kind != null ? s.session_id.slice(0, 12) : 'Session outside Otto'),
+                      s.kind ?? '',
+                      s.session_id.slice(0, 12),
+                      s.workspace_name ?? '—',
+                      s.provider,
+                      s.model ?? '',
+                    ].join('\n')}
+                >
                   {#snippet row(s)}
                     {@const isOttoSession = s.kind != null || s.title != null}
                     <div class="sess-row">

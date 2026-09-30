@@ -97,6 +97,18 @@
     void rowsWindow;
     tw.measure(objWrap);
   });
+  // ⌘F over every (filtered) object, not just the mounted slice.
+  $effect(() =>
+    tw.findRows(
+      () => objWrap,
+      () => rowsShown,
+      (r) =>
+        r.kind === 'folder'
+          ? `${r.name}/`
+          : [r.name, fmtBytes(r.obj.size), fmtAgo(r.obj.last_modified), r.obj.storage_class ?? ''].join('\n'),
+      'tbody tr.trow',
+    ),
+  );
 
   function leaf(key: string): string {
     const trimmed = key.endsWith('/') ? key.slice(0, -1) : key;

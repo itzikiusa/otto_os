@@ -51,6 +51,16 @@
     void rowsWindow;
     tw.measure(listEl, '.sftp-row.entry');
   });
+  // ⌘F over every (filtered) entry, not just the mounted slice.
+  $effect(() =>
+    tw.findRows(
+      () => listEl,
+      () => shownEntries,
+      (e) =>
+        [e.name, e.symlink_target ? `→ ${e.symlink_target}` : '', e.kind === 'dir' ? '' : humanSize(e.size), e.mtime ?? '', e.perms].join('\n'),
+      '.sftp-row.entry',
+    ),
+  );
   // A new directory (or filter) starts at the top.
   $effect(() => {
     void view.entries;

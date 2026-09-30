@@ -214,7 +214,6 @@
     "src/modules/vault/DocsAgentsView.svelte": 2
   },
   "physical-prop": {
-    "src/lib/components/Terminal.svelte": 1,
     "src/modules/aws/AccountWizard.svelte": 1,
     "src/modules/aws/AthenaView.svelte": 5,
     "src/modules/aws/AwsDrawer.svelte": 2,

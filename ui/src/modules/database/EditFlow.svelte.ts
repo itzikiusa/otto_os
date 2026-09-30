@@ -945,16 +945,35 @@ export class EditFlow {
 
   openDocEditor(rowIdx: number): void {
     if (!this.editable || !this.result) return;
-    const o: Record<string, unknown> = {};
-    if (rowIdx < 0) {
-      if (this.engine !== 'mongodb') {
-        const omitPk = this.editPkCols.length === 1;
-        for (const c of this.result.columns) if (!(omitPk && this.editPkCols.includes(c.name))) o[c.name] = null;
-      }
-    } else {
-      this.result.columns.forEach((c, i) => (o[c.name] = this.liveRows[rowIdx]?.[i]));
+    const o: Record<string, unknown> = rowIdx < 0 ? {} : this.rowObject(rowIdx);
+    if (rowIdx < 0 && this.engine !== 'mongodb') {
+      const omitPk = this.editPkCols.length === 1;
+      for (const c of this.result.columns) if (!(omitPk && this.editPkCols.includes(c.name))) o[c.name] = null;
     }
     this.docEditor = { rowIdx, draft: prettyJson(o), err: null };
+  }
+
+  /** Row `rowIdx` as one `{ column: value }` object — the whole document the
+   *  editor and the raw viewer show (Mongo values stay Extended JSON). */
+  rowObject(rowIdx: number): Record<string, unknown> {
+    const o: Record<string, unknown> = {};
+    this.result?.columns.forEach((c, i) => (o[c.name] = this.liveRows[rowIdx]?.[i]));
+    return o;
+  }
+
+  // ── Raw document viewer (read-only, searchable) ────────────────────────────
+  // The complete row pretty-printed as JSON in a read-only editor — the whole
+  // document as text, not the collapsed tree, so ⌘F reaches every nested value.
+  // `text` is serialized once on open (never per render).
+  rawDoc: { rowIdx: number; text: string } | null = $state.raw(null);
+  /** Menu label: Mongo rows ARE documents; any other engine's row is a JSON view. */
+  get rawDocLabel(): string {
+    return this.engine === 'mongodb' ? 'View full document' : 'View raw JSON';
+  }
+
+  openRawDoc(rowIdx: number): void {
+    if (!this.result || rowIdx < 0 || !this.liveRows[rowIdx]) return;
+    this.rawDoc = { rowIdx, text: prettyJson(this.rowObject(rowIdx)) };
   }
 
   saveDocEdit(): void {

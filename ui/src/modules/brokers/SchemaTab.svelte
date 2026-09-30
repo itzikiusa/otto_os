@@ -28,6 +28,10 @@
     void win;
     tw.measure(listEl, '.srow');
   });
+  // ⌘F over every subject, not just the mounted slice.
+  $effect(() =>
+    tw.findRows(() => listEl, () => subjects, (s) => `${s.subject}\nv${s.version} · ${s.schema_type} · #${s.id}`, '.srow'),
+  );
 
   function onViewKeydown(event: KeyboardEvent) {
     const tabs = Array.from(event.currentTarget instanceof HTMLElement ? event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]') : []);

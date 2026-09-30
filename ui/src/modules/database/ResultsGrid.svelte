@@ -12,6 +12,7 @@
   // connection's query API after a review).
   import { onDestroy } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { findInPage } from '../../lib/findinpage.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import {
     database,
@@ -34,6 +35,7 @@
   import JsonView from './JsonView.svelte';
   import CellViewer from './CellViewer.svelte';
   import DocEditor from './DocEditor.svelte';
+  import RawDocViewer from './RawDocViewer.svelte';
   import ReviewModal from './ReviewModal.svelte';
   import ExportDialog from './ExportDialog.svelte';
   import MongoFilterBar from './MongoFilterBar.svelte';
@@ -585,6 +587,17 @@
     mode === 'grid' ? 0 : Math.max(0, Math.min(viewRows.length, VIEW_CAP) - altCap),
   );
   const viewTruncated = $derived(mode !== 'grid' && viewRows.length > VIEW_CAP);
+  // Every record the JSON / Vertical views may draw, for ⌘F to search past the
+  // drawn batch (json-find.ts). Lazy: only a find reads it.
+  const findRows = $derived.by<Record<string, unknown>[]>(() => {
+    if (!result || mode === 'grid') return [];
+    const names = uniqueColNames;
+    return viewRows.slice(0, VIEW_CAP).map(({ row }) => {
+      const o: Record<string, unknown> = {};
+      names.forEach((n, i) => (o[n] = row[i]));
+      return o;
+    });
+  });
 
   // ── Edit flow ────────────────────────────────────────────────────────────────
   // Editability, cell drafts, selection, viewer / doc editor and the review
@@ -748,6 +761,7 @@
     items.push(
       { label: 'Expand value', icon: 'maximize', action: () => flow.openCell(v, rowIdx, ci) },
       { label: 'Copy value', icon: 'file', action: () => copyText(v === null || v === undefined ? '' : cellStr(v)) },
+      { label: flow.rawDocLabel, icon: 'eye', action: () => flow.openRawDoc(rowIdx) },
     );
     // Explicit NULL / '' — the typed editor can't express the difference (an
     // empty draft parks as NULL). Both park a pending change, review-gated.
@@ -1199,6 +1213,9 @@
           ><Icon name="panel" size={13} /></button>
         {/if}
         <span class="grow"></span>
+        <button class="icon-btn" onclick={() => findInPage.show()} aria-label="Find in results" title="Find (⌘F)">
+          <Icon name="search" size={13} />
+        </button>
         <button class="tb-btn" onclick={copyMenu} title="Copy the result{exportScope}" aria-haspopup="menu">
           <Icon name="copy" size={11} /><span class="tb-label">Copy</span><Icon name="chevronDown" size={10} />
         </button>
@@ -1309,6 +1326,7 @@
         onshowmore={() => (altShown += ALT_BATCH)}
         {expansion}
         oncompare={(l, r) => (compare = [l, r])}
+        {findRows}
       />
     {:else if mode === 'vertical'}
       <VerticalView
@@ -1325,6 +1343,7 @@
         onshowmore={() => (altShown += ALT_BATCH)}
         {expansion}
         oncompare={(l, r) => (compare = [l, r])}
+        {findRows}
       />
     {:else}
       <div class="grid-body" class:mini>
@@ -1357,6 +1376,8 @@
             total={viewRows.length}
             onstep={stepDetail}
             onopen={(ci) => { if (detailRow !== null) flow.openCell(liveRows[detailRow]?.[ci], detailRow, ci); }}
+            rawLabel={flow.rawDocLabel}
+            onraw={() => { if (detailRow !== null) flow.openRawDoc(detailRow); }}
             onclose={toggleDetail}
           />
         {/if}
@@ -1467,6 +1488,10 @@
 
 {#if flow.docEditor}
   <DocEditor {flow} />
+{/if}
+
+{#if flow.rawDoc}
+  <RawDocViewer {flow} />
 {/if}
 
 {#if showExportDialog && connectionId && statement}

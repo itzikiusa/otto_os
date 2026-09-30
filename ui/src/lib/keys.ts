@@ -43,7 +43,8 @@ export type KeyAction =
 /** Mutable context the Terminal component updates on focus/blur. */
 export const keyContext: {
   terminalFocused: boolean;
-  /** focused terminal registers its find-bar opener here */
+  /** focused terminal (or its find input) / CodeEditor registers its find
+   *  opener here — see routeFind below */
   openFind: (() => void) | null;
   /** The in-app floating bar has focus: ⌃1–⌃4 switch ITS spaces. */
   barFocused: boolean;
@@ -57,6 +58,110 @@ export const keyContext: {
   barFocused: false,
   pageChords: null,
 };
+
+// ── ⌘F routing ────────────────────────────────────────────────────────────
+// Focus-owned find (`keyContext.openFind`: a focused terminal, its own find
+// input, a focused CodeEditor) wins. Otherwise the active session pane's
+// terminal still owns ⌘F while it is on screen: a click on the pane header,
+// a side panel or empty chrome moves focus off the xterm, and the page-wide
+// FindInPage walks DOM text — a WebGL terminal has none, a DOM one only its
+// visible rows. Only then does ⌘F fall back to the page.
+//
+// "Still owns" is scoped to where the user last WAS: a session embedded next
+// to other content (a loop's timeline, a swarm board, the Agents right panel)
+// must not steal ⌘F from a click on that content — clicking plain text moves
+// focus to <body>, so focus alone can't tell. The last pointerdown / focusin
+// target (capture phase, installKeyMap) must lie inside the owner's pane; no
+// interaction yet counts as "in the active pane".
+
+/** A terminal that takes ⌘F without holding focus (Terminal `findRank`). */
+export interface FindOwner {
+  /** > 0 while it can take ⌘F (mounted, bound, visible); highest wins —
+   *  the focused split pane over another view of the same session. */
+  rank(): number;
+  /** Its pane (header included): the last interaction must be inside it. */
+  pane(): Element | null;
+  open(): void;
+}
+
+const findOwners = new Set<FindOwner>();
+
+/** Target of the last pointerdown / focusin anywhere in the document. */
+let lastInteraction: Element | null = null;
+
+/** Record where the user last pointed or focused (exported for the tests). */
+export function noteInteraction(target: EventTarget | null): void {
+  const el = target && typeof (target as Element).closest === 'function' ? (target as Element) : null;
+  // Chrome that only relays ⌘F (the phone quick-action bar) keeps the last
+  // real interaction.
+  if (el?.closest('[data-find-neutral]')) return;
+  lastInteraction = el;
+}
+
+/** The last interaction allows a pane owner inside `pane` to take ⌘F. */
+function interactedIn(pane: Element | null): boolean {
+  if (!lastInteraction) return true;
+  if (!pane || lastInteraction.closest('.rpanel')) return false;
+  return pane.contains(lastInteraction);
+}
+
+function shown(el: Element): boolean {
+  const check = (el as Element & { checkVisibility?: (o?: object) => boolean }).checkVisibility;
+  if (typeof check === 'function') return check.call(el, { visibilityProperty: true });
+  return (el as HTMLElement).offsetParent !== null;
+}
+
+/** Register a pane find owner; returns the unregister (an `$effect` cleanup). */
+export function registerFindOwner(o: FindOwner): () => void {
+  findOwners.add(o);
+  return () => {
+    findOwners.delete(o);
+  };
+}
+
+/** Focus sits where ⌘F means "search HERE", not the session pane: a text
+ *  field / editor outside any terminal, or anything under an open modal. */
+function focusClaimsFind(): boolean {
+  // Visible ones only: the compact right-panel Drawer stays mounted, hidden,
+  // with role=dialog + aria-modal (shell/Drawer.svelte).
+  for (const d of document.querySelectorAll('[role="dialog"][aria-modal="true"], dialog[open]')) {
+    if (shown(d)) return true;
+  }
+  const el = document.activeElement as HTMLElement | null;
+  if (!el || el.closest('.xterm')) return false;
+  return (
+    el.tagName === 'INPUT' ||
+    el.tagName === 'TEXTAREA' ||
+    el.tagName === 'SELECT' ||
+    el.isContentEditable ||
+    !!el.closest('.cm-editor')
+  );
+}
+
+/** ⌘F / the phone toolbar's find: focused owner → active session pane's
+ *  terminal → `fallback` (the page-wide find). */
+export function routeFind(fallback: () => void): void {
+  if (keyContext.openFind) {
+    keyContext.openFind();
+    return;
+  }
+  if (!focusClaimsFind()) {
+    let best: FindOwner | null = null;
+    let bestRank = 0;
+    for (const o of findOwners) {
+      const r = o.rank();
+      if (r > bestRank && interactedIn(o.pane())) {
+        best = o;
+        bestRank = r;
+      }
+    }
+    if (best) {
+      best.open();
+      return;
+    }
+  }
+  fallback();
+}
 
 /** `index` is the 1-based session number for the `jumpSession` action. */
 export type KeyDispatcher = (action: KeyAction, e: KeyboardEvent, index?: number) => void;
@@ -227,8 +332,9 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
         dispatch(e.shiftKey ? 'splitHorizontal' : 'splitVertical', e);
         return;
       case 'f':
-        // ⌘F → find. ⇧⌘F is NOT find (the DB editor uses it for Format).
-        if (e.shiftKey) return;
+        // ⌘F → find. ⇧⌘F is NOT find (the DB editor uses it for Format), nor
+        // ⌃⌘F (the native View ▸ Enter Full Screen).
+        if (e.shiftKey || (e.ctrlKey && e.metaKey)) return;
         e.preventDefault();
         dispatch('find', e);
         return;
@@ -274,8 +380,15 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
     }
   };
 
+  const note = (e: Event) => noteInteraction(e.target);
   window.addEventListener('keydown', handler, { capture: true });
-  return () => window.removeEventListener('keydown', handler, { capture: true });
+  window.addEventListener('pointerdown', note, { capture: true });
+  window.addEventListener('focusin', note, { capture: true });
+  return () => {
+    window.removeEventListener('keydown', handler, { capture: true });
+    window.removeEventListener('pointerdown', note, { capture: true });
+    window.removeEventListener('focusin', note, { capture: true });
+  };
 }
 
 // ---------------------------------------------------------------------------

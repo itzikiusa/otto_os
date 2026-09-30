@@ -33,7 +33,9 @@
   }: Props = $props();
 </script>
 
-<div class="action-bar" role="toolbar" aria-label="Quick actions">
+<!-- data-find-neutral: tapping Find here must not count as "the user left the
+     session pane" for ⌘F routing (lib/keys.ts noteInteraction). -->
+<div class="action-bar" role="toolbar" aria-label="Quick actions" data-find-neutral>
   <button
     class="ab-btn"
     onclick={onpalette}

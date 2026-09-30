@@ -11,7 +11,14 @@
   import { untrack } from 'svelte';
   import { findInPage } from '../findinpage.svelte';
   import Icon from './Icon.svelte';
-  import { activeFindProviders, countOccurrences, locateInElement, type FindProvider } from '../findProviders';
+  import {
+    activeFindProviders,
+    countOccurrences,
+    findSkipped,
+    locateInElement,
+    releaseFindProviders,
+    type FindProvider,
+  } from '../findProviders';
 
   // ---- state ----
   let query = $state('');
@@ -52,6 +59,7 @@
     ranges = [];
     rowMatches = [];
     currentRange = null;
+    releaseFindProviders();
   }
 
   // ---- open / close reactions ----
@@ -132,8 +140,18 @@
     return false;
   }
 
-  /** Walk `root`'s text, collecting ranges; `reject` subtrees are skipped. */
-  function walkText(root: Element, lower: string, into: AbstractRange[], cap: number, reject: Set<Element>, checkHidden: boolean): boolean {
+  /** Walk `root`'s text, collecting ranges; `reject` subtrees are skipped, and
+   *  so are `findSkipped` ones when `skipMarked` (painting a provider root's
+   *  mounted text — only what its model counts may light up). */
+  function walkText(
+    root: Element,
+    lower: string,
+    into: AbstractRange[],
+    cap: number,
+    reject: Set<Element>,
+    checkHidden: boolean,
+    skipMarked = false,
+  ): boolean {
     const bar = document.querySelector('.otto-find-bar');
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
@@ -143,6 +161,7 @@
           const el = node as Element;
           const tag = el.localName;
           if (el === bar || tag === 'script' || tag === 'style' || reject.has(el)) return NodeFilter.FILTER_REJECT;
+          if (skipMarked && findSkipped(el)) return NodeFilter.FILTER_REJECT;
           return NodeFilter.FILTER_SKIP;
         }
         const parent = node.parentElement;
@@ -190,7 +209,7 @@
     outer: for (const { provider } of active) {
       const n = provider.count();
       for (let i = 0; i < n; i++) {
-        const hits = countOccurrences(provider.text(i), lower, MAX_MATCHES - rows.length);
+        const hits = countOccurrences(provider.text(i), lower, MAX_MATCHES - rows.length, provider.lowered);
         for (let k = 0; k < hits; k++) rows.push({ p: provider, row: i, nth: k });
         if (rows.length >= MAX_MATCHES) {
           truncated = true;
@@ -237,7 +256,7 @@
     if (rowMatches.length > 0 && searched) {
       const mounted: AbstractRange[] = [];
       for (const { root } of activeFindProviders()) {
-        if (walkText(root, searched, mounted, MAX_MATCHES, new Set(), false)) break;
+        if (walkText(root, searched, mounted, MAX_MATCHES, new Set(), false, true)) break;
       }
       for (const r of mounted) all.add(r);
     }

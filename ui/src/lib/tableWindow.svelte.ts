@@ -15,6 +15,14 @@
 //     {#if win.bottom}<tr class="tw-spacer" aria-hidden="true"><td colspan={N} style="height:{win.bottom}px"></td></tr>{/if}
 //   (spacer cells need `padding: 0; border: 0` so their height is exact)
 //   $effect(() => { void win; tw.measure(el); });
+//
+// ⌘F over the WHOLE list (not just the mounted slice) is opt-in, like
+// VirtualList's `findText` — one provider per window (lib/findProviders.ts):
+//   $effect(() => tw.findRows(() => el, () => rows, (r) => `${r.name}\n${r.size}`));
+// The text should list the row's cells in DOM order (see findProviders.ts).
+
+import { tick } from 'svelte';
+import { registerFindProvider } from './findProviders';
 
 export interface WindowRange {
   start: number;
@@ -69,6 +77,42 @@ export class TableWindow {
     if (!row) return;
     const h = row.getBoundingClientRect().height;
     if (h > 4 && Math.abs(h - this.rowH) > 0.25) this.rowH = h;
+  }
+
+  /**
+   * Register a find provider over every row (`rows()` is the full list the
+   * window slices, `text` what row i shows). Sits out while the list isn't
+   * windowed — then every row is mounted and the plain DOM walk is exact.
+   * `rowSelector` matches the rendered data rows, in order (as `measure`).
+   * Returns the unregister — call it from an `$effect`.
+   */
+  findRows<T>(
+    container: () => HTMLElement | undefined | null,
+    rows: () => readonly T[],
+    text: (row: T, i: number) => string,
+    rowSelector = 'tbody tr:not(.tw-spacer)',
+  ): () => void {
+    return registerFindProvider({
+      root: () => container() ?? null,
+      active: () => this.active(rows().length),
+      count: () => rows().length,
+      text: (i) => {
+        const r = rows()[i];
+        return r === undefined ? '' : text(r, i);
+      },
+      reveal: async (i) => {
+        const el = container();
+        if (!el) return;
+        el.scrollTop = Math.max(0, i * this.rowH - (this.viewH || 600) / 2);
+        this.scrollTop = el.scrollTop;
+        await tick();
+      },
+      rowElement: (i) => {
+        const { start, end } = this.range(rows().length);
+        if (i < start || i >= end) return null;
+        return container()?.querySelectorAll(rowSelector)[i - start] ?? null;
+      },
+    });
   }
 
   /** Back to the top (a new listing replaced the rows). */

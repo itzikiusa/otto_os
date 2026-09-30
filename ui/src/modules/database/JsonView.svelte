@@ -4,14 +4,19 @@
   // copyable block. Same data the server returned; only the rendering differs.
   // Disclosure follows the same expansion plan as the Vertical view (node
   // budget + sticky per-path toggles + Expand/Collapse all), so what is open
-  // here is open there.
+  // here is open there. ⌘F searches inside closed branches and undrawn
+  // records too (json-find.ts).
+  import { tick, untrack } from 'svelte';
+  import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import Icon from '../../lib/components/Icon.svelte';
+  import { registerFindProvider } from '../../lib/findProviders';
   import JsonTree from './JsonTree.svelte';
   import type { QueryResult, DbEngine } from '../../lib/api/types';
   import type { EditFlow } from './EditFlow.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import {
+    CHUNK,
     estimateNodes,
     newExpansionState,
     planExpansion,
@@ -19,6 +24,7 @@
     type ExpansionState,
   } from './expansion-plan';
   import { ALT_BATCH, cellStr, copyText, prettyJson } from './results-format';
+  import { LineIndex, revealSteps, type FindTop, type RevealState } from './json-find';
 
   interface Props {
     result: QueryResult;
@@ -41,6 +47,9 @@
     expansion?: ExpansionState;
     /** "Compare two records" request from a record header (mounted by ResultsGrid). */
     oncompare?: (left: number, right: number) => void;
+    /** Every record the view may draw (≤ the view cap; `objRows` is its drawn
+     *  head) so ⌘F finds matches past the batch. Falls back to `objRows`. */
+    findRows?: Record<string, unknown>[];
   }
   let {
     result,
@@ -56,6 +65,7 @@
     onshowmore,
     expansion,
     oncompare,
+    findRows,
   }: Props = $props();
   // `uniqueColNames` / `engine` are accepted for prop parity with VerticalView
   // (the JSON view renders `obj`, already keyed by those names) and unused.
@@ -79,6 +89,72 @@
     }
     setExpansionMode(exp, 'all');
   }
+  /** Expand / Collapse / Reset also drop what a find revealed. */
+  function setMode(mode: ExpansionState['mode']): void {
+    reveals.clear();
+    setExpansionMode(exp, mode);
+  }
+
+  // ── ⌘F over closed branches (json-find.ts) ──────────────────────────────────
+  // Rows = every line of every findable record with everything open; built on
+  // demand, cached per record list until the find bar closes. Revealing one
+  // opens its path in THAT record only (draws more records first when it
+  // sits past the batch).
+  let viewEl = $state<HTMLElement | null>(null);
+  // Keyed by the record's ORIGINAL row idx (not its draw position), so a sort
+  // or filter leaves a reveal on the record it was made in.
+  const reveals = new SvelteMap<number, RevealState>();
+  $effect(() => {
+    void result;
+    untrack(() => reveals.clear());
+  });
+  const topsOf = (obj: Record<string, unknown>): FindTop[] => Object.entries(obj).map(([k, v]) => [k, k, v]);
+  let findCache: { src: unknown; idx: LineIndex } | null = null;
+  function findIndex(): { recs: Record<string, unknown>[]; idx: LineIndex } {
+    const recs = findRows ?? objRows.map((r) => r.obj);
+    const src = findRows ?? objRows;
+    if (findCache?.src !== src) findCache = { src, idx: new LineIndex(recs.length, (i) => topsOf(recs[i]), 'json') };
+    return { recs, idx: findCache.idx };
+  }
+  async function revealLine(i: number): Promise<void> {
+    const { recs, idx } = findIndex();
+    const at = idx.locate(i);
+    if (!at) return;
+    if (at.rec >= objRows.length) {
+      for (let n = objRows.length; n <= at.rec; n += ALT_BATCH) onshowmore();
+      await tick();
+    }
+    const key = objRows[at.rec]?.idx;
+    if (key === undefined) return;
+    let r = reveals.get(key);
+    if (!r) {
+      r = { opens: new SvelteSet(), shown: new SvelteMap(), strs: new SvelteSet() };
+      reveals.set(key, r);
+    }
+    const steps = revealSteps(topsOf(recs[at.rec]), at.line, CHUNK, true);
+    for (const p of steps.opens) r.opens.add(p);
+    for (const [p, n] of steps.shown) if ((r.shown.get(p) ?? 0) < n) r.shown.set(p, n);
+    if (at.line.long) r.strs.add(at.line.path);
+    await tick();
+  }
+  function lineElement(i: number): Element | null {
+    const at = findIndex().idx.locate(i);
+    if (!at || !viewEl) return null;
+    // A clipped string may hide the match: report it unmounted so it's revealed.
+    if (at.line.long && !reveals.get(objRows[at.rec]?.idx ?? -1)?.strs.has(at.line.path)) return null;
+    return viewEl.querySelector(`[data-jrec="${at.rec}"] [data-jpath="${CSS.escape(at.line.path)}"]`);
+  }
+  $effect(() =>
+    registerFindProvider({
+      root: () => viewEl,
+      count: () => findIndex().idx.count(),
+      text: (i) => findIndex().idx.text(i),
+      lowered: true,
+      release: () => (findCache = null),
+      reveal: revealLine,
+      rowElement: lineElement,
+    }),
+  );
 
   // ── Record menu (⋯): insert / export / compare — the same set as Vertical ──
   const canEdit = $derived(flow.editable && !flow.reviewSql);
@@ -116,6 +192,7 @@
         { separator: true },
       );
     }
+    items.push({ label: flow.rawDocLabel, icon: 'eye', action: () => flow.openRawDoc(idx) });
     items.push({
       label: 'Export…',
       icon: 'arrowDown',
@@ -143,18 +220,18 @@
   }
 </script>
 
-<div class="alt-view">
+<div class="alt-view" bind:this={viewEl}>
   {#if !mini}
-    <div class="vv-tools">
+    <div class="vv-tools" data-find-skip>
       <button class="vv-tool" onclick={expandAll} title="Open every nested field of the drawn records">Expand all</button>
-      <button class="vv-tool" onclick={() => setExpansionMode(exp, 'none')} title="Close every nested field">Collapse all</button>
-      <button class="vv-tool" onclick={() => setExpansionMode(exp, 'budget')} title="Back to the default: open what fits the node budget" disabled={!resettable}>Reset</button>
+      <button class="vv-tool" onclick={() => setMode('none')} title="Close every nested field">Collapse all</button>
+      <button class="vv-tool" onclick={() => setMode('budget')} title="Back to the default: open what fits the node budget" disabled={!resettable}>Reset</button>
     </div>
   {/if}
-  {#if viewTruncated}<div class="alt-note dim">Showing first {viewCap} of {totalRows} rows.</div>{/if}
+  {#if viewTruncated}<div class="alt-note dim" data-find-skip>Showing first {viewCap} of {totalRows} rows.</div>{/if}
   {#each objRows as { obj, idx }, ri (ri)}
-    <div class="jrec" class:compare-pick={comparePick === idx}>
-      <div class="jrec-head mono">
+    <div class="jrec" class:compare-pick={comparePick === idx} data-jrec={ri}>
+      <div class="jrec-head mono" data-find-skip>
         <span class="jrec-n">#{ri + 1}</span>
         {#if comparePick === idx}<span class="jrec-tag">comparing</span>{/if}
         <span class="grow"></span>
@@ -169,11 +246,11 @@
       <!-- Collapsible tree, NOT a stringified blob: a closed branch renders
            one summary line, so a 90KB document costs a handful of nodes.
            Controlled by the shared plan (sticky toggles across records). -->
-      <div class="alt-json mono"><JsonTree value={obj} path="" plan={plans[ri] ?? new Set<string>()} expansion={exp} /></div>
+      <div class="alt-json mono"><JsonTree value={obj} path="" plan={plans[ri] ?? new Set<string>()} expansion={exp} reveal={reveals.get(idx)} /></div>
     </div>
   {/each}
   {#if altRemaining > 0}
-    <button class="alt-more" onclick={onshowmore}>
+    <button class="alt-more" onclick={onshowmore} data-find-skip>
       Show {Math.min(ALT_BATCH, altRemaining)} more · {altRemaining} not rendered
     </button>
   {/if}
