@@ -5,7 +5,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
-  import MethodTag from './MethodTag.svelte';
+  import MethodTag, { methodWord } from './MethodTag.svelte';
   import StatusChip from './StatusChip.svelte';
   import RetentionDialog from './RetentionDialog.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
@@ -98,6 +98,13 @@
       { label: 'Clear history…', icon: 'trash', danger: true, disabled: !canEdit || apiClient.history.length === 0, action: () => void clear() },
     ]);
   }
+
+  /** ⌘F text of a history row — its cells in DOM order (see the VirtualList). */
+  function histFindText(h: ApiHistorySummary): string {
+    const u = splitUrl(h.url);
+    const agent = apiClient.historySource(h)?.kind === 'agent' ? 'Agent' : '';
+    return [methodWord(h.method), u.path, u.host || '—', agent, h.status ?? 'No response', rel(h.executed_at)].join('\n');
+  }
 </script>
 
 <div class="hist-wrap">
@@ -132,7 +139,9 @@
       {apiClient.historyAgentOnly && !tokens.length ? 'No agent runs yet.' : `No history matches “${search.trim()}”.`}
     </div>
   {:else}
-    <VirtualList items={filtered} estimateHeight={44} class="hist-vlist">
+    <!-- findText: the row's text in DOM order (MethodTag's short word, path,
+         host, source chip, status, age), so ⌘F reaches unmounted rows. -->
+    <VirtualList items={filtered} estimateHeight={44} class="hist-vlist" findText={histFindText}>
       {#snippet row(h: ApiHistorySummary)}
         {@const src = apiClient.historySource(h)}
         {@const u = splitUrl(h.url)}

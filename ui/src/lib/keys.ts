@@ -43,7 +43,8 @@ export type KeyAction =
 /** Mutable context the Terminal component updates on focus/blur. */
 export const keyContext: {
   terminalFocused: boolean;
-  /** focused terminal registers its find-bar opener here */
+  /** focused terminal (or its find input) / CodeEditor registers its find
+   *  opener here — see routeFind below */
   openFind: (() => void) | null;
   /** The in-app floating bar has focus: ⌃1–⌃4 switch ITS spaces. */
   barFocused: boolean;
@@ -57,6 +58,72 @@ export const keyContext: {
   barFocused: false,
   pageChords: null,
 };
+
+// ── ⌘F routing ────────────────────────────────────────────────────────────
+// Focus-owned find (`keyContext.openFind`: a focused terminal, its own find
+// input, a focused CodeEditor) wins. Otherwise the active session pane's
+// terminal still owns ⌘F while it is on screen: a click on the pane header,
+// a side panel or empty chrome moves focus off the xterm, and the page-wide
+// FindInPage walks DOM text — a WebGL terminal has none, a DOM one only its
+// visible rows. Only then does ⌘F fall back to the page.
+
+/** A terminal that takes ⌘F without holding focus (Terminal `findRank`). */
+export interface FindOwner {
+  /** > 0 while it can take ⌘F (mounted, bound, visible); highest wins —
+   *  the focused split pane over another view of the same session. */
+  rank(): number;
+  open(): void;
+}
+
+const findOwners = new Set<FindOwner>();
+
+/** Register a pane find owner; returns the unregister (an `$effect` cleanup). */
+export function registerFindOwner(o: FindOwner): () => void {
+  findOwners.add(o);
+  return () => {
+    findOwners.delete(o);
+  };
+}
+
+/** Focus sits where ⌘F means "search HERE", not the session pane: a text
+ *  field / editor outside any terminal, or anything under an open modal. */
+function focusClaimsFind(): boolean {
+  if (document.querySelector('[role="dialog"][aria-modal="true"], dialog[open]')) return true;
+  const el = document.activeElement as HTMLElement | null;
+  if (!el || el.closest('.xterm')) return false;
+  return (
+    el.tagName === 'INPUT' ||
+    el.tagName === 'TEXTAREA' ||
+    el.tagName === 'SELECT' ||
+    el.isContentEditable ||
+    !!el.closest('.cm-editor')
+  );
+}
+
+/** ⌘F / the phone toolbar's find: focused owner → active session pane's
+ *  terminal → `fallback` (the page-wide find). */
+export function routeFind(fallback: () => void): void {
+  if (keyContext.openFind) {
+    keyContext.openFind();
+    return;
+  }
+  if (!focusClaimsFind()) {
+    let best: FindOwner | null = null;
+    let bestRank = 0;
+    for (const o of findOwners) {
+      const r = o.rank();
+      if (r > bestRank) {
+        best = o;
+        bestRank = r;
+      }
+    }
+    if (best) {
+      best.open();
+      return;
+    }
+  }
+  fallback();
+}
 
 /** `index` is the 1-based session number for the `jumpSession` action. */
 export type KeyDispatcher = (action: KeyAction, e: KeyboardEvent, index?: number) => void;
@@ -227,8 +294,9 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
         dispatch(e.shiftKey ? 'splitHorizontal' : 'splitVertical', e);
         return;
       case 'f':
-        // ⌘F → find. ⇧⌘F is NOT find (the DB editor uses it for Format).
-        if (e.shiftKey) return;
+        // ⌘F → find. ⇧⌘F is NOT find (the DB editor uses it for Format), nor
+        // ⌃⌘F (the native View ▸ Enter Full Screen).
+        if (e.shiftKey || (e.ctrlKey && e.metaKey)) return;
         e.preventDefault();
         dispatch('find', e);
         return;

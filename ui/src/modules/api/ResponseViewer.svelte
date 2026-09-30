@@ -308,7 +308,12 @@
           {#if apiStream.items.length > STREAM_RING_MAX}
             <div class="ring-note">Showing the last {STREAM_RING_MAX} of {apiStream.items.length} messages.</div>
           {/if}
-          <VirtualList items={streamItems} estimateHeight={28} class="stream-vlist">
+          <VirtualList
+            items={streamItems}
+            estimateHeight={28}
+            class="stream-vlist"
+            findText={(it) => `${it.kind === 'event' ? it.event || 'event' : it.kind === 'message' ? (it.dir === 'out' ? 'Sent' : 'Received') : it.kind}\n${it.data}`}
+          >
             {#snippet row(it)}
               <div class="stream-item {it.kind} {it.dir ?? ''}">
                 <span class="si-tag">

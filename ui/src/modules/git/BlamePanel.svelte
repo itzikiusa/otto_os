@@ -65,6 +65,14 @@
     void win;
     tw.measure(bodyEl);
   });
+  // ⌘F over every blame run, not just the mounted slice.
+  $effect(() =>
+    tw.findRows(
+      () => bodyEl,
+      () => lines,
+      (l) => [range(l.line_start, l.count), l.author, l.short_sha, day(l.at), l.summary].join('\n'),
+    ),
+  );
   // A new blame starts at the top.
   $effect(() => {
     void blame;

@@ -306,6 +306,16 @@ clamped, never an error.
   to find output that scrolled off. The UI find bar runs both: local first, then
   a 300 ms-debounced server query.
 
+The find bar searches upward from the newest output (`↵` older, `⇧↵` newer) and
+highlights every local hit with an `N/M` count. The server hits list under the
+bar; `↑`/`↓` or a click steps through them, and the viewport only jumps there
+by itself when the client buffer has no hit. `⌘F` reaches the terminal of the
+active session pane even without keyboard focus in the xterm (the header search
+button does the same). A focused query editor, text field or open modal keeps
+`⌘F`, and so does the Chat view, where the page find covers the transcript.
+Routing: `routeFind` in `ui/src/lib/keys.ts`; the terminal opts in with
+`Terminal findRank`.
+
 ### Resize
 
 `{"type":"resize","cols","rows}"` triggers `manager.resize`, which both resizes

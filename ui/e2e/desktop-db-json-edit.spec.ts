@@ -124,9 +124,10 @@ test('JSON cell + JSON-view document editing round-trips through review', async 
   const rec = page.locator('.jrec').first();
   await expect(rec).toBeVisible();
   await rec.locator('[aria-label="Edit document"]').click();
-  const docEd = page.locator('.cell-viewer .cv-edit');
+  // The document editor is a CodeMirror editor: its text is `.cm-content`.
+  const docEd = page.locator('.cell-viewer .cv-edit .cm-content');
   await expect(docEd).toBeVisible();
-  const draft = JSON.parse(await docEd.inputValue()) as Record<string, unknown>;
+  const draft = JSON.parse(await docEd.innerText()) as Record<string, unknown>;
   expect(draft.status).toBe('pending');
   draft.status = 'paid';
   await docEd.fill(JSON.stringify(draft, null, 2));
@@ -256,7 +257,7 @@ test('Vertical: record menu → Insert document… reviews an insertOne', async 
 
   await rec.locator('[aria-label="Record actions"]').click();
   await page.locator('.ctx-item', { hasText: /Insert document/ }).first().click();
-  const docEd = page.locator('.cell-viewer .cv-edit');
+  const docEd = page.locator('.cell-viewer .cv-edit .cm-content');
   await expect(docEd).toBeVisible();
   await expect(page.getByRole('dialog', { name: 'Insert document' })).toBeVisible();
   await docEd.fill('{ "k": "doc2" }');

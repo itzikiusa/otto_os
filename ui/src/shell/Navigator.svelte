@@ -252,6 +252,52 @@
     return ws.requestDeleteSession(id);
   }
 
+  // ── Workspace quick filter ──────────────────────────────────────────────────
+  // Name or root-path substring (case-insensitive). The box only appears once
+  // the list is long enough to need it (or while a query is still set, so a
+  // workspace removed mid-filter can't strand a hidden query).
+  const WS_FILTER_MIN = 5;
+  let wsQuery = $state('');
+  const wq = $derived(wsQuery.trim().toLowerCase());
+  const showWsFilter = $derived(ws.workspaces.length >= WS_FILTER_MIN || wsQuery !== '');
+  const fWorkspaces = $derived(
+    wq === ''
+      ? ws.workspaces
+      : ws.workspaces.filter((w) => w.name.toLowerCase().includes(wq) || w.root_path.toLowerCase().includes(wq)),
+  );
+  /** Esc clears the query (a second Esc leaves the box); Enter switches to the
+   *  first match and clears, so "type a few letters ⏎" is a workspace switcher. */
+  function wsFilterKey(e: KeyboardEvent): void {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      if (wsQuery) wsQuery = '';
+      else (e.currentTarget as HTMLInputElement).blur();
+    } else if (e.key === 'Enter' && wq !== '' && fWorkspaces.length > 0) {
+      e.preventDefault();
+      void ws.select(fWorkspaces[0].id);
+      wsQuery = '';
+    }
+  }
+
+  /** The current-workspace chip under Agents: a switcher menu (filterable once
+   *  the list is long, like the Workspaces section's quick filter). */
+  function openWsSwitcher(e: MouseEvent | KeyboardEvent): void {
+    const items: MenuItem[] = ws.workspaces.map((w) => ({
+      label: w.name,
+      checked: ws.currentId === w.id,
+      title: w.root_path,
+      action: () => void ws.select(w.id),
+    }));
+    if (items.length > 0) items.push({ separator: true });
+    items.push({ label: 'Add workspace…', icon: 'plus', pinned: true, action: () => (ui.newWorkspaceOpen = true) });
+    ctxMenu.show(
+      e,
+      items,
+      ws.workspaces.length >= WS_FILTER_MIN ? { filter: true, filterPlaceholder: 'Switch workspace…', maxVisible: 12 } : undefined,
+    );
+  }
+
   // ── Workspace management (context menu on the Workspaces rows) ──────────────
   async function renameWorkspace(w: WorkspaceWithRole): Promise<void> {
     const name = await confirmer.promptText('New workspace name', {
@@ -689,6 +735,13 @@
           placeholder="Search all sessions…"
           aria-label="Search all sessions"
           bind:value={sessionQuery}
+          onkeydown={(e) => {
+            if (e.key !== 'Escape') return;
+            e.preventDefault();
+            e.stopPropagation();
+            if (sessionQuery) sessionQuery = '';
+            else e.currentTarget.blur();
+          }}
         />
         {#if sessionQuery}
           <button class="search-clear" onclick={() => (sessionQuery = '')} aria-label="Clear search" title="Clear search">
@@ -823,7 +876,28 @@
           <Icon name="plus" size={14} />
         </button>
       </div>
-      {#each ws.workspaces as w (w.id)}
+      {#if showWsFilter}
+        <div class="nav-search ws-filter">
+          <Icon name="search" size={12} />
+          <input
+            class="nav-search-input"
+            placeholder="Filter workspaces…"
+            aria-label="Filter workspaces"
+            data-testid="ws-filter"
+            bind:value={wsQuery}
+            onkeydown={wsFilterKey}
+          />
+          {#if wsQuery}
+            <button class="search-clear" onclick={() => (wsQuery = '')} aria-label="Clear workspace filter" title="Clear workspace filter">
+              <Icon name="x" size={11} />
+            </button>
+          {/if}
+        </div>
+      {/if}
+      {#if wq !== '' && fWorkspaces.length === 0}
+        <div class="nested-empty">No matching workspaces</div>
+      {/if}
+      {#each fWorkspaces as w (w.id)}
         <button
           class="nav-item"
           class:active-ws={ws.currentId === w.id}
@@ -1105,6 +1179,24 @@
        hangs off its row on one outline guide, so it reads as Agents' content
        rather than more sections. -->
   <div class="agents-sub">
+    <!-- Which workspace the flat list below belongs to (it was only visible
+         from the terminal or the Workspaces section far below). Click →
+         switch. With no current workspace the "No workspace" group right
+         below already says so, so the chip would only repeat it. -->
+    {#if ws.current}
+      <button
+        class="ws-chip"
+        onclick={openWsSwitcher}
+        aria-haspopup="menu"
+        title={`${ws.current.name}\n${ws.current.root_path}\nClick to switch workspace`}
+        aria-label={`Current workspace: ${ws.current.name}. Switch workspace`}
+        data-testid="agents-current-ws"
+      >
+        <Icon name="folder" size={11} />
+        <span class="ellipsis">{ws.current.name}</span>
+        <Icon name="chevronDown" size={10} />
+      </button>
+    {/if}
     {#if q ? fAgents.length > 0 : agentsOpen}
       <div class="nested" data-testid="agents-list">
         {#if agentSelMode}
@@ -1865,6 +1957,33 @@
     margin-inline-start: 15px;
     padding-inline-start: 4px;
     border-inline-start: 1px solid color-mix(in srgb, var(--text-dim) 22%, transparent);
+  }
+  /* Current-workspace chip: quiet, dim, one line; reads as a label until
+     hovered (then as the switcher it is). */
+  .ws-chip {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    max-width: calc(100% - 4px);
+    margin: 1px 0 2px;
+    padding: 2px 6px;
+    border: none;
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    text-align: start;
+    cursor: pointer;
+    min-width: 0;
+  }
+  .ws-chip:hover {
+    color: var(--text);
+    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+  }
+  .ws-chip:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
   .agents-sub .nested {
     padding-inline-start: 0;

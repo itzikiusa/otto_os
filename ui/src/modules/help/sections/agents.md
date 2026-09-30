@@ -40,7 +40,7 @@ Agents is where your coding agents run. Each session is a real terminal on this 
 - Per pane: **Terminal** or **Chat** (the conversation rebuilt from the agent's transcript). Chat works for `claude` and `codex`. For both at once, split the pane (`⌘D`) and put one side in Chat.
 
 **Terminal**
-- Full scrollback survives reconnects (the daemon keeps 10,000 lines per session). Find (`⌘F`) searches the screen and the daemon's full buffer.
+- Full scrollback survives reconnects (the daemon keeps 10,000 lines per session). Find (`⌘F`, or the search button in the pane header) searches the screen and the daemon's full buffer. `⌘F` reaches the active pane's terminal even when you last clicked its header or a side panel; in **Chat** it searches the conversation.
 - Click a URL to open it in your browser, or a file reference like `src/App.svelte:42` to open it in the Files panel.
 - `⌥`-drag selects text in agent CLIs (they capture the mouse). Copy-on-select is a toggle in the pane's ⋯ menu.
 - Paste an image and Otto uploads it, then types the saved file's path into the terminal.

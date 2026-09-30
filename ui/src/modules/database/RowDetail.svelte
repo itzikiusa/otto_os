@@ -20,9 +20,12 @@
     onstep: (delta: number) => void;
     /** Open a field in the full cell viewer. */
     onopen: (ci: number) => void;
+    /** Open the whole row as searchable raw JSON (labelled `rawLabel`). */
+    onraw?: () => void;
+    rawLabel?: string;
     onclose: () => void;
   }
-  let { result, row, rowIdx, position, total, onstep, onopen, onclose }: Props = $props();
+  let { result, row, rowIdx, position, total, onstep, onopen, onraw, rawLabel = 'View raw JSON', onclose }: Props = $props();
 
   let fieldFilter = $state('');
   const fields = $derived.by(() => {
@@ -42,6 +45,11 @@
     <span class="rd-title">{rowIdx === null ? 'Row' : `Row ${rowIdx + 1}`}</span>
     {#if position >= 0}<span class="rd-pos">{position + 1} of {total.toLocaleString()}</span>{/if}
     <span class="grow"></span>
+    {#if onraw}
+      <button class="icon-btn" disabled={!row} onclick={onraw} aria-label={rawLabel} title={rawLabel}>
+        <Icon name="eye" size={13} />
+      </button>
+    {/if}
     <button class="icon-btn" disabled={position <= 0} onclick={() => onstep(-1)} aria-label="Previous row" title="Previous row">
       <Icon name="chevronUp" size={13} />
     </button>

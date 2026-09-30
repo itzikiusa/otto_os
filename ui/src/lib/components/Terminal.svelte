@@ -151,7 +151,7 @@
   import { openFile } from '../stores/openfile.svelte';
   import { openExternal } from '../external';
   import { terminalLinksForRow, resolveTerminalFile, oscTerminalLink, type TerminalLink } from './terminalLinks';
-  import { keyContext } from '../keys';
+  import { keyContext, registerFindOwner } from '../keys';
   import { copyText } from '../clipboard';
   import { snipApi } from '../snip';
   import { toasts } from '../toast.svelte';
@@ -251,8 +251,14 @@
      *  daemon restart, window refocus) are view-only on EVERY terminal: a
      *  dropped socket is not the user asking for the CLI back. Default true. */
     resumeOnOpen?: boolean;
+    /** Take ⌘F without holding focus (keys.ts routeFind): the active session
+     *  pane passes > 0 so ⌘F opens THIS find bar after a click on its header
+     *  or anywhere off the xterm; the highest rank among visible terminals
+     *  wins (the focused split pane 2 over another view of the session 1).
+     *  A focused terminal / editor / text field still wins. Default 0 (off). */
+    findRank?: number;
   }
-  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, socketFactory, transformFrame, readOnlyReason, onstatus, onfontfit, onsearchresult, showToolbar = true, autoFocus = false, claimOnAttach = false, keepAlive = false, scrollback = EMBED_SCROLLBACK, resumeOnOpen = true }: Props = $props();
+  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, socketFactory, transformFrame, readOnlyReason, onstatus, onfontfit, onsearchresult, showToolbar = true, autoFocus = false, claimOnAttach = false, keepAlive = false, scrollback = EMBED_SCROLLBACK, resumeOnOpen = true, findRank = 0 }: Props = $props();
 
   const effScheme = $derived(forceDark ? 'dark' : ui.resolvedScheme);
 
@@ -401,6 +407,10 @@
   let findOpen = $state(false);
   let findQuery = $state('');
   let findInput: HTMLInputElement | null = $state(null);
+  /** Local (SearchAddon) match position / total, from onDidChangeResults.
+   *  `localIdx` is −1 past the addon's 1000-highlight cap. */
+  let localIdx = $state(-1);
+  let localCount = $state(0);
 
   /** Server-side ring-buffer matches for the current query. */
   let serverMatches = $state<TermSearchMatch[]>([]);
@@ -434,7 +444,7 @@
 
   /** Jump the xterm viewport to the server match at `idx`. */
   function goToServerMatch(idx: number): void {
-    if (serverMatches.length === 0) return;
+    if (serverMatches.length === 0 || !term) return;
     const clamped = ((idx % serverMatches.length) + serverMatches.length) % serverMatches.length;
     serverMatchIdx = clamped;
     const m = serverMatches[clamped];
@@ -442,18 +452,28 @@
     // index while xterm's scrollToLine addresses visual/wrapped rows, and after
     // a reconnect the client holds only the replayed tail of the history — so
     // the number alone can land on the wrong row.
-    term?.scrollToLine(m.line);
+    const buf = term.buffer.active;
+    const row = Math.max(0, Math.min(m.line, buf.length - 1));
+    term.scrollToLine(row);
     // Precise re-anchor: locate the match's actual text via the SearchAddon
-    // from the coarse position (wraps if needed) — this scrolls to and
-    // highlights the real occurrence regardless of wrapping/replay offsets.
-    // When the match predates the client's replayed history the text isn't in
-    // the buffer at all; the coarse jump (top of scrollback) is the best we
-    // can show.
+    // FROM the coarse row — findNext starts at the selection (no selection =
+    // the top of the buffer, which always landed on the FIRST copy of a
+    // repeated line), so select the row first; it wraps if needed. This
+    // scrolls to and selects the real occurrence regardless of wrapping/
+    // replay offsets. When the match predates the client's replayed history
+    // the text isn't in the buffer at all; the coarse jump is the best we can
+    // show.
     const needle = m.text.trim();
     if (needle && search) {
-      search.findNext(needle, { incremental: false });
+      term.select(0, row, 1);
+      search.findNext(needle);
     }
+    // Keep the stepped-to row visible in the results list.
+    queueMicrotask(() =>
+      findResultsEl?.querySelector<HTMLElement>(`[data-match="${clamped}"]`)?.scrollIntoView({ block: 'nearest' }),
+    );
   }
+  let findResultsEl: HTMLDivElement | null = $state(null);
 
   function sendJson(obj: unknown): void {
     const frame = transformFrame ? transformFrame(obj) : obj;
@@ -766,9 +786,13 @@
             // stale response overwriting results from a newer, faster one).
             if (frame.query === findQuery) {
               serverMatches = frame.matches;
-              // Jump to the first match automatically when the list refreshes.
               serverMatchIdx = -1;
-              if (frame.matches.length > 0) goToServerMatch(0);
+              // Jump only when the client buffer has no hit of its own (the
+              // newest ring-buffer match): auto-jumping to match 0 — the
+              // OLDEST line of history — yanked the viewport off the local
+              // hit a beat after every keystroke. A local pass still pending
+              // makes that call itself when it lands (scheduleLocalFind).
+              if (frame.matches.length > 0 && localMiss && localFindTimer === null) goToServerMatch(frame.matches.length - 1);
             }
             onsearchresult?.(frame);
             break;
@@ -1159,10 +1183,40 @@
   }
 
 
-  function openFind(): void {
+  /** Open (or re-focus) the find bar — ⌘F, the pane header's search button.
+   *  Re-opening selects the query so typing replaces it. */
+  export function openFind(): void {
     findOpen = true;
-    queueMicrotask(() => findInput?.focus());
+    queueMicrotask(() => {
+      findInput?.focus();
+      findInput?.select();
+    });
   }
+  // The find input owns ⌘F while focused (the xterm textarea just blurred):
+  // without this a second ⌘F from the bar opened the page-wide find on top.
+  function onFindFocus(): void {
+    keyContext.openFind = openFind;
+  }
+  function onFindBlur(): void {
+    if (keyContext.openFind === openFind) keyContext.openFind = null;
+  }
+  // Pane ownership (findRank): the active session pane takes ⌘F while it is
+  // bound and on screen, even with focus elsewhere. A parked / switched-away
+  // engine leaves `term` null (rank 0); a hidden page (display:none keep-alive)
+  // fails checkVisibility.
+  $effect(() => {
+    const r = findRank;
+    if (r <= 0) return;
+    return registerFindOwner({
+      rank: () => {
+        if (!term || !container?.isConnected) return 0;
+        const el = container as HTMLElement & { checkVisibility?: (o?: object) => boolean };
+        const shown = typeof el.checkVisibility === 'function' ? el.checkVisibility({ visibilityProperty: true }) : el.offsetParent !== null;
+        return shown ? r : 0;
+      },
+      open: openFind,
+    });
+  });
 
   // Local find is a whole-buffer SearchAddon pass (13–19 ms over 10k lines
   // incl. up to 1000 decorations, SA-12) — debounce it like the server search,
@@ -1186,18 +1240,35 @@
       localFindTimer = null;
       const q = findQuery;
       if (!search || !q) return;
-      if (q.length >= 2) search.findNext(q, { decorations: searchDecorations });
+      // Upward from the bottom (or from the current hit, growing it while it
+      // still matches): the newest output is what you're looking for — a
+      // forward pass started at the TOP of the scrollback, the oldest copy.
+      let found: boolean;
+      if (q.length >= 2) found = search.findPrevious(q, { decorations: searchDecorations });
       else {
         search.clearDecorations();
-        search.findNext(q);
+        localIdx = -1;
+        localCount = 0;
+        found = search.findPrevious(q);
       }
+      localMiss = !found;
+      // No local hit: the ring-buffer result (maybe already in) is the only
+      // place it lives — jump there.
+      if (!found && serverMatches.length > 0 && serverMatchIdx < 0) goToServerMatch(serverMatches.length - 1);
     }, LOCAL_FIND_DEBOUNCE_MS);
   }
+  /** The last local pass found nothing in the client's buffer. */
+  let localMiss = $state(false);
 
-  function closeFind(): void {
+  /** Drop the find bar's state (and the buffer highlights). */
+  function resetFind(): void {
     findOpen = false;
+    if (keyContext.openFind === openFind && document.activeElement === findInput) keyContext.openFind = null;
     cancelLocalFind();
     search?.clearDecorations();
+    localIdx = -1;
+    localCount = 0;
+    localMiss = false;
     // Clear server-side results so they don't linger on next open.
     serverMatches = [];
     serverMatchIdx = -1;
@@ -1206,26 +1277,77 @@
       clearTimeout(serverSearchTimer);
       serverSearchTimer = null;
     }
-    term?.focus();
   }
 
-  const searchDecorations = {
-    matchOverviewRuler: '#febc2e',
-    activeMatchColorOverviewRuler: '#ff9f0a',
-  };
+  function closeFind(): void {
+    resetFind();
+    term?.focus();
+    // onTermSelection skipped the textarea mirror while find drove the
+    // selection; restore it so Edit ▸ Copy (native ⌘C) takes the last hit.
+    const ta = term?.textarea;
+    if (term && ta && !composing && term.hasSelection()) {
+      ta.value = term.getSelection();
+      ta.select();
+    }
+  }
 
-  function findNext(back = false): void {
+  // Every match gets a fill — without matchBackground the addon paints
+  // nothing in the viewport (only the overview ruler, which this terminal
+  // doesn't show), so "highlight all" was invisible. xterm decorations take
+  // #RRGGBB only, hence literals picked per scheme rather than tokens.
+  const searchDecorations = $derived(
+    effScheme === 'dark'
+      ? {
+          matchBackground: '#4a3d12',
+          matchBorder: '#8a6d1f',
+          matchOverviewRuler: '#febc2e',
+          activeMatchBackground: '#8a5a00',
+          activeMatchBorder: '#ff9f0a',
+          activeMatchColorOverviewRuler: '#ff9f0a',
+        }
+      : {
+          matchBackground: '#fff0b3',
+          matchBorder: '#e0bb00',
+          matchOverviewRuler: '#febc2e',
+          activeMatchBackground: '#ffc966',
+          activeMatchBorder: '#ff9f0a',
+          activeMatchColorOverviewRuler: '#ff9f0a',
+        },
+  );
+
+  /** Step through the matches. Terminal order, like VS Code's terminal find:
+   *  ↵ / the up chevron go UP to the older match, ⇧↵ / down to the newer. The
+   *  client buffer is stepped when it has the query; only when it doesn't do
+   *  the ring-buffer hits step instead (stepping both fought over the
+   *  viewport — every ↵ undid the local move). ↑/↓ always walk the list. */
+  function findNext(newer = false): void {
     if (findQuery === '') return;
     // An explicit step supersedes the pending incremental search.
     cancelLocalFind();
-    // Local xterm search (visible buffer + decorations).
+    let found = false;
     if (search) {
-      if (back) search.findPrevious(findQuery, { decorations: searchDecorations });
-      else search.findNext(findQuery, { decorations: searchDecorations });
+      found = newer
+        ? search.findNext(findQuery, { decorations: searchDecorations })
+        : search.findPrevious(findQuery, { decorations: searchDecorations });
     }
-    // Server ring-buffer navigation: cycle through matches.
-    if (serverMatches.length > 0) {
-      goToServerMatch(back ? serverMatchIdx - 1 : serverMatchIdx + 1);
+    localMiss = !found;
+    if (!found && serverMatches.length > 0) {
+      goToServerMatch(newer ? serverMatchIdx + 1 : serverMatchIdx < 0 ? serverMatches.length - 1 : serverMatchIdx - 1);
+    }
+  }
+
+  function onFindKey(e: KeyboardEvent): void {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      findNext(e.shiftKey);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeFind();
+    } else if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && serverMatches.length > 0) {
+      e.preventDefault();
+      const down = e.key === 'ArrowDown';
+      goToServerMatch(serverMatchIdx < 0 ? (down ? 0 : serverMatches.length - 1) : serverMatchIdx + (down ? 1 : -1));
     }
   }
 
@@ -1462,6 +1584,11 @@
 
   function onTermSelection(): void {
     if (!term) return;
+    // The find bar drives the selection (each step selects its hit): leave
+    // the textarea and the clipboard alone — the mirror's select() must not
+    // compete with the find input, and copy-on-select would overwrite the
+    // clipboard with every hit. closeFind re-mirrors.
+    if (findOpen && document.activeElement !== term.textarea) return;
     const text = term.hasSelection() ? term.getSelection() : '';
 
     // Mirror the selection into xterm's hidden textarea and select it there.
@@ -1540,6 +1667,15 @@
     const linkProvider = t.registerLinkProvider(makeLinkProvider());
     t.attachCustomKeyEventHandler(termKeyHandler);
     const subs = [t.onData(onTermData), t.onSelectionChange(onTermSelection), t.onBinary(onTermBinary)];
+    // The find bar's "3/12" (fires only for decorated passes — 2+ chars).
+    if (search) {
+      subs.push(
+        search.onDidChangeResults(({ resultIndex, resultCount }) => {
+          localIdx = resultIndex;
+          localCount = resultCount;
+        }),
+      );
+    }
     const textarea = t.textarea;
     textarea?.addEventListener('compositionstart', onCompStart);
     textarea?.addEventListener('compositionend', onCompEnd);
@@ -1697,6 +1833,8 @@
    *  replays into the old one's buffer, and switching back is instant. */
   function switchEngine(sid: string): void {
     const hadFocus = !!term?.textarea && document.activeElement === term.textarea;
+    // The find bar's hits (and its ring-buffer list) belong to the old session.
+    resetFind();
     unbindTerm();
     tuiCleanup.cancel();
     if (tuiRefreshRaf !== null) {
@@ -1935,6 +2073,9 @@
       unregisterSelectAll();
       container.removeEventListener('paste', onPaste, true);
       container.removeEventListener('copy', onCopy, true);
+      // Search decorations live on the engine: a parked one must not come
+      // back highlighted under a closed find bar.
+      resetFind();
       unbindTerm();
       onTermBlur();
       if (parkable && canPark()) {
@@ -2138,34 +2279,42 @@
 <div class="term-outer" class:phone={viewport.isPhone}>
   <div class="term-wrap" class:force-dark-wrap={forceDark}>
     {#if findOpen}
-      <div class="find-bar">
+      <div class="find-bar" role="search" aria-label="Find in terminal">
         <input
           bind:this={findInput}
           bind:value={findQuery}
           placeholder="Find in terminal"
+          aria-label="Find in terminal"
+          onfocus={onFindFocus}
+          onblur={onFindBlur}
           oninput={() => {
-            // Local search: xterm SearchAddon (debounced, visible buffer only).
+            // Local search: xterm SearchAddon (debounced, client buffer).
             scheduleLocalFind();
             // Server search: ring-buffer grep (debounced, full scrollback history).
             scheduleServerSearch(findQuery);
           }}
-          onkeydown={(e) => {
-            if (e.key === 'Enter') findNext(e.shiftKey);
-            if (e.key === 'Escape') closeFind();
-          }}
+          onkeydown={onFindKey}
         />
-        <!-- Server-match count badge (spinner while pending) -->
+        <!-- Local match position (client buffer), then the scrollback count
+             (spinner while the ring-buffer search is in flight). -->
+        {#if findQuery && localCount > 0}
+          <span class="find-status" aria-live="polite" title="{localCount}{localIdx < 0 ? '+' : ''} match{localCount === 1 ? '' : 'es'} on screen and in the loaded scrollback">
+            {localIdx >= 0 ? `${localIdx + 1}/${localCount}` : `${localCount}+`}
+          </span>
+        {:else if findQuery && localMiss && !serverSearchPending && serverMatches.length === 0}
+          <span class="find-status" aria-live="polite">No results</span>
+        {/if}
         {#if serverSearchPending}
           <span class="find-status" title="Searching scrollback…">…</span>
         {:else if serverMatches.length > 0}
-          <span class="find-status" title="{serverMatches.length} scrollback match{serverMatches.length === 1 ? '' : 'es'}">
-            {serverMatchIdx >= 0 ? serverMatchIdx + 1 : '?'}/{serverMatches.length}
+          <span class="find-status server" title="{serverMatches.length} scrollback match{serverMatches.length === 1 ? '' : 'es'} (↑↓ to step)">
+            <Icon name="clock" size={10} />{serverMatchIdx >= 0 ? serverMatchIdx + 1 : '–'}/{serverMatches.length}
           </span>
         {/if}
-        <button class="icon-btn" onclick={() => findNext(true)} title="Previous (⇧↵)" aria-label="Previous match">
+        <button class="icon-btn" onclick={() => findNext(false)} title="Older match (↵)" aria-label="Older match">
           <Icon name="chevronUp" size={12} />
         </button>
-        <button class="icon-btn" onclick={() => findNext(false)} title="Next (↵)" aria-label="Next match">
+        <button class="icon-btn" onclick={() => findNext(true)} title="Newer match (⇧↵)" aria-label="Newer match">
           <Icon name="chevronDown" size={12} />
         </button>
         <button class="icon-btn" onclick={closeFind} title="Close (Esc)" aria-label="Close find">
@@ -2173,10 +2322,10 @@
         </button>
       </div>
       {#if serverMatches.length > 0}
-        <!-- Server ring-buffer match list: up to 8 rows shown, scroll for more.
-             Clicking a row jumps the viewport to that line in the scrollback. -->
-        <div class="find-results" role="listbox" aria-label="Scrollback search results">
-          {#each serverMatches.slice(0, 8) as m, i (m.line)}
+        <!-- Server ring-buffer match list (≤200, the list scrolls). Clicking a
+             row — or ↑↓ in the input — jumps the viewport to that line. -->
+        <div class="find-results" role="listbox" aria-label="Scrollback search results" bind:this={findResultsEl}>
+          {#each serverMatches as m, i (i)}
             <!-- svelte-ignore a11y_click_events_have_key_events -->
             <div
               class="find-result-row"
@@ -2184,15 +2333,13 @@
               role="option"
               aria-selected={i === serverMatchIdx}
               tabindex="-1"
+              data-match={i}
               onclick={() => goToServerMatch(i)}
             >
               <span class="find-result-line">{m.line + 1}</span>
               <span class="find-result-text">{m.text}</span>
             </div>
           {/each}
-          {#if serverMatches.length > 8}
-            <div class="find-result-more">{serverMatches.length - 8} more — use ↑↓ to navigate</div>
-          {/if}
         </div>
       {/if}
     {/if}
@@ -2428,9 +2575,12 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     box-shadow: var(--shadow);
+    max-width: calc(100% - 32px);
   }
   .find-bar input {
     width: 180px;
+    min-width: 60px;
+    flex: 0 1 auto;
     border: none;
     background: transparent;
     font-size: var(--fs-s);
@@ -2445,17 +2595,23 @@
     user-select: none;
     padding: 0 2px;
   }
+  .find-status.server {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+  }
   /* Dropdown list of server ring-buffer matches */
   .find-results {
     position: absolute;
     top: calc(8px + 30px + 2px);
-    right: 16px;
+    inset-inline-end: 16px;
     z-index: 5;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     box-shadow: var(--shadow);
     width: 340px;
+    max-width: calc(100% - 32px);
     max-height: 200px;
     overflow-y: auto;
     font-size: var(--fs-xs);
@@ -2488,14 +2644,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     flex: 1;
-  }
-  .find-result-more {
-    padding: 3px 8px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    font-family: var(--font-ui);
-    text-align: center;
-    border-top: 1px solid var(--border);
   }
   /* Small unobtrusive chip in the top-right — never covers the input line. */
   .term-overlay {

@@ -209,6 +209,23 @@
     void offsetsWin;
     offsetsTw.measure(offsetsEl);
   });
+  // ⌘F over every group / offset row, not just the mounted slice.
+  $effect(() =>
+    groupsTw.findRows(
+      () => groupsEl,
+      () => groups,
+      (g) => `${g.group_id}\n${g.state}\n${g.members} member${g.members === 1 ? '' : 's'}`,
+      '.grow-row',
+    ),
+  );
+  $effect(() =>
+    offsetsTw.findRows(
+      () => offsetsEl,
+      () => sortedOffsets,
+      (o) =>
+        [o.topic, o.partition, o.current_offset.toLocaleString(), o.high_watermark.toLocaleString(), o.lag.toLocaleString()].join('\n'),
+    ),
+  );
   // A new group (or a re-sort) starts the offsets table at the top.
   $effect(() => {
     void detail;

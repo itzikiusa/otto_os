@@ -49,6 +49,7 @@
   import { uiControl } from '../../lib/stores/uiControl.svelte';
   import { commandLabel, providerName } from '../../lib/uiCommands/frames';
   import { moduleLabel } from '../../lib/sidebar';
+  import { findInPage } from '../../lib/findinpage.svelte';
 
   interface Props {
     sessionId: string;
@@ -248,6 +249,18 @@
   const defaultView: SessionViewMode = 'terminal';
   const savedView = $derived(isAgent ? transcript.view(sessionId) : null);
   const view = $derived<SessionViewMode>(isAgent ? (savedView ?? defaultView) : 'terminal');
+  // Find: the terminal's own bar (an xterm has no DOM text for the page find
+  // to walk — WebGL none at all, DOM only the visible rows); the chat IS DOM,
+  // so the page-wide find covers it (ConversationView registers a provider
+  // for every loaded turn). ⌘F lands here too without a click: this pane's
+  // Terminal takes it while active (findRank → keys.ts routeFind); the
+  // focused split pane outranks another pane showing the same session.
+  const findRank = $derived(focused ? 2 : ws.activeSessionId === sessionId ? 1 : 0);
+  const findLabel = $derived(view === 'chat' ? 'Find in chat' : 'Find in terminal');
+  function openSessionFind(): void {
+    if (view === 'chat') findInPage.show();
+    else termRef?.openFind();
+  }
 
   function setView(mode: SessionViewMode): void {
     transcript.setView(sessionId, mode);
@@ -528,6 +541,7 @@
             action: () => setView(m),
           }) as MenuItem)
         : []),
+      ...(foldedMinimal ? [{ label: findLabel, icon: 'search', hint: '⌘F', action: openSessionFind } as MenuItem] : []),
       ...(foldedMinimal && showZoom
         ? [
             {
@@ -794,6 +808,14 @@
         data-testid="ui-control-toggle"
       ><Icon name="cursor" size={13} /></button>
     {/if}
+    <button
+      class="icon-btn pane-find"
+      data-testid="pane-find"
+      onmousedown={(e) => e.stopPropagation()}
+      onclick={openSessionFind}
+      title="{findLabel} (⌘F)"
+      aria-label={findLabel}
+    ><Icon name="search" size={13} /></button>
     {#if showZoom}
       <button
         class="icon-btn pane-zoom"
@@ -850,7 +872,7 @@
       </div>
     {:else}
       <div class="pane-term">
-        <Terminal bind:this={termRef} {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} restartNonce={ws.restartNonces[sessionId] ?? 0} onstatus={onTermStatus} onfontfit={(px) => (drawnFont = px)} showToolbar={false} autoFocus={kbFocused} preferDom={isAgent} claimOnAttach={!readOnly} keepAlive={true} {scrollback} {resumeOnOpen} />
+        <Terminal bind:this={termRef} {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} restartNonce={ws.restartNonces[sessionId] ?? 0} onstatus={onTermStatus} onfontfit={(px) => (drawnFont = px)} showToolbar={false} autoFocus={kbFocused} {findRank} preferDom={isAgent} claimOnAttach={!readOnly} keepAlive={true} {scrollback} {resumeOnOpen} />
       </div>
     {/if}
   </div>
@@ -1039,11 +1061,11 @@
     color: var(--text-dim);
     font-weight: 500;
   }
-  .pane:not(.current) .pane-head > :is(.view-seg, .view-flip, .ui-ctl, .pane-zoom, .pane-more, .pane-close, .meta-chip) {
+  .pane:not(.current) .pane-head > :is(.view-seg, .view-flip, .ui-ctl, .pane-find, .pane-zoom, .pane-more, .pane-close, .meta-chip) {
     opacity: 0.7;
     transition: opacity 140ms ease-out;
   }
-  .pane:not(.current) .pane-head:is(:hover, :focus-within) > :is(.view-seg, .view-flip, .ui-ctl, .pane-zoom, .pane-more, .pane-close, .meta-chip) {
+  .pane:not(.current) .pane-head:is(:hover, :focus-within) > :is(.view-seg, .view-flip, .ui-ctl, .pane-find, .pane-zoom, .pane-more, .pane-close, .meta-chip) {
     opacity: 1;
   }
   /* C3a drag handle: in the leading padding, visible on hover/focus only. The
@@ -1247,7 +1269,7 @@
   .view-flip {
     display: none;
   }
-  .pane-head > :is(.view-flip, .ui-ctl, .pane-zoom, .pane-more, .pane-close) {
+  .pane-head > :is(.view-flip, .ui-ctl, .pane-find, .pane-zoom, .pane-more, .pane-close) {
     flex-shrink: 0;
   }
   .pane-body {
@@ -1328,7 +1350,7 @@
      adds the hidden controls back into ⋯:
        full    ≥720  everything: labelled toggle, provider name · idle · folder
        compact 420–719  icon-only toggle, details chip = provider icon, no "Now:"
-       minimal 200–419  dot · title · view flip · ⋯   (zoom, ✕, chips → ⋯)
+       minimal 200–419  dot · title · view flip · ⋯   (find, zoom, ✕, chips → ⋯)
        micro   <200     dot · title · ⋯              (view switch → ⋯ too)
      The status dot, the title and ⋯ never go. */
   @container pane (width < 720px) {
@@ -1367,6 +1389,7 @@
     .pane-head .handover-crumb,
     .pane-head .handover-pending,
     .pane-head .ui-ctl,
+    .pane-head .pane-find,
     .pane-head .pane-zoom,
     .pane-head .pane-close {
       display: none;

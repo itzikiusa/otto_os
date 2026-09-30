@@ -72,7 +72,7 @@
   import { git } from '../lib/stores/git.svelte';
   import { auth } from '../lib/stores/auth.svelte';
   import { events } from '../lib/events.svelte';
-  import { installKeyMap, keyContext, type KeyAction } from '../lib/keys';
+  import { installKeyMap, routeFind, type KeyAction } from '../lib/keys';
   import { attachMenuBridge, attachCloseHandler, handleMenu } from '../lib/menu';
   import { gcWindowKeys } from '../lib/win';
   import { openExternal, isExternalUrl } from '../lib/external';
@@ -258,14 +258,9 @@
     ws.closeActiveTab();
   }
   function mobileFind(): void {
-    // A focused component (terminal OR the DB query editor) can OWN find via
-    // keyContext.openFind — route to its in-component search; else the page-wide
-    // find-in-page overlay.
-    if (keyContext.openFind) {
-      keyContext.openFind();
-    } else {
-      findInPage.show();
-    }
+    // A focused component (terminal OR the DB query editor) owns find, then the
+    // active session pane's terminal; else the page-wide find-in-page overlay.
+    routeFind(() => findInPage.show());
   }
   function mobileBroadcast(): void {
     ui.openBroadcast();
@@ -461,11 +456,7 @@
         ws.split('row');
         break;
       case 'find':
-        if (keyContext.openFind) {
-          keyContext.openFind();
-        } else {
-          findInPage.show();
-        }
+        routeFind(() => findInPage.show());
         break;
       case 'appZoomIn':
         ui.zoomIn();

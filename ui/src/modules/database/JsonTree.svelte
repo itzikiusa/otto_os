@@ -21,9 +21,15 @@
   // open iff its dotted `path` is in the owner's plan (a node budget with
   // sticky per-path overrides, see expansion-plan.ts); toggling records an
   // override on the shared state and the owner re-plans every record.
+  //
+  // ⌘F (json-find.ts): every line carries `data-jpath`; text the find model
+  // leaves out (chevrons, separators, summaries, array-index labels, "more"
+  // buttons) is `data-find-skip`. A find reveal (`reveal`, per record) forces
+  // paths open, grows "show more" slices and unclips strings on top of the plan.
   import Self from './JsonTree.svelte';
   import { bsonScalar } from './bson';
-  import { setOverride, type ExpansionState } from './expansion-plan';
+  import { setOverride, stickyKey, type ExpansionState } from './expansion-plan';
+  import { searchableLabel, STR_MAX, type RevealState } from './json-find';
 
   interface Props {
     value: unknown;
@@ -36,8 +42,10 @@
     plan?: Set<string>;
     /** Shared expansion state the toggles write to (controlled mode). */
     expansion?: ExpansionState;
+    /** This record's find-reveal overlay (JsonView only). */
+    reveal?: RevealState;
   }
-  let { value, label = null, depth = 0, path = '', plan, expansion }: Props = $props();
+  let { value, label = null, depth = 0, path = '', plan, expansion, reveal }: Props = $props();
 
   // Auto-expand only what stays cheap: shallow AND narrow. Everything else opens
   // on click. Tuned so a typical Mongo document shows its top-level shape (and
@@ -46,8 +54,6 @@
   const AUTO_ITEMS = 20;
   /** Children rendered per "show more" once a container is open. */
   const CHUNK = 50;
-  /** Inline string cap — full text stays one click away. */
-  const STR_MAX = 200;
 
   const bson = $derived(bsonScalar(value));
   const isArr = $derived(Array.isArray(value));
@@ -77,13 +83,28 @@
   }
   let localOpen = $state(initialOpen());
   const controlled = $derived(!!plan && path !== '');
-  const open = $derived(controlled ? plan!.has(path) : localOpen);
+  // An override-opened path the planner never reached (a child past its
+  // parent's first CHUNK, drawn by "show more") is open too — the plan only
+  // queues the first slice.
+  const open = $derived(
+    (controlled ? plan!.has(path) || expansion?.overrides.get(stickyKey(path)) === true : localOpen) ||
+      !!reveal?.opens.has(path),
+  );
   function toggle(): void {
-    if (controlled && expansion) setOverride(expansion, path, !open);
-    else localOpen = !open;
+    const next = !open;
+    reveal?.opens.delete(path);
+    if (controlled && expansion) setOverride(expansion, path, next);
+    else localOpen = next;
   }
-  let shown = $state(CHUNK);
-  let strOpen = $state(false);
+  let shownLocal = $state(CHUNK);
+  const shown = $derived(Math.max(shownLocal, reveal?.shown.get(path) ?? 0));
+  let strOpenLocal = $state(false);
+  const strOpen = $derived(strOpenLocal || !!reveal?.strs.has(path));
+  function toggleStr(): void {
+    strOpenLocal = !strOpen;
+    reveal?.strs.delete(path);
+  }
+  const keySkip = $derived(label !== null && !searchableLabel(label));
 
   const visible = $derived(open ? entries.slice(0, shown) : []);
   const hiddenCount = $derived(Math.max(0, size - shown));
@@ -106,8 +127,8 @@
 {#if isContainer}
   <div class="node" class:root={depth === 0}>
     {#if size === 0}
-      <div class="line">
-        {#if label !== null}<span class="k">{label}</span><span class="sep">:</span>{/if}
+      <div class="line" data-jpath={path}>
+        {#if label !== null}<span class="k" data-find-skip={keySkip || undefined}>{label}</span><span class="sep" data-find-skip>:</span>{/if}
         <span class="empty">{summary}</span>
       </div>
     {:else}
@@ -117,18 +138,19 @@
         aria-expanded={open}
         onclick={toggle}
         title={open ? 'Collapse' : 'Expand'}
+        data-jpath={path}
       >
-        <span class="chev" aria-hidden="true">{open ? '▾' : '▸'}</span>
-        {#if label !== null}<span class="k">{label}</span><span class="sep">:</span>{/if}
-        <span class="sum" class:dimmed={open}>{summary}</span>
+        <span class="chev" aria-hidden="true" data-find-skip>{open ? '▾' : '▸'}</span>
+        {#if label !== null}<span class="k" data-find-skip={keySkip || undefined}>{label}</span><span class="sep" data-find-skip>:</span>{/if}
+        <span class="sum" class:dimmed={open} data-find-skip>{summary}</span>
       </button>
       {#if open}
         <div class="kids">
           {#each visible as [k, v] (k)}
-            <Self value={v} label={k} depth={depth + 1} path={path ? `${path}.${k}` : k} {plan} {expansion} />
+            <Self value={v} label={k} depth={depth + 1} path={path ? `${path}.${k}` : k} {plan} {expansion} {reveal} />
           {/each}
           {#if hiddenCount > 0}
-            <button class="more" type="button" onclick={() => (shown += CHUNK)}>
+            <button class="more" type="button" onclick={() => (shownLocal = shown + CHUNK)}>
               show {Math.min(CHUNK, hiddenCount)} more · {hiddenCount} hidden
             </button>
           {/if}
@@ -137,8 +159,8 @@
     {/if}
   </div>
 {:else}
-  <div class="line leaf">
-    {#if label !== null}<span class="k">{label}</span><span class="sep">:</span>{/if}
+  <div class="line leaf" data-jpath={path}>
+    {#if label !== null}<span class="k" data-find-skip={keySkip || undefined}>{label}</span><span class="sep" data-find-skip>:</span>{/if}
     {#if bson !== null}
       <span class="json-bson">{bson}</span>
     {:else if value === null || value === undefined}
@@ -148,7 +170,7 @@
         >"{strLong && !strOpen ? str.slice(0, STR_MAX) : str}{strLong && !strOpen ? '…' : ''}"</span
       >
       {#if strLong}
-        <button class="more inline" type="button" onclick={() => (strOpen = !strOpen)}>
+        <button class="more inline" type="button" onclick={toggleStr} data-find-skip>
           {strOpen ? 'less' : `${str.length - STR_MAX} more chars`}
         </button>
       {/if}

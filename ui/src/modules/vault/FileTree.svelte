@@ -229,7 +229,14 @@
       <button class="btn ghost" onclick={() => onNewNote('')}>New note</button>
     </div>
   {:else}
-    <VirtualList items={flat} estimateHeight={26} class="tree-list">
+    <!-- findText: ⌘F sees every expanded row, not just the mounted window
+         (the name leads the row's text, so match n maps onto the DOM). -->
+    <VirtualList
+      items={flat}
+      estimateHeight={26}
+      class="tree-list"
+      findText={(n: TreeNode) => (n.entry.kind === 'note' ? n.entry.name.replace(/\.md$/i, '') : n.entry.name)}
+    >
       {#snippet row(n: TreeNode)}
         <div
           class="row {n.entry.kind}"

@@ -6,7 +6,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
-  import MethodTag from './MethodTag.svelte';
+  import MethodTag, { methodWord } from './MethodTag.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { api } from '../../lib/api/client';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -35,6 +35,13 @@
     | { kind: 'empty'; id: string; col: ApiCollection; depth: number }
     | { kind: 'section'; id: string };
   const ROW_H = 29; // 28 px row + 1 px gap
+  /** ⌘F text of a tree row — what it shows, in DOM order. */
+  function rowFindText(row: Row): string {
+    if (row.kind === 'col') return `${row.node.col.name}\n${row.node.count}`;
+    if (row.kind === 'req') return `${methodWord(row.r.method)}\n${row.r.name}`;
+    if (row.kind === 'empty') return 'Empty — add a request';
+    return 'Ungrouped';
+  }
 
   let collapsed: Record<string, boolean> = $state({});
   const canEdit = $derived(ws.myRole !== 'viewer');
@@ -304,7 +311,7 @@
       <button class="btn ghost small" onclick={() => (search = '')}>Clear search</button>
     </div>
   {:else}
-    <VirtualList items={rows} estimateHeight={ROW_H} class="tree" key={(r) => r.id} pinnedIndex={activeIndex}>
+    <VirtualList items={rows} estimateHeight={ROW_H} class="tree" key={(r) => r.id} pinnedIndex={activeIndex} findText={rowFindText}>
       {#snippet row(item: Row)}
         {#if item.kind === 'col'}
           {@render collectionNode(item.node, item.depth, item.open)}

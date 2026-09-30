@@ -3,7 +3,7 @@
   // badge, issue_type, a version dropdown (with body_md rendering), Refresh
   // button, watch toggle, and (for Jira stories) a rich section with status,
   // assignee, details, linked issues, comments, history, and attachments.
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -14,6 +14,7 @@
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { renderMarkdown } from '../../lib/md';
+  import { registerFindProvider } from '../../lib/findProviders';
   import { toasts } from '../../lib/toast.svelte';
   import { api, authedBlobUrl } from '../../lib/api/client';
   import type { ProductStoryVersion, IssueFull, JiraTransition, JiraUser, EditableField, FieldOption, DevStatus } from './types';
@@ -1000,6 +1001,35 @@
     expandedTranscripts = { ...expandedTranscripts, [id]: !expandedTranscripts[id] };
   }
 
+  // ⌘F reaches COLLAPSED transcripts too: their bodies aren't mounted, so the
+  // page-wide find overlay's DOM walk never saw them. This provider
+  // (lib/findProviders.ts) searches title + body of every transcript; going to
+  // a match in a collapsed one expands it. The date is `data-find-skip` in the
+  // row, so the row's text order is title → body, matching `text(i)`.
+  let transcriptListEl = $state<HTMLElement | undefined>();
+  $effect(() => {
+    if (!transcriptListEl) return;
+    const list = transcriptListEl;
+    return registerFindProvider({
+      root: () => list,
+      count: () => product.transcripts.length,
+      text: (i) => {
+        const t = product.transcripts[i];
+        return t ? `${t.title || 'Untitled transcript'}\n${t.body}` : '';
+      },
+      reveal: async (i) => {
+        const t = product.transcripts[i];
+        if (t && !expandedTranscripts[t.id]) expandedTranscripts = { ...expandedTranscripts, [t.id]: true };
+        await tick();
+      },
+      // Only an expanded row has its body mounted; a collapsed one → reveal.
+      rowElement: (i) => {
+        const t = product.transcripts[i];
+        return t && expandedTranscripts[t.id] ? (list.children[i] ?? null) : null;
+      },
+    });
+  });
+
   async function toggleWatch(): Promise<void> {
     if (!story) return;
     watchWorking = true;
@@ -1410,7 +1440,7 @@
             {:else if product.transcripts.length === 0}
               <div class="muted">No transcripts yet. Paste a conversation below.</div>
             {:else}
-              <div class="transcript-list">
+              <div class="transcript-list" bind:this={transcriptListEl}>
                 {#each product.transcripts as t (t.id)}
                   <div class="transcript-item">
                     <div class="transcript-header">
@@ -1421,7 +1451,7 @@
                       >
                         <span class="coll-arrow" aria-hidden="true"><Icon name={expandedTranscripts[t.id] ? 'chevronDown' : 'chevronRight'} size={11} /></span>
                         <span class="transcript-title">{t.title || 'Untitled transcript'}</span>
-                        <span class="transcript-date">{relDate(t.created_at)}</span>
+                        <span class="transcript-date" data-find-skip>{relDate(t.created_at)}</span>
                       </button>
                       <button
                         class="del-transcript-btn"

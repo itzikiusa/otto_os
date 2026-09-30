@@ -6,7 +6,7 @@ import { loadSource } from './sourceHarness.ts';
 const plain = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 
 const tableWindow = () =>
-  loadSource(new URL('../src/lib/tableWindow.svelte.ts', import.meta.url), {}, { requestAnimationFrame: (fn: () => void) => { fn(); return 1; } });
+  loadSource(new URL('../src/lib/tableWindow.svelte.ts', import.meta.url), { svelte: { tick: async () => {} }, './findProviders': { registerFindProvider: () => () => {} } }, { requestAnimationFrame: (fn: () => void) => { fn(); return 1; } });
 
 test('TableWindow renders small lists whole and windows big ones', () => {
   const { TableWindow } = tableWindow();

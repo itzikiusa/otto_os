@@ -1,3 +1,12 @@
+<script module lang="ts">
+  /** The word the tag shows (DELETE/OPTIONS shortened to fit the column) —
+   *  also what a list's ⌘F `findText` should use for this cell. */
+  export function methodWord(method: string): string {
+    const m = (method || 'GET').toUpperCase();
+    return m === 'DELETE' ? 'DEL' : m === 'OPTIONS' ? 'OPT' : m;
+  }
+</script>
+
 <script lang="ts">
   // The HTTP method as a small mono word, toned by what it does (read /
   // create / change / destroy — see methodTone). The word itself is the
@@ -13,7 +22,7 @@
   const m = $derived((method || 'GET').toUpperCase());
 </script>
 
-<span class="mtag {methodTone(m)}" class:fixed>{m === 'DELETE' ? 'DEL' : m === 'OPTIONS' ? 'OPT' : m}</span>
+<span class="mtag {methodTone(m)}" class:fixed>{methodWord(m)}</span>
 
 <style>
   .mtag {

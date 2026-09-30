@@ -40,7 +40,7 @@ You can also press `?` anywhere outside a text field to open the shortcut sheet 
 | `⌘1` | Show or hide the sidebar |
 | `⌘J` | Show or hide the right panel |
 | `⌘⇧←` / `⌘⇧→` | Go back / forward through the pages you visited (not while typing in a field) |
-| `⌘F` | Find: in the focused terminal or query editor, otherwise on the page |
+| `⌘F` | Find: in the focused terminal or query editor, else in the active session's terminal, otherwise on the page |
 | `⌘⇧R` | Reload the UI. Sessions keep running in the daemon |
 | `⌘U` / `⌘⇧U` | Update all installed agent CLIs |
 | `⌘⇧S` | Take a snip: capture a screen region and annotate it |
@@ -98,8 +98,9 @@ You can also press `?` anywhere outside a text field to open the shortcut sheet 
 | `⇧↵` | New line in an agent's prompt instead of sending it |
 | `⌘C` | Copy the selected terminal text (`⌃C` still interrupts) |
 | `⌘V` | Paste |
-| `⌘F` | Search the scrollback |
-| `↵` / `⇧↵` | In terminal search: next / previous match |
+| `⌘F` | Search the scrollback (also the pane header's search button) |
+| `↵` / `⇧↵` | In terminal search: older / newer match |
+| `↑` / `↓` | In terminal search: step through the full-scrollback results list |
 | `⌘+` / `⌘-` / `⌘0` | Terminal font bigger / smaller / reset (while the terminal has focus) |
 
 **Find on page**

@@ -15,14 +15,20 @@
   // grid's amber `dirty` look; a container with a change somewhere inside it
   // gets a thinner `dirty-in` marker; a pending `$set` on a path that doesn't
   // exist yet renders as a phantom row under its parent.
+  //
+  // ⌘F (json-find.ts): every row carries `data-jpath`; text the find model
+  // leaves out (chevrons, summaries, array-index labels, rename / unset marks,
+  // "more" buttons) is `data-find-skip`. A find reveal (`reveal`, per record)
+  // forces paths open, grows "show more" slices and unclips strings.
   import Self from './VerticalTree.svelte';
   import ValueEditor from './ValueEditor.svelte';
   import { bsonScalar } from './bson';
   import type { DbEngine } from '../../lib/api/types';
   import { typedRaw, type EditFlow } from './EditFlow.svelte';
   import type { FieldCtx, TypedValue } from './edit-types';
-  import { CHUNK, entriesOf, setOverride, valueKind, type ExpansionState } from './expansion-plan';
+  import { CHUNK, entriesOf, setOverride, stickyKey, valueKind, type ExpansionState } from './expansion-plan';
   import { cellStr } from './results-format';
+  import { searchableLabel, STR_MAX, type RevealState } from './json-find';
 
   interface Props {
     value: unknown;
@@ -42,6 +48,8 @@
     /** The top-level value IS a parked cell draft (rendered as its tree). */
     cellDraft?: boolean;
     onfieldmenu: (e: MouseEvent, ctx: FieldCtx) => void;
+    /** This record's find-reveal overlay. */
+    reveal?: RevealState;
   }
   let {
     value,
@@ -57,10 +65,8 @@
     engine,
     cellDraft = false,
     onfieldmenu,
+    reveal,
   }: Props = $props();
-
-  /** Inline string cap — full text stays one click away. */
-  const STR_MAX = 200;
 
   const bson = $derived(bsonScalar(value));
   const entries = $derived(entriesOf(value));
@@ -83,8 +89,14 @@
   );
   const dirtyInside = $derived(!asLeaf && !dirty && flow.hasPendingUnder(rowIdx, path));
 
-  const open = $derived(plan.has(path));
-  let shown = $state(CHUNK);
+  // An override-opened path the planner never reached (a child past its
+  // parent's first CHUNK, drawn by "show more") is open too — the plan only
+  // queues the first slice.
+  const open = $derived(
+    plan.has(path) || expansion.overrides.get(stickyKey(path)) === true || !!reveal?.opens.has(path),
+  );
+  let shownLocal = $state(CHUNK);
+  const shown = $derived(Math.max(shownLocal, reveal?.shown.get(path) ?? 0));
   const visible = $derived(open ? entries.slice(0, shown) : []);
   const hiddenCount = $derived(Math.max(0, size - shown));
   /** Pending `$set`s for keys this container doesn't have yet (phantom rows). */
@@ -105,7 +117,13 @@
   // Leaf display: typed BSON label, ∅ for null/absent, clipped long strings.
   const text = $derived(value === null || value === undefined ? '' : cellStr(value));
   const strLong = $derived(typeof value === 'string' && value.length > STR_MAX);
-  let strOpen = $state(false);
+  let strOpenLocal = $state(false);
+  const strOpen = $derived(strOpenLocal || !!reveal?.strs.has(path));
+  function toggleStr(): void {
+    strOpenLocal = !strOpen;
+    reveal?.strs.delete(path);
+  }
+  const keySkip = $derived(!searchableLabel(label));
   const inArray = $derived(/(^|\.)\d+(\.|$)/.test(path));
   const topLevel = $derived(!path.includes('.'));
 
@@ -142,7 +160,9 @@
     return { rowIdx, colIdx, path, label, value, container: container && size > 0, topLevel, inArray, edit: beginEdit };
   }
   function toggle(): void {
-    setOverride(expansion, path, !open);
+    const next = !open;
+    reveal?.opens.delete(path);
+    setOverride(expansion, path, next);
   }
 </script>
 
@@ -153,15 +173,16 @@
     class:dirty
     class:editable={canEdit}
     style="--depth:{depth}"
+    data-jpath={path}
     title={dirty ? 'Pending change — Review & apply (bar below) writes it' : canEdit ? 'Double-click to edit' : undefined}
     ondblclick={beginEdit}
     oncontextmenu={(e) => onfieldmenu(e, ctx())}
   >
-    <span class="vk mono" title={path}>{label}{#if renamedTo !== null}<span class="vk-ren"> → {renamedTo}</span>{/if}</span>
+    <span class="vk mono" title={path} data-find-skip={keySkip || undefined}>{label}{#if renamedTo !== null}<span class="vk-ren" data-find-skip> → {renamedTo}</span>{/if}</span>
     {#if editing}
       <span class="vv mono edit"><ValueEditor kind={editKind} raw={editRaw} {engine} onsave={(tv) => flow.parkPath(rowIdx, colIdx, path, tv)} oncancel={() => flow.cancelPathEdit()} /></span>
     {:else if pend === 'unset'}
-      <span class="vv mono pend"><s>{text}</s> <em>unset</em></span>
+      <span class="vv mono pend"><s>{text}</s> <em data-find-skip>unset</em></span>
     {:else if pendTyped !== null}
       <span class="vv mono pend" class:null-glyph={pendTyped.kind === 'null'}>{pendingText(pendTyped)}</span>
     {:else if value === null || value === undefined}
@@ -169,7 +190,7 @@
     {:else if bson !== null}
       <span class="vv mono bson">{bson}</span>
     {:else if strLong}
-      <span class="vv mono tree">{strOpen ? text : text.slice(0, STR_MAX) + '…'}<button class="vmore inline" type="button" onclick={() => (strOpen = !strOpen)}>{strOpen ? 'less' : `${text.length - STR_MAX} more chars`}</button></span>
+      <span class="vv mono tree">{strOpen ? text : text.slice(0, STR_MAX) + '…'}<button class="vmore inline" type="button" onclick={toggleStr} data-find-skip>{strOpen ? 'less' : `${text.length - STR_MAX} more chars`}</button></span>
     {:else if container}
       <span class="vv mono dim">{summary}</span>
     {:else}
@@ -183,11 +204,12 @@
     class:dirty-in={dirtyInside}
     class:dirty
     style="--depth:{depth}"
+    data-jpath={path}
     oncontextmenu={(e) => onfieldmenu(e, ctx())}
   >
-    <span class="vk mono" title={path}>{label}{#if renamedTo !== null}<span class="vk-ren"> → {renamedTo}</span>{/if}</span>
+    <span class="vk mono" title={path} data-find-skip={keySkip || undefined}>{label}{#if renamedTo !== null}<span class="vk-ren" data-find-skip> → {renamedTo}</span>{/if}</span>
     <span class="vv mono tree">
-      <button class="vsum" type="button" aria-expanded={open} onclick={toggle} title={open ? 'Collapse' : 'Expand'}>
+      <button class="vsum" type="button" aria-expanded={open} onclick={toggle} title={open ? 'Collapse' : 'Expand'} data-find-skip>
         <span class="chev" aria-hidden="true">{open ? '▾' : '▸'}</span><span class:dimmed={open}>{summary}</span>
       </button>
     </span>
@@ -195,13 +217,13 @@
   {#if open}
     <div class="vnest" style="--depth:{depth + 1}">
       {#each visible as [k, v] (k)}
-        <Self value={v} path={`${path}.${k}`} depth={depth + 1} label={k} {expansion} {plan} {editable} {rowIdx} {colIdx} {flow} {engine} {onfieldmenu} />
+        <Self value={v} path={`${path}.${k}`} depth={depth + 1} label={k} {expansion} {plan} {editable} {rowIdx} {colIdx} {flow} {engine} {onfieldmenu} {reveal} />
       {/each}
       {#each phantoms as [k] (k)}
         <Self value={undefined} path={`${path}.${k}`} depth={depth + 1} label={k} {expansion} {plan} {editable} {rowIdx} {colIdx} {flow} {engine} {onfieldmenu} />
       {/each}
       {#if hiddenCount > 0}
-        <button class="vmore" type="button" onclick={() => (shown += CHUNK)}>
+        <button class="vmore" type="button" onclick={() => (shownLocal = shown + CHUNK)}>
           show {Math.min(CHUNK, hiddenCount)} more · {hiddenCount} hidden
         </button>
       {/if}
