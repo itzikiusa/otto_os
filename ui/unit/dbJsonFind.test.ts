@@ -73,3 +73,26 @@ test('reveal opens every ancestor and grows the slices it sits past', () => {
   const last = jf.recordLines(wide, 'json')[55];
   assert.deepEqual(plain(jf.revealSteps(wide, last, 50, true).shown), [['', 100]]);
 });
+
+test('LineIndex.text: lower-cased, cached per record across searches, budget spills to a rolling cache', () => {
+  const recs: Record<string, unknown>[] = [{ Name: 'Book Of Ra' }, { b: { C: 'X' } }, { d: 1 }];
+  let built = 0;
+  const idx = new jf.LineIndex(recs.length, (i: number) => (built++, tops(recs[i])), 'json');
+  const scan = () => Array.from({ length: idx.count() }, (_, i) => idx.text(i));
+  assert.deepEqual(plain(scan()), ['name\n"book of ra"', 'b', 'c\n"x"', 'd\n1']);
+  const afterFirst = built;
+  scan(); // the next keystroke re-scans cached texts: nothing is rebuilt
+  assert.equal(built, afterFirst);
+  assert.equal(idx.cachedRecords(), 3);
+
+  const saved = jf.LineIndex.TEXT_BUDGET;
+  jf.LineIndex.TEXT_BUDGET = 17; // room for record 0 (17 chars) only
+  try {
+    const small = new jf.LineIndex(recs.length, (i: number) => tops(recs[i]), 'json');
+    const texts = Array.from({ length: small.count() }, (_, i) => small.text(i));
+    assert.equal(texts[3], 'd\n1', 'past the budget texts still come back');
+    assert.equal(small.cachedRecords(), 1);
+  } finally {
+    jf.LineIndex.TEXT_BUDGET = saved;
+  }
+});

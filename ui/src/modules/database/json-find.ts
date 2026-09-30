@@ -12,8 +12,12 @@
 //     would otherwise hit every element label. The trees mark them (and the
 //     summaries / chevrons / "more" buttons the model leaves out) with
 //     `data-find-skip`, so the n-th occurrence in a line maps onto the DOM;
-//   - lines are built one record at a time and only when a search reads them
-//     (a tiny LRU), so a 500 × 88KB result costs a record's lines, not all.
+//   - nothing is built until a search runs; then each record's lower-cased
+//     line texts are kept for the life of the index (the same record list —
+//     the view drops it on a new result and when the find bar closes), so a
+//     keystroke re-scans cached strings instead of re-templating 500 × 88KB
+//     documents. Past TEXT_BUDGET chars, records fall back to a one-record
+//     rolling cache.
 //
 // Revealing a line opens its ancestors in THAT record only (RevealState — not
 // the sticky cross-record overrides, which would unfold the branch in every
@@ -104,14 +108,22 @@ export function countLines(tops: FindTop[]): number {
 }
 
 /** Line model over a record list: prefix sums for `count`, per-record lines
- *  built on demand (FindInPage reads `text(i)` in order, so a scan builds each
- *  record once and keeps only the last few). Build a new one when the records
- *  change — it caches by record index. */
+ *  built on demand. Full lines (paths, for reveal) live in a tiny LRU; the
+ *  lower-cased texts a search scans are kept per record, up to TEXT_BUDGET.
+ *  Build a new one when the records change — it caches by record index. */
 export class LineIndex {
   private starts: number[] | null = null;
   private total = 0;
   private cache = new Map<number, FindLine[]>();
   private static readonly KEEP = 4;
+  /** Cached text chars across records (~2 bytes each): ≈ 50 MB. */
+  static TEXT_BUDGET = 25_000_000;
+  private texts: (string[] | undefined)[] = [];
+  private textChars = 0;
+  /** The last record read past the budget (sequential scans hit it again). */
+  private spill: { rec: number; ts: string[] } | null = null;
+  /** Record of the last lookup — `text(i)` is read in order, so it's usually it. */
+  private hint = 0;
 
   constructor(
     readonly records: number,
@@ -128,8 +140,41 @@ export class LineIndex {
   locate(i: number): { rec: number; line: FindLine } | null {
     const starts = this.build();
     if (i < 0 || i >= this.total) return null;
-    // Last record whose start is ≤ i (an empty record shares its successor's
-    // start, so the upper bound lands on the one that owns the line).
+    const rec = this.recOf(i, starts);
+    const line = this.lines(rec)[i - starts[rec]];
+    return line ? { rec, line } : null;
+  }
+
+  /** The lower-cased searchable text of flat row `i` ('' out of range). */
+  text(i: number): string {
+    const starts = this.build();
+    if (i < 0 || i >= this.total) return '';
+    const rec = this.recOf(i, starts);
+    let ts = this.texts[rec] ?? (this.spill?.rec === rec ? this.spill.ts : undefined);
+    if (!ts) {
+      ts = this.lines(rec).map((l) => l.text.toLowerCase());
+      let n = 0;
+      for (const t of ts) n += t.length;
+      if (this.textChars + n <= LineIndex.TEXT_BUDGET) {
+        this.texts[rec] = ts;
+        this.textChars += n;
+      } else {
+        this.spill = { rec, ts };
+      }
+    }
+    return ts[i - starts[rec]] ?? '';
+  }
+
+  /** Records whose texts are cached (tests / diagnostics). */
+  cachedRecords(): number {
+    return this.texts.filter(Boolean).length;
+  }
+
+  /** Last record whose start is ≤ i (an empty record shares its successor's
+   *  start, so the upper bound lands on the one that owns the line). */
+  private recOf(i: number, starts: number[]): number {
+    const h = this.hint;
+    if (starts[h] <= i && (h + 1 >= starts.length || starts[h + 1] > i)) return h;
     let lo = 0;
     let hi = starts.length;
     while (lo < hi) {
@@ -137,9 +182,8 @@ export class LineIndex {
       if (starts[mid] <= i) lo = mid + 1;
       else hi = mid;
     }
-    const rec = lo - 1;
-    const line = this.lines(rec)[i - starts[rec]];
-    return line ? { rec, line } : null;
+    this.hint = lo - 1;
+    return lo - 1;
   }
 
   lines(rec: number): FindLine[] {

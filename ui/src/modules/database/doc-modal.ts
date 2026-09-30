@@ -17,12 +17,32 @@ export function claimFind(open: () => void): () => void {
   };
 }
 
+/** Open CodeMirror UI that Esc dismisses: the search panel, a completion popup. */
+const ESC_CONSUMERS = '.cm-search, .cm-tooltip-autocomplete';
+
 /**
- * Keydown handler for the element wrapping the CodeEditor: an Esc CodeMirror
- * already consumed (closing its search panel or a completion popup — it
- * preventDefaults but lets the event bubble) must not reach Modal's `window`
- * listener and close the whole dialog too.
+ * Action for the element wrapping the CodeEditor: an Esc that dismisses open
+ * CodeMirror UI (the search panel, a completion popup) must not ALSO reach
+ * Modal's `window` listener and close the dialog. Whether such UI was open is
+ * read in the capture phase — before CodeMirror handles the key and removes
+ * it — and the bubble phase then stops the event. Any other Esc (including
+ * one CodeMirror spends collapsing a selection) closes the modal as usual.
  */
-export function keepEditorEsc(e: KeyboardEvent): void {
-  if (e.key === 'Escape' && e.defaultPrevented) e.stopPropagation();
+export function editorEscGuard(node: HTMLElement): { destroy: () => void } {
+  let swallow: Event | null = null;
+  const capture = (e: KeyboardEvent) => {
+    swallow = e.key === 'Escape' && node.querySelector(ESC_CONSUMERS) ? e : null;
+  };
+  const bubble = (e: KeyboardEvent) => {
+    if (e === swallow) e.stopPropagation();
+    swallow = null;
+  };
+  node.addEventListener('keydown', capture, true);
+  node.addEventListener('keydown', bubble);
+  return {
+    destroy() {
+      node.removeEventListener('keydown', capture, true);
+      node.removeEventListener('keydown', bubble);
+    },
+  };
 }

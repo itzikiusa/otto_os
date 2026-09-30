@@ -17,7 +17,9 @@
 // Navigating to a match outside the window calls `reveal(i)`, then maps the
 // n-th occurrence in the row's text onto the n-th occurrence among the
 // mounted row element's text nodes (subtrees marked `data-find-skip` — line
-// numbers, gutters, pod tags — are ignored there) to highlight it.
+// numbers, gutters, pod tags — are ignored there) to highlight it. The same
+// subtrees (plus CodeMirror's gutters / panels) are left unpainted when the
+// mounted provider text is highlighted, so what lights up is what was counted.
 
 export interface FindProvider {
   /** The view's DOM subtree. Its text is covered by the provider, so the DOM
@@ -34,6 +36,11 @@ export interface FindProvider {
   /** Optional gate: `false` → the view isn't windowing right now (everything
    *  is mounted), so the plain DOM walk is exact and the provider sits out. */
   active?(): boolean;
+  /** `text(i)` is already lower-cased (a provider caching its row texts
+   *  across searches) — the search skips re-lowercasing every row. */
+  lowered?: boolean;
+  /** The find bar closed: drop whatever the provider cached for searching. */
+  release?(): void;
 }
 
 const providers = new Set<FindProvider>();
@@ -52,6 +59,19 @@ function visible(el: Element): boolean {
   return (el as HTMLElement).offsetParent !== null || getComputedStyle(el).position === 'fixed';
 }
 
+/** Let every provider drop its search caches (the find bar closed). */
+export function releaseFindProviders(): void {
+  for (const p of providers) p.release?.();
+}
+
+/** Subtrees that are neither counted nor painted: `[data-find-skip]` and
+ *  CodeMirror's line-number gutters / search panels. */
+export function findSkipped(el: Element): boolean {
+  return (
+    el.hasAttribute('data-find-skip') || el.classList.contains('cm-gutters') || el.classList.contains('cm-panels')
+  );
+}
+
 /** Providers taking part in a search now, in document order of their roots. */
 export function activeFindProviders(): { provider: FindProvider; root: Element }[] {
   const out: { provider: FindProvider; root: Element }[] = [];
@@ -68,10 +88,11 @@ export function activeFindProviders(): { provider: FindProvider; root: Element }
   return outer;
 }
 
-/** Occurrences of `needleLower` in `text` (non-overlapping, case-insensitive). */
-export function countOccurrences(text: string, needleLower: string, cap = Infinity): number {
+/** Occurrences of `needleLower` in `text` (non-overlapping, case-insensitive;
+ *  `lowered`: `text` is already lower-case). */
+export function countOccurrences(text: string, needleLower: string, cap = Infinity, lowered = false): number {
   if (!needleLower || text.length < needleLower.length) return 0;
-  const hay = text.toLowerCase();
+  const hay = lowered ? text : text.toLowerCase();
   let n = 0;
   let pos = 0;
   while (n < cap && (pos = hay.indexOf(needleLower, pos)) !== -1) {
@@ -82,13 +103,13 @@ export function countOccurrences(text: string, needleLower: string, cap = Infini
 }
 
 /** The `nth` (0-based) occurrence of `needleLower` among `el`'s text nodes,
- *  skipping `[data-find-skip]` subtrees; falls back to the last one found.
+ *  skipping `findSkipped` subtrees; falls back to the last one found.
  *  Returns the text node + offset, or null when the row shows no match. */
 export function locateInElement(el: Element, needleLower: string, nth: number): { node: Text; offset: number } | null {
   const walker = document.createTreeWalker(el, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
       if (node.nodeType === Node.ELEMENT_NODE) {
-        return (node as Element).hasAttribute('data-find-skip') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_SKIP;
+        return findSkipped(node as Element) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_SKIP;
       }
       return NodeFilter.FILTER_ACCEPT;
     },

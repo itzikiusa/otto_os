@@ -83,3 +83,33 @@ test('an inactive outer provider leaves the nested one active', () => {
   fp.registerFindProvider(provider(toolOutput, ['d']));
   assert.deepEqual([...fp.activeFindProviders()].map((a: { root: unknown }) => a.root), [toolOutput]);
 });
+
+test('countOccurrences: a pre-lowered row is scanned as is', () => {
+  const { countOccurrences } = load();
+  assert.equal(countOccurrences('foo foo', 'foo', Infinity, true), 2);
+  // Trusts the flag: an upper-case row declared lowered isn't re-lowered.
+  assert.equal(countOccurrences('FOO', 'foo', Infinity, true), 0);
+});
+
+test('findSkipped: data-find-skip subtrees and CodeMirror gutters / panels are neither counted nor painted', () => {
+  const { findSkipped } = load();
+  const node = (attrs: string[], classes: string[]) => ({
+    hasAttribute: (a: string) => attrs.includes(a),
+    classList: { contains: (c: string) => classes.includes(c) },
+  });
+  assert.equal(findSkipped(node(['data-find-skip'], [])), true);
+  assert.equal(findSkipped(node([], ['cm-gutters'])), true);
+  assert.equal(findSkipped(node([], ['cm-panels'])), true);
+  assert.equal(findSkipped(node([], ['cm-line'])), false);
+});
+
+test('releaseFindProviders tells every registered provider to drop its caches', () => {
+  const fp = load();
+  let released = 0;
+  const off1 = fp.registerFindProvider({ ...provider(el([0]), ['a']), release: () => released++ });
+  const off2 = fp.registerFindProvider(provider(el([1]), ['b'])); // no release hook
+  fp.releaseFindProviders();
+  assert.equal(released, 1);
+  off1();
+  off2();
+});

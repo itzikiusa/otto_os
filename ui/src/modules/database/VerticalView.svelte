@@ -109,9 +109,11 @@
   // ── ⌘F over closed branches (json-find.ts) ──────────────────────────────────
   // Rows = every line of every findable record with everything open (stored
   // values — parked drafts aren't modelled); built on demand, cached per
-  // record list. Revealing one opens its path in THAT record only (draws more
-  // records first when it sits past the batch).
+  // record list until the find bar closes. Revealing one opens its path in
+  // THAT record only (draws more records first when it sits past the batch).
   let viewEl = $state<HTMLElement | null>(null);
+  // Keyed by the record's ORIGINAL row idx (not its draw position), so a sort
+  // or filter leaves a reveal on the record it was made in.
   const reveals = new SvelteMap<number, RevealState>();
   $effect(() => {
     void result;
@@ -135,10 +137,12 @@
       for (let n = objRows.length; n <= at.rec; n += ALT_BATCH) onshowmore();
       await tick();
     }
-    let r = reveals.get(at.rec);
+    const key = objRows[at.rec]?.idx;
+    if (key === undefined) return;
+    let r = reveals.get(key);
     if (!r) {
       r = { opens: new SvelteSet(), shown: new SvelteMap(), strs: new SvelteSet() };
-      reveals.set(at.rec, r);
+      reveals.set(key, r);
     }
     const steps = revealSteps(topsOf(recs[at.rec]), at.line, CHUNK, false);
     for (const p of steps.opens) r.opens.add(p);
@@ -150,14 +154,19 @@
     const at = findIndex().idx.locate(i);
     if (!at || !viewEl) return null;
     // A clipped string may hide the match: report it unmounted so it's revealed.
-    if (at.line.long && !reveals.get(at.rec)?.strs.has(at.line.path)) return null;
-    return viewEl.querySelector(`[data-jrec="${at.rec}"] [data-jpath="${CSS.escape(at.line.path)}"]`);
+    if (at.line.long && !reveals.get(objRows[at.rec]?.idx ?? -1)?.strs.has(at.line.path)) return null;
+    // `data-jcol`: duplicate column names (`SELECT a.id, b.id`) share a path.
+    return viewEl.querySelector(
+      `[data-jrec="${at.rec}"] [data-jcol="${at.line.top}"][data-jpath="${CSS.escape(at.line.path)}"]`,
+    );
   }
   $effect(() =>
     registerFindProvider({
       root: () => viewEl,
       count: () => findIndex().idx.count(),
-      text: (i) => findIndex().idx.locate(i)?.line.text ?? '',
+      text: (i) => findIndex().idx.text(i),
+      lowered: true,
+      release: () => (findCache = null),
       reveal: revealLine,
       rowElement: lineElement,
     }),
@@ -361,18 +370,18 @@
 
 <div class="alt-view" bind:this={viewEl}>
   {#if !mini}
-    <div class="vv-tools">
+    <div class="vv-tools" data-find-skip>
       <button class="vv-tool" onclick={expandAll} title="Open every nested field of the drawn records">Expand all</button>
       <button class="vv-tool" onclick={() => setMode('none')} title="Close every nested field">Collapse all</button>
       <button class="vv-tool" onclick={() => setMode('budget')} title="Back to the default: open what fits the node budget" disabled={!resettable}>Reset</button>
       {#if canEdit}<span class="vv-hint dim"><Icon name="edit" size={10} />double-click a value to edit · right-click a field for more</span>{/if}
     </div>
   {/if}
-  {#if viewTruncated}<div class="alt-note dim">Showing first {viewCap} of {totalRows} rows.</div>{/if}
+  {#if viewTruncated}<div class="alt-note dim" data-find-skip>Showing first {viewCap} of {totalRows} rows.</div>{/if}
   {#each objRows as { obj, idx }, ri (ri)}
     {@const plan = plans[ri] ?? new Set<string>()}
     <div class="vrec" class:compare-pick={comparePick === idx} data-jrec={ri}>
-      <div class="vrec-head mono">
+      <div class="vrec-head mono" data-find-skip>
         <span>#{ri + 1}</span>
         {#if comparePick === idx}<span class="vrec-tag">comparing</span>{/if}
         <span class="grow"></span>
@@ -399,16 +408,16 @@
           {engine}
           cellDraft={cv.draft}
           onfieldmenu={fieldMenu}
-          reveal={reveals.get(ri)}
+          reveal={reveals.get(idx)}
         />
       {/each}
       {#each phantomFields(idx) as [k] (k)}
-        <VerticalTree value={undefined} path={k} depth={0} label={k} expansion={exp} {plan} editable={canEdit} rowIdx={idx} colIdx={-1} {flow} {engine} onfieldmenu={fieldMenu} />
+        <VerticalTree value={undefined} path={k} depth={0} label={k} expansion={exp} {plan} editable={canEdit} rowIdx={idx} colIdx={-1} {flow} {engine} onfieldmenu={fieldMenu} phantom />
       {/each}
     </div>
   {/each}
   {#if altRemaining > 0}
-    <button class="alt-more" onclick={onshowmore}>
+    <button class="alt-more" onclick={onshowmore} data-find-skip>
       Show {Math.min(ALT_BATCH, altRemaining)} more · {altRemaining} not rendered
     </button>
   {/if}

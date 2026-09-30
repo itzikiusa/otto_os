@@ -255,7 +255,9 @@
      *  pane passes > 0 so ⌘F opens THIS find bar after a click on its header
      *  or anywhere off the xterm; the highest rank among visible terminals
      *  wins (the focused split pane 2 over another view of the session 1).
-     *  A focused terminal / editor / text field still wins. Default 0 (off). */
+     *  Only while the last click / focus was inside its `.pane` (or nothing
+     *  was clicked yet) — a loop timeline or the right panel keeps the page
+     *  find. A focused terminal / editor / text field still wins. Default 0. */
     findRank?: number;
   }
   let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, socketFactory, transformFrame, readOnlyReason, onstatus, onfontfit, onsearchresult, showToolbar = true, autoFocus = false, claimOnAttach = false, keepAlive = false, scrollback = EMBED_SCROLLBACK, resumeOnOpen = true, findRank = 0 }: Props = $props();
@@ -1214,6 +1216,7 @@
         const shown = typeof el.checkVisibility === 'function' ? el.checkVisibility({ visibilityProperty: true }) : el.offsetParent !== null;
         return shown ? r : 0;
       },
+      pane: () => container?.closest('.pane') ?? container ?? null,
       open: openFind,
     });
   });

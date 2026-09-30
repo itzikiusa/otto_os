@@ -150,7 +150,7 @@
             <Self value={v} label={k} depth={depth + 1} path={path ? `${path}.${k}` : k} {plan} {expansion} {reveal} />
           {/each}
           {#if hiddenCount > 0}
-            <button class="more" type="button" onclick={() => (shownLocal = shown + CHUNK)}>
+            <button class="more" type="button" onclick={() => (shownLocal = shown + CHUNK)} data-find-skip>
               show {Math.min(CHUNK, hiddenCount)} more · {hiddenCount} hidden
             </button>
           {/if}

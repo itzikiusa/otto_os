@@ -16,9 +16,9 @@
   // gets a thinner `dirty-in` marker; a pending `$set` on a path that doesn't
   // exist yet renders as a phantom row under its parent.
   //
-  // ⌘F (json-find.ts): every row carries `data-jpath`; text the find model
-  // leaves out (chevrons, summaries, array-index labels, rename / unset marks,
-  // "more" buttons) is `data-find-skip`. A find reveal (`reveal`, per record)
+  // ⌘F (json-find.ts): every row carries `data-jpath` + `data-jcol`; text the
+  // find model leaves out (chevrons, summaries, array-index labels, rename /
+  // unset marks, "more" buttons) is `data-find-skip`. A find reveal (`reveal`, per record)
   // forces paths open, grows "show more" slices and unclips strings.
   import Self from './VerticalTree.svelte';
   import ValueEditor from './ValueEditor.svelte';
@@ -50,6 +50,9 @@
     onfieldmenu: (e: MouseEvent, ctx: FieldCtx) => void;
     /** This record's find-reveal overlay. */
     reveal?: RevealState;
+    /** A pending `$set` on a path that doesn't exist yet — not in the find
+     *  model, so its row is `data-find-skip`. */
+    phantom?: boolean;
   }
   let {
     value,
@@ -66,6 +69,7 @@
     cellDraft = false,
     onfieldmenu,
     reveal,
+    phantom = false,
   }: Props = $props();
 
   const bson = $derived(bsonScalar(value));
@@ -174,6 +178,8 @@
     class:editable={canEdit}
     style="--depth:{depth}"
     data-jpath={path}
+    data-jcol={colIdx}
+    data-find-skip={phantom || undefined}
     title={dirty ? 'Pending change — Review & apply (bar below) writes it' : canEdit ? 'Double-click to edit' : undefined}
     ondblclick={beginEdit}
     oncontextmenu={(e) => onfieldmenu(e, ctx())}
@@ -205,6 +211,7 @@
     class:dirty
     style="--depth:{depth}"
     data-jpath={path}
+    data-jcol={colIdx}
     oncontextmenu={(e) => onfieldmenu(e, ctx())}
   >
     <span class="vk mono" title={path} data-find-skip={keySkip || undefined}>{label}{#if renamedTo !== null}<span class="vk-ren" data-find-skip> → {renamedTo}</span>{/if}</span>
@@ -220,10 +227,10 @@
         <Self value={v} path={`${path}.${k}`} depth={depth + 1} label={k} {expansion} {plan} {editable} {rowIdx} {colIdx} {flow} {engine} {onfieldmenu} {reveal} />
       {/each}
       {#each phantoms as [k] (k)}
-        <Self value={undefined} path={`${path}.${k}`} depth={depth + 1} label={k} {expansion} {plan} {editable} {rowIdx} {colIdx} {flow} {engine} {onfieldmenu} />
+        <Self value={undefined} path={`${path}.${k}`} depth={depth + 1} label={k} {expansion} {plan} {editable} {rowIdx} {colIdx} {flow} {engine} {onfieldmenu} phantom />
       {/each}
       {#if hiddenCount > 0}
-        <button class="vmore" type="button" onclick={() => (shownLocal = shown + CHUNK)}>
+        <button class="vmore" type="button" onclick={() => (shownLocal = shown + CHUNK)} data-find-skip>
           show {Math.min(CHUNK, hiddenCount)} more · {hiddenCount} hidden
         </button>
       {/if}

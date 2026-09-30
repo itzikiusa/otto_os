@@ -97,9 +97,12 @@
 
   // ── ⌘F over closed branches (json-find.ts) ──────────────────────────────────
   // Rows = every line of every findable record with everything open; built on
-  // demand, cached per record list. Revealing one opens its path in THAT
-  // record only (draws more records first when it sits past the batch).
+  // demand, cached per record list until the find bar closes. Revealing one
+  // opens its path in THAT record only (draws more records first when it
+  // sits past the batch).
   let viewEl = $state<HTMLElement | null>(null);
+  // Keyed by the record's ORIGINAL row idx (not its draw position), so a sort
+  // or filter leaves a reveal on the record it was made in.
   const reveals = new SvelteMap<number, RevealState>();
   $effect(() => {
     void result;
@@ -121,10 +124,12 @@
       for (let n = objRows.length; n <= at.rec; n += ALT_BATCH) onshowmore();
       await tick();
     }
-    let r = reveals.get(at.rec);
+    const key = objRows[at.rec]?.idx;
+    if (key === undefined) return;
+    let r = reveals.get(key);
     if (!r) {
       r = { opens: new SvelteSet(), shown: new SvelteMap(), strs: new SvelteSet() };
-      reveals.set(at.rec, r);
+      reveals.set(key, r);
     }
     const steps = revealSteps(topsOf(recs[at.rec]), at.line, CHUNK, true);
     for (const p of steps.opens) r.opens.add(p);
@@ -136,14 +141,16 @@
     const at = findIndex().idx.locate(i);
     if (!at || !viewEl) return null;
     // A clipped string may hide the match: report it unmounted so it's revealed.
-    if (at.line.long && !reveals.get(at.rec)?.strs.has(at.line.path)) return null;
+    if (at.line.long && !reveals.get(objRows[at.rec]?.idx ?? -1)?.strs.has(at.line.path)) return null;
     return viewEl.querySelector(`[data-jrec="${at.rec}"] [data-jpath="${CSS.escape(at.line.path)}"]`);
   }
   $effect(() =>
     registerFindProvider({
       root: () => viewEl,
       count: () => findIndex().idx.count(),
-      text: (i) => findIndex().idx.locate(i)?.line.text ?? '',
+      text: (i) => findIndex().idx.text(i),
+      lowered: true,
+      release: () => (findCache = null),
       reveal: revealLine,
       rowElement: lineElement,
     }),
@@ -215,16 +222,16 @@
 
 <div class="alt-view" bind:this={viewEl}>
   {#if !mini}
-    <div class="vv-tools">
+    <div class="vv-tools" data-find-skip>
       <button class="vv-tool" onclick={expandAll} title="Open every nested field of the drawn records">Expand all</button>
       <button class="vv-tool" onclick={() => setMode('none')} title="Close every nested field">Collapse all</button>
       <button class="vv-tool" onclick={() => setMode('budget')} title="Back to the default: open what fits the node budget" disabled={!resettable}>Reset</button>
     </div>
   {/if}
-  {#if viewTruncated}<div class="alt-note dim">Showing first {viewCap} of {totalRows} rows.</div>{/if}
+  {#if viewTruncated}<div class="alt-note dim" data-find-skip>Showing first {viewCap} of {totalRows} rows.</div>{/if}
   {#each objRows as { obj, idx }, ri (ri)}
     <div class="jrec" class:compare-pick={comparePick === idx} data-jrec={ri}>
-      <div class="jrec-head mono">
+      <div class="jrec-head mono" data-find-skip>
         <span class="jrec-n">#{ri + 1}</span>
         {#if comparePick === idx}<span class="jrec-tag">comparing</span>{/if}
         <span class="grow"></span>
@@ -239,11 +246,11 @@
       <!-- Collapsible tree, NOT a stringified blob: a closed branch renders
            one summary line, so a 90KB document costs a handful of nodes.
            Controlled by the shared plan (sticky toggles across records). -->
-      <div class="alt-json mono"><JsonTree value={obj} path="" plan={plans[ri] ?? new Set<string>()} expansion={exp} reveal={reveals.get(ri)} /></div>
+      <div class="alt-json mono"><JsonTree value={obj} path="" plan={plans[ri] ?? new Set<string>()} expansion={exp} reveal={reveals.get(idx)} /></div>
     </div>
   {/each}
   {#if altRemaining > 0}
-    <button class="alt-more" onclick={onshowmore}>
+    <button class="alt-more" onclick={onshowmore} data-find-skip>
       Show {Math.min(ALT_BATCH, altRemaining)} more · {altRemaining} not rendered
     </button>
   {/if}

@@ -11,7 +11,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import type { EditFlow } from './EditFlow.svelte';
-  import { claimFind, keepEditorEsc } from './doc-modal';
+  import { claimFind, editorEscGuard } from './doc-modal';
 
   interface Props {
     flow: EditFlow;
@@ -53,8 +53,7 @@
           <Icon name="text" size={13} />
         </button>
       </div>
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="cv-edit" onkeydown={keepEditorEsc}>
+      <div class="cv-edit" use:editorEscGuard>
         <CodeEditor
           bind:this={editor}
           findOwner={false}
