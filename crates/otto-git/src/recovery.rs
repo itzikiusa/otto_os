@@ -143,7 +143,14 @@ impl LocalGit {
             return Err(Error::Invalid("interactive planning currently requires linear history; this range contains merge commits".into()));
         }
         let text = self
-            .run_read(&["log", "--reverse", "--format=%H%x09%s", &range, "--"])
+            .run_read(&[
+                "log",
+                "--no-show-signature",
+                "--reverse",
+                "--format=%H%x09%s",
+                &range,
+                "--",
+            ])
             .await?;
         let commits = text
             .lines()

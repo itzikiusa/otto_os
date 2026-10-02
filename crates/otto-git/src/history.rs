@@ -127,7 +127,9 @@ impl LocalGit {
         let grep_arg = o.grep.as_deref().map(|g| format!("--grep={g}"));
         let author_arg = o.author.as_deref().map(|a| format!("--author={a}"));
 
-        let mut args: Vec<&str> = vec!["log"];
+        // `--no-show-signature`: `log.showSignature=true` would put gpg output
+        // ahead of each record and corrupt the parsed SHAs (see `LocalGit::log`).
+        let mut args: Vec<&str> = vec!["log", "--no-show-signature"];
         if o.all {
             args.push("--all");
         }
@@ -165,7 +167,14 @@ impl LocalGit {
                 let (bytes, _) = self.exec_truncated(&cmd, Some(stop)).await?;
                 String::from_utf8_lossy(&bytes).into_owned()
             }
-            None => self.exec_text(&cmd).await?,
+            None => match self.exec_text(&cmd).await {
+                Ok(out) => out,
+                // Unborn branch (fresh repo, no commit yet): an empty history,
+                // not git's "does not have any commits yet" as an error. Only
+                // checked on failure — no extra spawn per page.
+                Err(_) if !o.all && !self.head_exists().await => return Ok(Vec::new()),
+                Err(e) => return Err(e),
+            },
         };
         crate::parse::parse_log(&out)
     }

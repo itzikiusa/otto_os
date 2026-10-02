@@ -9,6 +9,7 @@
     CommitConfig,
     CommitInfo,
     DiffResp,
+    DiscardReq,
     DraftCommitMessageResp,
     FileChange,
     RepoStatusResp,
@@ -41,7 +42,10 @@
   // not sit in the stage/unstage trees, where the checkbox would `git add`
   // a file that still contains conflict markers and silently mark it resolved.
   const conflicted = $derived(status.changes.filter((c) => c.kind === 'conflicted'));
-  const unstaged = $derived(status.changes.filter((c) => !c.staged && c.kind !== 'conflicted'));
+  // A partially staged path (`MM`) is ONE row with both flags and belongs in
+  // BOTH lists — filtering on `!staged` hid its unstaged half, so "Stage all"
+  // skipped it and the commit silently left those edits out.
+  const unstaged = $derived(status.changes.filter((c) => c.unstaged && c.kind !== 'conflicted'));
   const staged = $derived(status.changes.filter((c) => c.staged && c.kind !== 'conflicted'));
 
   /** Partially staged: porcelain `MM` — the index and the worktree BOTH differ.
@@ -248,19 +252,34 @@
     }
   }
 
-  async function discardPaths(paths: string[], label: string): Promise<void> {
+  /** Discard `paths`. From the Unstaged list (`section: 'unstaged'`) only the
+   *  unstaged side goes (`keep_staged`): staged hunks of a partially staged
+   *  file survive. From the Staged list the whole change is reverted to HEAD. */
+  async function discardPaths(
+    paths: string[],
+    label: string,
+    section: 'unstaged' | 'staged' = 'staged',
+  ): Promise<void> {
     if (paths.length === 0) return;
+    const keepStaged = section === 'unstaged';
+    const them = paths.length === 1 ? 'it' : 'them';
     const ok = await confirmer.ask(
-      `Discard changes to ${label}? This reverts ${paths.length === 1 ? 'it' : 'them'} to the last commit (new files are deleted) and cannot be undone.`,
-      { title: 'Discard changes', confirmLabel: 'Discard' },
+      keepStaged
+        ? `Discard unstaged changes to ${label}? This reverts ${them} to the staged version (or the last commit) — staged changes are kept, untracked files are deleted — and cannot be undone.`
+        : `Discard changes to ${label}? This reverts ${them} to the last commit (new files are deleted) and cannot be undone.`,
+      { title: keepStaged ? 'Discard unstaged changes' : 'Discard changes', confirmLabel: 'Discard' },
     );
     if (!ok) return;
     try {
-      const s = await api.post<RepoStatusResp>(`/repos/${repoId}/discard`, { paths });
+      const req: DiscardReq = keepStaged ? { paths, keep_staged: true } : { paths };
+      const s = await api.post<RepoStatusResp>(`/repos/${repoId}/discard`, req);
       onstatus(s);
       // Trust the fresh status, not the 200: a discard that left a file
-      // changed must never toast "Discarded".
-      const left = paths.filter((p) => s.changes.some((c) => c.path === p));
+      // changed must never toast "Discarded". (Unstaged discard: a path may
+      // stay listed for its STAGED half — only an unstaged remainder counts.)
+      const left = paths.filter((p) =>
+        s.changes.some((c) => c.path === p && (!keepStaged || c.unstaged)),
+      );
       if (left.length > 0) {
         toasts.error(
           'Discard incomplete',
@@ -274,19 +293,20 @@
     }
   }
 
-  function fileMenu(e: MouseEvent, c: FileChange): void {
+  function fileMenu(e: MouseEvent, c: FileChange, section: 'unstaged' | 'staged'): void {
     e.preventDefault();
+    const inStaged = section === 'staged';
     ctxMenu.show(e, [
       {
-        label: c.staged ? 'Unstage' : 'Stage',
-        action: () => void stagePaths([c.path], !c.staged),
+        label: inStaged ? 'Unstage' : 'Stage',
+        action: () => void stagePaths([c.path], !inStaged),
       },
       { separator: true },
       {
-        label: 'Discard',
+        label: inStaged ? 'Discard' : 'Discard unstaged changes',
         icon: 'trash',
         danger: true,
-        action: () => void discardPaths([c.path], c.path),
+        action: () => void discardPaths([c.path], c.path, section),
       },
     ]);
   }
@@ -311,7 +331,7 @@
         label: `Discard ${node.name}/ (${n})`,
         icon: 'trash',
         danger: true,
-        action: () => void discardPaths(paths, `${node.path}/ (${n})`),
+        action: () => void discardPaths(paths, `${node.path}/ (${n})`, section),
       },
     ]);
   }
@@ -436,16 +456,36 @@
       .catch(() => {});
   });
 
-  // Amend prefill: ticking Amend with an empty subject pulls HEAD's message in.
+  // Amend: HEAD's subject is shown as the PLACEHOLDER, never copied into the
+  // field. An empty subject commits `--amend --no-edit`, which keeps the WHOLE
+  // previous message — copying only the subject in (the log has no body) and
+  // committing it replaced the message and silently dropped its description.
+  let amendSubject = $state('');
   $effect(() => {
-    if (!amend || subject.trim() !== '') return;
+    if (!amend) return;
+    const id = repoId;
+    amendSubject = '';
     void api
-      .get<CommitInfo[]>(`/repos/${repoId}/log?limit=1&skip=0`)
+      .get<CommitInfo[]>(`/repos/${id}/log?limit=1&skip=0`)
       .then((commits) => {
-        if (amend && subject.trim() === '' && commits[0]) subject = commits[0].subject;
+        if (amend && id === repoId) amendSubject = commits[0]?.subject ?? '';
       })
       .catch(() => {});
   });
+  /** HEAD is already on the upstream: amending rewrites a pushed commit, and
+   *  the next push needs a force (with lease). Said BEFORE the user commits. */
+  const amendRewritesPushed = $derived(amend && status.upstream != null && status.ahead === 0);
+
+  const canCommit = $derived(
+    !committing && !drafting && (subject.trim() !== '' || amend) && (staged.length > 0 || amend),
+  );
+  /** ⌘/Ctrl+Enter in the summary or description commits — the standard
+   *  composer shortcut; plain Enter keeps its meaning (newline / nothing). */
+  function commitKey(e: KeyboardEvent): void {
+    if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey) || e.isComposing) return;
+    e.preventDefault();
+    if (canCommit) void commit();
+  }
 
   async function draftMessage(): Promise<void> {
     if (drafting || committing) return;
@@ -511,7 +551,7 @@
     class="wp-file"
     class:selected={selectedPath === file.change.path}
     style="padding-inline-start:{8 + depth * 14}px"
-    oncontextmenu={(e) => fileMenu(e, file.change)}
+    oncontextmenu={(e) => fileMenu(e, file.change, section)}
   >
     <input
       type="checkbox"
@@ -523,7 +563,8 @@
     <button
       class="wp-name"
       onclick={() => {
-        stagedView = false;
+        // A partially staged path is in both lists: open the side clicked.
+        stagedView = section === 'staged';
         selectedPath = selectedPath === file.change.path ? null : file.change.path;
       }}
       title={file.change.path}
@@ -537,9 +578,9 @@
     </button>
     <button
       class="wp-discard"
-      title="Discard changes to this file"
+      title={section === 'unstaged' ? 'Discard unstaged changes to this file' : 'Discard changes to this file'}
       aria-label="Discard {file.change.path}"
-      onclick={() => void discardPaths([file.change.path], file.change.path)}
+      onclick={() => void discardPaths([file.change.path], file.change.path, section)}
     >
       <Icon name="trash" size={12} />
     </button>
@@ -587,6 +628,7 @@
           void discardPaths(
             node.files.map((f) => f.path),
             `${node.path}/ (${node.files.length} file${node.files.length === 1 ? '' : 's'})`,
+            section,
           )}
       >
         <Icon name="trash" size={12} />
@@ -697,12 +739,12 @@
             title="Discard changes to all unstaged files"
             onclick={(e) => {
               e.stopPropagation();
-              void discardPaths(unstaged.map((c) => c.path), 'all unstaged files');
+              void discardPaths(unstaged.map((c) => c.path), 'all unstaged files', 'unstaged');
             }}
             onkeydown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') {
                 e.stopPropagation();
-                void discardPaths(unstaged.map((c) => c.path), 'all unstaged files');
+                void discardPaths(unstaged.map((c) => c.path), 'all unstaged files', 'unstaged');
               }
             }}
           >Discard all</span>
@@ -820,8 +862,14 @@
       <input
         class="input subject-input"
         bind:value={subject}
-        placeholder="Summary"
+        placeholder={amend
+          ? amendSubject
+            ? `Keep “${amendSubject}” — or type a new message`
+            : 'Keep the previous message — or type a new one'
+          : 'Summary'}
+        aria-label="Commit summary"
         spellcheck="false"
+        onkeydown={commitKey}
       />
       <button
         class="btn small ghost draft-btn"
@@ -858,8 +906,16 @@
       rows="2"
       bind:value={body}
       placeholder="Description (optional)"
+      aria-label="Commit description"
       spellcheck="false"
+      onkeydown={commitKey}
     ></textarea>
+    {#if amendRewritesPushed}
+      <div class="amend-warn" role="note">
+        <Icon name="warning" size={12} />
+        <span>This commit is already on {status.upstream}. Amending rewrites it — the next push will need a force push with lease.</span>
+      </div>
+    {/if}
     <div class="row">
       <label class="checkbox-row">
         <input type="checkbox" bind:checked={amend} />
@@ -877,10 +933,11 @@
       <span class="grow"></span>
       <button
         class="btn primary"
-        disabled={committing || drafting || (subject.trim() === '' && !amend) || (staged.length === 0 && !amend)}
+        disabled={!canCommit}
         onclick={commit}
+        title="Commit (⌘↵)"
       >
-        {committing ? 'Committing…' : `Commit${staged.length > 0 ? ` (${staged.length})` : ''}`}
+        {committing ? 'Committing…' : `${amend ? 'Amend' : 'Commit'}${staged.length > 0 ? ` (${staged.length})` : ''}`}
       </button>
     </div>
   </div>
@@ -1217,6 +1274,20 @@
     display: flex;
     align-items: center;
     gap: 8px;
+  }
+  .amend-warn {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 6px 8px;
+    border-radius: var(--radius-s);
+    background: var(--warning-soft);
+    color: var(--warning);
+    font-size: var(--fs-s);
+  }
+  .amend-warn :global(svg) {
+    flex-shrink: 0;
+    margin-block-start: 2px;
   }
   .checkbox-row {
     display: inline-flex;

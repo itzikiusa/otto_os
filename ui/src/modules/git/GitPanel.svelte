@@ -35,7 +35,12 @@
   {:else}
     {@const primary = git.primary}
     {#if primary}
-      <RepoView repo={primary} tab={panelTab} embedded onTab={(t) => (panelTab = t)} />
+      <!-- Keyed like GitPage: switching the focused session to another repo
+           must remount, or repo A's in-flight merge status, commit draft and
+           selection land on repo B. -->
+      {#key primary.id}
+        <RepoView repo={primary} tab={panelTab} embedded onTab={(t) => (panelTab = t)} />
+      {/key}
     {/if}
   {/if}
 </div>

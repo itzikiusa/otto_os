@@ -313,9 +313,16 @@ fn diff_git_targets(line: &str, path: &str) -> bool {
             return true;
         }
     }
-    // git still quotes a name carrying a `"` or a backslash even with
-    // `core.quotePath=false`; compare what is inside the quotes verbatim.
+    // git still quotes a name carrying a `"`, a backslash, a tab or a control
+    // character even with `core.quotePath=false`. The client sends the RAW
+    // name (status/summary are `-z`, and the parser unquotes headers), so
+    // compare the UNQUOTED form; the escaped text is still accepted verbatim
+    // for a caller echoing what it was shown.
     if let Some(idx) = rest.rfind(" \"b/") {
+        let quoted = rest[idx + 1..].trim();
+        if crate::parse::unquote_c(quoted).strip_prefix("b/") == Some(path) {
+            return true;
+        }
         if rest[idx + 4..].trim().trim_end_matches('"') == path {
             return true;
         }
@@ -994,6 +1001,12 @@ index 1111111..2222222 100644
 ";
         let p = build_hunk_patch(raw, "we\\\"ird.txt", 0, "@@ -1,2 +1,2 @@", None).unwrap();
         assert_eq!(p, raw);
+        // The RAW name — what status/summary hand the client — matches too.
+        let p = build_hunk_patch(raw, "we\"ird.txt", 0, "@@ -1,2 +1,2 @@", None).unwrap();
+        assert_eq!(p, raw);
+        let tab = raw.replace("we\\\"ird", "t\\tab");
+        let p = build_hunk_patch(&tab, "t\tab.txt", 0, "@@ -1,2 +1,2 @@", None).unwrap();
+        assert_eq!(p, tab);
     }
 
     #[test]

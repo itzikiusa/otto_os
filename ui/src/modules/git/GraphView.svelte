@@ -1688,9 +1688,34 @@
 
   function checkoutRemote(b: RefBranch): void {
     holdDiff();
-    // strip "origin/" prefix to get local branch name
-    const localName = b.name.replace(/^[^/]+\//, '');
-    void checkout(localName, true);
+    void checkoutRemoteRef(b.name);
+  }
+
+  /** Check out a REMOTE-tracking ref (`origin/x`, `upstream/x`) the way every
+   *  git client does: switch to the local twin when one exists (a `create`
+   *  there died with "a branch named 'x' already exists"); otherwise create
+   *  `x` AT that remote ref with tracking. Only `origin/*` may go through the
+   *  checkout route's create (it bases on `origin/<name>`) — any other remote
+   *  creates from its own ref via `/branch`, which used to fork `x` from the
+   *  current HEAD instead and toast "Branch created". */
+  async function checkoutRemoteRef(remoteRef: string): Promise<void> {
+    const localName = remoteRef.replace(/^[^/]+\//, '');
+    if (refKnowledge.localNames.has(localName)) return checkout(localName, false);
+    if (remoteRef.startsWith('origin/')) return checkout(localName, true);
+    checkoutBusy = localName;
+    try {
+      const s = await api.post<RepoStatusResp>(`/repos/${repoId}/branch`, {
+        name: localName,
+        start_point: remoteRef,
+        checkout: true,
+      });
+      toasts.success('Branch created', `${localName} tracking ${remoteRef}`);
+      await refreshAfterCheckout(s, false);
+    } catch (e) {
+      toasts.error('Checkout failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      checkoutBusy = '';
+    }
   }
 
   /** ⋯ on a file row of the commit diff: the file-scoped history/blame tools.
@@ -2704,7 +2729,7 @@
     closeRefMenu();
     holdDiff();
     if (chip.kind === 'remote') {
-      void checkout(chip.label.replace(/^[^/]+\//, ''), true);
+      void checkoutRemoteRef(chip.label);
       return;
     }
     if (chip.worktree) {
