@@ -152,17 +152,55 @@ every tool enabled here that it doesn't serve natively (e.g. `otto_create_pr`),
 proxied through the same governed choke point — so the checklist, and the approval
 setting below, apply to Otto sessions as well as external clients.
 
-**Ask before each call.** Enabling a mutating tool makes it *callable*; each call
-still waits for a human approval by default. Under every **enabled mutating** tool
-the checklist shows an **Ask before each call** switch (on = gated, the default);
-each category with such tools also gets **Always ask / Don't ask**. Turning it off
-(after a confirm) stores the tool in `mcp_approval_exempt_tools`: its calls then run
-without a prompt but still pass the per-token scope, enable and RBAC gates and are
-**audited** like every other call. Disabling a tool drops its exemption, so
-re-enabling it starts gated again. If the global `mcp_require_approval_dangerous`
-switch is off, the page says so — nothing asks at all then. Policies and per-tool
-server rules (§7, **Servers → Tools**) govern registered external servers only; they
-never re-impose an approval on an `otto.*` tool.
+**Auto-approve — mutating calls without a human approval (opt-in).** Enabling a
+mutating tool makes it *callable*; each call still waits for a human approval by
+default. An **auto-approve rule** is the explicit, opt-in exception — mainly so agents
+can open PRs (`otto_create_pr`) without someone clicking Approve each time. A rule
+names **what** and **where**:
+
+| | Options |
+|---|---|
+| **What** | one mutating tool (`create_pr`), or every mutating tool of a catalog **category** (`Git`, `Issues`, `Sessions`, `Message Brokers`, …) — a category rule also covers tools added to it later |
+| **Where** | **Everywhere** (global) · **one workspace** (the workspace the call lands in — for git tools, the repo's workspace) · **one agent session** (calls made with that Otto session's credential; the rule is deleted with the session) |
+
+Manage rules in **MCP → Otto server → Auto-approve** (**New rule**; on/off switch and
+delete per rule) — MCP Admin. The **External tool catalog** shows the effect: under
+every enabled mutating tool an **Auto-approve everywhere** switch (a global per-tool
+rule) plus a badge for every other rule that covers it, and per category an
+**Auto-approve every _category_ write** switch (a global category rule). The header
+counts the tools some rule auto-approves.
+
+- **Off by default.** No rule ⇒ the call is gated exactly as before.
+- **Nothing is silent.** An auto-approved call still runs every other gate (per-token
+  scope, enable, workspace pin, RBAC) and is written to **Activity → Audit** with the
+  decision **Auto approved** and a reason naming the rule — e.g. `auto-approved by
+  policy 'Agents open PRs' (global, tool otto.create_pr) [rule 01J…]`. The governed
+  reply carries `auto_approved_by: {id, name, scope, …}`. Every rule create / change
+  / delete is in the admin audit log (`mcp.auto_approve.create|update|delete`).
+- **Most specific rule is recorded**: session > workspace > global, and a per-tool
+  rule over a category rule.
+- **Guardrail — irreversible tools.** `merge_pr`, `k8s_action`,
+  `produce_broker_message`, `aws_sqs_send`, `api_execute`, `api_run_automation`,
+  `delete_scheduled_task` and `assistant_forget` act on something nobody can take back
+  from inside Otto (a merge into the target branch, a live cluster, a message
+  consumers already acted on, an arbitrary — possibly production — HTTP write, a hard
+  delete). A **category rule never covers them**; a per-tool rule covers one only with
+  the **second explicit toggle** `allow_irreversible` (the UI asks twice). Opening,
+  commenting on or reviewing a PR, Jira/Confluence edits, messages to agents and vault
+  edits (`vault_delete` is a soft trash move) are reversible and auto-approvable.
+- **Disabling a tool drops its per-tool rules** (any scope), so re-enabling it starts
+  gated again. Category rules stay.
+- If the global `mcp_require_approval_dangerous` switch is off, the page says so —
+  nothing asks at all then, rule or not (those calls are audited `allowed`).
+
+Upgrading: migration 0148 turned each tool of the old per-tool **Ask before each
+call** switch (`mcp_approval_exempt_tools`) into a global per-tool rule (keeping an
+irreversible one — it was an explicit per-tool choice). Policies and per-tool server
+rules (§7, **Servers → Tools**) govern registered external servers only; they never
+re-impose an approval on an `otto.*` tool, and auto-approve rules never lift a gate on
+an external server's tool (use that tool's **Require approval** switch and risk label
+there — a `dangerous` external tool stays gated while `mcp_require_approval_dangerous`
+is on).
 
 Open **Connect an external client** to see
 the HTTP URL, install commands, network-access controls, and **Access tokens**. A new
@@ -402,8 +440,8 @@ path too.
 Every governed `tools/call` to a **registered server** — from the UI tester and the
 live-agent gateway — funnels through one choke point. (Otto's own `otto.*` tools use
 their own choke point, `governed_invoke`: per-token scope → enable → git repo
-resolution → approval (a mutating tool unless exempted via **Ask before each call**
-or cleared by a trusted token write grant, under the global
+resolution → approval (a mutating tool unless an **auto-approve rule** covers it —
+audited `auto_approved` — or a trusted token write grant clears it, under the global
 `mcp_require_approval_dangerous` switch) → dry-run → execute → audit. Allowlists,
 policies and per-tool server rules below do not apply to them.) The stages run in
 this order; the **first** decisive stage wins:
@@ -440,7 +478,8 @@ this order; the **first** decisive stage wins:
    table — no separate counter to drift.
 
 The terminal decision is one of `allowed` · `approved` · `denied` · `dry_run` ·
-`pending_approval` · `error`.
+`pending_approval` · `error` — plus `auto_approved` on the `otto.*` choke point (a
+mutating call an auto-approve rule let through; `decision_reason` names the rule).
 
 ---
 
@@ -553,7 +592,8 @@ and evaluate are read-only (View).
   governed call (UI tester, gateway, inbound `otto.*`, outbound downstream). Its
   server / tool / decision filters are collapsed by default. The **Log** view shows
   **Time, Server, Tool, Decision, Dir, OK, Latency, Bytes**. Args and error text are
-  stored redacted.
+  stored redacted. An **Auto approved** decision (amber) is a mutating call an
+  auto-approve rule let through without a person; hover it for the rule.
 - **Stats** (derived from the audit table) — choose **By tool** in the Audit panel to
   see **Calls, Errors, Err rate, Avg/Max latency, Avg/Total bytes, Last called**. Cost
   in USD is a **partial** signal — Otto meters latency/bytes/errors (the available
@@ -740,6 +780,9 @@ the workspace role.
 |---|---|---|
 | `GET /mcp/otto-server` | Outward status + tool catalog + token prefix | View (or `mcp` token) |
 | `PATCH /mcp/otto-server` | Enable/disable and per-tool allow; legacy-token rotation affects only `otto-mcp-server`-labelled tokens (prefer CP37) | **Admin** |
+| `GET /mcp/auto-approve` | **CP40** — auto-approve rules + the categories / irreversible tools a rule can name | View |
+| `POST /mcp/auto-approve` | **CP41** — create a rule (`{scope, workspace_id?, session_id?, target_kind, target, allow_irreversible?, name?}`) | **Admin** |
+| `PATCH /mcp/auto-approve/{id}` · `DELETE …` | **CP42/CP43** — rename / enable / flip `allow_irreversible`; delete | **Admin** |
 | `POST /mcp/otto-tools/invoke` | The governed choke point for the `otto.*` tools | Edit (or `mcp` token) |
 | `GET /mcp/gateway/tools` (`?workspace_id=`) | Namespaced governed downstream tools | View |
 | `POST /mcp/gateway/invoke` | Proxy a downstream call through the pipeline | Edit |
@@ -754,8 +797,9 @@ the workspace role.
 unlisted workspaces default on), `mcp_otto_server_enabled` (default
 `false`), `mcp_otto_server_tools` (default = read subset + the two scheduled-task
 reads), `mcp_require_approval_dangerous` (default `true`),
-`mcp_approval_exempt_tools` (default `[]` — mutating `otto.*` tools whose
-"Ask before each call" is off; set via CP25 `approval_exempt_tools`),
+`mcp_approval_exempt_tools` (legacy — imported into auto-approve rules by
+migration 0148 and no longer read; auto-approve lives in the
+`mcp_auto_approve_rules` table, CP40–CP43),
 `mcp_trust_token_write_grant` (default `true` — a `kind='mcp'` token minted with
 `allow_writes` skips the per-call prompt), `mcp_health_interval_secs`
 (default `300`; `0` = off).
@@ -776,7 +820,10 @@ reads), `mcp_require_approval_dangerous` (default `true`),
   approval queue.
 - Otto-as-MCP-server: `otto.*` tools spanning **every Otto feature** (read + write)
   over a restricted token that can reach only the governed choke point; reads
-  default-on, mutating tools off by default and approval-gated.
+  default-on, mutating tools off by default and approval-gated — unless an explicit
+  **auto-approve rule** (per tool or category; global / workspace / agent session)
+  covers them, with irreversible tools behind a second toggle and every such call
+  audited.
 - A **gateway** that brings Otto's own agents' downstream MCP calls under the same
   pipeline.
 - Per-workspace governance with strict per-workspace authorization on flat routes.
@@ -819,9 +866,14 @@ same user who requested it), then re-invoke — the approval is **single-use** a
 bound to the exact arguments, so changing the args invalidates it.
 
 **`otto_create_pr` still asks for approval although I enabled it.** Enabling a
-mutating `otto.*` tool only makes it callable; the per-call approval is a separate
-setting. Turn **Ask before each call** off under that tool in **MCP → Otto server**
-(MCP Admin). Calls stay audited.
+mutating `otto.*` tool only makes it callable; the per-call approval is a separate,
+opt-in setting. Turn on **Auto-approve everywhere** under that tool, or add a rule in
+**MCP → Otto server → Auto-approve** for the `Git` category or just this workspace /
+session (MCP Admin). Calls stay audited (`auto_approved`). If it still asks: a
+workspace rule only covers calls landing in that workspace (for PRs, the repo's
+workspace), a session rule only that session's own calls, and `merge_pr` is
+irreversible — no category rule covers it; it needs its own rule with the second
+toggle.
 
 **An agent says a repo "doesn't exist" / asks you to search again.** Repos are
 registered in exactly one workspace. `otto_list_repos` now lists every workspace you

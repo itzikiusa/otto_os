@@ -244,6 +244,9 @@ export type McpPolicyEffect = 'allow' | 'deny' | 'require_approval' | 'require_d
 export type McpDecision =
   | 'allowed'
   | 'approved'
+  /** A mutating `otto.*` call that skipped the per-call approval because an
+   *  auto-approve rule covers it; `decision_reason` names the rule. */
+  | 'auto_approved'
   | 'denied'
   | 'dry_run'
   | 'pending_approval'
@@ -562,10 +565,17 @@ export interface McpOttoToolInfo {
   /** Feature group (e.g. "Workflows", "Message Brokers") for UI grouping. Optional
    * for forward-compat with daemons that predate the categorised catalog. */
   category?: string | null;
-  /** True when an admin turned "Ask before each call" OFF for this (mutating)
-   *  tool: its calls skip the human approval (still audited). Optional for
+  /** True when the tool is auto-approved EVERYWHERE (an enabled global
+   *  per-tool auto-approve rule — the catalog's Auto-approve switch): its calls
+   *  skip the human approval (audited `auto_approved`). Optional for
    *  forward-compat with daemons that predate the per-tool exemption. */
   approval_exempt?: boolean;
+  /** In the guardrail tier (merge a PR, kubectl ops, produce to a live
+   *  topic/queue, arbitrary HTTP, hard deletes): never covered by a category
+   *  rule; a per-tool rule needs `allow_irreversible`. */
+  irreversible?: boolean;
+  /** Every enabled auto-approve rule (any scope) that covers this tool. */
+  auto_approved_by?: McpAutoApproveRef[];
 }
 
 /** `GET /mcp/otto-server` (+ `PATCH` reply, which may also carry `token` once). */
@@ -583,14 +593,86 @@ export interface McpOttoServerStatus {
   approval_exempt_tools?: string[];
 }
 
+// --- MCP auto-approve rules (`/mcp/auto-approve`) ---------------------------
+// The explicit, opt-in policy under which a mutating `otto.*` tool call skips
+// the per-call human approval. Mirrors `otto_state::McpAutoApproveRule`.
+
+export type McpAutoApproveScope = 'global' | 'workspace' | 'session';
+export type McpAutoApproveTargetKind = 'tool' | 'category';
+
+/** The short rule reference on a catalog tool / a governed envelope
+ *  (`auto_approved_by`). */
+export interface McpAutoApproveRef {
+  id: Id;
+  name: string;
+  scope: McpAutoApproveScope;
+  workspace_id?: Id | null;
+  session_id?: Id | null;
+  target_kind: McpAutoApproveTargetKind;
+  /** Bare tool name (`create_pr`) or category label (`Git`). */
+  target: string;
+}
+
+export interface McpAutoApproveRule extends McpAutoApproveRef {
+  enabled: boolean;
+  /** The second explicit toggle — only ever true on a per-tool rule for an
+   *  irreversible tool. */
+  allow_irreversible: boolean;
+  note?: string | null;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+  /** Display labels (GET/POST/PATCH responses). */
+  workspace_name?: string;
+  session_title?: string;
+  /** True when the rule's tool is in the irreversible tier. */
+  irreversible?: boolean;
+}
+
+/** `GET /mcp/auto-approve`. */
+export interface McpAutoApproveList {
+  rules: McpAutoApproveRule[];
+  /** The categories a category rule may name (each has ≥1 mutating tool),
+   *  with their mutating tools and which are irreversible. */
+  categories: { category: string; tools: { name: string; irreversible: boolean }[] }[];
+}
+
+/** `POST /mcp/auto-approve`. */
+export interface CreateMcpAutoApproveReq {
+  /** Defaults to "<target> — <scope>". */
+  name?: string;
+  enabled?: boolean;
+  scope: McpAutoApproveScope;
+  /** Required iff scope = workspace. */
+  workspace_id?: Id;
+  /** Required iff scope = session. */
+  session_id?: Id;
+  target_kind: McpAutoApproveTargetKind;
+  /** Bare or `otto.`-prefixed tool name, or a category label. */
+  target: string;
+  /** Required (true) for an irreversible tool; refused on a category rule. */
+  allow_irreversible?: boolean;
+  note?: string;
+}
+
+/** `PATCH /mcp/auto-approve/{id}`. */
+export interface UpdateMcpAutoApproveReq {
+  name?: string;
+  enabled?: boolean;
+  allow_irreversible?: boolean;
+  note?: string;
+}
+
 /** `PATCH /mcp/otto-server`. */
 export interface UpdateMcpOttoServerReq {
   enabled?: boolean;
   tools?: string[];
-  /** The COMPLETE set of mutating tools that skip the per-call approval
-   *  (replaces the stored list; bare or `otto.`-prefixed names; a read or
-   *  unknown name is a 400). Pruned to the enabled set — disabling a tool
-   *  also drops its exemption. */
+  /** Compatibility shim over the auto-approve rules: the COMPLETE set of
+   *  mutating tools auto-approved everywhere (global per-tool rules; bare or
+   *  `otto.`-prefixed names; a read or unknown name is a 400, and so is an
+   *  irreversible tool that is not already auto-approved). Pruned to the
+   *  enabled set — disabling a tool drops its per-tool rules. Prefer
+   *  `/mcp/auto-approve`. */
   approval_exempt_tools?: string[];
   rotate_token?: boolean;
 }

@@ -1,8 +1,12 @@
 import { api } from '../../lib/api/client';
 import type {
+  CreateMcpAutoApproveReq,
   Id,
+  McpAutoApproveList,
+  McpAutoApproveRule,
   McpSessionAttach,
   RotateMcpTokenResp,
+  UpdateMcpAutoApproveReq,
   UpdateMcpSessionAttachReq,
 } from '../../lib/api/types';
 
@@ -24,4 +28,11 @@ export const mcpCpExtraApi = {
     api.get<{ tools: McpGatewayToolRow[] }>(
       `/mcp/gateway/tools?workspace_id=${encodeURIComponent(wsId)}`,
     ),
+  // Auto-approve rules: mutating otto.* tools that skip the per-call approval.
+  autoApproveRules: () => api.get<McpAutoApproveList>(`/mcp/auto-approve`),
+  createAutoApprove: (body: CreateMcpAutoApproveReq) =>
+    api.post<McpAutoApproveRule>(`/mcp/auto-approve`, body),
+  updateAutoApprove: (id: Id, body: UpdateMcpAutoApproveReq) =>
+    api.patch<McpAutoApproveRule>(`/mcp/auto-approve/${encodeURIComponent(id)}`, body),
+  deleteAutoApprove: (id: Id) => api.del<void>(`/mcp/auto-approve/${encodeURIComponent(id)}`),
 };

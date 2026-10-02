@@ -1,0 +1,88 @@
+import { test, expect, type APIRequestContext } from '@playwright/test';
+import { apiCtx, seedWorkspace } from './seed';
+
+// MCP → Otto server → Auto-approve: the opt-in rules that let a mutating
+// otto.* tool (create_pr) run without a per-call approval. Pins the catalog
+// switch (confirm → a global per-tool rule shown in the panel), the panel's
+// delete, and the irreversible guardrail in the New-rule form (merge_pr can't
+// be saved until the second toggle is ticked).
+
+let base = '';
+let workspaceId = '';
+
+test.describe.configure({ mode: 'serial' });
+
+async function rules(ctx: APIRequestContext): Promise<{ id: string; target: string }[]> {
+  const r = await ctx.get(`${base}/api/v1/mcp/auto-approve`);
+  expect(r.ok(), `GET auto-approve → ${r.status()} ${await r.text()}`).toBeTruthy();
+  return ((await r.json()) as { rules: { id: string; target: string }[] }).rules;
+}
+
+async function clearRules(ctx: APIRequestContext): Promise<void> {
+  for (const rule of await rules(ctx)) await ctx.delete(`${base}/api/v1/mcp/auto-approve/${rule.id}`);
+}
+
+test.beforeAll(async () => {
+  const seeded = await apiCtx();
+  base = seeded.base;
+  workspaceId = await seedWorkspace(seeded.ctx, base);
+  const r = await seeded.ctx.patch(`${base}/api/v1/mcp/otto-server`, {
+    data: { tools: ['create_pr', 'comment_pr', 'merge_pr', 'list_repos'] },
+  });
+  expect(r.ok(), `enable tools → ${r.status()} ${await r.text()}`).toBeTruthy();
+  await clearRules(seeded.ctx);
+  await seeded.ctx.dispose();
+});
+
+test.afterAll(async () => {
+  const { ctx } = await apiCtx();
+  await clearRules(ctx);
+  await ctx.dispose();
+});
+
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript((wsId) => {
+    if (!sessionStorage.getItem('mcp-aa-seeded')) {
+      localStorage.setItem('otto_workspace', wsId as string);
+      sessionStorage.setItem('mcp-aa-seeded', '1');
+    }
+  }, workspaceId);
+});
+
+test('catalog switch auto-approves create_pr and the panel lists + deletes it', async ({ page }) => {
+  await page.goto('/#/mcp');
+  const panel = page.locator('[data-testid="mcp-auto-approve-panel"]');
+  await expect(panel).toBeVisible({ timeout: 30_000 });
+  await expect(panel.getByText('No auto-approve rules')).toBeVisible();
+
+  const toggle = page.locator('input[data-testid="mcp-auto-otto.create_pr"]');
+  await expect(toggle).not.toBeChecked();
+  await toggle.click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Auto-approve', exact: true }).click();
+  await expect(toggle).toBeChecked();
+  const row = panel.locator('[data-testid="mcp-auto-approve-rule-create_pr"]');
+  await expect(row).toBeVisible();
+  await expect(row).toContainText('Everywhere');
+
+  await row.getByRole('button', { name: /^Delete / }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect(row).toHaveCount(0);
+  await expect(toggle).not.toBeChecked();
+});
+
+test('an irreversible tool needs the second toggle in the New-rule form', async ({ page }) => {
+  await page.goto('/#/mcp');
+  await page.locator('[data-testid="mcp-auto-approve-new"]').click();
+  const form = page.locator('[data-testid="mcp-auto-approve-form"]');
+  await expect(form).toBeVisible();
+  await form.getByRole('radio', { name: 'One tool' }).check();
+  await form.locator('[data-testid="mcp-auto-approve-tool"]').selectOption('merge_pr');
+  const save = page.locator('[data-testid="mcp-auto-approve-save"]');
+  await expect(save).toBeDisabled();
+  await form.locator('[data-testid="mcp-auto-approve-ack"]').check();
+  await expect(save).toBeEnabled();
+  await save.click();
+  await expect(
+    page.locator('[data-testid="mcp-auto-approve-rule-merge_pr"]').getByText('Irreversible allowed'),
+  ).toBeVisible();
+});
