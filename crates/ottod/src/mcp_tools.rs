@@ -4334,9 +4334,7 @@ mod tests {
         assert_eq!(error, "ambiguous request 'login': r1, r3");
     }
 
-    /// The cross-workspace list tools read the daemon's directory — every
-    /// workspace the owner can read, this session's first — and work without
-    /// a session workspace at all (they used to list only `OTTO_WORKSPACE_ID`).
+    /// `otto_room_read` opens on the room's tail and pages both ways.
     #[test]
     fn room_read_opens_on_the_tail_and_pages_both_ways() {
         // No cursor: the newest messages, with a bounded default page.
@@ -4364,6 +4362,9 @@ mod tests {
         );
     }
 
+    /// The cross-workspace list tools read the daemon's directory — every
+    /// workspace the owner can read, this session's first — and work without
+    /// a session workspace at all (they used to list only `OTTO_WORKSPACE_ID`).
     #[test]
     fn list_tools_span_every_workspace_through_the_directory() {
         assert_eq!(
