@@ -2381,6 +2381,18 @@ export interface TestConnectionResp {
    *  readable) permissions; carries the full message incl. the `chmod 600 <path>`
    *  fix. Independent of `ok`. */
   warn_key_perms?: string | null;
+  /** What to change when `ok` is false and the failure is a recognised one
+   *  (auth rejected, host key changed, DNS, refused, timed out, …). */
+  hint?: string | null;
+}
+
+/** `POST /connections/unsaved/test` — SSH test-before-save (root only); probes
+ *  the form's current values, persists nothing. Database kinds use
+ *  `/connections/unsaved/db/test`. Responds with `TestConnectionResp`. */
+export interface TestUnsavedConnectionReq {
+  workspace_id: string;
+  kind: 'ssh';
+  params: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------

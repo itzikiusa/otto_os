@@ -24,6 +24,15 @@ use tokio::process::Command;
 /// Connect-timeout (seconds) handed to `sftp -o ConnectTimeout`.
 const CONNECT_TIMEOUT_SECS: u32 = 12;
 
+/// Bound on a metadata op (`pwd`, `ls`, `mkdir`, `rm`, `rename`). These finish in
+/// well under a second on a live link; a hang means the multiplexed connection
+/// died under us (laptop sleep, Wi-Fi/VPN change), so fail fast and reconnect.
+const META_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Bound on a whole-file `get` / `put` (the governed transfer path applies its
+/// own, caller-chosen limit on top).
+const TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// One directory entry from a remote `ls -la` longname listing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SftpEntry {
@@ -122,6 +131,15 @@ impl SftpSession {
             format!("ControlPath={}", self.ctl_path),
             "-o".into(),
             "ControlPersist=60s".into(),
+            // The ControlMaster outlives a single op, so it must notice a dead
+            // path itself: without keep-alives a master whose network vanished
+            // (sleep, Wi-Fi/VPN switch) stays "up" for TCP's ~2h timeout and
+            // every later browse attaches to it and hangs. Two missed probes
+            // (~30s) make it exit; the next op then dials a fresh connection.
+            "-o".into(),
+            "ServerAliveInterval=15".into(),
+            "-o".into(),
+            "ServerAliveCountMax=2".into(),
         ];
         if let Some(port) = p.port {
             args.extend(["-P".into(), port.to_string()]);
@@ -134,6 +152,9 @@ impl SftpSession {
             args.push("-J".into());
             args.push(jump.to_string());
         }
+        // `--` ends option parsing: the destination is never read as an option
+        // (a profile host like `-oProxyCommand=…` would otherwise run locally).
+        args.push("--".into());
         args.push(self.target());
         args
     }
@@ -150,9 +171,50 @@ impl SftpSession {
     /// stderr (first non-empty line, else whole) as the error on a non-zero
     /// exit. Secrets are never in argv (key/agent auth) so args are safe.
     async fn run(&self, batch: &str) -> Result<String> {
-        tokio::time::timeout(std::time::Duration::from_secs(600), self.run_inner(batch))
-            .await
-            .map_err(|_| Error::Upstream("SFTP operation timed out after 600 seconds".into()))?
+        self.run_bounded(batch, META_TIMEOUT).await
+    }
+
+    /// [`Self::run`] with an explicit bound. On timeout the shared control
+    /// master is torn down as well: the usual cause is a connection that died
+    /// silently (sleep / network change), and leaving its master in place would
+    /// make every following op attach to it and hang the same way.
+    async fn run_bounded(&self, batch: &str, limit: std::time::Duration) -> Result<String> {
+        match tokio::time::timeout(limit, self.run_inner(batch)).await {
+            Ok(result) => result,
+            Err(_) => {
+                self.reset_master().await;
+                Err(Error::Upstream(format!(
+                    "SFTP operation timed out after {}s — the connection may have dropped \
+                     (sleep or network change); Otto reset it, so retry",
+                    limit.as_secs()
+                )))
+            }
+        }
+    }
+
+    /// Close this session's ControlMaster (`ssh -O exit`, bounded) and remove a
+    /// leftover socket so the next op dials a fresh connection. Best-effort.
+    pub async fn reset_master(&self) {
+        let path = std::path::Path::new(&self.ctl_path);
+        if !path.exists() {
+            return;
+        }
+        let exit = Command::new("ssh")
+            .args([
+                "-o",
+                &format!("ControlPath={}", self.ctl_path),
+                "-O",
+                "exit",
+                "--",
+                &self.target(),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .status();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), exit).await;
+        let _ = std::fs::remove_file(path);
     }
 
     async fn run_inner(&self, batch: &str) -> Result<String> {
@@ -181,17 +243,13 @@ impl SftpSession {
         if out.status.success() {
             Ok(String::from_utf8_lossy(&out.stdout).into_owned())
         } else {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let msg = stderr
-                .lines()
-                .map(str::trim)
-                .find(|l| !l.is_empty())
-                .unwrap_or("")
-                .to_string();
-            let msg = if msg.is_empty() {
+            // The explanatory line, not ssh's known_hosts / post-quantum
+            // notices that precede it, plus a fix hint for connect failures.
+            let diagnosis = crate::diagnose::diagnose(&String::from_utf8_lossy(&out.stderr));
+            let msg = if diagnosis.is_empty() {
                 format!("sftp exited with {}", out.status)
             } else {
-                msg
+                diagnosis.to_string()
             };
             Err(Error::Upstream(msg))
         }
@@ -283,13 +341,13 @@ impl SftpSession {
     /// Download a remote file to a local path (sftp `get`).
     pub async fn download(&self, remote: &str, local: &str) -> Result<()> {
         let batch = format!("get {} {}", quote_checked(remote)?, quote_checked(local)?);
-        self.run(&batch).await.map(|_| ())
+        self.run_bounded(&batch, TRANSFER_TIMEOUT).await.map(|_| ())
     }
 
     /// Upload a local file to a remote path (sftp `put`).
     pub async fn upload(&self, local: &str, remote: &str) -> Result<()> {
         let batch = format!("put {} {}", quote_checked(local)?, quote_checked(remote)?);
-        self.run(&batch).await.map(|_| ())
+        self.run_bounded(&batch, TRANSFER_TIMEOUT).await.map(|_| ())
     }
 
     /// Create a remote directory.
@@ -327,7 +385,14 @@ impl Drop for SftpSession {
         std::thread::spawn(move || {
             if std::path::Path::new(&path).exists() {
                 if let Ok(mut child) = std::process::Command::new("ssh")
-                    .args(["-o", &format!("ControlPath={path}"), "-O", "exit", &target])
+                    .args([
+                        "-o",
+                        &format!("ControlPath={path}"),
+                        "-O",
+                        "exit",
+                        "--",
+                        &target,
+                    ])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .spawn()
@@ -762,6 +827,10 @@ drwxr-xr-x  2 me staff 64 Jun 20 12:00 mydir/
         assert!(args.iter().any(|a| a == "StrictHostKeyChecking=accept-new"));
         assert!(args.iter().any(|a| a.starts_with("ControlPath=")));
         assert!(args.iter().any(|a| a == "ControlPersist=60s"));
+        // The shared master must detect a dead path (sleep / network change).
+        assert!(args.iter().any(|a| a == "ServerAliveInterval=15"));
+        assert!(args.iter().any(|a| a == "ServerAliveCountMax=2"));
+        assert_eq!(args[args.len() - 2], "--");
         assert_eq!(
             args[args.iter().position(|a| a == "-P").unwrap() + 1],
             "2222"
@@ -888,6 +957,41 @@ mod file_size_tests {
             );
         }
     }
+    /// A hung op (a master whose network died during sleep) fails within its
+    /// bound and drops the control socket, so the next op reconnects instead
+    /// of attaching to the same dead master.
+    #[tokio::test]
+    async fn timed_out_op_resets_the_control_master() {
+        let session = fixture("import time\nsys.stdin.read()\ntime.sleep(30)");
+        std::fs::write(&session.ctl_path, b"stale").unwrap();
+        let started = std::time::Instant::now();
+        let error = session
+            .run_bounded("ls -la \"/x\"", std::time::Duration::from_millis(400))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("timed out after 0s"), "{error}");
+        assert!(error.contains("retry"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(!std::path::Path::new(&session.ctl_path).exists());
+    }
+
+    /// A failed op reports the explanatory stderr line, not the known_hosts
+    /// notice ssh prints first.
+    #[tokio::test]
+    async fn failed_op_reports_the_diagnosed_line() {
+        let session = fixture(
+            "sys.stdin.read()\nsys.stderr.write(\"Warning: Permanently added 'h' (ED25519) to the list of known hosts.\\nme@h: Permission denied (publickey).\\nConnection closed\\n\")\nsys.exit(255)",
+        );
+        let error = session.pwd().await.unwrap_err().to_string();
+        assert!(
+            error.contains("me@h: Permission denied (publickey)."),
+            "{error}"
+        );
+        assert!(!error.contains("Permanently added"), "{error}");
+        assert!(error.contains("ssh-add"), "{error}");
+    }
+
     #[tokio::test]
     async fn file_size_rejects_stdout_and_stderr_over_budget() {
         for fd in [1, 2] {

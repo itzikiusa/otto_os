@@ -10,7 +10,8 @@ use axum::{Extension, Json, Router};
 use otto_core::api::{
     MoveSectionReq, Problem, ReorderSectionsReq, SectionScopeQuery, SftpDownloadReq,
     SftpDownloadResp, SftpListResp, SftpMkdirReq, SftpReadResp, SftpRemoveReq, SftpRenameReq,
-    SftpUploadReq, TestConnectionResp, UpsertConnectionReq, UpsertSectionReq,
+    SftpUploadReq, TestConnectionResp, TestUnsavedConnectionReq, UpsertConnectionReq,
+    UpsertSectionReq,
 };
 use otto_core::auth::{AuthUser, RoleChecker};
 use otto_core::domain::{
@@ -145,6 +146,10 @@ pub fn api_router<S: ConnectionsCtx>() -> Router<S> {
         )
         .route("/connections/{id}/open", post(open_connection::<S>))
         .route("/connections/{id}/test", post(test_connection::<S>))
+        .route(
+            "/connections/unsaved/test",
+            post(test_unsaved_connection::<S>),
+        )
         .route("/connections/{id}/pin", patch(pin_connection::<S>))
         // --- SFTP file browser (SSH connections only) ---
         .route(
@@ -564,6 +569,25 @@ async fn test_connection<S: ConnectionsCtx>(
     Ok(Json(resp))
 }
 
+/// POST /connections/unsaved/test — ws editor + root. Test-before-save for an
+/// SSH profile: probes the form's current values (nothing is persisted), with
+/// the same diagnosis + fix hint and key-permission warning as a saved test.
+async fn test_unsaved_connection<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Json(req): Json<TestUnsavedConnectionReq>,
+) -> ApiResult<Json<TestConnectionResp>> {
+    ctx.roles()
+        .check(&user, &req.workspace_id, WorkspaceRole::Editor)
+        .await?;
+    let mut resp = ctx
+        .connections()
+        .test_unsaved(&user.id, req.kind, req.params.clone())
+        .await?;
+    resp.warn_key_perms = key_perms_warning_for(&req.params);
+    Ok(Json(resp))
+}
+
 /// PATCH /connections/{id}/pin — editor (global: root); toggle the pinned flag.
 async fn pin_connection<S: ConnectionsCtx>(
     State(ctx): State<S>,
@@ -607,6 +631,15 @@ fn sftp_params_for(conn: &Connection) -> Result<SftpParams, Error> {
     let host = conn_param(conn, "host").ok_or_else(|| {
         Error::Invalid("connection has no host — SFTP requires an SSH host".into())
     })?;
+    // Saved profiles are validated on save, but rows predating that check (or
+    // imported ones) are re-checked here: a host / user / jump that starts with
+    // `-` must never reach sftp's argv, where it would be read as an option.
+    crate::builders::reject_option_like("sftp", "host", host)?;
+    for key in ["user", "jump"] {
+        if let Some(value) = conn_param(conn, key) {
+            crate::builders::reject_option_like("sftp", key, value)?;
+        }
+    }
     // Omission lets the system SSH configuration choose the port.
     let port = match conn.params.get("port") {
         None | Some(serde_json::Value::Null) => None,
@@ -1034,4 +1067,54 @@ async fn move_section<S: ConnectionsCtx>(
             .reparent_section(&id, req.parent_id.as_deref())
             .await?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ssh_conn(params: serde_json::Value) -> Connection {
+        Connection {
+            id: "c1".into(),
+            workspace_id: None,
+            name: "box".into(),
+            kind: ConnectionKind::Ssh,
+            params,
+            secret_ref: None,
+            first_command: None,
+            section_id: None,
+            environment: Default::default(),
+            read_only: false,
+            created_by: "u1".into(),
+            created_at: chrono::Utc::now(),
+            last_opened_at: None,
+            pinned: false,
+        }
+    }
+
+    /// A legacy/imported row whose host, user or jump starts with `-` never
+    /// reaches sftp's argv (it would be parsed as an option there).
+    #[test]
+    fn sftp_params_refuse_option_like_values() {
+        for params in [
+            serde_json::json!({"host":"-oProxyCommand=touch /tmp/x"}),
+            serde_json::json!({"host":"h","user":"-oProxyCommand=x"}),
+            serde_json::json!({"host":"h","jump":"-oProxyCommand=x"}),
+            serde_json::json!({"host":"h\nx"}),
+        ] {
+            assert!(
+                matches!(
+                    sftp_params_for(&ssh_conn(params.clone())),
+                    Err(Error::Invalid(_))
+                ),
+                "{params}"
+            );
+        }
+        let ok = sftp_params_for(&ssh_conn(
+            serde_json::json!({"host":"h.example.com","user":"deploy","jump":"bastion","port":"2222"}),
+        ))
+        .unwrap();
+        assert_eq!(ok.port, Some(2222));
+        assert_eq!(ok.jump.as_deref(), Some("bastion"));
+    }
 }

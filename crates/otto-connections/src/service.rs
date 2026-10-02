@@ -288,6 +288,7 @@ impl ConnectionsService {
                     // untouched, and a failed DB write cannot replace its old secret.
                     let key = format!("conn-{}-{}", id, otto_core::new_id());
                     self.secrets.put(&key, &password)?;
+                    let superseded = conn.secret_ref.clone();
                     conn.params["conn_string"] = template.into();
                     conn = self
                         .repo
@@ -302,6 +303,14 @@ impl ConnectionsService {
                             None,
                         )
                         .await?;
+                    // The row now points at the fresh key; the credential it
+                    // used to reference would otherwise linger in the Keychain
+                    // forever (nothing else ever reads or deletes it).
+                    if let Some(old) = superseded.filter(|old| *old != key) {
+                        if let Err(e) = self.secrets.delete(&old) {
+                            tracing::warn!(connection = %id, "failed to delete superseded secret: {e}");
+                        }
+                    }
                 }
             }
         }
@@ -678,102 +687,213 @@ impl ConnectionsService {
     }
 
     /// Headless test-connect: run the command with a kind-specific probe,
-    /// 10s timeout, report ok/latency/first stderr line.
+    /// 10s timeout, report ok/latency and the line that explains a failure.
     pub async fn test(&self, conn: &Connection, user_id: &Id) -> Result<TestConnectionResp> {
         self.authorize(&conn.id, user_id, "configure").await?;
         let secret = self.fetch_secret(conn)?;
-        // NOTE: `warn_key_perms` is filled by the `test_connection` HTTP handler
-        // (the single spot that covers both this CLI path and the cached-tunnel
-        // DB-driver path uniformly), so it stays `None` on every return here.
-        let warn_key_perms = None;
-        let (spec, warn_argv) = build_command(conn, secret.as_deref())?;
-        let (spec, probe) = probe_spec(conn.kind, spec);
+        probe(conn, secret.as_deref()).await
+    }
 
-        let started = Instant::now();
-        let mut cmd = tokio::process::Command::new(&spec.program);
-        cmd.args(&spec.args)
-            .envs(spec.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok(TestConnectionResp {
-                    ok: false,
-                    latency_ms: None,
-                    message: format!("failed to start {}: {e}", spec.program),
-                    warn_argv,
-                    warn_key_perms,
-                });
-            }
-        };
-
-        if let Some(mut stdin) = child.stdin.take() {
-            if let Some(probe) = probe {
-                let _ = stdin.write_all(probe).await;
-            }
-            drop(stdin); // EOF so the client exits after the probe.
+    /// Test-before-save for an SSH profile: probe the form's CURRENT (unsaved)
+    /// values. Nothing is persisted. Root-only, like creating a profile — it
+    /// dials an arbitrary host with this Mac's keys / agent. SSH profiles carry
+    /// no secret, so no Keychain read happens either. Database kinds have their
+    /// own driver-backed `/connections/unsaved/db/test`.
+    pub async fn test_unsaved(
+        &self,
+        user_id: &Id,
+        kind: ConnectionKind,
+        params: serde_json::Value,
+    ) -> Result<TestConnectionResp> {
+        let actor = otto_state::UsersRepo::new(self.repo.pool())
+            .get(user_id)
+            .await?;
+        if actor.disabled || !actor.is_root {
+            return Err(Error::Forbidden(
+                "only root can test connection settings before they are saved".into(),
+            ));
         }
-
-        match tokio::time::timeout(TEST_TIMEOUT, child.wait_with_output()).await {
-            Err(_) => Ok(TestConnectionResp {
-                ok: false,
-                latency_ms: Some(TEST_TIMEOUT.as_millis() as u64),
-                message: "timed out after 10s".into(),
-                warn_argv,
-                warn_key_perms,
-            }),
-            Ok(Err(e)) => Ok(TestConnectionResp {
-                ok: false,
-                latency_ms: None,
-                message: format!("process error: {e}"),
-                warn_argv,
-                warn_key_perms,
-            }),
-            Ok(Ok(output)) => {
-                let latency_ms = started.elapsed().as_millis() as u64;
-                if output.status.success() {
-                    Ok(TestConnectionResp {
-                        ok: true,
-                        latency_ms: Some(latency_ms),
-                        message: "ok".into(),
-                        warn_argv,
-                        warn_key_perms,
-                    })
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    let first_line = stderr
-                        .lines()
-                        .find(|l| !l.trim().is_empty())
-                        .unwrap_or("")
-                        .trim()
-                        .to_string();
-                    let message = if first_line.is_empty() {
-                        format!("exited with {}", output.status)
-                    } else {
-                        // Keep the real driver error, but scrub any password a
-                        // client might echo (mongo `user:pass@`, `--password x`).
-                        redact_secrets(&first_line)
-                    };
-                    Ok(TestConnectionResp {
-                        ok: false,
-                        latency_ms: Some(latency_ms),
-                        message,
-                        warn_argv,
-                        warn_key_perms,
-                    })
-                }
-            }
+        if kind != ConnectionKind::Ssh {
+            return Err(Error::Invalid(
+                "only SSH settings are tested here — database kinds use /connections/unsaved/db/test"
+                    .into(),
+            ));
         }
+        validate_params(kind, &params, false)?;
+        let conn = transient_connection(kind, params);
+        probe(&conn, None).await
     }
 
     fn fetch_secret(&self, conn: &Connection) -> Result<Option<String>> {
         match &conn.secret_ref {
             Some(secret_ref) => self.secrets.get(secret_ref),
             None => Ok(None),
+        }
+    }
+}
+
+/// A throwaway, never-persisted profile for probing unsaved settings.
+fn transient_connection(kind: ConnectionKind, params: serde_json::Value) -> Connection {
+    Connection {
+        id: "unsaved".into(),
+        workspace_id: None,
+        name: "unsaved".into(),
+        kind,
+        params,
+        secret_ref: None,
+        first_command: None,
+        section_id: None,
+        environment: otto_core::domain::Environment::Dev,
+        read_only: false,
+        created_by: String::new(),
+        created_at: chrono::Utc::now(),
+        last_opened_at: None,
+        pinned: false,
+    }
+}
+
+/// The param a kind needs before there is anything to test. Without it
+/// `build_command` falls back to a local login shell (so a `first_command` can
+/// carry the whole invocation) — and probing THAT would report a green "ok"
+/// for a profile that never touches the network.
+fn missing_target(conn: &Connection) -> Option<&'static str> {
+    let key = match conn.kind {
+        ConnectionKind::Ssh
+        | ConnectionKind::Mysql
+        | ConnectionKind::Redis
+        | ConnectionKind::Clickhouse
+        | ConnectionKind::Postgres => "host",
+        ConnectionKind::Mongodb => "conn_string",
+        ConnectionKind::Custom => "command_template",
+    };
+    let present = conn
+        .params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .is_some_and(|v| !v.trim().is_empty());
+    (!present).then_some(match key {
+        "host" => "No host is set, so there is nothing to test — add a host (it only opens a local shell as-is).",
+        "conn_string" => "No connection string is set, so there is nothing to test.",
+        _ => "No command template is set, so there is nothing to test.",
+    })
+}
+
+/// Hint for a probe that hit [`TEST_TIMEOUT`].
+const TIMEOUT_HINT: &str = "the host didn't answer in time. Check the VPN, firewall / security group, the port, or the jump host";
+
+/// Run a connection's kind-specific headless probe (no authorization — the
+/// callers check it). `warn_key_perms` stays `None`: the HTTP handlers overlay
+/// it uniformly for every probe path.
+pub(crate) async fn probe(conn: &Connection, secret: Option<&str>) -> Result<TestConnectionResp> {
+    let warn_key_perms = None;
+    if let Some(message) = missing_target(conn) {
+        return Ok(TestConnectionResp {
+            ok: false,
+            latency_ms: None,
+            message: message.into(),
+            warn_argv: false,
+            warn_key_perms,
+            hint: None,
+        });
+    }
+    let (spec, warn_argv) = build_command(conn, secret)?;
+    let (spec, probe) = probe_spec(conn.kind, spec);
+    // ssh (the SSH kind, or a DB client run on a jump host) prints notices
+    // before its real error; pick the explanatory line + a fix hint.
+    let via_ssh = spec.program == "ssh";
+
+    let started = Instant::now();
+    let mut cmd = tokio::process::Command::new(&spec.program);
+    cmd.args(&spec.args)
+        .envs(spec.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok(TestConnectionResp {
+                ok: false,
+                latency_ms: None,
+                message: format!("failed to start {}: {e}", spec.program),
+                warn_argv,
+                warn_key_perms,
+                hint: (e.kind() == std::io::ErrorKind::NotFound).then(|| {
+                    format!(
+                        "`{}` isn't installed or isn't on the daemon's PATH",
+                        spec.program
+                    )
+                }),
+            });
+        }
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Some(probe) = probe {
+            let _ = stdin.write_all(probe).await;
+        }
+        drop(stdin); // EOF so the client exits after the probe.
+    }
+
+    match tokio::time::timeout(TEST_TIMEOUT, child.wait_with_output()).await {
+        Err(_) => Ok(TestConnectionResp {
+            ok: false,
+            latency_ms: Some(TEST_TIMEOUT.as_millis() as u64),
+            message: format!("timed out after {}s", TEST_TIMEOUT.as_secs()),
+            warn_argv,
+            warn_key_perms,
+            hint: Some(TIMEOUT_HINT.into()),
+        }),
+        Ok(Err(e)) => Ok(TestConnectionResp {
+            ok: false,
+            latency_ms: None,
+            message: format!("process error: {e}"),
+            warn_argv,
+            warn_key_perms,
+            hint: None,
+        }),
+        Ok(Ok(output)) => {
+            let latency_ms = started.elapsed().as_millis() as u64;
+            if output.status.success() {
+                return Ok(TestConnectionResp {
+                    ok: true,
+                    latency_ms: Some(latency_ms),
+                    message: "ok".into(),
+                    warn_argv,
+                    warn_key_perms,
+                    hint: None,
+                });
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let (line, hint) = if via_ssh {
+                let d = otto_ssh::diagnose_ssh_stderr(&stderr);
+                (d.line, d.hint.map(str::to_string))
+            } else {
+                let first = stderr
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                (first, None)
+            };
+            let message = if line.is_empty() {
+                format!("exited with {}", output.status)
+            } else {
+                // Keep the real driver error, but scrub any password a client
+                // might echo (mongo `user:pass@`, `--password x`).
+                redact_secrets(&line)
+            };
+            Ok(TestConnectionResp {
+                ok: false,
+                latency_ms: Some(latency_ms),
+                message,
+                warn_argv,
+                warn_key_perms,
+                hint,
+            })
         }
     }
 }
@@ -835,4 +955,176 @@ fn needs_credential_migration(conn: &Connection) -> bool {
                     Ok(None)
                 )
             })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// In-memory Keychain stand-in that records every key it holds.
+    #[derive(Default)]
+    struct MemSecrets(Mutex<HashMap<String, String>>);
+    impl SecretStore for MemSecrets {
+        fn put(&self, key: &str, value: &str) -> Result<()> {
+            self.0.lock().unwrap().insert(key.into(), value.into());
+            Ok(())
+        }
+        fn get(&self, key: &str) -> Result<Option<String>> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
+        }
+        fn delete(&self, key: &str) -> Result<()> {
+            self.0.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    struct Fixture {
+        root_dir: std::path::PathBuf,
+        svc: ConnectionsService,
+        repo: ConnectionsRepo,
+        secrets: Arc<MemSecrets>,
+        root: Id,
+        member: Id,
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root_dir);
+        }
+    }
+
+    async fn fixture() -> Fixture {
+        let root_dir = std::env::temp_dir().join(format!("otto-conn-svc-{}", otto_core::new_id()));
+        std::fs::create_dir(&root_dir).unwrap();
+        let pool = otto_state::DbPool::from(
+            sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(
+                    sqlx::sqlite::SqliteConnectOptions::new()
+                        .filename(root_dir.join("svc.db"))
+                        .create_if_missing(true)
+                        .foreign_keys(true),
+                )
+                .await
+                .unwrap(),
+        );
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
+        let mut ids = Vec::new();
+        for is_root in [1, 0] {
+            let id = otto_core::new_id();
+            sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,disabled,created_at) VALUES(?,?, 'hash','Fixture',?,0,strftime('%Y-%m-%dT%H:%M:%fZ','now'))")
+                .bind(&id).bind(&id).bind(is_root).execute(&pool).await.unwrap();
+            ids.push(id);
+        }
+        let secrets = Arc::new(MemSecrets::default());
+        let repo = ConnectionsRepo::new(pool.clone());
+        let svc = ConnectionsService::new(
+            ConnectionsRepo::new(pool.clone()),
+            ConnectionSectionsRepo::new(pool),
+            secrets.clone(),
+        );
+        Fixture {
+            root_dir,
+            svc,
+            repo,
+            secrets,
+            member: ids.pop().unwrap(),
+            root: ids.pop().unwrap(),
+        }
+    }
+
+    /// A profile with no host only opens a local shell — testing it must not
+    /// report a green "ok" for something that never touched the network.
+    #[tokio::test]
+    async fn probe_without_a_target_says_what_is_missing() {
+        for (kind, params) in [
+            (ConnectionKind::Ssh, serde_json::json!({"user":"me"})),
+            (ConnectionKind::Mysql, serde_json::json!({"host":"  "})),
+            (ConnectionKind::Mongodb, serde_json::json!({})),
+        ] {
+            let resp = probe(&transient_connection(kind, params), None)
+                .await
+                .unwrap();
+            assert!(!resp.ok, "{kind:?}");
+            assert!(resp.message.contains("nothing to test"), "{}", resp.message);
+            assert_eq!(resp.latency_ms, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn unsaved_test_is_root_only_ssh_only_and_validated() {
+        let f = fixture().await;
+        let ssh = serde_json::json!({"host":"build.example.com"});
+        assert!(matches!(
+            f.svc
+                .test_unsaved(&f.member, ConnectionKind::Ssh, ssh.clone())
+                .await,
+            Err(Error::Forbidden(_))
+        ));
+        assert!(matches!(
+            f.svc
+                .test_unsaved(&f.root, ConnectionKind::Mysql, ssh)
+                .await,
+            Err(Error::Invalid(_))
+        ));
+        // An option-like host is refused before any ssh process starts.
+        assert!(matches!(
+            f.svc
+                .test_unsaved(
+                    &f.root,
+                    ConnectionKind::Ssh,
+                    serde_json::json!({"host":"-oProxyCommand=touch /tmp/x"})
+                )
+                .await,
+            Err(Error::Invalid(_))
+        ));
+        let resp = f
+            .svc
+            .test_unsaved(&f.root, ConnectionKind::Ssh, serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(!resp.ok && resp.message.contains("No host"));
+    }
+
+    /// The legacy Mongo inline-password migration moves the credential to a
+    /// fresh Keychain key — and must not orphan the one it replaces.
+    #[tokio::test]
+    async fn mongo_password_migration_deletes_the_superseded_secret() {
+        let f = fixture().await;
+        let conn = f
+            .repo
+            .create(NewConnection {
+                workspace_id: None,
+                name: "legacy".into(),
+                kind: ConnectionKind::Mongodb,
+                params: serde_json::json!({"conn_string":"mongodb://app:inline-pw@m1:27017/db"}),
+                secret_ref: Some("conn-legacy-old".into()),
+                first_command: None,
+                section_id: None,
+                environment: Default::default(),
+                read_only: false,
+                created_by: f.root.clone(),
+            })
+            .await
+            .unwrap();
+        f.secrets.put("conn-legacy-old", "stale-pw").unwrap();
+
+        let migrated = f.svc.get(&conn.id).await.unwrap();
+        let new_ref = migrated.secret_ref.clone().unwrap();
+        assert_ne!(new_ref, "conn-legacy-old");
+        assert!(!migrated.params["conn_string"]
+            .as_str()
+            .unwrap()
+            .contains("inline-pw"));
+        let held = f.secrets.0.lock().unwrap().clone();
+        assert_eq!(held.get(&new_ref).map(String::as_str), Some("inline-pw"));
+        assert!(
+            !held.contains_key("conn-legacy-old"),
+            "superseded secret must be removed: {held:?}"
+        );
+    }
 }

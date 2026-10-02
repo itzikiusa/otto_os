@@ -442,6 +442,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/connections/{id}/open" || p == "/connections/{id}/test" {
         return Require(Connections, Edit);
     }
+    if p == "/connections/unsaved/test" {
+        // SSH test-before-save (form "Test"): dials the unsaved host, same trust
+        // as saving the profile; the handler additionally requires root.
+        return Require(Connections, Edit);
+    }
     if p == "/connections/{id}/pin" {
         // Toggle pin/recency-order — Edit tier (personal preference, not admin).
         return Require(Connections, Edit);
@@ -1743,6 +1748,10 @@ mod tests {
     fn connection_open_is_edit() {
         assert_eq!(
             pol(Method::POST, "/api/v1/connections/{id}/open"),
+            Require(Connections, Edit)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/connections/unsaved/test"),
             Require(Connections, Edit)
         );
         assert_eq!(
