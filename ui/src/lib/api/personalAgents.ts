@@ -72,7 +72,7 @@ export const personalAgentsApi = {
   rooms: (ws: string) => api.get<AgentRoomWithMembers[]>(`/workspaces/${ws}/agent-rooms`),
   createRoom: (ws: string, name: string) =>
     api.post<AgentRoom>(`/workspaces/${ws}/agent-rooms`, { name }),
-  getRoom: (id: string) => api.get<AgentRoomWithMembers>(`/agent-rooms/${id}`),
+  getRoom: (id: string) => api.get<Pick<AgentRoomWithMembers, 'room' | 'members'>>(`/agent-rooms/${id}`),
   renameRoom: (id: string, name: string) => api.patch<AgentRoom>(`/agent-rooms/${id}`, { name }),
   deleteRoom: (id: string) => api.del<{ ok: boolean }>(`/agent-rooms/${id}`),
   addMember: (roomId: string, agentId: string) =>

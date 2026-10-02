@@ -5,6 +5,7 @@ pub mod adapter;
 pub mod attach_guard;
 pub mod bridge;
 pub mod email;
+pub mod health;
 pub mod http;
 pub mod improve_notify;
 pub mod manager;

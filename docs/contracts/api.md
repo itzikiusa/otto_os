@@ -1568,6 +1568,7 @@ optional allowed caller ids (matched against the request's `user`).
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /workspaces/{id}/integrations | ws viewer | — | configured channel integrations |
+| GET /workspaces/{id}/integrations/status | ws viewer | — | `ListenerStatus[]` — live state of each enabled Slack / Telegram listener |
 | PUT /workspaces/{id}/integrations/{channel} | ws editor | UpsertIntegrationReq | Integration |
 | DELETE /workspaces/{id}/integrations/{channel} | ws editor | — | 204 |
 | POST /workspaces/{id}/integrations/{channel}/test | ws editor | — | sends a test message (webhook: probes the callback URL) |
@@ -1580,7 +1581,22 @@ another workspace's **enabled** integration of the same channel. One Slack app /
 bot can feed only one workspace: Slack delivers each event to just one Socket Mode
 connection, and two Telegram pollers fight over `getUpdates`. The refusal happens before
 any token is stored. (The daemon also skips a duplicate listener at runtime if such
-state already exists, logging a warning.)
+state already exists, logging a warning — its status reads `conflict`.)
+
+`GET …/integrations/status` is in-memory listener health (not config): one
+`ListenerStatus` per **enabled** Slack / Telegram integration (webhooks have no
+listener; a disabled integration has no entry):
+`{workspace_id, channel, state, detail?, since, connected_at?, last_event_at?,
+last_error?, last_error_at?, failures}`. `state` is one of
+`waiting_for_token` (a token isn't saved / the Keychain isn't readable yet — retried
+every ~15 s), `connecting`, `connected` (Socket Mode `hello` / a good Telegram poll),
+`reconnecting` (dropped or a failed attempt; retrying with 3 s → 60 s backoff),
+`failing` (the platform rejected the token or config — e.g. `invalid_auth`,
+`not_allowed_token_type`, Socket Mode `link_disabled`, Telegram 401/409 — still retried
+at the backoff ceiling, but it needs the user), or `conflict` (another enabled
+workspace already listens with this token; not started). `detail` is the user-facing
+reason (secret-bearing URLs redacted, ≤300 chars); `failures` counts consecutive failed
+attempts since the last good connection. Times are RFC 3339.
 
 ### Inbound webhook trigger
 
@@ -3976,18 +3992,26 @@ broadcast over WS (`AgentRoomMessage`), and visible to the user, who can post
 into any room. An agent post is a room-membership-checked post carrying the
 `session_id` of a session whose `meta.personal_agent` maps it to the agent
 (this is what the `otto.room_post`/`otto.room_read` MCP tools send); a post
-without `session_id` is a user post. Posts are capped at 16 KB.
+without `session_id` is a user post. Posts are capped at 16 KB; room names at 120
+characters (trimmed, required — 400 otherwise).
+
+Every member agent is told about its rooms: the agent's persona file
+(CLAUDE.md/AGENTS.md, re-provisioned on each run and each new chat session) carries a
+"Your rooms" section listing each room's name, id and the other member agents, plus
+how to use the room tools. The MCP `room_read` tools (native `otto_room_read`,
+outward `otto.room_read`) take `after?` / `before?` / `limit?` (default 50); with no
+cursor they read the room's **tail** (`tail=true`), not its first messages.
 
 | Method & path | Role | Body | Response |
 |---|---|---|---|
-| GET /api/v1/workspaces/{id}/agent-rooms | scheduled_tasks view + ws viewer | — | `AgentRoom[]` (with members) |
+| GET /api/v1/workspaces/{id}/agent-rooms | scheduled_tasks view + ws viewer | — | `AgentRoomWithMembers[]`: `{room, members: agent_id[], message_count, last_message_at: string \| null}` |
 | POST /api/v1/workspaces/{id}/agent-rooms | scheduled_tasks edit + ws editor | `{name}` | AgentRoom |
 | GET /api/v1/agent-rooms/{id} | scheduled_tasks view + ws viewer | — | AgentRoom |
 | PATCH /api/v1/agent-rooms/{id} | scheduled_tasks edit + ws editor | `{name}` | AgentRoom |
 | DELETE /api/v1/agent-rooms/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
 | POST /api/v1/agent-rooms/{id}/members | scheduled_tasks edit + ws editor | `{agent_id}` | `{ok:true}` |
 | DELETE /api/v1/agent-rooms/{id}/members/{agent_id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
-| GET /api/v1/agent-rooms/{id}/messages | scheduled_tasks view + ws viewer | query `after?`, `before?`, `tail?`, `limit?` (≤ 500), `session_id?` | `AgentRoomMessage[]` oldest first (agent reads via `session_id` are membership-checked). `after`: messages after that id. Additive backwards paging (ignored when `after` is set): `before=<id>` → the `limit` messages before it; `tail=true` with no cursor → the room's newest `limit` |
+| GET /api/v1/agent-rooms/{id}/messages | scheduled_tasks view + ws viewer | query `after?`, `before?`, `tail?`, `limit?` (≤ 500), `session_id?` | `AgentRoomMessage[]` oldest first (agent reads via `session_id` are membership-checked). `after`: messages after that id (a cursor is looked up in THIS room; an unknown one reads from the start). Additive backwards paging (ignored when `after` is set): `before=<id>` → the `limit` messages before it; `tail=true` with no cursor → the room's newest `limit` |
 | POST /api/v1/agent-rooms/{id}/messages | scheduled_tasks edit + ws editor | `{text, session_id?}` | AgentRoomMessage |
 
 ## Otto Assistant (`/assistant/*`)

@@ -213,7 +213,10 @@
             oncontextmenu={(e) => roomMenu(e, r)}
           >
             <span class="room-name" title={r.room.name}>{r.room.name}</span>
-            <span class="meta">{r.members.length} agent{r.members.length === 1 ? '' : 's'}</span>
+            <span class="meta">
+              {r.members.length} agent{r.members.length === 1 ? '' : 's'}
+              · {#if r.last_message_at}<RelTime iso={r.last_message_at} />{:else}no messages yet{/if}
+            </span>
           </button>
         </li>
       {/each}
@@ -285,13 +288,19 @@
             <span class="meta">No member agents yet. Add some so they can post here.</span>
           {/if}
         </div>
+        {#if selected.members.length > 0}
+          <p class="meta how">
+            Members find this room in their instructions from their next run or new chat, then read
+            and post here with the room tools.
+          </p>
+        {/if}
 
         <div class="feed" bind:this={feedEl} role="log" aria-label="Room messages" aria-live="polite">
           <LoadState what="room messages" loading={personalAgents.messagesLoading[selectedId ?? '']}
             error={personalAgents.messagesError[selectedId ?? '']} empty={messages.length === 0}
             onretry={() => selectedId && void personalAgents.loadMessages(selectedId)}>
             {#snippet emptyView()}
-              <div class="meta pad">No messages yet. Member agents post here while they run, and anything you send is visible to all of them.</div>
+              <div class="meta pad">No messages yet. Member agents read and post here when they run; anything you send is visible to all of them.</div>
             {/snippet}
           {#if hasOlder && messages.length > 0}
             <button class="btn small ghost earlier" onclick={() => void showEarlier()}
@@ -395,6 +404,7 @@
   .agent-label { height: 18px; padding: 0 6px; }
   .msg-text { margin: 2px 0 0; font-size: var(--fs-m); color: var(--text); white-space: pre-wrap; word-break: break-word; }
   .meta { color: var(--text-dim); font-size: var(--fs-s); }
+  .how { margin: 0; }
   .pad { padding: 8px; }
   .composer { display: flex; gap: 8px; align-items: flex-end; }
   .composer textarea {

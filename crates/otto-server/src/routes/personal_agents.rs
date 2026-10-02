@@ -41,6 +41,23 @@ use crate::state::ServerCtx;
 
 /// Max bytes for one room message (agent AND user posts).
 pub const MAX_ROOM_POST_BYTES: usize = 16 * 1024;
+/// Max characters in a room name (it is shown in lists, headers and every
+/// member agent's instructions).
+pub const MAX_ROOM_NAME_CHARS: usize = 120;
+
+/// Trimmed, non-empty, length-capped room name.
+fn room_name(raw: &str) -> Result<&str, ApiError> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err(ApiError(Error::Invalid("name is required".into())));
+    }
+    if name.chars().count() > MAX_ROOM_NAME_CHARS {
+        return Err(ApiError(Error::Invalid(format!(
+            "room name is longer than {MAX_ROOM_NAME_CHARS} characters"
+        ))));
+    }
+    Ok(name)
+}
 
 pub fn routes() -> Router<ServerCtx> {
     Router::new()
@@ -651,7 +668,9 @@ async fn chat_session(
 
 // --- Rooms ------------------------------------------------------------------
 
-/// `GET /workspaces/{id}/agent-rooms` — each room with its member agent ids.
+/// `GET /workspaces/{id}/agent-rooms` — each room with its member agent ids
+/// and its activity (`message_count`, `last_message_at`). Three queries for
+/// the whole list (rooms, members, activity), not one per room.
 async fn list_rooms(
     Path(ws_id): Path<String>,
     State(ctx): State<ServerCtx>,
@@ -659,11 +678,21 @@ async fn list_rooms(
 ) -> ApiResult<Json<Vec<Value>>> {
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Viewer).await?;
     let repo = rooms(&ctx);
-    let mut out = Vec::new();
-    for room in repo.list_by_workspace(&ws_id).await.map_err(ApiError)? {
-        let members = repo.list_members(&room.id).await.unwrap_or_default();
-        out.push(json!({"room": room, "members": members}));
-    }
+    let list = repo.list_by_workspace(&ws_id).await.map_err(ApiError)?;
+    let mut members = repo.members_by_workspace(&ws_id).await.map_err(ApiError)?;
+    let activity = repo.activity_by_workspace(&ws_id).await.map_err(ApiError)?;
+    let out = list
+        .into_iter()
+        .map(|room| {
+            let act = activity.get(&room.id).cloned().unwrap_or_default();
+            json!({
+                "members": members.remove(&room.id).unwrap_or_default(),
+                "message_count": act.message_count,
+                "last_message_at": act.last_message_at,
+                "room": room,
+            })
+        })
+        .collect();
     Ok(Json(out))
 }
 
@@ -675,11 +704,9 @@ async fn create_room(
     Json(req): Json<RoomReq>,
 ) -> ApiResult<Json<AgentRoom>> {
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
-    if req.name.trim().is_empty() {
-        return Err(ApiError(Error::Invalid("name is required".into())));
-    }
+    let name = room_name(&req.name)?;
     rooms(&ctx)
-        .create(&ws_id, req.name.trim(), Some(&user.id))
+        .create(&ws_id, name, Some(&user.id))
         .await
         .map(Json)
         .map_err(ApiError)
@@ -708,13 +735,8 @@ async fn update_room(
     let repo = rooms(&ctx);
     let room = repo.get(&id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &room.workspace_id, WorkspaceRole::Editor).await?;
-    if req.name.trim().is_empty() {
-        return Err(ApiError(Error::Invalid("name is required".into())));
-    }
-    repo.rename(&id, req.name.trim())
-        .await
-        .map(Json)
-        .map_err(ApiError)
+    let name = room_name(&req.name)?;
+    repo.rename(&id, name).await.map(Json).map_err(ApiError)
 }
 
 /// `DELETE /agent-rooms/{id}`
@@ -1059,5 +1081,14 @@ mod tests {
     #[test]
     fn room_post_cap_is_16k() {
         assert_eq!(MAX_ROOM_POST_BYTES, 16 * 1024);
+    }
+
+    #[test]
+    fn room_names_are_trimmed_required_and_capped() {
+        assert_eq!(room_name("  Standup  ").unwrap(), "Standup");
+        assert!(room_name("   ").is_err());
+        let max = "é".repeat(MAX_ROOM_NAME_CHARS);
+        assert_eq!(room_name(&max).unwrap(), max, "the cap counts characters");
+        assert!(room_name(&format!("{max}x")).is_err());
     }
 }

@@ -7,7 +7,7 @@
   import { api, baseUrl } from '../../lib/api/client';
   import { auth } from '../../lib/stores/auth.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import type { Channel, Integration, UpsertIntegrationReq } from '../../lib/api/types';
+  import type { Channel, Integration, ListenerStatus, UpsertIntegrationReq } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -19,6 +19,10 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { agentProviders } from '../../lib/providers';
   import { copyTextOrThrow } from '../../lib/clipboard';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import RelTime from '../../lib/components/RelTime.svelte';
+  import { pollWhileVisible, type Poller } from '../../lib/poll';
+  import type { Tone } from '../../lib/status';
 
   // ---------------------------------------------------------------------------
   // State
@@ -28,6 +32,10 @@
   let loading = $state(false);
   let loadError = $state('');
   let testBusy: Channel | null = $state(null); // which channel is mid-test
+  // Live listener health (GET …/integrations/status) — is the bot actually
+  // connected, or silently reconnecting / rejected? Polled while visible.
+  let statuses: ListenerStatus[] = $state([]);
+  let statusPoll: Poller | null = null;
 
   // Agent CLIs offered in the per-channel picker: a channel reply needs a
   // reasoning agent, so exclude the `shell` pseudo-provider (from /meta).
@@ -107,6 +115,28 @@
     }
   });
 
+  $effect(() => {
+    const id = wsId;
+    if (!id) return;
+    statuses = [];
+    const p = pollWhileVisible(async (signal) => {
+      const list = await api.get<ListenerStatus[]>(`/workspaces/${id}/integrations/status`, signal);
+      if (wsId === id) statuses = list;
+    }, { ms: 10_000 });
+    statusPoll = p;
+    return () => {
+      p.stop();
+      if (statusPoll === p) statusPoll = null;
+    };
+  });
+
+  /** Re-read health soon after a config change (the daemon's supervisor
+   *  respawns listeners on its ~15 s rescan, so read again a bit later too). */
+  function refreshStatusSoon(): void {
+    statusPoll?.now({ background: true });
+    setTimeout(() => statusPoll?.now({ background: true }), 16_000);
+  }
+
   async function load(id: string): Promise<void> {
     loading = true;
     loadError = '';
@@ -169,6 +199,7 @@
         updated,
       ];
       editOpen = false;
+      refreshStatusSoon();
       toasts.success(
         `${channelLabel(editChannel)} integration saved`,
         updated.enabled ? 'Enabled' : 'Saved as disabled',
@@ -202,6 +233,7 @@
         body,
       );
       integrations = integrations.map((i) => (i.channel === updated.channel ? updated : i));
+      refreshStatusSoon();
     } catch (e) {
       toasts.error(`Couldn't ${intg.enabled ? 'disable' : 'enable'} ${channelLabel(intg.channel)}`, loadErrorText(e));
     }
@@ -267,6 +299,44 @@
   // Status line helpers
   // ---------------------------------------------------------------------------
 
+  interface Health {
+    tone: Tone;
+    label: string;
+    /** Why — shown under the card for anything that needs attention. */
+    detail?: string;
+    since?: string;
+    lastEvent?: string;
+  }
+
+  /** The listener-health badge for an ENABLED Slack/Telegram card (webhooks
+   *  have no listener; a disabled card shows nothing). */
+  function health(intg: Integration | null, channel: Channel): Health | null {
+    if (!intg?.enabled || !intg.has_bot_token || channel === 'webhook') return null;
+    const st = statuses.find((x) => x.channel === channel);
+    if (!st) return { tone: 'neutral', label: 'Starting…' };
+    const base = { since: st.since, lastEvent: st.last_event_at };
+    switch (st.state) {
+      case 'connected':
+        return { ...base, tone: 'success', label: 'Connected' };
+      case 'connecting':
+        return { ...base, tone: 'info', label: 'Connecting…' };
+      case 'reconnecting':
+        return { ...base, tone: 'warning', label: 'Reconnecting', detail: st.detail ?? st.last_error };
+      case 'failing':
+        return { ...base, tone: 'danger', label: 'Not connected', detail: st.detail ?? st.last_error };
+      case 'waiting_for_token':
+        return { ...base, tone: 'warning', label: 'Waiting for token', detail: st.detail };
+      case 'conflict':
+        return { ...base, tone: 'danger', label: 'Token in use', detail: st.detail };
+    }
+  }
+
+  /** Blank allowed users = anyone who can message the bot drives an agent on
+   *  this Mac. Webhooks are key-protected, so a blank caller list is fine. */
+  function openToEveryone(intg: Integration | null, channel: Channel): boolean {
+    return !!intg?.enabled && channel !== 'webhook' && intg.allowed_users.trim() === '';
+  }
+
   function statusLine(intg: Integration | null, channel: Channel): string {
     if (!intg || !intg.has_bot_token) return 'Not set up';
     const target = intg.channel_id
@@ -296,6 +366,7 @@
     <div class="channel-list">
       {#snippet channelCard(channel: Channel, intg: Integration | null, icon: IconName, label: string)}
         {@const configured = !!intg?.has_bot_token}
+        {@const h = health(intg, channel)}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="channel-card card"
@@ -313,8 +384,25 @@
             <Icon name={icon} size={16} />
           </div>
           <div class="grow">
-            <div class="ch-label">{label}</div>
+            <div class="ch-label-row">
+              <span class="ch-label">{label}</span>
+              {#if h}
+                <StatusBadge tone={h.tone} label={h.label} testid="channel-health-{channel}"
+                  title={h.detail ?? `${label} listener: ${h.label.toLowerCase()}`} />
+              {/if}
+              {#if openToEveryone(intg, channel)}
+                <StatusBadge tone="warning" label="Open to everyone" dot={false}
+                  title="No allowed users set: anyone who can message the bot can run an agent on this Mac. Edit to restrict it." />
+              {/if}
+            </div>
             <div class="ch-status" title={statusLine(intg, channel)}>{statusLine(intg, channel)}</div>
+            {#if h?.detail}
+              <div class="ch-health-detail tone-{h.tone}" role="status">
+                {h.detail}{#if h.since} <span class="dim">· since <RelTime iso={h.since} /></span>{/if}
+              </div>
+            {:else if h?.lastEvent && h.tone === 'success'}
+              <div class="ch-status">Last message <RelTime iso={h.lastEvent} /></div>
+            {/if}
           </div>
           <div class="ch-actions">
             {#if intg && configured}
@@ -494,9 +582,15 @@
           Comma-separated caller ids, matched against the <code>user</code> field in the POST body.
           Leave blank to allow everyone.
         {:else}
-          Comma-separated {channelLabel(editChannel)} user IDs. Leave blank to allow everyone.
+          Comma-separated {channelLabel(editChannel)} user IDs{editChannel === 'slack' ? ' (Profile → ⋯ → Copy member ID)' : ''}.
+          Leave blank to allow everyone.
         {/if}
       </span>
+      {#if editChannel !== 'webhook' && fAllowedUsers.trim() === ''}
+        <span class="hint warn" role="note">
+          Blank means anyone who can message the bot — in any {editChannel === 'slack' ? 'channel it’s in, or by DM' : 'chat it’s in'} — can run an agent on this Mac.
+        </span>
+      {/if}
     </div>
 
     <!-- Preferred CLI -->
@@ -586,6 +680,30 @@
   .ch-label {
     font-size: var(--fs-m);
     font-weight: 600;
+  }
+  .ch-label-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  .ch-health-detail {
+    font-size: var(--fs-s);
+    margin-top: 4px;
+    overflow-wrap: anywhere;
+  }
+  .ch-health-detail.tone-danger {
+    color: var(--danger);
+  }
+  .ch-health-detail.tone-warning {
+    color: var(--warning);
+  }
+  .ch-health-detail .dim {
+    color: var(--text-dim);
+  }
+  .hint.warn {
+    color: var(--warning);
   }
   .ch-status {
     font-size: var(--fs-s);
