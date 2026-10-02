@@ -789,6 +789,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         if p == "/mcp/policies" || p.starts_with("/mcp/policies/") {
             return Require(Mcp, Admin);
         }
+        // Auto-approve rules loosen the approval posture: reading them is View,
+        // every change is Admin (like policy writes).
+        if p == "/mcp/auto-approve" || p == "/mcp/auto-approve/{id}" {
+            return Require(Mcp, if get { View } else { Admin });
+        }
         // Posture-changing routes → Admin: outward-server config, policy
         // create/update/delete/import, and approval decisions (separation of
         // duties is additionally enforced in the handler).
@@ -2000,6 +2005,16 @@ mod tests {
         );
         assert_eq!(
             pol(Method::PATCH, "/api/v1/mcp/otto-server"),
+            Require(Mcp, Admin)
+        );
+        assert_eq!(pol(Method::GET, "/api/v1/mcp/auto-approve"), Require(Mcp, View));
+        assert_eq!(pol(Method::POST, "/api/v1/mcp/auto-approve"), Require(Mcp, Admin));
+        assert_eq!(
+            pol(Method::PATCH, "/api/v1/mcp/auto-approve/{id}"),
+            Require(Mcp, Admin)
+        );
+        assert_eq!(
+            pol(Method::DELETE, "/api/v1/mcp/auto-approve/{id}"),
             Require(Mcp, Admin)
         );
         assert_eq!(

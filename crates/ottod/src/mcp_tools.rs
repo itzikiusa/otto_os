@@ -41,14 +41,18 @@
 //! naming (`otto.create_pr` → `otto_create_pr`) and its calls are proxied
 //! through `POST /mcp/otto-tools/invoke` — the same allow-list → approval →
 //! audit choke point the outward server uses, so a mutating tool such as
-//! `otto_create_pr` still waits on a human approval. Native tools win by name
+//! `otto_create_pr` still waits on a human approval — unless an explicit
+//! auto-approve rule (MCP → Otto server → Auto-approve; global, this
+//! workspace, or this session) covers it, in which case it runs at once and is
+//! audited `auto_approved` (the envelope's `auto_approved_by` names the rule,
+//! passed through to the agent unchanged). Native tools win by name
 //! (see `governed_tools_for`), so what the control plane shows as enabled is
 //! what a session can call, with no second hand-maintained list to drift.
 //!
 //! The Design Hall WRITES (`otto_design_assist` — start an agent turn that
 //! commits a version, `otto_design_link` — file an explicit link) are
 //! deliberately NOT native: they exist only as that governed bridge, so they
-//! stay approval-gated (DANGEROUS) unless the operator exempts them, and no
+//! stay approval-gated (DANGEROUS) unless an auto-approve rule covers them, and no
 //! tool approves a design version (humans only).
 //!
 //! Beyond Otto's own data, the DB tools (`otto_list_connections`,

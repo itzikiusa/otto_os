@@ -334,6 +334,16 @@ pub fn protected_routes() -> Router<ServerCtx> {
             get(crate::mcp_outward::otto_server_status)
                 .patch(crate::mcp_outward::otto_server_config),
         )
+        // MCP auto-approve rules: the explicit opt-in under which a mutating
+        // otto.* tool skips the per-call approval (View reads, Admin writes).
+        .route(
+            "/mcp/auto-approve",
+            get(crate::mcp_auto_approve::list_rules).post(crate::mcp_auto_approve::create_rule),
+        )
+        .route(
+            "/mcp/auto-approve/{id}",
+            patch(crate::mcp_auto_approve::update_rule).delete(crate::mcp_auto_approve::delete_rule),
+        )
         // Streamable-HTTP MCP transport: external clients reach the otto.* tools
         // over HTTP here (no local stdio subprocess). Confined for kind='mcp'
         // tokens by the feature guard; per-token scope enforced in the handler.
