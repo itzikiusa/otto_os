@@ -3786,15 +3786,30 @@ its `workspace_id` (IDOR guard).
 - **notify on change** — `notify_on_change` delivers only when the report hash differs from the last ok run (else `run.skipped_delivery`).
 - **proof pack** — `attach_proof` builds a proof pack per run (`run.proof_pack_id`).
 
-`schedule` = `{cadence:"interval"|"daily"|"weekly"|"cron", every_min (≥5), at:"HH:MM",
-weekday:0..6, expr}`. `destination` =
+`schedule` = `{cadence:"interval"|"daily"|"weekly"|"cron"|"once", every_min (whole
+minutes, ≥5), at:"HH:MM", weekday:0..6, expr, run_at}`. A `cron` whose consecutive
+fires are under 5 minutes apart is rejected (400) like a short interval; `once` fires
+at `run_at` (RFC3339 or local `YYYY-MM-DDTHH:MM` in `timezone`). `destination` =
 `{type:"none"|"slack"|"telegram"|"email"|"webhook", chat_id?, to?, subject?, url?}`.
 A `ScheduledTask` carries `{…, provider, model, cwd, schedule, destination, enabled,
 timezone, workflow_id?, sandbox, max_retries, notify_on_change, attach_proof,
-last_run_at?, last_status?, next_run_at?, …}`. A `ScheduledTaskRun` carries `{…,
-status, trigger, started_at, finished_at?, summary, report_path?, report_rel?,
+last_run_at?, last_status?, next_run_at?, armed_at?, …}`. `armed_at` is when the
+schedule was last (re)armed — created, resumed (`enabled` false→true), or given a
+really different `schedule`/`timezone`: the scheduler never fires an occurrence from
+before it, so a resumed task does not catch up what it missed while paused, and a new
+`daily 09:00` created at 15:00 first fires tomorrow 09:00 (its `next_run_at`). A
+`once` whose `run_at` changes forgets that it fired. `last_status` reflects the latest
+run, manual included (manual runs never move the cursor). A `ScheduledTaskRun` carries `{…,
+status (running|ok|error|canceled), trigger, started_at, finished_at?, summary, report_path?, report_rel?,
 delivered, delivery_error?, error?, session_id?, report_hash?, proof_pack_id?,
-attempts, skipped_delivery, workflow_run_id?, created_at}`.
+attempts, skipped_delivery, workflow_run_id?, created_at}`. A failed run keeps what it
+produced: its `session_id` (open it to see why), a shell task's stdout/stderr as the
+report, a workflow hand-off's `workflow_run_id`; a canceled workflow hand-off is an
+`error` run. One run of a task at a time — a scheduled occurrence waits (cursor
+untouched) while a manual run is in flight, and vice versa (409). A `worktree`
+sandbox whose worktree can't be created in a git repo fails the run instead of
+running in the checkout. PATCHing a `workflow`-kind task's `workflow_id` to null is
+a 400.
 
 Persistence: `otto_state::scheduled_tasks` (migrations 0084 + 0086); scheduler:
 `otto_server::scheduled_tasks_scheduler` (60s tick, in-flight-guard-first,
@@ -3815,6 +3830,7 @@ redacted (`otto_core::redact`); webhook delivery is SSRF-guarded (`otto_netguard
 | 141 | POST /api/v1/scheduled-tasks/{id}/run | scheduled_tasks edit + ws editor | — | ScheduledTaskRun — the manual run, returned at once in `running` (it executes in the background; completion arrives as `scheduled_task_run_updated`, or poll the runs list). 409 while a run of the task is already in progress |
 | 142 | GET /api/v1/scheduled-tasks/{id}/runs | scheduled_tasks view + ws viewer | — | `ScheduledTaskRun[]` |
 | 143 | GET /api/v1/scheduled-tasks/runs/{run_id}/report | scheduled_tasks view + ws viewer | — | `text/markdown` (the stored report) |
+| 143a | POST /api/v1/scheduled-tasks/runs/{run_id}/cancel | scheduled_tasks edit + ws editor | — | `{ok:true}` — stop a `running` run: its agent session is killed (no retry), a shell task's process group is killed, a workflow hand-off's workflow run is cancelled; the run settles `canceled` (announced by `scheduled_task_run_updated`; a scheduled run still advances the cursor). `409` when the run isn't running |
 | 144 | POST /api/v1/scheduled-tasks/{id}/convert-to-workflow | scheduled_tasks edit + ws editor | `ConvertTaskReq {disable_task?}` | `ConvertTaskResp {workflow_id, trigger_id?}` |
 
 **Convert to workflow (#144)** materializes a scheduled task as a Workflow
@@ -3854,9 +3870,10 @@ writes) + the workspace-role axis on the agent's workspace.
 | DELETE /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
 | GET /api/v1/personal-agents/{id}/schedules | scheduled_tasks view + ws viewer | — | `PersonalAgentSchedule[]` |
 | POST /api/v1/personal-agents/{id}/schedules | scheduled_tasks edit + ws editor | `{schedule, timezone?, directive?, enabled?}` (cadence format identical to scheduled tasks, plus the one-shot `{cadence:"once", run_at}` — see "Otto Assistant" — which disables the schedule after its run) | PersonalAgentSchedule |
-| PATCH /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | `{schedule?, timezone?, directive?, enabled?}` | PersonalAgentSchedule |
+| PATCH /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | `{schedule?, timezone?, directive?, enabled?}` | PersonalAgentSchedule — resuming it, or a really different `schedule`/`timezone`, re-arms it (`armed_at`; missed occurrences are not caught up) and refreshes `next_run_at`; a `once` whose `run_at` changes forgets that it fired. Resuming the AGENT (`PATCH /personal-agents/{id}` `enabled` false→true) re-arms all its schedules |
 | DELETE /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
-| POST /api/v1/personal-agents/{id}/run | scheduled_tasks edit + ws editor | `{schedule_id?}` (default: first enabled schedule) | PersonalAgentRun — manual fire, returned at once in `running` (executes in the background; poll runs). 409 while a run of the agent is already in progress |
+| POST /api/v1/personal-agents/{id}/run | scheduled_tasks edit + ws editor | `{schedule_id?}` (default: first enabled schedule) | PersonalAgentRun — manual fire, returned at once in `running` (executes in the background; poll runs). 409 while a run of the agent — manual, delegated or scheduled — is already in progress (one run per agent at a time: its runs share a folder and memory; a due schedule waits, cursor untouched) |
+| POST /api/v1/personal-agents/runs/{run_id}/cancel | scheduled_tasks edit + ws editor | — | `{ok:true}` — stop a `running` run (its session is killed, no retry); it settles `canceled`. `409` when the run isn't running |
 | GET /api/v1/personal-agents/{id}/runs | scheduled_tasks view + ws viewer | — | `PersonalAgentRun[]` |
 | GET /api/v1/personal-agents/runs/{run_id}/report | scheduled_tasks view + ws viewer | — | `text/markdown` (the stored report; served by run id, path-canonicalized) |
 | POST /api/v1/personal-agents/{id}/chat-session | scheduled_tasks edit + ws editor | — | `{session_id}` — returns (creating if absent) the agent's single interactive chat session, pinned to its provider/model/persona cwd |

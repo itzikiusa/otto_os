@@ -54,6 +54,22 @@ last 100 runs; run updates stream over WS.
 Manual fire: **Run now** on the agent (or a specific schedule) →
 `POST /personal-agents/{id}/run`.
 
+**One run per agent at a time.** Every run of an agent works in the same folder
+and rewrites the same `memory/notes.md`, so scheduled, manual and delegated runs
+share one per-agent guard: a due schedule waits (its cursor untouched, so it fires
+on a later tick) while another run is going, and Run now answers 409. A failed run
+keeps its session linked (*Open session*) and its error and any delivery failure
+show inline on the run row. Each run's scratch report file is removed once read. A running run has **Stop…**
+(`POST /personal-agents/runs/{run_id}/cancel`): its session is killed (no retry)
+and it settles `canceled`.
+
+**Arming.** A schedule never fires an occurrence from before its `armed_at` — set
+on create, on resume (the schedule's or the whole agent's), and when its cadence or
+timezone really changes. Re-enabling an agent after a week therefore doesn't fire
+(and deliver) the week's missed recaps at once. A `once` schedule — the Assistant
+creates them; the schedule form now supports them too — fires again after its
+`run_at` is edited and it is re-enabled.
+
 ## 3. Chat anytime
 
 `POST /personal-agents/{id}/chat-session` returns (creating if absent) the

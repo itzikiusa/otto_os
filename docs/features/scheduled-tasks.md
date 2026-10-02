@@ -232,7 +232,16 @@ pattern so that editing the schedule can never clobber the cursor.
 | **`interval`** | `{ "cadence":"interval", "every_min": 60 }` | Drift-based: due when never run, or `now - last_run >= every_min`. `every_min` is floored to **5**. Naturally catch-up-safe. |
 | **`daily`** | `{ "cadence":"daily", "at":"03:00" }` | Due when `now >= today@at` **and** the task hasn't run since `today@at`. A missed window still fires at the next tick (`cli_update` catch-up comparison). |
 | **`weekly`** | `{ "cadence":"weekly", "at":"03:00", "weekday":4 }` | As daily, but only on the matching `weekday` (`0`=Mon … `6`=Sun; default Monday). |
-| **`cron`** | `{ "cadence":"cron", "expr":"0 9 * * 1" }` | Standard 5-field cron (min hour dom month dow; Vixie DOM-OR-DOW semantics), evaluated in the task's `timezone`. |
+| **`cron`** | `{ "cadence":"cron", "expr":"0 9 * * 1" }` | Standard 5-field cron (min hour dom month dow; Vixie DOM-OR-DOW semantics), evaluated in the task's `timezone`. Fires closer than 5 minutes apart are rejected, like a short interval. |
+| **`once`** | `{ "cadence":"once", "run_at":"2026-10-03T09:00" }` | Fires once `run_at` has passed (RFC3339, or a local wall time in `timezone`), never again. Editing `run_at` re-arms it. The edit form supports it (it used to load a `once` as an interval). |
+
+**Arming.** The due check never looks before the task's `armed_at` — set when the
+task is created, resumed after a pause, or given a really different cadence or
+timezone (saving the form with the same cadence doesn't count). So a resumed task
+does **not** fire what it missed while paused, and a new `daily 09:00` created at
+15:00 first runs tomorrow at 09:00 — the `next_run_at` its row shows. (Rows created
+before migration 0154 have no `armed_at` and keep the old catch-up behaviour until
+their next resume/edit.)
 
 `at` defaults to **09:00** and `weekday` to **0** (Monday). Daily/weekly/cron times
 are interpreted in the task's IANA **`timezone`** (default `UTC`), DST-correctly.
@@ -414,8 +423,18 @@ matching tick instead of polling.
 - Four delivery channels (Slack, Telegram, email, webhook) reusing Otto's existing,
   tested integrations — with **redaction on delivery** and SSRF-guarded webhooks.
 - Full management from UI, REST, and 7 governed `otto.*` MCP tools.
-- At-least-once execution with overlap protection (per-task in-flight guard) and a
-  startup reaper for interrupted runs.
+- At-least-once execution with overlap protection — one run per task at a time,
+  shared by the scheduler and **Run now** (a due occurrence waits while a manual run
+  is going; Run now answers 409 while any run is) — and a startup reaper for
+  interrupted runs.
+- **A failed run says why, inline**: the run row shows its error and any delivery
+  failure; the agent session stays linked (*Open session*), a shell task's
+  stdout/stderr is kept as the report, and a workflow hand-off keeps its workflow
+  run id. A canceled workflow hand-off is a failed run, not a success. The task's
+  status badge reflects the latest run, manual ones included.
+- **Convert to workflow** asks first and, by default, pauses the original task — the
+  new workflow's schedule trigger has the same cadence, so keeping both doubles every
+  run and delivery.
 - A built-in preset that makes the ticket-review example work out of the box.
 
 **Limitations**
@@ -429,7 +448,15 @@ matching tick instead of polling.
   task with no owner can only use the headless claude fallback (a non-claude
   provider with no owner fails the run loudly rather than silently running claude).
 - **`cwd` / worktree is not a security sandbox** (see §12) — the worktree isolates
-  the *git working tree*, not the filesystem.
+  the *git working tree*, not the filesystem. If the worktree can't be created in a
+  git repo the run fails rather than running in your checkout (a non-repo `cwd` still
+  runs in place).
+- **Stopping a run**: a running run row has **Stop…** (`POST
+  /scheduled-tasks/runs/{run_id}/cancel`). It kills the agent session (no retry), a
+  shell command's whole process group, or cancels the workflow run a hand-off
+  launched; the run settles `canceled` and nothing is delivered. (Killing the
+  session by hand instead counts as a failure, and the agent is retried per
+  `max_retries`.)
 - **Retry covers agent and shell runs**, not the workflow handoff (a workflow owns
   its own run/retry lifecycle).
 - **Workflow handoff is single-launch** — a `workflow` task launches one workflow

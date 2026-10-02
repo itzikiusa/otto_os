@@ -58,6 +58,11 @@ pub struct PersonalAgentSchedule {
     pub enabled: bool,
     pub last_run_at: Option<String>,
     pub next_run_at: Option<String>,
+    /// When the schedule was last (re)armed — created, resumed (it or its
+    /// agent), or given a new cadence/timezone. The due check never looks
+    /// before it. `None` on pre-0154 rows.
+    #[serde(default)]
+    pub armed_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -242,6 +247,7 @@ fn row_to_schedule(r: &sqlx::sqlite::SqliteRow) -> Result<PersonalAgentSchedule>
         enabled: r.get::<i64, _>("enabled") != 0,
         last_run_at: r.get("last_run_at"),
         next_run_at: r.get("next_run_at"),
+        armed_at: r.get("armed_at"),
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
     })
@@ -441,7 +447,8 @@ impl PersonalAgentsRepo {
         let now = fmt(Utc::now());
         sqlx::query(
             "INSERT INTO personal_agent_schedules (id, agent_id, schedule_json, timezone, \
-             directive, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             directive, enabled, created_at, updated_at, armed_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&s.agent_id)
@@ -450,6 +457,8 @@ impl PersonalAgentsRepo {
         .bind(&s.directive)
         .bind(s.enabled as i64)
         .bind(&now)
+        .bind(&now)
+        // Armed at creation: the first fire is the next one after now.
         .bind(&now)
         .execute(&self.pool)
         .await
@@ -534,6 +543,34 @@ impl PersonalAgentsRepo {
         Ok(())
     }
 
+    /// Re-arm one schedule at `at` (see `PersonalAgentSchedule::armed_at`);
+    /// `reset_once` also forgets a fired `once` (its cursor is the fired flag).
+    pub async fn rearm_schedule(&self, id: &str, at: &str, reset_once: bool) -> Result<()> {
+        sqlx::query(
+            "UPDATE personal_agent_schedules SET armed_at = ?, \
+             last_run_at = CASE WHEN ? THEN NULL ELSE last_run_at END WHERE id = ?",
+        )
+        .bind(at)
+        .bind(reset_once)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("rearm personal agent schedule"))?;
+        Ok(())
+    }
+
+    /// Re-arm every schedule of an agent at `at` — the agent was resumed, so
+    /// what its schedules missed while it was paused is not caught up.
+    pub async fn rearm_agent_schedules(&self, agent_id: &str, at: &str) -> Result<()> {
+        sqlx::query("UPDATE personal_agent_schedules SET armed_at = ? WHERE agent_id = ?")
+            .bind(at)
+            .bind(agent_id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("rearm personal agent schedules"))?;
+        Ok(())
+    }
+
     /// Advance a schedule's cursor + display field after a run completes.
     pub async fn set_schedule_runtime(
         &self,
@@ -578,10 +615,13 @@ impl PersonalAgentsRepo {
         self.get_run(&id).await
     }
 
+    /// Settle a run. A `None` session id keeps the one recorded when the
+    /// run's session opened — a failed run is when the user needs it most.
     pub async fn finish_run(&self, run_id: &str, f: FinishAgentRun) -> Result<()> {
         sqlx::query(
             "UPDATE personal_agent_runs SET status = ?, summary = ?, report_path = ?, \
-             report_rel = ?, delivered = ?, delivery_error = ?, error = ?, session_id = ?, \
+             report_rel = ?, delivered = ?, delivery_error = ?, error = ?, \
+             session_id = COALESCE(?, session_id), \
              report_hash = ?, attempts = ?, skipped_delivery = ?, finished_at = ? WHERE id = ?",
         )
         .bind(&f.status)
@@ -1031,6 +1071,73 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(repo.list_enabled_schedules().await.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn schedules_are_armed_at_creation_and_rearmable() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let repo = PersonalAgentsRepo::new(p.clone());
+        let a = repo.create(new_agent("ws1", "Recap")).await.unwrap();
+        let s = repo
+            .create_schedule(NewAgentSchedule {
+                agent_id: a.id.clone(),
+                schedule: json!({"cadence":"once","run_at":"2026-09-01T10:00:00Z"}),
+                timezone: "UTC".into(),
+                directive: "once".into(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        assert_eq!(s.armed_at.as_deref(), Some(s.created_at.as_str()));
+        repo.set_schedule_runtime(&s.id, Some("2026-09-01T10:00:05+00:00"), None)
+            .await
+            .unwrap();
+        repo.rearm_agent_schedules(&a.id, "2026-09-02T00:00:00+00:00")
+            .await
+            .unwrap();
+        let got = repo.get_schedule(&s.id).await.unwrap();
+        assert_eq!(got.armed_at.as_deref(), Some("2026-09-02T00:00:00+00:00"));
+        assert!(got.last_run_at.is_some(), "an agent resume keeps cursors");
+        repo.rearm_schedule(&s.id, "2026-09-03T00:00:00+00:00", true)
+            .await
+            .unwrap();
+        let got = repo.get_schedule(&s.id).await.unwrap();
+        assert!(
+            got.last_run_at.is_none(),
+            "a re-timed once forgets it fired"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_run_keeps_its_live_session() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let repo = PersonalAgentsRepo::new(p.clone());
+        let a = repo.create(new_agent("ws1", "Recap")).await.unwrap();
+        let r = repo
+            .create_run(NewAgentRun {
+                agent_id: a.id.clone(),
+                schedule_id: None,
+                workspace_id: "ws1".into(),
+                trigger: "manual".into(),
+            })
+            .await
+            .unwrap();
+        repo.set_run_session(&r.id, "sess-1").await.unwrap();
+        repo.finish_run(
+            &r.id,
+            FinishAgentRun {
+                status: "error".into(),
+                error: Some("agent run failed".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let got = repo.list_runs(&a.id, 1).await.unwrap().remove(0);
+        assert_eq!(got.status, "error");
+        assert_eq!(got.session_id.as_deref(), Some("sess-1"));
     }
 
     #[tokio::test]

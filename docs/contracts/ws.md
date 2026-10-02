@@ -987,11 +987,11 @@ blind timer.
 
 ```json
 { "type": "scheduled_task_run_updated", "workspace_id": "<Id>", "task_id": "<Id>",
-  "run_id": "<Id>", "status": "running|ok|error" }
+  "run_id": "<Id>", "status": "running|ok|error|canceled" }
 ```
 
 - Emitted by `otto_server::scheduled_tasks_engine` when a scheduled-task run
-  starts, finishes (`ok`), or errors.
+  starts, finishes (`ok`), errors, or is stopped from Otto (`canceled`).
 - Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
 - The Scheduled Tasks page re-fetches the task's run history on a matching tick
   instead of polling.
