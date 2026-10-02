@@ -50,9 +50,49 @@ classify restarts + churn vs previous snapshot  → k8s_events rows
 write ClickHouse → status row → WS k8s_monitor_cycle
 ```
 
-Rows older than the cluster's retention are dropped by the tables' TTL (the
-largest retention among enabled clusters). A cluster that keeps fewer days
-than that TTL is trimmed with a `DELETE` at most once a day, not per cycle.
+Each cycle is ONE insert per table (all pods' samples in a single NDJSON
+body, all events in another) — one part per cycle, so no `async_insert` is
+needed.
+
+### Storage: raw samples + rollups
+
+The dashboards never re-aggregate raw samples. ClickHouse materialized views
+fold every `k8s_samples` insert into pre-aggregated tiers, keyed by series
+(`cluster, namespace, workload, metric, pod, labels`) and storing
+`min / max / sum / count / last` per bucket:
+
+| table | what | kept |
+|---|---|---|
+| `k8s_samples` | raw scraped values | 2 days (short drill-downs only) |
+| `k8s_samples_1m` | 1-minute rollup | 2 days |
+| `k8s_samples_5m` | 5-minute rollup | 14 days |
+| `k8s_samples_1h` | 1-hour rollup | the retention (≤ 90 days) |
+| `k8s_latest` | last value per series (current memory, versions) | 1 day |
+| `k8s_pods_1h` | hourly pod inventory (Fleet filters, pod lists) | the retention |
+| `k8s_events` | classified restarts / churn / k8s events | the retention |
+
+Every read plans the **coarsest** tier that still gives the window 24
+buckets and divides the chart step: a 1 h window reads the minute tier, 6 h
+the 5-minute tier, 24 h and 7 d the hour tier; only windows under 24 minutes
+(or sub-minute chart steps) read raw rows. The window start snaps down to
+the tier's bucket and rates divide by the seconds actually covered, so a
+counter rate over a rollup equals the raw answer for the same range (the
+ClickHouse integration test checks every query on every tier against raw).
+Charts use steps aligned to the tiers (whole minutes, 5 minutes or hours),
+so `step_secs` in a response can be slightly larger than requested.
+
+The keeps above are capped by the cluster's `retention_days`; the hour tier,
+the pod inventory and events follow the largest retention among enabled
+clusters (the tables' TTL), and a cluster that keeps fewer days is trimmed
+with a `DELETE` at most once a day, not per cycle. Changing a TTL never
+rewrites existing parts.
+
+**Upgrading an existing install** is automatic: on the first collector start
+the rollup tables are created and back-filled from the raw rows already there
+(one `(cluster, day)` partition per statement, two ClickHouse threads), the
+views are created only after that — every collector loop waits on the same
+lock, so nothing is counted twice and an interrupted backfill simply reruns —
+and raw days older than 2 days are dropped.
 
 Status series written from the sweep alone: `restarts_total`, `ready`,
 `phase_running`, `mem_limit_bytes`, `cpu_request_millis`, `pod_age_seconds`.
@@ -113,8 +153,17 @@ and records nothing.
 
 Reads are cached per (cluster, window, namespace) and invalidated by the
 collector's cycle timestamp, so a tab switch or the watchdog's poll never
-re-runs ClickHouse aggregations for unchanged data. The queries behind the
-workloads table run concurrently.
+re-runs ClickHouse aggregations for unchanged data; Fleet answers are reused
+for 15 s and then until any collector writes again. Identical requests that
+arrive together (the Home box and an open Monitor page, two windows) run the
+ClickHouse queries once — the rest wait for that answer. The queries behind
+the workloads table run concurrently.
+
+The pages refresh on collection cycles, not on a timer: cycle events are
+coalesced to at most one refresh every 30 s however many clusters are
+monitored, nothing refreshes while the window is hidden (one refresh runs
+when it comes back), and a page that just opened does not re-load on the
+first event.
 
 
 - **Overview** (`#/kubernetes/monitor`): one card per cluster — health badge

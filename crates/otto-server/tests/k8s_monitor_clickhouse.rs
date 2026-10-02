@@ -637,7 +637,7 @@ async fn every_rollup_tier_matches_raw_on_the_same_range() {
         // A baseline-shaped range with an upper bound too.
         let raw_b = Span::between(Tier::Raw, start, Some(start + 7200), now);
         let roll_b = Span::between(tier, start, Some(start + 7200), now);
-        let cases: Vec<(&str, String, String)> = vec![
+        let mut cases: Vec<(&str, String, String)> = vec![
             (
                 "rates",
                 queries::request_rates_in(&raw, &cids, None),
@@ -750,7 +750,6 @@ async fn every_rollup_tier_matches_raw_on_the_same_range() {
                 fleet::requests_in(&roll, &all),
             ),
         ];
-        let mut cases = cases;
         for m in [
             fleet::SeriesMetric::Mem,
             fleet::SeriesMetric::Rps,
