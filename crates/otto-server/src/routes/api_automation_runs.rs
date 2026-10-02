@@ -2,12 +2,13 @@
 //! each completed step is saved before starting the next outbound request.
 use crate::{
     api_secrets,
-    auth::{require_ws_role, CurrentUser},
+    auth::{require_ws_role, CurrentAuthContext, CurrentUser},
     error::{ApiError, ApiResult},
     state::ServerCtx,
 };
 use axum::{
     extract::{Path, Query, State},
+    http::HeaderMap,
     Json,
 };
 use otto_core::{
@@ -56,6 +57,8 @@ pub async fn start(
     Path((wid, id)): Path<(Id, Id)>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
+    headers: HeaderMap,
     Json(options): Json<StartApiAutomationRunReq>,
 ) -> ApiResult<Json<ApiAutomationRun>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
@@ -69,7 +72,19 @@ pub async fn start(
     let (initial_vars, environment, env_secrets) =
         super::api_client::resolve_environment(&ctx, &api, &wid, options.environment_id.as_ref())
             .await?;
-    let mut secret_values: Vec<String> = env_secrets.into_values().collect();
+    let mut secret_values: Vec<String> = env_secrets.values().cloned().collect();
+    // An agent-started run keeps every stored secret on its bound host (see
+    // `run_step`); a person's run is theirs to aim.
+    let binding = super::api_client::is_agent_caller(&headers, &auth).then(|| {
+        super::api_client::StepSecretBinding {
+            env_vars: initial_vars.clone(),
+            env_blob: env_secrets.clone(),
+            secret_keys: environment
+                .as_ref()
+                .map(|env| env.secret_keys.clone())
+                .unwrap_or_default(),
+        }
+    });
     let mut requests = Vec::new();
     let mut snapshot = Vec::new();
     for step in &steps {
@@ -134,7 +149,7 @@ pub async fn start(
                     break 'rows;
                 }
                 let result = tokio::select! {
-                    result = super::api_client::run_step(&ctx, &api, &wid, step, &mut vars, Some(request.clone()), &run.created_by) => result,
+                    result = super::api_client::run_step(&ctx, &api, &wid, step, &mut vars, Some(request.clone()), &run.created_by, binding.as_ref()) => result,
                     _ = cancelled.changed() => {run.status = "cancelled".into(); break 'rows;}
                 };
                 let step_id = new_id();
@@ -145,12 +160,26 @@ pub async fn start(
                     serde_json::from_value(value.clone()).expect("same step shape after redaction");
                 // A correlated request history entry is retained for each completed
                 // step, including transport/script failures and dataset row index.
-                let _ = api.insert_history(NewApiHistory {
+                let inserted = api.insert_history(NewApiHistory {
                     workspace_id: wid.clone(), method: request.method.clone(), url: api_secrets::scrub_str(&request.url, &secret_values),
                     status: value.get("status").and_then(Value::as_i64), duration_ms: value.get("duration_ms").and_then(Value::as_i64),
                     request: json!({"source":"automation_run","automation_run_id":run.id,"automation_id":run.automation_id,"request_id":request.id,"dataset_row":row_idx,"step_result_id":step_id}),
                     response: value,
                 }).await;
+                // Live History refresh, like an interactive send. The row's
+                // `source` is the "automation_run" marker (no `{kind}` object),
+                // which the history projection files under "human".
+                if let Ok(entry) = inserted {
+                    let _ = ctx
+                        .events
+                        .send(otto_core::event::Event::ApiHistoryAppended {
+                            workspace_id: entry.workspace_id,
+                            entry_id: entry.id,
+                            source: "human".into(),
+                            session_id: None,
+                            request_id: Some(request.id.clone()),
+                        });
+                }
                 // Same runtime history retention as interactive runs — applied
                 // every PRUNE_EVERY steps and once at the end instead of per
                 // step (a settings read + DELETE scan per request). Pruning is

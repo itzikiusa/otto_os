@@ -1050,8 +1050,10 @@ the committed answer.
 
 ### `api_history_appended`
 
-Workspace-scoped. Emitted after a human Send or agent saved-request execution
-successfully appends an API-client history row. It carries identifiers and
+Workspace-scoped. Emitted after a human Send, an agent saved-request execution
+or an automation-run step successfully appends an API-client history row (an
+automation step's row is filed `source: "human"` — its stored `request.source`
+is the `"automation_run"` marker). It carries identifiers and
 source metadata only — never request fields, responses, credentials, or other
 secret values.
 

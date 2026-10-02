@@ -93,19 +93,41 @@ impl FallbackEngine {
         if let Some(body) = &self.static_body {
             return Ok(body.clone());
         }
-        let send = self.client.get(url).send();
-        let resp = tokio::time::timeout(Duration::from_secs(PAGE_TIMEOUT_SECS), send)
+        self.raw_html_within(url, Duration::from_secs(PAGE_TIMEOUT_SECS))
             .await
-            .map_err(|_| EngineError::Timeout(PAGE_TIMEOUT_SECS))?
+    }
+
+    /// [`Self::raw_html`] against an explicit WALL-CLOCK budget: one deadline
+    /// covers the response head and every body chunk, so a server trickling a
+    /// byte just under a per-read timeout can't hold the fetch (and a daemon
+    /// task) open far past [`PAGE_TIMEOUT_SECS`].
+    async fn raw_html_within(&self, url: &str, budget: Duration) -> Result<String, EngineError> {
+        let secs = budget.as_secs().max(1);
+        let deadline = tokio::time::Instant::now() + budget;
+        let send = self.client.get(url).send();
+        let resp = tokio::time::timeout_at(deadline, send)
+            .await
+            .map_err(|_| EngineError::Timeout(secs))?
             .map_err(|e| EngineError::Nav(e.to_string()))?;
+        if let Some(ct) = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+        {
+            if !is_page_content_type(ct) {
+                return Err(EngineError::Nav(format!(
+                    "not a web page ({}) — the reader shows HTML and text; download it instead",
+                    ct.split(';').next().unwrap_or(ct).trim()
+                )));
+            }
+        }
 
         let mut buf: Vec<u8> = Vec::new();
         let mut stream = resp.bytes_stream();
-        let deadline = Duration::from_secs(PAGE_TIMEOUT_SECS);
         loop {
-            let next = tokio::time::timeout(deadline, stream.next())
+            let next = tokio::time::timeout_at(deadline, stream.next())
                 .await
-                .map_err(|_| EngineError::Timeout(PAGE_TIMEOUT_SECS))?;
+                .map_err(|_| EngineError::Timeout(secs))?;
             let Some(chunk) = next else { break };
             let chunk = chunk.map_err(|e| EngineError::Nav(e.to_string()))?;
             if buf.len() + chunk.len() > PAGE_BYTE_CAP {
@@ -115,6 +137,39 @@ impl FallbackEngine {
         }
         Ok(String::from_utf8_lossy(&buf).into_owned())
     }
+}
+
+/// Validate a CSS selector exactly as both engines will parse it (each runs
+/// `scraper` over the settled DOM). Lets a caller reject a typo up front —
+/// before paying for a full navigation / JS render only to fail afterwards.
+pub fn check_selector(selector: &str) -> Result<(), String> {
+    if selector.trim().is_empty() {
+        return Err("selector is required".into());
+    }
+    Selector::parse(selector)
+        .map(|_| ())
+        .map_err(|e| format!("invalid CSS selector {selector:?}: {e:?}"))
+}
+
+/// Whether a response `Content-Type` is something the reader can show:
+/// HTML / XHTML / XML / JSON / any `text/*`. A PDF, image, archive or
+/// octet-stream decoded as text would only reach the page (and the agent
+/// reading it) as mojibake.
+pub(crate) fn is_page_content_type(content_type: &str) -> bool {
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    mime.is_empty()
+        || mime.starts_with("text/")
+        || matches!(
+            mime.as_str(),
+            "application/xhtml+xml" | "application/xml" | "application/json"
+        )
+        || mime.ends_with("+xml")
+        || mime.ends_with("+json")
 }
 
 impl Default for FallbackEngine {
@@ -648,6 +703,98 @@ mod tests {
         let url = format!("http://{addr}/huge");
         let err = engine.fetch_page(&url).await.unwrap_err();
         assert!(matches!(err, EngineError::TooLarge(cap) if cap == PAGE_BYTE_CAP));
+    }
+
+    /// Serve one canned response head, then trickle `trickle` body bytes one
+    /// per `gap` (forever when the client keeps reading).
+    async fn trickle_server(head: &'static str, gap: Duration) -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            if socket.write_all(head.as_bytes()).await.is_err() {
+                return;
+            }
+            loop {
+                tokio::time::sleep(gap).await;
+                if socket.write_all(b"a").await.is_err() {
+                    return;
+                }
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn raw_html_budget_is_wall_clock_not_per_chunk() {
+        // A byte every 100 ms never trips a per-read 400 ms timeout; the
+        // whole fetch must still end at the 400 ms budget.
+        let addr = trickle_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 100000\r\n\r\n",
+            Duration::from_millis(100),
+        )
+        .await;
+        let engine = FallbackEngine::new();
+        let started = std::time::Instant::now();
+        let err = engine
+            .raw_html_within(&format!("http://{addr}/slow"), Duration::from_millis(400))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EngineError::Timeout(_)), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn raw_html_refuses_binary_content_types() {
+        let addr = trickle_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nContent-Length: 4\r\n\r\n",
+            Duration::from_millis(10),
+        )
+        .await;
+        let err = FallbackEngine::new()
+            .fetch_page(&format!("http://{addr}/doc.pdf"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, EngineError::Nav(m) if m.contains("application/pdf")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn selectors_are_checked_before_any_fetch() {
+        assert!(check_selector("main article > p.lead").is_ok());
+        assert!(check_selector("a[href^='https']").is_ok());
+        assert!(check_selector("").is_err());
+        assert!(check_selector("div[").is_err());
+        assert!(check_selector("p:::nope").is_err());
+    }
+
+    #[test]
+    fn page_content_types() {
+        for ok in [
+            "text/html; charset=utf-8",
+            "TEXT/PLAIN",
+            "application/xhtml+xml",
+            "application/json",
+            "application/rss+xml",
+            "application/ld+json",
+            "",
+        ] {
+            assert!(is_page_content_type(ok), "{ok}");
+        }
+        for bad in [
+            "application/pdf",
+            "image/png",
+            "application/octet-stream",
+            "application/zip",
+            "video/mp4",
+        ] {
+            assert!(!is_page_content_type(bad), "{bad}");
+        }
     }
 
     #[tokio::test]

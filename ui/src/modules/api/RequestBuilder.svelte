@@ -591,10 +591,24 @@
   }
 
   // ⌘↵ send · ⌘S save (⌘T / ⌘D are claimed by the page via keyContext).
+  // Window-level, but SCOPED: only while focus is inside this builder's own
+  // surface — the API page for the full builder (or nothing focused at all),
+  // the right panel for the compact one. Otherwise ⌘S in a vault note or ⌘↵
+  // in a DB dialog would also save / SEND the API request, and with the page
+  // and the panel both mounted one keypress would send twice.
+  let rootEl = $state<HTMLDivElement>();
+  function ownsShortcut(): boolean {
+    if (!rootEl) return false;
+    const active = document.activeElement;
+    if (!active || active === document.body) return !compact;
+    const scope = (compact ? rootEl.closest('.panel') : rootEl.closest('.api-root')) ?? rootEl;
+    return scope.contains(active);
+  }
   function onDocKeydown(e: KeyboardEvent): void {
     if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || ui.overlayOpen) return;
+    if (e.defaultPrevented || (e.key !== 'Enter' && e.key !== 's') || !ownsShortcut()) return;
     if (e.key === 'Enter') { e.preventDefault(); send(); }
-    else if (e.key === 's') { e.preventDefault(); void save(); }
+    else { e.preventDefault(); void save(); }
   }
 
   function stopRequest(): void {
@@ -719,7 +733,7 @@
 
 <svelte:window onkeydown={onDocKeydown} />
 
-<div class="builder" class:compact>
+<div class="builder" class:compact bind:this={rootEl}>
   <div class="name-row">
       <input
         class="name-input"

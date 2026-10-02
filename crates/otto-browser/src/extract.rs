@@ -61,11 +61,15 @@ fn walk_markdown(node: NodeRef<'_, Node>, out: &mut String, skip: &[&str], depth
                 out.push(' ');
             } else if tag == "li" {
                 out.push_str("\n- ");
+            } else if matches!(tag, "td" | "th") && follows_cell(node) {
+                // Cells of one row stay on one line, separated — not run
+                // together ("NameAge").
+                out.push_str(" | ");
             }
             for child in node.children() {
                 walk_markdown(child, out, skip, depth + 1);
             }
-            if heading_level.is_some() || matches!(tag, "p" | "div" | "li" | "tr") {
+            if heading_level.is_some() || is_block(tag) {
                 out.push('\n');
             }
             if tag == "br" {
@@ -101,13 +105,62 @@ fn walk_html(node: NodeRef<'_, Node>, out: &mut String, skip: &[&str], depth: us
             out.push_str(tag);
             out.push('>');
         }
-        Node::Text(text) => out.push_str(text),
+        // Re-escape: the text node holds DECODED characters, and this output
+        // is parsed as HTML again — a tutorial's literal `&lt;div&gt;` must
+        // stay text, not turn into (and vanish as) markup.
+        Node::Text(text) => push_escaped(out, text),
         _ => {
             for child in node.children() {
                 walk_html(child, out, skip, depth + 1);
             }
         }
     }
+}
+
+/// Append `text` with the three HTML-significant characters escaped.
+fn push_escaped(out: &mut String, text: &str) {
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            other => out.push(other),
+        }
+    }
+}
+
+/// Block-level tags that end their own line in the markdown rendering.
+fn is_block(tag: &str) -> bool {
+    matches!(
+        tag,
+        "p" | "div"
+            | "li"
+            | "tr"
+            | "ul"
+            | "ol"
+            | "dl"
+            | "dt"
+            | "dd"
+            | "table"
+            | "section"
+            | "article"
+            | "main"
+            | "blockquote"
+            | "pre"
+            | "figure"
+            | "figcaption"
+            | "hr"
+    )
+}
+
+/// Whether a `<td>`/`<th>` has an earlier cell in the same row.
+fn follows_cell(node: NodeRef<'_, Node>) -> bool {
+    node.prev_siblings().any(|sibling| {
+        sibling
+            .value()
+            .as_element()
+            .is_some_and(|el| matches!(el.name(), "td" | "th"))
+    })
 }
 
 /// Collapse the ragged whitespace the tag walk leaves behind: trim each
@@ -165,6 +218,26 @@ mod tests {
         let cleaned = readability(html);
         let md = html_to_markdown(&cleaned);
         assert!(md.contains("## Headline") && md.contains("Paragraph text") && !md.contains("Nav"));
+    }
+
+    #[test]
+    fn escaped_markup_in_page_text_survives_readability() {
+        let html = "<body><p>Use &lt;div&gt;hi&lt;/div&gt; &amp; &lt;script&gt;x()&lt;/script&gt;</p></body>";
+        let md = html_to_markdown(&readability(html));
+        assert!(md.contains("<div>hi</div>"), "{md}");
+        assert!(md.contains("<script>x()</script>"), "{md}");
+        assert!(md.contains(" & "), "{md}");
+    }
+
+    #[test]
+    fn table_cells_stay_separated_and_blocks_break() {
+        let html =
+            "<table><tr><th>Name</th><th>Age</th></tr><tr><td>Ada</td><td>36</td></tr></table>\
+                    <blockquote>Quote</blockquote><section>Next</section>";
+        let md = html_to_markdown(html);
+        assert!(md.contains("Name | Age"), "{md}");
+        assert!(md.contains("Ada | 36"), "{md}");
+        assert!(md.contains("Quote\nNext"), "{md}");
     }
 
     #[test]
