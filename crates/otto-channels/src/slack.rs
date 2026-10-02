@@ -17,6 +17,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::adapter::{Adapter, Inbound};
 use crate::bridge::Bridge;
+use crate::health::Health;
 
 /// Strip a secret-bearing URL out of an error/log string. Slack's external-upload
 /// URL and the Socket Mode WSS URL carry single-use tickets in their query
@@ -109,6 +110,80 @@ fn build_download_client() -> reqwest::Client {
         .unwrap_or_default()
 }
 
+/// Longest `Retry-After` Otto honours from Slack before giving up on a call.
+const MAX_RETRY_AFTER_SECS: u64 = 120;
+
+/// Decode a Web API response into its JSON body, or an error naming `method`.
+/// An HTTP 429 becomes `slack <method>: ratelimited (retry after Ns)` with N
+/// from the `Retry-After` header — the mirror keys its back-off on
+/// `ratelimited` and reads the delay back with `mirror::retry_after_hint`, so a
+/// rate-limited final reply is re-posted instead of silently lost. (It used to
+/// surface as reqwest's generic "429 Too Many Requests" with no delay.)
+async fn api_json(resp: reqwest::Response, method: &str) -> anyhow::Result<serde_json::Value> {
+    if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let secs = retry_after_secs(
+            resp.headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+        );
+        anyhow::bail!("slack {method}: ratelimited (retry after {secs}s)");
+    }
+    let val: serde_json::Value = resp.error_for_status()?.json().await?;
+    if !val["ok"].as_bool().unwrap_or(false) {
+        let err = val["error"].as_str().unwrap_or("unknown");
+        anyhow::bail!("slack {method}: {err}");
+    }
+    Ok(val)
+}
+
+/// Parse a `Retry-After` header (delta-seconds); absent/garbled → 1 s, and
+/// capped at [`MAX_RETRY_AFTER_SECS`].
+fn retry_after_secs(header: Option<&str>) -> u64 {
+    header
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(1)
+        .clamp(1, MAX_RETRY_AFTER_SECS)
+}
+
+/// `apps.connections.open` errors that retrying can't fix: the app token is
+/// wrong, revoked, of the wrong type, or Socket Mode is off for the app. The
+/// listener keeps retrying (the user may fix the app in place), but health
+/// reports `Failing` with a hint instead of a hopeful "Reconnecting".
+fn is_permanent_open_error(code: &str) -> bool {
+    matches!(
+        code,
+        "invalid_auth"
+            | "not_authed"
+            | "account_inactive"
+            | "token_revoked"
+            | "token_expired"
+            | "not_allowed_token_type"
+            | "missing_scope"
+            | "no_permission"
+            | "app_missing_action_url"
+            | "two_factor_setup_required"
+    )
+}
+
+/// The user-facing sentence for a failed `apps.connections.open`.
+fn open_error_detail(code: &str) -> String {
+    match code {
+        "not_allowed_token_type" => {
+            "Slack rejected the app token: it isn't an app-level token. \
+            Paste the xapp-… token (Basic Information → App-Level Tokens), not the xoxb- bot token."
+                .to_string()
+        }
+        "missing_scope" | "no_permission" => "Slack rejected the app token: it lacks the \
+            connections:write scope. Regenerate it with connections:write."
+            .to_string(),
+        c if is_permanent_open_error(c) => format!(
+            "Slack rejected the app token ({c}). Check that Socket Mode is enabled for the app \
+             and paste a current xapp-… token."
+        ),
+        c => format!("Couldn't open a Socket Mode connection ({c})."),
+    }
+}
+
 // Regex-free mention strip: strips leading `<@Uxxxxxxx>` (and trailing space)
 // from Slack message text when the bot is mentioned.
 fn strip_mention(text: &str) -> &str {
@@ -187,14 +262,8 @@ impl Adapter for SlackAdapter {
             .header("Authorization", format!("Bearer {}", self.bot_token))
             .json(&body)
             .send()
-            .await?
-            .error_for_status()?;
-
-        let val: serde_json::Value = resp.json().await?;
-        if !val["ok"].as_bool().unwrap_or(false) {
-            let err = val["error"].as_str().unwrap_or("unknown").to_string();
-            return Err(anyhow::anyhow!("slack chat.postMessage: {err}"));
-        }
+            .await?;
+        let val = api_json(resp, "chat.postMessage").await?;
         let ts = val["ts"].as_str().unwrap_or("").to_string();
         Ok(ts)
     }
@@ -221,13 +290,8 @@ impl Adapter for SlackAdapter {
             .header("Authorization", format!("Bearer {}", self.bot_token))
             .json(&body)
             .send()
-            .await?
-            .error_for_status()?;
-        let val: serde_json::Value = resp.json().await?;
-        if !val["ok"].as_bool().unwrap_or(false) {
-            let err = val["error"].as_str().unwrap_or("unknown").to_string();
-            return Err(anyhow::anyhow!("slack chat.postMessage (formatted): {err}"));
-        }
+            .await?;
+        let val = api_json(resp, "chat.postMessage (formatted)").await?;
         Ok(val["ts"].as_str().unwrap_or("").to_string())
     }
 
@@ -244,14 +308,8 @@ impl Adapter for SlackAdapter {
             .header("Authorization", format!("Bearer {}", self.bot_token))
             .json(&body)
             .send()
-            .await?
-            .error_for_status()?;
-
-        let val: serde_json::Value = resp.json().await?;
-        if !val["ok"].as_bool().unwrap_or(false) {
-            let err = val["error"].as_str().unwrap_or("unknown").to_string();
-            return Err(anyhow::anyhow!("slack chat.update: {err}"));
-        }
+            .await?;
+        api_json(resp, "chat.update").await?;
         Ok(())
     }
 
@@ -383,13 +441,15 @@ impl SlackAdapter {
 // ---------------------------------------------------------------------------
 
 /// Open and maintain a Slack Socket Mode connection until `cancel` is set.
-/// Each inbound `message` event is forwarded to `bridge`.
+/// Each inbound `message` event is forwarded to `bridge`. Every connect /
+/// drop / failure is reported to `health` (Settings → Channels shows it).
 pub async fn run(
     integ: Integration,
     bot_token: String,
     app_token: String,
     bridge: Arc<Bridge>,
     cancel: Arc<AtomicBool>,
+    health: Health,
 ) {
     let http = build_http_client();
     // In-memory dedup set: keyed by "channel:ts".
@@ -406,9 +466,15 @@ pub async fn run(
 
         // --- Step 1: request a fresh WSS URL from apps.connections.open ---
         let wss_url = match open_socket_mode_connection(&http, &app_token).await {
-            Some(url) => url,
-            None => {
-                error!("slack: failed to open socket mode connection, retrying in {backoff_ms}ms");
+            Ok(url) => url,
+            Err(OpenError { detail, permanent }) => {
+                error!("slack: failed to open socket mode connection ({detail}), retrying in {backoff_ms}ms");
+                // A rejected token won't heal on a 3 s cadence: go straight
+                // to the ceiling instead of hammering Slack.
+                if permanent {
+                    backoff_ms = BACKOFF_MAX_MS;
+                }
+                health.failed(&detail, permanent);
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                 continue 'outer;
@@ -427,10 +493,9 @@ pub async fn run(
         let ws_stream = match dial {
             Ok(Ok((stream, _))) => stream,
             Ok(Err(e)) => {
-                error!(
-                    "slack: websocket connect failed: {}",
-                    redact_url(&e, &wss_url)
-                );
+                let why = redact_url(&e, &wss_url);
+                error!("slack: websocket connect failed: {why}");
+                health.failed(&format!("Socket Mode connect failed: {why}"), false);
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                 continue 'outer;
@@ -439,6 +504,13 @@ pub async fn run(
                 error!(
                     "slack: websocket connect timed out after {}s, retrying in {backoff_ms}ms",
                     WS_CONNECT_TIMEOUT.as_secs()
+                );
+                health.failed(
+                    &format!(
+                        "Socket Mode connect timed out after {}s (network down or Slack unreachable)",
+                        WS_CONNECT_TIMEOUT.as_secs()
+                    ),
+                    false,
                 );
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
@@ -451,7 +523,9 @@ pub async fn run(
         // --- Step 3: read frames ---
         let mut last_frame = std::time::Instant::now();
         let mut last_ping = std::time::Instant::now();
-        'inner: loop {
+        // The inner loop yields why it ended (health detail) and whether that
+        // was a failure (vs. Slack's routine `disconnect` refresh).
+        let (drop_reason, drop_failed): (String, bool) = 'inner: loop {
             if cancel.load(Ordering::Relaxed) {
                 debug!("slack listener stopping (cancel) in inner loop");
                 return;
@@ -464,13 +538,19 @@ pub async fn run(
                     "slack: no frames for {}s — connection presumed dead, reconnecting",
                     last_frame.elapsed().as_secs()
                 );
-                break 'inner;
+                break 'inner (
+                    format!(
+                        "No frames from Slack for {}s — connection presumed dead",
+                        last_frame.elapsed().as_secs()
+                    ),
+                    true,
+                );
             }
             if last_ping.elapsed() >= CLIENT_PING_INTERVAL {
                 last_ping = std::time::Instant::now();
                 if let Err(e) = send_frame(&mut sink, Message::Ping(Default::default())).await {
                     warn!("slack: probe ping failed ({e}), reconnecting");
-                    break 'inner;
+                    break 'inner (format!("Probe ping failed: {e}"), true);
                 }
             }
 
@@ -493,24 +573,27 @@ pub async fn run(
                     // be written means the socket is gone — reconnect.
                     if let Err(e) = send_frame(&mut sink, Message::Pong(data)).await {
                         warn!("slack: pong failed ({e}), reconnecting");
-                        break 'inner;
+                        break 'inner (format!("Pong failed: {e}"), true);
                     }
                     continue 'inner;
                 }
                 Some(Ok(Message::Close(_))) => {
                     info!("slack: server closed websocket, reconnecting");
-                    break 'inner;
+                    break 'inner ("Slack closed the connection".into(), true);
                 }
                 Some(Ok(_)) => continue 'inner, // binary / pong frames
                 // The backoff pause is taken ONCE, after the inner loop —
                 // sleeping here too doubled every reconnect delay.
                 Some(Err(e)) => {
                     error!("slack: websocket error: {e}, reconnecting");
-                    break 'inner;
+                    break 'inner (
+                        format!("WebSocket error: {}", redact_url(&e, &wss_url)),
+                        true,
+                    );
                 }
                 None => {
                     info!("slack: stream ended, reconnecting");
-                    break 'inner;
+                    break 'inner ("Connection ended".into(), true);
                 }
             };
 
@@ -528,10 +611,23 @@ pub async fn run(
                 "hello" => {
                     info!("slack: socket mode connected (hello received)");
                     backoff_ms = 3_000;
+                    health.connected();
                 }
                 "disconnect" => {
-                    info!("slack: disconnect requested by server, reconnecting");
-                    break 'inner;
+                    // Routine: Slack rotates Socket Mode connections every
+                    // few hours (`refresh_requested`), or `link_disabled`
+                    // when Socket Mode was switched off for the app.
+                    let reason = val["reason"].as_str().unwrap_or("unspecified");
+                    info!("slack: disconnect requested by server ({reason}), reconnecting");
+                    if reason == "link_disabled" {
+                        break 'inner (
+                            "Slack disabled Socket Mode for this app (link_disabled) — turn \
+                             Socket Mode back on in the app settings"
+                                .into(),
+                            true,
+                        );
+                    }
+                    break 'inner (format!("Slack asked to reconnect ({reason})"), false);
                 }
                 "events_api" => {
                     // Always ack immediately.
@@ -540,9 +636,10 @@ pub async fn run(
                         let ack = format!(r#"{{"envelope_id":"{envelope_id}"}}"#);
                         if let Err(e) = send_frame(&mut sink, Message::Text(ack)).await {
                             error!("slack: failed to send ack: {e}");
-                            break 'inner;
+                            break 'inner (format!("Event ack failed: {e}"), true);
                         }
                     }
+                    health.event();
 
                     // Dedup: build key from (channel, ts).
                     let event = &val["payload"]["event"];
@@ -583,53 +680,79 @@ pub async fn run(
                             let ack = format!(r#"{{"envelope_id":"{eid}"}}"#);
                             if let Err(e) = send_frame(&mut sink, Message::Text(ack)).await {
                                 error!("slack: failed to send ack: {e}");
-                                break 'inner;
+                                break 'inner (format!("Envelope ack failed: {e}"), true);
                             }
                         }
                     }
                     debug!("slack: unhandled envelope type '{other}', ignored");
                 }
             }
-        }
+        };
 
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        if drop_failed {
+            health.failed(&drop_reason, false);
+        } else {
+            health.reconnecting(&drop_reason);
+        }
         // Pause before reconnecting (exponential backoff, reset on successful hello).
         tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
         backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
     }
 }
 
-/// POST to `apps.connections.open` and return the WSS URL, or `None` on error.
-async fn open_socket_mode_connection(http: &reqwest::Client, app_token: &str) -> Option<String> {
-    let resp = match http
+/// Why `apps.connections.open` failed: a user-facing `detail`, and whether
+/// retrying can fix it (see [`is_permanent_open_error`]).
+struct OpenError {
+    detail: String,
+    permanent: bool,
+}
+
+/// POST to `apps.connections.open` and return the WSS URL.
+async fn open_socket_mode_connection(
+    http: &reqwest::Client,
+    app_token: &str,
+) -> Result<String, OpenError> {
+    let transient = |detail: String| OpenError {
+        detail,
+        permanent: false,
+    };
+    let resp = http
         .post("https://slack.com/api/apps.connections.open")
         .header("Authorization", format!("Bearer {app_token}"))
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body("")
         .send()
         .await
-    {
-        Ok(r) => r,
-        Err(e) => {
+        .map_err(|e| {
             error!("slack: apps.connections.open request failed: {e}");
-            return None;
-        }
-    };
-
-    let val: serde_json::Value = match resp.json().await {
-        Ok(v) => v,
-        Err(e) => {
-            error!("slack: apps.connections.open parse failed: {e}");
-            return None;
-        }
-    };
-
+            transient(format!("Couldn't reach Slack (apps.connections.open): {e}"))
+        })?;
+    if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err(transient(
+            "Slack rate-limited the Socket Mode connect (apps.connections.open)".into(),
+        ));
+    }
+    let val: serde_json::Value = resp.json().await.map_err(|e| {
+        error!("slack: apps.connections.open parse failed: {e}");
+        transient(format!(
+            "Unreadable reply from Slack (apps.connections.open): {e}"
+        ))
+    })?;
     if !val["ok"].as_bool().unwrap_or(false) {
         let err = val["error"].as_str().unwrap_or("unknown");
         error!("slack: apps.connections.open not ok: {err}");
-        return None;
+        return Err(OpenError {
+            detail: open_error_detail(err),
+            permanent: is_permanent_open_error(err),
+        });
     }
-
-    val["url"].as_str().map(|s| s.to_string())
+    val["url"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| transient("Slack returned no Socket Mode URL".into()))
 }
 
 /// Inspect a single `events_api` payload event and, if it is a user message,
@@ -702,6 +825,18 @@ async fn handle_event(
         .or_else(|| event["user"].as_str())
         .unwrap_or("")
         .to_string();
+
+    // The allowed-users gate runs HERE as well as in the bridge: before it,
+    // anyone who could message the bot made the daemon download up to 50 MB
+    // per attachment into the temp dir — only for the bridge to drop it.
+    if !crate::bridge::user_allowed(&integ.allowed_users, &user) {
+        info!(
+            event_type,
+            user = %user,
+            "slack: sender not in allowed_users, dropped before attachment download"
+        );
+        return;
+    }
 
     let raw_text = content["text"].as_str().unwrap_or("");
     let text = strip_mention(raw_text).to_string();
@@ -915,6 +1050,31 @@ mod tests {
         // A plain new message keys on its own ts, exactly as before.
         let plain = serde_json::json!({"channel": "C1", "ts": "1785255600.5", "text": "hi"});
         assert_eq!(dedup_ts(&plain), "1785255600.5");
+    }
+
+    #[test]
+    fn retry_after_is_parsed_and_capped() {
+        assert_eq!(retry_after_secs(Some("7")), 7);
+        assert_eq!(retry_after_secs(Some(" 30 ")), 30);
+        assert_eq!(retry_after_secs(None), 1, "no header → retry soon");
+        assert_eq!(retry_after_secs(Some("soon")), 1);
+        assert_eq!(retry_after_secs(Some("0")), 1);
+        assert_eq!(retry_after_secs(Some("86400")), MAX_RETRY_AFTER_SECS);
+    }
+
+    #[test]
+    fn rejected_app_tokens_are_reported_as_failing_with_a_fix() {
+        for code in ["invalid_auth", "token_revoked", "not_allowed_token_type"] {
+            assert!(is_permanent_open_error(code), "{code}");
+        }
+        // Transport-ish / server-side codes are worth retrying quietly.
+        for code in ["internal_error", "ratelimited", "fatal_error", "unknown"] {
+            assert!(!is_permanent_open_error(code), "{code}");
+        }
+        assert!(open_error_detail("not_allowed_token_type").contains("xapp-"));
+        assert!(open_error_detail("missing_scope").contains("connections:write"));
+        assert!(open_error_detail("invalid_auth").contains("invalid_auth"));
+        assert!(open_error_detail("internal_error").contains("internal_error"));
     }
 
     #[test]

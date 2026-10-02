@@ -1501,6 +1501,7 @@ optional allowed caller ids (matched against the request's `user`).
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /workspaces/{id}/integrations | ws viewer | — | configured channel integrations |
+| GET /workspaces/{id}/integrations/status | ws viewer | — | `ListenerStatus[]` — live state of each enabled Slack / Telegram listener |
 | PUT /workspaces/{id}/integrations/{channel} | ws editor | UpsertIntegrationReq | Integration |
 | DELETE /workspaces/{id}/integrations/{channel} | ws editor | — | 204 |
 | POST /workspaces/{id}/integrations/{channel}/test | ws editor | — | sends a test message (webhook: probes the callback URL) |
@@ -1513,7 +1514,22 @@ another workspace's **enabled** integration of the same channel. One Slack app /
 bot can feed only one workspace: Slack delivers each event to just one Socket Mode
 connection, and two Telegram pollers fight over `getUpdates`. The refusal happens before
 any token is stored. (The daemon also skips a duplicate listener at runtime if such
-state already exists, logging a warning.)
+state already exists, logging a warning — its status reads `conflict`.)
+
+`GET …/integrations/status` is in-memory listener health (not config): one
+`ListenerStatus` per **enabled** Slack / Telegram integration (webhooks have no
+listener; a disabled integration has no entry):
+`{workspace_id, channel, state, detail?, since, connected_at?, last_event_at?,
+last_error?, last_error_at?, failures}`. `state` is one of
+`waiting_for_token` (a token isn't saved / the Keychain isn't readable yet — retried
+every ~15 s), `connecting`, `connected` (Socket Mode `hello` / a good Telegram poll),
+`reconnecting` (dropped or a failed attempt; retrying with 3 s → 60 s backoff),
+`failing` (the platform rejected the token or config — e.g. `invalid_auth`,
+`not_allowed_token_type`, Socket Mode `link_disabled`, Telegram 401/409 — still retried
+at the backoff ceiling, but it needs the user), or `conflict` (another enabled
+workspace already listens with this token; not started). `detail` is the user-facing
+reason (secret-bearing URLs redacted, ≤300 chars); `failures` counts consecutive failed
+attempts since the last good connection. Times are RFC 3339.
 
 ### Inbound webhook trigger
 

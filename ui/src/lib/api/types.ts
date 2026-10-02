@@ -3963,6 +3963,34 @@ export interface Integration {
   updated_at: string;
 }
 
+/** Live state of one Slack / Telegram inbound listener
+ *  (`GET /workspaces/{id}/integrations/status`). In-memory on the daemon:
+ *  only enabled, listener-backed integrations have an entry. */
+export type ListenerState =
+  | 'waiting_for_token'
+  | 'connecting'
+  | 'connected'
+  | 'reconnecting'
+  | 'failing'
+  | 'conflict';
+
+export interface ListenerStatus {
+  workspace_id: string;
+  channel: Channel;
+  state: ListenerState;
+  /** User-facing reason for `state` (an error, what's missing). */
+  detail?: string;
+  /** When the listener entered `state`. */
+  since: string;
+  connected_at?: string;
+  /** Last inbound event the listener received. */
+  last_event_at?: string;
+  last_error?: string;
+  last_error_at?: string;
+  /** Consecutive failed attempts since the last good connection. */
+  failures: number;
+}
+
 export interface UpsertIntegrationReq {
   enabled: boolean;
   bot_token?: string | null;   // omit/null to keep existing

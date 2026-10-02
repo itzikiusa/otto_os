@@ -850,15 +850,64 @@ async fn upload_file_path(
     }
 }
 
+/// Attempts for one final-reply post (the first try + retries).
+const REPLY_ATTEMPTS: u32 = 3;
+/// Wait before re-posting a rate-limited reply when the channel named no delay
+/// (Telegram's 429 carries none through the adapter).
+const REPLY_RETRY_DEFAULT: Duration = Duration::from_secs(5);
+/// Longest single wait honoured before re-posting a rate-limited reply.
+const REPLY_RETRY_MAX: Duration = Duration::from_secs(30);
+
+/// The delay a rate-limit error asks for — `… (retry after Ns)`, as the Slack
+/// adapter words an HTTP 429 with its `Retry-After`. `None` when absent.
+fn retry_after_hint(e: &anyhow::Error) -> Option<Duration> {
+    let s = e.to_string();
+    let rest = &s[s.find("retry after ")? + "retry after ".len()..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse::<u64>().ok().map(Duration::from_secs)
+}
+
+/// Send one reply message, re-posting it after a rate limit. The agent's
+/// final answer is the one message of the turn that matters, and it used to be
+/// tried once: a 429 (likely right after a busy feed's edits) dropped it with
+/// only a log line, leaving the thread on "done — N steps" and no answer. Only
+/// a rate limit is retried — the platform refused the post, so a retry can't
+/// duplicate it; a timeout might have landed and is not re-sent.
+async fn send_reply_with_retry(
+    adapter: &Arc<dyn Adapter>,
+    chat: &str,
+    thread: Option<&str>,
+    text: &str,
+) -> anyhow::Result<String> {
+    let mut attempt = 1;
+    loop {
+        match adapter.send_formatted(chat, thread, text).await {
+            Ok(id) => return Ok(id),
+            Err(e)
+                if attempt < REPLY_ATTEMPTS && classify_send_error(&e) == FeedSend::RateLimited =>
+            {
+                let wait = retry_after_hint(&e)
+                    .unwrap_or(REPLY_RETRY_DEFAULT)
+                    .min(REPLY_RETRY_MAX);
+                warn!("mirror reply rate-limited (attempt {attempt}), re-posting in {wait:?}: {e}");
+                tokio::time::sleep(wait).await;
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// Post one reply message to the channel via the adapter (the bot that received
 /// the message). Long replies post a short head + an `investigation.md` upload.
 /// Uses `send_formatted` so Slack mrkdwn and Telegram Markdown entities render
-/// (bold, italic, code, links) in the relayed agent reply.
+/// (bold, italic, code, links) in the relayed agent reply. Rate-limited posts
+/// are re-sent ([`send_reply_with_retry`]).
 async fn post_reply(adapter: &Arc<dyn Adapter>, chat: &str, thread: Option<&str>, text: &str) {
     if text.chars().count() > LONG_REPLY_THRESHOLD {
         let head = truncate_to_char_boundary(text, LONG_REPLY_HEAD_CHARS);
         let head_msg = format!("{head}\n\n📎 full reply attached as investigation.md");
-        if let Err(e) = adapter.send_formatted(chat, thread, &head_msg).await {
+        if let Err(e) = send_reply_with_retry(adapter, chat, thread, &head_msg).await {
             warn!("mirror final-head-send: {e}");
         }
         if let Err(e) = adapter
@@ -867,7 +916,7 @@ async fn post_reply(adapter: &Arc<dyn Adapter>, chat: &str, thread: Option<&str>
         {
             warn!("mirror upload: {e}");
         }
-    } else if let Err(e) = adapter.send_formatted(chat, thread, text).await {
+    } else if let Err(e) = send_reply_with_retry(adapter, chat, thread, text).await {
         warn!("mirror final-send: {e}");
     }
 }
@@ -875,6 +924,92 @@ async fn post_reply(adapter: &Arc<dyn Adapter>, chat: &str, thread: Option<&str>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fails `send_formatted` with each queued error, then succeeds.
+    struct FlakyAdapter {
+        errors: StdMutex<Vec<String>>,
+        calls: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for FlakyAdapter {
+        async fn send(&self, _c: &str, _t: Option<&str>, _x: &str) -> anyhow::Result<String> {
+            unreachable!("replies go through send_formatted")
+        }
+        async fn send_formatted(
+            &self,
+            _c: &str,
+            _t: Option<&str>,
+            _x: &str,
+        ) -> anyhow::Result<String> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let mut errs = self.errors.lock().unwrap();
+            if errs.is_empty() {
+                Ok("ts1".into())
+            } else {
+                Err(anyhow::anyhow!(errs.remove(0)))
+            }
+        }
+        async fn edit(&self, _c: &str, _m: &str, _x: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn channel(&self) -> Channel {
+            Channel::Slack
+        }
+    }
+
+    fn flaky(errors: &[&str]) -> Arc<FlakyAdapter> {
+        Arc::new(FlakyAdapter {
+            errors: StdMutex::new(errors.iter().map(|s| s.to_string()).collect()),
+            calls: std::sync::atomic::AtomicU32::new(0),
+        })
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_final_reply_is_re_posted() {
+        let a = flaky(&[
+            "slack chat.postMessage (formatted): ratelimited (retry after 0s)",
+            "slack chat.postMessage (formatted): ratelimited (retry after 0s)",
+        ]);
+        let dyn_a: Arc<dyn Adapter> = a.clone();
+        let id = send_reply_with_retry(&dyn_a, "C1", Some("1.2"), "the answer")
+            .await
+            .expect("delivered on the third attempt");
+        assert_eq!(id, "ts1");
+        assert_eq!(a.calls.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn retries_are_bounded_and_only_for_rate_limits() {
+        // Three 429s in a row: gives up after REPLY_ATTEMPTS.
+        let a = flaky(&["ratelimited (retry after 0s)"; 3]);
+        let dyn_a: Arc<dyn Adapter> = a.clone();
+        assert!(send_reply_with_retry(&dyn_a, "C1", None, "x")
+            .await
+            .is_err());
+        assert_eq!(a.calls.load(Ordering::Relaxed), REPLY_ATTEMPTS);
+        // A permanent error, or a timeout that may have landed, is not re-sent.
+        for err in [
+            "slack chat.postMessage: channel_not_found",
+            "error sending request: operation timed out",
+        ] {
+            let a = flaky(&[err]);
+            let dyn_a: Arc<dyn Adapter> = a.clone();
+            assert!(send_reply_with_retry(&dyn_a, "C1", None, "x")
+                .await
+                .is_err());
+            assert_eq!(a.calls.load(Ordering::Relaxed), 1, "{err}");
+        }
+    }
+
+    #[test]
+    fn retry_after_hint_reads_the_adapter_wording() {
+        let e = anyhow::anyhow!("slack chat.postMessage: ratelimited (retry after 7s)");
+        assert_eq!(retry_after_hint(&e), Some(Duration::from_secs(7)));
+        let e = anyhow::anyhow!("HTTP status client error (429 Too Many Requests)");
+        assert_eq!(retry_after_hint(&e), None);
+        assert_eq!(classify_send_error(&e), FeedSend::RateLimited);
+    }
 
     #[test]
     fn render_feed_short_is_verbatim() {
