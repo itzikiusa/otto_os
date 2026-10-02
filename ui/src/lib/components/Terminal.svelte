@@ -362,8 +362,25 @@
   // ~20–90 reconnect-per-second storm that left the terminal stuck "reconnecting".
   let connectedSid: string | null = null;
 
-  function scheduleReconnect(): void {
-    if (closedByUs || exitCode !== null || reconnectTimer) return;
+  /** The socket dropped right AFTER an `exit` frame. That is the daemon going
+   *  away, not the session ending on its own (a live socket outlives its
+   *  session's exit): a daemon shutdown kills — or, with session persistence,
+   *  detaches — its PTYs, and the exit we saw may be that shutdown. Without a
+   *  re-attach the pane stayed on that stale "Ended" forever, even after the
+   *  restarted daemon re-adopted the process or marked the session resumable
+   *  ("my shell never reconnects after a restart"). So the pane re-attaches
+   *  view-only once more and lets the `status` frame decide: live clears the
+   *  overlay, suspended shows "type or Resume", exited keeps it. */
+  let probingAfterExit = false;
+  /** Bounded: a socket refused for good (a revoked share on an ended session)
+   *  must not retry forever. ~2.5 min at the 5 s backoff cap — longer than a
+   *  daemon restart takes. Reset by any `status` frame. */
+  let exitProbes = 0;
+  const MAX_EXIT_PROBES = 30;
+
+  function scheduleReconnect(afterExit = false): void {
+    if (closedByUs || reconnectTimer) return;
+    if (exitCode !== null && !afterExit) return;
     reconnecting = true;
     const delay = Math.min(500 * 2 ** reconnectAttempts, 5000);
     reconnectAttempts++;
@@ -760,17 +777,25 @@
           case 'status':
             // A live status after an `exit` means the server moved this
             // socket onto a respawned process (chat send, channel follow-up,
-            // restart from elsewhere) — drop the exited overlay; the
-            // accompanying snapshot rebuilds the screen.
+            // restart from elsewhere, a daemon restart that re-adopted it) —
+            // drop the exited overlay; the accompanying snapshot rebuilds the
+            // screen.
             if (msg.status !== 'exited' && msg.status !== 'reconnectable') {
               exitCode = null;
               dormantView = false;
-            } else if ((msg.status === 'reconnectable' || resumable) && viewAttach && exitCode === null && !socketFactory) {
+            } else if (
+              (msg.status === 'reconnectable' || resumable) &&
+              viewAttach &&
+              (exitCode === null || probingAfterExit) &&
+              !socketFactory
+            ) {
               // View-only attach to a suspended session: nothing was spawned,
               // so show the exited overlay (Resume) — typing wakes it too.
               exitCode = 0;
               dormantView = true;
             }
+            probingAfterExit = false;
+            exitProbes = 0;
             onstatus?.(msg.status as SessionStatus);
             break;
           case 'exit':
@@ -807,9 +832,15 @@
 
     s.onclose = () => {
       connected = false;
-      if (exitCode === null && !closedByUs) {
+      if (closedByUs) return;
+      if (exitCode === null) {
         disconnected = true;
         scheduleReconnect();
+      } else if (!socketFactory && exitProbes < MAX_EXIT_PROBES) {
+        // See `probingAfterExit`: learn the session's state after the drop.
+        exitProbes++;
+        probingAfterExit = true;
+        scheduleReconnect(true);
       }
     };
   }
@@ -2403,19 +2434,21 @@
     {#if exitCode !== null}
       <!-- Shared exit vocabulary (lib/status.ts): "Ended", "Suspended —
            resumes on open", or "Failed (exit N)" — never a bare "exited (0)". -->
-      {@const ex = exitState(exitCode, resumable)}
+      <!-- A dormant view (a suspended session, incl. a shell after a daemon
+           restart) wakes on typing or Resume whatever its provider. -->
+      {@const ex = exitState(exitCode, resumable || dormantView)}
       {@const hint = dormantView && ex.key === 'suspended' ? (readOnly ? 'Suspended' : 'Suspended — type or Resume to continue') : ex.hint}
       <div class="term-overlay">
         <span class="badge {ex.tone}" data-exit={ex.key} data-dormant={dormantView || undefined} title={hint}>{ex.key === 'suspended' ? hint : ex.label}</span>
-        {#if (restartable || resumable) && !readOnly}
+        {#if (restartable || resumable || dormantView) && !readOnly}
           <button
             class="btn"
             onclick={() => {
               if (onrestart) onrestart();
               else { exitCode = null; connect({ view: false }); }
             }}
-            title={resumable ? 'Resume the session where it left off' : onrestart ? 'Start the session again in this pane' : 'Reconnect to the session'}
-          >{resumable ? 'Resume' : onrestart ? 'Restart session' : 'Reconnect'}</button>
+            title={resumable || dormantView ? 'Resume the session where it left off' : onrestart ? 'Start the session again in this pane' : 'Reconnect to the session'}
+          >{resumable || dormantView ? 'Resume' : onrestart ? 'Restart session' : 'Reconnect'}</button>
         {/if}
       </div>
     {:else if reconnecting}
