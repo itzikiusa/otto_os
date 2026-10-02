@@ -332,10 +332,11 @@ impl Ctx {
         parse_ok_body(&bytes)
     }
 
-    /// DELETE an `/api/v1` path with the bearer token. Used ONLY by
+    /// DELETE an `/api/v1` path with the bearer token. Used by
     /// `otto_vault_delete` — a soft delete (the daemon moves the note into the
-    /// vault's `.trash/`, never destroying files). Same error handling as
-    /// [`Self::post_json`]; tolerates an empty (204) body.
+    /// vault's `.trash/`, never destroying files) — and by `browser_navigate`
+    /// to remove the tab IT just created when that tab's fetch failed. Same
+    /// error handling as [`Self::post_json`]; tolerates an empty (204) body.
     async fn delete_ok(&self, path: &str) -> Result<(), String> {
         let url = format!("{}/api/v1{}", self.base.trim_end_matches('/'), path);
         let resp = tokio::time::timeout(
@@ -1268,7 +1269,7 @@ fn base_tool_catalog() -> Value {
             },
             {
                 "name": "otto_api_execute",
-                "description": "SENDS A REAL HTTP REQUEST: execute a SAVED request (by `request_id` or unique `name`) against an environment (`environment` = id or name, default the active one). Non-GET/HEAD/OPTIONS methods require `confirm:true`; an agent-authored request targeting a host no human request/run used requires `confirm_new_host:true` (the error says which). Secrets are resolved server-side and scrubbed from the result; JWTs come back as decoded claims (`jwt_claims`), never the token. `vars` override variables (values must not contain '{{').",
+                "description": "SENDS A REAL HTTP REQUEST: execute a SAVED request (by `request_id` or unique `name`) against an environment (`environment` = id or name, default the active one). Non-GET/HEAD/OPTIONS methods require `confirm:true`; an agent-authored request targeting a host no human request/run used requires `confirm_new_host:true` (the error says which); a send that would carry a stored secret to a host it isn't bound to is refused outright (a person must send it from the Otto UI). Secrets are resolved server-side and scrubbed from the result; JWTs come back as decoded claims (`jwt_claims`), never the token. `vars` override variables (values must not contain '{{').",
                 "inputSchema": { "type": "object", "properties": {
                     "request_id": { "type": "string", "description": "Saved request id." },
                     "name": { "type": "string", "description": "Unique saved request name (used when request_id is omitted)." },
@@ -3359,12 +3360,23 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
             // The tab is created in mode:"reader" by construction (see
             // `otto_state::browser::BrowserTabsRepo::create`), so this PATCH
             // runs the fetch pipeline and adopts the fetched page's title.
-            let updated = ctx
+            let updated = match ctx
                 .patch_json(
                     &format!("/browser/tabs/{}", seg(&tab_id)),
                     &json!({ "url": url }),
                 )
-                .await?;
+                .await
+            {
+                Ok(updated) => updated,
+                Err(error) => {
+                    // A refused / unreachable URL must not leave a blank tab
+                    // in the person's Browser for every failed agent attempt.
+                    let _ = ctx
+                        .delete_ok(&format!("/browser/tabs/{}", seg(&tab_id)))
+                        .await;
+                    return Err(error);
+                }
+            };
             let title = updated
                 .get("title")
                 .cloned()
