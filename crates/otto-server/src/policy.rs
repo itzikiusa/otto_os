@@ -413,6 +413,14 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/db/mongosh" {
         return Require(Database, View);
     }
+    // Multi-target / parameterised runs ("Run on…", `/db/multi-run/plan`,
+    // `/db/multi-runs…`): listing / polling a job / reading one run = View
+    // (the item handler re-checks Editor on that run's connection); planning
+    // (it probes the targets), starting and cancelling = Edit. The handlers
+    // also require Editor on EVERY target connection.
+    if p.starts_with("/db/multi-run") {
+        return Require(Database, if get { View } else { Edit });
+    }
     if p.starts_with("/workspaces/{wid}/db/")
         || p.starts_with("/db/saved-queries")
         || p.starts_with("/db/dashboards")
@@ -1698,6 +1706,35 @@ mod tests {
         );
         assert_eq!(
             pol(Method::DELETE, "/api/v1/db/saved-queries/{qid}"),
+            Require(Database, Edit)
+        );
+    }
+
+    #[test]
+    fn db_multi_run_reads_are_view_runs_are_edit() {
+        assert_eq!(
+            pol(Method::POST, "/api/v1/db/multi-run/plan"),
+            Require(Database, Edit),
+            "planning probes every target — Edit"
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/db/multi-runs"),
+            Require(Database, Edit)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/db/multi-runs"),
+            Require(Database, View)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/db/multi-runs/{rid}"),
+            Require(Database, View)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/db/multi-runs/{rid}/items/{index}"),
+            Require(Database, View)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/db/multi-runs/{rid}/cancel"),
             Require(Database, Edit)
         );
     }

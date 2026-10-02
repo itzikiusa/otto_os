@@ -18,6 +18,7 @@ pub mod drivers;
 pub mod export;
 pub mod http;
 pub mod import;
+pub mod multirun;
 pub mod native_access;
 pub mod nl;
 pub mod plan;

@@ -18,6 +18,8 @@ use otto_state::{capability_for_role, GrantsRepo, NewSavedQuery, NewWidget};
 use serde::Deserialize;
 use serde_json::Value;
 
+mod multirun;
+
 use crate::export::ExportFormat as PathFormat;
 use crate::service::DbViewerService;
 use crate::types::{
@@ -271,6 +273,18 @@ pub fn api_router<S: DbViewerCtx>() -> Router<S> {
             patch(update_widget::<S>).delete(delete_widget::<S>),
         )
         .route("/db/widgets/{id}/run", post(run_widget::<S>))
+        // Multi-target / parameterised runs ("Run on…").
+        .route("/db/multi-run/plan", post(multirun::plan::<S>))
+        .route(
+            "/db/multi-runs",
+            get(multirun::list::<S>).post(multirun::start::<S>),
+        )
+        .route("/db/multi-runs/{rid}", get(multirun::get_one::<S>))
+        .route(
+            "/db/multi-runs/{rid}/items/{index}",
+            get(multirun::item::<S>),
+        )
+        .route("/db/multi-runs/{rid}/cancel", post(multirun::cancel::<S>))
 }
 
 /// `min` in the connection's workspace; for **global** (workspace-less)
