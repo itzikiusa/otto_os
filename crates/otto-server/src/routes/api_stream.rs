@@ -21,7 +21,6 @@ use otto_core::{
     Id,
 };
 use otto_state::GrantsRepo;
-use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
@@ -161,14 +160,25 @@ async fn serve_sse(
     actor: &Id,
     confirm_allowed: bool,
 ) {
+    // The request's timeout bounds the wait for the response HEAD only — the
+    // event stream itself may run for as long as the user keeps it open.
+    let head_timeout = super::api_client::effective_timeout(spec.request.timeout_ms);
     let connecting = async {
         let req =
             super::api_client::prepare_stream(ctx, wid, &spec.request, actor, confirm_allowed)
                 .await?;
-        req.header("Accept", "text/event-stream")
-            .send()
-            .await
-            .map_err(|e| e.without_url().to_string())
+        match tokio::time::timeout(
+            head_timeout,
+            req.header("Accept", "text/event-stream").send(),
+        )
+        .await
+        {
+            Ok(sent) => sent.map_err(|e| e.without_url().to_string()),
+            Err(_) => Err(format!(
+                "no response from the server within {} ms",
+                head_timeout.as_millis()
+            )),
+        }
     };
     let result = tokio::select! {
         result = connecting => result,
@@ -193,19 +203,16 @@ async fn serve_sse(
     }
 
     let mut stream = resp.bytes_stream();
-    let mut buf = String::new();
+    let mut framer = SseFramer::default();
     loop {
         tokio::select! {
             chunk = stream.next() => match chunk {
                 Some(Ok(bytes)) => {
-                    if buf.len() + bytes.len() > 1024 * 1024 {
+                    if framer.pending() + bytes.len() > 1024 * 1024 {
                         let _ = send_json(&mut socket, json!({"type":"error","message":"SSE event exceeds 1 MiB"})).await;
                         return;
                     }
-                    buf.push_str(&String::from_utf8_lossy(&bytes));
-                    buf = buf.replace("\r\n", "\n");
-                    while let Some(idx) = buf.find("\n\n") {
-                        let block: String = buf.drain(..idx + 2).collect();
+                    for block in framer.push(&bytes) {
                         if let Some(ev) = parse_sse_event(&block) {
                             if send_json(&mut socket, ev).await.is_err() {
                                 return;
@@ -232,6 +239,43 @@ async fn serve_sse(
     )
     .await;
     let _ = socket.send(Message::Close(None)).await;
+}
+
+/// Splits an SSE byte stream into complete event blocks. Bytes are buffered
+/// RAW and only a whole block (ending in a blank line) is decoded, so a
+/// multi-byte UTF-8 character split across two network chunks (emoji / CJK in
+/// LLM token streams) arrives intact instead of as two U+FFFD.
+#[derive(Default)]
+struct SseFramer {
+    buf: Vec<u8>,
+}
+
+impl SseFramer {
+    /// Bytes held for the event still in progress.
+    fn pending(&self) -> usize {
+        self.buf.len()
+    }
+
+    /// Append a chunk; return every block it completed (CRLF folded to LF).
+    fn push(&mut self, bytes: &[u8]) -> Vec<String> {
+        self.buf.extend_from_slice(bytes);
+        // CRLF → LF across the whole pending buffer: a CR that ended the last
+        // chunk meets its LF here. A trailing lone CR waits for the next chunk.
+        let mut folded = Vec::with_capacity(self.buf.len());
+        for (i, b) in self.buf.iter().enumerate() {
+            if *b == b'\r' && self.buf.get(i + 1) == Some(&b'\n') {
+                continue;
+            }
+            folded.push(*b);
+        }
+        self.buf = folded;
+        let mut blocks = Vec::new();
+        while let Some(idx) = self.buf.windows(2).position(|w| w == b"\n\n") {
+            let block: Vec<u8> = self.buf.drain(..idx + 2).collect();
+            blocks.push(String::from_utf8_lossy(&block).into_owned());
+        }
+        blocks
+    }
 }
 
 fn parse_sse_event(block: &str) -> Option<Value> {
@@ -290,9 +334,9 @@ async fn serve_websocket(
         }
         let prepared =
             super::api_client::prepare_stream(ctx, wid, &spec.request, actor, confirm_allowed)
-            .await?
-            .build()
-            .map_err(|e| e.without_url().to_string())?;
+                .await?
+                .build()
+                .map_err(|e| e.without_url().to_string())?;
         let mut request = prepared
             .url()
             .as_str()
@@ -339,7 +383,7 @@ async fn serve_websocket(
         tokio_tungstenite::client_async_tls_with_config(request, socket, Some(config), None).await.map_err(|_| "WebSocket handshake failed; check the server URL, TLS certificate and authorization".to_string())
     };
     let result = tokio::select! {
-        result = tokio::time::timeout(Duration::from_millis(spec.request.timeout_ms.unwrap_or(60_000)), connecting) =>
+        result = tokio::time::timeout(super::api_client::effective_timeout(spec.request.timeout_ms), connecting) =>
             result.unwrap_or_else(|_| Err("WebSocket connection timed out".into())),
         _ = socket.recv() => return,
     };
@@ -423,6 +467,34 @@ mod tests {
         let ev = parse_sse_event(block).expect("event");
         assert_eq!(ev["event"], "message");
         assert_eq!(ev["data"], "hello");
+    }
+
+    #[test]
+    fn framer_keeps_utf8_split_across_chunks() {
+        let text = "data: héllo 🌍\n\n".as_bytes();
+        // Cut inside the 4-byte emoji and inside the 2-byte é.
+        let cut_a = text.iter().position(|b| *b == 0xC3).unwrap() + 1;
+        let cut_b = text.len() - 4;
+        let mut framer = SseFramer::default();
+        assert!(framer.push(&text[..cut_a]).is_empty());
+        assert!(framer.push(&text[cut_a..cut_b]).is_empty());
+        let blocks = framer.push(&text[cut_b..]);
+        assert_eq!(blocks.len(), 1);
+        let ev = parse_sse_event(&blocks[0]).expect("event");
+        assert_eq!(ev["data"], "héllo 🌍");
+        assert_eq!(framer.pending(), 0);
+    }
+
+    #[test]
+    fn framer_folds_crlf_even_when_split() {
+        let mut framer = SseFramer::default();
+        assert!(framer.push(b"data: a\r").is_empty());
+        assert!(framer.push(b"\n\r").is_empty());
+        let blocks = framer.push(b"\ndata: b\r\n\r\n");
+        assert_eq!(
+            blocks,
+            vec!["data: a\n\n".to_string(), "data: b\n\n".to_string()]
+        );
     }
 
     #[test]
