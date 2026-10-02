@@ -164,6 +164,8 @@
   let planning = $state(false);
   let planError = $state<string | null>(null);
   let notice = $state<string | null>(null);
+  /** A cluster override changed after the preview — re-plan before running. */
+  let planStale = $state(false);
 
   const setupBlocker = $derived(
     targets.length === 0
@@ -181,6 +183,8 @@
     planError = null;
     try {
       plan = await api.post<DbMultiRunPlan>('/db/multi-run/plan', spec());
+      notice = null;
+      planStale = false;
       stage = 'preview';
     } catch (e) {
       planError = e instanceof Error ? e.message : String(e);
@@ -193,6 +197,7 @@
     const t = targets[i];
     if (!t) return;
     overrides = { ...overrides, [targetKey(t.connection_id, t.node)]: { mode, name } };
+    planStale = true;
   }
 
   // ── Confirm ───────────────────────────────────────────────────────────────
@@ -235,9 +240,9 @@
       const msg = e instanceof Error ? e.message : String(e);
       if (e instanceof ApiError && msg.startsWith('plan_changed:')) {
         // The daemon re-planned and got different statements — show them.
-        notice = 'The final statements changed since the preview — review them again.';
         stage = 'setup';
         await preview();
+        notice = 'The final statements changed since the preview — review them again.';
       } else if (e instanceof ApiError && msg.startsWith('write_blocked:')) {
         stage = 'confirm';
         startError = msg.replace(/^write_blocked:\s*/, '');
@@ -338,8 +343,11 @@
 
 <Modal {title} width={920} onclose={close}>
   <div class="mr" data-testid="multi-run">
+    {#if notice && stage !== 'results'}<p class="mr-notice" role="status">{notice}</p>{/if}
+    {#if planError && stage === 'preview'}
+      <div class="mr-error" role="alert"><Icon name="warning" size={13} /><span>{planError}</span></div>
+    {/if}
     {#if stage === 'setup'}
-      {#if notice}<p class="mr-notice" role="status">{notice}</p>{/if}
       {#if recent.length > 0}
         <section class="mr-sec" aria-label="Recent multi-runs">
           <h3 class="mr-h">Recent</h3>
@@ -548,7 +556,8 @@
               </li>
             {/each}
           </ul>
-          {#if Object.keys(overrides).length > 0}
+          {#if planStale}
+            <p class="mr-notice" role="status">Cluster choice changed — update the preview to see the final statements.</p>
             <button class="btn small" onclick={preview} disabled={planning}>
               <Icon name="refresh" size={12} /> Update preview
             </button>
@@ -721,8 +730,8 @@
         class="btn primary"
         class:danger={plan.needs_confirm}
         onclick={proceed}
-        disabled={starting || planning}
-        title={plan.needs_confirm ? 'Writes to production / read-only targets — you will confirm each one' : 'Run every statement shown'}
+        disabled={starting || planning || planStale}
+        title={planStale ? 'Update the preview first' : plan.needs_confirm ? 'Writes to production / read-only targets — you will confirm each one' : 'Run every statement shown'}
       >
         {starting ? 'Starting…' : plan.needs_confirm ? `Review ${guardedRuns.length} guarded write${guardedRuns.length === 1 ? '' : 's'}…` : `Run ${plan.runs.length}`}
       </button>
