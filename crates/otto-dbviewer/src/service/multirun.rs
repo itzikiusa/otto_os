@@ -900,7 +900,7 @@ impl DbViewerService {
                 (is_root || j.user_id == *user_id).then(|| (j.created_at, j.brief()))
             })
             .collect();
-        out.sort_by(|a, b| b.0.cmp(&a.0));
+        out.sort_by_key(|a| std::cmp::Reverse(a.0));
         out.into_iter().map(|(_, b)| b).collect()
     }
 
