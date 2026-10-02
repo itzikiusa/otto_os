@@ -112,6 +112,7 @@
             <option value="">All decisions</option>
             <option value="allowed">allowed</option>
             <option value="approved">approved</option>
+            <option value="auto_approved">auto_approved</option>
             <option value="denied">denied</option>
             <option value="dry_run">dry_run</option>
             <option value="pending_approval">pending_approval</option>
@@ -149,7 +150,7 @@
             <span class="cell when">{new Date(r.created_at).toLocaleString()}</span>
             <span class="cell"><span class="trunc" title={r.server_name ?? undefined}>{r.server_name ?? '—'}</span></span>
             <span class="cell mono"><span class="trunc" title={r.tool}>{r.tool}</span>{#if r.dry_run}<span class="dry">dry</span>{/if}</span>
-            <span class="cell"><McpPill kind="decision" value={r.decision} small /></span>
+            <span class="cell" title={r.decision_reason ?? undefined}><McpPill kind="decision" value={r.decision} small /></span>
             <span class="cell"><McpPill kind="direction" value={r.direction} small /></span>
             <span class="cell num">
               {#if r.ok}<Icon name="check" size={13} />{:else}<span class="bad" title={r.error ?? 'error'}><Icon name="x" size={13} /></span>{/if}

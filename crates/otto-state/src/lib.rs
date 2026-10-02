@@ -31,6 +31,7 @@ pub mod issues;
 pub mod k8s_clusters;
 pub mod k8s_monitor;
 pub mod mcp_audit;
+pub mod mcp_auto_approve;
 pub mod mcp_control;
 pub mod mcp_servers;
 pub mod memory;
@@ -127,6 +128,9 @@ pub use k8s_clusters::{
 };
 pub use k8s_monitor::{K8sMonitorConfigRow, K8sMonitorRepo, K8sMonitorStatusRow};
 pub use mcp_audit::{McpAuditRepo, McpToolCallRow, NewMcpToolCall};
+pub use mcp_auto_approve::{
+    AutoApproveRulePatch, McpAutoApproveRepo, McpAutoApproveRule, NewAutoApproveRule,
+};
 pub use mcp_control::{
     set_approval_change_hook, ApprovalChange, CallLogQuery, DiscoveredTool, McpAllowlistEntry, McpAllowlistRepo, McpApproval,
     McpApprovalRepo, McpCallLogRepo, McpCallLogRow, McpPolicy, McpPolicyRepo, McpRegistryRepo,

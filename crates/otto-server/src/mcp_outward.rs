@@ -207,6 +207,79 @@ const DANGEROUS: &[&str] = &[
     "assistant_forget",
 ];
 
+/// The **irreversible** tier of [`DANGEROUS`] — the guardrail for auto-approve
+/// rules (`crate::mcp_auto_approve`). These tools act on something nobody can
+/// take back from inside Otto: a merge into the target branch, a kubectl verb
+/// against a live cluster (delete pod / scale / rollback / Argo prune), a
+/// message produced to a live topic or queue that consumers act on, an
+/// arbitrary HTTP request (an API-client call can be a production write or a
+/// DELETE), a hard delete, an erased memory. A category rule never covers one;
+/// a per-tool rule covers one only with the second explicit toggle
+/// `allow_irreversible`. Reversible writes (opening/commenting a PR, Jira and
+/// Confluence edits, messages to agents, vault edits — `vault_delete` is a soft
+/// trash move) stay auto-approvable by category.
+const IRREVERSIBLE: &[&str] = &[
+    "merge_pr",
+    "k8s_action",
+    "produce_broker_message",
+    "aws_sqs_send",
+    "api_execute",
+    "api_run_automation",
+    "delete_scheduled_task",
+    "assistant_forget",
+];
+
+/// True iff the bare tool is mutating + approval-gated ([`DANGEROUS`]).
+pub(crate) fn tool_is_dangerous(bare: &str) -> bool {
+    DANGEROUS.contains(&bare)
+}
+
+/// True iff the bare tool is in the [`IRREVERSIBLE`] guardrail tier.
+pub(crate) fn tool_is_irreversible(bare: &str) -> bool {
+    IRREVERSIBLE.contains(&bare)
+}
+
+/// The catalog category of a bare tool name (`create_pr` → `Git`), from
+/// [`otto_tool_specs`] — built once, the catalog is static.
+pub(crate) fn tool_category(bare: &str) -> Option<&'static str> {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+    static INDEX: OnceLock<HashMap<String, String>> = OnceLock::new();
+    INDEX
+        .get_or_init(|| {
+            otto_tool_specs()
+                .iter()
+                .filter_map(|s| {
+                    let name = s["name"].as_str()?;
+                    let cat = s["category"].as_str()?;
+                    Some((name.strip_prefix("otto.").unwrap_or(name).to_string(), cat.to_string()))
+                })
+                .collect()
+        })
+        .get(bare)
+        .map(String::as_str)
+}
+
+/// `(category, [bare mutating tool])` for every catalog category that has at
+/// least one approval-gated tool, in catalog order — what a category
+/// auto-approve rule can name.
+pub(crate) fn mutating_categories() -> Vec<(String, Vec<String>)> {
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for spec in otto_tool_specs() {
+        let Some(name) = spec["name"].as_str() else { continue };
+        let bare = name.strip_prefix("otto.").unwrap_or(name);
+        if !tool_is_dangerous(bare) {
+            continue;
+        }
+        let cat = spec["category"].as_str().unwrap_or("Other").to_string();
+        match out.iter_mut().find(|(c, _)| *c == cat) {
+            Some((_, tools)) => tools.push(bare.to_string()),
+            None => out.push((cat, vec![bare.to_string()])),
+        }
+    }
+    out
+}
+
 /// Non-mutating tools that are defined and enableable but stay **off by default**
 /// — either because they stream potentially large/sensitive payload *content*
 /// (message bodies, recalled knowledge, code, rows) or pre-date the default-on
@@ -1010,38 +1083,37 @@ async fn trust_token_write_grant(ctx: &ServerCtx) -> bool {
         .unwrap_or(true)
 }
 
-/// Short tool names exempted from the DANGEROUS approval gate — the
-/// `mcp_approval_exempt_tools` setting (a JSON array of short names, e.g.
-/// `["comment_pr"]`), managed by `PATCH /mcp/otto-server
-/// {approval_exempt_tools}` (MCP Admin) — the MCP → Otto server "Ask before
-/// each call" toggle — and pruned to the enabled set on every change.
+/// Short tool names exempted from the DANGEROUS approval gate EVERYWHERE — the
+/// MCP → Otto server per-tool **Auto-approve** switch (formerly "Ask before
+/// each call"): the bare targets of the enabled GLOBAL per-tool auto-approve
+/// rules (`mcp_auto_approve_rules`, see [`crate::mcp_auto_approve`]). Migration
+/// 0148 imported the legacy `mcp_approval_exempt_tools` setting into such rules;
+/// the setting is no longer read. Workspace / session / category rules are
+/// resolved per call and are not part of this list.
 ///
-/// WHY this exists: the gate was all-or-nothing. An operator who deliberately
+/// WHY per-tool exists: the gate was all-or-nothing. An operator who deliberately
 /// enabled ONE outward-facing tool (say, PR comments for the review workflow)
 /// could only stop the second approval prompt by clearing
 /// `mcp_require_approval_dangerous`, which simultaneously disarms `create_pr`,
 /// `run_workflow`, `produce_broker_message`, `vault_delete`, `broadcast_message`
 /// and every other write. Enabling one tool should not require disarming all of
-/// them, so exemption is per-tool and opt-in.
+/// them, so auto-approval is per-tool (or per-category) and opt-in.
 ///
 /// A tool must STILL be enabled (`tool_enabled`) to run at all — this only skips
-/// the approval prompt for a capability already granted. Calls remain audited.
+/// the approval prompt for a capability already granted. Calls remain audited
+/// (`auto_approved`, naming the rule).
 async fn approval_exempt_tools(ctx: &ServerCtx) -> Vec<String> {
-    SettingsRepo::new(ctx.pool.clone())
-        .get("mcp_approval_exempt_tools")
+    let rules = otto_state::McpAutoApproveRepo::new(ctx.pool.clone())
+        .list()
         .await
-        .ok()
-        .flatten()
-        .and_then(|v| {
-            v.as_array().map(|a| {
-                a.iter()
-                    .filter_map(Value::as_str)
-                    .map(|s| s.trim().trim_start_matches("otto.").to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-        })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let mut out: Vec<String> = Vec::new();
+    for r in rules.iter().filter(|r| crate::mcp_auto_approve::is_active_catalog_toggle(r)) {
+        if !out.contains(&r.target) {
+            out.push(r.target.clone());
+        }
+    }
+    out
 }
 
 /// Whether a governed `otto.*` call is subject to the human-approval gate
@@ -1499,13 +1571,6 @@ pub(crate) async fn governed_invoke(
     }
 
     let dangerous = DANGEROUS.contains(&short.as_str());
-    // An operator who granted this specific tool in the control plane has already
-    // made the call — don't ask a second time for the same decision. Exemption is
-    // per-tool and opt-in, so the rest of DANGEROUS stays gated.
-    let exempt = approval_exempt_tools(ctx)
-        .await
-        .iter()
-        .any(|t| t == short.as_str());
     // A `kind='mcp'` token carrying an EXPLICIT write grant (`allow_writes`) has
     // already cleared this decision at issue time: someone deliberately minted a
     // read+write token for this caller. Re-prompting per call asks the same
@@ -1521,13 +1586,32 @@ pub(crate) async fn governed_invoke(
         .as_ref()
         .is_some_and(|scope| scope.allow_writes)
         && trust_token_write_grant(ctx).await;
-    let needs_approval = approval_gated(dangerous, exempt, token_write_grant)
-        && require_approval_dangerous(ctx).await;
     let args_hash = canonical_hash(arguments);
     let ws = arguments
         .get("workspace_id")
         .and_then(Value::as_str)
         .map(str::to_string);
+    // The gate applies (before any opt-out rule) to a DANGEROUS tool without a
+    // trusted token grant, under the global `mcp_require_approval_dangerous`.
+    let gate_applies =
+        approval_gated(dangerous, false, token_write_grant) && require_approval_dangerous(ctx).await;
+    // An operator who explicitly auto-approved this tool (or its category) for
+    // this scope — global, the call's workspace, or the calling agent session —
+    // has already made the decision: don't ask a second time. Opt-in, off by
+    // default; irreversible tools need a per-tool rule with the second toggle.
+    // A lookup failure resolves to None ⇒ the call stays gated (fail closed).
+    let auto_rule = if gate_applies {
+        crate::mcp_auto_approve::resolve_for_call(ctx, auth, &short, ws.as_deref()).await
+    } else {
+        None
+    };
+    let needs_approval = approval_gated(dangerous, auto_rule.is_some(), token_write_grant)
+        && gate_applies;
+    if let Some(rule) = &auto_rule {
+        // Recorded on every terminal row below (dry-run and execution alike).
+        audit.decision_reason = Some(otto_mcp::auto_approve::audit_reason(rule));
+    }
+    let auto_approved_by = auto_rule.as_ref().map(crate::mcp_auto_approve::envelope_ref);
 
     if needs_approval && !dry_run {
         match ctx
@@ -1617,6 +1701,9 @@ pub(crate) async fn governed_invoke(
     // Fail-closed audit: insert before executing.
     audit.decision = if audit.approval_id.is_some() {
         "approved".into()
+    } else if auto_rule.is_some() {
+        // Never silent: the row names the rule (`decision_reason`, set above).
+        "auto_approved".into()
     } else {
         "allowed".into()
     };
@@ -1699,7 +1786,11 @@ pub(crate) async fn governed_invoke(
                 .call_log()
                 .finalize(&audit_id, true, None, Some(latency), Some(bytes), None)
                 .await;
-            Ok(json!({"decision":"allowed","executed":true,"content":value}))
+            let mut env = json!({"decision":"allowed","executed":true,"content":value});
+            if let Some(by) = &auto_approved_by {
+                env["auto_approved_by"] = by.clone();
+            }
+            Ok(env)
         }
         Err(e) => {
             let err = otto_core::redact::redact_text(&e.to_string()).value;
@@ -1708,7 +1799,12 @@ pub(crate) async fn governed_invoke(
                 .call_log()
                 .finalize(&audit_id, false, Some(&err), Some(latency), None, None)
                 .await;
-            Ok(json!({"decision":"error","executed":true,"is_error":true,"content":{"error":err}}))
+            let mut env =
+                json!({"decision":"error","executed":true,"is_error":true,"content":{"error":err}});
+            if let Some(by) = &auto_approved_by {
+                env["auto_approved_by"] = by.clone();
+            }
+            Ok(env)
         }
     }
 }
@@ -4466,20 +4562,36 @@ pub async fn otto_server_status(
     let enabled = outward_enabled(&ctx).await;
     let on = enabled_tools(&ctx).await;
     let exempt = approval_exempt_tools(&ctx).await;
+    let rules = otto_state::McpAutoApproveRepo::new(ctx.pool.clone())
+        .list()
+        .await
+        .map_err(ApiError)?;
     let tools: Vec<Value> = otto_tool_specs()
         .into_iter()
         .map(|t| {
             let name = t["name"].as_str().unwrap_or("").to_string();
             let short = name.strip_prefix("otto.").unwrap_or(&name).to_string();
+            let gated = tool_is_dangerous(&short);
             json!({
                 "name": name,
                 "description": t["description"],
                 "mutating": t["mutating"],
                 "category": t["category"],
                 "enabled": on.contains(&short),
-                // "Ask before each call" is OFF for this tool: an operator
-                // opted it out of the approval gate (calls stay audited).
+                // Auto-approved EVERYWHERE (an enabled global per-tool rule —
+                // the catalog's Auto-approve switch): calls skip the approval
+                // gate and are audited `auto_approved`.
                 "approval_exempt": exempt.contains(&short),
+                // The guardrail tier: no category rule reaches it; a per-tool
+                // rule needs the second toggle (`allow_irreversible`).
+                "irreversible": tool_is_irreversible(&short),
+                // Every enabled rule (any scope) that auto-approves this tool
+                // somewhere — what the catalog shows as badges.
+                "auto_approved_by": if gated {
+                    crate::mcp_auto_approve::rules_covering_tool(&rules, &short)
+                } else {
+                    Vec::new()
+                },
             })
         })
         .collect();
@@ -4504,9 +4616,12 @@ pub async fn otto_server_status(
 pub struct OttoServerConfigReq {
     pub enabled: Option<bool>,
     pub tools: Option<Vec<String>>,
-    /// The COMPLETE set of mutating tools that skip the per-call approval
-    /// (`mcp_approval_exempt_tools`); replaces the stored list. Bare or
-    /// `otto.`-prefixed names; non-mutating/unknown names are a 400.
+    /// Compatibility shim over the auto-approve rules: the COMPLETE set of
+    /// mutating tools auto-approved EVERYWHERE (global per-tool rules); missing
+    /// rules are created, enabled ones not listed are deleted. Bare or
+    /// `otto.`-prefixed names; non-mutating/unknown names are a 400, and so is
+    /// an irreversible tool without an existing rule (that needs the second
+    /// toggle — `POST /mcp/auto-approve {allow_irreversible:true}`).
     pub approval_exempt_tools: Option<Vec<String>>,
     #[serde(default)]
     pub rotate_token: bool,
@@ -4515,8 +4630,13 @@ pub struct OttoServerConfigReq {
 pub async fn otto_server_config(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<OttoServerConfigReq>,
 ) -> ApiResult<Json<Value>> {
+    // Auto-approving tools is a person's decision (never an agent session's own).
+    if req.approval_exempt_tools.is_some() {
+        crate::mcp_auto_approve::require_human(&auth).map_err(ApiError)?;
+    }
     let settings = SettingsRepo::new(ctx.pool.clone());
     // Validate the exemption list BEFORE any write, so a bad name never
     // leaves a half-applied config behind.
@@ -4526,6 +4646,20 @@ pub async fn otto_server_config(
         .map(normalize_exempt_tools)
         .transpose()
         .map_err(ApiError)?;
+    if let Some(list) = &requested_exempt {
+        // The irreversible guardrail: this shim cannot carry the second toggle,
+        // so it may only KEEP an irreversible tool that is already auto-approved.
+        let current = approval_exempt_tools(&ctx).await;
+        if let Some(t) = list
+            .iter()
+            .find(|t| tool_is_irreversible(t) && !current.contains(t))
+        {
+            return Err(ApiError(Error::Invalid(format!(
+                "'{t}' is irreversible — auto-approving it needs the second explicit toggle: \
+                 POST /mcp/auto-approve with allow_irreversible: true"
+            ))));
+        }
+    }
     if let Some(en) = req.enabled {
         settings
             .put("mcp_otto_server_enabled", &json!(en))
@@ -4563,20 +4697,21 @@ pub async fn otto_server_config(
             .await
             .map_err(ApiError)?;
     }
-    // Approval exemptions: an explicit list replaces the stored one (audited —
-    // it loosens the posture); either way the result is pruned to the enabled
-    // set, so turning a tool off also drops its "don't ask".
-    let current_exempt = approval_exempt_tools(&ctx).await;
+    // Auto-approve, everywhere-per-tool: an explicit list replaces the set of
+    // global per-tool rules (audited — it loosens the posture); either way every
+    // per-tool rule (any scope) of a tool that is no longer enabled is dropped,
+    // so re-enabling a tool starts from the secure default (gated).
     if requested_exempt.is_some() || req.tools.is_some() {
+        let current_exempt = approval_exempt_tools(&ctx).await;
+        let enabled_now = enabled_tools(&ctx).await;
         let next = prune_exempt_tools(
             requested_exempt.as_ref().unwrap_or(&current_exempt),
-            &enabled_tools(&ctx).await,
+            &enabled_now,
         );
+        crate::mcp_auto_approve::sync_catalog_toggles(&ctx, &user, &next, &enabled_now)
+            .await
+            .map_err(ApiError)?;
         if next != current_exempt {
-            settings
-                .put("mcp_approval_exempt_tools", &json!(next))
-                .await
-                .map_err(ApiError)?;
             ctx.audit(otto_state::NewAuditEntry {
                 user_id: Some(user.id.clone()),
                 action: "mcp.otto_server.approval_exempt".into(),

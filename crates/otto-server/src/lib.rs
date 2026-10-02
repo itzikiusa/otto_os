@@ -46,6 +46,7 @@ pub mod k8s_monitor_scheduler;
 pub mod live_events;
 pub mod login_throttle;
 pub mod lsp;
+pub mod mcp_auto_approve;
 pub mod mcp_capabilities;
 pub mod mcp_http;
 pub mod mcp_outward;
