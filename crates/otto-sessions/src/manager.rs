@@ -1063,7 +1063,22 @@ pub const REAP_UNRESUMABLE_GRACE: Duration = Duration::from_secs(30 * 60);
 /// grace instead of the infinite one they had (r3-05-01: every manual session
 /// opened since the daemon started kept its CLI — 150–400 MB of Node plus an
 /// MCP sidecar — alive forever). `0` in the setting = never (the old rule).
-pub const MANUAL_IDLE_SUSPEND: Duration = Duration::from_secs(30 * 60);
+///
+/// A full day: the 30 minutes this started at suspended a session you had
+/// merely stepped away from over lunch — reopening it worked (`--resume`),
+/// but whatever the CLI held in memory (and a plain shell's whole state) was
+/// gone. A day of complete silence is a session you are done with.
+pub const MANUAL_IDLE_SUSPEND: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Setting (bool, default `true`): spawn the sessions YOU start
+/// ([`is_user_started`] — Agents-page agents and shells) inside a detached
+/// PTY holder ([`otto_pty::holder`]) so they keep running across a daemon
+/// restart (deploy, crash, app relaunch) and are re-attached — same process,
+/// same screen and scrollback — when the daemon comes back. Off = the old
+/// behaviour: the PTY lives in the daemon and dies with it (agents come back
+/// via `--resume`, shells start fresh). Engine-owned sessions are never held:
+/// their driving engine dies with the daemon and recovers its own way.
+pub const SESSION_PERSISTENCE_SETTING: &str = "session_persistence";
 
 /// Default for the `max_live_agent_sessions` setting: a soft cap on live
 /// agent-CLI sessions. Past it the sweep suspends the least-recently-used
@@ -1119,6 +1134,19 @@ fn is_user_started(session: &Session) -> bool {
         Some(origin) => origin == "manual",
         None => true,
     }
+}
+
+/// The opaque metadata a session's PTY holder carries (and hands back to the
+/// daemon that re-adopts it after a restart): which session it is, plus the
+/// per-session ingest token already baked into the child's environment — the
+/// new daemon must accept that token, or the agent's hooks go silent.
+fn holder_meta(session: &Session, ingest_token: Option<String>) -> serde_json::Value {
+    serde_json::json!({
+        "session_id": session.id,
+        "workspace_id": session.workspace_id,
+        "provider": session.provider,
+        "ingest_token": ingest_token,
+    })
 }
 
 /// How much of a provider activity artifact the turn probe reads. Only the
@@ -1637,6 +1665,10 @@ pub struct SessionManager {
     /// 2026-07-21 fork incident). All resume paths take this lock and re-check
     /// `is_live` under it.
     resume_locks: Arc<DashMap<Id, Arc<Mutex<()>>>>,
+    /// Where user-started sessions' PTY holders live and how to launch one
+    /// (see [`SESSION_PERSISTENCE_SETTING`]). `None` = every PTY is local (the
+    /// pre-holder behaviour; bare test harnesses).
+    holders: Option<otto_pty::HolderConfig>,
 }
 
 impl SessionManager {
@@ -1687,7 +1719,77 @@ impl SessionManager {
             name_themes: None,
             title_probe: Arc::new(DashMap::new()),
             resume_locks: Arc::new(DashMap::new()),
+            holders: None,
         }
+    }
+
+    /// Enable PTY holders: user-started sessions survive daemon restarts (see
+    /// [`SESSION_PERSISTENCE_SETTING`]). Builder-style.
+    pub fn with_pty_holders(mut self, config: otto_pty::HolderConfig) -> Self {
+        self.holders = Some(config);
+        self
+    }
+
+    /// [`Self::with_pty_holders`] for an optional config (`None` = off).
+    pub fn with_pty_holders_opt(mut self, config: Option<otto_pty::HolderConfig>) -> Self {
+        self.holders = config;
+        self
+    }
+
+    /// Is session persistence active right now? Needs a holder config AND the
+    /// [`SESSION_PERSISTENCE_SETTING`] (default on).
+    pub async fn persistence_enabled(&self) -> bool {
+        if self.holders.is_none() {
+            return false;
+        }
+        match &self.settings {
+            Some(sr) => sr
+                .get(SESSION_PERSISTENCE_SETTING)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            None => true,
+        }
+    }
+
+    /// Spawn a session's PTY. A session the user started goes into a PTY
+    /// holder when persistence is on, so it outlives this daemon; anything
+    /// else — and any holder failure — spawns in-process as before (logged:
+    /// that session then won't survive a restart). Fork/exec runs on the
+    /// blocking pool either way (it can take tens-hundreds of ms).
+    async fn spawn_session_pty(
+        &self,
+        session: &Session,
+        spec: CommandSpec,
+        cols: u16,
+        rows: u16,
+    ) -> Result<PtyHandle> {
+        if is_user_started(session) && self.persistence_enabled().await {
+            if let Some(config) = self.holders.clone() {
+                let meta = holder_meta(
+                    session,
+                    self.ingest_tokens.get(&session.id).map(|t| t.value().clone()),
+                );
+                let held_spec = spec.clone();
+                let held = tokio::task::spawn_blocking(move || {
+                    PtyHandle::spawn_held(&config, &held_spec, cols, rows, meta)
+                })
+                .await
+                .unwrap_or_else(|e| Err(Error::Internal(format!("pty holder task: {e}"))));
+                match held {
+                    Ok(handle) => return Ok(handle),
+                    Err(e) => tracing::warn!(
+                        session = %session.id,
+                        "pty holder unavailable — spawning in-process (this session won't survive a daemon restart): {e}"
+                    ),
+                }
+            }
+        }
+        tokio::task::spawn_blocking(move || PtyHandle::spawn_sized(&spec, cols, rows))
+            .await
+            .unwrap_or_else(|e| Err(Error::Internal(format!("pty spawn task: {e}"))))
     }
 
     /// Attach the name-themes store so new agent sessions are auto-named from the
@@ -2673,14 +2775,12 @@ impl SessionManager {
         self.apply_sandbox(&mut spec, &session).await;
 
         // fork/exec of the agent CLI is a synchronous syscall path that can take
-        // tens-hundreds of ms — keep it off the async workers (blocked workers
-        // with idle CPU are exactly the intermittent everything-is-slow shape).
-        let spawn_spec = spec.clone();
-        let handle = match tokio::task::spawn_blocking(move || {
-            PtyHandle::spawn_sized(&spawn_spec, grid_cols, grid_rows)
-        })
-        .await
-        .unwrap_or_else(|e| Err(Error::Internal(format!("pty spawn task: {e}"))))
+        // tens-hundreds of ms — `spawn_session_pty` keeps it off the async
+        // workers (blocked workers with idle CPU are exactly the intermittent
+        // everything-is-slow shape).
+        let handle = match self
+            .spawn_session_pty(&session, spec.clone(), grid_cols, grid_rows)
+            .await
         {
             Ok(h) => Arc::new(h),
             Err(e) => {
@@ -2735,8 +2835,12 @@ impl SessionManager {
     /// window leaves the session non-resumable — we never guess and resume the
     /// wrong conversation.
     fn spawn_session_id_capture(&self, session: &Session) {
-        /// Give-up horizon for a session that never receives any input.
-        const NO_INPUT_GIVEUP: Duration = Duration::from_secs(30 * 60);
+        /// Give-up horizon for a session that never receives any input — as
+        /// long as such a session may sit idle before the sweep suspends it
+        /// ([`MANUAL_IDLE_SUSPEND`]): a codex session opened in the morning
+        /// and first typed into after lunch must still become resumable.
+        /// Waiting costs one map lookup per 500 ms tick.
+        const NO_INPUT_GIVEUP: Duration = MANUAL_IDLE_SUSPEND;
         /// Scan window after the first input. Generous: under a many-spawn CPU
         /// storm codex-tui has been observed taking 2min+ to boot and consume
         /// the (kernel-buffered) input, and only then does it flush the rollout.
@@ -4622,6 +4726,11 @@ impl SessionManager {
     /// shutdown. Returns the number of sessions terminated.
     pub async fn shutdown_all(&self) -> usize {
         let ids: Vec<Id> = self.live.iter().map(|e| e.key().clone()).collect();
+        self.shutdown_ids(ids).await
+    }
+
+    /// Kill `ids`' live PTYs and mark them exited (see [`Self::shutdown_all`]).
+    async fn shutdown_ids(&self, ids: Vec<Id>) -> usize {
         let count = ids.len();
         for id in ids {
             self.networks.clear(&id);
@@ -4907,12 +5016,9 @@ impl SessionManager {
         self.apply_sandbox(&mut spec, &session).await;
         // Blocking-pool fork/exec, mirroring create(): idle-resume runs on the
         // terminal-attach path, so a blocked async worker here is user-visible.
-        let spawn_spec = spec.clone();
-        let spawned = tokio::task::spawn_blocking(move || {
-                PtyHandle::spawn_sized(&spawn_spec, grid_cols, grid_rows)
-            })
-            .await
-            .unwrap_or_else(|e| Err(Error::Internal(format!("pty spawn task: {e}"))));
+        let spawned = self
+            .spawn_session_pty(&session, spec.clone(), grid_cols, grid_rows)
+            .await;
         let handle = match spawned {
             Ok(handle) => Arc::new(handle),
             Err(e) => {
@@ -4933,18 +5039,199 @@ impl SessionManager {
         self.repo.get(id).await
     }
 
+    /// Re-adopt the PTY holders the previous daemon run left behind (see
+    /// [`SESSION_PERSISTENCE_SETTING`]): for each live holder whose session
+    /// still exists, is not archived and is one the user started, re-attach
+    /// (replaying its screen + scrollback), re-register it as live, restore
+    /// its ingest token and mark it `running`. Every other holder is ended —
+    /// one for a session that is gone, archived or engine-owned, a duplicate
+    /// (only the newest holder per session is kept), one whose child already
+    /// exited while no daemon was attached (the session then restores like
+    /// any other), or one speaking an incompatible protocol version. Stale
+    /// socket files are removed. Returns the adopted session ids. Runs
+    /// regardless of the setting: switching persistence off must not orphan
+    /// sessions that are already running.
+    pub async fn adopt_holders(&self) -> Vec<Id> {
+        let Some(config) = self.holders.clone() else {
+            return Vec::new();
+        };
+        let sockets = config.sockets();
+        if sockets.is_empty() {
+            return Vec::new();
+        }
+        // Handshakes and snapshot replays are blocking I/O + parsing.
+        let attached = tokio::task::spawn_blocking(move || {
+            let mut out: Vec<PtyHandle> = Vec::new();
+            for path in sockets {
+                match PtyHandle::adopt(&path) {
+                    Ok(handle) => out.push(handle),
+                    Err(otto_pty::AdoptError::Stale) => {
+                        tracing::debug!(socket = %path.display(), "pty holder gone; removed its stale socket");
+                    }
+                    Err(otto_pty::AdoptError::Incompatible(info)) => {
+                        tracing::warn!(
+                            socket = %path.display(),
+                            holder = %info.holder_version,
+                            "pty holder speaks protocol {}.{} — ending it (its session resumes the old way)",
+                            info.proto_major, info.proto_minor
+                        );
+                        let _ = otto_pty::holder::terminate(&path);
+                    }
+                    Err(otto_pty::AdoptError::Failed(e)) => {
+                        // Unadoptable but maybe alive: end it, or reopening its
+                        // session would start a SECOND process (a resumed
+                        // agent forking the conversation it is still in).
+                        tracing::warn!(socket = %path.display(), "pty holder not adoptable — ending it: {e}");
+                        let _ = otto_pty::holder::terminate(&path);
+                    }
+                }
+            }
+            out
+        })
+        .await
+        .unwrap_or_default();
+
+        // Newest holder per session wins; the rest are ended below.
+        let mut by_session: std::collections::HashMap<Id, Vec<PtyHandle>> = Default::default();
+        for handle in attached {
+            let sid = handle
+                .holder()
+                .and_then(|i| i.meta.get("session_id"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            match sid {
+                Some(sid) => by_session.entry(sid).or_default().push(handle),
+                None => {
+                    tracing::warn!("pty holder without a session id — ending it");
+                    drop(handle); // not detached: kills the child, releases the holder
+                }
+            }
+        }
+        let mut adopted = Vec::new();
+        for (sid, mut handles) in by_session {
+            handles.sort_by_key(|h| std::cmp::Reverse(h.holder().map(|i| i.started_at_ms).unwrap_or(0)));
+            let mut iter = handles.into_iter();
+            let Some(handle) = iter.next() else { continue };
+            for dup in iter {
+                tracing::warn!(session = %sid, "duplicate pty holder for one session — ending the older one");
+                drop(dup);
+            }
+            if handle.has_exited() {
+                tracing::info!(session = %sid, "session's process exited while the daemon was down");
+                drop(handle);
+                continue;
+            }
+            let session = match self.repo.get(&sid).await {
+                Ok(s) => s,
+                Err(_) => {
+                    tracing::warn!(session = %sid, "pty holder for a session that no longer exists — ending it");
+                    drop(handle);
+                    continue;
+                }
+            };
+            if session.archived || !is_user_started(&session) || self.is_live(&sid) {
+                tracing::info!(session = %sid, "pty holder not re-adoptable (archived / engine-owned / already live) — ending it");
+                drop(handle);
+                continue;
+            }
+            if let Some(token) = handle
+                .holder()
+                .and_then(|i| i.meta.get("ingest_token"))
+                .and_then(|v| v.as_str())
+                .filter(|t| !t.is_empty())
+            {
+                self.ingest_tokens.insert(sid.clone(), token.to_string());
+            }
+            let pid = handle.pid();
+            let handle = Arc::new(handle);
+            self.live.insert(sid.clone(), Arc::clone(&handle));
+            if let Err(e) = self.repo.update_status(&sid, SessionStatus::Running).await {
+                tracing::warn!(session = %sid, "re-adopted session: status update failed: {e}");
+            }
+            let _ = self.events.send(Event::SessionStatus {
+                session_id: sid.clone(),
+                workspace_id: session.workspace_id.clone(),
+                status: SessionStatus::Running,
+            });
+            self.record_lifecycle(&session, "Reattached after a daemon restart (process kept running)");
+            self.start_status_task(
+                sid.clone(),
+                session.workspace_id.clone(),
+                session.provider.clone(),
+                handle,
+            );
+            // A codex/agy id capture that was still pending died with the old
+            // daemon: re-arm it (it waits for the next input, as at spawn).
+            if session.kind == SessionKind::Agent
+                && session.provider_session_id.is_none()
+                && self.providers.captures_session_id(&session.provider)
+            {
+                self.spawn_session_id_capture(&session);
+            }
+            tracing::info!(
+                session = %sid,
+                provider = %session.provider,
+                pid = ?pid,
+                "re-adopted live session from its pty holder"
+            );
+            adopted.push(sid);
+        }
+        adopted
+    }
+
+    /// Daemon shutdown. With session persistence on
+    /// ([`SESSION_PERSISTENCE_SETTING`]), sessions running in a PTY holder are
+    /// DETACHED — left running, status untouched, credentials kept — for the
+    /// next daemon run to re-adopt; every other live PTY is killed and marked
+    /// exited exactly as [`Self::shutdown_all`] does. With it off, everything
+    /// is killed. Returns `(killed, kept_running)`.
+    pub async fn shutdown_for_restart(&self) -> (usize, usize) {
+        let persist = self.persistence_enabled().await;
+        if persist {
+            // No teardown path from here on may end a held session.
+            otto_pty::holder::detach_all_on_drop();
+        }
+        let mut keep = Vec::new();
+        let mut kill = Vec::new();
+        for entry in self.live.iter() {
+            if persist && entry.value().holder().is_some() {
+                entry.value().detach();
+                keep.push(entry.key().clone());
+            } else {
+                kill.push(entry.key().clone());
+            }
+        }
+        // Untrack the detached ones: their status tasks then see a superseded
+        // handle and leave the row alone — it stays as it is (live) for the
+        // next daemon run, which re-adopts the process.
+        for id in &keep {
+            self.networks.clear(id);
+            self.live.remove(id);
+        }
+        (self.shutdown_ids(kill).await, keep.len())
+    }
+
     /// Daemon-boot restore. We deliberately do NOT respawn agent processes here:
     /// keeping every historical session resident would cost ~200 MB each. Instead
     /// every restorable session is marked `Reconnectable` (0 memory) and resumed
     /// lazily by [`Self::ensure_live`] the moment a client opens it — claude/codex
     /// keep their conversation in the on-disk JSONL, so `--resume` restores it in
     /// full. `_fallback_cwd` is kept for signature stability (used by resume).
+    ///
+    /// Sessions whose process outlived the previous daemon in a PTY holder
+    /// ([`SESSION_PERSISTENCE_SETTING`]) are re-adopted FIRST
+    /// ([`Self::adopt_holders`]): they come back `running` — same process,
+    /// same screen — and keep their credentials. Only the rest go dormant.
     pub async fn restore_all(
         &self,
         _fallback_cwd: &(dyn Fn(&Id) -> Option<String> + Send + Sync),
     ) -> Result<()> {
-        self.expire_orphaned_session_credentials().await;
+        let adopted = self.adopt_holders().await;
+        self.expire_orphaned_session_credentials(&adopted).await;
         for session in self.repo.list_all_restorable().await? {
+            if adopted.contains(&session.id) {
+                continue;
+            }
             self.repo
                 .update_status(&session.id, SessionStatus::Reconnectable)
                 .await?;
@@ -4957,15 +5244,17 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Boot-time credential sweep (see [`Self::restore_all`]): no agent process
-    /// survives a daemon restart, so every per-session MCP credential still
-    /// valid at boot has no live holder — revoke them all (a resume mints a
-    /// fresh one). Also retires the legacy `otto-mcp:<session>` label tokens
-    /// minted before managed ownership (thousands of full-owner, 10-year
-    /// credentials that nothing revoked). Best-effort; rows are kept.
-    async fn expire_orphaned_session_credentials(&self) {
+    /// Boot-time credential sweep (see [`Self::restore_all`]): apart from the
+    /// sessions just re-adopted from their PTY holders (`keep` — their agent
+    /// is still running with its credential in its environment), no agent
+    /// process survives a daemon restart, so every other per-session MCP
+    /// credential still valid at boot has no live holder — revoke them all (a
+    /// resume mints a fresh one). Also retires the legacy `otto-mcp:<session>`
+    /// label tokens minted before managed ownership (thousands of full-owner,
+    /// 10-year credentials that nothing revoked). Best-effort; rows are kept.
+    async fn expire_orphaned_session_credentials(&self, keep: &[Id]) {
         let Some(auth) = &self.auth else { return };
-        match auth.expire_managed_session_tokens().await {
+        match auth.expire_managed_session_tokens_except(keep).await {
             Ok(0) => {}
             Ok(n) => tracing::info!(count = n, "revoked per-session MCP credentials left over from the previous daemon run"),
             Err(e) => tracing::warn!("boot credential sweep (managed): {e}"),
