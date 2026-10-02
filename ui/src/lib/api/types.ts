@@ -2724,6 +2724,24 @@ export interface PullReq {
   mode?: PullMode;
 }
 
+/** `POST /repos/{id}/push` body (all optional — an empty body pushes the
+ *  current branch, publishing it with `--set-upstream` when it has none). */
+export interface PushReq {
+  /** Push THIS branch explicitly instead of the checked-out one. */
+  branch?: string;
+  /** Overwrite the remote branch with `--force-with-lease --force-if-includes`.
+   *  Send only after the user confirmed it; refused (409) when the remote
+   *  moved since it was last fetched and integrated. */
+  force_with_lease?: boolean;
+}
+
+/** `POST /repos/{id}/discard` body. `keep_staged` reverts only the unstaged
+ *  side (worktree → index), keeping staged hunks; absent = revert to HEAD. */
+export interface DiscardReq {
+  paths: string[];
+  keep_staged?: boolean;
+}
+
 /** `GET /repos/{id}/pull-mode` — the mode a plain pull would use. */
 export interface PullModeResp {
   mode: PullMode;

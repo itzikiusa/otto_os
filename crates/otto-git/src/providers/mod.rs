@@ -252,7 +252,32 @@ pub fn make_provider(account: &GitAccount, token: String) -> Arc<dyn GitProvider
 /// account's token to api.github.com and could come back with a public
 /// namesake repo's PRs as this repo's. Such a remote is now an explicit
 /// "not supported" instead.
-pub fn check_remote_reachable(kind: GitProviderKind, remote_url: &str) -> Result<()> {
+///
+/// GitLab is the same bug class: any host containing "gitlab" is DETECTED as
+/// GitLab, but an account without an API base URL talks to gitlab.com — so a
+/// self-hosted remote (`gitlab.corp.example`) sent the token there and acted
+/// on a public namesake project. Without `gitlab_api_base` a non-gitlab.com
+/// remote is refused with the fix (set the account's API base URL); with one,
+/// the user said where the API lives (ssh and API hosts may differ).
+pub fn check_remote_reachable(
+    kind: GitProviderKind,
+    remote_url: &str,
+    gitlab_api_base: Option<&str>,
+) -> Result<()> {
+    if kind == GitProviderKind::Gitlab {
+        if gitlab_api_base.is_some_and(|b| !b.trim().is_empty()) {
+            return Ok(());
+        }
+        return match detect::remote_host(remote_url) {
+            Some(host) if !matches!(host.as_str(), "gitlab.com" | "www.gitlab.com") => {
+                Err(otto_core::Error::Invalid(format!(
+                    "{host} looks like a self-hosted GitLab: set this git account's API base \
+                     URL (Settings → Git Accounts) — without it Otto would call gitlab.com"
+                )))
+            }
+            _ => Ok(()),
+        };
+    }
     if kind != GitProviderKind::Github {
         return Ok(());
     }
@@ -332,15 +357,40 @@ mod reach_tests {
     #[test]
     fn github_enterprise_remote_is_refused() {
         let gh = GitProviderKind::Github;
-        assert!(check_remote_reachable(gh, "git@github.com:o/r.git").is_ok());
-        assert!(check_remote_reachable(gh, "https://github.com/o/r").is_ok());
-        let err = check_remote_reachable(gh, "https://u:tok@github.corp.example.com/o/r.git")
+        assert!(check_remote_reachable(gh, "git@github.com:o/r.git", None).is_ok());
+        assert!(check_remote_reachable(gh, "https://github.com/o/r", None).is_ok());
+        let err = check_remote_reachable(gh, "https://u:tok@github.corp.example.com/o/r.git", None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("github.corp.example.com"), "{err}");
         assert!(!err.contains("u:tok"), "no credentials in the text: {err}");
+    }
+
+    /// A self-hosted GitLab remote with a gitlab.com-defaulting account is
+    /// refused before any token is loaded; an explicit API base unlocks it.
+    #[test]
+    fn self_hosted_gitlab_needs_an_api_base() {
+        let gl = GitProviderKind::Gitlab;
+        assert!(check_remote_reachable(gl, "git@gitlab.com:o/r.git", None).is_ok());
+        assert!(check_remote_reachable(gl, "https://gitlab.com/g/sub/r.git", None).is_ok());
+        let err = check_remote_reachable(gl, "https://u:tok@gitlab.corp/o/r", None)
+            .unwrap_err()
+            .to_string();
         assert!(
-            check_remote_reachable(GitProviderKind::Gitlab, "https://gitlab.corp/o/r").is_ok()
+            err.contains("gitlab.corp") && err.contains("API base"),
+            "{err}"
         );
+        assert!(!err.contains("u:tok"), "{err}");
+        assert!(
+            check_remote_reachable(gl, "https://gitlab.corp/o/r", Some("https://gitlab.corp"))
+                .is_ok()
+        );
+        assert!(check_remote_reachable(gl, "https://gitlab.corp/o/r", Some("  ")).is_err());
+        assert!(check_remote_reachable(
+            GitProviderKind::Bitbucket,
+            "https://bitbucket.org/o/r",
+            None
+        )
+        .is_ok());
     }
 }

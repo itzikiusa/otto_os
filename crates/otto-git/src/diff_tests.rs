@@ -505,3 +505,57 @@ async fn renames_incomplete_is_set_past_the_rename_limit() {
         .unwrap();
     assert_eq!(small.renames_incomplete, None);
 }
+
+/// A user's `diff.submodule=log` must not replace a gitlink's `diff --git`
+/// block with `Submodule sub a..b:` lines folded into the PREVIOUS file.
+#[tokio::test]
+async fn submodule_change_stays_its_own_file_under_diff_submodule_log() {
+    let (tmp, dir) = init();
+    let sub = tmp.path().join("subsrc");
+    std::fs::create_dir(&sub).unwrap();
+    sh_git(&sub, &["init", "-q", "-b", "main"]);
+    sh_git(&sub, &["config", "user.email", "otto@test.local"]);
+    sh_git(&sub, &["config", "user.name", "Otto Test"]);
+    write(&sub, "s.txt", b"one\n");
+    sh_git(&sub, &["add", "-A"]);
+    sh_git(&sub, &["commit", "-q", "-m", "s1"]);
+    write(&dir, "a.txt", b"a\n");
+    sh_git(
+        &dir,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            sub.to_str().unwrap(),
+            "sub",
+        ],
+    );
+    sh_git(&dir, &["add", "-A"]);
+    sh_git(&dir, &["commit", "-q", "-m", "base"]);
+    // Move the submodule and edit a.txt (a.txt sorts BEFORE sub).
+    let inner = dir.join("sub");
+    sh_git(&inner, &["config", "user.email", "otto@test.local"]);
+    sh_git(&inner, &["config", "user.name", "Otto Test"]);
+    write(&inner, "s.txt", b"two\n");
+    sh_git(&inner, &["commit", "-q", "-am", "s2"]);
+    write(&dir, "a.txt", b"a\nb\n");
+    sh_git(&dir, &["config", "diff.submodule", "log"]);
+
+    let git = LocalGit::new(&dir);
+    let d = git
+        .diff_with(&DiffTarget::Worktree, &DiffOpts::default())
+        .await
+        .unwrap();
+    let paths: Vec<&str> = d.files.iter().map(|f| f.path.as_str()).collect();
+    assert!(paths.contains(&"sub"), "gitlink is its own file: {paths:?}");
+    let a = d.files.iter().find(|f| f.path == "a.txt").unwrap();
+    assert!(
+        a.hunks
+            .iter()
+            .flat_map(|h| h.lines.iter())
+            .all(|l| !l.content.contains("Submodule")),
+        "no submodule summary folded into a.txt"
+    );
+}

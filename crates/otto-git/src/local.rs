@@ -332,12 +332,18 @@ async fn kill_group(pid: libc::pid_t) {
 /// Changes view goes empty), `diff.noprefix` / `diff.mnemonicPrefix` change
 /// the `a/`/`b/` prefixes the path matchers key on (every hunk op 404s/409s),
 /// and a textconv filter renders something that is not the blob.
-pub(crate) const DIFF_FORMAT: [&str; 5] = [
+///
+/// `--submodule=short`: a `diff.submodule=log|diff` config replaced a gitlink's
+/// `diff --git` block with `Submodule sub a..b:` summary lines (hashed into the
+/// PREVIOUS file's fingerprint) or inlined the submodule's own files as if
+/// they were this repo's.
+pub(crate) const DIFF_FORMAT: [&str; 6] = [
     "--no-color",
     "--no-ext-diff",
     "--no-textconv",
     "--src-prefix=a/",
     "--dst-prefix=b/",
+    "--submodule=short",
 ];
 
 /// One git invocation — argv, per-spawn env and spawn class. Every call that
@@ -1192,6 +1198,23 @@ impl LocalGit {
         Ok(st)
     }
 
+    /// Tracked changes only (`--untracked-files=no`) — for internal callers
+    /// that never look at untracked files (rename origins, conflicted paths,
+    /// "is the tracked tree dirty"). Enumerating every untracked file costs a
+    /// full directory walk, and these ran on every unstage / merge commit /
+    /// pull, two or three times each.
+    async fn tracked_status(&self) -> Result<RepoStatusResp> {
+        let out = self
+            .exec_text(&GitCmd::read(&[
+                "status",
+                "--porcelain=v2",
+                "-z",
+                "--untracked-files=no",
+            ]))
+            .await?;
+        Ok(crate::parse::parse_status(&out))
+    }
+
     /// Absolute path of this worktree's git dir: `.git` when it's a directory,
     /// or the `gitdir:` target when `.git` is a file (linked worktree /
     /// submodule). Pure filesystem — called on every `status()`, so it must not
@@ -1679,7 +1702,12 @@ impl LocalGit {
             args.push("--");
             args.push(p);
         }
-        let (out, err) = self.run_env(&args, &[]).await?;
+        // A NETWORK op (`--init` clones each submodule): the remote budget,
+        // not the 30 s local-write one that killed any clone running longer
+        // and left a half-written `.git/modules/<x>` behind. No askpass
+        // token — a submodule's host need not be the repo's, and the bound
+        // account's credential must not be offered to it.
+        let (out, err) = self.run_env_class(&args, &[], SpawnClass::Remote).await?;
         let msg = if out.trim().is_empty() { err } else { out };
         Ok(msg.trim().to_string())
     }
@@ -1689,19 +1717,30 @@ impl LocalGit {
     pub async fn log(&self, limit: u32, skip: u32, all: bool) -> Result<Vec<CommitInfo>> {
         let limit_s = limit.to_string();
         let skip_s = skip.to_string();
+        // `--no-show-signature`: a user's `log.showSignature=true` prints gpg
+        // output to stdout AHEAD of each signed record, corrupting the parsed
+        // SHA/parents (and running gpg once per commit).
         let mut args = vec![
             "log",
+            "--no-show-signature",
             "--pretty=format:%H%x1f%h%x1f%an%x1f%aI%x1f%s%x1f%P%x1f%D%x1e",
             "--skip",
             &skip_s,
         ];
         if limit > 0 {
-            args.splice(2..2, ["-n", limit_s.as_str()]);
+            args.splice(3..3, ["-n", limit_s.as_str()]);
         }
         if all {
             args.insert(1, "--all");
         }
-        let out = self.run_read(&args).await?;
+        let out = match self.run_read(&args).await {
+            Ok(out) => out,
+            // A fresh repo before its first commit has no history — an answer,
+            // not git's "does not have any commits yet" as an error. Checked
+            // only on failure, so a normal page costs no extra spawn.
+            Err(_) if !all && !self.head_exists().await => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
         crate::parse::parse_log(&out)
     }
 
@@ -2393,7 +2432,7 @@ impl LocalGit {
         // A set, and the cheap kind test first: `paths.contains` per change
         // was O(paths × changes) — 400M compares for "Unstage all" at 20k.
         let want: std::collections::HashSet<&str> = paths.iter().map(String::as_str).collect();
-        for change in self.status().await?.changes {
+        for change in self.tracked_status().await?.changes {
             if change.kind == "renamed" && want.contains(change.path.as_str()) {
                 if let Some(original) = change.orig_path {
                     expanded.push(original);
@@ -2414,7 +2453,7 @@ impl LocalGit {
     }
 
     /// True once HEAD resolves to a commit (false on an unborn branch).
-    async fn head_exists(&self) -> bool {
+    pub(crate) async fn head_exists(&self) -> bool {
         matches!(
             self.exec(&GitCmd::read(&["rev-parse", "-q", "--verify", "HEAD^{commit}"]), None)
                 .await,
@@ -2427,6 +2466,16 @@ impl LocalGit {
     /// everything else (modified/deleted/renamed/conflicted) is restored from
     /// HEAD. Destructive and irreversible — the UI confirms first.
     pub async fn discard(&self, paths: &[String]) -> Result<()> {
+        self.discard_with(paths, false).await
+    }
+
+    /// [`Self::discard`], or with `keep_staged` only the UNSTAGED side: a
+    /// tracked path's worktree goes back to its INDEX version (`restore
+    /// --worktree`, staged hunks kept), an untracked file is removed, and a
+    /// path with nothing unstaged is left alone. This is what "Discard" means
+    /// in the Unstaged list — reverting a partially staged file to HEAD there
+    /// threw away the hunks the user had deliberately staged.
+    pub async fn discard_with(&self, paths: &[String], keep_staged: bool) -> Result<()> {
         if paths.is_empty() {
             return Err(Error::Invalid("no paths to discard".into()));
         }
@@ -2436,8 +2485,20 @@ impl LocalGit {
         let status = self.status().await?;
         let mut restore: Vec<String> = Vec::new(); // tracked → revert to HEAD
         let mut remove: Vec<String> = Vec::new(); // new → delete
+        let mut worktree: Vec<String> = Vec::new(); // keep_staged → revert to index
         for c in &status.changes {
             if !want.contains(c.path.as_str()) {
+                continue;
+            }
+            if keep_staged {
+                // Conflicted paths are the resolver's business, never a
+                // worktree-only discard.
+                match c.kind.as_str() {
+                    "untracked" => remove.push(c.path.clone()),
+                    "conflicted" => {}
+                    _ if c.unstaged => worktree.push(c.path.clone()),
+                    _ => {}
+                }
                 continue;
             }
             match c.kind.as_str() {
@@ -2456,7 +2517,7 @@ impl LocalGit {
                 _ => restore.push(c.path.clone()),
             }
         }
-        if restore.is_empty() && remove.is_empty() {
+        if restore.is_empty() && remove.is_empty() && worktree.is_empty() {
             // Nothing the caller named has a change any more (a stale list, or
             // a name status never reported). Saying "Discarded" for a no-op is
             // how a silently-failed discard used to look like success.
@@ -2473,6 +2534,10 @@ impl LocalGit {
                     .paths_stdin(&restore),
             )
             .await?;
+        }
+        if !worktree.is_empty() {
+            self.exec_locked(&GitCmd::write(&["restore", "--worktree"]).paths_stdin(&worktree))
+                .await?;
         }
         if !remove.is_empty() {
             // Unstage first (a staged-new file → untracked), then `clean` removes
@@ -2494,6 +2559,25 @@ impl LocalGit {
     /// Amend with an EMPTY message keeps the previous commit's message
     /// (`--amend --no-edit`) — the "fold staged changes into the last commit"
     /// flow; rejecting it forced users to retype the message.
+    /// Commit ONLY `paths` (`git commit --only -- <paths>`), whatever else is
+    /// staged: the other staged changes stay staged and out of this commit.
+    /// For automated commits (the API client's collection push) that must
+    /// never sweep the user's own half-finished staged work along with them.
+    /// The paths must already be known to git (stage new files first).
+    pub async fn commit_only(&self, message: &str, paths: &[String]) -> Result<String> {
+        if message.trim().is_empty() {
+            return Err(Error::Invalid("empty commit message".into()));
+        }
+        if paths.is_empty() {
+            return Err(Error::Invalid("no paths to commit".into()));
+        }
+        Self::guard_paths(paths)?;
+        self.exec_locked(&GitCmd::write(&["commit", "-m", message, "--only"]).paths_stdin(paths))
+            .await?;
+        let sha = self.run_read(&["rev-parse", "HEAD"]).await?;
+        Ok(sha.trim().to_string())
+    }
+
     pub async fn commit(&self, message: &str, amend: bool) -> Result<String> {
         if message.trim().is_empty() {
             if !amend {
@@ -2552,68 +2636,110 @@ impl LocalGit {
     /// regardless of what's checked out — the Create-PR flow pushes the
     /// user-selected source branch, which previously silently pushed HEAD.
     pub async fn push_branch(&self, token: Option<String>, branch: Option<&str>) -> Result<String> {
-        match branch {
-            None => self.push(token).await,
-            Some(b) => {
-                Self::guard_ref(b)?;
-                let askpass = match &token {
-                    Some(t) => Some(AskPass::new(t)?),
-                    None => None,
-                };
-                let envs = askpass.as_ref().map(AskPass::envs).unwrap_or_default();
-                let (ok, stdout, stderr, code) = self
-                    .run_raw_class(&["push", "origin", b], &envs, SpawnClass::Remote)
-                    .await?;
-                if ok {
-                    return Ok(combine_push_output(&stdout, &stderr));
-                }
-                // First push of a fresh branch: set the upstream explicitly.
-                if stderr.contains("has no upstream branch") || stderr.contains("--set-upstream") {
-                    let (ok2, stdout2, stderr2, code2) = self
-                        .run_raw_class(
-                            &["push", "--set-upstream", "origin", b],
-                            &envs,
-                            SpawnClass::Remote,
-                        )
-                        .await?;
-                    if ok2 {
-                        return Ok(combine_push_output(&stdout2, &stderr2));
-                    }
-                    return Err(upstream_err(&stderr2, &stdout2, code2));
-                }
-                Err(upstream_err(&stderr, &stdout, code))
-            }
-        }
+        self.push_with(token, branch, false).await
     }
 
     pub async fn push(&self, token: Option<String>) -> Result<String> {
+        self.push_with(token, None, false).await
+    }
+
+    /// The one push implementation behind [`Self::push`] / [`Self::push_branch`].
+    ///
+    /// `force_with_lease` is the ONLY way this crate ever overwrites remote
+    /// history, and only when the caller asked for it explicitly (the UI asks
+    /// the user first). It is `--force-with-lease --force-if-includes`, never a
+    /// bare `--force`: the lease refuses when the remote branch moved since our
+    /// remote-tracking ref was updated, and `--force-if-includes` additionally
+    /// refuses when that tracking ref was refreshed by a fetch whose commits
+    /// were never integrated locally — so a background fetch can't turn the
+    /// lease into a blind overwrite of someone else's push.
+    ///
+    /// A non-fast-forward rejection is a 409 the caller can act on ("pull
+    /// first" / force with lease), not a 502 provider outage.
+    pub async fn push_with(
+        &self,
+        token: Option<String>,
+        branch: Option<&str>,
+        force_with_lease: bool,
+    ) -> Result<String> {
+        if let Some(b) = branch {
+            Self::guard_ref(b)?;
+        }
+        if force_with_lease {
+            // Forcing a detached HEAD has no branch to lease against.
+            let b = match branch {
+                Some(b) => b.to_string(),
+                None => self.current_branch().await?,
+            };
+            if b == "HEAD" {
+                return Err(Error::Conflict(
+                    "HEAD is detached — check out a branch before force pushing".into(),
+                ));
+            }
+        }
         let askpass = match &token {
             Some(t) => Some(AskPass::new(t)?),
             None => None,
         };
         let envs = askpass.as_ref().map(AskPass::envs).unwrap_or_default();
-
-        let (ok, stdout, stderr, code) = self
-            .run_raw_class(&["push"], &envs, SpawnClass::Remote)
-            .await?;
+        let force: &[&str] = if force_with_lease {
+            &["--force-with-lease", "--force-if-includes"]
+        } else {
+            &[]
+        };
+        let mut args = vec!["push"];
+        args.extend_from_slice(force);
+        // `branch: Some(b)` pushes THAT branch explicitly regardless of what's
+        // checked out; `None` is a plain `git push` of the current branch to
+        // its configured upstream. The explicit form names `refs/heads/b` (a
+        // same-named tag can't make the refspec ambiguous) and sets the
+        // upstream when the branch has none: `push origin b` SUCCEEDS without
+        // one, so the "no upstream" retry below never ran and a branch the
+        // Create-PR flow published was left untracked (no ahead/behind, and
+        // Pull died "no tracking information").
+        let full_ref = branch.map(|b| format!("refs/heads/{b}"));
+        if let (Some(b), Some(full)) = (branch, full_ref.as_deref()) {
+            let has_upstream = self
+                .run_raw_class(
+                    &[
+                        "rev-parse",
+                        "-q",
+                        "--verify",
+                        &format!("{full}@{{upstream}}"),
+                    ],
+                    &[],
+                    SpawnClass::LocalRead,
+                )
+                .await
+                .is_ok_and(|(ok, ..)| ok);
+            if !has_upstream && self.branch_exists(b).await {
+                args.push("--set-upstream");
+            }
+            args.extend_from_slice(&["origin", full]);
+        }
+        let (ok, stdout, stderr, code) =
+            self.run_raw_class(&args, &envs, SpawnClass::Remote).await?;
         if ok {
             return Ok(combine_push_output(&stdout, &stderr));
         }
+        // First push of a fresh branch: set the upstream explicitly.
         if stderr.contains("has no upstream branch") || stderr.contains("--set-upstream") {
-            let branch = self.current_branch().await?;
+            let b = match branch {
+                Some(b) => b.to_string(),
+                None => self.current_branch().await?,
+            };
+            let mut args2 = vec!["push"];
+            args2.extend_from_slice(force);
+            args2.extend_from_slice(&["--set-upstream", "origin", &b]);
             let (ok2, stdout2, stderr2, code2) = self
-                .run_raw_class(
-                    &["push", "--set-upstream", "origin", &branch],
-                    &envs,
-                    SpawnClass::Remote,
-                )
+                .run_raw_class(&args2, &envs, SpawnClass::Remote)
                 .await?;
             if ok2 {
                 return Ok(combine_push_output(&stdout2, &stderr2));
             }
-            return Err(upstream_err(&stderr2, &stdout2, code2));
+            return Err(push_err(&stderr2, &stdout2, code2));
         }
-        Err(upstream_err(&stderr, &stdout, code))
+        Err(push_err(&stderr, &stdout, code))
     }
 
     /// `git pull --no-rebase`, treating a CONFLICTING merge as a normal outcome
@@ -3071,7 +3197,7 @@ impl LocalGit {
 
     /// Conflicted paths from a fresh status (porcelain v2 `u` entries).
     pub(crate) async fn conflicted_paths(&self) -> Result<Vec<String>> {
-        let st = self.status().await?;
+        let st = self.tracked_status().await?;
         Ok(st
             .changes
             .iter()
@@ -3083,7 +3209,7 @@ impl LocalGit {
     /// True if the working tree has staged/unstaged TRACKED changes (untracked
     /// files don't block a merge and aren't stashed by a plain `git stash`).
     pub(crate) async fn working_dirty(&self) -> Result<bool> {
-        let st = self.status().await?;
+        let st = self.tracked_status().await?;
         Ok(st
             .changes
             .iter()
@@ -4011,7 +4137,7 @@ fn remote_ref_absent(stderr: &str) -> bool {
 /// Matched on git's stable porcelain wording; anything unrecognised keeps the
 /// conservative 502 (a genuine network/auth failure looks like nothing here).
 pub(crate) fn local_refusal(msg: &str) -> bool {
-    const MARKERS: [&str; 24] = [
+    const MARKERS: [&str; 29] = [
         "local changes to the following files would be overwritten",
         "would be overwritten by",
         "please commit your changes or stash them",
@@ -4044,9 +4170,81 @@ pub(crate) fn local_refusal(msg: &str) -> bool {
         // `pull --ff-only` on a diverged branch — the caller's choice of mode,
         // not an outage.
         "not possible to fast-forward",
+        // Push/pull on a detached HEAD, or pushing an unborn branch (no
+        // commit yet) — nothing was sent anywhere.
+        "you are not currently on a branch",
+        "src refspec",
+        // Unborn branch (no first commit) — stash/log have nothing to act on.
+        "you do not have the initial commit yet",
+        "does not have any commits yet",
+        // A conflicted path handed to restore/unstage — resolve it first.
+        "is unmerged",
     ];
     let lc = msg.to_ascii_lowercase();
     MARKERS.iter().any(|m| lc.contains(m))
+}
+
+/// Stable prefix of the 409 a non-fast-forward push rejection maps to. The UI
+/// matches on it to offer "Pull" / "Force push with lease…" instead of a dead
+/// end — keep it in sync with `ui/src/modules/git/push-errors.ts`.
+pub const PUSH_REJECTED: &str = "push rejected: the remote branch has commits yours doesn't";
+/// Stable prefix of the 409 a refused force-with-lease maps to.
+pub const PUSH_LEASE_REFUSED: &str = "force push refused: the remote branch moved";
+
+/// Map a failed `git push` to an error the caller can act on. A rejection
+/// because the remote has commits we don't (`fetch first` / `non-fast-forward`)
+/// or a refused lease (`stale info` / `remote ref updated since checkout`) is
+/// a LOCAL-state 409 — nothing is wrong with the provider, and calling it a 502
+/// told the user the remote was down when the fix is "pull first". Everything
+/// else (auth, network, hook/protected-branch refusals) goes through
+/// [`upstream_err`].
+pub(crate) fn push_err(stderr: &str, stdout: &str, code: Option<i32>) -> Error {
+    let rejected = stderr
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("! [rejected]"));
+    if let Some(line) = rejected {
+        if line.contains("(stale info)") || line.contains("(remote ref updated since checkout)") {
+            return Error::Conflict(format!(
+                "{PUSH_LEASE_REFUSED} since you last fetched and integrated it — fetch, review \
+                 the new commits, then try again ({line})"
+            ));
+        }
+        if line.contains("(fetch first)") || line.contains("(non-fast-forward)") {
+            return Error::Conflict(format!(
+                "{PUSH_REJECTED} — pull to bring them in, then push again ({line})"
+            ));
+        }
+    }
+    upstream_err(stderr, stdout, code)
+}
+
+/// A one-line next step for a remote op that failed on CREDENTIALS, appended
+/// to the error so "fatal: Authentication failed for …" says where to fix it.
+/// `None` for anything that isn't recognisably an auth failure.
+fn auth_hint(full_lc: &str) -> Option<&'static str> {
+    const HTTPS: [&str; 5] = [
+        "authentication failed",
+        "could not read username",
+        "could not read password",
+        "the requested url returned error: 401",
+        "the requested url returned error: 403",
+    ];
+    if full_lc.contains("permission denied (publickey")
+        || full_lc.contains("host key verification failed")
+    {
+        return Some(
+            "SSH authentication failed — check that your SSH agent has a key this remote accepts \
+             (`ssh-add -l`) and that the host is in known_hosts",
+        );
+    }
+    if HTTPS.iter().any(|m| full_lc.contains(m)) {
+        return Some(
+            "authentication failed — check the repository's git account token (Settings → Git \
+             Accounts: Test, expiry and write scope)",
+        );
+    }
+    None
 }
 
 pub(crate) fn upstream_err(stderr: &str, stdout: &str, code: Option<i32>) -> Error {
@@ -4080,8 +4278,11 @@ pub(crate) fn upstream_err(stderr: &str, stdout: &str, code: Option<i32>) -> Err
     if local_refusal(&full) {
         return Error::Conflict(pick.to_string());
     }
+    let hint = auth_hint(&full.to_ascii_lowercase())
+        .map(|h| format!(" — {h}"))
+        .unwrap_or_default();
     Error::Upstream(format!(
-        "git exited {}: {}",
+        "git exited {}: {}{hint}",
         code.map_or_else(|| "?".to_string(), |c| c.to_string()),
         pick
     ))
@@ -4733,6 +4934,8 @@ mod tests {
             "error: Merging is not possible because you have unmerged files.",
             "error: pathspec 'no-such-branch' did not match any file(s) known to git",
             "fatal: Unable to create '/r/.git/index.lock': File exists.\nAnother git process seems to be running",
+            "fatal: You are not currently on a branch.\nTo push the history leading to the current (detached HEAD)",
+            "error: src refspec main does not match any\nerror: failed to push some refs to 'origin'",
         ];
         for msg in local {
             match upstream_err(msg, "", Some(1)) {
@@ -5171,6 +5374,207 @@ mod tests {
         );
     }
 
+    /// `repo` (from [`fixture`], committed) pushed to a bare `origin.git`, plus
+    /// a second clone `other` that can push behind `repo`'s back.
+    fn pushed_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let (tmp, dir) = fixture();
+        sh_git(&dir, &["add", "-A"]);
+        sh_git(&dir, &["commit", "-m", "tidy"]);
+        let parent = dir.parent().unwrap().to_path_buf();
+        sh_git(&parent, &["init", "--bare", "-b", "main", "origin.git"]);
+        let bare = parent.join("origin.git");
+        sh_git(&dir, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        sh_git(&dir, &["push", "-u", "origin", "main"]);
+        sh_git(&parent, &["clone", bare.to_str().unwrap(), "other"]);
+        let other = parent.join("other");
+        sh_git(&other, &["config", "user.email", "o@test.local"]);
+        sh_git(&other, &["config", "user.name", "Other"]);
+        (tmp, dir, other)
+    }
+
+    /// A push the remote rejects because it has commits we don't is a 409
+    /// naming the fix (pull), never a 502 "provider unavailable"; and a
+    /// force-with-lease never overwrites commits we haven't seen/integrated.
+    #[tokio::test]
+    async fn diverged_push_is_a_conflict_and_lease_protects_unseen_commits() {
+        let (_tmp, dir, other) = pushed_fixture();
+        write(&other, "theirs.txt", "theirs\n");
+        sh_git(&other, &["add", "-A"]);
+        sh_git(&other, &["commit", "-m", "theirs"]);
+        sh_git(&other, &["push"]);
+        write(&dir, "mine.txt", "mine\n");
+        sh_git(&dir, &["add", "-A"]);
+        sh_git(&dir, &["commit", "-m", "mine"]);
+
+        let git = LocalGit::new(&dir);
+        match git.push(None).await {
+            Err(Error::Conflict(m)) => assert!(m.starts_with(PUSH_REJECTED), "{m}"),
+            other => panic!("expected a 409 push rejection, got {other:?}"),
+        }
+        // Lease against a stale tracking ref: refused, remote untouched.
+        let remote = dir.parent().unwrap().join("origin.git");
+        let theirs = rev(&remote, "main");
+        match git.push_with(None, None, true).await {
+            Err(Error::Conflict(m)) => assert!(m.starts_with(PUSH_LEASE_REFUSED), "{m}"),
+            other => panic!("expected a refused lease, got {other:?}"),
+        }
+        // Fetched but NOT integrated: --force-if-includes still refuses.
+        sh_git(&dir, &["fetch", "origin"]);
+        match git.push_with(None, None, true).await {
+            Err(Error::Conflict(m)) => assert!(m.starts_with(PUSH_LEASE_REFUSED), "{m}"),
+            other => panic!("expected --force-if-includes to refuse, got {other:?}"),
+        }
+        assert_eq!(rev(&remote, "main"), theirs, "the remote kept their commit");
+    }
+
+    /// Rewriting our OWN pushed commit (amend/rebase) is the case force-with-
+    /// lease exists for: the plain push is rejected, the lease goes through.
+    #[tokio::test]
+    async fn force_with_lease_replaces_our_own_rewritten_history() {
+        let (_tmp, dir, _other) = pushed_fixture();
+        sh_git(&dir, &["commit", "--amend", "-m", "tidy (reworded)"]);
+        let git = LocalGit::new(&dir);
+        assert!(matches!(git.push(None).await, Err(Error::Conflict(_))));
+        git.push_with(None, None, true).await.unwrap();
+        let remote = dir.parent().unwrap().join("origin.git");
+        assert_eq!(rev(&remote, "main"), rev(&dir, "HEAD"));
+        // An explicit branch takes the same path.
+        sh_git(&dir, &["commit", "--amend", "-m", "tidy (again)"]);
+        git.push_with(None, Some("main"), true).await.unwrap();
+        assert_eq!(rev(&remote, "main"), rev(&dir, "HEAD"));
+    }
+
+    /// Pushing a NAMED fresh branch (the Create-PR flow) publishes it WITH
+    /// tracking — `push origin b` alone succeeds without setting one.
+    #[tokio::test]
+    async fn push_named_branch_sets_its_upstream() {
+        let (_tmp, dir, _other) = pushed_fixture();
+        sh_git(&dir, &["branch", "feat"]);
+        // A same-named tag must not make the refspec ambiguous.
+        sh_git(&dir, &["tag", "feat"]);
+        let git = LocalGit::new(&dir);
+        git.push_branch(None, Some("feat")).await.unwrap();
+        assert_eq!(rev(&dir, "feat@{upstream}"), rev(&dir, "feat"));
+    }
+
+    /// `commit_only` commits exactly the named paths; the user's other staged
+    /// work stays staged and out of the commit.
+    #[tokio::test]
+    async fn commit_only_leaves_other_staged_work_alone() {
+        let (_tmp, dir) = fixture();
+        // fixture: staged rename c→d and staged new f.txt.
+        write(&dir, "collections/x.json", "{}\n");
+        let git = LocalGit::new(&dir);
+        let p = vec!["collections/x.json".to_string()];
+        git.stage(&p).await.unwrap();
+        git.commit_only("collections", &p).await.unwrap();
+        let files = String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(&dir)
+                .args(["show", "--name-only", "--format=", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        assert_eq!(files.trim(), "collections/x.json");
+        let st = git.status().await.unwrap();
+        assert!(st.changes.iter().any(|c| c.path == "f.txt" && c.staged));
+        assert!(st.changes.iter().any(|c| c.path == "d.txt" && c.staged));
+    }
+
+    /// Fresh repo, no commit yet: the graph's log is empty, not an error.
+    #[tokio::test]
+    async fn log_of_an_unborn_branch_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        sh_git(tmp.path(), &["init", "-b", "main"]);
+        let git = LocalGit::new(tmp.path());
+        assert!(git.log(50, 0, false).await.unwrap().is_empty());
+        assert!(git.log(50, 0, true).await.unwrap().is_empty());
+    }
+
+    /// `log.showSignature=true` in the user's config must not leak gpg
+    /// output into the parsed records.
+    #[tokio::test]
+    async fn log_ignores_show_signature_config() {
+        let (tmp, dir) = fixture();
+        // An SSH-signed commit: with showSignature git prints "No signature"
+        // (no allowedSigners) to stdout ahead of its record.
+        let key = tmp.path().join("sigkey");
+        let made = std::process::Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&key)
+            .output();
+        if !made.is_ok_and(|o| o.status.success()) {
+            eprintln!("ssh-keygen unavailable — skipping");
+            return;
+        }
+        sh_git(&dir, &["config", "gpg.format", "ssh"]);
+        sh_git(&dir, &["config", "user.signingkey", key.to_str().unwrap()]);
+        sh_git(&dir, &["add", "-A"]);
+        sh_git(&dir, &["commit", "-S", "-m", "signed"]);
+        sh_git(&dir, &["config", "log.showSignature", "true"]);
+        let git = LocalGit::new(&dir);
+        let log = git.log(10, 0, false).await.unwrap();
+        assert_eq!(log.len(), 3);
+        assert!(
+            log.iter()
+                .all(|c| c.sha.len() == 40 && !c.sha.contains('\n')),
+            "{log:?}"
+        );
+        assert_eq!(log[0].parents, vec![log[1].sha.clone()]);
+        assert_eq!(log[0].sha, rev(&dir, "HEAD"));
+    }
+
+    #[tokio::test]
+    async fn force_push_refuses_a_detached_head() {
+        let (_tmp, dir, _other) = pushed_fixture();
+        sh_git(&dir, &["checkout", "--detach"]);
+        let git = LocalGit::new(&dir);
+        assert!(matches!(
+            git.push_with(None, None, true).await,
+            Err(Error::Conflict(m)) if m.contains("detached")
+        ));
+    }
+
+    #[test]
+    fn auth_failures_name_where_to_fix_them() {
+        let e = upstream_err(
+            "fatal: Authentication failed for 'https://github.com/o/r.git/'",
+            "",
+            Some(128),
+        );
+        assert!(
+            matches!(&e, Error::Upstream(m) if m.contains("Git Accounts")),
+            "{e:?}"
+        );
+        let e = upstream_err(
+            "git@github.com: Permission denied (publickey).",
+            "",
+            Some(128),
+        );
+        assert!(
+            matches!(&e, Error::Upstream(m) if m.contains("SSH agent")),
+            "{e:?}"
+        );
+        let e = upstream_err(
+            "fatal: unable to access: Could not resolve host",
+            "",
+            Some(128),
+        );
+        assert!(
+            matches!(&e, Error::Upstream(m) if !m.contains(" — ")),
+            "{e:?}"
+        );
+        // A protected-branch hook refusal is not a non-fast-forward rejection.
+        let e = push_err(
+            " ! [remote rejected] main -> main (protected branch hook declined)",
+            "",
+            Some(1),
+        );
+        assert!(matches!(e, Error::Upstream(_)), "{e:?}");
+    }
+
     /// Creating a branch whose name exists on origin must start AT the remote
     /// tip and track it — a bare `checkout -b` from a stale HEAD makes an
     /// upstream-less branch whose first `pull` dies with "no tracking
@@ -5514,6 +5918,51 @@ mod tests {
             "rename fully undone — no residual staged entries: {:?}",
             st.changes
         );
+    }
+
+    /// The Unstaged list's Discard (`keep_staged`) reverts only the worktree
+    /// side: staged hunks of a partially staged file, a staged new file's
+    /// staged content and a staged-only file all survive; untracked files go.
+    #[tokio::test]
+    async fn discard_keep_staged_only_reverts_the_worktree_side() {
+        let (_tmp, dir) = fixture();
+        // a.txt: stage the "appended" edit, then edit it again (partial, MM).
+        sh_git(&dir, &["add", "a.txt"]);
+        let staged_a = "alpha line 1\nalpha CHANGED 2\nalpha line 3\nappended\n";
+        write(&dir, "a.txt", &format!("{staged_a}scratch\n"));
+        // f.txt: staged new file with an unstaged edit on top (AM).
+        write(&dir, "f.txt", "fresh\nscratch\n");
+        let git = LocalGit::new(&dir);
+        let all: Vec<String> = ["a.txt", "f.txt", "d.txt", "e.txt"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        git.discard_with(&all, true).await.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            staged_a
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+            "fresh\n"
+        );
+        assert!(dir.join("d.txt").exists(), "staged-only rename untouched");
+        assert!(!dir.join("e.txt").exists(), "untracked file removed");
+        let st = git.status().await.unwrap();
+        let by = |p: &str| st.changes.iter().find(|c| c.path == p).cloned();
+        let a = by("a.txt").expect("a.txt still staged");
+        assert!(a.staged && !a.unstaged, "{a:?}");
+        let f = by("f.txt").expect("f.txt still staged");
+        assert!(f.staged && !f.unstaged, "{f:?}");
+        assert!(by("d.txt").is_some_and(|c| c.staged));
+
+        // Nothing unstaged left among these → a 409, not a silent success.
+        assert!(matches!(
+            git.discard_with(&["a.txt".to_string()], true).await,
+            Err(Error::Conflict(_))
+        ));
     }
 
     /// Amend with an EMPTY message folds staged changes into HEAD and keeps
