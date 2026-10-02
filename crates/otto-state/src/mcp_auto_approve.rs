@@ -256,7 +256,10 @@ mod tests {
         let pool = mem_pool().await;
         let (ws, user) = seed(&pool).await;
         let repo = McpAutoApproveRepo::new(pool.clone());
-        let g = repo.create(new_rule("global", None, "create_pr", &user)).await.unwrap();
+        let g = repo
+            .create(new_rule("global", None, "create_pr", &user))
+            .await
+            .unwrap();
         let w = repo
             .create(new_rule("workspace", Some(&ws), "comment_pr", &user))
             .await
@@ -265,24 +268,41 @@ mod tests {
 
         // Another workspace sees only the global rule.
         let other = repo.list_applicable(Some("elsewhere"), None).await.unwrap();
-        assert_eq!(other.iter().map(|r| r.id.clone()).collect::<Vec<_>>(), vec![g.id.clone()]);
+        assert_eq!(
+            other.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
+            vec![g.id.clone()]
+        );
         let here = repo.list_applicable(Some(&ws), None).await.unwrap();
         assert_eq!(here.len(), 2);
 
         // Disabled rules never apply.
         let w2 = repo
-            .update(&w.id, &AutoApproveRulePatch { enabled: Some(false), ..Default::default() })
+            .update(
+                &w.id,
+                &AutoApproveRulePatch {
+                    enabled: Some(false),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         assert!(!w2.enabled);
-        assert_eq!(repo.list_applicable(Some(&ws), None).await.unwrap().len(), 1);
+        assert_eq!(
+            repo.list_applicable(Some(&ws), None).await.unwrap().len(),
+            1
+        );
 
         // Duplicate (same scope + place + target) → Conflict.
-        let dup = repo.create(new_rule("global", None, "create_pr", &user)).await;
+        let dup = repo
+            .create(new_rule("global", None, "create_pr", &user))
+            .await;
         assert!(matches!(dup, Err(otto_core::Error::Conflict(_))));
 
         repo.delete(&g.id).await.unwrap();
-        assert!(matches!(repo.delete(&g.id).await, Err(otto_core::Error::NotFound(_))));
+        assert!(matches!(
+            repo.delete(&g.id).await,
+            Err(otto_core::Error::NotFound(_))
+        ));
     }
 
     /// The 0148 carry-over of the legacy `mcp_approval_exempt_tools` setting:
@@ -294,11 +314,13 @@ mod tests {
     async fn migration_imports_the_legacy_exempt_list() {
         let pool = mem_pool().await;
         let (_ws, _user) = seed(&pool).await;
-        sqlx::query("INSERT INTO settings (key, value_json) VALUES ('mcp_approval_exempt_tools', ?)")
-            .bind(r#"["comment_pr","otto.merge_pr","comment_pr",42,""]"#)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO settings (key, value_json) VALUES ('mcp_approval_exempt_tools', ?)",
+        )
+        .bind(r#"["comment_pr","otto.merge_pr","comment_pr",42,""]"#)
+        .execute(&pool)
+        .await
+        .unwrap();
         let sql = include_str!("../migrations/0148_mcp_auto_approve_rules.sql");
         let insert = &sql[sql.find("INSERT OR IGNORE").expect("import block")..];
         sqlx::query(insert).execute(&pool).await.unwrap();
@@ -325,7 +347,9 @@ mod tests {
         let pool = mem_pool().await;
         let (ws, user) = seed(&pool).await;
         let repo = McpAutoApproveRepo::new(pool.clone());
-        repo.create(new_rule("workspace", Some(&ws), "create_pr", &user)).await.unwrap();
+        repo.create(new_rule("workspace", Some(&ws), "create_pr", &user))
+            .await
+            .unwrap();
         sqlx::query("DELETE FROM workspaces WHERE id = ?")
             .bind(&ws)
             .execute(&pool)

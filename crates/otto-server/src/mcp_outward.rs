@@ -4625,8 +4625,13 @@ pub struct OttoServerConfigReq {
 pub async fn otto_server_config(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<OttoServerConfigReq>,
 ) -> ApiResult<Json<Value>> {
+    // Auto-approving tools is a person's decision (never an agent session's own).
+    if req.approval_exempt_tools.is_some() {
+        crate::mcp_auto_approve::require_human(&auth).map_err(ApiError)?;
+    }
     let settings = SettingsRepo::new(ctx.pool.clone());
     // Validate the exemption list BEFORE any write, so a bad name never
     // leaves a half-applied config behind.

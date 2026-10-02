@@ -164,7 +164,8 @@ names **what** and **where**:
 | **Where** | **Everywhere** (global) · **one workspace** (the workspace the call lands in — for git tools, the repo's workspace) · **one agent session** (calls made with that Otto session's credential; the rule is deleted with the session) |
 
 Manage rules in **MCP → Otto server → Auto-approve** (**New rule**; on/off switch and
-delete per rule) — MCP Admin. The **External tool catalog** shows the effect: under
+delete per rule) — MCP Admin, signed in as a person: an agent session's own credential
+(or any MCP token) is refused, so an agent can never auto-approve its own calls. The **External tool catalog** shows the effect: under
 every enabled mutating tool an **Auto-approve everywhere** switch (a global per-tool
 rule) plus a badge for every other rule that covers it, and per category an
 **Auto-approve every _category_ write** switch (a global category rule). The header
@@ -781,8 +782,8 @@ the workspace role.
 | `GET /mcp/otto-server` | Outward status + tool catalog + token prefix | View (or `mcp` token) |
 | `PATCH /mcp/otto-server` | Enable/disable and per-tool allow; legacy-token rotation affects only `otto-mcp-server`-labelled tokens (prefer CP37) | **Admin** |
 | `GET /mcp/auto-approve` | **CP40** — auto-approve rules + the categories / irreversible tools a rule can name | View |
-| `POST /mcp/auto-approve` | **CP41** — create a rule (`{scope, workspace_id?, session_id?, target_kind, target, allow_irreversible?, name?}`) | **Admin** |
-| `PATCH /mcp/auto-approve/{id}` · `DELETE …` | **CP42/CP43** — rename / enable / flip `allow_irreversible`; delete | **Admin** |
+| `POST /mcp/auto-approve` | **CP41** — create a rule (`{scope, workspace_id?, session_id?, target_kind, target, allow_irreversible?, name?}`) | **Admin** (human credential) |
+| `PATCH /mcp/auto-approve/{id}` · `DELETE …` | **CP42/CP43** — rename / enable / flip `allow_irreversible`; delete | **Admin** (human credential) |
 | `POST /mcp/otto-tools/invoke` | The governed choke point for the `otto.*` tools | Edit (or `mcp` token) |
 | `GET /mcp/gateway/tools` (`?workspace_id=`) | Namespaced governed downstream tools | View |
 | `POST /mcp/gateway/invoke` | Proxy a downstream call through the pipeline | Edit |

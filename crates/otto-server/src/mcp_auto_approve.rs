@@ -31,17 +31,37 @@ use otto_mcp::auto_approve::{
     self as aa, AutoApproveCall, SCOPE_GLOBAL, SCOPE_SESSION, SCOPE_WORKSPACE, TARGET_CATEGORY,
     TARGET_TOOL,
 };
-use otto_state::{AutoApproveRulePatch, McpAutoApproveRepo, McpAutoApproveRule, NewAutoApproveRule};
+use otto_state::{
+    AutoApproveRulePatch, McpAutoApproveRepo, McpAutoApproveRule, NewAutoApproveRule,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::auth::CurrentUser;
+use crate::auth::{CurrentAuthContext, CurrentUser};
 use crate::error::{ApiError, ApiResult};
-use crate::mcp_outward::{mutating_categories, tool_category, tool_is_dangerous, tool_is_irreversible};
+use crate::mcp_outward::{
+    mutating_categories, tool_category, tool_is_dangerous, tool_is_irreversible,
+};
 use crate::state::ServerCtx;
 
 fn repo(ctx: &ServerCtx) -> McpAutoApproveRepo {
     McpAutoApproveRepo::new(ctx.pool.clone())
+}
+
+/// Rule writes loosen the approval posture, so they need a PERSON's own Otto
+/// credential: an agent session's managed token (which authorizes as its
+/// owner, often root) or any MCP credential must never auto-approve its own
+/// calls. Also applied to the `approval_exempt_tools` shim (`PATCH
+/// /mcp/otto-server`).
+pub(crate) fn require_human(auth: &AuthContext) -> Result<(), Error> {
+    if crate::ui_bridge::is_human(auth) {
+        return Ok(());
+    }
+    Err(Error::Forbidden(
+        "auto-approve rules can only be changed by a person signed in to Otto — an agent \
+         session's or MCP credential cannot approve its own calls"
+            .into(),
+    ))
 }
 
 /// The call facts for a bare tool name, minus the scope (filled per call).
@@ -68,7 +88,9 @@ fn rule_covers_tool(rule: &McpAutoApproveRule, short: &str) -> bool {
 /// per-tool rule that actually covers its tool (an irreversible tool needs
 /// `allow_irreversible`).
 pub(crate) fn is_active_catalog_toggle(rule: &McpAutoApproveRule) -> bool {
-    rule.scope == SCOPE_GLOBAL && rule.target_kind == TARGET_TOOL && rule_covers_tool(rule, &rule.target)
+    rule.scope == SCOPE_GLOBAL
+        && rule.target_kind == TARGET_TOOL
+        && rule_covers_tool(rule, &rule.target)
 }
 
 /// The short reference to a rule carried by the governed envelope
@@ -119,7 +141,10 @@ pub(crate) async fn resolve_for_call(
     let rules = match repo(ctx).list_applicable(ws.as_deref(), session).await {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(tool = short, "auto-approve rules unavailable, staying gated: {e}");
+            tracing::warn!(
+                tool = short,
+                "auto-approve rules unavailable, staying gated: {e}"
+            );
             return None;
         }
     };
@@ -162,7 +187,13 @@ pub(crate) async fn sync_catalog_toggles(
             Some(x) if x.enabled => {}
             Some(x) => {
                 let x = r
-                    .update(&x.id, &AutoApproveRulePatch { enabled: Some(true), ..Default::default() })
+                    .update(
+                        &x.id,
+                        &AutoApproveRulePatch {
+                            enabled: Some(true),
+                            ..Default::default()
+                        },
+                    )
                     .await?;
                 audit_change(ctx, user, "update", &x).await;
             }
@@ -236,14 +267,20 @@ pub struct UpdateAutoApproveReq {
 
 /// Validate a rule's target + guardrail. Returns the normalized
 /// `(target, allow_irreversible)`. Pure (catalog lookups only).
-fn validate_target(kind: &str, target: &str, allow_irreversible: bool) -> Result<(String, bool), Error> {
+fn validate_target(
+    kind: &str,
+    target: &str,
+    allow_irreversible: bool,
+) -> Result<(String, bool), Error> {
     let target = target.trim();
     match kind {
         TARGET_TOOL => {
             let bare = target.strip_prefix("otto.").unwrap_or(target).to_string();
             if !tool_is_dangerous(&bare) {
                 return Err(Error::Invalid(if tool_category(&bare).is_some() {
-                    format!("'{target}' is not a mutating tool — only mutating tools ask for approval")
+                    format!(
+                        "'{target}' is not a mutating tool — only mutating tools ask for approval"
+                    )
                 } else {
                     format!("unknown otto tool '{target}'")
                 }));
@@ -310,7 +347,8 @@ async fn rule_view(ctx: &ServerCtx, rule: &McpAutoApproveRule) -> Value {
             v["workspace_id_of_session"] = json!(s.workspace_id);
         }
     }
-    v["irreversible"] = json!(rule.target_kind == TARGET_TOOL && tool_is_irreversible(&rule.target));
+    v["irreversible"] =
+        json!(rule.target_kind == TARGET_TOOL && tool_is_irreversible(&rule.target));
     v
 }
 
@@ -343,11 +381,22 @@ pub async fn list_rules(
 pub async fn create_rule(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<CreateAutoApproveReq>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
-    let (target, allow_irreversible) =
-        validate_target(req.target_kind.as_str(), &req.target, req.allow_irreversible).map_err(ApiError)?;
-    let nonempty = |v: &Option<String>| v.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    require_human(&auth).map_err(ApiError)?;
+    let (target, allow_irreversible) = validate_target(
+        req.target_kind.as_str(),
+        &req.target,
+        req.allow_irreversible,
+    )
+    .map_err(ApiError)?;
+    let nonempty = |v: &Option<String>| {
+        v.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
     let workspace_id = nonempty(&req.workspace_id);
     let session_id = nonempty(&req.session_id);
     match req.scope.as_str() {
@@ -360,19 +409,27 @@ pub async fn create_rule(
         }
         SCOPE_WORKSPACE => {
             let Some(ws) = &workspace_id else {
-                return Err(ApiError(Error::Invalid("scope 'workspace' needs workspace_id".into())));
+                return Err(ApiError(Error::Invalid(
+                    "scope 'workspace' needs workspace_id".into(),
+                )));
             };
             if session_id.is_some() {
-                return Err(ApiError(Error::Invalid("a workspace rule takes no session_id".into())));
+                return Err(ApiError(Error::Invalid(
+                    "a workspace rule takes no session_id".into(),
+                )));
             }
             ctx.workspaces.get(ws).await.map_err(ApiError)?;
         }
         SCOPE_SESSION => {
             let Some(sid) = &session_id else {
-                return Err(ApiError(Error::Invalid("scope 'session' needs session_id".into())));
+                return Err(ApiError(Error::Invalid(
+                    "scope 'session' needs session_id".into(),
+                )));
             };
             if workspace_id.is_some() {
-                return Err(ApiError(Error::Invalid("a session rule takes no workspace_id".into())));
+                return Err(ApiError(Error::Invalid(
+                    "a session rule takes no workspace_id".into(),
+                )));
             }
             ctx.manager.get(sid).await.map_err(ApiError)?;
         }
@@ -382,8 +439,8 @@ pub async fn create_rule(
             ))))
         }
     }
-    let name = nonempty(&req.name)
-        .unwrap_or_else(|| default_name(&req.target_kind, &target, &req.scope));
+    let name =
+        nonempty(&req.name).unwrap_or_else(|| default_name(&req.target_kind, &target, &req.scope));
     let rule = repo(&ctx)
         .create(NewAutoApproveRule {
             name,
@@ -409,9 +466,11 @@ pub async fn create_rule(
 pub async fn update_rule(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Path(id): Path<String>,
     Json(req): Json<UpdateAutoApproveReq>,
 ) -> ApiResult<Json<Value>> {
+    require_human(&auth).map_err(ApiError)?;
     let cur = repo(&ctx).get(&id).await.map_err(ApiError)?;
     let allow_irreversible = match req.allow_irreversible {
         Some(true) if cur.target_kind == TARGET_CATEGORY => {
@@ -450,8 +509,10 @@ pub async fn update_rule(
 pub async fn delete_rule(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
+    require_human(&auth).map_err(ApiError)?;
     let cur = repo(&ctx).get(&id).await.map_err(ApiError)?;
     repo(&ctx).delete(&id).await.map_err(ApiError)?;
     audit_change(&ctx, &user, "delete", &cur).await;
@@ -464,19 +525,34 @@ mod tests {
 
     #[test]
     fn create_pr_is_auto_approvable_merge_needs_the_second_toggle() {
-        assert_eq!(validate_target("tool", "otto.create_pr", false).unwrap(), ("create_pr".into(), false));
+        assert_eq!(
+            validate_target("tool", "otto.create_pr", false).unwrap(),
+            ("create_pr".into(), false)
+        );
         // Reversible tool: the flag is normalized off.
-        assert_eq!(validate_target("tool", "create_pr", true).unwrap(), ("create_pr".into(), false));
-        let e = validate_target("tool", "merge_pr", false).unwrap_err().to_string();
+        assert_eq!(
+            validate_target("tool", "create_pr", true).unwrap(),
+            ("create_pr".into(), false)
+        );
+        let e = validate_target("tool", "merge_pr", false)
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("irreversible"), "{e}");
-        assert_eq!(validate_target("tool", "merge_pr", true).unwrap(), ("merge_pr".into(), true));
+        assert_eq!(
+            validate_target("tool", "merge_pr", true).unwrap(),
+            ("merge_pr".into(), true)
+        );
     }
 
     #[test]
     fn reads_and_unknown_tools_are_rejected() {
-        let e = validate_target("tool", "list_repos", false).unwrap_err().to_string();
+        let e = validate_target("tool", "list_repos", false)
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("not a mutating tool"), "{e}");
-        let e = validate_target("tool", "nope", false).unwrap_err().to_string();
+        let e = validate_target("tool", "nope", false)
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("unknown otto tool"), "{e}");
         let e = validate_target("glob", "x", false).unwrap_err().to_string();
         assert!(e.contains("target_kind"), "{e}");
@@ -484,7 +560,10 @@ mod tests {
 
     #[test]
     fn categories_are_validated_and_never_carry_the_irreversible_flag() {
-        assert_eq!(validate_target("category", "Git", false).unwrap(), ("Git".into(), false));
+        assert_eq!(
+            validate_target("category", "Git", false).unwrap(),
+            ("Git".into(), false)
+        );
         assert!(validate_target("category", "Git", true).is_err());
         // A category with only reads (Approvals) or none at all is refused.
         assert!(validate_target("category", "Approvals", false).is_err());
@@ -495,14 +574,29 @@ mod tests {
     fn the_guardrail_tier_is_a_subset_of_the_mutating_set() {
         // Every irreversible tool is a real, approval-gated catalog tool, and
         // the PR-opening path the user asked for is NOT in the tier.
-        for t in ["merge_pr", "k8s_action", "produce_broker_message", "aws_sqs_send", "api_execute",
-                  "api_run_automation", "delete_scheduled_task", "assistant_forget"] {
+        for t in [
+            "merge_pr",
+            "k8s_action",
+            "produce_broker_message",
+            "aws_sqs_send",
+            "api_execute",
+            "api_run_automation",
+            "delete_scheduled_task",
+            "assistant_forget",
+        ] {
             assert!(tool_is_irreversible(t), "{t}");
             assert!(tool_is_dangerous(t), "{t} must be approval-gated");
             assert!(tool_category(t).is_some(), "{t} must be in the catalog");
         }
-        for t in ["create_pr", "comment_pr", "comment_issue", "transition_issue", "send_message",
-                  "broadcast_message", "vault_delete"] {
+        for t in [
+            "create_pr",
+            "comment_pr",
+            "comment_issue",
+            "transition_issue",
+            "send_message",
+            "broadcast_message",
+            "vault_delete",
+        ] {
             assert!(!tool_is_irreversible(t), "{t}");
         }
         assert_eq!(tool_category("create_pr"), Some("Git"));
@@ -537,7 +631,15 @@ mod tests {
         // The Git category does not reach merge_pr; the un-acked per-tool rule neither.
         assert!(rules_covering_tool(&rules, "merge_pr").is_empty());
         assert!(!is_active_catalog_toggle(&rules[2]));
-        assert!(is_active_catalog_toggle(&rule(SCOPE_GLOBAL, TARGET_TOOL, "merge_pr", true)));
-        assert!(!is_active_catalog_toggle(&rules[1]), "a workspace rule is not the global switch");
+        assert!(is_active_catalog_toggle(&rule(
+            SCOPE_GLOBAL,
+            TARGET_TOOL,
+            "merge_pr",
+            true
+        )));
+        assert!(
+            !is_active_catalog_toggle(&rules[1]),
+            "a workspace rule is not the global switch"
+        );
     }
 }

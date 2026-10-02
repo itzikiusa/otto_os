@@ -49,7 +49,9 @@ pub fn covers(rule: &McpAutoApproveRule, call: &AutoApproveCall) -> bool {
     }
     let in_scope = match rule.scope.as_str() {
         SCOPE_GLOBAL => true,
-        SCOPE_WORKSPACE => rule.workspace_id.is_some() && rule.workspace_id.as_deref() == call.workspace_id,
+        SCOPE_WORKSPACE => {
+            rule.workspace_id.is_some() && rule.workspace_id.as_deref() == call.workspace_id
+        }
         SCOPE_SESSION => rule.session_id.is_some() && rule.session_id.as_deref() == call.session_id,
         _ => false, // unknown scope: fail closed
     };
@@ -110,7 +112,11 @@ pub fn audit_reason(rule: &McpAutoApproveRule) -> String {
         rule.name,
         scope_label(rule),
         target,
-        if rule.allow_irreversible { ", irreversible allowed" } else { "" },
+        if rule.allow_irreversible {
+            ", irreversible allowed"
+        } else {
+            ""
+        },
         rule.id
     )
 }
@@ -172,7 +178,10 @@ mod tests {
         assert!(resolve(&[ws.clone(), sess.clone()], &c).is_none());
         c.workspace_id = None;
         c.session_id = None;
-        assert!(resolve(&[ws, sess], &c).is_none(), "a scoped rule never matches an unscoped call");
+        assert!(
+            resolve(&[ws, sess], &c).is_none(),
+            "a scoped rule never matches an unscoped call"
+        );
     }
 
     #[test]
@@ -207,16 +216,28 @@ mod tests {
             rule("w-cat", SCOPE_WORKSPACE, TARGET_CATEGORY, "Git"),
             rule("s-cat", SCOPE_SESSION, TARGET_CATEGORY, "Git"),
         ];
-        assert_eq!(resolve(&rules, &call("create_pr", "Git")).unwrap().id, "s-cat");
-        assert_eq!(resolve(&rules[..3], &call("create_pr", "Git")).unwrap().id, "w-cat");
-        assert_eq!(resolve(&rules[..2], &call("create_pr", "Git")).unwrap().id, "g-tool");
+        assert_eq!(
+            resolve(&rules, &call("create_pr", "Git")).unwrap().id,
+            "s-cat"
+        );
+        assert_eq!(
+            resolve(&rules[..3], &call("create_pr", "Git")).unwrap().id,
+            "w-cat"
+        );
+        assert_eq!(
+            resolve(&rules[..2], &call("create_pr", "Git")).unwrap().id,
+            "g-tool"
+        );
     }
 
     #[test]
     fn audit_reason_names_the_policy() {
         let r = rule("01ABC", SCOPE_WORKSPACE, TARGET_CATEGORY, "Git");
         let reason = audit_reason(&r);
-        assert!(reason.starts_with("auto-approved by policy '01ABC'"), "{reason}");
+        assert!(
+            reason.starts_with("auto-approved by policy '01ABC'"),
+            "{reason}"
+        );
         assert!(reason.contains("workspace ws1") && reason.contains("category 'Git'"));
     }
 }

@@ -27,6 +27,7 @@ use otto_state::{
 };
 use serde_json::{json, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use tokio::sync::broadcast;
 
 // ---------------------------------------------------------------------------
 // Harness (mirrors ui_control.rs: a real base_url + listener)
@@ -102,12 +103,14 @@ async fn seed_workspace(pool: &DbPool, ws_id: &str, admin: &str) {
     .execute(pool)
     .await
     .expect("seed workspace");
-    sqlx::query("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'admin')")
-        .bind(ws_id)
-        .bind(admin)
-        .execute(pool)
-        .await
-        .expect("member");
+    sqlx::query(
+        "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'admin')",
+    )
+    .bind(ws_id)
+    .bind(admin)
+    .execute(pool)
+    .await
+    .expect("member");
 }
 
 async fn test_ctx(pool: &DbPool, base_url: String, tmp: &std::path::Path) -> ServerCtx {
@@ -124,7 +127,9 @@ async fn test_ctx(pool: &DbPool, base_url: String, tmp: &std::path::Path) -> Ser
         improvements: otto_state::ImprovementsRepo::new(pool.clone()),
         sessions: SessionsRepo::new(pool.clone()),
         workspaces: WorkspacesRepo::new(pool.clone()),
-        producer: Arc::new(otto_improve::RealProposalProducer::new(orchestrator.clone())),
+        producer: Arc::new(otto_improve::RealProposalProducer::new(
+            orchestrator.clone(),
+        )),
         events: events.clone(),
         library_root: tmp.join("lib"),
     });
@@ -292,8 +297,14 @@ async fn boot() -> Daemon {
         .await
         .unwrap();
     let auth = AuthRepo::new(pool.clone());
-    let (human, _) = auth.issue_api_token(&"alice".to_string(), Some("ui")).await.unwrap();
-    let (agent, _) = auth.issue_session_api_token(&"alice".to_string(), &s.id).await.unwrap();
+    let (human, _) = auth
+        .issue_api_token(&"alice".to_string(), Some("ui"))
+        .await
+        .unwrap();
+    let (agent, _) = auth
+        .issue_session_api_token(&"alice".to_string(), &s.id)
+        .await
+        .unwrap();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -322,7 +333,13 @@ async fn boot() -> Daemon {
 }
 
 impl Daemon {
-    async fn send(&self, method: &str, token: &str, path: &str, body: Option<Value>) -> (u16, Value) {
+    async fn send(
+        &self,
+        method: &str,
+        token: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> (u16, Value) {
         let url = format!("{}/api/v1{path}", self.base);
         let m = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
         let mut req = self.http.request(m, url).bearer_auth(token);
@@ -338,19 +355,26 @@ impl Daemon {
     /// The agent session's governed call — what stdio `otto_<tool>` proxies to.
     async fn agent_invoke(&self, tool: &str, args: Value) -> Value {
         let (st, body) = self
-            .send("POST", &self.agent, "/mcp/otto-tools/invoke",
-                  Some(json!({"tool": format!("otto.{tool}"), "arguments": args})))
+            .send(
+                "POST",
+                &self.agent,
+                "/mcp/otto-tools/invoke",
+                Some(json!({"tool": format!("otto.{tool}"), "arguments": args})),
+            )
             .await;
         assert_eq!(st, 200, "invoke {tool}: {body}");
         body
     }
 
     async fn rule(&self, body: Value) -> (u16, Value) {
-        self.send("POST", &self.human, "/mcp/auto-approve", Some(body)).await
+        self.send("POST", &self.human, "/mcp/auto-approve", Some(body))
+            .await
     }
 
     async fn pending_approvals(&self) -> Vec<Value> {
-        let (st, body) = self.send("GET", &self.human, "/mcp/approvals?status=pending", None).await;
+        let (st, body) = self
+            .send("GET", &self.human, "/mcp/approvals?status=pending", None)
+            .await;
         assert_eq!(st, 200, "approvals: {body}");
         body.as_array().cloned().unwrap_or_default()
     }
@@ -358,7 +382,12 @@ impl Daemon {
     /// Newest audit row for an otto.* tool.
     async fn last_audit(&self, tool: &str) -> Value {
         let (st, body) = self
-            .send("GET", &self.human, &format!("/mcp/audit?tool=otto.{tool}"), None)
+            .send(
+                "GET",
+                &self.human,
+                &format!("/mcp/audit?tool=otto.{tool}"),
+                None,
+            )
             .await;
         assert_eq!(st, 200, "audit: {body}");
         body.as_array()
@@ -385,15 +414,20 @@ async fn create_pr_without_a_rule_enqueues_an_approval() {
     let pending = d.pending_approvals().await;
     assert_eq!(pending.len(), 1, "{pending:?}");
     assert_eq!(pending[0]["tool"], "otto.create_pr");
-    assert_eq!(d.last_audit("create_pr").await["decision"], "pending_approval");
+    assert_eq!(
+        d.last_audit("create_pr").await["decision"],
+        "pending_approval"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_approved_create_pr_runs_without_an_approval_and_is_audited() {
     let d = boot().await;
     let (st, rule) = d
-        .rule(json!({"scope": "global", "target_kind": "tool", "target": "otto.create_pr",
-                     "name": "Agents open PRs"}))
+        .rule(
+            json!({"scope": "global", "target_kind": "tool", "target": "otto.create_pr",
+                     "name": "Agents open PRs"}),
+        )
         .await;
     assert_eq!(st, 201, "{rule}");
     assert_eq!(rule["target"], "create_pr");
@@ -404,24 +438,37 @@ async fn auto_approved_create_pr_runs_without_an_approval_and_is_audited() {
     assert_eq!(env["executed"], true, "{env}");
     assert_ne!(env["decision"], "pending_approval");
     assert_eq!(env["auto_approved_by"]["name"], "Agents open PRs", "{env}");
-    assert!(d.pending_approvals().await.is_empty(), "no approval may be enqueued");
+    assert!(
+        d.pending_approvals().await.is_empty(),
+        "no approval may be enqueued"
+    );
 
     let row = d.last_audit("create_pr").await;
     assert_eq!(row["decision"], "auto_approved", "{row}");
     let reason = row["decision_reason"].as_str().unwrap_or_default();
-    assert!(reason.starts_with("auto-approved by policy 'Agents open PRs'"), "{reason}");
+    assert!(
+        reason.starts_with("auto-approved by policy 'Agents open PRs'"),
+        "{reason}"
+    );
     assert!(row["approval_id"].is_null());
 
     // The status catalog shows it as auto-approved everywhere.
     let (_, status) = d.send("GET", &d.human, "/mcp/otto-server", None).await;
-    let tool = status["tools"].as_array().unwrap().iter()
-        .find(|t| t["name"] == "otto.create_pr").unwrap().clone();
+    let tool = status["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "otto.create_pr")
+        .unwrap()
+        .clone();
     assert_eq!(tool["approval_exempt"], true, "{tool}");
     assert_eq!(tool["auto_approved_by"][0]["id"], rule["id"]);
 
     // Deleting the rule restores the gate.
     let id = rule["id"].as_str().unwrap();
-    let (st, _) = d.send("DELETE", &d.human, &format!("/mcp/auto-approve/{id}"), None).await;
+    let (st, _) = d
+        .send("DELETE", &d.human, &format!("/mcp/auto-approve/{id}"), None)
+        .await;
     assert_eq!(st, 204);
     let env = d.agent_invoke("create_pr", pr_args()).await;
     assert_eq!(env["decision"], "pending_approval", "{env}");
@@ -455,14 +502,36 @@ async fn scoped_and_category_rules_apply_only_where_they_say() {
         .rule(json!({"scope": "workspace", "workspace_id": "ws1", "target_kind": "tool", "target": "comment_pr"}))
         .await;
     assert_eq!(st, 201, "{ws_rule}");
+    // Both the session's Git rule and the workspace's comment_pr rule cover
+    // it: the most specific scope (the session) is the one recorded…
     let env = d
-        .agent_invoke("comment_pr", json!({"repo_id": "demo", "number": 7, "body": "LGTM"}))
+        .agent_invoke(
+            "comment_pr",
+            json!({"repo_id": "demo", "number": 7, "body": "LGTM"}),
+        )
+        .await;
+    assert_eq!(env["auto_approved_by"]["id"], mine["id"], "{env}");
+    // …and without it the workspace rule (resolved via the repo's workspace).
+    let (st, _) = d
+        .send(
+            "DELETE",
+            &d.human,
+            &format!("/mcp/auto-approve/{}", mine["id"].as_str().unwrap()),
+            None,
+        )
+        .await;
+    assert_eq!(st, 204);
+    let env = d
+        .agent_invoke(
+            "comment_pr",
+            json!({"repo_id": "demo", "number": 8, "body": "LGTM"}),
+        )
         .await;
     assert_eq!(env["auto_approved_by"]["id"], ws_rule["id"], "{env}");
 
     // Validation: a duplicate is a 409; a global rule with a workspace is a 400.
     let (st, _) = d
-        .rule(json!({"scope": "session", "session_id": d.sid, "target_kind": "category", "target": "Git"}))
+        .rule(json!({"scope": "workspace", "workspace_id": "ws2", "target_kind": "category", "target": "Git"}))
         .await;
     assert_eq!(st, 409);
     let (st, _) = d
@@ -479,21 +548,32 @@ async fn irreversible_merge_needs_a_per_tool_rule_and_the_second_toggle() {
         .await;
     assert_eq!(st, 201);
     // The Git category covers create_pr but never the irreversible merge.
-    let env = d.agent_invoke("merge_pr", json!({"repo_id": "repo1", "number": 3})).await;
+    let env = d
+        .agent_invoke("merge_pr", json!({"repo_id": "repo1", "number": 3}))
+        .await;
     assert_eq!(env["decision"], "pending_approval", "{env}");
 
     // A per-tool rule without the second toggle is refused…
-    let (st, body) = d.rule(json!({"scope": "global", "target_kind": "tool", "target": "merge_pr"})).await;
+    let (st, body) = d
+        .rule(json!({"scope": "global", "target_kind": "tool", "target": "merge_pr"}))
+        .await;
     assert_eq!(st, 400, "{body}");
     // …a category rule can never carry it…
     let (st, _) = d
-        .rule(json!({"scope": "workspace", "workspace_id": "ws1", "target_kind": "category",
-                     "target": "Git", "allow_irreversible": true}))
+        .rule(
+            json!({"scope": "workspace", "workspace_id": "ws1", "target_kind": "category",
+                     "target": "Git", "allow_irreversible": true}),
+        )
         .await;
     assert_eq!(st, 400);
     // …and the legacy compat shim cannot add it either.
     let (st, _) = d
-        .send("PATCH", &d.human, "/mcp/otto-server", Some(json!({"approval_exempt_tools": ["merge_pr"]})))
+        .send(
+            "PATCH",
+            &d.human,
+            "/mcp/otto-server",
+            Some(json!({"approval_exempt_tools": ["merge_pr"]})),
+        )
         .await;
     assert_eq!(st, 400);
 
@@ -502,35 +582,89 @@ async fn irreversible_merge_needs_a_per_tool_rule_and_the_second_toggle() {
         .rule(json!({"scope": "global", "target_kind": "tool", "target": "merge_pr", "allow_irreversible": true}))
         .await;
     assert_eq!(st, 201, "{rule}");
-    let env = d.agent_invoke("merge_pr", json!({"repo_id": "repo1", "number": 4})).await;
+    let env = d
+        .agent_invoke("merge_pr", json!({"repo_id": "repo1", "number": 4}))
+        .await;
     assert_eq!(env["executed"], true, "{env}");
     let row = d.last_audit("merge_pr").await;
     assert_eq!(row["decision"], "auto_approved");
-    assert!(row["decision_reason"].as_str().unwrap().contains("irreversible allowed"), "{row}");
+    assert!(
+        row["decision_reason"]
+            .as_str()
+            .unwrap()
+            .contains("irreversible allowed"),
+        "{row}"
+    );
 
-    // Only an admin may change rules: the agent's own credential cannot.
+    // Only a person may change rules: the agent session's own credential
+    // (which authorizes as its root owner) cannot auto-approve its calls —
+    // neither through the rules API nor the compat shim.
     let (st, _) = d
-        .send("POST", &d.agent, "/mcp/auto-approve",
-              Some(json!({"scope": "global", "target_kind": "tool", "target": "comment_pr"})))
+        .send(
+            "POST",
+            &d.agent,
+            "/mcp/auto-approve",
+            Some(json!({"scope": "global", "target_kind": "tool", "target": "comment_pr"})),
+        )
         .await;
-    assert!(st == 403 || st == 401, "agent minted a rule: {st}");
+    assert_eq!(st, 403, "agent minted a rule");
+    let id = rule["id"].as_str().unwrap();
+    let (st, _) = d
+        .send(
+            "PATCH",
+            &d.agent,
+            &format!("/mcp/auto-approve/{id}"),
+            Some(json!({"enabled": false})),
+        )
+        .await;
+    assert_eq!(st, 403);
+    let (st, _) = d
+        .send("DELETE", &d.agent, &format!("/mcp/auto-approve/{id}"), None)
+        .await;
+    assert_eq!(st, 403);
+    let (st, _) = d
+        .send(
+            "PATCH",
+            &d.agent,
+            "/mcp/otto-server",
+            Some(json!({"approval_exempt_tools": ["comment_pr"]})),
+        )
+        .await;
+    assert_eq!(st, 403);
+    // Reading them is fine.
+    let (st, _) = d.send("GET", &d.agent, "/mcp/auto-approve", None).await;
+    assert_eq!(st, 200);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compat_shim_and_disabling_a_tool_drop_its_per_tool_rules() {
     let d = boot().await;
     let (st, status) = d
-        .send("PATCH", &d.human, "/mcp/otto-server", Some(json!({"approval_exempt_tools": ["otto.create_pr"]})))
+        .send(
+            "PATCH",
+            &d.human,
+            "/mcp/otto-server",
+            Some(json!({"approval_exempt_tools": ["otto.create_pr"]})),
+        )
         .await;
     assert_eq!(st, 200, "{status}");
     assert_eq!(status["approval_exempt_tools"], json!(["create_pr"]));
     let (_, list) = d.send("GET", &d.human, "/mcp/auto-approve", None).await;
     assert_eq!(list["rules"].as_array().unwrap().len(), 1, "{list}");
-    assert!(list["categories"].as_array().unwrap().iter().any(|c| c["category"] == "Git"));
+    assert!(list["categories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["category"] == "Git"));
 
     // Disabling create_pr drops its rule: re-enabling starts gated.
     let (st, _) = d
-        .send("PATCH", &d.human, "/mcp/otto-server", Some(json!({"tools": ["comment_pr", "list_repos"]})))
+        .send(
+            "PATCH",
+            &d.human,
+            "/mcp/otto-server",
+            Some(json!({"tools": ["comment_pr", "list_repos"]})),
+        )
         .await;
     assert_eq!(st, 200);
     let (_, list) = d.send("GET", &d.human, "/mcp/auto-approve", None).await;
