@@ -120,6 +120,9 @@
     void git
       .getMergeStatus(id)
       .then((m) => {
+        // A late reply for a repo this view no longer shows must not paint
+        // its conflicts here.
+        if (id !== repo.id) return;
         merging = m.merging;
         mergeOp = m.op ?? null;
         if (m.merging) {
@@ -132,6 +135,7 @@
         }
       })
       .catch(() => {
+        if (id !== repo.id) return;
         // Fall back to what the status already told us rather than hiding a
         // merge the user is standing in.
         merging = conflictedPaths.length > 0;

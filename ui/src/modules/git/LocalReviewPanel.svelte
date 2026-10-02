@@ -41,6 +41,10 @@
   let reviewLoading = $state(true);
   let starting = $state(false);
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
+  /** False once the panel unmounts: a poll already in flight then must not
+   *  re-arm the timer (it kept polling — and could toast "taking too long" —
+   *  on another page for up to MAX_POLLS). */
+  let alive = true;
   let pollCount = $state(0);
   const MAX_POLLS = 90; // 3 min at 2 s each
   // Which older run indices (history[1+]) are expanded
@@ -72,7 +76,9 @@
   $effect(() => {
     void loadRefs(repoId);
     void loadExisting(repoId);
+    alive = true;
     return () => {
+      alive = false;
       if (pollTimer !== null) clearTimeout(pollTimer);
     };
   });
@@ -148,6 +154,7 @@
   }
 
   function schedulePoll(): void {
+    if (!alive) return;
     if (pollTimer !== null) clearTimeout(pollTimer);
     pollTimer = setTimeout(() => void poll(), 2000);
   }
@@ -162,6 +169,7 @@
   }
 
   async function poll(): Promise<void> {
+    if (!alive) return;
     pollCount++;
     if (pollCount > MAX_POLLS) {
       toasts.warn('Review is taking too long', 'Try refreshing manually.');
@@ -169,6 +177,7 @@
     }
     try {
       const r = await api.get<Review>(`/repos/${repoId}/local-review`);
+      if (!alive) return;
       review = r;
       if (history.length > 0) {
         history = [r, ...history.slice(1)];
