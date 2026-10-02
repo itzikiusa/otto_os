@@ -744,9 +744,9 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "room_id":{"type":"string","description":ROOM_REF_DESC},"text":{"type":"string"},
                 "session_id":{"type":"string","description":"the calling session (injected automatically by Otto's MCP bridge; used to resolve which personal agent is speaking)"}}}}),
         json!({"name":"otto.room_read","mutating":false,"category":"Personal Agents",
-            "description":"Read messages from an agent room you are a member of, oldest first. Pass `after` (the last message id you saw) to page forward.",
+            "description":"Read messages from an agent room you are a member of (oldest first within the page). With no cursor it returns the room's NEWEST messages (default 50); pass `after` (the last message id you saw) for only newer ones, or `before` (the oldest id you hold) to page back.",
             "inputSchema":{"type":"object","required":["room_id"],"properties":{
-                "room_id":{"type":"string","description":ROOM_REF_DESC},"after":{"type":"string"},"limit":{"type":"integer"},
+                "room_id":{"type":"string","description":ROOM_REF_DESC},"after":{"type":"string"},"before":{"type":"string"},"limit":{"type":"integer"},
                 "session_id":{"type":"string","description":"the calling session (injected automatically by Otto's MCP bridge)"}}}}),
         // ---- Otto Assistant (the user's personal memory) ----
         json!({"name":"otto.assistant_remember","mutating":true,"category":"Assistant",
@@ -3921,17 +3921,22 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         }
         "room_read" => {
             let room = arg_str(args, "room_id")?;
-            let mut q = String::new();
-            if let Some(after) = args
-                .get("after")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-            {
-                q.push_str(&format!("&after={}", seg(after)));
-            }
-            if let Some(limit) = args.get("limit").and_then(i64_lenient) {
-                q.push_str(&format!("&limit={limit}"));
-            }
+            // Same paging as the native `otto_room_read`: `after` forward,
+            // `before` back, neither = the room's tail (it used to read from
+            // the very first message).
+            let cursor = |k: &str| {
+                args.get(k)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            };
+            let mut q = match (cursor("after"), cursor("before")) {
+                (Some(after), _) => format!("&after={}", seg(after)),
+                (None, Some(before)) => format!("&before={}", seg(before)),
+                (None, None) => "&tail=true".to_string(),
+            };
+            let limit = args.get("limit").and_then(i64_lenient).unwrap_or(50);
+            q.push_str(&format!("&limit={limit}"));
             if let Some(sid) = args
                 .get("session_id")
                 .and_then(Value::as_str)
@@ -5326,9 +5331,18 @@ mod tests {
         .unwrap();
         assert_eq!(c.method, Method::Get);
         assert_eq!(c.path, "/api/v1/agent-rooms/r1/messages?after=m9&limit=50");
-        // No optional args → no dangling query separator.
+        // No cursor → the room's tail, with a bounded default page.
         let c = route_for("room_read", &json!({"room_id":"r1"})).unwrap();
-        assert_eq!(c.path, "/api/v1/agent-rooms/r1/messages?");
+        assert_eq!(c.path, "/api/v1/agent-rooms/r1/messages?tail=true&limit=50");
+        let c = route_for(
+            "room_read",
+            &json!({"room_id":"r1","before":"m3","limit":"20","session_id":"s1"}),
+        )
+        .unwrap();
+        assert_eq!(
+            c.path,
+            "/api/v1/agent-rooms/r1/messages?before=m3&limit=20&session_id=s1"
+        );
     }
 
     #[test]

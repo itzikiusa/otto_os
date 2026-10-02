@@ -7926,6 +7926,10 @@ export interface AgentRoom {
 export interface AgentRoomWithMembers {
   room: AgentRoom;
   members: Id[];
+  /** Messages in the room (0 for an empty room). */
+  message_count: number;
+  /** `created_at` of the newest message; null for an empty room. */
+  last_message_at: string | null;
 }
 
 /** One persisted room message. `author_id` is a personal-agent id for

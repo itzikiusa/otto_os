@@ -139,7 +139,7 @@ pub use notifications::{NewNotice, NoticeAccess, NotificationsRepo};
 pub use personal_agents::{
     AgentRoom, AgentRoomMessage, AgentRoomsRepo, AgentSchedulePatch, FinishAgentRun, NewAgentRun,
     NewAgentSchedule, NewPersonalAgent, NewRoomMessage, PersonalAgent, PersonalAgentPatch,
-    PersonalAgentRun, PersonalAgentSchedule, PersonalAgentsRepo,
+    PersonalAgentRun, PersonalAgentSchedule, PersonalAgentsRepo, RoomActivity,
 };
 pub use plugins::{NewPlugin, PluginRecord, PluginsRepo};
 pub use product::*;

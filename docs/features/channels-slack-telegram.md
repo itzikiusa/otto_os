@@ -38,6 +38,17 @@ task per integration:
 - **Telegram** → `crates/otto-channels/src/telegram.rs::run` — long-polls
   `getUpdates` and forwards text messages.
 
+Every listener reports its live state to an in-memory health registry
+(`crates/otto-channels/src/health.rs`): connecting, connected, reconnecting
+(with the reason), failing (the platform rejected the token or config), waiting
+for a token, or conflict (another workspace already listens with the token).
+**Settings → Channels** polls it (`GET /workspaces/{id}/integrations/status`)
+and shows a badge on each enabled Slack/Telegram card — so a bot that is
+silently reconnecting, or whose `xapp-` token was revoked, is visible without
+reading the daemon log. The Socket Mode dial is bounded (20 s) and every
+failure retries with 3 s → 60 s backoff; a rejected app token goes straight to
+the 60 s ceiling.
+
 Both feed a shared `Bridge` (`crates/otto-channels/src/bridge.rs`), which maps
 the conversation to an agent session and pastes the message into its PTY. A
 `Mirror` (`crates/otto-channels/src/mirror.rs`) tails the agent's transcript and
@@ -107,7 +118,11 @@ What actually crosses the bridge — derived directly from `bridge.rs` and
 1. **Inbound message arrives** (Slack `message`/`app_mention`, or a Telegram text
    message). A leading bot `<@U…>` mention is stripped on Slack.
 2. **Allowed-users gate.** If `allowed_users` is set and the sender's id isn't in
-   it, the message is silently dropped.
+   it, the message is silently dropped. Ids are trimmed and compared
+   case-insensitively; a message with no sender id never passes a non-blank list.
+   On Slack the gate runs **before** attachments are downloaded. A blank list
+   lets anyone who can message the bot run an agent on your Mac — the Channels
+   page flags such an integration **Open to everyone**.
 3. **Quick commands.** A message that starts with `/` may be a quick command
    (`/help`, `/sessions`, `/who`, `/stop`, `/new`, `/restart`) and is handled
    locally without touching an agent — see §5.
@@ -347,7 +362,8 @@ On save, Otto writes the tokens to the macOS Keychain under the references
 `chan-bot-{workspaceId}-slack` (bot) and `chan-app-{workspaceId}-slack` (app) and
 returns only `has_bot_token` / `has_app_token` flags — **the tokens are never
 sent back to the UI or stored in the DB.** Within ~15 s the supervisor starts the
-Socket Mode listener (`"starting Slack Socket Mode listener"` in the daemon log).
+Socket Mode listener (`"starting Slack Socket Mode listener"` in the daemon log)
+and the Slack card's badge turns **Connected** once Slack says `hello`.
 
 ### 3.4 Invite the bot and start a thread
 
@@ -604,6 +620,11 @@ is no dedicated channel WS event. See `docs/contracts/ws.md`.
 - Default-chat-dependent features (`Test`, notifications) need `channel_id` set.
 - The activity feed is throttled (~1 edit / 2.5 s) and trimmed to the channel's
   message size limit; very long investigations elide older steps in the feed.
+  A rate-limited feed backs off for 60 s; the **final reply** is re-posted up to
+  twice after a rate limit (honouring Slack's `Retry-After`, ≤ 30 s per wait).
+  Other send failures (e.g. a timeout that may have landed) are not re-sent.
+- Listener health is in-memory: it resets on a daemon restart and covers only
+  enabled Slack/Telegram integrations (webhooks have no listener).
 
 ---
 
@@ -641,6 +662,14 @@ is no dedicated channel WS event. See `docs/contracts/ws.md`.
 
 ## 11. Troubleshooting
 
+**Read the badge first.** Each enabled Slack/Telegram card in Settings →
+Channels shows the listener's live state and, when something is wrong, the
+reason: *Waiting for token* (not saved, or the Keychain isn't readable yet —
+retried every ~15 s), *Reconnecting* (the network or Slack dropped the
+connection; self-healing), *Not connected* (the token or app config was
+rejected — fix it, the listener keeps retrying every 60 s), *Token in use*
+(another enabled workspace already uses this app/bot token).
+
 **Slack listener never starts / "app token missing".** Socket Mode needs the
 `xapp-` App-Level Token *in addition to* the `xoxb-` Bot token. Add it in
 **Settings → Channels → Slack → Edit → App token** and Save. The daemon log shows
@@ -665,7 +694,9 @@ exponential backoff (3 s → 60 s) on a closed socket, a server `disconnect`
 envelope, or a transport error — this is normal and self-healing. Persistent
 failure to even open a connection (`apps.connections.open not ok`) usually means
 the `xapp-` token lacks `connections:write` or Socket Mode is disabled in the app
-settings.
+settings — the badge reads *Not connected* with the exact reason. After a reboot
+the first connect can time out while the network comes up; that shows as
+*Reconnecting (Socket Mode connect timed out after 20s)* and clears by itself.
 
 **Telegram bot silent in a group.** Privacy mode is on (default). In BotFather:
 `/setprivacy` → your bot → **Disable**, then **remove and re-add** the bot to the

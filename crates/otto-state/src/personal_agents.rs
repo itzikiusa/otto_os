@@ -10,6 +10,8 @@
 //! `otto_server`. Message ids are ULIDs, so lexicographic `id > after` paging is
 //! chronological.
 
+use std::collections::HashMap;
+
 use chrono::Utc;
 use otto_core::{new_id, Result};
 use serde::{Deserialize, Serialize};
@@ -93,6 +95,14 @@ pub struct AgentRoom {
     pub created_by: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// A room's message volume and recency, for the rooms list.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RoomActivity {
+    pub message_count: i64,
+    /// `created_at` of the newest message (`None` for an empty room).
+    pub last_message_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -753,6 +763,70 @@ impl AgentRoomsRepo {
         rows.iter().map(row_to_room).collect()
     }
 
+    /// The rooms `agent_id` is a member of (oldest room first) — what the
+    /// agent is told about in its instructions.
+    pub async fn list_for_agent(&self, agent_id: &str) -> Result<Vec<AgentRoom>> {
+        let rows = sqlx::query(
+            "SELECT r.* FROM agent_rooms r \
+               JOIN agent_room_members m ON m.room_id = r.id \
+             WHERE m.agent_id = ? ORDER BY r.created_at ASC",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list agent rooms for agent"))?;
+        rows.iter().map(row_to_room).collect()
+    }
+
+    /// Member agent ids of every room in workspace `ws`, keyed by room id
+    /// (join order) — one query for the whole rooms list instead of one per
+    /// room.
+    pub async fn members_by_workspace(&self, ws: &str) -> Result<HashMap<String, Vec<String>>> {
+        let rows = sqlx::query(
+            "SELECT m.room_id, m.agent_id FROM agent_room_members m \
+               JOIN agent_rooms r ON r.id = m.room_id \
+             WHERE r.workspace_id = ? ORDER BY m.created_at ASC",
+        )
+        .bind(ws)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list agent room members by workspace"))?;
+        let mut out: HashMap<String, Vec<String>> = HashMap::new();
+        for r in &rows {
+            out.entry(r.get("room_id"))
+                .or_default()
+                .push(r.get("agent_id"));
+        }
+        Ok(out)
+    }
+
+    /// Message count + newest message time of every room in workspace `ws`
+    /// that has messages, keyed by room id (rides `idx_arm_room`).
+    pub async fn activity_by_workspace(&self, ws: &str) -> Result<HashMap<String, RoomActivity>> {
+        let rows = sqlx::query(
+            "SELECT m.room_id, COUNT(*) AS n, MAX(m.created_at) AS last_at \
+               FROM agent_room_messages m \
+              WHERE m.room_id IN (SELECT id FROM agent_rooms WHERE workspace_id = ?) \
+              GROUP BY m.room_id",
+        )
+        .bind(ws)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("agent room activity"))?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (
+                    r.get::<String, _>("room_id"),
+                    RoomActivity {
+                        message_count: r.get("n"),
+                        last_message_at: r.get("last_at"),
+                    },
+                )
+            })
+            .collect())
+    }
+
     pub async fn rename(&self, id: &str, name: &str) -> Result<AgentRoom> {
         sqlx::query("UPDATE agent_rooms SET name = ?, updated_at = ? WHERE id = ?")
             .bind(name)
@@ -853,7 +927,9 @@ impl AgentRoomsRepo {
     /// the cursor use the table's monotonic `rowid` (insertion order) rather than
     /// the ULID `id` — two messages minted in the same millisecond tie on the
     /// ULID timestamp and would otherwise sort by their random suffix, i.e.
-    /// non-deterministically.
+    /// non-deterministically. The cursor is looked up IN THIS ROOM: a cursor
+    /// from another room used to shift the page by that room's rowid; now it
+    /// is unknown here and the read starts from the beginning.
     pub async fn list_messages(
         &self,
         room_id: &str,
@@ -863,11 +939,13 @@ impl AgentRoomsRepo {
         let rows = sqlx::query(
             "SELECT * FROM agent_room_messages \
              WHERE room_id = ? \
-               AND rowid > COALESCE((SELECT rowid FROM agent_room_messages WHERE id = ?), 0) \
+               AND rowid > COALESCE((SELECT rowid FROM agent_room_messages \
+                                      WHERE id = ? AND room_id = ?), 0) \
              ORDER BY rowid ASC LIMIT ?",
         )
         .bind(room_id)
         .bind(after.unwrap_or(""))
+        .bind(room_id)
         .bind(limit.clamp(1, 500))
         .fetch_all(&self.pool)
         .await
@@ -889,13 +967,15 @@ impl AgentRoomsRepo {
             "SELECT * FROM (SELECT m.*, m.rowid AS seq FROM agent_room_messages m \
                WHERE m.room_id = ? \
                  AND (? IS NULL OR m.rowid < \
-                      COALESCE((SELECT rowid FROM agent_room_messages WHERE id = ?), 0)) \
+                      COALESCE((SELECT rowid FROM agent_room_messages \
+                                WHERE id = ? AND room_id = ?), 0)) \
                ORDER BY m.rowid DESC LIMIT ?) \
              ORDER BY seq ASC",
         )
         .bind(room_id)
         .bind(before)
         .bind(before.unwrap_or(""))
+        .bind(room_id)
         .bind(limit.clamp(1, 500))
         .fetch_all(&self.pool)
         .await
@@ -1144,6 +1224,58 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+
+        // Cursors are scoped to their room: another room's message id is an
+        // unknown cursor here (forward → from the start, backward → nothing).
+        let other = rooms.create("ws1", "other", None).await.unwrap();
+        let foreign = rooms
+            .add_message(NewRoomMessage {
+                room_id: other.id.clone(),
+                author_kind: "user".into(),
+                author_id: "u1".into(),
+                text: "elsewhere".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            rooms
+                .list_messages(&room.id, Some(&foreign.id), 50)
+                .await
+                .unwrap()
+                .len(),
+            2,
+            "a foreign cursor must not skip this room's messages"
+        );
+        assert!(rooms
+            .list_messages_before(&room.id, Some(&foreign.id), 50)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // The rooms-list aggregates: members and activity per room in one
+        // query each; an empty room has no activity row.
+        rooms.add_member(&other.id, &b.id).await.unwrap();
+        let members = rooms.members_by_workspace("ws1").await.unwrap();
+        assert_eq!(members[&room.id], vec![a.id.clone()]);
+        assert_eq!(members[&other.id], vec![b.id.clone()]);
+        let empty = rooms.create("ws1", "quiet", None).await.unwrap();
+        let activity = rooms.activity_by_workspace("ws1").await.unwrap();
+        assert_eq!(activity[&room.id].message_count, 2);
+        assert_eq!(
+            activity[&room.id].last_message_at.as_deref(),
+            Some(m2.created_at.as_str())
+        );
+        assert_eq!(activity[&other.id].message_count, 1);
+        assert!(!activity.contains_key(&empty.id));
+        // An agent's own rooms, oldest first.
+        let a_rooms = rooms.list_for_agent(&a.id).await.unwrap();
+        assert_eq!(
+            a_rooms.iter().map(|r| &r.id).collect::<Vec<_>>(),
+            vec![&room.id]
+        );
+        rooms.add_member(&empty.id, &a.id).await.unwrap();
+        assert_eq!(rooms.list_for_agent(&a.id).await.unwrap().len(), 2);
+        assert!(rooms.list_for_agent("nobody").await.unwrap().is_empty());
 
         // Deleting an agent cascades its membership but keeps its messages
         // (the transcript stays user-visible).

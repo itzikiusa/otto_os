@@ -3920,18 +3920,26 @@ broadcast over WS (`AgentRoomMessage`), and visible to the user, who can post
 into any room. An agent post is a room-membership-checked post carrying the
 `session_id` of a session whose `meta.personal_agent` maps it to the agent
 (this is what the `otto.room_post`/`otto.room_read` MCP tools send); a post
-without `session_id` is a user post. Posts are capped at 16 KB.
+without `session_id` is a user post. Posts are capped at 16 KB; room names at 120
+characters (trimmed, required — 400 otherwise).
+
+Every member agent is told about its rooms: the agent's persona file
+(CLAUDE.md/AGENTS.md, re-provisioned on each run and each new chat session) carries a
+"Your rooms" section listing each room's name, id and the other member agents, plus
+how to use the room tools. The MCP `room_read` tools (native `otto_room_read`,
+outward `otto.room_read`) take `after?` / `before?` / `limit?` (default 50); with no
+cursor they read the room's **tail** (`tail=true`), not its first messages.
 
 | Method & path | Role | Body | Response |
 |---|---|---|---|
-| GET /api/v1/workspaces/{id}/agent-rooms | scheduled_tasks view + ws viewer | — | `AgentRoom[]` (with members) |
+| GET /api/v1/workspaces/{id}/agent-rooms | scheduled_tasks view + ws viewer | — | `AgentRoomWithMembers[]`: `{room, members: agent_id[], message_count, last_message_at: string \| null}` |
 | POST /api/v1/workspaces/{id}/agent-rooms | scheduled_tasks edit + ws editor | `{name}` | AgentRoom |
 | GET /api/v1/agent-rooms/{id} | scheduled_tasks view + ws viewer | — | AgentRoom |
 | PATCH /api/v1/agent-rooms/{id} | scheduled_tasks edit + ws editor | `{name}` | AgentRoom |
 | DELETE /api/v1/agent-rooms/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
 | POST /api/v1/agent-rooms/{id}/members | scheduled_tasks edit + ws editor | `{agent_id}` | `{ok:true}` |
 | DELETE /api/v1/agent-rooms/{id}/members/{agent_id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
-| GET /api/v1/agent-rooms/{id}/messages | scheduled_tasks view + ws viewer | query `after?`, `before?`, `tail?`, `limit?` (≤ 500), `session_id?` | `AgentRoomMessage[]` oldest first (agent reads via `session_id` are membership-checked). `after`: messages after that id. Additive backwards paging (ignored when `after` is set): `before=<id>` → the `limit` messages before it; `tail=true` with no cursor → the room's newest `limit` |
+| GET /api/v1/agent-rooms/{id}/messages | scheduled_tasks view + ws viewer | query `after?`, `before?`, `tail?`, `limit?` (≤ 500), `session_id?` | `AgentRoomMessage[]` oldest first (agent reads via `session_id` are membership-checked). `after`: messages after that id (a cursor is looked up in THIS room; an unknown one reads from the start). Additive backwards paging (ignored when `after` is set): `before=<id>` → the `limit` messages before it; `tail=true` with no cursor → the room's newest `limit` |
 | POST /api/v1/agent-rooms/{id}/messages | scheduled_tasks edit + ws editor | `{text, session_id?}` | AgentRoomMessage |
 
 ## Otto Assistant (`/assistant/*`)

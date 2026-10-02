@@ -1232,8 +1232,8 @@ fn base_tool_catalog() -> Value {
             },
             {
                 "name": "otto_room_read",
-                "description": "Personal agents: read messages from an agent room this agent is a member of, oldest first. Pass `after` (the last message id you saw) to page forward.",
-                "inputSchema": { "type": "object", "properties": { "room_id": { "type": "string" }, "after": { "type": "string" }, "limit": { "type": "integer" } }, "required": ["room_id"] }
+                "description": "Personal agents: read messages from an agent room this agent is a member of (oldest first within the page). With no cursor it returns the room's NEWEST messages (default 50); pass `after` (the last message id you saw) to get only newer ones, or `before` (the oldest id you hold) to page back through history.",
+                "inputSchema": { "type": "object", "properties": { "room_id": { "type": "string" }, "after": { "type": "string" }, "before": { "type": "string" }, "limit": { "type": "integer" } }, "required": ["room_id"] }
             },
             // ---- API client. Reads return the daemon's masked agent shapes;
             // writers use the normal ApiClient:Edit routes as the session owner.
@@ -1781,6 +1781,33 @@ const NATIVE_REF_ARGS: &[(&str, &str, &str)] = &[
     ("k8s_health", "cluster_id", "k8s_cluster"),
     ("k8s_action", "cluster_id", "k8s_cluster"),
 ];
+
+/// Messages an agent's `otto_room_read` returns when it names no `limit`.
+const ROOM_READ_DEFAULT_LIMIT: i64 = 50;
+
+/// The `/agent-rooms/{id}/messages` query for `otto_room_read` (without the
+/// session id). `after` pages forward; `before` pages back; with neither the
+/// read opens on the room's TAIL — it used to start from the room's very first
+/// message, so an agent catching up on a long room got the oldest 100 posts
+/// (up to 1.6 MB of context) instead of what was just said. Pure — unit-tested.
+fn room_read_query(args: &Value) -> String {
+    let arg = |k: &str| {
+        args.get(k)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_i64)
+        .unwrap_or(ROOM_READ_DEFAULT_LIMIT);
+    let cursor = match (arg("after"), arg("before")) {
+        (Some(after), _) => format!("after={}", seg(after)),
+        (None, Some(before)) => format!("before={}", seg(before)),
+        (None, None) => "tail=true".to_string(),
+    };
+    format!("{cursor}&limit={limit}")
+}
 
 /// The `/refs/directory` query for a native list tool. Pure — unit-tested.
 fn directory_path(kind: &str, args: &Value, session_ws: Option<&str>) -> String {
@@ -2909,26 +2936,12 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
         }
         "otto_room_read" => {
             let room = arg_str(args, "room_id")?;
-            let mut q = String::new();
-            if let Some(after) = args
-                .get("after")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-            {
-                q.push_str(&format!("&after={}", seg(after)));
-            }
-            if let Some(limit) = args.get("limit").and_then(Value::as_i64) {
-                q.push_str(&format!("&limit={limit}"));
-            }
+            let mut q = room_read_query(args);
             if let Some(sid) = ctx.session_id.clone() {
                 q.push_str(&format!("&session_id={}", seg(&sid)));
             }
             let raw = ctx
-                .get_json(&format!(
-                    "/agent-rooms/{}/messages?{}",
-                    seg(&room),
-                    q.trim_start_matches('&')
-                ))
+                .get_json(&format!("/agent-rooms/{}/messages?{q}", seg(&room)))
                 .await?;
             Ok(finalize(json!({ "messages": raw })))
         }
@@ -4308,6 +4321,33 @@ mod tests {
     /// The cross-workspace list tools read the daemon's directory — every
     /// workspace the owner can read, this session's first — and work without
     /// a session workspace at all (they used to list only `OTTO_WORKSPACE_ID`).
+    #[test]
+    fn room_read_opens_on_the_tail_and_pages_both_ways() {
+        // No cursor: the newest messages, with a bounded default page.
+        assert_eq!(
+            room_read_query(&json!({"room_id":"r1"})),
+            "tail=true&limit=50"
+        );
+        assert_eq!(
+            room_read_query(&json!({"room_id":"r1","limit":10})),
+            "tail=true&limit=10"
+        );
+        // `after` pages forward (and wins over `before`); `before` pages back.
+        assert_eq!(
+            room_read_query(&json!({"after":"m9","before":"m1"})),
+            "after=m9&limit=50"
+        );
+        assert_eq!(
+            room_read_query(&json!({"before":"m1"})),
+            "before=m1&limit=50"
+        );
+        // Blank cursors are ignored, not sent as `after=`.
+        assert_eq!(
+            room_read_query(&json!({"after":"  "})),
+            "tail=true&limit=50"
+        );
+    }
+
     #[test]
     fn list_tools_span_every_workspace_through_the_directory() {
         assert_eq!(
