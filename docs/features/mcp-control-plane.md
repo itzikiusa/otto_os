@@ -587,8 +587,10 @@ and evaluate are read-only (View).
   raised by the user's **own agent** (`mcp_server`, `gateway`, `agent` — including
   `otto.ask_human_approval`) is exempt: every Otto session authorizes as its owner,
   and the human-in-the-loop check exists precisely so that owner can weigh in
-  (`McpApproval::requester_may_decide`). Stale approvals expire (default TTL 120 min
-  for tool-calls).
+  (`McpApproval::requester_may_decide`). The decision itself must come from a
+  **person's own Otto sign-in**: an agent session's credential, an MCP token or a
+  share token gets `403`, so the agent that raised a request can never approve it.
+  Stale approvals expire (default TTL 120 min for tool-calls).
 - **Audit** (`mcp_call_log`) — the second **Activity** panel is the ledger of **every**
   governed call (UI tester, gateway, inbound `otto.*`, outbound downstream). Its
   server / tool / decision filters are collapsed by default. The **Log** view shows
@@ -771,7 +773,7 @@ the workspace role.
 | `POST /mcp/policies/import` | Import (`{policies, replace?}`) | **Admin** |
 | `POST /mcp/policies/evaluate` | Preview the decision for a tool | View |
 | `GET /mcp/approvals` (`?status=`) | The approval queue (ws-filtered) | View |
-| `POST /mcp/approvals/{id}/decide` | Approve/deny (`{approved, note?}`) | **Admin** (approver ≠ requester) |
+| `POST /mcp/approvals/{id}/decide` | Approve/deny (`{approved, note?}`) | **Admin**, human credential (approver ≠ requester) |
 | `GET /mcp/audit` (filters) | The call-log ledger (ws-filtered) | View |
 | `GET /mcp/stats` | Per-tool aggregates (ws-filtered) | View |
 

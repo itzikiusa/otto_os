@@ -670,3 +670,48 @@ async fn compat_shim_and_disabling_a_tool_drop_its_per_tool_rules() {
     let (_, list) = d.send("GET", &d.human, "/mcp/auto-approve", None).await;
     assert!(list["rules"].as_array().unwrap().is_empty(), "{list}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agent_credential_cannot_decide_approvals_but_its_owner_can() {
+    let d = boot().await;
+    let env = d.agent_invoke("create_pr", pr_args()).await;
+    assert_eq!(env["decision"], "pending_approval", "{env}");
+    let id = env["approval_id"].as_str().unwrap().to_string();
+
+    // The agent session that raised it cannot approve (or deny) it.
+    let (st, body) = d
+        .send(
+            "POST",
+            &d.agent,
+            &format!("/mcp/approvals/{id}/decide"),
+            Some(json!({"approved": true})),
+        )
+        .await;
+    assert_eq!(st, 403, "agent approved its own request: {body}");
+    let (st, _) = d
+        .send(
+            "POST",
+            &d.agent,
+            &format!("/mcp/approvals/{id}/decide"),
+            Some(json!({"approved": false})),
+        )
+        .await;
+    assert_eq!(st, 403);
+    assert_eq!(d.pending_approvals().await.len(), 1, "still pending");
+
+    // The human owner approves their own agent's request — the normal flow —
+    // and the agent's identical retry then executes on that approval.
+    let (st, body) = d
+        .send(
+            "POST",
+            &d.human,
+            &format!("/mcp/approvals/{id}/decide"),
+            Some(json!({"approved": true})),
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["status"], "approved");
+    let env = d.agent_invoke("create_pr", pr_args()).await;
+    assert_eq!(env["executed"], true, "{env}");
+    assert_eq!(d.last_audit("create_pr").await["decision"], "approved");
+}
