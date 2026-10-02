@@ -205,8 +205,17 @@ with a one-line explanation of what the tab does. ←/→ move between them.
   value, *secret* (Keychain, never shown), or *not set* (sent literally). Each
   chip's tooltip says where the value comes from.
   - **Paste a `curl …` command into the URL field** and it is imported
-    automatically (parsed by the daemon).
-  - **Enter** sends the request; **⌘↵** also sends from anywhere.
+    automatically (parsed by the daemon). Besides `-X/-H/-d/-u/-G`, the parser
+    understands attached forms (`-XPOST`, `-HAccept:…`), `-F`/`--form`
+    (→ a multipart body; `name=@file` becomes a file row you re-pick),
+    `--json`, `--data-urlencode` (encoded like curl), `-A`/`-e`/`-b name=v`
+    (User-Agent/Referer/Cookie), `-I` (HEAD) and `--oauth2-bearer`; flags it
+    doesn't model (`--cacert`, `--resolve`, `-c`, …) are skipped with their
+    value, so they're never mistaken for the URL.
+  - **Enter** sends the request; **⌘↵** sends and **⌘S** saves while focus is
+    anywhere on the API page (or nothing is focused) — the right-panel builder
+    answers them only while focus is inside the panel, so ⌘S in a note or ⌘↵
+    in a dialog elsewhere never saves or sends the API request.
 - **Send** (label is `Send` / `Connect`/`Disconnect` / `Invoke` per kind).
 - **Stop** appears while an HTTP request is in flight or a stream is connected;
   it aborts the request / disconnects.
@@ -399,6 +408,11 @@ client, records a history entry, and returns the response.
   the first 512 KB… Download the response from ⋯ to get all of it."
 - **Too large** — bodies over **25 MB** are not inlined at all; a panel explains
   this (re-run against a smaller payload to inspect inline).
+- **Binary** — a body that isn't text (a PDF, zip, protobuf, an
+  octet-stream of non-text bytes — judged by its content type and, for
+  non-text types, by how much of it decodes to garbage) or an image too large
+  to preview shows a *Binary response* notice with its type and size and a
+  **Download** button, instead of a screen of mojibake.
 
 ### Other tabs
 
@@ -440,11 +454,15 @@ recorded per-workspace.
 - **⋯ → Retention…** opens a sheet (keep the newest N / delete after D days; 0 =
   no limit); the current policy is shown under the search. **⋯ → Clear
   history…** empties the workspace's history (`DELETE …/history`, Editor).
+- Until the first load answers the list says *Loading history…*; a failed load
+  with nothing on screen shows the error inline with **Retry** (a failed
+  refresh over existing rows is a toast and keeps the rows).
 - History is bounded server-side: default **100**, max **500** entries returned.
 - Agent executions carry `request.source = {kind:"agent", session_id}` and show an
   *Agent* chip. Use the **Agent runs only** filter to show only those rows.
 - New rows refresh live through the workspace-scoped `api_history_appended`
-  WebSocket event; no page reload is needed.
+  WebSocket event — including each automation-run step — no page reload is
+  needed.
 - The history API also accepts `q`, `status`, `request_id`, and
   `source=agent|human` filters, and a single row can be fetched by id.
 
@@ -634,7 +652,14 @@ ApiResponse     { status, status_text, headers[], body, body_base64,
 - **Read a stored secret back over REST** — Keychain-backed auth members and
   secret environment values are write-only; reads return `$secret` markers or
   key names (see [§11](#11-security)).
-- Requests **time out at 60 s** by default (override per request in Settings).
+- Requests **time out at 60 s** by default (override per request in Settings;
+  `0` means the default). The timeout covers connect → last body byte for a
+  normal send; for an **SSE** stream it bounds only the wait for the response
+  head, so a stream stays open as long as you keep it. A timeout error names
+  the limit that applied ("timed out after 5s").
+- **gRPC** calls are bounded at 60 s; a server stream is cut at 60 s, 1000
+  messages or 5 MB and returns what arrived, marked truncated.
+- Repeated header rows (two `Accept`s) are all sent, in order.
 
 ---
 
@@ -696,6 +721,24 @@ sensitive data your endpoints returned; clear history when appropriate.
   always masks `Set-Cookie`, and returns only secret names in
   `resolved.secrets_used`. JWTs are exposed as selected decoded claims, never as
   token strings.
+- **Secret host binding everywhere an agent can aim.** A stored secret (a
+  `$secret` auth marker or a Keychain environment variable) only travels to the
+  host it's bound to — on ad-hoc execute, streams and the OAuth token fetch
+  (caller-built URLs), and also on **saved-request execute** (after `vars`
+  overrides and the pre-request script) and every step of an **automation run
+  an agent started**. The binding is resolved with the environment's own
+  variables, so overriding `{{base_url}}` can't drag it along. A person can
+  confirm a new host; an agent never can (the step / call fails with
+  `needs_confirm=new_host`).
+- **Agent ad-hoc responses are scrubbed.** When an agent credential calls
+  `POST …/execute`, the returned response is secret-scrubbed like history and
+  carries no raw bytes (no inline base64, no `body_id` download).
+- **OAuth token fetch** never follows redirects (a 307/308 would resend the
+  client secret elsewhere), is bounded at 30 s, and honours the workspace's
+  *allow private addresses* opt-in (a local Keycloak works once allowed).
+- **Postman environments** imported from a file or the account sync keep
+  `secret`-typed and credential-named variables (token/secret/password/api-key/…)
+  in the Keychain — never as plain variables in the state DB.
 - **Agent-authored new-host rule.** A request stamped as agent-authored cannot be
   sent to a host that has not appeared in a human-authored saved request or run
   until `confirm_new_host:true` is supplied. This is an agent-side speed bump;

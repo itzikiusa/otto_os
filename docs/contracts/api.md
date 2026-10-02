@@ -2113,8 +2113,8 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | GET /workspaces/{wid}/api-client/requests | ws viewer | — | `Request[]` |
 | POST /workspaces/{wid}/api-client/requests | ws editor | CreateRequestReq | Request |
 | GET /workspaces/{wid}/api-client/requests/{id}?shape=full\|agent | ws viewer | — | Request. `full` is the unchanged default; `agent` masks auth/header/query secrets and caps the body at 64 KiB |
-| PATCH /workspaces/{wid}/api-client/requests/{id} | ws editor | UpdateRequestReq | Request. Create/Update carry the persisted extras: `pre_request_script?`, `post_response_script?`, `settings?` (`{timeout_ms?, follow_redirects?, verify_ssl?}`), `docs?`, `graphql_variables?` |
-| POST /workspaces/{wid}/api-client/requests/{id}/execute | ws editor | `RunSavedRequestReq` | `RunSavedRequestResp`. 400: `vars override '<k>' must not contain '{{' (no nested substitution)`. 409: `needs_confirm=method: <METHOD> '<name>' → <url> is not a safe method; re-send with confirm:true` or `needs_confirm=new_host: host '<host>' is not used by any human-authored request or run in this workspace; re-send with confirm_new_host:true`. Network/send failure is 502 and still writes history |
+| PATCH /workspaces/{wid}/api-client/requests/{id} | ws editor | UpdateRequestReq | Request. Create/Update carry the persisted extras: `pre_request_script?`, `post_response_script?`, `settings?` (`{timeout_ms?, follow_redirects?, tls_verify?}`), `docs?`, `graphql_variables?` |
+| POST /workspaces/{wid}/api-client/requests/{id}/execute | ws editor | `RunSavedRequestReq` | `RunSavedRequestResp`. 400: `vars override '<k>' must not contain '{{' (no nested substitution)`. 409: `needs_confirm=method: <METHOD> '<name>' → <url> is not a safe method; re-send with confirm:true` or `needs_confirm=new_host: host '<host>' is not used by any human-authored request or run in this workspace; re-send with confirm_new_host:true`, or the **Secret host binding** 409 (`needs_confirm=new_host: a stored secret would be sent to host '<host>' …`) when — after `vars` overrides and the pre-request script — a stored secret would leave its bound host (agents can never confirm that one). Network/send failure is 502 and still writes history |
 | DELETE /workspaces/{wid}/api-client/requests/{id} | ws editor | — | 204 |
 | GET /workspaces/{wid}/api-client/environments | ws viewer | — | `Environment[]` |
 | POST /workspaces/{wid}/api-client/environments | ws editor | CreateEnvironmentReq | Environment |
@@ -2124,13 +2124,13 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | GET /workspaces/{wid}/api-client/history?limit=&q=&status=&request_id=&source=agent\|human | ws viewer | — | filtered request history; `source=human` includes legacy rows with no source field |
 | GET /workspaces/{wid}/api-client/history/{id} | ws viewer | — | one history entry; cross-workspace ids return 404 |
 | DELETE /workspaces/{wid}/api-client/history | ws editor | — | clear history |
-| POST /workspaces/{wid}/api-client/execute | ws editor | ExecuteRequestReq | execute an HTTP request. 409 `needs_confirm=new_host: a stored secret would be sent to host '<host>', which it is not bound to; …` when a `$secret` marker or Keychain env variable would leave its bound host (see **Secret host binding**) — a person re-sends with `confirm_new_host:true`; agent callers can never confirm |
+| POST /workspaces/{wid}/api-client/execute | ws editor | ExecuteRequestReq | execute an HTTP request. 409 `needs_confirm=new_host: a stored secret would be sent to host '<host>', which it is not bound to; …` when a `$secret` marker or Keychain env variable would leave its bound host (see **Secret host binding**) — a person re-sends with `confirm_new_host:true`; agent callers can never confirm. For an agent caller the returned response is also secret-scrubbed (like history) and carries no raw bytes (`body_base64` empty, no `body_id`) |
 | GET /workspaces/{wid}/api-client/responses/{id}/raw | ws editor | — | the full bytes (`{id}` = `ApiResponse.body_id`) of a recent `execute` response whose `body_id` was set (truncated or non-UTF-8 body), `Content-Type` = the upstream one, `Content-Disposition: attachment`. Held in a daemon-memory cache for 10 min, ≤ 128 MiB total (oldest evicted first), served only to the user + workspace that executed it; 404 once gone |
 | POST /workspaces/{wid}/api-client/secure-all | ws editor | — | `{requests_secured, env_keys_secured}` — one-pass Keychain sweep |
 | POST /workspaces/{wid}/api-client/grpc/describe | ws editor | GrpcDescribeReq | service/method descriptors |
-| POST /workspaces/{wid}/api-client/grpc/invoke | ws editor | GrpcInvokeReq | gRPC call result |
+| POST /workspaces/{wid}/api-client/grpc/invoke | ws editor | GrpcInvokeReq | gRPC call result. The whole call is bounded at 60 s (unary: `DEADLINE_EXCEEDED` result); a server stream stops at 60 s, 1000 messages or 5 MiB of JSON and returns what arrived with `truncated: true` |
 | POST /workspaces/{wid}/api-client/grpc/reflect | ws editor | GrpcReflectReq | server reflection listing |
-| POST /workspaces/{wid}/api-client/oauth2/token | ws editor | OAuth2TokenReq | fetched OAuth2 token. Same 409 `needs_confirm=new_host` when a `$secret` marker's saved `token_url` host differs from the requested one; `confirm_new_host:true` (person only) |
+| POST /workspaces/{wid}/api-client/oauth2/token | ws editor | OAuth2TokenReq | fetched OAuth2 token. Same 409 `needs_confirm=new_host` when a `$secret` marker's saved `token_url` host differs from the requested one; `confirm_new_host:true` (person only). 30 s budget, redirects are NOT followed (a 307/308 would resend the client secret), the body read is capped at 256 KiB, and an error without `error`/`error_description` quotes at most 300 chars of the body. Honours the workspace `allow_local` opt-in like `execute` |
 | GET /workspaces/{wid}/api-client/cookies | ws editor | — | THIS workspace's cookie jar (jars are per-workspace, never shared; values are live credentials — editor-gated) |
 | DELETE /workspaces/{wid}/api-client/cookies | ws editor | — | clear THIS workspace's jar |
 | GET /workspaces/{wid}/api-client/automations | ws viewer | — | `Automation[]` |
@@ -2138,7 +2138,7 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | PATCH /workspaces/{wid}/api-client/automations/{id} | ws editor | UpdateAutomationReq | Automation |
 | DELETE /workspaces/{wid}/api-client/automations/{id} | ws editor | — | 204 |
 | POST /workspaces/{wid}/api-client/automations/{id}/run | ws editor | `StartApiAutomationRunReq?` | synchronous `ApiRunResult`; execution also persists a durable report |
-| POST /workspaces/{wid}/api-client/automations/{id}/runs | ws editor | `StartApiAutomationRunReq` | `ApiAutomationRun` immediately; runs in background |
+| POST /workspaces/{wid}/api-client/automations/{id}/runs | ws editor | `StartApiAutomationRunReq` | `ApiAutomationRun` immediately; runs in background. When an AGENT starts the run (this route or `…/run`), every step enforces the **Secret host binding** after its pre-request script: a step whose stored secret would leave its bound host fails with the `needs_confirm=new_host` message instead of sending |
 | GET /workspaces/{wid}/api-client/automation-runs?automation_id=&before= | ws editor | — | latest 50 `ApiAutomationRun` rows, newest id first; `before` is the last run id |
 | GET /workspaces/{wid}/api-client/automation-runs/{id}?after= | ws editor | — | `ApiAutomationRun`; foreign workspace is 404. `after=N` (delta poll while running): `report.steps`, `result_rows` and `result_ids` hold only the entries after the first N, and `snapshot` is `null` — the client appends to what it already has |
 | POST /workspaces/{wid}/api-client/automation-runs/{id}/cancel | ws editor | `{}` | current `ApiAutomationRun`; cancellation is asynchronous/idempotent |
@@ -2147,7 +2147,7 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | GET /api-client/oauth2/callback?state=&code=&error= | one-use state | provider redirect | static HTML; code exchanged with PKCE, tokens stored in Keychain |
 | GET /ws/api-client/stream?token=&workspace_id= *(root path, outside /api/v1)* | ws editor + API Client Edit | WS upgrade | relay; scoped/share and MCP-only tokens rejected |
 | POST /workspaces/{wid}/api-client/postman/sync | ws editor | `{api_key?, remember?}` | fetch EVERY collection + environment from the user's Postman account (api.getpostman.com) → `{collections: PostmanV21[], environments: PostmanEnv[], failed: [{name,error}], remembered}`. `api_key` optional when a prior sync stored one (`remember: true` → Keychain, ref `apiclient-postman`; only persisted after the key proved valid). Caps at 200 items per kind (Postman rate limits). The UI imports the returned docs through its normal import pipeline. |
-| POST /api-client/import-curl | member | `{curl}` | parsed Request from a curl command |
+| POST /api-client/import-curl | member | `{curl}` | parsed Request from a curl command. Understands attached short flags (`-XPOST`, `-HName:v`, `-uuser:pw`), `-F`/`--form`/`--form-string` (→ `body_mode:"multipart"`, a `[{key,type,value,filename}]` row array; `name=@path` becomes a `file` row with only the file name), `--json` (body + JSON Content-Type/Accept), `--data-urlencode` (encoded like curl), `-A`/`-e`/`-b name=v` (User-Agent/Referer/Cookie headers), `-I` (HEAD), `--oauth2-bearer` (bearer auth); value-taking flags it doesn't model (`--cacert`, `--resolve`, `-c`, …) consume their value |
 
 On request PATCH, absent/null `auth` keeps the stored auth row and Keychain blob,
 and absent `extras` keeps the stored extras. A non-empty `X-Otto-Session` or
@@ -2198,8 +2198,11 @@ the URL — ad-hoc `execute`, the SSE/WebSocket stream (`/ws/api-client/stream`)
 (after `{{var}}` substitution; for `oauth2/token`, the request's saved `token_url`), and a
 Keychain-backed environment variable (referenced directly, nested through another
 variable, or via a runtime override) to the hosts of the workspace's human-authored saved
-requests. Anything else is refused with `409 needs_confirm=new_host` before any secret is
-resolved. `ExecuteRequestReq.confirm_new_host` / `OAuth2TokenReq.confirm_new_host`
+requests. The binding side is resolved with the environment's OWN variables — a runtime
+`vars` override, dataset row or chained value can retarget the send but never moves the
+binding with it. Anything else is refused with `409 needs_confirm=new_host` before any
+secret is resolved. The same check runs on saved-request `execute` (after `vars` and the
+pre-request script) and on every step of an agent-started automation run. `ExecuteRequestReq.confirm_new_host` / `OAuth2TokenReq.confirm_new_host`
 (boolean, default false) confirm it, and are honoured only for a person's credential —
 never for an agent (bridge/MCP headers, a managed-session token or an MCP token).
 
@@ -2234,7 +2237,9 @@ resolution or tunnel failure is reported as a `502` and recorded in history.
 
 **Browser OAuth.** Saved auth accepts `grant:"authorization_code"`, `authorization_url`, `token_url`, `client_id`, optional `client_secret`/`scope`, and existing token members. Start returns a generated authorization URL with single-use random state and S256 PKCE; reserved provider query keys are replaced. Register `redirect_uri` exactly (daemon loopback `/api/v1/api-client/oauth2/callback`). Callback rechecks the current user, workspace and feature access before exchange and persistence. Both provider endpoints require HTTPS except loopback HTTP development endpoints; token DNS is pinned to checked addresses and redirects are disabled. A changed request revision/auth/secret fingerprint rejects completion. The callback task continues if the browser disconnects. Access/refresh tokens use the saved request's Keychain reference; status never returns token values. Invalid/expired/replayed callbacks do not exchange tokens. Pending flows are memory-only and expire after 600s or daemon restart.
 
-**Streaming open frame.** Send `{action:"open",kind:"sse"|"websocket",request:ExecuteApiReq}`; follow with `{action:"send",data}` for WebSocket or `{action:"close"}`. SSE uses shared HTTP environment/runtime variables, query, Keychain auth, body, timeout, redirect, TLS and SSH settings. SSH requires governed connection `shell` authorization for the initiating actor. WebSocket supports GET/query/headers/auth/connection timeout; bodies, SSH, and disabling TLS verification produce explicit errors; no redirects. Scripts are HTTP-only. Daemon messages remain `open|event|message|error|closed`; SSE buffered events and WS frames/messages are capped at 1 MiB. UI keeps at most 1000 messages / 4 MiB, clips each message at 64 KiB, and reports dropped messages.
+**Streaming open frame.** Send `{action:"open",kind:"sse"|"websocket",request:ExecuteApiReq}`; follow with `{action:"send",data}` for WebSocket or `{action:"close"}`. SSE uses shared HTTP environment/runtime variables, query, Keychain auth, body, timeout, redirect, TLS and SSH settings; its `timeout_ms` bounds only the wait for the response head — the event stream itself stays open until either side closes it. Events are framed on raw bytes, so a UTF-8 character split across network chunks arrives intact. SSH requires governed connection `shell` authorization for the initiating actor. WebSocket supports GET/query/headers/auth/connection timeout; bodies, SSH, and disabling TLS verification produce explicit errors; no redirects. Scripts are HTTP-only. Daemon messages remain `open|event|message|error|closed`; SSE buffered events and WS frames/messages are capped at 1 MiB. UI keeps at most 1000 messages / 4 MiB, clips each message at 64 KiB, and reports dropped messages.
+
+**Execution details.** `timeout_ms` covers connect → last body byte (`0`/absent = the 60 s default; a timeout error names the limit that applied). Enabled header rows with the same name are ALL sent, in order. Response header values are decoded as lossy UTF-8 (a non-ASCII value is never blanked).
 
 **Output limits and redaction.** HTTP download stops at 25 MiB plus one byte; `too_large:true` means `size_bytes` is a lower bound and body/base64 are empty. `body` is the UTF-8 (lossy) text capped at 512 KiB (`truncated:true` when cut). The full bytes are NOT inlined by default: `body_base64` is set only for `image/*` bodies ≤ 5 MiB (the preview); `execute` sets `body_id` (see `…/responses/{body_id}/raw`) when `body` isn't the exact payload (truncated or non-UTF-8); an exact UTF-8 body has neither — `body` is the payload. Saved-request runs (`…/requests/{id}/run`), automation steps and gRPC responses never set `body_id`. Saved execution scrubs known secret values from script labels, warnings and nested response metadata as well as bodies/headers. An explicit `{v:1}` extras object clears previously saved extensions; null/omitted PATCH extras still preserve them. Saved gRPC proto/method use `extras.grpc` within the existing 256 KiB extras limit.
 
@@ -4223,12 +4228,23 @@ IDOR guard, like Scheduled Tasks). Persistence: `otto_state::browser`
 so it netguard-checks it (`otto_netguard::check_url`) before the fetch — a
 blocked address (loopback/private/metadata) is a `400`. Navigating a
 reader-mode tab (`PATCH .../tabs/{id}` with a new `url` while `mode ==
-"reader"`) runs the same fetch pipeline and adopts the fetched page's title;
-navigating a non-reader-mode tab (`mode == "live"`, an embedded iframe) just
-records the given `url`/`title` with no fetch. `GET /browser/query` fetches
-the same way and runs a CSS-selector query against the settled page instead
-of returning the whole thing, sharing `BrowserService::query`'s
-denylist/fallback policy with `/page`. Broadcasts `browser_tab_updated`
+"reader"`) netguard-checks the URL and, when no `title` is sent (the agent
+`browser_navigate` path), runs the same fetch pipeline and adopts the fetched
+page's title; a `title` sent along (the reader UI, which has just fetched the
+page itself) is recorded as-is — no second fetch. Navigating a non-reader-mode
+tab (`mode == "live"`) just records the given `url`/`title` with no fetch. A
+PATCH resolves everything (mode, URL, netguard, fetch) before writing, so a
+failed navigation changes nothing — not even a `mode` sent with it. Tab URLs
+must be `http(s)` (or `about:blank`) and ≤ 8 KiB (400 otherwise, on create and
+PATCH); a supplied `title` has its whitespace (newlines included) collapsed and
+is capped at 300 chars. `GET /browser/query` fetches the same way and runs a
+CSS-selector query against the settled page instead of returning the whole
+thing, sharing `BrowserService::query`'s denylist/fallback policy with
+`/page`; a selector that is empty, over 512 chars or unparseable is a `400`
+before any fetch. The plain-fetch engine refuses a response whose
+`Content-Type` isn't a page (HTML / XHTML / XML / JSON / any `text/*`, or
+none) with a `502 navigation failed: not a web page (<type>)`, and its 30 s
+budget is wall-clock for the whole fetch (head + body). Broadcasts `browser_tab_updated`
 / `browser_annotation_added` (see `docs/contracts/ws.md`).
 
 | Method & path | Auth | Request | Response |

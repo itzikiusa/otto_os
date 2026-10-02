@@ -14,8 +14,11 @@ loopback, private, and cloud-metadata addresses are refused with a `400`.
   `mode:"reader"` (fetched/rendered) or `mode:"live"` (a real embedded page the
   daemon never fetches — a native Tauri child webview in the desktop app; off
   Tauri the pane falls back to reader, since there's nothing to host it in).
-  Navigating a reader tab re-fetches and adopts the new page's title. See "Live
-  tabs (desktop app)" below for how live mode is driven.
+  Navigating a reader tab fetches the page once (the reader UI loads it and
+  hands its title to the tab; an agent's `browser_navigate` lets the daemon
+  fetch and adopt it). A failed navigation leaves the tab as it was. Closing
+  the active tab selects its neighbour, like any browser. See "Live tabs
+  (desktop app)" below for how live mode is driven.
 - **DOM annotations** — a mark on a URL (selector + excerpt + your comment), keyed
   on the URL rather than the tab id so it survives the tab being closed and
   reattaches to any tab that later opens the same page.
@@ -89,9 +92,9 @@ fetch)" for the full request/response table. Summary:
 | Route | Effect |
 |---|---|
 | `GET/POST /workspaces/{wid}/browser/tabs` | list / create reader tabs |
-| `PATCH/DELETE /browser/tabs/{id}` | navigate (re-fetches in reader mode) / close |
+| `PATCH/DELETE /browser/tabs/{id}` | navigate (fetches in reader mode unless the caller sends the title it already fetched) / close |
 | `GET /workspaces/{wid}/browser/page?url=…` | fetch a URL → `{url,title,markdown,html,engine,degraded}` |
-| `GET /workspaces/{wid}/browser/query?url=…&selector=…` | fetch + CSS-selector match → `{matches:[{selector,outer_html,text}]}` |
+| `GET /workspaces/{wid}/browser/query?url=…&selector=…` | fetch + CSS-selector match → `{matches:[{selector,outer_html,text}]}`; a malformed selector is a 400 before any fetch |
 | `GET/POST /workspaces/{wid}/browser/annotations` | list / create marks (`?url=` filters) |
 | `PATCH/DELETE /browser/annotations/{id}` | edit comment / remove a mark |
 | `POST /workspaces/{wid}/browser/summarize` | fetch + one agent turn → `{summary,engine,degraded}` |
@@ -234,12 +237,23 @@ second, fabricated instruction line once inside the fence.
   in reader mode outside the desktop app (plain browser, PWA, remote share).
 - Fetches are size-capped (`otto_browser::PAGE_BYTE_CAP`, streamed so a huge
   response is aborted mid-flight rather than buffered) and time-capped
-  (`PAGE_TIMEOUT_SECS`).
+  (`PAGE_TIMEOUT_SECS` — wall-clock for the whole fetch, so a server trickling
+  bytes can't hold it open).
+- The plain fetch only reads pages: a PDF, image, archive or other non-text
+  `Content-Type` fails with "not a web page (…)" instead of turning into
+  mojibake for you (or an agent) to read.
+- Reader extraction keeps text that *shows* markup (`&lt;div&gt;` in a tutorial
+  stays visible as `<div>`), keeps table cells of one row apart (`Name | Age`)
+  and breaks lines at lists, quotes, sections and tables. Links and code-block
+  indentation are not preserved yet.
+- Tab URLs must be `http(s)` (or `about:blank`) and at most 8 KiB.
 - `/summarize` and `/vault-save`'s fresh-fetch path cap the markdown handed to the
   prompt at 30,000 chars; `/annotations/{id}/send` caps the excerpt at 2,000.
 - `browser_navigate`'s title comes from a real fetch (it PATCHes the new tab with
   its URL, which runs the same reader-mode fetch pipeline `PATCH .../tabs/{id}`
-  does), not from the create call.
+  does), not from the create call. When that fetch fails (a refused or
+  unreachable URL) the tool removes the tab it just created, so failed agent
+  attempts don't litter the Browser with blank tabs.
 - No cookies/sessions/auth are carried into a fetch — every request is anonymous,
   so pages behind a login return their logged-out view (or fail).
 - `mode:"live"` tabs are never fetched by the daemon at all — they're a plain
@@ -375,7 +389,10 @@ sha256 and run the install):
 ## Troubleshooting
 
 - **A URL 400s immediately** — netguard blocked it (loopback/private/link-local/
-  metadata address). This is intentional SSRF protection, not a bug.
+  metadata address), or it isn't an `http(s)` URL. This is intentional SSRF
+  protection, not a bug.
+- **"not a web page (application/pdf)"** — the URL serves a file, not a page;
+  open it in a live tab or download it instead.
 - **Every page comes back `degraded:true`** — no working `lightpanda` binary was
   found/started; plain-fetch (no JS) is being used for everything. Check the
   daemon log for a `browser: lightpanda sidecar failed to start` warning.
