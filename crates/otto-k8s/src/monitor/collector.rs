@@ -698,6 +698,10 @@ pub async fn run_cycle_with<S: K8sCtx>(
             write_err = Some(format!("write events: {e}"));
         }
     }
+    if samples_written + events_written > 0 {
+        // Fleet answers computed before this write are now stale.
+        super::cache::bump_generation();
+    }
 
     // 9. Status.
     status.snapshot = serde_json::to_value(&cur).unwrap_or_default();
@@ -774,7 +778,7 @@ pub async fn run_loop<S: K8sCtx>(ctx: S, cluster_id: Id, cancel: Arc<AtomicBool>
                 sleep_or_cancel(interval, &cancel).await;
                 continue;
             }
-            match sink.exec(&schema::schema_sql(cfg.retention_days)).await {
+            match schema::ensure(sink.as_ref(), cfg.retention_days).await {
                 Ok(()) => {
                     let _ = sink
                         .exec(&schema::alter_ttl_sql(

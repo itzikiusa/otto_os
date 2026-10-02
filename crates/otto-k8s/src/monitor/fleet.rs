@@ -30,12 +30,18 @@ use otto_core::Error;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::cache;
 use super::health::RestartCounts;
 use super::queries::{
-    self, ident_ok, is_counter, p95_from_buckets, LATENCY_BUCKETS, LATENCY_COUNTS, LATENCY_SUMS,
-    MEMORY_GAUGES, REQUEST_COUNTERS,
+    self, bucket, code_of, ident_ok, in_list, is_counter, now_secs, p95_from_buckets,
+    series_deltas, Span, B_UTC, LATENCY_BUCKETS, LATENCY_COUNTS, LATENCY_SUMS, MEMORY_GAUGES,
+    REQUEST_COUNTERS,
 };
-use super::schema::sql_str;
+use super::schema::{self, sql_str};
+
+/// Gauge mean / counter increase over the rows being grouped (see `queries`).
+const MEAN_V: &str = "sum(v_sum) / sum(n)";
+const DELTA_V: &str = "greatest(0, max(v_max) - min(v_min))";
 use crate::clusters::Clusters;
 use crate::http::ApiErr;
 use crate::{K8sCtx, MonitorSink};
@@ -128,16 +134,18 @@ impl FleetFilter {
     }
 }
 
-fn range(window: Duration) -> String {
-    format!("ts >= now() - INTERVAL {} SECOND", window.num_seconds())
+/// The planned sample read for a fleet window (now − window … now).
+pub fn span_for(window: Duration, step: Option<u32>) -> Span {
+    Span::plan(now_secs(), window.num_seconds(), 0, step)
 }
 
-fn in_list(items: &[&str]) -> String {
-    items
-        .iter()
-        .map(|s| sql_str(s))
-        .collect::<Vec<_>>()
-        .join(", ")
+/// Start of the hour-tier window for the pod / workload inventory.
+fn inventory_from(window: Duration) -> i64 {
+    (now_secs() - window.num_seconds().max(1)).div_euclid(3600) * 3600
+}
+
+fn events_range(window: Duration) -> String {
+    format!("ts >= now() - INTERVAL {} SECOND", window.num_seconds())
 }
 
 /// Rank expression so the most authoritative memory gauge wins per pod.
@@ -149,9 +157,6 @@ fn mem_rank_expr() -> String {
     format!("multiIf({}, {})", parts.join(", "), MEMORY_GAUGES.len())
 }
 
-const CODE_EXPR: &str =
-    "if(labels['code'] != '', labels['code'], if(labels['status'] != '', labels['status'], labels['status_code']))";
-const T_UTC: &str = "formatDateTime(t, '%Y-%m-%dT%H:%i:%SZ', 'UTC')";
 const TS_UTC: &str = "formatDateTime(ts, '%Y-%m-%dT%H:%i:%SZ', 'UTC')";
 
 /// `workload` | `pod` — the table's row identity.
@@ -178,23 +183,29 @@ impl Group {
             Group::Pod => "cluster_id, namespace, workload, pod",
         }
     }
+    /// The row identity minus `pod` (pod is always grouped per series).
+    fn base_cols(self) -> &'static str {
+        "cluster_id, namespace, workload"
+    }
 }
 
 // ---------------------------------------------------------------------------
 // SQL builders (pure, unit-tested)
 // ---------------------------------------------------------------------------
 
-/// Distinct (cluster, namespace, workload) with data in the window, from both
-/// tables, plus the sample count per cluster so the picker can show which
-/// clusters are actually reporting.
+/// Distinct (cluster, namespace, workload) with data in the window — from the
+/// hourly pod inventory (+ events) — plus the sample count per cluster so the
+/// picker can show which clusters are actually reporting.
 pub fn filters_sql(window: Duration) -> String {
     format!(
-        "SELECT cluster_id, namespace, workload, count() AS n FROM (
-           SELECT cluster_id, namespace, workload FROM k8s_samples WHERE {r}
+        "SELECT cluster_id, namespace, workload, sum(c) AS n FROM (
+           SELECT cluster_id, namespace, workload, toUInt64(n) AS c FROM {pods} WHERE t >= toDateTime({from})
            UNION ALL
-           SELECT cluster_id, namespace, workload FROM k8s_events WHERE {r}
+           SELECT cluster_id, namespace, workload, toUInt64(1) AS c FROM k8s_events WHERE {r}
          ) GROUP BY cluster_id, namespace, workload ORDER BY cluster_id, namespace, workload",
-        r = range(window)
+        pods = schema::PODS_TABLE,
+        from = inventory_from(window),
+        r = events_range(window),
     )
 }
 
@@ -202,10 +213,11 @@ pub fn filters_sql(window: Duration) -> String {
 /// separately and capped, since a fleet can have thousands.
 pub fn pods_sql(f: &FleetFilter, window: Duration, limit: u32) -> String {
     format!(
-        "SELECT cluster_id, namespace, workload, pod, max(ts) AS last FROM k8s_samples
-         WHERE {r}{f}
-         GROUP BY cluster_id, namespace, workload, pod ORDER BY last DESC LIMIT {limit}",
-        r = range(window),
+        "SELECT cluster_id, namespace, workload, pod, max(last) AS last_seen FROM {pods}
+         WHERE t >= toDateTime({from}){f}
+         GROUP BY cluster_id, namespace, workload, pod ORDER BY last_seen DESC LIMIT {limit}",
+        pods = schema::PODS_TABLE,
+        from = inventory_from(window),
         f = f.sql(),
         limit = limit.clamp(1, 5000),
     )
@@ -214,16 +226,18 @@ pub fn pods_sql(f: &FleetFilter, window: Duration, limit: u32) -> String {
 /// Memory per (row, pod, gauge): last / avg / max in the window. The Rust side
 /// keeps the best gauge per pod (rank) and sums pods into the row.
 pub fn memory_sql(f: &FleetFilter, window: Duration, g: Group) -> String {
+    memory_in(&span_for(window, None), f, g)
+}
+
+pub fn memory_in(span: &Span, f: &FleetFilter, g: Group) -> String {
+    let filter = format!(" AND metric IN ({}){}", in_list(&MEMORY_GAUGES), f.sql());
     format!(
-        "SELECT {cols}, pod, metric, {rank} AS rank, argMax(value, ts) AS mem_last, avg(value) AS mem_avg, max(value) AS mem_max
-         FROM k8s_samples
-         WHERE metric IN ({gauges}) AND {r}{f}
+        "SELECT {cols}, pod, metric, {rank} AS rank, tupleElement(max(v_last), 2) AS mem_last, sum(v_sum) / sum(n) AS mem_avg, max(v_max) AS mem_max
+         FROM ({src})
          GROUP BY {cols}, pod, metric",
         cols = g.cols(),
         rank = mem_rank_expr(),
-        gauges = in_list(&MEMORY_GAUGES),
-        r = range(window),
-        f = f.sql(),
+        src = span.source(&filter),
     )
 }
 
@@ -234,59 +248,62 @@ pub fn restarts_sql(f: &FleetFilter, window: Duration, g: Group) -> String {
          WHERE kind IN ('restart', 'churn') AND {r}{f}
          GROUP BY {cols}, kind, class",
         cols = g.cols(),
-        r = range(window),
+        r = events_range(window),
         f = f.sql(),
     )
 }
 
 /// Request rate + 5xx rate per row (counter deltas per pod × label-set).
 pub fn rates_sql(f: &FleetFilter, window: Duration, g: Group) -> String {
-    let secs = window.num_seconds().max(1);
+    rates_in(&span_for(window, None), f, g)
+}
+
+pub fn rates_in(span: &Span, f: &FleetFilter, g: Group) -> String {
+    let filter = format!(" AND metric IN ({}){}", in_list(&REQUEST_COUNTERS), f.sql());
     format!(
-        "SELECT {cols}, sum(delta) / {secs} AS rps, sumIf(delta, is5xx) / {secs} AS err_rps FROM (
-           SELECT {cols}, pod, labels, startsWith({code}, '5') AS is5xx, greatest(0, max(value) - min(value)) AS delta
-           FROM k8s_samples
-           WHERE metric IN ({counters}) AND {r}{f}
-           GROUP BY {cols}, pod, labels
-         ) GROUP BY {cols}",
+        "SELECT {cols}, sum(delta) / {secs} AS rps, sumIf(delta, startsWith({code}, '5')) / {secs} AS err_rps
+         FROM ({inner}) GROUP BY {cols}",
         cols = g.cols(),
-        code = CODE_EXPR,
-        counters = in_list(&REQUEST_COUNTERS),
-        r = range(window),
-        f = f.sql(),
+        secs = span.secs,
+        code = code_of("lb"),
+        inner = series_deltas(span, g.base_cols(), false, &filter),
     )
 }
 
 /// Histogram bucket deltas per row → p95 in Rust.
 pub fn latency_buckets_sql(f: &FleetFilter, window: Duration, g: Group) -> String {
+    latency_buckets_in(&span_for(window, None), f, g)
+}
+
+pub fn latency_buckets_in(span: &Span, f: &FleetFilter, g: Group) -> String {
+    let filter = format!(" AND metric IN ({}){}", in_list(&LATENCY_BUCKETS), f.sql());
     format!(
-        "SELECT {cols}, le, sum(delta) AS delta FROM (
-           SELECT {cols}, pod, labels['le'] AS le, labels, greatest(0, max(value) - min(value)) AS delta
-           FROM k8s_samples
-           WHERE metric IN ({buckets}) AND {r}{f}
-           GROUP BY {cols}, pod, labels
-         ) GROUP BY {cols}, le",
+        "SELECT {cols}, lb['le'] AS le, sum(delta) AS delta
+         FROM ({inner}) GROUP BY {cols}, le",
         cols = g.cols(),
-        buckets = in_list(&LATENCY_BUCKETS),
-        r = range(window),
-        f = f.sql(),
+        inner = series_deltas(span, g.base_cols(), false, &filter),
     )
 }
 
 /// Mean latency per row (`_sum` / `_count` deltas) — the fallback when no histogram.
 pub fn latency_avg_sql(f: &FleetFilter, window: Duration, g: Group) -> String {
+    latency_avg_in(&span_for(window, None), f, g)
+}
+
+pub fn latency_avg_in(span: &Span, f: &FleetFilter, g: Group) -> String {
+    let filter = format!(
+        " AND metric IN ({}, {}){}",
+        in_list(&LATENCY_SUMS),
+        in_list(&LATENCY_COUNTS),
+        f.sql()
+    );
     format!(
         "SELECT {cols}, if(sumIf(delta, is_count) > 0, 1000 * sumIf(delta, NOT is_count) / sumIf(delta, is_count), 0) AS avg_ms FROM (
-           SELECT {cols}, pod, labels, metric IN ({counts}) AS is_count, greatest(0, max(value) - min(value)) AS delta
-           FROM k8s_samples
-           WHERE metric IN ({sums}, {counts}) AND {r}{f}
-           GROUP BY {cols}, pod, labels, metric
+           SELECT {cols}, metric IN ({counts}) AS is_count, delta FROM ({inner})
          ) GROUP BY {cols}",
         cols = g.cols(),
         counts = in_list(&LATENCY_COUNTS),
-        sums = in_list(&LATENCY_SUMS),
-        r = range(window),
-        f = f.sql(),
+        inner = series_deltas(span, g.base_cols(), true, &filter),
     )
 }
 
@@ -379,61 +396,75 @@ pub fn series_sql(
     step_secs: u32,
 ) -> String {
     let step = step_secs.max(10);
-    let r = range(window);
+    series_in(&span_for(window, Some(step)), window, f, metric, by, step)
+}
+
+pub fn series_in(
+    span: &Span,
+    window: Duration,
+    f: &FleetFilter,
+    metric: SeriesMetric,
+    by: SeriesBy,
+    step_secs: u32,
+) -> String {
+    let step = step_secs.max(10);
     let fs = f.sql();
     let g = by.expr();
+    let b = bucket("t", step);
     match metric {
         SeriesMetric::Restarts => format!(
-            "SELECT class AS g, {t_utc} AS t, count() AS v FROM (
-               SELECT class, toStartOfInterval(ts, INTERVAL {step} SECOND) AS t FROM k8s_events
+            "SELECT class AS g, {b_utc} AS t, count() AS v FROM (
+               SELECT class, {eb} AS b FROM k8s_events
                WHERE kind = 'restart' AND {r}{fs}
-             ) GROUP BY g, t ORDER BY g, t",
-            t_utc = T_UTC
+             ) GROUP BY g, b ORDER BY g, b",
+            b_utc = B_UTC,
+            eb = bucket("ts", step),
+            r = events_range(window),
         ),
         SeriesMetric::Mem => format!(
-            "SELECT g, {t_utc} AS t, sum(v) AS v FROM (
-               SELECT g, t, pod, argMin(v, rank) AS v FROM (
-                 SELECT {g} AS g, toStartOfInterval(ts, INTERVAL {step} SECOND) AS t, pod, metric, {rank} AS rank, avg(value) AS v
-                 FROM k8s_samples
-                 WHERE metric IN ({gauges}) AND {r}{fs}
-                 GROUP BY g, t, pod, metric, rank
-               ) GROUP BY g, t, pod
-             ) GROUP BY g, t ORDER BY g, t",
-            t_utc = T_UTC,
+            "SELECT g, {b_utc} AS t, sum(v) AS v FROM (
+               SELECT g, b, pod, argMin(v, rank) AS v FROM (
+                 SELECT {g} AS g, {b} AS b, pod, metric, {rank} AS rank, {MEAN_V} AS v
+                 FROM ({src})
+                 GROUP BY g, b, pod, metric, rank
+               ) GROUP BY g, b, pod
+             ) GROUP BY g, b ORDER BY g, b",
+            b_utc = B_UTC,
             rank = mem_rank_expr(),
-            gauges = in_list(&MEMORY_GAUGES),
+            src = span.source(&format!(" AND metric IN ({}){fs}", in_list(&MEMORY_GAUGES))),
         ),
         SeriesMetric::Rps => format!(
-            "SELECT g, {t_utc} AS t, sum(v) AS v FROM (
-               SELECT {g} AS g, toStartOfInterval(ts, INTERVAL {step} SECOND) AS t, pod, labels, greatest(0, max(value) - min(value)) / {step} AS v
-               FROM k8s_samples
-               WHERE metric IN ({counters}) AND {r}{fs}
-               GROUP BY g, t, pod, labels
-             ) GROUP BY g, t ORDER BY g, t",
-            t_utc = T_UTC,
-            counters = in_list(&REQUEST_COUNTERS),
+            "SELECT g, {b_utc} AS t, sum(v) AS v FROM (
+               SELECT {g} AS g, {b} AS b, pod, series, {DELTA_V} / {step} AS v
+               FROM ({src})
+               GROUP BY g, b, pod, series
+             ) GROUP BY g, b ORDER BY g, b",
+            b_utc = B_UTC,
+            src = span.source(&format!(" AND metric IN ({}){fs}", in_list(&REQUEST_COUNTERS))),
         ),
         SeriesMetric::Err => format!(
-            "SELECT g, {t_utc} AS t, if(sum(d) > 0, 100 * sumIf(d, is5xx) / sum(d), 0) AS v FROM (
-               SELECT {g} AS g, toStartOfInterval(ts, INTERVAL {step} SECOND) AS t, pod, labels, startsWith({code}, '5') AS is5xx, greatest(0, max(value) - min(value)) AS d
-               FROM k8s_samples
-               WHERE metric IN ({counters}) AND {r}{fs}
-               GROUP BY g, t, pod, labels, is5xx
-             ) GROUP BY g, t ORDER BY g, t",
-            t_utc = T_UTC,
-            code = CODE_EXPR,
-            counters = in_list(&REQUEST_COUNTERS),
+            "SELECT g, {b_utc} AS t, if(sum(d) > 0, 100 * sumIf(d, startsWith({code}, '5')) / sum(d), 0) AS v FROM (
+               SELECT {g} AS g, {b} AS b, pod, series, any(labels) AS lb, {DELTA_V} AS d
+               FROM ({src})
+               GROUP BY g, b, pod, series
+             ) GROUP BY g, b ORDER BY g, b",
+            b_utc = B_UTC,
+            code = code_of("lb"),
+            src = span.source(&format!(" AND metric IN ({}){fs}", in_list(&REQUEST_COUNTERS))),
         ),
         SeriesMetric::Latency => format!(
-            "SELECT g, {t_utc} AS t, if(sumIf(d, is_count) > 0, 1000 * sumIf(d, NOT is_count) / sumIf(d, is_count), 0) AS v FROM (
-               SELECT {g} AS g, toStartOfInterval(ts, INTERVAL {step} SECOND) AS t, pod, labels, metric IN ({counts}) AS is_count, greatest(0, max(value) - min(value)) AS d
-               FROM k8s_samples
-               WHERE metric IN ({sums}, {counts}) AND {r}{fs}
-               GROUP BY g, t, pod, labels, metric, is_count
-             ) GROUP BY g, t ORDER BY g, t",
-            t_utc = T_UTC,
+            "SELECT g, {b_utc} AS t, if(sumIf(d, is_count) > 0, 1000 * sumIf(d, NOT is_count) / sumIf(d, is_count), 0) AS v FROM (
+               SELECT {g} AS g, {b} AS b, pod, series, metric, metric IN ({counts}) AS is_count, {DELTA_V} AS d
+               FROM ({src})
+               GROUP BY g, b, pod, series, metric
+             ) GROUP BY g, b ORDER BY g, b",
+            b_utc = B_UTC,
             counts = in_list(&LATENCY_COUNTS),
-            sums = in_list(&LATENCY_SUMS),
+            src = span.source(&format!(
+                " AND metric IN ({}, {}){fs}",
+                in_list(&LATENCY_SUMS),
+                in_list(&LATENCY_COUNTS)
+            )),
         ),
     }
 }
@@ -476,7 +507,7 @@ pub fn events_sql(
     };
     let where_ = format!(
         "{r}{kind}{f}",
-        r = range(window),
+        r = events_range(window),
         kind = kind_f,
         f = f.sql()
     );
@@ -496,26 +527,34 @@ pub fn events_sql(
 /// `request_labels` enabled carry the `path` label; everything else groups
 /// under an empty path and is dropped by the handler.
 pub fn requests_sql(f: &FleetFilter, window: Duration) -> String {
-    let secs = window.num_seconds().max(1);
+    requests_in(&span_for(window, None), f)
+}
+
+pub fn requests_in(span: &Span, f: &FleetFilter) -> String {
+    let secs = span.secs;
+    let filter = format!(
+        " AND labels['path'] != '' AND metric IN ({counters}, {sums}, {counts}){fs}",
+        counters = in_list(&REQUEST_COUNTERS),
+        sums = in_list(&LATENCY_SUMS),
+        counts = in_list(&LATENCY_COUNTS),
+        fs = f.sql(),
+    );
     format!(
         "SELECT path, method,
                 sumIf(delta, is_req) / {secs} AS rps,
                 sumIf(delta, is_req AND is5xx) / {secs} AS err_rps,
                 if(sumIf(delta, is_count) > 0, 1000 * sumIf(delta, is_sum) / sumIf(delta, is_count), 0) AS avg_ms
          FROM (
-           SELECT labels['path'] AS path, labels['method'] AS method, pod, labels, metric,
+           SELECT lb['path'] AS path, lb['method'] AS method,
                   metric IN ({counters}) AS is_req, metric IN ({sums}) AS is_sum, metric IN ({counts}) AS is_count,
-                  startsWith({code}, '5') AS is5xx, greatest(0, max(value) - min(value)) AS delta
-           FROM k8s_samples
-           WHERE labels['path'] != '' AND metric IN ({counters}, {sums}, {counts}) AND {r}{fs}
-           GROUP BY path, method, pod, labels, metric
+                  startsWith({code}, '5') AS is5xx, delta
+           FROM ({inner})
          ) GROUP BY path, method ORDER BY rps DESC LIMIT 500",
         counters = in_list(&REQUEST_COUNTERS),
         sums = in_list(&LATENCY_SUMS),
         counts = in_list(&LATENCY_COUNTS),
-        code = CODE_EXPR,
-        r = range(window),
-        fs = f.sql(),
+        code = code_of("lb"),
+        inner = series_deltas(span, "cluster_id, namespace, workload", true, &filter),
     )
 }
 
@@ -556,6 +595,26 @@ fn str_of<'a>(v: &'a Value, k: &str) -> &'a str {
     v.get(k).and_then(Value::as_str).unwrap_or("")
 }
 
+/// Serve a fleet answer from the read cache, computing it at most once per
+/// key at a time (see `cache`).
+async fn cached<F, Fut>(key: String, compute: F) -> ApiResult<Json<Value>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ApiResult<Json<Value>>>,
+{
+    if let Some(v) = cache::get_fleet(&key) {
+        return Ok(Json(v));
+    }
+    let _flight = cache::flight(&key).await;
+    if let Some(v) = cache::get_fleet(&key) {
+        return Ok(Json(v));
+    }
+    let gen = cache::generation();
+    let Json(v) = compute().await?;
+    cache::put_fleet(key, gen, &v);
+    Ok(Json(v))
+}
+
 fn sink_of<S: K8sCtx>(ctx: &S) -> ApiResult<std::sync::Arc<dyn MonitorSink>> {
     ctx.monitor_sink()
         .filter(|s| s.available())
@@ -573,6 +632,15 @@ async fn cluster_names<S: K8sCtx>(ctx: &S) -> HashMap<String, Value> {
         }
     }
     m
+}
+
+/// A short fingerprint of the cluster registry (ids, names, colours).
+fn registry_stamp(names: &HashMap<String, Value>) -> String {
+    let mut ids: Vec<String> = names.iter().map(|(id, v)| format!("{id}={v}")).collect();
+    ids.sort();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&ids, &mut h);
+    format!("{:x}", std::hash::Hasher::finish(&h))
 }
 
 fn cluster_json(names: &HashMap<String, Value>, id: &str) -> Value {
@@ -604,9 +672,19 @@ async fn filters<S: K8sCtx>(
     State(ctx): State<S>,
     Query(q): Query<FleetQuery>,
 ) -> ApiResult<Json<Value>> {
+    // Cluster names / colours decorate the rows: a registry change is a new key.
+    let names = cluster_names(&ctx).await;
+    let key = format!("fleet:filters:{q:?}:{}", registry_stamp(&names));
+    cached(key, || filters_body(ctx, q, names)).await
+}
+
+async fn filters_body<S: K8sCtx>(
+    ctx: S,
+    q: FleetQuery,
+    names: HashMap<String, Value>,
+) -> ApiResult<Json<Value>> {
     let (label, window, f) = parse_common(&q, "24h")?;
     let sink = sink_of(&ctx)?;
-    let names = cluster_names(&ctx).await;
     let rows = sink.query_rows(&filters_sql(window)).await?;
     let mut clusters: BTreeMap<String, u64> = BTreeMap::new();
     let mut namespaces: BTreeSet<(String, String)> = BTreeSet::new();
@@ -703,6 +781,17 @@ async fn table<S: K8sCtx>(
     State(ctx): State<S>,
     Query(q): Query<FleetQuery>,
 ) -> ApiResult<Json<Value>> {
+    // Cluster names / colours decorate the rows: a registry change is a new key.
+    let names = cluster_names(&ctx).await;
+    let key = format!("fleet:table:{q:?}:{}", registry_stamp(&names));
+    cached(key, || table_body(ctx, q, names)).await
+}
+
+async fn table_body<S: K8sCtx>(
+    ctx: S,
+    q: FleetQuery,
+    names: HashMap<String, Value>,
+) -> ApiResult<Json<Value>> {
     let (label, window, f) = parse_common(&q, "24h")?;
     let g = Group::parse(q.group.as_deref())?;
     let sort = q.sort.clone().unwrap_or_else(|| "restarts".into());
@@ -711,7 +800,6 @@ async fn table<S: K8sCtx>(
     }
     let desc = q.dir.as_deref().unwrap_or("desc") != "asc";
     let sink = sink_of(&ctx)?;
-    let names = cluster_names(&ctx).await;
 
     let (q_mem, q_rst, q_rates, q_buckets, q_avgs) = (
         memory_sql(&f, window, g),
@@ -913,16 +1001,28 @@ async fn series<S: K8sCtx>(
     State(ctx): State<S>,
     Query(q): Query<FleetQuery>,
 ) -> ApiResult<Json<Value>> {
+    // Cluster names / colours decorate the rows: a registry change is a new key.
+    let names = cluster_names(&ctx).await;
+    let key = format!("fleet:series:{q:?}:{}", registry_stamp(&names));
+    cached(key, || series_body(ctx, q, names)).await
+}
+
+async fn series_body<S: K8sCtx>(
+    ctx: S,
+    q: FleetQuery,
+    names: HashMap<String, Value>,
+) -> ApiResult<Json<Value>> {
     let (label, window, f) = parse_common(&q, "24h")?;
     let metric = SeriesMetric::parse(q.metric.as_deref().unwrap_or("restarts"))?;
     let by = SeriesBy::parse(q.by.as_deref())?;
-    // ~60 buckets by default; never finer than a minute (collector cadence).
-    let step = q
-        .step
-        .unwrap_or_else(|| (window.num_seconds() / 60).clamp(60, 3600) as u32)
-        .clamp(60, 86_400);
+    // ~60 buckets by default; never finer than a minute (collector cadence),
+    // and aligned to a rollup grain so the chart reads a rollup, not raw.
+    let step = queries::align_step(
+        q.step
+            .unwrap_or_else(|| (window.num_seconds() / 60).clamp(60, 3600) as u32)
+            .clamp(60, 86_400),
+    );
     let sink = sink_of(&ctx)?;
-    let names = cluster_names(&ctx).await;
     let rows = sink
         .query_rows(&series_sql(&f, window, metric, by, step))
         .await?;
@@ -971,6 +1071,17 @@ async fn events<S: K8sCtx>(
     State(ctx): State<S>,
     Query(q): Query<FleetQuery>,
 ) -> ApiResult<Json<Value>> {
+    // Cluster names / colours decorate the rows: a registry change is a new key.
+    let names = cluster_names(&ctx).await;
+    let key = format!("fleet:events:{q:?}:{}", registry_stamp(&names));
+    cached(key, || events_body(ctx, q, names)).await
+}
+
+async fn events_body<S: K8sCtx>(
+    ctx: S,
+    q: FleetQuery,
+    names: HashMap<String, Value>,
+) -> ApiResult<Json<Value>> {
     let (label, window, f) = parse_common(&q, "24h")?;
     if let Some(c) = q.class.as_deref().filter(|c| !c.is_empty()) {
         if !ident_ok(c) {
@@ -984,7 +1095,6 @@ async fn events<S: K8sCtx>(
     let (page_sql, total_sql) =
         events_sql(&f, window, q.class.as_deref(), &sort, desc, limit, offset)?;
     let sink = sink_of(&ctx)?;
-    let names = cluster_names(&ctx).await;
     let (rows, total) = tokio::join!(sink.query_rows(&page_sql), sink.query_rows(&total_sql));
     let rows: Vec<Value> = rows?
         .into_iter()
@@ -1009,6 +1119,10 @@ async fn requests<S: K8sCtx>(
     State(ctx): State<S>,
     Query(q): Query<FleetQuery>,
 ) -> ApiResult<Json<Value>> {
+    requests_body(ctx, q).await
+}
+
+async fn requests_body<S: K8sCtx>(ctx: S, q: FleetQuery) -> ApiResult<Json<Value>> {
     let (label, window, f) = parse_common(&q, "24h")?;
     let sink = sink_of(&ctx)?;
     // Which registered clusters keep request labels — so the page can say
@@ -1033,21 +1147,34 @@ async fn requests<S: K8sCtx>(
             }
         }
     }
-    let rows: Vec<Value> = sink
-        .query_rows(&requests_sql(&f, window))
-        .await?
-        .into_iter()
-        .filter(|r| !str_of(r, "path").is_empty())
-        .map(|r| {
-            let rps = f64_of(&r, "rps");
-            let err = f64_of(&r, "err_rps");
-            json!({
-                "path": str_of(&r, "path"), "method": str_of(&r, "method"),
-                "rps": rps, "err_pct": if rps > 0.0 { 100.0 * err / rps } else { 0.0 },
-                "avg_ms": f64_of(&r, "avg_ms"),
-            })
+    // Only the ClickHouse half is cached — the enabled/disabled lists above
+    // follow a config change at once.
+    let key = format!(
+        "fleet:requests-rows:{q:?}:{}",
+        registry_stamp(&cluster_names(&ctx).await)
+    );
+    let Json(raw) = cached(key, || async {
+        Ok(Json(Value::Array(
+            sink.query_rows(&requests_sql(&f, window)).await?,
+        )))
+    })
+    .await?;
+    let rows: Vec<Value> = match raw {
+        Value::Array(a) => a,
+        _ => vec![],
+    }
+    .into_iter()
+    .filter(|r| !str_of(r, "path").is_empty())
+    .map(|r| {
+        let rps = f64_of(&r, "rps");
+        let err = f64_of(&r, "err_rps");
+        json!({
+            "path": str_of(&r, "path"), "method": str_of(&r, "method"),
+            "rps": rps, "err_pct": if rps > 0.0 { 100.0 * err / rps } else { 0.0 },
+            "avg_ms": f64_of(&r, "avg_ms"),
         })
-        .collect();
+    })
+    .collect();
     Ok(Json(json!({
         "window": label, "enabled_on": enabled_on, "disabled_on": disabled_on, "rows": rows,
     })))
@@ -1098,9 +1225,11 @@ mod tests {
         let r = restarts_sql(&f(), w, Group::Workload);
         assert!(r.contains("kind IN ('restart', 'churn')"));
         let rates = rates_sql(&f(), w, Group::Workload);
-        assert!(rates.contains("/ 3600 AS rps"));
+        assert!(rates.contains(" AS rps"));
+        assert!(rates.contains("FROM k8s_samples_1m"), "1 h → minute tier");
+        assert!(rates.contains("GROUP BY cluster_id, namespace, workload, pod, series"));
         assert!(rates.contains("startsWith("));
-        assert!(latency_buckets_sql(&f(), w, Group::Workload).contains("labels['le'] AS le"));
+        assert!(latency_buckets_sql(&f(), w, Group::Workload).contains("lb['le'] AS le"));
         assert!(latency_avg_sql(&f(), w, Group::Workload).contains("1000 * sumIf"));
     }
 
@@ -1116,7 +1245,11 @@ mod tests {
         let r = series_sql(&f(), w, SeriesMetric::Rps, SeriesBy::Namespace, 5);
         assert!(r.contains("/ 10 AS v"), "step floors at 10s");
         assert!(series_sql(&f(), w, SeriesMetric::Err, SeriesBy::Pod, 60)
-            .contains("100 * sumIf(d, is5xx)"));
+            .contains("100 * sumIf(d, startsWith("));
+        assert!(
+            m.contains("FROM k8s_samples_5m"),
+            "24 h at a 600 s step → 5-minute tier"
+        );
         assert!(
             series_sql(&f(), w, SeriesMetric::Latency, SeriesBy::Cluster, 60).contains("is_count")
         );
@@ -1142,7 +1275,7 @@ mod tests {
     fn requests_query_needs_path_label() {
         let q = requests_sql(&f(), Duration::hours(1));
         assert!(q.contains("labels['path'] != ''"));
-        assert!(q.contains("labels['method'] AS method"));
+        assert!(q.contains("lb['method'] AS method"));
         assert!(q.contains("LIMIT 500"));
         assert!(keeps_request_labels("http_requests_total"));
         assert!(keeps_request_labels("http_server_requests_seconds_count"));
@@ -1156,6 +1289,7 @@ mod tests {
     fn filters_and_pods() {
         let q = filters_sql(Duration::hours(6));
         assert!(q.contains("UNION ALL"));
+        assert!(q.contains("FROM k8s_pods_1h WHERE t >= toDateTime("));
         assert!(q.contains("INTERVAL 21600 SECOND"));
         let p = pods_sql(&f(), Duration::hours(1), 99_999);
         assert!(p.contains("LIMIT 5000"));
