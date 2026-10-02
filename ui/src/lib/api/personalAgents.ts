@@ -56,6 +56,8 @@ export const personalAgentsApi = {
       scheduleId ? { schedule_id: scheduleId } : {},
     ),
   runs: (agentId: string) => api.get<PersonalAgentRun[]>(`/personal-agents/${agentId}/runs`),
+  /** Stop a running run (its session is killed; it settles `canceled`). */
+  cancelRun: (runId: string) => api.post<{ ok: boolean }>(`/personal-agents/runs/${runId}/cancel`, {}),
   /** The stored report path for a run (fetched as text/markdown via authedText). */
   reportPath: (runId: string) => `/personal-agents/runs/${runId}/report`,
 

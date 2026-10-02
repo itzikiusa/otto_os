@@ -7167,6 +7167,10 @@ export interface ScheduledTask {
   last_run_at?: string | null;
   last_status?: string | null;
   next_run_at?: string | null;
+  /** When the schedule was last (re)armed — created, resumed, or given a new
+   *  cadence/timezone. The scheduler never fires an occurrence from before it
+   *  (a resumed task doesn't catch up what it missed). Null on older rows. */
+  armed_at?: string | null;
   created_by?: string | null;
   created_at: string;
   updated_at: string;
@@ -7177,7 +7181,8 @@ export interface ScheduledTaskRun {
   id: Id;
   task_id: Id;
   workspace_id: Id;
-  status: 'running' | 'ok' | 'error';
+  /** `canceled`: stopped from Otto (`POST …/runs/{run_id}/cancel`). */
+  status: 'running' | 'ok' | 'error' | 'canceled';
   trigger: 'schedule' | 'manual';
   started_at: string;
   finished_at?: string | null;
@@ -7855,6 +7860,8 @@ export interface PersonalAgentSchedule {
   enabled: boolean;
   last_run_at?: string | null;
   next_run_at?: string | null;
+  /** When the schedule (or its agent) was last (re)armed — see `ScheduledTask.armed_at`. */
+  armed_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -7865,7 +7872,8 @@ export interface PersonalAgentRun {
   agent_id: Id;
   schedule_id?: Id | null;
   workspace_id: Id;
-  status: 'running' | 'ok' | 'error';
+  /** `canceled`: stopped from Otto (`POST …/runs/{run_id}/cancel`). */
+  status: 'running' | 'ok' | 'error' | 'canceled';
   trigger: 'schedule' | 'manual';
   started_at: string;
   finished_at?: string | null;
