@@ -9,6 +9,7 @@
   import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
   import StatusChip from './StatusChip.svelte';
   import JsonTree from './JsonTree.svelte';
+  import { looksBinary, mimeOf } from './responseKind';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { apiStream } from '../../lib/stores/apiStream.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -54,6 +55,11 @@
   const isJsonResp = $derived(!!resp && isJson(resp.content_type, resp.body));
   const isHtml = $derived(!!resp && /html/i.test(resp.content_type ?? ''));
   const isImage = $derived(!!resp?.content_type && /^image\//i.test(resp.content_type));
+  // Bytes the text editor can't show: binary payloads, and images too big for
+  // the inline preview (no `body_base64`). Shown as a download notice instead.
+  const isBinary = $derived(
+    !!resp && !resp.too_large && (isImage ? !resp.body_base64 && mimeOf(resp.content_type) !== 'image/svg+xml' : looksBinary(resp.content_type, resp.body)),
+  );
   const respPath = $derived(resp ? `response.${respExt(resp.content_type, resp.body)}` : 'response.txt');
   const respLang = $derived(resp ? respExt(resp.content_type, resp.body) : '');
 
@@ -123,7 +129,7 @@
   // The text editor exists whenever the body is showable as text; it is only
   // VISIBLE on the Body tab in Pretty/Raw (see the template).
   const bodyEmpty = $derived(!resp || resp.body.trim() === '');
-  const editorEligible = $derived(!!resp && !resp.too_large && !bodyEmpty);
+  const editorEligible = $derived(!!resp && !resp.too_large && !bodyEmpty && !isBinary);
   const showEditor = $derived.by(
     () =>
       editorEligible &&
@@ -385,7 +391,7 @@
           {t.label}{#if t.count}<span class="count" aria-hidden="true">{t.count}</span>{/if}
         </button>
       {/each}
-      {#if tab === 'body' && !resp.too_large}
+      {#if tab === 'body' && !resp.too_large && !isBinary}
         <span class="grow"></span>
         <div class="segmented view" role="group" aria-label="Body view">
           {#if !isImage}
@@ -410,6 +416,21 @@
             <div>
               <div class="n-title">This response is {formatBytes(resp.size_bytes)}, too large to show</div>
               <div class="n-sub">Bodies over 25 MB aren’t loaded. Try a smaller page of data.</div>
+            </div>
+          </div>
+        {:else if isBinary}
+          <div class="notice">
+            <Icon name="box" size={16} />
+            <div class="n-body">
+              <div class="n-title">Binary response · {formatBytes(resp.size_bytes)}</div>
+              <div class="n-sub">
+                {isImage ? 'This image is too large to preview here' : `${mimeOf(resp.content_type) || 'Unknown content type'} can’t be shown as text`}{canDownload ? '. Download it to open it in another app.' : '. Send the request again to download it.'}
+              </div>
+              {#if canDownload}
+                <button class="btn small n-action" onclick={() => void saveToDisk()}>
+                  <Icon name="download" size={12} /> Download
+                </button>
+              {/if}
             </div>
           </div>
         {:else if bodyView === 'preview' && isImage && previewUrl}
@@ -771,6 +792,9 @@
   }
   .n-title {
     font-weight: 600;
+  }
+  .n-action {
+    margin-block-start: 8px;
   }
   .n-sub {
     color: var(--text-dim);
