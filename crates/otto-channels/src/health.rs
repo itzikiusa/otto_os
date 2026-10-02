@@ -102,15 +102,22 @@ fn reset(ws: &str, channel: Channel, state: ListenerState, detail: Option<&str>)
     let now = Utc::now();
     let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let key = (ws.to_string(), channel.as_str());
-    let last_event_at = reg.get(&key).and_then(|s| s.last_event_at);
+    let detail = detail.map(clip);
+    let prev = reg.get(&key);
+    let last_event_at = prev.and_then(|s| s.last_event_at);
+    // The supervisor re-reports a still-missing token every rescan: keep
+    // "since" at when it first went that way, not the latest rescan.
+    let since = prev
+        .filter(|p| p.state == state && p.detail == detail)
+        .map_or(now, |p| p.since);
     reg.insert(
         key,
         ListenerStatus {
             workspace_id: ws.to_string(),
             channel,
             state,
-            detail: detail.map(clip),
-            since: now,
+            detail,
+            since,
             connected_at: None,
             last_event_at,
             last_error: None,
@@ -327,6 +334,18 @@ mod tests {
         let snap = snapshot("ws_health_snap");
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].channel, Channel::Slack);
+    }
+
+    #[test]
+    fn a_repeated_wait_keeps_its_since() {
+        waiting_for_token("ws_health_since", Channel::Slack, "app token is not saved");
+        let first = snapshot("ws_health_since")[0].since;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        waiting_for_token("ws_health_since", Channel::Slack, "app token is not saved");
+        assert_eq!(snapshot("ws_health_since")[0].since, first);
+        // A different reason is a new state.
+        waiting_for_token("ws_health_since", Channel::Slack, "bot token is not saved");
+        assert!(snapshot("ws_health_since")[0].since > first);
     }
 
     #[test]
