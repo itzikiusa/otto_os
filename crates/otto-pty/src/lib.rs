@@ -6,6 +6,10 @@ pub mod ring;
 pub mod input_authority;
 pub use input_authority::InputAuthorization;
 
+mod held;
+pub mod holder;
+pub use holder::{AdoptError, HolderConfig, HolderInfo, HolderLauncher};
+
 use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
@@ -201,35 +205,118 @@ pub struct CommandSpec {
     pub env: Vec<(String, String)>,
 }
 
+/// Where the PTY master and the child actually live.
+enum Backend {
+    /// In this process: the classic spawn. The child dies with this process
+    /// (its PTY master closes → SIGHUP), and [`PtyHandle`]'s `Drop` kills it.
+    Local {
+        master: Mutex<Box<dyn MasterPty + Send>>,
+        /// Fallback killer for a child whose pid the OS didn't report.
+        killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    },
+    /// In a detached PTY-holder process ([`holder`]) reached over a unix
+    /// socket: the child survives a restart of this process, and a new one
+    /// re-adopts it ([`PtyHandle::adopt`]). This handle keeps a local mirror
+    /// (emulator + ring + broadcast) fed by the holder's output stream, so
+    /// every read API behaves exactly as for a local PTY.
+    Held(Arc<held::HeldConn>),
+}
+
 /// A live PTY child process: write input, watch output, observe exit.
 pub struct PtyHandle {
-    master: Mutex<Box<dyn MasterPty + Send>>,
+    backend: Backend,
     /// Bounded input queue drained by a dedicated writer thread, so a child
     /// that stops reading its tty blocks that thread — never a daemon worker.
     input_tx: SyncSender<WriteJob>,
-    /// Fallback killer for a child whose pid the OS didn't report.
-    killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     /// Exit state shared with the waiter thread (pid-reuse-safe signalling).
     child_state: Arc<ChildState>,
-    ring: Arc<Mutex<RingBuffer>>,
-    /// Headless terminal emulator tracking the CURRENT screen, so a fresh
-    /// attach can reproduce the live screen in one coherent frame (no replay
-    /// flicker, no clipped TUI). This is what tmux does.
-    parser: Arc<Mutex<vt100::Parser>>,
-    tx: broadcast::Sender<Bytes>,
+    /// Ring + headless terminal emulator tracking the CURRENT screen (so a
+    /// fresh attach can reproduce the live screen in one coherent frame — no
+    /// replay flicker, no clipped TUI; this is what tmux does) + the live
+    /// output broadcast + the last-output clock (relative to `mirror.epoch`,
+    /// the instant the handle was created).
+    mirror: Mirror,
     exit_rx: watch::Receiver<Option<i32>>,
-    /// Instant the handle was created; `last_output_ms` is relative to it.
-    epoch: Instant,
     /// Daemon-unique spawn counter. A client that sees this change between
     /// attaches knows the process was respawned (resume/restart) and its local
     /// scrollback belongs to a dead process — rebuild from the snapshot instead
-    /// of appending to stale content.
+    /// of appending to stale content. An adopted (re-attached) held PTY gets a
+    /// fresh one too: clients reconnecting after a daemon restart rebuild from
+    /// the adoption snapshot.
     spawn_seq: u64,
-    last_output_ms: Arc<AtomicU64>,
     /// OS pid of the direct child, captured at spawn (None if the OS didn't
     /// report one). Used by the idle-suspend sweep to check for live descendant
-    /// processes before killing a "quiet" session.
+    /// processes before killing a "quiet" session. For a held PTY this is the
+    /// child's pid as the holder reported it (the holder is its parent).
     child_pid: Option<u32>,
+    /// Flips to `true` once the output stream has ended (local: the reader
+    /// thread saw EOF; held: the holder reported the exit). Lets a holder send
+    /// its final output before the exit notice.
+    reader_done: watch::Receiver<bool>,
+}
+
+/// The output side shared by both backends: the screen emulator, the raw
+/// ring, the live broadcast and the last-output clock. A local PTY's reader
+/// thread and a held PTY's socket reader feed it the same way.
+#[derive(Clone)]
+pub(crate) struct Mirror {
+    ring: Arc<Mutex<RingBuffer>>,
+    parser: Arc<Mutex<vt100::Parser>>,
+    tx: broadcast::Sender<Bytes>,
+    epoch: Instant,
+    last_output_ms: Arc<AtomicU64>,
+}
+
+impl Mirror {
+    fn new(cols: u16, rows: u16, ring: RingBuffer) -> Self {
+        let (tx, _) = broadcast::channel::<Bytes>(BROADCAST_CAPACITY);
+        Self {
+            ring: Arc::new(Mutex::new(ring)),
+            // Scrollback history kept by the emulator — this is the depth a
+            // client gets back on every reconnect rebuild, so it IS the
+            // user-visible scrollback for reopened sessions. Rows cost
+            // cols×32 bytes, so the cap trades replay depth against
+            // per-live-session memory (~25 MiB worst case at 200 cols when a
+            // long session fills it). Initialise at the requested grid size so
+            // the emulator agrees with the PTY from the very first byte —
+            // avoids a spurious SIGWINCH on reconnect when the client echoes
+            // back the same dimensions we already reported.
+            parser: Arc::new(Mutex::new(vt100::Parser::new(
+                rows,
+                cols,
+                EMULATOR_SCROLLBACK_LINES,
+            ))),
+            tx,
+            epoch: Instant::now(),
+            last_output_ms: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// One chunk of child output → emulator + ring + broadcast.
+    pub(crate) fn feed(&self, data: &[u8]) {
+        self.last_output_ms
+            .store(self.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
+        // Publish under the same lock as the emulator update:
+        // snapshot_and_subscribe must never include a chunk in its replay and
+        // then receive that chunk again.
+        let mut parser = lock_unpoisoned(&self.parser);
+        parser.process(data);
+        lock_unpoisoned(&self.ring).push(data);
+        // No receivers is fine — the screen state still records.
+        let _ = self.tx.send(Bytes::copy_from_slice(data));
+    }
+
+    /// Replace the emulator with one rebuilt from a holder snapshot (a fresh
+    /// adoption, or a resync after the holder dropped a lagging stream). Live
+    /// viewers get the snapshot bytes too — it is a full repaint.
+    pub(crate) fn reset_to(&self, cols: u16, rows: u16, snapshot: &[u8]) {
+        let mut parser = lock_unpoisoned(&self.parser);
+        let mut fresh = vt100::Parser::new(rows, cols, EMULATOR_SCROLLBACK_LINES);
+        fresh.process(snapshot);
+        *parser = fresh;
+        lock_unpoisoned(&self.ring).push(snapshot);
+        let _ = self.tx.send(Bytes::copy_from_slice(snapshot));
+    }
 }
 
 /// Emulator state copied under the parser lock, to be formatted AFTER the
@@ -285,6 +372,17 @@ impl PtyHandle {
     /// exactly the dimensions the user had. Values are **not** clamped here —
     /// call [`resolve_grid`] first to sanitise raw metadata.
     pub fn spawn_sized(spec: &CommandSpec, cols: u16, rows: u16) -> Result<PtyHandle> {
+        Self::spawn_local(spec, cols, rows, RingBuffer::default())
+    }
+
+    /// [`Self::spawn_sized`] with an explicit raw-ring size (a PTY holder
+    /// never reads its ring, so it keeps a token one).
+    pub(crate) fn spawn_local(
+        spec: &CommandSpec,
+        cols: u16,
+        rows: u16,
+        ring: RingBuffer,
+    ) -> Result<PtyHandle> {
         let pty = native_pty_system();
         let pair = pty
             .openpty(PtySize {
@@ -300,6 +398,8 @@ impl PtyHandle {
         if let Some(cwd) = &spec.cwd {
             cmd.cwd(cwd);
         }
+        // The holder's own launch marker must never leak into the session.
+        cmd.env_remove(holder::HOLDER_ENV);
 
         // Baseline terminal environment. The daemon is launched by launchd with
         // a minimal env (often no TERM/COLORTERM/LANG), which makes full-screen
@@ -337,51 +437,22 @@ impl PtyHandle {
             .take_writer()
             .map_err(|e| Error::Internal(format!("pty writer: {e}")))?;
 
-        let (tx, _) = broadcast::channel::<Bytes>(BROADCAST_CAPACITY);
         let (exit_tx, exit_rx) = watch::channel::<Option<i32>>(None);
-        let ring = Arc::new(Mutex::new(RingBuffer::default()));
-        // Scrollback history kept by the emulator — this is the depth a client
-        // gets back on every reconnect rebuild, so it IS the user-visible
-        // scrollback for reopened sessions. Rows cost cols×32 bytes, so the cap
-        // trades replay depth against per-live-session memory (~25 MiB worst
-        // case at 200 cols when a long session fills it). Initialise at the
-        // requested grid size so the emulator agrees with the PTY from the
-        // very first byte — avoids a spurious SIGWINCH on reconnect when the
-        // client echoes back the same dimensions we already reported.
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(
-            rows,
-            cols,
-            EMULATOR_SCROLLBACK_LINES,
-        )));
-        let epoch = Instant::now();
-        static SPAWN_SEQ: AtomicU64 = AtomicU64::new(1);
-        let spawn_seq = SPAWN_SEQ.fetch_add(1, Ordering::Relaxed);
-        let last_output_ms = Arc::new(AtomicU64::new(0));
+        let (done_tx, reader_done) = watch::channel(false);
+        let mirror = Mirror::new(cols, rows, ring);
 
         // Blocking reader thread: PTY output -> screen emulator + ring + broadcast.
         {
-            let tx = tx.clone();
-            let ring = Arc::clone(&ring);
-            let parser = Arc::clone(&parser);
-            let last = Arc::clone(&last_output_ms);
+            let mirror = mirror.clone();
             std::thread::spawn(move || {
                 let mut buf = [0u8; 8192];
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            last.store(epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
-                            // Publish under the same lock as the emulator update:
-                            // snapshot_and_subscribe must never include a chunk
-                            // in its replay and then receive that chunk again.
-                            let mut parser = lock_unpoisoned(&parser);
-                            parser.process(&buf[..n]);
-                            lock_unpoisoned(&ring).push(&buf[..n]);
-                            // No receivers is fine — the screen state still records.
-                            let _ = tx.send(Bytes::copy_from_slice(&buf[..n]));
-                        }
+                        Ok(n) => mirror.feed(&buf[..n]),
                     }
                 }
+                let _ = done_tx.send(true);
             });
         }
 
@@ -406,44 +477,114 @@ impl PtyHandle {
             });
         }
 
-        // Writer thread: drains the bounded input queue in order. A failed
-        // write (child gone → EIO) ends it; queued and later jobs then fail
-        // fast with "input closed" instead of blocking.
-        let (input_tx, input_rx) = sync_channel::<WriteJob>(INPUT_QUEUE_DEPTH);
-        std::thread::spawn(move || {
-            let mut writer = writer;
-            while let Ok(job) = input_rx.recv() {
-                let res = input_authority::write_authorized(writer.as_mut(), &job.data, job.authorization.as_ref());
-                // Revocation rejects this job, not the PTY writer or later valid jobs.
-                let failed = res.as_ref().is_err_and(|e| e.kind() != std::io::ErrorKind::PermissionDenied);
-                match job.done {
-                    WriteDone::Blocking(tx) => {
-                        let _ = tx.send(res);
-                    }
-                    WriteDone::Async(tx) => {
-                        let _ = tx.send(res);
-                    }
-                }
-                if failed {
-                    break;
-                }
-            }
-        });
+        let input_tx = spawn_writer(Box::new(writer));
 
         Ok(PtyHandle {
-            master: Mutex::new(pair.master),
+            backend: Backend::Local {
+                master: Mutex::new(pair.master),
+                killer: Mutex::new(killer),
+            },
             input_tx,
-            killer: Mutex::new(killer),
             child_state,
-            ring,
-            parser,
-            tx,
+            mirror,
             exit_rx,
-            epoch,
-            spawn_seq,
-            last_output_ms,
+            spawn_seq: next_spawn_seq(),
             child_pid,
+            reader_done,
         })
+    }
+
+    /// Spawn `spec` inside a detached PTY holder ([`holder`]) so the child
+    /// survives a restart of this process, then attach to it. `meta` is opaque
+    /// to the holder and handed back verbatim to whoever adopts it later
+    /// ([`HolderInfo::meta`]) — the caller's key to which session it is.
+    ///
+    /// Blocking (process launch + handshake): call it off the async workers.
+    pub fn spawn_held(
+        config: &HolderConfig,
+        spec: &CommandSpec,
+        cols: u16,
+        rows: u16,
+        meta: serde_json::Value,
+    ) -> Result<PtyHandle> {
+        holder::spawn_and_attach(config, spec, cols, rows, meta)
+    }
+
+    /// Re-attach to a live PTY holder at `socket` (e.g. after this process
+    /// restarted): the returned handle replays the holder's screen + history
+    /// into its emulator and streams from there on, exactly like the handle
+    /// that spawned it. Blocking: call it off the async workers.
+    pub fn adopt(socket: &std::path::Path) -> std::result::Result<PtyHandle, AdoptError> {
+        held::adopt(socket)
+    }
+
+    /// Assemble a held handle (see [`held::adopt`]).
+    pub(crate) fn from_held(
+        conn: Arc<held::HeldConn>,
+        mirror: Mirror,
+        child_state: Arc<ChildState>,
+        exit_rx: watch::Receiver<Option<i32>>,
+        reader_done: watch::Receiver<bool>,
+    ) -> PtyHandle {
+        let input_tx = spawn_writer(Box::new(held::HeldWriter::new(Arc::clone(&conn))));
+        let child_pid = conn.info().child_pid;
+        PtyHandle {
+            backend: Backend::Held(conn),
+            input_tx,
+            child_state,
+            mirror,
+            exit_rx,
+            spawn_seq: next_spawn_seq(),
+            child_pid,
+            reader_done,
+        }
+    }
+
+    /// The holder behind this PTY, when it is held ([`Self::spawn_held`] /
+    /// [`Self::adopt`]); `None` for a local PTY.
+    pub fn holder(&self) -> Option<&HolderInfo> {
+        match &self.backend {
+            Backend::Held(conn) => Some(conn.info()),
+            Backend::Local { .. } => None,
+        }
+    }
+
+    /// The holder's socket path, when held.
+    pub fn holder_socket(&self) -> Option<&std::path::Path> {
+        match &self.backend {
+            Backend::Held(conn) => Some(conn.path()),
+            Backend::Local { .. } => None,
+        }
+    }
+
+    /// Let go of a held PTY WITHOUT ending it: dropping this handle afterwards
+    /// closes the connection but neither kills the child nor releases the
+    /// holder, so the next daemon run can [`Self::adopt`] it. A no-op for a
+    /// local PTY (which cannot outlive this process anyway).
+    pub fn detach(&self) {
+        if let Backend::Held(conn) = &self.backend {
+            conn.detach();
+        }
+    }
+
+    /// Wait (blocking, at most `timeout`) until the output stream has ended.
+    /// True once it has.
+    pub fn wait_output_closed_blocking(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if *self.reader_done.borrow() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Watch the end of the output stream (see the `reader_done` field).
+    pub fn output_closed(&self) -> watch::Receiver<bool> {
+        self.reader_done.clone()
     }
 
     /// OS pid of the direct child process (None when the OS didn't report one).
@@ -514,7 +655,7 @@ impl PtyHandle {
 
     /// Current emulator grid as `(cols, rows)`.
     pub fn size(&self) -> (u16, u16) {
-        let parser = lock_unpoisoned(&self.parser);
+        let parser = lock_unpoisoned(&self.mirror.parser);
         let (rows, cols) = parser.screen().size();
         (cols, rows)
     }
@@ -534,7 +675,7 @@ impl PtyHandle {
     /// `block_in_place`: the calling worker hands its other tasks to the pool
     /// instead of stalling them (r3-06-02).
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        let mut parser = lock_unpoisoned(&self.parser);
+        let mut parser = lock_unpoisoned(&self.mirror.parser);
         if parser.screen().size() == (rows, cols) {
             return Ok(());
         }
@@ -546,14 +687,21 @@ impl PtyHandle {
             parser.screen_mut().set_size(rows, cols);
         }
         drop(parser);
-        lock_unpoisoned(&self.master)
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| Error::Internal(format!("pty resize: {e}")))
+        match &self.backend {
+            Backend::Local { master, .. } => lock_unpoisoned(master)
+                .resize(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .map_err(|e| Error::Internal(format!("pty resize: {e}"))),
+            // The holder applies TIOCSWINSZ to the real PTY and reflows its
+            // own emulator (the one future adoptions are rebuilt from).
+            Backend::Held(conn) => conn
+                .resize(cols, rows)
+                .map_err(|e| Error::Internal(format!("pty resize (holder): {e}"))),
+        }
     }
 
     /// Kill the child process and its process group: `SIGHUP` now (to the
@@ -564,9 +712,23 @@ impl PtyHandle {
     ///
     /// Idempotent and pid-reuse safe: once the child has exited nothing is
     /// signalled (its pid may already belong to an unrelated process).
+    ///
+    /// A held PTY delegates to its holder, which is the child's parent and
+    /// runs this same escalation locally (pid-reuse safe there too).
     pub fn kill(&self) -> Result<()> {
+        let (master, killer) = match &self.backend {
+            Backend::Local { master, killer } => (master, killer),
+            Backend::Held(conn) => {
+                if self.child_state.has_exited() {
+                    return Ok(());
+                }
+                return conn
+                    .kill()
+                    .map_err(|e| Error::Internal(format!("pty kill (holder): {e}")));
+            }
+        };
         let Some(pid) = self.child_pid else {
-            return lock_unpoisoned(&self.killer)
+            return lock_unpoisoned(killer)
                 .kill()
                 .map_err(|e| Error::Internal(format!("pty kill: {e}")));
         };
@@ -576,7 +738,7 @@ impl PtyHandle {
         // The foreground job (e.g. a command run from a shell session) may sit
         // in its own process group; capture it now, while the tty exists.
         #[cfg(unix)]
-        let fg_pgrp = lock_unpoisoned(&self.master).process_group_leader();
+        let fg_pgrp = lock_unpoisoned(master).process_group_leader();
         #[cfg(not(unix))]
         let fg_pgrp: Option<i32> = None;
         if !self.child_state.signal(pid, fg_pgrp, SIGHUP) {
@@ -600,18 +762,18 @@ impl PtyHandle {
 
     /// Subscribe to live output chunks.
     pub fn subscribe(&self) -> broadcast::Receiver<Bytes> {
-        self.tx.subscribe()
+        self.mirror.tx.subscribe()
     }
 
     /// Last `lines` lines of scrollback as raw bytes (legacy/raw history).
     pub fn scrollback(&self, lines: usize) -> Vec<u8> {
-        lock_unpoisoned(&self.ring).tail(lines)
+        lock_unpoisoned(&self.mirror.ring).tail(lines)
     }
 
     /// Search the scrollback ring for `query` (plain substring, case-insensitive).
     /// Returns up to `limit` `(line_index, plain_text)` pairs in buffer order.
     pub fn search(&self, query: &str, limit: usize) -> Vec<(usize, String)> {
-        lock_unpoisoned(&self.ring).search(query, limit)
+        lock_unpoisoned(&self.mirror.ring).search(query, limit)
     }
 
     /// A coherent snapshot of the CURRENT screen as escape sequences. Writing
@@ -619,7 +781,7 @@ impl PtyHandle {
     /// see — including a full-screen TUI's input box — in one frame, with no
     /// replay flicker and no clipped bottom. Used on every (re)attach.
     pub fn screen_snapshot(&self) -> Vec<u8> {
-        let parser = lock_unpoisoned(&self.parser);
+        let parser = lock_unpoisoned(&self.mirror.parser);
         let screen = parser.screen();
         // Reset + home, then the formatted contents (incl. cursor + attrs).
         let mut out = b"\x1b[2J\x1b[H".to_vec();
@@ -662,7 +824,7 @@ impl PtyHandle {
     /// Copy the emulator state (brief lock). Format it with
     /// [`ScreenCapture::format`], ideally off the async workers.
     pub fn capture(&self) -> ScreenCapture {
-        let parser = lock_unpoisoned(&self.parser);
+        let parser = lock_unpoisoned(&self.mirror.parser);
         ScreenCapture {
             screen: parser.screen().clone(),
         }
@@ -673,11 +835,11 @@ impl PtyHandle {
     /// lock, so every chunk is either reflected in the capture or delivered
     /// to the receiver — never both, never neither.
     pub fn capture_and_subscribe(&self) -> (ScreenCapture, broadcast::Receiver<Bytes>) {
-        let parser = lock_unpoisoned(&self.parser);
+        let parser = lock_unpoisoned(&self.mirror.parser);
         let capture = ScreenCapture {
             screen: parser.screen().clone(),
         };
-        (capture, self.tx.subscribe())
+        (capture, self.mirror.tx.subscribe())
     }
 
     /// Atomically replace a viewer's backlog with emulator state and a new
@@ -735,7 +897,7 @@ impl PtyHandle {
     /// trimmed per row, no scrollback). Cheap: one grid walk under the parser
     /// lock. Used by the conversation view's live draft and by prompt probes.
     pub fn screen_rows(&self) -> Vec<String> {
-        let parser = lock_unpoisoned(&self.parser);
+        let parser = lock_unpoisoned(&self.mirror.parser);
         let screen = parser.screen();
         let (_, cols) = screen.size();
         screen
@@ -746,7 +908,7 @@ impl PtyHandle {
 
     /// Current emulator size (rows, cols) — clients sync their xterm to this.
     pub fn screen_size(&self) -> (u16, u16) {
-        lock_unpoisoned(&self.parser).screen().size()
+        lock_unpoisoned(&self.mirror.parser).screen().size()
     }
 
     /// Watch the child's exit: `None` while running, `Some(code)` after exit.
@@ -756,13 +918,54 @@ impl PtyHandle {
 
     /// Time since the PTY was spawned.
     pub fn uptime(&self) -> Duration {
-        self.epoch.elapsed()
+        self.mirror.epoch.elapsed()
     }
 
     /// Instant of the most recent output chunk (spawn time when none yet).
     pub fn last_output_at(&self) -> Instant {
-        self.epoch + Duration::from_millis(self.last_output_ms.load(Ordering::Relaxed))
+        self.mirror.epoch + Duration::from_millis(self.mirror.last_output_ms.load(Ordering::Relaxed))
     }
+}
+
+/// Daemon-unique spawn counter (see [`PtyHandle::spawn_seq`]).
+fn next_spawn_seq() -> u64 {
+    static SPAWN_SEQ: AtomicU64 = AtomicU64::new(1);
+    SPAWN_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Writer thread: drains the bounded input queue in order. A failed write
+/// (child gone → EIO) ends it; queued and later jobs then fail fast with
+/// "input closed" instead of blocking. Two error kinds do NOT end it: a
+/// revoked room authority (`PermissionDenied`) rejects only that job, and a
+/// held PTY's transient loss of its holder connection (`ConnectionReset`)
+/// fails only the in-flight job — the connection is re-established and later
+/// input flows again.
+fn spawn_writer(writer: Box<dyn std::io::Write + Send>) -> SyncSender<WriteJob> {
+    let (input_tx, input_rx) = sync_channel::<WriteJob>(INPUT_QUEUE_DEPTH);
+    std::thread::spawn(move || {
+        let mut writer = writer;
+        while let Ok(job) = input_rx.recv() {
+            let res = input_authority::write_authorized(writer.as_mut(), &job.data, job.authorization.as_ref());
+            let failed = res.as_ref().is_err_and(|e| {
+                !matches!(
+                    e.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ConnectionReset
+                )
+            });
+            match job.done {
+                WriteDone::Blocking(tx) => {
+                    let _ = tx.send(res);
+                }
+                WriteDone::Async(tx) => {
+                    let _ = tx.send(res);
+                }
+            }
+            if failed {
+                break;
+            }
+        }
+    });
+    input_tx
 }
 
 fn input_closed() -> Error {
@@ -780,9 +983,26 @@ fn input_closed() -> Error {
 /// pid may belong to an unrelated process. Callers that want a tracked,
 /// observable shutdown still call [`PtyHandle::kill`] explicitly; this only
 /// catches the paths that drop a handle without an explicit kill.
+///
+/// A held PTY follows the same rule, plus: unless it was [`PtyHandle::detach`]ed
+/// (or the whole process is detaching, see [`holder::detach_all_on_drop`]),
+/// the holder is told it is no longer needed and exits once the child is gone.
+/// A detached handle just closes its connection — the child and its holder
+/// keep running for the next daemon run to adopt.
 impl Drop for PtyHandle {
     fn drop(&mut self) {
-        let _ = self.kill();
+        match &self.backend {
+            Backend::Local { .. } => {
+                let _ = self.kill();
+            }
+            Backend::Held(conn) => {
+                if !conn.is_detached() && !holder::detaching_all() {
+                    let _ = self.kill();
+                    conn.release();
+                }
+                conn.close();
+            }
+        }
     }
 }
 
@@ -1073,7 +1293,7 @@ mod tests {
         .await
         .expect("output in time");
         assert!(found, "did not receive 'hello' via subscribe");
-        assert!(handle.last_output_at() > handle.epoch);
+        assert!(handle.last_output_at() > handle.mirror.epoch);
     }
 
     #[tokio::test]
@@ -1295,13 +1515,13 @@ mod tests {
             env: vec![],
         };
         let handle = Arc::new(PtyHandle::spawn(&spec).unwrap());
-        let ring = lock_unpoisoned(&handle.ring);
+        let ring = lock_unpoisoned(&handle.mirror.ring);
         handle.write(b"SNAPSHOT-BARRIER").unwrap();
         // The reader takes parser before ring. Blocking ring holds it at the
         // publication boundary rather than relying on timing a live flood.
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            if handle.parser.try_lock().is_err() { break; }
+            if handle.mirror.parser.try_lock().is_err() { break; }
             assert!(Instant::now() < deadline, "reader did not retain emulator lock through publication");
             std::thread::sleep(Duration::from_millis(1));
         }
