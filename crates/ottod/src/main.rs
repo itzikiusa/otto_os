@@ -1384,7 +1384,9 @@ async fn run(cfg: Config) -> Result<(), String> {
     // and re-adopted, still running, by the next daemon start.
     let (killed, kept) = manager.shutdown_for_restart().await;
     if kept > 0 {
-        tracing::info!("left {kept} session(s) running in their pty holders for the next daemon start");
+        tracing::info!(
+            "left {kept} session(s) running in their pty holders for the next daemon start"
+        );
     }
     // Close remote live sessions and stop their Chromium processes (no-op when
     // the remote live view was never used this run).
@@ -1403,7 +1405,9 @@ async fn run(cfg: Config) -> Result<(), String> {
 /// per-user temp fallback when that path is too long for a unix socket) and
 /// how to start one: this very binary, `ottod pty-holder`. `None` (logged)
 /// disables session persistence for this run.
-fn pty_holder_config(data_dir: &std::path::Path) -> Option<otto_sessions::pty_holder::HolderConfig> {
+fn pty_holder_config(
+    data_dir: &std::path::Path,
+) -> Option<otto_sessions::pty_holder::HolderConfig> {
     use otto_sessions::pty_holder::{HolderConfig, HolderLauncher};
     let launcher = match HolderLauncher::current_exe(vec!["pty-holder".into()]) {
         Ok(l) => l,

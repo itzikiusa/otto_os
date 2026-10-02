@@ -864,7 +864,10 @@ async fn write_frame(
 async fn wait_exit(rx: &mut watch::Receiver<Option<i32>>) -> i32 {
     // Copy the code out first: the watch guard is not `Send` and must not
     // live across the `pending()` await below.
-    let code = rx.wait_for(|v| v.is_some()).await.map(|v| (*v).unwrap_or(-1));
+    let code = rx
+        .wait_for(|v| v.is_some())
+        .await
+        .map(|v| (*v).unwrap_or(-1));
     match code {
         Ok(code) => code,
         Err(_) => std::future::pending().await,

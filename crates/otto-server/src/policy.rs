@@ -2059,8 +2059,14 @@ mod tests {
             pol(Method::PATCH, "/api/v1/mcp/otto-server"),
             Require(Mcp, Admin)
         );
-        assert_eq!(pol(Method::GET, "/api/v1/mcp/auto-approve"), Require(Mcp, View));
-        assert_eq!(pol(Method::POST, "/api/v1/mcp/auto-approve"), Require(Mcp, Admin));
+        assert_eq!(
+            pol(Method::GET, "/api/v1/mcp/auto-approve"),
+            Require(Mcp, View)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/mcp/auto-approve"),
+            Require(Mcp, Admin)
+        );
         assert_eq!(
             pol(Method::PATCH, "/api/v1/mcp/auto-approve/{id}"),
             Require(Mcp, Admin)

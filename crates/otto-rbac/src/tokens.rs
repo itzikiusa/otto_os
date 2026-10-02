@@ -1687,14 +1687,28 @@ mod tests {
         let owner = seed_user(&pool, "boot_keep").await;
         let kept_sid = seed_managed_session(&pool, &owner).await;
         let dead_sid = seed_managed_session(&pool, &owner).await;
-        let (kept, _) = repo.issue_session_api_token(&owner, &kept_sid).await.unwrap();
-        let (dead, _) = repo.issue_session_api_token(&owner, &dead_sid).await.unwrap();
+        let (kept, _) = repo
+            .issue_session_api_token(&owner, &kept_sid)
+            .await
+            .unwrap();
+        let (dead, _) = repo
+            .issue_session_api_token(&owner, &dead_sid)
+            .await
+            .unwrap();
         assert_eq!(
-            repo.expire_managed_session_tokens_except(std::slice::from_ref(&kept_sid)).await.unwrap(),
+            repo.expire_managed_session_tokens_except(std::slice::from_ref(&kept_sid))
+                .await
+                .unwrap(),
             1
         );
-        assert!(repo.authenticate(&kept).await.is_ok(), "the surviving agent keeps its credential");
-        assert!(matches!(repo.authenticate(&dead).await, Err(Error::Unauthorized)));
+        assert!(
+            repo.authenticate(&kept).await.is_ok(),
+            "the surviving agent keeps its credential"
+        );
+        assert!(matches!(
+            repo.authenticate(&dead).await,
+            Err(Error::Unauthorized)
+        ));
     }
 
     /// Boot sweep of legacy `otto-mcp:<session>` tokens: pre-cutover Otto

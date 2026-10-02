@@ -252,7 +252,10 @@ pub(crate) fn tool_category(bare: &str) -> Option<&'static str> {
                 .filter_map(|s| {
                     let name = s["name"].as_str()?;
                     let cat = s["category"].as_str()?;
-                    Some((name.strip_prefix("otto.").unwrap_or(name).to_string(), cat.to_string()))
+                    Some((
+                        name.strip_prefix("otto.").unwrap_or(name).to_string(),
+                        cat.to_string(),
+                    ))
                 })
                 .collect()
         })
@@ -266,7 +269,9 @@ pub(crate) fn tool_category(bare: &str) -> Option<&'static str> {
 pub(crate) fn mutating_categories() -> Vec<(String, Vec<String>)> {
     let mut out: Vec<(String, Vec<String>)> = Vec::new();
     for spec in otto_tool_specs() {
-        let Some(name) = spec["name"].as_str() else { continue };
+        let Some(name) = spec["name"].as_str() else {
+            continue;
+        };
         let bare = name.strip_prefix("otto.").unwrap_or(name);
         if !tool_is_dangerous(bare) {
             continue;
@@ -1108,7 +1113,10 @@ async fn approval_exempt_tools(ctx: &ServerCtx) -> Vec<String> {
         .await
         .unwrap_or_default();
     let mut out: Vec<String> = Vec::new();
-    for r in rules.iter().filter(|r| crate::mcp_auto_approve::is_active_catalog_toggle(r)) {
+    for r in rules
+        .iter()
+        .filter(|r| crate::mcp_auto_approve::is_active_catalog_toggle(r))
+    {
         if !out.contains(&r.target) {
             out.push(r.target.clone());
         }
@@ -1593,8 +1601,8 @@ pub(crate) async fn governed_invoke(
         .map(str::to_string);
     // The gate applies (before any opt-out rule) to a DANGEROUS tool without a
     // trusted token grant, under the global `mcp_require_approval_dangerous`.
-    let gate_applies =
-        approval_gated(dangerous, false, token_write_grant) && require_approval_dangerous(ctx).await;
+    let gate_applies = approval_gated(dangerous, false, token_write_grant)
+        && require_approval_dangerous(ctx).await;
     // An operator who explicitly auto-approved this tool (or its category) for
     // this scope — global, the call's workspace, or the calling agent session —
     // has already made the decision: don't ask a second time. Opt-in, off by
@@ -1605,13 +1613,15 @@ pub(crate) async fn governed_invoke(
     } else {
         None
     };
-    let needs_approval = approval_gated(dangerous, auto_rule.is_some(), token_write_grant)
-        && gate_applies;
+    let needs_approval =
+        approval_gated(dangerous, auto_rule.is_some(), token_write_grant) && gate_applies;
     if let Some(rule) = &auto_rule {
         // Recorded on every terminal row below (dry-run and execution alike).
         audit.decision_reason = Some(otto_mcp::auto_approve::audit_reason(rule));
     }
-    let auto_approved_by = auto_rule.as_ref().map(crate::mcp_auto_approve::envelope_ref);
+    let auto_approved_by = auto_rule
+        .as_ref()
+        .map(crate::mcp_auto_approve::envelope_ref);
 
     if needs_approval && !dry_run {
         match ctx

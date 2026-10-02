@@ -18,14 +18,15 @@ pub mod ws;
 
 pub use http::{api_router, SessionsCtx};
 pub use lifecycle::{check_resumability, transcript_path, transcript_path_in_roots, Resumability};
+pub use manager::SESSION_PERSISTENCE_SETTING;
 pub use manager::{codex_rollout_path, codex_rollout_path_under, codex_sessions_root};
 pub use manager::{OutputScanner, SessionManager};
 pub use prompt_guard::{CompositeScanner, PromptGuard};
 pub use providers::{ProviderRegistry, ProviderSpec};
 pub use ws::ws_router;
+
 /// PTY holders (sessions that survive a daemon restart): the daemon binary
 /// serves `ottod pty-holder` from here and configures the manager with it.
 pub use otto_pty::holder as pty_holder;
-pub use manager::SESSION_PERSISTENCE_SETTING;
 
 pub mod network;

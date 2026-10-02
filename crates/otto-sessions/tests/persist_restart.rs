@@ -219,7 +219,10 @@ async fn user_sessions_survive_a_daemon_restart_and_engine_ones_do_not() {
 
     // ── daemon run #2 ──────────────────────────────────────────────────────
     let second = daemon(&w, &holders);
-    second.restore_all(&|_: &String| None::<String>).await.expect("restore");
+    second
+        .restore_all(&|_: &String| None::<String>)
+        .await
+        .expect("restore");
     assert!(second.is_live(&id), "re-adopted on boot");
     assert_eq!(
         second.live_pid(&id),

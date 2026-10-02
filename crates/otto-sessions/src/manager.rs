@@ -1770,7 +1770,9 @@ impl SessionManager {
             if let Some(config) = self.holders.clone() {
                 let meta = holder_meta(
                     session,
-                    self.ingest_tokens.get(&session.id).map(|t| t.value().clone()),
+                    self.ingest_tokens
+                        .get(&session.id)
+                        .map(|t| t.value().clone()),
                 );
                 let held_spec = spec.clone();
                 let held = tokio::task::spawn_blocking(move || {
@@ -5109,7 +5111,9 @@ impl SessionManager {
         }
         let mut adopted = Vec::new();
         for (sid, mut handles) in by_session {
-            handles.sort_by_key(|h| std::cmp::Reverse(h.holder().map(|i| i.started_at_ms).unwrap_or(0)));
+            handles.sort_by_key(|h| {
+                std::cmp::Reverse(h.holder().map(|i| i.started_at_ms).unwrap_or(0))
+            });
             let mut iter = handles.into_iter();
             let Some(handle) = iter.next() else { continue };
             for dup in iter {
@@ -5153,7 +5157,10 @@ impl SessionManager {
                 workspace_id: session.workspace_id.clone(),
                 status: SessionStatus::Running,
             });
-            self.record_lifecycle(&session, "Reattached after a daemon restart (process kept running)");
+            self.record_lifecycle(
+                &session,
+                "Reattached after a daemon restart (process kept running)",
+            );
             self.start_status_task(
                 sid.clone(),
                 session.workspace_id.clone(),

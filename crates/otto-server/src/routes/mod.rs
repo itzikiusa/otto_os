@@ -342,7 +342,8 @@ pub fn protected_routes() -> Router<ServerCtx> {
         )
         .route(
             "/mcp/auto-approve/{id}",
-            patch(crate::mcp_auto_approve::update_rule).delete(crate::mcp_auto_approve::delete_rule),
+            patch(crate::mcp_auto_approve::update_rule)
+                .delete(crate::mcp_auto_approve::delete_rule),
         )
         // Streamable-HTTP MCP transport: external clients reach the otto.* tools
         // over HTTP here (no local stdio subprocess). Confined for kind='mcp'
