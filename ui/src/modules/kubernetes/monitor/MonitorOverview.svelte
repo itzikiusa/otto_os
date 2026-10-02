@@ -58,10 +58,14 @@
     untrack(() => void load());
   });
 
-  // Live refresh after any cluster's cycle.
+  // Live refresh after collection cycles (coalesced by the store, paused
+  // while hidden). Only a NEW tick — the window effect covers mount.
+  let seenTick = untrack(() => k8s.monitorTick);
   $effect(() => {
     const t = k8s.monitorTick;
-    if (t > 0) untrack(() => void load(true));
+    if (t === seenTick) return;
+    seenTick = t;
+    untrack(() => void load(true));
   });
 
   function open(row: K8sMonitorOverviewRow, tab = 'workloads'): void {
