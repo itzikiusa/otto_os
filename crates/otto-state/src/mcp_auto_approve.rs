@@ -1,4 +1,4 @@
-//! MCP auto-approve rules (`mcp_auto_approve_rules`, migration 0148): the
+//! MCP auto-approve rules (`mcp_auto_approve_rules`, migration 0146): the
 //! explicit, opt-in policy under which a MUTATING `otto.*` tool call skips the
 //! per-call human approval. Pure persistence — validation (known mutating tool
 //! / category, the irreversible guardrail, scope ids) and the match itself live
@@ -305,7 +305,7 @@ mod tests {
         ));
     }
 
-    /// The 0148 carry-over of the legacy `mcp_approval_exempt_tools` setting:
+    /// The 0146 carry-over of the legacy `mcp_approval_exempt_tools` setting:
     /// re-run its INSERT against a seeded setting (the migration itself already
     /// ran on an empty DB) — each tool becomes one global per-tool rule, an
     /// `otto.` prefix is stripped, duplicates and junk are skipped, and the
@@ -321,7 +321,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let sql = include_str!("../migrations/0148_mcp_auto_approve_rules.sql");
+        let sql = include_str!("../migrations/0146_mcp_auto_approve_rules.sql");
         let insert = &sql[sql.find("INSERT OR IGNORE").expect("import block")..];
         sqlx::query(insert).execute(&pool).await.unwrap();
         // Idempotent: a second run inserts nothing new (unique index + OR IGNORE).

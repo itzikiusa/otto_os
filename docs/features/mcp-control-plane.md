@@ -194,7 +194,7 @@ counts the tools some rule auto-approves.
 - If the global `mcp_require_approval_dangerous` switch is off, the page says so —
   nothing asks at all then, rule or not (those calls are audited `allowed`).
 
-Upgrading: migration 0148 turned each tool of the old per-tool **Ask before each
+Upgrading: migration 0146 turned each tool of the old per-tool **Ask before each
 call** switch (`mcp_approval_exempt_tools`) into a global per-tool rule (keeping an
 irreversible one — it was an explicit per-tool choice). Policies and per-tool server
 rules (§7, **Servers → Tools**) govern registered external servers only; they never
@@ -801,7 +801,7 @@ unlisted workspaces default on), `mcp_otto_server_enabled` (default
 `false`), `mcp_otto_server_tools` (default = read subset + the two scheduled-task
 reads), `mcp_require_approval_dangerous` (default `true`),
 `mcp_approval_exempt_tools` (legacy — imported into auto-approve rules by
-migration 0148 and no longer read; auto-approve lives in the
+migration 0146 and no longer read; auto-approve lives in the
 `mcp_auto_approve_rules` table, CP40–CP43),
 `mcp_trust_token_write_grant` (default `true` — a `kind='mcp'` token minted with
 `allow_writes` skips the per-call prompt), `mcp_health_interval_secs`

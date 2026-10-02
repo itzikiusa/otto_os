@@ -62,7 +62,7 @@ pub struct PersonalAgentSchedule {
     pub next_run_at: Option<String>,
     /// When the schedule was last (re)armed — created, resumed (it or its
     /// agent), or given a new cadence/timezone. The due check never looks
-    /// before it. `None` on pre-0154 rows.
+    /// before it. `None` on pre-0147 rows.
     #[serde(default)]
     pub armed_at: Option<String>,
     pub created_at: String,

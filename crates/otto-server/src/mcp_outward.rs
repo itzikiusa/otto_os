@@ -1087,7 +1087,7 @@ async fn trust_token_write_grant(ctx: &ServerCtx) -> bool {
 /// MCP → Otto server per-tool **Auto-approve** switch (formerly "Ask before
 /// each call"): the bare targets of the enabled GLOBAL per-tool auto-approve
 /// rules (`mcp_auto_approve_rules`, see [`crate::mcp_auto_approve`]). Migration
-/// 0148 imported the legacy `mcp_approval_exempt_tools` setting into such rules;
+/// 0146 imported the legacy `mcp_approval_exempt_tools` setting into such rules;
 /// the setting is no longer read. Workspace / session / category rules are
 /// resolved per call and are not part of this list.
 ///

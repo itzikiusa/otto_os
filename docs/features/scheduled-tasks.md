@@ -240,7 +240,7 @@ task is created, resumed after a pause, or given a really different cadence or
 timezone (saving the form with the same cadence doesn't count). So a resumed task
 does **not** fire what it missed while paused, and a new `daily 09:00` created at
 15:00 first runs tomorrow at 09:00 — the `next_run_at` its row shows. (Rows created
-before migration 0154 have no `armed_at` and keep the old catch-up behaviour until
+before migration 0147 have no `armed_at` and keep the old catch-up behaviour until
 their next resume/edit.)
 
 `at` defaults to **09:00** and `weekday` to **0** (Monday). Daily/weekly/cron times
