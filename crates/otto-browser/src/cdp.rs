@@ -391,6 +391,20 @@ impl Drop for CdpClient {
     }
 }
 
+/// Error for a failed fill-and-submit evaluation. The page's
+/// `exceptionDetails` (a throwing `value` setter or input handler) can carry
+/// the value just assigned — the PASSWORD — so the details never travel on:
+/// this error reaches the agent and the daemon log. Transport failures keep
+/// their (credential-free) mapping.
+fn login_fill_error(e: CdpError) -> EngineError {
+    match e {
+        CdpError::Protocol(_) => {
+            EngineError::Nav("the login page's script failed while filling the form".into())
+        }
+        other => cdp_err(other),
+    }
+}
+
 fn cdp_err(e: CdpError) -> EngineError {
     match e {
         CdpError::Connect(msg) => EngineError::Unavailable(msg),
@@ -712,13 +726,19 @@ impl LightpandaEngine {
         // one safe way to splice an arbitrary username/password into a JS
         // expression string without risking injection into the surrounding
         // script (see `fill_and_submit_expr`'s doc comment).
-        let outcome = client
+        let outcome = match client
             .evaluate(
                 &session_id,
                 &fill_and_submit_expr(username, password, &expected),
             )
             .await
-            .map_err(cdp_err)?;
+        {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                let _ = client.close_target(&target_id).await;
+                return Err(login_fill_error(e));
+            }
+        };
         let refusal = match outcome.as_str() {
             Some("no-password-field") => Some("no password field found on login page"),
             Some("wrong-origin") => Some(
@@ -827,7 +847,11 @@ fn fill_and_submit_expr(username: &str, password: &str, expected: &LoginOrigin) 
     let user_js = serde_json::to_string(username).unwrap_or_else(|_| "\"\"".to_string());
     let pass_js = serde_json::to_string(password).unwrap_or_else(|_| "\"\"".to_string());
     let host_js = serde_json::to_string(&expected.host).unwrap_or_else(|_| "\"\"".to_string());
-    let https_js = if expected.require_https { "true" } else { "false" };
+    let https_js = if expected.require_https {
+        "true"
+    } else {
+        "false"
+    };
     format!(
         "(function(){{\
            var EXP = {host_js};\
@@ -920,6 +944,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn login_fill_errors_never_carry_page_exception_details() {
+        let details = CdpError::Protocol(
+            "Runtime.evaluate threw: {\"exception\":{\"description\":\"hunter2-sentinel\"}}".into(),
+        );
+        let err = login_fill_error(details).to_string();
+        assert!(!err.contains("hunter2-sentinel"), "{err}");
+        assert!(err.contains("login page"), "{err}");
+        // Transport failures keep their (credential-free) classification.
+        assert!(matches!(
+            login_fill_error(CdpError::Closed),
+            EngineError::Unavailable(_)
+        ));
+    }
+
+    #[test]
     fn login_origin_binds_to_the_credential_site() {
         let o = LoginOrigin::of("https://Example.com./").unwrap();
         assert_eq!(o.host, "example.com");
@@ -1002,7 +1041,9 @@ mod tests {
                     while let Some(Ok(Message::Text(t))) = ws.next().await {
                         let v: Value = serde_json::from_str(&t).unwrap();
                         let method = v["method"].as_str().unwrap_or("").to_string();
-                        log.lock().unwrap().push((method.clone(), v["params"].clone()));
+                        log.lock()
+                            .unwrap()
+                            .push((method.clone(), v["params"].clone()));
                         let id = v["id"].clone();
                         let reply = match method.as_str() {
                             "Target.createBrowserContext" if !support_contexts => json!({
@@ -1011,8 +1052,12 @@ mod tests {
                             "Target.createBrowserContext" => {
                                 json!({"id": id, "result": {"browserContextId": "CTX1"}})
                             }
-                            "Target.createTarget" => json!({"id": id, "result": {"targetId": "T1"}}),
-                            "Target.attachToTarget" => json!({"id": id, "result": {"sessionId": "S1"}}),
+                            "Target.createTarget" => {
+                                json!({"id": id, "result": {"targetId": "T1"}})
+                            }
+                            "Target.attachToTarget" => {
+                                json!({"id": id, "result": {"sessionId": "S1"}})
+                            }
                             "Runtime.evaluate" => {
                                 let expr = v["params"]["expression"].as_str().unwrap_or("");
                                 let value = if expr == "location.href" {
