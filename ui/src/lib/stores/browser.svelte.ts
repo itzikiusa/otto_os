@@ -178,9 +178,13 @@ class BrowserStore {
 
   async closeTab(id: string): Promise<void> {
     await browserApi.closeTab(id);
+    const at = this.tabs.findIndex((t) => t.id === id);
     this.tabs = this.tabs.filter((t) => t.id !== id);
     if (this.activeId === id) {
-      this.activeId = this.tabs.length ? this.tabs[0].id : null;
+      // Like any browser: the tab that slid into the closed one's place (or
+      // the new last one), not a jump back to the first tab.
+      const next = this.tabs[Math.min(Math.max(at, 0), this.tabs.length - 1)];
+      this.activeId = next ? next.id : null;
       if (this.activeId) {
         const tab = this.activeTab;
         if (tab && !isNativeLive(tab)) await this.loadPage(tab.url);
