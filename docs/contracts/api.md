@@ -229,6 +229,20 @@ Notes:
   global toggle; a `{ "<ws>": bool }` object overrides per workspace. Claude/agy receive it via
   the workspace `.mcp.json`; Codex via per-spawn `-c mcp_servers.otto.*` overrides. (Settings via
   `PUT /settings`.)
+- `session_persistence` (bool, **default `true`**) — sessions you start yourself (Agents-page
+  agents and shells: foreground, `work.origin` absent or `manual`) are spawned inside a detached
+  **PTY holder** (`ottod pty-holder`) so a daemon restart — deploy, crash, app relaunch — leaves
+  the process running; the next daemon start re-adopts it (same pid, screen + scrollback), marks
+  it `running` again and keeps its credentials. `false` = the PTY lives in the daemon and dies
+  with it (agents come back via `--resume`, shells start fresh). Applies to sessions spawned
+  after the change; holders already running are still re-adopted. Engine-owned sessions
+  (workflow / review / channel / swarm …) are never held. No wire change: re-adopted sessions
+  simply report `running` on the session APIs and `/ws/term` (docs/features/agent-sessions.md
+  → *Sessions survive daemon restarts*).
+- `manual_idle_suspend_secs` (u64, **default `86400`** = 24 h; `0` = never),
+  `idle_suspend_grace_secs` (default `300`), `max_live_agent_sessions` (default `12`, `0` = no
+  cap) — the idle-suspend sweep (docs/features/agent-sessions.md → *Idle-suspend*). The first is
+  exposed in Settings → Daemon → Sessions.
 
 ## Agent Swarm (#59–#86)
 

@@ -38,6 +38,18 @@ unsolicited `scrollback`, as on revival) and **does not deliver that
 keystroke** (the CLI is still starting). Emulator replies (`user: false`)
 never wake it. Read-only viewers never resume either way.
 
+**Daemon restarts.** A session running in a PTY holder (setting
+`session_persistence`, default on for sessions you start) keeps its process
+across a daemon restart: the socket drops, the client re-attaches (view-only,
+as for any dropped socket) and gets `status: running` plus a full `scrollback`
+snapshot with a NEW `epoch` (the re-adopted PTY is a new incarnation on this
+daemon), so it rebuilds from the snapshot exactly as after a respawn — same
+process, same screen and history. Other sessions report `reconnectable` /
+`exited` as before. A socket that drops right after an `exit` frame is the
+daemon going away (a live socket outlives its session's exit): clients should
+re-attach once view-only to learn the real state rather than stay on that
+exit.
+
 Role: workspace **viewer** may attach (read-only); **editor**+ may send input/resize.
 Input frames from viewers are silently dropped server-side (and a single JSON
 `{"type":"error","code":"forbidden"}` is sent once).

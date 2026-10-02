@@ -14,6 +14,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import SettingToggle from './SettingToggle.svelte';
   import { guardUnsaved } from '../../lib/leaveGuard';
+  import { DEFAULT_MANUAL_GRACE_SECS, formatGrace, policyFromSettings } from '../../lib/idleSuspend';
+  import { idleSuspend } from '../../lib/stores/idleSuspend.svelte';
 
   interface NetworkListener {
     enabled: boolean;
@@ -43,7 +45,26 @@
   const sandboxDirty = $derived(
     sandboxEnabled !== savedSandbox.enabled || sandboxNetwork !== savedSandbox.network,
   );
-  const dirty = $derived(listenerDirty || sandboxDirty);
+  // Session lifetime: `session_persistence` (sessions you start survive a
+  // daemon restart, default on) and `manual_idle_suspend_secs` (quiet time
+  // before a session you started is suspended; 0 = never, default 24 h).
+  let persistEnabled = $state(true);
+  let manualGrace = $state(DEFAULT_MANUAL_GRACE_SECS);
+  let savedSessions = $state({ persist: true, manualGrace: DEFAULT_MANUAL_GRACE_SECS });
+  const sessionsDirty = $derived(
+    persistEnabled !== savedSessions.persist || manualGrace !== savedSessions.manualGrace,
+  );
+  /** Presets for the manual idle grace (seconds; 0 = never). A value set
+   *  elsewhere (the API) that matches none is offered as-is. */
+  const GRACE_PRESETS = [1800, 3600, 4 * 3600, 8 * 3600, 86_400, 3 * 86_400, 7 * 86_400, 0];
+  const graceOptions = $derived(
+    GRACE_PRESETS.includes(manualGrace) ? GRACE_PRESETS : [...GRACE_PRESETS.slice(0, -1), manualGrace, 0],
+  );
+  function graceLabel(secs: number): string {
+    if (secs === 0) return 'Never';
+    return secs === DEFAULT_MANUAL_GRACE_SECS ? `${formatGrace(secs)} (default)` : formatGrace(secs);
+  }
+  const dirty = $derived(listenerDirty || sandboxDirty || sessionsDirty);
   // The inputs' min/max are advisory only; an out-of-range or empty port would
   // be saved as-is (and an empty one silently falls back to the loopback port).
   const portValid = $derived(Number.isInteger(port) && port >= 1024 && port <= 65535);
@@ -78,6 +99,10 @@
         sandboxNetwork = sb.network ?? 'full';
       }
       savedSandbox = { enabled: sandboxEnabled, network: sandboxNetwork };
+      // Unset = the daemon default (on); only an explicit `false` turns it off.
+      persistEnabled = allSettings['session_persistence'] !== false;
+      manualGrace = policyFromSettings(allSettings).manualGraceSecs;
+      savedSessions = { persist: persistEnabled, manualGrace };
     } catch (e) {
       loadError = loadErrorText(e);
     } finally {
@@ -104,8 +129,13 @@
     const body: Record<string, unknown> = {};
     if (listenerDirty) body.network_listener = { enabled, port };
     if (sandboxDirty) body.process_sandbox = { enabled: sandboxEnabled, network: sandboxNetwork };
+    if (sessionsDirty) {
+      if (persistEnabled !== savedSessions.persist) body.session_persistence = persistEnabled;
+      if (manualGrace !== savedSessions.manualGrace) body.manual_idle_suspend_secs = manualGrace;
+    }
     const saveListener = listenerDirty;
     const saveSandbox = sandboxDirty;
+    const saveSessions = sessionsDirty;
     saving = true;
     try {
       allSettings = await api.put<Record<string, unknown>>('/settings', body);
@@ -129,6 +159,16 @@
             : 'Sandbox off for new sessions',
         );
       }
+      if (saveSessions) {
+        savedSessions = { persist: persistEnabled, manualGrace };
+        // The Agents panes' "suspends in …" hint reads this policy.
+        idleSuspend.policy = policyFromSettings(allSettings);
+        notes.push(
+          persistEnabled
+            ? 'New sessions you start keep running across daemon restarts'
+            : 'New sessions stop when the daemon restarts',
+        );
+      }
       toasts.success('Daemon settings saved', notes.join(' · '));
     } catch (e) {
       toasts.error('Couldn’t save daemon settings', e instanceof Error ? e.message : String(e));
@@ -145,7 +185,7 @@
         <button
           class="btn small primary"
           disabled={!dirty || saving || !!portError}
-          title={portError || (dirty ? 'Save network and sandbox settings' : 'No changes to save')}
+          title={portError || (dirty ? 'Save the daemon settings' : 'No changes to save')}
           onclick={() => void save()}
         >
           {saving ? 'Saving…' : 'Save'}
@@ -217,6 +257,41 @@
       {/if}
     </div>
 
+    <h2 class="section-title">Sessions</h2>
+    <div class="card pad dm-card">
+      <SettingToggle
+        label="Keep sessions running when the daemon restarts"
+        checked={persistEnabled}
+        testid="session-persistence"
+        onchange={(v) => { persistEnabled = v; }}
+      >
+        Agents and shells you start from the Agents page run in a small helper process, so a
+        daemon restart (an update, a crash, reopening Otto) leaves them running and they
+        reconnect with their screen and scrollback. When off, they stop with the daemon: agents
+        resume their conversation when reopened, shells start fresh. Applies to sessions started
+        from now on. Background sessions (workflows, reviews, channels) always restart with the
+        daemon.
+      </SettingToggle>
+      <div class="field grace">
+        <label for="dm-manual-grace">Suspend idle sessions you started after</label>
+        <select
+          id="dm-manual-grace"
+          class="input"
+          bind:value={manualGrace}
+          data-testid="manual-idle-grace"
+        >
+          {#each graceOptions as secs (secs)}
+            <option value={secs}>{graceLabel(secs)}</option>
+          {/each}
+        </select>
+      </div>
+      <p class="hint-line">
+        Counted from the last output, and only while nobody is watching, no turn is open and
+        nothing is running in the session. A suspended agent resumes its conversation when you
+        reopen it; shells are never suspended.
+      </p>
+    </div>
+
     <h2 class="section-title">Logs</h2>
     <div class="card pad dm-card logs">
       <div class="log-line">
@@ -266,6 +341,9 @@
     max-width: 160px;
   }
   .field.net {
+    max-width: 320px;
+  }
+  .field.grace {
     max-width: 320px;
   }
   .warn-note {

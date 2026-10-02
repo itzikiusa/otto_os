@@ -2,14 +2,14 @@
 // needs it. The sweep lives in crates/otto-sessions/src/manager.rs
 // (`suspend_idle_unattached`); the defaults below MUST mirror its constants:
 //   SUSPEND_GRACE           300 s  → setting `idle_suspend_grace_secs`
-//   MANUAL_IDLE_SUSPEND    1800 s  → setting `manual_idle_suspend_secs` (0 = never)
+//   MANUAL_IDLE_SUSPEND   86400 s  → setting `manual_idle_suspend_secs` (0 = never)
 //   MAX_LIVE_AGENT_SESSIONS   12   → setting `max_live_agent_sessions`  (0 = no cap)
 // The hint is informational: the daemon also holds a session while anyone
 // watches it, while a turn is open or its process tree is busy, and gives a
 // passively resumed process (reopened, never typed into) only the engine grace.
 
 export const DEFAULT_ENGINE_GRACE_SECS = 300;
-export const DEFAULT_MANUAL_GRACE_SECS = 1800;
+export const DEFAULT_MANUAL_GRACE_SECS = 86_400;
 export const DEFAULT_MAX_LIVE_AGENT_SESSIONS = 12;
 
 export interface IdleSuspendPolicy {
@@ -42,6 +42,26 @@ export function policyFromSettings(all: Record<string, unknown> | null | undefin
   };
 }
 
+/** "26m" under 90 minutes, "23h" under two days, else "3d" — rounded UP, so
+ *  a countdown never claims less time than is left. */
+export function formatLeft(ms: number): string {
+  const min = Math.ceil(ms / 60_000);
+  if (min < 90) return `${min}m`;
+  const h = Math.ceil(ms / 3_600_000);
+  if (h < 48) return `${h}h`;
+  return `${Math.ceil(ms / 86_400_000)}d`;
+}
+
+/** A grace as prose: "30 min", "4 h", "24 h", "3 days". */
+export function formatGrace(secs: number): string {
+  const min = Math.max(1, Math.round(secs / 60));
+  if (min < 120) return `${min} min`;
+  const h = Math.round(min / 60);
+  if (h <= 48) return `${h} h`;
+  const d = Math.round(h / 24);
+  return `${d} days`;
+}
+
 export interface SuspendHint {
   label: string;
   title: string;
@@ -58,13 +78,13 @@ export function suspendHint(idleMs: number, userStarted: boolean, policy: IdleSu
   if (userStarted && graceSecs === 0) return null;
   const idleMin = Math.floor(idleMs / 60_000);
   const idleSec = Math.floor((idleMs % 60_000) / 1000);
-  const idleLabel = idleMin > 0 ? `${idleMin}m idle` : `${idleSec}s idle`;
+  const idleLabel =
+    idleMin >= 90 ? `${Math.floor(idleMin / 60)}h idle` : idleMin > 0 ? `${idleMin}m idle` : `${idleSec}s idle`;
   const leftMs = graceSecs * 1000 - idleMs;
-  const label = leftMs <= 0 ? `${idleLabel} · suspending…` : `${idleLabel} · suspends in ${Math.ceil(leftMs / 60_000)}m`;
-  const graceMin = Math.max(1, Math.round(graceSecs / 60));
+  const label = leftMs <= 0 ? `${idleLabel} · suspending…` : `${idleLabel} · suspends in ${formatLeft(leftMs)}`;
   const cap = policy.maxLiveAgentSessions;
   const title =
-    `Session is idle. Once nobody is watching it, auto-suspend frees its RAM after ${graceMin} min of quiet ` +
+    `Session is idle. Once nobody is watching it, auto-suspend frees its RAM after ${formatGrace(graceSecs)} of quiet ` +
     `(${userStarted ? 'sessions you start' : 'background sessions'}) while keeping it resumable.` +
     (cap > 0 ? ` With more than ${cap} live agent sessions, the least recently used idle ones may be suspended sooner.` : '');
   return { label, title };

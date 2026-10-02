@@ -3902,6 +3902,8 @@ dependencies = [
  "otto-core",
  "portable-pty",
  "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
  "vt100",
 ]

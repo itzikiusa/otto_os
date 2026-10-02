@@ -29,8 +29,10 @@ packaging/deploy.sh
 
 **Running it from inside Otto (an agent/shell session):** steps 6–7 (install →
 relaunch → verify) run as a one-shot launchd agent, `com.otto.deploy-finish`,
-because the relaunch restarts the daemon and the daemon hangs up every session
-PTY — a script running inline there dies with exit 137 mid-verify. The
+because the relaunch restarts the daemon, which hangs up every session PTY it
+owns itself — a script running inline there can die with exit 137 mid-verify
+(sessions kept in PTY holders survive, see below; the detached phase stays the
+safe default). The
 foreground only tails `~/Library/Logs/Otto/deploy-finish-<ts>.log`; if it gets
 killed, the phase still completes. Read the outcome with
 `packaging/deploy.sh --status` (exit 0 = deployed and healthy). `DETACH=0`
@@ -172,8 +174,19 @@ the app and daemon run from their installed paths, the daemon PID changes when
 the binary changes, the health API returns success, and the embedded SPA can be
 fetched when enabled. `DEPLOY-FINISH EXIT=0` marks successful completion;
 `--status` returns that exit code. No provider session is created to verify the
-installation. Replacing the daemon terminates its active PTYs, including an
+installation. Replacing the daemon terminates the PTYs it owns itself — engine
+sessions, and any session spawned with `session_persistence` off — including an
 agent running this command; launchd and the durable log survive that interruption.
+
+**Sessions kept across the restart.** With `session_persistence` on (the
+default), sessions you start from the Agents page run in `ottod pty-holder`
+processes (one per session, `setsid`, sockets in `<data dir>/pty-holders/`) and
+keep running while the daemon is replaced; the new daemon re-adopts them on
+boot. A holder keeps executing the binary it was started from (the old inode
+stays mapped), so swapping `ottod` in place is safe for it, and the protocol
+version handshake lets a newer daemon adopt it. The holders leave the launchd
+job's process group, which is why neither plist sets `AbandonProcessGroup` —
+see docs/features/agent-sessions.md → *Sessions survive daemon restarts*.
 
 Run the portable regression suite with `python3 packaging/tests/test_deploy.py`.
 It uses temporary files and mocks OS/process/network operations, without building,

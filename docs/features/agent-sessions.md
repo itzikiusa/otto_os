@@ -489,13 +489,89 @@ ticks every **2 s** (`STATUS_TICK`):
 | `working` | Output flowed within the last **5 s** (`WORKING_WINDOW`) — the agent is doing work. |
 | `idle` | No output for ≥5 s. |
 | `exited` | Child process exited. The terminal WS stays open so you can read the final output. |
-| `reconnectable` | The PTY is gone (idle-suspend or daemon restart) but the conversation can be resumed on demand — **0 RAM**. |
+| `reconnectable` | The PTY is gone (idle-suspend, or a daemon restart of a session that was not kept running) but the conversation can be resumed on demand — **0 RAM**. |
 
 Status changes broadcast as `session_status` events on `/ws/events` (§9).
 
+### Sessions survive daemon restarts
+
+**Sessions you start yourself keep running when the daemon restarts** — a
+deploy (`launchctl kickstart`), a crash, quitting and reopening Otto. The
+terminal drops for a moment, reconnects on its own and shows the same process
+with its screen and scrollback: a shell keeps its variables, its `cd`, the
+command it was running; an agent CLI keeps everything it held in memory, mid
+turn or not. Setting: **Settings → Daemon → Sessions → "Keep sessions running
+when the daemon restarts"** (`session_persistence`, default **on**).
+
+How it works (`crates/otto-pty/src/holder.rs`, `held.rs`):
+
+- A session the user started (`is_user_started`: an Agents-page agent or
+  shell — foreground, `work.origin` absent or `manual`) is spawned through a
+  **PTY holder**: a small detached process (`ottod pty-holder`, the daemon
+  binary re-executed) that owns ONE session's PTY master and child, keeps its
+  own screen emulator (4000 rows of history, like the daemon's) and serves a
+  single client over a unix socket. The holder runs in its own session
+  (`setsid`), outside the daemon's process group, so launchd's job teardown
+  and the PTY-master hangup that used to SIGHUP every shell and CLI on a
+  restart no longer reach it. The launch request (command, environment,
+  credentials) travels on the holder's stdin, never in `argv`.
+- Sockets live in `<data dir>/pty-holders/` (a 0700 directory, 0600 sockets,
+  random names; a per-user temp directory when that path is too long for a
+  unix socket). The daemon keeps its usual local mirror (emulator, raw ring,
+  broadcast), fed by the holder's output stream, so every terminal, chat,
+  search and snapshot API behaves exactly as for an in-process PTY; input is
+  acknowledged by the holder once it reached the tty (same ordering, queue and
+  "not accepting input" semantics as before), resize and kill (the same
+  HUP → TERM → KILL escalation) are forwarded to it.
+- **On shutdown** the daemon *detaches* held sessions instead of killing them:
+  their rows stay `running`/`idle`, their MCP credentials stay valid. Every
+  other live PTY is still killed and marked exited.
+- **On boot** (`restore_all` → `adopt_holders`), before anything else, the new
+  daemon connects to every holder socket, checks the protocol version, reads
+  which session it serves (holder metadata) and re-adopts it: the snapshot is
+  replayed into a fresh emulator, the session is registered live again, its
+  ingest token (baked into the child's environment) is accepted again, and it
+  is marked `running` (trail: *Reattached after a daemon restart (process kept
+  running)*). Clients re-attach to it like after any dropped socket and rebuild
+  from the snapshot (new `epoch`). The boot credential sweep spares these
+  sessions. A pending codex/agy id capture is re-armed.
+- **Cleanup — nothing leaks.** Closing, archiving, deleting, suspending,
+  restarting or killing a held session kills its child through the holder and
+  releases it; the holder exits once the child is gone and removes its socket.
+  On boot, a holder whose session no longer exists, is archived or is
+  engine-owned, a duplicate holder for one session (the newest wins), and a
+  holder speaking an incompatible protocol are all ended. A holder whose child
+  exited while no daemon was attached keeps the exit code and final screen for
+  10 minutes, then exits; the session then restores like any other. A holder
+  no daemon has attached to for **24 hours**, or whose socket file vanished
+  (its directory was wiped), ends its child and exits.
+- **Version handshake.** Frames are `[kind u8][len u32][payload]`; the client
+  says HELLO with its protocol version, the holder answers with its own
+  (`HolderInfo`, JSON — unknown fields ignored). A new daemon adopts holders of
+  the same protocol *major*, so a holder spawned by an older build survives an
+  upgrade. HELLO, HELLO_ACK, KILL and RELEASE are frozen forever, so any daemon
+  can always end any holder.
+
+What is **not** kept: engine-owned sessions (workflow steps, reviews, channel
+threads, swarm agents, …) — their driving engine dies with the daemon and
+recovers its own way, so their processes still restart as before; connection
+terminals (SSH/DB clients); the per-session network forwards of a held session
+(they belong to the daemon — restart the session to reopen them); and anything
+when the setting is off. If a holder cannot be started (binary missing, socket
+path problem) the session spawns in-process and the daemon logs `pty holder
+unavailable`.
+
+> **launchd.** The holders leave the daemon's process group with `setsid`, so
+> the job plist does not need `AbandonProcessGroup` (which would also stop
+> launchd from cleaning up the daemon's genuinely-orphaned helpers after a
+> crash). If a future macOS kills a job's whole coalition on `bootout`, held
+> sessions would fall back to the old behaviour (reconnectable / fresh shell) —
+> nothing worse.
+
 ### Resumability across daemon restarts
 
-On daemon boot, `SessionManager::restore_all` deliberately does **not** respawn
+For every session that was **not** kept running (above), on daemon boot,
+`SessionManager::restore_all` deliberately does **not** respawn
 any agent processes (keeping every historical session resident would cost
 ~200 MB each). Instead every restorable session is marked `reconnectable` and
 resumed **lazily** the moment a client opens it: `ensure_live` sees a
@@ -580,11 +656,14 @@ when **all** of these hold:
    `meta.source` such as `channel` (the `BACKGROUND_SESSION_SOURCES` list).
    **Sessions you started yourself from the Agents page** (`work.origin` is
    `manual`, or the row pre-dates that stamp and carries no work ref at all)
-   get a much longer grace instead: they are suspended only after **30
-   minutes** with no PTY output (`MANUAL_IDLE_SUSPEND`, setting
-   `manual_idle_suspend_secs`; `0` = never, the pre-2026-09-28 rule) — and
-   still only when every other guard here passes (no viewer, not pinned, no
-   open turn, no descendant CPU).
+   get a much longer grace instead: they are suspended only after **24
+   hours** with no PTY output (`MANUAL_IDLE_SUSPEND`, setting
+   `manual_idle_suspend_secs`, in **Settings → Daemon → Sessions**; `0` =
+   never, the pre-2026-09-28 rule; it was 30 minutes until 2026-10-02, which
+   suspended a session you had merely stepped away from) — and still only
+   when every other guard here passes (no viewer, not pinned, no open turn,
+   no descendant CPU). Plain shells are never suspended (they cannot be
+   resumed losslessly).
 
    **Opening a session only to look at it does not pin its CLI.** Reopening a
    suspended session (a terminal attach or a chat view) resumes it with
@@ -641,7 +720,8 @@ the cap stays exceeded until the next sweep and the daemon logs
 | Setting | Default | Meaning |
 |---|---|---|
 | `idle_suspend_grace_secs` | `300` | quiet time before an engine-owned (or passively resumed) session is suspended |
-| `manual_idle_suspend_secs` | `1800` | quiet time before a session you started is suspended; `0` = never |
+| `manual_idle_suspend_secs` | `86400` (24 h) | quiet time before a session you started is suspended; `0` = never |
+| `session_persistence` | `true` | sessions you start keep running across daemon restarts (see *Sessions survive daemon restarts*) |
 | `max_live_agent_sessions` | `12` | soft cap on live agent CLIs; `0` = no cap |
 
 > **Why 5 and 6 exist.** "Idle" here means *no PTY output*, which is not the
@@ -1104,9 +1184,20 @@ devices' sessions stay hidden here (they still run on the daemon)."* This is a
 - **429 / locked out of the terminal WS.** Too many failed token attempts from
   your IP; wait out the 15-minute lockout.
 - **Status shows `reconnectable` and the terminal says "reconnecting…".** The
-  PTY was suspended (idle) or the daemon restarted; opening/focusing the session
-  resumes it. The terminal overlay offers a **Now** / **Reconnect** / **Resume**
-  button.
+  PTY was suspended (idle) or the daemon restarted without keeping it;
+  opening/focusing the session resumes it. The terminal overlay offers a
+  **Now** / **Reconnect** / **Resume** button. A pane whose socket dropped
+  right after an exit (the daemon going away) re-attaches once on its own and
+  shows the session's real state — live again, or *Suspended — type or Resume
+  to continue* (a shell too: typing or Resume respawns it).
+- **A session did not survive a daemon restart.** Check that it is one you
+  started (Agents page — workflow/review/channel sessions always restart) and
+  that *Keep sessions running when the daemon restarts* is on. Then
+  `grep -E "pty holder|re-adopted|left .* running" ~/Library/Logs/Otto/ottod.log*`:
+  `pty holder unavailable` means it was spawned in-process; `re-adopted live
+  session` is the success line; `not re-adoptable` / `speaks protocol` explain
+  a holder that was ended on boot. Live holders are `ottod pty-holder`
+  processes (`pgrep -fl pty-holder`), one per kept session.
 - **Custom provider not appearing.** Confirm it's in the `providers` settings
   JSON and that `cmd` is on `PATH` (`GET /meta.tools` reports detected tools).
 
