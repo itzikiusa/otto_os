@@ -175,7 +175,11 @@ impl Write for HeldWriter {
 
 /// Connect and run the handshake: HELLO → HELLO_ACK (+ version check) →
 /// SNAPSHOT. Returns the stream (no read timeout) and what the holder said.
-fn handshake(path: &Path) -> Result<(UnixStream, HolderInfo, (u16, u16, Vec<u8>)), AdoptError> {
+/// A completed handshake: the stream, the holder's self-description and its
+/// `(cols, rows, bytes)` snapshot.
+type Handshake = (UnixStream, HolderInfo, (u16, u16, Vec<u8>));
+
+fn handshake(path: &Path) -> Result<Handshake, AdoptError> {
     let mut stream = match UnixStream::connect(path) {
         Ok(s) => s,
         Err(e)
@@ -216,7 +220,7 @@ fn handshake(path: &Path) -> Result<(UnixStream, HolderInfo, (u16, u16, Vec<u8>)
     let info: HolderInfo = serde_json::from_slice(&payload)
         .map_err(|e| AdoptError::Failed(format!("pty holder hello ack: {e}")))?;
     if info.proto_major != PROTO_MAJOR {
-        return Err(AdoptError::Incompatible(info));
+        return Err(AdoptError::Incompatible(Box::new(info)));
     }
     // Skip anything a newer minor sends before its snapshot.
     let snapshot = loop {

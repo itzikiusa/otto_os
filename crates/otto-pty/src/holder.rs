@@ -546,7 +546,7 @@ pub enum AdoptError {
     Stale,
     /// A holder answered with a protocol major this build cannot drive. Only
     /// the frozen frames work with it: [`terminate`] it.
-    Incompatible(HolderInfo),
+    Incompatible(Box<HolderInfo>),
     /// Anything else (I/O, a malformed handshake).
     Failed(String),
 }
