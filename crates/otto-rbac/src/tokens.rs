@@ -569,12 +569,23 @@ impl AuthRepo {
     /// them until the next spawn's rotation or the user removes them).
     /// Returns the number revoked.
     pub async fn expire_managed_session_tokens(&self) -> Result<u64> {
+        self.expire_managed_session_tokens_except(&[]).await
+    }
+
+    /// [`Self::expire_managed_session_tokens`], sparing the sessions in
+    /// `keep`: their agent process DID survive the restart (it kept running in
+    /// a PTY holder and was re-adopted), so the credential in its environment
+    /// is still in use.
+    pub async fn expire_managed_session_tokens_except(&self, keep: &[Id]) -> Result<u64> {
+        let keep = serde_json::to_string(keep).unwrap_or_else(|_| "[]".into());
         let hashes: Vec<String> = sqlx::query_scalar(
             "UPDATE auth_sessions SET revoked = 1, expires_at = ?
              WHERE session_scope IS NOT NULL AND kind IN ('api', 'agent_mcp') AND revoked = 0
+               AND session_scope NOT IN (SELECT value FROM json_each(?))
              RETURNING token_hash",
         )
         .bind(Utc::now().to_rfc3339())
+        .bind(keep)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| Error::Internal(format!("expire managed session tokens: {e}")))?;
@@ -1665,6 +1676,25 @@ mod tests {
         // A resume mints a fresh, working credential.
         let (fresh, _) = repo.issue_session_api_token(&owner, &sid).await.unwrap();
         assert!(repo.authenticate(&fresh).await.is_ok());
+    }
+
+    /// A session re-adopted from its PTY holder keeps its credential across
+    /// the boot sweep; every other managed one is still revoked.
+    #[tokio::test]
+    async fn boot_sweep_spares_sessions_that_survived_the_restart() {
+        let pool = mem_pool().await;
+        let (repo, _) = cached_repo(pool.clone());
+        let owner = seed_user(&pool, "boot_keep").await;
+        let kept_sid = seed_managed_session(&pool, &owner).await;
+        let dead_sid = seed_managed_session(&pool, &owner).await;
+        let (kept, _) = repo.issue_session_api_token(&owner, &kept_sid).await.unwrap();
+        let (dead, _) = repo.issue_session_api_token(&owner, &dead_sid).await.unwrap();
+        assert_eq!(
+            repo.expire_managed_session_tokens_except(std::slice::from_ref(&kept_sid)).await.unwrap(),
+            1
+        );
+        assert!(repo.authenticate(&kept).await.is_ok(), "the surviving agent keeps its credential");
+        assert!(matches!(repo.authenticate(&dead).await, Err(Error::Unauthorized)));
     }
 
     /// Boot sweep of legacy `otto-mcp:<session>` tokens: pre-cutover Otto

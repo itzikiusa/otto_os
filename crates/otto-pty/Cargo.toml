@@ -13,3 +13,8 @@ libc = "0.2"
 tokio = { workspace = true }
 bytes = { workspace = true }
 serde = { workspace = true }
+# PTY-holder wire protocol: launch request + handshake payloads (holder.rs).
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

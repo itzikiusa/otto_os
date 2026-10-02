@@ -90,7 +90,7 @@
   // `session.last_active_at` is updated whenever the status changes — so when
   // the session transitions to `idle` it stamps the moment. We use this as a
   // proxy for last-output time and count down to the daemon's suspend window:
-  // `manual_idle_suspend_secs` (30 min) for sessions the user started,
+  // `manual_idle_suspend_secs` (24 h) for sessions the user started,
   // `idle_suspend_grace_secs` (5 min) for engine-owned ones, read from the
   // daemon's settings (lib/idleSuspend.ts; defaults when not readable).
   const idleHint = $derived.by(() => {
