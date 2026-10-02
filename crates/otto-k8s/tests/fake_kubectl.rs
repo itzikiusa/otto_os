@@ -1376,7 +1376,7 @@ async fn fleet_routes_validate_and_aggregate_from_clickhouse_only() {
             ],
         ));
         canned.push((
-            "AS rank, argMax(value, ts) AS mem_last".into(),
+            "AS rank, tupleElement(max(v_last), 2) AS mem_last".into(),
             vec![
                 serde_json::json!({"cluster_id": id, "namespace": "shop", "workload": "web", "pod": "web-1", "metric": "mem_sys_bytes", "rank": 1, "mem_last": 900.0, "mem_avg": 800.0, "mem_max": 950.0}),
                 serde_json::json!({"cluster_id": id, "namespace": "shop", "workload": "web", "pod": "web-1", "metric": "mem_working_set_bytes", "rank": 0, "mem_last": 500.0, "mem_avg": 400.0, "mem_max": 600.0}),
@@ -1392,11 +1392,11 @@ async fn fleet_routes_validate_and_aggregate_from_clickhouse_only() {
             ],
         ));
         canned.push((
-            "AS rps, sumIf(delta, is5xx)".into(),
+            "AS rps, sumIf(delta, startsWith(".into(),
             vec![serde_json::json!({"cluster_id": id, "namespace": "shop", "workload": "web", "rps": 10.0, "err_rps": 1.0})],
         ));
         canned.push((
-            "labels['le'] AS le".into(),
+            "lb['le'] AS le".into(),
             vec![
                 serde_json::json!({"cluster_id": id, "namespace": "shop", "workload": "web", "le": "0.1", "delta": 90.0}),
                 serde_json::json!({"cluster_id": id, "namespace": "shop", "workload": "web", "le": "+Inf", "delta": 100.0}),
@@ -1422,7 +1422,7 @@ async fn fleet_routes_validate_and_aggregate_from_clickhouse_only() {
             })],
         ));
         canned.push((
-            "labels['path'] AS path".into(),
+            "lb['path'] AS path".into(),
             vec![serde_json::json!({"path": "/api/x", "method": "GET", "rps": 4.0, "err_rps": 1.0, "avg_ms": 12.5})],
         ));
     }
@@ -1606,7 +1606,7 @@ async fn monitor_health_digest_reports_disabled_then_stats() {
     .await;
     assert_eq!(st, StatusCode::OK);
     ctx.sink.canned.lock().unwrap().push((
-        "argMax(value, ts) AS mem".into(),
+        "argMax(last_value, last_ts) AS mem".into(),
         vec![serde_json::json!({"cluster_id": id, "namespace": "shop", "workload": "web-5d4c-abcde", "pod": "web-5d4c-abcde", "mem": 900.0, "metric": "mem_sys_bytes"})],
     ));
     let (st, body, text) = call(

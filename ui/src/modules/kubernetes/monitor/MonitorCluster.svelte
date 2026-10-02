@@ -127,10 +127,13 @@
     });
   });
 
+  // Coalesced by the store (≤ 1 per MONITOR_TICK_MIN_MS, none while
+  // hidden); only a NEW tick that included this cluster re-fetches.
+  let seenTick = untrack(() => k8s.monitorTick);
   $effect(() => {
     const tick = k8s.monitorTick;
-    const who = k8s.monitorTickCluster;
-    if (tick > 0 && who === cluster.id) {
+    if (tick !== seenTick && k8s.monitorTicked(cluster.id)) {
+      seenTick = tick;
       untrack(() => {
         if (activeTab === 'workloads') void loadWorkloads(true);
         if (activeTab === 'events') void loadEvents(true);

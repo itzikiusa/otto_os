@@ -4,17 +4,19 @@
 //!
 //! | module | responsibility |
 //! |---|---|
-//! | [`schema`] | ClickHouse DDL + per-cluster purge |
+//! | [`schema`] | ClickHouse DDL (raw + rollup tiers + views), one-time backfill, per-cluster purge |
 //! | [`probes`] | config model, validation, globs, exclusions, presets |
 //! | [`parse`] | prometheus text / JSON-mapping / health parsers → `Sample`s |
 //! | [`scrape`] | transport pick (API-server proxy vs port-forward) + HTTP fetch |
 //! | [`gateway`] | the per-cluster long-lived `kubectl proxy` the proxy transport uses |
 //! | [`classify`] | pod snapshots, diff, restart / churn classification |
 //! | [`collector`] | one cycle + the per-cluster loop |
-//! | [`queries`] | ClickHouse SQL builders for the dashboard |
+//! | [`queries`] | ClickHouse SQL builders + the rollup-tier planner ([`queries::Span`]) |
+//! | [`cache`] | dashboard read cache + single-flight |
 //! | [`health`] | the compact `k8s_health` digest |
 //! | [`http`] | `/k8s/monitor/*` + `/k8s/clusters/{id}/monitor*` routes |
 //! | [`fleet`] | `/k8s/monitor/fleet/*` — the ClickHouse-only cross-cluster dashboard |
+pub mod cache;
 pub mod classify;
 pub mod collector;
 pub mod fleet;

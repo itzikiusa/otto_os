@@ -69,11 +69,22 @@
     poller = poll(load, 60_000);
     return () => poller?.stop();
   });
+  // Manual refresh (frame button) runs interactive; a collection cycle
+  // (coalesced by the store, never while hidden) on the background lane.
+  // Only CHANGES count — the poller's own first run already covers mount.
+  let seenTick = untrack(() => tick);
+  let seenCycle = untrack(() => k8s.monitorTick);
   $effect(() => {
-    void tick;
-    const t = k8s.monitorTick;
-    void t;
+    const t = tick;
+    if (t === seenTick) return;
+    seenTick = t;
     untrack(() => poller?.now());
+  });
+  $effect(() => {
+    const c = k8s.monitorTick;
+    if (c === seenCycle) return;
+    seenCycle = c;
+    untrack(() => poller?.now({ background: true }));
   });
 
   // Overview rows keyed by cluster id; clusters with no row fall back to the

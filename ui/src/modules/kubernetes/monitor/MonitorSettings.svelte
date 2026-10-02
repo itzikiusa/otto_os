@@ -279,7 +279,7 @@
           {#if errors.concurrency}<em class="err">{errors.concurrency}</em>{/if}
         </label>
         <label class="field">
-          <span>Retention (days)</span>
+          <span>Retention (days) <span class="dim">(hourly history; minute detail 2 d)</span></span>
           <input class="input" type="number" min="1" max="90" bind:value={cfg.retention_days} disabled={!canEdit} />
           {#if errors.retention_days}<em class="err">{errors.retention_days}</em>{/if}
         </label>

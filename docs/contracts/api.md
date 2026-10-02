@@ -4767,8 +4767,12 @@ Opt-in, per-cluster metric collection from **user-defined HTTP probes on the
 pods themselves** (Otto's Go services expose `/actuator/info` +
 `/actuator/prometheus`, but nothing is hard-wired), plus whatever
 metrics-server allows, with restart classification and a ClickHouse-backed
-dashboard. Samples live in the embedded usage engine (`k8s_samples`,
-`k8s_events`, TTL = the largest configured `retention_days`); config + last
+dashboard. Samples live in the embedded usage engine: raw `k8s_samples`
+(2 days) feed 1 min / 5 min / 1 h rollups (`k8s_samples_1m|5m|1h`), a
+last-value table (`k8s_latest`) and an hourly pod inventory (`k8s_pods_1h`)
+through materialized views; reads plan the coarsest tier that fits the
+window (raw only below 24 minutes). `k8s_events` and the hour tier keep the
+largest configured `retention_days`. Config + last
 cycle status live in SQLite (migration 0116). A collector loop runs per
 **enabled** cluster (`crates/otto-server/src/k8s_monitor_scheduler.rs`), every
 `interval_secs`: sweep pods → events → metrics-server (re-probed every cycle;
@@ -4789,7 +4793,7 @@ is View on GET, Edit on PUT/POST. Enabling requires the usage engine
 | POST /k8s/clusters/{id}/monitor/run | Edit | — | `MonitorStatus` — runs one cycle inline (schema ensured first) |
 | GET /k8s/monitor/overview?window=24h | View | — | `OverviewRow[]`, one per registered cluster (disabled clusters carry `enabled:false`, `health:"off"`) |
 | GET /k8s/clusters/{id}/monitor/workloads?window=1h&ns= | View | — | `{ window, step_secs, enabled, status, namespaces: string[] /* all, unfiltered */, workloads: WorkloadRow[] }` |
-| GET /k8s/clusters/{id}/monitor/series?metric=&workload=&pod=&window=1h&step= | View | — | `{ metric, kind: "gauge"\|"rate", step_secs, points: [{ t, v }] }` — counters (`*_total`, `*_count`, `*_sum`, `*_bucket`) are returned as per-second rates |
+| GET /k8s/clusters/{id}/monitor/series?metric=&workload=&pod=&window=1h&step= | View | — | `{ metric, kind: "gauge"\|"rate", step_secs, points: [{ t, v }] }` — counters (`*_total`, `*_count`, `*_sum`, `*_bucket`) are returned as per-second rates; `step_secs` is rounded up to whole minutes / 5 minutes / hours (and ≥ 60 s for windows ≥ 24 min) so the chart reads a rollup |
 | GET /k8s/clusters/{id}/monitor/events?window=24h&class=&workload=&limit=200 | View | — | `MonitorEvent[]` newest first; `class` ∈ `oom\|crash\|probe\|planned\|completed\|unknown` filters classified rows, `k8s_event` returns raw cluster events |
 | GET /k8s/clusters/{id}/monitor/health?window=1h | View + per-cluster `discover` grant | — | `Health` — the compact digest the `k8s_health` MCP tool returns (≤20 entries per list) |
 
@@ -4798,21 +4802,25 @@ and `class` must match `^[A-Za-z0-9_.:/-]{1,128}$` (400 otherwise).
 
 #### Fleet dashboard (`/k8s/monitor/fleet/*`, `kubernetes:View`)
 
-One view over **every** cluster, read from **ClickHouse only** (`k8s_samples` +
-`k8s_events`) — never the cluster, never the collector's pod snapshot — so it
+One view over **every** cluster, read from **ClickHouse only** (the sample
+rollups, `k8s_pods_1h` + `k8s_events`) — never the cluster, never the collector's pod snapshot — so it
 answers "what happened over the window" (restarts / OOMs, memory, req/s, 5xx,
 latency) even for a cluster that is currently unreachable. Every route takes
 the same selection: `window` (default `24h`), `cluster` (comma-separated ids;
 empty = all), `ns`, `workload`, `pod` (each a single value; identifier rule
 above, 400 otherwise). Cluster ids are labelled from the registry; an id with
 rows but no registry row (a removed cluster) still appears under its id.
-`409 conflict` when the usage engine (ClickHouse) is off.
+`409 conflict` when the usage engine (ClickHouse) is off. Answers are cached
+server-side for 15 s, then until any collector writes again (keyed by the
+query and the cluster registry); identical concurrent requests share one
+computation. A window's start snaps down to the read tier's bucket (≤ 1 h
+for windows ≥ 24 h); rates divide by the seconds actually covered.
 
 | Method & path | Request | Response |
 |---|---|---|
-| GET /k8s/monitor/fleet/filters | selection | `{ window, clusters: [{ id, name, environment, color, rows }] /* every registered cluster + any id with rows; rows = sample+event rows in the window */, namespaces: [{ cluster_id, namespace }], workloads: [{ cluster_id, namespace, workload }], pods: [{ cluster_id, namespace, workload, pod }] /* only for a narrowed selection (workload / pod, or one cluster + ns); ≤ 2000, newest first */ }` |
+| GET /k8s/monitor/fleet/filters | selection | `{ window, clusters: [{ id, name, environment, color, rows }] /* every registered cluster + any id with rows; rows = sample+event rows in the window (samples counted per hour bucket) */, namespaces: [{ cluster_id, namespace }], workloads: [{ cluster_id, namespace, workload }], pods: [{ cluster_id, namespace, workload, pod }] /* only for a narrowed selection (workload / pod, or one cluster + ns); ≤ 2000, newest first */ }` |
 | GET /k8s/monitor/fleet/table?group=workload\|pod&sort=restarts&dir=desc&limit=200&offset=0 | selection + grouping/order | `{ window, group, sort, dir, total, offset, rows: FleetRow[] }` — sorted server-side; `sort` ∈ `cluster\|namespace\|workload\|pod\|pods\|restarts\|oom\|crash\|probe\|churn\|mem_last\|mem_avg\|mem_max\|rps\|err_pct\|latency_ms` (400 otherwise); `limit` ≤ 2000 |
-| GET /k8s/monitor/fleet/series?metric=restarts&by=cluster&step= | selection + `metric` ∈ `restarts\|mem\|rps\|err\|latency`, `by` ∈ `cluster\|namespace\|workload\|pod` | `{ window, metric, unit: 'count'\|'bytes'\|'rate'\|'percent'\|'ms', by, step_secs, series: [{ key, label, points: [{ t, v }] }] }` — `restarts` is always one series per class (`by: "class"`); `step` defaults to ~60 buckets, floor 60 s |
+| GET /k8s/monitor/fleet/series?metric=restarts&by=cluster&step= | selection + `metric` ∈ `restarts\|mem\|rps\|err\|latency`, `by` ∈ `cluster\|namespace\|workload\|pod` | `{ window, metric, unit: 'count'\|'bytes'\|'rate'\|'percent'\|'ms', by, step_secs, series: [{ key, label, points: [{ t, v }] }] }` — `restarts` is always one series per class (`by: "class"`); `step` defaults to ~60 buckets, floor 60 s, rounded up to whole minutes / 5 minutes / hours |
 | GET /k8s/monitor/fleet/events?class=&sort=ts&dir=desc&limit=200&offset=0 | selection + `class` (as the per-cluster events route, plus `churn` = churn only) | `{ window, sort, dir, total, offset, rows: (MonitorEvent & { cluster_id, cluster })[] }`; `sort` ∈ `ts\|cluster\|namespace\|workload\|pod\|kind\|class\|reason` |
 | GET /k8s/monitor/fleet/requests | selection | `{ window, enabled_on: [{ id, name }], disabled_on: [{ id, name }], rows: [{ path, method, rps, err_pct, avg_ms }] }` (≤ 500, by rps) — rows exist only for clusters with `request_labels` on |
 

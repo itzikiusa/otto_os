@@ -14,6 +14,7 @@ import { resourceAccess, type ResourceAccessChange } from './resource-access.sve
 import { ApiError } from '../api/client';
 import { formatBytes, formatMillicores } from '../../modules/kubernetes/k8s-util';
 import { k8sApi } from '../api/k8s';
+import { TickCoalescer, browserTickEnv } from '../../modules/kubernetes/monitor/tickCoalescer';
 import type {
   ImportK8sClusterReq,
   K8sCapabilities,
@@ -55,6 +56,10 @@ const CLUSTER_SCOPE_HINT =
   'This kubeconfig user can\'t list across all namespaces (cluster scope). Pick a namespace (press n) — e.g. the cluster\'s default one.';
 const AUTO_KEY = 'otto_k8s_autorefresh';
 const AUTO_REFRESH_MS = 10_000;
+/** Monitor views re-read at most this often, however many clusters cycle:
+ *  every read is a ClickHouse aggregation and the dashboards' windows (≥ 1 h,
+ *  read from minute-or-coarser rollups) do not move faster than this. */
+export const MONITOR_TICK_MIN_MS = 30_000;
 
 function lsGet(key: string): string | null {
   try {
@@ -518,17 +523,36 @@ class K8sStore {
 
   // --- live events ----------------------------------------------------------------------
 
-  /** Bumped on every `k8s_monitor_cycle`; the Monitor views `$effect` on it
-   *  (plus the cluster id of the cycle) to re-fetch without polling. */
+  /** Bumped after `k8s_monitor_cycle` events; the Monitor views `$effect` on
+   *  it (plus {@link monitorTicked} for their cluster) to re-fetch without
+   *  polling. Coalesced: at most one bump per {@link MONITOR_TICK_MIN_MS}
+   *  however many clusters cycle, and none while the document is hidden —
+   *  one fires when it is visible again. */
   monitorTick = $state(0);
+  /** The last cluster that cycled before the latest tick. */
   monitorTickCluster: string | null = $state(null);
+  /** Every cluster that cycled since the previous tick. */
+  monitorTickClusters = $state.raw<ReadonlySet<string>>(new Set());
+  private readonly cycles = new TickCoalescer(
+    MONITOR_TICK_MIN_MS,
+    (clusters) => {
+      this.monitorTickClusters = new Set(clusters);
+      this.monitorTickCluster = clusters[clusters.length - 1] ?? null;
+      this.monitorTick += 1;
+    },
+    browserTickEnv,
+  );
+
+  /** Did `clusterId` cycle since the previous tick? */
+  monitorTicked(clusterId: string): boolean {
+    return this.monitorTickClusters.has(clusterId);
+  }
 
   applyEvent(
     ev: Extract<OttoEvent, { type: 'k8s_cluster_updated' | 'k8s_install_updated' | 'k8s_monitor_cycle' }>,
   ): void {
     if (ev.type === 'k8s_monitor_cycle') {
-      this.monitorTickCluster = ev.cluster_id;
-      this.monitorTick += 1;
+      this.cycles.cycle(ev.cluster_id);
       return;
     }
     if (ev.type === 'k8s_cluster_updated') {
