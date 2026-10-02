@@ -547,6 +547,74 @@ Mongo — native Mongo queries (`db.coll.find({…})`, aggregate pipelines, BSON
 literals) are JS-shaped, so JS highlighting reads naturally (the SQL subset Mongo
 also accepts still renders fine).
 
+### Run on multiple targets ("Run on…")
+
+**Run on…** in the query toolbar runs the **selection** (else the whole buffer)
+on several targets and/or once per parameter value — e.g. one `ALTER TABLE` on
+ClickHouse **stg + prod**, each with 2–3 schemas that should hold the same
+tables, or a Mongo script with a `brand` parameter over `1, 2, 3, 4`. Every
+run is separate, with its own status, result and error. The sheet has four
+steps:
+
+1. **Setup.** *Targets*: tick connections of the same engine as the current
+   one (each with its environment badge) and, under each, the databases /
+   schemas / Redis keyspaces to hit (none ticked = the connection's default
+   database). *Parameters*: every placeholder in the script — the same
+   `:name` / `{name}` / `{{name}}` syntax as the Variables bar, pre-filled from
+   it — takes a value list (comma-separated, or one per line) and a type:
+   `string` (quoted and escaped for the engine), `number` (must be a number —
+   anything else is refused, never pasted in) or `raw` (verbatim). Several
+   parameters combine as a matrix, and the matrix runs on every target
+   (targets × values, up to 200 runs). *Options*: one at a time (default) or
+   2 / 4 / 8 in parallel; **Stop at the first failure** (default on) vs keep
+   going; rows kept per run (default 500). ClickHouse adds **ON CLUSTER for
+   DDL**: auto-detect per target (default) or off.
+2. **Preview.** The daemon plans the run and shows the **exact final
+   statement of every run** — placeholders substituted, `ON CLUSTER` injected —
+   with **write**, **needs confirm** and **ON CLUSTER ×n** tags. Nothing has run
+   yet. For ClickHouse a *Clusters* list shows per target what was detected
+   (`ON CLUSTER main (from the {cluster} macro)`, *Single node*, *Replicated
+   database — DDL replicates itself*, *Several clusters — pick one*…) and lets
+   you override it: Off, one of the detected clusters, or any other name;
+   **Update preview** re-plans.
+3. **Confirm** (only when a run writes to a **production or read-only**
+   target). Every such run is listed with its target and final statement; type
+   the connection's name (one guarded connection) or `RUN <n>` (several) to
+   start. Nothing runs partially: without this confirmation the daemon refuses
+   the whole multi-run up front. The confirmation is not an access grant: an
+   access-enforced production / read-only connection still refuses a direct
+   write (it needs an approved reviewed change) — the preview warns about it.
+4. **Results.** A live summary (`3 ok · 1 failed · 2 pending`), a progress bar
+   and one row per run (status, duration, rows / affected, error). Click a row
+   for its final statement and the first 200 rows of its result; **Open in a
+   new tab** loads that statement into a query tab. **Stop** cancels the runs in
+   flight (engine-native, as the editor's Stop) and the pending ones.
+
+The multi-run executes in the daemon, so closing the sheet does not stop it —
+**Recent** at the top of the next **Run on…** reopens it (kept for 30 minutes
+after it ends; results are in daemon memory only). Each run is also an
+ordinary **History** row on its own connection.
+
+**How ClickHouse cluster detection works.** When the script has DDL, each
+`auto` target is probed read-only: the database's engine (`Replicated` /
+`Shared` — ClickHouse Cloud included — replicate DDL themselves and reject
+`ON CLUSTER`, so nothing is injected), the `{cluster}` macro (used when
+`system.clusters` lists it), and `system.clusters` itself — where a cluster
+counts only with more than one host and a non-loopback one, because stock
+single-node servers list localhost-only `default` / `test_*` clusters. One
+real cluster is used; several are reported for you to pick. `ON CLUSTER` goes
+only into CREATE / ALTER / DROP / TRUNCATE / RENAME / EXCHANGE / ATTACH /
+DETACH / OPTIMIZE statements (after the object name), never into INSERT /
+SELECT / DELETE / UPDATE; a statement that already says `ON CLUSTER`, a
+TEMPORARY table and other DDL (users, roles…) are left as written and listed
+under *Not rewritten*.
+
+**Limits.** One engine per multi-run; ≤ 50 targets, ≤ 200 runs, ≤ 8 in
+parallel, ≤ 10 000 rows kept per run (and ~32 MB of rows per multi-run — past
+it a run keeps its status and counts only). The sheet shows the first 200
+rows of a result. Agents can use the same endpoints (`docs/contracts/api.md` →
+"DB Explorer — multi-target runs"); `read_only: true` refuses any write.
+
 ### MongoDB: running full mongosh scripts
 
 Pasting a real **mongosh script** — variables, functions, control flow,
@@ -1205,6 +1273,12 @@ execution/cancel/export = `ws editor` (global connections: `Database:Edit`):
 | `POST …/db/query-plan` | normalized EXPLAIN tree (`DbQueryPlan`; MySQL/PG/CH/Mongo; Redis 400) |
 | `POST …/db/import` | file → table/collection (SQL batched `INSERT`s / Mongo `insertMany`) |
 
+**Multi-target runs** ("Run on…", §4) — `POST /db/multi-run/plan` (preview:
+final statement per run, cluster detection), `POST /db/multi-runs` (start;
+`confirm_write` + `plan_hash`), `GET /db/multi-runs[/{rid}]` (status, summary,
+per-run detail), `GET /db/multi-runs/{rid}/items/{index}` (one run's statement +
+result), `POST /db/multi-runs/{rid}/cancel`. Editor on every target connection.
+
 **Saved queries / dashboards / widgets** — workspace-scoped lists under
 `/workspaces/{wid}/db/*`, item routes keyed by row id (reads `ws viewer`,
 mutations `ws editor`; by-id reads/mutations also require owner / ws-Admin /
@@ -1333,6 +1407,12 @@ without loss. The UI renders them as `ObjectId("…")`, `ISODate("…")`,
   writes on a guarded connection are **audited** (`db.write_confirmed`). The UI also
   shows danger styling — a red rail / **PROD** badge for production, an amber rail /
   **RO** badge for read-only — and a banner.
+- **Multi-target runs ("Run on…") keep the guard per target.** Every run goes
+  through the same `…/db/query` path (write-guard, access enforcement, history,
+  audit). A multi-run with any write to a production / read-only target is
+  refused **as a whole** unless the request carries `confirm_write` — set by
+  the UI only after a typed confirmation listing every such target and its
+  final statement — and `plan_hash` pins the run to the reviewed preview.
 - **`explain:true` can't bypass the gate.** A raw write sent with `explain:true` is
   still blocked (the SQL drivers execute by statement text); only a genuine
   `EXPLAIN`-prefixed statement classifies as a read.

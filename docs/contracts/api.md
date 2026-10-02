@@ -1077,6 +1077,72 @@ owner-private. An unknown `qid` → 404. The UI uses PATCH to rename a saved que
 inline and to update it in place when "Save" is pressed on a tab opened from it
 ("Save as new" instead POSTs a fresh one).
 
+## DB Explorer — multi-target runs (`/db/multi-run/plan`, `/db/multi-runs`)
+
+"Run on…": the SAME script against several targets (connection × database /
+schema / Redis keyspace — one engine per multi-run) and/or once per
+placeholder value, each run with its own status, result and error. Types:
+`crates/otto-dbviewer/src/multirun/mod.rs` ↔ `ui/src/lib/api/db-multirun-types.ts`.
+Every target connection needs the same role as `POST …/db/query` (ws editor;
+global connections: the Database grant) — checked for ALL targets before
+anything is probed or run. Jobs are in daemon memory only (a finished job and
+its results are dropped 30 min after it ends; at most 10 retained) and
+owner-scoped (another user's job is a 404; root sees all).
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /db/multi-run/plan | Database:Edit + ws editor on every target | `DbMultiRunSpec` | `DbMultiRunPlan` — the preview: the FINAL statement of every run, write / `needs_confirm` flags, per-target ClickHouse cluster facts, `plan_hash`. Runs only read-only topology probes (ClickHouse, when the script has DDL), never recorded in history. 400 on an invalid spec (see below). |
+| POST /db/multi-runs | Database:Edit + ws editor on every target | `DbStartMultiRunReq` | **202** `DbMultiRunJob` — re-plans, then runs in the background. 409 `write_blocked: …` when a run writes to a production / read-only target and `confirm_write` is not set (nothing runs); 409 `plan_changed: …` when `plan_hash` no longer matches; 403 `read_only: …` when `read_only` is set and a run is a write/DDL; 409 when 10 multi-runs are already running. |
+| GET /db/multi-runs | Database:View | — | `DbMultiRunBrief[]` — the caller's retained multi-runs, newest first |
+| GET /db/multi-runs/{rid} | Database:View + owner/root | — | `DbMultiRunJob` — status, `summary` (`total/ok/failed/running/pending/skipped/cancelled`), targets and per-run items (statement preview, status, duration, row / affected counts, message / error; no rows) |
+| GET /db/multi-runs/{rid}/items/{index} | Database:View + owner/root + ws editor on the run's connection | — | `DbMultiRunItemDetail` — the run's full final statement and retained result |
+| POST /db/multi-runs/{rid}/cancel | Database:Edit + owner/root | — | `DbMultiRunJob` — stops dispatching, marks pending runs `cancelled`, and cancels the running ones engine-natively (as `…/db/cancel`). Idempotent; a finished job is returned unchanged. |
+
+**`DbMultiRunSpec`** = `{ statement, targets: [{connection_id, node?, cluster_mode?
+("auto"|"off"|"custom", default auto), cluster_name?}], params?: [{name, values[],
+type? ("string"|"number"|"raw", default string), escape? (default true)}],
+max_rows? (per run, default 500, max 10 000), timeout_ms?, mask?, read_only? }`.
+`DbStartMultiRunReq` adds `{ concurrency? (1 = sequential, the default; max 8),
+stop_on_error? (default true), confirm_write?, plan_hash? }`.
+
+**Placeholders** reuse the editor's Variables syntax — `:name`, `{name}`,
+`{{name}}` (not `{…}` in Redis, a Cluster hash tag), at code positions only
+(never inside strings or comments). Substitution is server-side and typed:
+`string` → an engine-correct quoted literal (MySQL/ClickHouse `'…'` with `\`
+and `'` escaped, PostgreSQL `'…'` with `'` doubled, MongoDB a JSON string,
+Redis `"…"`); `number` must parse as a number (else 400 — never spliced);
+`raw` is verbatim. Several parameters combine as a cartesian product, and with
+every target (≤ 200 runs, ≤ 50 targets, ≤ 200 values per parameter). A
+placeholder without a parameter, a swept parameter the script never uses, a
+duplicate target, or targets of different engines → 400.
+
+**ClickHouse `ON CLUSTER`.** Per target with `cluster_mode: "auto"` and DDL in
+the script, the planner reads `system.macros` (`{cluster}`), `system.clusters`
+(a cluster is real only with >1 host and a non-loopback one — stock
+single-node configs list localhost-only `default` / `test_*` clusters) and the
+target database's engine. `Replicated` / `Shared` databases replicate DDL
+themselves → nothing injected (`source: "replicated_database"`); the
+`{cluster}` macro wins when `system.clusters` lists it (`"macro"`); else the one
+real cluster (`"system_clusters"`); several → `"ambiguous"` (pick one via
+`custom`). `ON CLUSTER <name>` is injected only into CREATE / ALTER / DROP /
+TRUNCATE / RENAME / EXCHANGE / ATTACH / DETACH / OPTIMIZE statements, right
+after the object name — never into INSERT / SELECT / DELETE / UPDATE; a
+statement already saying `ON CLUSTER`, TEMPORARY objects and other DDL forms
+are left as written and listed in `cluster_skipped`.
+
+**Execution.** Runs execute in plan order through the ordinary
+`POST …/db/query` path (`query_id` `multirun-<rid>-<index>`): the write-guard,
+access enforcement, masking, native cancel and **query history** (one row per
+run on its connection) apply to each run. A batch result with an `errored`
+entry counts as `failed`. `stop_on_error` stops dispatching after the first
+failure (runs in flight finish; the rest are `skipped`). With `confirm_write`,
+every guarded run fires the same `db.write_confirmed` audit as a confirmed
+single run. On an **access-enforced** production / read-only
+connection a direct write is still refused at run time (`review_required:` —
+the reviewed-change flow), exactly as for a single run; the plan warns about
+it up front. Per job, retained result rows are capped at ~32 MB; past that a
+run keeps its status and counts but `result_dropped: true`.
+
 ## Git — repos & PR extras (beyond #34–#56)
 
 > Provider rate limits: a 429, or a 403 with `x-ratelimit-remaining: 0` / `retry-after`, is retried once when the wait is ≤ 30 s, otherwise it is a 502 "GitHub rate limited — retry in Ns".

@@ -13,6 +13,7 @@
 //! cached connection valid — the two caches compose.
 
 mod changes;
+mod multirun;
 mod validation;
 
 use std::collections::HashMap;
@@ -423,6 +424,9 @@ pub struct DbViewerService {
     /// schema). Short-lived ([`ENFORCED_COMPLETION_TTL`]); cleared by the
     /// refresh action like the drivers' own caches.
     enforced_completions: Arc<crate::complete::CompletionCache>,
+    /// Multi-target / parameterised runs ("Run on…"), retained in memory for
+    /// status polling and result fetch (see `service/multirun.rs`).
+    multi_runs: Arc<std::sync::Mutex<multirun::MultiRunStore>>,
 }
 
 /// How long an enforced connection's completion snapshot is reused. Short: it
@@ -534,6 +538,7 @@ impl DbViewerService {
             enforced_completions: Arc::new(crate::complete::CompletionCache::with_ttl(
                 ENFORCED_COMPLETION_TTL,
             )),
+            multi_runs: Arc::new(std::sync::Mutex::new(multirun::MultiRunStore::default())),
         }
     }
 
