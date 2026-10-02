@@ -216,7 +216,7 @@ impl WorkflowsRepo {
             .begin()
             .await
             .map_err(dberr("begin workflow retry"))?;
-        let changed = sqlx::query("UPDATE workflow_runs SET status = 'pending', finished_at = NULL, error = NULL, resume_scope_json = ?, waiting_approval = 0, approval_node_id = NULL, rev = rev + 1, checkpoint_generation = checkpoint_generation + 1 WHERE id = ? AND status IN ('success','error','canceled')")
+        let changed = sqlx::query("UPDATE workflow_runs SET status = 'pending', finished_at = NULL, error = NULL, resume_scope_json = ?, waiting_approval = 0, approval_node_id = NULL, resume_attempts = 0, rev = rev + 1, checkpoint_generation = checkpoint_generation + 1 WHERE id = ? AND status IN ('success','error','canceled')")
             .bind(scope_json).bind(run_id).execute(&mut *tx).await.map_err(dberr("prepare workflow retry"))?.rows_affected();
         if changed == 0 {
             return Err(Error::Conflict("run is still active".into()));
@@ -626,11 +626,16 @@ impl WorkflowsRepo {
     /// re-entered approval node re-parks itself). The engine's normal
     /// Pending→Running transition then owns the lifecycle. Bumps + returns
     /// `rev` for the announcing WS event.
+    ///
+    /// `count_attempt` is false for a run that was parked at a human approval:
+    /// re-entering an approval has no side effects, so a run waiting a day for
+    /// sign-off used to exhaust its resume budget on the third reboot/deploy.
     pub async fn prepare_resume(
         &self,
         id: &Id,
         nodes: &[NodeRunState],
         scope_json: &str,
+        count_attempt: bool,
     ) -> Result<i64> {
         let nodes_json =
             serde_json::to_string(nodes).map_err(|e| Error::Internal(e.to_string()))?;
@@ -638,7 +643,7 @@ impl WorkflowsRepo {
             "UPDATE workflow_runs
              SET status = 'pending', nodes_json = ?, progress_json = NULL,
                  resume_scope_json = ?,
-                 interrupted_at = ?, resume_attempts = resume_attempts + 1,
+                 interrupted_at = ?, resume_attempts = resume_attempts + ?,
                  error = NULL, finished_at = NULL,
                  waiting_approval = 0, approval_node_id = NULL,
                  rev = rev + 1
@@ -648,6 +653,7 @@ impl WorkflowsRepo {
         .bind(&nodes_json)
         .bind(scope_json)
         .bind(fmt(Utc::now()))
+        .bind(count_attempt as i64)
         .bind(id)
         .fetch_one(&self.pool)
         .await
@@ -1046,7 +1052,7 @@ impl WorkflowsRepo {
     pub async fn reopen_run(&self, id: &Id) -> Result<()> {
         let n = sqlx::query(
             "UPDATE workflow_runs SET status = 'pending', finished_at = NULL, error = NULL,
-             waiting_approval = 0, approval_node_id = NULL,
+             waiting_approval = 0, approval_node_id = NULL, resume_attempts = 0,
              rev = rev + 1, checkpoint_generation = checkpoint_generation + 1
              WHERE id = ? AND status IN ('success','error','canceled')",
         )
@@ -1311,6 +1317,44 @@ mod tests {
         assert_eq!(r.status, RunStatus::Pending);
         assert!(r.error.is_none());
         assert!(r.finished_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn resume_budget_skips_approval_reentry_and_resets_on_retry() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool);
+        let g = WorkflowGraph::default();
+        let wf = repo
+            .create(&"ws1".into(), "WF", "", "", &g, &"u1".into())
+            .await
+            .unwrap();
+        let run = repo
+            .create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None)
+            .await
+            .unwrap();
+        // A restart while parked at an approval doesn't spend the budget…
+        repo.prepare_resume(&run.id, &[], "{}", false)
+            .await
+            .unwrap();
+        assert_eq!(repo.get_run(&run.id).await.unwrap().resume_attempts, 0);
+        // …a restart mid-step does.
+        repo.prepare_resume(&run.id, &[], "{}", true).await.unwrap();
+        repo.prepare_resume(&run.id, &[], "{}", true).await.unwrap();
+        assert_eq!(repo.get_run(&run.id).await.unwrap().resume_attempts, 2);
+        // A user retry is a fresh lifecycle with a fresh budget.
+        repo.update_run(&run.id, RunStatus::Error, &[], Some("boom"), true)
+            .await
+            .unwrap();
+        repo.prepare_retry(&run.id, &[], false, &Default::default())
+            .await
+            .unwrap();
+        assert_eq!(repo.get_run(&run.id).await.unwrap().resume_attempts, 0);
+        repo.prepare_resume(&run.id, &[], "{}", true).await.unwrap();
+        repo.update_run(&run.id, RunStatus::Error, &[], Some("boom"), true)
+            .await
+            .unwrap();
+        repo.reopen_run(&run.id).await.unwrap();
+        assert_eq!(repo.get_run(&run.id).await.unwrap().resume_attempts, 0);
     }
 
     #[tokio::test]
