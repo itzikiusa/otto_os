@@ -64,3 +64,35 @@ test('Mongo URI credentials are normalized by the server and SFTP errors wait fo
   await expect.poll(() => attempts).toBe(2);
   await ctx.dispose();
 });
+
+test('SSH settings can be tested before saving and a failure says what to fix', async ({ page }) => {
+  await openPage(page, 'connections');
+  await page.getByRole('button', { name: 'New connection', exact: true }).first().click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByRole('button', { name: 'SSH', exact: true }).click();
+  await dialog.getByLabel('Name', { exact: true }).fill(`ssh-test-${Date.now()}`);
+  // Real daemon round trip (no ssh is spawned): a profile without a host has
+  // nothing to probe and must not report "Connected".
+  await dialog.getByRole('button', { name: 'Test', exact: true }).click();
+  const panel = dialog.locator('.test-panel');
+  await expect(panel).toContainText('Test failed');
+  await expect(panel).toContainText('nothing to test');
+  // A recognised failure shows the full message and the fix hint (fulfilled
+  // fixture — no SSH host is contacted).
+  await page.route('**/connections/unsaved/test', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      ok: false, latency_ms: 812, warn_argv: false,
+      message: 'deploy@fixture.invalid: Permission denied (publickey).',
+      hint: 'the server rejected the login. Check the user name and the identity file, or load the key into ssh-agent (`ssh-add`).',
+    }),
+  }));
+  await dialog.getByLabel('Host', { exact: true }).fill('fixture.invalid');
+  await expect(panel).toBeHidden(); // editing clears the stale result
+  await dialog.getByRole('button', { name: 'Test', exact: true }).click();
+  await expect(panel).toContainText('Permission denied (publickey).');
+  await expect(panel).toContainText('What to check:');
+  await expect(panel).toContainText('ssh-add');
+  await expect(dialog.getByText('Test failed — see details above')).toBeVisible();
+});

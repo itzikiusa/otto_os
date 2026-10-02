@@ -173,7 +173,7 @@ the sessions docs.
 ### Test connection
 
 `POST /connections/{id}/test` runs a **headless** probe (10s timeout) and returns
-`TestConnectionResp { ok, latency_ms, message, warn_argv }`:
+`TestConnectionResp { ok, latency_ms, message, warn_argv, warn_key_perms?, hint? }`:
 
 | Kind | Probe |
 |---|---|
@@ -183,14 +183,32 @@ the sessions docs.
 | `mongodb` | `mongosh --quiet --eval "db.runCommand({ping:1})"` |
 | `custom` | runs the command as-is |
 
-On failure the **first non-empty stderr line** is surfaced, but credentials are
-**redacted** first: `scheme://user:pass@host` userinfo is stripped and
+On failure the line that **explains** the failure is surfaced. For anything run
+through `ssh` (the SSH kind, or a DB client on a jump host) that is chosen by
+`otto_ssh::diagnose`: ssh's notices — *"Warning: Permanently added … to the list
+of known hosts"*, OpenSSH 10's three-line post-quantum `** WARNING`, *"Pseudo-terminal
+will not be allocated"* — are skipped, a known failure pattern wins, else ssh's
+last line (its fatal error). Recognised failures also get a **`hint`** saying what
+to change (auth rejected → user / identity file / `ssh-add`; host key changed →
+`ssh-keygen -R <host>`; DNS → VPN/DNS; refused → port/sshd; timed out →
+VPN/firewall/jump host; key too open → `chmod 600`). A profile with **no host**
+(or no conn string / template) reports `ok:false` *"nothing to test"* instead of
+probing its local-shell fallback. Other kinds surface the first stderr line.
+Either way credentials are **redacted** first: `scheme://user:pass@host` userinfo is stripped and
 `--password <x>` / `-p <x>` / `--password=<x>` argv is replaced with
 `<redacted>`. For DB-kind connections, when the server has wired a `DbTester`
 (the Database Explorer's warm-tunnel pool), the probe is routed through the native
 driver path and **reuses a cached `ssh -L` forward** instead of spawning a fresh
 `ssh -J` child — a second test on an already-open connection skips the SSH
 handshake entirely. SSH and Custom always use the CLI subprocess path.
+
+**Test before saving.** The New/Edit connection sheet's **Test** button probes
+the form's *unsaved* values: DB kinds through `POST /connections/unsaved/db/test`
+(driver path), SSH through `POST /connections/unsaved/test` (the same `ssh …
+exit` probe; root only, nothing persisted, no Keychain read). A failure opens a
+panel at the end of the form with the full message, the hint and any key
+permission warning; the footer chip only summarises it. Editing any field clears
+a stale result.
 
 ### Pinning & recency
 
@@ -210,7 +228,9 @@ baseline `ssh` options: `-N` (no remote command), `BatchMode=yes`
 (non-interactive auth), `ExitOnForwardFailure=yes` (fail fast if the local port
 can't bind), `ConnectTimeout=10`, and `ServerAliveInterval=15` (keep-alive). The
 tunnel `ssh` child is **killed on drop**, and `open*()` waits up to **12s** for the
-local port to accept a TCP connection before returning (or surfaces ssh's stderr).
+local port to accept a TCP connection before returning (or surfaces ssh's stderr —
+diagnosed as above, with the fix hint appended, also when the 12s deadline hits).
+An IPv6-literal remote host is bracketed in the `-L` spec (`[fd00::5]:5432`).
 
 ### Local forward — `ssh -N -L`
 
@@ -259,7 +279,17 @@ ssh -t [-i identity] <jump> -- mysql -h db.internal -P 3306 -u root mydb
 ```
 
 i.e. the DB client runs *on the bastion* (`maybe_wrap_ssh_tunnel` in
-`builders.rs`); the password still travels via env, never argv.
+`builders.rs`). ssh hands the remote command to the bastion's shell as one
+string, so every word is **shell-quoted** (a database name or user with a space,
+`;` or `$` can't split or inject). ssh never forwards the local environment, so a
+saved password can't reach the remote client without landing in an argv: MySQL
+gets `-p` and **prompts on the terminal**, psql prompts when the server asks, and
+for Redis run `AUTH` in `redis-cli`. (ClickHouse still passes `--password`, as it
+does locally — `warn_argv`.) The **SSH tunnel** section (`params.ssh`) is the
+path that signs in automatically: the Database Explorer drives the driver
+through an `ssh -L`/`-D` forward. MongoDB and Custom terminals ignore `jump`, so
+the form only offers *Connect via SSH* for MySQL / PostgreSQL / Redis /
+ClickHouse.
 
 ### `AllowTcpForwarding` gotcha
 
@@ -287,6 +317,17 @@ read/write the **daemon host's real local disk**.
   `ControlMaster` socket (`ControlPersist=60s`) under a unique temp dir, removed
   on drop — so the many small `sftp` invocations a browse session makes reuse one
   multiplexed connection, fast even through a bastion.
+- **Survives sleep / network changes.** The master sends keep-alives
+  (`ServerAliveInterval=15`, `ServerAliveCountMax=2`) so a dead path makes it
+  exit within ~30s instead of TCP's ~2h; metadata ops (`pwd`/`ls`/`mkdir`/`rm`/
+  `rename`) are bounded at **60s** and whole-file `get`/`put` at **600s**. A
+  timed-out op also tears the master down (`ssh -O exit` + socket removal), so
+  the next request dials a fresh connection rather than re-attaching to the hung
+  one. Failures report the diagnosed stderr line + fix hint (see *Test
+  connection*).
+- **No option smuggling.** The destination follows `--`, and a profile host /
+  user / jump starting with `-` (a legacy or imported row) is refused before
+  `sftp` is spawned.
 
 ### UI flow
 
@@ -502,6 +543,9 @@ stops copying before publication.
 | **Test fails: "Access denied" / "authentication failed"** | Wrong secret, or absent for a kind that needs one. Re-enter the password (omitting it on PATCH keeps the old one). For SSH, ensure the key is in the agent or `identity_file` is correct. |
 | **"failed to start mysql/mongosh/…"** | The client binary isn't on the daemon's `PATH`. Install it / fix `PATH` for the launchd environment. |
 | **Tunnel: "ssh tunnel exited early" / "administratively prohibited: open failed"** | Bastion `sshd` has `AllowTcpForwarding no`. Enable forwarding on the bastion and reload `sshd`. Also check the jump host's reachability and your key. |
+| **SSH test/browse fails right after waking the Mac or switching Wi-Fi/VPN** | SFTP's shared connection (ControlMaster) now sends keep-alives (`ServerAliveInterval=15`, 2 misses) and exits on a dead path; a hung metadata op times out after 60s and resets the master, so **retry** reconnects. Transfers keep their own (≤600s) limit. |
+| **Test says "Warning: Permanently added …" / "\*\* WARNING: … post-quantum"** | Older builds surfaced ssh's first notice line instead of the error. The probe now skips those notices — update. |
+| **MySQL terminal over *Connect via SSH* says "using password: NO"** | ssh doesn't carry the saved password to the jump host; the client now prompts for it (`-p`). Use the **SSH tunnel** section for password-less sign-in in the Database Explorer. |
 | **"ssh tunnel did not become ready within 12s"** | Bastion slow/unreachable, host-key prompt blocking `BatchMode`, or the remote endpoint isn't listening. Verify `ssh user@bastion` works non-interactively first. |
 | **MongoDB `+srv` / Atlas won't connect through a bastion** | Atlas requires the **SOCKS5 (`-D`)** path, not a local `-L` forward — used automatically for Mongo. Ensure the bastion can resolve + reach the Atlas member hostnames and that `AllowTcpForwarding` is on. |
 | **ClickHouse won't connect on 9000/9440** | Use the HTTP interface — port **8123** (plain) or **8443** (TLS). The native protocol ports aren't supported by the engine. |

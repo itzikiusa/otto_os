@@ -318,6 +318,9 @@ impl otto_connections::DbTester for DbViewerTester {
                 // handler (it has the Connection + covers both this cached-tunnel
                 // path and the CLI path uniformly), so leave it None here.
                 warn_key_perms: None,
+                // A tunnel failure's fix hint is already part of `message`
+                // (otto-ssh diagnoses it); drivers report their own text.
+                hint: None,
             })
         })
     }

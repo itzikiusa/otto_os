@@ -905,6 +905,23 @@ pub struct TestConnectionResp {
     /// warning is independent of whether the test itself succeeded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warn_key_perms: Option<String>,
+    /// What to change when `ok` is false and the failure is a recognised one
+    /// (auth rejected, host key changed, DNS, refused, timed out, …) — e.g.
+    /// "Check the VPN, firewall / security group …". Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+/// Body of `POST /connections/unsaved/test` — probe an SSH profile's form
+/// values before they are saved (nothing is persisted).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestUnsavedConnectionReq {
+    /// Authorizes the caller (workspace Editor); the probe itself is global.
+    pub workspace_id: Id,
+    /// Only `ssh` — database kinds use `/connections/unsaved/db/test`.
+    pub kind: ConnectionKind,
+    #[serde(default)]
+    pub params: serde_json::Value,
 }
 
 /// Connection responses use the domain type (secret_ref is opaque).
