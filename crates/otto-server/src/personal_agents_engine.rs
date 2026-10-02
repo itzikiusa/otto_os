@@ -50,6 +50,7 @@ use crate::report_delivery::{
     augment_report_prompt, deliver_destination, extract_summary, report_hash, write_report,
 };
 use crate::review_session::{bracketed_paste, dispatched, wait_for_tui, PASTE_TO_ENTER};
+use crate::scheduled_tasks_engine::{until_cancelled, InFlightSet, RunCancels};
 use crate::state::ServerCtx;
 
 /// Marker the prompt-wrap embeds so the offline E2E stub returns a
@@ -350,6 +351,31 @@ pub async fn run_agent(
     complete_agent_run(ctx, agent, schedule, &run.id, trigger, None).await
 }
 
+/// Agent ids with a run in flight — ONE set shared by the scheduler tick and
+/// the manual / directive paths. Every run of an agent works in the same
+/// folder and rewrites the same `memory/notes.md`; the tick used to guard per
+/// SCHEDULE and the manual paths only checked the newest run row, so a recap,
+/// a needs-attention check and a manual run could interleave and lose each
+/// other's memory updates.
+pub(crate) fn in_flight() -> &'static InFlightSet {
+    static SET: OnceLock<InFlightSet> = OnceLock::new();
+    SET.get_or_init(InFlightSet::default)
+}
+
+/// Cancel handles of this engine's in-flight runs (see
+/// [`crate::scheduled_tasks_engine::RunCancels`]).
+fn run_cancels() -> &'static RunCancels {
+    static REG: OnceLock<RunCancels> = OnceLock::new();
+    REG.get_or_init(RunCancels::default)
+}
+
+/// Stop a running personal-agent run (`POST /personal-agents/runs/{id}/cancel`):
+/// its session is killed and it settles as `canceled`. `false` when no run
+/// with that id is executing in this daemon.
+pub fn cancel_run(run_id: &str) -> bool {
+    run_cancels().cancel(run_id)
+}
+
 /// Start a run in the BACKGROUND and return its `running` row at once — the
 /// manual "Run" path (same reasons as the scheduled-task Run now: the whole
 /// agent turn used to run inside the HTTP request, so the caller's timeout or
@@ -361,6 +387,11 @@ pub async fn spawn_agent_run(
     schedule: Option<&PersonalAgentSchedule>,
     trigger: &str,
 ) -> Result<PersonalAgentRun> {
+    let Some(guard) = in_flight().claim(&agent.id) else {
+        return Err(Error::Conflict(
+            "a run of this agent is already in progress".into(),
+        ));
+    };
     let busy = repo(ctx)
         .list_runs(&agent.id, 1)
         .await?
@@ -380,6 +411,7 @@ pub async fn spawn_agent_run(
         trigger.to_string(),
     );
     tokio::spawn(async move {
+        let _guard = guard;
         let _ = complete_agent_run(&ctx2, &agent2, schedule2.as_ref(), &run_id, &trigger2, None)
             .await;
     });
@@ -398,6 +430,11 @@ pub async fn spawn_directive_run(
     if directive.trim().is_empty() {
         return Err(Error::Invalid("directive is required".into()));
     }
+    let Some(guard) = in_flight().claim(&agent.id) else {
+        return Err(Error::Conflict(
+            "a run of this agent is already in progress".into(),
+        ));
+    };
     let busy = repo(ctx)
         .list_runs(&agent.id, 1)
         .await?
@@ -416,6 +453,7 @@ pub async fn spawn_directive_run(
         directive.to_string(),
     );
     tokio::spawn(async move {
+        let _guard = guard;
         let _ =
             complete_agent_run(&ctx2, &agent2, None, &run_id, "manual", Some(&directive2)).await;
     });
@@ -460,7 +498,38 @@ async fn complete_agent_run(
         .filter(|d| !d.trim().is_empty())
         .unwrap_or_else(|| "Check in: review your standing instructions and report status.".into());
 
-    match execute_agent(ctx, agent, &run_id, &directive).await {
+    // A user's Stop drops the execution (no retry) and kills its session.
+    let cancel = run_cancels().register(&run_id);
+    let result = tokio::select! {
+        r = execute_agent(ctx, agent, &run_id, &directive) => Some(r),
+        _ = until_cancelled(&cancel.signal) => None,
+    };
+    drop(cancel);
+    let Some(result) = result else {
+        if let Ok(run) = repo.get_run(&run_id).await {
+            if let Some(sid) = run.session_id.as_deref() {
+                if let Err(e) = ctx.manager.kill_session(&sid.to_string()).await {
+                    warn!(agent = %agent.id, "personal agent stop: kill session {sid}: {e}");
+                }
+            }
+        }
+        let _ = repo
+            .finish_run(
+                &run_id,
+                FinishAgentRun {
+                    status: "canceled".into(),
+                    error: Some("stopped from Otto before it finished".into()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        advance_cursor(ctx, schedule, trigger, Utc::now()).await;
+        prune(ctx, &agent.id).await;
+        emit(ctx, agent, &run_id, "canceled");
+        return Ok(run_id);
+    };
+
+    match result {
         Ok(out) => {
             let now = Utc::now();
             let rel = report_rel(&agent.id, now);
@@ -535,6 +604,9 @@ async fn complete_agent_run(
                 )
                 .await;
             advance_cursor(ctx, schedule, trigger, Utc::now()).await;
+            // Failed runs count against the history cap too (an always-failing
+            // agent used to grow its run list without bound).
+            prune(ctx, &agent.id).await;
             emit(ctx, agent, &run_id, "error");
             Ok(run_id)
         }
@@ -686,6 +758,10 @@ async fn execute_agent(
         },
     )
     .await;
+    // The watcher already read the report into `outcome`; the scratch file
+    // would otherwise pile up one per run (for a personal agent, inside the
+    // folder its next runs work in — where they could read stale reports).
+    let _ = std::fs::remove_file(&out_path);
 
     let session_id = captured_sid
         .lock()

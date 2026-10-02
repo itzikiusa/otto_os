@@ -769,7 +769,9 @@ pub async fn reconcile_interrupted_runs(ctx: &ServerCtx) -> (usize, usize) {
                 nodes: run.nodes.clone(),
                 error: "Interrupted by a daemon restart; resume is disabled for this workflow (on_restart = fail) — re-run it manually.".into(),
             },
-            Ok(_) if run.resume_attempts >= MAX_RESUME_ATTEMPTS => ResumeDecision::Fail {
+            // A run parked at a human approval re-parks without side effects:
+            // it never spends (or is failed for exhausting) the resume budget.
+            Ok(_) if !run.waiting_approval && run.resume_attempts >= MAX_RESUME_ATTEMPTS => ResumeDecision::Fail {
                 nodes: run.nodes.clone(),
                 error: format!(
                     "Interrupted by a daemon restart; automatic resume exhausted after {MAX_RESUME_ATTEMPTS} attempts — use \"retry from this step\" or re-run."
@@ -791,7 +793,10 @@ pub async fn reconcile_interrupted_runs(ctx: &ServerCtx) -> (usize, usize) {
         match decision {
             ResumeDecision::Resume { scope, nodes } => {
                 let scope_json = serde_json::to_string(&scope).unwrap_or_else(|_| "{}".into());
-                match repo.prepare_resume(&run.id, &nodes, &scope_json).await {
+                match repo
+                    .prepare_resume(&run.id, &nodes, &scope_json, !run.waiting_approval)
+                    .await
+                {
                     Ok(rev) => {
                         let (wf, ws) = loaded.expect("Resume implies a loaded workflow");
                         tracing::info!(
@@ -1132,7 +1137,11 @@ pub fn spawn_run(
     scope: RunScope,
     prior_nodes: Option<Vec<NodeRunState>>,
 ) {
+    // Registered BEFORE the task starts, so a retry request can never slip in
+    // between "spawned" and "driver alive".
+    let driver = DriverGuard::register(&run_id);
     tokio::spawn(async move {
+        let _driver = driver;
         {
             let scope_json = serde_json::to_string(&scope).unwrap_or_else(|_| "{}".into());
             if let Err(e) = WorkflowsRepo::new(ctx.pool.clone())
@@ -1231,7 +1240,35 @@ pub fn spawn_run(
                 return;
             }
             Err(e) => {
-                tracing::warn!(%run_id, "queued workflow run unavailable — skipping: {e}");
+                // Leaving the row `pending` here (a transient DB error) parked
+                // it until the next restart — and `has_active_run` blocked
+                // every schedule/event trigger of the workflow meanwhile.
+                tracing::warn!(%run_id, "queued workflow run unavailable — failing it: {e}");
+                let rev = pinned_repo
+                    .update_run_if(
+                        &run_id,
+                        &[RunStatus::Pending],
+                        RunStatus::Error,
+                        prior_nodes.as_deref().unwrap_or(&[]),
+                        Some(&format!("could not start the queued run: {e}")),
+                        true,
+                    )
+                    .await
+                    .ok()
+                    .flatten();
+                if let Some(rev) = rev {
+                    emit_run_updated(
+                        &ctx,
+                        &workflow.workspace_id,
+                        &run_id,
+                        "error",
+                        None,
+                        rev,
+                        None,
+                        prior_nodes.as_deref().unwrap_or(&[]),
+                        false,
+                    );
+                }
                 return;
             }
         };
@@ -1244,6 +1281,53 @@ pub fn spawn_run(
             )
             .await;
     });
+}
+
+/// Run ids with a live driver task (count per id: a stale driver and its
+/// successor may briefly overlap). A cancel flips the row at once but the
+/// driver notices only at its next poll — mid retry-backoff that used to be a
+/// minute — so "Retry" on a just-canceled run started a second driver next to
+/// the first: two agents in one worktree, both writing the run's nodes.
+fn live_drivers() -> &'static std::sync::Mutex<HashMap<Id, usize>> {
+    static LIVE: std::sync::OnceLock<std::sync::Mutex<HashMap<Id, usize>>> =
+        std::sync::OnceLock::new();
+    LIVE.get_or_init(Default::default)
+}
+
+/// Whether a driver task for `run_id` is still running (see [`live_drivers`]).
+pub fn driver_alive(run_id: &Id) -> bool {
+    live_drivers()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(run_id)
+        .is_some_and(|n| *n > 0)
+}
+
+/// Holds a run's [`live_drivers`] entry for the life of its driver task —
+/// released on drop, including when the task panics or is aborted.
+struct DriverGuard(Id);
+
+impl DriverGuard {
+    fn register(run_id: &Id) -> Self {
+        *live_drivers()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(run_id.clone())
+            .or_insert(0) += 1;
+        Self(run_id.clone())
+    }
+}
+
+impl Drop for DriverGuard {
+    fn drop(&mut self) {
+        let mut live = live_drivers().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = live.get_mut(&self.0) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                live.remove(&self.0);
+            }
+        }
+    }
 }
 
 /// Re-enqueue runs that were QUEUED (fresh `pending`) when the previous daemon
@@ -2419,11 +2503,13 @@ pub async fn run_workflow(
                         // mid-node so a long agent turn stops promptly; dropping
                         // `fut` ends our wait, and the finalize block kills the
                         // sessions this run spawned.
+                        let mut parked_at_approval = false;
                         if let Ok(r) = repo.get_run(&run_id).await {
                             if r.status == RunStatus::Canceled {
                                 canceled = true;
                                 break Err(otto_core::Error::Internal("run canceled".into()));
                             }
+                            parked_at_approval = r.waiting_approval;
                         }
                         // A chat `skip` command (consume-once) for THIS step → abort
                         // it and skip it; the run continues to the next node. The
@@ -2431,8 +2517,11 @@ pub async fn run_workflow(
                         // step never fires on this one before it did any work. An
                         // approval gate is never skippable — that would pass it
                         // unapproved (the chat user needn't hold approve rights).
+                        // That includes a LOOP parked at an approval inside it:
+                        // skipping the loop dropped the gate and let the steps
+                        // after it (a PR, say) run with nobody's sign-off.
                         if take_skip_marker(&ctx, &run_id, &node_id) {
-                            if node.kind == "human_approval" {
+                            if node.kind == "human_approval" || parked_at_approval {
                                 states[idx].logs.push(
                                     "⚠ skip ignored — an approval step must be approved or rejected".into(),
                                 );
@@ -2485,13 +2574,17 @@ pub async fn run_workflow(
                             stop_step_session(&ctx, &sid, &run_id, &mut retry_logs).await;
                         }
                     }
-                    // Bail out of the backoff promptly if the run was canceled.
-                    if let Ok(r) = repo.get_run(&run_id).await {
-                        if r.status == RunStatus::Canceled {
-                            break Err(e);
-                        }
+                    // Bail out of the backoff promptly if the run is canceled
+                    // — before AND during the sleep (up to ~65s for an
+                    // overloaded provider). It used to check once and then
+                    // sleep blind, and to settle the step as a FAILED step: a
+                    // "❌ failed" chat post and trace for a run the user
+                    // stopped, and a retry clicked meanwhile raced a second
+                    // attempt of this driver.
+                    if backoff_canceled(&repo, &run_id, Duration::from_millis(sleep_ms)).await {
+                        canceled = true;
+                        break Err(otto_core::Error::Internal("run canceled".into()));
                     }
-                    tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
                     backoff = ((sleep_ms as f64) * policy.factor) as u64;
                     backoff = backoff.clamp(1, 60_000);
                 }
@@ -2868,6 +2961,22 @@ pub async fn run_workflow(
 /// otherwise), report back and reap the worktrees. Shared by the in-loop
 /// cancel, a cancel that landed during startup, and one that landed after the
 /// last node boundary (the success/error CAS lost).
+/// Sleep a retry backoff of `total`, polling the run row every couple of
+/// seconds; `true` as soon as the run is canceled (also when it already is).
+async fn backoff_canceled(repo: &WorkflowsRepo, run_id: &Id, total: Duration) -> bool {
+    let deadline = Instant::now() + total;
+    loop {
+        if matches!(repo.get_run(run_id).await, Ok(r) if r.status == RunStatus::Canceled) {
+            return true;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        tokio::time::sleep(left.min(Duration::from_secs(2))).await;
+    }
+}
+
 async fn finalize_canceled_run(
     ctx: &ServerCtx,
     repo: &WorkflowsRepo,
@@ -2902,19 +3011,31 @@ async fn finalize_canceled_run(
             s.status = NodeStatus::Skipped;
         }
     }
-    let rev = repo
+    // CAS on `canceled` ONLY — every caller got here because the row says
+    // canceled. Accepting pending/running too let a stale driver overwrite a
+    // RETRY the user started meanwhile (its fresh `pending` row got this
+    // driver's old node states and a canceled status: the retry died silently).
+    let rev = match repo
         .update_run_if(
             run_id,
-            &[RunStatus::Pending, RunStatus::Running, RunStatus::Canceled],
+            &[RunStatus::Canceled],
             RunStatus::Canceled,
             states,
             Some("canceled"),
             true,
         )
         .await
-        .ok()
-        .flatten()
-        .unwrap_or(0);
+    {
+        Ok(Some(rev)) => rev,
+        Ok(None) => {
+            tracing::info!(%run_id, "canceled run was re-opened by a retry — leaving it to the new driver");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(%run_id, "workflow cancel finalize write failed: {e}");
+            0
+        }
+    };
     deliver_run_result(
         ctx,
         workflow,
@@ -4144,7 +4265,9 @@ async fn execute_node(
             let pool = &ctx.pool;
             let rev: i64 = sqlx::query_scalar(
                 "UPDATE workflow_runs
-                 SET waiting_approval = 1, approval_node_id = ?, rev = rev + 1
+                 SET waiting_approval = 1, approval_node_id = ?,
+                     approved_by = NULL, approval_note = NULL, approved_at = NULL,
+                     rev = rev + 1
                  WHERE id = ?
                  RETURNING rev",
             )
@@ -4194,7 +4317,7 @@ async fn execute_node(
                 }
                 // Read the current state of the run row.
                 let row = match sqlx::query(
-                    "SELECT waiting_approval, approved_by, approval_note
+                    "SELECT status, waiting_approval, approved_by, approval_note
                      FROM workflow_runs WHERE id = ?",
                 )
                 .bind(run_id)
@@ -4216,6 +4339,14 @@ async fn execute_node(
                 };
 
                 use sqlx::Row as _;
+                // A cancel clears `waiting_approval` too — it is NOT a
+                // decision. Reading it as one recorded "approved by <the
+                // previous approver>" (or "rejected") for a canceled run; keep
+                // waiting and let the run's cancel poll stop this step.
+                let status: String = row.get("status");
+                if status == "canceled" {
+                    continue;
+                }
                 let still_waiting: i64 = row.get("waiting_approval");
                 if still_waiting == 0 {
                     // The resume handler cleared the flag; read the decision.
@@ -8026,6 +8157,108 @@ mod tests {
 
     use super::*;
     use otto_core::workflows::WorkflowEdge;
+
+    /// Migrated in-memory DB; FKs off so a run needs no seeded workspace.
+    async fn mem_repo() -> WorkflowsRepo {
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(false);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .expect("in-memory sqlite");
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&pool)
+            .await
+            .expect("migrations");
+        WorkflowsRepo::new(pool)
+    }
+
+    #[tokio::test]
+    async fn retry_backoff_wakes_on_a_cancel() {
+        let repo = mem_repo().await;
+        let wf = repo
+            .create(
+                &"ws1".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
+            .await
+            .unwrap();
+        let run = repo
+            .create_run(&wf.id, &wf.workspace_id, &Value::Null, None)
+            .await
+            .unwrap();
+        // Not canceled: sleeps the (short) backoff out and reports false.
+        assert!(!backoff_canceled(&repo, &run.id, Duration::from_millis(50)).await);
+        // Canceled: true at once, not after the whole (long) backoff.
+        repo.request_cancel(&run.id).await.unwrap();
+        let t = Instant::now();
+        assert!(backoff_canceled(&repo, &run.id, Duration::from_secs(60)).await);
+        assert!(t.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn a_canceled_finalize_never_overwrites_a_retry() {
+        let repo = mem_repo().await;
+        let wf = repo
+            .create(
+                &"ws1".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
+            .await
+            .unwrap();
+        let run = repo
+            .create_run(&wf.id, &wf.workspace_id, &Value::Null, None)
+            .await
+            .unwrap();
+        repo.update_run(&run.id, RunStatus::Running, &[], None, false)
+            .await
+            .unwrap();
+        repo.request_cancel(&run.id).await.unwrap();
+        // The user retried before the stale driver finalized its cancel.
+        repo.prepare_retry(&run.id, &[], false, &Default::default())
+            .await
+            .unwrap();
+        // The guard finalize uses: canceled ONLY → no write on the retry row.
+        let wrote = repo
+            .update_run_if(
+                &run.id,
+                &[RunStatus::Canceled],
+                RunStatus::Canceled,
+                &[],
+                Some("canceled"),
+                true,
+            )
+            .await
+            .unwrap();
+        assert!(wrote.is_none());
+        assert_eq!(
+            repo.get_run(&run.id).await.unwrap().status,
+            RunStatus::Pending
+        );
+    }
+
+    #[test]
+    fn driver_registry_counts_overlapping_drivers() {
+        let id: Id = "run-driver-registry-test".into();
+        assert!(!driver_alive(&id));
+        let a = DriverGuard::register(&id);
+        let b = DriverGuard::register(&id);
+        assert!(driver_alive(&id));
+        drop(a);
+        assert!(driver_alive(&id), "the second driver is still running");
+        drop(b);
+        assert!(!driver_alive(&id));
+    }
 
     fn node(id: &str, kind: &str) -> WorkflowNode {
         WorkflowNode {

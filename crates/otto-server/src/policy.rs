@@ -1074,6 +1074,9 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/scheduled-tasks/runs/{run_id}/report" {
         return Require(ScheduledTasks, View);
     }
+    if p == "/scheduled-tasks/runs/{run_id}/cancel" {
+        return Require(ScheduledTasks, Edit);
+    }
     if p == "/scheduled-tasks/{id}/convert-to-workflow" {
         return Require(ScheduledTasks, Edit);
     }
@@ -1097,6 +1100,9 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(ScheduledTasks, if get { View } else { Edit });
     }
     if p == "/personal-agents/schedules/{schedule_id}" {
+        return Require(ScheduledTasks, Edit);
+    }
+    if p == "/personal-agents/runs/{run_id}/cancel" {
         return Require(ScheduledTasks, Edit);
     }
     if p == "/personal-agents/{id}/run" || p == "/personal-agents/{id}/chat-session" {

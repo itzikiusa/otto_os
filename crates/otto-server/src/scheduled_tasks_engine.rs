@@ -20,6 +20,7 @@
 //! [`Orchestrator::run_agent`]: otto_orchestrator::Orchestrator::run_agent
 //! [`ScheduledTask`]: otto_core::domain::ScheduledTask
 
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -35,6 +36,7 @@ use tracing::warn;
 
 use crate::agent_run::{run_with_recovery, watch_for_result};
 use crate::cadence;
+use crate::cancel_signal::CancelSignal;
 // Report + delivery mechanics are shared with the personal-agents engine; the
 // old `scheduled_tasks_engine::*` paths remain valid via these re-exports.
 use crate::report_delivery::{augment_report_prompt, deliver_destination, write_report};
@@ -85,6 +87,36 @@ struct ExecOutcome {
     /// Total agent attempts made (1 + retries used).
     attempts: i64,
 }
+
+/// Why an execution failed — plus whatever it still produced. A failed run
+/// used to keep only the error string: the shell output of a non-zero exit was
+/// thrown away, the failed workflow run it launched was not linked, and the
+/// agent session (the one place to see *why*) was overwritten with NULL.
+struct ExecFailure {
+    error: Error,
+    /// A report the failed attempt still produced (a shell run's output).
+    report: Option<String>,
+    session_id: Option<String>,
+    workflow_run_id: Option<String>,
+    attempts: i64,
+    /// Stopped by a user (`POST …/runs/{id}/cancel`), not failed.
+    canceled: bool,
+}
+
+impl From<Error> for ExecFailure {
+    fn from(error: Error) -> Self {
+        Self {
+            error,
+            report: None,
+            session_id: None,
+            workflow_run_id: None,
+            attempts: 1,
+            canceled: false,
+        }
+    }
+}
+
+type ExecResult = std::result::Result<ExecOutcome, ExecFailure>;
 
 // ---------------------------------------------------------------------------
 // Pure helpers (unit-tested)
@@ -137,6 +169,117 @@ fn run_semaphore() -> &'static Arc<Semaphore> {
     })
 }
 
+/// Task ids with a run in flight. ONE set shared by the scheduler tick and the
+/// manual "Run now" path: the scheduler used to keep its own private set while
+/// Run-now only checked the newest DB row, so a scheduled occurrence fired on
+/// top of a manual run still in progress (two agents, two worktrees, two
+/// deliveries), and two quick Run-now clicks could both pass the row check.
+#[derive(Clone, Default)]
+pub(crate) struct InFlightSet(Arc<Mutex<HashSet<String>>>);
+
+impl InFlightSet {
+    /// Claim `task_id`; `None` when a run of it is already in flight. The
+    /// claim is released when the returned guard drops — including on panic,
+    /// so a crashed run can't wedge its task "in flight" until a restart.
+    pub(crate) fn claim(&self, task_id: &str) -> Option<InFlightGuard> {
+        let mut set = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        set.insert(task_id.to_string()).then(|| InFlightGuard {
+            set: self.clone(),
+            id: task_id.to_string(),
+        })
+    }
+}
+
+/// Releases a task's [`InFlightSet`] claim on drop. Poison-tolerant.
+pub(crate) struct InFlightGuard {
+    set: InFlightSet,
+    id: String,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.set
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
+    }
+}
+
+/// Cancel handles of in-flight runs (run id → signal), behind
+/// `POST /scheduled-tasks/runs/{run_id}/cancel` and its personal-agents twin.
+/// A running run used to be unstoppable: killing its session only made the
+/// retry loop open a fresh one.
+#[derive(Default)]
+pub(crate) struct RunCancels(Mutex<HashMap<String, CancelSignal>>);
+
+impl RunCancels {
+    /// Register `run_id` for the life of the returned guard.
+    pub(crate) fn register(&'static self, run_id: &str) -> RunCancelGuard {
+        let signal = CancelSignal::new();
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(run_id.to_string(), signal.clone());
+        RunCancelGuard {
+            reg: self,
+            id: run_id.to_string(),
+            signal,
+        }
+    }
+
+    /// Signal `run_id`'s run to stop; false when it isn't running here.
+    pub(crate) fn cancel(&self, run_id: &str) -> bool {
+        match self.0.lock().unwrap_or_else(|e| e.into_inner()).get(run_id) {
+            Some(sig) => {
+                sig.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// A run's [`RunCancels`] registration; removed on drop (incl. panic).
+pub(crate) struct RunCancelGuard {
+    reg: &'static RunCancels,
+    id: String,
+    pub(crate) signal: CancelSignal,
+}
+
+impl Drop for RunCancelGuard {
+    fn drop(&mut self) {
+        self.reg
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
+    }
+}
+
+/// Resolves once `sig` is cancelled.
+pub(crate) async fn until_cancelled(sig: &CancelSignal) {
+    while !sig.sleep(Duration::from_secs(3600)).await {}
+}
+
+/// The process-wide [`RunCancels`] for scheduled-task runs.
+pub(crate) fn run_cancels() -> &'static RunCancels {
+    static REG: OnceLock<RunCancels> = OnceLock::new();
+    REG.get_or_init(RunCancels::default)
+}
+
+/// Stop a running scheduled-task run (`POST /scheduled-tasks/runs/{id}/cancel`).
+/// `false` when no run with that id is executing in this daemon.
+pub fn cancel_run(run_id: &str) -> bool {
+    run_cancels().cancel(run_id)
+}
+
+/// The process-wide [`InFlightSet`] for scheduled tasks.
+pub(crate) fn in_flight() -> &'static InFlightSet {
+    static SET: OnceLock<InFlightSet> = OnceLock::new();
+    SET.get_or_init(InFlightSet::default)
+}
+
 fn emit(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str, status: &str) {
     let _ = ctx.events.send(Event::ScheduledTaskRunUpdated {
         workspace_id: task.workspace_id.clone(),
@@ -161,12 +304,18 @@ pub async fn run_task(ctx: &ServerCtx, task: &ScheduledTask, trigger: &str) -> R
 /// a dropped request cancelled `run_task` mid-await: its row stayed `running`
 /// until the next daemon restart, the agent session ran on with nobody
 /// collecting its report, and the concurrency permit was released early.
-/// Refuses (409) while another run of the task is still `running`.
+/// Refuses (409) while another run of the task — manual or scheduled — is
+/// still in flight.
 pub async fn spawn_run(
     ctx: &ServerCtx,
     task: &ScheduledTask,
     trigger: &str,
 ) -> Result<ScheduledTaskRun> {
+    let Some(guard) = in_flight().claim(&task.id) else {
+        return Err(otto_core::Error::Conflict(
+            "a run of this task is already in progress".into(),
+        ));
+    };
     let busy = ctx
         .scheduled_tasks
         .list_runs(&task.id, 1)
@@ -186,6 +335,8 @@ pub async fn spawn_run(
         trigger.to_string(),
     );
     tokio::spawn(async move {
+        // Held until the run settles, so the scheduler skips this task meanwhile.
+        let _guard = guard;
         let _ = complete_run(&ctx2, &task2, &run_id, &trigger2).await;
     });
     Ok(run)
@@ -221,7 +372,16 @@ async fn complete_run(
     let run_id = run_id.to_string();
     let tz = cadence::task_tz(&task.timezone);
 
-    match execute(ctx, task, &run_id).await {
+    // A user's Stop drops the execution future (its permit, its shell's
+    // process group, its wait) and stops what it started — see `stop_run`.
+    let cancel = run_cancels().register(&run_id);
+    let result = tokio::select! {
+        r = execute(ctx, task, &run_id) => r,
+        _ = until_cancelled(&cancel.signal) => Err(stop_run(ctx, &run_id).await),
+    };
+    drop(cancel);
+
+    match result {
         Ok(out) => {
             let now = Utc::now();
             let rel = report_rel(&task.id, now);
@@ -283,42 +443,117 @@ async fn complete_run(
                 let _ = repo
                     .set_runtime(&task.id, Some(&now.to_rfc3339()), "ok", next.as_deref())
                     .await;
+            } else {
+                // A manual run's outcome is the task's latest status too — a
+                // failed "Run now" used to leave the row saying "Succeeded".
+                let _ = repo.set_last_status(&task.id, "ok").await;
             }
             prune(ctx, &task.id).await;
             emit(ctx, task, &run_id, "ok");
             Ok(run_id)
         }
-        Err(e) => {
-            let msg = e.to_string();
+        Err(fail) => {
+            let msg = fail.error.to_string();
+            let status = if fail.canceled { "canceled" } else { "error" };
             warn!(task = %task.id, "scheduled task run failed: {msg}");
+            // Keep whatever the failed run still produced (shell output, a
+            // workflow report) so the run's report view shows why it failed.
+            let (report_path, report_rel_opt, summary) = match fail.report.as_deref() {
+                Some(report) => {
+                    let rel = report_rel(&task.id, Utc::now());
+                    let abs = ctx.data_dir.join("scheduled").join(&rel);
+                    match write_report(&abs, report).await {
+                        Ok(()) => (
+                            Some(abs.to_string_lossy().to_string()),
+                            Some(rel),
+                            extract_summary(report),
+                        ),
+                        Err(e) => {
+                            warn!(task = %task.id, "scheduled task: write report failed: {e}");
+                            (None, None, String::new())
+                        }
+                    }
+                }
+                None => (None, None, String::new()),
+            };
             let _ = repo
                 .finish_run(
                     &run_id,
-                    FinishRun {
-                        status: "error".into(),
-                        error: Some(msg),
-                        ..Default::default()
-                    },
+                    failure_finish(fail, msg, summary, report_path, report_rel_opt),
                 )
                 .await;
             if trigger == "schedule" {
                 let now = Utc::now();
                 let next = cadence::next_run(&task.schedule, now, tz).map(|d| d.to_rfc3339());
                 let _ = repo
-                    .set_runtime(&task.id, Some(&now.to_rfc3339()), "error", next.as_deref())
+                    .set_runtime(&task.id, Some(&now.to_rfc3339()), status, next.as_deref())
                     .await;
+            } else {
+                let _ = repo.set_last_status(&task.id, status).await;
             }
-            emit(ctx, task, &run_id, "error");
+            // Failed runs count against the history cap too — a task that
+            // always fails used to grow its run list without bound.
+            prune(ctx, &task.id).await;
+            emit(ctx, task, &run_id, status);
             Ok(run_id)
         }
     }
 }
 
+/// A user stopped the run: kill the agent session it drove and cancel the
+/// workflow run it handed off to (both recorded on the run row as they
+/// started). The execution future itself was already dropped by the caller.
+async fn stop_run(ctx: &ServerCtx, run_id: &str) -> ExecFailure {
+    let row = ctx.scheduled_tasks.get_run(run_id).await.ok();
+    let session_id = row.as_ref().and_then(|r| r.session_id.clone());
+    let workflow_run_id = row.as_ref().and_then(|r| r.workflow_run_id.clone());
+    if let Some(sid) = &session_id {
+        if let Err(e) = ctx.manager.kill_session(sid).await {
+            warn!(run = %run_id, "scheduled task stop: kill session {sid}: {e}");
+        }
+    }
+    if let Some(wr) = &workflow_run_id {
+        let _ = otto_state::WorkflowsRepo::new(ctx.pool.clone())
+            .request_cancel(wr)
+            .await;
+    }
+    ExecFailure {
+        error: Error::Internal("stopped from Otto before it finished".into()),
+        report: None,
+        session_id,
+        workflow_run_id,
+        attempts: 1,
+        canceled: true,
+    }
+}
+
+/// The `FinishRun` for a failed execution: the error, plus whatever the run
+/// still produced (report, session, workflow run, attempt count).
+fn failure_finish(
+    fail: ExecFailure,
+    error: String,
+    summary: String,
+    report_path: Option<String>,
+    report_rel: Option<String>,
+) -> FinishRun {
+    FinishRun {
+        status: if fail.canceled { "canceled" } else { "error" }.into(),
+        error: Some(error),
+        summary,
+        report_path,
+        report_rel,
+        session_id: fail.session_id,
+        workflow_run_id: fail.workflow_run_id,
+        attempts: fail.attempts,
+        ..Default::default()
+    }
+}
+
 /// Dispatch a task by kind/provider: a handed-off workflow, a shell command, or
 /// (the default) an agent run.
-async fn execute(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> Result<ExecOutcome> {
+async fn execute(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> ExecResult {
     if task.kind == "workflow" {
-        return execute_workflow(ctx, task).await;
+        return execute_workflow(ctx, task, run_id).await;
     }
     if task.provider.trim() == "shell" {
         return execute_shell(ctx, task).await;
@@ -350,7 +585,7 @@ fn task_data_dir(ctx: &ServerCtx, task_id: &str) -> std::path::PathBuf {
 /// stub (no real CLI). Otherwise every run is a **real, openable session** of the
 /// task's provider (claude/codex/agy/custom), retried up to `1 + max_retries`
 /// times, capturing the Markdown report the agent writes to a file.
-async fn execute_agent(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> Result<ExecOutcome> {
+async fn execute_agent(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> ExecResult {
     let cwd = resolve_cwd(ctx, task).await?;
     let prompt = build_prompt(ctx, task);
     let model = (!task.model.trim().is_empty()).then_some(task.model.as_str());
@@ -391,7 +626,8 @@ async fn execute_agent(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> R
                     "scheduled task '{}' uses provider '{}' but has no owner to open a \
                      session under; non-claude providers require an owning user",
                     task.name, task.provider
-                )));
+                ))
+                .into());
             }
             let report = ctx
                 .orchestrator
@@ -450,20 +686,36 @@ async fn execute_agent(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> R
         },
     )
     .await;
+    // The watcher already read the report into `outcome`; the scratch file
+    // would otherwise pile up one per run (for a personal agent, inside the
+    // folder its next runs work in — where they could read stale reports).
+    let _ = std::fs::remove_file(&out_path);
 
     let session_id = captured_sid
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
+    let attempts = attempts.load(std::sync::atomic::Ordering::Relaxed).max(1);
+    // Keep the session on a failure: it is where the user sees what went wrong.
+    let fail = |error: Error| ExecFailure {
+        error,
+        report: None,
+        session_id: session_id.clone(),
+        workflow_run_id: None,
+        attempts,
+        canceled: false,
+    };
     if outcome.errored() {
-        return Err(Error::Internal(format!(
-            "agent run failed: {}",
+        return Err(fail(Error::Internal(format!(
+            "agent run failed after {attempts} attempt(s): {}",
             outcome.reason.map(|r| r.as_str()).unwrap_or("unknown")
-        )));
+        ))));
     }
     let report = outcome.raw.unwrap_or_default();
     if report.trim().is_empty() {
-        return Err(Error::Internal("agent produced an empty report".into()));
+        return Err(fail(Error::Internal(
+            "agent produced an empty report".into(),
+        )));
     }
     let summary = extract_summary(&report);
     Ok(ExecOutcome {
@@ -471,7 +723,7 @@ async fn execute_agent(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> R
         summary,
         session_id,
         workflow_run_id: None,
-        attempts: attempts.load(std::sync::atomic::Ordering::Relaxed).max(1),
+        attempts,
     })
 }
 
@@ -548,7 +800,7 @@ async fn run_one_agent_session(
 
 /// Run a `provider == "shell"` task: execute the prompt as a shell command in the
 /// resolved cwd, capturing stdout/stderr + exit code as the Markdown report.
-async fn execute_shell(ctx: &ServerCtx, task: &ScheduledTask) -> Result<ExecOutcome> {
+async fn execute_shell(ctx: &ServerCtx, task: &ScheduledTask) -> ExecResult {
     let cwd = resolve_cwd(ctx, task).await?;
     let _permit = run_semaphore()
         .acquire()
@@ -559,19 +811,31 @@ async fn execute_shell(ctx: &ServerCtx, task: &ScheduledTask) -> Result<ExecOutc
     // timeout, or non-zero exit) is retried up to `1 + max_retries` times.
     let (res, attempts) =
         run_shell_with_retry(&cmd, &cwd, task.max_retries, SHELL_TIMEOUT, &RETRY_BACKOFF).await;
-    let run = res?; // a spawn error / timeout on the final attempt → no report
+    // A spawn error / timeout on the final attempt → no report.
+    let run = res.map_err(|error| ExecFailure {
+        attempts,
+        ..ExecFailure::from(error)
+    })?;
     let report = shell_report(&task.name, &cmd, &run);
     let summary = extract_summary(&report);
     if !run.status.success() {
-        // Non-zero exit is a run error (so error status applies), but we still
-        // produced a report for the run record.
-        return Err(Error::Internal(format!(
-            "shell command exited with {} after {attempts} attempt(s)",
-            run.status
-                .code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "signal".into())
-        )));
+        // Non-zero exit is a run error (so error status applies), but the
+        // report — the command's stdout/stderr — is kept on the run: it is
+        // usually the only place that says why the command failed.
+        return Err(ExecFailure {
+            error: Error::Internal(format!(
+                "shell command exited with {} after {attempts} attempt(s)",
+                run.status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".into())
+            )),
+            report: Some(report),
+            session_id: None,
+            workflow_run_id: None,
+            attempts,
+            canceled: false,
+        });
     }
     Ok(ExecOutcome {
         report,
@@ -642,18 +906,34 @@ async fn run_shell_once(cmd: &str, cwd: &str, timeout: Duration) -> Result<std::
         .spawn()
         .map_err(|e| Error::Internal(format!("spawn shell: {e}")))?;
     let pid = child.id();
+    // Dropped mid-run (a user's Stop drops the whole execution): kill the
+    // group, not just the shell (kill_on_drop) — its children would run on.
+    let mut group = GroupKill(pid);
     match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(out)) => Ok(out),
+        Ok(Ok(out)) => {
+            group.0 = None;
+            Ok(out)
+        }
         Ok(Err(e)) => Err(Error::Internal(format!("shell: {e}"))),
         Err(_) => {
             // The shell itself died with the dropped future (kill_on_drop);
             // take its children with it.
+            group.0 = None;
             kill_process_group(pid);
             Err(Error::Internal(format!(
                 "shell command timed out after {}s (killed)",
                 timeout.as_secs()
             )))
         }
+    }
+}
+
+/// Kills the process group led by its pid on drop, unless disarmed (`.0 = None`).
+struct GroupKill(Option<u32>);
+
+impl Drop for GroupKill {
+    fn drop(&mut self) {
+        kill_process_group(self.0.take());
     }
 }
 
@@ -670,7 +950,7 @@ fn kill_process_group(_pid: Option<u32>) {}
 
 /// Hand off to a workflow: launch a [`WorkflowRun`], wait (bounded) for it to
 /// reach a terminal state, and summarise the node statuses as the report.
-async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask) -> Result<ExecOutcome> {
+async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask, sched_run_id: &str) -> ExecResult {
     use otto_state::WorkflowsRepo;
 
     let wf_id = task
@@ -681,9 +961,7 @@ async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask) -> Result<ExecO
     let repo = WorkflowsRepo::new(ctx.pool.clone());
     let workflow = repo.get(&wf_id.to_string()).await?;
     if workflow.workspace_id != task.workspace_id {
-        return Err(Error::Invalid(
-            "workflow belongs to a different workspace".into(),
-        ));
+        return Err(Error::Invalid("workflow belongs to a different workspace".into()).into());
     }
     // Overlap guard (the workflow schedule-trigger scheduler has the same one):
     // this path stops waiting after WORKFLOW_WAIT and releases the task's
@@ -694,7 +972,8 @@ async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask) -> Result<ExecO
         return Err(Error::Conflict(format!(
             "skipped: a run of workflow \"{}\" is still in progress",
             workflow.name
-        )));
+        ))
+        .into());
     }
     let ws = ctx.workspaces.get(&task.workspace_id).await?;
     let input = json!({ "trigger": "scheduled_task", "task_id": task.id, "task_name": task.name });
@@ -702,6 +981,12 @@ async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask) -> Result<ExecO
         .create_run(&workflow.id, &workflow.workspace_id, &input, None)
         .await?;
     let run_id = run.id.clone();
+    // Linked at once: the run row can open it while it runs, and a Stop
+    // cancels it.
+    let _ = ctx
+        .scheduled_tasks
+        .set_run_workflow_run(sched_run_id, &run_id)
+        .await;
     crate::workflow_engine::spawn_run(
         ctx.clone(),
         ws.clone(),
@@ -721,10 +1006,17 @@ async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask) -> Result<ExecO
             if matches!(status.as_str(), "success" | "error" | "canceled") {
                 let report = workflow_report(&workflow.name, &r);
                 let summary = extract_summary(&report);
-                if status == "error" {
-                    return Err(Error::Internal(format!(
-                        "workflow run {run_id} finished with errors"
-                    )));
+                // A canceled workflow did not do the task's job — reporting it
+                // `ok` (as this used to) hid a stopped run behind a green badge.
+                if let Some(error) = workflow_failure(&status, &run_id) {
+                    return Err(ExecFailure {
+                        error,
+                        report: Some(report),
+                        session_id: None,
+                        workflow_run_id: Some(run_id),
+                        attempts: 1,
+                        canceled: false,
+                    });
                 }
                 return Ok(ExecOutcome {
                     report,
@@ -772,7 +1064,16 @@ async fn resolve_cwd(ctx: &ServerCtx, task: &ScheduledTask) -> Result<String> {
                 if let Some(wt) = make_worktree(ctx, task, repo_path).await {
                     return Ok(wt);
                 }
-                // worktree add failed (not a git repo / git error) → run in the dir.
+                // Not a git repo → no tree to isolate; run in the dir. A REAL
+                // repo whose worktree add failed must not fall back to the
+                // user's own checkout: the task asked for isolation, and an
+                // agent (or shell command) would edit their working tree.
+                if std::path::Path::new(repo_path).join(".git").exists() {
+                    return Err(Error::Internal(format!(
+                        "could not create the isolated worktree in {repo_path} — refusing to \
+                         run in your checkout (see the daemon log for the git error)"
+                    )));
+                }
                 return Ok(repo_path.clone());
             }
         }
@@ -894,6 +1195,20 @@ fn shell_report(name: &str, cmd: &str, out: &std::process::Output) -> String {
         stdout.trim_end(),
         stderr.trim_end()
     )
+}
+
+/// The run error for a workflow that ended in `status` (lower-cased debug
+/// name), or `None` when it succeeded.
+fn workflow_failure(status: &str, run_id: &str) -> Option<Error> {
+    match status {
+        "success" => None,
+        "canceled" => Some(Error::Internal(format!(
+            "workflow run {run_id} was canceled before it finished"
+        ))),
+        _ => Some(Error::Internal(format!(
+            "workflow run {run_id} finished with errors"
+        ))),
+    }
 }
 
 /// Format a finished workflow run as a Markdown report.
@@ -1112,6 +1427,68 @@ mod tests {
         assert!(!headless_fallback_ok("codex"));
         assert!(!headless_fallback_ok("agy"));
         assert!(!headless_fallback_ok("my-custom-agent"));
+    }
+
+    #[test]
+    fn in_flight_claim_is_exclusive_and_released_on_drop() {
+        let set = InFlightSet::default();
+        let a = set.claim("t1").expect("first claim");
+        assert!(
+            set.claim("t1").is_none(),
+            "a second run of t1 must be refused"
+        );
+        let b = set.claim("t2").expect("other tasks are independent");
+        drop(a);
+        assert!(set.claim("t1").is_some(), "the claim is released on drop");
+        drop(b);
+    }
+
+    #[test]
+    fn in_flight_claim_is_released_when_the_run_panics() {
+        let set = InFlightSet::default();
+        let s2 = set.clone();
+        let res = std::panic::catch_unwind(move || {
+            let _g = s2.claim("t1").unwrap();
+            panic!("run blew up");
+        });
+        assert!(res.is_err());
+        assert!(set.claim("t1").is_some());
+    }
+
+    #[test]
+    fn canceled_and_failed_workflows_are_run_errors() {
+        assert!(workflow_failure("success", "r1").is_none());
+        let canceled = workflow_failure("canceled", "r1").unwrap().to_string();
+        assert!(canceled.contains("canceled"), "{canceled}");
+        let failed = workflow_failure("error", "r1").unwrap().to_string();
+        assert!(failed.contains("finished with errors"), "{failed}");
+    }
+
+    #[test]
+    fn failure_finish_keeps_what_the_run_produced() {
+        let fail = ExecFailure {
+            error: Error::Internal("shell command exited with 2".into()),
+            report: Some("# t\n\nexit 2\n\n---\n\nstderr".into()),
+            session_id: Some("s1".into()),
+            workflow_run_id: Some("w1".into()),
+            attempts: 3,
+            canceled: false,
+        };
+        let f = failure_finish(
+            fail,
+            "shell command exited with 2".into(),
+            "exit 2".into(),
+            Some("/abs/r.md".into()),
+            Some("t/reports/r.md".into()),
+        );
+        assert_eq!(f.status, "error");
+        assert_eq!(f.error.as_deref(), Some("shell command exited with 2"));
+        assert_eq!(f.summary, "exit 2");
+        assert_eq!(f.report_rel.as_deref(), Some("t/reports/r.md"));
+        assert_eq!(f.session_id.as_deref(), Some("s1"));
+        assert_eq!(f.workflow_run_id.as_deref(), Some("w1"));
+        assert_eq!(f.attempts, 3);
+        assert!(!f.delivered);
     }
 
     #[test]

@@ -88,7 +88,9 @@
   let fProvider = $state(defaultAgentProvider());
   let fModel = $state(''); // '' = provider default
   let fWorkflowId = $state('');
-  let fCadence = $state<'interval' | 'daily' | 'weekly' | 'cron'>('interval');
+  let fCadence = $state<'interval' | 'daily' | 'weekly' | 'cron' | 'once'>('interval');
+  /** `once`: the local wall-clock fire time (`YYYY-MM-DDTHH:MM`, in the task's timezone). */
+  let fRunAt = $state('');
   let fEveryMin = $state(60);
   let fAt = $state('03:00');
   let fWeekday = $state(0);
@@ -162,6 +164,7 @@
     fAt = '03:00';
     fWeekday = 0;
     fCronExpr = '0 9 * * 1';
+    fRunAt = '';
     fTimezone = browserTz;
     fSandbox = 'none';
     fMaxRetries = 0;
@@ -182,7 +185,7 @@
 
   function formState(): string {
     return JSON.stringify([fName, fPrompt, fSkill, fKind, fProvider, fModel, fWorkflowId, fCadence, fEveryMin, fAt, fWeekday,
-      fCronExpr, fTimezone, fSandbox, fMaxRetries, fNotifyOnChange, fAttachProof, fDestType, fChatId, fEmailTo, fUrl, fEnabled, fCwd]);
+      fCronExpr, fRunAt, fTimezone, fSandbox, fMaxRetries, fNotifyOnChange, fAttachProof, fDestType, fChatId, fEmailTo, fUrl, fEnabled, fCwd]);
   }
 
   function startCreate(): void {
@@ -244,10 +247,33 @@
     fDestType = ['slack', 'telegram', 'email', 'webhook'].includes(dt) ? (dt as typeof fDestType) : 'none';
   }
 
+  /** A `once` schedule's `run_at` as a `datetime-local` value in `tz`: a local
+   *  wall time passes through; an RFC3339 instant is shown in the timezone. */
+  function runAtInput(raw: string, tz: string): string {
+    const local = raw.trim().replace(' ', 'T');
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(local)) return local.slice(0, 16);
+    const d = new Date(raw);
+    if (Number.isNaN(d.getTime())) return '';
+    try {
+      const parts = Object.fromEntries(
+        new Intl.DateTimeFormat('en-CA', {
+          timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+        }).formatToParts(d).map((p) => [p.type, p.value]),
+      );
+      return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+    } catch {
+      return d.toISOString().slice(0, 16);
+    }
+  }
+
   /** Populate the cadence form vars from a schedule object (preset or task). */
-  function loadSchedule(s: Record<string, unknown>): void {
+  function loadSchedule(s: Record<string, unknown>, tz?: string): void {
     const cad = (s.cadence as string) ?? 'interval';
-    fCadence = ['daily', 'weekly', 'cron'].includes(cad) ? (cad as typeof fCadence) : 'interval';
+    // `once` (the Assistant and MCP create them) used to load as an interval
+    // and silently became "every 60 min" on the next save.
+    fCadence = ['daily', 'weekly', 'cron', 'once'].includes(cad) ? (cad as typeof fCadence) : 'interval';
+    fRunAt = typeof s.run_at === 'string' ? runAtInput(s.run_at, tz ?? fTimezone) : '';
     fEveryMin = (s.every_min as number) ?? 60;
     fAt = (s.at as string) ?? '03:00';
     fWeekday = (s.weekday as number) ?? 0;
@@ -265,7 +291,7 @@
     fProvider = t.provider || defaultAgentProvider();
     fModel = t.model ?? '';
     fWorkflowId = t.workflow_id ?? '';
-    loadSchedule(t.schedule ?? {});
+    loadSchedule(t.schedule ?? {}, t.timezone || browserTz);
     fTimezone = t.timezone || browserTz;
     fSandbox = t.sandbox === 'worktree' ? 'worktree' : 'none';
     fMaxRetries = t.max_retries ?? 0;
@@ -288,6 +314,7 @@
     if (fCadence === 'interval') return { cadence: 'interval', every_min: Math.max(5, fEveryMin) };
     if (fCadence === 'daily') return { cadence: 'daily', at: fAt };
     if (fCadence === 'cron') return { cadence: 'cron', expr: fCronExpr.trim() };
+    if (fCadence === 'once') return { cadence: 'once', run_at: fRunAt };
     return { cadence: 'weekly', at: fAt, weekday: fWeekday };
   }
 
@@ -355,6 +382,10 @@
     }
     if (fCadence === 'cron' && cronFieldCount !== 5) {
       error = 'The cron expression needs 5 fields.';
+      return;
+    }
+    if (fCadence === 'once' && !fRunAt) {
+      error = 'Pick the date and time it runs.';
       return;
     }
     // Outward-facing: every run posts its report off the Mac. Say where
@@ -429,12 +460,34 @@
   }
 
   async function convertToWorkflow(t: ScheduledTask): Promise<void> {
+    // The new workflow gets a schedule trigger on the SAME cadence. Keeping the
+    // task running too doubles every run — and every delivery — so pausing it
+    // is the default; keeping both is an explicit choice.
+    let disableTask = false;
+    if (t.enabled) {
+      const { value } = await confirmer.choose(
+        `“${t.name}” becomes a workflow with a schedule trigger on the same cadence. If the task keeps running too, it runs twice — and delivers twice.`,
+        {
+          title: 'Convert to workflow',
+          options: [
+            { label: 'Convert and pause the task', value: 'pause', kind: 'primary' },
+            { label: 'Convert, keep both running', value: 'keep', kind: 'normal' },
+          ],
+        },
+      );
+      if (!value) return;
+      disableTask = value === 'pause';
+    }
     busy = true;
     try {
-      const res = await scheduledTasksApi.convertToWorkflow(t.id);
+      const res = await scheduledTasksApi.convertToWorkflow(t.id, disableTask);
       convertedWfId = res.workflow_id;
       wfLoaded = false; // the picker re-fetches and sees the new workflow
-      toasts.success('Converted to workflow', `Created a workflow from “${t.name}”.`);
+      if (disableTask && ws.currentId) void scheduledTasks.loadList(ws.currentId);
+      toasts.success(
+        'Converted to workflow',
+        disableTask ? `Created a workflow from “${t.name}” and paused the task.` : `Created a workflow from “${t.name}”.`,
+      );
     } catch (e) {
       toasts.error(`Couldn't convert “${t.name}” to a workflow`, errText(e));
     } finally {
@@ -478,6 +531,22 @@
   }
 
   /** Navigate to the agent session a run drove (visible session row). */
+  /** Stop a running run — asks first: the agent's work so far is not reported. */
+  async function stopRun(r: ScheduledTaskRun, t: ScheduledTask): Promise<void> {
+    const ok = await confirmer.ask(
+      `Stop this run of “${t.name}”? Its agent session (or shell command / workflow run) is stopped and nothing is delivered. The next scheduled run is unaffected.`,
+      { title: 'Stop run', confirmLabel: 'Stop run' },
+    );
+    if (!ok) return;
+    try {
+      await scheduledTasksApi.cancelRun(r.id);
+      toasts.info('Stopping the run…', t.name);
+    } catch (e) {
+      toasts.error('Couldn’t stop the run', errText(e));
+    }
+    void scheduledTasks.loadRuns(t.id);
+  }
+
   function openSession(sessionId: string | null | undefined): void {
     if (sessionId) ws.navigateToSession(sessionId);
   }
@@ -513,6 +582,10 @@
     const tz = t.timezone || 'UTC';
     if (c === 'interval') return everyLabel((s.every_min as number) ?? 60);
     if (c === 'cron') return 'Cron';
+    if (c === 'once') {
+      const at = typeof s.run_at === 'string' ? runAtInput(s.run_at, tz).replace('T', ' ') : '';
+      return at ? `Once at ${at} · ${tz}` : 'Once';
+    }
     if (c === 'daily') return `Daily at ${(s.at as string) ?? '09:00'} · ${tz}`;
     const wd = ['Mondays', 'Tuesdays', 'Wednesdays', 'Thursdays', 'Fridays', 'Saturdays', 'Sundays'][(s.weekday as number) ?? 0];
     return `${wd} at ${(s.at as string) ?? '09:00'} · ${tz}`;
@@ -655,12 +728,18 @@
             <option value="daily">Daily</option>
             <option value="weekly">Weekly</option>
             <option value="cron">Cron</option>
+            <option value="once">Once</option>
           </select>
         </label>
         {#if fCadence === 'interval'}
           <label class="fld">
             <span>Every (minutes, min 5)</span>
             <input class="input" type="number" min="5" bind:value={fEveryMin} />
+          </label>
+        {:else if fCadence === 'once'}
+          <label class="fld">
+            <span>Runs once at (in the timezone)</span>
+            <input class="input" type="datetime-local" bind:value={fRunAt} aria-invalid={!fRunAt} />
           </label>
         {:else if fCadence === 'cron'}
           <label class="fld">
@@ -874,12 +953,23 @@
                     {#if r.session_id}
                       <button class="btn small" title="Open the agent session this run drove" onclick={() => openSession(r.session_id)}>Open session</button>
                     {/if}
+                    {#if r.status === 'running'}
+                      <button class="btn small danger" title="Stop this run (its agent session, shell command or workflow run is stopped)" onclick={() => void stopRun(r, t)}>Stop…</button>
+                    {/if}
                     {#if (r.attempts ?? 1) > 1}<span class="pill warn">{r.attempts} attempts</span>{/if}
                     {#if r.delivered}<span class="pill ok">Delivered</span>{/if}
                     {#if r.skipped_delivery}<span class="pill" title="Not delivered: the report is unchanged since the last run">No change</span>{/if}
                     {#if r.delivery_error}<span class="pill warn" title={r.delivery_error}>Delivery failed</span>{/if}
                     {#if r.proof_pack_id}<span class="pill ok" title="A proof pack is attached to this run">Proof</span>{/if}
                     {#if r.workflow_run_id}<span class="pill" title="Workflow run {r.workflow_run_id}">Workflow run</span>{/if}
+                    <!-- Why it failed / why it wasn't delivered, readable without
+                         hovering (a failed run used to say only "No summary"). -->
+                    {#if r.status === 'error' && r.error}
+                      <p class="run-err" role="note"><Icon name="warning" size={12} /> {r.error}</p>
+                    {/if}
+                    {#if r.delivery_error}
+                      <p class="run-err warn" role="note">Not delivered: {r.delivery_error}</p>
+                    {/if}
                   </div>
                 {/each}
                 </LoadState>
@@ -962,6 +1052,8 @@
   .run-when { color: var(--text-dim); font-variant-numeric: tabular-nums; }
   .run-sum { flex: 1; min-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .run-sum.none { color: var(--text-dim); font-style: italic; }
+  .run-err { flex-basis: 100%; margin: 0; padding-inline-start: 4px; font-size: var(--fs-xs); color: var(--danger); overflow-wrap: anywhere; display: flex; gap: 4px; align-items: baseline; }
+  .run-err.warn { color: var(--warning); }
   .pill { font-size: var(--fs-xs); padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); white-space: nowrap; }
   .pill.ok { background: var(--success-soft); color: var(--success); border-color: transparent; }
   .pill.warn { background: var(--warning-soft); color: var(--warning); border-color: transparent; }

@@ -79,6 +79,7 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/personal-agents/{id}/run", post(run_now))
         .route("/personal-agents/{id}/runs", get(list_runs))
         .route("/personal-agents/runs/{run_id}/report", get(report))
+        .route("/personal-agents/runs/{run_id}/cancel", post(cancel_run))
         .route("/personal-agents/{id}/chat-session", post(chat_session))
         .route(
             "/workspaces/{id}/agent-rooms",
@@ -334,6 +335,9 @@ async fn update(
     if let Some(c) = req.cwd.as_deref() {
         personal_agents_engine::validate_agent_cwd(c).map_err(ApiError)?;
     }
+    // Resuming the agent resumes all its schedules: re-arm them so what they
+    // missed while it was paused is not fired (and delivered) at once.
+    let resumed = !agent.enabled && req.enabled == Some(true);
     let updated = repo
         .update(
             &id,
@@ -351,6 +355,16 @@ async fn update(
         )
         .await
         .map_err(ApiError)?;
+    if resumed {
+        let _ = repo
+            .rearm_agent_schedules(&id, &chrono::Utc::now().to_rfc3339())
+            .await;
+        if let Ok(schedules) = repo.list_schedules(&id).await {
+            for s in &schedules {
+                refresh_next_run(&repo, s).await;
+            }
+        }
+    }
     Ok(Json(updated))
 }
 
@@ -430,6 +444,18 @@ async fn update_schedule(
         check_timezone(tz)?;
     }
     let cadence_changed = req.schedule.is_some() || req.timezone.is_some();
+    // Resumed, or a really new cadence/timezone → re-arm; a re-timed `once`
+    // forgets it fired (the engine disables a spent once — editing its time
+    // and turning it back on must make it fire again).
+    let rearm = cadence::rearms(
+        schedule.enabled,
+        req.enabled,
+        &schedule.schedule,
+        req.schedule.as_ref(),
+        &schedule.timezone,
+        req.timezone.as_deref(),
+    );
+    let reset_once = cadence::rearms_once(&schedule.schedule, req.schedule.as_ref());
     let updated = repo
         .update_schedule(
             &schedule_id,
@@ -442,7 +468,12 @@ async fn update_schedule(
         )
         .await
         .map_err(ApiError)?;
-    if cadence_changed {
+    if rearm || reset_once {
+        let _ = repo
+            .rearm_schedule(&schedule_id, &chrono::Utc::now().to_rfc3339(), reset_once)
+            .await;
+    }
+    if cadence_changed || rearm {
         refresh_next_run(&repo, &updated).await;
     }
     repo.get_schedule(&schedule_id)
@@ -521,6 +552,21 @@ async fn list_runs(
 }
 
 /// `GET /personal-agents/runs/{run_id}/report` — the stored Markdown report.
+/// `POST /personal-agents/runs/{run_id}/cancel` — stop a running run (its
+/// session is killed, no retry); it settles as `canceled`. 409 once finished.
+async fn cancel_run(
+    Path(run_id): Path<String>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<Value>> {
+    let run = agents(&ctx).get_run(&run_id).await.map_err(ApiError)?;
+    require_ws_role(&ctx, &user, &run.workspace_id, WorkspaceRole::Editor).await?;
+    if run.status != "running" || !personal_agents_engine::cancel_run(&run_id) {
+        return Err(ApiError(Error::Conflict("the run is not running".into())));
+    }
+    Ok(Json(json!({"ok": true})))
+}
+
 async fn report(
     Path(run_id): Path<String>,
     State(ctx): State<ServerCtx>,

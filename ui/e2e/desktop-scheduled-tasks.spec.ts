@@ -127,6 +127,55 @@ test.describe('scheduled tasks API (route → policy → engine → report)', ()
     await ctx.dispose();
   });
 
+  test('a failing shell run keeps its output, says why, and shows on the task badge', async () => {
+    const { ctx } = await apiCtx();
+    const t = await (
+      await ctx.post(`${base}${V1}/workspaces/${wsA}/scheduled-tasks`, {
+        data: {
+          name: 'E2E shell fail',
+          provider: 'shell',
+          prompt: 'echo otto-fail-marker >&2; exit 3',
+          schedule: { cadence: 'interval', every_min: 60 },
+        },
+      })
+    ).json();
+    // Armed at creation: the row carries armed_at, and next_run_at is a period out.
+    expect(t.armed_at, 'armed_at set on create').toBeTruthy();
+    const run = await (await ctx.post(`${base}${V1}/scheduled-tasks/${t.id}/run`, { data: {} })).json();
+    let final = run;
+    for (let i = 0; i < 40 && final.status === 'running'; i++) {
+      await new Promise((res) => setTimeout(res, 250));
+      const runs = await (await ctx.get(`${base}${V1}/scheduled-tasks/${t.id}/runs`)).json();
+      final = runs.find((x: any) => x.id === run.id) ?? final;
+    }
+    expect(final.status, JSON.stringify(final)).toBe('error');
+    expect(final.error).toContain('exited with 3');
+    expect(final.report_rel, 'the failed command output is kept as the report').toBeTruthy();
+    const md = await (await ctx.get(`${base}${V1}/scheduled-tasks/runs/${run.id}/report`)).text();
+    expect(md).toContain('otto-fail-marker');
+    // A manual run's outcome is the task's status too.
+    const after = await (await ctx.get(`${base}${V1}/scheduled-tasks/${t.id}`)).json();
+    expect(after.last_status).toBe('error');
+    // A finished run can't be stopped.
+    const stop = await ctx.post(`${base}${V1}/scheduled-tasks/runs/${run.id}/cancel`, { data: {} });
+    expect(stop.status()).toBe(409);
+    await ctx.dispose();
+  });
+
+  test('cron fires closer than 5 minutes apart are rejected', async () => {
+    const { ctx } = await apiCtx();
+    const status = async (expr: string) =>
+      (
+        await ctx.post(`${base}${V1}/workspaces/${wsA}/scheduled-tasks`, {
+          data: { name: `cron ${expr}`, schedule: { cadence: 'cron', expr }, enabled: false },
+        })
+      ).status();
+    expect(await status('* * * * *')).toBe(400);
+    expect(await status('0,1 9 * * *')).toBe(400);
+    expect(await status('*/15 * * * *')).toBe(200);
+    await ctx.dispose();
+  });
+
   test('list is workspace-scoped (A task absent from B)', async () => {
     const { ctx } = await apiCtx();
     const a = await (await ctx.get(`${base}${V1}/workspaces/${wsA}/scheduled-tasks`)).json();

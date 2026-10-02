@@ -578,6 +578,13 @@ pub async fn retry_run_node(
             "run is still active — cancel it first or wait for it to finish".into(),
         )));
     }
+    // Canceled, but its old driver hasn't noticed yet (it polls; mid retry
+    // backoff that took up to a minute): a retry now would run next to it.
+    if workflow_engine::driver_alive(&id) {
+        return Err(ApiError(Error::Conflict(
+            "the run is still stopping — try again in a few seconds".into(),
+        )));
+    }
     let node_id = req.node_id.trim();
     let target = run
         .nodes

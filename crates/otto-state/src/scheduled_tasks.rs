@@ -147,6 +147,7 @@ fn row_to_task(r: &sqlx::sqlite::SqliteRow) -> Result<ScheduledTask> {
         last_run_at: r.get("last_run_at"),
         last_status: r.get("last_status"),
         next_run_at: r.get("next_run_at"),
+        armed_at: r.get("armed_at"),
         created_by: r.get("created_by"),
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
@@ -192,8 +193,9 @@ impl ScheduledTasksRepo {
         sqlx::query(
             "INSERT INTO scheduled_tasks (id, workspace_id, name, kind, prompt, skill, provider, \
              model, cwd, schedule_json, destination_json, enabled, timezone, workflow_id, sandbox, \
-             max_retries, notify_on_change, attach_proof, created_by, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             max_retries, notify_on_change, attach_proof, created_by, created_at, updated_at, \
+             armed_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&t.workspace_id)
@@ -215,6 +217,8 @@ impl ScheduledTasksRepo {
         .bind(t.attach_proof as i64)
         .bind(&t.created_by)
         .bind(&now)
+        .bind(&now)
+        // Armed at creation: the first fire is the next one after now.
         .bind(&now)
         .execute(&self.pool)
         .await
@@ -322,6 +326,35 @@ impl ScheduledTasksRepo {
         Ok(())
     }
 
+    /// Record a manual run's outcome as the task's `last_status` without
+    /// touching the scheduler cursor or `next_run_at`.
+    pub async fn set_last_status(&self, id: &str, last_status: &str) -> Result<()> {
+        sqlx::query("UPDATE scheduled_tasks SET last_status = ?, updated_at = ? WHERE id = ?")
+            .bind(last_status)
+            .bind(fmt(Utc::now()))
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set scheduled task last status"))?;
+        Ok(())
+    }
+
+    /// Re-arm a task's schedule at `at` (see `ScheduledTask::armed_at`);
+    /// `reset_once` also forgets a fired `once` (its cursor is the fired flag).
+    pub async fn rearm(&self, id: &str, at: &str, reset_once: bool) -> Result<()> {
+        sqlx::query(
+            "UPDATE scheduled_tasks SET armed_at = ?, \
+             last_run_at = CASE WHEN ? THEN NULL ELSE last_run_at END WHERE id = ?",
+        )
+        .bind(at)
+        .bind(reset_once)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("rearm scheduled task"))?;
+        Ok(())
+    }
+
     pub async fn delete(&self, id: &str) -> Result<()> {
         sqlx::query("DELETE FROM scheduled_tasks WHERE id = ?")
             .bind(id)
@@ -353,12 +386,16 @@ impl ScheduledTasksRepo {
         self.get_run(&id).await
     }
 
+    /// Settle a run. A `None` session id keeps the one [`Self::set_run_session`]
+    /// recorded when the agent session opened — a failed run is exactly when the
+    /// user needs to open that session to see why.
     pub async fn finish_run(&self, run_id: &str, f: FinishRun) -> Result<()> {
         sqlx::query(
             "UPDATE scheduled_task_runs SET status = ?, summary = ?, report_path = ?, \
-             report_rel = ?, delivered = ?, delivery_error = ?, error = ?, session_id = ?, \
+             report_rel = ?, delivered = ?, delivery_error = ?, error = ?, \
+             session_id = COALESCE(?, session_id), \
              report_hash = ?, proof_pack_id = ?, attempts = ?, skipped_delivery = ?, \
-             workflow_run_id = ?, finished_at = ? WHERE id = ?",
+             workflow_run_id = COALESCE(?, workflow_run_id), finished_at = ? WHERE id = ?",
         )
         .bind(&f.status)
         .bind(&f.summary)
@@ -390,6 +427,18 @@ impl ScheduledTasksRepo {
             .execute(&self.pool)
             .await
             .map_err(dberr("set run session"))?;
+        Ok(())
+    }
+
+    /// Link the workflow run a hand-off launched as soon as it exists (the run
+    /// row can open it while it runs; a Stop cancels it).
+    pub async fn set_run_workflow_run(&self, run_id: &str, workflow_run_id: &str) -> Result<()> {
+        sqlx::query("UPDATE scheduled_task_runs SET workflow_run_id = ? WHERE id = ?")
+            .bind(workflow_run_id)
+            .bind(run_id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set run workflow run"))?;
         Ok(())
     }
 
@@ -672,6 +721,79 @@ mod tests {
         let n = repo.reap_running().await.unwrap();
         assert_eq!(n, 1);
         assert_eq!(repo.get_run(&r.id).await.unwrap().status, "error");
+    }
+
+    #[tokio::test]
+    async fn tasks_are_armed_at_creation_and_rearmable() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let repo = ScheduledTasksRepo::new(p.clone());
+        let t = repo.create(new_task("ws1", "t")).await.unwrap();
+        assert_eq!(t.armed_at.as_deref(), Some(t.created_at.as_str()));
+        repo.set_runtime(&t.id, Some("2026-09-01T10:00:00+00:00"), "ok", None)
+            .await
+            .unwrap();
+        repo.rearm(&t.id, "2026-09-02T00:00:00+00:00", false)
+            .await
+            .unwrap();
+        let got = repo.get(&t.id).await.unwrap();
+        assert_eq!(got.armed_at.as_deref(), Some("2026-09-02T00:00:00+00:00"));
+        assert_eq!(
+            got.last_run_at.as_deref(),
+            Some("2026-09-01T10:00:00+00:00")
+        );
+        repo.rearm(&t.id, "2026-09-03T00:00:00+00:00", true)
+            .await
+            .unwrap();
+        assert!(repo.get(&t.id).await.unwrap().last_run_at.is_none());
+        // A manual run's status shows on the task; the cursor stays put.
+        repo.set_last_status(&t.id, "error").await.unwrap();
+        let got = repo.get(&t.id).await.unwrap();
+        assert_eq!(got.last_status.as_deref(), Some("error"));
+        assert!(got.last_run_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn finish_without_session_keeps_the_live_one() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let repo = ScheduledTasksRepo::new(p.clone());
+        let t = repo.create(new_task("ws1", "t")).await.unwrap();
+        let r = repo
+            .create_run(NewRun {
+                task_id: t.id.clone(),
+                workspace_id: "ws1".into(),
+                trigger: "manual".into(),
+            })
+            .await
+            .unwrap();
+        repo.set_run_session(&r.id, "sess-1").await.unwrap();
+        repo.finish_run(
+            &r.id,
+            FinishRun {
+                status: "error".into(),
+                error: Some("agent run failed".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let got = repo.get_run(&r.id).await.unwrap();
+        assert_eq!(got.status, "error");
+        assert_eq!(got.session_id.as_deref(), Some("sess-1"));
+        // An explicit session id still wins.
+        repo.finish_run(
+            &r.id,
+            FinishRun {
+                status: "ok".into(),
+                session_id: Some("sess-2".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let got = repo.get_run(&r.id).await.unwrap();
+        assert_eq!(got.session_id.as_deref(), Some("sess-2"));
     }
 
     #[tokio::test]

@@ -6,7 +6,7 @@
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
-  import { api } from '../../lib/api/client';
+  import { api, baseUrl } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { WorkflowTrigger, TriggerKind } from '../../lib/api/types';
@@ -48,6 +48,26 @@
       await copyTextOrThrow(chatSnippet);
       copied = true;
       setTimeout(() => (copied = false), 1500);
+    } catch {
+      toasts.error('Couldn’t copy to the clipboard', 'Select the text and copy it manually.');
+    }
+  }
+
+  /** A webhook trigger's full URL — the token in the path IS the credential
+   *  (no bearer needed), so it could not be used from the UI before: the row
+   *  showed only the token's first 8 characters. */
+  function webhookUrl(t: WorkflowTrigger): string | null {
+    const tok = t.spec?.token;
+    if (typeof tok !== 'string' || !tok) return null;
+    return `${baseUrl()}/api/v1/workflows/${encodeURIComponent(workflowId)}/webhook/${encodeURIComponent(tok)}`;
+  }
+
+  async function copyWebhook(t: WorkflowTrigger): Promise<void> {
+    const url = webhookUrl(t);
+    if (!url) return;
+    try {
+      await copyTextOrThrow(url);
+      toasts.success('Webhook URL copied', 'Anyone with this URL can start the workflow — keep it private.');
     } catch {
       toasts.error('Couldn’t copy to the clipboard', 'Select the text and copy it manually.');
     }
@@ -344,6 +364,9 @@
       >
         {t.enabled ? 'On' : 'Off'}
       </button>
+      {#if t.kind === 'webhook' && webhookUrl(t)}
+        <button class="icon-btn" title="Copy the webhook URL (POST a JSON body to start a run)" aria-label="Copy webhook URL" onclick={() => copyWebhook(t)}><Icon name="copy" size={12} /></button>
+      {/if}
       <button class="icon-btn" title="Edit trigger" aria-label="Edit trigger" onclick={() => edit(t)}><Icon name="edit" size={12} /></button>
       <button class="row-del" title="Delete trigger…" aria-label="Delete trigger…" onclick={() => remove(t)}>
         <Icon name="trash" size={12} />

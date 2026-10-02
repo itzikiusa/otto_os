@@ -2510,6 +2510,11 @@ pub struct ScheduledTask {
     pub last_run_at: Option<String>,
     pub last_status: Option<String>,
     pub next_run_at: Option<String>,
+    /// When the schedule was last (re)armed — created, resumed, or given a new
+    /// cadence/timezone. The due check never looks before it (missed fires
+    /// while paused are not caught up). `None` on pre-0154 rows.
+    #[serde(default)]
+    pub armed_at: Option<String>,
     pub created_by: Option<String>,
     pub created_at: String,
     pub updated_at: String,

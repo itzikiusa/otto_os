@@ -262,6 +262,13 @@ from base — so files produced by the original run's steps are NOT there. To
 redo part of a run that produced files (implementations, test changes), use the
 run view's retry actions, which keep the original worktree.
 
+A retry is refused (409, *"still stopping"*) while a just-canceled run's engine
+driver is still winding down — it would otherwise run a second driver in the same
+worktree. A cancel also wakes a step sleeping in its retry backoff at once (it used
+to sleep out up to a minute and then settle the step as *failed*), and the stale
+driver's cancel finalize never overwrites a retry that reopened the run. A retry
+starts a fresh restart-resume budget.
+
 ### How node inputs flow (`assemble_input`)
 Each node's input is assembled from its **predecessors' outputs**:
 - **0 predecessors that produced output** → the node receives the **run input**
@@ -549,7 +556,7 @@ interface WorkflowTrigger { id; workflow_id; kind; spec: object; enabled; create
 
 | Kind | Spec | Fires when… | Run input | Wired & firing in the daemon? |
 |---|---|---|---|---|
-| **webhook** | `{ token }` (32-byte URL-safe token auto-generated server-side on create) | An external system calls `POST /workflows/{id}/webhook/{token}`. The token **is** the credential — no bearer auth required. | The request body (JSON), or `null`. | **Yes** — handler `webhook_trigger` spawns the run. |
+| **webhook** | `{ token }` (32-byte URL-safe token auto-generated server-side on create) | An external system calls `POST /workflows/{id}/webhook/{token}`. The token **is** the credential — no bearer auth required. The trigger row's copy button copies the full URL. | The request body (JSON), or `null`. | **Yes** — handler `webhook_trigger` spawns the run. |
 | **event** | `{ event_kind, filter_json? }` | A daemon event whose mapped name equals `event_kind` fires on the event bus. | `{ "trigger": "event", "event_kind": "..." }` | **Yes** — `spawn_workflow_event_trigger_listener` is started at daemon boot (`ottod` main, "workflow event-trigger listener started"). |
 | **schedule** | `{ cadence, every_min, at, weekday, expr, timezone, last_run, enabled, prompt? }` (the **shared cadence** format — same as Scheduled Tasks; `prompt` is new — see *Prompts & chat bindings*) | Cadence comes due: `interval` (every N min, default 60), `daily` (at `HH:MM`), `weekly` (weekday 0=Mon at `HH:MM`), or **`cron`** (`expr`, 5-field). All interpreted in the spec's IANA **`timezone`** (default UTC). | `{ "trigger": "schedule" }`, plus `"prompt"` when `spec.prompt` is set. | **Yes** — `workflow_trigger_scheduler::start` is started at daemon boot (`ottod` main, "workflow schedule-trigger scheduler started"). |
 | **chat** | `{ channel: "slack"\|"telegram", chat: "<id>", thread?: "<ts>", mention_only?: bool }` | Any inbound message that matches the binding (channel/chat exact, thread pinned or open, `@mention` if `mention_only`) — see *Prompts & chat bindings* below. | `{ trigger: "chat", origin_workspace_id, channel, chat, thread, user, prompt, msg, raw }` | **Yes** — evaluated **live** by the channels `Bridge` on every inbound message (not polled, unlike the other three kinds). |
@@ -862,6 +869,10 @@ maps directly onto the `{channel, chat, thread?, mention_only?}` spec.
 
 ### Run
 - **Run** (top bar) → `POST /workflows/{id}/run` with `{}` → runs the whole graph.
+  The top bar follows the **viewed** run: while it is active its *Cancel run…*
+  replaces *Run…*; other workflows (and finished runs) can be started meanwhile —
+  the daemon queues them. A failed run shows its run-level error under the status
+  (an invalid graph, an exhausted resume, a queued run that couldn't start).
 - From the inspector of a selected node: **▶ From here**
   (`{ start_node, only_node:false }`) or **Only this**
   (`{ start_node, only_node:true }`).
@@ -939,7 +950,9 @@ failing it:
 - **Opt-out & caps**: the workflow editor's Instructions panel has a
   *"Resume after a daemon restart"* toggle (`on_restart: 'resume' | 'fail'`;
   `'fail'` restores the old hard-fail). Automatic resumes are capped at 2 per
-  run (`resume_attempts`); the run view shows *"Resumed after a daemon
+  run (`resume_attempts`) — a restart while the run waits at a human approval
+  re-parks it without spending the budget, and a user retry resets it; the run
+  view shows *"Resumed after a daemon
   restart (attempt N)"*. A retry-node re-entry persists its scope
   (`resume_scope_json`) so even a restart mid-retry resumes with the same
   scope. The 10h run wall-clock is anchored to the run row's `started_at`,
@@ -1146,6 +1159,12 @@ engine's resume poll runs every 2s); reject errors the node
 ("rejected — &lt;note&gt;"). Both decisions re-emit the event so open views
 drop the banner at once. If no decision arrives within the node timeout, the
 node errors ("timed out").
+
+A cancel while parked is not a decision: the approval step waits for the run's
+cancel to stop it (it used to read the cleared flag as *"approved by"* the previous
+approver, or as a rejection). A chat `skip` is refused for an approval step **and**
+for a loop parked at an approval inside it — skipping it would let the steps after
+the gate run unapproved.
 
 ---
 
