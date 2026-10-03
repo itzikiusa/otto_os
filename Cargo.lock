@@ -4353,11 +4353,13 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "hex",
+ "indexmap",
  "serde",
  "serde_json",
  "sha1 0.11.0",
  "tempfile",
  "tracing",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -4420,6 +4422,7 @@ dependencies = [
  "axum",
  "axum-server",
  "dirs 7.0.0",
+ "notify",
  "otto-brokers",
  "otto-channels",
  "otto-connections",
