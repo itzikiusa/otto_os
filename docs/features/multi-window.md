@@ -37,6 +37,15 @@ ui/src/lib/win.ts                          per-window identity + key namespacing
   namespacing is what keeps two windows from clobbering each other. State for
   windows that no longer exist is GC'd on boot via the `windows_registry`
   command.
+- **Resume a module.** The router remembers the last route seen under every
+  sidebar module (keyed by its nav id, so Database / Message Brokers resume
+  under Connections) in `sessionStorage` under `winKey('otto_last_by_module')`.
+  A sidebar, bottom-nav or ⌘K "Go to" click on another module reopens that
+  route (e.g. the exact Kubernetes pod drawer); clicking the module that is
+  already active goes to its main page, as does **Open … main page** on the
+  module's context menu. Share / room routes are never remembered; the
+  side-by-side pane keeps its memory in RAM only. It survives a reload, not a
+  relaunch (relaunch restores `otto_last_route`).
 - **Close vs quit.** A `CloseRequested` on a non-last window removes it from
   the registry (that window is gone for good). `⌘Q` — and closing the *last*
   window, which exits the app — flips a `QUITTING` flag first, so the teardown

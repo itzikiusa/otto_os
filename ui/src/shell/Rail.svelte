@@ -69,6 +69,9 @@
     const fav = ui.sidebarFavorites.includes(id);
     const split = splitMenuItems(id, label);
     const items: MenuItem[] = [
+      // Plain clicks resume the module where it was left; this is the way home.
+      { label: `Open ${label} main page`, icon: 'home', action: () => router.go(id) },
+      { separator: true },
       ...split,
       ...(split.length ? [{ separator: true }] : []),
       fav

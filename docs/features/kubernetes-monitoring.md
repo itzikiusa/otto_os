@@ -170,12 +170,31 @@ first event.
   (`healthy` / `degraded` / `incident`), pods, unplanned restarts by class,
   memory vs limits, requests/s and 5xx %, workloads running mixed versions,
   the collector line, and the metrics-server RBAC hint with a Copy button.
+- **Per-cluster Monitor** (`#/kubernetes/<id>/monitor[/<tab>]`): the Monitor
+  half of the cluster workspace. A **Resources | Monitor** switch in the
+  header moves between the console and the Monitor of the same cluster; the
+  cluster stays selected, the console's cached rows stay (switching back
+  paints at once and refreshes quietly) and the namespace is shared. The old
+  `#/kubernetes/monitor/<id>/<tab>` links redirect here.
+- **Remembered view**: namespace, filter, sort, the expanded workload row, the
+  Events class filter and the scroll position are kept per cluster in the
+  k8s store (persisted in `localStorage` under `otto_k8s_ui:<user>:<cluster>`),
+  so the Monitor comes back as it was after a module switch, Resources ↔
+  Monitor or a reload.
 - **Workloads**: sortable table (memory, restarts, churn, req/s, 5xx, p95 or
   avg latency, versions) with sparklines; click a row for the memory and
   request-rate series of the window. Latency is `p95` when the probe exports
-  histogram buckets, `avg` (`_sum/_count`) otherwise.
+  histogram buckets, `avg` (`_sum/_count`) otherwise. The expanded row lists
+  the pods behind the workload — click a pod to open its drawer (Metrics tab)
+  in Resources — and **Open pods in Resources** (also on the row's context
+  menu) opens the Pods table filtered to the workload.
 - **Events**: classified restarts / churn newest first, filterable by class;
-  `Raw cluster events` shows the kept Kubernetes events.
+  `Raw cluster events` shows the kept Kubernetes events. Click an event's pod
+  to open that pod's drawer on its Events tab.
+- **From the console**: a workload drawer (and a pod's, via its owner) has a
+  **Monitor** button that opens this view with that workload expanded, and
+  the pod Metrics tab shows a **History (Monitor)** section (last hour of the
+  pod's memory and request-rate series) with **Open in Monitor**.
 - **Insights**: the latest report of the workspace's **Kubernetes watchdog**
   agent (below) with run history, Run now, and the verdict badge.
 - **Settings**: everything in Setup, plus **Keep request path labels** (off by
