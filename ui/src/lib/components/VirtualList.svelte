@@ -28,19 +28,22 @@
     /** Opt into ⌘F over the WHOLE list (lib/findProviders.ts): the text a row
      *  shows. Without it find-in-page only sees the mounted window. */
     findText?: (item: T, index: number) => string;
+    /** Bump when `items` was mutated IN PLACE (same array, new length /
+     *  contents) — e.g. a capped log ring appended without copying. */
+    version?: number;
   }
-  let { items, estimateHeight, overscan = 6, row, class: cls = '', pinnedIndex = -1, scrollIndex = -1, scrollVersion = 0, key, tabindex, findText }: Props = $props();
+  let { items, estimateHeight, overscan = 6, row, class: cls = '', pinnedIndex = -1, scrollIndex = -1, scrollVersion = 0, key, tabindex, findText, version = 0 }: Props = $props();
   let viewport: HTMLDivElement | undefined = $state();
 
   let scrollTop = $state(0);
   let clientH = $state(0);
 
-  const total = $derived(items.length * estimateHeight);
+  const total = $derived((void version, items.length * estimateHeight));
   const start = $derived(Math.max(0, Math.floor(scrollTop / estimateHeight) - overscan));
   const count = $derived(
-    Math.min(items.length - start, Math.ceil((clientH || 600) / estimateHeight) + overscan * 2 + 1),
+    (void version, Math.min(items.length - start, Math.ceil((clientH || 600) / estimateHeight) + overscan * 2 + 1)),
   );
-  const slice = $derived(items.slice(start, start + count));
+  const slice = $derived((void version, items.slice(start, start + count)));
 
   $effect(() => {
     void scrollVersion;

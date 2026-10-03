@@ -7,8 +7,10 @@ import { liveQuery, type LiveEvent } from '../../../lib/live';
 
 export type { Poller };
 
-export function poll(run: () => Promise<boolean>, ms: number, immediate = true): Poller {
-  return pollWhileVisible(() => run(), { ms, floorMs: 5000, jitter: 0, immediate });
+/** `run` receives the poller's AbortSignal (aborted on `stop()` — a box that
+ *  passes it on releases its socket when it unmounts or goes off screen). */
+export function poll(run: (signal?: AbortSignal) => Promise<boolean>, ms: number, immediate = true): Poller {
+  return pollWhileVisible((signal) => run(signal), { ms, floorMs: 5000, jitter: 0, immediate });
 }
 
 /**
@@ -19,8 +21,8 @@ export function poll(run: () => Promise<boolean>, ms: number, immediate = true):
  * tick — a slide back no longer re-fetches every box. A changed key always
  * fetches at once.
  */
-export function freshness(run: () => Promise<boolean>): {
-  run: () => Promise<boolean>;
+export function freshness(run: (signal?: AbortSignal) => Promise<boolean>): {
+  run: (signal?: AbortSignal) => Promise<boolean>;
   /** Call when (re)starting the poller; returns `immediate` for it. */
   start: (key: string, ms: number) => boolean;
 } {
@@ -28,9 +30,9 @@ export function freshness(run: () => Promise<boolean>): {
   let atKey = '';
   let curKey = '';
   return {
-    run: async () => {
+    run: async (signal?: AbortSignal) => {
       const key = curKey;
-      const ok = await run();
+      const ok = await run(signal);
       if (ok) {
         at = Date.now();
         atKey = key;

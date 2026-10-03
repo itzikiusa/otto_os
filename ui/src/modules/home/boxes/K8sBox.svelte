@@ -37,27 +37,30 @@
   let booted = false;
   let seq = 0;
 
-  async function load(): Promise<boolean> {
-    if (!booted) {
-      booted = true;
-      await k8s.loadStatus();
-      await k8s.loadClusters();
-    }
-    if (k8s.unavailable) {
-      loading = false;
-      return true;
-    }
+  async function load(signal?: AbortSignal): Promise<boolean> {
+    // perf K8s R5: status, the cluster list and the overview start together
+    // (they were three serial round-trips on mount); the overview is aborted
+    // with the poller when the box unmounts or leaves the screen.
+    const boot = booted ? null : Promise.all([k8s.loadStatus(), k8s.loadClusters()]);
+    booted = true;
     // Request token: a window change restarts the poller while the old
     // overview fetch may still be in flight — only the newest may land.
     const mine = ++seq;
+    const overview = k8sApi.monitorOverview(win, signal);
+    if (boot) await boot;
+    if (k8s.unavailable) {
+      overview.catch(() => undefined);
+      loading = false;
+      return true;
+    }
     try {
-      const next = await k8sApi.monitorOverview(win);
+      const next = await overview;
       if (mine !== seq) return true;
       rows = next;
       error = '';
       return true;
     } catch (e) {
-      if (mine !== seq) return true;
+      if (mine !== seq || signal?.aborted) return true;
       error = e instanceof Error ? e.message : String(e);
       return false;
     } finally {

@@ -113,7 +113,8 @@ test('Kubernetes splitter supports RTL pointer and keyboard resize', async ({ pa
 test('Kubernetes RTL logs retain LTR punctuation and metrics retry recovers', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('otto_direction', 'rtl'));
   let failed = true;
-  await page.route('**/k8s/clusters/ux-cluster/metrics?*', r => r.fulfill(failed ? { status: 503, json: { code: 'upstream', message: 'Metrics temporarily unavailable' } } : { json: { available: true, pods: [{ name: pod.name, namespace: 'default', cpu_millicores: 125, mem_bytes: 1048576, containers: [{ name: 'app', cpu_millicores: 125, mem_bytes: 1048576 }] }] } }));
+  let podParam: string | null = null;
+  await page.route('**/k8s/clusters/ux-cluster/metrics?*', r => (podParam = new URL(r.request().url()).searchParams.get('pod'), r.fulfill(failed ? { status: 503, json: { code: 'upstream', message: 'Metrics temporarily unavailable' } } : { json: { available: true, pods: [{ name: pod.name, namespace: 'default', cpu_millicores: 125, mem_bytes: 1048576, containers: [{ name: 'app', cpu_millicores: 125, mem_bytes: 1048576 }] }] } })));
   await openPage(page, `kubernetes/ux-cluster/pods/default/${pod.name}`);
   const drawer = page.getByTestId('k8s-drawer');
   await drawer.getByRole('tab', { name: 'Logs', exact: true }).click();
@@ -123,6 +124,8 @@ test('Kubernetes RTL logs retain LTR punctuation and metrics retry recovers', as
   failed = false;
   await drawer.getByRole('button', { name: 'Retry' }).click();
   await expect(drawer.getByRole('meter', { name: 'app CPU' })).toBeVisible();
+  // perf K8s R5: the Metrics tab asks for this one pod, not the namespace.
+  expect(podParam).toBe(pod.name);
 });
 
 test('SQS and Athena tabs support composite keyboard navigation', async ({ page }) => {

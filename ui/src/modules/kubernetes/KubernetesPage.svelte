@@ -20,11 +20,17 @@
   import InstallPanel from './InstallPanel.svelte';
   import ClustersOverview from './ClustersOverview.svelte';
   import ClusterWorkspace from './ClusterWorkspace.svelte';
-  import MonitorOverview from './monitor/MonitorOverview.svelte';
-  import MonitorCluster from './monitor/MonitorCluster.svelte';
-  import MonitorFleet from './monitor/MonitorFleet.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { isKind } from './k8s-util';
   import { monitorPath, parseK8sRoute } from './viewState';
+
+  // perf K8s R5: the Monitor views (and MonitorInsights → `marked`) load on
+  // first use, so the console chunk stays small; LazyMount designs the
+  // loading / failed-load (inline Retry) states.
+  const MonitorOverviewLazy = lazyComponent(() => import('./monitor/MonitorOverview.svelte'));
+  const MonitorClusterLazy = lazyComponent(() => import('./monitor/MonitorCluster.svelte'));
+  const MonitorFleetLazy = lazyComponent(() => import('./monitor/MonitorFleet.svelte'));
 
   const route = $derived(parseK8sRoute(router.parts));
   // `#/kubernetes/monitor` (overview) and `#/kubernetes/monitor/fleet[/<tab>]`
@@ -112,10 +118,10 @@
     <PageHeader title="Kubernetes" />
     <div class="k8s-scroll"><InstallPanel tool="kubectl" oncontinue={() => (skipInstall = true)} /></div>
   {:else if isFleet}
-    <MonitorFleet tab={fleetTab} />
+    <LazyMount lazy={MonitorFleetLazy} what="the Fleet dashboard" props={{ tab: fleetTab }} />
   {:else if isMonitor && monitorClusterId}
     {#if monitorCluster}
-      {#key monitorCluster.id}<MonitorCluster cluster={monitorCluster} tab={monitorTab} />{/key}
+      {#key monitorCluster.id}<LazyMount lazy={MonitorClusterLazy} what="the cluster Monitor" props={{ cluster: monitorCluster, tab: monitorTab }} />{/key}
     {:else if k8s.clustersLoaded}
       <PageHeader title="Monitor" crumbs={[{ label: 'Kubernetes', onclick: () => router.go('kubernetes') }]} />
       <EmptyState
@@ -131,7 +137,7 @@
       <div class="k8s-boot"><Skeleton rows={6} height={40} /></div>
     {/if}
   {:else if isMonitor}
-    <MonitorOverview />
+    <LazyMount lazy={MonitorOverviewLazy} what="the Monitor overview" />
   {:else if routeClusterId}
     {#if cluster}
       {#key `${cluster.id}/${k8s.accessRevision}`}<ClusterWorkspace {cluster} />{/key}
