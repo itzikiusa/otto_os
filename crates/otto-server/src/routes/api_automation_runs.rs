@@ -94,7 +94,8 @@ pub async fn start(
             return Err(ApiError(Error::NotFound("request".into())));
         }
         secret_values.extend(
-            api_secrets::load_blob(ctx.secrets.as_ref(), &api_secrets::request_ref(rid))
+            api_secrets::load_blob_async(&ctx.secrets, &api_secrets::request_ref(rid))
+                .await
                 .into_values(),
         );
         snapshot.push(json!({"request_id":rid,"name":request.name,"method":request.method,"url":request.url,"updated_at":request.updated_at,

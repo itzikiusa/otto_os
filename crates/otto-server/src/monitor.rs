@@ -122,7 +122,7 @@ impl CredentialMonitor {
             GitProviderKind::Github | GitProviderKind::Gitlab
         );
         if auto_capable {
-            match self.secrets_token(&account.token_ref) {
+            match self.secrets_token(&account.token_ref).await {
                 Some(token) => {
                     let provider = make_provider(account, token);
                     match provider.token_expiry().await {
@@ -309,8 +309,11 @@ impl CredentialMonitor {
         }
     }
 
-    fn secrets_token(&self, token_ref: &str) -> Option<String> {
-        self.ctx.secrets.get(token_ref).ok().flatten()
+    async fn secrets_token(&self, token_ref: &str) -> Option<String> {
+        otto_core::secrets::get_async(&self.ctx.secrets, token_ref)
+            .await
+            .ok()
+            .flatten()
     }
 }
 

@@ -955,6 +955,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if matches!(p, "/admin/db/stats" | "/admin/db/compact") {
         return Require(Settings, Admin);
     }
+    // Secret-store status + the confirmed "Secure secrets…" migration — root
+    // daemon maintenance (handlers require root).
+    if matches!(p, "/admin/secrets/status" | "/admin/secrets/secure") {
+        return Require(Settings, Admin);
+    }
     if matches!(
         p,
         "/state/connections/export" | "/state/connections/export/formats"

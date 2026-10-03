@@ -94,14 +94,15 @@ sha1 = "0.11.0"
 # engine (no native build deps) running the same `pm` API the UI runner defines.
 boa_engine = "0.22.0"
 
+# Secrets store status + the confirmed "Secure secrets" migration
+# (`/admin/secrets/*`); browser-credential route tests also use its FileStore.
+otto-keychain.workspace = true
+
 [dev-dependencies]
 # RBAC guard integration tests drive a minimal router via tower's oneshot and
 # read the response body. Pinned to the versions axum 0.8 already resolves.
 tower = { version = "0.5.3", features = ["util"] }
 http-body-util = "0.1.5"
-# Browser-credentials route tests exercise the real `OTTO_SECRETS=file` keychain
-# fallback (not the noop test double) so the reveal round-trip is real.
-otto-keychain.workspace = true
 # browser_login's audit-log test captures real `tracing` output (via a custom
 # `MakeWriter`) to assert the domain is logged and the password never is.
 tracing-subscriber.workspace = true

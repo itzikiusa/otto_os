@@ -26,6 +26,53 @@ fn data_dir() -> PathBuf {
         .join("Library/Application Support/Otto")
 }
 
+/// The `OTTO_SECRETS` plist entries matching the secret store ON DISK, so a
+/// regenerated plist never changes which store the daemon reads:
+/// - a legacy plaintext `secrets.json` (not yet secured) → `file` plus the
+///   explicit `OTTO_SECRETS_ALLOW_PLAINTEXT=1` release builds require — the
+///   user moves off it with Settings ▸ Security ▸ "Secure secrets…";
+/// - otherwise (already secured, or a fresh install) → `encrypted`: secrets in
+///   `secrets.enc`, sealed with ONE master key in the Keychain, so a re-signed
+///   rebuild costs at most one Keychain prompt instead of one per secret.
+fn secrets_env_xml(dir: &std::path::Path) -> String {
+    let lines: &[&str] = if dir.join("secrets.json").exists() {
+        &[
+            "        <!-- Legacy PLAINTEXT secret store (0600 secrets.json). Secure it",
+            "             from Settings > Security; the next plist rewrite then",
+            "             switches to the encrypted store. -->",
+            "        <key>OTTO_SECRETS</key><string>file</string>",
+            "        <key>OTTO_SECRETS_ALLOW_PLAINTEXT</key><string>1</string>",
+        ]
+    } else {
+        &[
+            "        <!-- Encrypted secret store: secrets.enc sealed with one master",
+            "             key in the macOS Keychain. -->",
+            "        <key>OTTO_SECRETS</key><string>encrypted</string>",
+        ]
+    };
+    lines.join("\n")
+}
+
+#[cfg(test)]
+mod secrets_env_tests {
+    use super::secrets_env_xml;
+
+    #[test]
+    fn plist_secrets_mode_matches_the_store_on_disk() {
+        let dir = std::env::temp_dir().join(format!("otto-sup-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _ = std::fs::remove_file(dir.join("secrets.json"));
+        let fresh = secrets_env_xml(&dir);
+        assert!(fresh.contains("<string>encrypted</string>"));
+        assert!(!fresh.contains("<string>file</string>"));
+        std::fs::write(dir.join("secrets.json"), "{}").unwrap();
+        let legacy = secrets_env_xml(&dir);
+        assert!(legacy.contains("<string>file</string>"));
+        assert!(legacy.contains("OTTO_SECRETS_ALLOW_PLAINTEXT"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 fn installed_bin() -> PathBuf {
     data_dir().join("bin/ottod")
 }
@@ -125,11 +172,7 @@ fn install_daemon() -> Result<String, String> {
     <array><string>{}</string></array>
     <key>EnvironmentVariables</key>
     <dict>
-        <!-- File-backed secret store (0600 secrets.json). Avoids the macOS
-             Keychain re-prompting "ottod wants to access com.otto.daemon"
-             on every rebuild, since a re-signed binary fails the Keychain
-             ACL match. Plaintext-on-disk, like loom's ~/.loom/.env. -->
-        <key>OTTO_SECRETS</key><string>file</string>
+{}
     </dict>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
@@ -142,7 +185,8 @@ fn install_daemon() -> Result<String, String> {
 </dict>
 </plist>
 "#,
-        dst.display()
+        dst.display(),
+        secrets_env_xml(&data_dir())
     );
     let pp = plist_path();
     std::fs::create_dir_all(pp.parent().unwrap()).map_err(|e| e.to_string())?;

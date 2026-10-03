@@ -330,8 +330,9 @@ impl ChannelManager {
                     crate::health::remove(ws, *ch);
                 }
                 live_keys = keys;
-                let (count, waiting) =
-                    self.spawn_generation(&integrations, &bridge, &g, &mut listening);
+                let (count, waiting) = self
+                    .spawn_generation(&integrations, &bridge, &g, &mut listening)
+                    .await;
                 info!("channel manager: {count} adapter(s) active");
                 pending = waiting;
                 gen_cancel = Some(g);
@@ -341,8 +342,9 @@ impl ChannelManager {
                 // under the running generation (no restart of live listeners).
                 if let Some(g) = gen_cancel.clone() {
                     let retry = std::mem::take(&mut pending);
-                    let (count, waiting) =
-                        self.spawn_generation(&retry, &bridge, &g, &mut listening);
+                    let (count, waiting) = self
+                        .spawn_generation(&retry, &bridge, &g, &mut listening)
+                        .await;
                     if count > 0 {
                         info!("channel manager: {count} waiting adapter(s) started");
                     }
@@ -369,7 +371,7 @@ impl ChannelManager {
     /// can still hold two — running both would split every bot's events
     /// randomly between the workspaces, so only the first (by workspace id)
     /// listens.
-    fn spawn_generation(
+    async fn spawn_generation(
         &self,
         integrations: &[otto_core::domain::Integration],
         bridge: &Arc<Bridge>,
@@ -380,7 +382,15 @@ impl ChannelManager {
         let mut waiting = Vec::new();
         for integ in integrations {
             let ws_id = integ.workspace_id.clone();
-            let tokens = match resolve_tokens(self.secrets.as_ref(), integ) {
+            // Token reads run on the blocking pool: a Keychain miss (or an
+            // ACL dialog) must not park the runtime worker driving the bridge.
+            let resolved = {
+                let (secrets, integ) = (self.secrets.clone(), integ.clone());
+                tokio::task::spawn_blocking(move || resolve_tokens(secrets.as_ref(), &integ))
+                    .await
+                    .unwrap_or_else(|e| Err(format!("token read task failed: {e}")))
+            };
+            let tokens = match resolved {
                 Ok(t) => t,
                 Err(why) => {
                     crate::health::waiting_for_token(&ws_id, integ.channel, &why);

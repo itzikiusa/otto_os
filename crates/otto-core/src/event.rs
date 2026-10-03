@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{AgentTask, Notice, Session, SessionStatus, TrailEvent};
 use crate::Id;
+use std::sync::Arc;
 
 /// Daemon-wide event. Serialized as JSON with a `type` tag, one per WS message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -566,11 +567,14 @@ pub enum Event {
     /// sent with `turns: []` so the client re-fetches instead. Session-family
     /// scoped (owner / workspace admin / root), like `trail_appended`. `turns`
     /// travels as JSON because otto-core cannot depend on otto-transcript.
+    /// `turns` is an `Arc<[_]>`: every bus subscriber's `recv` clones the
+    /// event, and a refcount bump beats deep-copying a 64 KB JSON tree a dozen
+    /// times per frame (serializes exactly like a `Vec`).
     TranscriptAppended {
         workspace_id: Id,
         session_id: Id,
         cursor: String,
-        turns: Vec<serde_json::Value>,
+        turns: Arc<[serde_json::Value]>,
     },
     /// Conversation view: the agent's in-progress response as currently drawn
     /// on the session's terminal screen (plain text, ≤ 16 KB), pushed by the
@@ -578,19 +582,21 @@ pub enum Event {
     /// writes a transcript record only when a block COMPLETES, so this is the
     /// only sub-turn signal; clients show it as a draft below the last folded
     /// turn and drop it once the real turn lands. `text` is empty when nothing
-    /// is streaming. Session-family scoped.
+    /// is streaming. Session-family scoped. The text fields are `Arc<str>`
+    /// (cheap per-subscriber clones, same JSON string on the wire) — this is
+    /// pushed every ~700 ms per streaming session.
     TranscriptLive {
         workspace_id: Id,
         session_id: Id,
-        text: String,
+        text: Arc<str>,
         /// Text currently typed (unsent) in the terminal's input box — the
         /// chat shows it so a message sent from the chat is known to be
         /// appended to it (the CLI submits both as ONE message).
-        input: String,
+        input: Arc<str>,
         /// The terminal's status rows below the input box (the CLI's own
         /// status line: model, context %, plan limits, mode …), joined by
         /// " · ".
-        status: String,
+        status: Arc<str>,
         /// Git branch of the session cwd (from `.git/HEAD`), if any.
         branch: Option<String>,
     },
@@ -789,6 +795,63 @@ impl Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every bus subscriber deep-clones the `Event` it receives (tokio
+    /// broadcast semantics), so the enum must stay small and big payloads must
+    /// live behind an `Arc`/`Box`. A new variant that inlines a large struct
+    /// trips this; box its payload instead of raising the bound.
+    #[test]
+    fn event_stays_small_for_cheap_bus_clones() {
+        let size = std::mem::size_of::<Event>();
+        assert!(size <= EVENT_SIZE_BUDGET, "size_of::<Event>() = {size}");
+    }
+
+    /// Bytes; see `event_stays_small_for_cheap_bus_clones`.
+    const EVENT_SIZE_BUDGET: usize = 512;
+
+    /// The `Arc` payloads serialize byte-identically to the old `Vec`/`String`
+    /// shape and round-trip through serde.
+    #[test]
+    fn transcript_events_keep_their_wire_shape() {
+        let ev = Event::TranscriptAppended {
+            workspace_id: "w".into(),
+            session_id: "s".into(),
+            cursor: "3".into(),
+            turns: vec![serde_json::json!({"id": "t1", "text": "hi"})].into(),
+        };
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"type": "transcript_appended", "workspace_id": "w",
+                "session_id": "s", "cursor": "3", "turns": [{"id": "t1", "text": "hi"}]})
+        );
+        let back: Event = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap(), v);
+
+        let ev = Event::TranscriptLive {
+            workspace_id: "w".into(),
+            session_id: "s".into(),
+            text: "draft".into(),
+            input: "".into(),
+            status: "opus · 12%".into(),
+            branch: None,
+        };
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"type": "transcript_live", "workspace_id": "w",
+                "session_id": "s", "text": "draft", "input": "",
+                "status": "opus · 12%", "branch": null})
+        );
+        let back: Event = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap(), v);
+        // A clone shares the payload instead of copying it.
+        if let (Event::TranscriptLive { text: a, .. }, Event::TranscriptLive { text: b, .. }) =
+            (&ev, &ev.clone())
+        {
+            assert!(Arc::ptr_eq(a, b));
+        }
+    }
 
     /// `type_name()` must equal the serde tag for every variant (it is
     /// generated from the variant names; this pins the snake_case rule incl.

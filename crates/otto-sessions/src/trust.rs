@@ -375,6 +375,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // test: plain sync fs is fine
     fn atomic_replace_keeps_permissions_and_refuses_a_changed_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");

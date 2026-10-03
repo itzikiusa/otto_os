@@ -51,6 +51,7 @@ export async function bootstrap() {
       // File-backed secrets: a DEBUG ottod otherwise hangs on a macOS Keychain
       // prompt the harness can never answer.
       OTTO_SECRETS: 'file',
+      OTTO_SECRETS_ALLOW_PLAINTEXT: '1',
       OTTO_SELF_IMPROVE: '0',
       // A fresh data dir has no cli-update last-run cursor: the catch-up run
       // fires at startup and its session reload SIGHUPs agent sessions

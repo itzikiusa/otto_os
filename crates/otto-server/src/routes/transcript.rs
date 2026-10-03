@@ -895,6 +895,8 @@ pub async fn create_task(
     tokio::spawn(async move {
         crate::agent_tasks_nudge::sweep_session(&cx, &sid).await;
     });
+    // Re-arm the fast safety tick in case delivery has to defer.
+    crate::agent_tasks_nudge::wake();
     Ok(Json(task))
 }
 

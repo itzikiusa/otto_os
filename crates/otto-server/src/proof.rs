@@ -381,7 +381,16 @@ pub async fn gate(
 }
 
 fn lock_for(ctx: &ServerCtx, pack_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-    let mut map = ctx.proof_locks.lock().unwrap();
+    lock_in(&ctx.proof_locks, pack_id)
+}
+
+/// Get-or-create `pack_id`'s lock, pruning locks nobody holds (strong count
+/// 1 = only this map) so the registry stays bounded by in-flight recomputes
+/// instead of growing by one entry per pack ever touched. Safe: a holder
+/// always owns an `Arc` clone while it waits for / holds the guard.
+fn lock_in(locks: &ProofLocks, pack_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let mut map = locks.lock().unwrap_or_else(|e| e.into_inner());
+    map.retain(|id, l| id == pack_id || Arc::strong_count(l) > 1);
     map.entry(pack_id.to_string())
         .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
         .clone()
@@ -1124,6 +1133,18 @@ pub fn ignore_err<T>(r: Result<T>) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proof_locks_prune_unheld_entries() {
+        let locks = new_locks();
+        let held = lock_in(&locks, "p1");
+        drop(lock_in(&locks, "p2"));
+        // p2 is unheld → pruned by the next insert; p1 (held) survives and is
+        // handed out again as the SAME mutex.
+        let again = lock_in(&locks, "p1");
+        assert!(Arc::ptr_eq(&held, &again));
+        assert_eq!(locks.lock().unwrap().len(), 1);
+    }
 
     #[test]
     fn risky_file_segments_not_substrings() {

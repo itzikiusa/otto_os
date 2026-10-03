@@ -376,7 +376,7 @@ impl BrokersService {
         Option<Arc<BrokerTunnel>>,
     )> {
         let sasl_password = match &row.secret_ref {
-            Some(r) => self.secrets.get(r)?,
+            Some(r) => otto_core::secrets::get_async(&self.secrets, r).await?,
             None => None,
         };
         let security = SecurityProtocol::parse(&row.security_protocol).unwrap_or_default();
@@ -419,7 +419,7 @@ impl BrokersService {
         let registry = match &row.schema_registry_url {
             Some(url) if !url.is_empty() => {
                 let pw = match &row.sr_secret_ref {
-                    Some(r) => self.secrets.get(r)?,
+                    Some(r) => otto_core::secrets::get_async(&self.secrets, r).await?,
                     None => None,
                 };
                 Some(Arc::new(SchemaRegistry::new(
@@ -497,13 +497,24 @@ impl BrokersService {
             .filter(|e| e.value().last_used.elapsed() > idle)
             .map(|e| e.key().clone())
             .collect();
+        let mut evicted = Vec::with_capacity(stale.len());
         for id in &stale {
             // Dropping the `Pooled` frees the librdkafka handles; dropping the
             // tunnel entry (the other Arc holder) tears down the ssh child +
             // proxy tasks. Leave the sampler/negative-cache — cheap in-memory
             // state that a re-open reuses.
-            self.pool.remove(id);
-            self.tunnels.remove(id);
+            evicted.push((self.pool.remove(id), self.tunnels.remove(id)));
+        }
+        // `rd_kafka_destroy` (run by the last client drop) flushes and joins
+        // librdkafka's threads and can block for seconds — never on a runtime
+        // worker. Off-runtime callers (tests) just drop inline.
+        if !evicted.is_empty() {
+            match tokio::runtime::Handle::try_current() {
+                Ok(h) => {
+                    h.spawn_blocking(move || drop(evicted));
+                }
+                Err(_) => drop(evicted),
+            }
         }
         stale.len()
     }

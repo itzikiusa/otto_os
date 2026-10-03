@@ -451,9 +451,8 @@ async fn to_jira(
             .ok_or_else(|| ApiError(Error::Invalid("no Jira account configured".to_string())))?,
     };
     otto_core::auth::authorize_owner(&account, &user).map_err(ApiError)?;
-    let token = ctx
-        .secrets
-        .get(&account.token_ref)
+    let token = otto_core::secrets::get_async(&ctx.secrets, &account.token_ref)
+        .await
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(Error::Invalid("Jira token missing".to_string())))?;
     let client = otto_issues::JiraClient::new(&account.base_url, &account.email, &token);

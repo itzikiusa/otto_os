@@ -6,7 +6,8 @@ license.workspace = true
 
 [dependencies]
 hex = { workspace = true }
-serde.workspace = true
+# `rc`: bus events carry `Arc<str>` / `Arc<[_]>` payloads (cheap clones).
+serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 chrono.workspace = true
 thiserror.workspace = true

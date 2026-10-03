@@ -4040,9 +4040,13 @@ dependencies = [
 name = "otto-keychain"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "keyring",
  "otto-core",
+ "ring",
+ "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]

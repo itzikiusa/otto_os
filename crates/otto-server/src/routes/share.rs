@@ -264,7 +264,7 @@ pub async fn mint_share(
 async fn gmail_mailer_for(ctx: &ServerCtx, owner_id: &str) -> ApiResult<GmailMailer> {
     let (gmail_address, app_password) = resolve_verified_sender(
         &EmailSendersRepo::new(ctx.pool.clone()),
-        ctx.secrets.as_ref(),
+        &ctx.secrets,
         owner_id,
     )
     .await?;
@@ -277,7 +277,7 @@ async fn gmail_mailer_for(ctx: &ServerCtx, owner_id: &str) -> ApiResult<GmailMai
 /// the route so the no-sender guard is unit-testable without a full `ServerCtx`.
 pub async fn resolve_verified_sender(
     senders: &EmailSendersRepo,
-    secrets: &dyn otto_core::secrets::SecretStore,
+    secrets: &std::sync::Arc<dyn otto_core::secrets::SecretStore>,
     owner_id: &str,
 ) -> ApiResult<(String, String)> {
     let sender = senders
@@ -290,11 +290,13 @@ pub async fn resolve_verified_sender(
                     .into(),
             ))
         })?;
-    let app_password = secrets.get(&sender.secret_ref)?.ok_or_else(|| {
-        ApiError(Error::Invalid(
-            "email sender app password is missing — re-configure your email sender".into(),
-        ))
-    })?;
+    let app_password = otto_core::secrets::get_async(secrets, &sender.secret_ref)
+        .await?
+        .ok_or_else(|| {
+            ApiError(Error::Invalid(
+                "email sender app password is missing — re-configure your email sender".into(),
+            ))
+        })?;
     Ok((sender.gmail_address, app_password))
 }
 

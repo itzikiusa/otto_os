@@ -407,7 +407,8 @@ async fn expired_otp_is_rejected() {
 async fn otp_mint_requires_verified_sender() {
     let pool = mem_pool().await;
     let senders = EmailSendersRepo::new(pool.clone());
-    let secrets = MemSecrets::default();
+    let secrets: std::sync::Arc<dyn otto_core::secrets::SecretStore> =
+        std::sync::Arc::new(MemSecrets::default());
     let owner = seed_user(&pool, "owner").await;
 
     // (a) No sender at all → 400 Invalid.

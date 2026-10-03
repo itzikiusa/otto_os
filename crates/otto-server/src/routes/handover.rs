@@ -560,13 +560,19 @@ fn fallback_brief(context: &str) -> String {
 async fn gather_source_context(ctx: &ServerCtx, source: &Session) -> Option<String> {
     if source.provider == "claude" {
         if let Some(sid) = source.provider_session_id.as_deref() {
-            if let Some(path) = find_claude_transcript(&source.cwd, sid) {
-                if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                    let digest = transcript_digest(&content, CONTEXT_CAP);
-                    if !digest.trim().is_empty() {
-                        return Some(digest);
-                    }
-                }
+            // The project-dir scan and the whole-transcript digest are sync
+            // fs + CPU work: run them on the blocking pool, not a worker.
+            let (cwd, sid) = (source.cwd.clone(), sid.to_string());
+            let digest = tokio::task::spawn_blocking(move || {
+                let path = find_claude_transcript(&cwd, &sid)?;
+                let content = std::fs::read_to_string(&path).ok()?;
+                Some(transcript_digest(&content, CONTEXT_CAP))
+            })
+            .await
+            .ok()
+            .flatten();
+            if let Some(digest) = digest.filter(|d| !d.trim().is_empty()) {
+                return Some(digest);
             }
         }
     }

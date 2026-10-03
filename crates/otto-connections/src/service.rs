@@ -343,7 +343,7 @@ impl ConnectionsService {
         let connection = self.repo.get(id).await?;
         let password = if include_passwords {
             match connection.secret_ref.as_deref() {
-                Some(reference) => Some(self.secrets.get(reference)
+                Some(reference) => Some(otto_core::secrets::get_async(&self.secrets, reference).await
                     .map_err(|_| Error::Internal("Could not read a saved connection credential; no export was produced".into()))?
                     .ok_or_else(|| Error::Conflict("A saved connection credential is missing; reconnect it or export without passwords".into()))?),
                 None => None,
@@ -662,7 +662,7 @@ impl ConnectionsService {
                     .into(),
             ));
         }
-        let secret = self.fetch_secret(conn)?;
+        let secret = self.fetch_secret(conn).await?;
         let (spec, _warn_argv) = build_command(conn, secret.as_deref())?;
         let session = spawner
             .spawn_connection(
@@ -690,7 +690,7 @@ impl ConnectionsService {
     /// 10s timeout, report ok/latency and the line that explains a failure.
     pub async fn test(&self, conn: &Connection, user_id: &Id) -> Result<TestConnectionResp> {
         self.authorize(&conn.id, user_id, "configure").await?;
-        let secret = self.fetch_secret(conn)?;
+        let secret = self.fetch_secret(conn).await?;
         probe(conn, secret.as_deref()).await
     }
 
@@ -724,9 +724,9 @@ impl ConnectionsService {
         probe(&conn, None).await
     }
 
-    fn fetch_secret(&self, conn: &Connection) -> Result<Option<String>> {
+    async fn fetch_secret(&self, conn: &Connection) -> Result<Option<String>> {
         match &conn.secret_ref {
-            Some(secret_ref) => self.secrets.get(secret_ref),
+            Some(secret_ref) => otto_core::secrets::get_async(&self.secrets, secret_ref).await,
             None => Ok(None),
         }
     }

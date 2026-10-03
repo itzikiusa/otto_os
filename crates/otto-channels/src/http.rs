@@ -153,12 +153,17 @@ async fn upsert_integration<S: ChannelsCtx>(
         }
         .map(str::trim)
         .filter(|t| !t.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            listener_token_ref(&ws_id, channel)
-                .and_then(|r| s.secrets().get(&r).ok().flatten())
-                .filter(|t| !t.is_empty())
-        });
+        .map(str::to_string);
+        // Fall back to the stored listener token (read off the worker pool).
+        let incoming = match (incoming, listener_token_ref(&ws_id, channel)) {
+            (Some(t), _) => Some(t),
+            (None, Some(r)) => otto_core::secrets::get_async(s.secrets(), &r)
+                .await
+                .ok()
+                .flatten()
+                .filter(|t| !t.is_empty()),
+            (None, None) => None,
+        };
         if let Some(token) = incoming {
             ensure_listener_token_unique(&s, &ws_id, channel, &token).await?;
         }
@@ -251,8 +256,25 @@ async fn ensure_listener_token_unique<S: ChannelsCtx>(
     token: &str,
 ) -> std::result::Result<(), Error> {
     let enabled = s.integrations().list_all_enabled().await?;
+    // Read the candidates' tokens up front via `get_async` (a Keychain miss
+    // must not park a runtime worker), then match synchronously.
+    let mut tokens: std::collections::HashMap<String, Option<String>> = Default::default();
+    for o in enabled
+        .iter()
+        .filter(|o| o.channel == channel && o.workspace_id != *ws_id)
+    {
+        if let Some(r) = listener_token_ref(&o.workspace_id, channel) {
+            if let std::collections::hash_map::Entry::Vacant(slot) = tokens.entry(r) {
+                let v = otto_core::secrets::get_async(s.secrets(), slot.key())
+                    .await
+                    .ok()
+                    .flatten();
+                slot.insert(v);
+            }
+        }
+    }
     let clash = workspace_listening_with(&enabled, ws_id, channel, token, |r| {
-        s.secrets().get(r).ok().flatten()
+        tokens.get(r).cloned().flatten()
     });
     let Some(other_ws) = clash else {
         return Ok(());
@@ -367,11 +389,11 @@ async fn test_integration<S: ChannelsCtx>(
     // Resolve the bot token from the keychain and build an adapter.
     let adapter: Arc<dyn Adapter> = match channel {
         Channel::Slack => {
-            let token = s
-                .secrets()
-                .get(&format!("chan-bot-{ws_id}-slack"))
-                .ok()
-                .flatten();
+            let token =
+                otto_core::secrets::get_async(s.secrets(), &format!("chan-bot-{ws_id}-slack"))
+                    .await
+                    .ok()
+                    .flatten();
             match token {
                 Some(t) if !t.is_empty() => Arc::new(SlackAdapter::new(t)),
                 _ => {
@@ -383,11 +405,11 @@ async fn test_integration<S: ChannelsCtx>(
             }
         }
         Channel::Telegram => {
-            let token = s
-                .secrets()
-                .get(&format!("chan-bot-{ws_id}-telegram"))
-                .ok()
-                .flatten();
+            let token =
+                otto_core::secrets::get_async(s.secrets(), &format!("chan-bot-{ws_id}-telegram"))
+                    .await
+                    .ok()
+                    .flatten();
             match token {
                 Some(t) if !t.is_empty() => Arc::new(TelegramAdapter::new(t)),
                 _ => {

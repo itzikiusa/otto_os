@@ -26,3 +26,39 @@ export interface DbCompactReport {
   duration_ms: number;
   auto_vacuum: number;
 }
+
+// Secret store status + "Secure secrets…" (p-daemon SEC-1) — mirrors
+// `otto_keychain::SecretsStatus` / `control::MigrationReport`. Counts and
+// states only; values and key names never cross the API.
+
+/** `GET /admin/secrets/status` (root). */
+export interface SecretsStatus {
+  /** Active backend. `plaintext` = unencrypted `secrets.json`. */
+  mode: 'plaintext' | 'encrypted' | 'keychain';
+  /** `secrets.json` exists on disk. */
+  plaintext_file: boolean;
+  /** Entries in `secrets.json` (0 when absent). */
+  plaintext_entries: number;
+  /** Master-key state; `locked` while a Keychain prompt waits. */
+  key_state: 'unlocked' | 'locked' | 'not_loaded' | 'error';
+  /** "Secure secrets…" is available (plaintext store in use). */
+  migration_available: boolean;
+  /** A migration is running right now. */
+  migrating: boolean;
+  /** An encrypted backup from an unfinished migration is still on disk. */
+  backup_present: boolean;
+}
+
+/** Body of `POST /admin/secrets/secure` (root). */
+export interface SecretsSecureReq {
+  confirm: true;
+}
+
+/** Response of `POST /admin/secrets/secure`. */
+export interface SecretsMigrationReport {
+  /** Entries moved out of `secrets.json`. */
+  migrated: number;
+  /** Entries in the encrypted store afterwards. */
+  total: number;
+  duration_ms: number;
+}

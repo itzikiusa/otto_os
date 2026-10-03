@@ -749,10 +749,10 @@ impl AwsService {
                     ));
                 }
                 let sref = cur.secret_ref.clone().unwrap_or_else(|| secret_ref_for(id));
-                let existing: Option<KeySecret> = self
-                    .secrets
-                    .get(&sref)?
-                    .and_then(|s| serde_json::from_str(&s).ok());
+                let existing: Option<KeySecret> =
+                    otto_core::secrets::get_async(&self.secrets, &sref)
+                        .await?
+                        .and_then(|s| serde_json::from_str(&s).ok());
                 let new_sk = req
                     .secret_access_key
                     .as_deref()

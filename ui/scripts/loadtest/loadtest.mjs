@@ -279,6 +279,8 @@ async function startDaemon() {
     CLAUDE_BIN: '/nonexistent/otto-e2e-no-claude',
     OTTO_PLUGINS_HOME: path.join(ctx.dataDir, 'plugins-home'),
     OTTO_SECRETS: 'file',
+    // Release builds refuse the plaintext store without this opt-in.
+    OTTO_SECRETS_ALLOW_PLAINTEXT: '1',
     FAKE_FIXTURE: FIXTURE,
     ...(A['quiet-agents'] === 'true' ? { FAKE_QUIET: '1' } : {}),
     RUST_LOG: process.env.RUST_LOG ?? 'info',

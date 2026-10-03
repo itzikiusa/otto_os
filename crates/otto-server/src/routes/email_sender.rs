@@ -58,7 +58,7 @@ pub async fn set_email_sender(
     let secret_ref = secret_ref_for(&user.id);
 
     // 1. Store the app password in the Keychain (never the DB).
-    ctx.secrets.put(&secret_ref, &req.app_password)?;
+    otto_core::secrets::put_async(&ctx.secrets, &secret_ref, &req.app_password).await?;
 
     // 2. Upsert the row with the Keychain ref (resets verification to NULL).
     repo.upsert(&user.id, &gmail_address, &secret_ref).await?;

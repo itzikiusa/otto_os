@@ -239,7 +239,7 @@ pub async fn aws_env_for<S: K8sCtx>(
         serde_json::from_str(&row.get::<String, _>("params_json")).unwrap_or(Value::Null);
     let secret_ref: Option<String> = row.get("secret_ref");
     let secret = match &secret_ref {
-        Some(r) => ctx.secrets().get(r)?,
+        Some(r) => otto_core::secrets::get_async(ctx.secrets(), r).await?,
         None => None,
     };
     Ok(build_aws_env(

@@ -249,6 +249,33 @@ async fn run(cfg: Config) -> Result<(), String> {
         .recover_interrupted()
         .await
         .map_err(|e| format!("recover interrupted database changes: {e}"))?;
+    // Planner statistics from the first query (sqlite_stat1), plus the
+    // one-time compaction when a third of the file is free pages and the live
+    // data is small enough to rewrite in a second or two (perf F1). A bigger
+    // file is compacted by the hourly pass while no session is live.
+    {
+        let t = std::time::Instant::now();
+        match otto_state::maintenance::boot(&pool).await {
+            Ok(b) => {
+                if let Some(r) = b.compacted {
+                    tracing::info!(
+                        "db maintenance: compacted at boot {} → {} bytes in {} ms",
+                        r.before_bytes,
+                        r.after_bytes,
+                        r.duration_ms
+                    );
+                } else if b.deferred_compaction {
+                    tracing::info!(
+                        "db maintenance: {} of {} bytes free — compaction deferred to an idle hour",
+                        b.stats.free_bytes(),
+                        b.stats.size_bytes()
+                    );
+                }
+                tracing::debug!("db maintenance: boot pass {} ms", t.elapsed().as_millis());
+            }
+            Err(e) => tracing::warn!("db boot maintenance failed: {e}"),
+        }
+    }
     // Self-improvement runs are in-process: nothing can still be running at
     // boot, and an orphaned `running` row blocks that workspace's runs forever.
     match ImprovementsRepo::new(pool.clone())
@@ -881,6 +908,12 @@ async fn run(cfg: Config) -> Result<(), String> {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(interval).await;
+                // Nothing live → no transcript is growing; skip the SQL
+                // candidate scan (the first sweep after a session goes live
+                // catches anything left unnamed).
+                if manager.live_count() == 0 {
+                    continue;
+                }
                 let n = manager.refresh_provider_titles().await;
                 if n > 0 {
                     tracing::info!("auto-named {n} session(s) from provider title");
@@ -940,6 +973,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         let pool = pool.clone();
         let auth_cache = auth_cache.clone();
         let interval = std::time::Duration::from_secs(60 * 60); // hourly
+        let manager = Arc::clone(&manager);
         tokio::spawn(async move {
             let settings = SettingsRepo::new(pool.clone());
             let auth = otto_rbac::AuthRepo::with_cache(pool.clone(), auth_cache);
@@ -991,6 +1025,25 @@ async fn run(cfg: Config) -> Result<(), String> {
                         }
                     }
                     Err(e) => tracing::warn!("db maintenance failed: {e}"),
+                }
+                // One-time auto-compaction (perf F1) for files too big to
+                // rewrite at boot: only while no session is live, so the
+                // rewrite's write lock stalls nobody. Converts the file to
+                // auto_vacuum=INCREMENTAL, so it never triggers again.
+                if manager.live_count() == 0 {
+                    if let Ok(s) = otto_state::maintenance::stats(&maint_pool).await {
+                        if otto_state::maintenance::needs_compaction(&s) {
+                            match otto_state::maintenance::compact(&maint_pool).await {
+                                Ok(r) => tracing::info!(
+                                    "db maintenance: auto-compacted {} → {} bytes in {} ms",
+                                    r.before_bytes,
+                                    r.after_bytes,
+                                    r.duration_ms
+                                ),
+                                Err(e) => tracing::warn!("db auto-compaction failed: {e}"),
+                            }
+                        }
+                    }
                 }
                 tokio::time::sleep(interval).await;
             }
