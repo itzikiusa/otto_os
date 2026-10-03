@@ -929,7 +929,18 @@ impl AwsService {
         .iter()
         .map(|s| s.to_string())
         .collect();
-        let out = cli::run_raw(&bin, &args, base, PROBE_TIMEOUT, None).await?;
+        let out = match cli::run_raw(&bin, &args, base, PROBE_TIMEOUT, None).await {
+            Ok(out) => out,
+            // A missing binary is a setup problem every call reports anyway.
+            Err(Error::Invalid(m)) if m.contains("not installed") => return Err(Error::Invalid(m)),
+            // A hung / failed export must never block the call itself: back off
+            // and let the child resolve the profile as before.
+            Err(e) => {
+                tracing::debug!(account = %account.id, "export-credentials failed: {e}");
+                crate::creds::mark_failed(&account.id);
+                return Ok(None);
+            }
+        };
         if !out.ok() {
             if cli::classify_stderr(&out.stderr) == StderrClass::LoginRequired {
                 crate::creds::evict(&account.id);

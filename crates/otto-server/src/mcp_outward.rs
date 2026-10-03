@@ -131,6 +131,10 @@ const DEFAULT_ENABLED: &[&str] = &[
     "aws_athena_list_tables",
     "aws_athena_get_query",
     "aws_eks_list_clusters",
+    "aws_logs_list_groups",
+    "aws_logs_filter",
+    "aws_logs_insights",
+    "aws_logs_get_insights",
     // Kubernetes console reads (`kubernetes`: View).
     "k8s_list_clusters",
     "k8s_get_resources",
@@ -946,6 +950,27 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"List the EKS clusters of an account/region (name, status, version, endpoint, arn, created_at). Read-only.",
             "inputSchema":{"type":"object","required":["account_id"],"properties":{
                 "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"region":{"type":"string"}}}}),
+        // CloudWatch Logs (read-only; times are epoch milliseconds).
+        json!({"name":"otto.aws_logs_list_groups","mutating":false,"category":"AWS",
+            "description":"List CloudWatch Logs log groups (name, retention_days, stored_bytes); optional name `prefix` (e.g. `/aws/eks/`), page with `token`. Read-only.",
+            "inputSchema":{"type":"object","required":["account_id"],"properties":{
+                "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"prefix":{"type":"string"},
+                "token":{"type":"string"},"max":{"type":"integer"},"region":{"type":"string"}}}}),
+        json!({"name":"otto.aws_logs_filter","mutating":false,"category":"AWS",
+            "description":"Read events from one log `group`: optional filter `pattern`, comma-separated `streams`, `start`/`end` (epoch ms — always pass a window), `max` (≤ 1000), `token` to page. Read-only.",
+            "inputSchema":{"type":"object","required":["account_id","group"],"properties":{
+                "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"group":{"type":"string"},"pattern":{"type":"string"},
+                "streams":{"type":"string"},"start":{"type":"integer"},"end":{"type":"integer"},
+                "token":{"type":"string"},"max":{"type":"integer"},"region":{"type":"string"}}}}),
+        json!({"name":"otto.aws_logs_insights","mutating":false,"category":"AWS",
+            "description":"START a Logs Insights `query` over `groups` (≤ 50) between `start` and `end` (epoch ms, ≤ 31 days); returns `{query_id}` — poll otto.aws_logs_get_insights. Read-only, but billed per GB scanned.",
+            "inputSchema":{"type":"object","required":["account_id","groups","query","start","end"],"properties":{
+                "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"groups":{"type":"array","items":{"type":"string"}},
+                "query":{"type":"string"},"start":{"type":"integer"},"end":{"type":"integer"},"limit":{"type":"integer"},"region":{"type":"string"}}}}),
+        json!({"name":"otto.aws_logs_get_insights","mutating":false,"category":"AWS",
+            "description":"Status + rows of a Logs Insights query: `status`, `done`, `result` {columns, rows}, bytes_scanned. Poll until `done`. Read-only.",
+            "inputSchema":{"type":"object","required":["account_id","query_id"],"properties":{
+                "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"query_id":{"type":"string"},"region":{"type":"string"}}}}),
         // ================= Kubernetes console =================
         // §3 routes; everything is `kubectl` with the cluster's own kubeconfig
         // server-side. `kubernetes` feature: View for reads, Edit for k8s_action.
@@ -2074,6 +2099,10 @@ pub(crate) const REF_ARGS: &[(&str, &str, &str)] = &[
     ("aws_athena_query", "account_id", "aws_account"),
     ("aws_athena_get_query", "account_id", "aws_account"),
     ("aws_eks_list_clusters", "account_id", "aws_account"),
+    ("aws_logs_list_groups", "account_id", "aws_account"),
+    ("aws_logs_filter", "account_id", "aws_account"),
+    ("aws_logs_insights", "account_id", "aws_account"),
+    ("aws_logs_get_insights", "account_id", "aws_account"),
     ("k8s_get_resources", "cluster_id", "k8s_cluster"),
     ("k8s_describe", "cluster_id", "k8s_cluster"),
     ("k8s_logs", "cluster_id", "k8s_cluster"),
@@ -4286,6 +4315,68 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             seg(&arg_str(args, "account_id")?),
             opt_query(args, &[("region", "region")])
         )),
+        "aws_logs_list_groups" => SelfCall::get(format!(
+            "/api/v1/aws/accounts/{}/logs/groups?{}",
+            seg(&arg_str(args, "account_id")?),
+            opt_query(
+                args,
+                &[
+                    ("prefix", "prefix"),
+                    ("token", "token"),
+                    ("max", "max"),
+                    ("region", "region")
+                ]
+            )
+        )),
+        "aws_logs_filter" => {
+            let extra = opt_query(
+                args,
+                &[
+                    ("pattern", "pattern"),
+                    ("streams", "streams"),
+                    ("start", "start"),
+                    ("end", "end"),
+                    ("token", "token"),
+                    ("max", "max"),
+                    ("region", "region"),
+                ],
+            );
+            let mut path = format!(
+                "/api/v1/aws/accounts/{}/logs/events?group={}",
+                seg(&arg_str(args, "account_id")?),
+                seg(&arg_str(args, "group")?)
+            );
+            if !extra.is_empty() {
+                path.push('&');
+                path.push_str(&extra);
+            }
+            SelfCall::get(path)
+        }
+        "aws_logs_insights" => {
+            let mut body = json!({
+                "groups": args.get("groups").cloned().unwrap_or(json!([])),
+                "query": arg_str(args, "query")?,
+                "start": args.get("start").and_then(Value::as_i64).unwrap_or(0),
+                "end": args.get("end").and_then(Value::as_i64).unwrap_or(0),
+            });
+            if let Some(limit) = args.get("limit").and_then(Value::as_u64) {
+                body["limit"] = json!(limit);
+            }
+            SelfCall::post(
+                format!(
+                    "/api/v1/aws/accounts/{}/logs/insights?{}",
+                    seg(&arg_str(args, "account_id")?),
+                    opt_query(args, &[("region", "region")])
+                ),
+                body,
+            )
+        }
+        "aws_logs_get_insights" => SelfCall::get(format!(
+            "/api/v1/aws/accounts/{}/logs/insights/{}?{}",
+            seg(&arg_str(args, "account_id")?),
+            seg(&arg_str(args, "query_id")?),
+            opt_query(args, &[("region", "region")])
+        )),
         // ---- Kubernetes console (§3) — `namespace` → `ns`; omitted ⇒ all (-A) ----
         "k8s_list_clusters" => SelfCall::get("/api/v1/k8s/clusters".into()),
         "k8s_get_resources" => {
@@ -5863,6 +5954,10 @@ mod tests {
         "aws_athena_list_tables",
         "aws_athena_get_query",
         "aws_eks_list_clusters",
+        "aws_logs_list_groups",
+        "aws_logs_filter",
+        "aws_logs_insights",
+        "aws_logs_get_insights",
     ];
     const K8S_READS: &[&str] = &[
         "k8s_list_clusters",
