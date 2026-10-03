@@ -950,6 +950,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p.starts_with("/state/git/") {
         return Require(Settings, Admin);
     }
+    // SQLite storage stats + the confirmed Compact database action — daemon
+    // maintenance, same tier as the diagnostics above (handlers require root).
+    if matches!(p, "/admin/db/stats" | "/admin/db/compact") {
+        return Require(Settings, Admin);
+    }
     if matches!(
         p,
         "/state/connections/export" | "/state/connections/export/formats"
