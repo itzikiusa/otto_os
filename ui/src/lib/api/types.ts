@@ -5563,6 +5563,9 @@ export interface WorkflowTrigger {
   spec: Record<string, unknown>;
   enabled: boolean;
   created_at: string;
+  /** When the schedule was last (re)armed — created, resumed, or re-timed.
+   *  Runs missed before it are never caught up. Null on pre-0165 rows. */
+  armed_at?: string | null;
 }
 
 export interface CreateTriggerReq {

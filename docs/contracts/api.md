@@ -3060,7 +3060,7 @@ are root; workflow trigger routes ride the Workflows prefix; the webhook is publ
 | POST /workflows/{id}/webhook/{token} | public-by-token | run input body | `{run_id}` (token validated against workflow_triggers) |
 | GET /workflows/{id}/triggers | ws viewer (Workflows:View) | — | `WorkflowTrigger[]` |
 | POST /workflows/{id}/triggers | ws editor (Workflows:Edit) | `UpsertTriggerReq {kind, spec}` | `WorkflowTrigger` |
-| PATCH /workflow-triggers/{id} | ws editor (Workflows:Edit) | `UpsertTriggerReq` | `WorkflowTrigger` |
+| PATCH /workflow-triggers/{id} | ws editor (Workflows:Edit) | `UpsertTriggerReq` | `WorkflowTrigger` — resuming it (`enabled` false→true) or a really different schedule key (`cadence`/`every_min`/`at`/`weekday`/`expr`/`timezone`/`run_at`) re-arms it: `armed_at` = now, and the scheduler never looks before `max(last_run, armed_at)`, so a run missed while paused is not caught up. Created triggers are armed at creation. `armed_at` is null on rows predating migration 0165 |
 | DELETE /workflow-triggers/{id} | ws editor (Workflows:Edit) | — | 204 |
 | POST /workflow-runs/{id}/approve | ws editor (Workflows:Edit) | `{node_id, approved}` | resumed run status. `409` when the run is not `running` (canceled/failed runs can't be approved) or was decided concurrently; `400` when it is not waiting at `node_id` |
 

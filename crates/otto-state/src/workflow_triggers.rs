@@ -24,6 +24,12 @@ pub struct WorkflowTrigger {
     pub spec: Value,
     pub enabled: bool,
     pub created_at: chrono::DateTime<Utc>,
+    /// When the schedule was last (re)armed — created, re-enabled after a
+    /// pause, or its cadence/timezone/expression changed. The scheduler's
+    /// due check never looks before it (a resumed trigger doesn't fire the
+    /// run it missed while off). `None` on rows predating migration 0165.
+    #[serde(default)]
+    pub armed_at: Option<chrono::DateTime<Utc>>,
 }
 
 /// Fields required to create a trigger.
@@ -50,7 +56,32 @@ fn row_to_trigger(r: &sqlx::sqlite::SqliteRow) -> Result<WorkflowTrigger> {
         spec,
         enabled: r.get::<i64, _>("enabled") != 0,
         created_at: ts(&r.get::<String, _>("created_at"))?,
+        armed_at: r
+            .get::<Option<String>, _>("armed_at")
+            .and_then(|s| ts(&s).ok()),
     })
+}
+
+/// The spec keys that define WHEN a schedule trigger fires. A change to any of
+/// them re-arms it; prompt / destination edits don't.
+const SCHEDULE_KEYS: [&str; 7] = [
+    "cadence",
+    "every_min",
+    "at",
+    "weekday",
+    "expr",
+    "timezone",
+    "run_at",
+];
+
+/// Whether an update re-arms the trigger: resumed after a pause, or one of
+/// its [`SCHEDULE_KEYS`] changed.
+fn rearms(was_enabled: bool, enabled: bool, old_spec: &Value, new_spec: &Value) -> bool {
+    let resumed = !was_enabled && enabled;
+    let respec = SCHEDULE_KEYS
+        .iter()
+        .any(|k| old_spec.get(k) != new_spec.get(k));
+    resumed || respec
 }
 
 #[derive(Clone)]
@@ -67,7 +98,7 @@ impl TriggersRepo {
     /// List all triggers for a workflow, ordered oldest-first.
     pub async fn list(&self, workflow_id: &Id) -> Result<Vec<WorkflowTrigger>> {
         let rows = sqlx::query(
-            "SELECT id, workflow_id, kind, spec_json, enabled, created_at
+            "SELECT id, workflow_id, kind, spec_json, enabled, created_at, armed_at
              FROM workflow_triggers
              WHERE workflow_id = ?
              ORDER BY created_at",
@@ -84,7 +115,7 @@ impl TriggersRepo {
     /// Used by the scheduler to find `schedule` triggers that are due.
     pub async fn list_enabled_by_kind(&self, kind: &str) -> Result<Vec<WorkflowTrigger>> {
         let rows = sqlx::query(
-            "SELECT id, workflow_id, kind, spec_json, enabled, created_at
+            "SELECT id, workflow_id, kind, spec_json, enabled, created_at, armed_at
              FROM workflow_triggers
              WHERE kind = ? AND enabled = 1
              ORDER BY created_at",
@@ -100,7 +131,7 @@ impl TriggersRepo {
     /// Fetch a single trigger by id.
     pub async fn get(&self, id: &Id) -> Result<WorkflowTrigger> {
         let row = sqlx::query(
-            "SELECT id, workflow_id, kind, spec_json, enabled, created_at
+            "SELECT id, workflow_id, kind, spec_json, enabled, created_at, armed_at
              FROM workflow_triggers WHERE id = ?",
         )
         .bind(id)
@@ -132,14 +163,16 @@ impl TriggersRepo {
             .map_err(|e| Error::Internal(format!("spec serialize: {e}")))?;
         let now = Utc::now().to_rfc3339();
         sqlx::query(
-            "INSERT INTO workflow_triggers (id, workflow_id, kind, spec_json, enabled, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO workflow_triggers
+                 (id, workflow_id, kind, spec_json, enabled, created_at, armed_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&new.workflow_id)
         .bind(&new.kind)
         .bind(&spec_json)
         .bind(new.enabled as i64)
+        .bind(&now)
         .bind(&now)
         .execute(&self.pool)
         .await
@@ -160,6 +193,11 @@ impl TriggersRepo {
         let new_enabled = enabled.unwrap_or(current.enabled);
         let spec_json = serde_json::to_string(&new_spec)
             .map_err(|e| Error::Internal(format!("spec serialize: {e}")))?;
+        // Re-arm (see `WorkflowTrigger::armed_at`) when the trigger is resumed
+        // or its schedule really changed; re-saving an unchanged form must not
+        // push the next fire out. NULL keeps the row's current arm instant.
+        let armed_at = rearms(current.enabled, new_enabled, &current.spec, &new_spec)
+            .then(|| Utc::now().to_rfc3339());
         // The schedule cursor (`spec.last_run`) is SERVER-owned. A config edit
         // carries the client's copy of the spec — captured when its edit dialog
         // opened — and writing it back rolled the cursor back (the trigger then
@@ -172,12 +210,14 @@ impl TriggersRepo {
                          THEN json_remove(?, '$.last_run')
                      ELSE json_set(?, '$.last_run', json_extract(spec_json, '$.last_run'))
                  END,
-                 enabled = ?
+                 enabled = ?,
+                 armed_at = COALESCE(?, armed_at)
              WHERE id = ?",
         )
         .bind(&spec_json)
         .bind(&spec_json)
         .bind(new_enabled as i64)
+        .bind(&armed_at)
         .bind(id)
         .execute(&self.pool)
         .await
@@ -378,5 +418,91 @@ mod tests {
         let t5 = repo.get(&t.id).await.unwrap();
         assert_eq!(t5.spec["at"], "11:00");
         assert_eq!(t5.spec["last_run"], "2026-10-26T06:00:00+00:00");
+    }
+
+    /// W1: a trigger is armed at creation and re-armed only when it's resumed
+    /// or its schedule really changes — not on a prompt edit or a re-save.
+    #[tokio::test]
+    async fn triggers_are_armed_at_creation_and_on_resume_or_reschedule() {
+        let pool = mem_pool().await;
+        let workflows = WorkflowsRepo::new(pool.clone());
+        let repo = TriggersRepo::new(pool.clone());
+        let wf = workflows
+            .create(
+                &"ws1".into(),
+                "WF",
+                "desc",
+                "",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
+            .await
+            .unwrap();
+        let spec = serde_json::json!({"cadence": "daily", "at": "09:00"});
+        let t = repo
+            .create(NewWorkflowTrigger {
+                workflow_id: wf.id.clone(),
+                kind: "schedule".into(),
+                spec: spec.clone(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        assert_eq!(t.armed_at, Some(t.created_at));
+
+        let old = "2020-01-01T00:00:00+00:00";
+        let set_armed = |v: &'static str| {
+            let pool = pool.clone();
+            let id = t.id.clone();
+            async move {
+                sqlx::query("UPDATE workflow_triggers SET armed_at = ? WHERE id = ?")
+                    .bind(v)
+                    .bind(&id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        };
+        set_armed(old).await;
+        let old_ts = ts(old).unwrap();
+
+        // A prompt edit with the same cadence keeps the arm instant.
+        let t2 = repo
+            .update(
+                &t.id,
+                Some(serde_json::json!({"cadence": "daily", "at": "09:00", "prompt": "hi"})),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(t2.armed_at, Some(old_ts));
+        // Pausing doesn't re-arm.
+        let t3 = repo.update(&t.id, None, Some(false)).await.unwrap();
+        assert_eq!(t3.armed_at, Some(old_ts));
+        // Resuming does.
+        let t4 = repo.update(&t.id, None, Some(true)).await.unwrap();
+        assert!(t4.armed_at.unwrap() > old_ts);
+        // A new time does.
+        set_armed(old).await;
+        let t5 = repo
+            .update(
+                &t.id,
+                Some(serde_json::json!({"cadence": "daily", "at": "10:00", "prompt": "hi"})),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(t5.armed_at.unwrap() > old_ts);
+    }
+
+    #[test]
+    fn rearms_only_on_resume_or_schedule_key_change() {
+        let a = serde_json::json!({"cadence": "interval", "every_min": 30, "prompt": "x"});
+        let b = serde_json::json!({"cadence": "interval", "every_min": 30, "prompt": "y"});
+        let c = serde_json::json!({"cadence": "interval", "every_min": 60});
+        assert!(!rearms(true, true, &a, &b));
+        assert!(!rearms(true, false, &a, &a));
+        assert!(rearms(false, true, &a, &a));
+        assert!(rearms(true, true, &a, &c));
     }
 }
