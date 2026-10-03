@@ -19,10 +19,14 @@
     today.start();
     return () => today.stop();
   });
-  // A workspace switch changes every fetched list.
+  // A workspace switch changes every fetched list. Not on mount: start()
+  // already loads, and a refresh then queued a second full load (needs-you,
+  // tasks, approvals, designs…) during the cold boot.
+  let seenWs: string | null | undefined;
   $effect(() => {
-    void ws.currentId;
-    today.refresh();
+    const id = ws.currentId;
+    if (seenWs !== undefined && id !== seenWs) today.refresh();
+    seenWs = id;
   });
 
   const name = $derived(auth.me ? auth.me.display_name || auth.me.username : '');

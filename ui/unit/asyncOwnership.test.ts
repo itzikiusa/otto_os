@@ -5,6 +5,14 @@ import * as sessionScope from '../src/lib/stores/sessionScope.ts';
 import * as sessionPatch from '../src/lib/stores/sessionPatch.ts';
 import * as sessionBuckets from '../src/lib/stores/sessionBuckets.ts';
 
+/** `whenIdle` as node has it (no requestIdleCallback): a 200 ms timer. */
+const lazyComponent = {
+  whenIdle(fn: () => void): () => void {
+    const t = setTimeout(fn, 200);
+    return () => clearTimeout(t);
+  },
+};
+
 function workspace() {
   const requests: { path: string; result: ReturnType<typeof deferred<any[]>> }[] = [];
   const restored: string[] = [];
@@ -21,7 +29,7 @@ function workspace() {
     './ui.svelte': { ui: { sessionIsolation: false }, clientId: () => 'test' },
     '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'otto_panes_' },
     '../storage': { lsGet: () => null, lsSet() {}, lsRemove() {} },
-    '../desktop': { isEmbedded: false }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets,
+    '../desktop': { isEmbedded: false }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets, '../lazy-component.svelte': lazyComponent,
   });
   ws.refreshOtherSessions = async () => {};
   return { ws, requests, restored };
@@ -53,7 +61,7 @@ function bootWorkspace(saved: string, list: { id: string }[], archivedIn: string
     './ui.svelte': { ui: { sessionIsolation: false }, clientId: () => 'test' },
     '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'otto_panes_' },
     '../storage': { lsGet: (k: string) => (k === 'otto_workspace' ? saved : null), lsSet() {}, lsRemove() {} },
-    '../desktop': { isEmbedded: false }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets,
+    '../desktop': { isEmbedded: false }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets, '../lazy-component.svelte': lazyComponent,
   });
   ws.refreshOtherSessions = async () => {};
   ws.refreshActiveWorkflowRuns = async () => {};
@@ -93,16 +101,22 @@ test('boot: a saved workspace that no longer exists drops its speculative list (
 
 const probes = (log: string[]) => log.filter((p) => p.includes('archived=true&limit=1')).length;
 
+/** The probe runs when idle (no requestIdleCallback in node: a 200 ms timer). */
+const idle = () => new Promise((resolve) => setTimeout(resolve, 260));
+
 test('the archived probe stops once it found rows, and keeps asking while there are none (perf G7)', async () => {
   const withRows = bootWorkspace('A', [{ id: 'A' }], ['A']);
   const a = withRows.ws.load();
   withRows.release();
   await a;
+  assert.equal(probes(withRows.log), 0, 'off the boot path: no probe before the list has painted');
+  await idle();
   const first = probes(withRows.log);
   assert.ok(first >= 1, 'the first list load probes');
   assert.equal(withRows.ws.hasArchived, true);
   await withRows.ws.refreshSessions();
   await withRows.ws.refreshSessions();
+  await idle();
   assert.equal(probes(withRows.log), first, 'known archived rows: no probe per refresh');
   assert.equal(withRows.ws.hasArchived, true, 'the folded header stays');
 
@@ -110,8 +124,10 @@ test('the archived probe stops once it found rows, and keeps asking while there 
   const b = none.ws.load();
   none.release();
   await b;
+  await idle();
   const before = probes(none.log);
   await none.ws.refreshSessions();
+  await idle();
   assert.ok(probes(none.log) > before, 'no archived rows yet: a refresh asks again (another client may archive)');
   assert.equal(none.ws.hasArchived, false);
 });

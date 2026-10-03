@@ -28,6 +28,7 @@ import { isEmbedded } from '../desktop';
 import { SCRATCH_WORKSPACE_ID } from './sessionScope';
 import { applyStatusPatches, canDropExited, patchSessionIn, staleStatusIds, type StatusPatch } from './sessionPatch';
 import { bucketSessions, idChunks, isForeground, isShownKind, shownListQuery } from './sessionBuckets';
+import { whenIdle } from '../lazy-component.svelte';
 
 /** Archived rows per "Load more" page (per scope: workspace / scratch). */
 const ARCHIVED_PAGE = 100;
@@ -819,7 +820,7 @@ class WorkspaceStore {
       const boot =
         this.bootSessions && this.bootSessions.key === `${getToken()}|${wsId}|${q}` ? this.bootSessions : null;
       if (boot) this.bootSessions = null;
-      const [own, scratch, pinned, archivedAny] = await Promise.all([
+      const [own, scratch, pinned] = await Promise.all([
         boot ? boot.own : wsId ? api.get<Session[]>(`/workspaces/${wsId}/sessions${q}`) : Promise.resolve([]),
         boot
           ? boot.scratch
@@ -831,14 +832,6 @@ class WorkspaceStore {
               .catch(() => [] as Session[]),
           ),
         ).then((pages) => pages.flat()),
-        // Once a page is loaded the section knows on its own; until then a
-        // 1-row probe decides whether the folded header shows at all; archiving
-        // here flips `hasArchived` locally.
-        probeArchived
-          ? Promise.all([...(wsId ? [probe(wsId)] : []), probe(SCRATCH_WORKSPACE_ID)]).then((r) =>
-              r.some(Boolean),
-            )
-          : Promise.resolve(false),
       ]);
       if (!current()) return;
       const seen = new Set<Id>();
@@ -850,8 +843,22 @@ class WorkspaceStore {
         seen.add(s.id);
         all.push(s);
       }
-      if (archivedAny) this.archivedKnown = true;
       this.hasArchived = this.archivedKnown || this.archivedSessions.length > 0;
+      // Once a page is loaded the section knows on its own; until then a
+      // 1-row probe decides whether the folded header shows at all; archiving
+      // here flips `hasArchived` locally. Off the boot path (idle): it only
+      // gates a folded header, and on a cold boot its two requests went out
+      // before first paint (desktop-boot-perf's request budget).
+      if (probeArchived) {
+        whenIdle(() => {
+          if (!current()) return;
+          void Promise.all([...(wsId ? [probe(wsId)] : []), probe(SCRATCH_WORKSPACE_ID)]).then((r) => {
+            if (!current() || !r.some(Boolean)) return;
+            this.archivedKnown = true;
+            this.hasArchived = true;
+          });
+        });
+      }
       // Background engine sessions that ARE here (open tabs, live ones this
       // document saw created, `includeSources` panels) stay in `this.sessions`
       // so their owning panels can look them up / open them; every
