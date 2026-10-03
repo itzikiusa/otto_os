@@ -161,11 +161,12 @@
     const my = sSeq;
     const fresh = await Promise.all(ids.map((id) => getArtifact(id).then((d) => d.artifact, () => null)));
     if (my !== sSeq) return; // a reload landed meanwhile
-    if (fresh.some((a) => !a)) {
+    const ok = fresh.filter((a): a is DesignArtifact => !!a);
+    if (ok.length < ids.length) {
       scheduleReload(); // gone or unreadable → the server decides
       return;
     }
-    const byId = new Map(fresh.map((a) => [a!.id, a!]));
+    const byId = new Map<string, DesignArtifact>(ok.map((a) => [a.id, a]));
     hits = hits
       .map((h) => {
         const a = byId.get(h.artifact.id);
