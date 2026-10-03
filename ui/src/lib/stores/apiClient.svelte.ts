@@ -35,6 +35,7 @@ import type {
 import { isSecretRef } from '../api/types';
 import { forDuplicate, stripSecretsForStorage, unmaskHistory } from '../api/apiSecretShapes';
 import { ws } from './workspace.svelte';
+import { announceModule } from '../lazyModule';
 import { HistoryRefresh, HistoryDetail } from './apiHistory';
 import { toasts } from '../toast.svelte';
 import type { PreRequestReq, TestResult } from '../api/scripts';
@@ -2024,3 +2025,6 @@ export function historyResponse(h: Pick<ApiHistoryEntry, 'response' | 'status' |
 }
 
 export const apiClient = new ApiClientStore();
+// `api_client_changed` is routed with `peek()` (events.svelte.ts): announce
+// so a statically imported store still sees it.
+announceModule('apiClient', apiClient);

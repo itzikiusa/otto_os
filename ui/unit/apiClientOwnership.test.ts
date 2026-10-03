@@ -22,6 +22,7 @@ function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: an
       : p.endsWith('/apiHistory') ? {HistoryRefresh, HistoryDetail}
       : p.endsWith('/apiSecretShapes') ? secretShapes
       : p.endsWith('/scriptRunner') ? {runScript}
+      : p.endsWith('/lazyModule') ? {announceModule() {}}
       : p.endsWith('/scripts') ? {runPreRequest: () => ({logs:[],tests:[]})}
       : p.endsWith('/importers') ? {isImportedEnvironment: (d: any) => d.format === 'postman-env'}
       : p.endsWith('/types') ? {isSecretRef: (v: any) => !!v?.$secret} : {},

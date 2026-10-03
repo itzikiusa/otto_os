@@ -40,7 +40,7 @@ const browserLiveStore = lazyModule(() => import('./stores/browserLive.svelte').
 const personalAgentsStore = lazyModule(() => import('./stores/personalAgents.svelte').then((m) => m.personalAgents), 'personalAgents');
 const k8sStore = lazyModule(() => import('./stores/k8s.svelte').then((m) => m.k8s), 'k8s');
 const awsStore = lazyModule(() => import('./stores/aws.svelte').then((m) => m.aws));
-const apiClientStore = lazyModule(() => import('./stores/apiClient.svelte').then((m) => m.apiClient));
+const apiClientStore = lazyModule(() => import('./stores/apiClient.svelte').then((m) => m.apiClient), 'apiClient');
 import {
   handleUiFrame,
   helloFrame,

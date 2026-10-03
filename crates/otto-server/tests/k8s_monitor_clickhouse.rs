@@ -392,7 +392,16 @@ async fn every_query_builder_runs_on_a_real_clickhouse() {
         .await
         .unwrap();
     assert_eq!(from_rollups[0].mem_bytes, 400.0);
-    assert_eq!(from_rollups[0].rps, web.rps);
+    // Same request total, but `rps` divides by the open window's length up
+    // to the CURRENT second (`parts_secs(.., now)`, ~3600–3660 s), so a call
+    // that lands a second later reads a ~0.03 % lower rate. Exact equality
+    // made this flaky whenever the TRUNCATE straddled a second boundary.
+    assert!(
+        (from_rollups[0].rps - web.rps).abs() <= web.rps * 0.01,
+        "rps from rollups {} vs {}",
+        from_rollups[0].rps,
+        web.rps
+    );
     assert_eq!(from_rollups[0].latency_ms, web.latency_ms);
     assert_eq!(from_rollups[0].versions.len(), 2);
 
