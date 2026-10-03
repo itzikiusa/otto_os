@@ -211,3 +211,109 @@ no CodeQL speedup is claimed. No larger runner or security/test exclusion was
 introduced. Deeper server-crate splits remain a subsequent, timing-guided
 change: this pass removes proven recompilation and scheduling overhead without
 attempting a language rewrite.
+
+## Everyday-loop pass — October 3
+
+Goal: an everyday change checked in about a minute. All numbers below come from
+one shared 8-core host while up to ten other agents were building (every Cargo
+run went through a 3-job throttle). Absolute times are therefore inflated and
+noisy; each comparison is an **A/B of the same command, back to back, in the
+same target slot**, and only relative differences are claimed. Two identical
+runs of the same five-crate test set differed by up to ±20% per crate (otto-git
+121 s vs 152 s of summed test time), so smaller deltas are noise.
+
+### Where the time goes (`cargo nextest run -p otto-server --timings`)
+
+Workspace crates only (dependencies were already built), 410 s total:
+
+| Unit | Time | Note |
+| --- | ---: | --- |
+| otto-server lib | 314.5 s | 286.9 s frontend (single-threaded), 27.6 s codegen; starts at 64 s, ends at 378 s |
+| otto-server lib unit tests | 149.1 s | runs in parallel with the lib |
+| 19 otto-server integration binaries | 94.5 s CPU / 31.6 s wall | each links the whole workspace |
+| otto-dbviewer | 32.8 s | next-largest crate, on the critical path before the server |
+| otto-git, otto-state, otto-core | 15.6 / 14.6 / 11.1 s | |
+
+otto-server is 162k lines (37% of all crate sources) and 77% of the build:
+any edit in it, or in anything it depends on, pays its ~5 minute (loaded)
+frontend serially. Nothing else comes close.
+
+### Changes and measured effect
+
+| Change | Before | After |
+| --- | ---: | ---: |
+| otto-server integration tests linked as one binary (`tests/it.rs`) | 19 units, 94.5 s CPU, 31.6 s wall after the lib, ~1.4 GB of binaries | 2 units, 16.9 s CPU, 12.3 s wall, 415 MB |
+| ClickHouse: internal DNS cache off (server boot / SIGTERM exit) | 5.5 s / 4.9 s | 0.6 s / 0.2 s |
+| ClickHouse: no idle keep-alive connection in the client pool (SIGTERM exit) | 10.1 s | 0.1 s |
+| otto-usage e2e (5 server-backed tests, summed) | 32.3 s | 8.9 s |
+| otto-server k8s_monitor_clickhouse (3 tests) | 9.4 / 8.1 / 7.2 s | 3.1 / 1.9 / 1.5 s |
+| otto-git ARG_MAX stage/unstage/discard (1,800 long paths, not 14,000 short) | 31 s (deps report) | 1.6 s |
+| otto-vault revision index at 5k revisions (50k variant now `#[ignore]`d, run by a CI step) | 39 s (deps report) | 4.0 s |
+| Dependencies at `opt-level = 1` in dev/test: otto-state tests (summed test time) | 309 s / 272 s (two runs) | 86 s |
+| … otto-sessions tests (summed) | 82.5 s / 82.0 s | 29.8 s |
+| … slowest otto-sessions test (`lifecycle_mutations_wait_for_in_flight_restart`) | 5.5 s (13 s in the deps report) | 2.0 s |
+
+The dependency `opt-level` change keeps workspace crates at `opt-level = 0`, so
+an edit compiles as before; it only changes how fast the dependencies run. Every
+test that opens a migrated SQLite database (146 migrations) spends its time in
+SQLite (C, built by `libsqlite3-sys` at the package's opt-level), sqlx, tokio
+and serde. One-time cost: rebuilding the 284 dependency units of otto-state and
+otto-sessions took 358 s of CPU (2m27 wall at 3 jobs); the whole otto-server
+tree (615 dependency units) took 2,186 s of CPU (about 12 minutes wall at 3
+jobs on the loaded host). They are cached afterwards locally and by CI's
+rust-cache, whose key changes once with this profile. On the new profile the
+complete otto-server suite (1,311 tests: lib, `it`, `snips`) passed in 65 s of
+nextest wall time, and the server lib still compiled at opt-level 0 (216 s).
+`debug = "line-tables-only"` / no dependency debuginfo would likely shorten
+local links further, but this host's throttle forces `debug = 0`, so it was
+not measured and not changed.
+
+The ClickHouse stalls were found by timing the real server: an unresolvable
+`<host>.local` costs a 5 s DNS timeout at boot and again on shutdown, and SIGTERM
+waits for every open client connection ("Waiting for 1 outstanding
+connections"). They also slowed the daemon's own usage-engine start and restart.
+The runtime-lag gates now take the best of up to three attempts and run in a
+max-one `timing` nextest group, so CPU contention cannot fail them on its own.
+
+### Everyday command
+
+`scripts/check.sh` (documented in `AGENTS.md`) runs CI's gates only for the
+changed crates (fmt + clippy) and their reverse dependents (nextest + doc-tests),
+plus the UI gates when `ui/` changed. A root build-file change selects the whole
+workspace. For an otto-server edit the loop is dominated by the server's own
+frontend; for a leaf crate (otto-vault, otto-git, …) it is that crate plus
+otto-server and ottod, i.e. still the server.
+
+### Not changed, and why
+
+- **Linker.** macOS uses Apple's ld-prime (ld-27037), already competitive with
+  lld; lld is not installed and would add a toolchain prerequisite. Linux CI
+  already links with the bundled `rust-lld` (default on x86_64 Linux since Rust
+  1.90).
+- **`split-debuginfo`** is already `unpacked` by default for macOS dev builds.
+- **CI sharding.** The CI Rust job is compile-bound (clippy 1m22, nextest with
+  compilation 6m08); two nextest partitions would each repeat the compilation.
+  Not a win without a shared build artifact, so it was not added.
+
+### Plan for the big ones (not done in this pass)
+
+1. **Split otto-server (the only lever that reaches "about a minute").** Its
+   frontend is single-threaded and serial on every edit. Move self-contained
+   domains into their own crates behind a narrow `AppState`-facing trait:
+   `workflow_engine` + `run_*` (~12k lines), `mcp_outward` + `mcp_*` (~17k),
+   design/vault/canvas assistants (`design_*`, `vault_docs_agent`,
+   `canvas_assist`, `mockup_assist`, ~12k), browser + API-client routes (~9k),
+   goal loops / swarm runtime (~9k). Keep `state.rs`, auth, policy, error and
+   `api_helpers` in a small `otto-server-core` that the domain crates depend on;
+   otto-server becomes the router that wires them. Expected effect: an edit in
+   one domain recompiles that crate plus the thin router, and the domains'
+   frontends run in parallel on a cold build. Start with `workflow_engine`
+   (largest, fewest inbound references), measure with `--timings`, continue only
+   if the edit-loop time drops as predicted.
+2. **Feature-gating heavy dependencies** (rdkafka/CMake, boa_engine, tree-sitter
+   grammars) only shortens cold builds; dependencies are cached in every warm
+   loop and in CI (rust-cache). Worth it for fresh worktrees, not for the
+   everyday loop — do it after the split.
+3. **Debuginfo** (`line-tables-only` for workspace crates, none for
+   dependencies) for local dev builds: measure link times on an unthrottled
+   host before adopting.

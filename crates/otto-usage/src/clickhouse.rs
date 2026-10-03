@@ -97,7 +97,14 @@ impl ClickHouse {
         // No global timeout — each request sets its own (queries are fast; DDL /
         // OPTIMIZE FINAL can take many minutes), so a slow merge isn't killed by a
         // short client cap.
+        //
+        // No idle keep-alive pool: on SIGTERM the server waits for every open
+        // client connection ("Waiting for 1 outstanding connections") before
+        // exiting, so one pooled idle socket turned each shutdown/restart into
+        // a ~5-10 s stall (measured 10.1 s vs 0.1 s). A fresh loopback connect
+        // per request costs well under a millisecond.
         let http = reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
             .build()
             .map_err(|e| Error::Internal(format!("http client: {e}")))?;
 
@@ -458,11 +465,19 @@ fn write_server_config(data_dir: &Path, port: u16) -> Result<PathBuf> {
     // call threw from RotateBySizeStrategy::mustRotate and the two AsyncLogger
     // threads spun at ~2 cores until restart, even after space was freed.
     // Server failures still surface to the daemon as query errors.
+    //
+    // `disable_internal_dns_cache`: a loopback-only single node never resolves a
+    // peer, yet with the cache on the server resolves its OWN hostname at boot
+    // and again from a 15 s updater task that shutdown waits on. When the Mac's
+    // `<name>.local` doesn't resolve (mDNS off/blocked, sandboxes) each lookup
+    // sits out a 5 s timeout: measured 5.5 s to the first /ping and 4.9 s to
+    // exit on SIGTERM, vs 0.6 s / 0.2 s with the cache off.
     let xml = format!(
         "<clickhouse>\n\
          <logger><level>error</level><console>1</console></logger>\n\
          <http_port>{port}</http_port>\n\
          <listen_host>127.0.0.1</listen_host>\n\
+         <disable_internal_dns_cache>1</disable_internal_dns_cache>\n\
          <path>{path}</path>\n\
          <tmp_path>{tmp}</tmp_path>\n\
          <mark_cache_size>67108864</mark_cache_size>\n\
@@ -670,6 +685,8 @@ mod tests {
         let xml = std::fs::read_to_string(&cfg).unwrap();
         assert!(xml.contains("<http_port>18999</http_port>"));
         assert!(xml.contains("<listen_host>127.0.0.1</listen_host>"));
+        // No 5 s self-hostname DNS stall at boot / shutdown.
+        assert!(xml.contains("<disable_internal_dns_cache>1</disable_internal_dns_cache>"));
         assert!(xml.contains("max_server_memory_usage_to_ram_ratio"));
         assert!(xml.contains("<max_server_memory_usage>1073741824</max_server_memory_usage>"));
         assert!(xml.contains("<background_schedule_pool_size>4</background_schedule_pool_size>"));

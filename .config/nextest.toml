@@ -19,11 +19,19 @@ clickhouse = { max-threads = 1 }
 # PTY/session tests spawn real shells and use short readiness/kill deadlines.
 # Keep their system process pressure bounded across all test binaries.
 processes = { max-threads = 2 }
+# Wall-clock gates (otto-server tests/runtime_lag.rs: worst ticker lag under a
+# 20 ms budget). One at a time, so they never compete with each other for a
+# core; each case also takes the best of three attempts against outside noise.
+timing = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = '(package(otto-usage) & binary(e2e)) | (package(otto-server) & binary(k8s_monitor_clickhouse))'
+filter = '(package(otto-usage) & binary(e2e)) | (package(otto-server) & binary(it) & test(/^k8s_monitor_clickhouse::/))'
 test-group = 'clickhouse'
 
 [[profile.default.overrides]]
 filter = 'package(otto-pty) | package(otto-sessions) | package(otto-sandbox)'
 test-group = 'processes'
+
+[[profile.default.overrides]]
+filter = 'package(otto-server) & binary(it) & test(/^runtime_lag::/)'
+test-group = 'timing'

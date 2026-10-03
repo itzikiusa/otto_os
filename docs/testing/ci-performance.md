@@ -93,7 +93,11 @@ The Rust runtime-lag gate (`crates/otto-server/tests/runtime_lag.rs`) also has
 a burst case again: 200 × 64 KB events queued at once and drained by a socket
 loop modelled on `ws_events`. It measured 208 ms of blocked worker before the
 events socket started pacing itself (`ws_fanout::Pacer`), 2–4 ms after, under
-the unchanged 20 ms budget.
+the unchanged 20 ms budget. Every case in the file takes the best of up to three
+attempts (stopping at the first under budget): the lag is one worst tick gap, so
+a single OS preemption on a loaded box failed the paced case at 57 ms, while a
+real regression blocks every attempt. Nextest runs the file in its own
+`timing` test group (max one at a time).
 
 ## Parallel-load CPU/RAM test
 

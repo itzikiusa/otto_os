@@ -117,14 +117,33 @@ npm run test:e2e # Playwright mobile/tablet E2E (spins an ISOLATED throwaway dae
                  # parallel per-page runs. Specs: ui/e2e/*.spec.ts.
 ```
 
-For the edit/check loop, select the affected package and test target first:
+**Everyday gate: `scripts/check.sh`.** It runs CI's gates scoped to what you
+changed vs the merge-base with `main` (committed, staged, unstaged, untracked):
+rustfmt on the changed `.rs` files, clippy `-D warnings` on the changed crates,
+nextest (+ doc-tests) on those crates **and every crate that depends on them**,
+and `npm run check` + `npm run test:unit` only if `ui/` changed. A root build
+file change (`Cargo.toml`, `Cargo.lock`, `.cargo/`, `.config/`) selects the whole
+workspace. Options: `--base REF` (e.g. your batch branch), `--all` (exactly
+CI), `--check` (fmt check, no rewrite), `--no-clippy`, `--no-test`, `--no-ui`,
+`--dry-run` (print the plan). `CARGO=<wrapper>` routes builds through a
+throttle wrapper.
+
+For a tighter edit/check loop, select the affected package and test target:
 
 ```bash
 cargo check -p otto-server --lib
 cargo test -p otto-server --lib <test_filter>
-cargo test -p otto-server --test <integration_test_target> <test_filter>
+cargo test -p otto-server --test it <suite>::<test_filter>   # integration suites
+cargo nextest run -p otto-server -E 'test(/^runtime_lag::/)'  # same, via nextest
 cargo clippy -p otto-server --all-targets -- -D warnings
 ```
+
+otto-server's integration tests link as ONE binary, `it` (`tests/it.rs`
+`#[path]`-includes each `tests/<suite>.rs`; only `snips.rs`, which sets process
+env vars, stays standalone). A new `tests/<suite>.rs` must get a `#[path]` line
+in `tests/it.rs` — a guard test fails until it does. Scale/perf gates too slow
+for every run are `#[ignore]`d and run in CI's "ignored scale gates" step
+(locally: `cargo nextest run --run-ignored only -E 'test(/_at_50k_revisions_/)'`).
 
 Include affected consumers when changing shared APIs. These focused commands
 give early feedback; the full workspace checks above remain the integration

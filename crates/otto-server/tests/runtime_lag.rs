@@ -27,6 +27,22 @@ fn budget() -> Duration {
     Duration::from_millis(ms)
 }
 
+/// The lag is the single worst tick gap, so one OS preemption on a loaded box
+/// (parallel test binaries, a shared CI runner) can exceed the budget by
+/// itself. A real regression blocks EVERY attempt; noise doesn't hit three in a
+/// row — so each gate takes the best of up to three attempts, stopping at the
+/// first one under budget (the common case costs a single run).
+fn best_of_three(mut attempt: impl FnMut() -> Duration) -> Duration {
+    let mut best = Duration::MAX;
+    for _ in 0..3 {
+        best = best.min(attempt());
+        if best < budget() {
+            break;
+        }
+    }
+    best
+}
+
 /// One worker (so a blocked worker starves the ticker) + a blocking pool.
 fn one_worker_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()
@@ -123,46 +139,60 @@ fn synthetic_jsonl(dir: &std::path::Path, mb: usize) -> std::path::PathBuf {
 fn transcript_fold_of_a_20mb_file_never_blocks_a_worker() {
     let dir = tempfile::tempdir().unwrap();
     let path = synthetic_jsonl(dir.path(), 20);
-    let key = CacheKey {
-        root: dir.path().to_path_buf(),
-        path: path.clone(),
-        provider: Provider::Claude,
-        sub: None,
-    };
-    let (turns, lag) = max_lag_while(async move {
-        let cache = TranscriptCache::default();
-        let snap = cache
-            .get(key, move || {
-                let folded = otto_transcript::fold_file(
-                    Provider::Claude,
-                    &path,
-                    FoldOpts {
-                        images: None,
-                        price: None,
+    let lag = best_of_three(|| {
+        let key = CacheKey {
+            root: dir.path().to_path_buf(),
+            path: path.clone(),
+            provider: Provider::Claude,
+            sub: None,
+        };
+        let path = path.clone();
+        let (turns, lag) = max_lag_while(async move {
+            let cache = TranscriptCache::default();
+            let snap = cache
+                .get(key, move || {
+                    let folded = otto_transcript::fold_file(
+                        Provider::Claude,
+                        &path,
+                        FoldOpts {
+                            images: None,
+                            price: None,
+                            subagents: Vec::new(),
+                        },
+                    )
+                    .map_err(|e| otto_core::Error::Internal(e.to_string()))?;
+                    Ok(Snapshot {
+                        folded,
                         subagents: Vec::new(),
-                    },
-                )
-                .map_err(|e| otto_core::Error::Internal(e.to_string()))?;
-                Ok(Snapshot {
-                    folded,
-                    subagents: Vec::new(),
+                    })
                 })
-            })
-            .await
-            .expect("fold");
-        snap.folded.turns.len()
+                .await
+                .expect("fold");
+            snap.folded.turns.len()
+        });
+        assert!(turns > 0, "the fold produced turns");
+        lag
     });
-    eprintln!("transcript fold (20 MB): worst worker lag {lag:?}");
-    assert!(turns > 0, "the fold produced turns");
+    eprintln!("transcript fold (20 MB): best-of-3 worst worker lag {lag:?}");
     assert!(
         lag < budget(),
-        "transcript fold stalled a worker for {lag:?} (budget {:?})",
+        "transcript fold stalled a worker for {lag:?} (budget {:?}, best of 3)",
         budget()
     );
 }
 
 #[test]
 fn events_socket_serialization_of_big_frames_stays_under_budget() {
+    let lag = best_of_three(paced_events_lag);
+    eprintln!("events serialization (200 × 64 KB): best-of-3 worst worker lag {lag:?}");
+    assert!(
+        lag < budget(),
+        "events serialization stalled a worker for {lag:?} (best of 3)"
+    );
+}
+
+/// One paced run of 200 big frames; returns its worst worker lag.
+fn paced_events_lag() -> Duration {
     // Built before the ticker starts: the gate measures the fan-out
     // serialization path, not this test's own 12.8 MB of payload copying.
     let events: Vec<Event> = (0..200)
@@ -191,12 +221,8 @@ fn events_socket_serialization_of_big_frames_stays_under_budget() {
         }
         bytes
     });
-    eprintln!("events serialization (200 × 64 KB): worst worker lag {lag:?}");
     assert!(lag_items >= 200 * 64 * 1024);
-    assert!(
-        lag < budget(),
-        "events serialization stalled a worker for {lag:?}"
-    );
+    lag
 }
 
 /// The burst variant (r3-10-02): the paced case above yields after every send
@@ -210,16 +236,11 @@ fn events_socket_serialization_of_big_frames_stays_under_budget() {
 /// Payloads are still built before the ticker starts (test-side copies are
 /// not product cost).
 ///
-/// The lag is the single worst tick gap, so one OS preemption on a shared CI
-/// runner can exceed the budget by itself. A real regression (no pacer)
-/// blocks EVERY burst for ~200 ms; noise doesn't hit three in a row — so the
-/// gate is the best of three bursts.
+/// A real regression (no pacer) blocks EVERY burst for ~200 ms, so the gate
+/// is the best of three bursts ([`best_of_three`]).
 #[test]
 fn events_fanout_of_a_queued_burst_stays_under_budget() {
-    let lag = (0..3)
-        .map(|_| queued_burst_lag())
-        .min()
-        .expect("three bursts");
+    let lag = best_of_three(queued_burst_lag);
     eprintln!("events burst (200 × 64 KB queued): best-of-3 worst worker lag {lag:?}");
     assert!(
         lag < budget(),
