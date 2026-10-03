@@ -377,6 +377,15 @@ pub fn meta_is_read_only(meta: &Value) -> bool {
     meta.get("read_only").and_then(Value::as_bool) == Some(true)
 }
 
+/// Is this a session the scheduled-task or workflow engine spawned (meta
+/// `source`), i.e. automation running unattended on its own schedule?
+pub fn unattended_automation(meta: &Value) -> bool {
+    matches!(
+        meta.get("source").and_then(Value::as_str),
+        Some("scheduled_task" | "workflow")
+    )
+}
+
 /// The session an agent-held credential is bound to.
 fn bound_session(auth: &AuthContext) -> Option<String> {
     auth.mcp_session_id
@@ -442,7 +451,25 @@ pub async fn evaluate(
             .unwrap_or_default(),
         None => Vec::new(),
     };
-    let gate = decide(read_only, &rules, bare, args);
+    let mut gate = decide(read_only, &rules, bare, args);
+    // A scheduled-task / workflow session runs unattended on a schedule the
+    // operator already configured (its results are delivered by the engine,
+    // never through this gate): the sensitive-action gate would park it on an
+    // approval nobody is there to give. It keeps the ordinary dangerous gate
+    // + auto-approve rules instead. Personal agents (and their rules) are
+    // never exempt.
+    if agent.is_none()
+        && unattended_automation(&session.meta)
+        && matches!(
+            gate,
+            AgentGate::ForceApproval {
+                risk: "sensitive",
+                ..
+            }
+        )
+    {
+        gate = AgentGate::Pass;
+    }
     if let Some(a) = &agent {
         crate::personal_agent_activity::record_tool_call(
             ctx,

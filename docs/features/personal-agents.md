@@ -159,7 +159,11 @@ scheduled task with a real `destination`; a credential/sharing argument
 URL/path under `/password`, `/credentials`, `/share`, `/permissions`,
 `/collaborators`, `/invitations`, `/tokens`, `/oauth`, `/members`, `/grants`,
 `/api-keys` — **always** files a human approval (`risk_label: sensitive`), even
-when an auto-approve rule or a token write grant covers the tool.
+when an auto-approve rule or a token write grant covers the tool. Sessions
+the scheduled-task or workflow engine spawned (meta `source`) are exempt: they
+run unattended on a schedule the operator configured, so they keep the ordinary
+dangerous-tool gate and auto-approve rules instead (their result delivery never
+passes through this gate).
 
 **Activity tab**: *Now* (the running run, its mode, read-only lock, session
 state, **Watch session**), *Waiting for you* (approvals the agent's calls filed,

@@ -539,6 +539,15 @@ async fn sensitive_actions_need_approval_even_with_an_auto_approve_rule() {
     // …and without it the rule applies as before.
     let env = d.invoke(&token, "create_pr", pr_args("Fix")).await;
     assert_eq!(env["executed"], true, "{env}");
+    // Unattended automation (a scheduled-task / workflow session) is not parked
+    // on a sensitive approval: the operator's auto-approve rule decides.
+    for source in ["scheduled_task", "workflow"] {
+        let auto = d.agent_session(json!({ "source": source })).await;
+        let mut args = pr_args("Fix");
+        args["api_key"] = json!("sk-123");
+        let env = d.invoke(&auto, "create_pr", args).await;
+        assert_eq!(env["executed"], true, "{source}: {env}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
