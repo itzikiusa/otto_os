@@ -249,6 +249,20 @@ frontend serially. Nothing else comes close.
 | otto-server k8s_monitor_clickhouse (3 tests) | 9.4 / 8.1 / 7.2 s | 3.1 / 1.9 / 1.5 s |
 | otto-git ARG_MAX stage/unstage/discard (1,800 long paths, not 14,000 short) | 31 s (deps report) | 1.6 s |
 | otto-vault revision index at 5k revisions (50k variant now `#[ignore]`d, run by a CI step) | 39 s (deps report) | 4.0 s |
+| Dependencies at `opt-level = 1` in dev/test: otto-state tests (summed test time) | 309 s / 272 s (two runs) | 86 s |
+| … otto-sessions tests (summed) | 82.5 s / 82.0 s | 29.8 s |
+| … slowest otto-sessions test (`lifecycle_mutations_wait_for_in_flight_restart`) | 5.5 s (13 s in the deps report) | 2.0 s |
+
+The dependency `opt-level` change keeps workspace crates at `opt-level = 0`, so
+an edit compiles as before; it only changes how fast the dependencies run. Every
+test that opens a migrated SQLite database (146 migrations) spends its time in
+SQLite (C, built by `libsqlite3-sys` at the package's opt-level), sqlx, tokio
+and serde. One-time cost: rebuilding the 284 dependency units of otto-state and
+otto-sessions took 358 s of CPU (2m27 wall at 3 jobs); they are cached afterwards
+locally and by CI's rust-cache, whose key changes once with this profile.
+`debug = "line-tables-only"` / no dependency debuginfo would likely shorten
+local links further, but this host's throttle forces `debug = 0`, so it was
+not measured and not changed.
 
 The ClickHouse stalls were found by timing the real server: an unresolvable
 `<host>.local` costs a 5 s DNS timeout at boot and again on shutdown, and SIGTERM
@@ -296,5 +310,6 @@ otto-server and ottod, i.e. still the server.
    grammars) only shortens cold builds; dependencies are cached in every warm
    loop and in CI (rust-cache). Worth it for fresh worktrees, not for the
    everyday loop — do it after the split.
-3. **Dependency `opt-level`** for faster test execution: see the measurement
-   above; adopt only with a clean A/B in an isolated slot.
+3. **Debuginfo** (`line-tables-only` for workspace crates, none for
+   dependencies) for local dev builds: measure link times on an unthrottled
+   host before adopting.

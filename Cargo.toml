@@ -137,6 +137,17 @@ reqwest_cookie_store = "0.10.0"
 rdkafka = { version = "0.39.0", default-features = false, features = ["cmake-build", "ssl-vendored", "libz", "zstd", "tokio"] }
 apache-avro = "0.22.0"
 
+# Dependencies build at opt-level 1 in dev/test (workspace crates stay at 0, so
+# an edit recompiles exactly as fast as before). Tests spend most of their time
+# inside dependencies — SQLite (C, compiled by its build script at the
+# package's opt-level), sqlx, tokio, serde — and at -O0 they crawl: A/B of the
+# same nextest run, otto-state 271-309 s -> 86 s of test time, otto-sessions
+# 82 s -> 30 s. One-time cost: those crates' 284 dependency units took 358 s of
+# CPU to rebuild (cached afterwards, locally and by CI's rust-cache).
+# docs/testing/build-performance.md
+[profile.dev.package."*"]
+opt-level = 1
+
 # Build speed over the last few % of runtime/binary size: this app is built +
 # deployed locally many times a day, and thin-LTO's cross-module phase capped
 # the final ottod compile at ~2-3 cores (observed 5+ min alone). No LTO keeps
