@@ -131,10 +131,12 @@ impl ProductService {
     // ---------------------------------------------------------------------------
 
     /// Load the API token for `account` from the secret store.
-    fn account_token(&self, account: &IssueAccount) -> Result<String> {
-        self.secrets.get(&account.token_ref)?.ok_or_else(|| {
-            Error::Invalid(format!("missing token for issue account {}", account.id))
-        })
+    async fn account_token(&self, account: &IssueAccount) -> Result<String> {
+        otto_core::secrets::get_async(&self.secrets, &account.token_ref)
+            .await?
+            .ok_or_else(|| {
+                Error::Invalid(format!("missing token for issue account {}", account.id))
+            })
     }
 
     /// Load the source document from the issue tracker and convert to Markdown.
@@ -146,7 +148,7 @@ impl ProductService {
         source_kind: &str,
         source_key: &str,
     ) -> Result<FetchedSource> {
-        let token = self.account_token(account)?;
+        let token = self.account_token(account).await?;
 
         match source_kind {
             "jira" => {
@@ -387,7 +389,7 @@ impl ProductService {
     ) -> Result<Vec<CommentInfo>> {
         let story = self.repo.get_story(story_id).await?;
         let account = self.issues.get_account(&story.account_id).await?;
-        let token = self.account_token(&account)?;
+        let token = self.account_token(&account).await?;
 
         // SE-13: with a cursor, read only what is at/after its timestamp (Jira
         // walks newest-first and stops there); the exact tie/seen-id filter
@@ -482,7 +484,7 @@ impl ProductService {
         // 1. Load story + account.
         let story = self.repo.get_story(story_id).await?;
         let account = self.issues.get_account(&story.account_id).await?;
-        let token = self.account_token(&account)?;
+        let token = self.account_token(&account).await?;
 
         // 2. Load each requested question (skipping any whose story_id doesn't match).
         let mut questions: Vec<ProductQuestion> = Vec::with_capacity(ids.len());
@@ -587,7 +589,7 @@ impl ProductService {
         let version = self.repo.get_version(version_id).await?;
         let story = self.repo.get_story(&version.story_id).await?;
         let account = self.issues.get_account(&story.account_id).await?;
-        let token = self.account_token(&account)?;
+        let token = self.account_token(&account).await?;
 
         // 2. Push to the issue tracker.
         let mut published_raw: Option<String> = None;
@@ -802,7 +804,7 @@ impl ProductService {
         let run = self.repo.get_testcase_run(run_id).await?;
         let story = self.repo.get_story(&run.story_id).await?;
         let account = self.issues.get_account(&story.account_id).await?;
-        let token = self.account_token(&account)?;
+        let token = self.account_token(&account).await?;
 
         // 2. Load and filter testcases to approved only.
         let all_cases = self.repo.list_testcases(run_id).await?;
@@ -1135,7 +1137,7 @@ impl ProductService {
                 // Load account + token; tolerate missing account gracefully.
                 let fetched: Option<String> = async {
                     let account = self.issues.get_account(&story.account_id).await.ok()?;
-                    let token = self.account_token(&account).ok()?;
+                    let token = self.account_token(&account).await.ok()?;
                     let client = JiraClient::new(&account.base_url, &account.email, &token);
                     match client.get_issue_full(&story.source_key).await {
                         Err(e) => {
@@ -1549,7 +1551,7 @@ impl ProductService {
     ) -> Result<ProductStoryDetail> {
         let story = self.repo.get_story(story_id).await?;
         let account = self.issues.get_account(account_id).await?;
-        let token = self.account_token(&account)?;
+        let token = self.account_token(&account).await?;
 
         // Best content to publish.
         let content_md = self
@@ -1635,7 +1637,7 @@ impl ProductService {
     ) -> Result<ProductStoryDetail> {
         let story = self.repo.get_story(story_id).await?;
         let account = self.issues.get_account(account_id).await?;
-        let token = self.account_token(&account)?;
+        let token = self.account_token(&account).await?;
 
         // Best content to publish.
         let content_md = self

@@ -158,7 +158,7 @@ async fn deliver_channel(
             Some("channel send failed (bot token missing or API error)".into()),
         );
     }
-    if let Some(adapter) = build_adapter(&ctx.secrets, &integ) {
+    if let Some(adapter) = build_adapter(&ctx.secrets, &integ).await {
         if let Err(e) = adapter.upload(&chat, None, "report.md", bytes).await {
             return (
                 true,
@@ -194,7 +194,7 @@ async fn deliver_email(
         Ok(_) => return (false, Some("no verified email sender for the owner".into())),
         Err(e) => return (false, Some(e.to_string())),
     };
-    let pw = match ctx.secrets.get(&sender.secret_ref) {
+    let pw = match otto_core::secrets::get_async(&ctx.secrets, &sender.secret_ref).await {
         Ok(Some(p)) => p,
         _ => {
             return (

@@ -269,9 +269,8 @@ async fn list_projects<S: IssuesCtx>(
         .ok_or_else(|| Error::Invalid("account_id query param required".into()))?
         .clone();
     let account = load_authorized_account(&s, &account_id, &user).await?;
-    let token = s
-        .secrets()
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = JiraClient::new(&account.base_url, &account.email, &token);
     let projects = client.list_projects().await?;
@@ -300,9 +299,8 @@ async fn search_issues<S: IssuesCtx>(
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
     let account = load_authorized_account(&s, &account_id, &user).await?;
-    let token = s
-        .secrets()
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = JiraClient::new(&account.base_url, &account.email, &token);
     let results = client.search(&q, project.as_deref(), start_at).await?;
@@ -321,9 +319,8 @@ async fn my_work<S: IssuesCtx>(
         .ok_or_else(|| Error::Invalid("account_id query param required".into()))?
         .clone();
     let account = load_authorized_account(&s, &account_id, &user).await?;
-    let token = s
-        .secrets()
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = JiraClient::new(&account.base_url, &account.email, &token);
     let results = client.my_work().await?;
@@ -336,9 +333,8 @@ async fn get_issue<S: IssuesCtx>(
     Path((account_id, key)): Path<(Id, String)>,
 ) -> ApiResult<Json<IssueDetail>> {
     let account = load_authorized_account(&s, &account_id, &user).await?;
-    let token = s
-        .secrets()
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = JiraClient::new(&account.base_url, &account.email, &token);
     let detail = client.get_issue(&key).await?;
@@ -355,9 +351,8 @@ async fn list_spaces_cf<S: IssuesCtx>(
         .ok_or_else(|| Error::Invalid("account_id query param required".into()))?
         .clone();
     let account = load_authorized_account(&s, &account_id, &user).await?;
-    let token = s
-        .secrets()
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = ConfluenceClient::new(&account.base_url, &account.email, &token);
     let spaces = client.list_spaces().await?;
@@ -383,9 +378,8 @@ async fn search_pages_cf<S: IssuesCtx>(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     let account = load_authorized_account(&s, &account_id, &user).await?;
-    let token = s
-        .secrets()
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = ConfluenceClient::new(&account.base_url, &account.email, &token);
     let results = client.search_pages(space.as_deref(), &q).await?;
@@ -411,9 +405,8 @@ async fn confluence_client_for<S: IssuesCtx>(
         .ok_or_else(|| Error::Invalid("account_id query param required".into()))?
         .clone();
     let account = load_authorized_account(s, &account_id, user).await?;
-    let token = s
-        .secrets()
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     Ok(ConfluenceClient::new(
         &account.base_url,
@@ -577,9 +570,8 @@ async fn get_issue_full<S: IssuesCtx>(
     Path((account_id, key)): Path<(Id, String)>,
 ) -> ApiResult<Json<IssueFull>> {
     let account = load_authorized_account(&s, &account_id, &user).await?;
-    let token = s
-        .secrets()
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = JiraClient::new(&account.base_url, &account.email, &token);
     let full = client.get_issue_full(&key).await?;
@@ -601,9 +593,8 @@ async fn get_devstatus<S: IssuesCtx>(
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult<Json<DevStatus>> {
     let account = load_authorized_account(&s, &account_id, &user).await?;
-    let token = s
-        .secrets()
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = JiraClient::new(&account.base_url, &account.email, &token);
     // Use the numeric id from the query param when supplied (avoids a round-trip).
@@ -625,9 +616,8 @@ async fn list_transitions<S: IssuesCtx>(
     Path((account_id, key)): Path<(Id, String)>,
 ) -> ApiResult<Json<Vec<JiraTransition>>> {
     let account = load_authorized_account(&s, &account_id, &user).await?;
-    let token = s
-        .secrets()
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = JiraClient::new(&account.base_url, &account.email, &token);
     let transitions = client.list_transitions(&key).await?;
@@ -650,9 +640,8 @@ async fn do_transition<S: IssuesCtx>(
         .ok_or_else(|| Error::Invalid("transition_id is required".into()))?
         .to_string();
     let account = load_authorized_account(&s, &account_id, &user).await?;
-    let token = s
-        .secrets()
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = JiraClient::new(&account.base_url, &account.email, &token);
     client.transition_issue(&key, &transition_id).await?;
@@ -668,9 +657,8 @@ async fn list_assignable<S: IssuesCtx>(
     Path((account_id, key)): Path<(Id, String)>,
 ) -> ApiResult<Json<Vec<JiraUser>>> {
     let account = load_authorized_account(&s, &account_id, &user).await?;
-    let token = s
-        .secrets()
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = JiraClient::new(&account.base_url, &account.email, &token);
     let users = client.list_assignable(&key).await?;
@@ -694,9 +682,8 @@ async fn assign_issue<S: IssuesCtx>(
         .ok_or_else(|| Error::Invalid("account_id is required".into()))?
         .to_string();
     let account = load_authorized_account(&s, &account_id, &user).await?;
-    let token = s
-        .secrets()
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = JiraClient::new(&account.base_url, &account.email, &token);
     client.assign_issue(&key, &assignee_account_id).await?;
@@ -714,9 +701,8 @@ async fn get_attachment<S: IssuesCtx>(
     Path((account_id, _key, attachment_id)): Path<(Id, String, String)>,
 ) -> ApiResult<Response> {
     let account = load_authorized_account(&s, &account_id, &user).await?;
-    let token = s
-        .secrets()
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = JiraClient::new(&account.base_url, &account.email, &token);
     let (mime, bytes) = client.attachment_bytes(&attachment_id).await?;
@@ -747,9 +733,8 @@ async fn list_issue_types_handler<S: IssuesCtx>(
     Path((account_id, project_key)): Path<(Id, String)>,
 ) -> ApiResult<Json<Vec<String>>> {
     let account = load_authorized_account(&s, &account_id, &user).await?;
-    let token = s
-        .secrets()
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = JiraClient::new(&account.base_url, &account.email, &token);
     let types = client.list_issue_types(&project_key).await?;
@@ -772,9 +757,8 @@ async fn add_comment<S: IssuesCtx>(
         .ok_or_else(|| Error::Invalid("body is required".into()))?
         .to_string();
     let account = load_authorized_account(&s, &account_id, &user).await?;
-    let token = s
-        .secrets()
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = JiraClient::new(&account.base_url, &account.email, &token);
     let comment_ref = client.add_comment(&key, &comment_body).await?;
@@ -792,9 +776,8 @@ async fn list_editmeta<S: IssuesCtx>(
     Path((account_id, key)): Path<(Id, String)>,
 ) -> ApiResult<Json<Vec<EditableField>>> {
     let account = load_authorized_account(&s, &account_id, &user).await?;
-    let token = s
-        .secrets()
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = JiraClient::new(&account.base_url, &account.email, &token);
     let fields = client.editmeta(&key).await?;
@@ -821,9 +804,8 @@ async fn update_fields<S: IssuesCtx>(
         return Err(Error::Invalid("fields must be an object".into()).into());
     }
     let account = load_authorized_account(&s, &account_id, &user).await?;
-    let token = s
-        .secrets()
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = JiraClient::new(&account.base_url, &account.email, &token);
     client.update_fields(&key, fields).await?;
@@ -853,9 +835,8 @@ async fn update_description<S: IssuesCtx>(
         .ok_or_else(|| Error::Invalid("body_md is required".into()))?
         .to_string();
     let account = load_authorized_account(&s, &account_id, &user).await?;
-    let token = s
-        .secrets()
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = JiraClient::new(&account.base_url, &account.email, &token);
     client.update_description(&key, &body_md).await?;

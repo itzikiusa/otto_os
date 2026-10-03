@@ -643,7 +643,7 @@ pub async fn create_request(
     // A brand-new id has no Keychain item: an empty blob would only issue a
     // synchronous Keychain delete per created request (3k on an import).
     if !blob.is_empty() {
-        api_secrets::store_blob(ctx.secrets.as_ref(), &own_ref, &blob)?;
+        api_secrets::store_blob_async(&ctx.secrets, &own_ref, &blob).await?;
     }
 
     let mut new = req_to_new(&wid, req, position, extras);
@@ -680,17 +680,17 @@ pub async fn update_request(
     // Lazy secret migration: plaintext secret members move to the Keychain;
     // markers sent back unchanged keep their stored values.
     let previous_blob =
-        api_secrets::load_blob_checked(ctx.secrets.as_ref(), &api_secrets::request_ref(&id))?;
+        api_secrets::load_blob_checked_async(&ctx.secrets, &api_secrets::request_ref(&id)).await?;
     let auth_row = if let Some(incoming) = merged_auth_for_update(&req.auth) {
         let own_ref = api_secrets::request_ref(&id);
-        let existing_blob = api_secrets::load_blob_checked(ctx.secrets.as_ref(), &own_ref)?;
+        let existing_blob = api_secrets::load_blob_checked_async(&ctx.secrets, &own_ref).await?;
         let (auth_row, blob) = api_secrets::split_auth_secrets(
             &normalize_json_object(incoming),
             &own_ref,
             &existing_blob,
         )
         .map_err(|m| ApiError(Error::Invalid(m)))?;
-        api_secrets::store_blob(ctx.secrets.as_ref(), &own_ref, &blob)?;
+        api_secrets::store_blob_async(&ctx.secrets, &own_ref, &blob).await?;
         auth_row
     } else {
         existing.auth.clone()
@@ -702,11 +702,12 @@ pub async fn update_request(
     let updated = match repo.update_request(&id, new).await {
         Ok(updated) => updated,
         Err(error) => {
-            api_secrets::store_blob(
-                ctx.secrets.as_ref(),
+            api_secrets::store_blob_async(
+                &ctx.secrets,
                 &api_secrets::request_ref(&id),
                 &previous_blob,
-            )?;
+            )
+            .await?;
             return Err(error.into());
         }
     };
@@ -730,7 +731,7 @@ pub async fn delete_request(
     ensure_in_workspace(&repo.get_request(&id).await?.workspace_id, &wid)?;
     repo.delete_request(&id).await?;
     // Best-effort: drop the request's Keychain blob with it.
-    let _ = ctx.secrets.delete(&api_secrets::request_ref(&id));
+    let _ = otto_core::secrets::delete_async(&ctx.secrets, &api_secrets::request_ref(&id)).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -821,7 +822,7 @@ pub async fn create_environment(
         .into_iter()
         .filter(|(k, _)| secret_keys.contains(k))
         .collect();
-    api_secrets::store_blob(ctx.secrets.as_ref(), &api_secrets::env_ref(&env.id), &blob)?;
+    api_secrets::store_blob_async(&ctx.secrets, &api_secrets::env_ref(&env.id), &blob).await?;
     Ok(Json(env))
 }
 
@@ -845,14 +846,14 @@ pub async fn update_environment(
     let vars =
         api_secrets::strip_secret_variables(&normalize_json_object(req.variables), &secret_keys);
     let sref = api_secrets::env_ref(&id);
-    let mut blob = api_secrets::load_blob(ctx.secrets.as_ref(), &sref);
+    let mut blob = api_secrets::load_blob_async(&ctx.secrets, &sref).await;
     apply_secret_changes(
         &mut blob,
         &secret_keys,
         &req.secret_renames,
         req.secret_values,
     );
-    api_secrets::store_blob(ctx.secrets.as_ref(), &sref, &blob)?;
+    api_secrets::store_blob_async(&ctx.secrets, &sref, &blob).await?;
     let env = repo
         .update_environment(&id, Some(req.name.trim()), Some(&vars), Some(&secret_keys))
         .await?;
@@ -896,7 +897,7 @@ pub async fn delete_environment(
     ensure_in_workspace(&repo.get_environment(&id).await?.workspace_id, &wid)?;
     repo.delete_environment(&id).await?;
     // Best-effort: drop the environment's Keychain blob with it.
-    let _ = ctx.secrets.delete(&api_secrets::env_ref(&id));
+    let _ = otto_core::secrets::delete_async(&ctx.secrets, &api_secrets::env_ref(&id)).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1108,7 +1109,7 @@ pub async fn postman_sync(
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
 
     // Resolve the key: explicit in the request, else the remembered one.
-    let stored = api_secrets::load_blob(ctx.secrets.as_ref(), POSTMAN_SECRET_REF);
+    let stored = api_secrets::load_blob_async(&ctx.secrets, POSTMAN_SECRET_REF).await;
     let key = match req
         .api_key
         .as_deref()
@@ -1208,7 +1209,7 @@ pub async fn postman_sync(
     if req.remember && req.api_key.is_some() {
         let mut blob = BTreeMap::new();
         blob.insert("api_key".to_string(), key);
-        api_secrets::store_blob(ctx.secrets.as_ref(), POSTMAN_SECRET_REF, &blob)?;
+        api_secrets::store_blob_async(&ctx.secrets, POSTMAN_SECRET_REF, &blob).await?;
         remembered = true;
     }
 
@@ -1479,7 +1480,7 @@ async fn resolve_marker_or_string(
                 )))
             })?;
             ensure_in_workspace(&request.workspace_id, wid)?;
-            let blob = api_secrets::load_blob(ctx.secrets.as_ref(), r);
+            let blob = api_secrets::load_blob_async(&ctx.secrets, r).await;
             Ok(blob.get(field).cloned().unwrap_or_default())
         }
     }
@@ -1842,7 +1843,7 @@ pub async fn run_saved_request(
         }
     }
 
-    exec = resolve_exec_auth(&repo, ctx.secrets.as_ref(), &wid, &exec)
+    exec = resolve_exec_auth(&repo, &ctx.secrets, &wid, &exec)
         .await
         .map_err(|message| ApiError(Error::Invalid(message)))?;
     let (secret_names, secret_values) = collect_secrets(
@@ -2095,7 +2096,7 @@ pub async fn execute(
 
     // Resolve `$secret` auth markers in-memory, immediately before send. The
     // referenced request must live in this workspace.
-    let exec_req = match resolve_exec_auth(&repo, ctx.secrets.as_ref(), &wid, &req).await {
+    let exec_req = match resolve_exec_auth(&repo, &ctx.secrets, &wid, &req).await {
         Ok(r) => Some(r),
         Err(msg) => {
             let secret_values: Vec<String> = env_blob.values().cloned().collect();
@@ -2237,7 +2238,7 @@ pub(crate) async fn resolve_environment(
     let blob = if env.secret_keys.is_empty() {
         BTreeMap::new()
     } else {
-        api_secrets::load_blob(ctx.secrets.as_ref(), &api_secrets::env_ref(&env.id))
+        api_secrets::load_blob_async(&ctx.secrets, &api_secrets::env_ref(&env.id)).await
     };
     if !env.secret_keys.is_empty() {
         for key in &env.secret_keys {
@@ -2255,7 +2256,7 @@ pub(crate) async fn resolve_environment(
 /// exfiltrate another workspace's credential through execute.
 async fn resolve_exec_auth(
     repo: &ApiClientRepo,
-    secrets: &dyn otto_core::secrets::SecretStore,
+    secrets: &std::sync::Arc<dyn otto_core::secrets::SecretStore>,
     wid: &Id,
     req: &ExecuteApiReq,
 ) -> Result<ExecuteApiReq, String> {
@@ -2286,7 +2287,7 @@ async fn resolve_exec_auth(
         }
         allowed.push(rid.to_string());
     }
-    api_secrets::resolve_auth_markers(secrets, &mut out.auth, &allowed)?;
+    api_secrets::resolve_auth_markers_async(secrets, &mut out.auth, &allowed).await?;
     Ok(out)
 }
 
@@ -2610,7 +2611,7 @@ pub(crate) async fn prepare_stream(
             return Err(new_host_conflict(&host, !confirm_allowed).0.to_string());
         }
     }
-    let req = resolve_exec_auth(&repo, ctx.secrets.as_ref(), wid, request).await?;
+    let req = resolve_exec_auth(&repo, &ctx.secrets, wid, request).await?;
     let proxy = resolve_socks_proxy(ctx, wid, req.ssh_connection_id.as_ref(), actor).await?;
     let allow_local = workspace_allows_local(ctx, wid).await;
     let values: Vec<String> = vars
@@ -3395,11 +3396,13 @@ pub(crate) async fn run_step(
     }
 
     // Resolve `$secret` auth markers (this stored request's own ref only).
-    if let Err(msg) = api_secrets::resolve_auth_markers(
-        ctx.secrets.as_ref(),
+    if let Err(msg) = api_secrets::resolve_auth_markers_async(
+        &ctx.secrets,
         &mut exec.auth,
         std::slice::from_ref(&request.id),
-    ) {
+    )
+    .await
+    {
         return ApiRunStepResult {
             request_id,
             name: request.name,
@@ -3720,7 +3723,7 @@ pub async fn secure_all(
 ) -> ApiResult<Json<Value>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
     let (requests_secured, env_keys_secured) =
-        secure_all_sweep(&repo(&ctx), ctx.secrets.as_ref(), &wid).await?;
+        secure_all_sweep(&repo(&ctx), &ctx.secrets, &wid).await?;
     Ok(Json(json!({
         "requests_secured": requests_secured,
         "env_keys_secured": env_keys_secured,
@@ -3731,7 +3734,7 @@ pub async fn secure_all(
 /// against a bare repo + secret store.
 async fn secure_all_sweep(
     repo: &ApiClientRepo,
-    secrets: &dyn otto_core::secrets::SecretStore,
+    secrets: &std::sync::Arc<dyn otto_core::secrets::SecretStore>,
     wid: &Id,
 ) -> Result<(usize, usize), ApiError> {
     let mut requests_secured = 0usize;
@@ -3739,14 +3742,14 @@ async fn secure_all_sweep(
         let _credential_guard = api_secrets::request_guard(&request.id).await;
         let request = repo.get_request(&request.id).await?;
         let own_ref = api_secrets::request_ref(&request.id);
-        let existing_blob = api_secrets::load_blob_checked(secrets, &own_ref)?;
+        let existing_blob = api_secrets::load_blob_checked_async(secrets, &own_ref).await?;
         let (auth_row, blob) =
             api_secrets::split_auth_secrets(&request.auth, &own_ref, &existing_blob)
                 .map_err(|m| ApiError(Error::Internal(m)))?;
         if auth_row == request.auth {
             continue; // nothing plaintext left — already secured (idempotency)
         }
-        api_secrets::store_blob(secrets, &own_ref, &blob)?;
+        api_secrets::store_blob_async(secrets, &own_ref, &blob).await?;
         repo.update_request(
             &request.id,
             NewApiRequest {
@@ -3790,13 +3793,13 @@ async fn secure_all_sweep(
             continue;
         }
         let sref = api_secrets::env_ref(&env.id);
-        let mut blob = api_secrets::load_blob(secrets, &sref);
+        let mut blob = api_secrets::load_blob_async(secrets, &sref).await;
         let mut secret_keys = env.secret_keys.clone();
         for (k, v) in &candidates {
             blob.insert(k.clone(), v.clone());
             secret_keys.push(k.clone());
         }
-        api_secrets::store_blob(secrets, &sref, &blob)?;
+        api_secrets::store_blob_async(secrets, &sref, &blob).await?;
         let vars = api_secrets::strip_secret_variables(&env.variables, &secret_keys);
         repo.update_environment(&env.id, None, Some(&vars), Some(&secret_keys))
             .await?;
@@ -4079,7 +4082,7 @@ mod tests {
     #[tokio::test]
     async fn secure_all_sweeps_and_is_idempotent() {
         let (_pool, repo, ws) = mk_repo().await;
-        let store = MemStore::new();
+        let store = std::sync::Arc::new(MemStore::new());
 
         // Legacy rows: plaintext bearer token + a secret-shaped env variable.
         let req = repo
@@ -4100,7 +4103,13 @@ mod tests {
             .await
             .unwrap();
 
-        let (r, e) = secure_all_sweep(&repo, &store, &ws).await.unwrap();
+        let (r, e) = secure_all_sweep(
+            &repo,
+            &(store.clone() as std::sync::Arc<dyn otto_core::secrets::SecretStore>),
+            &ws,
+        )
+        .await
+        .unwrap();
         assert_eq!((r, e), (1, 1));
 
         // Row now carries a marker; the value lives only in the store.
@@ -4130,7 +4139,13 @@ mod tests {
             .contains("sekret"));
 
         // Second sweep finds nothing to do (idempotent).
-        let (r2, e2) = secure_all_sweep(&repo, &store, &ws).await.unwrap();
+        let (r2, e2) = secure_all_sweep(
+            &repo,
+            &(store.clone() as std::sync::Arc<dyn otto_core::secrets::SecretStore>),
+            &ws,
+        )
+        .await
+        .unwrap();
         assert_eq!((r2, e2), (0, 0));
 
         // The OpenAPI export of the secured request contains marker refs only.
@@ -4149,7 +4164,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_exec_auth_resolves_own_and_rejects_foreign() {
         let (pool, repo, ws) = mk_repo().await;
-        let store = MemStore::new();
+        let store = std::sync::Arc::new(MemStore::new());
 
         let req = repo
             .create_request(legacy_request(
@@ -4159,7 +4174,13 @@ mod tests {
             ))
             .await
             .unwrap();
-        secure_all_sweep(&repo, &store, &ws).await.unwrap();
+        secure_all_sweep(
+            &repo,
+            &(store.clone() as std::sync::Arc<dyn otto_core::secrets::SecretStore>),
+            &ws,
+        )
+        .await
+        .unwrap();
         let stored = repo.get_request(&req.id).await.unwrap();
 
         let exec = ExecuteApiReq {
@@ -4179,7 +4200,14 @@ mod tests {
             confirm_new_host: false,
         };
         // Same-workspace marker resolves in-memory only.
-        let resolved = resolve_exec_auth(&repo, &store, &ws, &exec).await.unwrap();
+        let resolved = resolve_exec_auth(
+            &repo,
+            &(store.clone() as std::sync::Arc<dyn otto_core::secrets::SecretStore>),
+            &ws,
+            &exec,
+        )
+        .await
+        .unwrap();
         assert_eq!(resolved.auth["token"], "live-tok");
         assert!(repo.get_request(&req.id).await.unwrap().auth["token"].is_object());
 
@@ -4194,9 +4222,14 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let err = resolve_exec_auth(&repo, &store, &ws2, &exec)
-            .await
-            .unwrap_err();
+        let err = resolve_exec_auth(
+            &repo,
+            &(store.clone() as std::sync::Arc<dyn otto_core::secrets::SecretStore>),
+            &ws2,
+            &exec,
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("outside this workspace"), "{err}");
 
         // History snapshots redact markers AND plaintext to ***.

@@ -90,9 +90,8 @@ pub(crate) async fn provider_for_repo(
         .ok_or_else(|| Error::Invalid("repo has no remote url".into()))?;
     let (_, remote_ref) = otto_git::detect(remote_url)
         .ok_or_else(|| Error::Invalid(format!("unsupported remote: {remote_url}")))?;
-    let token = ctx
-        .secrets
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(&ctx.secrets, &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for git account {}", account.id)))?;
     Ok((otto_git::make_provider(&account, token), remote_ref))
 }
@@ -166,9 +165,8 @@ async fn issue_account(
 
 async fn resolve_jira(ctx: &ServerCtx, run: &OttoRun) -> Result<ResolvedSource> {
     let account = issue_account(ctx, &run.created_by).await?;
-    let token = ctx
-        .secrets
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(&ctx.secrets, &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid("Jira token missing".into()))?;
     let client = otto_issues::JiraClient::new(&account.base_url, &account.email, &token);
     let issue = client.get_issue_full(&run.source_ref).await?;
@@ -205,9 +203,8 @@ async fn resolve_jira(ctx: &ServerCtx, run: &OttoRun) -> Result<ResolvedSource> 
 
 async fn resolve_confluence(ctx: &ServerCtx, run: &OttoRun) -> Result<ResolvedSource> {
     let account = issue_account(ctx, &run.created_by).await?;
-    let token = ctx
-        .secrets
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(&ctx.secrets, &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid("Confluence token missing".into()))?;
     let client = otto_issues::ConfluenceClient::new(&account.base_url, &account.email, &token);
     let page = client.get_page(&run.source_ref).await?;

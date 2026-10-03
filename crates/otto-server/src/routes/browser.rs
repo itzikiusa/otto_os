@@ -1447,7 +1447,9 @@ async fn create_credential(
     match created {
         Ok(cred) => Ok(Json(cred)),
         Err(e) => {
-            if let Err(cleanup_err) = ctx.secrets.delete(&keychain_ref) {
+            if let Err(cleanup_err) =
+                otto_core::secrets::delete_async(&ctx.secrets, &keychain_ref).await
+            {
                 tracing::warn!(
                     "failed to clean up orphaned keychain entry after rejected browser credential create: {cleanup_err}"
                 );
@@ -1509,7 +1511,7 @@ async fn delete_credential(
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(Error::NotFound(format!("browser credential {id}"))))?;
     require_ws_role(&ctx, &user, &existing.workspace_id, WorkspaceRole::Editor).await?;
-    if let Err(e) = ctx.secrets.delete(&existing.keychain_ref) {
+    if let Err(e) = otto_core::secrets::delete_async(&ctx.secrets, &existing.keychain_ref).await {
         tracing::warn!(credential = %id, "failed to delete browser credential secret: {e}");
     }
     ctx.browser_credentials
@@ -1539,9 +1541,8 @@ async fn reveal_credential(
             "reveal requires an explicit {\"confirm\": true} body".into(),
         )));
     }
-    let password = ctx
-        .secrets
-        .get(&existing.keychain_ref)
+    let password = otto_core::secrets::get_async(&ctx.secrets, &existing.keychain_ref)
+        .await
         .map_err(ApiError)?
         .ok_or_else(|| {
             ApiError(Error::NotFound(format!(
@@ -1650,7 +1651,7 @@ async fn login_credential(
             .into_response();
     };
 
-    let password = match ctx.secrets.get(&cred.keychain_ref) {
+    let password = match otto_core::secrets::get_async(&ctx.secrets, &cred.keychain_ref).await {
         Ok(Some(p)) => p,
         Ok(None) => {
             return ApiError(Error::NotFound(format!(

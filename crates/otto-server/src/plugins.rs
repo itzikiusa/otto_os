@@ -769,7 +769,7 @@ async fn host_jira_credentials(
         Ok(a) => a,
         Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
     };
-    let token = match ctx.secrets.get(&account.token_ref) {
+    let token = match otto_core::secrets::get_async(&ctx.secrets, &account.token_ref).await {
         Ok(Some(t)) => t,
         Ok(None) => return (StatusCode::NOT_FOUND, "token missing").into_response(),
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),

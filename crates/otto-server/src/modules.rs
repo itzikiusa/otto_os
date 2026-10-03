@@ -1755,9 +1755,8 @@ pub(crate) async fn resolve_provider_remote(
         .ok_or_else(|| Error::Invalid("repo has no remote url".into()))?;
     let (_, remote_ref) = otto_git::detect(remote_url)
         .ok_or_else(|| Error::Invalid(format!("unsupported remote: {remote_url}")))?;
-    let token = ctx
-        .secrets
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(&ctx.secrets, &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for git account {}", account.id)))?;
     Ok((otto_git::make_provider(&account, token), remote_ref))
 }
@@ -4240,12 +4239,14 @@ async fn run_pr_review_inner(
                 let account = ctx.issues_store.get_account(&account_id).await?;
                 // S4: only the issue account's owner (or root) may use its token.
                 otto_core::auth::authorize_owner(&account, user)?;
-                let token = ctx.secrets.get(&account.token_ref)?.ok_or_else(|| {
-                    otto_core::Error::Invalid(format!(
-                        "token missing for issue account {}",
-                        account.id
-                    ))
-                })?;
+                let token = otto_core::secrets::get_async(&ctx.secrets, &account.token_ref)
+                    .await?
+                    .ok_or_else(|| {
+                        otto_core::Error::Invalid(format!(
+                            "token missing for issue account {}",
+                            account.id
+                        ))
+                    })?;
                 let client =
                     otto_issues::JiraClient::new(&account.base_url, &account.email, &token);
                 let detail = client.get_issue(key).await?;
@@ -4297,7 +4298,10 @@ async fn run_pr_review_inner(
         // refs/remotes) and never touches a working tree.
         let git_token: Option<String> = match repo.git_account_id.as_ref() {
             Some(aid) => match ctx.git_store.get_account(aid).await {
-                Ok(acc) => ctx.secrets.get(&acc.token_ref).ok().flatten(),
+                Ok(acc) => otto_core::secrets::get_async(&ctx.secrets, &acc.token_ref)
+                    .await
+                    .ok()
+                    .flatten(),
                 Err(_) => None,
             },
             None => None,

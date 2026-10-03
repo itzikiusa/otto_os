@@ -315,7 +315,7 @@ fn spawn_progress_pump(
             }
         };
         // One adapter for file uploads, built once (send_to builds its own).
-        let adapter = otto_channels::improve_notify::build_adapter(&ctx.secrets, &integ);
+        let adapter = otto_channels::improve_notify::build_adapter(&ctx.secrets, &integ).await;
         while let Some(item) = rx.recv().await {
             match item {
                 ProgressItem::Text(msg) => {
@@ -3367,7 +3367,7 @@ async fn deliver_run_result(
                     .await;
                     if sent {
                         if let Some(adapter) =
-                            otto_channels::improve_notify::build_adapter(&ctx.secrets, &integ)
+                            otto_channels::improve_notify::build_adapter(&ctx.secrets, &integ).await
                         {
                             if let Err(e) = adapter.upload(chat, thread, attach_name, &bytes).await
                             {
@@ -3659,7 +3659,11 @@ async fn execute_node(
                     .await
                     {
                         Ok(account) => {
-                            let token = ctx.secrets.get(&account.token_ref).ok().flatten();
+                            let token =
+                                otto_core::secrets::get_async(&ctx.secrets, &account.token_ref)
+                                    .await
+                                    .ok()
+                                    .flatten();
                             match token {
                                 Some(t) => otto_issues::JiraClient::new(
                                     &account.base_url,
@@ -4156,7 +4160,12 @@ async fn execute_node(
                 let send_result = match integ.channel {
                     Channel::Telegram => {
                         let key = format!("chan-bot-{ws_id}-telegram");
-                        match secrets.get(&key).ok().flatten().filter(|t| !t.is_empty()) {
+                        match otto_core::secrets::get_async(secrets, &key)
+                            .await
+                            .ok()
+                            .flatten()
+                            .filter(|t| !t.is_empty())
+                        {
                             Some(token) => {
                                 let adapter = otto_channels::telegram::TelegramAdapter::new(token);
                                 adapter.send(chat, thread, &message).await.map(|_| ())
@@ -4169,7 +4178,12 @@ async fn execute_node(
                     }
                     Channel::Slack => {
                         let key = format!("chan-bot-{ws_id}-slack");
-                        match secrets.get(&key).ok().flatten().filter(|t| !t.is_empty()) {
+                        match otto_core::secrets::get_async(secrets, &key)
+                            .await
+                            .ok()
+                            .flatten()
+                            .filter(|t| !t.is_empty())
+                        {
                             Some(token) => {
                                 let adapter = otto_channels::slack::SlackAdapter::new(token);
                                 adapter.send(chat, thread, &message).await.map(|_| ())
@@ -6099,7 +6113,10 @@ async fn execute_node(
                 // "branch not found" from the create call.
                 let push_token = match repo.git_account_id.as_ref() {
                     Some(aid) => match ctx.git_store.get_account(aid).await {
-                        Ok(acc) => ctx.secrets.get(&acc.token_ref).ok().flatten(),
+                        Ok(acc) => otto_core::secrets::get_async(&ctx.secrets, &acc.token_ref)
+                            .await
+                            .ok()
+                            .flatten(),
                         Err(_) => None,
                     },
                     None => None,
@@ -7650,9 +7667,23 @@ fn fetchable_branch_name(base: &str) -> bool {
 /// reopen TTL has passed).
 async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
     let dir = ctx.data_dir.join("workflow-runs").join(run_id);
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return, // nothing provisioned
+    // Listing (and the per-entry `is_dir` stats) is sync fs work: blocking pool.
+    let listed = {
+        let dir = dir.clone();
+        tokio::task::spawn_blocking(move || {
+            std::fs::read_dir(&dir).ok().map(|rd| {
+                rd.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir())
+                    .collect::<Vec<_>>()
+            })
+        })
+        .await
+        .ok()
+        .flatten()
+    };
+    let Some(worktrees) = listed else {
+        return; // nothing provisioned
     };
     if run_worktrees_in_use(ctx, run_id, &dir).await {
         tracing::info!(
@@ -7663,11 +7694,7 @@ async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
     }
     let branch = format!("otto-wf/{run_id}");
     let mut kept_any = false;
-    for entry in entries.flatten() {
-        let wt = entry.path();
-        if !wt.is_dir() {
-            continue;
-        }
+    for wt in worktrees {
         let wt_str = wt.to_string_lossy().to_string();
         // Owning repo root: the worktree's git-common-dir is `<root>/.git`.
         let wt_git = otto_git::LocalGit::new(&wt_str);
@@ -7734,7 +7761,7 @@ async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
     // Only when every worktree was safely handled — a kept (unsweepable)
     // worktree must not be bulldozed by the directory cleanup.
     if !kept_any {
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }
 
@@ -7750,12 +7777,18 @@ pub async fn sweep_stale_run_worktrees(ctx: &ServerCtx) {
         return;
     };
     let base = ctx.data_dir.join("workflow-runs");
-    let entries = match std::fs::read_dir(&base) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let run_id = entry.file_name().to_string_lossy().to_string();
+    let run_ids: Vec<String> = tokio::task::spawn_blocking(move || {
+        std::fs::read_dir(&base)
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default();
+    for run_id in run_ids {
         if run_id.is_empty() {
             continue;
         }
