@@ -1265,16 +1265,15 @@
   {/snippet}
 
   <!-- One row of the flattened diff. Every row root carries `use:measure`. -->
-  {#snippet codeText(content: string, lang: string | null, key: string)}
-    {#if content.length > LINE_CUT && !expandedLines.has(key)}{@html hl.html(content.slice(0, LINE_CUT), lang)}<button
+  <!-- No whitespace around the {#if}: it would render inside the code cell. -->
+  {#snippet codeText(content: string, lang: string | null, key: string)}{#if content.length > LINE_CUT && !expandedLines.has(key)}{@html hl.html(content.slice(0, LINE_CUT), lang)}<button
         type="button"
         class="line-cut-btn"
         data-find-skip
         aria-label={`Expand line (${kb(content.length)})`}
         title={`Show the full line (${kb(content.length)})`}
         onclick={() => expandedLines.add(key)}>… expand line ({kb(content.length)})</button
-      >{:else}{@html hl.html(content, lang)}{/if}
-  {/snippet}
+      >{:else}{@html hl.html(content, lang)}{/if}{/snippet}
 
   {#snippet rowView(r: Row, i: number)}
     {#if r.kind === 'file'}
