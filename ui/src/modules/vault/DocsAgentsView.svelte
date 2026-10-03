@@ -519,7 +519,7 @@
             <input class="model" bind:value={agent.model} placeholder="model (optional)" />
             <button
               class="icon-btn"
-              title="Remove agent"
+              title="Remove agent" aria-label="Remove agent"
               disabled={agents.length <= 1}
               onclick={() => removeAgent(i)}
             >
@@ -1010,7 +1010,7 @@
             {#if !isActive(r)}
               <button
                 class="run-del"
-                title="Delete this run from history"
+                title="Delete this run from history" aria-label="Delete this run from history"
                 disabled={deleting === r.id}
                 onclick={() => void deleteRun(r)}
               >
@@ -1361,7 +1361,7 @@
     justify-content: flex-end;
   }
   .primary {
-    background: var(--accent);
+    background: var(--accent-solid);
     border: none;
     color: var(--accent-contrast);
     border-radius: 8px;

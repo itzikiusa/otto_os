@@ -1,12 +1,22 @@
 <script lang="ts">
   // Full-window image viewer for transcript images. Esc / click-outside closes.
+  import { untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import { ui } from '../../../lib/stores/ui.svelte';
   interface Props {
     src: string;
     alt: string;
     onclose: () => void;
   }
   let { src, alt, onclose }: Props = $props();
+
+  // A full-window overlay on the Modal layer: register it so the native
+  // browser webview hides under it (untracked: pushModal reads the counter it
+  // bumps — see Modal.svelte).
+  $effect(() => {
+    untrack(() => ui.pushModal());
+    return () => untrack(() => ui.popModal());
+  });
 
   $effect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -31,7 +41,7 @@
   .lb {
     position: fixed;
     inset: 0;
-    z-index: 1000;
+    z-index: var(--z-modal);
     background: color-mix(in srgb, #000 78%, transparent);
     display: flex;
     align-items: center;

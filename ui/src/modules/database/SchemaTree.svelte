@@ -535,7 +535,7 @@
         aria-label="Find an object"
       />
       {#if database.objectSearchQuery || hits !== null}
-        <button class="tree-search-clear" onclick={clearSearch} aria-label="Clear filter">
+        <button class="tree-search-clear" onclick={clearSearch} aria-label="Clear filter" title="Clear filter">
           <Icon name="x" size={10} />
         </button>
       {/if}

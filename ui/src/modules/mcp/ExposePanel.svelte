@@ -153,7 +153,7 @@
     aria-expanded={networkOpen}
     onclick={() => (networkOpen = !networkOpen)}
   >
-    <span class:open={networkOpen}><Icon name="chevronRight" size={12} /></span>
+    <span class:open={networkOpen}><Icon name="chevronRight" noflip size={12} /></span>
     Network access (advanced)
   </button>
   {#if networkOpen}

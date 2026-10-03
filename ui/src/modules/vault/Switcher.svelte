@@ -112,7 +112,8 @@
     outline: none;
   }
   .vs-input:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .hits {
     padding: 6px 0 0;

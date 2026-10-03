@@ -4018,7 +4018,7 @@
     width: 14px;
     height: 14px;
     border-radius: 50%;
-    background: var(--accent);
+    background: var(--accent-solid);
     color: var(--accent-contrast);
   }
   /* Worktree pip: violet folder so it never reads as "checked out here". */

@@ -86,7 +86,7 @@
     <button class="run" onclick={run} disabled={busy || !prompt.trim()} title="Generate (⌘↵)">
       {busy ? 'Drawing…' : 'Draw'}
     </button>
-    <button class="close" onclick={onclose} aria-label="Close"><Icon name="x" /></button>
+    <button class="close" onclick={onclose} aria-label="Close" title="Close"><Icon name="x" /></button>
   </div>
 </div>
 
@@ -138,15 +138,15 @@
     cursor: pointer;
   }
   .modes button.active {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    border-color: var(--accent-solid);
+    color: var(--accent-contrast);
   }
   .run {
     padding: 5px 12px;
     border: none;
-    background: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
     border-radius: 999px;
     font-size: var(--fs-m);
     cursor: pointer;

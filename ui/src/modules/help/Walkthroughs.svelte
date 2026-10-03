@@ -321,9 +321,6 @@
 </div>
 
 <style>
-  :global([dir='rtl']) .help-back :global(svg) {
-    transform: scaleX(-1);
-  }
   .help-page {
     height: 100%;
     min-height: 0;
@@ -367,8 +364,8 @@
     color: var(--text-dim);
   }
   .rail-search:focus-within {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px var(--accent-soft);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .phone .rail-search {
     height: 38px;

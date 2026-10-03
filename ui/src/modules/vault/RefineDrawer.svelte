@@ -222,7 +222,7 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    background: var(--accent);
+    background: var(--accent-solid);
     border: none;
     color: var(--accent-contrast);
     border-radius: 7px;

@@ -264,7 +264,7 @@
           ondrop={(e) => onDrop(e, n)}
         >
           {#if n.entry.kind === 'dir'}
-            <span class="chev" class:open={n.open}><Icon name="chevronRight" size={12} /></span>
+            <span class="chev" class:open={n.open}><Icon name="chevronRight" noflip size={12} /></span>
             <Icon name="folder" size={14} />
           {:else}
             <input

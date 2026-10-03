@@ -300,7 +300,7 @@
         onkeydown={(e) => onRowKey(e, r.id)}
       >
         {#if r.node.kind === 'group'}
-          <button class="s3d-disclose" tabindex="-1" aria-label={r.collapsed ? 'Expand' : 'Collapse'} onclick={(e) => toggle(r.id, e)}>
+          <button class="s3d-disclose" tabindex="-1" aria-label={r.collapsed ? 'Expand' : 'Collapse'} title={r.collapsed ? 'Expand' : 'Collapse'} onclick={(e) => toggle(r.id, e)}>
             <Icon name={r.collapsed ? 'chevronRight' : 'chevronDown'} size={12} />
           </button>
         {:else}

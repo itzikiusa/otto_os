@@ -1330,7 +1330,7 @@
       <button
         class="caret"
         onclick={() => toggleCollapse(node.sec.id)}
-        aria-label={isOpen ? `Collapse ${node.sec.name}` : `Expand ${node.sec.name}`}
+        aria-label={isOpen ? `Collapse ${node.sec.name}` : `Expand ${node.sec.name}`} title={isOpen ? `Collapse ${node.sec.name}` : `Expand ${node.sec.name}`}
         aria-expanded={isOpen}
       >
         <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
@@ -1446,7 +1446,7 @@
       aria-label="Filter connections"
     />
     {#if connFilter}
-      <button class="tree-search-clear" onclick={() => (connFilter = '')} aria-label="Clear filter"><Icon name="x" size={10} /></button>
+      <button class="tree-search-clear" onclick={() => (connFilter = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={10} /></button>
     {/if}
     {#if !viewport.isPhone}
       <!-- New section / connection live here on tablet/desktop (the phone keeps
@@ -1558,7 +1558,7 @@
         aria-label="Search saved queries"
       />
       {#if savedSearch}
-        <button class="icon-btn" onclick={() => (savedSearch = '')} aria-label="Clear search"><Icon name="x" size={12} /></button>
+        <button class="icon-btn" onclick={() => (savedSearch = '')} aria-label="Clear search" title="Clear search"><Icon name="x" size={12} /></button>
       {/if}
     </div>
     <LoadState what="saved queries" variant="compact" loading={database.savedQueriesLoading} error={database.savedQueriesError} empty={database.savedQueries.length === 0} onretry={() => database.loadSavedQueries()} />
@@ -1615,7 +1615,7 @@
         aria-label="Search query history"
       />
       {#if historySearch}
-        <button class="icon-btn" onclick={() => (historySearch = '')} aria-label="Clear search"><Icon name="x" size={12} /></button>
+        <button class="icon-btn" onclick={() => (historySearch = '')} aria-label="Clear search" title="Clear search"><Icon name="x" size={12} /></button>
       {/if}
     </div>
     <LoadState what="query history" variant="compact" loading={database.historyLoading} error={database.historyError} empty={database.history.length === 0} onretry={() => database.loadHistory()} />

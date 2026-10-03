@@ -2613,6 +2613,10 @@
     box-shadow: var(--shadow);
     max-width: calc(100% - 32px);
   }
+  .find-bar:focus-within {
+    border-color: var(--accent-text);
+    box-shadow: var(--shadow), 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
   .find-bar input {
     width: 180px;
     min-width: 60px;

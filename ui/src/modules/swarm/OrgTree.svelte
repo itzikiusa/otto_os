@@ -217,7 +217,7 @@
     tabindex="-1"
   >
     {#if kids.length > 0 || sessions.length > 0}
-      <button class="twist" onclick={() => toggle(a.id)} aria-label={isOpen ? `Collapse ${a.name}` : `Expand ${a.name}`} aria-expanded={isOpen}>
+      <button class="twist" onclick={() => toggle(a.id)} aria-label={isOpen ? `Collapse ${a.name}` : `Expand ${a.name}`} title={isOpen ? `Collapse ${a.name}` : `Expand ${a.name}`} aria-expanded={isOpen}>
         <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
       </button>
     {:else}

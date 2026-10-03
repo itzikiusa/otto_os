@@ -76,16 +76,16 @@
 
   <div class="right">
     {#if !readonly}
-      <button class="icon-btn" title="Undo (⌘Z)" disabled={!canvas.canUndo} onclick={() => canvas.undo()}>
+      <button class="icon-btn" title="Undo (⌘Z)" aria-label="Undo (⌘Z)" disabled={!canvas.canUndo} onclick={() => canvas.undo()}>
         <Icon name="arrowUp" />
       </button>
-      <button class="icon-btn" title="Redo (⌘⇧Z)" disabled={!canvas.canRedo} onclick={() => canvas.redo()}>
+      <button class="icon-btn" title="Redo (⌘⇧Z)" aria-label="Redo (⌘⇧Z)" disabled={!canvas.canRedo} onclick={() => canvas.redo()}>
         <Icon name="arrowDown" />
       </button>
       <span class="sep"></span>
     {/if}
-    <button class="icon-btn" title="Zoom to fit" onclick={onfit}><Icon name="maximize" /></button>
-    <button class="icon-btn" title="Export JSON" onclick={exportJson}><Icon name="file" /></button>
+    <button class="icon-btn" title="Zoom to fit" aria-label="Zoom to fit" onclick={onfit}><Icon name="maximize" /></button>
+    <button class="icon-btn" title="Export JSON" aria-label="Export JSON" onclick={exportJson}><Icon name="file" /></button>
     <button class="btn" title="Present" onclick={onpresent}>
       <Icon name="play" /> Present
     </button>
@@ -195,9 +195,9 @@
     background: var(--surface-2);
   }
   .btn.accent {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    border-color: var(--accent-solid);
+    color: var(--accent-contrast);
   }
   .btn.accent:hover {
     filter: brightness(1.08);

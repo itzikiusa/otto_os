@@ -487,8 +487,8 @@
     cursor: pointer;
   }
   .tbtn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
+    background: var(--accent-solid);
+    border-color: var(--accent-solid);
     color: var(--accent-contrast);
   }
   .tbtn:disabled {

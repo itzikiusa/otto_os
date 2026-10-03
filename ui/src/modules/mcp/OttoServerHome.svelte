@@ -526,7 +526,7 @@
       aria-expanded={exposeOpen}
       onclick={() => (exposeOpen = !exposeOpen)}
     >
-      <span class:open={exposeOpen}><Icon name="chevronRight" size={13} /></span>
+      <span class:open={exposeOpen}><Icon name="chevronRight" noflip size={13} /></span>
       Connect an external client
     </button>
     {#if exposeOpen}<ExposePanel {groups} {isMcpAdmin} />{/if}

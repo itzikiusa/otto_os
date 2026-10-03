@@ -369,6 +369,10 @@
     background: var(--surface-2);
     color: var(--text-dim);
   }
+  .search:focus-within {
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
   .search-in {
     border: none;
     background: transparent;
