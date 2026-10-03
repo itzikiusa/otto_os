@@ -26,7 +26,7 @@ import { budgetMs, isDesktopProject, isWebkitProject, percentile, scrollFrameWor
 //   7. dashboard of 12 bar widgets × 5,000 rows (chart sampling, F6)
 //        all tiles drawn < 3 s · ≤ 12 × 160 bars
 //   8. multi-run sheet with 200 runs polling
-//        no poll frame over 50 ms · polls slow down (≤ 1.6/s)
+//        no poll frame over 50 ms · polls slow down (≤ 1.6/s) · `?since=` deltas only
 // Timings are budgetMs()-scaled; DOM / request counts never are.
 // `@ci` (1–3: deterministic counts + scaled timings, ~1 min) runs in the CI
 // perf-gates job (`--grep @ci`); the rest run locally with the full perf set.
@@ -600,9 +600,15 @@ test('multi-run sheet with 200 runs polls without long frames', async ({ page },
   const plan = { engine: 'mysql', placeholders: ['brand'], targets: [target], runs, write_count: 0, needs_confirm: false, warnings: [], plan_hash: 'h200' };
   let polls = 0;
   const pollTimes: number[] = [];
-  const job = () => {
+  const pollBytes: number[] = [];
+  // Like the daemon: `seq` = runs finished so far; `?since=` answers carry
+  // only the runs whose status changed after it (finished or started).
+  const job = (since?: number) => {
     const done = Math.min(N, polls * 10);
+    const changed = (i: number) => since === undefined || (i >= since - 4 && i < done + 4);
     return {
+      seq: done,
+      partial: since !== undefined,
       id: 'job200',
       status: done >= N ? 'done' : 'running',
       engine: 'mysql',
@@ -612,8 +618,8 @@ test('multi-run sheet with 200 runs polls without long frames', async ({ page },
       read_only: true,
       statement_preview: 'SELECT * FROM orders WHERE brand_id = :brand',
       summary: { total: N, ok: done, failed: 0, running: done >= N ? 0 : 4, pending: Math.max(0, N - done - 4), skipped: 0, cancelled: 0 },
-      targets: [target],
-      items: runs.map((r) => ({
+      targets: since === undefined ? [target] : [],
+      items: runs.filter((r) => changed(r.index)).map((r) => ({
         index: r.index,
         target: 0,
         label: r.label,
@@ -630,10 +636,13 @@ test('multi-run sheet with 200 runs polls without long frames', async ({ page },
   await page.route('**/api/v1/db/multi-runs', (route: Route) =>
     route.request().method() === 'GET' ? route.fulfill({ json: [] }) : route.fulfill({ status: 202, json: job() }),
   );
-  await page.route('**/api/v1/db/multi-runs/job200', (route: Route) => {
+  await page.route('**/api/v1/db/multi-runs/job200*', (route: Route) => {
     polls++;
     pollTimes.push(Date.now());
-    return route.fulfill({ json: job() });
+    const since = new URL(route.request().url()).searchParams.get('since');
+    const body = JSON.stringify(job(since === null ? undefined : Number(since)));
+    pollBytes.push(body.length);
+    return route.fulfill({ contentType: 'application/json', body });
   });
   await openConn(page);
   const content = page.locator('.qe-edit .cm-content');
@@ -670,7 +679,14 @@ test('multi-run sheet with 200 runs polls without long frames', async ({ page },
   });
   const span = (pollTimes.at(-1)! - pollTimes[0]) / 1000;
   const rate = pollTimes.length > 1 ? (pollTimes.length - 1) / span : 0;
-  perfLine(`multi-run ${N}: ${polls} polls (${rate.toFixed(2)}/s); worst frame gap ${Math.max(...gaps).toFixed(0)} ms, p95 ${percentile(gaps, 95).toFixed(1)} ms`);
+  const fullBytes = JSON.stringify(job()).length;
+  const maxPoll = Math.max(...pollBytes);
+  perfLine(
+    `multi-run ${N}: ${polls} polls (${rate.toFixed(2)}/s), poll ≤ ${maxPoll} B vs ${fullBytes} B full; ` +
+      `worst frame gap ${Math.max(...gaps).toFixed(0)} ms, p95 ${percentile(gaps, 95).toFixed(1)} ms`,
+  );
+  // Every poll used `?since=` (a delta), none re-pulled the whole job.
+  expect(maxPoll, 'largest poll answer').toBeLessThan(fullBytes / 4);
   expect(percentile(gaps, 95), 'frame gap p95 while polling').toBeLessThan(budgetMs(50));
   expect(rate, 'poll rate').toBeLessThanOrEqual(1.6);
 });

@@ -67,13 +67,25 @@ pub(super) async fn list<S: DbViewerCtx>(
     Ok(Json(ctx.db().multi_run_list(&user.id, user.is_root)).into_response())
 }
 
-/// `GET /db/multi-runs/{rid}` — status, summary and per-run detail (no rows).
+/// `?since=<seq>` on `GET /db/multi-runs/{rid}`.
+#[derive(Debug, Default, serde::Deserialize)]
+pub(super) struct SinceQuery {
+    since: Option<u64>,
+}
+
+/// `GET /db/multi-runs/{rid}` — status, summary and per-run detail (no rows);
+/// with `?since=<seq>` only the runs changed after it (`partial: true`).
 pub(super) async fn get_one<S: DbViewerCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(rid): Path<String>,
+    Query(q): Query<SinceQuery>,
 ) -> ApiResult<Response> {
-    Ok(Json(ctx.db().multi_run_get(&user.id, user.is_root, &rid)?).into_response())
+    Ok(Json(
+        ctx.db()
+            .multi_run_get_since(&user.id, user.is_root, &rid, q.since)?,
+    )
+    .into_response())
 }
 
 /// `GET /db/multi-runs/{rid}/items/{index}` — one run's full statement and

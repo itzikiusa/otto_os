@@ -1385,7 +1385,8 @@ execution/cancel/export = `ws editor` (global connections: `Database:Edit`):
 **Multi-target runs** ("Run on…", §4) — `POST /db/multi-run/plan` (preview:
 final statement per run, cluster detection), `POST /db/multi-runs` (start;
 `confirm_write` + `plan_hash`), `GET /db/multi-runs[/{rid}]` (status, summary,
-per-run detail), `GET /db/multi-runs/{rid}/items/{index}` (one run's statement +
+per-run detail; the sheet polls `?since=<seq>` and gets only the runs that
+changed, merged by index), `GET /db/multi-runs/{rid}/items/{index}` (one run's statement +
 result), `POST /db/multi-runs/{rid}/cancel`. Editor on every target connection.
 
 **Saved queries / dashboards / widgets** — workspace-scoped lists under
