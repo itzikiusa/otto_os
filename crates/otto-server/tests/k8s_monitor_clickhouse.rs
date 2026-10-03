@@ -1350,6 +1350,14 @@ async fn rows_read_per_refresh_before_and_after() {
         .max(3)
         / 3
         * 3;
+    // Every wide table carries the time index (granule pruning on `t`).
+    assert_eq!(
+        sink.query_rows(&schema::wide_t_index_present_sql())
+            .await
+            .unwrap()
+            .len(),
+        schema::wide_tables().len()
+    );
     let cid = "m1";
     let now = Utc::now().timestamp();
     let start = (now - 26 * 3600) / 60 * 60;

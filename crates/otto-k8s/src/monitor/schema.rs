@@ -162,6 +162,36 @@ pub const WIDE_1H: WideTier = WideTier {
 };
 /// Finest first.
 pub const WIDE_TIERS: [WideTier; 3] = [WIDE_1M, WIDE_5M, WIDE_1H];
+/// Granule-level time pruning for the wide tiers. The coarse `toStartOf…(t)`
+/// sort-key prefix does NOT prune a `t >= …` filter (measured: a 5-minute
+/// edge read the whole day partition); a minmax index on `t` does.
+const T_INDEX_NAME: &str = "t_minmax";
+const T_INDEX: &str = "INDEX t_minmax t TYPE minmax GRANULARITY 1";
+
+/// Wide tables that already have the time index (`name` column).
+pub fn wide_t_index_present_sql() -> String {
+    let names = wide_tables()
+        .iter()
+        .map(|t| sql_str(t))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "SELECT table AS name FROM system.data_skipping_indices
+         WHERE database = currentDatabase() AND name = {} AND table IN ({names})",
+        sql_str(T_INDEX_NAME)
+    )
+}
+
+/// Add + build the time index on a wide table created before it existed
+/// (idempotent `ADD`; the `MATERIALIZE` mutation runs once, only for a
+/// table that lacked it).
+pub fn wide_t_index_add_sql(table: &str) -> String {
+    format!(
+        "ALTER TABLE {table} ADD INDEX IF NOT EXISTS {T_INDEX_NAME} t TYPE minmax GRANULARITY 1;
+ALTER TABLE {table} MATERIALIZE INDEX {T_INDEX_NAME}"
+    )
+}
+
 /// Small granules: a workload-tier read is a few hundred rows, and the
 /// default 8192-row granule would set the floor of every read.
 const WIDE_GRANULARITY: u32 = 1024;
@@ -353,7 +383,8 @@ CREATE TABLE IF NOT EXISTS {wl} (
     namespace   LowCardinality(String),
     workload    LowCardinality(String),
     n           SimpleAggregateFunction(sum, UInt64),
-    pods_max    SimpleAggregateFunction(max, UInt64),{AGG}
+    pods_max    SimpleAggregateFunction(max, UInt64),{AGG},
+    {T_INDEX}
 ) ENGINE = AggregatingMergeTree
 PARTITION BY (cluster_id, {part})
 ORDER BY (cluster_id, {prefix}, namespace, workload, t)
@@ -366,7 +397,8 @@ CREATE TABLE IF NOT EXISTS {pod} (
     namespace   LowCardinality(String),
     workload    LowCardinality(String),
     pod         String,
-    n           SimpleAggregateFunction(sum, UInt64),{AGG}
+    n           SimpleAggregateFunction(sum, UInt64),{AGG},
+    {T_INDEX}
 ) ENGINE = AggregatingMergeTree
 PARTITION BY (cluster_id, {part})
 ORDER BY (cluster_id, {prefix}, namespace, workload, pod, t)
@@ -592,6 +624,19 @@ pub async fn ensure(sink: &dyn MonitorSink, retention_days: u32) -> Result<()> {
     // is a Null table only the collector writes, after this returns).
     sink.exec(&wide_schema_sql(retention_days)).await?;
     sink.exec(&wide_views_sql()).await?;
+    if let Ok(rows) = sink.query_rows(&wide_t_index_present_sql()).await {
+        let have: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| r.get("name").and_then(|v| v.as_str()))
+            .collect();
+        for t in wide_tables() {
+            if !have.contains(&t) {
+                if let Err(e) = sink.exec(&wide_t_index_add_sql(t)).await {
+                    tracing::debug!("k8s monitor: time index on {t}: {e}");
+                }
+            }
+        }
+    }
     let present = sink
         .query_rows(&views_present_sql())
         .await?
@@ -761,6 +806,15 @@ mod tests {
             );
         }
         assert_eq!(s.matches("index_granularity = 1024").count(), 6);
+        assert_eq!(
+            s.matches("INDEX t_minmax t TYPE minmax GRANULARITY 1")
+                .count(),
+            6
+        );
+        let add = wide_t_index_add_sql("k8s_wl_1m");
+        assert!(add.contains("ADD INDEX IF NOT EXISTS t_minmax t TYPE minmax"));
+        assert!(add.contains("MATERIALIZE INDEX t_minmax"));
+        assert!(wide_t_index_present_sql().contains("'k8s_pod_1h'"));
         assert!(s.contains("ORDER BY (cluster_id, toMonday(t), namespace, workload, t)"));
         assert!(s.contains("ORDER BY (cluster_id, toStartOfHour(t), namespace, workload, pod, t)"));
         assert!(s.contains("hist        SimpleAggregateFunction(sumMap, Map(String, Float64))"));
