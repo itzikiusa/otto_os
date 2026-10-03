@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
-use axum::{Extension, Json, Router};
+use axum::{Extension, Router};
 use otto_core::api::CommitInfo;
 use otto_core::auth::AuthUser;
 use otto_core::domain::WorkspaceRole;
@@ -199,7 +199,14 @@ impl LocalGit {
                 Err(e) => return Err(e),
             },
         };
-        crate::parse::parse_log(&out)
+        if o.all {
+            // The graph's `--all --date-order` walk is where a missing
+            // commit-graph hurts most (no generation numbers: the whole
+            // history is walked before the first record). Seed it once.
+            self.seed_commit_graph();
+        }
+        // A 10k-commit page is ~2.5 MB of records — parsed off the workers.
+        crate::local::off_runtime(out.len(), move || crate::parse::parse_log(&out)).await?
     }
 
     /// `git blame --porcelain <rev> -- <path>` grouped into runs.
@@ -218,14 +225,22 @@ impl LocalGit {
         let cmd =
             GitCmd::read(&["blame", "--porcelain", rev, "--", path]).max_stdout(BLAME_STDOUT_CAP);
         let (ok, stdout, stderr, code) = self.exec(&cmd, None).await?;
-        let stdout = String::from_utf8_lossy(&stdout);
         if !ok {
+            let stdout = String::from_utf8_lossy(&stdout);
             return Err(crate::local::upstream_err(&stderr, &stdout, code));
         }
+        // Blame walks history per line; the changed-path Bloom filters of a
+        // commit-graph make it several times faster on big repos.
+        self.seed_commit_graph();
+        // Up to 32 MB of porcelain — parsed off the async workers.
+        let lines = crate::local::off_runtime(stdout.len(), move || {
+            parse_blame(&String::from_utf8_lossy(&stdout))
+        })
+        .await?;
         Ok(BlameResp {
             path: path.to_string(),
             rev: rev.to_string(),
-            lines: parse_blame(&stdout),
+            lines,
         })
     }
 }
@@ -364,10 +379,16 @@ async fn repo_blame<S: GitCtx>(
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<BlameQuery>,
-) -> ApiResult<Json<BlameResp>> {
+) -> ApiResult<axum::response::Response> {
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
     let rev = q.rev.as_deref().map(str::trim).filter(|r| !r.is_empty());
-    Ok(Json(git.blame(&q.path, rev.unwrap_or("HEAD")).await?))
+    let resp = git.blame(&q.path, rev.unwrap_or("HEAD")).await?;
+    let est: usize = resp
+        .lines
+        .iter()
+        .map(|l| 160 + l.text.iter().map(|t| t.len() + 4).sum::<usize>())
+        .sum();
+    Ok(crate::http::json_off_runtime(resp, est).await?)
 }
 
 /// Routes owned by this module (merged into `crate::http::router`).
