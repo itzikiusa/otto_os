@@ -36,13 +36,15 @@ const CONTAINER = `otto-e2e-localstack-${SLOT}`;
 // last Community release that runs token-free. Override the image (and pass a
 // token through) when you have a licence.
 const IMAGE = process.env.OTTO_E2E_LOCALSTACK_IMAGE ?? 'localstack/localstack:4.14.0';
-const SERVICES = ['s3', 'sqs', 'sts', 'iam', 'ec2'];
+const SERVICES = ['s3', 'sqs', 'sts', 'iam', 'ec2', 'logs'];
 const REGION = 'us-east-1';
 const BUCKET = 'otto-e2e-bucket';
 const QUEUE = 'otto-e2e-queue';
 const FIFO_QUEUE = 'otto-e2e-queue.fifo';
 const INSTANCE_NAME = 'otto-e2e';
 const ACCOUNT_NAME = `e2e-localstack-${Date.now().toString(36)}`;
+const LOG_GROUP = '/otto/e2e/app';
+const LOG_STREAM = 'web-1';
 
 const JSON_BODY = JSON.stringify(
   { service: 'otto-e2e', replicas: 3, tags: ['alpha', 'beta'], owner: { team: 'platform' } },
@@ -256,6 +258,23 @@ test.beforeAll(async () => {
   ) as { Instances: { InstanceId: string }[] };
   env.instanceId = run.Instances[0].InstanceId;
 
+  // CloudWatch Logs: one group + stream with two events (idempotent re-runs).
+  try {
+    awsCli(['logs', 'create-log-group', '--log-group-name', LOG_GROUP]);
+  } catch {
+    /* already exists on a reused container */
+  }
+  try {
+    awsCli(['logs', 'create-log-stream', '--log-group-name', LOG_GROUP, '--log-stream-name', LOG_STREAM]);
+  } catch {
+    /* already exists */
+  }
+  const now = Date.now();
+  awsCli([
+    'logs', 'put-log-events', '--log-group-name', LOG_GROUP, '--log-stream-name', LOG_STREAM,
+    '--log-events', `timestamp=${now - 2000},message=boot ok`, `timestamp=${now - 1000},message={"level":"error","msg":"boom"}`,
+  ]);
+
   // ── the Otto account, pointed at the container ──
   const { ctx, base } = await apiCtx();
   try {
@@ -438,4 +457,70 @@ test('EC2: the seeded instance is running → Stop with typed id → stopped', a
   await expect(page.getByText('stop sent')).toBeVisible({ timeout: 15_000 });
   await pollWithRefresh(page, 'Refresh', () => row.locator('.pill').innerText(), /^stopp(ed|ing)$/);
   expect(realErrors(errors), `console errors: ${errors.join('\n')}`).toEqual([]);
+});
+
+test('S3 API: upload → 409 on re-upload → overwrite → inline preview → presign → delete', async () => {
+  const { ctx, base } = await apiCtx();
+  const obj = (key: string, extra = '') =>
+    `${base}/api/v1/aws/accounts/${env.accountId}/s3/buckets/${BUCKET}/object?key=${encodeURIComponent(key)}${extra}`;
+  const key = `uploads/e2e-${Date.now().toString(36)}.svg`;
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4"/></svg>';
+  try {
+    const up = await ctx.put(obj(key), { data: svg, headers: { 'Content-Type': 'image/svg+xml' } });
+    expect(up.status(), await up.text()).toBe(201);
+    expect(((await up.json()) as { size: number }).size).toBe(svg.length);
+    const again = await ctx.put(obj(key), { data: svg, headers: { 'Content-Type': 'image/svg+xml' } });
+    expect(again.status()).toBe(409);
+    expect(await again.text()).toMatch(/already exists/);
+    const over = await ctx.put(obj(key, '&overwrite=true'), { data: svg, headers: { 'Content-Type': 'image/svg+xml' } });
+    expect(over.status()).toBe(201);
+
+    const pv = await ctx.get(`${base}/api/v1/aws/accounts/${env.accountId}/s3/buckets/${BUCKET}/preview?key=${encodeURIComponent(key)}`);
+    expect(pv.ok()).toBeTruthy();
+    expect(((await pv.json()) as { kind: string }).kind).toBe('image');
+    const inline = await ctx.get(`${base}/api/v1/aws/accounts/${env.accountId}/s3/buckets/${BUCKET}/download?key=${encodeURIComponent(key)}&inline=true`);
+    expect(inline.ok()).toBeTruthy();
+    expect(inline.headers()['content-disposition']).toMatch(/^inline/);
+    expect(inline.headers()['content-security-policy']).toMatch(/sandbox/);
+
+    const ps = await ctx.post(`${base}/api/v1/aws/accounts/${env.accountId}/s3/buckets/${BUCKET}/presign`, {
+      data: { key, expires_in: 600 },
+    });
+    expect(ps.ok(), await ps.text()).toBeTruthy();
+    const link = (await ps.json()) as { url: string; expires_at: string };
+    expect(link.url).toMatch(/^http/);
+    expect(link.url).toContain(BUCKET);
+
+    const del = await ctx.delete(obj(key));
+    expect(del.status()).toBe(204);
+    const gone = await ctx.get(`${base}/api/v1/aws/accounts/${env.accountId}/s3/buckets/${BUCKET}/object?key=${encodeURIComponent(key)}`);
+    expect(gone.ok()).toBeFalsy();
+  } finally {
+    await ctx.dispose();
+  }
+});
+
+test('Logs API: groups → newest streams → filtered events', async () => {
+  const { ctx, base } = await apiCtx();
+  const api = `${base}/api/v1/aws/accounts/${env.accountId}/logs`;
+  try {
+    const groups = await ctx.get(`${api}/groups?prefix=${encodeURIComponent('/otto/e2e')}`);
+    expect(groups.ok(), await groups.text()).toBeTruthy();
+    expect(((await groups.json()) as { groups: { name: string }[] }).groups.map((g) => g.name)).toContain(LOG_GROUP);
+    const streams = await ctx.get(`${api}/streams?group=${encodeURIComponent(LOG_GROUP)}`);
+    expect(streams.ok()).toBeTruthy();
+    expect(((await streams.json()) as { streams: { name: string }[] }).streams[0]?.name).toBe(LOG_STREAM);
+    const events = await ctx.get(
+      `${api}/events?group=${encodeURIComponent(LOG_GROUP)}&start=${Date.now() - 3_600_000}&pattern=boom`,
+    );
+    expect(events.ok(), await events.text()).toBeTruthy();
+    const ev = ((await events.json()) as { events: { message: string; id: string }[] }).events;
+    expect(ev.some((e) => e.message.includes('boom'))).toBeTruthy();
+    // Validation explains the fix.
+    const bad = await ctx.post(`${api}/insights`, { data: { groups: [], query: 'fields @message', start: 0, end: 1000 } });
+    expect(bad.status()).toBe(400);
+    expect(await bad.text()).toMatch(/at least one log group/);
+  } finally {
+    await ctx.dispose();
+  }
 });

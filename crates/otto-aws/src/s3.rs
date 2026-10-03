@@ -1,6 +1,8 @@
-//! S3 — read-only: buckets, prefix listing, head, text preview, streamed
-//! download (§2.2). All `s3api` JSON except the download, which pipes
-//! `aws s3 cp s3://… -` stdout straight into the response body.
+//! S3 — buckets, prefix listing, head, preview (text inline; images/PDF via
+//! the size-capped `download?inline=true` stream), streamed download (§2.2),
+//! plus the Edit-gated writes: upload (`s3 cp <tmp> s3://…`), delete
+//! (`s3api delete-object`) and presigned GET links (`s3 presign`). All `s3api`
+//! JSON except the high-level `s3 cp` / `s3 presign` calls.
 
 use std::process::Stdio;
 
@@ -16,6 +18,15 @@ pub const PREVIEW_DEFAULT: u64 = 64 * 1024;
 pub const PREVIEW_CAP: u64 = 1024 * 1024;
 /// Download refusal threshold (§2.2).
 pub const DOWNLOAD_CAP: u64 = 2 * 1024 * 1024 * 1024;
+/// Inline (in-app) image/PDF preview cap — bigger objects must be downloaded.
+pub const INLINE_PREVIEW_CAP: u64 = 25 * 1024 * 1024;
+/// Upload cap for the in-app uploader (the body is spooled to a temp file).
+pub const UPLOAD_CAP: u64 = 5 * 1024 * 1024 * 1024;
+/// Presigned link lifetime: default 1 h, S3's SigV4 maximum is 7 days.
+pub const PRESIGN_DEFAULT_SECS: u64 = 3600;
+pub const PRESIGN_MAX_SECS: u64 = 7 * 24 * 3600;
+/// `s3 cp` upload budget (a multi-GB upload over a slow link).
+pub const UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct S3Bucket {
@@ -67,6 +78,22 @@ pub struct PreviewResp {
     pub content_type: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub binary: bool,
+    /// How the UI should render it: `text` (in `text`), `image` / `pdf`
+    /// (fetch `download?inline=true`, ≤ [`INLINE_PREVIEW_CAP`]) or `binary`
+    /// (download only).
+    pub kind: PreviewKind,
+    /// Object size in bytes (from `head-object`), when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewKind {
+    Text,
+    Image,
+    Pdf,
+    Binary,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -82,6 +109,48 @@ pub struct KeyQuery {
     pub key: String,
     pub max_bytes: Option<u64>,
     pub region: Option<String>,
+    /// `download` only: serve for in-app preview (`Content-Disposition:
+    /// inline`, capped at [`INLINE_PREVIEW_CAP`]).
+    pub inline: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PresignReq {
+    pub key: String,
+    /// Link lifetime in seconds (1..=604800, default 3600).
+    pub expires_in: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PresignResp {
+    pub url: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    /// Set when the account signs with temporary (SSO / assumed-role)
+    /// credentials that end before `expires_at` — the link dies with them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UploadQuery {
+    pub key: String,
+    pub region: Option<String>,
+    /// Replace an existing object (default false ⇒ 409 when the key exists).
+    pub overwrite: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UploadResp {
+    pub key: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeleteQuery {
+    pub key: String,
+    pub region: Option<String>,
+    /// Must equal `key` on prod accounts (typed confirmation).
+    pub confirm: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -250,8 +319,10 @@ pub fn preview_from_bytes(
         return PreviewResp {
             text: None,
             truncated: false,
+            kind: preview_kind(content_type.as_deref(), key),
             content_type,
             binary: true,
+            size: total_size,
         };
     }
     let truncated = total_size.map(|t| t > bytes.len() as u64).unwrap_or(false);
@@ -260,7 +331,68 @@ pub fn preview_from_bytes(
         truncated,
         content_type,
         binary: false,
+        kind: PreviewKind::Text,
+        size: total_size,
     }
+}
+
+const IMAGE_EXTS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif",
+];
+
+/// How a non-text object can be previewed: by MIME type first, then (for the
+/// generic octet-stream / missing types S3 often stores) by key extension.
+pub fn preview_kind(content_type: Option<&str>, key: &str) -> PreviewKind {
+    let ct = content_type
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if ct.starts_with("image/") {
+        return PreviewKind::Image;
+    }
+    if ct == "application/pdf" {
+        return PreviewKind::Pdf;
+    }
+    if ct.is_empty() || ct == "application/octet-stream" || ct == "binary/octet-stream" {
+        let ext = key.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+        if IMAGE_EXTS.contains(&ext.as_str()) {
+            return PreviewKind::Image;
+        }
+        if ext == "pdf" {
+            return PreviewKind::Pdf;
+        }
+    }
+    PreviewKind::Binary
+}
+
+/// The MIME type to serve an inline preview with: the stored type when it is
+/// already specific, else one derived from the extension (WKWebView will not
+/// render `application/octet-stream` as an image or PDF).
+pub fn inline_content_type(content_type: Option<&str>, key: &str) -> String {
+    let ct = content_type.unwrap_or("").trim();
+    let generic = ct.is_empty()
+        || ct.eq_ignore_ascii_case("application/octet-stream")
+        || ct.eq_ignore_ascii_case("binary/octet-stream");
+    if !generic {
+        return ct.to_string();
+    }
+    let ext = key.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        "avif" => "image/avif",
+        "pdf" => "application/pdf",
+        _ => "application/octet-stream",
+    }
+    .to_string()
 }
 
 /// Guard against `..`, leading `/` and control chars in a caller-supplied key
@@ -368,8 +500,10 @@ pub async fn preview(
         return Ok(PreviewResp {
             text: None,
             truncated: false,
+            kind: preview_kind(head.content_type.as_deref(), key),
             content_type: head.content_type,
             binary: true,
+            size: Some(head.size),
         });
     }
     // Scratch file at an Otto-owned location: <data_dir>/tmp/<fresh ULID>.
@@ -419,10 +553,18 @@ pub async fn download(
     bucket: &str,
     key: &str,
     region: Option<&str>,
+    inline: bool,
 ) -> Result<DownloadStream> {
     validate_bucket(bucket)?;
     validate_key(key)?;
     let head = head_object(svc, a, bucket, key, region).await?;
+    if inline && head.size > INLINE_PREVIEW_CAP {
+        return Err(Error::PayloadTooLarge(format!(
+            "object is {:.1} MB; in-app preview is capped at {} MB — use Download instead",
+            head.size as f64 / 1_048_576.0,
+            INLINE_PREVIEW_CAP / 1_048_576
+        )));
+    }
     if head.size > DOWNLOAD_CAP {
         return Err(Error::PayloadTooLarge(format!(
             "object is {} bytes; the in-app download cap is 2 GiB — use the CLI",
@@ -468,9 +610,153 @@ pub async fn download(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Writes (Edit) + presign
+// ---------------------------------------------------------------------------
+
+/// Does `bucket/key` exist? `head-object` answers 404 for a missing key.
+pub async fn object_exists(
+    svc: &AwsService,
+    a: &AwsAccountRow,
+    bucket: &str,
+    key: &str,
+    region: Option<&str>,
+) -> Result<bool> {
+    match head_object(svc, a, bucket, key, region).await {
+        Ok(_) => Ok(true),
+        Err(Error::Invalid(m)) if m.contains("(404)") || m.contains("Not Found") => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Upload the spooled file at `path` to `s3://bucket/key` (`s3 cp` handles
+/// multipart for big bodies).
+pub async fn upload_file(
+    svc: &AwsService,
+    a: &AwsAccountRow,
+    bucket: &str,
+    key: &str,
+    path: &std::path::Path,
+    content_type: Option<&str>,
+    region: Option<&str>,
+) -> Result<()> {
+    validate_bucket(bucket)?;
+    validate_key(key)?;
+    if key.ends_with('/') {
+        return Err(Error::Invalid(
+            "the object key ends with '/' — add a file name".into(),
+        ));
+    }
+    let src = path.to_string_lossy().into_owned();
+    let uri = format!("s3://{bucket}/{key}");
+    let mut args: Vec<&str> = vec!["s3", "cp", &src, &uri, "--no-progress"];
+    let ct = content_type
+        .map(str::trim)
+        .filter(|c| !c.is_empty() && c.len() <= 255 && !c.chars().any(char::is_control));
+    if let Some(ct) = ct {
+        args.extend(["--content-type", ct]);
+    }
+    svc.run_with(a, region, &args, UPLOAD_TIMEOUT, None).await?;
+    Ok(())
+}
+
+pub async fn delete_object(
+    svc: &AwsService,
+    a: &AwsAccountRow,
+    bucket: &str,
+    key: &str,
+    region: Option<&str>,
+) -> Result<()> {
+    validate_bucket(bucket)?;
+    validate_key(key)?;
+    svc.run(
+        a,
+        region,
+        &["s3api", "delete-object", "--bucket", bucket, "--key", key],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Clamp a requested presign lifetime into S3's SigV4 window.
+pub fn presign_secs(requested: Option<u64>) -> u64 {
+    requested
+        .unwrap_or(PRESIGN_DEFAULT_SECS)
+        .clamp(1, PRESIGN_MAX_SECS)
+}
+
+pub async fn presign(
+    svc: &AwsService,
+    a: &AwsAccountRow,
+    bucket: &str,
+    req: &PresignReq,
+    region: Option<&str>,
+) -> Result<PresignResp> {
+    validate_bucket(bucket)?;
+    validate_key(&req.key)?;
+    let secs = presign_secs(req.expires_in);
+    let secs_s = secs.to_string();
+    let uri = format!("s3://{bucket}/{}", req.key);
+    let out = svc
+        .run(a, region, &["s3", "presign", &uri, "--expires-in", &secs_s])
+        .await?;
+    let url = out.stdout.trim().to_string();
+    if !url.starts_with("http") {
+        return Err(Error::Upstream(
+            "aws s3 presign returned no URL — check the CLI version (v2 required)".into(),
+        ));
+    }
+    let expires_at = chrono::Utc::now() + chrono::Duration::seconds(secs as i64);
+    let warning = svc
+        .temporary_credentials_expiry(a)
+        .filter(|creds_end| *creds_end < expires_at)
+        .map(|creds_end| {
+            format!(
+                "Signed with temporary credentials: the link stops working when they expire ({} UTC), before the requested lifetime",
+                creds_end.format("%Y-%m-%d %H:%M")
+            )
+        });
+    Ok(PresignResp {
+        url,
+        expires_at,
+        warning,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_kind_and_inline_types() {
+        assert_eq!(preview_kind(Some("image/png"), "a"), PreviewKind::Image);
+        assert_eq!(preview_kind(Some("application/pdf"), "a"), PreviewKind::Pdf);
+        assert_eq!(
+            preview_kind(Some("binary/octet-stream"), "logo.SVG"),
+            PreviewKind::Image
+        );
+        assert_eq!(preview_kind(None, "report.pdf"), PreviewKind::Pdf);
+        assert_eq!(
+            preview_kind(Some("application/zip"), "a.png"),
+            PreviewKind::Binary
+        );
+        assert_eq!(inline_content_type(None, "x.webp"), "image/webp");
+        assert_eq!(inline_content_type(Some("image/gif"), "x.bin"), "image/gif");
+        assert_eq!(
+            inline_content_type(Some("application/octet-stream"), "x.pdf"),
+            "application/pdf"
+        );
+        let p = preview_from_bytes(b"\x89PNG\0", Some("image/png".into()), Some(9), "a.png");
+        assert_eq!(p.kind, PreviewKind::Image);
+        assert_eq!(p.size, Some(9));
+    }
+
+    #[test]
+    fn presign_lifetime_is_clamped() {
+        assert_eq!(presign_secs(None), 3600);
+        assert_eq!(presign_secs(Some(0)), 1);
+        assert_eq!(presign_secs(Some(30 * 24 * 3600)), PRESIGN_MAX_SECS);
+    }
 
     #[test]
     fn buckets_normalize() {

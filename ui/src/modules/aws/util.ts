@@ -142,3 +142,13 @@ export function mergeS3Head(
     objects: fresh.objects.concat(loaded.objects.filter((o) => o.key > edge && !seenO.has(o.key))),
   };
 }
+
+/** Route to the CloudWatch Logs view, optionally preselecting a log group (or,
+ *  with a trailing `/`, a group-name prefix) in a region:
+ *  `#/aws/<id>/logs/<group>/<region>` (the group is one encoded segment). */
+export function logsRoute(accountId: string, group?: string, region?: string): string {
+  let r = `aws/${accountId}/logs`;
+  if (group) r += `/${encodeURIComponent(group)}`;
+  if (group && region) r += `/${encodeURIComponent(region)}`;
+  return r;
+}

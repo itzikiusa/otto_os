@@ -8190,10 +8190,21 @@ export interface AwsAccount {
   color?: string | null;
   identity?: AwsIdentity | null;
   permissions?: AwsPermissions | null;
+  /** When the sign-in ends (profile accounts only) — warn before it lapses. */
+  session?: AwsSessionInfo | null;
   created_by: Id;
   created_at: string;
   updated_at: string;
   last_used_at?: string | null;
+}
+
+/** `AwsAccount.session` — the SSO token / exported temporary credentials. */
+export interface AwsSessionInfo {
+  expires_at: string;
+  /** `sso` = the IAM Identity Center token; `credentials` = exported role creds. */
+  source: 'sso' | 'credentials';
+  /** The CLI renews it silently (refresh token / re-export) — no warning needed. */
+  refreshable: boolean;
 }
 
 /** `POST /aws/accounts` body; every field optional on `PATCH` (secrets omitted = keep). */
@@ -8262,6 +8273,82 @@ export interface S3PreviewResp {
   truncated?: boolean;
   content_type?: string | null;
   binary?: boolean;
+  /** `text` → `text`; `image`/`pdf` → fetch `download?inline=true` (≤ 25 MB); `binary` → download only. */
+  kind?: 'text' | 'image' | 'pdf' | 'binary';
+  size?: number | null;
+}
+
+/** `POST …/s3/buckets/{bucket}/presign`. */
+export interface S3PresignResp {
+  url: string;
+  expires_at: string;
+  /** Temporary credentials end before `expires_at` — the link dies with them. */
+  warning?: string | null;
+}
+
+/** `PUT …/s3/buckets/{bucket}/object?key=` (raw body) → 201. */
+export interface S3UploadResp {
+  key: string;
+  size: number;
+}
+
+/** One region that failed in an `?region=all` fan-out (EC2 / EKS / RDS lists). */
+export interface AwsRegionError {
+  region: string;
+  message: string;
+}
+
+// --- CloudWatch Logs (`/aws/accounts/{id}/logs/*`) ---
+export interface AwsLogGroup {
+  name: string;
+  arn?: string | null;
+  created_ms?: number | null;
+  retention_days?: number | null;
+  stored_bytes?: number | null;
+  class?: string | null;
+}
+export interface AwsLogStream {
+  name: string;
+  created_ms?: number | null;
+  first_event_ms?: number | null;
+  last_event_ms?: number | null;
+  stored_bytes?: number | null;
+}
+export interface AwsLogEvent {
+  /** Unique per event — tail polls dedupe on it. */
+  id: string;
+  stream: string;
+  timestamp: number;
+  ingestion_time?: number | null;
+  message: string;
+}
+export interface AwsLogEventsQuery {
+  group: string;
+  streams?: string[];
+  pattern?: string;
+  /** Epoch ms. */
+  start?: number;
+  end?: number;
+  token?: string | null;
+  max?: number;
+  region?: string;
+}
+export interface AwsLogsInsightsReq {
+  groups: string[];
+  query: string;
+  /** Epoch ms. */
+  start: number;
+  end: number;
+  limit?: number;
+}
+/** `GET …/logs/insights/{qid}` — `result` is the DB Explorer `QueryResult` shape. */
+export interface AwsLogsInsightsResults {
+  status: 'Scheduled' | 'Running' | 'Complete' | 'Failed' | 'Cancelled' | 'Timeout' | 'Unknown';
+  done: boolean;
+  result: QueryResult;
+  records_matched?: number | null;
+  records_scanned?: number | null;
+  bytes_scanned?: number | null;
 }
 
 /** `POST …/s3/buckets/{bucket}/download-to` / `GET …/s3/download-jobs/{job}` —
@@ -8336,6 +8423,8 @@ export type Ec2State =
 
 export interface Ec2Instance {
   instance_id: string;
+  /** Set on `?region=all` rows. */
+  region?: string;
   name?: string | null;
   state: Ec2State;
   type: string;
@@ -8412,6 +8501,8 @@ export interface AthenaQueryStatus {
 
 export interface EksClusterSummary {
   name: string;
+  /** Set on `?region=all` rows. */
+  region?: string;
   status: string;
   version?: string | null;
   endpoint?: string | null;
@@ -8452,6 +8543,8 @@ export interface EksImportResp {
 
 export interface RdsInstance {
   identifier: string;
+  /** Set on `?region=all` rows. */
+  region?: string;
   engine?: string | null;
   engine_version?: string | null;
   class?: string | null;

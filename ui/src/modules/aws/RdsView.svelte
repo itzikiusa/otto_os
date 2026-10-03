@@ -15,9 +15,13 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import JsonTree from '../database/JsonTree.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
+  import RegionPicker from './RegionPicker.svelte';
+  import RegionErrors from './RegionErrors.svelte';
+  import { ALL_REGIONS } from '../../lib/api/aws';
   import AwsDrawer from './AwsDrawer.svelte';
   import MetricsPanel from './MetricsPanel.svelte';
   import { fmtAgo, fmtDate, awsErrorText } from './util';
+  import { router } from '../../lib/router.svelte';
   import type { AwsAccount, RdsInstance, RdsInstanceDetail } from '../../lib/api/types';
 
   interface Props {
@@ -34,6 +38,10 @@
   let loading = $state(false);
   let error = $state('');
   const instances = $derived(aws.rds[`${account.id}:${region}`] ?? null);
+  const allRegions = $derived(region === ALL_REGIONS);
+  const regionErrors = $derived(aws.regionErrors[`${account.id}:${region}`] ?? []);
+  /** The region an instance lives in (rows of an "All regions" list carry it). */
+  const rowRegion = (i: RdsInstance): string => i.region ?? region;
 
   const shown = $derived.by(() => {
     const q = filter.trim().toLowerCase();
@@ -92,7 +100,7 @@
     if (detail?.inst.identifier !== i.identifier) drawerTab = 'overview';
     detail = { inst: i, full: null, error: '' };
     try {
-      const d = await awsApi.rdsInstance(account.id, i.identifier, region);
+      const d = await awsApi.rdsInstance(account.id, i.identifier, rowRegion(i));
       if (detail?.inst.identifier === i.identifier) detail = { inst: i, full: d, error: '' };
     } catch (e) {
       if (detail?.inst.identifier === i.identifier)
@@ -140,36 +148,28 @@
   bind:auto
   onrefresh={() => void load()}
 >
-  <label class="sel">
-    <span class="lbl">Region</span>
-    {#if aws.regions.length}
-      <select bind:value={region} aria-label="Region">
-        {#each aws.regions as r (r.code)}<option value={r.code}>{r.code}</option>{/each}
-      </select>
-    {:else}
-      <input class="mono" bind:value={region} aria-label="Region" size={12} />
-    {/if}
-  </label>
+  <RegionPicker {account} service="rds" bind:region allowAll />
 </ViewToolbar>
 
 <div class="body">
 <div class="tbl-wrap">
+  <RegionErrors errors={regionErrors} />
   {#if loading && !instances}
     <div class="pad" role="status"><p class="load-note">Loading RDS instances…</p><Skeleton rows={8} /></div>
   {:else if error}
     <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list DB instances" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
   {:else if shown.length === 0}
-    <EmptyState icon="db" title={filter ? 'No matching instances' : `No DB instances in ${region}`} />
+    <EmptyState icon="db" title={filter ? 'No matching instances' : allRegions ? 'No DB instances in any enabled region' : `No DB instances in ${region}`} />
   {:else}
     <table class="tbl">
       <thead>
         <tr>
-          <th>Status</th><th>Identifier</th><th class="hide-sm">Engine</th><th class="hide-sm">Class</th><th class="hide-md">AZ</th>
+          <th>Status</th><th>Identifier</th>{#if allRegions}<th>Region</th>{/if}<th class="hide-sm">Engine</th><th class="hide-sm">Class</th><th class="hide-md">AZ</th>
           <th class="hide-md num">Storage</th><th class="hide-md">Endpoint</th><th class="hide-md">Created</th><th class="act"></th>
         </tr>
       </thead>
       <tbody>
-        {#each shown as i (i.identifier)}
+        {#each shown as i (`${i.region ?? ''}/${i.identifier}`)}
           <tr
             class="trow"
             class:sel={detail?.inst.identifier === i.identifier}
@@ -180,6 +180,7 @@
           >
             <td><span class="pill {pillClass(i.status)}">{i.status}</span></td>
             <td class="strong mono" title={i.identifier}>{i.identifier}</td>
+            {#if allRegions}<td class="mono">{i.region ?? '—'}</td>{/if}
             <td class="hide-sm">{i.engine ?? '—'}{#if i.engine_version}<span class="dim"> {i.engine_version}</span>{/if}</td>
             <td class="mono hide-sm">{i.class ?? '—'}</td>
             <td class="mono hide-md">{i.az ?? '—'}{#if i.multi_az}<span class="tag" title="Multi-AZ">MAZ</span>{/if}</td>
@@ -212,6 +213,9 @@
   >
     {#if drawerTab === 'overview'}
       <div class="dt">
+        <div class="logs-link">
+          <button class="btn small" onclick={() => router.go(`aws/${account.id}/logs/${encodeURIComponent(`/aws/rds/instance/${inst.identifier}/`)}/${encodeURIComponent(rowRegion(inst))}`)} title="Open this instance's exported log groups in CloudWatch Logs (needs log exports enabled)"><Icon name="text" size={12} /> Logs</button>
+        </div>
         <dl class="kv">
           <dt>Engine</dt><dd>{inst.engine ?? '—'} {inst.engine_version ?? ''}</dd>
           <dt>Class</dt><dd class="mono">{inst.class ?? '—'}</dd>
@@ -235,8 +239,8 @@
         {/if}
       </div>
     {:else if drawerTab === 'metrics'}
-      {#key `${account.id}/${region}/${inst.identifier}`}
-        <MetricsPanel accountId={account.id} namespace="AWS/RDS" dimValue={inst.identifier} {region} {onsignin} />
+      {#key `${account.id}/${rowRegion(inst)}/${inst.identifier}`}
+        <MetricsPanel accountId={account.id} namespace="AWS/RDS" dimValue={inst.identifier} region={rowRegion(inst)} {onsignin} />
       {/key}
     {:else}
       <div class="dt">
@@ -254,6 +258,10 @@
 </div>
 
 <style>
+  .logs-link {
+    display: flex;
+    justify-content: flex-end;
+  }
   .load-note {
     margin: 0 0 10px;
     font-size: var(--fs-s);
@@ -261,26 +269,6 @@
   }
   .pad {
     padding: 12px;
-  }
-  .sel {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: var(--fs-s);
-  }
-  .lbl {
-    color: var(--text-dim);
-  }
-  .sel select,
-  .sel input {
-    height: 26px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--bg);
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-s);
-    padding: 0 4px;
   }
   .body {
     flex: 1;

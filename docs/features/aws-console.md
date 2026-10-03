@@ -127,6 +127,20 @@ the browser-based device flow works exactly as in a terminal. The UI polls
 `/test` every 3 s until `ok` and closes the tab. Access-keys accounts have
 nothing to sign in to — `/login` returns 400; re-enter the keys instead.
 
+**Credential cache + early warning.** For profile accounts the daemon exports
+the profile's credentials once (`aws configure export-credentials --profile P
+--format process`) and hands them to every later `aws` child as
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` (next to
+`AWS_PROFILE`, so the profile's other settings still apply) until five minutes
+before they expire — each call skips the SSO cache and STS round-trip. When
+the sign-in has lapsed the call fails immediately with `login required: the
+sign-in for AWS profile 'P' has expired — press Sign in …`. `GET
+/aws/accounts` also reports `session { expires_at, source, refreshable }`
+(read from `~/.aws/sso/cache`, never written); the account rail shows **"Sign-in
+ends in N min — Sign in again"** 15 minutes before a non-refreshable SSO token
+runs out, and **"Sign-in expired"** after. Sessions backed by an `sso-session`
+refresh token renew silently, so they show no warning.
+
 ### 2.4 Permission chips
 
 Each account card shows five chips from
@@ -145,32 +159,72 @@ action itself surfaces the IAM denial as a 403 if it happens.
 ## 3. Walkthrough per service
 
 Every service endpoint accepts `?region=` and falls back to the account's
-region; the toolbar region switcher just sets that parameter.
+region; the toolbar region switcher (S3 aside, every service view has one —
+SQS and Athena included) just sets that parameter and remembers the last pick
+per account + service. EC2, EKS and RDS add **All enabled regions**
+(`?region=all`): the daemon lists the account's enabled regions
+(`ec2 describe-regions`, cached 1 h) and queries them six at a time; rows get
+a Region column, and regions that failed are listed in an inline note above
+the table while the rest still render.
 
-### 3.1 S3 (read-only by design)
+### 3.1 S3
 
 Buckets (`s3api list-buckets`) → object browser with breadcrumb prefixes
 (`list-objects-v2 --delimiter /`, folders first, `token` for the next page,
 the `prefix` "directory marker" object is hidden) → per-object **head**,
-**preview** and **download**.
+**preview**, **download**, **presigned link**, **delete**, plus **upload**.
 
-- **Preview** does a ranged `get-object` (`bytes=0-<max-1>`, default 64 KiB,
-  cap 1 MiB) into a temp file under `<data_dir>/tmp` and returns `{ text,
-  truncated, content_type }`. Only text-like objects are previewed: `text/*`,
-  JSON / NDJSON / XML / YAML / CSV / JS / SQL types, or an `octet-stream` whose
-  key has a text-looking extension (`.log`, `.json`, `.csv`, `.yaml`, …); a
-  NUL byte in the sample or any other type yields `{ binary: true }`.
+- **Search.** The filter box filters the loaded rows instantly; when the
+  folder has more pages it also searches the bucket server-side (400 ms after
+  you stop typing, or via "Search the bucket for '…'"), listing with
+  `prefix = <current folder> + <query>`. S3 prefix search is case-sensitive
+  and matches from the start of the name.
+- **Preview** — text: a ranged `get-object` (`bytes=0-<max-1>`, default
+  64 KiB, cap 1 MiB) into a temp file under `<data_dir>/tmp` → `{ text,
+  truncated, content_type, kind: "text" }`; JSON renders as a tree, CSV/TSV as
+  a table (first 200 rows, Raw toggle), logs as text. Images (PNG/JPEG/GIF/
+  WebP/SVG/…) and PDFs (`kind: "image" | "pdf"`) are fetched through
+  `download?inline=true` (≤ **25 MB**, served with a `sandbox` CSP) and shown
+  in an `<img>` / PDF viewer — an SVG is only ever drawn as an image. Bigger
+  objects and other binaries offer Download.
 - **Download** streams `aws s3 cp s3://bucket/key -` straight into the HTTP
   response (`Content-Disposition: attachment`, `Content-Length` from the head,
   `Cache-Control: no-store`). The child process is killed the moment the
   client disconnects. Objects over **2 GiB** are refused (413) — use the CLI.
+- **Upload** (toolbar button or drag-and-drop onto the list; `aws_s3:Edit` +
+  `s3_write`): each file goes to `<current folder>/<file name>`, spooled to a
+  temp file (≤ 5 GiB) and sent with `aws s3 cp`. An existing key asks
+  "Replace existing object?" first (the daemon answers 409 without
+  `overwrite=true`); production accounts confirm the destination first.
+- **Presigned link** (⋯ menu, `aws_s3:View`): pick 1 h / 12 h / 24 h / 7 d;
+  the URL is copied and the action audited. Links signed with temporary SSO
+  credentials stop working when those credentials expire — the daemon says
+  so in a `warning`.
+- **Delete** (⋯ menu, `aws_s3:Edit` + `s3_delete`): confirmed naming account,
+  environment, bucket and key; on production accounts you type the key.
+  Audited `aws.s3.delete`.
 
-There is no upload, delete, or presign. Everything here is `aws_s3:View`,
-except **Download to folder** (`download-to` and its cancel), which writes a
-file onto the daemon host and therefore needs `aws_s3:Edit`. Its destination
-must be a folder in your home directory (not `~/Library` or a hidden folder) or
-on an external volume; the file never starts with a dot and never overwrites
-an existing file.
+**Download to folder** (`download-to` and its cancel) writes a file onto the
+daemon host and therefore needs `aws_s3:Edit`. Its destination must be a
+folder in your home directory (not `~/Library` or a hidden folder) or on an
+external volume; the file never starts with a dot and never overwrites an
+existing file.
+
+### 3.1b CloudWatch Logs
+
+Account → **CloudWatch Logs**: log groups (prefix filter, newest streams
+first), a stream picker, time-range presets, a CloudWatch filter pattern, and
+an event list with expandable (pretty-printed JSON) lines. **Live tail**
+polls every 2 s while the window is visible, from the newest event seen,
+de-duplicated and capped at 5 000 lines. The **Insights** tab runs a Logs
+Insights query over the chosen groups (`logs start-query`, polled until
+done, Stop to cancel), shows the rows in the DB Explorer grid, keeps saved
+queries per account, and exports CSV. The EKS cluster sheet links to its
+control-plane group (`/aws/eks/<name>/cluster`) and the RDS drawer to
+`/aws/rds/instance/<id>/…`. Everything is read-only (`aws:View`, the
+account's `metrics` operation); Insights is billed per GB scanned and the
+range is capped at 31 days. Agents get `aws_logs_list_groups`,
+`aws_logs_filter`, `aws_logs_insights` and `aws_logs_get_insights`.
 
 ### 3.2 SQS
 
@@ -319,9 +373,14 @@ writes an `audit_log` row: `aws.sqs.send`, `aws.sqs.delete_message`,
 - ✅ One-click EKS → Kubernetes console import.
 - ✅ Custom endpoints per account (`endpoint_url`) — LocalStack, VPC interface
   endpoints, S3-compatible stores — via `AWS_ENDPOINT_URL` on every call.
-- ⚠️ **S3 is read-only** (no upload / delete / presign) — a product decision.
+- ✅ S3 upload / delete (Edit, confirmed, audited) and presigned links;
+  inline image / PDF preview up to 25 MB.
+- ✅ CloudWatch Logs: groups, streams, live tail, Logs Insights.
+- ✅ "All enabled regions" for EC2 / EKS / RDS (six regions at a time).
 - ⚠️ Every call is a subprocess: expect ~200–600 ms per request (the CLI's
   Python start-up), and 30 s hard timeouts (8 s per permission probe).
+  Profile credentials are exported once and cached, so SSO resolution is no
+  longer paid per call.
 - ⚠️ The permission probe checks *read* actions only; Edit-level denials
   surface when you act.
 - ⚠️ The EKS/Athena list views fan out `describe` calls (first 20 items) —
