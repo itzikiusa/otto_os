@@ -217,7 +217,7 @@ restore is itself undoable.
 `note` is the agent's one-line description (or an error explanation when nothing
 was drawn).
 
-**Storage (migration 0170).** Each version records its `format` and byte `size`
+**Storage (migration 0159).** Each version records its `format` and byte `size`
 as columns at snapshot time, so opening the history never parses up to 30 stored
 documents. An Excalidraw board's pasted images (`files[*].dataURL`, base64) are
 moved into a content-addressed `canvas_files` table (one row per sha256) when a

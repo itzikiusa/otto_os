@@ -427,7 +427,7 @@ impl CanvasRepo {
     /// `origin` is younger than it (user saves: at most one per window). Prunes
     /// to the newest [`SCENE_VERSIONS_KEPT`].
     ///
-    /// `format` / `size` are recorded once here (migration 0170) so
+    /// `format` / `size` are recorded once here (migration 0159) so
     /// [`Self::list_versions`] never parses a document. A plain doc is copied
     /// inside SQLite (it never travels through Rust); an Excalidraw doc with
     /// pasted images has its base64 `files` moved into the content-addressed
@@ -728,7 +728,7 @@ impl CanvasRepo {
 }
 
 // ---------------------------------------------------------------------------
-// Excalidraw file externalization (migration 0170)
+// Excalidraw file externalization (migration 0159)
 // ---------------------------------------------------------------------------
 
 /// Marker a version doc stores in place of an externalized file's `dataURL`.

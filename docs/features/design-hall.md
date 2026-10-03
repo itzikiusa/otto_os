@@ -83,10 +83,12 @@ otto.db
 ### Retention
 
 Every content save keeps a full content-addressed blob, so the store needs
-squashing. A **daily scheduled pass** (first run 10 minutes after boot) applies
+squashing. An **opt-in daily scheduled pass** (first run 10 minutes after boot) applies
 the policy below to `autosave` versions **older than a day** only — an editing
 session's recent history is never touched — then GCs unreferenced blobs.
-`OTTO_DESIGN_AUTO_PRUNE=0` turns it off; `OTTO_DESIGN_PRUNE_WINDOW_SECS`
+It is **off by default** — it deletes intermediate autosave versions, which are
+user data — and runs only when `OTTO_DESIGN_AUTO_PRUNE=1` (or `true`/`on`/`yes`)
+is set; `OTTO_DESIGN_PRUNE_WINDOW_SECS`
 (default 600) and `OTTO_DESIGN_PRUNE_MIN_AGE_SECS` (default 86400) tune it.
 `GET /design/admin/storage` (root) is the size gauge: blob files/bytes on disk,
 version rows/bytes, and the last scheduled pass. A replaced thumbnail's blob is

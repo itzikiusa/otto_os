@@ -3376,8 +3376,8 @@ workspaces the caller can view (root: all). The library is global — a
 **Never destructive by default.** `DELETE` archives (status `archived`,
 every version kept); `?hard=true` (workspace Admin) removes the graph rows but
 never a blob. Retention: an admin's `/design/admin/prune` (dry run unless
-`apply`), plus a daily scheduled pass that only squashes `autosave` versions
-older than a day (`OTTO_DESIGN_AUTO_PRUNE=0` disables it; see
+`apply`), plus an opt-in daily scheduled pass that only squashes `autosave`
+versions older than a day (off by default; `OTTO_DESIGN_AUTO_PRUNE=1` enables it; see
 `docs/features/design-hall.md` § Retention). The legacy import mirrors — it never moves or edits
 `product_attachments` / `canvas_scenes` rows or files.
 

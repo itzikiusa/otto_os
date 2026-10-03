@@ -36,7 +36,7 @@ pub fn validate_content(format: &str, bytes: &[u8]) -> Result<()> {
 
 /// Boot hook: build the FTS index and run the idempotent legacy import in the
 /// background (never blocks or fails startup; the outcome is logged), and
-/// start the daily retention pass (`OTTO_DESIGN_AUTO_PRUNE=0` turns it off).
+/// start the daily retention pass (opt-in: off unless `OTTO_DESIGN_AUTO_PRUNE=1`).
 pub fn spawn_startup_import(ctx: &ServerCtx) {
     let svc = service(ctx);
     tokio::spawn(otto_design::import::startup(svc));

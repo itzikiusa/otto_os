@@ -10247,6 +10247,7 @@ export interface DesignStorageReport {
   /** Version rows and the bytes they reference (before dedupe). */
   version_count: number;
   version_bytes: number;
+  /** Scheduled retention pass enabled — opt-in, off unless `OTTO_DESIGN_AUTO_PRUNE=1`. */
   auto_prune: boolean;
   last_prune: DesignScheduledPruneRun | null;
 }
