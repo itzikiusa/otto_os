@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { SIDEBAR_MODULES } from '../src/lib/sidebar.ts';
+import { chainTo, staticClosure } from './staticClosure.ts';
 
 const SRC = join(import.meta.dirname, '..', 'src');
 const read = (p: string) => readFileSync(join(SRC, p), 'utf8');
@@ -49,4 +50,27 @@ test('mermaid, sql-formatter and qrcode are never imported statically', () => {
   for (const f of ['shell/Navigator.svelte', 'shell/TabBar.svelte']) {
     assert.doesNotMatch(read(f), /import\s+ShareModal\s+from/, `${f}: ShareModal bundles qrcode — load it on open`);
   }
+});
+
+test('the shell chunk evaluates no page-owned store, handler file or the ui-commands catalog (perf F2)', () => {
+  const entry = join(SRC, 'shell/App.svelte');
+  const closure = staticClosure(entry);
+  const heavy = [
+    'lib/stores/database.svelte.ts',
+    'lib/stores/apiClient.svelte.ts',
+    'lib/stores/k8s.svelte.ts',
+    'lib/stores/aws.svelte.ts',
+    'lib/stores/product.svelte.ts',
+    'lib/stores/swarm.svelte.ts',
+    'lib/stores/canvas.svelte.ts',
+    'lib/uiCommands/database.ts',
+    'lib/uiCommands/catalog.ts',
+    'lib/components/CodeEditor.svelte',
+    'modules/vault/vault.svelte.ts',
+    'modules/home/home.svelte.ts',
+  ];
+  const reached = heavy
+    .filter((f) => closure.has(join(SRC, f)))
+    .map((f) => chainTo(entry, join(SRC, f), SRC).join(' → '));
+  assert.deepEqual(reached, [], 'route through lazyModule() / registerLazyUiCommands() instead of a static import');
 });

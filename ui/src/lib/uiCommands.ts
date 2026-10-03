@@ -109,21 +109,89 @@ function capabilitiesChanged(): void {
  * handler (hot reload) with a console warning. Returns the unregister.
  */
 export function registerUiCommands(module: string, map: Record<string, UiHandler>): () => void {
+  return addHandlers(module, map);
+}
+
+function addHandlers(module: string, map: Record<string, UiHandler>): () => void {
   const names = Object.keys(map);
+  let added = false;
   for (const name of names) {
     const prev = handlers.get(name);
     if (prev && prev.module !== module) {
       console.warn(`[uiCommands] "${name}" re-registered by ${module} (was ${prev.module})`);
     }
+    if (!prev) added = true;
     handlers.set(name, { module, handler: map[name] });
   }
-  capabilitiesChanged();
+  // A lazy stub replaced by its real handler keeps the name set unchanged:
+  // no point re-sending `hello` for it.
+  if (added) capabilitiesChanged();
   return () => {
     for (const name of names) {
       if (handlers.get(name)?.handler === map[name]) handlers.delete(name);
     }
     capabilitiesChanged();
   };
+}
+
+// ─── Lazy handler modules (perf F2) ─────────────────────────────────────────
+//
+// `hello.capabilities` must list every command from the first frame, but the
+// handler files pull in their module's store (database, apiClient, k8s, …) —
+// evaluating all of them per document cost the shell its startup budget. So
+// `uiCommands/index.ts` registers each module's NAMES statically with a stub
+// that imports the handler file on first use; that file's own
+// `registerUiCommands` then swaps the real handler in under the same name.
+
+const lazyStateLoaders = new Map<string, () => Promise<unknown>>();
+
+/**
+ * Register `names` under `module`, loading their handlers from `load()` on the
+ * first call (the file must `registerUiCommands(module, …)` those names).
+ * `stateKey` is the `registerUiState` key the file contributes, so `ui_state`
+ * can load it before reading. Returns the unregister.
+ */
+export function registerLazyUiCommands(
+  module: string,
+  names: readonly string[],
+  load: () => Promise<unknown>,
+  stateKey?: string,
+): () => void {
+  let loading: Promise<unknown> | null = null;
+  const ensure = (): Promise<unknown> =>
+    (loading ??= load().catch((e: unknown) => {
+      loading = null; // a failed chunk fetch retries on the next call
+      throw e;
+    }));
+  if (stateKey) lazyStateLoaders.set(stateKey, ensure);
+  const map: Record<string, UiHandler> = {};
+  for (const name of names) {
+    const stub: UiHandler = async (args, ctx) => {
+      try {
+        await ensure();
+      } catch {
+        throw new UiCommandError('failed', `Couldn't load the ${module} controls. Check the connection and retry.`);
+      }
+      const real = handlers.get(name);
+      if (!real || real.handler === stub) {
+        throw new UiCommandError('not_found', `“${name}” isn't available in this window.`);
+      }
+      return real.handler(args, ctx);
+    };
+    // Only fill a gap: when the real file already loaded (a page imported
+    // it first), its handler stays.
+    if (!handlers.has(name)) map[name] = stub;
+  }
+  return addHandlers(module, map);
+}
+
+/** Load the handler file that contributes `ui_state` for `module`, if lazy. */
+export async function ensureUiModuleState(module: string): Promise<void> {
+  try {
+    await lazyStateLoaders.get(module)?.();
+  } catch {
+    /* state degrades to null — the handler file couldn't load */
+  }
 }
 
 /** The registered command names (what `hello.capabilities` reports). */
