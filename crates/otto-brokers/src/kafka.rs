@@ -1,5 +1,6 @@
 //! Kafka driver over `rdkafka` (librdkafka). Wraps an `AdminClient`, a base
-//! `BaseConsumer` (metadata / watermarks / groups) and a `FutureProducer`.
+//! `BaseConsumer` (metadata / watermarks / groups) and a `FutureProducer` (the
+//! admin client and producer are created on first use).
 //!
 //! Consumer-only operations are **synchronous** librdkafka C calls and are meant
 //! to be run on a blocking thread by the service (`spawn_blocking`). Admin and
@@ -163,9 +164,15 @@ pub struct RawConsume {
 }
 
 pub struct KafkaClient {
-    admin: AdminClient<DefaultClientContext>,
+    /// Created on the first admin op / produce (see [`lazy_client`]): each
+    /// librdkafka handle owns its own broker threads and connections, and a
+    /// browse-only session never needs either.
+    admin: std::sync::OnceLock<AdminClient<DefaultClientContext>>,
     consumer: BaseConsumer<QuietContext>,
-    producer: FutureProducer,
+    producer: std::sync::OnceLock<FutureProducer>,
+    /// Serializes the lazy creation above (so two first calls racing never
+    /// build — and then drop — a second handle).
+    lazy_init: std::sync::Mutex<()>,
     base_config: ClientConfig,
     /// Idle pooled peek consumer (manual assignment, never commits). A peek
     /// takes it (or builds a fresh one when another peek holds it) and puts it
@@ -477,6 +484,24 @@ fn fanout_watermarks_with<S: WatermarkSource>(
     results.into_inner().unwrap_or_else(|p| p.into_inner())
 }
 
+/// `cell`'s client, built from `cfg` on first use (double-checked under
+/// `lock`, so concurrent first calls create exactly one).
+fn lazy_client<'a, T: rdkafka::config::FromClientConfig>(
+    cell: &'a std::sync::OnceLock<T>,
+    lock: &std::sync::Mutex<()>,
+    cfg: &ClientConfig,
+) -> Result<&'a T> {
+    if let Some(c) = cell.get() {
+        return Ok(c);
+    }
+    let _g = lock.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(c) = cell.get() {
+        return Ok(c);
+    }
+    let client: T = cfg.create().map_err(kerr)?;
+    Ok(cell.get_or_init(|| client))
+}
+
 fn build_config(spec: &KafkaConnSpec) -> ClientConfig {
     let mut c = ClientConfig::new();
     c.set("bootstrap.servers", &spec.bootstrap_servers);
@@ -536,22 +561,31 @@ impl ConsumerContext for QuietContext {}
 impl KafkaClient {
     pub fn connect(spec: &KafkaConnSpec) -> Result<Self> {
         let base = build_config(spec);
-        let admin: AdminClient<DefaultClientContext> = base.create().map_err(kerr)?;
-        let producer: FutureProducer = base.create().map_err(kerr)?;
         let mut cc = base.clone();
         cc.set("group.id", "otto-brokers-meta");
         cc.set("enable.auto.commit", "false");
         let consumer: BaseConsumer<QuietContext> =
             cc.create_with_context(QuietContext).map_err(kerr)?;
         Ok(Self {
-            admin,
+            admin: std::sync::OnceLock::new(),
             consumer,
-            producer,
+            producer: std::sync::OnceLock::new(),
+            lazy_init: std::sync::Mutex::new(()),
             base_config: base,
             peek_pool: std::sync::Mutex::new(None),
             group_pool: std::sync::Mutex::new(Vec::new()),
             partition_cache: std::sync::Mutex::new(PartitionCache::default()),
         })
+    }
+
+    /// The admin client, created on first use.
+    fn admin(&self) -> Result<&AdminClient<DefaultClientContext>> {
+        lazy_client(&self.admin, &self.lazy_init, &self.base_config)
+    }
+
+    /// The producer, created on the first produce.
+    fn producer(&self) -> Result<&FutureProducer> {
+        lazy_client(&self.producer, &self.lazy_init, &self.base_config)
     }
 
     /// Run `f` with a consumer whose `group.id` is `group`: the pooled one when
@@ -1332,7 +1366,7 @@ impl KafkaClient {
             nt = nt.set(&kv.name, &kv.value);
         }
         let opts = AdminOptions::new().operation_timeout(Some(Duration::from_secs(20)));
-        let res = self.admin.create_topics([&nt], &opts).await;
+        let res = self.admin()?.create_topics([&nt], &opts).await;
         // After the op (success or not): a refresh racing it may have cached
         // the topic as absent.
         self.forget_partitions(&req.name);
@@ -1345,7 +1379,7 @@ impl KafkaClient {
 
     pub async fn delete_topic(&self, topic: &str) -> Result<()> {
         let opts = AdminOptions::new().operation_timeout(Some(Duration::from_secs(20)));
-        let res = self.admin.delete_topics(&[topic], &opts).await;
+        let res = self.admin()?.delete_topics(&[topic], &opts).await;
         self.forget_partitions(topic);
         let res = res.map_err(kerr)?;
         for r in res {
@@ -1358,7 +1392,7 @@ impl KafkaClient {
         let opts = AdminOptions::new().request_timeout(Some(Duration::from_secs(15)));
         let spec = ResourceSpecifier::Topic(topic);
         let res = self
-            .admin
+            .admin()?
             .describe_configs([&spec], &opts)
             .await
             .map_err(kerr)?;
@@ -1398,7 +1432,10 @@ impl KafkaClient {
             .iter()
             .map(|t| ResourceSpecifier::Topic(t.as_str()))
             .collect();
-        let Ok(res) = self.admin.describe_configs(specs.iter(), &opts).await else {
+        let Ok(admin) = self.admin() else {
+            return HashMap::new();
+        };
+        let Ok(res) = admin.describe_configs(specs.iter(), &opts).await else {
             return HashMap::new();
         };
         let mut out = HashMap::with_capacity(topics.len());
@@ -1422,7 +1459,7 @@ impl KafkaClient {
         let opts = AdminOptions::new().request_timeout(Some(Duration::from_secs(15)));
         let spec = ResourceSpecifier::Topic(topic);
         let current = self
-            .admin
+            .admin()?
             .describe_configs([&spec], &opts)
             .await
             .map_err(kerr)?;
@@ -1446,7 +1483,7 @@ impl KafkaClient {
             alter = alter.set(k, v);
         }
         let res = self
-            .admin
+            .admin()?
             .alter_configs([&alter], &opts)
             .await
             .map_err(kerr)?;
@@ -1492,7 +1529,7 @@ impl KafkaClient {
         if !req.headers.is_empty() {
             record = record.headers(owned);
         }
-        match self.producer.send(record, Duration::from_secs(15)).await {
+        match self.producer()?.send(record, Duration::from_secs(15)).await {
             Ok(d) => Ok(ProduceResp {
                 partition: d.partition,
                 offset: d.offset,
@@ -1763,6 +1800,22 @@ mod tests {
         .expect("librdkafka clients are created lazily (no broker needed)")
     }
 
+    /// N4: connecting builds only the metadata consumer; the admin client and
+    /// producer appear on first use, once.
+    #[test]
+    fn admin_and_producer_are_created_on_first_use() {
+        let c = offline_client();
+        assert!(c.admin.get().is_none() && c.producer.get().is_none());
+        let p1 = c.producer().unwrap() as *const FutureProducer;
+        assert!(
+            c.admin.get().is_none(),
+            "producing must not build the admin"
+        );
+        assert!(std::ptr::eq(p1, c.producer().unwrap()));
+        let a1 = c.admin().unwrap() as *const AdminClient<DefaultClientContext>;
+        assert!(std::ptr::eq(a1, c.admin().unwrap()));
+    }
+
     /// Counts metadata requests by kind; `topics` is the cluster.
     #[derive(Default)]
     struct MetaMock {
@@ -1967,5 +2020,179 @@ mod tests {
     #[test]
     fn parse_assignment_malformed_is_empty() {
         assert!(parse_member_assignment(&[0x00]).is_empty());
+    }
+
+    /// An in-process librdkafka mock cluster with request tracking, so a
+    /// test can count the Kafka protocol requests a call really sends.
+    /// (`rdkafka::mocking::MockCluster` hides its handle, and request
+    /// tracking is only reachable through the raw API.)
+    struct TrackedMock {
+        mock: *mut rdkafka::bindings::rd_kafka_mock_cluster_t,
+        /// The handle the mock cluster lives on; dropped after it.
+        _owner: rdkafka::producer::BaseProducer,
+        bootstrap: String,
+    }
+
+    /// Kafka protocol API keys.
+    const API_LIST_OFFSETS: i16 = 2;
+    const API_METADATA: i16 = 3;
+
+    impl TrackedMock {
+        fn new(topics: &[(&str, i32)]) -> Self {
+            use rdkafka::bindings as rd;
+            use rdkafka::producer::Producer;
+            let owner: rdkafka::producer::BaseProducer = ClientConfig::new().create().unwrap();
+            // SAFETY: `owner` outlives the mock (destroyed first in `Drop`).
+            let mock = unsafe { rd::rd_kafka_mock_cluster_new(owner.client().native_ptr(), 1) };
+            assert!(!mock.is_null(), "mock cluster");
+            for &(t, parts) in topics {
+                let name = std::ffi::CString::new(t).unwrap();
+                // SAFETY: valid mock handle and NUL-terminated name.
+                let err = unsafe { rd::rd_kafka_mock_topic_create(mock, name.as_ptr(), parts, 1) };
+                assert_eq!(err, rd::rd_kafka_resp_err_t::RD_KAFKA_RESP_ERR_NO_ERROR);
+            }
+            // SAFETY: the returned string is owned by the mock cluster.
+            let bootstrap = unsafe {
+                std::ffi::CStr::from_ptr(rd::rd_kafka_mock_cluster_bootstraps(mock))
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            // SAFETY: valid mock handle.
+            unsafe { rd::rd_kafka_mock_start_request_tracking(mock) };
+            Self {
+                mock,
+                _owner: owner,
+                bootstrap,
+            }
+        }
+
+        fn clear(&self) {
+            // SAFETY: valid mock handle.
+            unsafe { rdkafka::bindings::rd_kafka_mock_clear_requests(self.mock) };
+        }
+
+        /// Requests seen since the last `clear`, by API key.
+        fn requests(&self, api_key: i16) -> usize {
+            use rdkafka::bindings as rd;
+            let mut n = 0usize;
+            // SAFETY: the array and its `n` elements are ours to read, then
+            // free with `destroy_array`.
+            unsafe {
+                let arr = rd::rd_kafka_mock_get_requests(self.mock, &mut n);
+                if arr.is_null() {
+                    return 0;
+                }
+                let hits = (0..n)
+                    .filter(|&i| rd::rd_kafka_mock_request_api_key(*arr.add(i)) == api_key)
+                    .count();
+                rd::rd_kafka_mock_request_destroy_array(arr, n);
+                hits
+            }
+        }
+
+        fn client(&self) -> KafkaClient {
+            KafkaClient::connect(&KafkaConnSpec {
+                bootstrap_servers: self.bootstrap.clone(),
+                security_protocol: SecurityProtocol::Plaintext,
+                sasl_mechanism: None,
+                sasl_username: None,
+                sasl_password: None,
+                tls_skip_verify: false,
+            })
+            .unwrap()
+        }
+
+        fn produce(&self, topic: &str, n: usize) {
+            use rdkafka::producer::{BaseRecord, Producer};
+            let p: rdkafka::producer::BaseProducer = ClientConfig::new()
+                .set("bootstrap.servers", &self.bootstrap)
+                .create()
+                .unwrap();
+            for i in 0..n {
+                let key = format!("k{i}");
+                p.send(
+                    BaseRecord::to(topic)
+                        .key(&key)
+                        .payload("v")
+                        .partition((i % 3) as i32),
+                )
+                .map_err(|(e, _)| e)
+                .unwrap();
+            }
+            p.flush(Duration::from_secs(10)).unwrap();
+        }
+    }
+
+    impl Drop for TrackedMock {
+        fn drop(&mut self) {
+            // SAFETY: created in `new`, destroyed exactly once, before `_owner`.
+            unsafe { rdkafka::bindings::rd_kafka_mock_cluster_destroy(self.mock) };
+        }
+    }
+
+    /// N5 budget, against a real (in-process) Kafka protocol peer: the
+    /// Topics tab's warm count refresh sends NO metadata request and one
+    /// batched ListOffsets per offset kind (never one per partition), within
+    /// a generous wall-clock ceiling; a live-tail tick over a 3-partition
+    /// topic is the same single watermark batch and returns the new messages.
+    #[test]
+    fn mock_cluster_counts_and_tail_tick_request_budget() {
+        let topics: Vec<(String, i32)> = (0..6).map(|i| (format!("t{i}"), 3)).collect();
+        let refs: Vec<(&str, i32)> = topics.iter().map(|(t, p)| (t.as_str(), *p)).collect();
+        let mock = TrackedMock::new(&refs);
+        mock.produce("t0", 30);
+        let client = mock.client();
+        let names: Vec<String> = topics.iter().map(|(t, _)| t.clone()).collect();
+
+        // Cold: one all-topics pass fills the partition cache.
+        let cold = client.topics_message_counts(&names).unwrap();
+        assert_eq!(cold["t0"], 30, "{cold:?}");
+
+        // Warm: partitions from the cache, watermarks in one batch per kind.
+        mock.clear();
+        let started = Instant::now();
+        let warm = client.topics_message_counts(&names).unwrap();
+        let took = started.elapsed();
+        assert_eq!(warm, cold);
+        assert_eq!(
+            mock.requests(API_METADATA),
+            0,
+            "a warm count refresh must not fetch metadata"
+        );
+        let list_offsets = mock.requests(API_LIST_OFFSETS);
+        assert!(
+            (1..=2).contains(&list_offsets),
+            "18 partitions must cost ≤ 2 batched ListOffsets, saw {list_offsets}"
+        );
+        assert!(took < Duration::from_secs(2), "warm counts took {took:?}");
+
+        // Live tail: first tick reads the latest page and warms the peek pool.
+        let req: ConsumeReq = serde_json::from_value(serde_json::json!({
+            "limit": 50, "max_wait_ms": 3000
+        }))
+        .unwrap();
+        let first = client.consume_raw_from("t0", &req, None, None).unwrap();
+        assert_eq!(first.messages.len(), 30);
+        let starts: HashMap<i32, i64> = first
+            .partitions
+            .iter()
+            .map(|r| (r.partition, r.high))
+            .collect();
+        mock.produce("t0", 30);
+
+        // Next tick: everything after the previous highs, in one batch.
+        mock.clear();
+        let started = Instant::now();
+        let tick = client
+            .consume_raw_from("t0", &req, Some(&starts), Some(MAX_CONSUME_BYTES))
+            .unwrap();
+        let took = started.elapsed();
+        assert_eq!(tick.messages.len(), 30, "the tick returns the new messages");
+        let list_offsets = mock.requests(API_LIST_OFFSETS);
+        assert!(
+            (1..=2).contains(&list_offsets),
+            "a tail tick is one batched watermark pass, saw {list_offsets} ListOffsets"
+        );
+        assert!(took < Duration::from_secs(2), "tail tick took {took:?}");
     }
 }
