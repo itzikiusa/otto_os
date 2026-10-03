@@ -36,6 +36,7 @@ const V1 = '/api/v1';
 const CLUSTER = `perf-kafka-${Date.now().toString(36)}`;
 const TOPIC = 'perf-topic';
 let workspaceId = '';
+let kafkaClusterId = '';
 let sshConnId = '';
 const SSH_NAME = `perf-ssh-${Date.now().toString(36)}`;
 let awsAccountId = '';
@@ -55,6 +56,7 @@ test.beforeAll(async () => {
       },
     });
     expect(r.ok(), `seed cluster → ${r.status()} ${await r.text()}`).toBeTruthy();
+    kafkaClusterId = ((await r.json()) as { id: string }).id;
     const c = await ctx.post(`${base}${V1}/workspaces/${workspaceId}/connections`, {
       data: { name: SSH_NAME, kind: 'ssh', params: { host: 'fixture.invalid' } },
     });
@@ -248,7 +250,10 @@ test('Kafka: 3,000 schema subjects mount ≤ 150 rows', async ({ page }) => {
 
 test('Kafka: the overview never has more than one /metrics in flight (slow sweep)', async ({ page }) => {
   await mockKafka(page, { metricsDelayMs: 5000 });
-  const log = requestLog(page, /\/brokers\/clusters\/[^/]+\/metrics/);
+  // This run's cluster only: on a retry (or a re-seeded daemon) the page first
+  // auto-opens the remembered cluster from the previous attempt — a same-named
+  // one — and the click switches away, rightly aborting that cluster's sweep.
+  const log = requestLog(page, new RegExp(`/brokers/clusters/${kafkaClusterId}/metrics`));
   await openCluster(page);
   await page.waitForTimeout(20_000);
   log.stop();
@@ -256,7 +261,7 @@ test('Kafka: the overview never has more than one /metrics in flight (slow sweep
   expect(s.count, s.paths.join('\n')).toBeGreaterThanOrEqual(1);
   expect(s.maxInFlight, 'chained poll: a slow sweep never stacks').toBeLessThanOrEqual(1);
   // 5 s answer + 4 s cadence ⇒ at most ~3 sweeps in 20 s (an interval would be 5+).
-  expect(s.count).toBeLessThanOrEqual(3);
+  expect(s.count, s.paths.join('\n')).toBeLessThanOrEqual(3);
 });
 
 // ── SFTP gate ─────────────────────────────────────────────────────────────────
@@ -464,7 +469,10 @@ test('K8s: 10 rapid j presses in the drawer cost ≤ 3 /resource loads', async (
 
 // ── K8s resources: conditional poll (perf K2) ─────────────────────────────────
 
-test('K8s: the resources poll sends If-None-Match and a 304 keeps the rows', async ({ page }) => {
+test('K8s: the resources poll sends If-None-Match and a 304 keeps the rows', async ({ page, browserName }) => {
+  // Playwright's WebKit refuses to `route.fulfill` any 3xx ("Cannot fulfill
+  // with redirect status: 304"), so a mocked 304 can't be served there.
+  test.skip(browserName === 'webkit', 'Playwright WebKit cannot fulfill a mocked 304');
   test.setTimeout(90_000);
   const items = Array.from({ length: 300 }, (_, i) => ({
     name: `pod-${i}`, namespace: `ns-${i % 5}`, kind: 'Pod', status: 'Running', ready: '1/1', restarts: 0,
