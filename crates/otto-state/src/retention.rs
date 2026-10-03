@@ -31,6 +31,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::convert::{dberr, fmt};
 
+// --- Run history (perf W6) ---------------------------------------------------
+mod runs;
+pub use runs::{RunHistoryReport, DEFAULT_RUN_HISTORY_DAYS, MIN_RUN_HISTORY_DAYS};
+// -----------------------------------------------------------------------------
+
 /// Settings key holding the JSON [`RetentionPolicy`] (partial objects merge
 /// over the defaults).
 pub const SETTING_KEY: &str = "data_retention";
@@ -78,6 +83,12 @@ pub struct RetentionPolicy {
     /// whose review row is gone) older than this are pruned. A running
     /// review's artifacts are never touched.
     pub review_retry_days: i64,
+    // --- Run history (perf W6) ---
+    /// `otto_runs` (+ events), `swarm_runs` (spend rolled up first),
+    /// `swarm_messages`, and all-but-the-last iteration of finished goal
+    /// loops: terminal rows older than this are pruned (see
+    /// `retention/runs.rs`).
+    pub run_history_days: i64,
 }
 
 impl Default for RetentionPolicy {
@@ -90,6 +101,8 @@ impl Default for RetentionPolicy {
             mcp_audit_days: 90,
             audit_log_days: 90,
             review_retry_days: DEFAULT_REVIEW_RETRY_DAYS,
+            // --- Run history (perf W6) ---
+            run_history_days: DEFAULT_RUN_HISTORY_DAYS,
         }
     }
 }
@@ -112,6 +125,8 @@ impl RetentionPolicy {
         self.mcp_audit_days = self.mcp_audit_days.max(MIN_DAYS);
         self.audit_log_days = self.audit_log_days.max(MIN_AUDIT_LOG_DAYS);
         self.review_retry_days = self.review_retry_days.max(MIN_REVIEW_RETRY_DAYS);
+        // --- Run history (perf W6) ---
+        self.run_history_days = self.run_history_days.max(MIN_RUN_HISTORY_DAYS);
         self
     }
 }
@@ -125,6 +140,8 @@ pub struct RetentionReport {
     pub audit_log: u64,
     pub review_agent_prompts: u64,
     pub review_diffs: u64,
+    // --- Run history (perf W6) ---
+    pub run_history: RunHistoryReport,
 }
 
 impl RetentionReport {
@@ -135,6 +152,8 @@ impl RetentionReport {
             + self.audit_log
             + self.review_agent_prompts
             + self.review_diffs
+            // --- Run history (perf W6) ---
+            + self.run_history.total()
     }
 }
 
@@ -184,6 +203,8 @@ impl RetentionRepo {
         report.review_diffs = self
             .delete_review_artifacts("review_diffs", &review_cut)
             .await?;
+        // --- Run history (perf W6) ---
+        report.run_history = self.prune_run_history(&cutoff(p.run_history_days)).await?;
         Ok(report)
     }
 

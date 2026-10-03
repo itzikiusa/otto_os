@@ -802,9 +802,13 @@ impl SwarmRepo {
     /// `max_total_runs` / `max_cost_usd` budget checks and the API surface.
     /// `cost_usd` sums the per-run backfilled cost (NULLs count as 0).
     pub async fn swarm_spend(&self, swarm_id: &Id) -> Result<SwarmSpend> {
+        // + the rollup of runs the retention job pruned (migration 0174), so
+        // pruning never refunds a lifetime budget.
         let row = sqlx::query(
-            "SELECT COUNT(*) AS n, COALESCE(SUM(cost_usd), 0.0) AS spend
-             FROM swarm_runs WHERE swarm_id = ?",
+            "SELECT COUNT(*) + COALESCE((SELECT pruned_runs FROM swarms WHERE id = ?1), 0) AS n,
+                    COALESCE(SUM(cost_usd), 0.0)
+                      + COALESCE((SELECT pruned_cost_usd FROM swarms WHERE id = ?1), 0.0) AS spend
+             FROM swarm_runs WHERE swarm_id = ?1",
         )
         .bind(swarm_id)
         .fetch_one(&self.pool)
