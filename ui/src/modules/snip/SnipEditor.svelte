@@ -167,20 +167,41 @@
     return baseLayer;
   }
 
+  // Move/resize: every OTHER annotation is fixed for the whole drag, so the
+  // image + those are rendered once and each frame blits them and draws only
+  // the dragged one (it was a full-resolution re-render per pointer move).
+  // The dragged shape sits on top while dragging; the full render on release
+  // restores its z-order.
+  let dragBase: HTMLCanvasElement | null = null;
+  function dragLayer(image: HTMLImageElement): HTMLCanvasElement | null {
+    if (dragBase) return dragBase;
+    const c = document.createElement('canvas');
+    c.width = image.width;
+    c.height = image.height;
+    const bctx = c.getContext('2d');
+    if (!bctx) return null;
+    render(bctx, image, annos.filter((a) => a.id !== selected));
+    dragBase = c;
+    return c;
+  }
+
   function redraw(): void {
     if (!canvasEl || !img) return;
     if (canvasEl.width !== img.width) canvasEl.width = img.width;
     if (canvasEl.height !== img.height) canvasEl.height = img.height;
     const ctx = canvasEl.getContext('2d');
     if (!ctx) return;
-    const base = drafting ? committedLayer(img) : null;
+    const sel = annos.find((a) => a.id === selected);
+    const moving = (dragMode === 'move' || dragMode === 'resize') && sel;
+    const base = drafting ? committedLayer(img) : moving ? dragLayer(img) : null;
     if (drafting && base) renderOver(ctx, base, img, [drafting]);
+    else if (moving && base) renderOver(ctx, base, img, [moving]);
     else {
       render(ctx, img, drafting ? [...annos, drafting] : annos);
       // Nothing is being drawn: free the off-screen copy (a 5K snip is ~60 MB).
       if (baseLayer) { baseLayer.width = baseLayer.height = 0; baseLayer = null; baseFor = null; }
     }
-    const sel = annos.find((a) => a.id === selected);
+    if (!moving && dragBase) { dragBase.width = dragBase.height = 0; dragBase = null; }
     if (sel) drawSelection(ctx, sel);
   }
 
@@ -399,8 +420,10 @@
       }
       drafting = null;
       requestRedraw();
-    } else if ((dragMode === 'move' || dragMode === 'resize') && dragChanged) {
-      scheduleCopy();
+    } else if (dragMode === 'move' || dragMode === 'resize') {
+      if (dragChanged) scheduleCopy();
+      // Full render restores the dragged shape's z-order + frees dragBase.
+      requestRedraw();
     }
     dragMode = null;
     dragSnap = null;

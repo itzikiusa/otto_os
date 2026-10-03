@@ -308,7 +308,8 @@ the artifact. The CI badges (`ci_passed`/`ci_failed`/`ci_pending`) and the
 `attach_media` stores a binary **blob** (`proof_blobs`, content-addressed by
 sha256) and creates the owning `screenshot`/`video` artifact (`ref_kind=blob`,
 `content_ref=blob:<id>`, status `info`). The endpoint (**`POST /media`**, #129)
-takes base64 (`AttachMediaReq {kind, title, mime, data_base64, metadata?}`) and
+takes a raw body (`Content-Type` = mime, `?kind=&title=` — what the UI sends) or
+the legacy base64 JSON (`AttachMediaReq {kind, title, mime, data_base64, metadata?}`) and
 enforces:
 
 - **MIME allow-list** (`ALLOWED_MEDIA_MIMES`): `image/png`, `image/jpeg`,

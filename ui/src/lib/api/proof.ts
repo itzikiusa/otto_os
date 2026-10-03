@@ -2,7 +2,7 @@
 // (see crates/otto-server/src/routes/proof.rs). Workspace-scoped list/create +
 // summary; flat-by-id detail/patch/delete/assemble/waive + per-artifact ops.
 
-import { api, ApiError, authedBlobUrl, authedText, baseUrl, getToken } from './client';
+import { api, ApiError, authedBlobUrl, authedText, baseUrl, getToken, postBlob } from './client';
 import type {
   AddArtifactReq,
   ApiEvidenceReq,
@@ -157,6 +157,19 @@ export function getSnapshot(id: string): Promise<ProofSnapshotResp> {
 /** Attach screenshot/video evidence (base64; ≤25 MiB). */
 export function attachMedia(id: string, body: AttachMediaReq): Promise<ProofPackResp> {
   return api.post<ProofPackResp>(`/proof-packs/${id}/media`, body);
+}
+
+/** Attach media as a RAW body (`Content-Type` = the file's mime) — no base64
+ *  inflation or JSON parse; the UI's path. */
+export function attachMediaRaw(
+  id: string,
+  kind: 'screenshot' | 'video',
+  title: string,
+  file: Blob,
+  mime: string,
+): Promise<ProofPackResp> {
+  const qs = new URLSearchParams({ kind, title });
+  return postBlob<ProofPackResp>(`/proof-packs/${id}/media?${qs}`, file, mime);
 }
 
 /** A revocable object URL for a media artifact's blob (auth'd fetch). */
