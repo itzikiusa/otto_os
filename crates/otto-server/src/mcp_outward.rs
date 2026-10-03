@@ -138,6 +138,7 @@ const DEFAULT_ENABLED: &[&str] = &[
     "k8s_logs",
     "k8s_top",
     "k8s_health",
+    "k8s_pod_actions_list",
     // (Vault v2 structural reads removed — Vault feature disabled.)
 ];
 const DANGEROUS: &[&str] = &[
@@ -200,6 +201,9 @@ const DANGEROUS: &[&str] = &[
     "aws_athena_query",
     "aws_sqs_send",
     "k8s_action",
+    // An HTTP request to a pod's port (actuator loggers / refresh / env…) —
+    // approval-gated even for GET: an actuator GET can dump env/secrets.
+    "k8s_pod_http",
     // Otto Assistant memory writes: an outside agent writing / erasing the
     // user's personal memory is approval-gated (in-session assistant calls go
     // through the native stdio tools, which chip + Undo every write).
@@ -221,6 +225,7 @@ const DANGEROUS: &[&str] = &[
 const IRREVERSIBLE: &[&str] = &[
     "merge_pr",
     "k8s_action",
+    "k8s_pod_http",
     "produce_broker_message",
     "aws_sqs_send",
     "api_execute",
@@ -980,6 +985,19 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["cluster_id","action","kind","namespace","name"],"properties":{
                 "cluster_id":{"type":"string","description":K8S_CLUSTER_REF_DESC},"action":{"type":"string"},"kind":{"type":"string"},
                 "namespace":{"type":"string"},"name":{"type":"string"},"params":{"type":"object"}}}}),
+        json!({"name":"otto.k8s_pod_actions_list","mutating":false,"category":"Kubernetes",
+            "description":"List the saved pod HTTP actions of a cluster (per workload: name, method, port, path, headers, body_template with {{logger}}/{{level}} variables). Optional `namespace`, `workload_kind`, `workload` filters. Read-only.",
+            "inputSchema":{"type":"object","required":["cluster_id"],"properties":{
+                "cluster_id":{"type":"string","description":K8S_CLUSTER_REF_DESC},"namespace":{"type":"string"},
+                "workload_kind":{"type":"string"},"workload":{"type":"string"}}}}),
+        json!({"name":"otto.k8s_pod_http","mutating":true,"category":"Kubernetes",
+            "description":"Send ONE HTTP request to a pod's container port through the API-server pod proxy (port-forward fallback) — e.g. Spring Boot actuator: GET /actuator/loggers, POST /actuator/loggers/<logger> body {\"configuredLevel\":\"DEBUG\"}, GET /actuator/health|info|env|threaddump, POST /actuator/refresh. Target one `pod` OR every running pod of a `workload` {kind,name} (per-pod results: status, duration_ms, headers, body ≤256 KiB). A non-GET method on a prod cluster is refused unless `confirm_name` equals the pod/workload name — set it only after the user explicitly confirmed. DANGEROUS: can change a live app's runtime state — approval-gated.",
+            "inputSchema":{"type":"object","required":["cluster_id","namespace","port","method","path"],"properties":{
+                "cluster_id":{"type":"string","description":K8S_CLUSTER_REF_DESC},"namespace":{"type":"string"},
+                "pod":{"type":"string"},"workload":{"type":"object","properties":{"kind":{"type":"string"},"name":{"type":"string"}}},
+                "port":{"type":"integer"},"method":{"type":"string","description":"GET|POST|PUT|PATCH|DELETE"},
+                "path":{"type":"string"},"headers":{"type":"object"},"body":{"type":"string"},
+                "timeout_ms":{"type":"integer"},"max_concurrency":{"type":"integer"},"confirm_name":{"type":"string"}}}}),
     ];
     // Agent UI control: one governed tool per `docs/contracts/ui-commands.json`
     // entry (`otto.ui_*`, category "UI control") — see `crate::ui_commands`.
@@ -1378,6 +1396,25 @@ fn dangerous_detail(tool: &str, args: &Value) -> String {
             "Send a message to SQS queue '{}' on AWS account '{}'",
             args.get("url").and_then(Value::as_str).unwrap_or("?"),
             args.get("account_id").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "k8s_pod_http" => format!(
+            "HTTP {} {} on port {} of {} in namespace '{}' of cluster '{}'",
+            args.get("method").and_then(Value::as_str).unwrap_or("?"),
+            args.get("path").and_then(Value::as_str).unwrap_or("?"),
+            args.get("port")
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "?".into()),
+            match (args.get("pod").and_then(Value::as_str), args.get("workload")) {
+                (Some(p), _) => format!("pod {p}"),
+                (None, Some(w)) => format!(
+                    "every pod of {}/{}",
+                    w.get("kind").and_then(Value::as_str).unwrap_or("?"),
+                    w.get("name").and_then(Value::as_str).unwrap_or("?")
+                ),
+                _ => "?".into(),
+            },
+            args.get("namespace").and_then(Value::as_str).unwrap_or("?"),
+            args.get("cluster_id").and_then(Value::as_str).unwrap_or("?")
         ),
         "k8s_action" => format!(
             "Kubernetes action '{}' on {}/{} in namespace '{}' of cluster '{}'",
@@ -2080,6 +2117,8 @@ pub(crate) const REF_ARGS: &[(&str, &str, &str)] = &[
     ("k8s_top", "cluster_id", "k8s_cluster"),
     ("k8s_health", "cluster_id", "k8s_cluster"),
     ("k8s_action", "cluster_id", "k8s_cluster"),
+    ("k8s_pod_http", "cluster_id", "k8s_cluster"),
+    ("k8s_pod_actions_list", "cluster_id", "k8s_cluster"),
 ];
 
 /// Governed list tools served by the cross-workspace `agent_refs` directory:
@@ -2683,6 +2722,8 @@ fn call_timeout(tool: &str, args: &Value) -> Duration {
         }
         "api_run_automation" => 180,
         "k8s_logs" | "k8s_action" | "aws_athena_query" | "aws_athena_get_query" => 75,
+        // ≤30 s per pod request + a pod list + proxy start-up.
+        "k8s_pod_http" => 90,
         "consume_broker_messages" | "run_workflow" | "start_pr_review" | "open_session" => 60,
         _ => 30,
     };
@@ -4360,6 +4401,51 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 "params": args.get("params").cloned().unwrap_or(json!({})),
             }),
         ),
+        "k8s_pod_actions_list" => SelfCall::get(format!(
+            "/api/v1/k8s/clusters/{}/pod-actions?{}",
+            seg(&arg_str(args, "cluster_id")?),
+            opt_query(
+                args,
+                &[
+                    ("namespace", "namespace"),
+                    ("workload_kind", "workload_kind"),
+                    ("workload", "workload")
+                ]
+            )
+        )),
+        "k8s_pod_http" => {
+            let mut body = json!({
+                "namespace": arg_str(args, "namespace")?,
+                "port": args
+                    .get("port")
+                    .and_then(u64_lenient)
+                    .ok_or_else(|| Error::Invalid("missing argument 'port'".into()))?,
+                "method": arg_str(args, "method")?,
+                "path": arg_str(args, "path")?,
+            });
+            // Forwarded verbatim: the route owns validation and the prod
+            // confirm_name guard.
+            for k in [
+                "pod",
+                "workload",
+                "headers",
+                "body",
+                "timeout_ms",
+                "max_concurrency",
+                "confirm_name",
+            ] {
+                if let Some(v) = args.get(k).filter(|v| !v.is_null()) {
+                    body[k] = v.clone();
+                }
+            }
+            SelfCall::post(
+                format!(
+                    "/api/v1/k8s/clusters/{}/pod-http",
+                    seg(&arg_str(args, "cluster_id")?)
+                ),
+                body,
+            )
+        }
         other => return Err(Error::Invalid(format!("unknown otto tool '{other}'"))),
     })
 }
@@ -5871,8 +5957,14 @@ mod tests {
         "k8s_logs",
         "k8s_top",
         "k8s_health",
+        "k8s_pod_actions_list",
     ];
-    const CONSOLE_WRITES: &[&str] = &["aws_athena_query", "aws_sqs_send", "k8s_action"];
+    const CONSOLE_WRITES: &[&str] = &[
+        "aws_athena_query",
+        "aws_sqs_send",
+        "k8s_action",
+        "k8s_pod_http",
+    ];
 
     #[test]
     fn aws_k8s_tools_present_and_classified() {
@@ -6125,6 +6217,17 @@ mod tests {
         let c = route_for("k8s_action", &json!({"cluster_id":"c1","action":"restart","kind":"deployments","namespace":"prod","name":"web"})).unwrap();
         assert_eq!(c.body.unwrap()["params"], json!({}));
         assert!(route_for("k8s_action", &json!({"cluster_id":"c1","action":"restart"})).is_err());
+        let c = route_for("k8s_pod_http", &json!({"cluster_id":"c1","namespace":"shop","port":8081,"method":"POST","path":"/actuator/loggers/com.acme","workload":{"kind":"deployment","name":"api"},"body":"{}","confirm_name":"api"})).unwrap();
+        assert!(c.path.ends_with("/k8s/clusters/c1/pod-http"), "{}", c.path);
+        let b = c.body.unwrap();
+        assert_eq!(b["workload"]["name"], "api");
+        assert_eq!(b["confirm_name"], "api");
+        assert!(b.get("pod").is_none());
+        assert!(route_for(
+            "k8s_pod_http",
+            &json!({"cluster_id":"c1","namespace":"shop"})
+        )
+        .is_err());
         assert!(route_for("k8s_describe", &json!({"cluster_id":"c1","kind":"pods"})).is_err());
     }
 

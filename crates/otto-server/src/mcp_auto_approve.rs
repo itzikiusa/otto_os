@@ -577,6 +577,7 @@ mod tests {
         for t in [
             "merge_pr",
             "k8s_action",
+            "k8s_pod_http",
             "produce_broker_message",
             "aws_sqs_send",
             "api_execute",
