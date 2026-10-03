@@ -20,6 +20,7 @@
 //! so the rest of the daemon is unaffected.
 
 pub mod budget_dedup;
+pub mod ccusage;
 mod clickhouse;
 mod engine;
 mod metrics;
@@ -36,18 +37,18 @@ pub const EXTERNAL_WORKSPACE: &str = "external";
 
 pub use budget_dedup::{BudgetDedup, BudgetSignal};
 pub use clickhouse::ClickHouse;
-pub use engine::UsageEngine;
+pub use engine::{UsageEngine, UsageScope};
 pub use metrics::{Metric, MetricsSampler};
 pub use pricing::{estimate_cost, is_priced, PRICED_AS_OF};
 pub use tailer::{
-    parse_claude_line, parse_codex_line, parse_codex_session_meta, ClaudeLine, CodexCounterStore,
-    CodexMeta, CursorStore, ParsedUsage, SeenKeys,
+    merge_max, parse_claude_line, parse_codex_line, parse_codex_session_meta, ClaudeLine,
+    CodexCounterStore, CodexMeta, CursorStore, HeldResponse, ParsedUsage, ResponseFolder, SeenKeys,
 };
 pub use types::{
     AttributionDimension, AttributionRow, CcusageCheck, CcusageCheckReq, CcusageDayRow,
     CcusageDiffRow, DailyModelUsage, DailyUsage, FeatureUsage, ForecastReq, ForecastResp,
-    MetricPoint, ModelUsage, MonthlyUsage, ProviderUsage, SessionTotals, SessionUsage,
-    TokenTotals, UsageConfig, UsageEvent, UsageReport, UsageStatus, UsageSummary,
+    MetricPoint, ModelUsage, MonthlyUsage, ProviderUsage, SessionTotals, SessionUsage, TokenTotals,
+    UsageConfig, UsageEvent, UsageReport, UsageStatus, UsageSummary,
 };
 
 /// Max sessions in a [`UsageReport`].

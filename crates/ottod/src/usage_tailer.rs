@@ -34,7 +34,12 @@
 //!     one API *response* spans several transcript lines (one per content
 //!     block, all repeating the same usage) and resumed sessions replay old
 //!     lines into new files — so a response can arrive on many lines while
-//!     billing happens once.
+//!     billing happens once. Lines written while a response streams carry a
+//!     PARTIAL `output_tokens`, so the response is held (per file) until its
+//!     `stop_reason` line, the next response, or a scan with no growth, and
+//!     counted once with its FINAL usage (`ResponseFolder`); a line arriving
+//!     after that becomes a positive correction row. The persisted cursor
+//!     never passes a held response, so a restart re-reads it.
 //!   * **True-time stamping.** Claude events carry the transcript line's own
 //!     `timestamp` (`UsageEvent.ts`), so history ingested late (the one-time
 //!     rebuild below, or catch-up after daemon downtime) is dated when the API
@@ -43,9 +48,10 @@
 //!     pre-existing history is still seeded away at startup.
 //!   * **One-time dedup rebuild.** The pre-dedup tailer counted every line, so
 //!     stores it fed are inflated (~2.4× on real data). On first start after
-//!     upgrade (marker `<data_dir>/usage_tailer_dedup_rebuild.done` absent) the
+//!     upgrade (marker `<data_dir>/usage_tailer_dedup_rebuild_v2.done` absent) the
 //!     tailer purges its own claude rows and re-derives them from the full
-//!     transcripts — deduped, true-time-stamped. Delete-first + marker-last
+//!     transcripts — deduped (FINAL usage per response), true-time-stamped,
+//!     re-priced. Delete-first + marker-last
 //!     makes a crashed rebuild retry cleanly on the next start.
 //!   * **Crash-resilient.** A bad file/line logs and is skipped; the loop never
 //!     panics.
@@ -58,8 +64,9 @@ use std::time::Duration;
 
 use otto_state::{DbPool, SessionsRepo};
 use otto_usage::{
-    estimate_cost, parse_claude_line, parse_codex_line, parse_codex_session_meta,
-    CodexCounterStore, CursorStore, SeenKeys, UsageEngine, UsageEvent, EXTERNAL_WORKSPACE,
+    estimate_cost, parse_claude_line, parse_codex_line, parse_codex_session_meta, ClaudeLine,
+    CodexCounterStore, CursorStore, HeldResponse, ResponseFolder, SeenKeys, UsageEngine,
+    UsageEvent, EXTERNAL_WORKSPACE,
 };
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -79,6 +86,18 @@ const CODEX_COUNTERS_CAP: usize = 20_000;
 /// Default model label for Codex turns when the rollout file carries no model.
 /// `estimate_cost` prices this at the gpt tier (substring match on "codex").
 const CODEX_FALLBACK_MODEL: &str = "codex";
+
+/// Released claude responses remembered for late-line corrections (see
+/// [`ResponseFolder`]). A response only straddles an idle release while it is
+/// still streaming, so a few thousand recent keys is plenty.
+const RECENT_RESPONSES_CAP: usize = 4_096;
+
+/// Marker of the one-time claude history rebuild. `_v2`: the first rebuild
+/// (marker `usage_tailer_dedup_rebuild.done`) kept the FIRST line per response
+/// — a streamed response's partial `output_tokens` — and priced Opus 5.5 at
+/// the Opus 4.x rate card, so it runs once more to keep the FINAL usage and
+/// re-price every claude row.
+const REBUILD_MARKER: &str = "usage_tailer_dedup_rebuild_v2.done";
 
 /// Append-only seen-key log lines tolerated before the next persist compacts
 /// them into the JSON array. ~5k keys ≈ a few days of active use; each append
@@ -127,6 +146,12 @@ pub struct UsageTailer {
     codex_meta: HashMap<PathBuf, otto_usage::CodexMeta>,
     /// Response-level dedup for claude lines (see module docs).
     seen: SeenKeys,
+    /// Folds a streamed response's lines into its FINAL usage.
+    folder: ResponseFolder,
+    /// The response currently held back per claude file (still streaming).
+    held: HashMap<PathBuf, HeldResponse>,
+    /// Attribution of each held response's file: (workspace_id, session_id).
+    held_attr: HashMap<PathBuf, (String, String)>,
     /// Set when [`Self::scan_once`] recorded a new claude key, so the seen file
     /// is only rewritten when it actually changed.
     seen_dirty: bool,
@@ -171,6 +196,9 @@ impl UsageTailer {
             cursors_dirty: false,
             codex_meta: HashMap::new(),
             seen,
+            folder: ResponseFolder::new(RECENT_RESPONSES_CAP),
+            held: HashMap::new(),
+            held_attr: HashMap::new(),
             seen_dirty: false,
             codex_counters,
             codex_counters_dirty: false,
@@ -202,7 +230,12 @@ impl UsageTailer {
                 // (no 500 ms polling slices — they cost idle wakeups).
                 tokio::select! {
                     _ = tokio::time::sleep(SCAN_INTERVAL) => {}
-                    _ = wake_task.notified() => return,
+                    _ = wake_task.notified() => {
+                        // Count what is still held; its key is persisted only
+                        // if a later persist runs, so a lost flush is re-read.
+                        self.release_held(|_| true);
+                        return;
+                    }
                 }
             }
         });
@@ -236,7 +269,7 @@ impl UsageTailer {
     /// tailing appends from the old offsets (deduped) until the next daemon
     /// start retries.
     async fn rebuild_claude_history(&mut self) {
-        let marker = self.data_dir.join("usage_tailer_dedup_rebuild.done");
+        let marker = self.data_dir.join(REBUILD_MARKER);
         if marker.exists() {
             return;
         }
@@ -270,7 +303,9 @@ impl UsageTailer {
 
         let mut events: Vec<UsageEvent> = Vec::new();
         let mut keys: Vec<String> = Vec::new();
-        let mut key_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Response key → (index into `events`, merged line): later lines of a
+        // streamed response carry bigger counts — keep the FINAL (max) usage.
+        let mut key_idx: HashMap<String, (usize, ClaudeLine)> = HashMap::new();
         let mut offsets: Vec<(PathBuf, u64)> = Vec::new();
         let mut min_date: Option<String> = None;
 
@@ -302,9 +337,28 @@ impl UsageTailer {
                     continue;
                 };
                 if let Some(key) = &parsed.dedup_key {
-                    if !key_set.insert(key.clone()) {
-                        continue; // another line of an already-counted response
+                    if let Some((idx, merged)) = key_idx.get_mut(key) {
+                        // Another line of an already-seen response: fold it in.
+                        otto_usage::merge_max(merged, &parsed);
+                        let ev = &mut events[*idx];
+                        let u = &merged.usage;
+                        ev.input_tokens = u.input;
+                        ev.output_tokens = u.output;
+                        ev.cache_read_tokens = u.cache_read;
+                        ev.cache_write_tokens = u.cache_write;
+                        if ev.model.is_empty() {
+                            ev.model = u.model.clone();
+                        }
+                        ev.cost_usd = estimate_cost(
+                            &ev.model,
+                            u.input,
+                            u.output,
+                            u.cache_read,
+                            u.cache_write,
+                        );
+                        continue;
                     }
+                    key_idx.insert(key.clone(), (events.len(), parsed.clone()));
                     keys.push(key.clone());
                 }
                 if let Some(date) = parsed.timestamp.as_deref().and_then(|t| t.get(..10)) {
@@ -388,6 +442,11 @@ impl UsageTailer {
         }
         for k in &keys {
             self.seen.insert(k);
+            // Newest keys stay remembered (files are oldest-first), so a
+            // response still streaming during the rebuild is corrected, not lost.
+            if let Some((_, line)) = key_idx.get(k) {
+                self.folder.remember(k, line);
+            }
         }
         if let Err(e) = self.cursors.save() {
             tracing::warn!("usage tailer: failed to persist cursors after rebuild: {e}");
@@ -493,11 +552,21 @@ impl UsageTailer {
         } else {
             Attribution::default()
         };
+        let mut grew: HashSet<PathBuf> = HashSet::new();
         for (file, size) in &claude {
-            if let Err(e) = self.tail_claude_file(file, *size, &attr).await {
-                tracing::debug!("usage tailer: claude file {} skipped: {e}", file.display());
+            match self.tail_claude_file(file, *size, &attr).await {
+                Ok(true) => {
+                    grew.insert(file.clone());
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::debug!("usage tailer: claude file {} skipped: {e}", file.display())
+                }
             }
         }
+        // A held response whose file wrote nothing for a whole scan is as
+        // final as it will get — count it (a later line becomes a correction).
+        self.release_held(|f| !grew.contains(f));
         for (file, size) in &codex {
             if let Err(e) = self.tail_codex_file(file, *size, &attr).await {
                 tracing::debug!("usage tailer: codex file {} skipped: {e}", file.display());
@@ -535,9 +604,23 @@ impl UsageTailer {
                 }
             }
             if guards_persisted && self.cursors_dirty {
+                // Never persist a cursor past a held (uncounted) response: a
+                // restart re-reads it from its first line instead of losing it.
+                let mut restore = Vec::new();
+                for (f, h) in &self.held {
+                    if let Some(cur) = self.cursors.get(f) {
+                        if h.start_offset < cur {
+                            self.cursors.set(f, h.start_offset);
+                            restore.push((f.clone(), cur));
+                        }
+                    }
+                }
                 match self.cursors.save() {
                     Ok(()) => self.cursors_dirty = false,
                     Err(e) => tracing::warn!("usage tailer: failed to persist cursors: {e}"),
+                }
+                for (f, cur) in restore {
+                    self.cursors.set(&f, cur);
                 }
             }
         });
@@ -623,65 +706,105 @@ impl UsageTailer {
 
     // ── Claude ────────────────────────────────────────────────────────────────
 
+    /// Tail one claude transcript. Returns `Ok(true)` when it had new lines.
     async fn tail_claude_file(
         &mut self,
         file: &Path,
         size: u64,
         attr: &Attribution,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
+        let start = self.cursors.get(file).filter(|c| *c <= size).unwrap_or(0);
         let (chunk, new_offset) = match self.read_new_bytes(file, size).await? {
             Some(v) => v,
-            None => return Ok(()),
+            None => return Ok(false),
         };
 
         // Filename stem is the CLI's session uuid (= provider_session_id); a
         // subagent transcript bills to its parent session.
         let stem = claude_session_stem(file);
-        let sref = attr.by_provider_session.get(&stem);
+        let ids = match attr.by_provider_session.get(&stem) {
+            Some(s) => (s.workspace_id.clone(), s.otto_session_id.clone()),
+            None => (EXTERNAL_WORKSPACE.to_string(), stem.clone()),
+        };
 
-        for line in chunk.lines() {
+        // One API response = many lines (content blocks, streamed partials,
+        // resume replays), billed once — the folder counts each response once
+        // with its FINAL usage (see `ResponseFolder`).
+        let mut held = self.held.remove(file);
+        let mut out: Vec<ClaudeLine> = Vec::new();
+        let mut offset = start;
+        for line in chunk.split_inclusive('\n') {
+            let line_start = offset;
+            offset += line.len() as u64;
             let Some(parsed) = parse_claude_line(line) else {
                 continue;
             };
-            // One API response = many lines (content blocks, resume replays),
-            // billed once — count only the first sighting of its key.
-            if let Some(key) = &parsed.dedup_key {
-                if !self.seen.insert(key) {
-                    continue;
-                }
-                self.seen_dirty = true;
-            }
-            let (workspace_id, session_id) = match sref {
-                Some(s) => (s.workspace_id.clone(), s.otto_session_id.clone()),
-                None => (EXTERNAL_WORKSPACE.to_string(), stem.clone()),
-            };
-            let usage = parsed.usage;
-            let cost = estimate_cost(
-                &usage.model,
-                usage.input,
-                usage.output,
-                usage.cache_read,
-                usage.cache_write,
-            );
-            self.usage.record(UsageEvent {
-                ts: parsed.timestamp,
-                workspace_id,
-                session_id,
-                provider: "claude".to_string(),
-                model: usage.model,
-                kind: "completion".to_string(),
-                input_tokens: usage.input,
-                output_tokens: usage.output,
-                cache_read_tokens: usage.cache_read,
-                cache_write_tokens: usage.cache_write,
-                cost_usd: cost,
-                duration_ms: 0,
-                ..Default::default()
-            });
+            self.folder
+                .push(&mut held, parsed, line_start, &mut self.seen, &mut out);
+        }
+        if let Some(h) = held {
+            self.held.insert(file.to_path_buf(), h);
+            self.held_attr.insert(file.to_path_buf(), ids.clone());
+        } else {
+            self.held_attr.remove(file);
+        }
+        if !out.is_empty() {
+            self.seen_dirty = true;
+        }
+        for line in out {
+            self.record_claude(line, &ids);
         }
 
         self.set_cursor(file, new_offset);
-        Ok(())
+        Ok(true)
+    }
+
+    /// Count every held response whose file passes `which`.
+    fn release_held(&mut self, which: impl Fn(&Path) -> bool) {
+        let files: Vec<PathBuf> = self.held.keys().filter(|f| which(f)).cloned().collect();
+        for f in files {
+            let mut held = self.held.remove(&f);
+            let ids = self
+                .held_attr
+                .remove(&f)
+                .unwrap_or_else(|| (EXTERNAL_WORKSPACE.to_string(), claude_session_stem(&f)));
+            let mut out = Vec::new();
+            self.folder.release(&mut held, &mut self.seen, &mut out);
+            if !out.is_empty() {
+                self.seen_dirty = true;
+                // The persisted cursor floor moves on with the next save.
+                self.cursors_dirty = true;
+            }
+            for line in out {
+                self.record_claude(line, &ids);
+            }
+        }
+    }
+
+    fn record_claude(&self, line: ClaudeLine, ids: &(String, String)) {
+        let usage = line.usage;
+        let cost = estimate_cost(
+            &usage.model,
+            usage.input,
+            usage.output,
+            usage.cache_read,
+            usage.cache_write,
+        );
+        self.usage.record(UsageEvent {
+            ts: line.timestamp,
+            workspace_id: ids.0.clone(),
+            session_id: ids.1.clone(),
+            provider: "claude".to_string(),
+            model: usage.model,
+            kind: "completion".to_string(),
+            input_tokens: usage.input,
+            output_tokens: usage.output,
+            cache_read_tokens: usage.cache_read,
+            cache_write_tokens: usage.cache_write,
+            cost_usd: cost,
+            duration_ms: 0,
+            ..Default::default()
+        });
     }
 
     // ── Codex ─────────────────────────────────────────────────────────────────
