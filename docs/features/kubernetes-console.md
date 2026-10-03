@@ -145,6 +145,18 @@ large clusters); a denied verb simply comes back as a `403`.
 
 ## 3. The cluster workspace
 
+One workspace per cluster with a **Resources | Monitor** switch in the header
+(`#/kubernetes/<id>/<kind>[/<ns>/<name>]` and `#/kubernetes/<id>/monitor[/<tab>]`;
+see [Kubernetes Monitoring](./kubernetes-monitoring.md)). Leaving for the
+Monitor, the clusters overview or another module never deselects the cluster:
+the last four (cluster, kind, namespace) row sets stay cached, so coming back
+paints at once and refreshes quietly. The text filter (per kind), the drawer
+tab and the table's scroll position are remembered per cluster in
+`localStorage` (`otto_k8s_ui:<user>:<cluster>`), and the sidebar resumes the
+exact route last shown (see [Multi-window](./multi-window.md#how-it-works)),
+so a pod drawer with its filter survives a module switch and a reload. Click
+the active Kubernetes entry in the sidebar again for the clusters overview.
+
 ### Namespaces, nodes, resource kinds
 
 The top bar has a namespace filter (**All namespaces** ⇒ kubectl `-A`,
@@ -221,6 +233,12 @@ fallback when the row is gone):
   Shell buttons open it straight on those tabs. The row menu offers the same
   as **Pods** and **Logs (all pods)**.
 - **Logs** — one stream across every matching pod (next section).
+
+Every drawer has a **Refresh** button in its header, and re-reads its detail
+quietly about 1.5 s after an action on the object (restart, scale, sync, …).
+Pod and workload drawers also have a **Monitor** button (opens the workload
+in the Monitor, row expanded) and an **HTTP** tab (next section, *Pod HTTP
+actions*); the pod Metrics tab ends with a **History (Monitor)** section.
 
 ### Logs
 
@@ -336,6 +354,16 @@ replicaset / job (≤ 50 pods, ≤ 8 at a time) — and returns one result per p
   Credential headers are never stored.
 - **Audit.** `k8s.pod_http` records cluster, namespace, pods, method, path,
   redacted headers, per-pod status codes and the body's sha256 — never the body.
+- **In the UI.** The drawer's **HTTP** tab (pods and the workload kinds
+  above): saved actions for the workload and built-in actuator presets on the
+  left (Loggers, Get logger, **Set log level** with a TRACE…OFF / RESET
+  picker — RESET sends `configuredLevel: null` — Health, Info, Environment,
+  Metrics, Refresh config, Thread dump); method, port (guessed from the
+  container ports: management/actuator/admin, then http*, else 8080), path,
+  `{{variable}}` inputs, headers and body on the right; **This pod / All pods
+  of <workload>** for a pod whose owner is known; one result row per pod
+  (status, ms, port-forward marker) expanding to the pretty-printed body with
+  Copy. Mutating methods need Edit; on prod the target name must be typed.
 - **MCP.** `k8s_pod_http` is approval-gated for every method and sits in the
   irreversible tier (no category auto-approve rule covers it);
   `k8s_pod_actions_list` is a read.

@@ -31,7 +31,7 @@
     workload?: { kind: string; name: string } | null;
     /** Pod or workload manifest — for the default port guess. */
     manifest?: unknown;
-    /** May the person send mutating methods (Edit + the `pod_http` op)? */
+    /** May the person send mutating methods (Edit + the `exec` op — the daemon's rule)? */
     canMutate: boolean;
   }
   let { clusterId, ns, pod, workload = null, manifest = null, canMutate }: Props = $props();

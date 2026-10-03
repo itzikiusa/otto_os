@@ -87,7 +87,7 @@
     const k = owner.kind.toLowerCase();
     return ['statefulset', 'daemonset', 'job'].includes(k) ? { kind: k, name: owner.name } : null;
   });
-  const canHttp = $derived((isPod || !!workloadKindFor(kind)) && canOperation('pod_http'));
+  const canHttp = $derived((isPod || !!workloadKindFor(kind)) && canOperation('workloads_view'));
   /** `spec.selector` of a workload (row extra, or the manifest when the row
    *  is gone) — unlocks the Pods + Logs tabs. */
   const selector = $derived.by((): string => {
@@ -423,7 +423,7 @@
     {:else if tab === 'http' && canHttp}
       {#if detailLoading && !detail}<div class="pad"><Skeleton rows={4} height={22} /></div>
       {:else}
-        <PodHttpPanel {clusterId} {ns} pod={isPod ? name : undefined} workload={httpWorkload} manifest={detail?.manifest ?? null} canMutate={canEdit && canOperation('pod_http')} />
+        <PodHttpPanel {clusterId} {ns} pod={isPod ? name : undefined} workload={httpWorkload} manifest={detail?.manifest ?? null} canMutate={canEdit && canExec} />
       {/if}
     {/if}
   </div>
