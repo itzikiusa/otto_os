@@ -90,6 +90,14 @@ test.describe('usage (persistent clickhouse server)', () => {
       expect(report, `report missing ${k}`).toHaveProperty(k);
     }
     expect(report.otto_only).toBe(false);
+    // Slim by default (the page): no day×model table; the export opts in.
+    expect(report.daily_models).toEqual([]);
+    expect(report.sessions.length).toBeLessThanOrEqual(100);
+    const fullRep = await ctx.get(`${base}${V1}/usage/report?days=30&otto_only=false&sessions_limit=1000&include=daily_models`);
+    expect(fullRep.ok(), await fullRep.text()).toBeTruthy();
+    const full = await fullRep.json();
+    expect(Array.isArray(full.daily_models), 'full.daily_models').toBeTruthy();
+    expect(full.totals).toEqual(report.totals);
 
     // forecast (POST) prices an explicit estimate without needing history.
     const f = await ctx.post(`${base}${V1}/usage/forecast`, {

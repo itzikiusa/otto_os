@@ -114,7 +114,13 @@ the cumulative `total_token_usage`, to avoid double-counting:
 
 ### 3.3 Attribution (which session a turn belongs to)
 
-Each scan rebuilds an attribution index from the SQLite `sessions` table:
+The tailer keeps an attribution index built from the SQLite `sessions` table.
+It is built on the first pass that actually reads new lines and **reused across
+passes** (event-driven passes run every ~2 s while an agent streams): it is
+re-read only when it is older than 60 s, or when a lookup misses **and** a
+session was created / deleted / given its provider-session id since the index
+was built (a write generation bumped by `SessionsRepo`). A transcript that is
+simply not Otto's (external) never re-queries. Indexes:
 
 - **Claude** — by transcript filename stem (= the CLI session UUID =
   `provider_session_id` on the Otto session row).
@@ -233,11 +239,19 @@ original untouched and retries next start. Both tables use
 ### 4.1 How it runs
 
 Otto ships no embedded C++; it drives the *same* `clickhouse` binary you'd install
-via `curl https://clickhouse.com/ | sh`, in **`clickhouse local --path <dir>`**
-mode — a serverless, portless, on-disk database. Because `clickhouse local` takes
-an exclusive lock on its `--path`, every call is serialized through a single mutex
-in `ClickHouse` (`crates/otto-usage/src/clickhouse.rs`); process startup is tens of
-ms, writes are batched, so this is cheap.
+via `curl https://clickhouse.com/ | sh`, as one persistent **`clickhouse server`**
+child bound to a random loopback HTTP port over the data dir
+(`crates/otto-usage/src/clickhouse.rs`). Writes are batched (usage events every
+15 s while any are buffered, system metrics every 5 min).
+
+**Idle-stop.** The server costs ~56 threads / ~100+ MB RSS even with nothing to
+do, so after **15 min** with no query, insert or DDL (and none in flight) it is
+stopped cleanly (SIGTERM) and the next request restarts it on demand — measured
+~0.5–0.7 s to the first answer on a small data dir; the usage writer and the
+metrics batch keep buffering in memory meanwhile. An idle-stopped server counts
+as alive for the self-heal check (it did not crash); a restart that fails trips
+the normal self-heal. Merge pools are sized for a few MB of data
+(`background_pool_size` 4, paired with MergeTree's free-entry thresholds).
 
 ### 4.2 On-disk layout
 
@@ -400,9 +414,12 @@ tooltip *"Estimated — model not in the rate table; priced at the Opus tier."*
 ### 5.3 Usage Report and the ccusage cross-check
 
 - **Report** (`GET /usage/report`): daily, monthly, per-model and per-session
-  (≤1000) tables over the window, tokens first and cost secondary, scoped like
-  the summary. The page's **Download HTML** writes the same tables to one
-  self-contained file (inline CSS, light/dark) for sharing or archiving.
+  tables over the window, tokens first and cost secondary, scoped like the
+  summary — two ClickHouse scans (one grouped day×provider×model scan the other
+  tables are re-aggregated from, plus the session leaderboard). The page loads
+  the slim shape (100 sessions, no day×model table); **Show more sessions** and
+  **Download HTML** fetch the full one once (`sessions_limit=1000&include=daily_models`)
+  and write every table to one self-contained file (inline CSS, light/dark).
 - **Compare with ccusage** (root, opt-in, `POST /usage/ccusage-check {days}`):
   the daemon runs `npx --yes ccusage daily --json --breakdown --since … --until …`
   on demand (no Otto dependency; npx downloads/caches ccusage on first use;
@@ -479,7 +496,13 @@ The dashboard surfaces this as the **CostForecastChip** next to the headline cos
 a short window apart, so the sample sleeps ~200 ms and runs on a blocking thread. A
 quick first sample is taken ~3 s after boot, then on the configured cadence (re-read
 each loop, so a settings change takes effect within one interval). Sampling runs only
-while `usage.available()`.
+while `usage.available()` **and something needs it**: a live session, a
+`/usage/metrics` read in the last 10 min, or usage recorded in the last 10 min — an
+idle daemon nobody watches takes no samples and broadcasts no ticks (budgets have
+nothing new to check then). One sampler lives across ticks, so the `ottod` CPU % is
+measured over the interval. Samples are buffered in memory and inserted as one batch
+every **5 min** (and on shutdown); `/usage/metrics` serves the unflushed tail from
+memory, so the sparklines stay live.
 
 Each sample → one `system_metrics` row:
 
@@ -590,7 +613,7 @@ estimated when not supplied, and work-graph dims are flattened from the session'
 
 | Event | When | Payload |
 |---|---|---|
-| `usage_metrics_tick` | After each `system_metrics` sample is stored. | `{"type":"usage_metrics_tick","ts":"<UTC ISO-8601>"}` |
+| `usage_metrics_tick` | After each `system_metrics` sample (only while sampling is wanted — see §7). | `{"type":"usage_metrics_tick","ts":"<UTC ISO-8601>"}` |
 | `budget_exceeded` | On a budget crossing (enforcement on). | see §8.1 |
 
 The UI subscribes to `usage_metrics_tick` and calls `usage.applyMetricsTick()`, which
