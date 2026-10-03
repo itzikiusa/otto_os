@@ -435,6 +435,9 @@ pub fn protected_routes() -> Router<ServerCtx> {
             "/notifications/read-all",
             post(notifications::mark_all_read),
         )
+        // Bulk read / dismiss: one statement + one broadcast (perf §15 N4).
+        .route("/notifications/read", post(notifications::mark_many_read))
+        .route("/notifications/dismiss", post(notifications::dismiss_many))
         .route("/notifications/{id}/read", post(notifications::mark_read))
         .route("/notifications/{id}", delete(notifications::dismiss))
         .route(

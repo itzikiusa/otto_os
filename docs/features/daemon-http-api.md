@@ -343,6 +343,7 @@ resolve their owning workspace from the row and role-check against it.
 | Method & path | Auth | Purpose |
 |---|---|---|
 | `GET /notifications` · `POST /notifications/read-all` | member | Your notices + global · mark all read |
+| `POST /notifications/read` · `POST /notifications/dismiss` | member | Mark read / dismiss a batch `{ids}` (≤ 500) in one statement + one `notifications_changed` |
 | `GET /plugins` · `GET/POST /plugin-admin` | member / root | Enabled plugins for the sidebar · install/manage sidecars |
 | `GET /admin/sessions` · `POST /admin/sessions/{id}/terminate` | Users:Admin or root | Daemon-wide session overview · force-terminate (audited) |
 | `POST /admin/impersonate/{user_id}` · `/stop` | Users:Admin or root | Mint an act-as token · end it (audited) |

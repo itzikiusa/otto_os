@@ -6,13 +6,22 @@
 
 import { untrack } from 'svelte';
 import { api } from '../api/client';
-import type { Notice, NoticeAction, NoticeSeverity, NotificationSettings } from '../api/types';
+import type {
+  BulkNoticeResult,
+  Notice,
+  NoticeAction,
+  NoticeSeverity,
+  NotificationSettings,
+} from '../api/types';
 import { toasts } from '../toast.svelte';
 import { openExternal } from '../external';
 import { ws } from './workspace.svelte';
 import { router } from '../router.svelte';
 import { parseNoticeRoute } from '../noticeRoute';
 import { isEmbedded } from '../desktop';
+
+/** Most ids one bulk read / dismiss call may carry (daemon `BULK_MAX`). */
+const BULK_MAX = 500;
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
@@ -368,30 +377,41 @@ class NotificationStore {
   }
 
   /** Mark every notice this client currently holds as read — what the open
-   *  panel showed. A large backlog falls back to one read-all call. */
+   *  panel showed. One bulk call (the client holds ≤ 200); a backlog past the
+   *  daemon's bulk cap falls back to one read-all call. */
   async markSeenRead(): Promise<void> {
     const ids = this.notices.filter((n) => !n.read).map((n) => n.id);
     if (ids.length === 0) return;
-    if (ids.length > 25) return this.markAllRead();
+    if (ids.length > BULK_MAX) return this.markAllRead();
     await this.markManyRead(ids);
   }
 
-  /** Mark a group of notices read (a grouped session row). */
+  /** Mark a group of notices read (a grouped session row / the seen set) in
+   *  ONE request + one `notifications_changed` broadcast (perf §15 N4). */
   async markManyRead(ids: string[]): Promise<void> {
-    await Promise.all(ids.map((id) => this.markRead(id)));
+    const want = new Set(ids.filter((id) => this.notices.some((n) => n.id === id && !n.read)));
+    if (want.size === 0) return;
+    this.notices = this.notices.map((n) => (want.has(n.id) ? { ...n, read: true } : n));
+    try {
+      await api.post<BulkNoticeResult>('/notifications/read', { ids: [...want] });
+    } catch {
+      this.notices = this.notices.map((n) => (want.has(n.id) ? { ...n, read: false } : n));
+    }
   }
 
-  /** Dismiss a group of notices (a grouped session row). */
+  /** Dismiss a group of notices (a grouped session row) in ONE request. */
   async dismissMany(ids: string[]): Promise<void> {
     const drop = new Set(ids);
     const prev = this.notices;
+    const back = prev.filter((n) => drop.has(n.id));
+    if (back.length === 0) return;
     this.notices = this.notices.filter((n) => !drop.has(n.id));
-    const results = await Promise.allSettled(ids.map((id) => api.del(`/notifications/${id}`)));
-    const failed = new Set(ids.filter((_, i) => results[i].status === 'rejected'));
-    if (failed.size > 0) {
-      // Put back only what the daemon still has.
-      const back = prev.filter((n) => failed.has(n.id));
-      this.notices = [...back, ...this.notices].sort(newestFirst);
+    try {
+      await api.post<BulkNoticeResult>('/notifications/dismiss', { ids: back.map((n) => n.id) });
+    } catch {
+      // Nothing was removed (one statement): put the group back.
+      const kept = new Set(this.notices.map((n) => n.id));
+      this.notices = [...back.filter((n) => !kept.has(n.id)), ...this.notices].sort(newestFirst);
     }
   }
 

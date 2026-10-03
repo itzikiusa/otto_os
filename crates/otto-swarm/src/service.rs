@@ -266,6 +266,11 @@ impl SwarmService {
         self.repo.list_tasks(project_id).await
     }
 
+    /// Every task of a swarm across its projects (one indexed read).
+    pub async fn list_tasks_for_swarm(&self, swarm_id: &Id) -> Result<Vec<SwarmTask>> {
+        self.repo.list_tasks_for_swarm(swarm_id).await
+    }
+
     pub async fn get_task(&self, id: &Id) -> Result<SwarmTask> {
         self.repo.get_task(id).await
     }

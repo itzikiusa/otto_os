@@ -289,6 +289,50 @@ impl NotificationsRepo {
         Ok(())
     }
 
+    /// Mark a batch of notices read in ONE statement (a grouped session row /
+    /// the panel's "seen" set — perf §15 N4). Same ownership rule as
+    /// [`Self::mark_read`]; unknown or foreign ids are skipped. Returns the
+    /// number of rows that flipped. Callers cap `ids` (bound-parameter limit).
+    pub async fn mark_many_read(&self, ids: &[Id], access: &NoticeAccess) -> Result<u64> {
+        self.many(
+            "UPDATE notifications SET read = 1 WHERE read = 0 AND",
+            ids,
+            access,
+        )
+        .await
+        .map_err(dberr("mark notifications read"))
+    }
+
+    /// Dismiss a batch of notices in ONE statement. Same ownership rule as
+    /// [`Self::dismiss`]. Returns the number of rows removed.
+    pub async fn dismiss_many(&self, ids: &[Id], access: &NoticeAccess) -> Result<u64> {
+        self.many("DELETE FROM notifications WHERE", ids, access)
+            .await
+            .map_err(dberr("dismiss notifications"))
+    }
+
+    async fn many(
+        &self,
+        head: &str,
+        ids: &[Id],
+        access: &NoticeAccess,
+    ) -> std::result::Result<u64, sqlx::Error> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let mut q = sqlx::QueryBuilder::<sqlx::Sqlite>::new(head);
+        q.push(" id IN (");
+        let mut sep = q.separated(", ");
+        for id in ids {
+            sep.push_bind(id.clone());
+        }
+        q.push(")");
+        if let NoticeAccess::User(uid) = access {
+            q.push(" AND user_id = ").push_bind(uid.clone());
+        }
+        Ok(q.build().execute(&self.pool).await?.rows_affected())
+    }
+
     /// Mark every notice the caller owns as read. A [`NoticeAccess::User`] only
     /// touches their own rows; global notices are left untouched.
     pub async fn mark_all_read(&self, access: &NoticeAccess) -> Result<()> {
@@ -483,6 +527,38 @@ mod tests {
         r.clear(&u1).await.unwrap();
         assert!(r.get(&m.id).await.is_err());
         assert!(r.get(&other.id).await.is_ok());
+    }
+
+    /// Perf §15 N4: a batch read / dismiss is ONE statement, honours the same
+    /// ownership rule as the single-row calls and reports what it changed.
+    #[tokio::test]
+    async fn bulk_read_and_dismiss_are_one_statement_and_owned() {
+        let r = repo().await;
+        let g = r.create(notice("g", None, None)).await.unwrap();
+        let m1 = r.create(notice("m1", None, Some("u1"))).await.unwrap();
+        let m2 = r.create(notice("m2", None, Some("u1"))).await.unwrap();
+        let other = r.create(notice("o", None, Some("u2"))).await.unwrap();
+        let u1 = NoticeAccess::User("u1".into());
+        let all = vec![g.id.clone(), m1.id.clone(), m2.id.clone(), other.id.clone()];
+        let probe = r.pool.statement_probe();
+        probe.reset();
+        assert_eq!(r.mark_many_read(&all, &u1).await.unwrap(), 2);
+        assert_eq!(probe.take().len(), 1);
+        assert!(r.get(&m1.id).await.unwrap().read);
+        assert!(r.get(&m2.id).await.unwrap().read);
+        assert!(!r.get(&g.id).await.unwrap().read, "global is read-only");
+        assert!(!r.get(&other.id).await.unwrap().read, "foreign untouched");
+        // Already-read rows don't count again.
+        assert_eq!(r.mark_many_read(&all, &u1).await.unwrap(), 0);
+        assert_eq!(r.mark_many_read(&[], &u1).await.unwrap(), 0);
+
+        probe.reset();
+        assert_eq!(r.dismiss_many(&all, &u1).await.unwrap(), 2);
+        assert_eq!(probe.take().len(), 1);
+        assert!(r.get(&g.id).await.is_ok());
+        assert!(r.get(&other.id).await.is_ok());
+        assert_eq!(r.dismiss_many(&all, &NoticeAccess::All).await.unwrap(), 2);
+        assert!(r.get(&g.id).await.is_err());
     }
 
     /// Perf §15 R6/M1: the per-user list is two index range reads (no
