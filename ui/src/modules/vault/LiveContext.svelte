@@ -1,16 +1,30 @@
 <script module lang="ts">
-  // Shared 60 s cache of the cross-module reads, so flipping between notes of
-  // one bundle does not refetch the repo directory / monitor overview per note.
+  // Shared cache of the cross-module reads, so flipping between notes of one
+  // bundle does not refetch the repo directory / monitor overview / repo status
+  // per note. TTL is per key: 60 s for directories and overviews, 15 s for a
+  // repo's `git status`, 120 s for the forge's open-PR list (rate limited).
   const TTL_MS = 60_000;
-  const cache = new Map<string, { at: number; p: Promise<unknown> }>();
-  function cached<T>(key: string, load: () => Promise<T>): Promise<T> {
+  const STATUS_TTL_MS = 15_000;
+  const PRS_TTL_MS = 120_000;
+  const cache = new Map<string, { at: number; ttl: number; p: Promise<unknown>; signal?: AbortSignal }>();
+  function cached<T>(key: string, load: () => Promise<T>, ttl = TTL_MS, signal?: AbortSignal): Promise<T> {
     const hit = cache.get(key);
-    if (hit && Date.now() - hit.at < TTL_MS) return hit.p as Promise<T>;
+    // An entry whose load was aborted (a superseded note) is a miss — the
+    // abort is synchronous, its rejection (which evicts it) is not.
+    if (hit && Date.now() - hit.at < hit.ttl && !hit.signal?.aborted) return hit.p as Promise<T>;
     const p = load();
-    p.catch(() => cache.delete(key)); // failures retry on the next note
-    cache.set(key, { at: Date.now(), p });
+    const entry = { at: Date.now(), ttl, p, signal };
+    p.catch(() => { if (cache.get(key) === entry) cache.delete(key); }); // failures retry on the next note
+    cache.set(key, entry);
     return p;
   }
+  /** Whole-panel results per (workspace, hints): re-mounting the panel (an
+   *  Edit → Read toggle, flipping back to a note) within this window renders
+   *  instantly with zero requests. */
+  const RESULT_TTL_MS = 15_000;
+  const results = new Map<string, { at: number; ctx: unknown }>();
+  /** Open-PR counts the user asked for (opt-in forge call), per repo. */
+  const prCounts = new Map<string, { at: number; n: number }>();
 </script>
 
 <script lang="ts">
@@ -71,9 +85,9 @@
     }
   }
 
-  async function k8sHits(): Promise<WorkloadHit[]> {
+  async function k8sHits(signal: AbortSignal): Promise<WorkloadHit[]> {
     if (!hints.services.length) return [];
-    const overview = await cached('k8s:overview', () => k8sApi.monitorOverview('1h'));
+    const overview = await cached('k8s:overview', () => k8sApi.monitorOverview('1h', signal), TTL_MS, signal);
     const want = hints.k8sCluster ? norm(hints.k8sCluster) : null;
     const clusters = overview
       .filter((r) => r.enabled && (!want || norm(r.cluster.name) === want || r.cluster.id === hints.k8sCluster))
@@ -81,8 +95,11 @@
     const per = await Promise.all(
       clusters.map(async (r) => {
         try {
-          const w = await cached<K8sMonitorWorkloadsResp>(`k8s:wl:${r.cluster.id}:${hints.k8sNamespace ?? ''}`, () =>
-            k8sApi.monitorWorkloads(r.cluster.id, '1h', hints.k8sNamespace ?? undefined),
+          const w = await cached<K8sMonitorWorkloadsResp>(
+            `k8s:wl:${r.cluster.id}:${hints.k8sNamespace ?? ''}`,
+            () => k8sApi.monitorWorkloads(r.cluster.id, '1h', hints.k8sNamespace ?? undefined, signal),
+            TTL_MS,
+            signal,
           );
           return matchByName(hints.services, w.workloads, (x) => x.workload).map((row) => ({ cluster: r.cluster, row }));
         } catch {
@@ -93,58 +110,131 @@
     return per.flat().slice(0, 8);
   }
 
-  async function repoHits(): Promise<RepoHit[]> {
+  async function repoHits(signal: AbortSignal): Promise<RepoHit[]> {
     if (!hints.repos.length) return [];
-    const dir = await cached<RepoDirectory>('git:directory', () => api.bg.get<RepoDirectory>('/git/repos/directory'));
+    const dir = await cached<RepoDirectory>('git:directory', () => api.bg.get<RepoDirectory>('/git/repos/directory', signal), TTL_MS, signal);
     const matched = matchRepos(hints.repos, dir.repos).slice(0, 3);
     return Promise.all(
-      matched.map(async (repo, i) => {
-        const status = await api.bg.get<RepoStatusResp>(`/repos/${repo.id}/status`).catch(() => null);
-        // Open PRs ask the forge — only for the best match, never blocking the card.
-        const prs = i === 0 && repo.remote_url
-          ? await api.bg.get<{ items: unknown[] }>(`/repos/${repo.id}/prs?state=open`).then((r) => r.items.length, () => null)
-          : null;
-        return { repo, status, prs };
+      matched.map(async (repo) => {
+        const status = await cached(
+          `git:status:${repo.id}`,
+          () => api.bg.get<RepoStatusResp>(`/repos/${repo.id}/status`, signal),
+          STATUS_TTL_MS,
+          signal,
+        ).catch(() => null);
+        // Open PRs ask the forge (rate limited): opt-in from the card's chip,
+        // unless a recent answer is already cached.
+        return { repo, status, prs: cachedPrs(repo.id) };
       }),
     );
   }
 
-  async function load(): Promise<void> {
+  /** A still-fresh cached open-PR count, without fetching. */
+  function cachedPrs(repoId: string): number | null {
+    const hit = prCounts.get(repoId);
+    return hit && Date.now() - hit.at < PRS_TTL_MS ? hit.n : null;
+  }
+  let prLoading = $state<string | null>(null);
+  async function loadPrs(h: RepoHit): Promise<void> {
+    if (prLoading) return;
+    prLoading = h.repo.id;
+    try {
+      const n = await cached(
+        `git:prs:${h.repo.id}`,
+        () => api.bg.get<{ items: unknown[] }>(`/repos/${h.repo.id}/prs?state=open`).then((r) => r.items.length),
+        PRS_TTL_MS,
+      );
+      prCounts.set(h.repo.id, { at: Date.now(), n });
+      if (ctx) {
+        ctx = { ...ctx, repos: ctx.repos.map((r) => (r.repo.id === h.repo.id ? { ...r, prs: n } : r)) };
+        const prior = results.get(key);
+        if (prior) results.set(key, { at: prior.at, ctx });
+      }
+    } catch {
+      /* the chip stays clickable; the Pull requests button still works */
+    } finally {
+      prLoading = null;
+    }
+  }
+
+  let controller: AbortController | null = null;
+
+  async function load(force = false): Promise<void> {
     const mine = ++seq;
+    controller?.abort(); // superseded loads stop instead of finishing unseen
+    const ctl = new AbortController();
+    controller = ctl;
+    const signal = ctl.signal;
+    const rkey = key;
+    const prior = results.get(rkey);
+    if (!force && prior && Date.now() - prior.at < RESULT_TTL_MS) {
+      ctx = prior.ctx as Ctx;
+      loading = false;
+      return;
+    }
     loading = true;
     const failed: string[] = [];
     const nameHints = [...hints.databases, ...hints.services];
     const [workloads, repos, connections, collections, dashboards] = await Promise.all([
-      source('Kubernetes', failed, k8sHits),
-      source('Git', failed, repoHits),
+      source('Kubernetes', failed, () => k8sHits(signal)),
+      source('Git', failed, () => repoHits(signal)),
       source('Connections', failed, async () =>
         hints.databases.length || hints.services.length
-          ? matchByName(nameHints, await cached(`conn:${wsId}`, () => api.bg.get<Connection[]>(`/workspaces/${wsId}/connections`)), (c) => c.name)
+          ? matchByName(nameHints, await cached(`conn:${wsId}`, () => api.bg.get<Connection[]>(`/workspaces/${wsId}/connections`, signal), TTL_MS, signal), (c) => c.name)
           : [],
       ),
       source('API collections', failed, async () =>
         hints.collections.length
-          ? matchByName(hints.collections, await cached(`coll:${wsId}`, () => api.bg.get<ApiCollection[]>(`/workspaces/${wsId}/api-client/collections`)), (c) => c.name)
+          ? matchByName(hints.collections, await cached(`coll:${wsId}`, () => api.bg.get<ApiCollection[]>(`/workspaces/${wsId}/api-client/collections`, signal), TTL_MS, signal), (c) => c.name)
           : [],
       ),
       source('Dashboards', failed, async () =>
         hints.dashboards.length || hints.services.length
-          ? matchByName([...hints.dashboards, ...hints.services], await cached(`dash:${wsId}`, () => api.bg.get<DbDashboard[]>(`/workspaces/${wsId}/db/dashboards`)), (d) => d.name)
+          ? matchByName([...hints.dashboards, ...hints.services], await cached(`dash:${wsId}`, () => api.bg.get<DbDashboard[]>(`/workspaces/${wsId}/db/dashboards`, signal), TTL_MS, signal), (d) => d.name)
           : [],
       ),
     ]);
-    if (mine !== seq) return;
+    if (mine !== seq || signal.aborted) return;
     ctx = { workloads, repos, connections, collections, dashboards, failed };
+    if (!failed.length) results.set(rkey, { at: Date.now(), ctx });
     loading = false;
   }
+
+  function refresh(): void {
+    cache.clear();
+    results.clear();
+    prCounts.clear();
+    void load(true);
+  }
+
+  // Load only once the panel is (nearly) on screen: a typed note whose live
+  // context sits below the fold costs no requests until it is scrolled to.
+  let host = $state<HTMLElement | null>(null);
+  let visible = $state(typeof IntersectionObserver === 'undefined');
+  $effect(() => {
+    if (visible || !host) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          visible = true;
+          io.disconnect();
+        }
+      },
+      { rootMargin: '200px' },
+    );
+    io.observe(host);
+    return () => io.disconnect();
+  });
 
   // Keyed on the hints' VALUE: a poll that re-delivers the same note builds a
   // new (equal) hints object and must not refetch repo status per tick.
   const key = $derived(`${wsId}|${JSON.stringify(hints)}`);
   $effect(() => {
     void key;
+    if (!visible) return;
     untrack(() => void load());
   });
+  $effect(() => () => controller?.abort());
 
   const total = $derived(
     ctx ? ctx.workloads.length + ctx.repos.length + ctx.connections.length + ctx.collections.length + ctx.dashboards.length : 0,
@@ -170,22 +260,24 @@
   }
 </script>
 
-<section class="live" aria-label="Live context" aria-busy={loading}>
+<section class="live" aria-label="Live context" aria-busy={loading} bind:this={host} data-testid="vault-live-context">
   <h4>
     <Icon name="radar" size={13} /> Live context
     {#if ctx && !loading}
-      <button class="refresh" title="Refresh live context" aria-label="Refresh live context" onclick={() => { cache.clear(); void load(); }}>
+      <button class="refresh" title="Refresh live context" aria-label="Refresh live context" onclick={refresh}>
         <Icon name="refresh" size={12} />
       </button>
     {/if}
   </h4>
-  {#if loading && !ctx}
+  {#if !visible && !ctx}
+    <p class="dim">Live context loads when this panel is on screen.</p>
+  {:else if loading && !ctx}
     <p class="dim" role="status">Looking for matching workloads, repos and connections…</p>
   {:else if ctx}
     {#if ctx.failed.length}
       <p class="warn" role="alert">
         Couldn’t read {ctx.failed.join(', ')}.
-        <button class="link" onclick={() => { cache.clear(); void load(); }}>Retry</button>
+        <button class="link" onclick={refresh}>Retry</button>
       </p>
     {/if}
     {#if total === 0 && !ctx.failed.length}
@@ -220,7 +312,17 @@
             {:else}
               <span class="dim">Status unavailable</span>
             {/if}
-            {#if h.prs !== null}<span>{h.prs} open PR{h.prs === 1 ? '' : 's'}</span>{/if}
+            {#if h.prs !== null}
+              <span>{h.prs} open PR{h.prs === 1 ? '' : 's'}</span>
+            {:else if h.repo.remote_url}
+              <button
+                class="link prs"
+                data-testid="vault-live-prs"
+                title="Count open pull requests (asks the forge)"
+                disabled={prLoading === h.repo.id}
+                onclick={() => void loadPrs(h)}
+              >{prLoading === h.repo.id ? 'Counting PRs…' : 'Count open PRs'}</button>
+            {/if}
           </div>
           <div class="acts">
             <button class="btn small" onclick={() => openRepo(h.repo.id)}>Open repo</button>
@@ -277,6 +379,7 @@
   p { margin: 4px 0; font-size: var(--fs-s); }
   .dim { color: var(--text-dim); }
   .warn { color: var(--warning); }
+  .link.prs { font-size: var(--fs-xs); }
   .link { background: none; border: 0; padding: 0; color: var(--accent-text); cursor: pointer; font: inherit; text-decoration: underline; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
   .lc-card {

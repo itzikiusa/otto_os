@@ -45,6 +45,20 @@ pub struct Store {
     pub(crate) all_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     pub(crate) link_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Status aggregate COUNT round-trips — regression counter (F2).
+    #[cfg(test)]
+    pub(crate) status_count_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Note-index transactions committed — regression counter (F7).
+    #[cfg(test)]
+    pub(crate) index_commits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// The status aggregates that need a COUNT over links/tags/files.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StatusCounts {
+    pub unresolved: i64,
+    pub tags: i64,
+    pub attachments: i64,
 }
 
 impl Store {
@@ -56,6 +70,10 @@ impl Store {
             all_reads: Default::default(),
             #[cfg(test)]
             link_reads: Default::default(),
+            #[cfg(test)]
+            status_count_reads: Default::default(),
+            #[cfg(test)]
+            index_commits: Default::default(),
         }
     }
 
@@ -226,7 +244,49 @@ impl Store {
     }
 
     pub async fn status(&self, id: i64) -> Result<VaultStatus> {
+        Ok(self.status_with(id, None).await?.0)
+    }
+
+    /// Status with the three aggregate COUNTs taken from `cached` when the
+    /// caller knows nothing changed (F2); returns the counts it used.
+    pub async fn status_with(
+        &self,
+        id: i64,
+        cached: Option<StatusCounts>,
+    ) -> Result<(VaultStatus, StatusCounts)> {
         let v = self.get_vault(id).await?;
+        let counts = match cached {
+            Some(c) => c,
+            None => self.status_counts(id).await?,
+        };
+        #[cfg(test)]
+        if cached.is_none() {
+            self.status_count_reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let StatusCounts {
+            unresolved,
+            tags,
+            attachments,
+        } = counts;
+        Ok((
+            VaultStatus {
+                generation: None,
+                graph_generation: None,
+                id,
+                scan_state: v.scan_state,
+                last_scan_at: v.last_scan_at,
+                notes: v.notes,
+                links: v.links,
+                unresolved,
+                tags,
+                attachments,
+            },
+            counts,
+        ))
+    }
+
+    async fn status_counts(&self, id: i64) -> Result<StatusCounts> {
         let unresolved: i64 = sqlx::query(
             "SELECT COUNT(*) AS c FROM vault_links WHERE vault_id = ? AND dst_path IS NULL",
         )
@@ -249,18 +309,46 @@ impl Store {
                 .await
                 .map_err(dberr("vault.status"))?
                 .get("c");
-        Ok(VaultStatus {
-            generation: None,
-            graph_generation: None,
-            id,
-            scan_state: v.scan_state,
-            last_scan_at: v.last_scan_at,
-            notes: v.notes,
-            links: v.links,
+        Ok(StatusCounts {
             unresolved,
             tags,
             attachments,
         })
+    }
+
+    /// `(size, mtime_ns)` of the given paths, notes and files alike — the
+    /// watcher's targeted "did this really change?" probe (F2).
+    pub async fn sigs_for<'a>(
+        &self,
+        vault: i64,
+        paths: impl Iterator<Item = &'a str>,
+    ) -> Result<std::collections::HashMap<String, (i64, i64)>> {
+        let paths: Vec<&str> = paths.collect();
+        let mut out = std::collections::HashMap::new();
+        for chunk in paths.chunks(200) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT path, size, mtime_ns FROM vault_notes WHERE vault_id = ? AND path IN ({marks}) \
+                 UNION ALL SELECT path, size, mtime_ns FROM vault_files WHERE vault_id = ? AND path IN ({marks})"
+            );
+            // Only `?` placeholders are interpolated; paths are bound.
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).bind(vault);
+            for p in chunk {
+                q = q.bind(*p);
+            }
+            q = q.bind(vault);
+            for p in chunk {
+                q = q.bind(*p);
+            }
+            for r in q
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("vault.sigs_for"))?
+            {
+                out.insert(r.get("path"), (r.get("size"), r.get("mtime_ns")));
+            }
+        }
+        Ok(out)
     }
 
     // -- notes ---------------------------------------------------------------
@@ -353,7 +441,45 @@ impl Store {
             .begin()
             .await
             .map_err(dberr("vault.index.begin"))?;
-        Self::upsert_note_conn(&mut tx, vault, &note.row).await?;
+        Self::index_note_conn(&mut tx, vault, note, incoming, fts).await?;
+        tx.commit().await.map_err(dberr("vault.index.commit"))?;
+        #[cfg(test)]
+        self.index_commits
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Index many scanned notes in ONE transaction (F7: a cold 10k-note scan
+    /// commits ~50 times, not 10k). Scan-only: no incoming-link rewrites.
+    pub(crate) async fn index_notes(
+        &self,
+        vault: i64,
+        notes: &[crate::prepare::PreparedNote],
+        fts: bool,
+    ) -> Result<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("vault.index.begin"))?;
+        for note in notes {
+            Self::index_note_conn(&mut tx, vault, note, &[], fts).await?;
+        }
+        tx.commit().await.map_err(dberr("vault.index.commit"))?;
+        #[cfg(test)]
+        self.index_commits
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn index_note_conn(
+        tx: &mut sqlx::SqliteConnection,
+        vault: i64,
+        note: &crate::prepare::PreparedNote,
+        incoming: &[(i64, Option<String>)],
+        fts: bool,
+    ) -> Result<()> {
+        Self::upsert_note_conn(tx, vault, &note.row).await?;
         for sql in [
             "DELETE FROM vault_tags WHERE vault_id=? AND path=?",
             "DELETE FROM vault_links WHERE vault_id=? AND src_path=?",
@@ -388,11 +514,10 @@ impl Store {
                 .map_err(dberr("vault.index.incoming"))?;
         }
         if fts {
-            fts_put_conn(&mut tx, vault, &note.row.path, &note.row.title, &note.body)
+            fts_put_conn(tx, vault, &note.row.path, &note.row.title, &note.body)
                 .await
                 .map_err(dberr("vault.index.fts"))?;
         }
-        tx.commit().await.map_err(dberr("vault.index.commit"))?;
         Ok(())
     }
 
@@ -672,6 +797,35 @@ impl Store {
         .await
         .map_err(dberr("vault.unresolved_sources"))?;
         Ok(rows.iter().map(|r| r.get("src_path")).collect())
+    }
+
+    /// Link rows whose lower-cased raw target contains `needle` (ASCII,
+    /// lower-case) — the candidate set a newly created note can capture (F9).
+    pub async fn links_mentioning(
+        &self,
+        vault: i64,
+        needle: &str,
+    ) -> Result<Vec<(i64, String, String, Option<String>)>> {
+        let rows = sqlx::query(
+            "SELECT rowid, src_path, raw_target, dst_path FROM vault_links \
+             WHERE vault_id = ? AND instr(lower(raw_target), ?) > 0",
+        )
+        .bind(vault)
+        .bind(needle)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("vault.links_mentioning"))?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (
+                    r.get("rowid"),
+                    r.get("src_path"),
+                    r.get("raw_target"),
+                    r.get("dst_path"),
+                )
+            })
+            .collect())
     }
 
     /// Every link row `(rowid, src, raw, dst)` — the global re-resolve pass.

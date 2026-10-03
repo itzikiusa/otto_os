@@ -13,7 +13,10 @@ use otto_state::{CanvasRepo, NewScene, SceneUpdate};
 use serde::Deserialize;
 use std::sync::Arc;
 
-use crate::types::{empty_doc, CreateSceneReq, UpdateSceneReq};
+use crate::types::{empty_doc, raw_doc, CreateSceneReq, UpdateSceneReq};
+use axum::body::Bytes;
+use axum::http::{header, HeaderMap};
+use serde::de::DeserializeOwned;
 
 // ---------------------------------------------------------------------------
 // Context trait
@@ -29,6 +32,7 @@ pub trait CanvasCtx: Clone + Send + Sync + 'static {
 // Error → response
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 struct ApiErr(Error);
 
 impl From<Error> for ApiErr {
@@ -163,6 +167,43 @@ struct UpdateSceneQ {
     summary: bool,
 }
 
+/// Bodies above this are JSON-scanned on the blocking pool, not a runtime
+/// worker (a full 25 MB board takes tens of ms even as a `RawValue` scan).
+const PARSE_OFF_RUNTIME_ABOVE: usize = 1024 * 1024;
+
+/// Decode a document-carrying JSON body. Same contract as axum's `Json`
+/// extractor (415 without `application/json`, 400 on bad JSON) but large
+/// bodies are scanned in `spawn_blocking`.
+async fn json_body<T: DeserializeOwned + Send + 'static>(
+    headers: &HeaderMap,
+    body: Bytes,
+) -> ApiResult<T> {
+    let is_json = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|m| {
+            let m = m.trim();
+            m.eq_ignore_ascii_case("application/json")
+                || (m.starts_with("application/") && m.ends_with("+json"))
+        });
+    if !is_json {
+        return Err(Error::UnsupportedMedia("expected application/json".into()).into());
+    }
+    let large = body.len() > PARSE_OFF_RUNTIME_ABOVE;
+    let parse = move || {
+        serde_json::from_slice::<T>(&body)
+            .map_err(|e| ApiErr(Error::Invalid(format!("invalid JSON body: {e}"))))
+    };
+    if large {
+        tokio::task::spawn_blocking(parse)
+            .await
+            .map_err(|e| Error::Internal(format!("canvas body parse: {e}")))?
+    } else {
+        parse()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Handlers — collection (workspace-scoped)
 // ---------------------------------------------------------------------------
@@ -192,17 +233,22 @@ async fn create_scene<S: CanvasCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(WsPath { ws }): Path<WsPath>,
-    Json(req): Json<CreateSceneReq>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> ApiResult<Response> {
     ctx.roles().check(&user, &ws, WorkspaceRole::Editor).await?;
-    let doc = req.doc.unwrap_or_else(|| empty_doc(&req.title));
+    let req: CreateSceneReq = json_body(&headers, body).await?;
+    let doc_json = match req.doc {
+        Some(raw) => raw_doc(raw),
+        None => empty_doc(&req.title).to_string(),
+    };
     let scene = ctx
         .canvas_repo()
         .create(NewScene {
             workspace_id: ws,
             story_id: req.story_id,
             title: req.title,
-            doc_json: doc.to_string(),
+            doc_json,
             provider: req.provider.unwrap_or_else(|| "claude".into()),
             section: req.section,
             created_by: user.id,
@@ -229,9 +275,11 @@ async fn update_scene<S: CanvasCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(SceneIdPath { id }): Path<SceneIdPath>,
     Query(q): Query<UpdateSceneQ>,
-    Json(req): Json<UpdateSceneReq>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> ApiResult<Response> {
     check_scene_role(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let req: UpdateSceneReq = json_body(&headers, body).await?;
     if req.doc.is_some() {
         // Keep the pre-save document in the scene's history — at most one
         // user snapshot per window, so a 700 ms autosave stream doesn't churn
@@ -251,7 +299,7 @@ async fn update_scene<S: CanvasCtx>(
     }
     let patch = SceneUpdate {
         title: req.title,
-        doc_json: req.doc.map(|v| v.to_string()),
+        doc_json: req.doc.map(raw_doc),
         thumbnail: req.thumbnail,
         provider: req.provider,
         section: req.section,
@@ -317,4 +365,58 @@ async fn restore_version<S: CanvasCtx>(
         )
         .await?;
     Ok(Json(updated).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn json_headers() -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+        h
+    }
+
+    #[tokio::test]
+    async fn doc_is_kept_as_raw_text_without_reserialising() {
+        let body = Bytes::from_static(br#"{"doc": {"b": 1,  "a": [1, 2]}, "title": "t"}"#);
+        let req: UpdateSceneReq = json_body(&json_headers(), body).await.unwrap();
+        assert_eq!(raw_doc(req.doc.unwrap()), r#"{"b": 1,  "a": [1, 2]}"#);
+        assert_eq!(req.title.as_deref(), Some("t"));
+    }
+
+    #[tokio::test]
+    async fn null_or_missing_doc_leaves_the_document_unchanged() {
+        let req: UpdateSceneReq =
+            json_body(&json_headers(), Bytes::from_static(br#"{"doc": null}"#))
+                .await
+                .unwrap();
+        assert!(req.doc.is_none());
+        let req: UpdateSceneReq =
+            json_body(&json_headers(), Bytes::from_static(br#"{"title": "x"}"#))
+                .await
+                .unwrap();
+        assert!(req.doc.is_none());
+    }
+
+    #[tokio::test]
+    async fn large_bodies_parse_off_runtime_and_bad_json_or_type_is_rejected() {
+        let big = format!(
+            r#"{{"doc": {{"source": "{}"}}}}"#,
+            "x".repeat(2 * 1024 * 1024)
+        );
+        let req: UpdateSceneReq = json_body(&json_headers(), Bytes::from(big)).await.unwrap();
+        assert!(raw_doc(req.doc.unwrap()).len() > 2 * 1024 * 1024);
+
+        let bad =
+            json_body::<UpdateSceneReq>(&json_headers(), Bytes::from_static(b"{\"doc\": {")).await;
+        assert!(matches!(bad, Err(ApiErr(Error::Invalid(_)))));
+
+        let mut text = HeaderMap::new();
+        text.insert(header::CONTENT_TYPE, "text/plain".parse().unwrap());
+        let wrong = json_body::<UpdateSceneReq>(&text, Bytes::from_static(b"{}")).await;
+        assert!(matches!(wrong, Err(ApiErr(Error::UnsupportedMedia(_)))));
+        let none = json_body::<UpdateSceneReq>(&HeaderMap::new(), Bytes::from_static(b"{}")).await;
+        assert!(none.is_err());
+    }
 }

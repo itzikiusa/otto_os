@@ -308,7 +308,8 @@ the artifact. The CI badges (`ci_passed`/`ci_failed`/`ci_pending`) and the
 `attach_media` stores a binary **blob** (`proof_blobs`, content-addressed by
 sha256) and creates the owning `screenshot`/`video` artifact (`ref_kind=blob`,
 `content_ref=blob:<id>`, status `info`). The endpoint (**`POST /media`**, #129)
-takes base64 (`AttachMediaReq {kind, title, mime, data_base64, metadata?}`) and
+takes a raw body (`Content-Type` = mime, `?kind=&title=` — what the UI sends) or
+the legacy base64 JSON (`AttachMediaReq {kind, title, mime, data_base64, metadata?}`) and
 enforces:
 
 - **MIME allow-list** (`ALLOWED_MEDIA_MIMES`): `image/png`, `image/jpeg`,
@@ -320,6 +321,20 @@ enforces:
 Any non-failed media artifact earns the `ui_verified` badge. The raw bytes are
 served back inline via **`GET /proof-artifacts/{id}/blob`** (#130), and the UI
 renders the image/`<video>` directly in pack detail.
+
+**Where the bytes live.** Media is kept OUT of the state SQLite file: new
+blobs are written to a content-addressed file store,
+`data_dir/proof-media/<sha[..2]>/<sha>` (tmp + fsync + rename; an identical
+screenshot attached twice is stored once), and the `proof_blobs` row keeps only
+metadata (`stored = 1`, empty `data`). Rows written before this change still
+carry their bytes inline (`stored = 0`) and are served from there; a background
+job (90 s after boot, then daily) moves them in small batches — each row's
+bytes are re-hashed, written, **read back and verified** before the row drops
+its inline copy, and a row whose bytes don't match its recorded sha is left
+untouched. The same job deletes store files no row references (artifact
+deleted) once they are over an hour old, and logs the store's file/byte count.
+Base64 decoding and hashing run on the blocking pool. The blob route answers
+with `ETag` = sha + `immutable` caching (304 on revalidation).
 
 ### 8.3 API request/response evidence
 
@@ -541,7 +556,9 @@ wiring is a follow-up, so today it's a manual `/evidence/*` call.
 
 `ui/src/modules/proof/ProofPage.svelte` is a two-pane viewer:
 
-- **Left rail** — a status filter (`all · passed · failed · partial · missing ·
+- **Left rail** — loads 100 packs at a time (keyset paging, **Load more** at
+  the bottom); a `proof_pack_updated` event patches the row and the sidebar
+  chip in place from the event's `badges` instead of refetching. A status filter (`all · passed · failed · partial · missing ·
   waived`) over the workspace's packs, each row showing its title (or
   `work_item_id`), a `ProofStatusChip` (status + risk), the `work_item_kind` tag,
   and its `ProofBadges`. A **`+`** creates a `manual` pack (a random `work_item_id`)
@@ -552,7 +569,8 @@ wiring is a follow-up, so today it's a manual `/evidence/*` call.
   grouped by kind**. Each artifact shows a status dot, its title, a
   `sha:<8 hex>…` chip, the status label; media (`screenshot`/`video`) render
   inline; a `pr_check` artifact renders its per-check breakdown; previews are
-  expandable and **"Load full"** pulls the uncapped content.
+  expandable and **"Load full"** pulls the uncapped content (the detail
+  response itself only carries the 8 KiB preview, cut in SQL).
 - **Pack actions** — **Assemble** (diff + commands), **Add artifact**,
   **Add media** (screenshot/video, ≤25 MiB), **Add evidence** (api/db/kafka),
   **PR check**, **Refresh CI** (when repo-linked), **Requirements** (edit the

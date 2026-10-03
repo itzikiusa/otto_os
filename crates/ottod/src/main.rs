@@ -665,7 +665,9 @@ async fn run(cfg: Config) -> Result<(), String> {
             events.clone(),
         )),
         scheduled_tasks: otto_state::ScheduledTasksRepo::new(pool.clone()),
-        proof_repo: otto_state::ProofRepo::new(pool.clone()),
+        // Proof media lives in a content-addressed file store, not the state DB.
+        proof_repo: otto_state::ProofRepo::new(pool.clone())
+            .with_media_dir(cfg.data_dir.join("proof-media")),
         proof_locks: otto_server::proof::new_locks(),
         runs: otto_state::RunsRepo::new(pool.clone()),
         runs_engine: otto_server::run_engine::RunEngine::new(),
@@ -1226,6 +1228,8 @@ async fn run(cfg: Config) -> Result<(), String> {
     // design graph (graph rows only; the legacy rows/files are never touched)
     // and re-syncs a `sync` version when a legacy source changed.
     otto_server::design_hall::spawn_startup_import(&ctx);
+    // Move legacy inline proof media into the file store + daily GC.
+    otto_server::proof::spawn_media_maintenance(ctx.proof_repo.clone());
 
     // --- Vault docs-runs recovery: this restart killed any in-flight run ---
     // Flip still-non-terminal persisted runs to 'interrupted' and soft-trash

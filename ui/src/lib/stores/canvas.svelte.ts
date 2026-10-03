@@ -119,6 +119,9 @@ class CanvasStore {
     const write = (async () => {
       await previous?.catch(() => {});
       if (context !== this.#saveContext) return;
+      // Superseded while queued: a newer draft is already chained behind this
+      // write and will carry the latest doc — skip sending a stale multi-MB body.
+      if (this.#drafts.get(id) !== doc) return;
       await api.put(`/canvas/scenes/${id}?summary=true`, { doc }); // list row back, not the doc (SD-22)
       if (context !== this.#saveContext) return;
       if (this.#drafts.get(id) !== doc) return;

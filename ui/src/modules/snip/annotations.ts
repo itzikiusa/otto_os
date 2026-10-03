@@ -173,7 +173,9 @@ function drawAnno(
       const block = Math.max(8, Math.round(Math.max(w, h) / 24));
       const tw = Math.max(1, Math.round(w / block));
       const th = Math.max(1, Math.round(h / block));
-      const off = document.createElement('canvas');
+      // One reused scratch canvas — a fresh element per pixelate per frame
+      // churned GPU-backed allocations during drags (S-review).
+      const off = pixelScratch();
       off.width = tw;
       off.height = th;
       const octx = off.getContext('2d');
@@ -329,9 +331,72 @@ export function resizeAnno(a: Anno, handle: number, x: number, y: number): Anno 
   return { ...a, x1: nx, y1: ny, x2: nx + nw, y2: ny + nh };
 }
 
+let scratch: HTMLCanvasElement | null = null;
+function pixelScratch(): HTMLCanvasElement {
+  return (scratch ??= document.createElement('canvas'));
+}
+
 // ── Export ───────────────────────────────────────────────────────────────────
 
-/** Flatten image + annotations to a PNG blob at natural resolution. */
+/** Stable fingerprint of an annotation list: the editor skips the flatten +
+ *  upload entirely when nothing changed since the last successful save (a
+ *  select-click, an undo+redo back to the same state). FNV-1a over the JSON. */
+export function annosHash(annos: Anno[]): string {
+  const s = JSON.stringify(annos);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return `${s.length.toString(36)}-${(h >>> 0).toString(36)}`;
+}
+
+let encoder: Worker | null = null;
+let encoderBroken = false;
+let encodeSeq = 0;
+const pendingEncodes = new Map<number, { resolve: (b: Blob) => void; reject: (e: Error) => void }>();
+
+function encodeWorker(): Worker | null {
+  if (encoderBroken) return null;
+  if (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined') return null;
+  if (typeof createImageBitmap === 'undefined') return null;
+  if (encoder) return encoder;
+  try {
+    encoder = new Worker(new URL('./encode.worker.ts', import.meta.url), { type: 'module' });
+  } catch {
+    encoderBroken = true;
+    return null;
+  }
+  encoder.onmessage = (e: MessageEvent<{ id: number; blob?: Blob; error?: string }>) => {
+    const p = pendingEncodes.get(e.data.id);
+    if (!p) return;
+    pendingEncodes.delete(e.data.id);
+    if (e.data.blob) p.resolve(e.data.blob);
+    else p.reject(new Error(e.data.error ?? 'PNG encode failed'));
+  };
+  encoder.onerror = () => {
+    // A worker that can't start (CSP, old engine) degrades to the main thread.
+    encoderBroken = true;
+    for (const p of pendingEncodes.values()) p.reject(new Error('encode worker failed'));
+    pendingEncodes.clear();
+    encoder?.terminate();
+    encoder = null;
+  };
+  return encoder;
+}
+
+function encodeOnMain(canvas: HTMLCanvasElement): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (b) => (b ? resolve(b) : reject(new Error('PNG encode failed'))),
+      'image/png',
+    );
+  });
+}
+
+/** Flatten image + annotations to a PNG blob at natural resolution. The draw
+ *  happens here; the PNG encode runs in a worker (OffscreenCanvas
+ *  `convertToBlob`) when available, else falls back to `canvas.toBlob`. */
 export async function flatten(
   img: CanvasImageSource & { width: number; height: number },
   annos: Anno[],
@@ -342,12 +407,18 @@ export async function flatten(
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('canvas 2d context unavailable');
   render(ctx, img, annos);
-  return new Promise((resolve, reject) => {
-    canvas.toBlob(
-      (b) => (b ? resolve(b) : reject(new Error('PNG encode failed'))),
-      'image/png',
-    );
-  });
+  const w = encodeWorker();
+  if (!w) return encodeOnMain(canvas);
+  try {
+    const bitmap = await createImageBitmap(canvas);
+    const id = ++encodeSeq;
+    return await new Promise<Blob>((resolve, reject) => {
+      pendingEncodes.set(id, { resolve, reject });
+      w.postMessage({ id, bitmap }, [bitmap]);
+    });
+  } catch {
+    return encodeOnMain(canvas);
+  }
 }
 
 export async function blobToB64(blob: Blob): Promise<string> {

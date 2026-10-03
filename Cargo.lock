@@ -4394,6 +4394,7 @@ dependencies = [
  "dirs 7.0.0",
  "hex",
  "mime_guess",
+ "notify",
  "otto-core",
  "otto-state",
  "rustix",

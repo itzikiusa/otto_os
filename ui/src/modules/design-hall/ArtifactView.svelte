@@ -447,22 +447,9 @@
     );
     if (!ok) return;
     try {
-      const asText = textual;
-      const c = await api.fetchContent(id, { version: versionId, asText });
-      let res;
-      if (asText) {
-        res = await api.putContent(id, { content: c.text ?? '', base_version: head.id, message: `Restored v${seq}` });
-      } else {
-        const blob = await fetch(c.blobUrl!).then((r) => r.blob());
-        URL.revokeObjectURL(c.blobUrl!);
-        const b64 = await new Promise<string>((resolve, reject) => {
-          const fr = new FileReader();
-          fr.onerror = () => reject(fr.error);
-          fr.onload = () => resolve(String(fr.result).split(',')[1] ?? '');
-          fr.readAsDataURL(blob);
-        });
-        res = await api.putContent(id, { content_b64: b64, base_version: head.id, message: `Restored v${seq}` });
-      }
+      // Server-side: the old blob is re-committed as-is (no download +
+      // base64 re-upload of the bytes through the webview).
+      const res = await api.restoreVersion(id, versionId, { base_version: head.id, message: `Restored v${seq}` });
       api.captureSignal({
         artifact_id: id,
         kind: 'restored',

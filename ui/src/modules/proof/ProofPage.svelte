@@ -22,7 +22,7 @@
     attachApiEvidence,
     attachDbEvidence,
     attachKafkaEvidence,
-    attachMedia,
+    attachMediaRaw,
     ciRefresh,
     createProofPack,
     deleteArtifact,
@@ -363,20 +363,6 @@
     mFile = null;
   }
 
-  /** Read a File → base64 (no data-URL prefix). */
-  function fileToB64(blob: Blob): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onerror = () => reject(reader.error);
-      reader.onload = () => {
-        const result = reader.result as string;
-        const idx = result.indexOf(',');
-        resolve(idx >= 0 ? result.slice(idx + 1) : result);
-      };
-      reader.readAsDataURL(blob);
-    });
-  }
-
   async function submitMedia(): Promise<void> {
     if (!detail || !mFile || !mTitle.trim()) return;
     if (mFile.size > 25 * 1024 * 1024) {
@@ -384,13 +370,14 @@
       return;
     }
     try {
-      const data_base64 = await fileToB64(mFile);
-      await attachMedia(detail.pack.id, {
-        kind: mKind === 'video' ? 'video' : 'screenshot',
-        title: mTitle.trim(),
-        mime: mFile.type || (mKind === 'video' ? 'video/mp4' : 'image/png'),
-        data_base64,
-      });
+      // Raw body: the file goes over the wire as is (no base64 / JSON).
+      await attachMediaRaw(
+        detail.pack.id,
+        mKind === 'video' ? 'video' : 'screenshot',
+        mTitle.trim(),
+        mFile,
+        mFile.type || (mKind === 'video' ? 'video/mp4' : 'image/png'),
+      );
       await proof.refreshDetail();
       mediaOpen = false;
       resetMedia();
@@ -731,6 +718,12 @@
           </div>
         </button>
       {/each}
+      {#if proof.nextCursor}
+        <!-- Keyset paging: the list loads 100 packs at a time. -->
+        <button class="btn small ghost load-more" disabled={proof.loadingMore} aria-busy={proof.loadingMore} onclick={() => void proof.loadMore()}>
+          {proof.loadingMore ? 'Loading…' : 'Load more'}
+        </button>
+      {/if}
       {#if proof.packs.length === 0 && !listError}
         {#if proof.loading && !listLoaded}
           <LoadState what="proof packs" loading empty variant="compact" />
@@ -1557,5 +1550,10 @@
     .proof-page.phone .rail.hide-phone {
       display: none;
     }
+  }
+  .load-more {
+    display: block;
+    margin-block: 8px;
+    margin-inline: auto;
   }
 </style>

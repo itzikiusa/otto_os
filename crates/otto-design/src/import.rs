@@ -357,19 +357,18 @@ async fn import_scenes(
     index: &HashMap<(String, String), DesignArtifact>,
     report: &mut ImportReport,
 ) -> Result<()> {
-    let rows = sqlx::query(
-        "SELECT id, workspace_id, story_id, title, doc_json, section, created_by,
-                created_at, updated_at
-         FROM canvas_scenes ORDER BY created_at",
-    )
-    .fetch_all(svc.store().pool())
-    .await
-    .map_err(|e| Error::Internal(format!("design import: list canvas scenes: {e}")))?;
+    // D13: list ids + stamps only; a scene's (up to 25 MB) `doc_json` is read
+    // only when it changed since the last import — the boot import used to
+    // load every scene document to skip nearly all of them.
+    let heads = sqlx::query("SELECT id, updated_at FROM canvas_scenes ORDER BY created_at")
+        .fetch_all(svc.store().pool())
+        .await
+        .map_err(|e| Error::Internal(format!("design import: list canvas scenes: {e}")))?;
 
-    for r in &rows {
+    for h in &heads {
         report.scenes_scanned += 1;
-        let id: String = r.get("id");
-        let updated_at: String = r.get("updated_at");
+        let id: String = h.get("id");
+        let updated_at: String = h.get("updated_at");
         let existing = index.get(&(SOURCE_SCENE.to_string(), id.clone()));
         if let Some(a) = existing {
             if a.meta["imported_from"]["source_updated_at"].as_str() == Some(updated_at.as_str()) {
@@ -377,6 +376,19 @@ async fn import_scenes(
                 continue;
             }
         }
+        let Some(r) = sqlx::query(
+            "SELECT id, workspace_id, story_id, title, doc_json, section, created_by,
+                    created_at, updated_at
+             FROM canvas_scenes WHERE id = ?",
+        )
+        .bind(&id)
+        .fetch_optional(svc.store().pool())
+        .await
+        .map_err(|e| Error::Internal(format!("design import: read canvas scene: {e}")))?
+        else {
+            continue; // deleted meanwhile
+        };
+        let r = &r;
         let doc: String = r.get("doc_json");
         let bytes = doc.clone().into_bytes();
         if bytes.len() > format::MAX_CONTENT_BYTES {

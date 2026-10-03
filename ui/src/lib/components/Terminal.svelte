@@ -712,7 +712,8 @@
     if (socketFactory || readOnly) return;
     try {
       const png = await toPngBytes(file);
-      const snip = await snipApi.upload(bytesToBase64(png), file.name || 'pasted.png');
+      // Raw image/png body (no base64 inflation).
+      const snip = await snipApi.uploadPng(new Blob([png as Uint8Array<ArrayBuffer>], { type: 'image/png' }));
       // Bracketed paste: the path lands as one literal chunk the TUI will not
       // auto-submit, so the user can still type a prompt around it.
       sendJson({ type: 'input', data: textToBase64(`\x1b[200~${snip.path}\x1b[201~`) });

@@ -2,7 +2,7 @@
 // (see crates/otto-server/src/routes/proof.rs). Workspace-scoped list/create +
 // summary; flat-by-id detail/patch/delete/assemble/waive + per-artifact ops.
 
-import { api, authedBlobUrl, authedText } from './client';
+import { api, ApiError, authedBlobUrl, authedText, baseUrl, getToken, postBlob } from './client';
 import type {
   AddArtifactReq,
   ApiEvidenceReq,
@@ -14,6 +14,7 @@ import type {
   DbEvidenceReq,
   KafkaEvidenceReq,
   PrCheckReq,
+  Problem,
   ProofPackDetail,
   ProofPackResp,
   ProofSnapshotMeta,
@@ -39,6 +40,41 @@ export function listProofPacks(wsId: string, q?: ProofPackFilter): Promise<Proof
   if (q?.work_item_id) params.set('work_item_id', q.work_item_id);
   const qs = params.toString();
   return api.get<ProofPackResp[]>(`/workspaces/${wsId}/proof-packs${qs ? `?${qs}` : ''}`);
+}
+
+/** One keyset page of the pack list: `next` is the `x-next-cursor` header
+ *  (null = last page). */
+export interface ProofPackPage {
+  packs: ProofPackResp[];
+  next: string | null;
+}
+
+/** Page through a workspace's proof packs (newest first, `limit` per page). */
+export async function listProofPacksPage(
+  wsId: string,
+  q: ProofPackFilter | undefined,
+  limit: number,
+  cursor?: string | null,
+): Promise<ProofPackPage> {
+  const params = new URLSearchParams();
+  if (q?.status) params.set('status', q.status);
+  if (q?.work_item_kind) params.set('work_item_kind', q.work_item_kind);
+  if (q?.work_item_id) params.set('work_item_id', q.work_item_id);
+  params.set('limit', String(limit));
+  if (cursor) params.set('cursor', cursor);
+  const token = getToken();
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  const resp = await fetch(`${baseUrl()}/api/v1/workspaces/${wsId}/proof-packs?${params}`, { headers });
+  if (!resp.ok) {
+    let problem: Problem = { code: 'internal', message: resp.statusText };
+    try {
+      problem = await resp.json();
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new ApiError(resp.status, problem);
+  }
+  return { packs: (await resp.json()) as ProofPackResp[], next: resp.headers.get('x-next-cursor') };
 }
 
 /** Cheap per-work-item badge/status roll-up for the whole workspace. */
@@ -121,6 +157,19 @@ export function getSnapshot(id: string): Promise<ProofSnapshotResp> {
 /** Attach screenshot/video evidence (base64; ≤25 MiB). */
 export function attachMedia(id: string, body: AttachMediaReq): Promise<ProofPackResp> {
   return api.post<ProofPackResp>(`/proof-packs/${id}/media`, body);
+}
+
+/** Attach media as a RAW body (`Content-Type` = the file's mime) — no base64
+ *  inflation or JSON parse; the UI's path. */
+export function attachMediaRaw(
+  id: string,
+  kind: 'screenshot' | 'video',
+  title: string,
+  file: Blob,
+  mime: string,
+): Promise<ProofPackResp> {
+  const qs = new URLSearchParams({ kind, title });
+  return postBlob<ProofPackResp>(`/proof-packs/${id}/media?${qs}`, file, mime);
 }
 
 /** A revocable object URL for a media artifact's blob (auth'd fetch). */

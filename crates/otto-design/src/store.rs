@@ -65,6 +65,19 @@ enum Arg {
     I(i64),
 }
 
+type SqliteQuery<'q> = sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>;
+
+/// Bind `args` in order.
+fn bind_args<'q>(mut q: SqliteQuery<'q>, args: &'q [Arg]) -> SqliteQuery<'q> {
+    for a in args {
+        q = match a {
+            Arg::S(s) => q.bind(s.as_str()),
+            Arg::I(i) => q.bind(*i),
+        };
+    }
+    q
+}
+
 // ---------------------------------------------------------------------------
 // Row mappers
 // ---------------------------------------------------------------------------
@@ -1230,6 +1243,41 @@ impl Store {
     /// version a link pins or was extracted from, published / publish-pinned
     /// versions, and versions a learning signal cites.
     pub async fn protected_versions(&self, a: &DesignArtifact) -> Result<HashSet<String>> {
+        let pins = self.publish_pinned_index().await?;
+        self.protected_versions_with(a, &pins).await
+    }
+
+    /// Every publish's pinned set, parsed ONCE: artifact id → pinned version
+    /// ids. A library-wide prune used to re-read and re-parse every publish's
+    /// `pinned_set_json` per artifact (O(artifacts × publishes)).
+    pub async fn publish_pinned_index(&self) -> Result<HashMap<String, HashSet<String>>> {
+        let sets: Vec<String> = sqlx::query_scalar("SELECT pinned_set_json FROM design_publishes")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("design.version.protected.publishes"))?;
+        let mut out: HashMap<String, HashSet<String>> = HashMap::new();
+        for s in sets {
+            if let Ok(Value::Array(items)) = serde_json::from_str::<Value>(&s) {
+                for it in items {
+                    let aid = it.get("artifact_id").and_then(Value::as_str);
+                    let vid = it.get("version_id").and_then(Value::as_str);
+                    if let (Some(aid), Some(vid)) = (aid, vid) {
+                        out.entry(aid.to_string())
+                            .or_default()
+                            .insert(vid.to_string());
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// [`Self::protected_versions`] against a pre-parsed publish pin index.
+    pub async fn protected_versions_with(
+        &self,
+        a: &DesignArtifact,
+        pins: &HashMap<String, HashSet<String>>,
+    ) -> Result<HashSet<String>> {
         let mut out: HashSet<String> = HashSet::new();
         out.extend(a.head_version_id.clone());
         out.extend(a.approved_version_id.clone());
@@ -1248,23 +1296,37 @@ impl Store {
         .await
         .map_err(dberr("design.version.protected"))?;
         out.extend(ids);
-        // Versions pinned inside ANY publish's pinned set (embedded artifacts).
-        let sets: Vec<String> = sqlx::query_scalar("SELECT pinned_set_json FROM design_publishes")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(dberr("design.version.protected.publishes"))?;
-        for s in sets {
-            if let Ok(Value::Array(items)) = serde_json::from_str::<Value>(&s) {
-                for it in items {
-                    if it.get("artifact_id").and_then(Value::as_str) == Some(a.id.as_str()) {
-                        if let Some(v) = it.get("version_id").and_then(Value::as_str) {
-                            out.insert(v.to_string());
-                        }
-                    }
-                }
-            }
+        if let Some(p) = pins.get(&a.id) {
+            out.extend(p.iter().cloned());
         }
         Ok(out)
+    }
+
+    /// Artifacts the scheduled prune should look at: those holding more than
+    /// one `autosave` version created before `cutoff` (RFC 3339). Everything
+    /// else has nothing to squash, so it costs no per-artifact queries.
+    pub async fn prune_candidates(&self, cutoff: &str) -> Result<Vec<Id>> {
+        sqlx::query_scalar(
+            "SELECT artifact_id FROM design_versions
+              WHERE kind = 'autosave' AND created_at < ?
+              GROUP BY artifact_id HAVING COUNT(*) > 1",
+        )
+        .bind(cutoff)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("design.version.prune.candidates"))
+    }
+
+    /// Row-side storage gauge: version count + the bytes they reference
+    /// (logical, before blob dedupe).
+    pub async fn version_totals(&self) -> Result<(i64, i64)> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(size_bytes), 0) AS bytes FROM design_versions",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("design.version.totals"))?;
+        Ok((row.get("n"), row.get("bytes")))
     }
 
     /// Delete version rows (opt-in prune only). Returns their blob hashes.
@@ -1983,56 +2045,97 @@ impl Store {
                 .map(|a| (a, String::new(), 0.0))
                 .collect());
         };
-        let mut args = Vec::new();
-        let sql = if self.has_fts().await {
-            args.push(Arg::S(mq));
-            let mut sql = String::from(concat!(
+        // FTS first; a DB without the (runtime-built) FTS table answers "no
+        // such table" and falls back to the LIKE scan — no per-search
+        // `sqlite_master` probe on the hot path.
+        match self.search_fts(&mq, f, limit, offset).await {
+            Ok(hits) => Ok(hits),
+            Err(e) if e.to_string().contains("no such table") => {
+                self.search_like(query, f, limit, offset).await
+            }
+            Err(e) => Err(dberr("design.search")(e)),
+        }
+    }
+
+    /// FTS5 search in two steps: the inner query ranks and pages the matching
+    /// rowids (bm25 only), the outer one computes `snippet()` for that page
+    /// alone — snippets used to be built for EVERY match before the LIMIT.
+    async fn search_fts(
+        &self,
+        mq: &str,
+        f: &ArtifactFilter,
+        limit: i64,
+        offset: i64,
+    ) -> std::result::Result<Vec<(DesignArtifact, String, f64)>, sqlx::Error> {
+        let mut args = vec![Arg::S(mq.to_string())];
+        let mut inner = String::from(
+            "SELECT design_search_fts.rowid AS rid, bm25(design_search_fts) AS rank,
+                    a.status AS st
+             FROM design_search_fts
+             JOIN design_artifacts a ON a.id = design_search_fts.artifact_id
+             WHERE design_search_fts MATCH ?",
+        );
+        f.push_where(&mut inner, &mut args);
+        inner.push_str(&format!(" ORDER BY {STATUS_ORDER}, rank LIMIT ? OFFSET ?"));
+        args.push(Arg::I(limit));
+        args.push(Arg::I(offset));
+        args.push(Arg::S(mq.to_string()));
+        let sql = format!(
+            concat!(
+                "WITH page AS ({inner}) ",
                 "SELECT a.*, v.seq AS head_seq, ",
                 art_enrich_cols!(),
                 ",
                         snippet(design_search_fts, -1, '\u{2039}', '\u{203a}', '\u{2026}', 12) AS snip,
-                        bm25(design_search_fts) AS rank
-                 FROM design_search_fts
+                        page.rank AS rank
+                 FROM page
+                 JOIN design_search_fts ON design_search_fts.rowid = page.rid
                  JOIN design_artifacts a ON a.id = design_search_fts.artifact_id
                  LEFT JOIN design_versions v ON v.id = a.head_version_id
-                 WHERE design_search_fts MATCH ?"
-            ));
-            f.push_where(&mut sql, &mut args);
-            sql.push_str(&format!(" ORDER BY {STATUS_ORDER}, rank LIMIT ? OFFSET ?"));
-            sql
-        } else {
-            let needle = format!("%{}%", query.trim().replace('%', "\\%").replace('_', "\\_"));
-            args.push(Arg::S(needle.clone()));
-            args.push(Arg::S(needle));
-            let mut sql = format!(
-                "{ART_SELECT} WHERE (a.title LIKE ? ESCAPE '\\' OR a.tags_json LIKE ? ESCAPE '\\')"
-            );
-            f.push_where(&mut sql, &mut args);
-            sql.push_str(&format!(
-                " ORDER BY {STATUS_ORDER}, a.updated_at DESC LIMIT ? OFFSET ?"
-            ));
-            sql
-        };
-        args.push(Arg::I(limit));
-        args.push(Arg::I(offset));
-        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
-        for a in &args {
-            q = match a {
-                Arg::S(s) => q.bind(s.as_str()),
-                Arg::I(i) => q.bind(*i),
-            };
-        }
-        let rows = q
+                 WHERE design_search_fts MATCH ?
+                 ORDER BY {order}, page.rank"
+            ),
+            inner = inner,
+            order = STATUS_ORDER,
+        );
+        let rows = bind_args(sqlx::query(sqlx::AssertSqlSafe(sql.as_str())), &args)
             .fetch_all(&self.pool)
-            .await
-            .map_err(dberr("design.search"))?;
+            .await?;
         rows.iter()
             .map(|r| {
-                let a = row_artifact(r)?;
+                let a = row_artifact(r).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
                 let snip = r.try_get::<String, _>("snip").unwrap_or_default();
                 let rank = r.try_get::<f64, _>("rank").unwrap_or(0.0);
                 Ok((a, snip, -rank))
             })
+            .collect()
+    }
+
+    /// The no-FTS fallback: a LIKE scan over titles + tags.
+    async fn search_like(
+        &self,
+        query: &str,
+        f: &ArtifactFilter,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<(DesignArtifact, String, f64)>> {
+        let needle = format!("%{}%", query.trim().replace('%', "\\%").replace('_', "\\_"));
+        let mut args = vec![Arg::S(needle.clone()), Arg::S(needle)];
+        let mut sql = format!(
+            "{ART_SELECT} WHERE (a.title LIKE ? ESCAPE '\\' OR a.tags_json LIKE ? ESCAPE '\\')"
+        );
+        f.push_where(&mut sql, &mut args);
+        sql.push_str(&format!(
+            " ORDER BY {STATUS_ORDER}, a.updated_at DESC LIMIT ? OFFSET ?"
+        ));
+        args.push(Arg::I(limit));
+        args.push(Arg::I(offset));
+        let rows = bind_args(sqlx::query(sqlx::AssertSqlSafe(sql.as_str())), &args)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("design.search"))?;
+        rows.iter()
+            .map(|r| Ok((row_artifact(r)?, String::new(), 0.0)))
             .collect()
     }
 }

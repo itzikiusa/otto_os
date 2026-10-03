@@ -469,6 +469,14 @@ pub enum Event {
         /// Done-contract readiness 0..100 (see `proof::compute_done_contract`).
         #[serde(default)]
         done_score: u8,
+        /// The pack's badges after this recompute, so a listener can patch its
+        /// summary row in place instead of refetching (absent from older
+        /// emitters).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        badges: Option<Vec<String>>,
+        /// Evidence count after this recompute.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact_count: Option<u32>,
     },
     /// A scheduled-task run started, finished, or errored. The Scheduled Tasks page
     /// subscribes and re-fetches the task's run history on a matching tick instead

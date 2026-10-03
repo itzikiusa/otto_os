@@ -267,6 +267,10 @@ pub fn router<S: DesignCtx>() -> Router<S> {
             "/design/artifacts/{id}/versions/{v}/content",
             get(version_content::<S>),
         )
+        .route(
+            "/design/artifacts/{id}/versions/{v}/restore",
+            post(restore_version::<S>),
+        )
         .route("/design/artifacts/{id}/approve", post(approve::<S>))
         .route(
             "/design/artifacts/{id}/links",
@@ -284,6 +288,7 @@ pub fn router<S: DesignCtx>() -> Router<S> {
         )
         .route("/design/admin/import", post(run_import::<S>))
         .route("/design/admin/prune", post(prune::<S>))
+        .route("/design/admin/storage", get(storage::<S>))
         .merge(crate::brand::http::routes::<S>())
         .merge(crate::site::http::routes::<S>())
 }
@@ -391,15 +396,48 @@ fn filter_from(
     })
 }
 
+/// Does `If-None-Match` already name `sha` (or `*`)? Weak validators match
+/// too — the tag is the content hash either way.
+fn etag_matches(headers: &axum::http::HeaderMap, sha: &str) -> bool {
+    headers
+        .get_all(header::IF_NONE_MATCH)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(|t| t.trim().trim_start_matches("W/").trim_matches('"'))
+        .any(|t| t == "*" || t == sha)
+}
+
+/// `304 Not Modified` for a conditional GET whose tag still matches.
+fn not_modified(sha: &str, cache: &'static str) -> ApiResult<Response> {
+    Response::builder()
+        .status(StatusCode::NOT_MODIFIED)
+        .header(header::CACHE_CONTROL, cache)
+        .header(header::ETAG, format!("\"{sha}\""))
+        .body(Body::empty())
+        .map_err(|e| ApiErr(Error::Internal(format!("build response: {e}"))))
+}
+
+/// The head's bytes change under the same URL: cache, but revalidate (a
+/// matching `If-None-Match` is a 304 with no blob read).
+const CACHE_REVALIDATE: &str = "private, no-cache";
+/// A version (by id or seq) or a sha-keyed thumbnail never changes.
+const CACHE_IMMUTABLE: &str = "private, max-age=31536000, immutable";
+
 /// Raw bytes of one version, served with the artifact's mime. `sandbox` CSP +
 /// `nosniff` keep an HTML/SVG design from ever running at the daemon origin.
-fn content_response(a: &DesignArtifact, v: &DesignVersion, bytes: Vec<u8>) -> ApiResult<Response> {
+fn content_response(
+    a: &DesignArtifact,
+    v: &DesignVersion,
+    bytes: Vec<u8>,
+    cache: &'static str,
+) -> ApiResult<Response> {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, a.mime.as_str())
         .header("x-content-type-options", "nosniff")
         .header(header::CONTENT_SECURITY_POLICY, "sandbox")
-        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::CACHE_CONTROL, cache)
         .header(header::ETAG, format!("\"{}\"", v.blob_sha256))
         .header("x-design-version", v.id.as_str())
         .header("x-design-seq", v.seq.to_string())
@@ -691,11 +729,16 @@ async fn get_content<S: DesignCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(IdPath { id }): Path<IdPath>,
+    headers: axum::http::HeaderMap,
 ) -> ApiResult<Response> {
     let svc = ctx.design();
     let a = load_artifact(&ctx, &svc, &user, &id, WorkspaceRole::Viewer).await?;
-    let (v, bytes) = svc.head_content(&a).await?;
-    content_response(&a, &v, bytes)
+    let v = svc.head_version(&a).await?;
+    if etag_matches(&headers, &v.blob_sha256) {
+        return not_modified(&v.blob_sha256, CACHE_REVALIDATE);
+    }
+    let bytes = svc.version_bytes(&v).await?;
+    content_response(&a, &v, bytes, CACHE_REVALIDATE)
 }
 
 async fn put_content<S: DesignCtx>(
@@ -734,10 +777,21 @@ async fn put_content<S: DesignCtx>(
     Ok(Json(saved).into_response())
 }
 
+#[derive(Deserialize, Default)]
+struct ThumbQuery {
+    /// The thumbnail sha the caller expects (`?v=<thumb_blob>`): when it is
+    /// the current one the response is cacheable forever (the URL is
+    /// content-keyed); otherwise it is served revalidate-only.
+    #[serde(default)]
+    v: Option<String>,
+}
+
 async fn get_thumbnail<S: DesignCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(IdPath { id }): Path<IdPath>,
+    Query(q): Query<ThumbQuery>,
+    headers: axum::http::HeaderMap,
 ) -> ApiResult<Response> {
     let svc = ctx.design();
     let a = load_artifact(&ctx, &svc, &user, &id, WorkspaceRole::Viewer).await?;
@@ -745,12 +799,21 @@ async fn get_thumbnail<S: DesignCtx>(
         .thumb_blob
         .as_deref()
         .ok_or_else(|| Error::NotFound(format!("design artifact {} has no thumbnail", a.id)))?;
+    let cache = if q.v.as_deref() == Some(sha) {
+        CACHE_IMMUTABLE
+    } else {
+        CACHE_REVALIDATE
+    };
+    if etag_matches(&headers, sha) {
+        return not_modified(sha, cache);
+    }
     let bytes = svc.blobs().get(sha).await?;
     let mime = crate::service::thumb_mime(&bytes).unwrap_or("image/png");
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, mime)
         .header("x-content-type-options", "nosniff")
+        .header(header::CACHE_CONTROL, cache)
         .header(header::ETAG, format!("\"{sha}\""))
         .body(Body::from(bytes))
         .map_err(|e| ApiErr(Error::Internal(format!("build response: {e}"))))
@@ -823,12 +886,40 @@ async fn version_content<S: DesignCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(VersionPath { id, v }): Path<VersionPath>,
+    headers: axum::http::HeaderMap,
 ) -> ApiResult<Response> {
     let svc = ctx.design();
     let a = load_artifact(&ctx, &svc, &user, &id, WorkspaceRole::Viewer).await?;
     let version = svc.resolve_version(&a, &v).await?;
+    // A version id / seq names immutable bytes.
+    if etag_matches(&headers, &version.blob_sha256) {
+        return not_modified(&version.blob_sha256, CACHE_IMMUTABLE);
+    }
     let bytes = svc.version_bytes(&version).await?;
-    content_response(&a, &version, bytes)
+    content_response(&a, &version, bytes, CACHE_IMMUTABLE)
+}
+
+/// Restore an older version as a new `restore` head, server-side (the bytes
+/// never round-trip through the client). `base_version` guards like a PUT.
+async fn restore_version<S: DesignCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(VersionPath { id, v }): Path<VersionPath>,
+    Json(req): Json<RestoreReq>,
+) -> ApiResult<Response> {
+    let svc = ctx.design();
+    let a = load_artifact(&ctx, &svc, &user, &id, WorkspaceRole::Editor).await?;
+    let version = svc.resolve_version(&a, &v).await?;
+    let saved = svc
+        .restore_version(
+            &a,
+            &version,
+            req.base_version,
+            Author::user(&user.id),
+            req.message,
+        )
+        .await?;
+    Ok(Json(saved).into_response())
 }
 
 async fn approve<S: DesignCtx>(
@@ -1138,6 +1229,20 @@ async fn prune<S: DesignCtx>(
         )
         .await?;
     Ok(Json(report).into_response())
+}
+
+/// Storage gauge: blob files/bytes on disk, version rows/bytes, and the
+/// scheduled retention pass (Design:Admin via the policy table; root only).
+async fn storage<S: DesignCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+) -> ApiResult<Response> {
+    if !user.is_root {
+        return Err(ApiErr(Error::Forbidden(
+            "the design storage gauge is root-only".into(),
+        )));
+    }
+    Ok(Json(ctx.design().storage().await?).into_response())
 }
 
 #[cfg(test)]
@@ -1741,5 +1846,154 @@ mod tests {
         // The failed puts left the WebP in place.
         let (_, got, _) = call(&app, Method::GET, &uri, None).await;
         assert_eq!(got, webp);
+    }
+
+    async fn get_with_etag(
+        app: &Router,
+        uri: &str,
+        etag: &str,
+    ) -> (StatusCode, Vec<u8>, axum::http::HeaderMap) {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("if-none-match", etag)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec();
+        (status, bytes, headers)
+    }
+
+    #[tokio::test]
+    async fn conditional_gets_answer_304_and_versions_are_immutable() {
+        let (app, _ctx) = app().await;
+        let (_, b, _) = call(
+            &app,
+            Method::POST,
+            "/design/artifacts",
+            Some(serde_json::json!({
+                "workspace_id": "w1", "format": "html", "title": "T", "content": "<p>1</p>"
+            })),
+        )
+        .await;
+        let aid = json_of(&b)["artifact"]["id"].as_str().unwrap().to_string();
+        let uri = format!("/design/artifacts/{aid}/content");
+        let (st, _, h) = call(&app, Method::GET, &uri, None).await;
+        assert_eq!(st, StatusCode::OK);
+        let etag = h.get("etag").unwrap().to_str().unwrap().to_string();
+        assert_eq!(h.get("cache-control").unwrap(), CACHE_REVALIDATE);
+        let (st, body, _) = get_with_etag(&app, &uri, &etag).await;
+        assert_eq!(st, StatusCode::NOT_MODIFIED);
+        assert!(body.is_empty(), "a 304 carries no blob");
+        let (st, _, _) = get_with_etag(&app, &uri, "\"deadbeef\"").await;
+        assert_eq!(st, StatusCode::OK, "a stale tag gets the bytes");
+        // Version content by seq is immutable and revalidates the same way.
+        let vuri = format!("/design/artifacts/{aid}/versions/1/content");
+        let (st, _, h) = call(&app, Method::GET, &vuri, None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(h.get("cache-control").unwrap(), CACHE_IMMUTABLE);
+        let (st, _, _) = get_with_etag(&app, &vuri, &format!("W/{etag}")).await;
+        assert_eq!(st, StatusCode::NOT_MODIFIED);
+    }
+
+    #[tokio::test]
+    async fn restore_recommits_an_old_version_server_side() {
+        let (app, ctx) = app().await;
+        let (_, b, _) = call(
+            &app,
+            Method::POST,
+            "/design/artifacts",
+            Some(serde_json::json!({
+                "workspace_id": "w1", "format": "html", "title": "T", "content": "<p>one</p>"
+            })),
+        )
+        .await;
+        let created = json_of(&b);
+        let aid = created["artifact"]["id"].as_str().unwrap().to_string();
+        let v1 = created["version"]["id"].as_str().unwrap().to_string();
+        let (_, b, _) = call(
+            &app,
+            Method::PUT,
+            &format!("/design/artifacts/{aid}/content"),
+            Some(serde_json::json!({ "content": "<p>two</p>" })),
+        )
+        .await;
+        let v2 = json_of(&b)["version"]["id"].as_str().unwrap().to_string();
+        let blobs_before = ctx.design().blobs().usage().await.0;
+
+        // A stale base is a 409, like a PUT.
+        let (st, _, _) = call(
+            &app,
+            Method::POST,
+            &format!("/design/artifacts/{aid}/versions/{v1}/restore"),
+            Some(serde_json::json!({ "base_version": v1 })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT);
+        let (st, b, _) = call(
+            &app,
+            Method::POST,
+            &format!("/design/artifacts/{aid}/versions/v1/restore"),
+            Some(serde_json::json!({ "base_version": v2 })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+        let saved = json_of(&b);
+        assert_eq!(saved["version"]["seq"], 3);
+        assert_eq!(saved["version"]["kind"], "restore");
+        assert_eq!(saved["version"]["provenance"]["restored_from"], v1.as_str());
+        let (_, got, _) = call(
+            &app,
+            Method::GET,
+            &format!("/design/artifacts/{aid}/content"),
+            None,
+        )
+        .await;
+        assert_eq!(got, b"<p>one</p>");
+        assert_eq!(
+            ctx.design().blobs().usage().await.0,
+            blobs_before,
+            "the restored blob is reused, not copied"
+        );
+    }
+
+    #[tokio::test]
+    async fn sha_keyed_thumbnails_cache_forever_and_replaced_ones_are_gcd() {
+        let (app, ctx) = app().await;
+        let (_, b, _) = call(
+            &app,
+            Method::POST,
+            "/design/artifacts",
+            Some(serde_json::json!({ "workspace_id": "w1", "format": "html", "title": "T" })),
+        )
+        .await;
+        let aid = json_of(&b)["artifact"]["id"].as_str().unwrap().to_string();
+        let uri = format!("/design/artifacts/{aid}/thumbnail");
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(b"first");
+        put_raw(&app, &uri, png.clone()).await;
+        let sha1 = crate::blobs::sha256_hex(&png);
+        let (_, _, h) = call(&app, Method::GET, &format!("{uri}?v={sha1}"), None).await;
+        assert_eq!(h.get("cache-control").unwrap(), CACHE_IMMUTABLE);
+        let (_, _, h) = call(&app, Method::GET, &uri, None).await;
+        assert_eq!(h.get("cache-control").unwrap(), CACHE_REVALIDATE);
+        let (st, _, _) = get_with_etag(&app, &uri, &format!("\"{sha1}\"")).await;
+        assert_eq!(st, StatusCode::NOT_MODIFIED);
+
+        let mut png2 = png.clone();
+        png2.extend_from_slice(b"-second");
+        put_raw(&app, &uri, png2).await;
+        assert!(
+            !ctx.design().blobs().exists(&sha1).await,
+            "the replaced thumbnail is GC'd at once"
+        );
     }
 }

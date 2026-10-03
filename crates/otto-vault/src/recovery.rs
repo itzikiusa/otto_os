@@ -8,8 +8,13 @@
 //! in-process copy is kept per vault root. It is purely a CACHE: the directory
 //! listing stays authoritative, any revision the index doesn't know yet (older
 //! history, a crash between the revision write and the append, another
-//! process) has its meta read once and is appended. Nothing is ever deleted —
-//! coalescing and retention are a separate, approval-gated decision.
+//! process) has its meta read once and is appended. Nothing is ever deleted;
+//! retention stays a separate, approval-gated decision.
+//!
+//! **Storage (F1).** Revision bodies are deduped (`before` is a content-
+//! addressed blob, hard-linked from the previous revision's `after`) and user
+//! autosaves of one note within [`COALESCE_SECS`] extend ONE revision instead
+//! of minting a directory per typing pause. See [`VaultEngine::prepare_revision`].
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -35,6 +40,52 @@ fn valid_id(id: &str) -> Result<()> {
 }
 
 const PATH_INDEX: &str = ".path-index.jsonl";
+/// Content-addressed revision bodies (F1). Hidden + not a valid revision id,
+/// so neither the index nor the revision listing ever sees it.
+const BLOBS: &str = ".otto-history/.blobs";
+/// User autosaves of one path inside this window share one revision (F1),
+/// mirroring the canvas `USER_SNAPSHOT_EVERY_SECS` cadence.
+pub(crate) const COALESCE_SECS: u64 = 300;
+/// Bound on the in-process open-revision map (pruned of expired entries).
+const OPEN_REVISIONS_CAP: usize = 4096;
+
+/// A revision snapshotted by [`VaultEngine::prepare_revision`], committed by
+/// [`VaultEngine::commit_revision`] once the write landed.
+pub(crate) struct PendingRevision {
+    revision: VaultRevision,
+    coalesce: bool,
+    opened: std::time::Instant,
+    /// A coalesced revision's previous `after` sha, retired at commit.
+    superseded: Option<String>,
+}
+
+/// The newest committed revision per (vault root, path) — the coalescing
+/// candidate, and the hard-link source for the next revision's `before`.
+#[derive(Clone)]
+struct OpenRevision {
+    revision: VaultRevision,
+    opened: std::time::Instant,
+    coalescable: bool,
+}
+
+fn open_revisions() -> &'static Mutex<HashMap<(String, String), OpenRevision>> {
+    static OPEN: OnceLock<Mutex<HashMap<(String, String), OpenRevision>>> = OnceLock::new();
+    OPEN.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| Error::Internal(format!("recovery write task: {e}")))?
+}
+
+/// Revision-file writes / coalesced saves — regression counters (F1).
+#[cfg(test)]
+pub(crate) static REVISION_FILE_WRITES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub(crate) static REVISIONS_COALESCED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// Vault root → (revision id → note path). See the module docs.
 type PathIndex = Arc<HashMap<String, String>>;
@@ -244,50 +295,223 @@ impl VaultEngine {
             .map_err(|e| Error::Internal(format!("list recovery directory: {e}")))?
     }
 
+    /// Snapshot `before`/`after` for a write that is about to happen (F1).
+    ///
+    /// Layout: `before` lives content-addressed in `.otto-history/.blobs/<sha>`
+    /// (hard-linked from the previous revision's `after` when that is the same
+    /// content, so the copy costs no bytes); `after` lives in the revision dir
+    /// as `a-<sha>`. With `coalesce`, a user autosave that continues the open
+    /// revision of the same path (same reason, its `after` == this `before`,
+    /// opened < [`COALESCE_SECS`] ago) REUSES that revision: only a new `a-<sha>`
+    /// is written, the meta is repointed at commit and the superseded `a-<sha>`
+    /// is unlinked. Nothing else is ever deleted. `meta.json` is written once,
+    /// by [`Self::commit_revision`], after the note itself was replaced; a crash
+    /// before that leaves an invisible, harmless orphan (and for a coalesced
+    /// revision the old meta still points at the old, still-present file).
+    /// Revision files use a plain `fsync` — the note keeps F_FULLFSYNC.
     pub(crate) async fn prepare_revision(
         root: &str,
         path: &str,
         before: Option<&[u8]>,
         after: &[u8],
         reason: &str,
-    ) -> Result<Option<VaultRevision>> {
+        coalesce: bool,
+    ) -> Result<Option<PendingRevision>> {
         if before == Some(after) {
             return Ok(None);
+        }
+        let before_hash = before.map(hash);
+        let after_hash = hash(after);
+        let key = (root.to_string(), path.to_string());
+        let last = open_revisions()
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&key).cloned());
+        let reuse = last.as_ref().filter(|open| {
+            coalesce
+                && open.coalescable
+                && open.revision.reason == reason
+                && open.opened.elapsed().as_secs() < COALESCE_SECS
+                && before_hash.as_deref() == Some(open.revision.after_hash.as_str())
+        });
+        let (root_s, after_v) = (root.to_string(), after.to_vec());
+        if let Some(open) = reuse {
+            let mut revision = open.revision.clone();
+            let superseded = std::mem::replace(&mut revision.after_hash, after_hash.clone());
+            revision.committed = false;
+            let dir = format!(".otto-history/{}", revision.id);
+            let name = format!("{dir}/a-{after_hash}");
+            blocking(move || Self::write_light(&root_s, &name, &after_v)).await?;
+            #[cfg(test)]
+            REVISIONS_COALESCED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Ok(Some(PendingRevision {
+                revision,
+                coalesce,
+                opened: open.opened,
+                superseded: Some(superseded),
+            }));
         }
         let revision = VaultRevision {
             id: otto_core::new_id().to_string(),
             path: path.into(),
             created_at: chrono::Utc::now().to_rfc3339(),
-            before_hash: before.map(hash),
-            after_hash: hash(after),
+            before_hash: before_hash.clone(),
+            after_hash: after_hash.clone(),
             reason: reason.into(),
             committed: false,
         };
         let dir = format!(".otto-history/{}", revision.id);
-        if let Some(bytes) = before {
-            Self::recovery_write(root, &format!("{dir}/before"), bytes).await?;
-        }
-        Self::recovery_write(root, &format!("{dir}/after"), after).await?;
-        Self::recovery_write(
-            root,
-            &format!("{dir}/meta.json"),
-            &serde_json::to_vec(&revision).unwrap(),
-        )
+        let before_v = before.map(<[u8]>::to_vec);
+        // The previous revision of this path already holds `before` as its
+        // `a-<sha>`: link it into the blob store instead of writing it again.
+        let link_from = last
+            .filter(|open| before_hash.as_deref() == Some(open.revision.after_hash.as_str()))
+            .map(|open| {
+                format!(
+                    ".otto-history/{}/a-{}",
+                    open.revision.id, open.revision.after_hash
+                )
+            });
+        blocking(move || {
+            if let (Some(bytes), Some(sha)) = (before_v.as_deref(), before_hash.as_deref()) {
+                Self::write_blob(&root_s, sha, bytes, link_from.as_deref())?;
+            }
+            Self::write_light(&root_s, &format!("{dir}/a-{after_hash}"), &after_v)
+        })
         .await?;
-        Ok(Some(revision))
+        Ok(Some(PendingRevision {
+            revision,
+            coalesce,
+            opened: std::time::Instant::now(),
+            superseded: None,
+        }))
     }
 
-    pub(crate) async fn commit_revision(root: &str, revision: Option<VaultRevision>) -> Result<()> {
-        if let Some(mut revision) = revision {
-            revision.committed = true;
-            Self::recovery_write(
-                root,
-                &format!(".otto-history/{}/meta.json", revision.id),
-                &serde_json::to_vec(&revision).unwrap(),
-            )
-            .await?;
+    /// Write `meta.json` (once, `committed:true`) after the note was replaced,
+    /// then retire a coalesced revision's superseded `a-<sha>`.
+    pub(crate) async fn commit_revision(
+        root: &str,
+        pending: Option<PendingRevision>,
+    ) -> Result<()> {
+        let Some(mut pending) = pending else {
+            return Ok(());
+        };
+        pending.revision.committed = true;
+        let id = pending.revision.id.clone();
+        let meta = serde_json::to_vec(&pending.revision).unwrap();
+        let superseded = pending
+            .superseded
+            .take()
+            .filter(|sha| *sha != pending.revision.after_hash);
+        let root_s = root.to_string();
+        blocking(move || {
+            Self::write_light(&root_s, &format!(".otto-history/{id}/meta.json"), &meta)?;
+            if let Some(sha) = superseded {
+                // Private to this revision dir (a blob-store link is its own
+                // name), so dropping it never touches another revision.
+                if let Ok((parent, name)) =
+                    Self::text_parent(&root_s, &format!(".otto-history/{id}/a-{sha}"))
+                {
+                    let _ = rustix::fs::unlinkat(&parent, name.as_str(), AtFlags::empty());
+                }
+            }
+            Ok(())
+        })
+        .await?;
+        if let Ok(mut m) = open_revisions().lock() {
+            if m.len() > OPEN_REVISIONS_CAP {
+                m.retain(|_, open| open.opened.elapsed().as_secs() < COALESCE_SECS);
+            }
+            m.insert(
+                (root.to_string(), pending.revision.path.clone()),
+                OpenRevision {
+                    revision: pending.revision,
+                    opened: pending.opened,
+                    coalescable: pending.coalesce,
+                },
+            );
         }
         Ok(())
+    }
+
+    /// Blocking create-or-replace of a hidden revision file: owner-only
+    /// parent, temp + rename, plain `fsync` (not F_FULLFSYNC).
+    fn write_light(root: &str, rel: &str, bytes: &[u8]) -> Result<()> {
+        let (parent, name) = Self::text_parent(root, rel)?;
+        rustix::fs::fchmod(&parent, rustix::fs::Mode::RWXU)
+            .map_err(|e| Error::Internal(format!("protect recovery directory: {e}")))?;
+        let temp = format!(".{name}.otto-tmp-{}", otto_core::new_id());
+        let fd = rustix::fs::openat(
+            &parent,
+            temp.as_str(),
+            rustix::fs::OFlags::WRONLY
+                | rustix::fs::OFlags::CREATE
+                | rustix::fs::OFlags::EXCL
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .map_err(|e| Error::Internal(format!("create recovery temp: {e}")))?;
+        let res = (|| {
+            let mut file = std::fs::File::from(fd);
+            file.write_all(bytes)
+                .map_err(|e| Error::Internal(format!("write recovery record: {e}")))?;
+            rustix::fs::fsync(&file)
+                .map_err(|e| Error::Internal(format!("flush recovery record: {e}")))?;
+            drop(file);
+            rustix::fs::renameat(&parent, temp.as_str(), &parent, name.as_str())
+                .map_err(|e| Error::Internal(format!("replace recovery record: {e}")))
+        })();
+        if res.is_err() {
+            let _ = rustix::fs::unlinkat(&parent, temp.as_str(), AtFlags::empty());
+        }
+        #[cfg(test)]
+        if res.is_ok() {
+            REVISION_FILE_WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        res
+    }
+
+    /// Content-addressed blob: no-op when present, else a hard link from
+    /// `link_from` (same content, verified by its name) or a fresh write.
+    fn write_blob(root: &str, sha: &str, bytes: &[u8], link_from: Option<&str>) -> Result<()> {
+        let rel = format!("{BLOBS}/{sha}");
+        let (parent, name) = Self::text_parent(root, &rel)?;
+        if rustix::fs::statat(&parent, name.as_str(), AtFlags::SYMLINK_NOFOLLOW).is_ok() {
+            return Ok(());
+        }
+        if let Some(src) = link_from {
+            if let Ok((src_parent, src_name)) = Self::text_parent(root, src) {
+                if rustix::fs::linkat(
+                    &src_parent,
+                    src_name.as_str(),
+                    &parent,
+                    name.as_str(),
+                    AtFlags::empty(),
+                )
+                .is_ok()
+                {
+                    return Ok(());
+                }
+            }
+        }
+        Self::write_light(root, &rel, bytes)
+    }
+
+    /// One revision body: legacy in-dir copy first, then the F1 layout.
+    async fn revision_body(root: &str, dir: &str, legacy: &str, sha: &str) -> Result<Vec<u8>> {
+        for rel in [
+            format!("{dir}/{legacy}"),
+            format!("{dir}/a-{sha}"),
+            format!("{BLOBS}/{sha}"),
+        ] {
+            match Self::recovery_read(root, &rel).await {
+                Ok(bytes) => return Ok(bytes),
+                Err(Error::NotFound(_)) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(Error::NotFound("recovery entry no longer exists".into()))
     }
 
     pub async fn revisions(
@@ -346,18 +570,18 @@ impl VaultEngine {
         )
         .map_err(|e| Error::Invalid(format!("invalid revision record: {e}")))?;
         let before = if revision.before_hash.is_some() {
+            let sha = revision.before_hash.as_deref().unwrap_or_default();
             Some(
-                String::from_utf8(
-                    Self::recovery_read(&v.root_path, &format!("{dir}/before")).await?,
-                )
-                .map_err(|_| Error::Invalid("revision contains non-UTF-8 content".into()))?,
+                String::from_utf8(Self::revision_body(&v.root_path, &dir, "before", sha).await?)
+                    .map_err(|_| Error::Invalid("revision contains non-UTF-8 content".into()))?,
             )
         } else {
             None
         };
-        let after =
-            String::from_utf8(Self::recovery_read(&v.root_path, &format!("{dir}/after")).await?)
-                .map_err(|_| Error::Invalid("revision contains non-UTF-8 content".into()))?;
+        let after = String::from_utf8(
+            Self::revision_body(&v.root_path, &dir, "after", &revision.after_hash).await?,
+        )
+        .map_err(|_| Error::Invalid("revision contains non-UTF-8 content".into()))?;
         if before.as_deref().map(|raw| hash(raw.as_bytes())) != revision.before_hash
             || hash(after.as_bytes()) != revision.after_hash
         {

@@ -19,7 +19,7 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { designBus } from '../../lib/events.svelte';
-  import { search, updateProject, type DesignListFilter } from '../../lib/api/design';
+  import { getArtifact, search, updateProject, type DesignListFilter } from '../../lib/api/design';
   import type { DesignArtifact, DesignSearchHit, DesignStudio } from '../../lib/api/types';
   import ArtifactCard from './ArtifactCard.svelte';
   import StudioBadge from './StudioBadge.svelte';
@@ -69,17 +69,24 @@
         ? { studio: scope.id }
         : { story_id: scope.id };
 
-  /** `append` fetches the next page; otherwise reload everything shown so far
-   *  (at least one page) so a live refresh never collapses "Load more". */
+  /** `append` fetches the next page by KEYSET cursor (the last row's
+   *  `updated_at|id`, newest-first like the server) — OFFSET paging re-read
+   *  every skipped row. Otherwise reload everything shown so far (at least
+   *  one page) so a resync never collapses "Load more". */
   async function loadScoped(append = false): Promise<void> {
     const my = ++sSeq;
     sLoading = true;
-    const offset = append ? hits.length : 0;
+    const last = append ? hits[hits.length - 1]?.artifact : undefined;
     const limit = append ? PAGE : Math.max(PAGE, hits.length);
     try {
-      const page = await search('', { ...filter(), limit, offset });
+      const page = await search('', { ...filter(), limit, ...(last ? { cursor: `${last.updated_at}|${last.id}` } : {}) });
       if (my !== sSeq) return;
-      hits = append ? [...hits, ...page.filter((h) => !hits.some((x) => x.artifact.id === h.artifact.id))] : page;
+      if (append) {
+        const have = new Set(hits.map((h) => h.artifact.id));
+        hits = [...hits, ...page.filter((h) => !have.has(h.artifact.id))];
+      } else {
+        hits = page;
+      }
       hasMore = page.length === limit;
       sError = null;
       sLoaded = true;
@@ -99,16 +106,74 @@
       void loadScoped();
     });
   });
+  // A resync (WS reconnect: events may have been missed) reloads the slice.
   $effect(() => {
     void designBus.resyncTick;
-    void designBus.seq;
     untrack(() => {
-      if (!sLoaded) return;
-      clearTimeout(reloadTimer);
-      reloadTimer = setTimeout(() => void loadScoped(), 600); // coalesce bursts
+      if (sLoaded) scheduleReload();
     });
     return () => clearTimeout(reloadTimer);
   });
+  function scheduleReload(): void {
+    clearTimeout(reloadTimer);
+    reloadTimer = setTimeout(() => void loadScoped(), 600); // coalesce bursts
+  }
+  // Live events PATCH the cards they name (one detail GET each) instead of
+  // re-reading the whole slice; only creates/deletes/link changes — which
+  // can change membership — fall back to a debounced reload.
+  let seenScoped = designBus.seq;
+  const patchIds = new Set<string>();
+  let patchTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    const now = designBus.seq;
+    untrack(() => {
+      const evs = designBus.since(seenScoped);
+      seenScoped = now;
+      if (!sLoaded || !evs.length) return;
+      const ids = new Set(hits.map((h) => h.artifact.id));
+      let full = false;
+      for (const ev of evs) {
+        if (ev.type === 'design_learning_update') continue;
+        if (ev.type === 'design_artifact_updated' && ev.change !== 'created' && ev.change !== 'deleted') {
+          if (ids.has(ev.artifact_id)) patchIds.add(ev.artifact_id);
+          // An update to a card this slice doesn't show can't add it here
+          // (studio/project/story membership changes arrive as their own events).
+          else if (scope.kind === 'project' && ev.change === 'meta') full = true;
+          continue;
+        }
+        full = true;
+      }
+      if (full || patchIds.size > 20) {
+        patchIds.clear();
+        scheduleReload();
+      } else if (patchIds.size && !patchTimer) {
+        patchTimer = setTimeout(() => {
+          patchTimer = undefined;
+          void patchCards();
+        }, 350);
+      }
+    });
+    return () => clearTimeout(patchTimer);
+  });
+  async function patchCards(): Promise<void> {
+    const ids = [...patchIds];
+    patchIds.clear();
+    const my = sSeq;
+    const fresh = await Promise.all(ids.map((id) => getArtifact(id).then((d) => d.artifact, () => null)));
+    if (my !== sSeq) return; // a reload landed meanwhile
+    const ok = fresh.filter((a): a is DesignArtifact => !!a);
+    if (ok.length < ids.length) {
+      scheduleReload(); // gone or unreadable → the server decides
+      return;
+    }
+    const byId = new Map<string, DesignArtifact>(ok.map((a) => [a.id, a]));
+    hits = hits
+      .map((h) => {
+        const a = byId.get(h.artifact.id);
+        return a ? { ...h, artifact: a } : h;
+      })
+      .filter((h) => scope.kind !== 'project' || h.artifact.project_id === scope.id);
+  }
   const hitById = $derived(new Map(hits.map((h) => [h.artifact.id, h])));
   const storyKeysOf = (id: string): string[] =>
     (hitById.get(id)?.story_ids ?? []).map((sid) => library.stories[sid]?.source_key).filter((k): k is string => !!k);
