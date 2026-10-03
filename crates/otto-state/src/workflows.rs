@@ -1059,6 +1059,34 @@ impl WorkflowsRepo {
     /// Lifecycle-only read of a run (perf W1): `(status, waiting_approval)`
     /// without loading or parsing `nodes_json` (live runs carry 50–200 KB).
     /// `None` when the run is gone.
+    /// The run's original `input` alone (perf N5: the notify node read the
+    /// whole run — `nodes_json` included — just for this). `Null` when the
+    /// row is gone or the JSON is unreadable, like the old full read's
+    /// fallback.
+    pub async fn run_input(&self, id: &Id) -> Result<serde_json::Value> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT input_json FROM workflow_runs WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(dberr("run input"))?;
+        Ok(row
+            .and_then(|(j,)| serde_json::from_str(&j).ok())
+            .unwrap_or(serde_json::Value::Null))
+    }
+
+    /// The user who started the run (`None` for trigger/schedule runs or a
+    /// missing row) — one column, for the run start (perf N5).
+    pub async fn run_created_by(&self, id: &Id) -> Result<Option<Id>> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT created_by FROM workflow_runs WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(dberr("run created_by"))?;
+        Ok(row.and_then(|(c,)| c))
+    }
+
     pub async fn run_status(&self, id: &Id) -> Result<Option<(RunStatus, bool)>> {
         let row: Option<(String, i64)> = sqlx::query_as(
             "SELECT status, COALESCE(waiting_approval, 0) FROM workflow_runs WHERE id = ?",
@@ -1579,6 +1607,41 @@ mod tests {
             .await
             .unwrap();
         assert!(t.created_by.is_none(), "trigger runs carry no starter");
+        // Perf N5: the single-column reads agree with the full row and read
+        // neither nodes_json nor the whole row.
+        let probe = repo.pool.statement_probe();
+        probe.reset();
+        assert_eq!(
+            repo.run_created_by(&r.id).await.unwrap().as_deref(),
+            Some("user-b")
+        );
+        assert!(repo.run_created_by(&t.id).await.unwrap().is_none());
+        assert!(repo.run_created_by(&"gone".into()).await.unwrap().is_none());
+        let with_input = repo
+            .create_run(
+                &wf.id,
+                &wf.workspace_id,
+                &serde_json::json!({"jira_ticket": "OT-1"}),
+                None,
+            )
+            .await
+            .unwrap();
+        probe.reset();
+        assert_eq!(
+            repo.run_input(&with_input.id).await.unwrap(),
+            serde_json::json!({"jira_ticket": "OT-1"})
+        );
+        assert_eq!(
+            repo.run_input(&"gone".into()).await.unwrap(),
+            serde_json::Value::Null
+        );
+        let stmts = probe.take();
+        assert!(
+            stmts
+                .iter()
+                .all(|q| !q.contains("SELECT *") && !q.contains("nodes_json")),
+            "{stmts:?}"
+        );
     }
 
     #[tokio::test]
@@ -1866,8 +1929,9 @@ mod tests {
     /// ~200 KB) — what every `update_run` / `update_run_progress` does off the
     /// runtime. `progress_write` is memoized per node, so a steady-state write
     /// (one node changed) must stay well under the cold full projection.
-    /// Timing-sensitive, so `#[ignore]`d in CI; run with
-    /// `cargo test -p otto-state --lib big_run_write_budget -- --ignored --nocapture`.
+    /// Timing-sensitive, so `#[ignore]`d in the per-PR run; the nightly bench
+    /// runs it in release (`.github/workflows/nightly-bench.yml`):
+    /// `cargo test --release -p otto-state --lib big_run_write_budget -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn big_run_write_budget() {
@@ -1898,8 +1962,15 @@ mod tests {
         let t = std::time::Instant::now();
         crate::workflow_progress::nodes_projection(&nodes).unwrap();
         let full = t.elapsed();
-        eprintln!("big run {size} B: cold {cold:?}, warm max {warm:?}, unmemoized {full:?}");
-        let budget = if cfg!(debug_assertions) { 150 } else { 15 };
+        // Greppable for the nightly bench summary (.github/workflows/nightly-bench.yml).
+        eprintln!(
+            "WORKFLOW_BIG_RUN size={size}B cold={cold:?} warm_max={warm:?} unmemoized={full:?}"
+        );
+        // `OTTO_BENCH_WRITE_MS` overrides the ceiling (nightly runs release).
+        let budget = std::env::var("OTTO_BENCH_WRITE_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(if cfg!(debug_assertions) { 150 } else { 15 });
         assert!(
             warm < std::time::Duration::from_millis(budget),
             "steady-state progress write {warm:?} over {budget} ms"
