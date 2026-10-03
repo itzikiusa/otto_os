@@ -4,6 +4,7 @@
   // picks the label column; `mapping.y[]` pick the numeric series.
   import ResultsGrid from './ResultsGrid.svelte';
   import type { DbViz, DbWidgetMapping, QueryResult } from '../../lib/api/types';
+  import { bucketBars, decimateMinMax, topSlices } from './chart-sample';
 
   interface Props {
     result: QueryResult | null;
@@ -55,7 +56,21 @@
       name: result.columns[yi]?.name ?? `s${yi}`,
       values: result.rows.map((r) => toNum(r[yi])),
     }));
-    return { labels, series };
+    // Sample to what a 300-unit tile can show (chart-sample.ts): bars average
+    // into ≤150 buckets, lines/areas keep each bucket's min + max (~2 per
+    // viewBox unit), a pie keeps its 11 largest slices + "Other".
+    if (viz === 'bar') return bucketBars(labels, series);
+    if (viz === 'line' || viz === 'area') {
+      const n = labels.length;
+      const target = 2 * W;
+      if (n <= target) return { labels, series, aggregated: 0 };
+      return {
+        labels,
+        series: series.map((sr) => ({ name: sr.name, values: decimateMinMax(sr.values, target) })),
+        aggregated: n,
+      };
+    }
+    return { labels, series, aggregated: 0 };
   });
 
   // ── Number ─────────────────────────────────────────────────────────────────
@@ -125,7 +140,8 @@
     if (!resolved || resolved.series.length === 0) return [];
     // NaN and negative values can't be pie fractions — treat both as 0 (a
     // negative slice would rewind `acc` and corrupt every arc after it).
-    const vals = resolved.series[0].values.map((v) => (Number.isNaN(v) || v < 0 ? 0 : v));
+    const top = topSlices(resolved.labels, resolved.series[0].values);
+    const vals = top.values;
     const total = vals.reduce((a, b) => a + b, 0) || 1;
     let acc = 0;
     const cx = 80;
@@ -148,7 +164,7 @@
       return {
         d,
         color: COLORS[i % COLORS.length],
-        label: resolved.labels[i],
+        label: top.labels[i],
         pct: Math.round(frac * 100),
       };
     });
@@ -215,11 +231,16 @@
         {/each}
       {/if}
     </svg>
-    {#if resolved.series.length > 1}
+    {#if resolved.series.length > 1 || resolved.aggregated > 0}
       <ul class="legend inline">
-        {#each resolved.series as s, si (si)}
-          <li><span class="sw" style="background:{COLORS[si % COLORS.length]}"></span>{s.name}</li>
-        {/each}
+        {#if resolved.series.length > 1}
+          {#each resolved.series as s, si (si)}
+            <li><span class="sw" style="background:{COLORS[si % COLORS.length]}"></span>{s.name}</li>
+          {/each}
+        {/if}
+        {#if resolved.aggregated > 0}
+          <li class="dim" data-testid="chart-aggregated">{resolved.aggregated.toLocaleString()} points {viz === 'bar' ? 'averaged' : 'sampled'}</li>
+        {/if}
       </ul>
     {/if}
   </div>
