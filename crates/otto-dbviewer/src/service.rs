@@ -444,6 +444,8 @@ pub struct DbViewerService {
     /// Multi-target / parameterised runs ("Run on…"), retained in memory for
     /// status polling and result fetch (see `service/multirun.rs`).
     multi_runs: Arc<std::sync::Mutex<multirun::MultiRunStore>>,
+    /// Built schema graphs with single-flight builds (see [`GraphCache`]).
+    graphs: Arc<GraphCache>,
 }
 
 /// How long an enforced connection's completion snapshot is reused. Short: it
@@ -451,6 +453,74 @@ pub struct DbViewerService {
 const ENFORCED_COMPLETION_TTL: Duration = Duration::from_secs(60);
 /// Tables introspected for an enforced connection's completion snapshot.
 const ENFORCED_COMPLETION_MAX_TABLES: usize = 300;
+
+/// Cadence of the eligibility re-check while a query runs (revocation, policy
+/// switch, credential change). Each tick is one access snapshot (2 indexed
+/// state reads) on a legacy connection; the full scope rebuild only runs on
+/// enforced ones. Was 500 ms with 3+ reads per tick.
+const ELIGIBILITY_TICK: Duration = Duration::from_secs(2);
+/// Driver client handles (pools, Mongo/Redis/ClickHouse clients) not handed
+/// out for this long are dropped by [`DbViewerService::reap_idle`], so an
+/// abandoned connection stops heartbeating to a dead tunnel port.
+const HANDLE_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
+/// How long a built schema graph (ERD / DB Assistant / enforced completion
+/// source) is reused per (connection, credentials, schema). Refresh clears it.
+const SCHEMA_GRAPH_TTL: Duration = Duration::from_secs(120);
+
+/// The access state one request needs — the connection row and its access
+/// policy — read ONCE and passed down, instead of every helper re-reading
+/// them (a legacy Run used to make ~13 state reads; see perf DB-06).
+#[derive(Clone)]
+struct AccessSnapshot {
+    conn: Connection,
+    policy: otto_core::access::AccessPolicy,
+}
+
+impl AccessSnapshot {
+    fn enforced(&self) -> bool {
+        self.policy.mode == otto_core::access::AccessMode::Enforced
+    }
+}
+
+/// Built schema graphs, keyed `{conn_id}\0{cache_key}\0{schema}\0{max}`,
+/// with a per-key single-flight gate so concurrent diagram / assistant /
+/// completion requests build one graph, not one each. Graphs are stored
+/// BEFORE the per-caller edge filter (that runs on every request).
+#[derive(Default)]
+struct GraphCache {
+    entries: std::sync::Mutex<HashMap<String, (Instant, Arc<SchemaGraph>)>>,
+    gates: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl GraphCache {
+    fn get(&self, key: &str) -> Option<Arc<SchemaGraph>> {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        entries.retain(|_, (at, _)| at.elapsed() < SCHEMA_GRAPH_TTL);
+        entries.get(key).map(|(_, g)| Arc::clone(g))
+    }
+    fn put(&self, key: String, graph: Arc<SchemaGraph>) {
+        self.entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, (Instant::now(), graph));
+    }
+    fn gate(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut gates = self.gates.lock().unwrap_or_else(|e| e.into_inner());
+        Arc::clone(gates.entry(key.to_string()).or_default())
+    }
+    fn release_gate(&self, key: &str) {
+        self.gates
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(key);
+    }
+    fn invalidate_prefix(&self, prefix: &str) {
+        self.entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|k, _| !k.starts_with(prefix));
+    }
+}
 
 /// `secret_ref` → (secret, read time); see [`DbViewerService::completion_secrets`].
 type CompletionSecrets = HashMap<String, (Option<String>, Instant)>;
@@ -556,6 +626,7 @@ impl DbViewerService {
                 ENFORCED_COMPLETION_TTL,
             )),
             multi_runs: Arc::new(std::sync::Mutex::new(multirun::MultiRunStore::default())),
+            graphs: Arc::new(GraphCache::default()),
         }
     }
 
@@ -629,6 +700,60 @@ impl DbViewerService {
         .await
     }
 
+    /// Load the request-scoped [`AccessSnapshot`]: two indexed state reads.
+    async fn access_snapshot(&self, conn_id: &Id) -> Result<AccessSnapshot> {
+        crate::access::count_read();
+        let conn = self.connections.get(conn_id).await?;
+        let policy = crate::access::policy(&self.connections.pool(), conn_id).await?;
+        Ok(AccessSnapshot { conn, policy })
+    }
+
+    /// [`Self::authorize`] against an already-loaded snapshot: zero state
+    /// reads on a legacy connection.
+    async fn authorize_snap(
+        &self,
+        snap: &AccessSnapshot,
+        user_id: &Id,
+        node: Option<&str>,
+        operation: &str,
+    ) -> Result<()> {
+        let child = crate::access::child(node);
+        crate::access::check_with(
+            &self.connections.pool(),
+            &snap.conn,
+            &snap.policy,
+            user_id,
+            child.as_deref(),
+            operation,
+        )
+        .await
+    }
+
+    /// One allow flag per node (tree roots, search hits, ERD edge targets),
+    /// with the caller's membership/discover state loaded once — not two state
+    /// reads per node as a per-node [`Self::authorize`] loop cost.
+    async fn authorize_nodes(
+        &self,
+        snap: &AccessSnapshot,
+        user_id: &Id,
+        nodes: &[&str],
+        operation: &str,
+    ) -> Result<Vec<bool>> {
+        let children: Vec<Option<String>> = nodes
+            .iter()
+            .map(|n| crate::access::child(Some(n)))
+            .collect();
+        crate::access::check_many(
+            &self.connections.pool(),
+            &snap.conn,
+            &snap.policy,
+            user_id,
+            &children,
+            operation,
+        )
+        .await
+    }
+
     pub async fn is_enforced(&self, conn_id: &Id) -> Result<bool> {
         Ok(crate::access::policy(&self.connections.pool(), conn_id)
             .await?
@@ -640,19 +765,33 @@ impl DbViewerService {
         if !self.is_enforced(conn_id).await? {
             return Ok(());
         }
-        let conn = self.connections.get(conn_id).await?;
+        let snap = self.access_snapshot(conn_id).await?;
+        self.execution_access_snap(&snap, user_id, req).await
+    }
+
+    /// [`Self::execution_access`] against a loaded snapshot.
+    async fn execution_access_snap(
+        &self,
+        snap: &AccessSnapshot,
+        user_id: &Id,
+        req: &QueryRequest,
+    ) -> Result<()> {
+        if !snap.enforced() {
+            return Ok(());
+        }
+        let conn = &snap.conn;
         let engine =
             Engine::from_kind(conn.kind).ok_or_else(|| Error::Invalid("not a database".into()))?;
         let operations = crate::access::operations(engine, &req.statement)?;
         for operation in &operations {
-            self.authorize(conn_id, user_id, req.node.as_deref(), operation)
+            self.authorize_snap(snap, user_id, req.node.as_deref(), operation)
                 .await?;
         }
         // A lexer-classified (not parser-proven) statement needs editor trust
         // even when it reads — see `access::unparsed_read_requires`.
         if let Some(extra) = crate::access::unparsed_read_requires(engine) {
             if !operations.contains(&extra) {
-                self.authorize(conn_id, user_id, req.node.as_deref(), extra)
+                self.authorize_snap(snap, user_id, req.node.as_deref(), extra)
                     .await?;
             }
         }
@@ -677,8 +816,22 @@ impl DbViewerService {
         if !self.is_enforced(conn_id).await? {
             return Ok(());
         }
-        let conn = self.connections.get(conn_id).await?;
-        let user = crate::access::current_user(&self.connections.pool(), &conn, user_id).await?;
+        let snap = self.access_snapshot(conn_id).await?;
+        self.verify_native_snap(&snap, conn_id, user_id, r).await
+    }
+
+    async fn verify_native_snap(
+        &self,
+        snap: &AccessSnapshot,
+        conn_id: &Id,
+        user_id: &Id,
+        r: &Resolved,
+    ) -> Result<()> {
+        if !snap.enforced() {
+            return Ok(());
+        }
+        let conn = &snap.conn;
+        let user = crate::access::current_user(&self.connections.pool(), conn, user_id).await?;
         if user.is_root {
             return Ok(());
         }
@@ -742,17 +895,18 @@ impl DbViewerService {
         Ok(())
     }
 
-    async fn current_scope(
+    async fn current_scope_snap(
         &self,
-        conn_id: &Id,
+        snap: &AccessSnapshot,
         user_id: &Id,
         child: Option<&str>,
         operation: &str,
     ) -> Result<Option<String>> {
-        let logical = self.connections.get(conn_id).await?;
-        let (profile_id, scope) = crate::access::credential_profile(
+        let logical = &snap.conn;
+        let (profile_id, scope) = crate::access::credential_profile_with(
             &self.connections.pool(),
-            &logical,
+            logical,
+            &snap.policy,
             user_id,
             child,
             operation,
@@ -761,7 +915,12 @@ impl DbViewerService {
         let Some(scope) = scope else {
             return Ok(None);
         };
-        let profile = self.connections.get(&profile_id).await?;
+        let profile = if profile_id == logical.id {
+            logical.clone()
+        } else {
+            crate::access::count_read();
+            self.connections.get(&profile_id).await?
+        };
         let secret = match &profile.secret_ref {
             Some(key) => self.read_secret(key, SecretRead::Fresh).await?,
             None => None,
@@ -784,9 +943,22 @@ impl DbViewerService {
         operation: &str,
         r: &Resolved,
     ) -> Result<()> {
+        let snap = self.access_snapshot(conn_id).await?;
+        self.check_resolved_scope_snap(&snap, user_id, node, operation, r)
+            .await
+    }
+
+    async fn check_resolved_scope_snap(
+        &self,
+        snap: &AccessSnapshot,
+        user_id: &Id,
+        node: Option<&str>,
+        operation: &str,
+        r: &Resolved,
+    ) -> Result<()> {
         let child = crate::access::child(node);
         let current = self
-            .current_scope(conn_id, user_id, child.as_deref(), operation)
+            .current_scope_snap(snap, user_id, child.as_deref(), operation)
             .await?;
         if current.as_deref()
             != r.config
@@ -799,6 +971,33 @@ impl DbViewerService {
             ));
         }
         Ok(())
+    }
+
+    /// Is a resolved query still allowed to run / return its result? One fresh
+    /// [`AccessSnapshot`] (2 state reads); on a legacy connection that is the
+    /// whole check — legacy access has no scope, so the only change that can
+    /// revoke it is a switch to enforced mode, which leaves the resolved
+    /// (unscoped) config mismatching. Enforced connections re-run the full
+    /// operation + credential-scope check against the same snapshot.
+    async fn query_eligible(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        req: &QueryRequest,
+        r: &Resolved,
+    ) -> Result<()> {
+        let snap = self.access_snapshot(conn_id).await?;
+        if !snap.enforced() {
+            if r.config.params.get("__access_scope").is_some() {
+                return Err(Error::Forbidden(
+                    "connection authorization or credentials changed during execution".into(),
+                ));
+            }
+            return Ok(());
+        }
+        self.execution_access_snap(&snap, user_id, req).await?;
+        self.check_resolved_scope_snap(&snap, user_id, req.node.as_deref(), "db_query", r)
+            .await
     }
 
     async fn monitor_export<T>(
@@ -865,16 +1064,37 @@ impl DbViewerService {
         operation: &str,
         secret_read: SecretRead,
     ) -> Result<Resolved> {
+        {
+            let mut states = self.lifecycles.lock().unwrap_or_else(|e| e.into_inner());
+            states.entry(conn_id.clone()).or_default().token.check()?;
+        }
+        let snap = self.access_snapshot(conn_id).await?;
+        self.resolve_snap(&snap, conn_id, user_id, child, operation, secret_read)
+            .await
+    }
+
+    /// [`Self::resolve_with`] against a loaded [`AccessSnapshot`] — the Run
+    /// path loads it once and shares it with the access/write guards.
+    async fn resolve_snap(
+        &self,
+        snap: &AccessSnapshot,
+        conn_id: &Id,
+        user_id: &Id,
+        child: Option<&str>,
+        operation: &str,
+        secret_read: SecretRead,
+    ) -> Result<Resolved> {
         let lifecycle = {
             let mut states = self.lifecycles.lock().unwrap_or_else(|e| e.into_inner());
             let state = states.entry(conn_id.clone()).or_default();
             state.token.check()?;
             state.token.clone()
         };
-        let logical = self.connections.get(conn_id).await?;
-        let (profile_id, scope) = crate::access::credential_profile(
+        let logical = &snap.conn;
+        let (profile_id, scope) = crate::access::credential_profile_with(
             &self.connections.pool(),
-            &logical,
+            logical,
+            &snap.policy,
             user_id,
             child,
             operation,
@@ -883,6 +1103,7 @@ impl DbViewerService {
         let conn = if profile_id == *conn_id {
             logical.clone()
         } else {
+            crate::access::count_read();
             let profile = self.connections.get(&profile_id).await?;
             let mut logical_params = logical.params.clone();
             let mut profile_params = profile.params.clone();
@@ -1133,6 +1354,25 @@ impl DbViewerService {
             .len()
     }
 
+    /// Drop driver client handles (pools / clients) unused for
+    /// [`HANDLE_IDLE_TTL`] on every engine — the periodic reaper calls this
+    /// next to [`Self::reap_idle`]. Mongo/Redis/ClickHouse handles were never
+    /// evicted before, so a Mongo client kept heartbeating to a reaped
+    /// tunnel's dead SOCKS port. Returns how many handles were dropped.
+    pub async fn reap_idle_handles(&self) -> usize {
+        let mut evicted = 0;
+        for engine in [
+            Engine::Mysql,
+            Engine::Postgres,
+            Engine::Redis,
+            Engine::Mongodb,
+            Engine::Clickhouse,
+        ] {
+            evicted += self.registry.get(engine).evict_idle(HANDLE_IDLE_TTL).await;
+        }
+        evicted
+    }
+
     async fn tunnel_for(
         &self,
         conn_id: &Id,
@@ -1303,17 +1543,20 @@ impl DbViewerService {
             .resolve(conn_id, user_id, child.as_deref(), "discover")
             .await?;
         let nodes = r.with_lifecycle(r.driver.schema_root(&r.config)).await?;
-        let mut visible = Vec::new();
-        for node in nodes {
-            if self
-                .authorize(conn_id, user_id, Some(&node.id), "db_browse")
-                .await
-                .is_ok()
-            {
-                visible.push(node);
-            }
-        }
-        self.authorize(conn_id, user_id, None, "discover").await?;
+        // One snapshot + one membership load for every root, not 2+ state
+        // reads per database (500 databases used to cost ~1,000 reads).
+        let snap = self.access_snapshot(conn_id).await?;
+        let ids: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+        let allowed = self
+            .authorize_nodes(&snap, user_id, &ids, "db_browse")
+            .await?;
+        let visible = nodes
+            .into_iter()
+            .zip(allowed)
+            .filter_map(|(node, ok)| ok.then_some(node))
+            .collect();
+        self.authorize_snap(&snap, user_id, None, "discover")
+            .await?;
         Ok(visible)
     }
 
@@ -1378,17 +1621,16 @@ impl DbViewerService {
         let mut result = r
             .with_lifecycle(r.driver.search_objects(&r.config, req))
             .await?;
-        let mut visible = Vec::new();
-        for hit in result.hits {
-            if self
-                .authorize(conn_id, user_id, Some(&hit.schema), "db_browse")
-                .await
-                .is_ok()
-            {
-                visible.push(hit);
-            }
-        }
-        result.hits = visible;
+        let snap = self.access_snapshot(conn_id).await?;
+        let schemas: Vec<&str> = result.hits.iter().map(|h| h.schema.as_str()).collect();
+        let allowed = self
+            .authorize_nodes(&snap, user_id, &schemas, "db_browse")
+            .await?;
+        result.hits = std::mem::take(&mut result.hits)
+            .into_iter()
+            .zip(allowed)
+            .filter_map(|(hit, ok)| ok.then_some(hit))
+            .collect();
         // Counts cannot reveal how many hidden databases were inspected.
         result.scanned = result
             .hits
@@ -1396,7 +1638,8 @@ impl DbViewerService {
             .map(|h| &h.schema)
             .collect::<std::collections::HashSet<_>>()
             .len();
-        self.authorize(conn_id, user_id, None, "discover").await?;
+        self.authorize_snap(&snap, user_id, None, "discover")
+            .await?;
         Ok(result)
     }
 
@@ -1470,6 +1713,14 @@ impl DbViewerService {
             return Ok(());
         }
         let conn = self.connections.get(conn_id).await?;
+        Self::guard_write_conn(&conn, req)
+    }
+
+    /// [`Self::guard_write`] against an already-loaded connection row.
+    fn guard_write_conn(conn: &Connection, req: &QueryRequest) -> Result<()> {
+        if req.confirm_write {
+            return Ok(());
+        }
         if !conn.is_write_guarded() {
             return Ok(());
         }
@@ -1546,6 +1797,85 @@ impl DbViewerService {
             });
         }
 
+        let key = format!("{conn_id}\0{}\0{schema}\0{max_tables}", cfg.cache_key());
+        let graph = match self.graphs.get(&key) {
+            Some(graph) => graph,
+            None => {
+                // Single-flight: concurrent diagram / assistant / completion
+                // requests for the same schema wait for ONE build.
+                let gate = self.graphs.gate(&key);
+                let _built = gate.lock().await;
+                match self.graphs.get(&key) {
+                    Some(graph) => graph,
+                    None => {
+                        let built = self.build_schema_graph(&r, schema, max_tables).await;
+                        let built = match built {
+                            Ok(graph) => Arc::new(graph),
+                            Err(e) => {
+                                self.graphs.release_gate(&key);
+                                return Err(e);
+                            }
+                        };
+                        self.graphs.put(key.clone(), Arc::clone(&built));
+                        self.graphs.release_gate(&key);
+                        built
+                    }
+                }
+            }
+        };
+
+        // The cached graph is caller-independent; the edge filter is not, so
+        // it runs per request — one snapshot + one membership load for all
+        // edge targets.
+        let snap = self.access_snapshot(conn_id).await?;
+        let targets: Vec<&str> = graph.edges.iter().map(|e| e.to_schema.as_str()).collect();
+        let allowed = self
+            .authorize_nodes(&snap, user_id, &targets, "db_browse")
+            .await?;
+        let visible_edges = graph
+            .edges
+            .iter()
+            .zip(allowed)
+            .filter(|(_, ok)| *ok)
+            .map(|(edge, _)| edge.clone())
+            .collect();
+        self.authorize_snap(&snap, user_id, Some(schema), "db_browse")
+            .await?;
+        Ok(SchemaGraph {
+            schema: graph.schema.clone(),
+            tables: graph.tables.clone(),
+            edges: visible_edges,
+            relationships: graph.relationships && relationships,
+            truncated: graph.truncated,
+        })
+    }
+
+    /// Build one schema's graph (unfiltered edges): the driver's set-based
+    /// [`Driver::schema_graph_bulk`] when it has one (a handful of catalog
+    /// queries for the whole schema), else the per-object walk below. A bulk
+    /// failure (e.g. a catalog the credentials can't read) falls back too.
+    async fn build_schema_graph(
+        &self,
+        r: &Resolved,
+        schema: &str,
+        max_tables: usize,
+    ) -> Result<SchemaGraph> {
+        let driver = Arc::clone(&r.driver);
+        let cfg = r.config.clone();
+        match r
+            .with_lifecycle(driver.schema_graph_bulk(&cfg, schema, max_tables))
+            .await
+        {
+            Ok(Some(graph)) => return Ok(graph),
+            Ok(None) => {}
+            Err(e) => {
+                if let Some(token) = cfg.lifecycle.as_ref() {
+                    token.check()?;
+                }
+                tracing::debug!(error = %e, schema, "bulk schema read failed; walking objects");
+            }
+        }
+        let relationships = driver.capabilities().joins;
         // Enumerate the table-like objects under the schema. We list the db
         // node's children and descend one level into any "folder" grouping
         // (MySQL exposes Tables/Views as folders); ClickHouse/Mongo list the
@@ -1671,22 +2001,10 @@ impl DbViewerService {
             });
         }
 
-        let mut visible_edges = Vec::new();
-        for edge in edges {
-            if self
-                .authorize(conn_id, user_id, Some(&edge.to_schema), "db_browse")
-                .await
-                .is_ok()
-            {
-                visible_edges.push(edge);
-            }
-        }
-        self.authorize(conn_id, user_id, Some(schema), "db_browse")
-            .await?;
         Ok(SchemaGraph {
             schema: schema.to_string(),
             tables,
-            edges: visible_edges,
+            edges,
             relationships,
             truncated,
         })
@@ -1756,13 +2074,23 @@ impl DbViewerService {
             node: crate::access::canonical_node(req.node.as_deref()),
             ..req.clone()
         };
-        self.execution_access(conn_id, user_id, req).await?;
-        self.guard_write(conn_id, req).await?;
+        // One access snapshot for the whole pre-execution phase (access gate,
+        // write guard, resolution, native verification) — see DB-06.
+        let snap = self.access_snapshot(conn_id).await?;
+        self.execution_access_snap(&snap, user_id, req).await?;
+        Self::guard_write_conn(&snap.conn, req)?;
         let child = crate::access::child(req.node.as_deref());
         let mut r = self
-            .resolve(conn_id, user_id, child.as_deref(), "db_query")
+            .resolve_snap(
+                &snap,
+                conn_id,
+                user_id,
+                child.as_deref(),
+                "db_query",
+                SecretRead::Fresh,
+            )
             .await?;
-        if self.is_enforced(conn_id).await?
+        if snap.enforced()
             && crate::access::operations(r.config.engine, &req.statement)?
                 .iter()
                 .any(|op| *op != "db_query")
@@ -1787,7 +2115,7 @@ impl DbViewerService {
                 map.insert("__read_only_execution".into(), Value::Bool(true));
             }
         }
-        self.verify_native(conn_id, user_id, &r).await?;
+        self.verify_native_snap(&snap, conn_id, user_id, &r).await?;
         let token = CancelToken::new();
 
         // Without a `query_id` there is nothing to cancel or re-attach to —
@@ -1886,20 +2214,20 @@ impl DbViewerService {
         record: bool,
     ) -> Result<QueryResult> {
         let started = Instant::now();
-        self.execution_access(conn_id, user_id, req).await?;
-        self.check_resolved_scope(conn_id, user_id, req.node.as_deref(), "db_query", &r)
-            .await?;
+        self.query_eligible(conn_id, user_id, req, &r).await?;
         let execution = r.with_lifecycle(r.driver.run_tracked(&r.config, req, token));
         tokio::pin!(execution);
-        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        // The check above just ran: the first re-check is one tick away (a
+        // plain `interval` fires immediately and re-read everything at t=0).
+        let mut interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + ELIGIBILITY_TICK,
+            ELIGIBILITY_TICK,
+        );
         let result = loop {
             tokio::select! {
                 result = &mut execution => break result,
                 _ = interval.tick() => {
-                    let eligibility = async {
-                        self.execution_access(conn_id, user_id, req).await?;
-                        self.check_resolved_scope(conn_id, user_id, req.node.as_deref(), "db_query", &r).await
-                    }.await;
+                    let eligibility = self.query_eligible(conn_id, user_id, req, &r).await;
                     if let Err(error) = eligibility {
                         if let Some(handle) = token.handle() {
                             let _ = r.driver.cancel(&r.config, &handle).await;
@@ -1909,9 +2237,7 @@ impl DbViewerService {
                 }
             }
         };
-        self.execution_access(conn_id, user_id, req).await?;
-        self.check_resolved_scope(conn_id, user_id, req.node.as_deref(), "db_query", &r)
-            .await?;
+        self.query_eligible(conn_id, user_id, req, &r).await?;
         let elapsed = started.elapsed().as_millis() as i64;
 
         // Apply server-side PII masking when the request opts in. Raw cell values
@@ -2810,6 +3136,7 @@ impl DbViewerService {
             .await?;
         r.driver.invalidate_completion_cache(&r.config).await;
         self.enforced_completions.invalidate(conn_id.as_str());
+        self.graphs.invalidate_prefix(&format!("{conn_id}\0"));
         Ok(())
     }
 
@@ -3505,3 +3832,5 @@ mod tests {
 
 #[cfg(test)]
 mod lifecycle_tests;
+#[cfg(test)]
+mod perf_budget_tests;

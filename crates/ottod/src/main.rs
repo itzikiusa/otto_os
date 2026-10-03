@@ -443,6 +443,10 @@ async fn run(cfg: Config) -> Result<(), String> {
                 if n > 0 {
                     tracing::info!("db explorer: reaped {n} idle SSH tunnel(s)");
                 }
+                let n = db.reap_idle_handles().await;
+                if n > 0 {
+                    tracing::info!("db explorer: dropped {n} idle client handle(s)");
+                }
             }
         });
     }

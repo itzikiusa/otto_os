@@ -3,7 +3,11 @@ use otto_core::{Error, Result};
 use std::{
     collections::HashMap,
     future::Future,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
 };
 use tokio::sync::{watch, Mutex as AsyncMutex};
 
@@ -60,6 +64,9 @@ struct Slot<V> {
     initializer: AsyncMutex<()>,
     value: Mutex<Option<V>>,
     lifecycle: Lifecycle,
+    /// Last time this slot was handed out (ms since `epoch()`), for idle
+    /// eviction ([`ResourceCache::take_idle`]).
+    last_used: AtomicU64,
 }
 impl<V> Default for Slot<V> {
     fn default() -> Self {
@@ -67,8 +74,22 @@ impl<V> Default for Slot<V> {
             initializer: AsyncMutex::new(()),
             value: Mutex::new(None),
             lifecycle: Lifecycle::default(),
+            last_used: AtomicU64::new(now_ms()),
         }
     }
+}
+impl<V> Slot<V> {
+    fn touch(&self) {
+        self.last_used.store(now_ms(), Ordering::Relaxed);
+    }
+}
+/// Monotonic milliseconds since the first call (process-local clock).
+fn now_ms() -> u64 {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    EPOCH
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
 }
 pub(crate) struct ResourceCache<V> {
     slots: Mutex<HashMap<String, Arc<Slot<V>>>>,
@@ -134,6 +155,7 @@ impl<V: Clone> ResourceCache<V> {
         {
             let mut value = lease.slot.value.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ready) = value.as_ref().filter(|v| usable(v)) {
+                lease.slot.touch();
                 return Ok(ready.clone());
             }
             *value = None;
@@ -149,7 +171,28 @@ impl<V: Clone> ResourceCache<V> {
             token.check()?;
         }
         *ready = Some(value.clone());
+        lease.slot.touch();
         Ok(value)
+    }
+    /// Detach every READY slot not handed out for longer than `idle`, returning
+    /// the values so the caller can close them. In-flight initializations (no
+    /// value yet) and slots in use within the window are kept.
+    pub(crate) fn take_idle(&self, idle: Duration) -> Vec<(String, V)> {
+        let cutoff = now_ms().saturating_sub(idle.as_millis() as u64);
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        let keys = slots
+            .iter()
+            .filter(|(_, slot)| {
+                slot.last_used.load(Ordering::Relaxed) < cutoff
+                    && slot
+                        .value
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .is_some()
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        Self::detach_keys(&mut slots, keys)
     }
     pub(crate) fn insert_ready(&self, key: String, value: V) {
         let slot = Slot {
@@ -436,5 +479,30 @@ mod tests {
         assert!(cache.get_ready("missing").is_none());
         assert_eq!(cache.remove_where(|key| key.starts_with("a|")).len(), 2);
         assert_eq!(cache.get_ready("b|db=0"), Some(1));
+    }
+
+    #[tokio::test]
+    async fn take_idle_detaches_only_ready_slots_unused_for_the_window() {
+        let cache = ResourceCache::<u32>::default();
+        cache
+            .get_or_try_init("old".into(), None, |_| true, async { Ok(1) })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        cache
+            .get_or_try_init("fresh".into(), None, |_| true, async { Ok(2) })
+            .await
+            .unwrap();
+        let taken = cache.take_idle(Duration::from_millis(20));
+        assert_eq!(taken, vec![("old".to_string(), 1)]);
+        assert_eq!(cache.get_ready("fresh"), Some(2));
+        assert_eq!(cache.get_ready("old"), None);
+        // A hit refreshes last_used, so a just-used slot survives.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        cache
+            .get_or_try_init("fresh".into(), None, |_| true, async { Ok(9) })
+            .await
+            .unwrap();
+        assert!(cache.take_idle(Duration::from_millis(20)).is_empty());
     }
 }
