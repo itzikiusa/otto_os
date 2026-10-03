@@ -17,6 +17,10 @@ built on **one artifact graph**:
 
 - **Projects** — named collections of artifacts (the unit the Lobby browses),
   optionally bound to an epic (`epic_story_id`) and/or a swarm project.
+  A project, studio or story page loads its own slice from
+  `GET /design/search?q=&project_id=|studio=|story_id=` in pages of 120
+  ("Load more"), so older designs are never cut off by the Lobby's shared
+  newest-500 library.
 - **Artifacts** — one design each, in a **studio** (`frames`, `graphics`,
   `site`, `3d`, `whiteboard`, `brand`, `spatial`) and a **format** (`html`,
   `mermaid`, `d2`, `excalidraw`, `scene3d`, `otto-canvas`, `otto-site`,
