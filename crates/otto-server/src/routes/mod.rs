@@ -260,6 +260,9 @@ pub fn protected_routes() -> Router<ServerCtx> {
             get(workspaces::members).put(workspaces::set_members),
         )
         .route("/settings", get(settings::get_all).put(settings::put_all))
+        // Database maintenance (14-daemon-perf P3; root only).
+        .route("/admin/db/stats", get(settings::db_stats))
+        .route("/admin/db/compact", post(settings::db_compact))
         // --- Dynamic model catalog (discovered per-provider model ids) ----
         .route("/providers/models", get(crate::model_catalog::list))
         // --- Walkthrough video redirect resolver (WebKit can't follow a

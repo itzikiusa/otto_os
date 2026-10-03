@@ -1,11 +1,12 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedGitRepo, seedWorkspace } from './seed';
 
 // MCP → Otto server → Auto-approve: the opt-in rules that let a mutating
 // otto.* tool (create_pr) run without a per-call approval. Pins the catalog
 // switch (confirm → a global per-tool rule shown in the panel), the panel's
 // delete, and the irreversible guardrail in the New-rule form (merge_pr can't
-// be saved until the second toggle is ticked).
+// be saved until the second toggle is ticked), and the approval card's
+// "Approve & always allow…" (prefilled rule form → rule + approval).
 
 let base = '';
 let workspaceId = '';
@@ -85,4 +86,39 @@ test('an irreversible tool needs the second toggle in the New-rule form', async 
   await expect(
     page.locator('[data-testid="mcp-auto-approve-rule-merge_pr"]').getByText('Irreversible allowed'),
   ).toBeVisible();
+});
+
+test('"Approve & always allow…" on a pending card creates the rule and approves it', async ({ page }) => {
+  const { ctx } = await apiCtx();
+  try {
+    const { repoId } = await seedGitRepo(ctx, base, workspaceId);
+    const args = { repo_id: repoId, title: 'E2E always allow', description: 'Body',
+                   source_branch: 'e2e/always', target_branch: 'main' };
+    const call = () => ctx.post(`${base}/api/v1/mcp/otto-tools/invoke`, {
+      data: { tool: 'otto.create_pr', arguments: args },
+    });
+    const first = (await (await call()).json()) as { decision: string; approval_id?: string };
+    expect(first.decision).toBe('pending_approval');
+    // A retry reuses the waiting card instead of filing another.
+    const again = (await (await call()).json()) as { approval_id?: string };
+    expect(again.approval_id).toBe(first.approval_id);
+  } finally {
+    await ctx.dispose();
+  }
+
+  await page.goto('/#/mcp/activity');
+  const queue = page.locator('[data-testid="mcp-approvals"]');
+  await expect(queue).toBeVisible({ timeout: 30_000 });
+  await expect(queue.getByText('otto MCP server → otto.create_pr')).toHaveCount(1);
+  await queue.locator('[data-testid="mcp-approve-always"]').first().click();
+  const form = page.locator('[data-testid="mcp-auto-approve-form"]');
+  await expect(form).toBeVisible();
+  await expect(form.getByRole('radio', { name: 'One tool' })).toBeChecked();
+  await expect(form.locator('[data-testid="mcp-auto-approve-tool"]')).toHaveValue('create_pr');
+  await page.locator('[data-testid="mcp-auto-approve-save"]').click();
+  await expect(form).toHaveCount(0);
+  await expect(queue.getByText('otto MCP server → otto.create_pr')).toHaveCount(0);
+  const check = await apiCtx();
+  expect((await rules(check.ctx)).some((r) => r.target === 'create_pr')).toBeTruthy();
+  await check.ctx.dispose();
 });

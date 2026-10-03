@@ -18,18 +18,39 @@
     catalog: McpAutoApproveList['categories'];
     /** Pre-selected target (e.g. opened from a catalog row). */
     preset?: { kind: McpAutoApproveTargetKind; target: string } | null;
+    /** Pre-selected scope (e.g. "Approve & always allow…" from an approval
+     *  card defaults to the requesting session, else its workspace). */
+    presetScope?: {
+      scope: McpAutoApproveScope;
+      workspace_id?: string | null;
+      session_id?: string | null;
+      /** Shown when the session isn't in the current workspace's list. */
+      session_label?: string | null;
+    } | null;
+    /** Modal title / primary label overrides (the approval-card flow also approves). */
+    title?: string;
+    saveLabel?: string;
     onclose: () => void;
-    onsaved: () => void;
+    onsaved: () => void | Promise<void>;
   }
-  let { catalog, preset = null, onclose, onsaved }: Props = $props();
+  let {
+    catalog,
+    preset = null,
+    presetScope = null,
+    title = 'New auto-approve rule',
+    saveLabel = 'Create rule',
+    onclose,
+    onsaved,
+  }: Props = $props();
 
   const init = untrack(() => preset);
+  const initScope = untrack(() => presetScope);
   let kind = $state<McpAutoApproveTargetKind>(init?.kind ?? 'category');
   let category = $state(init?.kind === 'category' ? init.target : (untrack(() => catalog)[0]?.category ?? ''));
   let tool = $state(init?.kind === 'tool' ? init.target.replace(/^otto\./, '') : '');
-  let scope = $state<McpAutoApproveScope>('global');
-  let workspaceId = $state(untrack(() => ws.currentId) ?? '');
-  let sessionId = $state('');
+  let scope = $state<McpAutoApproveScope>(initScope?.scope ?? 'global');
+  let workspaceId = $state(initScope?.workspace_id ?? untrack(() => ws.currentId) ?? '');
+  let sessionId = $state(initScope?.session_id ?? '');
   let name = $state('');
   let ackIrreversible = $state(false);
   let saving = $state(false);
@@ -44,7 +65,13 @@
   const categoryGroup = $derived(catalog.find((group) => group.category === category) ?? null);
   const excluded = $derived((categoryGroup?.tools ?? []).filter((t) => t.irreversible));
   const covered = $derived((categoryGroup?.tools ?? []).filter((t) => !t.irreversible));
-  const sessions = $derived(ws.agentSessions);
+  // The preset session stays choosable even when it lives in another workspace.
+  const sessions = $derived.by(() => {
+    const list = ws.agentSessions.map((s) => ({ id: s.id, label: `${s.title} · ${s.provider}` }));
+    const pre = initScope?.session_id;
+    if (pre && !list.some((s) => s.id === pre)) list.unshift({ id: pre, label: initScope?.session_label ?? pre });
+    return list;
+  });
   const workspaces = $derived(ws.workspaces);
 
   const target = $derived(kind === 'category' ? category : tool);
@@ -67,7 +94,7 @@
         allow_irreversible: irreversible ? ackIrreversible : undefined,
       });
       toasts.success('Auto-approve rule created', kind === 'category' ? `${category} writes` : `otto.${tool}`);
-      onsaved();
+      await onsaved();
       onclose();
     } catch (e) {
       toasts.error('Could not create the rule', e instanceof Error ? e.message : String(e));
@@ -77,7 +104,7 @@
   }
 </script>
 
-<Modal title="New auto-approve rule" width={560} {onclose}>
+<Modal {title} width={560} {onclose}>
   <div class="form" data-testid="mcp-auto-approve-form">
     <fieldset class="field">
       <legend>What runs without asking</legend>
@@ -149,7 +176,7 @@
         {#if sessions.length}
           <select bind:value={sessionId} aria-label="Agent session">
             <option value="" disabled>Choose a session…</option>
-            {#each sessions as s (s.id)}<option value={s.id}>{s.title} · {s.provider}</option>{/each}
+            {#each sessions as s (s.id)}<option value={s.id}>{s.label}</option>{/each}
           </select>
           <span class="hint">Only calls made by this agent session. The rule is removed with the session.</span>
         {:else}
@@ -182,7 +209,7 @@
   {#snippet footer()}
     <button class="btn" onclick={onclose} disabled={saving}>Cancel</button>
     <button class="btn primary" onclick={() => void save()} disabled={!canSave} data-testid="mcp-auto-approve-save">
-      {saving ? 'Saving…' : 'Create rule'}
+      {saving ? 'Saving…' : saveLabel}
     </button>
   {/snippet}
 </Modal>

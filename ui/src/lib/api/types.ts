@@ -511,6 +511,8 @@ export interface McpApproval {
   status: McpApprovalStatus;
   requested_by: string | null;
   requested_by_kind: string | null;
+  /** The agent session that raised the request, when known. */
+  requested_by_session_id?: string | null;
   decided_by: string | null;
   decision_note: string | null;
   created_at: string;
@@ -548,6 +550,8 @@ export interface McpCallLogRow {
   bytes: number | null;
   rows: number | null;
   approval_id: string | null;
+  /** The agent session that made the call (Otto-minted session credentials only). */
+  caller_session_id?: string | null;
   created_at: string;
 }
 
@@ -1798,7 +1802,12 @@ export type NoticeAction =
   | { type: 'open_url'; url: string }
   | { type: 'open_session'; session_id: Id }
   /** `target` e.g. "claude" | "codex" | "git:<id>" | "issue:<id>". */
-  | { type: 'reauth'; target: string };
+  | { type: 'reauth'; target: string }
+  /** In-app route (hash path without `#/`) — automation notices:
+   *  `workflows/<wf>/runs/<run>`, `scheduled-tasks/<task>/runs/<run>`,
+   *  `loops/<loop>`, `personal-agents/<agent>/runs`. `workspace_id` is the
+   *  workspace the target lives in (the UI switches to it first). */
+  | { type: 'open_route'; route: string; workspace_id?: Id };
 
 /** A persisted notification shown in the notification center. */
 export interface Notice {
@@ -4470,6 +4479,10 @@ export interface InstallBundledResp {
 export interface InstallAllBundledResp {
   installed: string[];
   backed_up: string[];
+  /** Already at the bundled version, or ahead of it (local edits) without `force` — untouched. */
+  skipped: string[];
+  /** Skills that failed to install; the rest of the batch still ran. */
+  failed: { name: string; error: string }[];
 }
 
 export interface GlobalSoulReq {
@@ -5585,6 +5598,9 @@ export interface WorkflowTrigger {
   spec: Record<string, unknown>;
   enabled: boolean;
   created_at: string;
+  /** When the schedule was last (re)armed — created, resumed, or re-timed.
+   *  Runs missed before it are never caught up. Null on pre-0165 rows. */
+  armed_at?: string | null;
 }
 
 export interface CreateTriggerReq {
@@ -11083,3 +11099,5 @@ export interface K8sPodActionInput {
   headers?: Record<string, string>;
   body_template?: string | null;
 }
+
+export type * from './maintenance-types';

@@ -34,6 +34,7 @@ pub mod k8s_pod_actions;
 pub mod mcp_audit;
 pub mod mcp_auto_approve;
 pub mod mcp_control;
+pub mod maintenance;
 pub mod mcp_servers;
 pub mod memory;
 pub mod name_themes;

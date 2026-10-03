@@ -7,6 +7,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { mcpCpApi } from '../../lib/api/mcp';
+  import { ws } from '../../lib/stores/workspace.svelte';
   import type { McpCallLogRow, McpServerDetail } from '../../lib/api/types';
   import McpPill from './McpPill.svelte';
   import StatsTab from './StatsTab.svelte';
@@ -55,6 +56,13 @@
     if (b < 1024) return `${b} B`;
     if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
     return `${(b / 1024 / 1024).toFixed(1)} MB`;
+  }
+  /** Tool tooltip naming the agent session behind the call, when known. */
+  function callTitle(r: McpCallLogRow): string {
+    const sid = r.caller_session_id;
+    if (!sid) return r.tool;
+    const title = ws.sessions.find((s) => s.id === sid)?.title;
+    return `${r.tool} — from session ${title ?? `${sid.slice(0, 8)}…`}`;
   }
 </script>
 
@@ -149,7 +157,7 @@
           <div class="arow">
             <span class="cell when">{new Date(r.created_at).toLocaleString()}</span>
             <span class="cell"><span class="trunc" title={r.server_name ?? undefined}>{r.server_name ?? '—'}</span></span>
-            <span class="cell mono"><span class="trunc" title={r.tool}>{r.tool}</span>{#if r.dry_run}<span class="dry">dry</span>{/if}</span>
+            <span class="cell mono"><span class="trunc" title={callTitle(r)}>{r.tool}</span>{#if r.dry_run}<span class="dry">dry</span>{/if}</span>
             <span class="cell" title={r.decision_reason ?? undefined}><McpPill kind="decision" value={r.decision} small /></span>
             <span class="cell"><McpPill kind="direction" value={r.direction} small /></span>
             <span class="cell num">

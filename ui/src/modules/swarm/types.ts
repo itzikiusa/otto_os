@@ -490,3 +490,23 @@ export interface CreateTriggerReq {
 
 /** PATCH /swarm/triggers/{id} — every field optional (partial update). */
 export type UpdateTriggerReq = Partial<CreateTriggerReq>;
+
+/** Why a ready task isn't starting (12-mcp W1) — `waiting[task_id]` on
+ *  `GET /swarm/swarms/{sid}/utilization`, rebuilt by every coordinator tick. */
+export interface TaskWaiting {
+  code: 'no_agent_fit' | 'agent_busy' | 'verifying' | 'capacity' | 'run_budget';
+  /** Board text, e.g. "Dev is busy with another task". */
+  detail: string;
+  /** RFC 3339 — when the task started waiting for this reason. */
+  since: string;
+}
+
+/** The part of the utilization response the board reads. */
+export interface SwarmUtilization {
+  swarm_id: string;
+  status: string;
+  parallel_cap: number;
+  active_runs: number;
+  ready_tasks: number;
+  waiting?: Record<string, TaskWaiting>;
+}

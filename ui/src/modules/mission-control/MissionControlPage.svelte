@@ -111,6 +111,9 @@
   // Monotonic request token: a slower, OLDER response must never overwrite a
   // newer one (live ticks fire reloads back to back).
   let reqSeq = 0;
+  /** The graph is only fetched while it is shown; otherwise a reload marks it
+   *  stale and flipping to the Graph view loads it then. */
+  let graphStale = true;
 
   async function reload(id: string): Promise<void> {
     const seq = ++reqSeq;
@@ -123,16 +126,21 @@
       q: debouncedQ || undefined,
       limit: 300,
     };
+    const withGraph = untrack(() => view) === 'graph';
+    if (!withGraph) graphStale = true;
     try {
       const [s, its, g] = await Promise.all([
         missionControlApi.summary(id),
         missionControlApi.items(id, f),
-        missionControlApi.graph(id, f),
+        withGraph ? missionControlApi.graph(id, f) : Promise.resolve(null),
       ]);
       if (seq !== reqSeq) return;
       summary = s;
       items = its;
-      graph = g;
+      if (g) {
+        graph = g;
+        graphStale = false;
+      }
     } catch (e) {
       if (seq !== reqSeq) return;
       err = e instanceof ApiError ? e.message : 'Otto couldn’t reach the daemon.';
@@ -147,6 +155,13 @@
     // establish dependencies so the effect re-runs when these change
     void [kindF, statusF, riskF, debouncedQ];
     if (id) void reload(id);
+  });
+
+  // Flipping to the Graph view loads a graph that went stale while hidden.
+  $effect(() => {
+    if (view !== 'graph') return;
+    const id = untrack(() => ws.currentId);
+    if (id && graphStale) void reload(id);
   });
 
   // Live work_graph_updated ticks: only THIS workspace's (or a reconnect

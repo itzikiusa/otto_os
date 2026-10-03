@@ -39,7 +39,12 @@ pub async fn open(path: &Path) -> Result<DbPool> {
         // only a power-loss can drop the last few commits, never corrupt.
         .synchronous(SqliteSynchronous::Normal)
         .foreign_keys(true)
-        .busy_timeout(Duration::from_secs(5));
+        .busy_timeout(Duration::from_secs(5))
+        // Without a limit a checkpointed WAL keeps its high-water size on
+        // disk forever (206 MB observed). 64 MiB: big enough that normal
+        // bursts never re-grow it, small enough to cap the waste
+        // (14-daemon-perf P3; the hourly `maintenance::hourly` TRUNCATEs).
+        .pragma("journal_size_limit", "67108864");
     // Readers share the file but never write: `read_only` makes a mis-routed
     // write fail loudly. Journal mode is the file's (WAL, set by the writer).
     let read_opts = opts

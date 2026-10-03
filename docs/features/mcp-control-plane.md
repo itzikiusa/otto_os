@@ -462,7 +462,10 @@ this order; the **first** decisive stage wins:
    `mcp_require_approval_dangerous` on, the default), or policy/per-tool requires
    approval, the call needs a **human approval** bound to the exact args (a SHA-256
    `args_hash`). With no usable approval it creates a **pending** `mcp_approvals` row
-   and returns `pending_approval`. An existing approval is **consumed single-use**
+   and returns `pending_approval`. A retry of the same call (same tool, args hash,
+   workspace and requester) while that row is still pending **reuses it** — the
+   same `approval_id` comes back and no duplicate card is filed, however often a
+   waiting agent resubmits. An existing approval is **consumed single-use**
    (atomically) and must match `(server, tool, workspace, args_hash)`, be unexpired,
    and have been decided by **someone other than the requester**. A `dry_run` request
    skips approval *creation* (a preview executes nothing).
@@ -590,7 +593,12 @@ and evaluate are read-only (View).
   (`McpApproval::requester_may_decide`). The decision itself must come from a
   **person's own Otto sign-in**: an agent session's credential, an MCP token or a
   share token gets `403`, so the agent that raised a request can never approve it.
-  Stale approvals expire (default TTL 120 min for tool-calls).
+  Stale approvals expire (default TTL 120 min for tool-calls). A card raised by an
+  agent session names that session (a link that opens it) and shows relative
+  times. On an `otto.*` tool call, **Approve & always allow…** opens the
+  auto-approve rule form prefilled with that tool and the requesting session (else
+  the call's workspace); **Create rule & approve** saves the rule and approves this
+  request. Irreversible tools still need the form's second toggle.
 - **Audit** (`mcp_call_log`) — the second **Activity** panel is the ledger of **every**
   governed call (UI tester, gateway, inbound `otto.*`, outbound downstream). Its
   server / tool / decision filters are collapsed by default. The **Log** view shows
@@ -603,8 +611,13 @@ and evaluate are read-only (View).
   signals) and leaves true per-vendor cost out.
 
 Both **Audit** and **Stats** are **filtered to the workspaces the caller can access**
-(or the global view for MCP Admin / root) — no cross-workspace governance via a
-single-workspace grant.
+(or the global view for root) — no cross-workspace governance via a
+single-workspace grant. Every `otto.*` row records the **workspace** the call
+resolved to (else the calling agent session's workspace) and the
+**calling session** (`caller_session_id`, Otto-minted session credentials only).
+A workspace-less `otto.*` row is visible to a non-root viewer only when they
+made the call, so one user's outward calls never show in another's audit or
+per-tool stats.
 
 ### 8.1 Live signals
 

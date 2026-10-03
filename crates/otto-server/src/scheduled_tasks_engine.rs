@@ -419,6 +419,7 @@ async fn complete_run(
                 None
             };
 
+            let derr_for_notice = derr.clone();
             repo.finish_run(
                 &run_id,
                 FinishRun {
@@ -427,7 +428,7 @@ async fn complete_run(
                     report_path,
                     report_rel: report_rel_opt,
                     delivered,
-                    delivery_error: derr,
+                    delivery_error: derr.clone(),
                     session_id: out.session_id.clone(),
                     report_hash: Some(hash),
                     proof_pack_id,
@@ -450,10 +451,13 @@ async fn complete_run(
             }
             prune(ctx, &task.id).await;
             emit(ctx, task, &run_id, "ok");
+            task_notice(ctx, task, &run_id, None, derr_for_notice.as_deref()).await;
             Ok(run_id)
         }
         Err(fail) => {
             let msg = fail.error.to_string();
+            let canceled = fail.canceled;
+            let msg_for_notice = msg.clone();
             let status = if fail.canceled { "canceled" } else { "error" };
             warn!(task = %task.id, "scheduled task run failed: {msg}");
             // Keep whatever the failed run still produced (shell output, a
@@ -495,9 +499,53 @@ async fn complete_run(
             // always fails used to grow its run list without bound.
             prune(ctx, &task.id).await;
             emit(ctx, task, &run_id, status);
+            // A user's Stop isn't a failure to tell them about.
+            if !canceled {
+                task_notice(ctx, task, &run_id, Some(&msg_for_notice), None).await;
+            }
             Ok(run_id)
         }
     }
+}
+
+/// Notification-center notice for an unattended task (review 08 · N1): the
+/// first failed run (or failed delivery) of a streak notices once; a clean run
+/// ends the streak. Clicking it opens the task's runs.
+async fn task_notice(
+    ctx: &ServerCtx,
+    task: &ScheduledTask,
+    run_id: &str,
+    error: Option<&str>,
+    delivery_error: Option<&str>,
+) {
+    let key = crate::run_notices::streak_key("scheduled_task", &task.id);
+    let (title, body) = match (error, delivery_error) {
+        (Some(e), _) => (
+            format!("Scheduled task “{}” failed", task.name),
+            e.to_string(),
+        ),
+        (None, Some(d)) => (
+            format!("Scheduled task “{}” couldn’t deliver its report", task.name),
+            d.to_string(),
+        ),
+        (None, None) => {
+            crate::run_notices::clear_streak(&key);
+            return;
+        }
+    };
+    crate::run_notices::notify_failure(
+        ctx,
+        crate::run_notices::RunNotice {
+            key,
+            severity: otto_core::domain::NoticeSeverity::Error,
+            title,
+            body,
+            route: format!("scheduled-tasks/{}/runs/{run_id}", task.id),
+            workspace_id: Some(task.workspace_id.clone()),
+            user_id: task.created_by.clone(),
+        },
+    )
+    .await;
 }
 
 /// A user stopped the run: kill the agent session it drove and cancel the

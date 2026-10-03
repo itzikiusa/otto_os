@@ -56,7 +56,15 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
     let now = Utc::now();
 
     for trigger in triggers_repo.list_enabled_by_kind("schedule").await? {
-        if !is_due_since(&trigger.spec, Some(trigger.created_at), now) {
+        // The cursor never predates the arm instant (created / resumed /
+        // re-timed), so a resumed trigger doesn't fire the run it missed
+        // while off — the scheduled-tasks fix from PR #70.
+        if !is_due_armed(
+            &trigger.spec,
+            Some(trigger.created_at),
+            trigger.armed_at,
+            now,
+        ) {
             continue;
         }
 
@@ -183,11 +191,23 @@ pub fn is_due(spec: &Value, now: DateTime<Utc>) -> bool {
 /// when the Mac slept or the daemon was down at that minute — the scheduled
 /// tasks / personal agents ticks already anchor on creation.
 pub fn is_due_since(spec: &Value, created: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    is_due_armed(spec, created, None, now)
+}
+
+/// [`is_due_since`] with the trigger's arm instant as a floor on the cursor
+/// (see `WorkflowTrigger::armed_at`): `max(last_run, armed_at)`.
+pub fn is_due_armed(
+    spec: &Value,
+    created: Option<DateTime<Utc>>,
+    armed: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> bool {
     let last = spec
         .get("last_run")
         .and_then(Value::as_str)
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|d| d.with_timezone(&Utc));
+    let last = crate::cadence::effective_cursor(spec, last, armed);
     let tz = crate::cadence::task_tz(spec.get("timezone").and_then(Value::as_str).unwrap_or(""));
     crate::cadence::is_due_since(spec, last, created, now, tz)
 }
@@ -513,6 +533,29 @@ mod tests {
         // Created after today's 09:00 → nothing owed until tomorrow.
         let late = Utc.with_ymd_and_hms(2026, 6, 29, 9, 10, 0).unwrap();
         assert!(!is_due_since(&s, Some(late), now));
+    }
+
+    #[test]
+    fn resumed_trigger_does_not_fire_its_missed_run() {
+        use chrono::TimeZone;
+        let now = Utc.with_ymd_and_hms(2026, 6, 29, 15, 0, 0).unwrap();
+        let week_ago = now - chrono::Duration::days(7);
+        // Interval trigger paused a week, re-enabled a minute ago.
+        let s = json!({"cadence": "interval", "every_min": 60, "last_run": week_ago.to_rfc3339()});
+        assert!(is_due_since(&s, Some(week_ago), now), "old behaviour fired");
+        let armed = now - chrono::Duration::minutes(1);
+        assert!(!is_due_armed(&s, Some(week_ago), Some(armed), now));
+        assert!(is_due_armed(
+            &s,
+            Some(week_ago),
+            Some(armed),
+            now + chrono::Duration::minutes(60)
+        ));
+        // A daily 09:00 trigger created/enabled at 15:00 waits for tomorrow.
+        let d = json!({"cadence": "daily", "at": "09:00", "timezone": "UTC"});
+        assert!(!is_due_armed(&d, Some(now), Some(now), now));
+        let tomorrow = Utc.with_ymd_and_hms(2026, 6, 30, 9, 1, 0).unwrap();
+        assert!(is_due_armed(&d, Some(now), Some(now), tomorrow));
     }
 
     #[test]

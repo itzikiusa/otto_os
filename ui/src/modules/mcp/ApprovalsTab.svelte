@@ -8,7 +8,9 @@
   // every Otto session authorizes as its owner (mirrors
   // `AGENT_REQUESTER_KINDS` in crates/otto-state/src/mcp_control.rs). Polls
   // every few seconds and on tab refocus so a new pending request appears
-  // without a manual reload.
+  // without a manual reload. "Approve & always allow…" on an `otto.*` tool
+  // call opens the auto-approve rule form prefilled with that tool and the
+  // requesting session (else its workspace), then approves this request.
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -17,8 +19,12 @@
   import { mcpCpApi } from '../../lib/api/mcp';
   import { liveQuery } from '../../lib/live';
   import { toasts } from '../../lib/toast.svelte';
-  import type { McpApproval } from '../../lib/api/types';
+  import { ws } from '../../lib/stores/workspace.svelte';
+  import { rel } from '../../lib/stores/now.svelte';
+  import type { McpApproval, McpAutoApproveList } from '../../lib/api/types';
   import McpPill from './McpPill.svelte';
+  import AutoApproveForm from './AutoApproveForm.svelte';
+  import { mcpCpExtraApi } from './cp-api';
 
   let approvals = $state<McpApproval[]>([]);
   const AGENT_REQUESTER_KINDS = ['mcp_server', 'gateway', 'agent'];
@@ -38,6 +44,33 @@
     a.requested_by === auth.me?.id && !requesterMayDecide(a)
       ? 'You raised this request yourself — another admin has to decide it'
       : 'You don’t have approve access to this server';
+
+  /** The approval whose "always allow" rule form is open, with the catalog it needs. */
+  let allowFor = $state<{ approval: McpApproval; catalog: McpAutoApproveList['categories'] } | null>(null);
+  let allowLoading = $state<string | null>(null);
+  /** Only governed `otto.*` tool calls can be covered by an auto-approve rule. */
+  const canAlwaysAllow = (a: McpApproval): boolean =>
+    a.kind === 'tool_call' && !a.server_id && !!a.tool?.startsWith('otto.') && canDecide(a);
+  const sessionTitle = (id: string): string | null =>
+    ws.sessions.find((s) => s.id === id)?.title ?? null;
+  const requesterLabel = (a: McpApproval): string =>
+    a.requested_by === auth.me?.id ? 'you' : (a.requested_by ?? 'unknown');
+
+  async function openAlwaysAllow(a: McpApproval): Promise<void> {
+    allowLoading = a.id;
+    try {
+      const list = await mcpCpExtraApi.autoApproveRules();
+      allowFor = { approval: a, catalog: list.categories };
+    } catch (e) {
+      toasts.error('Could not load the auto-approve catalog', e instanceof Error ? e.message : String(e));
+    } finally {
+      allowLoading = null;
+    }
+  }
+
+  function openSession(id: string): void {
+    ws.navigateToSession(id);
+  }
 
   let loadSeq = 0;
   async function load(): Promise<boolean> {
@@ -129,14 +162,25 @@
             {#if a.risk_label}<McpPill kind="risk" value={a.risk_label} small />{/if}
             <McpPill kind="status" value={a.status} small />
             <span class="grow"></span>
-            <span class="when">{new Date(a.created_at).toLocaleString()}</span>
+            <span class="when" title={new Date(a.created_at).toLocaleString()}>{rel(a.created_at)}</span>
           </div>
           <div class="meta">
             {#if a.server_name || a.tool}
               <span class="route mono">{a.server_name ?? '—'}{a.tool ? ` → ${a.tool}` : ''}</span>
             {/if}
-            {#if a.requested_by}<span class="by">requested by {a.requested_by}{a.requested_by_kind ? ` (${a.requested_by_kind})` : ''}</span>{/if}
-            {#if a.expires_at}<span class="by">expires {new Date(a.expires_at).toLocaleString()}</span>{/if}
+            {#if a.requested_by_session_id}
+              {@const sid = a.requested_by_session_id}
+              <span class="by">
+                from session
+                <button class="link" type="button" onclick={() => openSession(sid)} title="Open the requesting session" data-testid="mcp-approval-session">
+                  {sessionTitle(sid) ?? `${sid.slice(0, 8)}…`}
+                </button>
+                · {requesterLabel(a)}
+              </span>
+            {:else if a.requested_by}
+              <span class="by">requested by {requesterLabel(a)}{a.requested_by_kind ? ` (${a.requested_by_kind})` : ''}</span>
+            {/if}
+            {#if a.expires_at}<span class="by" title={new Date(a.expires_at).toLocaleString()}>expires {rel(a.expires_at)}</span>{/if}
           </div>
           {#if a.detail}<p class="detail">{a.detail}</p>{/if}
           {#if a.args_redacted_json && a.args_redacted_json !== '{}'}
@@ -154,6 +198,17 @@
               <button class="btn small ok" disabled={busy[a.id] || !canDecide(a)} title={canDecide(a) ? undefined : decideBlockedReason(a)} onclick={() => void decide(a, true)}>
                 {busy[a.id] ? '…' : 'Approve'}
               </button>
+              {#if canAlwaysAllow(a)}
+                <button
+                  class="btn small"
+                  disabled={busy[a.id] || allowLoading === a.id}
+                  title="Approve this call and stop asking for {a.tool} — opens the auto-approve rule form"
+                  data-testid="mcp-approve-always"
+                  onclick={() => void openAlwaysAllow(a)}
+                >
+                  {allowLoading === a.id ? '…' : 'Approve & always allow…'}
+                </button>
+              {/if}
               <button class="btn small danger" disabled={busy[a.id] || !canDecide(a)} title={canDecide(a) ? undefined : decideBlockedReason(a)} onclick={() => void decide(a, false)}>
                 {busy[a.id] ? '…' : 'Deny'}
               </button>
@@ -169,6 +224,24 @@
     </div>
   {/if}
 </div>
+
+{#if allowFor}
+  {@const a = allowFor.approval}
+  {@const sid = a.requested_by_session_id ?? null}
+  <AutoApproveForm
+    catalog={allowFor.catalog}
+    preset={{ kind: 'tool', target: a.tool ?? '' }}
+    presetScope={sid
+      ? { scope: 'session', session_id: sid, session_label: sessionTitle(sid) ?? `Session ${sid.slice(0, 8)}…` }
+      : a.workspace_id
+        ? { scope: 'workspace', workspace_id: a.workspace_id }
+        : null}
+    title="Approve & always allow {a.tool}"
+    saveLabel="Create rule & approve"
+    onclose={() => (allowFor = null)}
+    onsaved={() => decide(a, true)}
+  />
+{/if}
 
 <style>
   .appr {
@@ -283,6 +356,19 @@
     color: var(--text);
     padding: 6px 9px;
     font-size: var(--fs-m);
+  }
+  .link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--accent-text);
+    font: inherit;
+    cursor: pointer;
+    text-decoration: underline;
+  }
+  .link:focus-visible {
+    outline: 2px solid var(--accent-solid);
+    outline-offset: 2px;
   }
   .btn.ok {
     color: var(--success);

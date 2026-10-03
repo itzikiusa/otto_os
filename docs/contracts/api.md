@@ -298,7 +298,7 @@ workspace from the row.
 | 73 | DELETE /api/v1/swarm/projects/{pid} | ws editor | — | 204 |
 | 74 | POST /api/v1/workspaces/{id}/swarm/projects/{pid}/plan | ws editor | PlanReq | `SwarmTask[]` |
 | 74b | POST /api/v1/swarm/projects/{pid}/clear | ws editor | — | `{ok, runs_stopped, tasks_deleted, messages_deleted}` — stops the project's in-flight runs, deletes ALL its tasks + project-scoped feed messages (runs/spend history kept), emits `swarm_project_cleared` |
-| 74c | GET /api/v1/swarm/swarms/{sid}/utilization | ws viewer | — | `{parallel_cap, active_runs, ready_tasks, tasks_by_status, agents:[{id,name,title,status,active_run}]}` — board-utilization snapshot (drives the 5-min manager utilization watchdog + the `swarm_utilization` MCP tool) |
+| 74c | GET /api/v1/swarm/swarms/{sid}/utilization | ws viewer | — | `{parallel_cap, active_runs, ready_tasks, tasks_by_status, agents:[{id,name,title,status,active_run}], waiting: {<task_id>: {code, detail, since}}}` — board-utilization snapshot (drives the 5-min manager utilization watchdog + the `swarm_utilization` MCP tool). `waiting` = why each ready task did not start on the last coordinator tick (in memory, rebuilt every tick; empty when the swarm isn't active): `code` ∈ `no_agent_fit` \| `agent_busy` \| `verifying` \| `capacity` \| `run_budget`, `detail` = board text, `since` = when it started waiting for that code. The Kanban board shows it on To-do cards |
 | 75 | GET /api/v1/swarm/projects/{pid}/tasks | ws viewer | — | `SwarmTask[]` |
 | 76 | POST /api/v1/swarm/projects/{pid}/tasks | ws editor | CreateTaskReq | SwarmTask |
 | 77 | PATCH /api/v1/swarm/tasks/{tid} | ws editor | UpdateTaskReq | SwarmTask |
@@ -1918,7 +1918,7 @@ choices. The UI surfaces this distinction in the preview.
 | GET /library/bundled | root | — | bundled skill catalog |
 | GET /library/bundled/{name} | root | — | BundledSkillContent (SKILL.md body + file list; view without installing) |
 | POST /library/bundled/{name}/install | root | — | install/update one bundled skill |
-| POST /library/bundled/install-all | root | `?category=&backup=` | install all bundled skills (optionally one category) |
+| POST /library/bundled/install-all | root | `?category=&backup=&force=` | install all bundled skills (optionally one category) → `{installed, backed_up, skipped, failed: [{name, error}]}`. Skips skills already up to date, and ones whose installed copy is ahead of the bundled version unless `force=true`; a failing skill is reported in `failed` and the rest still install. Runs off the async workers; keeps the newest 3 `skills-backup/<name>-<secs>` per skill |
 
 Each catalog entry carries `{name, category, version, description, installed_version,
 state, update_available}`. `state` is `not_installed | up_to_date | update_available
@@ -2515,6 +2515,23 @@ the UI restores the admin's own token.
 
 The audit log is an **append-only** ledger written best-effort by the daemon at security-relevant sites — it is never updated or deleted, and an audit-insert failure never fails the audited request. `AuditEntry` = `{id, ts, user_id?, action, target?, detail?, ip?}` where `action` is a stable snake_case verb. Wired actions today: `login.success`, `login.failure`, `login.lockout` (`user_id` null — the actor is unauthenticated; `target` = attempted username; `ip` = real socket peer), `token.mint` / `token.revoke` (`target` = token id), `settings.change` (`target` = changed key list; `detail.keys`; secret values are NOT captured), `network_listener.toggle` (`target` = `on`/`off`; `detail` = the new listener config), `db.write_confirmed` (a confirmed write on a guarded production/read-only connection; `target` = connection name; `detail.environment` + truncated `detail.statement`), `grant.changed` (`target` = the user whose grants changed; `detail.old`/`detail.new` grant lists), `session.terminated` (an admin force-terminated a session via `POST /admin/sessions/{id}/terminate`; `target` = session id; `detail.owner_id` + `detail.workspace_id`), and `impersonate.start` / `impersonate.stop` (an admin began / ended acting-as another user; `user_id` = the real admin, `target` = the effective/impersonated user, `detail.real_user_id` + `detail.effective_user_id`). The posture summary derives entirely from existing settings + the auth store (no new state): the network listener key drives `network_listener` / `network_listener_port` / `loopback_only`, and `active_api_tokens` counts unexpired API tokens instance-wide.
 
+## Database maintenance
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /admin/db/stats | root | — | `DbStatsResp {size_bytes, free_bytes, auto_vacuum: 0\|1\|2, compacting}` |
+| POST /admin/db/compact | root | `{confirm: true}` | `DbCompactReport {before_bytes, after_bytes, freed_bytes, duration_ms, auto_vacuum}` · 400 without `confirm` · 409 while one is running |
+
+- `compact` is the one-time `PRAGMA auto_vacuum = INCREMENTAL; VACUUM;` rewrite
+  of `otto.db`. It holds the SQLite write lock for the whole rewrite (tens of
+  seconds on a large DB), so it never runs automatically: the UI sends it only
+  after a confirm dialog that says writes stall meanwhile. Audited as
+  `db.compact` (`detail` = the report). Once `auto_vacuum = 2`, the daemon's
+  hourly maintenance runs `PRAGMA incremental_vacuum(4000)`.
+- Hourly maintenance (no endpoint): `PRAGMA optimize`, then
+  `wal_checkpoint(TRUNCATE)` (PASSIVE when a reader pins the WAL). The writer
+  sets `journal_size_limit = 64 MiB`.
+
 ## Usage tracking & system metrics (embedded ClickHouse)
 
 | Method & path | Auth | Request | Response |
@@ -3072,7 +3089,7 @@ are root; workflow trigger routes ride the Workflows prefix; the webhook is publ
 | POST /workflows/{id}/webhook/{token} | public-by-token | run input body | `{run_id}` (token validated against workflow_triggers) |
 | GET /workflows/{id}/triggers | ws viewer (Workflows:View) | — | `WorkflowTrigger[]` |
 | POST /workflows/{id}/triggers | ws editor (Workflows:Edit) | `UpsertTriggerReq {kind, spec}` | `WorkflowTrigger` |
-| PATCH /workflow-triggers/{id} | ws editor (Workflows:Edit) | `UpsertTriggerReq` | `WorkflowTrigger` |
+| PATCH /workflow-triggers/{id} | ws editor (Workflows:Edit) | `UpsertTriggerReq` | `WorkflowTrigger` — resuming it (`enabled` false→true) or a really different schedule key (`cadence`/`every_min`/`at`/`weekday`/`expr`/`timezone`/`run_at`) re-arms it: `armed_at` = now, and the scheduler never looks before `max(last_run, armed_at)`, so a run missed while paused is not caught up. Created triggers are armed at creation. `armed_at` is null on rows predating migration 0165 |
 | DELETE /workflow-triggers/{id} | ws editor (Workflows:Edit) | — | 204 |
 | POST /workflow-runs/{id}/approve | ws editor (Workflows:Edit) | `{node_id, approved}` | resumed run status. `409` when the run is not `running` (canceled/failed runs can't be approved) or was decided concurrently; `400` when it is not waiting at `node_id` |
 
@@ -3737,10 +3754,10 @@ enforce the entity's workspace role.
 | CP17 | GET /api/v1/mcp/policies/export | mcp:view | — | `{version, policies}` (policy-as-code doc) |
 | CP18 | POST /api/v1/mcp/policies/import | mcp:admin | `{policies, replace?}` | `{imported, replaced}` |
 | CP19 | POST /api/v1/mcp/policies/evaluate | mcp:view | `{server_id, tool, workspace_id?}` | decision preview |
-| CP20 | GET /api/v1/mcp/approvals | mcp:view (ws-filtered) | `?status=` | `McpApproval[]` |
+| CP20 | GET /api/v1/mcp/approvals | mcp:view (ws-filtered) | `?status=` | `McpApproval[]` — additive `requested_by_session_id?` (the agent session that raised it). A retried governed call reuses its still-pending approval (same tool + args hash + workspace + requester) instead of filing a duplicate |
 | CP21 | POST /api/v1/mcp/approvals/{id}/decide | mcp:admin + human credential (`403` for an agent session's / MCP / share token); approver≠requester, except agent-raised requests, which their human owner may decide | `{approved, note?}` | McpApproval |
-| CP22 | GET /api/v1/mcp/audit | mcp:view (ws-filtered) | filters | `McpCallLogRow[]` |
-| CP23 | GET /api/v1/mcp/stats | mcp:view (ws-filtered) | — | `McpToolStats[]` |
+| CP22 | GET /api/v1/mcp/audit | mcp:view (ws-filtered) | filters | `McpCallLogRow[]` — additive `caller_session_id?`; `otto.*` rows carry the resolved (else calling session's) `workspace_id`; for non-root callers a workspace-less `otto.*` row is listed only when `caller_user_id` is the caller |
+| CP23 | GET /api/v1/mcp/stats | mcp:view (ws-filtered) | — | `McpToolStats[]` (same row scoping as CP22) |
 
 ### Otto as an MCP server (outward) + live-agent gateway
 
@@ -4077,7 +4094,7 @@ cursor they read the room's **tail** (`tail=true`), not its first messages.
 | POST /api/v1/agent-rooms/{id}/members | scheduled_tasks edit + ws editor | `{agent_id}` | `{ok:true}` |
 | DELETE /api/v1/agent-rooms/{id}/members/{agent_id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
 | GET /api/v1/agent-rooms/{id}/messages | scheduled_tasks view + ws viewer | query `after?`, `before?`, `tail?`, `limit?` (≤ 500), `session_id?` | `AgentRoomMessage[]` oldest first (agent reads via `session_id` are membership-checked). `after`: messages after that id (a cursor is looked up in THIS room; an unknown one reads from the start). Additive backwards paging (ignored when `after` is set): `before=<id>` → the `limit` messages before it; `tail=true` with no cursor → the room's newest `limit` |
-| POST /api/v1/agent-rooms/{id}/messages | scheduled_tasks edit + ws editor | `{text, session_id?}` | AgentRoomMessage |
+| POST /api/v1/agent-rooms/{id}/messages | scheduled_tasks edit + ws editor | `{text, session_id?}` | AgentRoomMessage. An agent-session credential (managed or per-session MCP token) is bound to its own session on both room routes: `session_id` defaults to it (never a user post / unchecked read), and naming another session is `403` |
 
 ## Otto Assistant (`/assistant/*`)
 

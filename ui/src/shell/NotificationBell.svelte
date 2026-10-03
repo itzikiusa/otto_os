@@ -209,6 +209,8 @@
         return 'Go to session';
       case 'reauth':
         return 'Re-authenticate';
+      case 'open_route':
+        return notice.title.includes('waiting for your approval') ? 'Review' : 'Open';
       default:
         return null;
     }

@@ -423,6 +423,12 @@ matching tick instead of polling.
 - Four delivery channels (Slack, Telegram, email, webhook) reusing Otto's existing,
   tested integrations — with **redaction on delivery** and SSRF-guarded webhooks.
 - Full management from UI, REST, and 7 governed `otto.*` MCP tools.
+- **Failure notices.** The first failed run (or failed report delivery) of a
+  streak posts one notice to the notification center — scoped to the task's
+  creator, clicking it opens the task's runs. Further failures stay silent until
+  a clean run ends the streak, so a 15-minute watchdog can't flood the bell. A
+  run you stopped is never notified. (Workflow runs, personal agents and goal
+  loops notify the same way; see `docs/contracts/ws.md` "Automation notices".)
 - At-least-once execution with overlap protection — one run per task at a time,
   shared by the scheduler and **Run now** (a due occurrence waits while a manual run
   is going; Run now answers 409 while any run is) — and a startup reaper for

@@ -10,6 +10,8 @@ import type { Notice, NoticeAction, NoticeSeverity, NotificationSettings } from 
 import { toasts } from '../toast.svelte';
 import { openExternal } from '../external';
 import { ws } from './workspace.svelte';
+import { router } from '../router.svelte';
+import { parseNoticeRoute } from '../noticeRoute';
 import { isEmbedded } from '../desktop';
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -433,6 +435,7 @@ class NotificationStore {
    * - open_url   → open in the system browser
    * - open_session → focus the session + jump to the Agents module
    * - reauth     → toast guidance (the actual re-auth happens in a terminal)
+   * - open_route → open the run / task / loop an automation notice is about
    */
   async runAction(notice: Notice): Promise<void> {
     void this.markRead(notice.id);
@@ -458,6 +461,52 @@ class NotificationStore {
       case 'reauth':
         this.guideReauth(action.target);
         break;
+      case 'open_route':
+        await this.openRoute(action.route, action.workspace_id ?? null);
+        break;
+    }
+  }
+
+  /** Automation notices (failed task / workflow run / goal loop, workflow
+   *  awaiting approval): switch to the item's workspace, then open the page
+   *  and the item itself through its page port. */
+  private async openRoute(route: string, workspaceId: string | null): Promise<void> {
+    try {
+      if (workspaceId && ws.currentId !== workspaceId) {
+        if (!ws.workspaces.some((w) => w.id === workspaceId)) {
+          toasts.warn('Workspace unavailable', 'It may have been removed, or you no longer have access.');
+          return;
+        }
+        await ws.select(workspaceId);
+      }
+      const target = parseNoticeRoute(route);
+      const signal = new AbortController().signal;
+      switch (target.kind) {
+        case 'workflow_run': {
+          const { workflowsPagePort } = await import('../uiCommands/workflows');
+          router.go('workflows');
+          const page = await workflowsPagePort.get(signal);
+          if (await page.open(target.workflowId)) await page.openRun(target.workflowId, target.runId);
+          break;
+        }
+        case 'scheduled_task': {
+          const { scheduledTasksPort } = await import('../uiCommands/scheduled');
+          router.go('scheduled-tasks');
+          (await scheduledTasksPort.get(signal)).expand(target.taskId);
+          break;
+        }
+        case 'goal_loop': {
+          const { loopsPagePort } = await import('../uiCommands/loops');
+          router.go('loops');
+          (await loopsPagePort.get(signal)).open(target.loopId);
+          break;
+        }
+        case 'route':
+          router.go(target.route);
+          break;
+      }
+    } catch (e) {
+      toasts.error('Couldn’t open it', e instanceof Error ? e.message : String(e));
     }
   }
 

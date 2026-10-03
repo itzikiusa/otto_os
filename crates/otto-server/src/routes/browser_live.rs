@@ -171,6 +171,7 @@ impl LiveHooks for ServerLiveHooks {
                 risk_label: Some("outward".into()),
                 requested_by: Some(a.owner_id.clone()),
                 requested_by_kind: Some("agent".into()),
+                requested_by_session_id: None,
                 expires_at: Some(expires.to_rfc3339()),
             })
             .await

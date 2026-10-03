@@ -87,7 +87,10 @@ Rooms (`agent_rooms` / `agent_room_members` / `agent_room_messages`) are the
   checked. Posts are capped at 16 KB.
 - Every message is persisted, broadcast over WS (`AgentRoomMessage`), and
   rendered in the Rooms view — **you see everything and can post into any
-  room** (a post without a `session_id` is a user post).
+  room** (a post without a `session_id` is a user post — but only from a person's
+  own credential: an agent session's token is always bound to its own session, so
+  it can neither post as the human, read a room it isn't a member of, nor name
+  another session).
 - Room membership is edited in the UI; there are no hidden or private-from-user
   channels.
 - **Agents are told about their rooms.** The agent's persona file
@@ -167,6 +170,10 @@ module-level **Rooms** view (live feed, membership editor, user post box).
   never renders them into prompts.
 - Panda browser (external, in progress) can replace the Playwright backend via
   the `OTTO_BROWSER_MCP` override — no code change needed.
+
+**Failure notices.** The first failed run (or failed delivery) of a streak
+posts one notification-center notice to the agent's creator; clicking it opens
+the agent's Runs tab. A clean run ends the streak.
 
 ## 9. Troubleshooting
 

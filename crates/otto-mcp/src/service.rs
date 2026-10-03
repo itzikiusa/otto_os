@@ -715,6 +715,7 @@ impl McpService {
                             risk_label: Some(risk_label.clone()),
                             requested_by: ctx.caller_user_id.clone(),
                             requested_by_kind: Some(ctx.caller_kind.clone()),
+                            requested_by_session_id: None,
                             expires_at: Some(expires),
                         })
                         .await?;
@@ -790,6 +791,7 @@ impl McpService {
                 bytes: None,
                 rows: None,
                 approval_id: approval_id_used.clone(),
+                caller_session_id: None,
             })
             .await?; // ← propagates: no audit row ⇒ no execution (fail-closed)
 
@@ -983,6 +985,7 @@ impl McpService {
                 bytes: None,
                 rows: None,
                 approval_id: approval_id.map(str::to_string),
+                caller_session_id: None,
             })
             .await
             .map(|_| ())

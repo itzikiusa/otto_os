@@ -959,8 +959,11 @@ async fn list_audit<S: McpCtx>(
     Query(q): Query<AuditQuery>,
 ) -> ApiResult<Json<Vec<otto_state::McpCallLogRow>>> {
     let ws = accessible_ws(&ctx, &user).await?;
+    // A non-root caller's workspace-less `otto.*` rows are their own only.
+    let me = ws.as_ref().map(|_| user.id.clone());
     let query = otto_state::CallLogQuery {
         workspace_ids: ws,
+        caller_user_id: me,
         server_id: q.server_id,
         tool: q.tool,
         decision: q.decision,
@@ -982,7 +985,8 @@ async fn stats<S: McpCtx>(
 ) -> ApiResult<Json<Vec<otto_state::McpToolStats>>> {
     let ws = accessible_ws(&ctx, &user).await?;
     let mut visible = Vec::new();
-    for row in ctx.mcp().call_log().stats(ws.as_deref()).await? {
+    let me = ws.as_ref().map(|_| user.id.as_str());
+    for row in ctx.mcp().call_log().stats(ws.as_deref(), me).await? {
         if visible_record(&ctx, &user, row.server_id.as_ref(), Some(&row.tool)).await? {
             visible.push(row);
         }

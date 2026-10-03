@@ -557,6 +557,19 @@ Notices & notifications:
   claude's native Notification hook, and — for every AGENT provider — the daemon's
   Working→Idle turn-finish transition (`session:{id}:waiting`). Shell sessions keep the
   plain `session:{id}:idle` key and never raise the flag.
+  **Automation notices** (`kind: "system"`, `source_key` `automation:<kind>:<id>`): the
+  first failed run of a streak of a scheduled task (`scheduled_task`, incl. a failed
+  report delivery), personal agent (`personal_agent`) or workflow (`workflow`) posts one
+  `error` notice; further failures stay silent until a clean run ends the streak (the
+  streak set is in-memory, so after a daemon restart the next failure refreshes the same
+  row). A goal loop that becomes `exhausted`/`blocked`/`failed`/`succeeded` posts one per
+  episode (`goal_loop`; a running loop resets it), and a workflow run parked at a
+  human-approval step posts a `warn` notice once per gate
+  (`automation:workflow_approval:<run>:<node>`). Notices are scoped to the
+  task/agent/workflow/loop creator (`user_id`) and carry an `open_route` action
+  (`{type:"open_route", route, workspace_id?}`; routes: `workflows/<wf>/runs/<run>`,
+  `scheduled-tasks/<task>/runs/<run>`, `loops/<loop>`, `personal-agents/<agent>/runs`).
+  A user's cancel/stop is never notified.
 
 Activity trail & tasks (session-family — owner/admin/root, viewer-gated):
 
