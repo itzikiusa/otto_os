@@ -68,6 +68,11 @@
   import { base64ToBytes as parkedB64 } from '../b64';
   import { snapshotApplies, withInOrderReset as parkedRis, type TermFlow as FlowT, type WriteQueue as QueueT } from './termFlow';
   import { PARK_SCROLLBACK, TermPark } from './termPark';
+  import { CompactQueue } from './termCompactQueue';
+
+  /** Resize compacts for every Terminal in this window: one in flight, the
+   *  most recently focused pane first (perf F1, termCompactQueue.ts). */
+  const compactQueue = new CompactQueue();
 
   /** Everything a live Terminal hands over when it parks: the emulator, its
    *  socket and the socket's flow/snapshot state, so the adopter continues
@@ -188,7 +193,8 @@
   import { WebglAddon } from '@xterm/addon-webgl';
   import '@xterm/xterm/css/xterm.css';
   import { wsUrl, WS_BEARER_SUBPROTOCOL } from '../api/client';
-  import type { SessionStatus, TermSearchMatch, WsSearchResultFrame, WsTermFlowFrame, WsTermProbeAckFrame, WsTermProbeFrame, WsTermResyncFrame } from '../api/types';
+  import type { SessionStatus, TermSearchMatch, WsSearchResultFrame, WsTermFlowFrame, WsTermProbeAckFrame, WsTermProbeFrame, WsTermResyncFrame, WsTermScrollbackRequestFrame } from '../api/types';
+  import type { CompactClient } from './termCompactQueue';
   import { EMBED_SCROLLBACK, QuietRepaint, TermFlow, WriteQueue, hasCursorOrErase, resizeDecision, withInOrderReset } from './termFlow';
   import { KeyLatency, ProbeClock, fmtMs, fmtPair, loopMonitor, termLatencyEnabled, type EchoStats } from './termLatency';
   import { textToBase64, base64ToBytes, bytesToBase64 } from '../b64';
@@ -771,6 +777,8 @@
     snapshotEpoch = null;
     // The snapshot this socket requests on open rebuilds the screen anyway.
     localReflowed = false;
+    compactDeferred = false;
+    compactQueue.cancel(compactClient);
     keyLat?.reset();
     // A fresh server stream starts unpaused. Bytes still queued in front of
     // xterm belong to the old stream and are superseded by the snapshot this
@@ -817,9 +825,24 @@
       // guarantees the freshly-(re)attached PTY gets our real grid, not the
       // server's spawn-time 80×24), then verify again as layout settles.
       safeFit();
-      sendResize(true);
+      // Attach WITH our grid (perf F1): a viewer that may resize has the
+      // daemon resize the PTY + emulator BEFORE it captures the snapshot, so
+      // the snapshot already matches this xterm and the TUI's SIGWINCH
+      // repaint arrives as live bytes. Recording the grid as sent makes the
+      // forced confirm below find nothing changed — no follow-up compact, one
+      // snapshot per attach (it used to be two: one at the old PTY grid, then
+      // a compact once the forced resize confirmed).
       const want = term?.options.scrollback ?? scrollback;
-      sendJson({ type: 'scrollback', lines: want });
+      const req: WsTermScrollbackRequestFrame = { type: 'scrollback', lines: want };
+      if (term && !readOnly) {
+        req.cols = term.cols;
+        req.rows = term.rows;
+        lastCols = term.cols;
+        lastRows = term.rows;
+        localReflowed = false;
+      }
+      sendJson(req);
+      sendResize(true);
       verifyFitSoon();
     };
 
@@ -843,6 +866,7 @@
             flow.granted(typeof msg.window === 'number' ? msg.window : undefined);
             break;
           case 'scrollback': {
+            compactQueue.done(compactClient);
             // A delayed optional compact must not erase a selection or reading
             // position established after its request. A new process/connection still rebuilds: its
             // epoch differs (or was cleared on connect).
@@ -950,6 +974,7 @@
 
     s.onclose = () => {
       connected = false;
+      compactQueue.cancel(compactClient);
       if (closedByUs) return;
       if (exitCode === null) {
         disconnected = true;
@@ -1034,12 +1059,14 @@
       resizeForcePending = false;
       if (defer && measured) applyGrid(measured, 'confirmed');
       const sentChanged = term.cols !== lastCols || term.rows !== lastRows;
+      const prev = { cols: lastCols, rows: lastRows };
+      const next = { cols: term.cols, rows: term.rows };
       // Forced path pushes even when unchanged: the server may hold a
       // different grid (daemon restart / another viewer) and drops same-size
       // resizes before the ioctl, so this is free when nothing changed. A
       // local reflow with an unchanged PTY grid sends nothing but still
       // compacts (resizeDecision).
-      const d = resizeDecision({ sentChanged, localReflowed, force, preferDom });
+      const d = resizeDecision({ sentChanged, localReflowed, force, preferDom, prev, next });
       localReflowed = false;
       if (d.send) {
         lastCols = term.cols;
@@ -1093,14 +1120,64 @@
       scheduleResizeCompact();
       return;
     }
-    const buf = term.buffer.active;
-    // Preserve an active selection: rebuilding resets xterm's selection and
-    // would erase a drag just before the user copies it.
-    // Skip also when the user is CLEARLY reading scrollback — a TUI repaint
-    // routinely leaves the viewport a row or two shy of the bottom.
-    if (buf.baseY - buf.viewportY > 3 || term.hasSelection()) return;
-    compactPending = true;
-    sendJson({ type: 'scrollback', lines: term.options.scrollback ?? scrollback });
+    // Off-screen or in a hidden window: nobody sees the pane, so its 1–2 MB
+    // rebuild waits until it comes back (onCompactWake). Otherwise take a
+    // turn in the window-wide queue (one compact in flight, focused first).
+    if (!compactEligible()) {
+      compactDeferred = true;
+      return;
+    }
+    compactQueue.request(compactClient);
+  }
+
+  /** Is this pane on screen, in a visible window, with a live socket? */
+  let onScreen = true;
+  function compactEligible(): boolean {
+    return !!term && connected && onScreen && document.visibilityState === 'visible';
+  }
+  /** A compact was due while the pane was hidden / off-screen. */
+  let compactDeferred = false;
+  const compactClient: CompactClient = {
+    lastFocus: () => gpuClient.lastFocus,
+    eligible: () => {
+      const ok = compactEligible();
+      if (!ok && connected) compactDeferred = true;
+      return ok;
+    },
+    run: () => {
+      if (!term || compactPending) return false;
+      const buf = term.buffer.active;
+      // Preserve an active selection: rebuilding resets xterm's selection and
+      // would erase a drag just before the user copies it.
+      // Skip also when the user is CLEARLY reading scrollback — a TUI repaint
+      // routinely leaves the viewport a row or two shy of the bottom.
+      if (buf.baseY - buf.viewportY > 3 || term.hasSelection()) return false;
+      compactPending = true;
+      sendJson({ type: 'scrollback', lines: term.options.scrollback ?? scrollback } satisfies WsTermScrollbackRequestFrame);
+      return true;
+    },
+  };
+  /** The pane came into view / the window became visible / it was focused:
+   *  run the compact it skipped while hidden. */
+  function onCompactWake(): void {
+    if (!compactDeferred || !compactEligible()) return;
+    compactDeferred = false;
+    runResizeCompact();
+  }
+
+  // ── Ack withholding (perf F9, TermFlow.hold) ───────────────────────────────
+  // A non-focused pane in a hidden window (another Space, minimized) keeps
+  // parsing what already arrived but stops acknowledging it: the daemon
+  // stops after one credit window and, only if output overflowed meanwhile,
+  // sends ONE snapshot when the window shows again. The pane the user last
+  // worked in keeps streaming (PR A's background-latency fix).
+  function isFocusedPane(): boolean {
+    if (gpuClient.lastFocus === 0) return false;
+    for (const c of gpuClients) if (c.lastFocus > gpuClient.lastFocus) return false;
+    return true;
+  }
+  function syncAckHold(): void {
+    flow.hold(document.visibilityState === 'hidden' && !isFocusedPane());
   }
 
   function sendResize(force = false): void {
@@ -1881,6 +1958,8 @@
     // The pane the user works in renders on the GPU (L4): take a slot from
     // the least recently focused terminal when the budget is full.
     gpuClient.lastFocus = performance.now();
+    flow.hold(false);
+    onCompactWake();
     if (term && webglWanted && !webglAddon) {
       stealGpuSlotFor(gpuClient);
       retryWebglNow();
@@ -1968,7 +2047,13 @@
     // Park at the PTY's grid, not at whatever passing size the leaving layout
     // measured: a parked engine keeps parsing the TUI's cursor moves for
     // minutes, and at the wrong size they land on the wrong cells (G1).
-    let needsCompact = localReflowed;
+    let needsCompact = localReflowed || compactDeferred;
+    compactDeferred = false;
+    compactQueue.cancel(compactClient);
+    // A parked engine keeps parsing what arrives but stops acknowledging it
+    // (perf F9): the daemon sends at most one credit window, and a session
+    // that overflowed meanwhile is caught up with ONE snapshot on adopt.
+    flow.hold(true);
     if (lastCols > 0 && lastRows > 0 && (t.cols !== lastCols || t.rows !== lastRows)) {
       try {
         t.resize(lastCols, lastRows);
@@ -2028,6 +2113,9 @@
     writes = e.writes;
     flow.setSink(flowSink);
     writes.rebind(writeSink, canSendNow);
+    // Report what was parsed while parked: the daemon sends what it held,
+    // or ONE snapshot if the parked stream overflowed (perf F9).
+    syncAckHold();
     wireSocket(e.sock);
     compactPending = e.compactPending;
     resyncPending = e.resyncPending;
@@ -2191,11 +2279,20 @@
     const onGpuWake = (): void => {
       if (document.visibilityState === 'visible') retryWebglNow();
     };
+    const onPageVis = (): void => {
+      syncAckHold();
+      if (document.visibilityState === 'visible') onCompactWake();
+    };
+    document.addEventListener('visibilitychange', onPageVis);
     document.addEventListener('visibilitychange', onGpuWake);
     window.addEventListener('focus', onGpuWake);
     const gpuIo = typeof IntersectionObserver === 'function'
       ? new IntersectionObserver((entries) => {
-          if (entries.some((en) => en.isIntersecting)) retryWebglNow();
+          onScreen = entries[entries.length - 1].isIntersecting;
+          if (onScreen) {
+            retryWebglNow();
+            onCompactWake();
+          }
         })
       : null;
     gpuIo?.observe(container);
@@ -2343,6 +2440,8 @@
       cancelWebglRetry();
       gpuClients.delete(gpuClient);
       document.removeEventListener('visibilitychange', onGpuWake);
+      document.removeEventListener('visibilitychange', onPageVis);
+      compactQueue.cancel(compactClient);
       window.removeEventListener('focus', onGpuWake);
       gpuIo?.disconnect();
       if (hudTimer !== null) clearInterval(hudTimer);
