@@ -60,6 +60,13 @@ test('typed note renders structured panels with previews and live context', asyn
   const tip = page.getByRole('tooltip');
   await expect(tip).toContainText('How we ship.');
   await expectFullyInViewport(page, tip);
+  await page.mouse.move(0, 0);
+  await expect(tip).toHaveCount(0);
+
+  // Inline wikilinks in the body get the same preview.
+  await page.locator('.read a.internal-link', { hasText: 'the deploy runbook' }).hover();
+  await expect(page.getByTestId('vault-link-preview')).toContainText('How we ship.');
+  await expectFullyInViewport(page, tip);
 
   // Live context resolves to a designed state (no matches in an empty daemon).
   await expect(panel.getByLabel('Live context')).toContainText(/Nothing in Otto matches|Open|Couldn’t read/);

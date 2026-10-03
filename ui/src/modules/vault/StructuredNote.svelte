@@ -1,11 +1,3 @@
-<script module lang="ts">
-  import type { VaultNote } from '../../lib/api/types';
-  /** Hover-preview cache per (vault, path, ws): a hub note's link list must not
-   *  refetch on every pass of the pointer. */
-  const previews = new Map<string, Promise<VaultNote>>();
-  const PREVIEW_MAX = 100;
-</script>
-
 <script lang="ts">
   // Structured reading view for typed OKF notes: metadata header (type,
   // owners, status, tags, resource), key-field cards (endpoints, environments,
@@ -14,10 +6,11 @@
   // backlinks with hover previews, and LIVE CONTEXT from the rest of Otto.
   // Sits above the unchanged markdown body; plain notes never mount it.
   import Icon from '../../lib/components/Icon.svelte';
-  import { vaultNote } from '../../lib/api/vault';
+  import type { VaultNote } from '../../lib/api/types';
   import { vault } from './vault.svelte';
   import LiveContext from './LiveContext.svelte';
-  import { previewText, type StructuredModel } from './structuredNote';
+  import { linkPreview } from './previewStore.svelte';
+  import type { StructuredModel } from './structuredNote';
 
   let { model, note }: { model: StructuredModel; note: VaultNote } = $props();
 
@@ -33,52 +26,8 @@
   const missing = $derived(model.sections.filter((s) => !s.present).length);
   let showSections = $state(false);
 
-  // -- hover previews (clamped into the viewport, height-capped) -------------
-  let preview = $state<{ path: string; x: number; y: number; title: string; type: string | null; text: string; state: 'loading' | 'ok' | 'error' } | null>(null);
-  let hoverTimer: ReturnType<typeof setTimeout> | undefined;
-  let popEl = $state<HTMLElement | undefined>();
-
-  function loadPreview(path: string): Promise<VaultNote> {
-    const v = vault.current!;
-    const key = `${vault.wsId}:${v.id}:${path}`;
-    let p = previews.get(key);
-    if (!p) {
-      p = vaultNote(vault.wsId, v.id, path);
-      p.catch(() => previews.delete(key));
-      previews.set(key, p);
-      while (previews.size > PREVIEW_MAX) previews.delete(previews.keys().next().value!);
-    }
-    return p;
-  }
-
-  function showPreview(e: MouseEvent | FocusEvent, path: string | null): void {
-    clearTimeout(hoverTimer);
-    if (!path || !/\.md$/i.test(path) || !vault.current) return;
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    hoverTimer = setTimeout(() => {
-      preview = { path, x: r.left, y: r.bottom + 6, title: path.split('/').pop()!.replace(/\.md$/i, ''), type: null, text: '', state: 'loading' };
-      loadPreview(path).then(
-        (n) => {
-          if (preview?.path !== path) return;
-          preview = { ...preview, title: n.meta.title, type: n.meta.okf_type, text: n.meta.description || previewText(n.raw), state: 'ok' };
-        },
-        () => { if (preview?.path === path) preview = { ...preview, state: 'error' }; },
-      );
-    }, 300);
-  }
-  function hidePreview(): void {
-    clearTimeout(hoverTimer);
-    preview = null;
-  }
-  // Clamp after layout: never off the right/bottom edge, never above 8px.
-  const popStyle = $derived.by(() => {
-    if (!preview) return '';
-    const w = Math.min(320, window.innerWidth - 16);
-    const left = Math.max(8, Math.min(preview.x, window.innerWidth - w - 8));
-    const h = popEl?.offsetHeight ?? 120;
-    const top = preview.y + h > window.innerHeight - 8 ? Math.max(8, window.innerHeight - h - 8) : preview.y;
-    return `left:${left}px;top:${top}px;width:${w}px;max-height:${Math.max(120, window.innerHeight - 16)}px`;
-  });
+  const showPreview = (e: Event, path: string | null | undefined): void => linkPreview.show(e.currentTarget as Element, path);
+  const hidePreview = (): void => linkPreview.hide();
 
   function open(path: string | null | undefined): void {
     hidePreview();
@@ -111,7 +60,7 @@
             {#each c.items as it, i (i)}
               <li>
                 {#if it.path}
-                  <button class="lnk" onclick={() => open(it.path)} onmouseenter={(e) => showPreview(e, it.path ?? null)} onmouseleave={hidePreview} onfocus={(e) => showPreview(e, it.path ?? null)} onblur={hidePreview}>{it.value}</button>
+                  <button class="lnk" onclick={() => open(it.path)} onmouseenter={(e) => showPreview(e, it.path)} onmouseleave={hidePreview} onfocus={(e) => showPreview(e, it.path)} onblur={hidePreview}>{it.value}</button>
                 {:else}
                   <span>{it.value}</span>
                 {/if}
@@ -179,17 +128,6 @@
   <LiveContext hints={model.hints} wsId={vault.wsId} />
 </div>
 
-{#if preview}
-  <div class="preview" role="tooltip" bind:this={popEl} style={popStyle}>
-    <div class="p-title">{preview.title}{#if preview.type}<span class="sn-chip">{preview.type}</span>{/if}</div>
-    <div class="p-path">{preview.path}</div>
-    {#if preview.state === 'loading'}<p class="dim">Loading preview…</p>
-    {:else if preview.state === 'error'}<p class="dim">Preview unavailable</p>
-    {:else if preview.text}<p>{preview.text}</p>
-    {:else}<p class="dim">Empty note</p>{/if}
-  </div>
-{/if}
-
 <style>
   .structured {
     margin: 0 0 18px;
@@ -250,20 +188,5 @@
   .lnkchip:hover:not(:disabled) { background: var(--hover); }
   .lnkchip.unresolved { color: var(--text-dim); border-style: dashed; cursor: default; }
   .dim { color: var(--text-dim); font-size: var(--fs-xs); margin: 0; }
-  .preview {
-    position: fixed;
-    z-index: var(--z-popover);
-    overflow-y: auto;
-    padding: 10px 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface);
-    box-shadow: var(--shadow);
-    font-size: var(--fs-s);
-    pointer-events: none;
-  }
-  .p-title { display: flex; gap: 6px; align-items: center; font-weight: 600; }
-  .p-path { font-size: var(--fs-xs); color: var(--text-dim); margin-block: 2px 6px; overflow-wrap: anywhere; }
-  .preview p { margin: 0; overflow-wrap: anywhere; }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 </style>

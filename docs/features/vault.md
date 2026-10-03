@@ -234,7 +234,8 @@ the editor are untouched. The panel holds:
   `okf-authoring` concept patterns, with the missing ones flagged.
 - **Links to / Linked from** — outgoing links and backlinks as chips, each
   with a hover (and keyboard-focus) preview of the target's title, type and
-  description or first lines.
+  description or first lines. Inline wikilinks in the reading view (typed
+  or plain notes) show the same preview.
 - **Live context** — the note's entity hints matched against the rest of
   Otto through the modules' existing read APIs: K8s Monitor workloads on
   monitored clusters (ready pods, memory, rps/error rate; links to the

@@ -47,6 +47,8 @@
   import { renderNote, resolverFrom, slugifyHeading, stripFrontmatter } from './mdRender';
   import RefineDrawer from './RefineDrawer.svelte';
   import StructuredNote from './StructuredNote.svelte';
+  import LinkPreview from './LinkPreview.svelte';
+  import { linkPreview } from './previewStore.svelte';
   import { structuredModel } from './structuredNote';
   import { vault, vaultConflictKind } from './vault.svelte';
 
@@ -152,6 +154,23 @@
       });
     }
   }
+
+  // Page previews on inline wikilinks (delegated; same popover as the
+  // structured panel's chips). Leaving the link, scrolling or switching
+  // notes closes it.
+  function onReadOver(e: Event): void {
+    const a = (e.target as HTMLElement).closest?.('a.internal-link[data-path]');
+    if (a) linkPreview.show(a, a.getAttribute('data-path'));
+  }
+  function onReadOut(e: Event): void {
+    const a = (e.target as HTMLElement).closest?.('a.internal-link[data-path]');
+    if (a && !a.contains((e as MouseEvent).relatedTarget as Node | null)) linkPreview.hide();
+  }
+  $effect(() => {
+    void vault.notePath;
+    void vault.editing;
+    linkPreview.hide();
+  });
 
   function scrollToHeading(anchor: string): void {
     requestAnimationFrame(() => {
@@ -393,14 +412,25 @@
       </div>
     {:else}
       <!-- Rendered markdown is sanitized in mdRender (allowlist). -->
-      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-      <div class="read md-body" bind:this={readEl} onclick={onReadClick}>
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions, a11y_mouse_events_have_key_events -->
+      <div
+        class="read md-body"
+        bind:this={readEl}
+        onclick={onReadClick}
+        onmouseover={onReadOver}
+        onmouseout={onReadOut}
+        onfocusin={onReadOver}
+        onfocusout={() => linkPreview.hide()}
+        onscroll={() => linkPreview.hide()}
+      >
         {#if structured && structuredOn && vault.note}
           <StructuredNote model={structured} note={vault.note} />
         {/if}
         {@html rendered}
       </div>
     {/if}
+
+    <LinkPreview />
 
     {#if refineShown && vault.notePath}
       <!-- Keyed by path (NOT by note content): reloading the same note after
