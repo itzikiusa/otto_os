@@ -177,11 +177,13 @@ mod tests {
     #[test]
     fn proactive_goal_respects_switch_budget_spacing_and_round_robin() {
         let now = parse_ts("2026-10-03T12:00:00+00:00").unwrap();
-        let mut cfg = AgentAutonomy::default();
-        cfg.goals = vec![
-            goal("a", Some("2026-10-02T06:00:00+00:00")),
-            goal("b", Some("2026-10-02T01:00:00+00:00")),
-        ];
+        let mut cfg = AgentAutonomy {
+            goals: vec![
+                goal("a", Some("2026-10-02T06:00:00+00:00")),
+                goal("b", Some("2026-10-02T01:00:00+00:00")),
+            ],
+            ..Default::default()
+        };
         // Off by default.
         assert_eq!(next_proactive_goal(&cfg, 0, now), None);
         cfg.proactive.enabled = true;
