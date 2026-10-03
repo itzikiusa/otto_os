@@ -37,6 +37,12 @@
   let historyRun = $state<ApiAutomationRun | null>(null);
   let loadedFor = $state<string | null>(null);
 
+  /** Run-list rows are summaries (no steps / snapshot): load the whole run. */
+  async function openHistoryRun(id: string): Promise<void> {
+    const run = await apiClient.getAutomationRun(id);
+    if (run && run.automation_id === automationId) historyRun = run;
+  }
+
   function loadInto(a: ApiAutomation): void {
     loadedFor = a.id;
     steps = editableSteps(a.steps);
@@ -391,14 +397,14 @@
       <summary>Run history ({runs.length})</summary>
       <div class="runs">
         {#each runs as savedRun (savedRun.id)}
-          <button class="run-row" class:sel={historyRun?.id === savedRun.id} onclick={() => (historyRun = savedRun)} title={new Date(savedRun.created_at).toLocaleString()}>
-            {RUN_STATUS[savedRun.status]} · {savedRun.report.steps.length} steps · {rel(savedRun.created_at)}
+          <button class="run-row" class:sel={historyRun?.id === savedRun.id} onclick={() => void openHistoryRun(savedRun.id)} title={new Date(savedRun.created_at).toLocaleString()}>
+            {RUN_STATUS[savedRun.status]} · {savedRun.steps_total ?? savedRun.report.steps.length} steps · {rel(savedRun.created_at)}
           </button>
         {:else}
           <p class="sub-empty">No runs yet.</p>
         {/each}
         <div class="runs-actions">
-          <button class="btn ghost small" onclick={async () => { await apiClient.loadAutomationRuns(automationId); if (historyRun) historyRun = apiClient.automationRuns.find((r) => r.id === historyRun?.id) ?? historyRun; }}>
+          <button class="btn ghost small" onclick={async () => { await apiClient.loadAutomationRuns(automationId); if (historyRun) await openHistoryRun(historyRun.id); }}>
             <Icon name="refresh" size={12} />Refresh
           </button>
           {#if apiClient.automationRuns.length >= 50}

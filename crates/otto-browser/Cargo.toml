@@ -23,6 +23,9 @@ scraper = "0.27.0"
 # Tree type scraper's `Html` is built on (transitive via scraper already, but
 # Rust requires a direct dependency to name `ego_tree::NodeRef` ourselves).
 ego-tree = "0.11.0"
+# Bounded outer-HTML serialization for selector queries (same version scraper
+# already pulls in — no new crate in the tree).
+html5ever = "0.39.0"
 # Remote live view (`live` module): screencast frames arrive base64-encoded,
 # the Chromium download is sha256-verified, timestamps on the wire.
 base64 = { workspace = true }

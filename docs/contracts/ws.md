@@ -1166,6 +1166,32 @@ secret values.
 
 ---
 
+### `api_run_progress`
+
+Workspace-scoped. Emitted by an API automation run after each completed step
+and once when the run ends (with its final `status`). Counts and status only —
+never a step result, request, response or secret. The running view fetches
+`GET …/automation-runs/{run_id}?after=<steps it has>` on it instead of polling
+blind (the poll stays as a slow fallback).
+
+```json
+{
+  "type": "api_run_progress",
+  "workspace_id": "<Id>",
+  "automation_id": "<Id>",
+  "run_id": "<Id>",
+  "status": "running|passed|failed|cancelled|interrupted",
+  "steps_done": 12
+}
+```
+
+- Scope: `Workspace` (members with viewer+ on `workspace_id`).
+- TypeScript mirror: `{ type: 'api_run_progress'; workspace_id: Id;
+  automation_id: Id; run_id: Id; status: ApiAutomationRun['status'];
+  steps_done: number }`.
+
+---
+
 ### `canvas_updated` / `canvas_session_started`
 
 Workspace-scoped. Emitted by `crates/otto-server/src/canvas_assist.rs` while an

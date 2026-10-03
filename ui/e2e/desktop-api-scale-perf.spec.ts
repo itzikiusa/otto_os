@@ -313,3 +313,24 @@ test('dragging the API sidebar splitter persists once, on release', async ({ pag
   const after = await page.evaluate(() => (window as unknown as { __lsWrites: string[] }).__lsWrites);
   expect(after).toEqual(['otto_api_side_width']);
 });
+
+// perf F4: re-entering the API page within a minute of a successful load
+// reuses it — no second `/requests` (or `/collections`) fetch.
+test('re-entering the API page within 60 s refetches nothing', async ({ page }) => {
+  let requestLists = 0;
+  const base = `/api/v1/workspaces/${workspaceId}/api-client`;
+  page.on('request', (req) => {
+    if (req.method() === 'GET' && new URL(req.url()).pathname === `${base}/requests`) requestLists++;
+  });
+  await mockBigWorkspace(page);
+  await openPage(page, 'api');
+  await expect(page.locator('.tree-wrap .col-head').first()).toBeVisible({ timeout: 30_000 });
+  expect(requestLists).toBe(1);
+  // In-app navigation away and back (no reload).
+  await page.evaluate(() => { location.hash = '#/home'; });
+  await expect(page.locator('.tree-wrap')).toHaveCount(0);
+  await page.evaluate(() => { location.hash = '#/api'; });
+  await expect(page.locator('.tree-wrap .col-head').first()).toBeVisible({ timeout: 30_000 });
+  await page.waitForLoadState('networkidle').catch(() => {});
+  expect(requestLists).toBe(1);
+});

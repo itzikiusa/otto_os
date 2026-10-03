@@ -2986,7 +2986,10 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
             } else {
                 25
             };
-            let mut path = format!("{base}/history?limit={limit}");
+            // The scalar summary projection (method/url/status/duration/
+            // source) — the list never needs bodies; `id` returns one whole
+            // entry (perf F9: up to 100 × 64 KB responses into the context).
+            let mut path = format!("{base}/history/summaries?limit={limit}");
             path.push_str(&opt_query(
                 args,
                 &[

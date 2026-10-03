@@ -394,6 +394,7 @@ fn scope_of(event: &Event) -> Scope<'_> {
         | Event::CanvasUpdated { workspace_id, .. }
         // API-client history writes go to every member of the request's workspace.
         | Event::ApiHistoryAppended { workspace_id, .. }
+        | Event::ApiRunProgress { workspace_id, .. }
         | Event::CanvasSessionStarted { workspace_id, .. }
         // A session's referenced-scenes set changed — workspace-member scoped like
         // the other canvas events (Canvas is a workspace-shared tool).

@@ -632,6 +632,10 @@ class EventsClient {
           // API Client history is shared across human sends and agent MCP runs.
           // Refresh once after a burst so the current workspace stays live.
           apiClient.noteHistoryAppended(parsed.workspace_id, parsed.entry_id);
+        } else if (parsed.type === 'api_run_progress') {
+          // A running automation finished a step: fetch its delta now
+          // instead of waiting for the fallback poll.
+          apiClient.noteRunProgress(parsed.run_id);
         } else if (
           parsed.type === 'swarm_run_updated' ||
           parsed.type === 'swarm_task_updated' ||

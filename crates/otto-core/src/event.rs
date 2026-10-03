@@ -101,6 +101,16 @@ pub enum Event {
         session_id: Option<Id>,
         request_id: Option<Id>,
     },
+    /// An API automation run completed a step or finished (perf F2): the
+    /// running view fetches the new steps on this instead of polling blind.
+    /// Counts and status only — never a step result.
+    ApiRunProgress {
+        workspace_id: Id,
+        automation_id: Id,
+        run_id: Id,
+        status: String,
+        steps_done: usize,
+    },
     /// A swarm run was created or changed. `run` is the serialized SwarmRun row
     /// (otto-core can't depend on otto-state, so it travels as JSON).
     SwarmRunUpdated {
@@ -731,6 +741,7 @@ impl Event {
             Event::TrailAppended { .. } => "trail_appended",
             Event::TasksUpdated { .. } => "tasks_updated",
             Event::ApiHistoryAppended { .. } => "api_history_appended",
+            Event::ApiRunProgress { .. } => "api_run_progress",
             Event::SwarmRunUpdated { .. } => "swarm_run_updated",
             Event::SwarmTaskUpdated { .. } => "swarm_task_updated",
             Event::SwarmProjectCleared { .. } => "swarm_project_cleared",

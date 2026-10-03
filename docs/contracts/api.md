@@ -2234,6 +2234,7 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | DELETE /workspaces/{wid}/api-client/collections/{id} | ws editor | — | 204 |
 | GET /workspaces/{wid}/api-client/collections/{id}/openapi | ws viewer | — | export the collection as OpenAPI |
 | GET /workspaces/{wid}/api-client/requests | ws viewer | — | `Request[]` |
+| GET /workspaces/{wid}/api-client/requests/summaries?collection_id= | ws viewer | — | `ApiOverviewRequest[]` (`{id, name, method, url, collection_id, auth_type, has_ssh, agent_authored, updated_at}`), same order as `/requests` — a scalar projection: never the body, headers, query, auth values, scripts, docs or multipart files. `/overview` reads it too |
 | POST /workspaces/{wid}/api-client/requests | ws editor | CreateRequestReq | Request |
 | GET /workspaces/{wid}/api-client/requests/{id}?shape=full\|agent | ws viewer | — | Request. `full` is the unchanged default; `agent` masks auth/header/query secrets and caps the body at 64 KiB |
 | PATCH /workspaces/{wid}/api-client/requests/{id} | ws editor | UpdateRequestReq | Request. Create/Update carry the persisted extras: `pre_request_script?`, `post_response_script?`, `settings?` (`{timeout_ms?, follow_redirects?, tls_verify?}`), `docs?`, `graphql_variables?` |
@@ -2262,8 +2263,8 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | DELETE /workspaces/{wid}/api-client/automations/{id} | ws editor | — | 204 |
 | POST /workspaces/{wid}/api-client/automations/{id}/run | ws editor | `StartApiAutomationRunReq?` | synchronous `ApiRunResult`; execution also persists a durable report |
 | POST /workspaces/{wid}/api-client/automations/{id}/runs | ws editor | `StartApiAutomationRunReq` | `ApiAutomationRun` immediately; runs in background. When an AGENT starts the run (this route or `…/run`), every step enforces the **Secret host binding** after its pre-request script: a step whose stored secret would leave its bound host fails with the `needs_confirm=new_host` message instead of sending |
-| GET /workspaces/{wid}/api-client/automation-runs?automation_id=&before= | ws editor | — | latest 50 `ApiAutomationRun` rows, newest id first; `before` is the last run id |
-| GET /workspaces/{wid}/api-client/automation-runs/{id}?after= | ws editor | — | `ApiAutomationRun`; foreign workspace is 404. `after=N` (delta poll while running): `report.steps`, `result_rows` and `result_ids` hold only the entries after the first N, and `snapshot` is `null` — the client appends to what it already has |
+| GET /workspaces/{wid}/api-client/automation-runs?automation_id=&before= | ws editor | — | latest 50 `ApiAutomationRun` **summary** rows, newest id first; `before` is the last run id. List rows carry `steps_total` / `steps_passed` and NO step results: `report.steps`, `result_rows`, `result_ids` are `[]` and `snapshot` is `null` — read the run by id for those |
+| GET /workspaces/{wid}/api-client/automation-runs/{id}?after= | ws editor | — | `ApiAutomationRun`; foreign workspace is 404. `after=N` (delta poll while running): `report.steps`, `result_rows` and `result_ids` hold only the entries after the first N, and `snapshot` is `null` — the client appends to what it already has. Steps are stored one row each (`api_automation_run_steps`, migration 0166) and the delta is read from that table by index; runs recorded before 0166 keep their steps inline and read the same. `steps_total`/`steps_passed` are absent on this read. Progress is pushed as the `api_run_progress` WS event (see ws.md) — clients fetch the delta on it and poll only as a fallback |
 | POST /workspaces/{wid}/api-client/automation-runs/{id}/cancel | ws editor | `{}` | current `ApiAutomationRun`; cancellation is asynchronous/idempotent |
 | POST /workspaces/{wid}/api-client/oauth2/authorize | ws editor | `{request_id}` | `{flow_id,authorization_url,redirect_uri,expires_in:600}` |
 | GET /workspaces/{wid}/api-client/oauth2/flows/{id} | initiating user + ws editor | — | `{status:pending\|exchanging\|completed\|failed,error?,request_id}`; expired/foreign flow is 404 |
@@ -2336,7 +2337,17 @@ step) the daemon trims the workspace's history: rows older than
 nothing is ever deleted until an admin picks a limit (History list → retention control, or
 `PATCH /workspaces/{id}` settings JSON). Once set, pre-existing rows beyond the limits are
 trimmed on the workspace's next run. A history row keeps at most 64 KB of the response `body`
-(`truncated: true` when cut) — the live response is unaffected. No migration.
+(`truncated: true` when cut) and at most 64 KB of the request snapshot's `body`
+(`request.request_truncated: true` when cut); a multipart `file` part keeps its `filename`
+and decoded `size` but not its base64 `value` — the live request/response are unaffected.
+The trim runs in the background, at most once per 30 s per workspace, so it never delays
+the `/execute` reply (rows over a limit can outlive it by up to that interval). There is
+still **no default row cap**: a default limit would delete user history and needs the
+user's sign-off first. No migration.
+
+**Automation run retention (opt-in).** `settings.api_client.automation_runs_keep` (integer,
+default `0` = keep every run) keeps only the newest N finished runs per automation, pruned
+when a run ends; a running run is never pruned.
 
 **Cookie jar scope.** The cookie jar is per-WORKSPACE (in-memory per daemon run): cookies
 captured executing in one workspace are never replayed for another. The cookies endpoints
@@ -4563,8 +4574,8 @@ budget is wall-clock for the whole fetch (head + body). Broadcasts `browser_tab_
 | POST /api/v1/workspaces/{wid}/browser/tabs | ws editor · Browser Edit | `{url}` | `BrowserTab` (created in `mode:"reader"`) |
 | PATCH /api/v1/browser/tabs/{id} | ws editor · Browser Edit | `{url?, title?, mode?}` (`mode` ∈ `reader`\|`live`) | `BrowserTab` |
 | DELETE /api/v1/browser/tabs/{id} | ws editor · Browser Edit | — | 204 |
-| GET /api/v1/workspaces/{wid}/browser/page?url=…[&include_html=0] | ws editor · Browser Edit | — | `{url, title, markdown, html, engine, degraded}` — netguard-checked; `degraded:true` means the plain-fetch fallback ran (no JS). `include_html=0` (or `false`) returns `html: ""` — the reader UI and the `browser_page` MCP tool pass it (raw markup is up to 2 MB); default includes it |
-| GET /api/v1/workspaces/{wid}/browser/query?url=…&selector=… | ws editor · Browser Edit | — | `{matches: [{selector, outer_html, text}]}` — netguard-checked, same as `/page`; CSS-selector matches against the settled page |
+| GET /api/v1/workspaces/{wid}/browser/page?url=…[&include_html=0][&fresh=1] | ws editor · Browser Edit | — | `{url, title, markdown, html, engine, degraded}` — netguard-checked; `degraded:true` means the plain-fetch fallback ran (no JS). `include_html=0` (or `false`) returns `html: ""` — the reader UI and the `browser_page` MCP tool pass it (raw markup is up to 2 MB); default includes it. Renders are cached per workspace + URL (fragment ignored) for 60 s, concurrent requests share one in-flight render (≤32 pages / 32 MB); `fresh=1` (or `true`) forces a new render. A `/browser/login` drops that host's cached pages |
+| GET /api/v1/workspaces/{wid}/browser/query?url=…&selector=…[&fresh=1] | ws editor · Browser Edit | — | `{matches: [{selector, outer_html, text}]}` — netguard-checked, same as `/page`; CSS-selector matches against the settled page (served from the same 60 s page cache as `/page`; `fresh=1` re-renders). Bounded: ≤500 matches, `outer_html` ≤16 KB each (`…[truncated]`), ≤1 MB total |
 | GET /api/v1/workspaces/{wid}/browser/annotations | ws viewer · Browser View | query `url?` (filters to one page) | `BrowserAnnotation[]` |
 | POST /api/v1/workspaces/{wid}/browser/annotations | ws editor · Browser Edit | `{url, selector, excerpt?, text?, comment?, color?, tab_id?}` (`excerpt`/`text` default `""`, `color` defaults `"yellow"`) | `BrowserAnnotation` |
 | PATCH /api/v1/browser/annotations/{id} | ws editor · Browser Edit | `{comment}` | `BrowserAnnotation` |

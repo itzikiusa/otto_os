@@ -146,18 +146,32 @@ impl BrowserEngineHandle {
             .await
     }
 
-    /// Caller must netguard-check `url` first — see module docs.
-    pub async fn page(&self, url: &str) -> Result<otto_browser::Page, otto_browser::EngineError> {
-        self.service().await.page(url).await
+    /// The rendered page, from the service's short-lived per-workspace cache
+    /// when a render of `url` is under a minute old (or in flight) — `fresh`
+    /// forces a new render (the reader's reload button). Caller must
+    /// netguard-check `url` first — see module docs.
+    pub async fn page(
+        &self,
+        scope: &str,
+        url: &str,
+        fresh: bool,
+    ) -> Result<std::sync::Arc<otto_browser::Page>, otto_browser::EngineError> {
+        self.service().await.page_shared(scope, url, fresh).await
     }
 
-    /// Caller must netguard-check `url` first — see module docs.
+    /// A selector query against the (cached) rendered page — see
+    /// [`Self::page`]. Caller must netguard-check `url` first.
     pub async fn query(
         &self,
+        scope: &str,
         url: &str,
         selector: &str,
+        fresh: bool,
     ) -> Result<Vec<otto_browser::MatchedNode>, otto_browser::EngineError> {
-        self.service().await.query(url, selector).await
+        self.service()
+            .await
+            .query_shared(scope, url, selector, fresh)
+            .await
     }
 
     /// Test-only: wraps an already-built `BrowserService` (e.g. a scripted
@@ -280,12 +294,21 @@ struct PageQuery {
     /// (perf SB-15). Default: included (API compatibility).
     #[serde(default)]
     include_html: Option<String>,
+    /// `1`/`true` → bypass the daemon's one-minute page cache (an explicit
+    /// reload). Default: a render under a minute old is reused.
+    #[serde(default)]
+    fresh: Option<String>,
 }
 
 impl PageQuery {
     fn wants_html(&self) -> bool {
         !matches!(self.include_html.as_deref(), Some("0" | "false"))
     }
+}
+
+/// `?fresh=1|true` on the page/query routes.
+fn is_fresh(v: Option<&str>) -> bool {
+    matches!(v, Some("1" | "true"))
 }
 
 /// `{url,title,markdown,html,engine,degraded}` — mirrors `otto_browser::Page`
@@ -304,6 +327,9 @@ struct BrowserPageResp {
 struct SelectorQuery {
     url: String,
     selector: String,
+    /// Same as [`PageQuery::fresh`].
+    #[serde(default)]
+    fresh: Option<String>,
 }
 
 /// `{selector,outer_html,text}` — mirrors `otto_browser::MatchedNode`
@@ -591,7 +617,13 @@ async fn update_tab(
                     .map_err(|m| ApiError(Error::Invalid(m)))?;
                 match supplied_title {
                     Some(title) => title,
-                    None => ctx.browser.page(&url).await.map_err(engine_err)?.title,
+                    None => ctx
+                        .browser
+                        .page(&tab.workspace_id, &url, false)
+                        .await
+                        .map_err(engine_err)?
+                        .title
+                        .clone(),
                 }
             } else {
                 supplied_title.unwrap_or_else(|| tab.title.clone())
@@ -662,18 +694,22 @@ async fn fetch_page(
     otto_netguard::check_url(&q.url)
         .await
         .map_err(|m| ApiError(Error::Invalid(m)))?;
-    let page = ctx.browser.page(&q.url).await.map_err(engine_err)?;
+    let page = ctx
+        .browser
+        .page(&wid, &q.url, is_fresh(q.fresh.as_deref()))
+        .await
+        .map_err(engine_err)?;
     let html = if q.wants_html() {
-        page.html
+        page.html.clone()
     } else {
         String::new()
     };
     Ok(Json(BrowserPageResp {
-        url: page.url,
-        title: page.title,
-        markdown: page.markdown,
+        url: page.url.clone(),
+        title: page.title.clone(),
+        markdown: page.markdown.clone(),
         html,
-        engine: page.engine,
+        engine: page.engine.clone(),
         degraded: page.degraded,
     }))
 }
@@ -696,7 +732,7 @@ async fn query_page(
         .map_err(|m| ApiError(Error::Invalid(m)))?;
     let matches = ctx
         .browser
-        .query(&q.url, &q.selector)
+        .query(&wid, &q.url, &q.selector, is_fresh(q.fresh.as_deref()))
         .await
         .map_err(engine_err)?;
     Ok(Json(BrowserQueryResp {
@@ -835,7 +871,11 @@ async fn summarize_page(
     otto_netguard::check_url(&req.url)
         .await
         .map_err(|m| ApiError(Error::Invalid(m)))?;
-    let page = ctx.browser.page(&req.url).await.map_err(engine_err)?;
+    let page = ctx
+        .browser
+        .page(&wid, &req.url, false)
+        .await
+        .map_err(engine_err)?;
     let ws = ctx.workspaces.get(&wid).await.map_err(ApiError)?;
 
     let capped: String = page.markdown.chars().take(SUMMARIZE_MAX_CHARS).collect();
@@ -879,7 +919,7 @@ async fn summarize_page(
 
     Ok(Json(SummarizeResp {
         summary: raw.trim().to_string(),
-        engine: page.engine,
+        engine: page.engine.clone(),
         degraded: page.degraded,
     }))
 }
@@ -1187,9 +1227,13 @@ async fn vault_save(
             otto_netguard::check_url(&req.url)
                 .await
                 .map_err(|m| ApiError(Error::Invalid(m)))?;
-            let page = ctx.browser.page(&req.url).await.map_err(engine_err)?;
+            let page = ctx
+                .browser
+                .page(&wid, &req.url, false)
+                .await
+                .map_err(engine_err)?;
             let capped: String = page.markdown.chars().take(SUMMARIZE_MAX_CHARS).collect();
-            (page.title, capped)
+            (page.title.clone(), capped)
         }
     };
 
@@ -2403,6 +2447,44 @@ mod tests {
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
+    /// Perf guard (F1/F11): the agent flow navigate → page → query on one URL
+    /// renders it ONCE; `?fresh=1` (the reload button) renders again.
+    #[tokio::test]
+    async fn navigate_page_and_query_on_one_url_render_once() {
+        let (_tmp, calls, app) = counting_app(false).await;
+        let (_, body) = post_json(
+            &app,
+            "/workspaces/ws1/browser/tabs",
+            serde_json::json!({"url": "https://8.8.8.8/"}),
+        )
+        .await;
+        let id = json(&body)["id"].as_str().unwrap().to_string();
+        let (status, _) = send(
+            &app,
+            Method::PATCH,
+            &format!("/browser/tabs/{id}"),
+            Some(serde_json::json!({"url": "https://8.8.8.8/doc"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = get(&app, "/workspaces/ws1/browser/page?url=https://8.8.8.8/doc").await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = get(
+            &app,
+            "/workspaces/ws1/browser/query?url=https://8.8.8.8/doc&selector=p",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let (status, _) = get(
+            &app,
+            "/workspaces/ws1/browser/page?url=https://8.8.8.8/doc&fresh=1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
     #[tokio::test]
     async fn annotation_update_and_delete_via_http() {
         let (_tmp, app) = test_app().await;
@@ -3067,6 +3149,7 @@ mod tests {
         let q = |v: Option<&str>| PageQuery {
             url: "https://example.com".into(),
             include_html: v.map(str::to_string),
+            fresh: None,
         };
         assert!(q(None).wants_html());
         assert!(q(Some("1")).wants_html());

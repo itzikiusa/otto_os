@@ -25,9 +25,39 @@ use std::{
 };
 use tokio::sync::watch;
 
-fn live() -> &'static Mutex<HashMap<Id, watch::Sender<bool>>> {
-    static LIVE: OnceLock<Mutex<HashMap<Id, watch::Sender<bool>>>> = OnceLock::new();
+/// A run in flight: its cancel switch and a step-count progress channel. The
+/// entry is removed (dropping both senders) only after the final record is
+/// saved, so a progress receiver seeing its sender close means "finished".
+struct LiveRun {
+    cancel: watch::Sender<bool>,
+    progress: watch::Sender<usize>,
+}
+
+fn live() -> &'static Mutex<HashMap<Id, LiveRun>> {
+    static LIVE: OnceLock<Mutex<HashMap<Id, LiveRun>>> = OnceLock::new();
     LIVE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Progress of a run still in flight (`None` once it finished, or for an
+/// unknown id): `changed()` fires per completed step and errors when the run
+/// ends — what the synchronous runner waits on instead of polling the DB
+/// every 100 ms (perf F2).
+pub(crate) fn subscribe(run_id: &Id) -> Option<watch::Receiver<usize>> {
+    live()
+        .lock()
+        .unwrap()
+        .get(run_id)
+        .map(|r| r.progress.subscribe())
+}
+
+fn publish_progress(ctx: &ServerCtx, run: &ApiAutomationRun) {
+    let _ = ctx.events.send(otto_core::event::Event::ApiRunProgress {
+        workspace_id: run.workspace_id.clone(),
+        automation_id: run.automation_id.clone(),
+        run_id: run.id.clone(),
+        status: run.status.clone(),
+        steps_done: run.report.steps.len(),
+    });
 }
 fn db_error(e: sqlx::Error) -> ApiError {
     ApiError(if matches!(e, sqlx::Error::RowNotFound) {
@@ -75,16 +105,20 @@ pub async fn start(
     let mut secret_values: Vec<String> = env_secrets.values().cloned().collect();
     // An agent-started run keeps every stored secret on its bound host (see
     // `run_step`); a person's run is theirs to aim.
-    let binding = super::api_client::is_agent_caller(&headers, &auth).then(|| {
-        super::api_client::StepSecretBinding {
+    let binding = if super::api_client::is_agent_caller(&headers, &auth) {
+        Some(super::api_client::StepSecretBinding {
+            bound_hosts: super::api_client::bound_env_secret_hosts(&api, &wid, &initial_vars)
+                .await?,
             env_vars: initial_vars.clone(),
             env_blob: env_secrets.clone(),
             secret_keys: environment
                 .as_ref()
                 .map(|env| env.secret_keys.clone())
                 .unwrap_or_default(),
-        }
-    });
+        })
+    } else {
+        None
+    };
     let mut requests = Vec::new();
     let mut snapshot = Vec::new();
     for step in &steps {
@@ -129,12 +163,18 @@ pub async fn start(
         result_rows: vec![],
         result_ids: vec![],
         error: None,
+        steps_total: None,
+        steps_passed: None,
     };
     let reports = ApiRunsRepo(ctx.pool.clone());
-    reports.save(&run).await.map_err(db_error)?;
+    reports.save_header(&run).await.map_err(db_error)?;
     let initial = run.clone();
     let (cancel, mut cancelled) = watch::channel(false);
-    live().lock().unwrap().insert(run.id.clone(), cancel);
+    let (progress, _) = watch::channel(0usize);
+    live()
+        .lock()
+        .unwrap()
+        .insert(run.id.clone(), LiveRun { cancel, progress });
     tokio::spawn(async move {
         let rows = if options.dataset.is_empty() {
             vec![serde_json::Map::new()]
@@ -188,14 +228,24 @@ pub async fn start(
                 if (run.report.steps.len() + 1).is_multiple_of(PRUNE_EVERY) {
                     prune_history(&ctx, &api, &wid).await;
                 }
-                run.report.steps.push(result);
-                run.result_rows.push(row_idx);
-                run.result_ids.push(step_id);
-                if let Err(e) = reports.save(&run).await {
+                // One step row + two counters per step (perf F2) — the run
+                // record used to be re-serialized whole after every step.
+                let idx = run.report.steps.len();
+                if let Err(e) = reports
+                    .append_step(&run.id, idx, row_idx, &step_id, &result)
+                    .await
+                {
                     run.status = "interrupted".into();
                     run.error = Some(format!("Could not persist step result: {e}"));
                     break 'rows;
                 }
+                run.report.steps.push(result);
+                run.result_rows.push(row_idx);
+                run.result_ids.push(step_id);
+                if let Some(live) = live().lock().unwrap().get(&run.id) {
+                    live.progress.send_replace(run.report.steps.len());
+                }
+                publish_progress(&ctx, &run);
                 if failed && options.stop_on_failure {
                     run.status = "failed".into();
                     break 'rows;
@@ -218,22 +268,46 @@ pub async fn start(
             );
         }
         run.finished_at = Some(chrono::Utc::now().to_rfc3339());
-        if let Err(e) = reports.save(&run).await {
+        if let Err(e) = reports.save_header(&run).await {
             tracing::error!(run_id=%run.id,error=%e,"could not finalize API automation run");
         }
         if !run.report.steps.is_empty() {
             prune_history(&ctx, &api, &wid).await;
         }
+        // Opt-in run retention (`settings.api_client.automation_runs_keep`,
+        // default 0 = keep every run — old reports are user data).
+        let keep = runs_keep(&ctx, &wid).await;
+        if keep > 0 {
+            let _ = reports.prune_runs(&wid, &run.automation_id, keep).await;
+        }
         live().lock().unwrap().remove(&run.id);
+        publish_progress(&ctx, &run);
     });
     Ok(Json(initial))
 }
 
 /// Steps between history-retention passes during a run (plus one at the end).
-/// The run record itself is still saved after EVERY step (each completed step
-/// is durable before the next request goes out) — at the 1000-execution cap
-/// that record is ~300 KB, so the per-step save stays cheap next to a request.
+/// Each completed step is still durable before the next request goes out — as
+/// one `api_automation_run_steps` row, not a rewrite of the whole record.
 const PRUNE_EVERY: usize = 50;
+
+/// `settings.api_client.automation_runs_keep`: newest finished runs kept per
+/// automation (`0`/absent = keep all, the default —
+/// [`otto_state::api_runs::RUNS_KEEP_DEFAULT`]).
+async fn runs_keep(ctx: &ServerCtx, wid: &Id) -> i64 {
+    ctx.workspaces
+        .get(wid)
+        .await
+        .ok()
+        .and_then(|ws| {
+            ws.settings
+                .get("api_client")
+                .and_then(|a| a.get("automation_runs_keep"))
+                .and_then(Value::as_i64)
+        })
+        .filter(|v| *v > 0)
+        .unwrap_or(otto_state::api_runs::RUNS_KEEP_DEFAULT)
+}
 
 async fn prune_history(ctx: &ServerCtx, api: &ApiClientRepo, wid: &Id) {
     let (max_rows, max_days) = super::api_client::history_retention(ctx, wid).await;
@@ -272,26 +346,13 @@ pub async fn get(
     Query(q): Query<GetQuery>,
 ) -> ApiResult<Json<ApiAutomationRun>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    let mut run = ApiRunsRepo(ctx.pool)
-        .get(&wid, &id)
-        .await
-        .map_err(db_error)?;
-    if let Some(after) = q.after {
-        tail_after(&mut run, after);
+    let repo = ApiRunsRepo(ctx.pool);
+    let run = match q.after {
+        Some(after) => repo.get_after(&wid, &id, after).await,
+        None => repo.get(&wid, &id).await,
     }
+    .map_err(db_error)?;
     Ok(Json(run))
-}
-
-/// Keep only the step results after the first `after` (the three per-step
-/// vectors stay index-aligned) and drop the snapshot.
-fn tail_after(run: &mut ApiAutomationRun, after: usize) {
-    let steps = std::mem::take(&mut run.report.steps);
-    run.report.steps = steps.into_iter().skip(after).collect();
-    let rows = std::mem::take(&mut run.result_rows);
-    run.result_rows = rows.into_iter().skip(after).collect();
-    let ids = std::mem::take(&mut run.result_ids);
-    run.result_ids = ids.into_iter().skip(after).collect();
-    run.snapshot = Value::Null;
 }
 pub async fn cancel(
     Path((wid, id)): Path<(Id, Id)>,
@@ -303,8 +364,8 @@ pub async fn cancel(
         .get(&wid, &id)
         .await
         .map_err(db_error)?;
-    if let Some(cancel) = live().lock().unwrap().get(&id) {
-        let _ = cancel.send(true);
+    if let Some(live) = live().lock().unwrap().get(&id) {
+        let _ = live.cancel.send(true);
     }
     Ok(Json(run))
 }
@@ -321,48 +382,5 @@ mod tests {
         };
         assert!(validate(&options, 100).is_err());
         assert!(validate(&options, 90).is_ok());
-    }
-
-    #[test]
-    fn tail_after_returns_only_new_steps_and_no_snapshot() {
-        let step = |name: &str| otto_core::api::ApiRunStepResult {
-            request_id: "r".into(),
-            name: name.into(),
-            status: Some(200),
-            duration_ms: 1,
-            ok: true,
-            assertions: json!([]),
-            error: None,
-        };
-        let mut run = ApiAutomationRun {
-            id: "run".into(),
-            workspace_id: "w".into(),
-            automation_id: "a".into(),
-            environment_id: None,
-            created_by: "u".into(),
-            status: "running".into(),
-            created_at: String::new(),
-            finished_at: None,
-            stop_on_failure: false,
-            dataset_rows: 1,
-            snapshot: json!([{"request_id": "r"}]),
-            report: ApiRunResult {
-                automation_id: "a".into(),
-                steps: vec![step("one"), step("two"), step("three")],
-                passed: false,
-            },
-            result_rows: vec![0, 0, 1],
-            result_ids: vec!["s1".into(), "s2".into(), "s3".into()],
-            error: None,
-        };
-        let mut past_end = run.clone();
-        tail_after(&mut run, 2);
-        assert_eq!(run.report.steps.len(), 1);
-        assert_eq!(run.report.steps[0].name, "three");
-        assert_eq!(run.result_rows, vec![1]);
-        assert_eq!(run.result_ids, vec!["s3".to_string()]);
-        assert!(run.snapshot.is_null());
-        tail_after(&mut past_end, 10);
-        assert!(past_end.report.steps.is_empty() && past_end.result_ids.is_empty());
     }
 }

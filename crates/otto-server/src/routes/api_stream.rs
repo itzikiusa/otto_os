@@ -248,6 +248,11 @@ async fn serve_sse(
 #[derive(Default)]
 struct SseFramer {
     buf: Vec<u8>,
+    /// `buf[..scanned]` is already CRLF-folded and holds no `\n\n` start
+    /// (except possibly at its last byte) — each push folds and scans only the
+    /// new bytes (perf F10: it re-folded and rescanned the whole pending
+    /// buffer per chunk, O(pending²) for a large event).
+    scanned: usize,
 }
 
 impl SseFramer {
@@ -258,22 +263,33 @@ impl SseFramer {
 
     /// Append a chunk; return every block it completed (CRLF folded to LF).
     fn push(&mut self, bytes: &[u8]) -> Vec<String> {
-        self.buf.extend_from_slice(bytes);
-        // CRLF → LF across the whole pending buffer: a CR that ended the last
-        // chunk meets its LF here. A trailing lone CR waits for the next chunk.
-        let mut folded = Vec::with_capacity(self.buf.len());
-        for (i, b) in self.buf.iter().enumerate() {
-            if *b == b'\r' && self.buf.get(i + 1) == Some(&b'\n') {
+        // CRLF → LF over the new bytes only: everything before is already
+        // folded, except a trailing lone CR, which may meet its LF now.
+        let fold_from = if self.buf.last() == Some(&b'\r') {
+            self.buf.len() - 1
+        } else {
+            self.buf.len()
+        };
+        let mut tail = self.buf.split_off(fold_from);
+        tail.extend_from_slice(bytes);
+        for (i, b) in tail.iter().enumerate() {
+            if *b == b'\r' && tail.get(i + 1) == Some(&b'\n') {
                 continue;
             }
-            folded.push(*b);
+            self.buf.push(*b);
         }
-        self.buf = folded;
+        // A `\n\n` can start one byte before the unscanned / refolded region.
+        let mut from = self.scanned.min(fold_from).saturating_sub(1);
+        let mut start = 0;
         let mut blocks = Vec::new();
-        while let Some(idx) = self.buf.windows(2).position(|w| w == b"\n\n") {
-            let block: Vec<u8> = self.buf.drain(..idx + 2).collect();
-            blocks.push(String::from_utf8_lossy(&block).into_owned());
+        while let Some(rel) = self.buf[from..].windows(2).position(|w| w == b"\n\n") {
+            let end = from + rel + 2;
+            blocks.push(String::from_utf8_lossy(&self.buf[start..end]).into_owned());
+            start = end;
+            from = end;
         }
+        self.buf.drain(..start);
+        self.scanned = self.buf.len();
         blocks
     }
 }
@@ -493,6 +509,31 @@ mod tests {
             blocks,
             vec!["data: a\n\n".to_string(), "data: b\n\n".to_string()]
         );
+    }
+
+    /// perf F10: any chunking (down to one byte at a time) frames exactly
+    /// like one big push, and a large pending event is scanned linearly.
+    #[test]
+    fn framer_is_chunking_invariant() {
+        let stream = b"data: a\r\n\r\nevent: x\ndata: \xF0\x9F\x8C\x8D\n\n:c\r\n\r\ndata: tail";
+        let mut whole = SseFramer::default();
+        let expected = whole.push(stream);
+        for size in [1usize, 2, 3, 5, 7] {
+            let mut f = SseFramer::default();
+            let mut got = Vec::new();
+            for chunk in stream.chunks(size) {
+                got.extend(f.push(chunk));
+            }
+            assert_eq!(got, expected, "chunk size {size}");
+            assert_eq!(f.pending(), whole.pending());
+        }
+        let mut big = SseFramer::default();
+        let line = vec![b'x'; 1024];
+        for _ in 0..1024 {
+            assert!(big.push(&line).is_empty());
+        }
+        assert_eq!(big.push(b"\n\n").len(), 1);
+        assert_eq!(big.pending(), 0);
     }
 
     #[test]

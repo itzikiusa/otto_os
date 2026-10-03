@@ -839,7 +839,7 @@
         onopenurl={focusUrl}
         onretry={() => {
           const url = browser.activeTab?.url;
-          if (url) void browser.loadPage(url);
+          if (url) void browser.loadPage(url, { fresh: true });
         }}
       />
       {#if browser.page}

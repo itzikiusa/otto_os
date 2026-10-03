@@ -162,6 +162,50 @@ fn build_settings_client(
     if !no_redirect && !no_verify && proxy.is_none() {
         return Ok(None);
     }
+    // Memoized per settings combination (perf F8): every SSH-tunnelled,
+    // no-verify or no-redirect send — and every step of such an automation —
+    // built a fresh client and paid a new SOCKS + TCP + TLS dial. Errors are
+    // never cached; a key is only ever a working client.
+    static CLIENTS: OnceLock<StdMutex<HashMap<String, (reqwest::Client, Instant)>>> =
+        OnceLock::new();
+    let key = format!(
+        "{wid}|{allow_local}|{no_redirect}|{no_verify}|{}",
+        proxy.unwrap_or("")
+    );
+    let clients = CLIENTS.get_or_init(|| StdMutex::new(HashMap::new()));
+    {
+        let mut map = clients.lock().unwrap_or_else(|e| e.into_inner());
+        map.retain(|_, (_, used)| used.elapsed() < TUNNEL_IDLE_TTL);
+        if let Some((client, used)) = map.get_mut(&key) {
+            *used = Instant::now();
+            return Ok(Some(client.clone()));
+        }
+    }
+    let client = build_settings_client_uncached(wid, no_redirect, no_verify, proxy, allow_local)?;
+    let mut map = clients.lock().unwrap_or_else(|e| e.into_inner());
+    if map.len() >= SETTINGS_CLIENTS_MAX {
+        if let Some(oldest) = map
+            .iter()
+            .min_by_key(|(_, (_, used))| *used)
+            .map(|(k, _)| k.clone())
+        {
+            map.remove(&oldest);
+        }
+    }
+    map.insert(key, (client.clone(), Instant::now()));
+    Ok(Some(client))
+}
+
+/// Most per-settings clients kept by [`build_settings_client`].
+const SETTINGS_CLIENTS_MAX: usize = 32;
+
+fn build_settings_client_uncached(
+    wid: &Id,
+    no_redirect: bool,
+    no_verify: bool,
+    proxy: Option<&str>,
+    allow_local: bool,
+) -> Result<reqwest::Client, String> {
     // Tunnelled: the target resolves and is dialled at the FAR end — the local
     // guard would only false-block bastion-only hosts (and would refuse the
     // local SOCKS endpoint itself). allow_local: the workspace explicitly opted
@@ -193,7 +237,7 @@ fn build_settings_client(
             .map_err(|e| format!("Couldn't route through the SSH tunnel ({e})"))?;
         builder = builder.proxy(px);
     }
-    builder.build().map(Some).map_err(|e| {
+    builder.build().map_err(|e| {
         if proxy.is_some() {
             format!("Couldn't route through the SSH tunnel ({e})")
         } else {
@@ -376,7 +420,7 @@ pub async fn overview(
     let repo = repo(&ctx);
     let collections = repo.list_collections(&wid).await?;
     let requests = repo
-        .list_requests(&wid, query.collection_id.as_ref())
+        .list_request_summaries(&wid, query.collection_id.as_ref())
         .await?;
     let environments = repo.list_environments(&wid).await?;
     let automations = repo.list_automations(&wid).await?;
@@ -393,7 +437,7 @@ pub async fn overview(
 /// Build the compact, secret-free API-client discovery view.
 pub(crate) fn build_overview(
     collections: Vec<ApiCollection>,
-    requests: Vec<ApiRequest>,
+    requests: Vec<ApiOverviewRequest>,
     environments: Vec<ApiEnvironment>,
     automations: Vec<ApiAutomation>,
     q: Option<&str>,
@@ -428,26 +472,6 @@ pub(crate) fn build_overview(
             requests
                 .into_iter()
                 .filter(|request| matches(&[&request.name, &request.method, &request.url]))
-                .map(|request| {
-                    let auth_type = request
-                        .auth
-                        .get("type")
-                        .and_then(Value::as_str)
-                        .unwrap_or("none")
-                        .to_string();
-                    let agent_authored = is_agent_authored(&request);
-                    ApiOverviewRequest {
-                        id: request.id,
-                        name: request.name,
-                        method: request.method,
-                        url: request.url,
-                        collection_id: request.collection_id,
-                        auth_type,
-                        has_ssh: request.ssh_connection_id.is_some(),
-                        agent_authored,
-                        updated_at: request.updated_at,
-                    }
-                })
                 .collect()
         } else {
             Vec::new()
@@ -574,6 +598,23 @@ pub async fn list_requests(
     Ok(Json(
         repo(&ctx)
             .list_requests(&wid, filter.collection_id.as_ref())
+            .await?,
+    ))
+}
+
+/// `GET /workspaces/{wid}/api-client/requests/summaries` (?collection_id) —
+/// the scalar projection of `/requests` ([`ApiOverviewRequest`] rows: no
+/// body, headers, auth values, scripts or docs).
+pub async fn list_request_summaries(
+    Path(wid): Path<Id>,
+    Query(filter): Query<RequestsFilter>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<Vec<ApiOverviewRequest>>> {
+    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
+    Ok(Json(
+        repo(&ctx)
+            .list_request_summaries(&wid, filter.collection_id.as_ref())
             .await?,
     ))
 }
@@ -1513,14 +1554,13 @@ async fn record_history(
     );
     request.entry("name").or_insert(Value::Null);
     request.insert("source".into(), source.clone());
+    cap_history_request(request);
     cap_history_body(&mut history.response);
     let entry = repo.insert_history(history).await.ok()?;
-    // Retention (runtime cap, no migration): trim this workspace's history to
-    // its row/age limits after every insert, best-effort.
-    let (max_rows, max_days) = history_retention(ctx, &entry.workspace_id).await;
-    let _ = repo
-        .prune_history(&entry.workspace_id, max_rows, max_days)
-        .await;
+    // Retention (runtime cap, no migration) runs OFF the response path and at
+    // most every PRUNE_MIN_INTERVAL per workspace (perf F5: a workspace read
+    // plus a DELETE scan used to precede every `/execute` reply).
+    schedule_history_prune(ctx, repo, &entry.workspace_id);
     let source_kind = source
         .get("kind")
         .and_then(Value::as_str)
@@ -1534,6 +1574,82 @@ async fn record_history(
         request_id,
     });
     Some(entry.id)
+}
+
+/// Minimum gap between two background history-retention passes for one
+/// workspace. Rows over a limit survive at most this long (or until the next
+/// send after it); nothing is pruned when no limit is set.
+const PRUNE_MIN_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Run the workspace's history retention in the background, throttled to one
+/// pass per [`PRUNE_MIN_INTERVAL`]. Best-effort, like the inline prune it
+/// replaced.
+fn schedule_history_prune(ctx: &ServerCtx, repo: &ApiClientRepo, wid: &Id) {
+    static LAST: OnceLock<StdMutex<HashMap<Id, Instant>>> = OnceLock::new();
+    {
+        let mut last = LAST
+            .get_or_init(|| StdMutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if last
+            .get(wid)
+            .is_some_and(|at| at.elapsed() < PRUNE_MIN_INTERVAL)
+        {
+            return;
+        }
+        last.insert(wid.clone(), Instant::now());
+    }
+    let (ctx, repo, wid) = (ctx.clone(), repo.clone(), wid.clone());
+    tokio::spawn(async move {
+        let (max_rows, max_days) = history_retention(&ctx, &wid).await;
+        if max_rows > 0 || max_days > 0 {
+            let _ = repo.prune_history(&wid, max_rows, max_days).await;
+        }
+    });
+}
+
+/// Request body kept in a history row (perf F5: it was uncapped — up to the
+/// 2 MB request limit, base64 multipart files included).
+const HISTORY_REQUEST_BODY_MAX: usize = 64 * 1024;
+
+/// Shrink a history row's `request` snapshot: multipart `file` parts keep
+/// their `filename` and decoded `size` but drop the base64 `value`, and the
+/// `body` is then capped at [`HISTORY_REQUEST_BODY_MAX`] (UTF-8 safe) with
+/// `request_truncated: true`. The live send already used the full body.
+fn cap_history_request(request: &mut serde_json::Map<String, Value>) {
+    let multipart = matches!(
+        request.get("body_mode").and_then(Value::as_str),
+        Some("multipart" | "form-data" | "formdata")
+    );
+    let mut cut = false;
+    if let Some(Value::String(body)) = request.get_mut("body") {
+        if multipart && body.trim_start().starts_with('[') {
+            if let Ok(Value::Array(mut fields)) = serde_json::from_str::<Value>(body) {
+                let mut changed = false;
+                for field in fields.iter_mut().filter_map(Value::as_object_mut) {
+                    if field.get("type").and_then(Value::as_str) != Some("file") {
+                        continue;
+                    }
+                    if let Some(Value::String(b64)) = field.get("value") {
+                        let size = b64.trim().len() / 4 * 3;
+                        field.insert("value".into(), Value::String(String::new()));
+                        field.insert("size".into(), json!(size));
+                        changed = true;
+                    }
+                }
+                if changed {
+                    *body = Value::Array(fields).to_string();
+                }
+            }
+        }
+        if body.len() > HISTORY_REQUEST_BODY_MAX {
+            truncate_string(body, HISTORY_REQUEST_BODY_MAX);
+            cut = true;
+        }
+    }
+    if cut {
+        request.insert("request_truncated".into(), Value::Bool(true));
+    }
 }
 
 /// Default history retention per workspace: newest rows kept …
@@ -2142,9 +2258,12 @@ pub async fn execute(
                     .unwrap_or(&[]),
                 &exec_req.auth,
             );
+            // The history copy never keeps raw bytes: lift them out first so
+            // the clone doesn't copy them only to clear them.
+            let body_base64 = std::mem::take(&mut resp.body_base64);
             let mut stored_resp = resp.clone();
+            resp.body_base64 = body_base64;
             api_secrets::scrub_secrets(&mut stored_resp, &secret_values);
-            stored_resp.body_base64.clear();
             // Record success in history (best-effort; do not fail the request).
             record_history(
                 &ctx,
@@ -2355,15 +2474,26 @@ pub(crate) fn uses_env_secret(
 
 /// Hosts an environment's secrets are bound to: the hosts of the workspace's
 /// human-authored saved requests (substituted with the same variables).
+/// `urls` are the raw urls of those requests
+/// ([`ApiClientRepo::request_host_urls`] — a one-column read, not full rows).
 pub(crate) fn env_secret_hosts(
-    requests: &[ApiRequest],
+    urls: &[String],
     vars: &serde_json::Map<String, Value>,
 ) -> BTreeSet<String> {
-    requests
-        .iter()
-        .filter(|request| !is_agent_authored(request))
-        .filter_map(|request| host_of(&substitute(&request.url, vars)))
+    urls.iter()
+        .filter_map(|url| host_of(&substitute(url, vars)))
         .collect()
+}
+
+/// [`env_secret_hosts`] for `wid` with `bind_vars` — what an agent-started
+/// automation computes ONCE per run ([`StepSecretBinding::bound_hosts`]).
+pub(crate) async fn bound_env_secret_hosts(
+    repo: &ApiClientRepo,
+    wid: &Id,
+    bind_vars: &serde_json::Map<String, Value>,
+) -> ApiResult<BTreeSet<String>> {
+    let urls = repo.request_host_urls(wid).await?;
+    Ok(env_secret_hosts(&urls, bind_vars))
 }
 
 /// The host a stored secret in `req` would be sent to OUTSIDE its binding
@@ -2385,6 +2515,23 @@ pub(crate) async fn unbound_secret_host(
     bind_vars: &serde_json::Map<String, Value>,
     env_blob: &BTreeMap<String, String>,
     secret_keys: &[String],
+) -> ApiResult<Option<String>> {
+    unbound_secret_host_with(repo, wid, req, vars, bind_vars, env_blob, secret_keys, None).await
+}
+
+/// [`unbound_secret_host`] with the environment-secret host set precomputed
+/// (`bound_hosts`, from [`bound_env_secret_hosts`] with the same `bind_vars`)
+/// — `None` reads it when an env secret is actually used.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn unbound_secret_host_with(
+    repo: &ApiClientRepo,
+    wid: &Id,
+    req: &ExecuteApiReq,
+    vars: &serde_json::Map<String, Value>,
+    bind_vars: &serde_json::Map<String, Value>,
+    env_blob: &BTreeMap<String, String>,
+    secret_keys: &[String],
+    bound_hosts: Option<&BTreeSet<String>>,
 ) -> ApiResult<Option<String>> {
     let Some(target) = host_of(&substitute(&req.url, vars)) else {
         return Ok(None);
@@ -2414,8 +2561,13 @@ pub(crate) async fn unbound_secret_host(
         }
     }
     if uses_env_secret(req, vars, env_blob, secret_keys) {
-        let requests = repo.list_requests(wid, None).await?;
-        if !env_secret_hosts(&requests, bind_vars).contains(&target) {
+        let bound = match bound_hosts {
+            Some(hosts) => hosts.contains(&target),
+            None => bound_env_secret_hosts(repo, wid, bind_vars)
+                .await?
+                .contains(&target),
+        };
+        if !bound {
             return Ok(Some(target));
         }
     }
@@ -3193,6 +3345,11 @@ pub async fn run_automation(
         Json(options.map(|o| o.0).unwrap_or_default()),
     )
     .await?;
+    // Wait on the run's progress channel (closed once the final record is
+    // saved) instead of decoding the run from the DB every 100 ms (perf F2).
+    if let Some(mut progress) = super::api_automation_runs::subscribe(&run.id) {
+        while progress.changed().await.is_ok() {}
+    }
     let reports = otto_state::api_runs::ApiRunsRepo(ctx.pool);
     loop {
         let report = reports
@@ -3202,7 +3359,9 @@ pub async fn run_automation(
         if report.status != "running" {
             return Ok(Json(report.report));
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Only reachable if the channel closed without a final status (a
+        // failed finalize write) — a slow safety net, not the wait path.
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -3214,6 +3373,9 @@ pub(crate) struct StepSecretBinding {
     pub env_vars: serde_json::Map<String, Value>,
     pub env_blob: BTreeMap<String, String>,
     pub secret_keys: Vec<String>,
+    /// [`bound_env_secret_hosts`] for `env_vars`, computed once per run
+    /// rather than once per step (perf F3).
+    pub bound_hosts: BTreeSet<String>,
 }
 
 /// Run one automation step against its saved request, evaluating assertions and
@@ -3348,7 +3510,7 @@ pub(crate) async fn run_step(
     // rewritten request, a dataset row or a chained value can retarget the
     // URL). The step fails instead of sending; a person can run it from the UI.
     if let Some(binding) = binding {
-        let unbound = unbound_secret_host(
+        let unbound = unbound_secret_host_with(
             repo,
             wid,
             &exec,
@@ -3356,6 +3518,7 @@ pub(crate) async fn run_step(
             &binding.env_vars,
             &binding.env_blob,
             &binding.secret_keys,
+            Some(&binding.bound_hosts),
         )
         .await;
         let error = match unbound {
@@ -4580,7 +4743,7 @@ mod tests {
         }];
         let overview = build_overview(
             collections,
-            vec![request],
+            vec![overview_row(&request)],
             environments,
             automations,
             None,
@@ -4600,7 +4763,11 @@ mod tests {
 
         let filtered = build_overview(
             Vec::new(),
-            vec![domain_request("orders", "https://api.test/orders", None)],
+            vec![overview_row(&domain_request(
+                "orders",
+                "https://api.test/orders",
+                None,
+            ))],
             Vec::new(),
             Vec::new(),
             Some("ORDERS"),
@@ -4608,6 +4775,27 @@ mod tests {
         );
         assert_eq!(filtered.requests.len(), 1);
         assert!(filtered.environments.is_empty());
+    }
+
+    /// The Rust reading of a request's overview row — the reference the
+    /// SQL projection (`list_request_summaries`) is checked against.
+    fn overview_row(request: &ApiRequest) -> ApiOverviewRequest {
+        ApiOverviewRequest {
+            id: request.id.clone(),
+            name: request.name.clone(),
+            method: request.method.clone(),
+            url: request.url.clone(),
+            collection_id: request.collection_id.clone(),
+            auth_type: request
+                .auth
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("none")
+                .to_string(),
+            has_ssh: request.ssh_connection_id.is_some(),
+            agent_authored: is_agent_authored(request),
+            updated_at: request.updated_at,
+        }
     }
 
     #[test]
