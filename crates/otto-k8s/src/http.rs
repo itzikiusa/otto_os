@@ -468,8 +468,12 @@ async fn list_resources<S: K8sCtx>(
                 Some(l) => l,
                 None => {
                     let k = clusters::kubectl_for(&ctx, &c).await?;
+                    // The cluster's GET-only list gateway while a console
+                    // polls (perf R3); `None` ⇒ kubectl.
+                    let gw = crate::list_gateway::get(c.id.as_str(), &k).await;
                     let (items, has_metrics) = resources::list(
                         &k,
+                        gw.as_deref(),
                         kind,
                         q.ns.as_deref(),
                         q.label.as_deref(),

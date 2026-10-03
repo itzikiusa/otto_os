@@ -180,6 +180,16 @@ daemon derives the columns itself so they are stable across kubectl versions.
 `q` is a case-insensitive substring match over the visible columns, applied
 daemon-side.
 
+While a console lists, the cluster gets ONE GET-only `kubectl proxy` (on a
+Unix socket in a private `0700` temp dir; it admits only the collection paths
+of the listed kinds and metrics-server pods — no single objects, no
+exec/log/proxy sub-resources, no writes). Lists are paged straight off the API
+server through it (`limit=500` + `continue`, each page parsed off the async
+runtime) instead of a `kubectl get -o json` process per list; the proxy stops
+after 2 minutes without a list, and if it cannot start (or a page fails) the
+list falls back to kubectl — retrying the proxy after 5 minutes — so errors
+keep kubectl's exact mapping.
+
 Lists are cached for 10 s (the poll floor) with single-flight, so the console,
 a second window, WorkloadPods and an agent asking for the same list share one
 kubectl call; an action on the cluster drops its cached lists. Each answer
