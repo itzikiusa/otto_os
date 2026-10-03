@@ -451,9 +451,8 @@ mod tests {
         assert_eq!(RetentionPolicy::default().run_history_days, 0);
         assert_eq!(super::DEFAULT_RUN_HISTORY_DAYS, 0);
         for off in [0, -5] {
-            let p = RetentionPolicy::from_setting(Some(
-                &serde_json::json!({"run_history_days": off}),
-            ));
+            let p =
+                RetentionPolicy::from_setting(Some(&serde_json::json!({"run_history_days": off})));
             assert_eq!(p.run_history_days, 0);
         }
     }
