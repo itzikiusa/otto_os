@@ -1390,6 +1390,15 @@ export type OttoEvent =
       status: string;
     }
   | {
+      /** A personal agent's live activity changed (tool call allowed/blocked/
+       *  needing approval, or an approval it waits on) — the Activity tab
+       *  re-fetches `GET /personal-agents/{id}/activity`. */
+      type: 'personal_agent_activity';
+      workspace_id: Id;
+      agent_id: Id;
+      kind: string;
+    }
+  | {
       /** A message was appended to an agent room (agent via the room MCP tools,
        *  or the user over REST). Ids only — clients re-fetch the room's messages
        *  after their cursor. */
@@ -8002,6 +8011,8 @@ export interface PersonalAgentSchedule {
   next_run_at?: string | null;
   /** When the schedule (or its agent) was last (re)armed — see `ScheduledTask.armed_at`. */
   armed_at?: string | null;
+  /** The schedule's own permission set: `read_only` runs can't change anything. */
+  permission?: PersonalAgentPermission;
   created_at: string;
   updated_at: string;
 }
@@ -8014,7 +8025,7 @@ export interface PersonalAgentRun {
   workspace_id: Id;
   /** `canceled`: stopped from Otto (`POST …/runs/{run_id}/cancel`). */
   status: 'running' | 'ok' | 'error' | 'canceled';
-  trigger: 'schedule' | 'manual';
+  trigger: 'schedule' | 'manual' | 'proactive';
   started_at: string;
   finished_at?: string | null;
   summary: string;
@@ -8029,7 +8040,118 @@ export interface PersonalAgentRun {
   attempts: number;
   /** Delivery was suppressed because the report didn't meaningfully change. */
   skipped_delivery: boolean;
+  /** The permission mode the run executed under. */
+  mode?: PersonalAgentRunMode;
+  /** True when the run's session was confined read-only. */
+  read_only?: boolean;
+  /** The standing goal a proactive run worked on. */
+  goal_id?: string | null;
   created_at: string;
+}
+
+// ---- Personal agent autonomy (batch 2026-10-03) — docs/contracts/api.md
+// "Personal agent autonomy".
+
+/** A schedule's permission set. */
+export type PersonalAgentPermission = 'read_only' | 'directed';
+/** The mode a run executed under. */
+export type PersonalAgentRunMode = 'proactive' | 'directed' | 'scheduled';
+
+export interface PersonalAgentProactive {
+  enabled: boolean;
+  /** Proactive runs in any rolling 24 h (1..24). */
+  runs_per_day: number;
+  /** Wall-clock cap per proactive run, minutes (1..60). */
+  max_minutes: number;
+}
+
+export interface PersonalAgentGoal {
+  id: string;
+  text: string;
+  enabled: boolean;
+  /** Server-maintained. */
+  last_run_at: string | null;
+}
+
+export interface PersonalAgentRule {
+  id: string;
+  text: string;
+  /** Server-derived from the text; null = instructions only. */
+  enforce: { kind: 'approval' | 'deny'; terms: string[] } | null;
+}
+
+export interface PersonalAgentAutonomy {
+  proactive: PersonalAgentProactive;
+  goals: PersonalAgentGoal[];
+  rules: PersonalAgentRule[];
+  /** The workspace's primary assistant ("your agent"). */
+  primary: boolean;
+}
+
+/** `PUT /personal-agents/{id}/autonomy` — partial; omitted sections are kept. */
+export interface SavePersonalAgentAutonomyReq {
+  proactive?: PersonalAgentProactive;
+  goals?: { id?: string; text: string; enabled?: boolean }[];
+  rules?: { id?: string; text: string }[];
+  primary?: boolean;
+}
+
+export type PersonalAgentActivityKind =
+  | 'tool_call'
+  | 'blocked'
+  | 'approval_required'
+  | 'approval_waiting';
+
+export interface PersonalAgentActivityItem {
+  seq: number;
+  at: string;
+  kind: PersonalAgentActivityKind;
+  tool: string;
+  detail: string;
+  session_id: string | null;
+  approval_id: string | null;
+}
+
+export interface PersonalAgentActivityApproval {
+  approval_id: string;
+  tool: string;
+  at: string;
+  status: string;
+  title: string;
+  detail: string | null;
+  risk_label: string | null;
+}
+
+export interface PersonalAgentActivity {
+  now: { run: PersonalAgentRun | null; session_status: string | null };
+  items: PersonalAgentActivityItem[];
+  approvals: PersonalAgentActivityApproval[];
+  runs: PersonalAgentRun[];
+}
+
+export type PersonalAgentMemorySource =
+  | 'chat'
+  | 'slack'
+  | 'telegram'
+  | 'vault'
+  | 'run'
+  | 'user'
+  | 'notes';
+
+export interface PersonalAgentMemoryItem {
+  line: number;
+  text: string;
+  source: PersonalAgentMemorySource;
+  section: string;
+  /** The stored line — quote it back on edit/forget. */
+  raw: string;
+}
+
+export interface PersonalAgentMemories {
+  version: string;
+  exists: boolean;
+  path: string | null;
+  items: PersonalAgentMemoryItem[];
 }
 
 /** An agent room — the ONLY agent-to-agent transport, always user-visible. */

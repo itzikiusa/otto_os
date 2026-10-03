@@ -23,7 +23,8 @@
   import AgentPage from './AgentPage.svelte';
   import RoomsView from './RoomsView.svelte';
   import { loadErrorOf } from './loadError';
-  import type { PersonalAgent } from '../../lib/api/types';
+  import { personalAgentsApi } from '../../lib/api/personalAgents';
+  import type { PersonalAgent, PersonalAgentAutonomy } from '../../lib/api/types';
 
   const sub = $derived(router.parts[1] ?? '');
   const agentId = $derived(sub && sub !== 'rooms' ? sub : null);
@@ -39,7 +40,32 @@
   // Live run events refetch runs/schedules only while this page is mounted.
   $effect(() => personalAgents.watch());
 
-  const agents = $derived(personalAgents.agents);
+  // Autonomy summaries (primary / proactive) for the cards — one small GET per
+  // agent, best-effort (a failure just hides the badges).
+  let autonomyById = $state<Record<string, PersonalAgentAutonomy>>({});
+  const agentIdsKey = $derived(personalAgents.agents.map((a) => a.id).join(','));
+  $effect(() => {
+    const ids = agentIdsKey ? agentIdsKey.split(',') : [];
+    void Promise.all(
+      ids.map((id) =>
+        personalAgentsApi
+          .autonomy(id)
+          .then((a) => [id, a] as const)
+          .catch(() => null),
+      ),
+    ).then((rows) => {
+      const next: Record<string, PersonalAgentAutonomy> = {};
+      for (const r of rows) if (r) next[r[0]] = r[1];
+      autonomyById = next;
+    });
+  });
+  // "Your agent" (primary) leads the list — the one entry point.
+  const agents = $derived(
+    [...personalAgents.agents].sort(
+      (a, b) => Number(!!autonomyById[b.id]?.primary) - Number(!!autonomyById[a.id]?.primary),
+    ),
+  );
+  const primaryAgent = $derived(agents.find((a) => autonomyById[a.id]?.primary) ?? null);
   const loadError = $derived(loadErrorOf(personalAgents, 'agentsError'));
 
   async function toggle(a: PersonalAgent): Promise<void> {
@@ -159,10 +185,14 @@
             onaction={() => (creating = true)}
           />
         {/snippet}
+        {#if !primaryAgent && Object.keys(autonomyById).length > 0}
+          <p class="pa-hint" role="note"><Icon name="star" size={12} /> Choose one agent as <strong>your agent</strong> (its Autonomy tab): your main assistant, routing specialist work to the others.</p>
+        {/if}
         <ul class="cards" data-testid="pa-cards">
           {#each agents as a (a.id)}
             {@const example = isExample(a)}
-            <li class="pa-card" class:paused={!a.enabled} oncontextmenu={(e) => cardMenu(e, a)}>
+            {@const auto = autonomyById[a.id]}
+            <li class="pa-card" class:paused={!a.enabled} class:primary={!!auto?.primary} oncontextmenu={(e) => cardMenu(e, a)}>
               <div class="card-top">
                 <AgentAvatar avatar={a.avatar} name={a.name} size={36} />
                 <div class="card-id">
@@ -189,12 +219,17 @@
                   <span class="chip ok">Enabled</span>
                 {/if}
                 {#if a.browser}<span class="chip" title="Runs and chat can drive the in-app browser">Browser</span>{/if}
+                {#if auto?.primary}<span class="chip pa-accent" title="Your primary assistant"><Icon name="star" size={11} /> Your agent</span>{/if}
+                {#if auto?.proactive.enabled}<span class="chip" title="Works its standing goals in the background, read-only"><Icon name="eye" size={11} /> Proactive</span>{/if}
                 <!-- A paused agent's schedules never fire — don't promise a next run. -->
                 {#if a.enabled}
                   <span class="meta">Next run <RelTime iso={personalAgents.nextRunAt(a.id)} fallback="not scheduled" /></span>
                 {/if}
               </div>
               <div class="card-actions">
+                {#if auto?.primary}
+                  <button class="btn small primary" onclick={() => router.go(`personal-agents/${a.id}/chat`)}><Icon name="comment" size={12} /> Chat</button>
+                {/if}
                 {#if a.enabled}
                   <button class="btn small" disabled={busyId === a.id} onclick={() => void runNow(a)}><Icon name="play" size={12} /> Run now</button>
                   <button class="btn small" disabled={busyId === a.id} onclick={() => void toggle(a)}>Pause</button>
@@ -251,5 +286,8 @@
   .card-more, .card-actions, .card-meta [title] { position: relative; }
   .card-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-height: 20px; }
   .meta { color: var(--text-dim); font-size: var(--fs-s); }
-  .card-actions { display: flex; gap: 6px; margin-top: auto; }
+  .card-actions { display: flex; gap: 6px; margin-top: auto; flex-wrap: wrap; }
+  .pa-card.primary { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+  .pa-accent { color: var(--accent-text); border-color: color-mix(in srgb, var(--accent) 35%, transparent); display: inline-flex; align-items: center; gap: 4px; }
+  .pa-hint { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; color: var(--text-dim); font-size: var(--fs-s); }
 </style>
