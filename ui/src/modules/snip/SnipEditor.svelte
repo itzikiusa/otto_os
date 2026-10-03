@@ -29,7 +29,7 @@
     resizeAnno,
     bounds,
     flatten,
-    blobToB64,
+    annosHash,
   } from './annotations';
 
   // The shell keys this editor by id; cleanup saves belong to that mounted image.
@@ -44,7 +44,9 @@
   let canvasEl: HTMLCanvasElement | undefined = $state();
   let wrapEl: HTMLDivElement | undefined = $state();
 
-  let annos: Anno[] = $state([]);
+  // `$state.raw`: every mutation replaces the array (commit/map), so deep
+  // proxies only cost a proxy per point of every pen stroke (S3).
+  let annos: Anno[] = $state.raw([]);
   let selected: number | null = $state(null); // Anno id
   let tool: Tool = $state('rect');
   let color: string = $state(PALETTE[0]);
@@ -52,14 +54,22 @@
   let fontIx = $state(1);
 
   // Undo/redo: snapshots of the object list (cheap — plain JSON objects).
-  let undoStack: Anno[][] = $state([]);
-  let redoStack: Anno[][] = $state([]);
+  // Raw + capped: an hour of editing kept every snapshot forever (S4).
+  const UNDO_CAP = 100;
+  let undoStack: Anno[][] = $state.raw([]);
+  let redoStack: Anno[][] = $state.raw([]);
+  function pushUndo(s: Anno[]): void {
+    undoStack = [...undoStack.slice(-(UNDO_CAP - 1)), s];
+  }
 
   // Auto-copy machinery.
   let copyState: 'idle' | 'pending' | 'copying' | 'copied' | 'failed' = $state('idle');
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
   let copyInFlight = false;
   let copyAgain = false;
+  // Fingerprint of the annotations last saved successfully — an unchanged
+  // state is never re-encoded or re-uploaded. `annosHash([])` = the original.
+  let savedHash = annosHash([]);
 
   // In-progress drawing state (not reactive — pointermove is hot).
   let drafting: Anno | null = null;
@@ -204,7 +214,7 @@
   }
 
   function snapshot(): void {
-    undoStack = [...undoStack, cloneAnnos()];
+    pushUndo(cloneAnnos());
     redoStack = [];
   }
 
@@ -217,7 +227,7 @@
   /** First real mutation of a move/resize commits the stashed snapshot. */
   function markDragChanged(): void {
     if (dragChanged || !dragSnap) return;
-    undoStack = [...undoStack, dragSnap];
+    pushUndo(dragSnap);
     redoStack = [];
     dragChanged = true;
   }
@@ -242,11 +252,18 @@
       copyAgain = true;
       return;
     }
+    const hash = annosHash(annos);
+    if (hash === savedHash) {
+      copyState = 'copied'; // already saved + on the clipboard
+      return;
+    }
     copyInFlight = true;
     copyState = 'copying';
     try {
       const blob = await flatten(img, annos);
-      const resp = await snipApi.saveAnnotated(snipId, await blobToB64(blob));
+      // Raw image/png body — no base64 inflation, no JSON parse server-side.
+      const resp = await snipApi.saveAnnotatedPng(snipId, blob);
+      savedHash = hash;
       copyState = resp.copied ? 'copied' : 'failed';
     } catch (e) {
       copyState = 'failed';
@@ -273,7 +290,7 @@
     const next = redoStack.at(-1);
     if (!next) return;
     redoStack = redoStack.slice(0, -1);
-    undoStack = [...undoStack, annos];
+    pushUndo(annos);
     selected = null;
     commit(next);
   }

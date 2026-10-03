@@ -731,6 +731,12 @@
           </div>
         </button>
       {/each}
+      {#if proof.nextCursor}
+        <!-- Keyset paging: the list loads 100 packs at a time. -->
+        <button class="btn small ghost load-more" disabled={proof.loadingMore} aria-busy={proof.loadingMore} onclick={() => void proof.loadMore()}>
+          {proof.loadingMore ? 'Loading…' : 'Load more'}
+        </button>
+      {/if}
       {#if proof.packs.length === 0 && !listError}
         {#if proof.loading && !listLoaded}
           <LoadState what="proof packs" loading empty variant="compact" />
@@ -1557,5 +1563,10 @@
     .proof-page.phone .rail.hide-phone {
       display: none;
     }
+  }
+  .load-more {
+    display: block;
+    margin-block: 8px;
+    margin-inline: auto;
   }
 </style>

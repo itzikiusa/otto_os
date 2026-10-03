@@ -45,14 +45,17 @@ window.
    sizes; select/move/resize/delete; undo/redo (⌘Z / ⇧⌘Z); arrow-key nudge
    (⇧ = 10 px).
 5. **Every edit re-copies (automatically).** 800 ms after your last change the
-   flattened PNG replaces the clipboard (“Copied ✓” in the toolbar). ⌘C or the
+   flattened PNG replaces the clipboard (“Copied ✓” in the toolbar). The PNG
+   encode runs in a worker (OffscreenCanvas, main-thread fallback), the upload
+   is a raw `image/png` body, and nothing is re-encoded or re-sent when the
+   annotations are unchanged since the last save. Undo keeps the last 100 steps. ⌘C or the
    **Copy** button forces it immediately. Paste into your session whenever
    you're ready — the newest state is always what pastes.
 6. **Done** — Close the window. Snips are pruned after 14 days (Delete removes
    one immediately).
 
-You can also annotate an **existing** image: `POST /api/v1/snips` with
-`{data_b64}` (PNG), then open `#/snip/{id}`.
+You can also annotate an **existing** image: `POST /api/v1/snips` with a raw
+`image/png` body (or the legacy `{data_b64}` JSON), then open `#/snip/{id}`.
 
 ## API surface
 

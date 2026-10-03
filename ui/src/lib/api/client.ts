@@ -547,6 +547,29 @@ export async function authedBlobUrl(path: string): Promise<string> {
 }
 
 /**
+ * POST a raw binary body (e.g. an `image/png` Blob) to /api/v1<path> and parse
+ * the JSON reply. Skips JSON/base64 framing entirely — a 15 MB PNG goes over
+ * the wire as 15 MB, not ~20 MB of base64 inside a JSON string. Mirrors
+ * `postForText`'s auth + error handling.
+ */
+export async function postBlob<T>(path: string, body: Blob, contentType: string): Promise<T> {
+  const headers: Record<string, string> = { 'Content-Type': contentType };
+  const token = getToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const resp = await fetch(`${baseUrl()}/api/v1${path}`, { method: 'POST', headers, body });
+  if (!resp.ok) {
+    let problem: Problem = { code: 'internal', message: resp.statusText };
+    try {
+      problem = await resp.json();
+    } catch {
+      // non-JSON error body — keep statusText
+    }
+    throw new ApiError(resp.status, problem);
+  }
+  return (await resp.json()) as T;
+}
+
+/**
  * POST a JSON body to /api/v1<path> with the bearer token and return the RAW
  * response body as text. For download/export endpoints that reply with a
  * non-JSON body (e.g. `text/csv`) — which the JSON-parsing `request()` helper

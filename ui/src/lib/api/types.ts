@@ -1379,6 +1379,12 @@ export type OttoEvent =
       work_item_id: string;
       status: string;
       risk_score: number;
+      done_score?: number;
+      /** Badges after this recompute — present on current daemons; lets the
+       *  store patch the summary/list row instead of refetching. */
+      badges?: string[];
+      /** Evidence count after this recompute. */
+      artifact_count?: number;
     }
   | {
       /** A Mission Control work item was created or its normalized status
@@ -7602,7 +7608,8 @@ export interface CaptureSnipResp {
   snip?: Snip | null;
 }
 
-/** `POST /snips` body — base64 PNG upload (also the "annotate an image" path). */
+/** `POST /snips` legacy JSON body — base64 PNG upload. Current clients send a
+ *  raw `image/png` body instead (no base64 inflation); both are accepted. */
 export interface UploadSnipReq {
   data_b64: string;
   filename?: string;

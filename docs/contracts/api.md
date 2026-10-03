@@ -3680,10 +3680,10 @@ checks the caller's workspace role. Persistence: `otto_state::proof`
 
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
-| 115 | GET /api/v1/workspaces/{id}/proof-packs | ws viewer · ProofPack View | query `status?`, `work_item_kind?`, `work_item_id?` | `ProofPackResp[]` |
+| 115 | GET /api/v1/workspaces/{id}/proof-packs | ws viewer · ProofPack View | query `status?`, `work_item_kind?`, `work_item_id?`, `limit?` (1..500), `cursor?` | `ProofPackResp[]` newest first (`updated_at DESC, id DESC`). With `limit`, a keyset page; the `x-next-cursor` response header carries the opaque cursor for the next page (absent on the last page). Without `limit`, every pack (legacy) |
 | 116 | POST /api/v1/workspaces/{id}/proof-packs | ws editor · ProofPack Edit | CreateProofPackReq `{work_item_kind, work_item_id, title?, parent_pack_id?, repo_id?}` | ProofPackResp (`repo_id` links the pack to a repo so its proof policy applies — strengthen-only) |
 | 117 | GET /api/v1/workspaces/{id}/proof-summary | ws viewer · ProofPack View | — | ProofSummaryResp `{rows:[{work_item_kind, work_item_id, proof_pack_id, status, risk_score, done_score, badges[]}]}` |
-| 118 | GET /api/v1/proof-packs/{id} | ws viewer · ProofPack View | — | ProofPackDetailResp `{pack, badges[], artifacts[], children[], done_contract, snapshots[]}` (done_contract computed live) |
+| 118 | GET /api/v1/proof-packs/{id} | ws viewer · ProofPack View | — | ProofPackDetailResp `{pack, badges[], artifacts[], children[], done_contract, snapshots[]}` (done_contract computed live). Each artifact's `content_ref` is cut to the preview (`PREVIEW_CAP`, 8 KiB) server-side — `truncated:true` when more is stored; fetch the full body from `/proof-artifacts/{id}/content` |
 | 119 | PATCH /api/v1/proof-packs/{id} | ws editor · ProofPack Edit | `{title?, summary?}` | ProofPackResp |
 | 120 | DELETE /api/v1/proof-packs/{id} | ws editor · ProofPack Edit | — | `{ok:true}` (cascades artifacts, snapshots, blobs) |
 | 121 | POST /api/v1/proof-packs/{id}/artifacts | ws editor · ProofPack Edit | AddArtifactReq `{kind, title, content?, content_url?, status?, metadata?}` | ProofPackResp |
@@ -3695,7 +3695,7 @@ checks the caller's workspace role. Persistence: `otto_state::proof`
 | 127 | GET /api/v1/proof-packs/{id}/snapshots | ws viewer · ProofPack View | — | `ProofSnapshotMeta[]` (newest first) |
 | 128 | GET /api/v1/proof-snapshots/{id} | ws viewer · ProofPack View | — | ProofSnapshotResp |
 | 129 | POST /api/v1/proof-packs/{id}/media | ws editor · ProofPack Edit | AttachMediaReq `{kind:screenshot\|video, title, mime, data_base64, metadata?}` (≤25 MiB) | ProofPackResp — `415` if `mime` not in the allow-list (png/jpeg/gif/webp/svg, mp4/webm); `413` if the decoded blob exceeds 25 MiB. 40 MB body cap (base64 inflation) |
-| 130 | GET /api/v1/proof-artifacts/{id}/blob | ws viewer · ProofPack View | — | raw bytes (`Content-Type` = blob mime, `Content-Disposition: inline`) |
+| 130 | GET /api/v1/proof-artifacts/{id}/blob | ws viewer · ProofPack View | — | raw bytes (`Content-Type` = blob mime, `Content-Disposition: inline`); `ETag` = the media sha256, `Cache-Control: private, max-age=31536000, immutable`, 304 on `If-None-Match`. Bytes live in the content-addressed `data_dir/proof-media/` store (deduped by sha; legacy inline BLOBs are moved there in the background and still served until then) |
 | 131 | POST /api/v1/proof-packs/{id}/evidence/api | ws editor · ProofPack Edit | ApiEvidenceReq `{title, method, url, status, duration_ms?, request?, response?, metadata?}` | ProofPackResp |
 | 132 | POST /api/v1/proof-packs/{id}/evidence/db | ws editor · ProofPack Edit | DbEvidenceReq `{title, engine?, query?, columns?, row_count?, sample?, error?, metadata?}` | ProofPackResp |
 | 133 | POST /api/v1/proof-packs/{id}/evidence/kafka | ws editor · ProofPack Edit | KafkaEvidenceReq `{title, topic, message_count?, sample?, truncated?, error?, metadata?}` | ProofPackResp |
@@ -4464,7 +4464,7 @@ automatically — capture/upload copies the original, each annotated save
 re-copies the flattened export, so the latest state is always paste-ready in an
 agent session. Storage is file-backed under `data_dir/snips/` (`{id}.png`,
 `{id}.annotated.png`, `{id}.json` sidecar; no SQLite table); snips older than
-14 days are pruned on create. The bytes last written to the clipboard are
+14 days are pruned on create (at most one sweep per hour). The bytes last written to the clipboard are
 mirrored to `data_dir/snips/clipboard-last.png` (observability + E2E sink;
 under `OTTO_E2E` only the mirror is written, the pasteboard is untouched).
 Feature gate: `Agents` (GET = View, everything else = Edit).
@@ -4472,11 +4472,11 @@ Feature gate: `Agents` (GET = View, everything else = Edit).
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | POST /snips/capture | member (Agents:Edit) | `{}` | `CaptureSnipResp {cancelled, snip?}` — runs interactive `screencapture -i` (Esc ⇒ `cancelled:true`); 409 while another capture is on screen; 500 with a Screen-Recording hint when macOS blocks the capture |
-| POST /snips | member (Agents:Edit) | `UploadSnipReq {data_b64, filename?}` (PNG only, 25 MB raw / 40 MB body) | `Snip` |
+| POST /snips | member (Agents:Edit) | raw `image/png` body (preferred — no base64), or legacy JSON `UploadSnipReq {data_b64, filename?}`; PNG only (magic-byte sniff), 25 MB raw / 40 MB body | `Snip` |
 | GET /snips | member (Agents:View) | — | `Snip[]` (newest first, cap 100) |
-| GET /snips/{id}/image | member (Agents:View) | — | `image/png` (nosniff, inline) |
-| GET /snips/{id}/annotated | member (Agents:View) | — | `image/png`, 404 until the first annotated save |
-| POST /snips/{id}/annotated | member (Agents:Edit) | `{data_b64}` (PNG, 40 MB body) | `SnipCopyResp {copied}` — saves the flattened export and puts it on the clipboard |
+| GET /snips/{id}/image | member (Agents:View) | — | `image/png` (nosniff, inline); `Cache-Control: private, max-age=31536000, immutable` + `ETag` (304 on `If-None-Match`) — the original never changes |
+| GET /snips/{id}/annotated | member (Agents:View) | — | `image/png`, 404 until the first annotated save; `Cache-Control: private, no-cache` + weak `ETag` (304 on `If-None-Match`) |
+| POST /snips/{id}/annotated | member (Agents:Edit) | raw `image/png` body (preferred) or legacy `{data_b64}` (PNG, 40 MB body) | `SnipCopyResp {copied}` — saves the flattened export and puts it on the clipboard. The editor encodes in a worker and only posts when the annotations changed |
 | POST /snips/{id}/copy | member (Agents:Edit) | `{}` | `SnipCopyResp` — re-copy (annotated if present, else original) |
 | DELETE /snips/{id} | member (Agents:Edit) | — | 204 |
 
