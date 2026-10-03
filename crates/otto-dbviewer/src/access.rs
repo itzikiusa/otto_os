@@ -116,16 +116,28 @@ pub(crate) async fn check_with(
         return Ok(());
     }
     let user = current_user(pool, conn, user_id).await?;
+    check_loaded_user(pool, conn, &user, child, operation).await
+}
+
+/// The enforced half of [`check_with`] for a user the caller JUST reloaded via
+/// [`current_user`] in the same request step (no second user/grant reload).
+async fn check_loaded_user(
+    pool: &DbPool,
+    conn: &Connection,
+    user: &User,
+    child: Option<&str>,
+    operation: &str,
+) -> Result<()> {
     let access = ResourceAccess::new(pool.clone());
     if !access
-        .evaluate(&user, &target(&conn.id, None), "discover")
+        .evaluate(user, &target(&conn.id, None), "discover")
         .await?
         .allowed
     {
         return Err(Error::NotFound("connection".into()));
     }
     access
-        .check(&user, &target(&conn.id, child), operation)
+        .check(user, &target(&conn.id, child), operation)
         .await
 }
 
@@ -193,7 +205,7 @@ pub(crate) async fn credential_profile_with(
         return Ok((conn.id.clone(), None));
     }
     let user = current_user(pool, conn, user_id).await?;
-    check_with(pool, conn, policy, user_id, child, operation).await?;
+    check_loaded_user(pool, conn, &user, child, operation).await?;
     let decision = ResourceAccess::new(pool.clone())
         .evaluate(&user, &target(&conn.id, child), operation)
         .await?;

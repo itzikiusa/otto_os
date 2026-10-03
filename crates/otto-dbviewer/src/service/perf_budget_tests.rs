@@ -160,7 +160,9 @@ async fn run_reads(legacy: bool) -> u64 {
         ..Default::default()
     };
     service.run(&conn, &user, &req).await.unwrap();
-    crate::access::reads::take()
+    let reads = crate::access::reads::take();
+    eprintln!("Run state reads (legacy={legacy}): {reads}");
+    reads
 }
 
 /// A legacy Run: one snapshot for the pre-execution phase, one for the
@@ -179,8 +181,8 @@ async fn legacy_run_stays_within_state_read_budget() {
 async fn enforced_run_stays_within_state_read_budget() {
     let reads = run_reads(false).await;
     assert!(
-        reads <= 16,
-        "enforced Run made {reads} state reads (budget 16)"
+        reads <= 13,
+        "enforced Run made {reads} state reads (budget 13)"
     );
 }
 
