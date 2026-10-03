@@ -178,15 +178,39 @@ type IdleWindow = Window & {
   cancelIdleCallback?: (id: number) => void;
 };
 
+/** Input-quiet window the timer fallback waits for (perf F9). */
+const INPUT_QUIET_MS = 800;
+/** `performance.now()` of the last click / key / wheel in this document. */
+let lastInput = -Infinity;
+if (typeof window !== 'undefined') {
+  const note = (): void => {
+    lastInput = performance.now();
+  };
+  for (const type of ['pointerdown', 'keydown', 'wheel'] as const) {
+    window.addEventListener(type, note, { capture: true, passive: true });
+  }
+}
+
 /** Run `cb` when the main thread is idle. WKWebView has no
- *  requestIdleCallback, so it falls back to a short timer. */
+ *  requestIdleCallback, so it falls back to a short timer — deferred while
+ *  the person is clicking or typing, so a page chunk's parse/evaluate never
+ *  competes with their first interactions after boot. */
 function whenIdle(cb: () => void, timeout: number): () => void {
   const w = window as IdleWindow;
   if (w.requestIdleCallback) {
     const id = w.requestIdleCallback(cb, { timeout });
     return () => w.cancelIdleCallback?.(id);
   }
-  const t = setTimeout(cb, 120);
+  let t: ReturnType<typeof setTimeout>;
+  const attempt = (): void => {
+    const quiet = performance.now() - lastInput;
+    if (quiet < INPUT_QUIET_MS) {
+      t = setTimeout(attempt, INPUT_QUIET_MS - quiet);
+      return;
+    }
+    cb();
+  };
+  t = setTimeout(attempt, 120);
   return () => clearTimeout(t);
 }
 

@@ -74,3 +74,9 @@ test('the shell chunk evaluates no page-owned store, handler file or the ui-comm
     .map((f) => chainTo(entry, join(SRC, f), SRC).join(' → '));
   assert.deepEqual(reached, [], 'route through lazyModule() / registerLazyUiCommands() instead of a static import');
 });
+
+test('the entry chunk never carries the mock-API fixtures (perf F10)', () => {
+  const entry = join(SRC, 'main.ts');
+  const mock = join(SRC, 'lib/api/mock.ts');
+  assert.ok(!staticClosure(entry).has(mock), chainTo(entry, mock, SRC).join(' → '));
+});
