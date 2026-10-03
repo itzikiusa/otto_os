@@ -10,7 +10,8 @@
   // When the result comes from a simple single-table SELECT with a known
   // primary key, cells become double-click editable (issues an UPDATE via the
   // connection's query API after a review).
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
+  import { stashGridState, takeGridState, type GridTabState } from './grid-tab-state';
   import Icon from '../../lib/components/Icon.svelte';
   import { findInPage } from '../../lib/findinpage.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -41,7 +42,7 @@
   import MongoFilterBar from './MongoFilterBar.svelte';
   import AggregateBuilder from './AggregateBuilder.svelte';
   import RecordDiff from './RecordDiff.svelte';
-  import { EditFlow, SET_EMPTY, SET_NULL } from './EditFlow.svelte';
+  import { EditFlow, SET_EMPTY, SET_NULL, type RowPatch } from './EditFlow.svelte';
   import { qid, valueLiteral } from './edit-sql';
   import { ALT_BATCH, cellStr, copyText, fmtBytes, isComplex } from './results-format';
   import { newExpansionState } from './expansion-plan';
@@ -93,6 +94,18 @@
     ranNode?: string | null;
     /** True while the active tab's query is in flight — drives the running overlay. */
     running?: boolean;
+    /**
+     * When the in-flight run started (epoch ms, the tab's `pending.startedAt`).
+     * The overlay counts from it, so switching tab / connection / view or
+     * reloading doesn't restart the clock at 0s. Absent → counts from mount.
+     */
+    startedAt?: number | null;
+    /**
+     * Stable key of the query tab this grid currently shows (its uid). Sort,
+     * search, column filters and un-applied edits are kept per tab under it
+     * (grid-tab-state.ts) instead of leaking across tabs / being discarded.
+     */
+    tabKey?: string | null;
     /** Active tab's current row offset (footer pager). */
     offset?: number;
     /**
@@ -127,6 +140,8 @@
     connectionId,
     ranNode,
     running = false,
+    startedAt = null,
+    tabKey = null,
     offset = 0,
     viewMode,
     viewReason,
@@ -186,11 +201,13 @@
   let elapsed = $state(0);
   $effect(() => {
     if (!running) return;
-    elapsed = 0;
-    const start = Date.now();
-    const iv = setInterval(() => {
-      elapsed = Math.floor((Date.now() - start) / 1000);
-    }, 250);
+    const start = startedAt ?? Date.now();
+    const tick = (): void => {
+      elapsed = Math.max(0, Math.floor((Date.now() - start) / 1000));
+    };
+    // Immediately: no "0s" flash for a run that has been going for minutes.
+    tick();
+    const iv = setInterval(tick, 250);
     return () => clearInterval(iv);
   });
 
@@ -218,13 +235,57 @@
   let liveRows = $state.raw<unknown[][]>([]);
   // Column-name signature of the shown result. GridView takes it as its
   // `resetToken` (widths + scroll reset only when it changes).
-  const colKey = $derived((result?.columns ?? []).map((c) => c.name).join(''));
+  const colKey = $derived((result?.columns ?? []).map((c) => c.name).join('\u0001'));
   // Signature of the last rendered result (non-reactive — used only to decide
   // whether the view state should reset).
   let prevColKey: string | null = null;
+  // The tab whose view state is live in this instance (non-reactive).
+  let prevTabKey: string | null = null;
+  /** The live view state, to park under the tab it belongs to. */
+  function currentGridState(): GridTabState<RowPatch> {
+    return {
+      result: resultProp,
+      colKey: prevColKey ?? '',
+      search: searchInput,
+      sortCol,
+      sortDir,
+      colFilters,
+      pending: flow.pending,
+    };
+  }
+  // Park the shown tab's state when the grid goes away (view switch, page
+  // navigation) so coming back restores it.
+  onDestroy(() => {
+    if (prevTabKey) stashGridState(prevTabKey, untrack(currentGridState));
+  });
   $effect(() => {
     // Rows always re-seed (edits re-query, not patch in place).
     liveRows = result ? (mini ? result.rows.slice(0, MINI_MAX) : result.rows) : [];
+    // A different query tab: park the outgoing tab's sort/search/filters and
+    // un-applied edits, and bring back the incoming tab's (when its result is
+    // still the one they were made on) — never carry one tab's onto another.
+    const key = tabKey ?? null;
+    if (key !== prevTabKey) {
+      if (prevTabKey) stashGridState(prevTabKey, untrack(currentGridState));
+      prevTabKey = key;
+      const saved = key ? takeGridState<RowPatch>(key) : null;
+      if (saved && saved.colKey === colKey) {
+        setSearch(saved.search);
+        sortCol = saved.sortCol;
+        sortDir = saved.sortDir;
+        colFilters = saved.colFilters;
+        detailIdx = null;
+        expansion = newExpansionState();
+        prevColKey = colKey;
+        flow.resetForResult();
+        if (saved.result === resultProp && saved.pending.size > 0) flow.pending = saved.pending;
+        compare = null;
+        return;
+      }
+      // No parked state for this tab: start it clean (the shape check below
+      // would otherwise keep the previous tab's sort when columns match).
+      prevColKey = null;
+    }
     // Preserve sort / search (and, in GridView, column widths / scroll) when the
     // new result has the SAME columns (a re-run of the same query), so the grid
     // doesn't jump; reset them only when the shape actually changes.
@@ -351,7 +412,7 @@
       let s = '';
       for (const v of row) {
         if (v === null || v === undefined) continue;
-        s += cellStr(v) + ' ';
+        s += cellStr(v) + '\u0000';
         if (s.length >= SCAN_MAX) break;
       }
       return s.slice(0, SCAN_MAX).toLowerCase();

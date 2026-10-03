@@ -4,7 +4,8 @@
   import { onDestroy, untrack } from 'svelte';
   import { EditorView, lineNumbers, keymap, drawSelection, placeholder as cmPlaceholder } from '@codemirror/view';
   import { EditorState, Compartment, Prec, Text, type StateEffect } from '@codemirror/state';
-  import { defaultKeymap, history, historyKeymap, selectAll } from '@codemirror/commands';
+  import { defaultKeymap, history, historyField, historyKeymap, selectAll } from '@codemirror/commands';
+  import { loadEditorState, saveEditorState } from '../editor-history';
   import { search, searchKeymap, openSearchPanel } from '@codemirror/search';
   import {
     autocompletion,
@@ -158,6 +159,21 @@
      */
     keepStates?: boolean;
     /**
+     * Opt-in: keep each doc's state + undo history in the shared store
+     * (lib/editor-history.ts) under the returned key, so ⌘Z survives this
+     * editor being destroyed and rebuilt (a view switch, leaving the page) —
+     * and, with `persist`, a reload (IndexedDB). Return null for a doc whose
+     * history must not be kept; `persist: false` keeps it in memory only (a
+     * masked DB tab: history holds every pasted string).
+     */
+    historyKey?: ((path: string) => { key: string; persist: boolean } | null) | null;
+    /**
+     * Called with the copied/cut text when the user copies or cuts inside the
+     * editor (the clipboard ring, lib/stores/clipHistory.svelte.ts). Absent =
+     * not recorded.
+     */
+    oncopy?: ((text: string) => void) | null;
+    /**
      * Attach a language server for this doc. OPT-IN (default false): only an
      * editor showing a REAL file under `root` (the Files viewer) passes it.
      * Scratch / virtual-path editors (API body/scripts, canvases, vault notes,
@@ -205,6 +221,8 @@
     placeholder = '',
     wrap = false,
     keepStates = false,
+    historyKey = null,
+    oncopy = null,
     lsp = false,
     sqlDialect = 'standard',
     highlightLineLimit = 0,
@@ -685,10 +703,19 @@
     view?.focus();
   }
 
+  /** Insert `text` at the cursor (replacing the selection) as ONE undoable
+   *  transaction, then focus the editor (the clipboard-history picker). */
+  export function insertText(text: string): void {
+    if (!view || readOnly) return;
+    view.dispatch(view.state.replaceSelection(text), { scrollIntoView: true, userEvent: 'input.paste' });
+    view.focus();
+  }
+
   /** A fresh EditorState for `filePath` with the full extension set, wired to
    *  the current compartments (so live reconfigures keep reaching it). */
   function createState(filePath: string, fileContent: string): EditorState {
     appliedDialect = sqlDialect;
+    const hk = readOnly ? null : (historyKey?.(filePath) ?? null);
     // Long-line plain mode needs the doc's lines up front (to pick the theme);
     // split them once here instead of letting EditorState.create do it again.
     const limit = highlightLineLimit;
@@ -754,8 +781,32 @@
         ...(readOnly ? [] : historyKeymap),
       ]),
       langCompartment.of(langExt ?? []),
-      ...(readOnly ? [] : [history()]),
+      ...(readOnly ? [] : [history(hk ? { minDepth: 500 } : undefined)]),
+      ...(hk ? [historySaver] : []),
+      ...(oncopy ? [copyRecorder] : []),
     ];
+
+    // A doc parked by an earlier editor instance (or a previous page load):
+    // rebuild it with THIS instance's extensions, then reconcile the text with
+    // `content` as one undoable change. A disk entry whose doc no longer
+    // matches the draft is ignored (its history belongs to another text).
+    const saved = hk ? loadEditorState(hk.key) : null;
+    if (saved && (!saved.fromDisk || saved.json.doc === fileContent)) {
+      try {
+        let st = EditorState.fromJSON(
+          saved.json,
+          { extensions: baseExtensions },
+          { history: historyField },
+        );
+        if (st.doc.toString() !== fileContent) {
+          st = st.update({ changes: { from: 0, to: st.doc.length, insert: fileContent } }).state;
+        }
+        pendingScrollTop = saved.scrollTop;
+        return st;
+      } catch {
+        /* incompatible JSON (an older build) — start fresh below */
+      }
+    }
 
     return EditorState.create({
       doc: doc ?? fileContent,
@@ -763,7 +814,73 @@
     });
   }
 
+  // ── Shared history store (historyKey) ──────────────────────────────────────
+  /** The path the live view shows (set by buildEditor / swapState). */
+  let livePath = '';
+  /** Scroll offset to restore once a store-rebuilt state is on screen. */
+  let pendingScrollTop: number | null = null;
+  let historySaveTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Park `state` (of `forPath`) in the shared store, when it opted in. */
+  function parkHistory(forPath: string, state: EditorState, scrollTop: number): void {
+    if (readOnly || !historyKey || !forPath) return;
+    const hk = historyKey(forPath);
+    if (!hk) return;
+    try {
+      saveEditorState(
+        hk.key,
+        state.toJSON({ history: historyField }) as { doc: string },
+        scrollTop,
+        hk.persist,
+      );
+    } catch {
+      /* a state without the history field — nothing worth keeping */
+    }
+  }
+  function parkLive(): void {
+    if (historySaveTimer !== null) clearTimeout(historySaveTimer);
+    historySaveTimer = null;
+    if (view) parkHistory(livePath, view.state, view.scrollDOM.scrollTop);
+  }
+  function applyPendingScroll(): void {
+    const top = pendingScrollTop;
+    pendingScrollTop = null;
+    if (top == null || top <= 0) return;
+    requestAnimationFrame(() => {
+      if (view) view.scrollDOM.scrollTop = top;
+    });
+  }
+  // Save 2 s after the last edit, so a reload (no unmount) still finds it.
+  const historySaver = EditorView.updateListener.of((u) => {
+    if (!u.docChanged) return;
+    if (historySaveTimer !== null) clearTimeout(historySaveTimer);
+    historySaveTimer = setTimeout(() => {
+      historySaveTimer = null;
+      if (view) parkHistory(livePath, view.state, view.scrollDOM.scrollTop);
+    }, 2000);
+  });
+  // Copies/cuts made in the editor feed the clipboard ring (oncopy).
+  const copyRecorder = EditorView.domEventHandlers({
+    copy: (_e, v) => {
+      recordCopy(v.state);
+      return false;
+    },
+    cut: (_e, v) => {
+      recordCopy(v.state);
+      return false;
+    },
+  });
+  function recordCopy(state: EditorState): void {
+    const text = state.selection.ranges
+      .filter((r) => !r.empty)
+      .map((r) => state.sliceDoc(r.from, r.to))
+      .join('\n');
+    if (text) oncopy?.(text);
+  }
+
   function buildEditor(el: HTMLDivElement, filePath: string, fileContent: string, rootPath: string): void {
+    // Park the outgoing doc + every kept one before they are dropped.
+    parkLive();
+    for (const [p, k] of keptStates) parkHistory(p, k.state, 0);
     teardownEditor();
     lspCompartment = new Compartment();
     completionCompartment = new Compartment();
@@ -776,6 +893,8 @@
     sel = null;
 
     view = new EditorView({ state: createState(filePath, fileContent), parent: el });
+    livePath = filePath;
+    applyPendingScroll();
 
     // A caller-supplied completion source replaces LSP for this doc; only attach
     // the language server when no custom source is wired.
@@ -798,7 +917,7 @@
     string,
     { state: EditorState; scroll: StateEffect<unknown>; dialect: SqlDialectName }
   >();
-  const MAX_KEPT_STATES = 8;
+  const MAX_KEPT_STATES = 24;
 
   /**
    * Switch the live view from `fromPath` to `toPath` without rebuilding it:
@@ -809,6 +928,8 @@
     if (!view) return;
     // See teardownEditor: `onchange` already targets `toPath`.
     changes.cancel();
+    if (historySaveTimer !== null) clearTimeout(historySaveTimer);
+    historySaveTimer = null;
     keptStates.delete(fromPath);
     keptStates.set(fromPath, {
       state: view.state,
@@ -818,12 +939,17 @@
     while (keptStates.size > MAX_KEPT_STATES) {
       const oldest = keptStates.keys().next().value;
       if (oldest === undefined) break;
+      // Evicted from this instance: spill it to the shared store (historyKey).
+      const ev = keptStates.get(oldest);
+      if (ev) parkHistory(oldest, ev.state, 0);
       keptStates.delete(oldest);
     }
+    livePath = toPath;
     const kept = keptStates.get(toPath);
     keptStates.delete(toPath);
     if (!kept) {
       view.setState(createState(toPath, toContent));
+      applyPendingScroll();
     } else {
       view.setState(kept.state);
       if (plainRecheck) clearTimeout(plainRecheck);
@@ -998,6 +1124,9 @@
   onDestroy(() => {
     // Same doc, going away (a tab/view toggle): deliver its last edit.
     changes.flush();
+    // Keep every doc's undo history for the next editor instance (historyKey).
+    parkLive();
+    for (const [p, k] of keptStates) parkHistory(p, k.state, 0);
     teardownEditor();
   });
 </script>

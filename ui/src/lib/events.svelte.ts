@@ -531,7 +531,12 @@ class EventsClient {
     if (!boot) return;
     const changed = this.bootId !== null && this.bootId !== boot;
     this.bootId = boot;
-    if (changed) void auth.refreshMeta();
+    if (changed) {
+      void auth.refreshMeta();
+      // Every DB pool/tunnel died with the old daemon: mark open connections
+      // stale and re-warm them (selected first) instead of showing "ready".
+      database.onDaemonRestart();
+    }
   }
 
   private scheduleLagResync(): void {
