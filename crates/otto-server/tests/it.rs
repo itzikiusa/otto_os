@@ -33,6 +33,8 @@ mod impersonation;
 mod k8s_monitor_clickhouse;
 #[path = "mcp_auto_approve.rs"]
 mod mcp_auto_approve;
+#[path = "personal_agent_policy.rs"]
+mod personal_agent_policy;
 #[path = "policy_coverage.rs"]
 mod policy_coverage;
 #[path = "rbac_matrix.rs"]
