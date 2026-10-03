@@ -16,7 +16,7 @@ use otto_core::domain::WorkspaceRole;
 use otto_core::{Error, Id, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::http::{repo_ctx, repo_lock, ApiResult, GitCtx};
+use crate::http::{remote_lock, repo_ctx, repo_lock, ApiResult, GitCtx};
 use crate::local::{validate_remote_url, LocalGit, PullOutcome, SpawnClass};
 
 /// How `git pull` reconciles diverged history.
@@ -417,7 +417,7 @@ async fn repo_rebase<S: GitCtx>(
     git.rebase(&req.onto, req.auto_stash).await?;
     // A conflicting rebase is a normal 200 — the status carries
     // `op_in_progress:"rebase"` + the unmerged paths for the resolver.
-    Ok(Json(git.status().await?))
+    crate::http::status_after_release(&git, _g).await
 }
 
 #[derive(Deserialize)]
@@ -471,6 +471,10 @@ async fn repo_remote_op<S: GitCtx>(
 ) -> ApiResult<Json<Vec<RemoteInfo>>> {
     let lock = repo_lock(&id);
     let _g = lock.lock().await;
+    // Renaming/removing a remote rewrites `refs/remotes/<name>/*`: never
+    // under a push or fetch that is writing them (order: repo → remote).
+    let rlock = remote_lock(&id);
+    let _rg = rlock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     Ok(Json(
         git.remote_op(req.op, &req.name, req.url.as_deref()).await?,
