@@ -60,6 +60,8 @@ export function pathProblem(path: string): string | null {
   if (/\s/.test(path)) return 'The path cannot contain spaces';
   if (path.includes('..')) return 'The path cannot contain ..';
   if (path.includes('://')) return 'Give a path, not a URL';
+  if (path.includes('#')) return 'The path cannot contain #';
+  if (/%2f/i.test(path)) return 'The path cannot contain an encoded slash';
   if (/\{\{/.test(path)) return 'Fill in every {{variable}} first';
   return null;
 }

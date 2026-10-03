@@ -10899,6 +10899,7 @@ export interface K8sPodAction {
   id: string;
   cluster_id: string;
   namespace: string;
+  /** Plural wire kind, e.g. "deployments" (inputs accept singular aliases). */
   workload_kind: string;
   workload: string;
   name: string;

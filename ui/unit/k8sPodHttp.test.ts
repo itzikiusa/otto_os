@@ -17,6 +17,8 @@ test('path rule mirrors the daemon', () => {
   assert.ok(pathProblem('/a/../b'));
   assert.ok(pathProblem('/http://x'));
   assert.ok(pathProblem('/a b'));
+  assert.ok(pathProblem('/a#frag'));
+  assert.ok(pathProblem('/a%2Fb'));
   assert.ok(pathProblem('/actuator/loggers/{{logger}}'));
 });
 

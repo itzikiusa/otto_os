@@ -169,7 +169,7 @@
         port: Number(port),
         path,
         headers: parseHeaders(headersText),
-        body_template: body.trim() ? body : null,
+        body_template: mutating && body.trim() ? body : null,
       });
       saved = [...saved.filter((s) => s.id !== a.id), a].sort((x, y) => x.name.localeCompare(y.name));
       loadedFrom = a.id;
