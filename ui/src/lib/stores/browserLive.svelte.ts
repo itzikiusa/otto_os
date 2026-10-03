@@ -29,6 +29,7 @@ import type {
   OttoEvent,
 } from '../api/types';
 import { nativeBrowserAvailable } from '../nativeBrowser';
+import { announceModule } from '../lazyModule';
 
 export type LiveRenderer = 'native' | 'remote';
 
@@ -182,3 +183,6 @@ class BrowserLiveStore {
 }
 
 export const browserLive = new BrowserLiveStore();
+// Routed by `peek()` in lib/events.svelte.ts (perf H1): let it see this store
+// however it was first imported.
+announceModule('browserLive', browserLive);

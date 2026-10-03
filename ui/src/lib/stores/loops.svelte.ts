@@ -18,6 +18,7 @@ import type {
   OttoEvent,
   UpdateGoalLoopReq,
 } from '../api/types';
+import { announceModule } from '../lazyModule';
 
 class LoopsStore {
   list: GoalLoop[] = $state([]);
@@ -252,3 +253,6 @@ class LoopsStore {
 }
 
 export const loops = new LoopsStore();
+// Routed by `peek()` in lib/events.svelte.ts (perf H1): let it see this store
+// however it was first imported.
+announceModule('loops', loops);

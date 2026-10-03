@@ -18,6 +18,8 @@ export class HistoryRefresh<T extends {id:string}> {
   private activeWaiters:Array<()=>void>=[];
   private options:RefreshOptions<T>;
   constructor(options:RefreshOptions<T>) {this.options=options;}
+  /** No refresh scheduled or in flight. */
+  get idle():boolean {return !this.flight && !this.unschedule;}
   reset():void {
     this.epoch++;this.flight?.abort();this.flight=null;this.unschedule?.();this.unschedule=null;
     this.ids.clear();this.generic=false;this.seen.clear();
