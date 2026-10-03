@@ -197,8 +197,9 @@ pub async fn start(
                 let failed = !result.ok;
                 let mut value = serde_json::to_value(result).expect("serializable step");
                 api_secrets::scrub_json(&mut value, &secret_values);
-                let result =
-                    serde_json::from_value(value.clone()).expect("same step shape after redaction");
+                // Deserialize from a borrow: `value` itself becomes the history row.
+                let result = serde::Deserialize::deserialize(&value)
+                    .expect("same step shape after redaction");
                 // A correlated request history entry is retained for each completed
                 // step, including transport/script failures and dataset row index.
                 let inserted = api.insert_history(NewApiHistory {
@@ -277,8 +278,13 @@ pub async fn start(
         // Opt-in run retention (`settings.api_client.automation_runs_keep`,
         // default 0 = keep every run — old reports are user data).
         let keep = runs_keep(&ctx, &wid).await;
-        if keep > 0 {
-            let _ = reports.prune_runs(&wid, &run.automation_id, keep).await;
+        if keep > 0
+            && reports
+                .prune_runs(&wid, &run.automation_id, keep)
+                .await
+                .is_ok_and(|n| n > 0)
+        {
+            super::api_client::invalidate_storage_gauge(&wid);
         }
         live().lock().unwrap().remove(&run.id);
         publish_progress(&ctx, &run);
@@ -294,7 +300,7 @@ const PRUNE_EVERY: usize = 50;
 /// `settings.api_client.automation_runs_keep`: newest finished runs kept per
 /// automation (`0`/absent = keep all, the default —
 /// [`otto_state::api_runs::RUNS_KEEP_DEFAULT`]).
-async fn runs_keep(ctx: &ServerCtx, wid: &Id) -> i64 {
+pub(crate) async fn runs_keep(ctx: &ServerCtx, wid: &Id) -> i64 {
     ctx.workspaces
         .get(wid)
         .await
@@ -311,7 +317,13 @@ async fn runs_keep(ctx: &ServerCtx, wid: &Id) -> i64 {
 
 async fn prune_history(ctx: &ServerCtx, api: &ApiClientRepo, wid: &Id) {
     let (max_rows, max_days) = super::api_client::history_retention(ctx, wid).await;
-    let _ = api.prune_history(wid, max_rows, max_days).await;
+    if api
+        .prune_history(wid, max_rows, max_days)
+        .await
+        .is_ok_and(|n| n > 0)
+    {
+        super::api_client::invalidate_storage_gauge(wid);
+    }
 }
 
 #[derive(Deserialize)]

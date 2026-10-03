@@ -1231,6 +1231,35 @@ blind (the poll stays as a slow fallback).
 
 ---
 
+### `api_client_changed`
+
+Workspace-scoped (perf N4). Emitted after a saved API-client object is
+created, updated, deleted (or, for an environment, activated) through the
+REST routes — by a person or by an agent tool (`otto.api_upsert_request` and
+the other agent writes go through the same routes) — and once per kind after
+`POST …/secure-all` changes rows (`id: null`). Ids only. Clients that cache the
+request tree / environments / automations (the UI keeps a 60 s list cache)
+drop or patch their copy on it instead of waiting for the cache to expire.
+An import creates its requests one by one, so it arrives as a burst —
+coalesce before refetching.
+
+```json
+{
+  "type": "api_client_changed",
+  "workspace_id": "<Id>",
+  "kind": "request|collection|environment|automation",
+  "id": "<Id>|null",
+  "deleted": false
+}
+```
+
+- Scope: `Workspace` (members with viewer+ on `workspace_id`).
+- TypeScript mirror: `{ type: 'api_client_changed'; workspace_id: Id;
+  kind: 'request' | 'collection' | 'environment' | 'automation';
+  id: Id | null; deleted: boolean }`.
+
+---
+
 ### `canvas_updated` / `canvas_session_started`
 
 Workspace-scoped. Emitted by `crates/otto-server/src/canvas_assist.rs` while an

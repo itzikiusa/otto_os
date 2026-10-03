@@ -326,6 +326,39 @@ pub fn scrub_secrets(resp: &mut ApiResponse, secrets: &[String]) {
     }
 }
 
+/// [`scrub_secrets`] on an already-serialized `ApiResponse` (the history
+/// copy): same fields, same masking, no typed clone of the body first.
+pub fn scrub_response_json(resp: &mut Value, secrets: &[String]) {
+    let Some(obj) = resp.as_object_mut() else {
+        return;
+    };
+    if let Some(Value::String(body)) = obj.get_mut("body") {
+        *body = scrub_str(body, secrets);
+    }
+    if let Some(headers) = obj.get_mut("headers").and_then(Value::as_array_mut) {
+        for header in headers {
+            let set_cookie = header
+                .get("key")
+                .and_then(Value::as_str)
+                .is_some_and(|key| key.eq_ignore_ascii_case("set-cookie"));
+            if let Some(h) = header.as_object_mut() {
+                if set_cookie {
+                    h.insert("value".into(), Value::String(MASK.into()));
+                } else if let Some(Value::String(value)) = h.get_mut("value") {
+                    *value = scrub_str(value, secrets);
+                }
+            }
+        }
+    }
+    if let Some(trace) = obj.get_mut("trace").and_then(Value::as_array_mut) {
+        for step in trace {
+            if let Some(Value::String(detail)) = step.get_mut("detail") {
+                *detail = scrub_str(detail, secrets);
+            }
+        }
+    }
+}
+
 fn jwt_parts(token: &str) -> Option<(&str, &str, &str)> {
     let mut parts = token.split('.');
     let header = parts.next()?;
@@ -954,5 +987,38 @@ mod tests {
         scrub_json(&mut result, &["secret-abc".into()]);
         assert!(!result.to_string().contains("secret-abc"));
         assert_eq!(result["script_tests"][0]["passed"], false);
+    }
+
+    /// perf N7: the in-place JSON scrub of the history copy redacts exactly
+    /// what the typed `scrub_secrets` does.
+    #[test]
+    fn scrub_response_json_matches_typed_scrub() {
+        use otto_core::api::{ApiResponse, TraceStep};
+        use serde_json::json;
+        let secrets = vec!["s3cr3t-value".to_string()];
+        let resp: ApiResponse = serde_json::from_value(json!({
+            "status": 200, "status_text": "OK",
+            "headers": [
+                {"key": "X-Echo", "value": "Bearer s3cr3t-value"},
+                {"key": "Set-Cookie", "value": "sid=abc"},
+            ],
+            "body": "{\"token\":\"s3cr3t-value\"}",
+            "duration_ms": 3, "size_bytes": 10, "content_type": null,
+        }))
+        .unwrap();
+        let mut resp = resp;
+        resp.trace.push(TraceStep {
+            label: "Request".into(),
+            detail: "GET https://h/?k=s3cr3t-value".into(),
+            ms: None,
+            level: "info".into(),
+        });
+        let mut typed = resp.clone();
+        super::scrub_secrets(&mut typed, &secrets);
+        let mut json = serde_json::to_value(&resp).unwrap();
+        super::scrub_response_json(&mut json, &secrets);
+        assert_eq!(json, serde_json::to_value(&typed).unwrap());
+        assert!(!json.to_string().contains("s3cr3t-value"));
+        assert!(!json.to_string().contains("sid=abc"));
     }
 }

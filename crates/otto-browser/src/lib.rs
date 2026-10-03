@@ -265,9 +265,17 @@ pub struct BrowserService {
     denylist: Mutex<HashMap<String, (u32, Instant)>>,
     denylist_window: Duration,
     /// Short-lived rendered-page cache + in-flight dedupe (perf F1) — see
-    /// [`Self::page_shared`].
-    cache: PageCache,
+    /// [`Self::page_shared`]. Shared so it outlives an idle-stopped engine
+    /// (see [`SharedPageCache`]).
+    cache: Arc<PageCache>,
 }
+
+/// A rendered-page cache that can be handed to successive
+/// [`BrowserService`]s: the daemon stops an idle Lightpanda sidecar by
+/// dropping its service (perf N6) and the next one started keeps the pages
+/// rendered before.
+#[derive(Clone, Default)]
+pub struct SharedPageCache(Arc<PageCache>);
 
 impl BrowserService {
     pub fn with_engines(engine: Arc<dyn BrowserEngine>, fallback: FallbackEngine) -> Self {
@@ -276,8 +284,21 @@ impl BrowserService {
             fallback,
             denylist: Mutex::new(HashMap::new()),
             denylist_window: DENYLIST_WINDOW,
-            cache: PageCache::default(),
+            cache: Arc::new(PageCache::default()),
         }
+    }
+
+    /// Use `cache` (shared with earlier/later services) as this service's
+    /// rendered-page cache.
+    pub fn with_page_cache(mut self, cache: &SharedPageCache) -> Self {
+        self.cache = cache.0.clone();
+        self
+    }
+
+    /// Whether the primary engine owns a sidecar process (Lightpanda) — the
+    /// only kind worth stopping when idle.
+    pub fn has_sidecar(&self) -> bool {
+        self.engine.owns_process()
     }
 
     /// [`Self::page`] behind a short-lived per-`(scope, url)` cache that also
@@ -513,6 +534,10 @@ impl BrowserEngine for SidecarBackedEngine {
 
     fn is_usable(&self) -> bool {
         self.engine.is_usable()
+    }
+
+    fn owns_process(&self) -> bool {
+        true
     }
 }
 
@@ -786,7 +811,13 @@ impl PageCache {
 
     fn invalidate_host(&self, host: &str) {
         let mut inner = self.inner.lock().expect("page cache poisoned");
-        inner.entries.retain(|_, e| host_of(&e.page.url) != host);
+        // Match the requested URL (in the key) as well as the final one: a
+        // page asked for on the login host that redirected elsewhere still
+        // reflects the pre-login session.
+        inner.entries.retain(|key, e| {
+            let requested = key.split_once('\n').map_or("", |(_, url)| url);
+            host_of(&e.page.url) != host && host_of(requested) != host
+        });
         inner.bytes = inner.entries.values().map(|e| e.bytes).sum();
     }
 
@@ -1484,7 +1515,7 @@ mod tests {
     #[tokio::test]
     async fn page_cache_expires_and_login_invalidates_the_host() {
         let (n, mut svc) = counting_svc(Duration::ZERO);
-        svc.cache.ttl = Some(Duration::from_millis(30));
+        Arc::get_mut(&mut svc.cache).unwrap().ttl = Some(Duration::from_millis(30));
         svc.page_shared("ws", "https://e.com/a", false)
             .await
             .unwrap();
@@ -1493,7 +1524,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n.load(std::sync::atomic::Ordering::SeqCst), 2);
-        svc.cache.ttl = None;
+        Arc::get_mut(&mut svc.cache).unwrap().ttl = None;
         svc.page_shared("ws", "https://other.com/", false)
             .await
             .unwrap();
@@ -1520,5 +1551,43 @@ mod tests {
         }
         assert_eq!(cache.len(), PAGE_CACHE_MAX_ENTRIES);
         assert!(cache.get("k0", None).is_none(), "oldest evicted first");
+    }
+
+    /// N7 (low): a login invalidates pages REQUESTED on the host even when
+    /// they redirected elsewhere; perf N6: a page cache handed to a new
+    /// service (after an idle engine stop) keeps its pages.
+    #[tokio::test]
+    async fn login_drops_redirected_pages_and_shared_cache_outlives_a_service() {
+        let cache = PageCache::default();
+        let page = Page {
+            url: "https://elsewhere.com/landing".into(),
+            title: String::new(),
+            html: "x".into(),
+            markdown: String::new(),
+            degraded: false,
+            engine: "mock".into(),
+        };
+        cache.put(cache_key("ws", "https://e.com/start"), Arc::new(page));
+        cache.invalidate_host("e.com");
+        assert_eq!(cache.len(), 0, "requested-host entry dropped");
+
+        let shared = SharedPageCache::default();
+        let (n, svc) = counting_svc(Duration::ZERO);
+        let svc = svc.with_page_cache(&shared);
+        svc.page_shared("ws", "https://e.com/a", false)
+            .await
+            .unwrap();
+        drop(svc);
+        let (_, next) = counting_svc(Duration::ZERO);
+        let next = next.with_page_cache(&shared);
+        next.page_shared("ws", "https://e.com/a", false)
+            .await
+            .unwrap();
+        assert_eq!(
+            n.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "served from the shared cache"
+        );
+        assert!(!next.has_sidecar());
     }
 }

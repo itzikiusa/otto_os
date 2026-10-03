@@ -1695,6 +1695,23 @@ class WorkspaceStore {
     );
   }
 
+  /** Newest finished automation runs kept per automation
+   *  (`settings.api_client.automation_runs_keep`; 0 = keep all, the opt-in
+   *  default). */
+  get apiRunsKeep(): number {
+    const v = (this.current?.settings?.api_client as { automation_runs_keep?: unknown } | undefined)?.automation_runs_keep;
+    return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : 0;
+  }
+
+  /** Set the run-history retention (same admin-gated PATCH, shallow merge). */
+  async setApiRunsKeep(keep: number): Promise<void> {
+    if (!this.currentId || !this.current) return;
+    const prev = (this.current.settings?.api_client as Record<string, unknown>) ?? {};
+    const settings = { ...this.current.settings, api_client: { ...prev, automation_runs_keep: keep } };
+    const updated = await api.patch<Workspace>(`/workspaces/${this.currentId}`, { settings });
+    this.workspaces = this.workspaces.map((w) => (w.id === updated.id ? { ...w, ...updated } : w));
+  }
+
   /** Set this workspace's default agent CLI. '' clears it (use the global
    *  default). Shallow-merges into the workspace settings JSON. */
   async saveDefaultAgent(provider: string): Promise<void> {

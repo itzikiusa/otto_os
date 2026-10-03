@@ -14,7 +14,7 @@ function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: an
   api.long = {post: (...args: unknown[]) => api.post(...args), get: (...args: unknown[]) => api.get(...args)};
   const context = {exports: {} as Record<string, any>,
     $state: Object.assign((v: unknown) => v, {snapshot: (v: unknown) => v, raw: (v: unknown) => v}), $derived: (v: unknown) => v,
-    crypto: {randomUUID}, URL, URLSearchParams, AbortController, DOMException, setTimeout, clearTimeout,
+    crypto: {randomUUID}, URL, URLSearchParams, AbortController, DOMException, setTimeout, clearTimeout, performance, encodeURIComponent,
     localStorage: {getItem() {return null;},setItem() {}},
     require: (p: string) => p.endsWith('/client') ? {api, isAbortError: () => false}
       : p.includes('workspace.svelte') ? {ws}
@@ -146,16 +146,20 @@ test('a pristine blank tab is reused when opening a saved request', () => {
   assert.equal(v.draft.requestId, 'r1');
 });
 
-test('history replay rehydrates masked credentials from the saved request, never sends ***', () => {
-  const {v} = setup();
+test('history replay rehydrates masked credentials from the saved request, never sends ***', async () => {
   const marker = {$secret:'otto.api.request.r1'};
-  v.requests = [savedReq('r1','https://r1.test/x',{type:'bearer',token:marker})];
-  v.loadHistoryIntoDraft({id:'h1',method:'GET',url:'https://r1.test/x',
+  const full = savedReq('r1','https://r1.test/x',{type:'bearer',token:marker});
+  const gets: string[] = [];
+  // The tree holds summaries; the full row (with the auth marker) is fetched.
+  const {v} = setup({get: async (url: string) => { gets.push(url); return full; }});
+  v.requests = [{id:'r1',name:'r1',method:'GET',url:'https://r1.test/x',collection_id:null,workspace_id:'A',position:0}];
+  await v.loadHistoryIntoDraft({id:'h1',method:'GET',url:'https://r1.test/x',
     request:{request_id:'r1',method:'GET',url:'https://r1.test/x',headers:[],query:[],auth:{type:'bearer',token:'***'}}});
   assert.deepEqual(v.draft.auth, {type:'bearer',token:marker});
+  assert.deepEqual(gets, ['/workspaces/A/api-client/requests/r1']);
   // Unknown origin: blanked instead of replaying the mask.
   v.newDraft();
-  v.loadHistoryIntoDraft({id:'h2',method:'GET',url:'https://other.test/',
+  await v.loadHistoryIntoDraft({id:'h2',method:'GET',url:'https://other.test/',
     request:{method:'GET',url:'https://other.test/',headers:[{key:'Authorization',value:'***',enabled:true}],query:[],auth:{type:'bearer',token:'***'}}});
   assert.deepEqual(v.draft.auth, {type:'bearer',token:''});
   assert.equal(v.draft.headers[0].value, '');
@@ -195,8 +199,115 @@ test('import creates every item in order and reloads the lists once', async () =
   const req = (name: string, folderPath: string[]) => ({name,method:'GET',url:'https://x.test',folderPath,headers:[],query:[],body_mode:'none',body:'',auth:{type:'none'}});
   await v.importParsed({name:'Imported',format:'postman',requests:[req('a',['F']),req('b',['F']),req('c',[])]}, true);
   assert.deepEqual(posts, ['/collections:Imported','/collections:F','/requests:a','/requests:b','/requests:c']);
-  assert.equal(gets.filter((g) => g === '/requests').length, 1);
+  assert.equal(gets.filter((g) => g === '/requests/summaries').length, 1);
+  assert.equal(gets.filter((g) => g === '/requests').length, 0, 'never the full rows');
   assert.equal(gets.filter((g) => g === '/collections').length, 1);
+});
+
+// ── perf2 N1: summaries in the tree, the full row on open ──────────────────
+
+test('opening a saved request fetches its full row once and reuses it', async () => {
+  const gets: string[] = [];
+  const full = {...savedReq('r1','https://r1.test/full'), body: 'big body', headers: [{key:'X',value:'1',enabled:true}]};
+  const {v} = setup({get: async (url: string) => { gets.push(url); return full; }});
+  v.requests = [{id:'r1',name:'r1',method:'GET',url:'https://r1.test/full',collection_id:null,workspace_id:'A',position:0}];
+  const [a, b] = await Promise.all([v.ensureRequest('r1'), v.ensureRequest('r1')]);
+  assert.equal(a, b);
+  assert.equal(gets.length, 1, 'concurrent opens share one GET');
+  assert.equal(await v.openRequest('r1'), true);
+  assert.equal(v.draft.body, 'big body');
+  assert.equal(v.isDirty(v.draft), false);
+  await v.openRequest('r1'); // already open: focused, no refetch
+  assert.equal(gets.length, 1);
+});
+
+test('a restored tab whose saved row is not loaded yet is never repurposed', () => {
+  const {v} = setup();
+  v.requests = [{id:'r9',name:'r9',method:'GET',url:'https://r9.test',collection_id:null,workspace_id:'A',position:0}];
+  v.draft = {...v.draft, requestId: 'r9', url: 'https://r9.test/edited'};
+  assert.equal(v.isDirty(v.draft), false, 'no dirty dot while unknown');
+  const before = v.tabs.length;
+  v.loadRequestIntoDraft(savedReq('r1','https://r1.test'));
+  assert.equal(v.tabs.length, before + 1, 'opened beside, not over, the unknown tab');
+});
+
+// ── perf2 N3: coalesced, latched run-progress wakes ──────────────────────────
+
+test('a final run_progress during an in-flight delta GET is latched, not dropped', async () => {
+  const step = (name: string) => ({request_id:'r',name,status:200,duration_ms:1,ok:true,assertions:[],error:null});
+  const run = {id:'run1',workspace_id:'A',automation_id:'auto',environment_id:null,created_by:'u',created_at:'',finished_at:null,stop_on_failure:false,dataset_rows:1,error:null,snapshot:null,result_rows:[],result_ids:[]};
+  let calls = 0;
+  let v: any;
+  ({v} = setup({
+    post: async () => ({...run,status:'running',report:{automation_id:'auto',steps:[],passed:false}}),
+    get: async (url: string) => {
+      if (!url.includes('/automation-runs/run1')) return [];
+      calls++;
+      if (calls === 1) {
+        // The run finishes while this GET is in flight: no waiter is armed.
+        v.noteRunProgress('run1', 'passed');
+        return {...run,status:'running',report:{automation_id:'auto',steps:[step('one')],passed:false}};
+      }
+      return {...run,status:'passed',report:{automation_id:'auto',steps:[step('two')],passed:true}};
+    },
+  }));
+  const t0 = Date.now();
+  setTimeout(() => v.noteRunProgress('run1', 'running'), 5);
+  const report = await v.runAutomation('auto');
+  const took = Date.now() - t0;
+  assert.equal(calls, 2);
+  assert.equal(JSON.stringify(report.steps.map((s: any) => s.name)), '["one","two"]');
+  assert.ok(took < 1500, `finished in ${took} ms (the 2 s fallback would be the dropped-event path)`);
+});
+
+test('run_progress wakes are coalesced to one delta GET per 250 ms', async () => {
+  const run = {id:'run1',workspace_id:'A',automation_id:'auto',environment_id:null,created_by:'u',created_at:'',finished_at:null,stop_on_failure:false,dataset_rows:1,error:null,snapshot:null,result_rows:[],result_ids:[]};
+  let calls = 0;
+  let finished = false;
+  const {v} = setup({
+    post: async () => ({...run,status:'running',report:{automation_id:'auto',steps:[],passed:false}}),
+    get: async (url: string) => {
+      if (!url.includes('/automation-runs/run1')) return [];
+      calls++;
+      return {...run,status:finished ? 'passed' : 'running',report:{automation_id:'auto',steps:[],passed:finished}};
+    },
+  });
+  const t0 = Date.now();
+  const timer = setInterval(() => v.noteRunProgress('run1', 'running'), 2);
+  setTimeout(() => { finished = true; clearInterval(timer); v.noteRunProgress('run1', 'passed'); }, 800);
+  await v.runAutomation('auto');
+  const took = Date.now() - t0;
+  assert.ok(calls <= Math.ceil(took / 250) + 2, `${calls} GETs in ${took} ms`);
+  assert.ok(took < 1500, `finished in ${took} ms`);
+});
+
+// ── perf2 N4: api_client_changed keeps the reuse window honest ──────────────
+
+test('api_client_changed patches the loaded workspace and expires others', async () => {
+  const gets: string[] = [];
+  const full = {...savedReq('r2','https://agent.test'), name: 'Agent made', workspace_id: 'A', updated_at: 't2', position: 3};
+  const {v, ws} = setup({get: async (url: string) => {
+    gets.push(url);
+    if (url.endsWith('/requests/r2')) return full;
+    return [];
+  }});
+  await v.loadAll();
+  assert.equal(v.requests.length, 0);
+  v.noteClientChanged({workspace_id:'A',kind:'request',id:'r2',deleted:false});
+  v.noteClientChanged({workspace_id:'A',kind:'request',id:'r2',deleted:false});
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(gets.filter((g) => g.endsWith('/requests/r2')).length, 1, 'coalesced');
+  assert.equal(JSON.stringify(v.requests.map((r: any) => [r.id, r.name, r.position])), '[["r2","Agent made",3]]');
+  v.noteClientChanged({workspace_id:'A',kind:'request',id:'r2',deleted:true});
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(v.requests.length, 0);
+  // Another workspace's change: nothing fetched now; its next entry reloads.
+  ws.currentId = 'B';
+  await v.loadAll();
+  const n = gets.length;
+  v.noteClientChanged({workspace_id:'A',kind:'request',id:'r3',deleted:false});
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(gets.length, n);
 });
 
 // ── Per-tab response slots ─────────────────────────────────────────────────

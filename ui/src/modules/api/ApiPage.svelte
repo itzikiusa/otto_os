@@ -148,7 +148,7 @@
       const only = apiClient.tabs.length === 1 ? apiClient.tabs[0] : null;
       if (persisted || !only || only.requestId || apiClient.isDirty(only)) return;
       const latest = reqs.reduce((a, b) => ((b.updated_at ?? '') > (a.updated_at ?? '') ? b : a));
-      apiClient.loadRequestIntoDraft(latest);
+      void apiClient.openRequest(latest.id);
     });
   });
 

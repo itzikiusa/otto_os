@@ -504,6 +504,15 @@ pub fn protected_routes() -> Router<ServerCtx> {
             "/workspaces/{wid}/api-client/history/summaries",
             get(api_client::list_history_summaries),
         )
+        // perf N2: storage gauge + on-demand (configured, opt-in) retention.
+        .route(
+            "/workspaces/{wid}/api-client/storage",
+            get(api_client::storage),
+        )
+        .route(
+            "/workspaces/{wid}/api-client/storage/prune",
+            post(api_client::prune_storage),
+        )
         .route(
             "/workspaces/{wid}/api-client/history/{id}",
             get(api_client::get_history),

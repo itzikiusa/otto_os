@@ -18,6 +18,19 @@ use sqlx::{QueryBuilder, Row, Sqlite};
 
 use crate::convert::{dberr, fmt, json, ts};
 
+thread_local! {
+    /// Full-row `list_requests` reads made on this thread (perf N5 guard):
+    /// hot paths (`/execute`, secret binding, overview) must use the
+    /// projections instead. Thread-local so parallel tests don't interfere.
+    static LIST_REQUESTS_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many full-row [`ApiClientRepo::list_requests`] reads ran on the
+/// calling thread so far (a perf guard for tests on a current-thread runtime).
+pub fn list_requests_calls_on_this_thread() -> usize {
+    LIST_REQUESTS_CALLS.with(|c| c.get())
+}
+
 #[derive(Clone)]
 pub struct ApiClientRepo {
     pool: DbPool,
@@ -288,6 +301,7 @@ impl ApiClientRepo {
         ws: &Id,
         collection_id: Option<&Id>,
     ) -> Result<Vec<ApiRequest>> {
+        LIST_REQUESTS_CALLS.with(|c| c.set(c.get() + 1));
         let rows = match collection_id {
             Some(cid) => sqlx::query(
                 "SELECT * FROM api_requests
@@ -326,7 +340,7 @@ impl ApiClientRepo {
                     ssh_connection_id IS NOT NULL AS has_ssh, \
                     (CASE WHEN json_valid(extras_json) \
                           THEN json_type(extras_json, '$.agent') END) IS 'object' AS agent_authored, \
-                    updated_at \
+                    updated_at, position \
                FROM api_requests \
               WHERE workspace_id = ? AND (? IS NULL OR collection_id = ?) \
               ORDER BY position, name",
@@ -353,6 +367,7 @@ impl ApiClientRepo {
                     has_ssh: r.get::<bool, _>("has_ssh"),
                     agent_authored: r.get::<bool, _>("agent_authored"),
                     updated_at: ts(&r.get::<String, _>("updated_at"))?,
+                    position: r.get("position"),
                 })
             })
             .collect()
@@ -878,6 +893,69 @@ impl ApiClientRepo {
             .rows_affected();
         }
         Ok(deleted)
+    }
+
+    /// Storage gauge for `ws` (perf N2): history + automation-run row counts
+    /// and stored bytes. Every query is bounded by a `workspace_id` index and
+    /// sizes come from `octet_length`, which SQLite answers from the record
+    /// header without loading the (possibly overflowing) JSON text.
+    pub async fn storage_stats(&self, ws: &Id) -> Result<otto_core::api::ApiClientStorage> {
+        let h = sqlx::query(
+            "SELECT COUNT(*) AS n,
+                    COALESCE(SUM(octet_length(request_json) + octet_length(response_json)), 0) AS b
+               FROM api_history WHERE workspace_id = ?",
+        )
+        .bind(ws)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("api history storage"))?;
+        let r = sqlx::query(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(steps_total), 0) AS steps,
+                    COALESCE(SUM(octet_length(record_json)), 0) AS b
+               FROM api_automation_runs WHERE workspace_id = ?",
+        )
+        .bind(ws)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("api run storage"))?;
+        let step_bytes: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(octet_length(s.result_json)), 0)
+               FROM api_automation_runs r JOIN api_automation_run_steps s ON s.run_id = r.id
+              WHERE r.workspace_id = ?",
+        )
+        .bind(ws)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("api run step storage"))?;
+        let max_runs: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(c), 0) FROM (
+                SELECT COUNT(*) AS c FROM api_automation_runs
+                 WHERE workspace_id = ? GROUP BY automation_id)",
+        )
+        .bind(ws)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("api run storage"))?;
+        Ok(otto_core::api::ApiClientStorage {
+            history_rows: h.get("n"),
+            history_bytes: h.get("b"),
+            run_rows: r.get("n"),
+            step_rows: r.get("steps"),
+            run_bytes: r.get::<i64, _>("b") + step_bytes,
+            max_runs_per_automation: max_runs,
+        })
+    }
+
+    /// Automation ids that have recorded runs in `ws` (for an on-demand
+    /// retention pass over every automation).
+    pub async fn run_automation_ids(&self, ws: &Id) -> Result<Vec<String>> {
+        sqlx::query_scalar(
+            "SELECT DISTINCT automation_id FROM api_automation_runs WHERE workspace_id = ?",
+        )
+        .bind(ws)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("api run automations"))
     }
 
     pub async fn clear_history(&self, ws: &Id) -> Result<()> {
@@ -1637,7 +1715,7 @@ mod tests {
                 auth,
                 ssh_connection_id: None,
                 extras,
-                position: 0,
+                position: if name == "b" { 7 } else { 0 },
             }
         };
         repo.create_request(req("a", jval!({"type":"bearer","token":"t"}), None))
@@ -1657,6 +1735,7 @@ mod tests {
             assert_eq!(f.id, s.id);
             assert_eq!(f.url, s.url);
             assert_eq!(f.updated_at, s.updated_at);
+            assert_eq!(f.position, s.position);
             assert_eq!(
                 f.auth
                     .get("type")
@@ -1697,5 +1776,58 @@ mod tests {
             serde_json::to_value(&entry).unwrap(),
             serde_json::to_value(&stored).unwrap()
         );
+    }
+
+    /// perf N2: the storage gauge counts rows and stored bytes per workspace
+    /// (octet_length over the JSON snapshots) and sees run reports + steps.
+    #[tokio::test]
+    async fn storage_stats_count_rows_and_bytes() {
+        let (pool, ws) = setup().await;
+        let repo = ApiClientRepo::new(pool.clone());
+        assert_eq!(
+            repo.storage_stats(&ws).await.unwrap(),
+            otto_core::api::ApiClientStorage::default()
+        );
+        let big = "x".repeat(10_000);
+        for i in 0..3 {
+            repo.insert_history(NewApiHistory {
+                workspace_id: ws.clone(),
+                method: "GET".into(),
+                url: format!("https://h.test/{i}"),
+                status: Some(200),
+                duration_ms: Some(1),
+                request: jval!({}),
+                response: jval!({ "body": big }),
+            })
+            .await
+            .unwrap();
+        }
+        let now = Utc::now().to_rfc3339();
+        for (id, auto, steps) in [("r1", "a1", 4), ("r2", "a1", 2), ("r3", "a2", 1)] {
+            sqlx::query(
+                "INSERT INTO api_automation_runs
+                    (id, workspace_id, automation_id, status, created_at, record_json, steps_total)
+                 VALUES (?, ?, ?, 'passed', ?, '{}', ?)",
+            )
+            .bind(id)
+            .bind(&ws)
+            .bind(auto)
+            .bind(&now)
+            .bind(steps)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let s = repo.storage_stats(&ws).await.unwrap();
+        assert_eq!(s.history_rows, 3);
+        assert!(s.history_bytes >= 30_000, "{s:?}");
+        assert!(s.history_bytes < 31_000, "{s:?}");
+        assert_eq!(s.run_rows, 3);
+        assert_eq!(s.step_rows, 7);
+        assert_eq!(s.run_bytes, 6);
+        assert_eq!(s.max_runs_per_automation, 2);
+        let mut autos = repo.run_automation_ids(&ws).await.unwrap();
+        autos.sort();
+        assert_eq!(autos, vec!["a1".to_string(), "a2".to_string()]);
     }
 }

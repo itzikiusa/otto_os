@@ -109,6 +109,9 @@ tracing-subscriber.workspace = true
 # The gRPC endpoint test builds a TLS config, which needs the process-level
 # rustls provider `ottod` installs at startup. Same version/feature ottod pins.
 rustls = { version = "0.23.45", default-features = false, features = ["ring"] }
+# The gRPC channel-reuse test (perf N5) dials a minimal h2c server. Same
+# version tonic/hyper already resolve.
+h2 = "0.4.19"
 
 # Local shared-screen OCR; Vision ships with macOS (no cloud credentials).
 [target.'cfg(target_os = "macos")'.dependencies]
