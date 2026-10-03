@@ -767,9 +767,10 @@ async fn upsert_product_story_row(ctx: &ServerCtx, story: &otto_state::ProductSt
 
 /// Re-derive the whole graph for every workspace. Idempotent; heals
 /// missed/lagged events. SQLite-only (NO usage/ClickHouse) so it is safe to run
-/// every 60 s on the reconcile loop without contending with the usage engine's
-/// `clickhouse local` queries — cost is refreshed on-demand (item detail) and on
-/// the user-triggered backfill, not on a background sweep.
+/// on every reconcile pass (5 min by default, `OTTO_WORKGRAPH_RECONCILE_SECS`)
+/// without contending with the usage engine's `clickhouse local` queries — cost
+/// is refreshed on-demand (item detail) and on the user-triggered backfill, not
+/// on a background sweep.
 pub async fn backfill_all(ctx: &ServerCtx) {
     let workspaces = match ctx.workspaces.list_all().await {
         Ok(w) => w,

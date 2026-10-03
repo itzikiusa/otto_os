@@ -89,12 +89,62 @@ const STATUS_TICK: Duration = Duration::from_millis(3500);
 /// A turn with no transcript activity for this long is treated as over: an
 /// interrupted or crashed turn never writes its `Final` line, which used to
 /// leave the 300 ms transcript poll, the status ticker and the typing loop
-/// running until the session exited (perf §15 N6). `begin_turn` re-arms them.
+/// running until the session exited (perf §15 N6). `begin_turn` re-arms them,
+/// and so does any later `Tool` event (see [`TurnWatchdog`]).
 const TURN_STALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-/// Has a live turn gone quiet long enough to drop back to the idle cadence?
-fn turn_stalled(last_activity: Instant, now: Instant) -> bool {
-    now.saturating_duration_since(last_activity) >= TURN_STALL_TIMEOUT
+/// The stall watchdog for the tailer's live turn. A stall is a guess, not a
+/// verdict: a legitimately silent tool (a 15-minute build or test run) looks
+/// exactly like a crashed turn until it reports back. So a stall only parks
+/// the turn — the next `Tool` event re-arms it (fast poll, typing, rotating
+/// status header) instead of letting the turn finish with no liveness signal.
+struct TurnWatchdog {
+    timeout: Duration,
+    /// Last transcript event (or turn start) — the watchdog's clock.
+    last_activity: Instant,
+    /// The live turn was parked by this watchdog (not ended by its `Final`).
+    stalled: bool,
+}
+
+impl TurnWatchdog {
+    fn new(timeout: Duration, now: Instant) -> Self {
+        Self {
+            timeout,
+            last_activity: now,
+            stalled: false,
+        }
+    }
+
+    /// A fresh turn (`begin_turn`): restart the clock, forget any stall.
+    fn begin_turn(&mut self, now: Instant) {
+        self.last_activity = now;
+        self.stalled = false;
+    }
+
+    /// A transcript event arrived. A `Tool` event on a stalled turn re-enters
+    /// the active state; a `Final` just ends the turn (its arm idles it).
+    fn on_activity(
+        &mut self,
+        now: Instant,
+        is_final: bool,
+        turn: &tokio::sync::watch::Sender<bool>,
+    ) {
+        self.last_activity = now;
+        if std::mem::take(&mut self.stalled) && !is_final {
+            turn.send_replace(true);
+        }
+    }
+
+    /// A status wake during a live turn: has it gone quiet for `timeout`? If
+    /// so, park it (drop to the idle cadence) and return `true`.
+    fn check_stall(&mut self, now: Instant, turn: &tokio::sync::watch::Sender<bool>) -> bool {
+        if now.saturating_duration_since(self.last_activity) < self.timeout {
+            return false;
+        }
+        self.stalled = true;
+        turn.send_replace(false);
+        true
+    }
 }
 
 /// The typing indicator loop. Persistent across turns: sends the typing
@@ -380,8 +430,7 @@ impl Mirror {
         let mut status_ticker = tokio::time::interval(STATUS_TICK);
         status_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut turn_rx = typing_active.subscribe();
-        // Last transcript event (or turn start) — the stall watchdog's clock.
-        let mut last_activity = Instant::now();
+        let mut watchdog = TurnWatchdog::new(TURN_STALL_TIMEOUT, Instant::now());
 
         loop {
             if cancel.load(Ordering::Relaxed) {
@@ -398,7 +447,7 @@ impl Mirror {
                 last_edit = Instant::now() - EDIT_THROTTLE * 2; // post the new turn's first update at once
                 feed = FeedHealth::new();
                 typing_active.send_replace(true);
-                last_activity = Instant::now();
+                watchdog.begin_turn(Instant::now());
                 let d = current_dest(&dest);
                 adapter = d.adapter;
                 chat = d.chat;
@@ -416,7 +465,9 @@ impl Mirror {
                     if cancel.load(Ordering::Relaxed) {
                         break;
                     }
-                    last_activity = Instant::now();
+                    // Re-arms a stalled turn on its next Tool event.
+                    let is_final = matches!(evt, TranscriptEvent::Final { .. });
+                    watchdog.on_activity(Instant::now(), is_final, &typing_active);
                     match evt {
                         TranscriptEvent::Tool { name: _, display: display_line, code } => {
                             let line = render_tool_line(&display_line, code.as_deref(), code_blocks);
@@ -527,9 +578,9 @@ impl Mirror {
                     // A turn that never wrote its Final (interrupt / crash)
                     // drops back to the idle cadence instead of polling at
                     // 300 ms and ticking the header until the session exits.
-                    if !idle && turn_stalled(last_activity, Instant::now()) {
+                    // The next Tool event re-arms it (see `TurnWatchdog`).
+                    if !idle && watchdog.check_stall(Instant::now(), &typing_active) {
                         info!(session = %session_id, "mirror: turn stalled, pausing feed + typing");
-                        typing_active.send_replace(false);
                         continue;
                     }
                     // Liveness probe: a tailer must not outlive its session. The
@@ -1145,18 +1196,74 @@ mod tests {
     }
 
     /// perf §15 N6: a turn that never writes its Final drops to idle after
-    /// TURN_STALL_TIMEOUT without transcript activity.
+    /// the stall timeout without transcript activity.
     #[test]
     fn a_silent_turn_stalls_after_the_timeout() {
         let t0 = Instant::now();
-        assert!(!turn_stalled(t0, t0));
-        assert!(!turn_stalled(
-            t0,
-            t0 + TURN_STALL_TIMEOUT - Duration::from_secs(1)
-        ));
-        assert!(turn_stalled(t0, t0 + TURN_STALL_TIMEOUT));
+        let turn = tokio::sync::watch::Sender::new(true);
+        let mut w = TurnWatchdog::new(TURN_STALL_TIMEOUT, t0);
+        assert!(!w.check_stall(t0, &turn));
+        assert!(!w.check_stall(t0 + TURN_STALL_TIMEOUT - Duration::from_secs(1), &turn));
+        assert!(*turn.borrow(), "still live just under the timeout");
         // A clock that went "backwards" (activity stamped after `now`) is fresh.
-        assert!(!turn_stalled(t0 + Duration::from_secs(5), t0));
+        let mut ahead = TurnWatchdog::new(TURN_STALL_TIMEOUT, t0 + Duration::from_secs(5));
+        assert!(!ahead.check_stall(t0, &turn));
+        assert!(w.check_stall(t0 + TURN_STALL_TIMEOUT, &turn));
+        assert!(!*turn.borrow(), "a stalled turn drops to idle");
+    }
+
+    /// perf §15 S3: a stall is not the end of the turn. A legitimately silent
+    /// tool (a long build) reports back later; its Tool event must re-enter
+    /// the active state (fast poll, typing, status header) — every watcher of
+    /// the turn flag (tailer poll, typing loop, status ticker) sees the flip.
+    /// A Final while stalled, or activity on a turn that never stalled, must
+    /// not (re-)arm anything. Shortened stall interval.
+    #[test]
+    fn a_stalled_turn_re_arms_on_new_tool_activity() {
+        let stall = Duration::from_millis(50);
+        let t0 = Instant::now();
+        let turn = tokio::sync::watch::Sender::new(true);
+        let mut poll = turn.subscribe();
+        let mut w = TurnWatchdog::new(stall, t0);
+
+        // Live activity just keeps the clock fresh — no spurious flips.
+        w.on_activity(t0 + stall / 2, false, &turn);
+        assert!(!w.check_stall(t0 + stall, &turn));
+        assert!(!poll.has_changed().unwrap(), "no flip while live");
+
+        // Silent past the timeout → idle.
+        let t1 = t0 + stall / 2 + stall;
+        assert!(w.check_stall(t1, &turn));
+        assert!(poll.has_changed().unwrap());
+        assert!(!*poll.borrow_and_update(), "stalled → idle cadence");
+
+        // The long tool finishes: its Tool event re-arms the turn.
+        let t2 = t1 + stall * 4;
+        w.on_activity(t2, false, &turn);
+        assert!(poll.has_changed().unwrap(), "watchers woken");
+        assert!(*poll.borrow_and_update(), "new activity → active again");
+        // …with a fresh clock: not instantly re-stalled, but it can stall again.
+        assert!(!w.check_stall(t2 + stall / 2, &turn));
+        assert!(w.check_stall(t2 + stall, &turn));
+        assert!(!*poll.borrow_and_update());
+
+        // A Final that arrives while stalled ends the turn — it stays idle.
+        w.on_activity(t2 + stall * 2, true, &turn);
+        assert!(!poll.has_changed().unwrap(), "Final never re-arms");
+        // And after that, stray activity doesn't resurrect the ended turn.
+        w.on_activity(t2 + stall * 3, false, &turn);
+        assert!(!*turn.borrow());
+
+        // begin_turn forgets the stall state.
+        w.check_stall(t2 + stall * 10, &turn);
+        w.begin_turn(t2 + stall * 10);
+        turn.send_replace(true);
+        poll.borrow_and_update();
+        w.on_activity(t2 + stall * 11, false, &turn);
+        assert!(
+            !poll.has_changed().unwrap(),
+            "fresh turn — nothing to re-arm"
+        );
     }
 
     #[tokio::test]
